@@ -959,8 +959,8 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   apply, a worker created by the broker; never a resume) with the skill on disk then, in
   `.lever-state/sessions.jsonl` (0600, a host record like the ledgers). The proxy lets a contact
   post to an agent only while that agent's last fresh start saw the skill that is on disk now;
-  otherwise it answers 403 "this agent cannot take your messages yet". Every bring-up warns about
-  each such agent. For the manager, run `lever up --fresh` after you back up its conversation; a
+  otherwise it answers 403 "this agent cannot take your messages yet". Every bring-up prints one
+  warning line that names such agents (at most eight, grouped by reason). For the manager, run `lever up --fresh` after you back up its conversation; a
   worker takes contact messages once the broker next creates it fresh.
 - **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
   contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
@@ -1058,6 +1058,9 @@ With `landing: chat`, an operator login's agent list on the [chat page](#the-cha
 **Contacts** section: what you would otherwise get by being copied on a contact's email. A contact
 login never gets it: the page does not show it, and the routes refuse a contact (`403`, audit
 `deny-contact`) whatever it sends.
+
+A contact whose login holds a `/` is listed but cannot be opened: its route would carry an
+encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
 
 - **What it shows.** Each contact in `allowed_users`, the agents it may message (its `agents:`
   list; a `see:` agent has no conversation), and, per agent, the whole direct conversation

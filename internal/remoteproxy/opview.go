@@ -62,7 +62,8 @@ type contactsAnswer struct {
 // the bare route, or the login and agent of a messages route (files for the
 // files route, remote.files). Splitting the
 // escaped form keeps a "/" inside a login (legal in allowed_users) in its
-// segment.
+// segment; the proxy's path check (pathcheck.go) refuses such a path before
+// it gets here, so a login holding "/" cannot be opened.
 func opViewTarget(escaped string) (login, name string, list, files, ok bool) {
 	if escaped == chatContactsPath {
 		return "", "", true, false, true

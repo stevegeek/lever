@@ -169,17 +169,36 @@ func IsAgentAbsent(err error) bool {
 		strings.Contains(msg, "no git origin remote found")
 }
 
-// hubReadyAttempts/hubReadyInterval are the default waitHubReady budget.
+// The default waitHubReady budget: probe every hubReadyInterval for up to
+// hubReadyTimeout; say so after hubReadyNotice and then every hubReadyEvery;
+// check every hubAliveEvery that a scion server is still alive to wait on.
+//
+// The timeout is a TIME, not an attempt count, and it is long because a hub
+// start is slow before it serves at all. On the assistant's guest each start
+// spends about 14 s between its first log line and "Starting Web Frontend"
+// (server.log, every start since 2026-08-22; 13 s of it is the hub's GCP
+// project-ID lookup timing out against 169.254.169.254 —
+// cmd/server_foreground.go, the Policy Troubleshooter's
+// hub.ResolveGCPProjectID — on a machine that is not on GCP). Add the
+// daemon's re-exec, a cold page cache for the binary and a 100+ MB hub.db
+// after a reboot, and the probe CLI's own start each attempt, and a cold
+// start overran the old 30 attempts (card #82: "hub not ready after 30
+// attempts" on the first apply after a Mac restart; a retry seconds later
+// found the hub up).
 const (
-	hubReadyAttempts = 30
+	hubReadyTimeout  = 2 * time.Minute
 	hubReadyInterval = 1 * time.Second
+	hubReadyNotice   = 15 * time.Second
+	hubReadyEvery    = 30 * time.Second
+	hubAliveEvery    = 5 * time.Second
 )
 
 // waitHubReady polls a lightweight, PROJECT-INDEPENDENT hub call until it
-// succeeds or attempts run out. `list --all` lists agents across all projects
-// and hits the hub without resolving a current project — unlike `list --global`,
-// which forces project resolution and fails with "no git origin remote found"
-// when run (as here) before any project is registered (verified live 2026-06-17).
+// succeeds or the budget runs out. `list --all` lists agents across all
+// projects and hits the hub without resolving a current project — unlike
+// `list --global`, which forces project resolution and fails with "no git
+// origin remote found" when run (as here) before any project is registered
+// (verified live 2026-06-17).
 //
 // An authentication failure also counts as ready: the hub answered, it only
 // refused the credential. That is the case whenever lever holds no working
@@ -188,14 +207,52 @@ const (
 // down (seen on scion f7155ecb+, where the mint failed with
 // scope_violation). Whoever needs the credential fails on it next, with the
 // real error.
-func (c *Client) waitHubReady(ctx context.Context) error {
+//
+// The wait follows the server process, so the long budget costs nothing
+// when the start has failed: every hubAliveEvery it runs the pid probe
+// (serverPIDProbe), and once that answers that no scion server is alive —
+// the daemon exited, or its pid file named another process — it stops with
+// ErrHubNotReady and a pointer at the server log. A probe that cannot run
+// says nothing and the wait goes on. progress, when non-nil, gets a line
+// after hubReadyNotice and every hubReadyEvery after it, so a slow start
+// reads as a wait and not as a hang.
+func (c *Client) waitHubReady(ctx context.Context, progress func(format string, args ...any)) error {
+	start := time.Now()
+	deadline := start.Add(c.hubReadyTimeout)
+	nextNotice := start.Add(c.hubReadyNotice)
+	lastAlive := start
+	attempts := 0
 	var lastErr error
-	err := retry.Until(ctx, c.hubReadyAttempts, c.hubReadyInterval, func() (bool, error) {
+	errGone := errors.New("server gone")
+	err := retry.Until(ctx, 0, c.hubReadyInterval, func() (bool, error) {
+		attempts++
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json")
-		return lastErr == nil || isHubAuthRefusal(lastErr), nil
+		if lastErr == nil || isHubAuthRefusal(lastErr) {
+			return true, nil
+		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return false, retry.ErrExhausted
+		}
+		if now.Sub(lastAlive) >= c.hubAliveEvery {
+			lastAlive = now
+			if pid, perr := c.serverPIDProbe(ctx); perr == nil && pid == 0 {
+				return false, errGone
+			}
+		}
+		if progress != nil && !now.Before(nextNotice) {
+			progress("scion-server: the hub is not answering yet after %s; a cold start (the first after a reboot or a scion pin change) can take a minute — waiting up to %s",
+				now.Sub(start).Round(time.Second), c.hubReadyTimeout)
+			nextNotice = now.Add(hubReadyEvery)
+		}
+		return false, nil
 	})
-	if errors.Is(err, retry.ErrExhausted) {
-		return fmt.Errorf("%w after %d attempts: %w", ErrHubNotReady, c.hubReadyAttempts, lastErr)
+	switch {
+	case errors.Is(err, retry.ErrExhausted):
+		return fmt.Errorf("%w after %s (%d attempts): %w", ErrHubNotReady, time.Since(start).Round(time.Second), attempts, lastErr)
+	case errors.Is(err, errGone):
+		return fmt.Errorf("%w: no scion server is running in the jail any more (it exited during start-up); see ~/%s in the jail: %w",
+			ErrHubNotReady, layout.ServerLogRel, lastErr)
 	}
 	return err
 }
@@ -208,7 +265,8 @@ func isHubAuthRefusal(err error) bool {
 }
 
 // ErrHubNotReady is wrapped by waitHubReady when the hub never answers within
-// its budget; the last probe error is wrapped alongside it.
+// its budget, or its server is gone; the last probe error is wrapped
+// alongside it.
 var ErrHubNotReady = errors.New("hub not ready")
 
 // brokerReadyAttempts/brokerReadyInterval are the default WaitRuntimeBrokerReady
@@ -421,6 +479,9 @@ type ServerOpts struct {
 	// Empty omits the flag (scion's per-boot random key) — the throwaway
 	// mint-window hub, whose sessions nobody keeps.
 	SessionSecret string
+	// Progress, when non-nil, gets a line while the start waits on a slow
+	// hub (see waitHubReady). Not part of the argv.
+	Progress func(format string, args ...any)
 }
 
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises
@@ -468,6 +529,12 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 			args = append(args, "--web-assets-dir="+o.WebAssetsDir)
 		}
 	}
+	// A pid file that names a live process which is not a scion server (a
+	// reboot reused the pid) makes scion answer "already running" without
+	// starting anything, and the wait below would then wait on nothing. The
+	// probe removes such a file first. Best-effort: when the jail shell
+	// fails, the start runs as before.
+	_, _ = c.serverPIDProbe(ctx)
 	// Idempotent: tolerate an already-running server on re-apply; waitHubReady
 	// then confirms the existing server is actually serving.
 	//
@@ -477,7 +544,7 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && (o.Exclusive || !AlreadyRunning(err)) {
 		return err
 	}
-	return c.waitHubReady(ctx)
+	return c.waitHubReady(ctx, o.Progress)
 }
 
 // ServerStop stops the workstation daemon, tolerating a daemon that is not

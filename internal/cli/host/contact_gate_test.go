@@ -2,10 +2,13 @@ package host
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -164,7 +168,11 @@ func TestContactSessionWarningsNameTheAgentAndTheFix(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetErr(&out)
 	printContactSessionWarnings(cmd, app, st)
-	for _, want := range []string{"contacts cannot post to scratch", "contacts cannot post to hello", "lever up --fresh"} {
+	// One line for both agents, naming each and both fixes.
+	if n := strings.Count(out.String(), "\n"); n != 1 {
+		t.Fatalf("warnings %q: %d lines, want one summarised line", out.String(), n)
+	}
+	for _, want := range []string{"contacts cannot post to 2 agents", "scratch, hello (", "lever up --fresh", "a worker takes contact messages"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("warnings %q, want %q", out.String(), want)
 		}
@@ -174,8 +182,8 @@ func TestContactSessionWarningsNameTheAgentAndTheFix(t *testing.T) {
 	}
 	out.Reset()
 	printContactSessionWarnings(cmd, app, st)
-	if strings.Contains(out.String(), "scratch") {
-		t.Fatalf("a fresh session still warned: %q", out.String())
+	if strings.Contains(out.String(), "scratch") || !strings.Contains(out.String(), "contacts cannot post to hello (") || strings.Contains(out.String(), "a worker takes") {
+		t.Fatalf("a fresh session still warned, or the manager's line is wrong: %q", out.String())
 	}
 }
 
@@ -200,5 +208,63 @@ func TestStaleSkillWarningWithVerifiedChat(t *testing.T) {
 	printContactSessionWarnings(cmd, app, st)
 	if out.Len() != 0 {
 		t.Fatalf("current skills warned: %q", out.String())
+	}
+}
+
+// TestContactSessionWarningIsBounded: many blocked agents give one line
+// listing at most maxWarnedContactAgents names, grouped by reason, with the
+// rest counted; names are sanitized for the terminal.
+func TestContactSessionWarningIsBounded(t *testing.T) {
+	blocked := []blockedContactAgent{{"evil\x1b]0;pwned\x07", "x"}}
+	for i := range 11 {
+		reason := "lever has no record of its session starting fresh"
+		if i == 1 {
+			reason = "its lever skill is not current"
+		}
+		blocked = append(blocked, blockedContactAgent{fmt.Sprintf("w%d", i), reason})
+	}
+	line := contactSessionWarning("hello", blocked)
+	if strings.Contains(line, "\n") || strings.Contains(line, "\x1b") {
+		t.Fatalf("line %q must be one line with no escape", line)
+	}
+	for _, want := range []string{"cannot post to 12 agents", "evil (x); w0, w2, w3, w4, w5, w6 (lever has no record", "w1 (its lever skill is not current)", "and 4 more"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("line %q, want %q", line, want)
+		}
+	}
+	if strings.Contains(line, "w7") || strings.Contains(line, "lever up --fresh") {
+		t.Fatalf("line %q lists past the bound or names a manager fix with no manager blocked", line)
+	}
+	if contactSessionWarning("hello", nil) != "" {
+		t.Fatal("nothing blocked must print nothing")
+	}
+}
+
+// Agents whose sessions predate the current skill share one group in the
+// warning even though each started at its own time (after an upgrade every
+// agent does); the per-agent start time stays in contactSession's error.
+func TestContactSessionWarningGroupsStaleSessions(t *testing.T) {
+	app, _, st := scaffoldFixture(t)
+	app.Name = "hello"
+	withContact(app)
+	app.Remote.AllowedUsers[1].Agents = []string{"scratch", "hello"}
+	if _, err := syncSkills(app, st, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for i, a := range []string{"scratch", "hello"} {
+		r := sessionrec.Record{Agent: a, SkillHash: "old", Version: "0.0." + strconv.Itoa(i), Started: time.Date(2026, 9, 1+i, 0, 0, 0, 0, time.UTC)}
+		if err := sessionrec.Append(st.Sessions(), r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "2026-09-01") {
+		t.Fatalf("contactSession err = %v, want the start time in it", err)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetErr(&out)
+	printContactSessionWarnings(cmd, app, st)
+	if !strings.Contains(out.String(), "scratch, hello (its session started before its current skill was written)") || strings.Contains(out.String(), "2026-09") {
+		t.Fatalf("warning %q: want one group with no per-agent time", out.String())
 	}
 }

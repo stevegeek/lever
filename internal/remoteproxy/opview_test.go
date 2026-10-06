@@ -467,12 +467,20 @@ func TestOperatorViewAllowList(t *testing.T) {
 		"/lever/api/contacts/c%40x/agents/w1/messages/extra", // more parts
 		"/lever/api/contacts/c%40x/agent/w1/messages",        // wrong word
 		"/lever/api/contacts/C%40x/agents/w1/messages",       // case differs
-		"/lever/api/contacts/%2E%2E/agents/w1/messages",      // dots
-		"/lever/api/contacts/c%40x%2Fagents%2Fw1%2Fmessages", // one escaped segment
 		"/lever/api/contacts/",
 	} {
 		rw := viewDo(h, "op@x", "GET", p)
 		if rw.Code != http.StatusNotFound || strings.TrimSpace(rw.Body.String()) != `{"error":"not-found"}` {
+			t.Errorf("%s: %d %s", p, rw.Code, rw.Body)
+		}
+	}
+	// An encoded dot or slash never reaches the view: the proxy's path
+	// check (pathcheck.go) refuses it first, for every route.
+	for _, p := range []string{
+		"/lever/api/contacts/%2E%2E/agents/w1/messages",      // dots
+		"/lever/api/contacts/c%40x%2Fagents%2Fw1%2Fmessages", // one escaped segment
+	} {
+		if rw := viewDo(h, "op@x", "GET", p); rw.Code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s", p, rw.Code, rw.Body)
 		}
 	}
@@ -487,9 +495,14 @@ func TestOperatorViewLoginEncoding(t *testing.T) {
 	cfg.AllowedUsers = append(cfg.AllowedUsers, "a/b@x")
 	cfg.Contacts["a/b@x"] = []string{"w1"}
 	h := viewHandler(t, cfg)
-	viewMessages(t, viewDo(h, "op@x", "GET", "/lever/api/contacts/"+url.PathEscape("a/b@x")+"/agents/w1/messages"))
-	if sess.askedFor("a/b@x") != 1 {
-		t.Fatal("an escaped slash is part of the login")
+	// The proxy's path check refuses an encoded slash on every route, so a
+	// login holding "/" cannot be opened in the view (the guide says so);
+	// nothing is asked for it.
+	if rw := viewDo(h, "op@x", "GET", "/lever/api/contacts/"+url.PathEscape("a/b@x")+"/agents/w1/messages"); rw.Code != http.StatusBadRequest {
+		t.Fatalf("an escaped slash = %d %s", rw.Code, rw.Body)
+	}
+	if sess.askedFor("a/b@x") != 0 {
+		t.Fatal("a refused path asked for a session")
 	}
 	if rw := viewDo(h, "op@x", "GET", "/lever/api/contacts/a/b@x/agents/w1/messages"); rw.Code != http.StatusNotFound {
 		t.Fatalf("a raw slash splits the path: %d", rw.Code)

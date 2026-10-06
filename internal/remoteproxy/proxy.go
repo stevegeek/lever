@@ -809,6 +809,10 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// maxAuditFieldLen-byte prefix the same operator.
 	login := r.Header.Get(cfg.identityHeader())
 	line := AuditLine{Time: time.Now().UTC(), TSLogin: truncateAudit(login), Method: truncateAudit(r.Method), Path: truncateAudit(r.URL.Path)}
+	if msg := unsafePath(r); msg != "" {
+		g.deny(w, &line, http.StatusBadRequest, DecisionDenyPath, msg)
+		return
+	}
 
 	if !g.authorize(w, r, &line, login) {
 		return

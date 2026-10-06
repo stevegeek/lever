@@ -2,17 +2,23 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -49,10 +55,12 @@ func TestStopSuspendsManager(t *testing.T) {
 	if !sb.stopped {
 		t.Fatal("stop must call Backend.Stop")
 	}
-	if len(f.Calls) != 1 {
-		t.Fatalf("expected exactly one scion call (suspend), got %+v", f.Calls)
+	// A list (is the manager's phase stopped over a live harness? see
+	// healStoppedManager), then the suspend.
+	if len(f.Calls) != 2 || f.Calls[0].Args[0] != "list" {
+		t.Fatalf("expected a list then the suspend, got %+v", f.Calls)
 	}
-	call := f.Calls[0]
+	call := f.Calls[1]
 	if call.Name != "scion" || len(call.Args) == 0 || call.Args[0] != "suspend" {
 		t.Fatalf("expected `scion suspend ...`, got %+v", call)
 	}
@@ -82,23 +90,33 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 		// wantArgv are the leading words of every scion call, in order.
 		wantArgv []string
 		wantOut  string
+		alsoOut  string // a second line the output must contain, when set
 	}{
 		{
 			name:     "running worker suspended after the manager",
 			scripts:  map[string]string{"scion suspend": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
 			wantOut:  `worker "scratch" suspended`,
 		},
 		{
 			name:     "list fails",
 			scripts:  map[string]string{"scion suspend": "ok"},
-			wantArgv: []string{"suspend demo", "list"},
+			wantArgv: []string{"list", "suspend demo", "list"},
 			wantOut:  "warning: listing agents failed",
+		},
+		{
+			// The manager's suspend failing is a warning too: the worker pass
+			// still runs under its own budget, then the power-off.
+			name:     "manager suspend fails",
+			scripts:  map[string]string{"scion suspend scratch": "ok", argvScionList: stopFleetJSON},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
+			wantOut:  "warning: scion suspend failed",
+			alsoOut:  `worker "scratch" suspended`,
 		},
 		{
 			name:     "worker suspend fails",
 			scripts:  map[string]string{"scion suspend demo": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
 			wantOut:  `warning: scion suspend of worker "scratch" failed`,
 		},
 	} {
@@ -130,8 +148,8 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 					t.Fatalf("call %d = %q, want `scion %s …`", i, got, want)
 				}
 			}
-			if !strings.Contains(out.String(), tc.wantOut) {
-				t.Fatalf("output %q does not contain %q", out.String(), tc.wantOut)
+			if !strings.Contains(out.String(), tc.wantOut) || !strings.Contains(out.String(), tc.alsoOut) {
+				t.Fatalf("output %q does not contain %q and %q", out.String(), tc.wantOut, tc.alsoOut)
 			}
 			if !strings.Contains(out.String(), "stopped — disk preserved") {
 				t.Fatalf("stop did not report the power-off: %q", out.String())
@@ -278,5 +296,279 @@ func TestStopHostDaemonsIsQuietWhenNothingRuns(t *testing.T) {
 	stopHostDaemons(cmd, state.ForConfig(t.TempDir()))
 	if errOut.Len() != 0 {
 		t.Fatalf("unexpected warnings: %s", errOut.String())
+	}
+}
+
+// fakeSuspender is a workerSuspender: List answers agents; Suspend runs
+// suspend for the worker (nil = succeed at once). It tracks the peak number
+// of suspends in flight.
+type fakeSuspender struct {
+	agents  []scion.Agent
+	suspend map[string]func(ctx context.Context) error
+
+	mu       sync.Mutex
+	inFlight int
+	peak     int
+}
+
+func (f *fakeSuspender) List(context.Context, string) ([]scion.Agent, error) { return f.agents, nil }
+
+func (f *fakeSuspender) Suspend(ctx context.Context, worker, _ string) error {
+	f.mu.Lock()
+	f.inFlight++
+	f.peak = max(f.peak, f.inFlight)
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.inFlight--
+		f.mu.Unlock()
+	}()
+	if do := f.suspend[worker]; do != nil {
+		return do(ctx)
+	}
+	return nil
+}
+
+// The worker suspends run side by side, never more than the pool allows,
+// and each error lands at its worker's index.
+func TestSuspendWorkersIsBoundedParallel(t *testing.T) {
+	slow := func(context.Context) error { time.Sleep(30 * time.Millisecond); return nil }
+	f := &fakeSuspender{suspend: map[string]func(context.Context) error{}}
+	var names []string
+	for i := range 7 {
+		name := fmt.Sprintf("w%d", i)
+		names = append(names, name)
+		f.suspend[name] = slow
+	}
+	f.suspend["w4"] = func(context.Context) error { time.Sleep(30 * time.Millisecond); return errors.New("w4 failed") }
+	errs := suspendWorkers(context.Background(), f, names, "/lever", 3, time.Second)
+	if f.peak < 2 || f.peak > 3 {
+		t.Fatalf("peak suspends in flight = %d, want 2..3 (pool of 3)", f.peak)
+	}
+	for i, err := range errs {
+		if (err != nil) != (i == 4) {
+			t.Fatalf("errs = %v, want only index 4 to fail", errs)
+		}
+	}
+}
+
+// One hung suspend costs only its own timeout: the others finish, and the
+// hung one fails with the deadline.
+func TestSuspendWorkersTimesOutEachWorker(t *testing.T) {
+	f := &fakeSuspender{suspend: map[string]func(context.Context) error{
+		"hung": func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
+	}}
+	start := time.Now()
+	errs := suspendWorkers(context.Background(), f, []string{"a", "hung", "b"}, "/lever", 2, 30*time.Millisecond)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the pass took %s", d)
+	}
+	if errs[0] != nil || errs[2] != nil || !errors.Is(errs[1], context.DeadlineExceeded) {
+		t.Fatalf("errs = %v, want only hung to fail with the deadline", errs)
+	}
+}
+
+// The pass reports in config order whatever order the suspends finish in,
+// and a failure's text is sanitised before it reaches the terminal.
+func TestSuspendRunningWorkersReportsInConfigOrder(t *testing.T) {
+	app := &config.App{Workers: []config.Worker{{Name: "first"}, {Name: "second"}, {Name: "third"}, {Name: "asleep"}}}
+	f := &fakeSuspender{
+		agents: []scion.Agent{
+			{Slug: "first", Phase: "running"}, {Slug: "second", Phase: "running"},
+			{Slug: "third", Phase: "resumed"}, {Slug: "asleep", Phase: "suspended"},
+		},
+		suspend: map[string]func(context.Context) error{
+			"first":  func(context.Context) error { time.Sleep(40 * time.Millisecond); return nil },
+			"second": func(context.Context) error { return errors.New("hub said \x1b[31mno\x1b[0m") },
+		},
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	suspendRunningWorkers(cmd, f, app, "/lever")
+	got := out.String()
+	i1, i2, i3 := strings.Index(got, `"first"`), strings.Index(got, `"second"`), strings.Index(got, `"third"`)
+	if i1 < 0 || i2 < 0 || i3 < 0 || i1 > i2 || i2 > i3 {
+		t.Fatalf("output not in config order:\n%s", got)
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Fatalf("an escape sequence reached the output: %q", got)
+	}
+	if !strings.Contains(got, `warning: scion suspend of worker "second" failed`) || strings.Contains(got, `"asleep"`) {
+		t.Fatalf("unexpected output:\n%s", got)
+	}
+}
+
+// reportProbe is an apply.AgentSessionProbe for healStoppedManager: a valid
+// token, a live harness, and a count of session reports.
+type reportProbe struct{ reports int }
+
+func (p *reportProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
+	now := time.Now()
+	return jail.HubTokenTimes{Expiry: now.Add(time.Hour * 5), Now: now}, nil
+}
+func (p *reportProbe) HarnessAlive(context.Context, string) (bool, error) { return true, nil }
+func (p *reportProbe) ReportSessionRunning(context.Context, string) error {
+	p.reports++
+	return nil
+}
+
+// TestHealStoppedManagerBeforeSuspend: a manager whose hub phase reads
+// stopped while its claude still runs is reported running before `lever
+// stop` suspends it, so the next `lever up` resumes the conversation; any
+// other phase is left to the suspend alone.
+func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
+	for _, tc := range []struct {
+		list        string
+		wantReports int
+	}{
+		{`[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`, 1},
+		{`[{"slug":"demo","phase":"running","containerStatus":"Up 2 hours"}]`, 0},
+		{`[{"slug":"demo","phase":"stopped","containerStatus":"stopped"}]`, 0},
+		{`[]`, 0},
+	} {
+		f := proc.NewFakeRunner()
+		f.Script("scion list", proc.Result{Stdout: tc.list})
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetErr(&out)
+		p := &reportProbe{}
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, nil, nil, "demo", "/lever")
+		if p.reports != tc.wantReports {
+			t.Fatalf("%s: reports = %d, want %d (%s)", tc.list, p.reports, tc.wantReports, out.String())
+		}
+		if tc.wantReports > 0 && !strings.Contains(out.String(), "lever stop: agent \"demo\"") {
+			t.Fatalf("%s: output %q", tc.list, out.String())
+		}
+	}
+}
+
+// blockingProbe's harness probe waits for its context to end, like a hung
+// podman exec; it records that context's deadline.
+type blockingProbe struct{ deadline time.Time }
+
+func (p *blockingProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
+	now := time.Now()
+	return jail.HubTokenTimes{Expiry: now.Add(5 * time.Hour), Now: now}, nil
+}
+func (p *blockingProbe) HarnessAlive(ctx context.Context, _ string) (bool, error) {
+	p.deadline, _ = ctx.Deadline()
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+func (p *blockingProbe) ReportSessionRunning(context.Context, string) error { return nil }
+
+// ctxRecordingRunner records, for every scion suspend, whether its context
+// was already done when the call ran.
+type ctxRecordingRunner struct {
+	*proc.FakeRunner
+	suspendCtxErr []error
+}
+
+func (r *ctxRecordingRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if len(args) > 0 && args[0] == "suspend" {
+		r.suspendCtxErr = append(r.suspendCtxErr, ctx.Err())
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+func (r *ctxRecordingRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestStopHealCannotEatTheSuspendBudget: a heal that hangs runs out its own
+// budget, and the manager's suspend still runs with a live context.
+func TestStopHealCannotEatTheSuspendBudget(t *testing.T) {
+	dir := writeInstance(t, managerYAML)
+	t.Chdir(dir)
+	oldBudget, oldProbe := stopHealBudget, stopSessionProbe
+	p := &blockingProbe{}
+	stopHealBudget = 50 * time.Millisecond
+	stopSessionProbe = func(proc.Runner) apply.AgentSessionProbe { return p }
+	t.Cleanup(func() { stopHealBudget, stopSessionProbe = oldBudget, oldProbe })
+
+	f := proc.NewFakeRunner()
+	f.Script("scion list", proc.Result{Stdout: `[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`})
+	f.Script("scion suspend", proc.Result{Stdout: "ok"})
+	r := &ctxRecordingRunner{FakeRunner: f}
+	sb := &stubBackend{runner: r}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop"})
+	start := time.Now()
+	if err := root.Execute(); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out.String())
+	}
+	if p.deadline.IsZero() || p.deadline.Sub(start) > 5*time.Second {
+		t.Fatalf("the heal ran without its own short budget (deadline %v)", p.deadline)
+	}
+	if len(r.suspendCtxErr) != 1 || r.suspendCtxErr[0] != nil {
+		t.Fatalf("suspend calls / ctx errors = %v, want one live-context suspend", r.suspendCtxErr)
+	}
+}
+
+// expiredThenReportProbe models #84 and #156 at once: the token reads expired
+// until a reset-auth has run (seen on the scion runner), and the session
+// report records whether the reset came first.
+type expiredThenReportProbe struct {
+	f                *proc.FakeRunner
+	reportAfterReset []bool
+}
+
+func (p *expiredThenReportProbe) reset() bool {
+	return p.f.Called(proc.ArgvContains("reset-auth demo"))
+}
+func (p *expiredThenReportProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
+	now := time.Now()
+	if p.reset() {
+		return jail.HubTokenTimes{Expiry: now.Add(10 * time.Hour), Now: now}, nil
+	}
+	return jail.HubTokenTimes{Expiry: now.Add(-time.Hour), Now: now}, nil
+}
+func (p *expiredThenReportProbe) HarnessAlive(context.Context, string) (bool, error) {
+	return true, nil
+}
+func (p *expiredThenReportProbe) ReportSessionRunning(context.Context, string) error {
+	p.reportAfterReset = append(p.reportAfterReset, p.reset())
+	return nil
+}
+
+// TestHealStoppedManagerResetsAnExpiredTokenFirst: with an expired token the
+// stop heal resets it (behind the role guard) before the session report, which
+// would otherwise go out on a token the hub refuses; a guard refusal resets
+// nothing.
+func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
+	for _, refuse := range []bool{false, true} {
+		f := proc.NewFakeRunner()
+		f.Script("scion list", proc.Result{Stdout: `[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`})
+		f.Script("scion reset-auth", proc.Result{Stdout: "ok"})
+		p := &expiredThenReportProbe{f: f}
+		var guarded []string
+		verify := func(_ context.Context, project, agent string) error {
+			guarded = append(guarded, project+"/"+agent)
+			if refuse {
+				return errors.New("record stores no role")
+			}
+			return nil
+		}
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetErr(&out)
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, verify, nil, "demo", "/lever")
+		if len(guarded) != 1 || guarded[0] != "lever/demo" {
+			t.Fatalf("refuse=%v: guard calls %v", refuse, guarded)
+		}
+		if refuse {
+			if p.reset() || !strings.Contains(out.String(), "NOT reset") {
+				t.Fatalf("a refused guard must reset nothing: %q", out.String())
+			}
+			continue
+		}
+		if len(p.reportAfterReset) != 1 || !p.reportAfterReset[0] {
+			t.Fatalf("the session report must follow the reset: %v (%s)", p.reportAfterReset, out.String())
+		}
 	}
 }

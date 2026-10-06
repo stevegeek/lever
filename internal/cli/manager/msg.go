@@ -27,6 +27,11 @@ func decodeMsgEvents(raw json.RawMessage) ([]scion.Event, error) {
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("decode /msg/list response: %w", err)
 	}
+	// The broker already marks each event (scion.WorkerReported); applying
+	// it again here is a no-op on its answer and covers an older broker.
+	for i, e := range res.Events {
+		res.Events[i] = scion.WorkerReported(e)
+	}
 	return res.Events, nil
 }
 

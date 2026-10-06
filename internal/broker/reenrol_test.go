@@ -3,10 +3,14 @@ package broker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -289,5 +293,239 @@ func TestHealRechecksRevocationAfterTheLockWait(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "revoked identity") {
 		t.Fatalf("no deny line for the revoked heal:\n%s", buf.String())
+	}
+}
+
+// gatedRuntime makes fakeRuntime safe to share between a heal and a request
+// handler, and can hold Resume open: it signals resumeEntered, then waits
+// for resumeRelease to close (mu is not held while it waits).
+type gatedRuntime struct {
+	mu            sync.Mutex
+	f             *fakeRuntime
+	resumeEntered chan string
+	resumeRelease chan struct{}
+}
+
+func (g *gatedRuntime) List(ctx context.Context, p string) ([]scion.Agent, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.List(ctx, p)
+}
+func (g *gatedRuntime) Start(ctx context.Context, o scion.StartOpts) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.Start(ctx, o)
+}
+func (g *gatedRuntime) Resume(ctx context.Context, w, p string) error {
+	g.resumeEntered <- w
+	<-g.resumeRelease
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.Resume(ctx, w, p)
+}
+func (g *gatedRuntime) ResumeForce(ctx context.Context, w, p string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.ResumeForce(ctx, w, p)
+}
+func (g *gatedRuntime) Stop(ctx context.Context, w, p string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.Stop(ctx, w, p)
+}
+func (g *gatedRuntime) Suspend(ctx context.Context, w, p string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.Suspend(ctx, w, p)
+}
+func (g *gatedRuntime) EnvSet(ctx context.Context, d, k, v string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.EnvSet(ctx, d, k, v)
+}
+func (g *gatedRuntime) Message(ctx context.Context, o scion.MsgOpts) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.Message(ctx, o)
+}
+func (g *gatedRuntime) Inbox(ctx context.Context, u bool, p string) ([]scion.Event, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.Inbox(ctx, u, p)
+}
+func (g *gatedRuntime) StageWorkerTicket(ctx context.Context, w string, payload []byte) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.StageWorkerTicket(ctx, w, payload)
+}
+
+func newGatedRuntime(phase string) *gatedRuntime {
+	return &gatedRuntime{
+		f: &fakeRuntime{agents: map[string][]scion.Agent{
+			testInstanceProject: {{Slug: "scratch", Phase: phase}},
+		}},
+		resumeEntered: make(chan string, 4),
+		resumeRelease: make(chan struct{}),
+	}
+}
+
+func reenrolTriesOf(b *Broker, cn string) int {
+	b.reenrolMu.Lock()
+	defer b.reenrolMu.Unlock()
+	return b.reenrolTries[cn]
+}
+
+// A heal and the manager's resume of the same worker run one after the
+// other, never interleaved: the resume waits for the heal's lock, then
+// reads the phase the heal left (running) and answers 200 with no second
+// resume, so it cannot meet the hub mid-bounce and answer "try again".
+// Run with -race.
+func TestHealAndManualResumeAreSerialised(t *testing.T) {
+	g := newGatedRuntime("suspended")
+	b, _, _ := reenrolBroker(t, g, "all")
+	b.liveAttempts, b.liveInterval = 5, time.Millisecond
+	waiting := make(chan string, 1)
+	b.onWorkerLockWait = func(name string) { waiting <- name }
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		b.healLapse(context.Background(), "scratch")
+	}()
+	<-g.resumeEntered // the heal holds the lock, in its resume
+	var rec *httptest.ResponseRecorder
+	go func() {
+		defer wg.Done()
+		rec = callWorker(t, b, "/worker/resume", `{"worker":"scratch"}`, "test-manager")
+	}()
+	if got := <-waiting; got != "scratch" {
+		t.Fatalf("lock wait for %q, want scratch", got)
+	}
+	close(g.resumeRelease)
+	wg.Wait()
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"phase":"running"`) {
+		t.Fatalf("manual resume after the heal: %d %s, want 200 running", rec.Code, rec.Body.String())
+	}
+	if n := len(g.f.resumed); n != 1 {
+		t.Fatalf("resume calls = %d, want 1 (the manual resume must see the heal's result)", n)
+	}
+	if n := reenrolTriesOf(b, "scratch"); n != 0 {
+		t.Fatalf("heal attempts after a healed lapse = %d, want 0", n)
+	}
+}
+
+// The other order: the manager's resume holds the lock, so the heal is
+// skipped without using an attempt, and the resume's success clears the
+// count that earlier failed heals left. Run with -race.
+func TestManualResumeDuringHealResetsTheAttemptCount(t *testing.T) {
+	g := newGatedRuntime("suspended")
+	b, _, _ := reenrolBroker(t, g, "all")
+	b.liveAttempts, b.liveInterval = 5, time.Millisecond
+	b.reenrolLockWait = 20 * time.Millisecond
+	b.reenrolMu.Lock()
+	b.reenrolTries["scratch"] = reenrolMaxAttempts - 1 // two failed heals before
+	b.reenrolMu.Unlock()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var rec *httptest.ResponseRecorder
+	go func() {
+		defer wg.Done()
+		rec = callWorker(t, b, "/worker/resume", `{"worker":"scratch"}`, "test-manager")
+	}()
+	<-g.resumeEntered // the manual resume holds the lock
+	b.healLapse(context.Background(), "scratch")
+	if n := reenrolTriesOf(b, "scratch"); n != reenrolMaxAttempts-1 {
+		t.Fatalf("a heal skipped for a busy lock changed the count to %d", n)
+	}
+	close(g.resumeRelease)
+	wg.Wait()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manual resume: %d %s", rec.Code, rec.Body.String())
+	}
+	if n := reenrolTriesOf(b, "scratch"); n != 0 {
+		t.Fatalf("heal attempts after a successful manual resume = %d, want 0", n)
+	}
+	if len(g.f.staged["scratch"]) != 1 || len(g.f.resumed) != 1 {
+		t.Fatalf("staged=%d resumed=%d, want 1 and 1 (the skipped heal must do nothing)", len(g.f.staged["scratch"]), len(g.f.resumed))
+	}
+}
+
+// A reset that lands while a heal waits for the lock: the heal's skip must
+// not drive the count below zero (which would give the next burst an extra
+// attempt).
+func TestSkippedHealNeverLeavesANegativeCount(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "suspended"}},
+	}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	b.reenrolLockWait = 20 * time.Millisecond
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	b.onWorkerLockWait = func(name string) { b.resetReenrolTries(name) }
+	b.healLapse(context.Background(), "scratch")
+	if n := reenrolTriesOf(b, "scratch"); n != 0 {
+		t.Fatalf("count after a reset and a skipped heal = %d, want 0", n)
+	}
+}
+
+// A heal refused for the record's stored role stages nothing: the role check
+// runs before the ticket is staged, so no fresh one-use ticket is left
+// behind for a worker (guest channel) or the manager (bootstrap dir).
+func TestHealRefusedForRoleStagesNoTicket(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {
+			{Slug: "scratch", Phase: "running", ContainerStatus: "Up 2 minutes"},
+			{Slug: "appname", Phase: "running", ContainerStatus: "Up 5 minutes"},
+		},
+	}}
+	b, _, managerDir := reenrolBroker(t, rt, "all")
+	var checked []string
+	b.verifyRole = func(_ context.Context, agent string) error {
+		checked = append(checked, agent)
+		return errors.New("stored role reads as full")
+	}
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	b.healLapse(context.Background(), "scratch")
+	b.healLapse(context.Background(), "test-manager")
+
+	if len(rt.staged) != 0 {
+		t.Fatalf("a role-refused worker heal staged %d ticket(s)", len(rt.staged["scratch"]))
+	}
+	if cn := stagedCN(t, managerDir); cn != "" {
+		t.Fatalf("a role-refused manager heal staged a bootstrap (CN %q)", cn)
+	}
+	if len(rt.suspend) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("a role-refused heal bounced: suspend=%v resume=%v", rt.suspend, rt.resumed)
+	}
+	if len(checked) != 2 || checked[0] != "scratch" || checked[1] != "appname" {
+		t.Fatalf("role checked for %v, want [scratch appname] (one check each, by scion slug)", checked)
+	}
+	if strings.Count(buf.String(), "refusing to bounce") != 2 {
+		t.Fatalf("want two deny lines:\n%s", buf.String())
+	}
+}
+
+// A fresh start of a worker (absent record: stage, scion start, live) also
+// clears the count earlier failed heals left, as a resume does.
+func TestFreshStartResetsTheAttemptCount(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	b.liveAttempts, b.liveInterval = 5, time.Millisecond
+	b.reenrolMu.Lock()
+	b.reenrolTries["scratch"] = reenrolMaxAttempts
+	b.reenrolMu.Unlock()
+	rec := callWorker(t, b, "/worker/start", `{"worker":"scratch","task":"go"}`, "test-manager")
+	if rec.Code != http.StatusOK || len(rt.started) != 1 {
+		t.Fatalf("start: %d %s started=%d, want 200 and one start", rec.Code, rec.Body.String(), len(rt.started))
+	}
+	if n := reenrolTriesOf(b, "scratch"); n != 0 {
+		t.Fatalf("heal attempts after a fresh start = %d, want 0", n)
 	}
 }

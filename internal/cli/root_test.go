@@ -30,21 +30,47 @@ func TestVersionCommand(t *testing.T) {
 
 func TestFormatVersion(t *testing.T) {
 	for _, c := range []struct {
-		name, base, rev string
-		dirty           bool
-		modVer, want    string
+		name, base, rev   string
+		dirty             bool
+		modVer, bin, want string
 	}{
-		{"commit", "0.5.0", "a8abdaef12345678", false, "", "0.5.0 (a8abdaef1234)"},
-		{"commit-dirty", "0.5.0", "a8abdaef12345678", true, "", "0.5.0 (a8abdaef1234-dirty)"},
-		{"short-commit-not-truncated", "0.5.0", "abc123", false, "", "0.5.0 (abc123)"},
-		{"module-version-when-no-vcs", "0.5.0", "", false, "v0.5.0", "0.5.0 (v0.5.0)"},
-		{"devel-module-ignored", "0.5.0", "", false, "(devel)", "0.5.0"},
-		{"nothing-available", "0.5.0", "", false, "", "0.5.0"},
-		{"commit-wins-over-module", "0.5.0", "deadbeef", true, "v0.5.0", "0.5.0 (deadbeef-dirty)"},
+		{"commit", "0.5.0", "a8abdaef12345678", false, "", "", "0.5.0 (a8abdaef1234)"},
+		{"commit-dirty", "0.5.0", "a8abdaef12345678", true, "", "", "0.5.0 (a8abdaef1234-dirty)"},
+		{"short-commit-not-truncated", "0.5.0", "abc123", false, "", "", "0.5.0 (abc123)"},
+		{"module-version-when-no-vcs", "0.5.0", "", false, "v0.5.0", "", "0.5.0 (v0.5.0)"},
+		{"devel-module-ignored", "0.5.0", "", false, "(devel)", "", "0.5.0"},
+		{"nothing-available", "0.5.0", "", false, "", "", "0.5.0"},
+		{"commit-wins-over-module", "0.5.0", "deadbeef", true, "v0.5.0", "", "0.5.0 (deadbeef-dirty)"},
+		{"worktree-build-gets-binary-hash", "0.5.0", "", false, "(devel)", "1a2b3c4d5e6f", "0.5.0 (bin 1a2b3c4d5e6f)"},
+		{"dirty-build-gets-binary-hash", "0.5.0", "deadbeef", true, "", "1a2b3c4d5e6f", "0.5.0 (deadbeef-dirty, bin 1a2b3c4d5e6f)"},
 	} {
-		if got := formatVersion(c.base, c.rev, c.dirty, c.modVer); got != c.want {
-			t.Errorf("%s: formatVersion(%q,%q,%v,%q) = %q, want %q", c.name, c.base, c.rev, c.dirty, c.modVer, got, c.want)
+		if got := formatVersion(c.base, c.rev, c.dirty, c.modVer, c.bin); got != c.want {
+			t.Errorf("%s: formatVersion(%q,%q,%v,%q,%q) = %q, want %q", c.name, c.base, c.rev, c.dirty, c.modVer, c.bin, got, c.want)
 		}
+	}
+}
+
+// TestNeedsBinaryHash: only a build whose stamp cannot tell two builds apart
+// pays for hashing the binary — a clean commit and a tagged module do not.
+func TestNeedsBinaryHash(t *testing.T) {
+	for _, c := range []struct {
+		rev    string
+		dirty  bool
+		modVer string
+		want   bool
+	}{
+		{"deadbeef", false, "", false},
+		{"deadbeef", true, "", true},
+		{"", false, "v0.5.0", false},
+		{"", false, "(devel)", true},
+		{"", false, "", true},
+	} {
+		if got := needsBinaryHash(c.rev, c.dirty, c.modVer); got != c.want {
+			t.Errorf("needsBinaryHash(%q,%v,%q) = %v, want %v", c.rev, c.dirty, c.modVer, got, c.want)
+		}
+	}
+	if h := executableHash(); len(h) != 12 {
+		t.Fatalf("executableHash() = %q, want 12 hex digits of the test binary", h)
 	}
 }
 

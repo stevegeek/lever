@@ -59,7 +59,9 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 	}
 	defer f.Close()
 	for _, e := range fresh {
-		line, err := json.Marshal(e)
+		// The manager Monitors this file: each line's message is marked as the
+		// worker's own text (idempotent over what the broker already marked).
+		line, err := json.Marshal(scion.WorkerReported(e))
 		if err != nil {
 			return nil, err
 		}

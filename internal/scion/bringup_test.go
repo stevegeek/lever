@@ -23,6 +23,17 @@ func okScion() (*proc.FakeRunner, *Client) {
 	return f, New(f, Options{})
 }
 
+// serverStartCall is the `scion server start` call (ServerStart probes the
+// pid file before it).
+func serverStartCall(t *testing.T, f *proc.FakeRunner) proc.Call {
+	t.Helper()
+	i := f.CallIndex(proc.ArgvPrefix("scion", "server", "start"))
+	if i < 0 {
+		t.Fatalf("no server start call; calls=%+v", f.Calls)
+	}
+	return f.Calls[i]
+}
+
 func TestEnvSetArgvAndProjectScope(t *testing.T) {
 	f, c := okScion()
 	if err := c.EnvSet(context.Background(), "/jail/work", "LEVER_LLM_AUTH", "api-key"); err != nil {
@@ -118,7 +129,7 @@ func TestServerStartArgvWithPort(t *testing.T) {
 	if len(f.Calls) == 0 {
 		t.Fatal("expected at least one call")
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := strings.Join(serverStartCall(t, f).Args, " ")
 	if got != "server start --web-port 41000 --dev-auth=false" {
 		t.Errorf("args = %q", got)
 	}
@@ -132,7 +143,7 @@ func TestServerStartArgvWithoutPort(t *testing.T) {
 	if len(f.Calls) == 0 {
 		t.Fatal("expected at least one call")
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := strings.Join(serverStartCall(t, f).Args, " ")
 	if got != "server start --dev-auth=true" {
 		t.Errorf("args = %q", got)
 	}
@@ -151,7 +162,7 @@ func TestServerStartEmitsEnableWebOnly(t *testing.T) {
 	if len(f.Calls) == 0 {
 		t.Fatal("expected at least one call")
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := strings.Join(serverStartCall(t, f).Args, " ")
 	want := "server start --web-port 8080 --dev-auth=false --enable-web"
 	if got != want {
 		t.Errorf("args = %q, want %q", got, want)
@@ -167,7 +178,7 @@ func TestServerStartEmitsWebAssetsDir(t *testing.T) {
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := strings.Join(serverStartCall(t, f).Args, " ")
 	want := "server start --web-port 8080 --dev-auth=false --enable-web --web-assets-dir=/usr/local/share/scion/web"
 	if got != want {
 		t.Errorf("args = %q, want %q", got, want)
@@ -183,7 +194,7 @@ func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--web-assets-dir") {
+	if got := strings.Join(serverStartCall(t, f).Args, " "); strings.Contains(got, "--web-assets-dir") {
 		t.Errorf("args = %q, must not carry --web-assets-dir without --enable-web", got)
 	}
 }
@@ -197,7 +208,7 @@ func TestServerStartEmitsSessionSecret(t *testing.T) {
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := strings.Join(serverStartCall(t, f).Args, " ")
 	want := "server start --web-port 8080 --dev-auth=false --session-secret=sessionsecrethex"
 	if got != want {
 		t.Errorf("args = %q, want %q", got, want)
@@ -211,7 +222,7 @@ func TestServerStartOmitsSessionSecretWhenEmpty(t *testing.T) {
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: true}); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(f.Calls[0].Args, " "); strings.Contains(got, "--session-secret") {
+	if got := strings.Join(serverStartCall(t, f).Args, " "); strings.Contains(got, "--session-secret") {
 		t.Errorf("args = %q, must not carry --session-secret when unset", got)
 	}
 }
@@ -248,7 +259,7 @@ func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
 	if len(f.Calls) == 0 {
 		t.Fatal("expected at least one call")
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := strings.Join(serverStartCall(t, f).Args, " ")
 	if strings.Contains(got, "--enable-web") || strings.Contains(got, "--base-url") {
 		t.Errorf("args = %q, must not contain web flags when EnableWeb is unset", got)
 	}
@@ -287,7 +298,7 @@ func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 		if len(f.Calls) == 0 {
 			t.Fatalf("%+v: expected at least one call", o)
 		}
-		got := strings.Join(f.Calls[0].Args, " ")
+		got := strings.Join(serverStartCall(t, f).Args, " ")
 		if strings.Contains(got, "--enable-web=false") {
 			t.Fatalf("args = %q: this moves the Hub API off the web port and takes the instance down", got)
 		}
@@ -393,7 +404,7 @@ func TestServerStartArgvWebDisabled(t *testing.T) {
 	if err := c.ServerStart(context.Background(), ServerOpts{HubPort: 48080, DisableWeb: true, DevAuth: true, Exclusive: true}); err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(f.Calls[0].Args, " ")
+	got := strings.Join(serverStartCall(t, f).Args, " ")
 	if got != "server start --port 48080 --enable-web=false --dev-auth=true" {
 		t.Errorf("args = %q", got)
 	}

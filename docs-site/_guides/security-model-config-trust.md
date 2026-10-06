@@ -105,7 +105,10 @@ that reaches out of the entry, a `Gemfile`, `.bundle/config`, `package.json` or 
 or do not trust them. **Create-time only:** scion keeps a record's mounts for life, so the mounts reach
 a manager created after the setting; `lever up --fresh` recreates an existing one (it discards the
 manager's conversation, back it up first). `lever apply` warns, and `lever doctor`'s *manager
-read-only paths* row fails, when the running manager lacks a mount.
+read-only paths* row fails, when the running manager lacks a mount. The same holds the other way:
+removing an entry leaves it mounted read-only until a fresh create, and its directory must stay until
+then (a resume of a record whose mounted directory is gone fails; apply refuses it up front and names
+the directory).
 
 ### 5.2 No walk-up discovery (no planted-parent config)
 

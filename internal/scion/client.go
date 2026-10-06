@@ -72,10 +72,13 @@ type Client struct {
 	agentRole      string
 	r              proc.Runner
 
-	// Poll budgets for waitHubReady / WaitRuntimeBrokerReady. New sets the
+	// Poll budgets (and waitHubReady's progress delay) for waitHubReady /
+	// WaitRuntimeBrokerReady. New sets the
 	// defaults; tests shrink them on the instance.
-	hubReadyAttempts    int
+	hubReadyTimeout     time.Duration
 	hubReadyInterval    time.Duration
+	hubReadyNotice      time.Duration
+	hubAliveEvery       time.Duration
 	brokerReadyAttempts int
 	brokerReadyInterval time.Duration
 }
@@ -92,8 +95,10 @@ func New(r proc.Runner, o Options) *Client {
 		agentRole:      o.AgentRole,
 		r:              r,
 
-		hubReadyAttempts:    hubReadyAttempts,
+		hubReadyTimeout:     hubReadyTimeout,
 		hubReadyInterval:    hubReadyInterval,
+		hubReadyNotice:      hubReadyNotice,
+		hubAliveEvery:       hubAliveEvery,
 		brokerReadyAttempts: brokerReadyAttempts,
 		brokerReadyInterval: brokerReadyInterval,
 	}

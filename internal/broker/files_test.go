@@ -233,3 +233,78 @@ func TestFilesShareTargetFoldsCase(t *testing.T) {
 		t.Fatalf("record login %q", r.Login)
 	}
 }
+
+// A login taken out of the config loses its place in the list: its
+// records stay in the ledger but no longer reach the agent.
+func TestFilesListDropsALoginRemovedFromConfig(t *testing.T) {
+	f := newFilesFixture(t)
+	f.put(t, "workers/scratch", ".lever-files/out/"+chatfiles.Key("client@example.org")+"/a.pdf", "x")
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "a.pdf")); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	removed := func(c *Config) { c.Files.Contacts = c.Files.Contacts[1:] } // only d@example.org stays
+	again := &filesFixture{verifyFixture: verifyBroker(t, nil, filesOpt(f.tree, f.dir), removed), tree: f.tree, dir: f.dir}
+	out := again.list(t, "scratch", "")
+	if len(out.Shares) != 0 || strings.Contains(fmt.Sprint(out.Contacts), "client@example.org") {
+		t.Fatalf("%+v", out)
+	}
+}
+
+func TestFilesShareToAnOperatorRecordsTheConfigSpelling(t *testing.T) {
+	f := newFilesFixture(t)
+	f.put(t, "workers/scratch", ".lever-files/out/"+chatfiles.Key("op@example.com")+"/a.pdf", "x")
+	res := f.share(t, "scratch", "OP@Example.COM", outPath("op@example.com", "a.pdf"))
+	if !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	l, _ := fileledger.Open(filepath.Join(f.dir, "files-ledger"))
+	if r, _, _ := l.Find("scratch", res.ID); r.Login != "op@example.com" {
+		t.Fatalf("record login %q", r.Login)
+	}
+}
+
+// One fold, lowercase: U+017F (long s) folds to "s" under Unicode case
+// folding but is not the login "s@x".
+func TestFileTargetUsesTheLowercaseFold(t *testing.T) {
+	b := &Broker{files: FilesConfig{Operators: []string{"s@x"},
+		Contacts: []FileContactEntry{{Login: "ks@x", Agents: []string{"w1"}}}}}
+	if _, _, ok := b.fileTarget("ſ@x", "w1"); ok {
+		t.Fatal("operator matched through a Unicode fold")
+	}
+	if _, _, ok := b.fileTarget("kſ@x", "w1"); ok {
+		t.Fatal("contact matched through a Unicode fold")
+	}
+	if canon, _, ok := b.fileTarget("KS@X", "w1"); !ok || canon != "ks@x" {
+		t.Fatalf("%q %v", canon, ok)
+	}
+}
+
+// Past the hourly count the share is refused before the file is hashed:
+// a missing file answers rate, not not-found.
+func TestFilesShareRateIsCheckedBeforeTheHash(t *testing.T) {
+	f := newFilesFixture(t)
+	ck := chatfiles.Key("client@example.org")
+	for i := 0; i < 20; i++ {
+		f.put(t, "workers/scratch", fmt.Sprintf(".lever-files/out/%s/f%d.pdf", ck, i), "x")
+		if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", fmt.Sprintf("f%d.pdf", i))); !res.OK {
+			t.Fatalf("%d: %+v", i, res)
+		}
+	}
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "none.pdf")); res.Reason != "rate" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestFilesShareRefusesAHardLink(t *testing.T) {
+	f := newFilesFixture(t)
+	ck := chatfiles.Key("client@example.org")
+	f.put(t, "workers/scratch", ".lever-files/in/"+ck+"/up.pdf", "x")
+	f.put(t, "workers/scratch", ".lever-files/out/"+ck+"/keep.pdf", "x")
+	ws := filepath.Join(f.tree, "workers/scratch/.lever-files")
+	if err := os.Link(filepath.Join(ws, "in", ck, "up.pdf"), filepath.Join(ws, "out", ck, "up.pdf")); err != nil {
+		t.Fatal(err)
+	}
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "up.pdf")); res.Reason != "symlink" {
+		t.Fatalf("%+v", res)
+	}
+}

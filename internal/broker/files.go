@@ -90,21 +90,26 @@ func (f *fileRecord) get() (*fileledger.Ledger, error) {
 
 // fileTarget is login as a file target of the agent slug: the configured
 // spelling of the login and its tier — operator, or contact when its agents
-// list slug — or ok false. Logins compare case-folded, like the hub's emails
-// and chatfiles.Key, so the record always carries the config's spelling.
+// list slug — or ok false. Logins compare lowercased, the one fold of the
+// config's duplicate check, the hub's emails and chatfiles.Key (a Unicode
+// case fold would also match U+017F to "s"), so the record always carries
+// the config's spelling.
 func (b *Broker) fileTarget(login, slug string) (canon, tier string, ok bool) {
 	for _, op := range b.files.Operators {
-		if strings.EqualFold(op, login) {
+		if sameLogin(op, login) {
 			return op, chatledger.TierOperator, true
 		}
 	}
 	for _, c := range b.files.Contacts {
-		if strings.EqualFold(c.Login, login) && slices.Contains(c.Agents, slug) {
+		if sameLogin(c.Login, login) && slices.Contains(c.Agents, slug) {
 			return c.Login, chatledger.TierContact, true
 		}
 	}
 	return "", "", false
 }
+
+// sameLogin compares two logins as lever does everywhere: lowercased.
+func sameLogin(a, b string) bool { return strings.ToLower(a) == strings.ToLower(b) }
 
 // fileTargets is every login slug may exchange files with, operators first.
 func (b *Broker) fileTargets(slug, ws string) []wire.FileContact {
@@ -166,7 +171,7 @@ func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
 	out := wire.FilesListResponse{Enabled: true, MaxBytes: b.files.MaxBytes, Extensions: b.files.Extensions,
 		Contacts: b.fileTargets(slug, ws), Uploads: []wire.FileInfo{}, Shares: []wire.FileInfo{}}
 	for _, rec := range recs {
-		if _, _, ok := b.fileTarget(rec.Login, slug); !ok || req.Contact != "" && !strings.EqualFold(rec.Login, req.Contact) {
+		if _, _, ok := b.fileTarget(rec.Login, slug); !ok || req.Contact != "" && !sameLogin(rec.Login, req.Contact) {
 			continue // another login, or one no longer configured for the caller
 		}
 		info := wire.FileInfo{ID: rec.ID, Login: rec.Login, Name: rec.Name, Size: rec.Size, SHA256: rec.SHA256,
@@ -190,6 +195,22 @@ func lastN[T any](s []T, n int) []T {
 }
 
 var errShareRate = errors.New(refuseRate)
+
+// shareRate is the hourly share limit over an agent's records.
+func shareRate(now time.Time) func([]fileledger.Record) error {
+	return func(prior []fileledger.Record) error {
+		n := 0
+		for _, p := range prior {
+			if p.Op == fileledger.OpShare && now.Sub(p.At) < time.Hour {
+				n++
+			}
+		}
+		if n >= filesSharesPerHour {
+			return errShareRate
+		}
+		return nil
+	}
+}
 
 func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 	caller, ok := b.requireLiveAgent(w, r, "files", "")
@@ -239,6 +260,16 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 		refuse(refuseUnavailable, "the host record is unavailable", "ledger: "+err.Error())
 		return
 	}
+	// A cheap look at the hourly count first, so an agent past it cannot
+	// make the host hash max_bytes on every call; Add checks again under
+	// the lock, and that check decides.
+	if prior, err := led.List(slug); err != nil {
+		refuse(refuseUnavailable, "the host record is unavailable", "ledger: "+err.Error())
+		return
+	} else if shareRate(now)(prior) != nil {
+		refuse(refuseRate, "too many shares this hour", "hourly rate")
+		return
+	}
 	sha, size, err := chatfiles.Hash(b.files.Tree, rel, b.files.MaxBytes)
 	if word := shareFault(err); word != "" {
 		refuse(word, "see the skill's share rules", "file: "+word)
@@ -251,18 +282,7 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := fileledger.Record{V: 1, Op: fileledger.OpShare, ID: id, Agent: slug, Login: to, Name: name, Rel: rel,
 		SHA256: sha, Size: size, At: now}
-	err = led.Add(rec, func(prior []fileledger.Record) error {
-		n := 0
-		for _, p := range prior {
-			if p.Op == fileledger.OpShare && now.Sub(p.At) < time.Hour {
-				n++
-			}
-		}
-		if n >= filesSharesPerHour {
-			return errShareRate
-		}
-		return nil
-	})
+	err = led.Add(rec, shareRate(now))
 	switch {
 	case errors.Is(err, errShareRate):
 		refuse(refuseRate, "too many shares this hour", "hourly rate")
@@ -278,13 +298,14 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 // shareFault maps a Hash error to its refusal word ("" for none). A
 // component that exists but is not a directory (out is a file) is a plain
 // error from the walk and so unavailable: the agent broke its own exchange.
+// A hard link is "symlink": the one word for a file reached by another name.
 func shareFault(err error) string {
 	switch {
 	case err == nil:
 		return ""
 	case errors.Is(err, fs.ErrNotExist):
 		return refuseNotFound
-	case errors.Is(err, fsutil.ErrSymlink), errors.Is(err, fsutil.ErrEscapesTree):
+	case errors.Is(err, fsutil.ErrSymlink), errors.Is(err, fsutil.ErrHardLink), errors.Is(err, fsutil.ErrEscapesTree):
 		return refuseSymlink
 	case errors.Is(err, fsutil.ErrNotRegularFile):
 		return refuseNotFile

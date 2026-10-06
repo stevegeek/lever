@@ -446,13 +446,16 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		t.Fatal(err)
 	}
 	for re, want := range map[string]int{
-		`createElement\(`:        4,
-		`createElement\('div'\)`: 4,
-		`setAttribute\(`:         1,
-		`setAttribute\('href', `: 1,
-		`\bfetch\(`:              1,
-		`new EventSource\(`:      1,
-		`location\.reload\(\)`:   2,
+		`createElement\(`:           7,
+		`createElement\('div'\)`:    4,
+		`createElement\('li'\)`:     1,
+		`createElement\('button'\)`: 1,
+		`createElement\('span'\)`:   1,
+		`setAttribute\(`:            1,
+		`setAttribute\('href', `:    1,
+		`\bfetch\(`:                 1,
+		`new EventSource\(`:         1,
+		`location\.reload\(\)`:      0,
 	} {
 		if got := len(regexp.MustCompile(re).FindAll(js, -1)); got != want {
 			t.Errorf("chat.js has %d of %s, want %d: review what the new one writes or requests", got, re, want)

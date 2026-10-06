@@ -297,8 +297,9 @@ func CreateInTreeNoLinks(tree, rel string, dirPerm, perm os.FileMode) (*os.File,
 
 // OpenInTreeNoLinks opens the regular file at rel below tree for reading:
 // no symbolic link on any component (rootNoLinks for the directories, Lstat
-// plus os.SameFile for the leaf), at most max bytes when opened. The file
-// may still grow: the caller reads through io.LimitReader(f, max+1).
+// plus os.SameFile for the leaf), with one name only (a hard link is
+// ErrHardLink), at most max bytes when opened. The file may still grow:
+// the caller reads through io.LimitReader(f, max+1).
 func OpenInTreeNoLinks(tree, rel string, max int64) (*os.File, fs.FileInfo, error) {
 	dir, leaf, err := splitNoLinks(rel)
 	if err != nil {
@@ -333,7 +334,23 @@ func OpenInTreeNoLinks(tree, rel string, max int64) (*os.File, fs.FileInfo, erro
 		f.Close()
 		return nil, nil, fmt.Errorf("%s changed while it was opened: %w", filepath.Join(tree, rel), ErrSymlink)
 	}
+	if hardLinked(st) {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s: %w", filepath.Join(tree, rel), ErrHardLink)
+	}
 	return f, st, nil
+}
+
+// ErrHardLink reports a regular file with more than one name, refused by
+// OpenInTreeNoLinks: a second name in the agent's directory says nothing
+// about where the inode came from, so lever reads only a file with one.
+var ErrHardLink = errors.New("hard link refused")
+
+// hardLinked reports whether fi (an open file's Stat) has more than one
+// directory entry.
+func hardLinked(fi fs.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Nlink > 1
 }
 
 // RemoveInTreeNoLinks removes the entry at rel (a file, or a link itself,

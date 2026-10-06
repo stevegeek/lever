@@ -593,3 +593,65 @@ func TestRemoveInTreeNoLinksRemovesTheEntryNotTheTarget(t *testing.T) {
 		t.Fatal("the link target was removed")
 	}
 }
+
+func TestOpenInTreeNoLinksRefusesAHardLink(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(tree, "a.txt"), filepath.Join(tree, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"a.txt", "b.txt"} {
+		if _, _, err := OpenInTreeNoLinks(tree, rel, 10); !errors.Is(err, ErrHardLink) {
+			t.Errorf("%s: err = %v, want ErrHardLink", rel, err)
+		}
+	}
+}
+
+// The leaf swapped after its Lstat for something os.Root still opens: only
+// the SameFile and IsRegular check after the open refuses it.
+func TestOpenInTreeNoLinksRefusesALeafSwappedInPlace(t *testing.T) {
+	for name, swap := range map[string]func(d string) error{
+		"in-directory link": func(d string) error {
+			if err := os.Remove(filepath.Join(d, "ok.txt")); err != nil {
+				return err
+			}
+			return os.Symlink("other.txt", filepath.Join(d, "ok.txt"))
+		},
+		"sibling file": func(d string) error {
+			return os.Rename(filepath.Join(d, "other.txt"), filepath.Join(d, "ok.txt"))
+		},
+		"fifo": func(d string) error {
+			if err := os.Remove(filepath.Join(d, "ok.txt")); err != nil {
+				return err
+			}
+			return syscall.Mkfifo(filepath.Join(d, "ok.txt"), 0o644)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := t.TempDir()
+			d := filepath.Join(tree, "d")
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, n := range []string{"ok.txt", "other.txt"} {
+				if err := os.WriteFile(filepath.Join(d, n), []byte(n), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			afterNoLinkWalk = func() {
+				if err := swap(d); err != nil {
+					t.Error(err)
+				}
+			}
+			defer func() { afterNoLinkWalk = nil }()
+			if f, _, err := OpenInTreeNoLinks(tree, "d/ok.txt", 100); !errors.Is(err, ErrSymlink) {
+				if f != nil {
+					f.Close()
+				}
+				t.Fatalf("err = %v, want ErrSymlink", err)
+			}
+		})
+	}
+}

@@ -51,6 +51,15 @@ func (s State) ChatVerified() string { return filepath.Join(s.Dir, "chat-verifie
 // written and read by the broker only.
 func (s State) SentLedger() string { return filepath.Join(s.Dir, "sent-ledger") }
 
+// AgentLedger is the broker's record of messages agents were authorized to
+// send to contacts, and of the hub message each was shown as (package
+// agentledger): written and read by the broker only.
+func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger") }
+
+// FilesLedger is the record of the chat page's file exchange (package
+// fileledger): uploads written by the remote proxy, shares by the broker.
+func (s State) FilesLedger() string { return filepath.Join(s.Dir, "files-ledger") }
+
 // Sessions is the record of each agent's last fresh session start and the
 // skill text on disk for it then (package sessionrec): written by apply (the
 // manager) and the broker (workers), read by the remote proxy before it lets
@@ -76,6 +85,10 @@ func (s State) SkillsAdopted() string { return filepath.Join(s.Dir, "skills-adop
 // its own would be reachable by whatever reaches the proxy. A file beside
 // remote.pid keeps the answer host-side, where only lever writes it.
 func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
+
+// PushDir holds the remote proxy's Web Push key, subscriptions and last
+// send result (remote.push), each 0600.
+func (s State) PushDir() string { return filepath.Join(s.Dir, "push") }
 
 // ToolLogDir is the directory holding per-supervised-tool logs.
 func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }

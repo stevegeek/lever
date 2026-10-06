@@ -3,6 +3,7 @@ package hostledger
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -37,5 +38,61 @@ func TestLockIsHeldAcrossTheAppend(t *testing.T) {
 	}}
 	if err := f.Append(1); err != nil || held != 1 {
 		t.Fatalf("append: %v, lock taken %d times", err, held)
+	}
+}
+
+// A rotate whose new file cannot be opened moves the full file back: no
+// reader is left with a .1 and no main file.
+func TestAppendRollsBackARotateItCannotFinish(t *testing.T) {
+	dir := t.TempDir()
+	w := &File{Path: filepath.Join(dir, "x.jsonl"), Label: "test", Cap: 10}
+	if err := w.Append(map[string]string{"k": "a long enough first line"}); err != nil {
+		t.Fatal(err)
+	}
+	orig := openFile
+	openFile = func(string, int, os.FileMode) (*os.File, error) { return nil, os.ErrPermission }
+	err := w.Append(map[string]string{"k": "second"})
+	openFile = orig
+	if err == nil {
+		t.Fatal("the failed open must be an error")
+	}
+	if _, err := os.Stat(w.Path); err != nil {
+		t.Fatalf("the main file must be back: %v", err)
+	}
+	if _, err := os.Stat(w.Path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("no .1 left behind: %v", err)
+	}
+	if err := w.Append(map[string]string{"k": "third"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(w.Path + ".1"); err != nil {
+		t.Fatalf("the next append rotates: %v", err)
+	}
+}
+
+// Another process that created the main file between the rotate and the
+// failed open keeps it: the full file stays in .1.
+func TestAppendRollbackLeavesAnotherWritersFile(t *testing.T) {
+	dir := t.TempDir()
+	w := &File{Path: filepath.Join(dir, "x.jsonl"), Label: "test", Cap: 10}
+	if err := w.Append(map[string]string{"k": "a long enough first line"}); err != nil {
+		t.Fatal(err)
+	}
+	orig := openFile
+	openFile = func(p string, _ int, _ os.FileMode) (*os.File, error) {
+		if err := os.WriteFile(p, []byte("{\"k\":\"other\"}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return nil, os.ErrPermission
+	}
+	err := w.Append(map[string]string{"k": "second"})
+	openFile = orig
+	if err == nil {
+		t.Fatal("the failed open must be an error")
+	}
+	main, _ := os.ReadFile(w.Path)
+	old, _ := os.ReadFile(w.Path + ".1")
+	if string(main) != "{\"k\":\"other\"}\n" || !strings.Contains(string(old), "first line") {
+		t.Fatalf("main %q, .1 %q", main, old)
 	}
 }

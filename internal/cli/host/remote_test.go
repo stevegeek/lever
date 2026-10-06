@@ -413,3 +413,38 @@ func (b *blockingBackend) ResolveRunUser(context.Context) error {
 	b.onResolve()
 	return nil
 }
+
+func TestRemoteContactUser(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	f := remoteContactUser(st)
+	if _, ok := f("c@example.com"); ok {
+		t.Fatal("no record: no contact is bound")
+	}
+	rec := state.RemoteRoleRecord{
+		Bound:    map[string]string{"c@example.com": "u-c", "op@example.com": "u-op", "7@id.lever.local": "u-7"},
+		Contacts: []string{"c@example.com", "7@id.lever.local", "gone@example.com"},
+		Pending:  []string{"d@example.com"},
+	}
+	if err := st.SaveRemoteRoleRecord(rec); err != nil {
+		t.Fatal(err)
+	}
+	for login, want := range map[string]string{
+		"c@example.com":    "u-c",
+		"7":                "u-7", // a user id login: its synthesized email
+		"op@example.com":   "",    // bound, but as an operator
+		"d@example.com":    "",    // pending: no hub user when apply ran
+		"gone@example.com": "",    // a contact with no bound id
+		"C@example.com":    "",    // logins match exactly
+	} {
+		got, ok := f(login)
+		if got != want || ok != (want != "") {
+			t.Errorf("%s: %q %v, want %q", login, got, ok, want)
+		}
+	}
+	if err := os.WriteFile(st.RemoteRole(), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f("c@example.com"); ok {
+		t.Fatal("an unreadable record binds no one")
+	}
+}

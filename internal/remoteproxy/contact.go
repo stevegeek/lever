@@ -137,6 +137,7 @@ func (f *contactFence) userID(ctx context.Context, login, cookie string) (string
 type contactScope struct {
 	userID string
 	agents map[string]string // hub id → name
+	login  string
 }
 
 func (s contactScope) key(agentID string) string { return "dm:agent:" + agentID + ":user:" + s.userID }
@@ -216,7 +217,7 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		g.deny(w, line, http.StatusBadGateway, DecisionDenyContact, "cannot resolve your agents")
 		return nil
 	}
-	scope := contactScope{userID: uid, agents: ids}
+	scope := contactScope{userID: uid, agents: ids, login: login}
 
 	switch {
 	case strings.HasPrefix(p, "/api/v1/chat/conversations/"):
@@ -226,6 +227,10 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		q["sub"] = []string{"user." + uid + ".chat.>", "user." + uid + ".notification"}
 		r2 := r.Clone(r.Context())
 		r2.URL.RawQuery = q.Encode()
+		if g.cfg.MatchAgentMessages != nil {
+			// Agent messages on: events carry no text (events.go).
+			r2 = withRewrite(r2, reduceEvents(uid))
+		}
 		return r2
 	case m == http.MethodGet && contactCanned[p] != "":
 		g.answerContact(w, line, "application/json", contactCanned[p])
@@ -235,8 +240,13 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		return nil
 	case (m == http.MethodGet || m == http.MethodHead) && p == "/api/v1/chat/dms":
 		// The hub lists every DM the user is in, with a message preview;
-		// the answer is cut down to the contact's own conversations.
-		return r.WithContext(context.WithValue(r.Context(), keepDMKey{}, scope.allows))
+		// the answer is cut down to the contact's own conversations. With
+		// agent messages on, the previews go too (stripDMPreviews).
+		r = r.WithContext(context.WithValue(r.Context(), keepDMKey{}, scope.allows))
+		if g.cfg.MatchAgentMessages != nil {
+			r = withRewrite(r, stripDMPreviews)
+		}
+		return r
 	case (m == http.MethodGet || m == http.MethodHead) && slices.Contains(contactForwardGET, p):
 		return r
 	case (m == http.MethodPut && p == "/api/v1/chat/user-prefs") || (m == http.MethodPost && p == "/auth/logout"):
@@ -274,7 +284,14 @@ func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *A
 	m := r.Method
 	switch {
 	case sub == "messages" && m == http.MethodGet:
-		return r
+		if g.cfg.MatchAgentMessages == nil {
+			return r
+		}
+		// Agent messages on: only the agent rows the agent ledger recorded
+		// reach the contact (agentmsgs.go).
+		agentID := strings.Split(key, ":")[2]
+		name := scope.agents[agentID]
+		return withRewrite(r, func(resp *http.Response) { g.filterHistory(resp, scope.login, name, agentID, scope.userID) })
 	case sub == "messages" && m == http.MethodPost:
 		r2 := g.checkContactMessage(w, r, line, deny)
 		if r2 == nil {
@@ -395,12 +412,15 @@ func contactLanding(s contactScope) string {
 // errNoUserID means the hub's /auth/me answer carried no id.
 var errNoUserID = errors.New("the hub named no user id")
 
-// errSessionUnknown means the hub answered 401 to the login's session.
+// errSessionUnknown means the hub answered the login's session with a 401
+// or a redirect (to its login page): it does not know the session.
 var errSessionUnknown = errors.New("the hub does not know this session")
 
 // hubWhoAmI asks the hub, with a login's own session, for its user id.
 func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	// No redirect is followed: a session the hub does not know is answered
+	// with one, and the operator view asks this with a contact's session.
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: noRedirect}
 	if cfg.DialContext != nil {
 		client.Transport = jailTransport(cfg.DialContext)
 	}
@@ -415,7 +435,7 @@ func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, err
 			return "", err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			return "", errSessionUnknown
 		}
 		if resp.StatusCode != http.StatusOK {

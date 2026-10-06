@@ -41,6 +41,28 @@ type RemoteIdentity struct {
 	Workers    []string `json:",omitempty"`
 	Tree       string   `json:",omitempty"`
 	LabelsFile string   `json:",omitempty"`
+	// AgentMessages: the proxy filters a contact's history, events and
+	// previews (remote.agent_messages). Omitted when off, so an instance that
+	// never turns it on keeps its stamp.
+	AgentMessages bool `json:",omitempty"`
+	// Push is the VAPID subject while remote.push is on ("" off, omitted,
+	// so an instance that never turns it on keeps its stamp).
+	Push string `json:",omitempty"`
+	// Files (remote.files, landing chat only): the limits and every agent's
+	// workspace the proxy writes uploads into. Omitted when off.
+	Files *FilesIdentity `json:",omitempty"`
+}
+
+// FilesIdentity is the part of remote.files a running proxy captured.
+type FilesIdentity struct {
+	MaxBytes   int64
+	Extensions []string
+	Workspaces []string // "name=dir", config order, manager first
+	// Set only when not the default (remote.files.uploads/shares false,
+	// allowed_users files: false), so the stamp is unchanged without them.
+	NoUploads bool     `json:",omitempty"`
+	NoShares  bool     `json:",omitempty"`
+	Excluded  []string `json:",omitempty"`
 }
 
 // RemoteConfigHash identifies the configuration a `lever remote serve` process

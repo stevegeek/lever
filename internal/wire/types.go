@@ -1,5 +1,7 @@
 package wire
 
+import "time"
+
 // Request/response bodies of the broker's HTTP routes. Each type is the ONE
 // declaration of its JSON shape: the broker decodes/encodes it and the agent,
 // captool and cli marshal/decode the very same type. Responses whose payload
@@ -273,6 +275,158 @@ type VerifiedMessage struct {
 	// on it only if it has not acted on that message yet.
 	Repeat        bool   `json:"repeat,omitempty"`
 	FirstVerified string `json:"first_verified,omitempty"`
+}
+
+// ---- messages to a contact (remote.agent_messages) ----
+
+// ContactsResponse answers PathContacts: the contacts whose allowed_users
+// entry lists the caller in agents (never see-only, never an operator).
+// Enabled is false when agent messages are off; Note then says why, or is
+// "rate" when the caller is over its call limit.
+type ContactsResponse struct {
+	Enabled  bool          `json:"enabled"`
+	Contacts []ContactInfo `json:"contacts"`
+	Note     string        `json:"note,omitempty"`
+}
+
+// ContactInfo is one contact the caller may message. To is the scion message
+// reference a send goes to ("@" + the contact's hub email). Times are RFC
+// 3339 UTC, "" when none: the contact's last post to the caller, the
+// caller's last initiated authorization to it, and when the initiate rule
+// next allows one (with CanInitiate false).
+type ContactInfo struct {
+	Login           string `json:"login"`
+	To              string `json:"to"`
+	LastFromContact string `json:"last_from_contact,omitempty"`
+	LastInitiated   string `json:"last_initiated,omitempty"`
+	CanInitiate     bool   `json:"can_initiate"`
+	NextAllowedAt   string `json:"next_allowed_at,omitempty"`
+}
+
+// ContactMessageRequest asks PathContactMessage to authorize Text to the
+// contact login To. ReplyToRef, for a reply, is the message_id
+// message_verify returned for that contact's post to the caller.
+type ContactMessageRequest struct {
+	To         string `json:"to"`
+	Text       string `json:"text"`
+	ReplyToRef string `json:"reply_to_ref,omitempty"`
+}
+
+// ContactMessageResponse answers PathContactMessage, always with HTTP 200.
+// OK: Ref is the record id, Kind "initiated" or "reply", To the scion
+// message reference, Expires when the authorization lapses unsent. Refused:
+// Reason is one fixed word (not-a-contact, limit, too-long, empty, bad-ref,
+// rate, bad-text, off, unavailable), with NextAllowedAt on a limit that a
+// reminder will lift.
+type ContactMessageResponse struct {
+	OK            bool   `json:"ok"`
+	Reason        string `json:"reason,omitempty"`
+	Ref           string `json:"ref,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	To            string `json:"to,omitempty"`
+	Expires       string `json:"expires,omitempty"`
+	NextAllowedAt string `json:"next_allowed_at,omitempty"`
+	Note          string `json:"note,omitempty"`
+}
+
+// ---- files in the chat (remote.files) ----
+
+// FilesListRequest asks PathFilesList for the caller's exchange with one
+// login, Contact (required: no call lists every login's files).
+type FilesListRequest struct {
+	Contact string `json:"contact,omitempty"`
+}
+
+// FilesListResponse answers PathFilesList: Contact as a login the caller
+// may share with (an operator, or a contact whose agents list the caller),
+// with its directories as the caller's container sees them, and the
+// caller's recorded uploads from it and shares to it, oldest first. Enabled
+// false: off (Note says so). Note "rate", "contact-required" or
+// "not-a-contact": nothing listed.
+type FilesListResponse struct {
+	Enabled    bool          `json:"enabled"`
+	Note       string        `json:"note,omitempty"`
+	MaxBytes   int64         `json:"max_bytes,omitempty"`
+	Extensions []string      `json:"extensions,omitempty"`
+	Contacts   []FileContact `json:"contacts"`
+	Uploads    []FileInfo    `json:"uploads"`
+	Shares     []FileInfo    `json:"shares"`
+}
+
+// FileContact is one login the caller may share with: its tier and its
+// in and out directories as the caller's container sees them.
+type FileContact struct {
+	Login  string `json:"login"`
+	Tier   string `json:"tier"`
+	InDir  string `json:"in_dir"`
+	OutDir string `json:"out_dir"`
+}
+
+// FileInfo is one recorded file: Path is where the caller's container sees
+// it, At RFC 3339 UTC.
+type FileInfo struct {
+	ID     string `json:"id"`
+	Login  string `json:"login"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	Path   string `json:"path"`
+	At     string `json:"at"`
+}
+
+// FileShareRequest asks PathFilesShare to record the file at Path (in the
+// caller's out directory for To) as shared with the login To.
+type FileShareRequest struct {
+	To   string `json:"to"`
+	Path string `json:"path"`
+}
+
+// FileShareResponse answers PathFilesShare, always with HTTP 200. Refused:
+// Reason is one fixed word (not-a-contact, bad-path, not-found, symlink,
+// hard-link, not-a-file, too-large, extension, rate, off, shares-off,
+// unavailable).
+type FileShareResponse struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+	Note   string `json:"note,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Name   string `json:"name,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+}
+
+// AgentMessagesMatchRequest asks PathOperatorAgentMessagesMatch which of
+// Agent's rows in Contact's DM history the agent ledger recorded. Agent is
+// the scion slug (the app name for the manager, else the worker name), as
+// a contact's agents list names it. No text crosses the socket: each row is
+// its hub id, the sha256 of its text, and the hub's time for it. At most
+// 200 rows (the hub's page cap).
+type AgentMessagesMatchRequest struct {
+	Contact  string            `json:"contact"`
+	Agent    string            `json:"agent"`
+	Messages []AgentMessageRef `json:"messages"`
+	// Peek asks without binding: the answer is what the contact's own read
+	// would keep now, and the ledger is not written. The operator's view of
+	// a contact's conversation peeks; the contact's reads bind.
+	Peek bool `json:"peek,omitempty"`
+}
+
+// AgentMessageRef is one agent row without its text.
+type AgentMessageRef struct {
+	ID        string    `json:"id"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AgentMessagesMatchResponse lists the ids of the rows to keep, in request
+// order; every other agent row is dropped.
+type AgentMessagesMatchResponse struct {
+	Keep []string `json:"keep"`
+	// Pending (a peek only) lists the ids of Keep that no contact read has
+	// bound yet: kept because a record would bind them, so the contact has
+	// not been shown them. Which one a record finally binds depends on the
+	// pages the contact reads.
+	Pending []string `json:"pending,omitempty"`
 }
 
 // ---- operator directives: admin side (UDS channel) ----

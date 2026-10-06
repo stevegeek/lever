@@ -62,6 +62,11 @@ type Config struct {
 	Directives  DirectiveConfig
 	Chat        ChatConfig
 	Timeouts    TimeoutConfig
+	// AgentMessages is remote.agent_messages (contactmsg.go): the contacts
+	// an agent may message and the limits. Zero = off.
+	AgentMessages AgentMessagesConfig
+	// Files is remote.files: the file exchange of the chat page.
+	Files FilesConfig
 
 	// Log receives the audit decisions; nil ⇒ a discard logger.
 	Log *slog.Logger
@@ -357,6 +362,16 @@ type Broker struct {
 	sent           *sentRecord       // ChatConfig.SentLedgerDir
 	controller     *controllerSender // DispatchConfig.ResolveControllerSender
 
+	// messages to a contact (contactmsg.go, contactmatch.go)
+	agentMsgs   AgentMessagesConfig
+	agentLedger *agentRecord // AgentMessagesConfig.LedgerDir
+	contactRate *rateWindow  // contacts + contact_message calls
+
+	// files in the chat (files.go)
+	files      FilesConfig
+	fileLedger *fileRecord // FilesConfig.LedgerDir
+	filesRate  *rateWindow // list + share calls
+
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
 	toolSecret string // presented to first-party tools (see Config.ToolSecret)
@@ -427,6 +442,12 @@ func New(c Config) *Broker {
 		chatUses:   newChatUses(c.Chat.UsedPath, time.Now()),
 		sent:       &sentRecord{dir: c.Chat.SentLedgerDir},
 		controller: &controllerSender{resolve: d.ResolveControllerSender},
+		// messages to a contact
+		agentMsgs: c.AgentMessages.withDefaults(), agentLedger: &agentRecord{dir: c.AgentMessages.LedgerDir},
+		contactRate: newRateWindow(contactCallLimit),
+		// files in the chat
+		files: c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
+		filesRate: newRateWindow(filesCallLimit),
 	}
 }
 

@@ -238,3 +238,53 @@ func Lookup(dir, agentID, sender, createdAt string) ([]Entry, error) {
 	}
 	return out, nil
 }
+
+// loginEntries reads one login's file and its rotated copy.
+func loginEntries(dir, login string) ([]Entry, error) {
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err := checkDir(dir); err != nil {
+		return nil, err
+	}
+	p := filepath.Join(dir, FileFor(login))
+	var out []Entry
+	for _, f := range []string{p + ".1", p} {
+		got, err := readFile(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, got...)
+	}
+	return out, nil
+}
+
+// LastPost is when the proxy recorded login's latest contact-tier post to
+// agentID (zero when none): the reset point of the broker's initiate rule.
+func LastPost(dir, login, agentID string) (time.Time, error) {
+	entries, err := loginEntries(dir, login)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var last time.Time
+	for _, e := range entries {
+		if e.Login == login && e.Tier == TierContact && e.AgentID == agentID && e.Recorded.After(last) {
+			last = e.Recorded
+		}
+	}
+	return last, nil
+}
+
+// ByMessageID returns login's recorded post with the hub id messageID.
+func ByMessageID(dir, login, messageID string) (Entry, bool, error) {
+	entries, err := loginEntries(dir, login)
+	if err != nil || messageID == "" {
+		return Entry{}, false, err
+	}
+	for _, e := range entries {
+		if e.Login == login && e.MessageID == messageID {
+			return e, true, nil
+		}
+	}
+	return Entry{}, false, nil
+}

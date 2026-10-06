@@ -46,13 +46,14 @@ import (
 // under it is a 404, never forwarded, so a route added here later cannot
 // shadow one the hub answers.
 
-// The page is installable as an app (a web app manifest and icons, below),
-// with no service worker on purpose: a worker scoped to /lever/ would sit
-// between the page and every request it makes, and a cache it keeps can
-// serve a page older than the binary. Current browsers install without one.
+// The page is installable as an app (a web app manifest and icons, below).
+// The page has no service worker unless remote.push is on. Then
+// /lever/sw.js is a push-only worker (no fetch handler, no cache): it shows
+// a notification and opens the chat, and never sits between the page and
+// its requests, so it cannot serve a stale page.
 
 //go:generate go run chaticons_gen.go
-//go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js chatui/*.png
+//go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js chatui/sw.js chatui/*.png
 var chatUI embed.FS
 
 // DecisionChatUnavailable is the audit decision for a chat page request the
@@ -85,17 +86,33 @@ const (
 // Opened under another name the Host check admits (the loopback probe
 // address, or a bind address), the browser blocks the page's own files:
 // those names are for probes and fronts, not for a browser.
-func chatCSPFor(serveHost string) string {
+//
+// With push on (remote.push), two directives change and nothing else:
+// worker-src names /lever/ for the push-only worker, and Trusted Types
+// allows exactly one policy, lever-sw, whose only output is the literal
+// worker URL (chat.js): serviceWorker.register is a script-URL sink, so with
+// no policy at all the page could not register its worker. Off, the policy
+// is the one the page had before push existed.
+func chatCSPFor(serveHost string, push bool) string {
 	own, img := "'self'", "'self'"
 	if cspHost(serveHost) {
 		own, img = serveHost+chatPrefix, serveHost+"/favicon.svg "+serveHost+chatPrefix
 	}
+	worker, tt := "", "'none'"
+	if push {
+		worker, tt = "worker-src "+own+"; ", chatSWPolicy
+	}
 	// Trusted Types with no policy allowed makes every markup or script sink
 	// throw where the browser supports it: a second guard on the same rule.
 	return "default-src 'none'; script-src " + own + "; style-src " + own + "; connect-src 'self'; " +
-		"img-src " + img + "; manifest-src " + own + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
-		"require-trusted-types-for 'script'; trusted-types 'none'"
+		"img-src " + img + "; manifest-src " + own + "; " + worker + "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
+		"require-trusted-types-for 'script'; trusted-types " + tt
 }
+
+// chatSWPolicy is the one Trusted Types policy the page may create, with
+// push on: it turns the literal "/lever/sw.js" into a script URL, nothing
+// else (chat.js; TestChatPageHasNoMarkupSink pins it).
+const chatSWPolicy = "lever-sw"
 
 // cspHost reports whether host (a name or an IPv4 address, with an optional
 // port) can be written into a CSP source as it is. An IPv6 literal cannot:
@@ -144,6 +161,9 @@ type chatPage struct {
 	// hubGet reads a hub JSON route with a login's own session (the agent
 	// list's unread counts).
 	hubGet func(ctx context.Context, cookie, path string, out any) (int, error)
+	// hubBody reads a hub route's raw 200 answer with a login's own session,
+	// GET only (the operator view's one use of a contact's session).
+	hubBody func(ctx context.Context, cookie, path string) (int, []byte, error)
 
 	mu      sync.Mutex
 	users   map[string]contactUser  // login → hub user id, for the agent list
@@ -154,8 +174,8 @@ type chatPage struct {
 // newChatPage loads the embedded files. A file that is missing is a build
 // fault, so it panics rather than serve a page with a hole in it.
 func newChatPage(cfg Config) *chatPage {
-	p := &chatPage{csp: chatCSPFor(cfg.ServeHost), whoAmI: hubWhoAmI(cfg),
-		hubGet: hubGetJSON(cfg), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
+	p := &chatPage{csp: chatCSPFor(cfg.ServeHost, cfg.Push != nil), whoAmI: hubWhoAmI(cfg),
+		hubGet: hubGetJSON(cfg), hubBody: hubGetBody(cfg, maxHistoryAnswer), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
 	file := func(contentType string, body []byte) chatFile {
 		sum := sha256.Sum256(body)
 		return chatFile{contentType: contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
@@ -176,6 +196,13 @@ func newChatPage(cfg Config) *chatPage {
 			panic("remoteproxy: embedded chat page file: " + err.Error())
 		}
 		add(route, f.contentType, body)
+	}
+	if cfg.Push != nil {
+		body, err := chatUI.ReadFile("chatui/sw.js")
+		if err != nil {
+			panic("remoteproxy: embedded service worker: " + err.Error())
+		}
+		add(chatSWPath, "text/javascript; charset=utf-8", body)
 	}
 	for tier, name := range map[string]string{chatledger.TierOperator: cfg.ChatAgent, chatledger.TierContact: contactAppName} {
 		manifest, err := json.Marshal(chatManifestFor(name))
@@ -283,6 +310,12 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		return false
 	}
 	v := g.viewerFor(login)
+	if p == chatContactsPath || strings.HasPrefix(p, chatContactsPath+"/") {
+		// Before the method check: a contact gets the fence's refusal
+		// whatever it sends.
+		g.serveOperatorView(w, r, line, v)
+		return true
+	}
 	if name, under := wakeTarget(p); under {
 		if name == "" {
 			// Under the agents prefix only the wake route exists.
@@ -290,6 +323,20 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 			return true
 		}
 		g.serveWake(w, r, line, v, name)
+		return true
+	}
+	if agent, id, under := filesTarget(p); under {
+		if !g.filesOnFor(v.login) || agent == "" {
+			// Off, or a path under the prefix that names no agent: the
+			// prefix is lever's either way, never the hub's.
+			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
+			return true
+		}
+		g.serveFiles(w, r, line, v, agent, id)
+		return true
+	}
+	if g.push != nil && (p == pushKeyPath || p == pushSubsPath) {
+		g.servePush(w, r, line, v, p)
 		return true
 	}
 	if !read {

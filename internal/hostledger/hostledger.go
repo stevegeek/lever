@@ -51,6 +51,9 @@ type File struct {
 	mu sync.Mutex
 }
 
+// openFile is os.OpenFile; tests replace it to fail the open after a rotate.
+var openFile = os.OpenFile
+
 // Append writes v as one JSON line, rotating first when the file has grown
 // past Cap. The file is created 0600, and an existing file is set back to
 // 0600, so no other user can add a line.
@@ -69,15 +72,27 @@ func (w *File) Append(v any) error {
 		}
 		defer unlock()
 	}
+	rotated := false
 	if fi, err := os.Stat(w.Path); err == nil && fi.Size() > w.Cap {
 		if err := os.Rename(w.Path, w.Path+".1"); err != nil {
 			return fmt.Errorf("%s: rotate: %w", w.Label, err)
 		}
+		rotated = true
 	}
 	// O_NOFOLLOW: never append to (or chmod) whatever a symlink here points
 	// at; ReadFile refuses a symlinked file anyway.
-	f, err := os.OpenFile(w.Path, os.O_CREATE|os.O_RDWR|os.O_APPEND|ONoFollow, 0o600)
+	f, err := openFile(w.Path, os.O_CREATE|os.O_RDWR|os.O_APPEND|ONoFollow, 0o600)
 	if err != nil {
+		if rotated {
+			// No new file: move the full one back, so no reader is left
+			// with a .1 and no main file (one that lists main files would
+			// miss its records). It rotates again on the next append. A
+			// link fails when another process created the main file in
+			// between; then both stay (readers read .1 and the main file).
+			if os.Link(w.Path+".1", w.Path) == nil {
+				_ = os.Remove(w.Path + ".1")
+			}
+		}
 		return fmt.Errorf("%s: %w", w.Label, err)
 	}
 	if err := f.Chmod(0o600); err != nil {

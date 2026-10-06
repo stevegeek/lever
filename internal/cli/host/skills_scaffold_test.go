@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -72,7 +73,7 @@ func TestSyncSkillsFreshCreatesAllAndRecordsHashes(t *testing.T) {
 		}
 	}
 	st := readState(t, stateDir)
-	if st[".claude/skills/lever-operator/SKILL.md"] != skills.Hash(skills.Operator(cli.Version, false)) {
+	if st[".claude/skills/lever-operator/SKILL.md"] != skills.Hash(skills.Operator(cli.Version, false, false, false)) {
 		t.Fatalf("state hash mismatch: %+v", st)
 	}
 }
@@ -625,5 +626,66 @@ func TestScaffoldCapsReads(t *testing.T) {
 	}
 	if _, err := adoptSkills(app, stateDir); !errors.Is(err, fsutil.ErrFileTooLarge) {
 		t.Fatalf("adopt oversize CLAUDE.md: err=%v, want fsutil.ErrFileTooLarge", err)
+	}
+}
+
+// TestSkillTargetsFollowAgentMessages: remote.agent_messages picks the skill
+// variant, so turning it on changes every rendered hash (the contact gate
+// then waits for a fresh session on the new skill).
+func TestSkillTargetsFollowAgentMessages(t *testing.T) {
+	app := &config.App{Name: "boss", Tree: t.TempDir(), Workers: []config.Worker{{Name: "w1"}},
+		Remote: config.Remote{Enabled: true, AllowedUsers: []config.RemoteUser{{Login: "op@x"},
+			{Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+	off := skillTargets(app)
+	app.Remote.AgentMessages.Enabled = true
+	on := skillTargets(app)
+	if len(off) != 2 || len(on) != 2 {
+		t.Fatalf("targets %d %d", len(off), len(on))
+	}
+	for i := range on {
+		if bytes.Equal(on[i].content, off[i].content) || !bytes.Contains(on[i].content, []byte("contact_message")) ||
+			bytes.Contains(off[i].content, []byte("contact_message")) {
+			t.Fatalf("%s: the variant does not follow the config", on[i].relPath)
+		}
+	}
+}
+
+// The file directions reach every rendered skill: each "off" block only
+// while that direction is off.
+func TestSkillTargetsFollowFileDirections(t *testing.T) {
+	app := &config.App{Name: "boss", Tree: t.TempDir(), Workers: []config.Worker{{Name: "w1"}},
+		Remote: config.Remote{Enabled: true, Landing: config.RemoteLandingChat, Files: config.Files{Enabled: true},
+			AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+	no := false
+	has := func(word string) bool {
+		ts := skillTargets(app)
+		if len(ts) != 2 {
+			t.Fatalf("targets %d", len(ts))
+		}
+		n := 0
+		for _, tg := range ts {
+			if bytes.Contains(tg.content, []byte(word)) {
+				n++
+			}
+		}
+		if n != 0 && n != len(ts) {
+			t.Fatalf("%q in %d of %d skills", word, n, len(ts))
+		}
+		return n > 0
+	}
+	if has("uploads-off") || has("shares-off") {
+		t.Fatal("defaults render no direction block")
+	}
+	app.Remote.Files.Uploads = &no
+	if !has("uploads-off") || has("shares-off") {
+		t.Fatal("uploads: false")
+	}
+	app.Remote.Files.Uploads, app.Remote.Files.Shares = nil, &no
+	if has("uploads-off") || !has("shares-off") {
+		t.Fatal("shares: false")
+	}
+	app.Remote.Files.Enabled = false
+	if has("uploads-off") || has("shares-off") {
+		t.Fatal("files off renders no direction block")
 	}
 }

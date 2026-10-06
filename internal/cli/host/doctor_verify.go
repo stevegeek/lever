@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/agentledger"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
@@ -73,6 +74,10 @@ func brokerRunning(st state.State) bool {
 // guestClockWarn is the guest/host clock difference doctor starts to report.
 const guestClockWarn = 2 * time.Second
 
+// agentMessagesClockWarn is how far behind the host the guest may be, with
+// agent messages on, before the row fails: half of agentledger.SkewBefore.
+const agentMessagesClockWarn = 5 * time.Second
+
 // checkGuestClock compares the guest's clock with the host's. A message lever
 // sends is verified by its ref, whatever the clocks say. But an agent image
 // built before message_verify (0.27) cannot pass the ref, and the broker then
@@ -80,7 +85,14 @@ const guestClockWarn = 2 * time.Second
 // the host clock within sentledger.ClockSkew. A guest clock that drifted
 // (Lima after the host slept) fails those verifications, and those agents
 // treat lever's messages as data.
-func checkGuestClock(ctx context.Context, jr proc.Runner, now func() time.Time) checkResult {
+//
+// With agent messages on (agentMessages), a guest clock behind the host
+// matters more: the hub stamps a contact message with the guest time, and
+// the agent ledger binds a message only when that time is at most
+// agentledger.SkewBefore before its authorization (host time). A guest
+// more than that behind hides every authorized message from contacts; the
+// row says so past agentMessagesClockWarn.
+func checkGuestClock(ctx context.Context, jr proc.Runner, now func() time.Time, agentMessages bool) checkResult {
 	const name = "guest clock"
 	before := now()
 	res, err := jr.Run(ctx, nil, "date", "-u", "+%s")
@@ -93,10 +105,15 @@ func checkGuestClock(ctx context.Context, jr proc.Runner, now func() time.Time) 
 		return checkResult{name, true, "not checked (unexpected `date` output)", ""}
 	}
 	mid := before.Add(after.Sub(before) / 2)
-	skew := time.Duration(math.Abs(float64(time.Unix(guest, 0).Sub(mid.Truncate(time.Second)))))
+	diff := time.Unix(guest, 0).Sub(mid.Truncate(time.Second)) // < 0: the guest is behind
+	skew := time.Duration(math.Abs(float64(diff)))
 	// The guest reads whole seconds, so up to a second is resolution.
 	detail := fmt.Sprintf("guest clock within %s of the host", skew.Round(time.Second))
 	fix := "resync the guest clock (on Lima: `limactl shell <vm> sudo hwclock -s`, or restart the VM)"
+	if agentMessages && diff < -agentMessagesClockWarn {
+		return checkResult{name, false, fmt.Sprintf("guest clock is %s behind the host: with agent messages on, the hub stamps an agent's message before its authorization, and contacts are not shown it once that is more than %s",
+			skew.Round(time.Second), agentledger.SkewBefore), fix}
+	}
 	switch {
 	case skew > sentledger.ClockSkew+time.Second:
 		return checkResult{name, false, fmt.Sprintf("guest clock is %s off the host: agents on images built before message_verify cannot verify lever's messages (they match by time, within %s)",

@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_MESSAGE,
+  filesConfig,
+  fileList,
+  sizeText,
+  fileCheck,
+  uploadErrorText,
+  uploadNote,
+  downloadPath,
   classify,
   errorText,
   historyItems,
@@ -23,6 +30,18 @@ import {
   WAKE_POLL_MS,
   WAKE_POLLS,
   LIST_MS,
+  CONTACTS_MS,
+  NOT_SHOWN,
+  NOT_YET,
+  contactList,
+  transcriptItems,
+  transcriptPath,
+  transcriptWho,
+  mergeRows,
+  viewErrorText,
+  hashAgent,
+  pushKeyBytes,
+  pushView,
 } from './chatcore.js';
 
 test('historyItems reads either key and drops junk', () => {
@@ -280,4 +299,152 @@ test('the page timings', () => {
   assert.equal(WAKE_POLL_MS, 3000);
   assert.equal(WAKE_POLLS * WAKE_POLL_MS, 90000);
   assert.equal(LIST_MS, 15000);
+});
+
+test('contactList keeps well-formed contacts and agents only', () => {
+  assert.equal(contactList(null), null);
+  assert.equal(contactList({ contacts: 'x' }), null);
+  assert.deepEqual(contactList({ contacts: [
+    { login: 'c@x', signedIn: true, agents: [{ name: 'w1', label: 'Via\nRoma', state: 'running', id: 'leak' }, { name: 'w1' }, { label: 'no name' }, { name: 'w2', state: 'bogus' }] },
+    { login: 'c@x' }, { login: '' }, null, 7,
+    { login: 'd@x', signedIn: 'yes', agents: 'none' },
+  ] }), [
+    { login: 'c@x', signedIn: true, agents: [{ name: 'w1', label: 'Via Roma', state: 'running', access: 'see' }, { name: 'w2', label: '', state: 'unknown', access: 'see' }] },
+    { login: 'd@x', signedIn: false, agents: [] },
+  ]);
+});
+
+test('transcriptItems: only rows with an id; shownToContact only when exactly true', () => {
+  assert.deepEqual(transcriptItems({ messages: [
+    { id: 'a', from: 'agent', text: 't', createdAt: 'c', shownToContact: true },
+    { id: 'b', from: 'contact', text: 7, shownToContact: 'true', pending: 'true' },
+    { id: 'p', from: 'agent', text: 'p', shownToContact: false, pending: true },
+    { id: 'q', from: 'agent', text: 'q', shownToContact: true, pending: true },
+    { id: 'c', from: '<b>', text: 'x' },
+    { from: 'agent', text: 'no id' }, null,
+  ] }), [
+    { id: 'a', from: 'agent', text: 't', createdAt: 'c', shownToContact: true, pending: false },
+    { id: 'b', from: 'contact', text: '', createdAt: '', shownToContact: false, pending: false },
+    { id: 'p', from: 'agent', text: 'p', createdAt: '', shownToContact: false, pending: true },
+    { id: 'q', from: 'agent', text: 'q', createdAt: '', shownToContact: true, pending: false },
+    { id: 'c', from: 'agent', text: 'x', createdAt: '', shownToContact: false, pending: false },
+  ]);
+  assert.deepEqual(transcriptItems('nope'), []);
+});
+
+test('transcriptPath encodes the login and the agent', () => {
+  assert.equal(transcriptPath('a/b+c@x', 'w1', ''), '/lever/api/contacts/a%2Fb%2Bc%40x/agents/w1/messages?limit=50');
+  assert.equal(transcriptPath('c@x', 'w1', 'C 1'), '/lever/api/contacts/c%40x/agents/w1/messages?limit=50&cursor=C+1');
+});
+
+test('transcriptWho names the writer', () => {
+  assert.equal(transcriptWho({ from: 'contact' }, 'c@x', 'w1'), 'c@x');
+  assert.equal(transcriptWho({ from: 'agent' }, 'c@x', 'w1'), 'w1');
+  assert.equal(transcriptWho({ from: 'system' }, 'c@x', 'w1'), 'hub');
+});
+
+test('mergeRows reports a new row, new text and a new mark', () => {
+  const m = new Map();
+  assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: false }]), true);
+  assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: false }]), false);
+  assert.equal(mergeRows(m, [{ id: 'a', text: 't', shownToContact: true }]), true);
+  assert.equal(mergeRows(m, [{ id: 'a', text: 'u', shownToContact: true }]), true);
+  assert.equal(mergeRows(m, [{ id: 'b', text: 't', shownToContact: false, pending: false }]), true);
+  assert.equal(mergeRows(m, [{ id: 'b', text: 't', shownToContact: false, pending: true }]), true);
+  assert.equal(mergeRows(m, [{ id: 'b', text: 't', shownToContact: false, pending: true }]), false);
+});
+
+test('viewErrorText reads the fixed words', () => {
+  assert.equal(viewErrorText(409, { error: 'not-signed-in' }), 'has not signed in yet');
+  assert.equal(viewErrorText(409, { error: 'not-signed-in', hint: 'run lever apply' }), 'the contact has a new hub user: run lever apply');
+  assert.equal(viewErrorText(409, { error: 'not-signed-in', hint: '<b>other</b>' }), 'has not signed in yet');
+  assert.equal(viewErrorText(409, { error: 'no-record' }), 'the agent has no record on the hub yet');
+  assert.equal(viewErrorText(502, 'bad gateway\n'), errorText(502, 'bad gateway\n'));
+});
+
+test('the operator view constants', () => {
+  assert.equal(CONTACTS_MS, 30000);
+  assert.equal(NOT_SHOWN, 'not shown to the contact');
+  assert.equal(NOT_YET, 'not yet read by the contact');
+});
+
+test('hashAgent takes only a config name', () => {
+  assert.equal(hashAgent('#agent=deal-2'), 'deal-2');
+  for (const bad of ['', '#agent=', '#agent=Deal', '#agent=../x', '#agent=a b', '#agent=-a', '#x=deal', '#agent=deal-2&x=1', null, 7, `#agent=${'a'.repeat(64)}`]) {
+    assert.equal(hashAgent(bad), '', String(bad));
+  }
+});
+
+test('pushKeyBytes accepts only an uncompressed P-256 point', () => {
+  const key = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4';
+  const b = pushKeyBytes(key);
+  assert.equal(b.length, 65);
+  assert.equal(b[0], 4);
+  for (const bad of ['', 'AAAA', key.slice(1), key + 'A', 'A' + key.slice(1), key.replace('_', '/'), null, 5]) assert.equal(pushKeyBytes(bad), null, String(bad));
+});
+
+test('pushView', () => {
+  assert.deepEqual(pushView({ available: false }), { hidden: true, disabled: true, text: '', note: '' });
+  assert.equal(pushView({ available: true, permission: 'denied' }).hidden, true);
+  assert.match(pushView({ available: true, permission: 'denied' }).note, /blocked/);
+  assert.equal(pushView({ available: true, permission: 'default', subscribed: false }).text, 'Turn on notifications');
+  assert.equal(pushView({ available: true, permission: 'granted', subscribed: true }).text, 'Turn off notifications');
+  assert.equal(pushView({ available: true, permission: 'granted', busy: true }).disabled, true);
+  assert.equal(pushView({ available: true, permission: 'granted', error: 'x' }).note, 'x');
+});
+
+test('filesConfig: only a well-formed object turns files on', () => {
+  assert.deepEqual(filesConfig({ files: { maxBytes: 100, extensions: ['pdf', 'BAD', '.x', 'xlsm', 7] } }), { maxBytes: 100, extensions: ['pdf', 'xlsm'], uploads: true, shares: true });
+  for (const body of [{}, { files: null }, { files: { maxBytes: 0, extensions: [] } }, { files: { maxBytes: '5', extensions: [] } }, { files: { maxBytes: 5 } }]) {
+    assert.equal(filesConfig(body), null, JSON.stringify(body));
+  }
+  assert.equal(agentList({ agents: [] }).files, null);
+  assert.deepEqual(agentList({ agents: [], files: { maxBytes: 9, extensions: ['pdf'] } }).files, { maxBytes: 9, extensions: ['pdf'], uploads: true, shares: true });
+});
+
+test('fileList: rows need a 32-hex id; names are one line; direction is a fixed word', () => {
+  const id = 'a'.repeat(32);
+  const l = fileList({ files: [
+    { id, name: 'x\n<b>y</b>', size: 3, at: '2026-10-07T10:00:00Z', direction: 'received' },
+    { id: '../../x', name: 'bad' },
+    { id: 'b'.repeat(32), name: '', size: -1, direction: 'evil' },
+  ] });
+  assert.equal(l.length, 2);
+  assert.equal(l[0].name, 'x <b>y</b>');
+  assert.equal(l[0].direction, 'received');
+  assert.deepEqual([l[1].name, l[1].size, l[1].direction], ['file', 0, 'sent']);
+  assert.equal(fileList({ nope: 1 }), null);
+});
+
+test('sizeText, uploadNote, downloadPath', () => {
+  assert.equal(sizeText(512), '512 B');
+  assert.equal(sizeText(2048), '2 KB');
+  assert.equal(sizeText(25 * 1048576), '25.0 MB');
+  assert.equal(uploadNote('a.pdf'), '📎 uploaded a.pdf');
+  assert.equal(downloadPath('deal-1', 'c'.repeat(32)), `/lever/api/files/deal-1/${'c'.repeat(32)}`);
+  for (const [a, i] of [['../x', 'c'.repeat(32)], ['deal-1', '../x'], ['Deal', 'c'.repeat(32)], ['deal-1', 'C'.repeat(32)]]) assert.equal(downloadPath(a, i), '');
+});
+
+test('fileCheck refuses a file over the limit or of another type before any request', () => {
+  const cfg = { maxBytes: 1000, extensions: ['pdf', 'xlsm'] };
+  assert.equal(fileCheck({ name: 'a.PDF', size: 10 }, cfg), '');
+  assert.match(fileCheck({ name: 'a.pdf', size: 1001 }, cfg), /limit/);
+  assert.match(fileCheck({ name: 'a.exe', size: 1 }, cfg), /\.exe.*not accepted/);
+  assert.match(fileCheck({ name: 'noext', size: 1 }, cfg), /not accepted/);
+});
+
+test('uploadErrorText maps the fixed words', () => {
+  assert.match(uploadErrorText(413, { error: 'too-large' }), /too large/);
+  assert.match(uploadErrorText(429, { error: 'rate' }), /many/);
+  assert.match(uploadErrorText(409, { error: 'not-fresh' }), /restart/);
+  assert.match(uploadErrorText(0, 'cannot reach the server'), /cannot reach/);
+  for (const word of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    assert.equal(uploadErrorText(400, { error: word }), `${word} (HTTP 400)`);
+  }
+});
+
+test('filesConfig: uploads and shares are on unless the answer says false', () => {
+  assert.deepEqual(filesConfig({ files: { maxBytes: 9, extensions: ['pdf'] } }), { maxBytes: 9, extensions: ['pdf'], uploads: true, shares: true });
+  assert.deepEqual(filesConfig({ files: { maxBytes: 9, extensions: [], uploads: false, shares: false } }), { maxBytes: 9, extensions: [], uploads: false, shares: false });
+  assert.equal(contactList({ contacts: [{ login: 'c@x', agents: [], noFiles: true }, { login: 'd@x', agents: [] }] }).map((c) => !!c.noFiles).join(), 'true,false');
 });

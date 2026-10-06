@@ -14,7 +14,9 @@ import (
 
 // JailHandler builds an http.Handler that routes the jail (mTLS) listener.
 // Routes: /worker/*, /msg/send, /msg/list, /msg/recipients, /directive/consume,
-// /directive/check, /directive/preview, /message/verify, /chat/verify, /enrol, /renew, /request, and one gated proxy per
+// /directive/check, /directive/preview, /message/verify, /chat/verify, /contacts, /contact/message,
+// /files/list, /files/share,
+// /enrol, /renew, /request, and one gated proxy per
 // currently-registered tool under /mcp/<name>/. Tool routes are bound at
 // call time — tools must be registered before JailHandler() is called.
 //
@@ -54,6 +56,10 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathDirectivePreview, control(b.handleDirectivePreview))
 	mux.Handle("POST "+wire.PathMessageVerify, control(b.handleMessageVerify))
 	mux.Handle("POST "+wire.PathChatVerify, control(b.handleChatVerify))
+	mux.Handle("POST "+wire.PathContacts, control(b.handleContacts))
+	mux.Handle("POST "+wire.PathContactMessage, control(b.handleContactMessage))
+	mux.Handle("POST "+wire.PathFilesList, control(b.handleFilesList))
+	mux.Handle("POST "+wire.PathFilesShare, control(b.handleFilesShare))
 	mux.Handle("POST "+wire.PathEnrol, control(b.handleEnrol))
 	mux.Handle("POST "+wire.PathRenew, control(b.handleRenew))
 	mux.Handle("POST "+wire.PathRequest, control(b.handleRequest))
@@ -132,11 +138,14 @@ func (b *Broker) AdminHandler() http.Handler {
 // permissions are the gate, the same boundary as the host records it writes.
 // The remote chat page's wake (handleOperatorWake) is here for the same
 // reason: a resume route on the admin listener would let the jail wake
-// workers.
+// workers. So is the proxy's agent-message match
+// (handleAgentMessagesMatch): it binds ledger records, which nothing in the
+// jail may do.
 func (b *Broker) OperatorHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
 	mux.HandleFunc("POST "+wire.PathOperatorWake, b.handleOperatorWake)
+	mux.HandleFunc("POST "+wire.PathOperatorAgentMessagesMatch, b.handleAgentMessagesMatch)
 	return mux
 }
 

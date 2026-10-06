@@ -119,16 +119,16 @@ func TestCountUnread(t *testing.T) {
 	// The hub's order is not trusted: sorted here by time, then id.
 	items := []hubMessage{m("m3", "a", "2026-10-06T10:03:00Z"), m("m1", "a", "2026-10-06T10:01:00Z"),
 		m("m5", "a", "2026-10-06T10:05:00Z"), m("m2", "a", "2026-10-06T10:02:00Z"), m("m4", "u", "2026-10-06T10:04:00Z")}
-	if n := countUnread(items, "a", "m2", false); n != 2 { // m5, m3; m4 is the user's own
+	if n := countUnread(items, "a", "m2", false, nil); n != 2 { // m5, m3; m4 is the user's own
 		t.Errorf("after m2: %d", n)
 	}
-	if n := countUnread(items, "a", "", false); n != 4 {
+	if n := countUnread(items, "a", "", false, nil); n != 4 {
 		t.Errorf("never read: %d", n)
 	}
-	if n := countUnread(items, "a", "gone", true); n != 99 {
+	if n := countUnread(items, "a", "gone", true, nil); n != 99 {
 		t.Errorf("marker not in a full page: %d, want 99", n)
 	}
-	if n := countUnread(items, "a", "gone", false); n != 4 {
+	if n := countUnread(items, "a", "gone", false, nil); n != 4 {
 		t.Errorf("marker not in a short page: %d, want all of the agent's", n)
 	}
 }
@@ -429,3 +429,77 @@ func (perLoginSession) Cookie(_ context.Context, login string) (string, error) {
 	return "sess-" + login, nil
 }
 func (perLoginSession) Invalidate(string, string) {}
+
+func TestUnreadCountsOnlyRecordedAgentRows(t *testing.T) {
+	items := []hubMessage{
+		{ID: "a2", SenderID: "id-w1", Sender: "agent:w1", Msg: "unrecorded", CreatedAt: "2026-10-06T10:02:00Z"},
+		{ID: "a1", SenderID: "id-w1", Sender: "agent:w1", Msg: "recorded", CreatedAt: "2026-10-06T10:01:00Z"},
+	}
+	keep := func(m hubMessage) bool { return m.ID == "a1" }
+	if n := countUnread(items, "id-w1", "", false, keep); n != 1 {
+		t.Fatalf("unread = %d, want 1", n)
+	}
+	if n := countUnread(items, "id-w1", "", false, nil); n != 2 {
+		t.Fatalf("nil keep (off or operator) counts every agent row: %d", n)
+	}
+}
+
+// With agent messages on, a contact's unread count holds only the rows the
+// broker keeps; a broker that cannot answer leaves the count out. The
+// operator's count is spec 1's, whatever the broker says.
+func TestUnreadOmittedWhenTheBrokerIsDown(t *testing.T) {
+	w1Key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	dms := `{"dms":[{"conversationKey":"` + w1Key + `","hasUnread":true}]}`
+	history := map[string]string{w1Key: `{"messages":[` +
+		`{"id":"m1","sender":"agent:w1","senderId":"` + agentW1 + `","msg":"recorded","createdAt":"2026-10-06T10:01:00Z"},` +
+		`{"id":"m2","sender":"agent:w1","senderId":"` + agentW1 + `","msg":"SECRET","createdAt":"2026-10-06T10:02:00Z"}]}`}
+	down := func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
+		return nil, errors.New("down")
+	}
+	var asked atomic.Int32
+	keepOne := func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error) {
+		asked.Add(1)
+		if contact != "c@x" || agent != "w1" {
+			t.Errorf("asked about %s/%s", contact, agent)
+		}
+		return recordedOnly("recorded")(ctx, "c@x", "w1", msgs)
+	}
+	w1 := func(ans agentsAnswer) *int {
+		for _, a := range ans.Agents {
+			if a.Name == "w1" {
+				return a.Unread
+			}
+		}
+		t.Fatalf("no w1 in %+v", ans)
+		return nil
+	}
+	for name, tc := range map[string]struct {
+		login string
+		match func(context.Context, string, string, []AgentMessage) (map[string]bool, error)
+		want  int // -1: no count
+	}{
+		"contact, broker down":  {"c@x", down, -1},
+		"contact, one kept":     {"c@x", keepOne, 1},
+		"operator, broker down": {chatOp, down, 2},
+		"contact, feature off":  {"c@x", nil, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := chatConfig(t, dmHub(t, dms, history))
+			cfg.MatchAgentMessages = tc.match
+			rw, ans := agentsAs(t, NewHandler(cfg), tc.login)
+			if rw.Code != http.StatusOK {
+				t.Fatalf("%d %s", rw.Code, rw.Body)
+			}
+			got := w1(ans)
+			switch {
+			case tc.want < 0 && got != nil:
+				t.Fatalf("unread %d, want none: %s", *got, rw.Body)
+			case tc.want >= 0 && (got == nil || *got != tc.want):
+				t.Fatalf("unread %v, want %d: %s", got, tc.want, rw.Body)
+			}
+		})
+	}
+	if asked.Load() == 0 {
+		t.Fatal("the contact's count never asked the broker")
+	}
+}

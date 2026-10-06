@@ -161,6 +161,39 @@ type Config struct {
 	// live or the broker refused; a refusal is a *WakeError with the
 	// broker's status. Nil answers every wake 503.
 	Wake func(ctx context.Context, login, tier, worker string) error
+	// MatchAgentMessages (remote.agent_messages) reports which agent rows of
+	// a contact's DM the broker's agent ledger recorded, by row id. A
+	// contact is shown no other agent row, no event text, no DM preview,
+	// and only shown rows count as unread (agentmsgs.go, events.go). Any
+	// error hides every agent row. Nil = off: no contact answer is
+	// rewritten.
+	MatchAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
+	// ContactUser reports the hub user id `lever apply` bound a contact login
+	// to (remote-role.json), or false when it bound none: the contact never
+	// signed in, or signed in after the last apply. The operator view
+	// (opview.go) reads a contact's conversations only for a bound contact,
+	// with that contact's own session; for an unbound one it asks the login
+	// driver for nothing, since a login would create the contact's hub user.
+	// Nil: no contact is bound.
+	ContactUser func(login string) (string, bool)
+	// PeekAgentMessages is MatchAgentMessages without binding: it answers
+	// what the contact's own read would keep now, and the broker writes
+	// nothing. The operator view uses it, so an operator's read never decides
+	// which message a record shows. Nil while MatchAgentMessages is set: the
+	// operator view treats every answer as unmatched (no agent row shown).
+	// pending is the kept ids no contact read has bound yet (not shown to
+	// the contact so far).
+	PeekAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (keep, pending map[string]bool, err error)
+	// Files (remote.files) turns on the chat page's file exchange: a login
+	// uploads to an agent it may message and downloads what the agent
+	// shared with it (files.go). Nil = off: every /lever/api/files/ path is
+	// a 404. Needs ChatAgent.
+	Files *FilesConfig
+	// Push, when non-nil, is the Web Push service (remote.push, push.go):
+	// the page's subscription routes and worker, and the hub streams that
+	// turn agent messages into pushes (the caller runs Push.Run). It needs
+	// ChatAgent: without the chat page there is nothing to notify about.
+	Push *Push
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -380,7 +413,8 @@ type AuditLine struct {
 	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
 	// navigation, DecisionLoginRedirect; the contact fence DecisionDenyContact;
 	// the chat page DecisionChatUnavailable and, for its wake route,
-	// DecisionWake, DecisionDenyWake and DecisionWakeResult; the login driver DecisionOIDCSession
+	// DecisionWake, DecisionDenyWake and DecisionWakeResult; the operator view
+	// DecisionOperatorView and DecisionDenyOperatorView; the login driver DecisionOIDCSession
 	// and DecisionOIDCSessionFailed; the provider the DecisionOIDC* values and
 	// DecisionDenyAuthorize.
 	Decision Decision `json:"decision"`
@@ -388,6 +422,12 @@ type AuditLine struct {
 	// Reason is a fixed word for why the chat page's wake route refused or
 	// how a late wake ended (wake.go), never caller or broker text.
 	Reason string `json:"reason,omitempty"`
+	// Contact and Agent name the conversation an operator-view read was for,
+	// and Count how many rows (or contacts) it answered (opview.go). Never
+	// message text.
+	Contact string `json:"contact,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Count   *int   `json:"count,omitempty"`
 	// Error records why an allowed request never got an answer from the hub
 	// (set only on the 502 path). The transport's own diagnosis lands here
 	// rather than in the client's response body: the operator needs to know
@@ -476,6 +516,9 @@ type ctxState struct {
 	// keepDM, when set, filters the hub's /api/v1/chat/dms answer to the
 	// conversations it allows (the contact fence).
 	keepDM func(key string) bool
+	// rewrite, when set, rewrites the hub's answer for a contact
+	// (remote.agent_messages): after keepDM, on every attempt.
+	rewrite func(*http.Response)
 }
 
 type ctxStateKey struct{}
@@ -497,6 +540,13 @@ func NewHandler(cfg Config) http.Handler {
 	}
 	if cfg.ChatAgent != "" {
 		g.chat = newChatPage(cfg)
+		if cfg.Files != nil {
+			g.files = newFilesState(*cfg.Files)
+		}
+		if cfg.Push != nil {
+			g.push = cfg.Push
+			cfg.Push.attach(g)
+		}
 	}
 	return g
 }
@@ -586,6 +636,9 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 		sandboxAPIDocument(resp)
 		if s := stateFrom(resp.Request); s != nil && s.keepDM != nil {
 			filterDMList(resp, s.keepDM)
+		}
+		if s := stateFrom(resp.Request); s != nil && s.rewrite != nil && !(s.retryable && sessionRejected(resp)) {
+			s.rewrite(resp)
 		}
 		if s := stateFrom(resp.Request); s != nil {
 			if s.retryable && sessionRejected(resp) {
@@ -715,6 +768,8 @@ type gate struct {
 	rp       *httputil.ReverseProxy
 	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
 	chat     *chatPage     // nil unless Config.ChatAgent is set
+	push     *Push         // nil unless Config.Push and ChatAgent are set
+	files    *filesState   // nil unless Config.Files and ChatAgent are set
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration
@@ -811,6 +866,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		state.cookie = cookie
 		state.keepDM = contactKeepDM(r)
+		state.rewrite = contactRewrite(r)
 	}
 	// Only a bodiless method may be repeated: the retry in forward re-runs
 	// the request, and a body has already been consumed by then.
@@ -955,7 +1011,7 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 	}
 	// retryable is deliberately not set: one retry, then the hub's answer
 	// stands whatever it is.
-	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM}
+	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM, rewrite: state.rewrite}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }
 

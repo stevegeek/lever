@@ -22,11 +22,20 @@ function hubWith(parts = {}) {
     post: (body) => ({ status: 201, body: { id: 'sent1', content: body.content, senderId: 'u1', type: 'instruction', createdAt: new Date(1.8e12).toISOString(), dispatchState: 'dispatched' } }),
     read: () => ({ status: 200, body: { status: 'ok' } }),
     wake: () => ({ status: 202, body: { state: 'starting' } }),
+    contacts: () => ({ status: 200, body: { contacts: [] } }),
+    transcript: () => ({ status: 200, body: { contact: 'c@x', agent: 'w1', matched: true, messages: [] } }),
+    upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: 'report.pdf', size: 3, sha256: '0'.repeat(64) }, progress: [50, 100] }),
+    files: () => ({ status: 200, body: { files: [] } }),
+    viewFiles: () => ({ status: 200, body: { files: [] } }),
     ...parts,
   };
   const fn = (method, path, body) => {
+    if (path === '/lever/api/contacts') return h.contacts();
+    if (path.startsWith('/lever/api/contacts/') && path.endsWith('/files')) return h.viewFiles(path);
+    if (path.startsWith('/lever/api/contacts/')) return h.transcript(path);
     if (path === '/lever/api/agents') return h.agents();
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
+    if (path.startsWith('/lever/api/files/')) return method === 'POST' ? h.upload(body, path) : h.files(path);
     if (method === 'POST' && path.endsWith('/read')) return h.read(body, path);
     if (method === 'POST') return h.post(body, path);
     return h.history(path);
@@ -119,7 +128,7 @@ test('a history answer of any shape does not stop the page', async () => {
   for (const body of ['null', 'not json', '[]', '{"messages":"x"}', '{"messages":[null,7,{"id":7}]}']) {
     const env = await loadChat(hubWith({ history: () => ({ status: 200, body }) }));
     assert.equal(env.streams.length, 1, body);
-    assert.equal(env.intervals.length, 1, body);
+    assert.equal(env.intervals.filter((i) => i.ms === 15000).length, 1, body);
     assert.equal(env.rows().length, 0, body);
   }
 });
@@ -293,7 +302,7 @@ test('the hub is away at start: the page keeps trying', async () => {
   assert.equal(env.els.listnote.hidden, true);
   assert.equal(env.els.agent.textContent, 'boss');
   assert.equal(env.els.text.disabled, false);
-  assert.equal(env.intervals.length, 1, 'one poll, however many attempts it took');
+  assert.equal(env.intervals.filter((i) => i.ms === 15000).length, 1, 'one poll, however many attempts it took');
 });
 
 test('a list the fence refuses is not asked for again and again', async () => {
@@ -1178,7 +1187,8 @@ test('a chat event reloads the list and the open history', async () => {
 
 test('the list is read every 15 s while the page shows', async () => {
   const env = await load(hubWith());
-  assert.deepEqual(env.intervals.map((i) => i.ms), [15000]);
+  // An operator's page also reads its contacts every 30 s.
+  assert.deepEqual(env.intervals.map((i) => i.ms), [30000, 15000]);
   const lists = env.count('GET', '/lever/api/agents');
   await env.poll();
   assert.equal(env.count('GET', '/lever/api/agents'), lists + 1);
@@ -1468,4 +1478,472 @@ test('with no chat open the chat pane says to choose an agent (a wide screen sho
   assert.equal(env.els.notice.textContent, 'Choose an agent from the list.');
   assert.equal(env.els.notice.hidden, false);
   assert.equal(env.els.composer.hidden, true);
+});
+
+const CONTACTS = () => ({ status: 200, body: { contacts: [
+  { login: 'c@x', signedIn: true, agents: [{ name: 'w1', label: 'Via Roma', state: 'running' }] },
+  { login: 'd@x', signedIn: false, agents: [{ name: 'w1', label: '', state: 'suspended' }] },
+] } });
+const T = (i, from, text, shown) => ({ id: `t${i}`, from, text, createdAt: new Date(1.7e12 + i * 1000).toISOString(), shownToContact: shown });
+const TPATH = '/lever/api/contacts/c%40x/agents/w1/messages';
+
+test('operator: a Contacts section; a contact gets none and never asks', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  assert.equal(env.els['contacts-title'].hidden, false);
+  assert.deepEqual(env.contactRows(), ['c@x | ', 'd@x | not signed in yet']);
+  await env.clickContact(0);
+  assert.deepEqual(env.contactRows(), ['c@x | ', '  w1 · Via Roma | running', 'd@x | not signed in yet']);
+
+  const contact = await load(hubWith({ agents: () => roster([A('w1')], { tier: 'contact', console: '' }), contacts: CONTACTS }));
+  assert.equal(contact.count('GET', '/lever/api/contacts'), 0);
+  assert.equal(contact.els['contacts-title'].hidden, true);
+  assert.equal(contact.els.contacts.hidden, true);
+});
+
+test('a transcript is read-only, marks what the contact is not shown, and writes nothing', async () => {
+  const env = await load(hubWith({
+    contacts: CONTACTS,
+    transcript: () => ({ status: 200, body: { matched: true, messages: [T(2, 'agent', 'CANARY', false), T(1, 'contact', 'hello', true), T(3, 'system', 'started', true),
+      { ...T(4, 'agent', 'soon', false), pending: true }] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.count('GET', TPATH), 1);
+  assert.equal(env.els.agent.textContent, 'c@x · w1');
+  assert.equal(env.els.state.textContent, 'read only');
+  assert.equal(env.els.composer.hidden, true);
+  assert.equal(env.els.readonly.hidden, false);
+  assert.equal(env.els.refresh.hidden, false);
+  const rows = env.rows();
+  assert.match(rows[0], /^msg contact: c@x .* \/ hello$/);
+  assert.match(rows[1], /^msg agent unshown: w1 .* \/ CANARY \/ not shown to the contact$/);
+  assert.match(rows[2], /^msg system: hub .* \/ started$/);
+  assert.match(rows[3], /^msg agent pending: w1 .* \/ soon \/ not yet read by the contact$/);
+  await env.poll();
+  assert.equal(env.calls.filter((c) => c.method !== 'GET').length, 0, 'no post, no read marker');
+});
+
+test('transcript text is only text', async () => {
+  const evil = '<img src=x onerror=alert(1)>';
+  const env = await load(hubWith({
+    contacts: () => ({ status: 200, body: { contacts: [{ login: evil, signedIn: true, agents: [{ name: 'w1', label: evil, state: evil }] }] } }),
+    transcript: () => ({ status: 200, body: { matched: true, messages: [{ id: 't1', from: evil, text: evil, createdAt: evil, shownToContact: false }] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  for (const row of env.els.list.children) {
+    assert.equal(row.tag, 'div');
+    for (const c of row.children) assert.deepEqual([c.tag, c.children.length], ['div', 0]);
+  }
+  assert.ok(env.rows()[0].startsWith('msg agent unshown: w1'));
+  assert.equal(env.contactRows()[1], `  w1 · ${evil} | unknown`);
+});
+
+test('a contact that never signed in reads nothing', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(1);
+  await env.clickContactAgent(1, 0);
+  assert.equal(env.els.notice.textContent, 'd@x has not signed in yet.');
+  assert.equal(env.count('GET', '/lever/api/contacts/'), 0);
+});
+
+test('a refusal shows its words', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS, transcript: () => ({ status: 409, body: { error: 'not-signed-in' } }) }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.els.notice.textContent, 'Cannot read the conversation: has not signed in yet');
+});
+
+test('a transcript the broker could not match says so', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS, transcript: () => ({ status: 200, body: { matched: false, messages: [T(1, 'agent', 'x', false)] } }) }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.els.notice.textContent, 'The broker did not answer: which agent messages the contact sees is not known.');
+});
+
+test('the transcript refreshes every 30 s and on Refresh, and stops when closed', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  const every = env.intervals.find((i) => i.ms === 30000);
+  assert.ok(every, 'a 30 s interval');
+  every.f();
+  await tick(5);
+  assert.equal(env.count('GET', TPATH), 2);
+  env.els.refresh.dispatch('click');
+  await tick(5);
+  assert.equal(env.count('GET', TPATH), 3);
+  env.els.back.dispatch('click');
+  every.f();
+  await tick(5);
+  assert.equal(env.count('GET', TPATH), 3, 'no read once closed');
+  assert.equal(env.els.readonly.hidden, true);
+});
+
+test('Load earlier reads with the cursor', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS, transcript: (p) => ({ status: 200, body: { matched: true, nextCursor: p.includes('cursor=') ? '' : 'C1', messages: [T(p.includes('cursor=') ? 1 : 2, 'agent', 'x', true)] } }) }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.els.older.hidden, false);
+  env.els.older.dispatch('click');
+  await tick(5);
+  assert.equal(env.count('GET', `${TPATH}?limit=50&cursor=C1`), 1);
+  assert.equal(env.rows().length, 2);
+  assert.equal(env.els.older.hidden, true);
+});
+
+test('opening an agent chat leaves the transcript', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  env.els.agents.children[0].children[0].dispatch('click');
+  await tick(5);
+  assert.equal(env.els.readonly.hidden, true);
+  assert.equal(env.els.refresh.hidden, true);
+  assert.equal(env.els.composer.hidden, false);
+  assert.equal(env.els.agent.textContent, 'boss');
+});
+
+const VAPID = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4';
+// pushHub: the default hub plus the push routes.
+function pushHub(parts = {}) {
+  const h = hubWith(parts);
+  const subs = [];
+  const fn = (method, path, body) => {
+    if (path === '/lever/api/push/key') return (parts.pushKey || (() => ({ status: 200, body: { key: VAPID } })))();
+    if (path === '/lever/api/push/subscriptions') {
+      subs.push({ method, body });
+      return (parts.subs || (() => ({ status: method === 'POST' ? 201 : 200, body: { ok: 'true' } })))(method, body);
+    }
+    return h(method, path, body);
+  };
+  fn.subs = subs;
+  return fn;
+}
+
+test('push: a browser without push asks nothing and shows no button', async () => {
+  const hub = pushHub();
+  const env = await load(hub);
+  assert.equal(env.count('GET', '/lever/api/push'), 0);
+  assert.equal(env.els.push.hidden, true);
+});
+
+test('push: server off hides the button and removes an old worker', async () => {
+  const env = await load(pushHub({ pushKey: () => ({ status: 404, body: 'not found' }) }), { push: { registered: true } });
+  assert.equal(env.els.push.hidden, true);
+  assert.equal(env.push.registered, null);
+});
+
+test('push: no worker is registered until the login turns notifications on', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {} });
+  assert.equal(env.els.push.hidden, false);
+  assert.equal(env.els.push.textContent, 'Turn on notifications');
+  assert.equal(env.push.registerCalls.length, 0);
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.deepEqual(env.push.registerCalls, [{ url: '/lever/sw.js', scope: '/lever/' }]);
+  assert.equal(env.push.subscribeOpts.userVisibleOnly, true);
+  assert.equal(env.push.subscribeOpts.applicationServerKey.length, 65);
+  assert.deepEqual(hub.subs.at(-1), { method: 'POST', body: { endpoint: env.push.sub.endpoint, keys: env.push.sub.toJSON().keys } });
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+});
+
+test('push: a refused permission registers nothing and says why', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: { grant: 'denied' } });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.push.registerCalls.length, 0);
+  assert.equal(env.els.push.hidden, true);
+  assert.match(env.els.pushnote.textContent, /blocked/);
+  assert.equal(hub.subs.length, 0);
+});
+
+test('push: a subscription the server refuses is undone', async () => {
+  const hub = pushHub({ subs: () => ({ status: 400, body: { error: 'endpoint' } }) });
+  const env = await load(hub, { push: {} });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.push.sub, null);
+  assert.equal(env.els.push.textContent, 'Turn on notifications');
+  assert.ok(env.els.pushnote.textContent.length > 0);
+});
+
+test('push: an existing subscription is sent again at load and can be turned off', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: { registered: true, existing: true, permission: 'granted' }, local: { 'lever-push-optin:op': '1' } });
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+  assert.equal(hub.subs[0].method, 'POST');
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.deepEqual(hub.subs.at(-1), { method: 'DELETE', body: { endpoint: 'https://fcm.googleapis.com/fcm/send/fake' } });
+  assert.equal(env.push.sub, null);
+  assert.equal(env.push.registered, null);
+  assert.equal(env.els.push.textContent, 'Turn on notifications');
+});
+
+test('a notification tap opens the agent named in the hash, only if listed', async () => {
+  let env = await load(hubWith(), { hash: '#agent=w1' });
+  assert.equal(env.els.agent.textContent, 'w1');
+  assert.equal(env.replaced.length, 1);
+  env = await load(hubWith(), { hash: '#agent=nobody' });
+  assert.equal(env.els.agent.textContent, 'Chat');
+  env = await load(hubWith(), { hash: '#agent=../w1' });
+  assert.equal(env.els.agent.textContent, 'Chat');
+});
+
+test('a message from the worker opens a listed agent', async () => {
+  const env = await load(pushHub(), { push: {} });
+  env.swMessage({ agent: 'w1' });
+  await tick(5);
+  assert.equal(env.els.agent.textContent, 'w1');
+  env.swMessage({ agent: 'nobody' });
+  env.swMessage({ agent: 7 });
+  env.swMessage(null);
+  await tick(5);
+  assert.equal(env.els.agent.textContent, 'w1');
+});
+
+test('push: turning on marks this login, turning off clears the mark', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {} });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.local['lever-push-optin:op'], '1');
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.local['lever-push-optin:op'], undefined);
+});
+
+test('push: another login on a shared device does not take the subscription', async () => {
+  // Login op turned notifications on here; contact c now uses the page.
+  const c = pushHub({ agents: () => roster([A('w1')], { login: 'c', tier: 'contact', console: undefined }) });
+  const envC = await load(c, { push: { registered: true, existing: true, permission: 'granted' }, local: { 'lever-push-optin:op': '1' } });
+  assert.equal(c.subs.length, 0, 'the subscription was posted for a login that never opted in');
+  assert.equal(envC.els.push.textContent, 'Turn on notifications');
+});
+
+const withFiles = (agents) => () => roster(agents, { files: { maxBytes: 1000, extensions: ['pdf', 'xlsm'] } });
+
+test('files off: no paperclip and no Files button', async () => {
+  const env = await loadChat(hubWith());
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, true);
+});
+
+test('files on: paperclip and Files for a message agent, none for a see-only one', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS(), A('w2', { access: 'see' })]) }));
+  assert.equal(env.els.attach.hidden, false);
+  assert.equal(env.els.files.hidden, false);
+  env.els.agents.children[1].children[0].dispatch('click');
+  await tick(5);
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, true);
+});
+
+test('upload: one file field, progress, then the chat note through the normal send', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]) }));
+  env.els.attach.dispatch('click');
+  assert.equal(env.els.file.clicks, 1);
+  await env.pick({ name: 'report.pdf', size: 3 });
+  await env.runTimers();
+  const up = env.calls.find((c) => c.method === 'POST' && c.path === '/lever/api/files/boss');
+  assert.deepEqual(up.body.form, [{ field: 'file', name: 'report.pdf', size: 3 }]);
+  assert.equal(up.headers['X-Lever-Upload'], '1');
+  assert.ok(env.uploadNotes.some((t) => /50%/.test(t)), env.uploadNotes.join(' | '));
+  const s = sends(env);
+  assert.equal(s.length, 1);
+  assert.equal(s[0].body.content, '📎 uploaded report.pdf');
+  assert.equal(env.els.upload.hidden, true);
+  assert.equal(env.els.error.hidden, true);
+});
+
+test('a file over the limit or of another type is refused before any request', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]) }));
+  await env.pick({ name: 'big.pdf', size: 5000 });
+  assert.match(env.els.error.textContent, /limit/);
+  await env.pick({ name: 'run.exe', size: 1 });
+  assert.match(env.els.error.textContent, /not accepted/);
+  assert.equal(env.count('POST', '/lever/api/files/'), 0);
+  assert.equal(sends(env).length, 0);
+});
+
+test('an upload refusal shows its words and posts nothing', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]), upload: () => ({ status: 413, body: { error: 'too-large' } }) }));
+  await env.pick({ name: 'a.pdf', size: 3 });
+  await env.runTimers();
+  assert.match(env.els.error.textContent, /^Not uploaded: .*too large/);
+  assert.equal(sends(env).length, 0);
+});
+
+test('uploaded, but the chat note was refused: says so', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]), post: () => ({ status: 403, body: 'forbidden' }) }));
+  await env.pick({ name: 'a.pdf', size: 3 });
+  await env.runTimers();
+  assert.match(env.els.error.textContent, /^Uploaded report\.pdf, but the chat message was not sent/);
+});
+
+test('files panel: names are text, links only to lever\'s download route', async () => {
+  const evil = '<img src=x onerror=alert(1)>.pdf';
+  const id = 'e'.repeat(32);
+  const env = await loadChat(hubWith({
+    agents: withFiles([BOSS()]),
+    files: () => ({ status: 200, body: { files: [
+      { id, name: evil, size: 2048, at: '2026-10-07T10:00:00Z', direction: 'received' },
+      { id: '../../api/v1/x', name: 'bad', size: 1, direction: 'sent' },
+    ] } }),
+  }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.filespanel.hidden, false);
+  const rows = env.els.filelist.children;
+  assert.equal(rows.length, 1);
+  const a = rows[0].children.find((c) => c.tag === 'a');
+  assert.equal(a.textContent, evil);
+  assert.equal(a.attrs.href, `https://mac.ts.net/lever/api/files/boss/${id}`);
+  assert.equal(a.attrs.download, '');
+  assert.match(rows[0].textContent, /From boss/);
+  assert.match(rows[0].textContent, /2 KB/);
+});
+
+test('files panel closes and clears when the chat changes', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS(), A('w1')]),
+    files: () => ({ status: 200, body: { files: [{ id: 'e'.repeat(32), name: 'a.pdf', size: 1, direction: 'sent' }] } }) }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  env.els.back.dispatch('click');
+  assert.equal(env.els.filespanel.hidden, true);
+  assert.equal(env.els.filelist.children.length, 0);
+});
+
+test('the chat note names the file as the server stored it', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]),
+    upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: '_bashrc.pdf', size: 3, sha256: '0'.repeat(64) } }) }));
+  await env.pick({ name: '.bashrc.pdf', size: 3 });
+  await env.runTimers();
+  assert.equal(sends(env)[0].body.content, '📎 uploaded _bashrc.pdf');
+});
+
+test('push and files together: both buttons work', async () => {
+  const hub = pushHub({ agents: withFiles([BOSS()]) });
+  const env = await load(hub, { push: {}, store: { 'lever-chat-open': 'boss' } });
+  assert.equal(env.els.push.hidden, false);
+  assert.equal(env.els.attach.hidden, false);
+  assert.equal(env.els.files.hidden, false);
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+  await env.pick({ name: 'a.pdf', size: 3 });
+  await env.runTimers();
+  assert.equal(env.count('POST', '/lever/api/files/boss'), 1);
+  assert.equal(sends(env).length, 1);
+});
+
+test('operator view: a contact\'s files are listed read-only, with links to lever\'s download route', async () => {
+  const id = 'e'.repeat(32);
+  const evil = '<img src=x onerror=alert(1)>.pdf';
+  const env = await load(hubWith({
+    agents: withFiles([BOSS(), A('w1')]),
+    contacts: CONTACTS,
+    viewFiles: () => ({ status: 200, body: { files: [
+      { id, name: evil, size: 10, at: '2026-10-07T10:00:00Z', direction: 'sent' },
+      { id: 'f'.repeat(32), name: 'v3.xlsm', size: 2048, direction: 'received' },
+      { id: '../x', name: 'bad', size: 1, direction: 'sent' },
+    ] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 1);
+  assert.equal(env.els.filespanel.hidden, false);
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, true);
+  const rows = env.els.filelist.children;
+  assert.equal(rows.length, 2);
+  const a = rows[0].children.find((c) => c.tag === 'a');
+  assert.equal(a.textContent, evil);
+  assert.equal(a.attrs.href, `https://mac.ts.net/lever/api/files/w1/${id}`);
+  assert.match(rows[0].textContent, /From c@x/);
+  assert.match(rows[1].textContent, /From w1/);
+  await env.poll();
+  assert.equal(env.calls.filter((c) => c.method !== 'GET').length, 0, 'the view writes nothing');
+  env.els.back.dispatch('click');
+  assert.equal(env.els.filespanel.hidden, true);
+  assert.equal(env.els.filelist.children.length, 0);
+});
+
+test('operator view with files off: no files list and no request', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 0);
+  assert.equal(env.els.filespanel.hidden, true);
+});
+
+test('the view poll does not read a not-signed-in contact\'s conversation', async () => {
+  const env = await load(hubWith({ agents: withFiles([BOSS(), A('w1')]), contacts: CONTACTS }));
+  await env.clickContact(1);
+  await env.clickContactAgent(1, 0);
+  assert.equal(env.els.notice.textContent, 'd@x has not signed in yet.');
+  const reads = () => env.count('GET', '/lever/api/contacts/d%40x/');
+  const before = reads();
+  await env.poll();
+  await env.poll();
+  assert.equal(reads(), before, 'no transcript or files read from the poll');
+  assert.equal(env.els.notice.textContent, 'd@x has not signed in yet.');
+});
+
+test('push: under Trusted Types the worker URL comes from the lever-sw policy', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {}, trustedTypes: true });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.deepEqual(env.push.registerCalls, [{ url: '/lever/sw.js', scope: '/lever/', trusted: true }]);
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+  const policy = env.tt.policies['lever-sw'];
+  for (const bad of ['/lever/sw.js?x', '/lever/other.js', '/api/agent.js', 'https://evil.test/sw.js', '']) {
+    assert.throws(() => policy.createScriptURL(bad), /refused/, bad);
+  }
+  // Off, then on again: the policy is made once (a second one would be
+  // refused by the CSP).
+  env.els.push.dispatch('click');
+  await tick(20);
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.push.registerCalls.length, 2);
+  assert.equal(env.tt.refused, 0);
+});
+
+test('uploads off: no paperclip, the Files panel stays', async () => {
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS()], { files: { maxBytes: 1000, extensions: ['pdf'], uploads: false, shares: true } }) }));
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, false);
+});
+
+test('shares off: a share is listed without a link, an upload keeps its link', async () => {
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS()], { files: { maxBytes: 1000, extensions: ['pdf'], uploads: true, shares: false } }),
+    files: () => ({ status: 200, body: { files: [
+      { id: 'e'.repeat(32), name: 'v3.xlsm', size: 10, direction: 'received' },
+      { id: 'f'.repeat(32), name: 'mine.pdf', size: 10, direction: 'sent' },
+    ] } }),
+  }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  const [share, mine] = env.els.filelist.children;
+  assert.equal(share.children.find((c) => c.tag === 'a').attrs.href, undefined);
+  assert.match(share.textContent, /downloads of shared files are off/);
+  assert.equal(mine.children.find((c) => c.tag === 'a').attrs.href, `https://mac.ts.net/lever/api/files/boss/${'f'.repeat(32)}`);
+});
+
+test('operator view: a contact with files off gets no files request', async () => {
+  const env = await load(hubWith({
+    agents: withFiles([BOSS(), A('w1')]),
+    contacts: () => ({ status: 200, body: { contacts: [{ login: 'c@x', signedIn: true, noFiles: true, agents: [{ name: 'w1', label: '', state: 'running' }] }] } }),
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  await env.poll();
+  assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 0);
+  assert.equal(env.els.filespanel.hidden, true);
 });

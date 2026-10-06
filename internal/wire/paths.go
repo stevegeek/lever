@@ -25,6 +25,14 @@ const (
 	// PathChatVerify is the 0.27 route agent images of that release post
 	// to; it answers like PathMessageVerify.
 	PathChatVerify = "/chat/verify"
+	// PathContacts lists the contacts an agent may message (remote.agent_messages).
+	PathContacts = "/contacts"
+	// PathContactMessage authorizes one message to a contact and records it.
+	PathContactMessage = "/contact/message"
+	// PathFilesList lists an agent's file exchange (remote.files).
+	PathFilesList = "/files/list"
+	// PathFilesShare records one file an agent shares with a login.
+	PathFilesShare = "/files/share"
 )
 
 // Admin (loopback) listener routes.
@@ -45,6 +53,12 @@ const PathOperatorNote = "/operator/note"
 // PathOperatorWake is the remote chat page's wake of a suspended or stopped
 // worker, on the same 0600 operator socket (never the admin listener).
 const PathOperatorWake = "/operator/wake"
+
+// PathOperatorAgentMessagesMatch is the remote proxy's question, on the same
+// 0600 operator socket, which agent rows of a contact's history the agent
+// ledger recorded (remote.agent_messages). Never on the jail or admin
+// listener: it binds ledger records.
+const PathOperatorAgentMessagesMatch = "/operator/agent-messages/match"
 
 // Operator-directive (UDS) admin channel routes.
 const (

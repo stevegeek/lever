@@ -2,8 +2,10 @@ package brokerctl
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // ConfigHash must be deterministic, sensitive to broker-relevant config
@@ -73,5 +75,134 @@ func TestConfigHashFollowsTheRemoteLogins(t *testing.T) {
 	off.Remote.Enabled = false
 	if got := WebSenders(off); got != nil {
 		t.Fatalf("WebSenders with remote off = %v", got)
+	}
+}
+
+// Off, the broker's stamp is the one it had before agent_messages existed:
+// an upgrade alone never bounces the broker.
+func TestConfigHashUnchangedWhileAgentMessagesOff(t *testing.T) {
+	app := &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Remote: config.Remote{Enabled: true,
+		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+	old := state.HashJSON(struct {
+		Broker       config.Broker
+		Workers      []config.Worker
+		Scion        config.ScionConfig
+		VerifiedChat bool
+		WebSenders   []string `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app)})
+	if ConfigHash(app) != old {
+		t.Fatal("off must keep the pre-change hash")
+	}
+	app.Remote.AgentMessages = config.AgentMessages{FollowUpAfter: 48 * time.Hour} // set but off
+	if ConfigHash(app) != old {
+		t.Fatal("limits without enabled must not change the hash")
+	}
+	app.Remote.AgentMessages.Enabled = true
+	on := ConfigHash(app)
+	if on == old {
+		t.Fatal("turning agent messages on must bounce the broker")
+	}
+	app.Remote.AllowedUsers[1].Agents = []string{"w1", "w2"}
+	if ConfigHash(app) == on {
+		t.Fatal("a contact's agents must be in the stamp while on")
+	}
+}
+
+func TestConfigHashFilesOnlyWhileOn(t *testing.T) {
+	app := remoteTestApp(t)
+	off := ConfigHash(app)
+	app.Remote.Files.MaxBytes = 5 << 20 // set but off
+	if ConfigHash(app) != off {
+		t.Fatal("files settings while off changed the broker hash")
+	}
+	app.Remote.Files.Enabled = true
+	on := ConfigHash(app)
+	if on == off {
+		t.Fatal("turning files on must bounce the broker")
+	}
+	app.Remote.Files.Extensions = []string{"pdf"}
+	if ConfigHash(app) == on {
+		t.Fatal("extensions must be in the broker hash")
+	}
+}
+
+func TestRemoteConfigHashFilesOnlyWhileOn(t *testing.T) {
+	app := remoteTestApp(t)
+	off := RemoteConfigHash(app)
+	app.Remote.Files.MaxBytes = 5 << 20
+	if RemoteConfigHash(app) != off {
+		t.Fatal("files settings while off changed the proxy hash")
+	}
+	app.Remote.Files.Enabled = true
+	if RemoteConfigHash(app) == off {
+		t.Fatal("turning files on must restart the proxy")
+	}
+}
+
+// Off, the proxy's stamp is the one it had before remote.files existed.
+func TestRemoteConfigHashUnchangedWhileFilesOff(t *testing.T) {
+	app := remoteTestApp(t)
+	id := state.RemoteIdentity{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net", AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
+		IdentityHeader: app.EffectiveRemoteIdentityHeader(), Bind: app.EffectiveRemoteBind(), Landing: app.EffectiveRemoteLanding(),
+		Name: "boss", Workers: []string{"w1", "w2"}, Tree: "/t"}
+	if RemoteConfigHash(app) != state.RemoteConfigHash(id) {
+		t.Fatal("off must keep the pre-change proxy hash")
+	}
+}
+
+// The per-direction and per-login switches change both stamps only when
+// set to their non-default value: an instance with files on and neither
+// key keeps the stamps it had.
+func TestFilesSwitchesInTheStamps(t *testing.T) {
+	app := remoteTestApp(t)
+	app.Remote.Files.Enabled = true
+	oldBroker := state.HashJSON(struct {
+		Broker        config.Broker
+		Workers       []config.Worker
+		Scion         config.ScionConfig
+		VerifiedChat  bool
+		WebSenders    []string            `json:",omitempty"`
+		AgentMessages *agentMessagesStamp `json:",omitempty"`
+		Files         *struct {
+			MaxBytes   int64
+			Extensions []string
+			Contacts   []string
+			Operators  []string
+		} `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), nil, &struct {
+		MaxBytes   int64
+		Extensions []string
+		Contacts   []string
+		Operators  []string
+	}{app.EffectiveFilesMaxBytes(), app.EffectiveFilesExtensions(), []string{"c@x=w1"}, []string{"op@x"}}})
+	if ConfigHash(app) != oldBroker {
+		t.Fatal("defaults changed the broker stamp")
+	}
+	b0, p0 := ConfigHash(app), RemoteConfigHash(app)
+	yes, no := true, false
+	app.Remote.Files.Uploads, app.Remote.Files.Shares = &yes, &yes
+	app.Remote.AllowedUsers[1].Files = &yes
+	if ConfigHash(app) != b0 || RemoteConfigHash(app) != p0 {
+		t.Fatal("explicit defaults changed a stamp")
+	}
+	app.Remote.Files.Uploads = &no
+	if ConfigHash(app) != b0 || RemoteConfigHash(app) == p0 {
+		t.Fatal("uploads off: the proxy restarts, the broker does not act on it")
+	}
+	app.Remote.Files.Uploads = &yes
+	app.Remote.Files.Shares = &no
+	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+		t.Fatal("shares off must restart both")
+	}
+	app.Remote.Files.Shares = &yes
+	app.Remote.AllowedUsers[1].Files = &no
+	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+		t.Fatal("a login with files: false must restart both")
+	}
+	app.Remote.Files.Enabled = false
+	off := RemoteConfigHash(app)
+	app.Remote.AllowedUsers[1].Files = nil
+	if RemoteConfigHash(app) != off {
+		t.Fatal("files off: the login switch is ignored")
 	}
 }

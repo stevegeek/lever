@@ -26,12 +26,16 @@
       <h1>Agents</h1>
     </div>
     <nav>
+      <button id="push" type="button" hidden></button>
       <a id="console" hidden>Console</a>
     </nav>
   </header>
   <main class="listscroll">
     <p id="listnote" class="notice" hidden></p>
+    <p id="pushnote" class="notice" hidden></p>
     <ul id="agents" class="agents"></ul>
+    <h2 id="contacts-title" class="section" hidden>Contacts</h2>
+    <ul id="contacts" class="agents" hidden></ul>
   </main>
 </section>
 <section id="pane-chat" class="pane">
@@ -42,6 +46,8 @@
       <p id="state" class="state"></p>
     </div>
     <nav>
+      <button id="refresh" type="button" hidden>Refresh</button>
+      <button id="files" type="button" hidden>Files</button>
       <a id="terminal" hidden>Terminal</a>
     </nav>
   </header>
@@ -49,13 +55,17 @@
     <button id="older" type="button" hidden>Load earlier messages</button>
     <p id="notice" class="notice">Choose an agent from the list.</p>
     <p id="viewonly" class="notice" hidden>View only: you can see this agent and its state, not its messages.</p>
+    <p id="readonly" class="notice" hidden>Read only: this contact's conversation with the agent. Messages marked "not shown to the contact" are hidden from them; "not yet read by the contact" is a message they will see when they next read this conversation.</p>
+    <section id="filespanel" class="filespanel" hidden aria-label="Files"><p id="filesnote" class="notice" hidden></p><ul id="filelist" class="filelist"></ul></section>
     <div id="list" role="log" aria-live="polite"></div>
   </main>
   <form id="composer" hidden>
     <p id="error" class="error" role="alert" hidden></p>
     <p id="note" class="note" hidden></p>
+    <p id="upload" class="note" role="status" hidden></p>
     <button id="ask" class="ask" type="button" hidden></button>
     <div class="row">
+      <button id="attach" type="button" aria-label="Attach a file" hidden>📎</button><input id="file" type="file" hidden>
       <textarea id="text" rows="1" placeholder="Message" aria-label="Message" disabled></textarea>
       <button id="send" type="submit" disabled>Send</button>
     </div>

@@ -431,7 +431,76 @@ type Remote struct {
 	// host-side with no symlink on the path, bounded, and only ever shown
 	// as text.
 	LabelsFile string `yaml:"labels_file"`
+	// AgentMessages lets an agent start a message to a contact that lists it
+	// (broker contact_message) and makes the proxy show a contact only the
+	// agent messages lever recorded. Off by default; see AgentMessages.
+	AgentMessages AgentMessages `yaml:"agent_messages"`
+	// Push turns on Web Push notifications for the chat page: a login's
+	// devices show "New message from <agent>" when the page is closed.
+	// Off by default; needs landing: chat. See Push.
+	Push Push `yaml:"push"`
+	// Files lets a login upload files to an agent it may message and
+	// download the files that agent shares with it, through the chat page
+	// (remoteproxy/files.go, broker share_file). Off by default; needs
+	// landing: chat. See Files.
+	Files Files `yaml:"files"`
 }
+
+// Push is remote.push.
+type Push struct {
+	Enabled bool `yaml:"enabled"`
+	// Subject is the VAPID contact the push services see (RFC 8292 §2.1):
+	// mailto:<address> or an https URL. Required when enabled.
+	Subject string `yaml:"subject"`
+	// TestHosts is TEST ONLY: loopback "127.0.0.1:<port>" addresses of a
+	// fake push service (tools/test/pushrecv). The proxy admits them only
+	// when LEVER_PUSH_TEST_HOSTS in its environment names the same
+	// addresses; either one alone stops it. Never set it for a real
+	// instance (`lever doctor` fails while it is set).
+	TestHosts []string `yaml:"test_hosts"`
+}
+
+// AgentMessages is remote.agent_messages.
+type AgentMessages struct {
+	Enabled bool `yaml:"enabled"`
+	// FollowUpAfter is how long after an unanswered message an agent started
+	// it may send one reminder. Zero = DefaultAgentFollowUpAfter.
+	FollowUpAfter time.Duration `yaml:"follow_up_after"`
+	// MaxChars bounds one message to a contact, in characters. Zero =
+	// DefaultAgentMaxChars.
+	MaxChars int `yaml:"max_chars"`
+}
+
+const (
+	DefaultAgentFollowUpAfter = 24 * time.Hour
+	DefaultAgentMaxChars      = 4000
+	// MaxAgentMaxChars is scion's own cap on one message
+	// (messages.MaxMessageLength): a longer text could never be sent.
+	MaxAgentMaxChars = 16000
+)
+
+// Files is remote.files.
+type Files struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxBytes bounds one file. Zero = DefaultFilesMaxBytes.
+	MaxBytes int64 `yaml:"max_bytes"`
+	// Extensions are the accepted file types, lowercase, without the dot.
+	// Empty = chatfiles.DefaultExtensions.
+	Extensions []string `yaml:"extensions"`
+	// Uploads and Shares turn one direction off (nil = on): no new upload
+	// from a login, or no new share from an agent. Records already made
+	// stay listed; a share already made is no longer downloadable while
+	// Shares is off.
+	Uploads *bool `yaml:"uploads"`
+	Shares  *bool `yaml:"shares"`
+}
+
+const (
+	DefaultFilesMaxBytes = 25 << 20
+	// MaxFilesMaxBytes bounds max_bytes: a download is copied whole to a
+	// private temp file before it is served (chatfiles.CopyVerified).
+	MaxFilesMaxBytes = 100 << 20
+)
 
 type App struct {
 	Name     string      `yaml:"name"`

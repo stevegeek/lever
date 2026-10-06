@@ -49,7 +49,7 @@ body {
   #pane-list { flex: 0 0 18rem; border-right: 1px solid var(--line); }
   #back { display: none; }
 }
-#back {
+#back, #refresh, #push {
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -58,6 +58,8 @@ body {
   font: inherit;
   font-size: 14px;
 }
+#push { cursor: pointer; }
+#push:disabled { opacity: .5; cursor: default; }
 .label { font-weight: 400; color: var(--muted); }
 .label::before { content: "· "; }
 .listscroll { padding-left: 0; padding-right: 0; }
@@ -185,3 +187,29 @@ textarea {
 }
 #send:disabled { opacity: 0.45; }
 .error { max-width: 760px; margin: 0 auto 6px; font-size: 14px; color: var(--bad); overflow-wrap: anywhere; }
+.section { margin: 16px 16px 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.agents .note { font-size: 12px; color: var(--muted); }
+.agents.nested { padding-inline-start: 16px; }
+.msg.contact { align-self: flex-end; align-items: flex-end; }
+.msg.contact .body { background: var(--mine); color: var(--mine-text); border-bottom-right-radius: 4px; }
+.msg.unshown .body { outline: 2px dashed var(--bad); outline-offset: 2px; }
+.msg.pending .body { outline: 2px dotted var(--muted); outline-offset: 2px; }
+.msg.pending .mark { color: var(--muted); }
+.msg .mark { font-size: 12px; color: var(--bad); margin: 2px 6px 0; }
+#attach {
+  height: 42px;
+  min-width: 2.75rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+#attach:disabled { opacity: 0.45; }
+.filespanel { max-width: 760px; margin: 8px auto 12px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.filespanel .notice { margin: 8px auto; }
+.filelist { list-style: none; margin: 0; padding: 0; }
+.filelist .file { display: grid; grid-template-columns: auto 1fr auto; gap: 0.5rem; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line); }
+.filelist .file:first-child { border-top: 0; }
+.filelist .file a { color: var(--mine); overflow-wrap: anywhere; }
+.filelist .who, .filelist .meta { font-size: 12px; color: var(--muted); }

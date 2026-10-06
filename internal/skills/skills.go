@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"regexp"
 	"strings"
 )
 
@@ -22,14 +23,73 @@ var agentSrc string
 // verifiedChat is whether the instance has verified web chat on; it fills
 // {{VERIFIED_CHAT}}, so an agent image with no verify tool reads every user:
 // message as data only where verified chat (and so a contact) can exist.
-func Operator(version string, verifiedChat bool) []byte {
-	return renderChat(operatorSrc, version, verifiedChat)
+// agentMessages (remote.agent_messages) keeps the "agent-messages on" blocks,
+// else the "off" ones; files (remote.files) does the same for the "files"
+// blocks. Off renders the text as it was before those blocks.
+func Operator(version string, verifiedChat, agentMessages, files bool) []byte {
+	return OperatorWith(version, verifiedChat, agentMessages, Files{On: files})
 }
 
 // Agent returns the rendered worker skill (lever-agent), with
-// {{VERIFIED_CHAT}} filled as in Operator.
-func Agent(version string, verifiedChat bool) []byte {
-	return renderChat(agentSrc, version, verifiedChat)
+// {{VERIFIED_CHAT}} and the blocks as in Operator.
+func Agent(version string, verifiedChat, agentMessages, files bool) []byte {
+	return AgentWith(version, verifiedChat, agentMessages, Files{On: files})
+}
+
+// Files is remote.files as the skills render it. NoUploads and NoShares
+// keep the "uploads off" and "shares off" blocks inside the files block;
+// with both false the render is exactly Operator's or Agent's with files.
+type Files struct {
+	On, NoUploads, NoShares bool
+}
+
+// OperatorWith is Operator with the file directions.
+func OperatorWith(version string, verifiedChat, agentMessages bool, f Files) []byte {
+	return renderChat(pickFiles(pick(operatorSrc, agentMessages), f), version, verifiedChat)
+}
+
+// AgentWith is Agent with the file directions.
+func AgentWith(version string, verifiedChat, agentMessages bool, f Files) []byte {
+	return renderChat(pickFiles(pick(agentSrc, agentMessages), f), version, verifiedChat)
+}
+
+// pickFiles keeps the files variant, then, inside it, the "uploads off"
+// and "shares off" blocks only for a direction that is off.
+func pickFiles(src string, f Files) string {
+	src = pickBlocks(src, f.On, filesOn, filesOff)
+	src = pickBlocks(src, !f.NoUploads, uploadsOn, uploadsOff)
+	return pickBlocks(src, !f.NoShares, sharesOn, sharesOff)
+}
+
+var (
+	amOn     = block("agent-messages", "on")
+	amOff    = block("agent-messages", "off")
+	filesOn  = block("files", "on")
+	filesOff = block("files", "off")
+	// One variant each: the "on" blocks do not exist, so on drops the "off"
+	// ones and leaves the text as it was.
+	uploadsOn  = block("uploads", "on")
+	uploadsOff = block("uploads", "off")
+	sharesOn   = block("shares", "on")
+	sharesOff  = block("shares", "off")
+)
+
+// block matches one marked block of a skill, markers included.
+func block(name, state string) *regexp.Regexp {
+	return regexp.MustCompile(`(?ms)^<!-- lever:` + name + ` ` + state + ` -->\n(.*?)^<!-- /lever:` + name + ` ` + state + ` -->\n`)
+}
+
+// pick keeps the agent-messages variant on (or off).
+func pick(src string, on bool) string { return pickBlocks(src, on, amOn, amOff) }
+
+// pickBlocks keeps one variant of each block pair and drops the other
+// variant and every marker line.
+func pickBlocks(src string, on bool, onRE, offRE *regexp.Regexp) string {
+	keep, drop := onRE, offRE
+	if !on {
+		keep, drop = offRE, onRE
+	}
+	return keep.ReplaceAllString(drop.ReplaceAllString(src, ""), "$1")
 }
 
 func renderChat(src, version string, verifiedChat bool) []byte {

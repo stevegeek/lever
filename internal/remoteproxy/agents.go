@@ -62,6 +62,18 @@ type agentsAnswer struct {
 	UserID  string       `json:"userId"`
 	Console string       `json:"console,omitempty"` // operator only
 	Agents  []agentEntry `json:"agents"`
+	Files   *filesInfo   `json:"files,omitempty"` // remote.files on
+}
+
+// filesInfo is the upload limits the page checks before it sends a file
+// (the proxy checks them again).
+type filesInfo struct {
+	MaxBytes   int64    `json:"maxBytes"`
+	Extensions []string `json:"extensions"`
+	// Uploads false: the page shows no paperclip. Shares false: shares are
+	// listed without a download link.
+	Uploads bool `json:"uploads"`
+	Shares  bool `json:"shares"`
 }
 
 const (
@@ -227,13 +239,18 @@ const (
 type hubMessage struct {
 	ID        string `json:"id"`
 	SenderID  string `json:"senderId"`
+	Sender    string `json:"sender"`
+	Type      string `json:"type"`
+	Msg       string `json:"msg"`
 	CreatedAt string `json:"createdAt"`
 }
 
 // countUnread counts the agent's messages newer than lastRead in one page
 // of history (sorted here, newest first, so the hub's order does not
 // matter). A marker that is not in a full page means at least a page: cap.
-func countUnread(items []hubMessage, agentID, lastRead string, full bool) int {
+// keep, when set, is the agent-messages filter: only the agent rows it
+// keeps count (the rows the login is shown).
+func countUnread(items []hubMessage, agentID, lastRead string, full bool, keep func(hubMessage) bool) int {
 	at := func(m hubMessage) time.Time {
 		t, _ := time.Parse(time.RFC3339Nano, m.CreatedAt)
 		return t
@@ -247,7 +264,7 @@ func countUnread(items []hubMessage, agentID, lastRead string, full bool) int {
 		if lastRead != "" && m.ID == lastRead {
 			return min(n, maxUnread)
 		}
-		if m.SenderID == agentID {
+		if m.SenderID == agentID && (keep == nil || keep(m)) {
 			n++
 		}
 	}
@@ -320,7 +337,21 @@ func (g *gate) addUnread(ctx context.Context, login, cookie string, ans *agentsA
 		if items == nil {
 			items = page.Items
 		}
-		n := countUnread(items, e.ID, d.LastReadMessageID, len(items) >= unreadPage)
+		var keep func(hubMessage) bool
+		if g.cfg.MatchAgentMessages != nil && ans.Tier == chatledger.TierContact {
+			// Agent messages on: a contact's count holds only the agent rows
+			// it is shown (agentmsgs.go); no answer, no count.
+			rows := make([]historyRow, len(items))
+			for i, m := range items {
+				rows[i] = historyRow{ID: m.ID, Sender: m.Sender, SenderID: m.SenderID, Type: m.Type, Msg: m.Msg, CreatedAt: m.CreatedAt}
+			}
+			kept, err := g.keepAgentRows(ctx, login, e.Name, e.ID, ans.UserID, rows)
+			if err != nil {
+				continue
+			}
+			keep = func(m hubMessage) bool { return kept[m.ID] }
+		}
+		n := countUnread(items, e.ID, d.LastReadMessageID, len(items) >= unreadPage, keep)
 		e.Unread = &n
 	}
 }
@@ -445,6 +476,10 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	recs, err := g.records(ctx)
 	ans := buildAgents(v, g.cfg.ChatAgent, uid, recs, err != nil, g.labels(), g.cfg.ContactSession)
+	if g.filesOnFor(v.login) {
+		ans.Files = &filesInfo{MaxBytes: g.files.cfg.MaxBytes, Extensions: g.files.cfg.Extensions,
+			Uploads: !g.files.cfg.NoUploads, Shares: !g.files.cfg.NoShares}
+	}
 	g.addUnread(ctx, v.login, cookie, &ans)
 	body, err := json.Marshal(ans)
 	if err != nil {

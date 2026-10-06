@@ -102,14 +102,39 @@ func TestCheckGuestClock(t *testing.T) {
 	} {
 		fr := proc.NewFakeRunner()
 		fr.Script("date -u +%s", proc.Result{Stdout: strconv.FormatInt(now.Add(tc.off).Unix(), 10) + "\n"})
-		r := checkGuestClock(context.Background(), fr, clock)
+		r := checkGuestClock(context.Background(), fr, clock, false)
 		if r.ok != tc.ok || (tc.warn != (r.fix != "" && r.ok)) || !strings.Contains(r.detail, tc.wantInDetail) {
 			t.Fatalf("off %v: %+v", tc.off, r)
 		}
 	}
 	// A guest that does not answer is not a failure of this row.
-	if r := checkGuestClock(context.Background(), proc.NewFakeRunner(), clock); !r.ok || !strings.Contains(r.detail, "not checked") {
+	if r := checkGuestClock(context.Background(), proc.NewFakeRunner(), clock, false); !r.ok || !strings.Contains(r.detail, "not checked") {
 		t.Fatalf("no answer: %+v", r)
+	}
+}
+
+// With agent messages on, a guest more than 5 s behind the host fails the
+// row with the reason (contacts are not shown authorized messages); a guest
+// ahead keeps the plain rule.
+func TestCheckGuestClockWithAgentMessages(t *testing.T) {
+	now := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	for _, tc := range []struct {
+		off  time.Duration
+		ok   bool
+		want string
+	}{
+		{0, true, "within"},
+		{-4 * time.Second, true, "off the host"},
+		{-6 * time.Second, false, "contacts are not shown"},
+		{6 * time.Second, true, "off the host"},
+	} {
+		fr := proc.NewFakeRunner()
+		fr.Script("date -u +%s", proc.Result{Stdout: strconv.FormatInt(now.Add(tc.off).Unix(), 10) + "\n"})
+		r := checkGuestClock(context.Background(), fr, clock, true)
+		if r.ok != tc.ok || !strings.Contains(r.detail, tc.want) {
+			t.Fatalf("off %v: %+v", tc.off, r)
+		}
 	}
 }
 

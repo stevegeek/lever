@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"net"
 	"net/textproto"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/opsig"
 )
 
@@ -201,6 +203,82 @@ func (a *App) EffectiveRemoteLanding() string {
 // RemoteLandingChat reports whether the proxy serves lever's chat page.
 func (a *App) RemoteLandingChat() bool {
 	return a.RemoteEnabled() && a.Remote.Landing == RemoteLandingChat
+}
+
+// AgentMessagesOn reports whether agents may start messages to contacts and
+// the proxy filters what contacts see (remote.agent_messages.enabled, with
+// remote access on).
+func (a *App) AgentMessagesOn() bool { return a.RemoteEnabled() && a.Remote.AgentMessages.Enabled }
+
+// PushOn reports whether the proxy sends Web Push notifications
+// (remote.push.enabled, with remote access on; validation requires the chat
+// landing).
+func (a *App) PushOn() bool { return a.RemoteEnabled() && a.Remote.Push.Enabled }
+
+// EffectiveAgentFollowUpAfter is follow_up_after with its default.
+func (a *App) EffectiveAgentFollowUpAfter() time.Duration {
+	return cmp.Or(a.Remote.AgentMessages.FollowUpAfter, DefaultAgentFollowUpAfter)
+}
+
+// EffectiveAgentMaxChars is max_chars with its default.
+func (a *App) EffectiveAgentMaxChars() int {
+	return cmp.Or(a.Remote.AgentMessages.MaxChars, DefaultAgentMaxChars)
+}
+
+// FilesOn reports whether the chat page's file exchange is on
+// (remote.files.enabled; the routes are the chat page's, so landing chat).
+func (a *App) FilesOn() bool { return a.RemoteLandingChat() && a.Remote.Files.Enabled }
+
+// EffectiveFilesMaxBytes is max_bytes with its default.
+func (a *App) EffectiveFilesMaxBytes() int64 {
+	return cmp.Or(a.Remote.Files.MaxBytes, DefaultFilesMaxBytes)
+}
+
+// EffectiveFilesExtensions is extensions with its default, as a copy.
+func (a *App) EffectiveFilesExtensions() []string {
+	if len(a.Remote.Files.Extensions) == 0 {
+		return slices.Clone(chatfiles.DefaultExtensions)
+	}
+	return slices.Clone(a.Remote.Files.Extensions)
+}
+
+// FilesUploadsOn reports whether logins may upload (files on, and
+// remote.files.uploads not false).
+func (a *App) FilesUploadsOn() bool {
+	return a.FilesOn() && (a.Remote.Files.Uploads == nil || *a.Remote.Files.Uploads)
+}
+
+// FilesSharesOn reports whether agents may share files (files on, and
+// remote.files.shares not false).
+func (a *App) FilesSharesOn() bool {
+	return a.FilesOn() && (a.Remote.Files.Shares == nil || *a.Remote.Files.Shares)
+}
+
+// FilesExcludedLogins is every allowed_users login with files: false, in
+// config order, while files are on (nil otherwise): logins with no file
+// exchange at all.
+func (a *App) FilesExcludedLogins() []string {
+	if !a.FilesOn() {
+		return nil
+	}
+	var out []string
+	for _, u := range a.Remote.AllowedUsers {
+		if !u.FilesAllowed() {
+			out = append(out, u.Login)
+		}
+	}
+	return out
+}
+
+// AgentWorkspaces maps each agent name to its workspace, tree-relative:
+// the manager's is the tree ("."), a worker's its dir. Inside its container
+// each one is /workspace.
+func (a *App) AgentWorkspaces() map[string]string {
+	out := map[string]string{a.Name: "."}
+	for _, w := range a.Workers {
+		out[w.Name] = path.Clean(filepath.ToSlash(w.Dir))
+	}
+	return out
 }
 
 // RemoteBindLoopback reports whether the proxy listens on loopback only — the

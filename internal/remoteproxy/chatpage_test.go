@@ -123,7 +123,7 @@ func TestChatPageServesItsFiles(t *testing.T) {
 		if rw.Code != http.StatusOK || rw.Header().Get("Content-Type") != ctype || rw.Body.Len() == 0 {
 			t.Errorf("%s: %d %q (%d bytes), want 200 %s", path, rw.Code, rw.Header().Get("Content-Type"), rw.Body.Len(), ctype)
 		}
-		if got := rw.Header().Get("Content-Security-Policy"); got != chatCSPFor(testServeHost) {
+		if got := rw.Header().Get("Content-Security-Policy"); got != chatCSPFor(testServeHost, false) {
 			t.Errorf("%s: CSP %q", path, got)
 		}
 		for k, want := range map[string]string{"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
@@ -165,7 +165,7 @@ func TestChatPageServesItsFiles(t *testing.T) {
 // Script and style come from /lever/ only: on this origin 'self' would also
 // admit a .js file an agent wrote, which the hub serves under /api/.
 func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
-	csp := chatCSPFor("mac.ts.net")
+	csp := chatCSPFor("mac.ts.net", false)
 	for _, bad := range []string{"unsafe-inline", "unsafe-eval", "*", "data:", "blob:", "http:", "https:", "script-src 'self'", "style-src 'self'"} {
 		if strings.Contains(csp, bad) {
 			t.Errorf("chat CSP contains %q: %s", bad, csp)
@@ -178,13 +178,17 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 			t.Errorf("chat CSP lacks %q: %s", need, csp)
 		}
 	}
+	if strings.Contains(csp, "worker-src") {
+		t.Errorf("push off: the CSP names a worker source: %s", csp)
+	}
 	// The whole policy, pinned: a directive added or widened shows up here.
+	// With push off it is byte-identical to the policy before push existed.
 	if want := "default-src 'none'; script-src mac.ts.net/lever/; style-src mac.ts.net/lever/; connect-src 'self'; " +
 		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
 		"frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"; csp != want {
 		t.Errorf("chat CSP\n got %s\nwant %s", csp, want)
 	}
-	if got := chatCSPFor("127.0.0.1:8445"); !strings.Contains(got, "script-src 127.0.0.1:8445/lever/;") {
+	if got := chatCSPFor("127.0.0.1:8445", false); !strings.Contains(got, "script-src 127.0.0.1:8445/lever/;") {
 		t.Errorf("an address with a port must be nameable: %s", got)
 	}
 	// A host the policy cannot name is never written into it. An IPv6
@@ -192,7 +196,7 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	// cannot parse would leave the page with no script.
 	for _, odd := range []string{"", "a b", "a;script-src *", "a,b", "a'b", "a/b", "*", "*.ts.net", "[::1]:8445", "[fd7a::1]", "fd7a::1",
 		"https:", "data:", "a:", ":80", "a:b", "a:80:90", strings.Repeat("a", 256)} {
-		got := chatCSPFor(odd)
+		got := chatCSPFor(odd, false)
 		if !strings.Contains(got, "script-src 'self';") || !strings.Contains(got, "img-src 'self'; manifest-src 'self';") ||
 			(odd != "" && strings.Contains(got, odd)) {
 			t.Errorf("chatCSPFor(%q) = %s, want the 'self' fallback", odd, got)
@@ -244,7 +248,7 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 		if rw.Code != http.StatusNotFound || rw.Header().Get("Cache-Control") != "no-store" {
 			t.Errorf("GET %s: %d (Cache-Control %q), want an uncached 404", p, rw.Code, rw.Header().Get("Cache-Control"))
 		}
-		if rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost) || rw.Header().Get("X-Content-Type-Options") != "nosniff" {
+		if rw.Header().Get("Content-Security-Policy") != chatCSPFor(testServeHost, false) || rw.Header().Get("X-Content-Type-Options") != "nosniff" {
 			t.Errorf("GET %s: the 404 lacks the page's headers", p)
 		}
 		if head := chatDo(h, chatOp, "HEAD", p); head.Code != http.StatusNotFound || head.Body.Len() != 0 {
@@ -427,39 +431,91 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 	}
 }
 
+// chatSinkRE matches the ways a later edit could turn text into markup or
+// code. open( is a page-level or window.open call; a method named open of
+// another object (XMLHttpRequest.open, the file upload) is not one.
+var chatSinkRE = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\blocation\s*\[|\bnavigat(e|ion)\b|Object\.assign\(\s*location|Reflect\.set\(\s*location|(?:^|[^.\w$])open\s*\(|\b(?:window|self|globalThis|top|parent|opener|frames)\s*\.\s*open\s*\(|\[\s*['"\x60]open['"\x60]\s*\]|setAttributeNS\(|createElementNS\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
+
 // TestChatPageHasNoMarkupSink: the page shows agent text on the operator's
 // origin, so its script may only ever write text. This fails on the ways a
 // later edit could turn text into markup or code.
+// The narrowed open( rule still catches a page-level open and window.open,
+// and lets a method of another object (XMLHttpRequest.open) through.
+func TestMarkupSinkRuleOpen(t *testing.T) {
+	for src, bad := range map[string]bool{"open('x')": true, "window.open('x')": true, " open (u)": true, "window . open(u)": true, "self.open(u)": true, "globalThis . open(u)": true, "top.open(u)": true, "parent.open(u)": true,
+		"opener.open(u)": true, "frames.open(u)": true, "window['open'](u)": true, "x[ \"open\" ](u)": true, "el.setAttributeNS(n, k, v)": true,
+		"document.createElementNS(ns, 'svg')": true,
+		"location['href'] = u":                true, "navigation.navigate(u)": true, "Object.assign(location, {href: u})": true,
+		"Reflect.set(location, 'href', u)": true, "navigator.serviceWorker": false,
+		"xhr.open('POST', p)": false, "$open(u)": false} {
+		if got := chatSinkRE.MatchString(src); got != bad {
+			t.Errorf("%q: matched %v, want %v", src, got, bad)
+		}
+	}
+}
+
 func TestChatPageHasNoMarkupSink(t *testing.T) {
-	sinks := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\bopen\s*\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
-	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js"} {
+	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js", "chatui/sw.js"} {
 		b, err := chatUI.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m := sinks.Find(b); m != nil {
+		// No policy outside chat.js's one (the CSP names only lever-sw).
+		if name != "chatui/chat.js" && regexp.MustCompile(`createPolicy|trustedTypes`).Match(b) {
+			t.Errorf("%s makes a Trusted Types policy: only chat.js's lever-sw may", name)
+		}
+		if m := chatSinkRE.Find(b); m != nil {
 			t.Errorf("%s contains %q: the chat page writes network text as text only", name, m)
 		}
 	}
+	// The service worker opens one window: the chat page, on a tap.
+	if sw, _ := chatUI.ReadFile("chatui/sw.js"); len(regexp.MustCompile(`openWindow\(`).FindAll(sw, -1)) != 1 {
+		t.Error("sw.js must call openWindow( exactly once")
+	}
+	// The one method named open is the upload's XMLHttpRequest, in chat.js
+	// (counted below); the other scripts have none.
+	for _, name := range []string{"chatui/chatcore.js", "chatui/sw.js"} {
+		b, _ := chatUI.ReadFile(name)
+		if m := regexp.MustCompile(`\.\s*open\s*\(`).Find(b); m != nil {
+			t.Errorf("%s contains %q: no script but chat.js calls a method named open", name, m)
+		}
+	}
 	// What the script may build and where it may reach, counted: every
-	// element it makes is a div, the one attribute it sets is the href of
-	// the two fixed links, and the one fetch is the api helper's. A new
-	// element kind, attribute or request shows up here, to be looked at.
+	// element it makes is a div, li, ul, button, span or a (a file row's
+	// download link), the attributes it sets are the href of the two fixed
+	// links and of a file row (lever's own download route, built from a
+	// checked agent name and id) and that row's download name, the one
+	// fetch is the api helper's, and the one XMLHttpRequest is the upload. A new element kind, attribute or request shows up here,
+	// to be looked at.
 	js, err := chatUI.ReadFile("chatui/chat.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for re, want := range map[string]int{
-		`createElement\(`:           7,
-		`createElement\('div'\)`:    4,
-		`createElement\('li'\)`:     1,
-		`createElement\('button'\)`: 1,
-		`createElement\('span'\)`:   1,
-		`setAttribute\(`:            1,
-		`setAttribute\('href', `:    1,
-		`\bfetch\(`:                 1,
-		`new EventSource\(`:         1,
-		`location\.reload\(\)`:      0,
+		`createElement\(`:            18,
+		`createElement\('div'\)`:     8,
+		`createElement\('li'\)`:      4,
+		`createElement\('a'\)`:       1,
+		`createElement\('button'\)`:  3,
+		`createElement\('ul'\)`:      1,
+		`createElement\('span'\)`:    1,
+		`setAttribute\(`:             3,
+		`setAttribute\('href', `:     2,
+		`setAttribute\('download', `: 1,
+		`new XMLHttpRequest\(`:       1,
+		`\.\s*open\s*\(`:             1,
+		`\bfetch\(`:                  1,
+		`serviceWorker\.register\(swScriptURL\(\), \{ scope: '/lever/' \}\)`: 1,
+		// The one Trusted Types policy, whose only output is the worker URL.
+		`createPolicy\(`: 1,
+		`createPolicy\('lever-sw', \{ createScriptURL: \(u\) => \{ if \(u !== '/lever/sw\.js'\) throw new TypeError\('lever-sw: refused'\); return u; \} \}\)`: 1,
+		`createScriptURL\(`:                            1,
+		`swPolicy\.createScriptURL\('/lever/sw\.js'\)`: 1,
+		`createHTML|createScript\b`:                    0,
+		`serviceWorker\.register\(`:                    1,
+		`pushManager\.subscribe\(`:                     1,
+		`new EventSource\(`:                            1,
+		`location\.reload\(\)`:                         0,
 	} {
 		if got := len(regexp.MustCompile(re).FindAll(js, -1)); got != want {
 			t.Errorf("chat.js has %d of %s, want %d: review what the new one writes or requests", got, re, want)
@@ -482,6 +538,31 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 	}
 	if m := regexp.MustCompile(`(?i)url\s*\(|@import|expression\s*\(`).Find(css); m != nil {
 		t.Errorf("chat.css contains %q: it loads nothing", m)
+	}
+}
+
+// TestServiceWorkerIsPushOnly: the worker has a push and a click handler
+// and nothing that could sit between the page and its requests.
+func TestServiceWorkerIsPushOnly(t *testing.T) {
+	js, err := chatUI.ReadFile("chatui/sw.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for re, want := range map[string]int{
+		`addEventListener\(`:                    2,
+		`addEventListener\('push'`:              1,
+		`addEventListener\('notificationclick'`: 1,
+		`addEventListener\(\s*['"]fetch`:        0,
+		`\bcaches\b`:                            0,
+		`importScripts`:                         0,
+		`skipWaiting|clients\.claim`:            0,
+		`\bfetch\(`:                             1,
+		`fetch\('/lever/api/agents'`:            1,
+		`openWindow\(`:                          1,
+	} {
+		if got := len(regexp.MustCompile(re).FindAll(js, -1)); got != want {
+			t.Errorf("sw.js has %d of %s, want %d", got, re, want)
+		}
 	}
 }
 
@@ -511,7 +592,7 @@ func TestChatPageEmbedsOnlyThePage(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	want := "apple-touch-icon.png,chat.css,chat.html,chat.js,chatcore.js,icon-192.png,icon-512.png,icon-maskable-512.png"
+	want := "apple-touch-icon.png,chat.css,chat.html,chat.js,chatcore.js,icon-192.png,icon-512.png,icon-maskable-512.png,sw.js"
 	if got := strings.Join(names, ","); got != want {
 		t.Fatalf("embedded %s, want only the page's files: %s", got, want)
 	}

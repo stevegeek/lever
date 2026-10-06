@@ -597,8 +597,10 @@ decision (`allow` / `deny-host` when the `Host` header does not match `base_url`
 `deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session` / `deny-contact` when the
 contact fence refuses a request / `chat-unavailable` when the [chat page](#the-chat-page) cannot
 resolve your hub user / `remote-wake` and `deny-wake` for a [wake](#waking-a-worker), with a
-`reason` word on a refusal, and `remote-wake-result` for the broker's late answer), and the
-upstream status once known. The login path writes there too: `oidc-session` when a session is
+`reason` word on a refusal, and `remote-wake-result` for the broker's late answer /
+`operator-view` and `deny-operator-view` for the [operator's view of contact
+conversations](#the-operators-view-of-contact-conversations), with `contact`, `agent` and `count`
+fields and a `reason` word on a refusal), and the upstream status once known. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
 refuses one, `oidc-not-found` for an unknown path), and `deny-authorize` for anything that probes `/authorize` — nothing legitimate
@@ -976,6 +978,314 @@ grants no hub route: the fence below admits nothing for a see-only agent.
 - **Manager messages are recorded.** A worker verifies every message too, so a manager message
   answers `lever` with the kind `manager` and a contact's post answers `web` with the tier
   `contact`, whatever either says.
+
+## Messages agents start
+
+With `remote.agent_messages.enabled: true` an agent can tell a contact something without waiting
+for the contact to write first ("workbook v3 is ready", "I need document X"), in the chat the
+contact already has with it. Lever controls these messages, and replies to a contact too:
+
+```yaml
+remote:
+  allowed_users:
+    - operator@example.com
+    - {login: client@example.com, tier: contact, agents: [deal]}
+  agent_messages:
+    enabled: true
+    follow_up_after: 24h      # default; 1h to 720h
+    max_chars: 4000           # default; 1 to 16000
+```
+
+- **The agent's two steps.** The agent calls `contact_message` (a tool of its `lever-capability`
+  MCP server) with the contact's login, the whole text and, for a reply, the `message_id` that
+  `message_verify` returned for the contact's post. The broker checks that the contact lists
+  this agent, that a reply answers that contact's verified post to this agent, the length and the
+  limit, and records a hash of the exact text in `.lever-state/agent-ledger/` (0700, one 0600
+  file per contact). `lever-agent` writes the text to a 0600 file and the agent runs the
+  `scion message --body-file … -- '@<email>'` command it gets back. `contacts` lists the logins
+  the agent may write to, with when it may start its next message.
+- **What the contact sees.** Only agent messages whose exact text the record holds, each
+  record showing one hub message, sent within 10 minutes of the authorization (the hub's time
+  for it may be at most 10 seconds before the authorization and 2 minutes after its expiry). A message the
+  agent sent any other way, or edited after it showed, is removed from the contact's history.
+  Reply previews are removed, and so are the attachment entries of every agent message (their
+  names are agent text no record covers). A row id that appears twice on a page hides both rows.
+  The contact's event stream carries only the subject of each event (and the stream's event id),
+  never text, a sender or a message id; the DM list carries no last-message preview, sender, id
+  or time and no unread flag; the chat page's unread count holds only shown messages. Anything
+  the proxy cannot read, or a broker that does not answer, hides every agent message (it fails
+  closed); paging stays the hub's, so a page can hold fewer messages than asked for, and its
+  `totalCount` can show how many rows the page hid (never their text).
+- **The limit.** Per agent and contact: one message the agent started and the contact has not
+  answered yet, then one reminder after `follow_up_after`; a message from the contact resets
+  it. Every authorization counts, sent or not. A reply to a contact message is not limited by
+  this rule: up to 3 per contact message, within 24 hours of it. Every agent has at most 30
+  authorizations an hour. Refusals are fixed words: `not-a-contact`, `limit`
+  (with `next_allowed_at`), `too-long`, `empty`, `bad-text` (invalid UTF-8, a control
+  character, or a word that starts with `@`, which the hub would rewrite), `bad-ref`, `rate`,
+  `off`, `unavailable`. The broker audit names the login, agent, kind, record id, length and
+  decision, never the text.
+- **What the operator sees.** Everything, unfiltered, as before. Messages to the operator keep
+  their old path. The chat page's [Contacts
+  section](#the-operators-view-of-contact-conversations) shows each contact's conversations
+  read-only, with the agent messages the contact is not shown marked.
+- **Turning it on (or off).** Run `lever init` first, then `lever apply`: `init` rewrites both
+  skills (they teach the two steps while it is on), and `apply` refuses contact logins while the
+  skills on disk are not the ones this config renders. `apply` then restarts the broker and the
+  proxy (the key is part of their config stamps); until it runs, they keep the old setting, and
+  the `agent messages` row of `lever doctor` says so. The agent image must contain this
+  release's `lever-agent`, which has the two tools: run `make lever-image` (and rebuild an
+  instance image built from it), then `lever up --fresh` for the manager after you back up its
+  conversation. Each contact agent must start fresh on the new skill: `lever up --fresh` for the
+  manager, purge and start for a worker. Until then a contact's post to it is refused as not
+  fresh. Turning it off again restores the earlier behaviour, with the same steps.
+- **Clocks.** The hub stamps a message with the VM's clock, and lever binds it to its
+  authorization only when that time is at most 10 seconds before the authorization (host
+  clock). A VM clock that fell behind the host (on Lima, after the Mac slept) hides authorized
+  messages from contacts. With agent messages on, the `guest clock` row of `lever doctor` fails
+  when the VM is more than 5 seconds behind; resync it (`limactl shell <vm> sudo hwclock -s`, or
+  restart the VM). A message sent while the clock lagged keeps its hub time and stays hidden;
+  messages sent after the resync show.
+- **Known limits.** The hub's own web UI (the console landing) shows a new agent message to a
+  contact only after a reload, since the events carry no text, and shows no unread marks (lever's
+  chat page counts them itself). A message older than the two 4 MiB record files of that
+  contact stops showing. An authorization the agent does not send
+  still uses its slot until the reminder time.
+
+## The operator's view of contact conversations
+
+With `landing: chat`, an operator login's agent list on the [chat page](#the-chat-page) has a
+**Contacts** section: what you would otherwise get by being copied on a contact's email. A contact
+login never gets it: the page does not show it, and the routes refuse a contact (`403`, audit
+`deny-contact`) whatever it sends.
+
+A contact whose login holds a `/` is listed but cannot be opened: its route would carry an
+encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
+
+- **What it shows.** Each contact in `allowed_users`, the agents it may message (its `agents:`
+  list; a `see:` agent has no conversation), and, per agent, the whole direct conversation
+  between them: read-only (no composer, no read marker, no event stream), newest at the bottom,
+  read again every 30 seconds while it is open and with **Refresh**. "Load earlier messages"
+  pages back. With `agent_messages` on, every agent message the contact is not shown (see
+  [Messages agents start](#messages-agents-start)) is marked "not shown to the contact", so you
+  can spot an agent that writes to a contact outside the rules. An agent message that a record
+  would show but no read of the contact has bound yet is marked "not yet read by the contact":
+  the contact has not seen it, and sees it on its next read. The marks are per page: when two
+  messages carry the same text and one record, which of them the record finally shows depends on
+  the page the contact reads first, so a "not yet read" mark can turn into "not shown". When the broker does not answer,
+  the page says that which agent messages the contact sees is not known (the contact is then
+  shown none).
+- **How it reads.** The hub lets a person read only the direct messages that name them, so the
+  proxy reads the conversation with the CONTACT's own hub session, on the host, and passes you the
+  rows as text. That session makes one request kind only: `GET` of that one conversation's
+  history (`limit` and `cursor`, nothing else of your request), with no redirect followed. Your
+  browser never holds the contact's session. The contact login and the agent in the path must
+  match your config exactly; the conversation key comes from the agent's hub record and the
+  contact's hub user id, never from the request.
+- **"has not signed in yet".** The proxy reads only for a contact that `lever apply` bound to a
+  hub user (`.lever-state/remote-role.json`). For any other contact it does not sign in, since a
+  sign-in would create the contact's hub user. After a contact signs in for the first time, run
+  `lever apply` again; until then its conversations show "has not signed in yet". When the hub
+  refuses a read and the contact's session belongs to another hub user than the one `apply`
+  bound (the hub forgot the contact, and its next sign-in made a new user), the answer is also
+  `not-signed-in`, with the hint `run lever apply`. To find that out the proxy asks the hub who
+  the session is (`GET /api/v1/auth/me`, no redirect followed), only after a failed read. The
+  proxy's own sign-in for a bound contact can create that new hub user when the hub forgot the
+  old one; this is accepted, since the contact's own next visit does the same.
+- **Side effects.** A bound contact with no live session in the proxy (after a proxy restart, or
+  after the 12-hour renewal) is signed in by the proxy, which moves the contact's `last login` on
+  the hub. With `agent_messages` on, your read asks the broker with a peek: the answer is what the
+  contact's own read would show now, and the agent ledger is not written. Only the contact's
+  reads bind a record to a message, so your reads never change what the contact sees.
+- **Routes.** `GET /lever/api/contacts` (the contacts, their message agents, labels, states and
+  whether each is bound) and `GET /lever/api/contacts/<login>/agents/<name>/messages?cursor=&limit=`
+  (`limit` 1 to 200, default 50), with the login URL-encoded. `HEAD` is answered like `GET`; any
+  other method is `405`. Refusals are fixed words: `not-found` (404: not a contact, or not one of
+  its agents), `not-signed-in` (409, with `"hint": "run lever apply"` and the audit reason
+  `stale-binding` for a changed hub user), `no-record` (409: the agent has no hub record),
+  `bad-query` (400) and `unavailable` (502: the hub or its answer failed).
+- **Audit.** Every answer is one line in `.lever-state/remote-audit.jsonl`: `operator-view` with
+  the `contact`, the `agent` and the `count` of rows (or of contacts for the list), or
+  `deny-operator-view` with the `reason` word. No line holds message text.
+
+## Notifications
+
+With `landing: chat` and `remote.push` on, a login can have its devices show a notification when
+an agent writes to it while the chat page is closed.
+
+```yaml
+remote:
+  landing: chat
+  push:
+    enabled: true
+    subject: mailto:you@example.com   # the contact the push services see for this sender
+```
+
+- **What a login sees.** "New message from <agent>" (or "New message" when the agent is not in
+  the login's list). A tap opens the chat with that agent. No message text leaves the host, not
+  even encrypted: the push carries only `{"v":1,"agent":"<name>"}`, encrypted for the device
+  (Web Push, VAPID and aes128gcm, on the Go standard library).
+- **Turning it on.** Per device, from **Turn on notifications** in the agent list (the browser
+  asks for permission then). On an iPhone, add the page to the Home Screen first and open it from
+  there (iOS 16.4 or later). On Linux Chrome, the browser tab or the installed app both work.
+  **Turn off notifications** removes the device's subscription. A login keeps at most five
+  devices (the oldest goes); a device endpoint belongs to the last login that turned it on.
+- **Shared devices.** A browser keeps one push subscription for the page, whoever is signed in.
+  The page re-sends it at load only for the login that turned notifications on in that browser
+  (a per-login mark in the browser's storage). Another login on the same device sees **Turn on
+  notifications** and gets no notification until it turns them on itself, which moves the
+  device to it. Turning notifications off removes the browser's subscription for every login.
+- **Who is told.** A login is told only about agents it may message (an operator: every agent; a
+  contact: its `agents:` list, never a `see:` agent). With `agent_messages` on, a contact is told
+  only about a message it would be shown. No notification for the login's own messages or hub
+  lines, none while the chat is open and read, and at most one per agent a minute (a later
+  message in that minute gets one more when the minute ends).
+- **How it works.** For each login with a device, the proxy holds one hub events stream with
+  that login's own hub session; an event for one of its direct conversations makes the proxy
+  read the newest messages as the login and decide. After a hub or proxy restart it catches up
+  (a message older than one hour is not notified); a check the hub or the disk fails is tried
+  again, up to five times over about 31 seconds (1, 2, 4, 8 and 16 s); then it stops, with a
+  `push-failed` audit line (reason `retries`), until the next event or connect checks again. Each stream is one long-lived connection into the jail, so each
+  subscribed login keeps one jail dial process open on the host.
+- **What the push services learn.** Google, Apple, Mozilla or Microsoft see when a push goes to
+  a device, never what it says. That timing tells them when your agents write to that login.
+- **The broker's record.** With `agent_messages` on, the check for a contact asks the broker
+  what the contact's own read would show now, without binding: the push check never decides
+  which message a ledger record shows, and the operator's view still marks such a message "not
+  yet read" until the contact reads it.
+- **The service worker.** `/lever/sw.js` (scope `/lever/`) handles `push` and
+  `notificationclick` only: no fetch handler and no cache, so it never stands between the page
+  and its requests. The page registers it only when a login turns notifications on. With push on,
+  the page's CSP gains `worker-src` for `/lever/` and allows one Trusted Types policy,
+  `lever-sw`, whose only output is the worker's URL (`serviceWorker.register` is a script-URL
+  sink); with push off the CSP is the same as without push.
+- **Egress.** The host process connects out to the push services: `fcm.googleapis.com`,
+  `*.push.apple.com`, `updates.push.services.mozilla.com` and `*.notify.windows.com`, on 443. A
+  host firewall must allow that. The proxy accepts a subscription only on those hosts (https,
+  no port, one spelling per endpoint), never
+  follows a redirect, uses no HTTP proxy, and connects only to public addresses (never a
+  private, loopback, link-local or tailnet `100.64.0.0/10` address, whatever DNS answers).
+- **State.** `.lever-state/push/` (0700): `vapid.key` (the signing key), `subscriptions.json`
+  and `status.json` (the last send result), each 0600. A file that another user can read keeps
+  push off, and `lever doctor` names it. Deleting `vapid.key` makes every device turn
+  notifications on again. A login removed from `allowed_users` loses its devices at the next
+  proxy start.
+- **Off.** `enabled: false` removes the routes and the worker; the page unregisters the worker on
+  its next load.
+- **Doctor.** The `push` row shows off, or on with the key, the device count per login and the
+  last send result.
+- **Audit.** `push-subscribe`, `push-unsubscribe`, `deny-push`, `push-sent`, `push-gone`,
+  `push-failed` and `push-stream` lines in `.lever-state/remote-audit.jsonl`. A line names the
+  push service's host only, never the endpoint path, a key or a payload.
+
+> **Test only.** For the end-to-end test with `tools/test/pushrecv` (a fake push service that
+> decrypts what it gets), the proxy admits exact loopback addresses over plain http only when
+> both `remote.push.test_hosts: [127.0.0.1:<port>]` in `lever.yaml` and
+> `LEVER_PUSH_TEST_HOSTS=127.0.0.1:<port>` in the proxy's environment name the same addresses.
+> Either one alone, or any other value, stops `lever remote serve`; the proxy prints a warning
+> and `lever doctor` fails while they are set. Never set them for a real instance.
+
+## Files in the chat
+
+With `landing: chat` and `remote.files` on, a login uploads files to an agent it may message, and
+downloads the files that agent shares with it. For example, a contact sends a PDF, and the
+agent sends back a versioned `.xlsm` workbook.
+
+```yaml
+remote:
+  landing: chat
+  files:
+    enabled: true
+    # max_bytes: 26214400                     # one file; default 25 MiB, at most 100 MiB
+    # extensions: [pdf, xlsx, xlsm, xls, csv, docx, doc, png, jpg, jpeg, txt, zip]
+```
+
+- **What a login does.** In a chat with an agent it may message (never a `see:` agent), the
+  paperclip uploads one file at a time, with progress. After the upload, the page sends the chat
+  message "📎 uploaded <name>" through the normal send path, so the agent verifies it as that
+  login's message. The **Files** button lists the login's own uploads to that agent and the files
+  the agent shared with it, with a download link for each. An operator also sees each contact's
+  files in the [operator's view](#the-operators-view-of-contact-conversations), read-only, and may
+  download them.
+- **Switching a direction or a login off.** `files.uploads: false` stops new uploads (the upload
+  route answers `403 uploads-off`, the page hides the paperclip); `files.shares: false` stops new
+  shares (`share_file` answers `shares-off`) and the download of shares already made (`403
+  shares-off`; the page lists them without a link). Records already made stay listed either
+  way, and an upload stays downloadable by its owner. An `allowed_users` entry with `files: false`
+  gives that login no file exchange at all: its file routes answer 404 as with files off, its
+  page shows no paperclip and no Files panel, `share_file` and `contact_files` answer
+  `not-a-contact` for it, and the operator view lists no files for it (and asks for none). For
+  a contact this is enforced: the contact fence keeps it to the chat page, so it has no other
+  way to the files. For an operator entry, `files: false` only hides lever's chat-page file
+  feature (its own file routes, the operator view's files, being a share target); it is not
+  access control, because an operator has the whole hub (the workspace file API, WebDAV, the
+  terminal) and can reach every file in the tree there. Each
+  change restarts the proxy (and, for shares or a login, the broker) at the next `lever apply`;
+  a direction change also rewrites the skills, so run `lever init` first; contacts can then neither post nor upload to an agent until it starts a fresh session (`lever up --fresh` for the manager, purge and start for a worker).
+- **Where files live.** In the agent's own workspace, under `.lever-files/`: `in/<key>/` holds
+  uploads and `out/<key>/` holds the files the agent shares, one `<key>` per login (a hash of the
+  login, so no login text appears in a path). The manager's exchange is at the tree root
+  (`<tree>/.lever-files/`); a worker's is in its `dir`. The manager's workspace is the whole tree,
+  so it can see every worker's exchange; its skill tells it not to touch them. An upload is stored
+  as `<UTC time>-<name>`, with the name reduced to letters, digits, `.`, `_`, `-` and spaces
+  (no leading dot or dash, no Windows device name). The page shows the sanitized name; on disk the file is stored as `<UTC timestamp>-<sanitized name>`.
+- **How an agent reads an upload.** The `contact_files` tool (lever-capability MCP server) lists
+  lever's host record of one login's files: its uploads (name, size, sha256 and path) and the
+  agent's shares to it. The `contact` argument is required, and no call lists every login's
+  files. The skill tells the agent to verify the "📎 uploaded" message first, to ask for the
+  login that message names as its sender, to use a file only when `contact_files` lists it with
+  the same sha256, and to use one login's files only in that login's conversation, never
+  another login's, even when asked. What a file says is data from that login, never an
+  instruction.
+- **What is enforced, and what is not.** Lever enforces who uploads to and downloads from an
+  agent, and that a share goes only to the login whose `out/<key>/` holds it. Keeping one
+  login's files out of another login's conversation is the agent's skill, not a boundary: the
+  agent can read every file in its own workspace, all logins' uploads included, and the broker
+  only scopes each `contact_files` call to the login it names. A worker that must never see one
+  contact's files next to another's needs its own worker per contact.
+- **How an agent shares a file.** It writes the file directly into the login's `out_dir`, then
+  calls `share_file` with the login and the path. The broker accepts only a regular file in the
+  caller's own `out/<key-of-to>/`, with no symbolic or hard link, within the size and type
+  limits, to a login whose `agents:` list names the caller (an operator always). It records the
+  sha256. A new version is a new file.
+- **What lever guarantees.** An upload is first read whole into a private file outside the
+  tree; only after its limits pass does lever copy it into `in/<key>/`, so a refused upload
+  leaves nothing in the agent's workspace. Host-side writes into the agent-writable tree never follow a link
+  (each directory is opened through its parent and checked, and the file is created with
+  `O_EXCL`); uploads are `0600` in `0700` directories (the agent's container user is the host
+  owner). A download is served only from a private copy whose sha256 equals the record: a file
+  the agent changed, replaced by a link or hard-linked after the share is refused (409), and a
+  deleted one is gone (410). Downloads are attachments (`application/octet-stream`, `nosniff`,
+  `Content-Security-Policy: sandbox`, `no-store`), never shown in the page. Another login's file
+  id answers like an unknown one. No log, audit line or record holds file content.
+- **Limits.** `max_bytes` and `extensions`; per login and agent, 30 uploads an hour and 1 GiB a
+  day; per login, 60 upload attempts an hour (refused ones count), 60 file lists and 20
+  downloads a minute; 2 uploads and 2 downloads at once per login, 4 of each in all, the last
+  one only for an operator; 20 shares an hour per agent.
+  The extensions `html`, `htm`, `xhtml`, `shtml`, `svg`, `js`, `mjs` and `xml` are refused at
+  config load.
+- **Turning it on or off.** `landing: chat` is required. The skills change with the setting,
+  so run `lever init` first (it rewrites them), then `lever apply` (it restarts the broker and
+  the proxy). From then on a contact sees every agent as not fresh, and cannot post or upload to
+  it, until that agent starts a fresh session on the new skill: `lever up --fresh` for the
+  manager (back up its conversation first), purge and start for a worker. The operator is not
+  held back. The agent image must contain this release's lever-agent (`make lever-image`), which
+  has the two tools; they are direct lever-capability tools, called with no `request` mint.
+- **The front.** The page sends every upload with the header `X-Lever-Upload: 1`, and the proxy
+  refuses an upload without it. A browser sends such a header to another origin only after a
+  CORS preflight, which the proxy never grants. A front must not answer `/lever/api/` with a
+  307 or 308 redirect: those resend the request body.
+- **Doctor.** The `files` row shows off, or on with each direction, the logins with no files,
+  the limits and the bytes of uploads stored per agent; it fails when the state directory is inside the tree (then nothing can be recorded
+  and every route refuses), when the ledger (or its `.lock`) is not private, or when an agent's
+  `.lever-files`, `in`, `out` or `in/<key>` is a link.
+- **Audit.** `file-upload`, `file-download` and `deny-file` lines in
+  `.lever-state/remote-audit.jsonl`; the broker audits `files` list and share calls.
+- **Known limits.** The host record is `.lever-state/files-ledger/` (`0700`, one `0600` file per
+  agent). A file is rotated at 8 MiB; past the second rotation its oldest records are dropped, and
+  those files are no longer listed or downloadable. Lever never deletes a file, uploads included:
+  the doctor row shows how much each agent holds; remove old ones from `.lever-files/in/` by
+  hand. Disk space is the host's.
 
 ## What this does NOT do
 

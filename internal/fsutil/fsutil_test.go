@@ -393,3 +393,314 @@ func TestReadInTreeNoLinksRefusesASwapAfterTheWalk(t *testing.T) {
 		})
 	}
 }
+func TestCreateInTreeNoLinksCreatesParentsAndFile(t *testing.T) {
+	tree := t.TempDir()
+	f, err := CreateInTreeNoLinks(tree, "a/b/c.txt", 0o755, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("hello"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	fi, err := os.Lstat(filepath.Join(tree, "a/b/c.txt"))
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("leaf = %v, %v", fi, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(tree, "a/b/c.txt")); string(b) != "hello" {
+		t.Fatalf("content %q", b)
+	}
+	if fi, err := os.Lstat(filepath.Join(tree, "a/b")); err != nil || !fi.IsDir() {
+		t.Fatalf("parent = %v, %v", fi, err)
+	}
+}
+
+func TestCreateInTreeNoLinksRefusesExisting(t *testing.T) {
+	tree := t.TempDir()
+	f, err := CreateInTreeNoLinks(tree, "x.txt", 0o755, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := CreateInTreeNoLinks(tree, "x.txt", 0o755, 0o644); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("second create = %v, want ErrExist", err)
+	}
+}
+
+func TestCreateInTreeNoLinksRefusesLinkLeaf(t *testing.T) {
+	tree, outside := t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "victim")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(tree, "x.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CreateInTreeNoLinks(tree, "x.txt", 0o755, 0o644); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("create over a link = %v, want ErrExist", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatalf("link target changed: %q", b)
+	}
+}
+
+func TestCreateInTreeNoLinksRefusesLinkOnPath(t *testing.T) {
+	for name, link := range map[string]func(tree, outside string) string{
+		"out of tree": func(tree, outside string) string { return outside },
+		"in tree":     func(tree, outside string) string { return filepath.Join(tree, "real") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree, outside := t.TempDir(), t.TempDir()
+			if err := os.MkdirAll(filepath.Join(tree, "real"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(tree, "a"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(link(tree, outside), filepath.Join(tree, "a", "b")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := CreateInTreeNoLinks(tree, "a/b/c.txt", 0o755, 0o644); !errors.Is(err, ErrSymlink) {
+				t.Fatalf("err = %v, want ErrSymlink", err)
+			}
+			for _, d := range []string{outside, filepath.Join(tree, "real")} {
+				if ents, _ := os.ReadDir(d); len(ents) != 0 {
+					t.Fatalf("%s got %v", d, ents)
+				}
+			}
+		})
+	}
+}
+
+// The "sibling" link is relative and stays inside the parent's Root, so
+// os.Root opens it: only the SameFile check refuses it. The absolute one
+// leaves the Root and os.Root refuses it itself.
+func TestCreateInTreeNoLinksRefusesSwapAfterCheck(t *testing.T) {
+	for name, link := range map[string]func(tree, outside string) string{
+		"out of tree": func(tree, outside string) string { return outside },
+		"sibling":     func(tree, outside string) string { return "real" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree, outside := t.TempDir(), t.TempDir()
+			for _, d := range []string{"a/real", "a/b"} {
+				if err := os.MkdirAll(filepath.Join(tree, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			afterNoLinkStep = func(n string) {
+				if n != "b" {
+					return
+				}
+				b := filepath.Join(tree, "a", "b")
+				_ = os.Rename(b, b+".moved")
+				_ = os.Symlink(link(tree, outside), b)
+			}
+			defer func() { afterNoLinkStep = nil }()
+			if _, err := CreateInTreeNoLinks(tree, "a/b/c.txt", 0o755, 0o644); !errors.Is(err, ErrSymlink) {
+				t.Fatalf("a component swapped for a link after its check: %v, want ErrSymlink", err)
+			}
+			for _, d := range []string{outside, filepath.Join(tree, "a", "real")} {
+				if ents, _ := os.ReadDir(d); len(ents) != 0 {
+					t.Fatalf("%s got %v", d, ents)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateInTreeNoLinksRefusesEscape(t *testing.T) {
+	tree := t.TempDir()
+	for _, rel := range []string{"", ".", "../x", "/abs/x", "a/../../x", "a//b", "a/./b"} {
+		if _, err := CreateInTreeNoLinks(tree, rel, 0o755, 0o644); !errors.Is(err, ErrEscapesTree) {
+			t.Errorf("%q: err = %v, want ErrEscapesTree", rel, err)
+		}
+	}
+}
+
+func TestCreateInTreeNoLinksTreeItselfMayBeALink(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "tree")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	f, err := CreateInTreeNoLinks(link, "a/x.txt", 0o755, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := os.Stat(filepath.Join(real, "a", "x.txt")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenInTreeNoLinks(t *testing.T) {
+	tree, outside := t.TempDir(), t.TempDir()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(tree, "d"), 0o755))
+	must(os.WriteFile(filepath.Join(tree, "d", "ok.txt"), []byte("12345"), 0o644))
+	must(os.WriteFile(filepath.Join(outside, "secret"), []byte("s"), 0o600))
+	must(os.Symlink(filepath.Join(outside, "secret"), filepath.Join(tree, "d", "link.txt")))
+	must(os.Symlink(filepath.Join(tree, "d"), filepath.Join(tree, "dl")))
+	must(syscall.Mkfifo(filepath.Join(tree, "d", "fifo"), 0o644))
+
+	f, fi, err := OpenInTreeNoLinks(tree, "d/ok.txt", 10)
+	if err != nil || fi.Size() != 5 {
+		t.Fatalf("ok = %v %v", fi, err)
+	}
+	f.Close()
+	for rel, want := range map[string]error{
+		"d/link.txt": ErrSymlink,
+		"dl/ok.txt":  ErrSymlink,
+		"d/fifo":     ErrNotRegularFile,
+		"d/none":     fs.ErrNotExist,
+		"../x":       ErrEscapesTree,
+	} {
+		if _, _, err := OpenInTreeNoLinks(tree, rel, 10); !errors.Is(err, want) {
+			t.Errorf("%s: err = %v, want %v", rel, err, want)
+		}
+	}
+	if _, _, err := OpenInTreeNoLinks(tree, "d/ok.txt", 4); !errors.Is(err, ErrFileTooLarge) {
+		t.Errorf("max: %v", err)
+	}
+	afterNoLinkWalk = func() {
+		_ = os.Remove(filepath.Join(tree, "d", "ok.txt"))
+		_ = os.Symlink(filepath.Join(outside, "secret"), filepath.Join(tree, "d", "ok.txt"))
+	}
+	defer func() { afterNoLinkWalk = nil }()
+	if _, _, err := OpenInTreeNoLinks(tree, "d/ok.txt", 10); !errors.Is(err, ErrSymlink) {
+		t.Errorf("leaf swapped after its check: %v", err)
+	}
+}
+
+func TestRemoveInTreeNoLinksRemovesTheEntryNotTheTarget(t *testing.T) {
+	tree, outside := t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "keep")
+	if err := os.WriteFile(target, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(tree, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveInTreeNoLinks(tree, "l"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatal("the link target was removed")
+	}
+}
+
+func TestOpenInTreeNoLinksRefusesAHardLink(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "a.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(tree, "a.txt"), filepath.Join(tree, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"a.txt", "b.txt"} {
+		if _, _, err := OpenInTreeNoLinks(tree, rel, 10); !errors.Is(err, ErrHardLink) {
+			t.Errorf("%s: err = %v, want ErrHardLink", rel, err)
+		}
+	}
+}
+
+// The leaf swapped after its Lstat for something os.Root still opens: only
+// the SameFile and IsRegular check after the open refuses it.
+func TestOpenInTreeNoLinksRefusesALeafSwappedInPlace(t *testing.T) {
+	for name, swap := range map[string]func(d string) error{
+		"in-directory link": func(d string) error {
+			if err := os.Remove(filepath.Join(d, "ok.txt")); err != nil {
+				return err
+			}
+			return os.Symlink("other.txt", filepath.Join(d, "ok.txt"))
+		},
+		"sibling file": func(d string) error {
+			return os.Rename(filepath.Join(d, "other.txt"), filepath.Join(d, "ok.txt"))
+		},
+		"fifo": func(d string) error {
+			if err := os.Remove(filepath.Join(d, "ok.txt")); err != nil {
+				return err
+			}
+			return syscall.Mkfifo(filepath.Join(d, "ok.txt"), 0o644)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := t.TempDir()
+			d := filepath.Join(tree, "d")
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, n := range []string{"ok.txt", "other.txt"} {
+				if err := os.WriteFile(filepath.Join(d, n), []byte(n), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			afterNoLinkWalk = func() {
+				if err := swap(d); err != nil {
+					t.Error(err)
+				}
+			}
+			defer func() { afterNoLinkWalk = nil }()
+			if f, _, err := OpenInTreeNoLinks(tree, "d/ok.txt", 100); !errors.Is(err, ErrSymlink) {
+				if f != nil {
+					f.Close()
+				}
+				t.Fatalf("err = %v, want ErrSymlink", err)
+			}
+		})
+	}
+}
+
+func TestOpenDirInTreeNoLinks(t *testing.T) {
+	tree, outside := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tree, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(tree, "a", "l")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenDirInTreeNoLinks(tree, "a/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+	if r, err := OpenDirInTreeNoLinks(tree, "."); err != nil {
+		t.Fatal(err)
+	} else {
+		r.Close()
+	}
+	for rel, want := range map[string]error{"a/l": ErrSymlink, "../x": ErrEscapesTree, "a//b": ErrEscapesTree, "a/none": fs.ErrNotExist} {
+		if _, err := OpenDirInTreeNoLinks(tree, rel); !errors.Is(err, want) {
+			t.Errorf("%s: %v, want %v", rel, err, want)
+		}
+	}
+}
+
+// An unreadable directory is its own error, not a link.
+func TestNoLinksWalkReportsAnUnreadableDirAsIs(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root opens a mode 000 directory")
+	}
+	tree := t.TempDir()
+	d := filepath.Join(tree, "a", "b")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(d, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(d, 0o755)
+	for name, err := range map[string]error{
+		"create": func() error { _, err := CreateInTreeNoLinks(tree, "a/b/c.txt", 0o755, 0o644); return err }(),
+		"dir":    func() error { _, err := OpenDirInTreeNoLinks(tree, "a/b"); return err }(),
+	} {
+		if errors.Is(err, ErrSymlink) || !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("%s: %v, want a permission error, not ErrSymlink", name, err)
+		}
+	}
+}

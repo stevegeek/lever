@@ -2,6 +2,7 @@ package brokerctl
 
 import (
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
@@ -30,13 +31,67 @@ func ConfigHash(app *config.App) string {
 	// (ChatConfigured) and WebSenders the remote sign-ins' sender labels:
 	// both derive from the remote block, which the broker otherwise ignores,
 	// so changing allowed_users must bounce the broker too.
+	//
+	// AgentMessages (only while on) is the contact list and limits
+	// contact_message enforces; nil while off keeps the hash an instance had
+	// before remote.agent_messages existed. Files likewise (share_file).
 	return state.HashJSON(struct {
-		Broker       config.Broker
-		Workers      []config.Worker
-		Scion        config.ScionConfig
-		VerifiedChat bool
-		WebSenders   []string `json:",omitempty"`
-	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app)})
+		Broker        config.Broker
+		Workers       []config.Worker
+		Scion         config.ScionConfig
+		VerifiedChat  bool
+		WebSenders    []string            `json:",omitempty"`
+		AgentMessages *agentMessagesStamp `json:",omitempty"`
+		Files         *filesStamp         `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app)})
+}
+
+// agentMessagesStamp is the part of remote.agent_messages the broker acts on.
+type agentMessagesStamp struct {
+	FollowUpAfter time.Duration
+	MaxChars      int
+	Contacts      []string // "login=agent,agent", config order
+}
+
+func agentMessagesStampOf(app *config.App) *agentMessagesStamp {
+	if !app.AgentMessagesOn() {
+		return nil
+	}
+	s := &agentMessagesStamp{FollowUpAfter: app.EffectiveAgentFollowUpAfter(), MaxChars: app.EffectiveAgentMaxChars()}
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			s.Contacts = append(s.Contacts, u.Login+"="+strings.Join(u.Agents, ","))
+		}
+	}
+	return s
+}
+
+// filesStamp is the part of remote.files the broker acts on (share_file):
+// the limits and who may receive files from which agent.
+type filesStamp struct {
+	MaxBytes   int64
+	Extensions []string
+	Contacts   []string // "login=agent,agent", config order
+	Operators  []string
+	// Set only when not the default, so an instance that never sets
+	// remote.files.shares or an allowed_users files key keeps its stamp.
+	NoShares bool     `json:",omitempty"`
+	Excluded []string `json:",omitempty"` // logins with files: false
+}
+
+func filesStampOf(app *config.App) *filesStamp {
+	if !app.FilesOn() {
+		return nil
+	}
+	s := &filesStamp{MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions(),
+		Operators: app.Remote.LoginsWithTier(config.TierOperator)}
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			s.Contacts = append(s.Contacts, u.Login+"="+strings.Join(u.Agents, ","))
+		}
+	}
+	s.NoShares, s.Excluded = !app.FilesSharesOn(), app.FilesExcludedLogins()
+	return s
 }
 
 // RemoteConfigHash digests the config a `lever remote serve` process captures
@@ -59,6 +114,7 @@ func RemoteConfigHash(app *config.App) string {
 		Landing:            app.EffectiveRemoteLanding(),
 		Name:               app.Name,
 		Backend:            app.Backend,
+		AgentMessages:      app.AgentMessagesOn(),
 	}
 	// The chat page's list reads the workers, the tree and the labels file;
 	// only a chat-landing proxy captures them, so a console-landing proxy
@@ -70,6 +126,23 @@ func RemoteConfigHash(app *config.App) string {
 		}
 		id.Tree = app.Tree
 		id.LabelsFile = app.Remote.LabelsFile
+		if app.FilesOn() {
+			f := &state.FilesIdentity{MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions(),
+				Workspaces: []string{app.Name + "=."}}
+			for _, w := range app.Workers {
+				f.Workspaces = append(f.Workspaces, w.Name+"="+app.AgentWorkspaces()[w.Name])
+			}
+			f.NoUploads, f.NoShares, f.Excluded = !app.FilesUploadsOn(), !app.FilesSharesOn(), app.FilesExcludedLogins()
+			id.Files = f
+		}
+	}
+	if app.PushOn() {
+		id.Push = app.Remote.Push.Subject
+		// The test hosts (TEST ONLY) are captured at start too; omitted when
+		// unset, so the stamp of a real instance is the subject alone.
+		if th := app.Remote.Push.TestHosts; len(th) > 0 {
+			id.Push += "\ntest_hosts=" + strings.Join(th, ",")
+		}
 	}
 	return state.RemoteConfigHash(id)
 }

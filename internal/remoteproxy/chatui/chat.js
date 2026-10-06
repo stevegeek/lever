@@ -14,8 +14,19 @@
 // A test in the proxy package fails the build if one appears in this file.
 
 import {
+  CONTACTS_MS,
+  UPLOAD_MS,
+  downloadPath,
+  fileCheck,
+  fileList,
+  sizeText,
+  uploadErrorText,
+  uploadNote,
+  viewFilesPath,
   LIST_MS,
   MAX_MESSAGE,
+  NOT_SHOWN,
+  NOT_YET,
   WAKE_POLLS,
   WAKE_POLL_MS,
   agentList,
@@ -23,18 +34,27 @@ import {
   badgeText,
   chipText,
   classify,
+  contactList,
   errorText,
+  hashAgent,
   historyItems,
   inputView,
   isChatSubject,
   makeCoalescer,
   mergeMessages,
+  mergeRows,
   messageLength,
   messageText,
   nextCursor,
   oneLine,
+  pushKeyBytes,
+  pushView,
   rowTitle,
   sortedMessages,
+  transcriptItems,
+  transcriptPath,
+  transcriptWho,
+  viewErrorText,
   wakeText,
 } from './chatcore.js';
 
@@ -76,6 +96,19 @@ const el = {
   ask: $('ask'),
   text: $('text'),
   send: $('send'),
+  contacts: $('contacts'),
+  contactsTitle: $('contacts-title'),
+  refresh: $('refresh'),
+  readonly: $('readonly'),
+  push: $('push'),
+  pushnote: $('pushnote'),
+  attach: $('attach'),
+  file: $('file'),
+  upload: $('upload'),
+  files: $('files'),
+  filespanel: $('filespanel'),
+  filelist: $('filelist'),
+  filesnote: $('filesnote'),
 };
 
 let roster = null; // the list as last applied (agentList shape)
@@ -111,10 +144,25 @@ let reading = false; // a history read is under way
 let readAgain = false; // something changed while it was
 let olderCursor = '';
 let sending = false;
+let uploading = false; // a file upload is under way
+let filesOpen = false; // the Files panel is open
+let filesSeq = 0; // counts Files panel reads and closes
 let waking = ''; // the agent a send is waking ('' = none)
 let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
+
+// The operator's read-only view of contact conversations. contacts is the
+// list from /lever/api/contacts (null for a contact login: it never asks).
+// view is the open transcript ({login, name}); a transcript has its own
+// rows and never touches chat, the composer or the read marker.
+let contacts = null;
+const openContacts = new Set(); // contact logins whose agents show
+let view = null;
+let viewSeq = 0; // counts transcript opens and closes
+let viewReading = false;
+let viewOlder = '';
+const transcript = new Map();
 
 // api does one same-origin request and reads the answer as JSON when it is
 // JSON, else as text. It never throws: a network fault is status 0.
@@ -292,6 +340,171 @@ function renderRows() {
     frag.append(li);
   }
   el.agents.replaceChildren(frag);
+}
+
+// renderContacts draws the Contacts section: per contact a button with its
+// login (and a note when it never signed in), and, opened, its agents.
+function renderContacts() {
+  const has = !!contacts && contacts.length > 0;
+  el.contactsTitle.hidden = !has;
+  el.contacts.hidden = !has;
+  const frag = document.createDocumentFragment();
+  for (const c of has ? contacts : []) {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.append(span('title', c.login), span('note', c.signedIn ? '' : 'not signed in yet'));
+    b.addEventListener('click', () => toggleContact(c.login));
+    li.append(b);
+    if (openContacts.has(c.login)) {
+      const ul = document.createElement('ul');
+      ul.className = 'agents nested';
+      for (const a of c.agents) {
+        const ali = document.createElement('li');
+        ali.className = view && view.login === c.login && view.name === a.name ? 'current' : '';
+        const ab = document.createElement('button');
+        // a.state is one of contactList's fixed words.
+        ab.append(span('title', rowTitle(a)), span(`chip ${a.state}`, chipText(a)));
+        ab.addEventListener('click', () => openTranscript(c.login, a.name));
+        ali.append(ab);
+        ul.append(ali);
+      }
+      li.append(ul);
+    }
+    frag.append(li);
+  }
+  el.contacts.replaceChildren(frag);
+}
+
+function toggleContact(login) {
+  if (openContacts.has(login)) openContacts.delete(login);
+  else openContacts.add(login);
+  renderContacts();
+}
+
+async function reloadContacts() {
+  const res = await api('/lever/api/contacts');
+  const l = res.ok ? contactList(res.body) : null;
+  if (l) contacts = l; // a failed read keeps the last list
+  renderContacts();
+}
+
+// renderTranscript draws the open transcript, all text. A row the contact
+// is not shown carries a mark: "not yet read" when a record would show it
+// on the contact's next read, else "not shown".
+function renderTranscript(toBottom) {
+  const stick = toBottom || nearBottom();
+  const frag = document.createDocumentFragment();
+  for (const m of sortedMessages(transcript)) {
+    const row = document.createElement('div');
+    // m.from is one of transcriptItems' fixed words.
+    row.className = `msg ${m.from}${m.shownToContact ? '' : m.pending ? ' pending' : ' unshown'}`;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    setText(meta, `${transcriptWho(m, view.login, view.name)} ${when(m)}`.trim());
+    const body = document.createElement('div');
+    body.className = 'body';
+    setText(body, m.text || '(no text)');
+    row.append(meta, body);
+    if (!m.shownToContact) {
+      const mark = document.createElement('div');
+      mark.className = 'mark';
+      setText(mark, m.pending ? NOT_YET : NOT_SHOWN);
+      row.append(mark);
+    }
+    frag.append(row);
+  }
+  el.list.replaceChildren(frag);
+  if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
+}
+
+// readTranscript reads the newest page (cursor '') or the page before
+// cursor, one read at a time; an answer for a transcript no longer open
+// is dropped.
+async function readTranscript(cursor) {
+  const v = view;
+  if (!v || viewReading) return;
+  viewReading = true;
+  const seq = viewSeq;
+  try {
+    const res = await api(transcriptPath(v.login, v.name, cursor));
+    if (seq !== viewSeq) return;
+    if (!res.ok) {
+      showNotice(`Cannot read the conversation: ${viewErrorText(res.status, res.body)}`);
+      return;
+    }
+    const first = transcript.size === 0;
+    if (cursor || first) viewOlder = nextCursor(res.body);
+    el.older.hidden = !viewOlder;
+    const changed = mergeRows(transcript, transcriptItems(res.body));
+    if (res.body && res.body.matched === false) showNotice('The broker did not answer: which agent messages the contact sees is not known.');
+    else showNotice(transcript.size ? '' : 'No messages yet.');
+    if (changed || first) renderTranscript(first);
+  } finally {
+    viewReading = false;
+  }
+}
+
+// leaveTranscript closes the open transcript, if any.
+function leaveTranscript() {
+  view = null;
+  viewSeq++;
+  transcript.clear();
+  viewOlder = '';
+  el.readonly.hidden = true;
+  el.refresh.hidden = true;
+}
+
+// openTranscript shows a contact's conversation with one of its agents,
+// read-only: no composer, no read marker, no events.
+function openTranscript(login, name) {
+  const c = contacts && contacts.find((x) => x.login === login);
+  const a = c && c.agents.find((x) => x.name === name);
+  if (!a) return;
+  closeChat();
+  view = { login, name, signedIn: !!c.signedIn, noFiles: !!c.noFiles };
+  document.body.classList.add('chatting');
+  document.title = name;
+  setText(el.agent, `${login} · ${name}`);
+  setText(el.label, a.label);
+  el.label.hidden = !a.label;
+  showState('read only', true);
+  el.form.hidden = true;
+  el.readonly.hidden = false;
+  el.refresh.hidden = false;
+  showNotice(c.signedIn ? '' : `${login} has not signed in yet.`);
+  renderContacts();
+  if (c.signedIn) void readTranscript('');
+  void loadViewFiles();
+}
+
+// pollView refreshes the contact list and the open transcript.
+function pollView() {
+  if (document.visibilityState !== 'visible') return;
+  void reloadContacts();
+  // A contact that has not signed in has no conversation to read (the read
+  // answers not-signed-in): the poll leaves its view and note as they are.
+  if (view && view.signedIn) {
+    void readTranscript('');
+    void loadViewFiles();
+  }
+}
+
+// loadViewFiles lists the open transcript's files (the contact's uploads to
+// the agent and the agent's shares to it), read-only, while files are on.
+async function loadViewFiles() {
+  const v = view;
+  if (!v || v.noFiles || !roster || !roster.files) return;
+  const seq = ++filesSeq;
+  el.filespanel.hidden = false;
+  const res = await api(viewFilesPath(v.login, v.name));
+  if (seq !== filesSeq || view !== v) return;
+  const list = res.ok ? fileList(res.body) : null;
+  if (!list) {
+    showFilesNote(`The files cannot be read: ${viewErrorText(res.status, res.body)}`);
+    return;
+  }
+  showFilesNote(list.length ? '' : 'No files yet.');
+  el.filelist.replaceChildren(...list.map((f) => fileRow(v.name, f, v.login)));
 }
 
 function historyPath(c, cursor) {
@@ -489,6 +702,7 @@ function applyRoster(l) {
   appliedSeq = l.seq;
   roster = l;
   renderRows();
+  syncAttach();
   setLink(el.console, l.tier === 'operator' ? l.console : '');
   if (!current) return;
   const a = l.agents.find((x) => x.name === current);
@@ -552,6 +766,148 @@ function applyView(a) {
 
 function syncSend() {
   el.send.disabled = sending || held || !chat || !chat.view || !chat.view.input;
+  syncAttach();
+}
+
+function showUpload(text) {
+  setText(el.upload, text);
+  el.upload.hidden = !text;
+}
+
+function showFilesNote(text) {
+  setText(el.filesnote, text);
+  el.filesnote.hidden = !text;
+}
+
+// syncAttach shows the paperclip and the Files button for an open chat
+// with an agent the login may message, while files are on.
+function syncAttach() {
+  const on = !!(roster && roster.files && chat);
+  el.attach.hidden = !on || !roster.files.uploads;
+  el.files.hidden = !on;
+  el.attach.disabled = uploading || sending || !chat || !chat.view || !chat.view.input;
+}
+
+function closeFiles() {
+  filesOpen = false;
+  filesSeq++;
+  el.filespanel.hidden = true;
+  setText(el.files, 'Files');
+  el.filelist.replaceChildren();
+  showFilesNote('');
+}
+
+// sendFile posts one file to the agent's upload route. XMLHttpRequest, not
+// fetch: only it reports upload progress. It never throws.
+function sendFile(name, file, progress) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    const done = (status, text) => {
+      let body = text;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // not JSON: keep the text
+      }
+      resolve({ ok: status >= 200 && status < 300, status, body });
+    };
+    xhr.open('POST', `/lever/api/files/${encodeURIComponent(name)}`);
+    xhr.timeout = UPLOAD_MS;
+    xhr.setRequestHeader('Accept', 'application/json');
+    // The proxy refuses an upload without it: a custom header needs a CORS
+    // preflight across origins, so a resend elsewhere cannot carry it.
+    xhr.setRequestHeader('X-Lever-Upload', '1');
+    xhr.upload.addEventListener('progress', (ev) => {
+      if (ev.lengthComputable && ev.total > 0) progress(Math.floor((ev.loaded * 100) / ev.total));
+    });
+    xhr.addEventListener('load', () => done(xhr.status, xhr.responseText));
+    xhr.addEventListener('error', () => done(0, 'cannot reach the server'));
+    xhr.addEventListener('timeout', () => done(0, 'no answer in time'));
+    const form = new FormData();
+    form.append('file', file, file.name);
+    xhr.send(form);
+  });
+}
+
+// upload sends the picked file to the open chat's agent, then tells the
+// agent in the chat with the normal send path (deliver: the list check, a
+// wake, the idempotency key), so the agent verifies the note as this
+// login's message.
+async function upload(file) {
+  const c = chat;
+  const cfg = roster && roster.files;
+  if (!file || !c || !cfg || uploading || sending) return;
+  const why = fileCheck(file, cfg);
+  if (why) {
+    showError(why);
+    return;
+  }
+  const shown = oneLine(file.name, 120);
+  uploading = true;
+  syncAttach();
+  showError('');
+  showUpload(`Uploading ${shown}… 0%`);
+  const res = await sendFile(c.name, file, (pct) => showUpload(`Uploading ${shown}… ${pct}%`));
+  uploading = false;
+  showUpload('');
+  syncAttach();
+  const here = () => !!chat && chat.name === c.name;
+  if (res.status !== 201 || !res.body || typeof res.body !== 'object' || typeof res.body.name !== 'string') {
+    if (here()) showError(`Not uploaded: ${uploadErrorText(res.status, res.body)}`);
+    return;
+  }
+  const name = oneLine(res.body.name, 120);
+  if (filesOpen && here()) void loadFiles();
+  sending = true;
+  syncSend();
+  syncAttach();
+  const out = await deliver(c, uploadNote(name));
+  sending = false;
+  syncSend();
+  syncAttach();
+  if (!out.blocked && out.res && out.res.status === 201) {
+    setUnsent(c, null);
+    if (chat === c && out.res.body && typeof out.res.body === 'object' && mergeMessages(messages, [out.res.body])) render(true);
+    refreshSoon();
+  } else if (here()) {
+    showError(`Uploaded ${name}, but the chat message was not sent: ${out.blocked || reason(out.res)}. Tell ${c.name} yourself.`);
+  }
+}
+
+async function loadFiles() {
+  const c = chat;
+  if (!c || !filesOpen) return;
+  const seq = ++filesSeq;
+  const res = await api(`/lever/api/files/${encodeURIComponent(c.name)}`);
+  if (seq !== filesSeq || chat !== c) return;
+  const list = res.ok ? fileList(res.body) : null;
+  if (!list) {
+    showFilesNote(`The files cannot be read: ${errorText(res.status, res.body)}.`);
+    return;
+  }
+  showFilesNote(list.length ? '' : 'No files yet.');
+  el.filelist.replaceChildren(...list.map((f) => fileRow(c.name, f)));
+}
+
+// fileRow is one file as text, with a download link only to lever's own
+// route for that agent and id (built here, never taken from the answer).
+// sender names who uploaded a "sent" row ('' = this login).
+function fileRow(agent, f, sender = '') {
+  const li = document.createElement('li');
+  li.className = `file ${f.direction}`;
+  const a = document.createElement('a');
+  // Shares off: a share stays listed, but its download is refused.
+  const off = f.direction === 'received' && roster && roster.files && !roster.files.shares;
+  const href = off ? '' : localLink(downloadPath(agent, f.id));
+  if (href) {
+    a.setAttribute('href', href);
+    // Bare: the server's Content-Disposition names the file.
+    a.setAttribute('download', '');
+  }
+  setText(a, f.name);
+  const meta = `${sizeText(f.size)} · ${when({ createdAt: f.at })}${off ? ' · downloads of shared files are off' : ''}`;
+  li.append(span('who', f.direction === 'received' ? `From ${agent}` : sender ? `From ${sender}` : 'You sent'), a, span('meta', meta));
+  return li;
 }
 
 function resetHistory() {
@@ -567,6 +923,7 @@ function resetHistory() {
 // openChat shows the chat with name. A see-only agent shows its name,
 // label and state, and nothing is read for it.
 function openChat(name) {
+  leaveTranscript();
   const a = roster && roster.agents.find((x) => x.name === name);
   if (!a) {
     closeChat();
@@ -581,10 +938,12 @@ function openChat(name) {
   el.label.hidden = !a.label;
   setLink(el.terminal, roster.tier === 'operator' ? a.terminal : '');
   resetHistory();
+  closeFiles();
   showError('');
   renderRows();
   if (a.access !== 'message') {
     chat = null;
+    syncAttach();
     showState(chipText(a), false);
     showNote('');
     showNotice('');
@@ -609,6 +968,7 @@ function openChat(name) {
 
 // closeChat goes back to the list.
 function closeChat() {
+  leaveTranscript();
   current = '';
   chat = null;
   store(OPEN_KEY, null);
@@ -620,12 +980,16 @@ function closeChat() {
   setLink(el.terminal, '');
   showState('', true);
   resetHistory();
+  closeFiles();
+  showUpload('');
   showError('');
   showNote('');
   el.viewonly.hidden = true;
   el.form.hidden = true;
+  syncAttach();
   showNotice('Choose an agent from the list.');
   if (roster) renderRows();
+  if (contacts) renderContacts();
 }
 
 // openStream listens for the hub's chat events for this login: one stream
@@ -662,6 +1026,7 @@ function poll() {
   if (document.visibilityState !== 'visible') return;
   void reloadList();
   refreshSoon();
+  if (filesOpen) void loadFiles();
   if (!stream || stream.readyState === EventSource.CLOSED) openStream();
 }
 
@@ -913,6 +1278,156 @@ function askManager() {
   el.text.focus();
 }
 
+// Notifications (remote.push). The page asks lever for its key only where
+// the browser can push, and registers the push-only worker only when the
+// login turns notifications on (a click: iOS and Chrome ask for permission
+// only then). The worker has no fetch handler: it never stands between the
+// page and its requests.
+const PUSH_SCOPE = '/lever/';
+
+// serviceWorker.register is a script-URL sink: with the page's Trusted
+// Types policy on (require-trusted-types-for 'script'), Chrome refuses a
+// plain string there. With push on, the CSP allows exactly one policy,
+// lever-sw, and this is it: its only output is the literal worker URL;
+// anything else throws. Created once, on the first Turn on. A browser
+// without Trusted Types takes the plain string.
+let swPolicy = null;
+function swScriptURL() {
+  const tt = window.trustedTypes;
+  if (!tt || typeof tt.createPolicy !== 'function') return '/lever/sw.js';
+  if (!swPolicy) {
+    swPolicy = tt.createPolicy('lever-sw', { createScriptURL: (u) => { if (u !== '/lever/sw.js') throw new TypeError('lever-sw: refused'); return u; } });
+  }
+  return swPolicy.createScriptURL('/lever/sw.js');
+}
+let push = { available: false, permission: 'default', subscribed: false, busy: false, error: '', key: null };
+const pushSupported = () => !!(navigator && navigator.serviceWorker) && typeof window.PushManager !== 'undefined' && typeof Notification !== 'undefined';
+
+function showPush() {
+  const v = pushView(push);
+  el.push.hidden = v.hidden;
+  el.push.disabled = v.disabled;
+  setText(el.push, v.text);
+  setText(el.pushnote, v.note);
+  el.pushnote.hidden = !v.note;
+}
+
+function sendSubscription(sub, method) {
+  const j = sub.toJSON();
+  const body = method === 'DELETE' ? { endpoint: j.endpoint } : { endpoint: j.endpoint, keys: j.keys };
+  return api('/lever/api/push/subscriptions', { method, headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+async function pushRegistration() {
+  try {
+    return await navigator.serviceWorker.getRegistration(PUSH_SCOPE);
+  } catch {
+    return undefined;
+  }
+}
+
+// The per-login opt-in marker. A browser has one push subscription per
+// worker scope, whoever is signed in, so on a shared device another login
+// finds the subscription a first login made. Only the login that turned
+// notifications on here re-sends it at load; any other sees "Turn on" and
+// gets pushes only after it opts in itself.
+const optInKey = () => `lever-push-optin:${roster ? roster.login : ''}`;
+
+function optedIn() {
+  try {
+    return localStorage.getItem(optInKey()) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setOptIn(on) {
+  try {
+    if (on) localStorage.setItem(optInKey(), '1');
+    else localStorage.removeItem(optInKey());
+  } catch {
+    // storage is off: the subscription is then not re-sent at load
+  }
+}
+
+async function setupPush() {
+  if (!pushSupported()) return;
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    const d = ev && ev.data;
+    const name = d && typeof d.agent === 'string' ? hashAgent(`#agent=${d.agent}`) : '';
+    if (name && roster && roster.agents.some((a) => a.name === name)) openChat(name);
+  });
+  const res = await api('/lever/api/push/key');
+  const key = res.ok && res.body ? pushKeyBytes(res.body.key) : null;
+  const reg = await pushRegistration();
+  if (!key) {
+    // Push is off on the server: a worker left from when it was on goes.
+    if (reg && res.status === 404) await reg.unregister().catch(() => {});
+    return;
+  }
+  push = { ...push, available: true, key, permission: Notification.permission };
+  const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+  if (sub && optedIn()) {
+    push.subscribed = true;
+    // lever may have dropped it (the push service said gone): send it again.
+    void sendSubscription(sub, 'POST');
+  }
+  showPush();
+}
+
+async function turnOn() {
+  let perm = 'denied';
+  try {
+    perm = await Notification.requestPermission();
+  } catch {
+    // treated as refused
+  }
+  push.permission = perm;
+  if (perm !== 'granted') return;
+  let sub;
+  try {
+    await navigator.serviceWorker.register(swScriptURL(), { scope: '/lever/' });
+    const reg = await navigator.serviceWorker.ready;
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: push.key });
+  } catch {
+    push.error = 'Notifications could not be turned on in this browser.';
+    return;
+  }
+  const res = await sendSubscription(sub, 'POST');
+  if (!res.ok) {
+    await sub.unsubscribe().catch(() => {});
+    push.error = `Notifications could not be turned on: ${errorText(res.status, res.body)}.`;
+    return;
+  }
+  push.subscribed = true;
+  setOptIn(true);
+}
+
+async function turnOff() {
+  const reg = await pushRegistration();
+  const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+  if (sub) {
+    await sendSubscription(sub, 'DELETE');
+    await sub.unsubscribe().catch(() => {});
+  }
+  if (reg) await reg.unregister().catch(() => {});
+  push.subscribed = false;
+  setOptIn(false);
+}
+
+async function togglePush() {
+  if (push.busy || !push.available) return;
+  push.busy = true;
+  push.error = '';
+  showPush();
+  try {
+    await (push.subscribed ? turnOff() : turnOn());
+  } finally {
+    push.busy = false;
+    showPush();
+  }
+}
+
 async function start() {
   const l = await readList();
   if (l.error) {
@@ -929,14 +1444,21 @@ async function start() {
   showListNote('');
   adoptOldRecords(l);
   applyRoster(l);
+  if (roster.tier === 'operator') {
+    void reloadContacts();
+    setInterval(pollView, CONTACTS_MS);
+  }
   setInterval(poll, LIST_MS);
   document.addEventListener('visibilitychange', poll);
   // The stream first, so a message stored while a history is read still
   // raises an event.
   openStream();
-  const want = stored(OPEN_KEY);
+  const fromHash = hashAgent(location.hash);
+  if (fromHash) history.replaceState(null, '', '/lever/chat');
+  const want = fromHash || stored(OPEN_KEY);
   if (want && roster.agents.some((a) => a.name === want)) openChat(want);
   else closeChat();
+  void setupPush();
 }
 
 el.form.addEventListener('submit', (ev) => {
@@ -957,9 +1479,29 @@ el.text.addEventListener('keydown', (ev) => {
   // A held key repeats: one press, one send (and no new lines from it).
   if (!ev.repeat) void send();
 });
-el.older.addEventListener('click', () => void loadOlder());
+el.older.addEventListener('click', () => void (view ? readTranscript(viewOlder) : loadOlder()));
+el.refresh.addEventListener('click', () => {
+  void readTranscript('');
+  void loadViewFiles();
+});
 el.back.addEventListener('click', closeChat);
 el.ask.addEventListener('click', askManager);
+el.push.addEventListener('click', () => void togglePush());
+el.attach.addEventListener('click', () => {
+  el.file.value = '';
+  el.file.click();
+});
+el.file.addEventListener('change', () => void upload(el.file.files && el.file.files[0]));
+el.files.addEventListener('click', () => {
+  if (filesOpen) {
+    closeFiles();
+    return;
+  }
+  filesOpen = true;
+  el.filespanel.hidden = false;
+  setText(el.files, 'Hide files');
+  void loadFiles();
+});
 window.addEventListener('resize', grow);
 
 void start();

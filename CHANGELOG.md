@@ -5,6 +5,52 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **File directions and logins without files.** `remote.files.uploads` and `remote.files.shares`
+  (default `true`) turn one direction off: no new upload (`403 uploads-off`, no paperclip), or no
+  new share (`share_file` answers `shares-off`, and shares already made are listed but no longer
+  downloadable). An `allowed_users` entry with `files: false` gives that login no file exchange
+  on the chat page: enforced for a contact (the contact fence); for an operator it only hides the
+  feature, since an operator has the whole hub (workspace file API, WebDAV, terminal). The `files` doctor row shows both directions and the logins
+  without files; the skills mention a direction only while it is off. Without the new keys the
+  config stamps and the skills are unchanged.
+- **Files in the chat (`remote.files`).** Off by default; needs `landing: chat`. A login uploads
+  one file at a time to an agent it may message (paperclip, progress) and downloads the files the
+  agent shares with it (Files panel); the operator also sees each contact's files in its read-only
+  view. Files live in the agent's workspace under `.lever-files/in|out/<key>/`, written host-side
+  with no link followed and `O_EXCL`; a host ledger records every upload and share with its
+  sha256, and a download is served only from a private copy that still matches. New capability
+  tools `contact_files` and `share_file` (rebuild the agent image and restart agents fresh).
+  `lever doctor` row `files`.
+- **Notifications for the chat page (`remote.push`).** Off by default. On, a login turns
+  notifications on per device from the agent list; when an agent writes to it while the page is
+  closed, the device shows "New message from <agent>" and a tap opens that chat (Linux Chrome; iPhone
+  as a Home Screen app, iOS 16.4+). Standard Web Push with VAPID and aes128gcm, implemented on the Go
+  standard library; the push carries only the agent's name, encrypted; the service worker handles
+  push and click only (no fetch handler, no cache). The proxy holds one hub event stream per
+  subscribed login; contacts are notified only for messages they would be shown. Push endpoints are
+  limited to the known push services and to public addresses. `lever doctor` has a `push` row.
+- **The operator can read contacts' conversations (chat page, read-only).** With `landing: chat`,
+  an operator login's agent list gains a Contacts section: each contact, the agents it may message,
+  and each conversation, read-only, with agent messages the contact is not shown (agent messages on)
+  marked. The proxy reads with the contact's own hub session, GET of that one history route only;
+  a contact `lever apply` has not bound to a hub user shows "has not signed in yet" and no session
+  is made for it. Routes `/lever/api/contacts[/<login>/agents/<name>/messages]`, operator only;
+  every read is audited (`operator-view`).
+- **Agents can start a message to a contact (`remote.agent_messages`).** Off by default. On, an
+  agent messages a contact in two steps: `contact_message` (lever-capability MCP tool) checks that
+  the contact lists the agent, that a reply answers that contact's verified post, and the limit (one
+  unanswered message the agent started, one reminder after `follow_up_after`, 24 h by default;
+  a reply to a contact message: up to 3 per contact message), and records a hash of the exact text; the agent then sends it with the
+  returned `scion message` command. The remote proxy shows a contact only agent messages whose text
+  the record holds, removes text from the contact's events stream and DM previews, and counts only
+  shown messages as unread; the operator's view is unchanged. Needs the agent image rebuilt
+  (`make lever-image`) and each contact agent started fresh on the new skill. `lever doctor` has an
+  `agent messages` row. Off, the skills render byte-identical and no config stamp changes.
+
 ## [0.30.0] - 2026-10-06
 
 ### Added

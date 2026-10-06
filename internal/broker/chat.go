@@ -273,3 +273,28 @@ func (u *chatUses) takeAll(caller string, want []useWant, now time.Time) ([]useG
 	}
 	return got, nil
 }
+
+// verifiedBy reports whether caller verified the message id (a hub id for a
+// web post), reading the record again so a use recorded by another broker
+// counts. A record that cannot be read answers false: a reply then fails
+// closed (bad-ref).
+func (u *chatUses) verifiedBy(caller, id string, now time.Time) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if _, ok := u.used[useKey(caller, id)]; ok {
+		return true
+	}
+	if u.path == "" {
+		return false
+	}
+	lines, err := readUses(u.path, now)
+	if err != nil {
+		return false
+	}
+	for _, c := range lines {
+		if c.Caller == caller && c.ID == id {
+			return true
+		}
+	}
+	return false
+}

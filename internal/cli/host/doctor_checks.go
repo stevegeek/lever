@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/agentledger"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/backend/types"
@@ -25,6 +27,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -33,6 +36,8 @@ import (
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/webpush"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // checkResult is one diagnostic outcome. detail is shown in both the pass and
@@ -501,6 +506,164 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s/ (%d files, 0700)", tier, stateRel(st, p), len(files)), ""}
 }
 
+// agentMsgsLive is what the running processes were started with, for the
+// agent messages row: the running broker's config hash (ok false when no
+// broker answers) and whether a running remote proxy's stamp differs from
+// this config.
+type agentMsgsLive struct {
+	brokerHash func() (string, bool)
+	// proxyMatches reports whether a remote proxy runs, and whether it was
+	// started by this lever version with the remote config whose hash is
+	// given.
+	proxyMatches func(hash string) (running, matches bool)
+}
+
+// liveAgentMessages reads what the running broker and remote proxy were
+// started with: the broker's /epoch config hash on its admin port, and the
+// proxy's stamp file against this config.
+func liveAgentMessages(ctx context.Context, app *config.App, st state.State) agentMsgsLive {
+	return agentMsgsLive{
+		brokerHash: func() (string, bool) {
+			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			var er wire.EpochResponse
+			u := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), wire.PathEpoch)
+			// A redirect is not the broker's answer: never followed.
+			client := &http.Client{Timeout: 2 * time.Second,
+				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			if err := httpjson.Get(ctx, client, u, &er); err != nil {
+				return "", false
+			}
+			return er.ConfigHash, true
+		},
+		proxyMatches: func(hash string) (bool, bool) {
+			_, found, alive := state.PIDStatus(st.RemotePID())
+			if !found || !alive {
+				return false, false
+			}
+			return true, st.RemoteStampMatches(cli.VersionString(), hash)
+		},
+	}
+}
+
+// checkAgentMessages reports remote.agent_messages: off, or on with the
+// limits, the contacts and their agents, and the agent ledger's safety. The
+// broker and the proxy read the config only when they start. So while the
+// setting is on, the row says when either runs with another config (or
+// lever version); while it is off, it says so only when a process runs
+// with this config plus agent messages on, the one case where the setting
+// itself differs. Other config changes are other rows' business.
+func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) checkResult {
+	r := agentMessagesRow(app, st)
+	if !r.ok {
+		return r
+	}
+	on := app.AgentMessagesOn()
+	// The hashes a process started with agent messages on would carry.
+	onApp := *app
+	onApp.Remote.AgentMessages.Enabled = true
+	var stale []string
+	if live.brokerHash != nil {
+		if h, ok := live.brokerHash(); ok && (on && h != brokerctl.ConfigHash(app) || !on && onApp.AgentMessagesOn() && h == brokerctl.ConfigHash(&onApp)) {
+			stale = append(stale, "broker")
+		}
+	}
+	if live.proxyMatches != nil {
+		if on {
+			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(app)); running && !ok {
+				stale = append(stale, "remote proxy")
+			}
+		} else if onApp.AgentMessagesOn() {
+			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(&onApp)); running && ok {
+				stale = append(stale, "remote proxy")
+			}
+		}
+	}
+	if len(stale) > 0 {
+		return warnResult(r.name, r.detail+"; the running "+strings.Join(stale, " and ")+
+			" started with another config; agent message settings take effect after `lever init` + `lever apply`",
+			"run `lever init`, then `lever apply`")
+	}
+	return r
+}
+
+func agentMessagesRow(app *config.App, st state.State) checkResult {
+	const name = "agent messages"
+	if !app.AgentMessagesOn() {
+		return checkResult{name, true, "off (agents answer contacts as before; nothing is filtered)", ""}
+	}
+	if brokerctl.StateInsideTree(app, st) {
+		return checkResult{name, false, "on, but the state directory is inside the tree: no record can be kept, so contacts see no agent message",
+			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	}
+	var who []string
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact {
+			who = append(who, u.Login+" ("+strings.Join(u.Agents, ", ")+")")
+		}
+	}
+	detail := fmt.Sprintf("on: follow_up_after %s, max_chars %d; contacts: %s; agents need an image with this release's lever-agent (contacts, contact_message)",
+		shortDuration(app.EffectiveAgentFollowUpAfter()), app.EffectiveAgentMaxChars(), strings.Join(who, "; "))
+	p := st.AgentLedger()
+	fi, err := os.Lstat(p)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return checkResult{name, true, detail + "; no message authorized yet", ""}
+	case err != nil:
+		return checkResult{name, false, "cannot read the agent ledger: " + err.Error(), "check " + stateRel(st, p)}
+	case !fi.IsDir():
+		return checkResult{name, false, "the agent ledger " + stateRel(st, p) + " is not a directory (a symlink?), so contacts see no agent message", "remove " + p}
+	case fi.Mode().Perm()&0o022 != 0:
+		return checkResult{name, false, fmt.Sprintf("the agent ledger %s is %v: another user can add a file, so contacts see no agent message", stateRel(st, p), fi.Mode().Perm()), "chmod 700 " + p}
+	}
+	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
+		return checkResult{name, false, fmt.Sprintf("the agent ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()), "remove " + p}
+	}
+	// Every authorization counts the hourly rate over all contact files,
+	// so one unsafe file refuses every authorization (failing closed).
+	if bad := unsafeLedgerFile(p); bad != "" {
+		return checkResult{name, false, "the agent ledger file " + stateRel(st, bad) + " is not a private regular file of yours: " +
+			"every agent's contact_message is refused (unavailable) and contacts are shown no agent message until it is fixed",
+			"chmod 600 " + bad + " (or remove it, which forgets that contact's records)"}
+	}
+	return checkResult{name, true, detail + "; ledger " + stateRel(st, p) + "/ (0700)", ""}
+}
+
+// unsafeLedgerFile is the first contact file in dir (or its .1) that is not
+// a regular file, is writable by others, or belongs to another user; "" if
+// none.
+func unsafeLedgerFile(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !agentledger.IsContactFile(e.Name()) {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		fi, err := os.Lstat(p)
+		if err != nil {
+			continue
+		}
+		if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o022 != 0 {
+			return p
+		}
+		if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
+			return p
+		}
+	}
+	return ""
+}
+
+// shortDuration prints whole hours as "24h" (time.Duration prints 24h0m0s).
+func shortDuration(d time.Duration) string {
+	if d > 0 && d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", d/time.Hour)
+	}
+	return d.String()
+}
+
 // checkChatLabels reads remote.labels_file the way the proxy does. A bad
 // file is a warning, not a failure: it is agent-written, and its only
 // effect is that the chat page shows no labels. The row names the fault.
@@ -543,6 +706,59 @@ func labelFault(err error) string {
 		return "is not a JSON object of strings"
 	}
 	return "cannot be read: " + firstLine(err.Error())
+}
+
+// checkPush reports remote.push the way the proxy reads it. The proxy
+// writes push/status.json at start and after each send, so this row shows
+// the last outcome and whether the running proxy pushes to test hosts.
+func checkPush(app *config.App, st state.State) checkResult {
+	const name = "push"
+	if !app.PushOn() {
+		return checkResult{name, true, "off (no service worker, no push routes, no hub streams)", ""}
+	}
+	if brokerctl.StateInsideTree(app, st) {
+		return checkResult{name, false, "on, but the state directory is inside the tree: push stays off (agents could read its key)",
+			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	}
+	if th := app.Remote.Push.TestHosts; len(th) > 0 {
+		return checkResult{name, false, "on, with remote.push.test_hosts set (" + strings.Join(th, ",") + "): TEST ONLY, the proxy may push over plain http to loopback",
+			"remove remote.push.test_hosts, stop the proxy, unset " + webpush.TestHostsEnv + ", and run `lever apply`"}
+	}
+	dir := st.PushDir()
+	sum := remoteproxy.ReadPushSummary(dir)
+	switch {
+	case errors.Is(sum.KeyErr, fs.ErrNotExist):
+		return warnResult(name, "on, but no key yet: the remote proxy creates "+stateRel(st, dir)+"/vapid.key when it starts", "run `lever apply`")
+	case sum.KeyErr != nil:
+		return checkResult{name, false, "on, but the push key is unusable: " + sum.KeyErr.Error() + "; push is off", "chmod 600 " + filepath.Join(dir, "vapid.key") + " (or remove it: every device must then turn notifications on again)"}
+	case sum.StoreErr != nil:
+		return checkResult{name, false, "on, but the subscription store is unusable: " + sum.StoreErr.Error() + "; push is off", "chmod 600 " + filepath.Join(dir, "subscriptions.json") + " (or remove it)"}
+	}
+	total, per := 0, []string{}
+	for _, l := range slices.Sorted(maps.Keys(sum.Subs)) {
+		total += sum.Subs[l]
+		per = append(per, fmt.Sprintf("%s %d", l, sum.Subs[l]))
+	}
+	last := "none yet"
+	if sum.Last != nil && sum.Last.Result != "started" {
+		last = fmt.Sprintf("%s %s (%s)", sum.Last.Result, sum.Last.Host, sum.Last.At.Local().Format("2006-01-02 15:04"))
+	}
+	detail := fmt.Sprintf("on (subject %s): key present (0600); %d subscription(s)%s; last send: %s; "+
+		"the proxy connects out to fcm.googleapis.com, *.push.apple.com, updates.push.services.mozilla.com and *.notify.windows.com on 443",
+		app.Remote.Push.Subject, total, func() string {
+			if len(per) == 0 {
+				return ""
+			}
+			return " (" + strings.Join(per, ", ") + ")"
+		}(), last)
+	if sum.Last != nil && sum.Last.TestHosts {
+		return checkResult{name, false, detail + "; the running proxy pushes to test hosts (TEST ONLY)",
+			"stop the proxy, unset " + webpush.TestHostsEnv + ", and run `lever apply`"}
+	}
+	if sum.Last != nil && sum.Last.Result == "failed" {
+		return warnResult(name, detail, "see "+stateRel(st, st.RemoteAudit())+" (decision push-failed)")
+	}
+	return checkResult{name, true, detail, ""}
 }
 
 // warnResult is a warning row: not a failure (doctor's exit status ignores

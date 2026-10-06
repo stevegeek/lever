@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/mcp"
@@ -15,6 +17,9 @@ type MCPConfig struct {
 	BrokerURL string
 	AgentCN   string
 	Client    *http.Client // mTLS client (this agent's identity)
+	// BodyDir is where contact_message writes the authorized text for
+	// scion message --body-file. "" = os.TempDir().
+	BodyDir string
 }
 
 // MCPServer is the LLM-facing capability tool: request / delegate.
@@ -23,10 +28,11 @@ type MCPServer struct {
 	brokerURL string
 	agentCN   string
 	client    *http.Client
+	bodyDir   string // contact_message body files (MCPConfig.BodyDir)
 }
 
 func NewMCPServer(c MCPConfig) *MCPServer {
-	return &MCPServer{brokerURL: c.BrokerURL, agentCN: c.AgentCN, client: c.Client}
+	return &MCPServer{brokerURL: c.BrokerURL, agentCN: c.AgentCN, client: c.Client, bodyDir: cmp.Or(c.BodyDir, os.TempDir())}
 }
 
 // Handle is the transport-free core: it takes one raw JSON-RPC message and
@@ -44,7 +50,7 @@ func (s *MCPServer) Handle(ctx context.Context, msg []byte) []byte {
 
 func capabilityToolSchemas() []any {
 	strProp := func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
-	return []any{
+	return append([]any{
 		map[string]any{"name": "request", "description": "mint a capability token bound to self (or bound_to)",
 			"inputSchema": map[string]any{"type": "object",
 				"required": []string{"tool", "op"},
@@ -75,7 +81,7 @@ func capabilityToolSchemas() []any {
 		map[string]any{"name": "message_verify", "description": messageVerifyDescription, "inputSchema": messageVerifySchema(strProp)},
 		map[string]any{"name": "chat_verify", "description": "Alias of message_verify (the 0.27 name): same arguments, same answer. " + messageVerifyDescription,
 			"inputSchema": messageVerifySchema(strProp)},
-	}
+	}, append(contactToolSchemas(strProp), fileToolSchemas(strProp)...)...)
 }
 
 // directivePreviewDescription is what the model reads when it decides whether
@@ -188,6 +194,15 @@ var capabilityTools = map[string]func(*MCPServer, context.Context, map[string]st
 	// chat_verify: the 0.27 name of message_verify, kept so a skill of that
 	// release still finds its tool. Same call, same answer.
 	"chat_verify": messageVerifyTool,
+	// contacts / contact_message: messages to a contact (contactmsg.go). The
+	// broker decides from the mTLS caller and its host config which contacts
+	// the caller may reach; the arguments grant nothing.
+	"contacts":        contactsTool,
+	"contact_message": contactMessageTool,
+	// contact_files / share_file: files in the chat (files.go). The broker
+	// decides from the mTLS caller which files and logins it may touch.
+	"contact_files": contactFilesTool,
+	"share_file":    shareFileTool,
 }
 
 func messageVerifyTool(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {

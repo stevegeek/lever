@@ -611,7 +611,10 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 // own directories (.lever, which holds the manager's bootstrap ticket, or
 // the state directory): those are host-written secrets, never labels.
 // Compared without case, since the tree may sit on a case-insensitive
-// filesystem.
+// filesystem. Not Unicode-normalised (NFC/NFD, as macOS folds): both sides
+// are operator-written config, not agent input, and the stdlib has no
+// normaliser; a worker dir and a labels_file spelled in different
+// normalisation forms would pass here.
 func (a *App) validLabelsFileOwner(lf string) error {
 	inside := func(p, dir string) bool {
 		p, dir = strings.ToLower(p), strings.ToLower(dir)

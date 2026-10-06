@@ -3,11 +3,14 @@ package scion
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 func TestWaitHubReadySucceeds(t *testing.T) {
@@ -25,8 +28,8 @@ func TestWaitHubReadyTimesOut(t *testing.T) {
 	f := proc.NewFakeRunner()
 	// Leave "list --all" unscripted so the probe errors every attempt.
 	c := New(f, Options{})
-	c.hubReadyAttempts, c.hubReadyInterval = 2, 0
-	err := c.waitHubReady(context.Background())
+	c.hubReadyTimeout, c.hubReadyInterval = 20*time.Millisecond, time.Millisecond
+	err := c.waitHubReady(context.Background(), nil)
 	if !errors.Is(err, ErrHubNotReady) {
 		t.Fatalf("expected ErrHubNotReady when hub never comes up, got %v", err)
 	}
@@ -119,8 +122,8 @@ func (r *refusingRunner) RunStdin(ctx context.Context, _ io.Reader, env map[stri
 func TestWaitHubReadyAcceptsAuthRefusal(t *testing.T) {
 	r := &refusingRunner{stderr: "Error: authentication failed, login to hub with 'scion hub auth login'\n"}
 	c := New(r, Options{})
-	c.hubReadyAttempts, c.hubReadyInterval = 5, 0
-	if err := c.waitHubReady(context.Background()); err != nil {
+	c.hubReadyInterval = 0
+	if err := c.waitHubReady(context.Background(), nil); err != nil {
 		t.Fatalf("a hub refusing the credential is up; got %v", err)
 	}
 	if r.calls != 1 {
@@ -132,8 +135,125 @@ func TestWaitHubReadyAcceptsAuthRefusal(t *testing.T) {
 func TestWaitHubReadyOtherErrorsNotReady(t *testing.T) {
 	r := &refusingRunner{stderr: "Error: hub at http://127.0.0.1:8080 is not responding\n"}
 	c := New(r, Options{})
-	c.hubReadyAttempts, c.hubReadyInterval = 2, 0
-	if err := c.waitHubReady(context.Background()); !errors.Is(err, ErrHubNotReady) {
+	c.hubReadyTimeout, c.hubReadyInterval = 20*time.Millisecond, time.Millisecond
+	if err := c.waitHubReady(context.Background(), nil); !errors.Is(err, ErrHubNotReady) {
 		t.Fatalf("want ErrHubNotReady, got %v", err)
 	}
+}
+
+// A cold hub that answers only after many failed probes is waited on: the
+// budget is a time, not the old 30 attempts, and a slow start prints that
+// it is waiting.
+func TestWaitHubReadyOutlastsAColdStart(t *testing.T) {
+	r := &coldHubRunner{failures: 40}
+	c := New(r, Options{})
+	c.hubReadyInterval = 0
+	var lines []string
+	start := time.Now()
+	err := c.waitHubReady(context.Background(), func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		t.Fatalf("a hub that answers on probe 41 is ready within the budget; got %v", err)
+	}
+	if r.probes != 41 {
+		t.Fatalf("probes = %d, want 41", r.probes)
+	}
+	if time.Since(start) < c.hubReadyNotice && len(lines) != 0 {
+		t.Fatalf("progress before the notice delay: %q", lines)
+	}
+}
+
+// Progress is printed once the wait passes the notice delay, naming the
+// budget.
+func TestWaitHubReadyPrintsProgress(t *testing.T) {
+	r := &coldHubRunner{failures: 1 << 30, slow: 5 * time.Millisecond}
+	c := New(r, Options{})
+	c.hubReadyTimeout, c.hubReadyInterval, c.hubReadyNotice = 60*time.Millisecond, 0, 10*time.Millisecond
+	var lines []string
+	err := c.waitHubReady(context.Background(), func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	if !errors.Is(err, ErrHubNotReady) || !strings.Contains(err.Error(), "attempts") {
+		t.Fatalf("err = %v, want ErrHubNotReady with the attempt count", err)
+	}
+	if len(lines) == 0 || !strings.Contains(lines[0], "not answering yet") || !strings.Contains(lines[0], "waiting up to") {
+		t.Fatalf("progress = %q", lines)
+	}
+}
+
+// When the server process is gone, the wait stops early instead of using
+// the whole budget: nothing will ever answer.
+func TestWaitHubReadyStopsWhenTheServerIsGone(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("sh -c f=", proc.Result{}) // the probe: no live scion server
+	c := New(f, Options{})
+	c.hubReadyTimeout, c.hubReadyInterval, c.hubAliveEvery = time.Hour, time.Millisecond, 0
+	start := time.Now()
+	err := c.waitHubReady(context.Background(), nil)
+	if !errors.Is(err, ErrHubNotReady) || !strings.Contains(err.Error(), "server.log") {
+		t.Fatalf("err = %v, want ErrHubNotReady pointing at the server log", err)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("the wait did not stop when the server was gone")
+	}
+}
+
+// A live server keeps the wait going; a probe that cannot run is no verdict.
+func TestWaitHubReadyKeepsWaitingOnALiveServer(t *testing.T) {
+	for _, live := range []bool{true, false} {
+		f := proc.NewFakeRunner()
+		if live {
+			f.Script("sh -c f=", proc.Result{Stdout: "4242"})
+		} // else unscripted: the fake fails the probe, as a failed jail shell would
+		c := New(f, Options{})
+		c.hubReadyTimeout, c.hubReadyInterval, c.hubAliveEvery = 30*time.Millisecond, time.Millisecond, 0
+		err := c.waitHubReady(context.Background(), nil)
+		if !errors.Is(err, ErrHubNotReady) || strings.Contains(err.Error(), "server.log") {
+			t.Fatalf("live=%v: err = %v, want the budget to run out", live, err)
+		}
+	}
+}
+
+// ServerStart clears a stale pid file BEFORE the start: a file naming a live
+// non-scion process would make scion answer "already running" and start
+// nothing.
+func TestServerStartProbesThePidFileFirst(t *testing.T) {
+	f, c := okScion()
+	f.Script("sh -c f=", proc.Result{Stdout: "stale:77"})
+	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080}); err != nil {
+		t.Fatal(err)
+	}
+	iProbe := f.CallIndex(proc.ArgvContains(layout.ServerPIDRel))
+	iStart := f.CallIndex(proc.ArgvPrefix("scion", "server", "start"))
+	if iProbe < 0 || iStart < 0 || iProbe > iStart {
+		t.Fatalf("want the pid probe before the start; calls=%+v", f.Calls)
+	}
+}
+
+// coldHubRunner fails the hub probe failures times (connection refused),
+// then answers.
+type coldHubRunner struct {
+	failures, probes int
+	slow             time.Duration
+}
+
+func (r *coldHubRunner) RunIn(_ context.Context, _ string, _ map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "sh" {
+		return proc.Result{Code: 1}, errors.New("exit status 1")
+	}
+	r.probes++
+	time.Sleep(r.slow)
+	if r.probes <= r.failures {
+		return proc.Result{Code: 1, Stderr: "Error: hub at http://127.0.0.1:8080 is not responding\n"}, errors.New("exit status 1")
+	}
+	return proc.Result{Stdout: "[]"}, nil
+}
+
+func (r *coldHubRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r *coldHubRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
 }

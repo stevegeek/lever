@@ -1329,13 +1329,15 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 			return brokerctl.BeginSession(w.app, st, cli.VersionString(), agent)
 		},
 		// InspectContainerMounts lets apply warn when a manager it kept or
-		// resumed lacks the manager.read_only mounts (create-time only).
+		// resumed lacks the manager.read_only mounts (create-time only), and
+		// refuse a resume whose record mounts a directory that is gone.
 		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
 			return jail.ContainerMounts(ctx, b.JailRunner(), ref)
 		},
 		ProbeContainerWritable: func(ctx context.Context, ref, target string) (bool, error) {
 			return jail.ContainerPathWritable(ctx, b.JailRunner(), ref, target)
 		},
+		RecordVolumes: w.recordVolumes,
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is
@@ -1361,10 +1363,44 @@ func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error
 func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), patMintOpts{
 		RestartHub: func(ctx context.Context) error {
-			return w.sc.ServerStart(ctx, apply.HubServerOpts(w.app, w.deps.HubSessionSecret))
+			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret)
+			opts.Progress = w.deps.Log
+			return w.sc.ServerStart(ctx, opts)
 		},
 		ScopeKnown: w.sc.KnowsUATScope,
 	})
+}
+
+// recordVolumes backs Deps.RecordVolumes (see hubRecordVolumes).
+func (w *applyWiring) recordVolumes(ctx context.Context, projectName, agentName string) ([]jail.Mount, error) {
+	return hubRecordVolumes(ctx, w.hub(), projectName, agentName)
+}
+
+// hubRecordVolumes is agentName's record volumes from the hub's agent
+// listing, as jail mounts — read-only, the same listing the role check
+// reads. Shared by apply's stale-mount check and doctor's read-only row,
+// for when the manager has no container to inspect.
+func hubRecordVolumes(ctx context.Context, hc *hubapi.Client, projectName, agentName string) ([]jail.Mount, error) {
+	agents, err := hc.Agents(ctx, projectName, scion.DefaultHubEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	return recordMounts(agents, agentName)
+}
+
+// recordMounts converts agentName's record volumes to jail mounts.
+func recordMounts(agents []hubapi.Agent, agentName string) ([]jail.Mount, error) {
+	for _, a := range agents {
+		if a.Slug != agentName {
+			continue
+		}
+		out := make([]jail.Mount, 0, len(a.Volumes))
+		for _, v := range a.Volumes {
+			out = append(out, jail.Mount{Source: v.Source, Destination: v.Target, RW: !v.ReadOnly})
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("no hub record for agent %q", agentName)
 }
 
 // hub is the Hub REST client, over curl in the jail with the controller PAT.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -1256,5 +1259,26 @@ func TestAwaitListeningHonoursContext(t *testing.T) {
 	}
 	if time.Since(start) > 500*time.Millisecond {
 		t.Fatal("awaitListening kept waiting after the context was cancelled")
+	}
+}
+
+// recordMounts turns the manager record's volumes into the jail mounts
+// apply's stale-mount check compares, and fails for an absent record (so
+// the check says nothing rather than reading "no mounts").
+func TestRecordMounts(t *testing.T) {
+	agents := []hubapi.Agent{
+		{Slug: "scratch", Volumes: []hubapi.Volume{{Source: "/x", Target: "/y"}}},
+		{Slug: "hello", Volumes: []hubapi.Volume{
+			{Source: "/lever/kb", Target: "/workspace/kb", ReadOnly: true},
+			{Source: "/lever/a", Target: "/workspace/a"},
+		}},
+	}
+	got, err := recordMounts(agents, "hello")
+	want := []jail.Mount{{Source: "/lever/kb", Destination: "/workspace/kb"}, {Source: "/lever/a", Destination: "/workspace/a", RW: true}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if _, err := recordMounts(agents, "nobody"); err == nil {
+		t.Fatal("an absent record must be an error")
 	}
 }

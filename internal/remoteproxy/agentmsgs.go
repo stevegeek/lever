@@ -65,8 +65,8 @@ func agentRow(m historyRow, uid, agentID string) bool {
 }
 
 // keepAgentRows asks the broker which agent rows to keep. Rows that are not
-// agent rows are not asked about (and not in the answer); an agent row with
-// no id, no text (a deleted one), no readable time, or an id that appears
+// agent rows are not asked about (and not in the answer); an agent row from
+// another sender id than the DM's agent, with no id, no text (a deleted one), no readable time, or an id that appears
 // more than once in rows is never kept. Only an id the proxy asked about
 // can be in the answer: the broker's keep list is checked against the
 // question, never trusted on its own.
@@ -74,7 +74,9 @@ func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid s
 	seen := idCounts(rows)
 	var ask []AgentMessage
 	for _, m := range rows {
-		if !agentRow(m, uid, agentID) || m.ID == "" || m.Msg == "" || seen[m.ID] != 1 {
+		// Only the DM agent's own rows are asked about: another sender's row
+		// with the same text must not take the agent's record.
+		if !agentRow(m, uid, agentID) || m.SenderID != agentID || m.ID == "" || m.Msg == "" || seen[m.ID] != 1 {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, m.CreatedAt)
@@ -152,6 +154,7 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	removed := map[string]bool{}
 	agentIDs := map[string]bool{} // ids of agent rows, kept or not
 	seen := idCounts(rows)
+	shown := map[string]bool{} // ids of the rows the contact gets
 	for i, m := range rows {
 		isAgent := agentRow(m, uid, agentID)
 		if isAgent {
@@ -164,6 +167,7 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 			continue
 		}
 		kept = append(kept, raws[i])
+		shown[m.ID] = true
 	}
 	doc["messages"], _ = json.Marshal(kept)
 	delete(doc, "items")
@@ -185,6 +189,10 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 			// for contacts are a later spec).
 			if removed[id] || !listed[id] || k == "messageAttachments" && agentIDs[id] {
 				delete(m, id)
+				continue
+			}
+			if k == "messageExtensions" {
+				m[id] = dropHiddenReplyTo(m[id], shown)
 			}
 		}
 		doc[k], _ = json.Marshal(m)
@@ -202,6 +210,25 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 // shown. The chat page takes its unread counts from /lever/api/agents,
 // which counts only shown rows.
 var dmEntryHidden = []string{"lastMessagePreview", "lastMessageSender", "lastMessageId", "lastActivityAt", "hasUnread"}
+
+// dropHiddenReplyTo removes an extension entry's replyToId unless it names
+// a row the contact is shown on this page: the id of a hidden row is not
+// the contact's to see. An entry that is not an object is dropped.
+func dropHiddenReplyTo(raw json.RawMessage, shown map[string]bool) json.RawMessage {
+	var e map[string]json.RawMessage
+	if json.Unmarshal(raw, &e) != nil || e == nil {
+		return json.RawMessage(`{}`)
+	}
+	var to string
+	if v, ok := e["replyToId"]; ok && (json.Unmarshal(v, &to) != nil || !shown[to]) {
+		delete(e, "replyToId")
+	}
+	b, err := json.Marshal(e)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return b
+}
 
 // stripDMPreviews removes dmEntryHidden from every DM entry. An answer it
 // cannot read becomes an empty list.

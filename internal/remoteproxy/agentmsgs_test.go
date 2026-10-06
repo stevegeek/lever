@@ -279,3 +279,44 @@ func gzipped(s string) string {
 	_ = z.Close()
 	return b.String()
 }
+
+// A kept row's extension keeps replyToId only when it names a row the
+// contact is shown on this page.
+func TestHistoryFilterDropsAReplyToAHiddenRow(t *testing.T) {
+	body := `{"messages":[
+ {"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:00Z"},
+ {"id":"a2","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"SECRET","createdAt":"2026-10-06T10:01:00Z"},
+ {"id":"c1","sender":"user:c@x","senderId":"u-contact","type":"instruction","msg":"mine","createdAt":"2026-10-06T09:59:00Z"}],
+ "messageExtensions":{"a1":{"messageId":"a1","replyToId":"a2"},"c1":{"messageId":"c1","replyToId":"a1"}}}`
+	h := agentMsgHandler(t, historyHub(t, body, nil), recordedOnly("recorded"))
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	var doc struct {
+		Ext map[string]map[string]string `json:"messageExtensions"`
+	}
+	if err := json.Unmarshal([]byte(got), &doc); err != nil {
+		t.Fatalf("%v %s", err, got)
+	}
+	if _, ok := doc.Ext["a1"]["replyToId"]; ok || doc.Ext["a1"]["messageId"] != "a1" || doc.Ext["c1"]["replyToId"] != "a1" {
+		t.Fatalf("extensions %v", doc.Ext)
+	}
+}
+
+// Only the DM agent's own rows are asked about: a row from another sender
+// with the agent's recorded text stays hidden.
+func TestHistoryFilterAsksOnlyAboutTheAgentsRows(t *testing.T) {
+	body := `{"messages":[
+ {"id":"x1","sender":"agent:w2","senderId":"id-w2","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:00Z"},
+ {"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:01Z"}]}`
+	var asked []string
+	match := func(ctx context.Context, c, a string, msgs []AgentMessage) (map[string]bool, error) {
+		for _, m := range msgs {
+			asked = append(asked, m.ID)
+		}
+		return recordedOnly("recorded")(ctx, c, a, msgs)
+	}
+	h := agentMsgHandler(t, historyHub(t, body, nil), match)
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	if strings.Contains(got, `"x1"`) || !strings.Contains(got, `"a1"`) || len(asked) != 1 || asked[0] != "a1" {
+		t.Fatalf("asked %v: %s", asked, got)
+	}
+}

@@ -136,7 +136,7 @@ func TestContactMessagePassesToUnchanged(t *testing.T) {
 	defer srv.Close()
 	s := NewMCPServer(MCPConfig{BrokerURL: srv.URL, AgentCN: "worker", Client: srv.Client(), BodyDir: t.TempDir()})
 	out := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"contact_message","arguments":{"to":" c@example.com ","text":"hi"}}}`)
-	if got.To != " c@example.com " || !strings.Contains(out, "not-a-contact") {
+	if got.To != " c@example.com " || !strings.Contains(out, "not-a-contact") || strings.Contains(out, "next_allowed_at") {
 		t.Fatalf("posted %q, result %s", got.To, out)
 	}
 }

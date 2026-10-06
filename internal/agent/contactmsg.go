@@ -81,7 +81,11 @@ func contactMessageTool(s *MCPServer, ctx context.Context, args map[string]strin
 		return "", err
 	}
 	if !resp.OK {
-		b, _ := json.Marshal(map[string]any{"ok": false, "reason": resp.Reason, "note": resp.Note, "next_allowed_at": resp.NextAllowedAt})
+		out := map[string]any{"ok": false, "reason": resp.Reason, "note": resp.Note}
+		if resp.NextAllowedAt != "" {
+			out["next_allowed_at"] = resp.NextAllowedAt
+		}
+		b, _ := json.Marshal(out)
 		return string(b), nil
 	}
 	if !plainTarget.MatchString(resp.To) || !plainRef.MatchString(resp.Ref) {

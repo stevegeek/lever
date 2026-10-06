@@ -92,20 +92,28 @@ func (p *Push) watch(ctx context.Context, login string) {
 		if ctx.Err() != nil {
 			return
 		}
-		if time.Since(start) >= p.healthy {
-			backoff = p.backoffMin
-		}
 		if err != nil {
 			p.record(login, "", "", DecisionPushStream, 0, streamFault(err))
 		}
-		jitter := time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64()))
+		var wait time.Duration
+		wait, backoff = p.nextBackoff(backoff, time.Since(start))
+		jitter := time.Duration(float64(wait) * (0.8 + 0.4*rand.Float64()))
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(jitter):
 		}
-		backoff = min(backoff*2, p.backoffMax)
 	}
+}
+
+// nextBackoff is the wait before the next connect and the backoff after it:
+// a stream that lived healthy starts again from backoffMin; otherwise the
+// wait doubles up to backoffMax.
+func (p *Push) nextBackoff(backoff, lived time.Duration) (wait, next time.Duration) {
+	if lived >= p.healthy {
+		backoff = p.backoffMin
+	}
+	return backoff, min(backoff*2, p.backoffMax)
 }
 
 var (
@@ -163,7 +171,7 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	if ct, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); resp.StatusCode != http.StatusOK || ct != "text/event-stream" {
 		return fmt.Errorf("hub events: HTTP %d", resp.StatusCode)
 	}
-	s := &pushSession{uid: uid, cookie: cookie, tier: g.viewerFor(login).tier}
+	s := &pushSession{uid: uid, cookie: cookie, tier: g.viewerFor(login).tier, end: func() { cancel(errPushSession) }}
 	sched := newPushScheduler(sctx, p, login, s)
 	s.schedule = func(t pushTarget, after time.Duration) { sched.add(t.key, after, false) }
 	schedDone := make(chan struct{})
@@ -179,6 +187,10 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	for {
 		lines, err := rd.nextEvent()
 		if err != nil {
+			if s.stale.Load() {
+				g.cfg.Session.Invalidate(login, cookie)
+				return errPushSession
+			}
 			if c := context.Cause(sctx); c != nil && !errors.Is(c, context.Canceled) {
 				return c
 			}
@@ -228,7 +240,10 @@ func dmEventKey(lines []string, subject string) (string, bool) {
 }
 
 // pushScheduler runs one login's checks, one at a time. key "" means every
-// target; catchUp marks a pass after a connect.
+// target; catchUp marks a pass after a connect. A check that decided
+// nothing (the hub or the store failed) runs again, with backoff, at most
+// maxCheckRetries times, and keeps its catch-up flag: a message stored in
+// a reconnect gap is found only by that pass.
 type pushScheduler struct {
 	ctx   context.Context
 	p     *Push
@@ -237,11 +252,38 @@ type pushScheduler struct {
 	mu    sync.Mutex
 	due   map[string]time.Time
 	catch map[string]bool
+	tries map[string]int
 	wake  chan struct{}
 }
 
+const maxCheckRetries = 5
+
 func newPushScheduler(ctx context.Context, p *Push, login string, s *pushSession) *pushScheduler {
-	return &pushScheduler{ctx: ctx, p: p, login: login, s: s, due: map[string]time.Time{}, catch: map[string]bool{}, wake: make(chan struct{}, 1)}
+	return &pushScheduler{ctx: ctx, p: p, login: login, s: s, due: map[string]time.Time{}, catch: map[string]bool{},
+		tries: map[string]int{}, wake: make(chan struct{}, 1)}
+}
+
+// retry schedules key again after a failed check, or gives up after
+// maxCheckRetries (audited; the next event or connect checks it again).
+func (q *pushScheduler) retry(key string, catchUp bool) {
+	q.mu.Lock()
+	q.tries[key]++
+	n := q.tries[key]
+	if n > maxCheckRetries {
+		delete(q.tries, key)
+	}
+	q.mu.Unlock()
+	if n > maxCheckRetries {
+		q.p.record(q.login, "", "", DecisionPushFailed, 0, "retries")
+		return
+	}
+	q.add(key, min(q.p.backoffMin<<(n-1), q.p.backoffMax), catchUp)
+}
+
+func (q *pushScheduler) done(key string) {
+	q.mu.Lock()
+	delete(q.tries, key)
+	q.mu.Unlock()
 }
 
 // add asks for a check of key after the debounce (or after, if longer).
@@ -301,14 +343,27 @@ func (q *pushScheduler) runDue() {
 	}
 	targets, err := q.p.g.pushTargets(q.ctx, q.login, q.s.uid)
 	if err != nil {
+		if q.ctx.Err() == nil {
+			for k := range keys {
+				q.retry(k, catch[k])
+			}
+		}
 		return
 	}
+	q.done("")
 	for _, t := range targets {
 		if q.ctx.Err() != nil {
 			return
 		}
-		if keys[""] || keys[t.key] {
-			q.p.check(q.ctx, q.login, t, q.s, catch[""] || catch[t.key])
+		if !keys[""] && !keys[t.key] {
+			continue
+		}
+		c := catch[""] || catch[t.key]
+		switch err := q.p.check(q.ctx, q.login, t, q.s, c); {
+		case err == nil:
+			q.done(t.key)
+		case errors.Is(err, errCheck) && q.ctx.Err() == nil:
+			q.retry(t.key, c)
 		}
 	}
 }

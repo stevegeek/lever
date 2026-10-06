@@ -18,9 +18,14 @@ type fakeSender struct {
 	mu   sync.Mutex
 	sent []string // "<endpoint> <payload>"
 	err  func(webpush.Subscription) error
+	// hook, when set, runs before the send is recorded, with its context.
+	hook func(ctx context.Context)
 }
 
-func (f *fakeSender) Send(_ context.Context, s webpush.Subscription, p []byte) error {
+func (f *fakeSender) Send(ctx context.Context, s webpush.Subscription, p []byte) error {
+	if f.hook != nil {
+		f.hook(ctx)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, s.Endpoint+" "+string(p))

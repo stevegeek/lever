@@ -2,6 +2,7 @@ package remoteproxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -253,5 +254,163 @@ func TestDMEventKey(t *testing.T) {
 		if key != tc.key || ok != tc.ok {
 			t.Errorf("%s: %q %v", name, key, ok)
 		}
+	}
+}
+
+func (e *watchEnv) reads() int {
+	e.hub.mu.Lock()
+	defer e.hub.mu.Unlock()
+	return e.hub.reads
+}
+
+// TestWatchRetriesAFailedCatchUp: a message stored during a gap is found
+// only by the catch-up after the connect; a failed read there is retried.
+func TestWatchRetriesAFailedCatchUp(t *testing.T) {
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = time.Minute
+		e.p.store.Add(chatOp, sub("op"))
+		e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: time.Now().Add(-time.Minute)})
+		e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+		e.hub.histErr, e.hub.histErrTimes = http.StatusBadGateway, 2 // boss and w1 fail once
+	})
+	eventually(t, "the push after the retry", func() bool { return len(e.fs.all()) == 1 })
+}
+
+// TestWatchRetryKeepsTheCatchUpFlag: a retried catch-up is still a catch-up:
+// a DM seen for the first time sets the mark and pushes nothing.
+func TestWatchRetryKeepsTheCatchUpFlag(t *testing.T) {
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = time.Minute
+		e.p.store.Add(chatOp, sub("op"))
+		e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+		e.hub.histErr, e.hub.histErrTimes = http.StatusBadGateway, 2
+	})
+	eventually(t, "the baseline mark", func() bool { m, ok := e.p.store.Mark(chatOp, "w1"); return ok && m.ID == "m1" })
+	time.Sleep(100 * time.Millisecond)
+	if len(e.fs.all()) != 0 {
+		t.Fatal("a retried catch-up pushed a row that was there before the first connect")
+	}
+}
+
+func TestWatchRetriesAreBounded(t *testing.T) {
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = time.Minute
+		e.p.store.Add(chatOp, sub("op"))
+		e.hub.histErr = http.StatusBadGateway
+	})
+	// Four targets (boss, w1, w2, w3), each read once and retried five times.
+	eventually(t, "every retry", func() bool { return e.reads() == 4*(1+maxCheckRetries) })
+	time.Sleep(300 * time.Millisecond)
+	if n := e.reads(); n != 4*(1+maxCheckRetries) {
+		t.Fatalf("%d history reads: the retries do not stop", n)
+	}
+	b, _ := json.Marshal(e.lines.all())
+	if !strings.Contains(string(b), `"retries"`) {
+		t.Fatalf("no audit line for the given-up check: %s", b)
+	}
+}
+
+// TestWatchRejectedSessionReconnectsAndCatchesUp: a history read the hub
+// refuses (401) ends the stream at once; the next connect logs in again and
+// its catch-up pushes the message.
+func TestWatchRejectedSessionReconnectsAndCatchesUp(t *testing.T) {
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	var sess *stubSession
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = time.Minute // only the rejected session may end the stream
+		sess = e.g.cfg.Session.(*stubSession)
+		e.p.store.Add(chatOp, sub("op"))
+		e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: time.Now().Add(-time.Minute)})
+	})
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	time.Sleep(50 * time.Millisecond)
+	e.hub.mu.Lock()
+	e.hub.histErr, e.hub.histErrTimes = http.StatusUnauthorized, 1
+	e.hub.mu.Unlock()
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- pushDMEvent(chatUID, key)
+	eventually(t, "a reconnect", func() bool { return e.sse.count() >= 2 })
+	eventually(t, "the catch-up push", func() bool { return len(e.fs.all()) == 1 })
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if len(sess.invalidated) == 0 {
+		t.Fatal("the rejected session was not invalidated")
+	}
+}
+
+// TestWatchHeartbeatsKeepTheStream: any event or heartbeat resets the idle
+// timer.
+func TestWatchHeartbeatsKeepTheStream(t *testing.T) {
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = 300 * time.Millisecond
+		e.p.store.Add(chatOp, sub("op"))
+	})
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	for range 9 {
+		e.sse.events <- ":heartbeat 1\n\n"
+		time.Sleep(100 * time.Millisecond)
+	}
+	if n := e.sse.count(); n != 1 {
+		t.Fatalf("%d streams: a beating stream was dropped as idle", n)
+	}
+}
+
+// TestRunWaitsForInFlightSends: Run returns only after every watcher, and
+// each watcher only after its checks, so a shutdown never cuts a send.
+func TestRunWaitsForInFlightSends(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	var finished atomic.Bool
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle = time.Minute
+		e.p.store.Add(chatOp, sub("op"))
+		e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: time.Now().Add(-time.Minute)})
+		e.fs.hook = func(context.Context) {
+			entered <- struct{}{}
+			time.Sleep(200 * time.Millisecond)
+			finished.Store(true)
+		}
+	})
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	time.Sleep(50 * time.Millisecond)
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- pushDMEvent(chatUID, key)
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no send")
+	}
+	e.cancel()
+	<-e.done
+	if !finished.Load() {
+		t.Fatal("Run returned while a send was under way")
+	}
+}
+
+func TestNextBackoff(t *testing.T) {
+	p := &Push{backoffMin: time.Second, backoffMax: 8 * time.Second, healthy: time.Minute}
+	for _, tc := range []struct{ cur, lived, wait, next time.Duration }{
+		{time.Second, 0, time.Second, 2 * time.Second},
+		{4 * time.Second, 0, 4 * time.Second, 8 * time.Second},
+		{8 * time.Second, 0, 8 * time.Second, 8 * time.Second},
+		{8 * time.Second, 2 * time.Minute, time.Second, 2 * time.Second},
+	} {
+		if w, n := p.nextBackoff(tc.cur, tc.lived); w != tc.wait || n != tc.next {
+			t.Errorf("nextBackoff(%v, %v) = %v, %v; want %v, %v", tc.cur, tc.lived, w, n, tc.wait, tc.next)
+		}
+	}
+}
+
+// TestSchedulerKeepsACatchUpFlag: an event for a key that a catch-up pass
+// already waits for does not turn that pass into a plain check.
+func TestSchedulerKeepsACatchUpFlag(t *testing.T) {
+	q := newPushScheduler(context.Background(), &Push{debounce: time.Millisecond}, chatOp, &pushSession{})
+	q.add("", 0, true)
+	q.add("", 0, false)
+	q.add("k", 0, false)
+	if !q.catch[""] || q.catch["k"] {
+		t.Fatalf("catch %v", q.catch)
 	}
 }

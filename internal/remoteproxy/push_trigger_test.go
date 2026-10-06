@@ -21,7 +21,10 @@ type pushDMHub struct {
 	rows    map[string][]historyRow // conversation key → newest first
 	unread  map[string]bool
 	histErr int // status to answer history with (0 = 200)
-	reads   int
+	// histErrTimes, when > 0, is how many history reads get histErr; then
+	// the reads answer 200 again.
+	histErrTimes int
+	reads        int
 }
 
 func (d *pushDMHub) route(w http.ResponseWriter, r *http.Request) bool {
@@ -37,6 +40,15 @@ func (d *pushDMHub) route(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if key, ok := strings.CutPrefix(r.URL.Path, "/api/v1/chat/conversations/"); ok && strings.HasSuffix(key, "/messages") {
 		d.reads++
+		if d.histErr != 0 && d.histErrTimes > 0 {
+			d.histErrTimes--
+			if d.histErrTimes == 0 {
+				st := d.histErr
+				d.histErr = 0
+				w.WriteHeader(st)
+				return true
+			}
+		}
 		if d.histErr != 0 {
 			w.WriteHeader(d.histErr)
 			return true
@@ -155,6 +167,8 @@ func TestCheckIgnoresOwnAndHubRows(t *testing.T) {
 		"deleted":      {ID: "m1", Sender: "agent:w1", SenderID: agentW1, Type: "instruction", Msg: "", CreatedAt: t0.Format(time.RFC3339Nano)},
 		"other agent":  {ID: "m1", Sender: "agent:w2", SenderID: "id-w2", Type: "instruction", Msg: "x", CreatedAt: t0.Format(time.RFC3339Nano)},
 		"bad time":     {ID: "m1", Sender: "agent:w1", SenderID: agentW1, Type: "instruction", Msg: "x", CreatedAt: "yesterday"},
+		// The agent's id with a person's sender: only an agent sender pushes.
+		"user sender": {ID: "m1", Sender: "user:x@y", SenderID: agentW1, Type: "instruction", Msg: "x", CreatedAt: t0.Format(time.RFC3339Nano)},
 	} {
 		e := newTriggerEnv(t, nil)
 		e.p.store.Add(chatOp, sub("op"))
@@ -364,5 +378,62 @@ func TestCheckHistory401MarksTheSessionStale(t *testing.T) {
 	e.p.check(context.Background(), chatOp, tg, s, false)
 	if !s.stale.Load() {
 		t.Fatal("a rejected session was not reported to the watcher")
+	}
+}
+
+func TestCheckSkipsADuplicatedID(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("op"))
+	tg := e.target(t, chatOp, chatUID, "w1")
+	e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: t0.Add(-time.Minute)})
+	e.hub.put(tg.key, agentMsg("m1", agentW1, "w1", t0), agentMsg("m1", agentW1, "w1", t0.Add(time.Second)))
+	e.p.check(context.Background(), chatOp, tg, e.session(chatUID, chatledger.TierOperator), false)
+	if len(e.fs.all()) != 0 {
+		t.Fatal("a row whose id appears twice on the page was pushed")
+	}
+}
+
+// TestCheckSendOutlivesTheStream: the mark is stored before the send, so a
+// send cancelled with the stream (idle drop, hub restart) would be a lost
+// push. The send gets a context the stream's end does not cancel.
+func TestCheckSendOutlivesTheStream(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("op"))
+	tg := e.target(t, chatOp, chatUID, "w1")
+	e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: t0.Add(-time.Minute)})
+	e.hub.put(tg.key, agentMsg("m1", agentW1, "w1", t0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.fs.hook = func(c context.Context) {
+		cancel() // the stream ends while the send is under way
+		if c.Err() != nil {
+			t.Error("the send was cancelled with the stream")
+		}
+		if _, ok := c.Deadline(); !ok {
+			t.Error("the send has no time limit")
+		}
+	}
+	if err := e.p.check(ctx, chatOp, tg, e.session(chatUID, chatledger.TierOperator), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.fs.all()) != 1 {
+		t.Fatal("no send")
+	}
+}
+
+func TestCheckReportsWhatToRetry(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("op"))
+	tg := e.target(t, chatOp, chatUID, "w1")
+	e.hub.histErr = http.StatusBadGateway
+	if err := e.p.check(context.Background(), chatOp, tg, e.session(chatUID, chatledger.TierOperator), true); !errors.Is(err, errCheck) {
+		t.Fatalf("a failed history read: %v, want errCheck", err)
+	}
+	e.hub.histErr = http.StatusUnauthorized
+	ended := false
+	s := e.session(chatUID, chatledger.TierOperator)
+	s.end = func() { ended = true }
+	if err := e.p.check(context.Background(), chatOp, tg, s, true); !errors.Is(err, errSessionUnknown) || !ended {
+		t.Fatalf("a rejected session: %v, ended %v", err, ended)
 	}
 }

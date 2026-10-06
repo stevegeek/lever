@@ -40,6 +40,9 @@ type pushSession struct {
 	uid, cookie, tier string
 	stale             atomic.Bool
 	schedule          func(t pushTarget, after time.Duration)
+	// end, when set, ends the stream at once (a rejected session): the
+	// next connect logs in again and its catch-up runs the check again.
+	end func()
 }
 
 // pushTargets are the agents login may message that have a usable hub
@@ -140,18 +143,26 @@ func (g *gate) dmUnread(ctx context.Context, cookie, key string) bool {
 	return true
 }
 
+// errCheck is a check that decided nothing (the history or the store
+// failed): the scheduler runs it again.
+var errCheck = errors.New("push check: no decision")
+
 // check decides one (login, agent). catchUp is the pass after a (re)connect:
 // a DM never seen sets the mark only, and a row older than pushCatchUp only
-// moves it.
-func (p *Push) check(ctx context.Context, login string, t pushTarget, s *pushSession, catchUp bool) {
+// moves it. It returns errCheck when it decided nothing and
+// errSessionUnknown when the hub refused the session; nil otherwise.
+func (p *Push) check(ctx context.Context, login string, t pushTarget, s *pushSession, catchUp bool) error {
 	row, at, ok, err := p.g.newestForPush(ctx, login, s.cookie, s.uid, s.tier, t)
 	if errors.Is(err, errSessionUnknown) {
 		s.stale.Store(true)
-		return
+		if s.end != nil {
+			s.end()
+		}
+		return errSessionUnknown
 	}
 	if err != nil {
 		p.record(login, t.name, "", DecisionPushFailed, 0, "history")
-		return
+		return errCheck
 	}
 	mark, had := p.store.Mark(login, t.name)
 	if !ok {
@@ -160,31 +171,35 @@ func (p *Push) check(ctx context.Context, login string, t pushTarget, s *pushSes
 		if catchUp && !had {
 			_ = p.store.SetMark(login, t.name, PushMark{})
 		}
-		return
+		return nil
 	}
 	if had && !newerRow(at, row.ID, mark.At, mark.ID) {
-		return
+		return nil
 	}
 	next := PushMark{ID: row.ID, At: at}
 	if catchUp && (!had || p.now().Sub(at) > pushCatchUp) {
 		_ = p.store.SetMark(login, t.name, next)
-		return
+		return nil
 	}
 	if !p.g.dmUnread(ctx, s.cookie, t.key) {
 		_ = p.store.SetMark(login, t.name, next)
-		return
+		return nil
 	}
 	if wait := p.takeSlot(login, t.name); wait > 0 {
 		if s.schedule != nil {
 			s.schedule(t, wait)
 		}
-		return
+		return nil
 	}
 	if err := p.store.SetMark(login, t.name, next); err != nil {
 		p.record(login, t.name, "", DecisionPushFailed, 0, "store")
-		return
+		return errCheck
 	}
-	p.notify(ctx, login, t.name)
+	// The mark is stored: from here the sends must not die with the stream
+	// (an idle drop or a hub restart), or the push is lost. notify bounds
+	// each send itself.
+	p.notify(context.WithoutCancel(ctx), login, t.name)
+	return nil
 }
 
 // takeSlot spends the (login, agent) push slot, or reports how long until
@@ -208,7 +223,9 @@ func (p *Push) notify(ctx context.Context, login, agent string) {
 		Agent string `json:"agent"`
 	}{1, agent})
 	for _, sub := range p.store.Subs(login) {
-		err := p.send.Send(ctx, sub.Subscription, payload)
+		sctx, cancel := context.WithTimeout(ctx, webpush.SendTimeout)
+		err := p.send.Send(sctx, sub.Subscription, payload)
+		cancel()
 		host := endpointHost(sub.Endpoint)
 		switch {
 		case err == nil:

@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -470,5 +471,43 @@ func TestSkippedHealNeverLeavesANegativeCount(t *testing.T) {
 	b.healLapse(context.Background(), "scratch")
 	if n := reenrolTriesOf(b, "scratch"); n != 0 {
 		t.Fatalf("count after a reset and a skipped heal = %d, want 0", n)
+	}
+}
+
+// A heal refused for the record's stored role stages nothing: the role check
+// runs before the ticket is staged, so no fresh one-use ticket is left
+// behind for a worker (guest channel) or the manager (bootstrap dir).
+func TestHealRefusedForRoleStagesNoTicket(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {
+			{Slug: "scratch", Phase: "running", ContainerStatus: "Up 2 minutes"},
+			{Slug: "appname", Phase: "running", ContainerStatus: "Up 5 minutes"},
+		},
+	}}
+	b, _, managerDir := reenrolBroker(t, rt, "all")
+	var checked []string
+	b.verifyRole = func(_ context.Context, agent string) error {
+		checked = append(checked, agent)
+		return errors.New("stored role reads as full")
+	}
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	b.healLapse(context.Background(), "scratch")
+	b.healLapse(context.Background(), "test-manager")
+
+	if len(rt.staged) != 0 {
+		t.Fatalf("a role-refused worker heal staged %d ticket(s)", len(rt.staged["scratch"]))
+	}
+	if cn := stagedCN(t, managerDir); cn != "" {
+		t.Fatalf("a role-refused manager heal staged a bootstrap (CN %q)", cn)
+	}
+	if len(rt.suspend) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("a role-refused heal bounced: suspend=%v resume=%v", rt.suspend, rt.resumed)
+	}
+	if len(checked) != 2 || checked[0] != "scratch" || checked[1] != "appname" {
+		t.Fatalf("role checked for %v, want [scratch appname] (one check each, by scion slug)", checked)
+	}
+	if strings.Count(buf.String(), "refusing to bounce") != 2 {
+		t.Fatalf("want two deny lines:\n%s", buf.String())
 	}
 }

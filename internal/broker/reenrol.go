@@ -133,6 +133,17 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	// hold every start, resume, wake, stop and suspend of it for good.
 	hctx, hcancel := context.WithTimeout(ctx, reenrolHealTimeout)
 	defer hcancel()
+	// The heal bounces the agent through resume, so it meets the same
+	// pre-role record hazard as an operator-driven resume (see
+	// DispatchConfig.VerifyAgentRole). Abandoning the heal is the safe
+	// answer: a lapsed leaf costs that agent its brokered tools, while
+	// healing it into full hub authority costs the instance its
+	// containment. Checked BEFORE the stage, like the workspace check: a
+	// refused heal must not leave a fresh one-use ticket behind.
+	if err := b.checkAgentRole(hctx, slug); err != nil {
+		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
+		return
+	}
 	if err := stage(hctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return
@@ -232,15 +243,6 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 			phase = scion.PhaseLabel(a.Phase)
 			break
 		}
-	}
-	// The healer bounces an agent through resume, so it meets the same pre-role
-	// record hazard as an operator-driven resume (see DispatchConfig.VerifyAgentRole).
-	// Abandoning the heal is the safe answer: a lapsed leaf costs that agent its
-	// brokered tools, while healing it into full hub authority costs the
-	// instance its containment.
-	if err = b.checkAgentRole(ctx, slug); err != nil {
-		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
-		return "", false
 	}
 	// A worker's resume re-resolves its workspace bind source: with
 	// manager.read_only set, refuse to bounce one whose dir is now reached

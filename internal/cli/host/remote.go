@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -167,6 +168,9 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// remote.agent_messages: which agent rows a contact is shown, asked
 		// of the broker over its operator socket. Nil when off.
 		MatchAgentMessages: remoteAgentMessages(app, st),
+		// The operator's read-only view of contact conversations reads only
+		// for a contact apply bound to a hub user (opview.go).
+		ContactUser: remoteContactUser(st),
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
@@ -699,5 +703,25 @@ func newRemoteStatusCmd() *cobra.Command {
 			}
 			return nil
 		},
+	}
+}
+
+// remoteContactUser is the operator view's source of a contact's hub user
+// id: the one `lever apply` bound it to, as a contact (remote-role.json).
+// Read on each call: apply rewrites the file while the proxy runs, and the
+// operator view is read rarely. A contact apply did not bind (it had not
+// signed in) has none, so the proxy never logs in for it.
+func remoteContactUser(st state.State) func(login string) (string, bool) {
+	return func(login string) (string, bool) {
+		rec, found, err := st.LoadRemoteRoleRecord()
+		if err != nil || !found {
+			return "", false
+		}
+		email := config.HubEmailFor(login)
+		if !slices.Contains(rec.Contacts, email) {
+			return "", false
+		}
+		id := rec.Bound[email]
+		return id, id != ""
 	}
 }

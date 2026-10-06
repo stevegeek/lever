@@ -81,7 +81,7 @@ func capabilityToolSchemas() []any {
 		map[string]any{"name": "message_verify", "description": messageVerifyDescription, "inputSchema": messageVerifySchema(strProp)},
 		map[string]any{"name": "chat_verify", "description": "Alias of message_verify (the 0.27 name): same arguments, same answer. " + messageVerifyDescription,
 			"inputSchema": messageVerifySchema(strProp)},
-	}, contactToolSchemas(strProp)...)
+	}, append(contactToolSchemas(strProp), fileToolSchemas(strProp)...)...)
 }
 
 // directivePreviewDescription is what the model reads when it decides whether
@@ -199,6 +199,10 @@ var capabilityTools = map[string]func(*MCPServer, context.Context, map[string]st
 	// the caller may reach; the arguments grant nothing.
 	"contacts":        contactsTool,
 	"contact_message": contactMessageTool,
+	// contact_files / share_file: files in the chat (files.go). The broker
+	// decides from the mTLS caller which files and logins it may touch.
+	"contact_files": contactFilesTool,
+	"share_file":    shareFileTool,
 }
 
 func messageVerifyTool(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {

@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"time"
@@ -51,6 +52,9 @@ func (b *Broker) lapseFunc() ca.LapseFunc {
 	}
 }
 
+// reenrolLockWaitDefault bounds the healer's wait for a worker's lock.
+const reenrolLockWaitDefault = 2 * time.Second
+
 // runHealer drains lapse events for the life of ctx. Started by Serve.
 func (b *Broker) runHealer(ctx context.Context) {
 	for {
@@ -84,6 +88,25 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
 	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
 	// audit line.
+	// A worker's heal holds the worker's lifecycle lock from the stage to
+	// the end of the bounce, like every other start/resume/stop of it: a
+	// bounce must not undo a stop that lands after its phase read, nor
+	// resume a worker a remote wake is resuming. The wait is bounded, since
+	// this goroutine heals every agent; a busy lock skips this heal (not a
+	// failed attempt), and the next lapse event retries.
+	if _, isWorker := b.workerSpec(cn); isWorker {
+		lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
+		unlock, err := b.lockWorker(lctx, cn)
+		cancel()
+		if err != nil {
+			b.reenrolMu.Lock()
+			b.reenrolTries[cn]--
+			b.reenrolMu.Unlock()
+			b.audit("reenrol", cn, "error", "natural lapse: worker busy (another start, resume, wake, stop or suspend of it is under way); heal skipped, the next lapse retries")
+			return
+		}
+		defer unlock()
+	}
 	if err := stage(ctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return

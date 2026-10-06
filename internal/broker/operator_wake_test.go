@@ -161,12 +161,21 @@ func TestResumeAndWakeOfOneWorkerDoNotRace(t *testing.T) {
 	rt := &slowResumeRuntime{fakeRuntime: &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}},
 		gate: make(chan struct{}), entered: make(chan struct{})}
 	b := newTestBroker(t, rt, wakeSpec)
+	waiting := make(chan struct{})
+	var waitOnce sync.Once
+	b.onWorkerLockWait = func(string) { waitOnce.Do(func() { close(waiting) }) }
 	verb := make(chan int, 1)
 	go func() { verb <- callWorker(t, b, "/worker/resume", `{"worker":"worker"}`, "test-manager").Code }()
 	<-rt.entered
 	wake := make(chan *httptest.ResponseRecorder, 1)
 	go func() { wake <- postWake(t, b, `{"worker":"worker","login":"c@x"}`) }()
-	time.Sleep(50 * time.Millisecond) // let the wake reach the lock (or, without one, the runtime)
+	// The wake is queued on the worker's lock before the first resume ends.
+	// (Without the lock it never waits: this times out, and the second
+	// resume below shows the race.)
+	select {
+	case <-waiting:
+	case <-time.After(2 * time.Second):
+	}
 	close(rt.gate)
 	if code := <-verb; code != http.StatusOK {
 		t.Fatalf("verb: %d", code)

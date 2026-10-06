@@ -163,6 +163,14 @@ func (b *Broker) lockWorker(ctx context.Context, name string) (func(), error) {
 	select {
 	case sem <- struct{}{}:
 		return func() { <-sem }, nil
+	default:
+	}
+	if b.onWorkerLockWait != nil {
+		b.onWorkerLockWait(name)
+	}
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

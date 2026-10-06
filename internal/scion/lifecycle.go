@@ -756,6 +756,21 @@ func (c *Client) Suspend(ctx context.Context, worker, project string) error {
 	return err
 }
 
+// ResetAuth gives a running agent a new hub token without a restart (`scion
+// reset-auth`): the hub mints an agent token from the agent's STORED role and
+// scopes (scion pkg/hub/httpdispatcher.go DispatchAgentResetAuth, the same
+// agentRoleAndScopes every start and refresh uses), and the runtime broker
+// writes it to the agent's token file over exec stdin and signals sciontool
+// to restart its refresh loop. The call authenticates with the controller
+// PAT, like every lever verb; the new token is the agent's own, never a user
+// or controller token, so no authority moves into the container. It is the
+// one recovery for an expired agent token, which cannot refresh itself.
+func (c *Client) ResetAuth(ctx context.Context, agent, project string) error {
+	args := append([]string{"reset-auth", agent}, projectFlag(project)...)
+	_, err := c.run(ctx, "", append(args, "--non-interactive")...)
+	return err
+}
+
 // AttachArgv returns the in-jail argv to attach interactively. The caller
 // exec()s it (wrapped by the backend's AttachArgv) to hand over the TTY — it
 // never goes through the runner, so it bypasses env() entirely.

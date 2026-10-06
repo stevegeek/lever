@@ -15,6 +15,13 @@
 
 import {
   CONTACTS_MS,
+  UPLOAD_MS,
+  downloadPath,
+  fileCheck,
+  fileList,
+  sizeText,
+  uploadErrorText,
+  uploadNote,
   LIST_MS,
   MAX_MESSAGE,
   NOT_SHOWN,
@@ -94,6 +101,13 @@ const el = {
   readonly: $('readonly'),
   push: $('push'),
   pushnote: $('pushnote'),
+  attach: $('attach'),
+  file: $('file'),
+  upload: $('upload'),
+  files: $('files'),
+  filespanel: $('filespanel'),
+  filelist: $('filelist'),
+  filesnote: $('filesnote'),
 };
 
 let roster = null; // the list as last applied (agentList shape)
@@ -129,6 +143,9 @@ let reading = false; // a history read is under way
 let readAgain = false; // something changed while it was
 let olderCursor = '';
 let sending = false;
+let uploading = false; // a file upload is under way
+let filesOpen = false; // the Files panel is open
+let filesSeq = 0; // counts Files panel reads and closes
 let waking = ''; // the agent a send is waking ('' = none)
 let held = false; // Send rests after a note (see hold)
 let stream = null;
@@ -660,6 +677,7 @@ function applyRoster(l) {
   appliedSeq = l.seq;
   roster = l;
   renderRows();
+  syncAttach();
   setLink(el.console, l.tier === 'operator' ? l.console : '');
   if (!current) return;
   const a = l.agents.find((x) => x.name === current);
@@ -723,6 +741,140 @@ function applyView(a) {
 
 function syncSend() {
   el.send.disabled = sending || held || !chat || !chat.view || !chat.view.input;
+  syncAttach();
+}
+
+function showUpload(text) {
+  setText(el.upload, text);
+  el.upload.hidden = !text;
+}
+
+function showFilesNote(text) {
+  setText(el.filesnote, text);
+  el.filesnote.hidden = !text;
+}
+
+// syncAttach shows the paperclip and the Files button for an open chat
+// with an agent the login may message, while files are on.
+function syncAttach() {
+  const on = !!(roster && roster.files && chat);
+  el.attach.hidden = !on;
+  el.files.hidden = !on;
+  el.attach.disabled = uploading || sending || !chat || !chat.view || !chat.view.input;
+}
+
+function closeFiles() {
+  filesOpen = false;
+  filesSeq++;
+  el.filespanel.hidden = true;
+  setText(el.files, 'Files');
+  el.filelist.replaceChildren();
+  showFilesNote('');
+}
+
+// sendFile posts one file to the agent's upload route. XMLHttpRequest, not
+// fetch: only it reports upload progress. It never throws.
+function sendFile(name, file, progress) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    const done = (status, text) => {
+      let body = text;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // not JSON: keep the text
+      }
+      resolve({ ok: status >= 200 && status < 300, status, body });
+    };
+    xhr.open('POST', `/lever/api/files/${encodeURIComponent(name)}`);
+    xhr.timeout = UPLOAD_MS;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.upload.addEventListener('progress', (ev) => {
+      if (ev.lengthComputable && ev.total > 0) progress(Math.floor((ev.loaded * 100) / ev.total));
+    });
+    xhr.addEventListener('load', () => done(xhr.status, xhr.responseText));
+    xhr.addEventListener('error', () => done(0, 'cannot reach the server'));
+    xhr.addEventListener('timeout', () => done(0, 'no answer in time'));
+    const form = new FormData();
+    form.append('file', file, file.name);
+    xhr.send(form);
+  });
+}
+
+// upload sends the picked file to the open chat's agent, then tells the
+// agent in the chat with the normal send path (deliver: the list check, a
+// wake, the idempotency key), so the agent verifies the note as this
+// login's message.
+async function upload(file) {
+  const c = chat;
+  const cfg = roster && roster.files;
+  if (!file || !c || !cfg || uploading || sending) return;
+  const why = fileCheck(file, cfg);
+  if (why) {
+    showError(why);
+    return;
+  }
+  const shown = oneLine(file.name, 120);
+  uploading = true;
+  syncAttach();
+  showError('');
+  showUpload(`Uploading ${shown}… 0%`);
+  const res = await sendFile(c.name, file, (pct) => showUpload(`Uploading ${shown}… ${pct}%`));
+  uploading = false;
+  showUpload('');
+  syncAttach();
+  const here = () => !!chat && chat.name === c.name;
+  if (res.status !== 201 || !res.body || typeof res.body !== 'object' || typeof res.body.name !== 'string') {
+    if (here()) showError(`Not uploaded: ${uploadErrorText(res.status, res.body)}`);
+    return;
+  }
+  const name = oneLine(res.body.name, 120);
+  if (filesOpen && here()) void loadFiles();
+  sending = true;
+  syncSend();
+  syncAttach();
+  const out = await deliver(c, uploadNote(name));
+  sending = false;
+  syncSend();
+  syncAttach();
+  if (!out.blocked && out.res && out.res.status === 201) {
+    setUnsent(c, null);
+    if (chat === c && out.res.body && typeof out.res.body === 'object' && mergeMessages(messages, [out.res.body])) render(true);
+    refreshSoon();
+  } else if (here()) {
+    showError(`Uploaded ${name}, but the chat message was not sent: ${out.blocked || reason(out.res)}. Tell ${c.name} yourself.`);
+  }
+}
+
+async function loadFiles() {
+  const c = chat;
+  if (!c || !filesOpen) return;
+  const seq = ++filesSeq;
+  const res = await api(`/lever/api/files/${encodeURIComponent(c.name)}`);
+  if (seq !== filesSeq || chat !== c) return;
+  const list = res.ok ? fileList(res.body) : null;
+  if (!list) {
+    showFilesNote(`The files cannot be read: ${errorText(res.status, res.body)}.`);
+    return;
+  }
+  showFilesNote(list.length ? '' : 'No files yet.');
+  el.filelist.replaceChildren(...list.map((f) => fileRow(c.name, f)));
+}
+
+// fileRow is one file as text, with a download link only to lever's own
+// route for that agent and id (built here, never taken from the answer).
+function fileRow(agent, f) {
+  const li = document.createElement('li');
+  li.className = `file ${f.direction}`;
+  const a = document.createElement('a');
+  const href = localLink(downloadPath(agent, f.id));
+  if (href) {
+    a.setAttribute('href', href);
+    a.setAttribute('download', f.name);
+  }
+  setText(a, f.name);
+  li.append(span('who', f.direction === 'received' ? `From ${agent}` : 'You sent'), a, span('meta', `${sizeText(f.size)} · ${when({ createdAt: f.at })}`));
+  return li;
 }
 
 function resetHistory() {
@@ -753,10 +905,12 @@ function openChat(name) {
   el.label.hidden = !a.label;
   setLink(el.terminal, roster.tier === 'operator' ? a.terminal : '');
   resetHistory();
+  closeFiles();
   showError('');
   renderRows();
   if (a.access !== 'message') {
     chat = null;
+    syncAttach();
     showState(chipText(a), false);
     showNote('');
     showNotice('');
@@ -793,10 +947,13 @@ function closeChat() {
   setLink(el.terminal, '');
   showState('', true);
   resetHistory();
+  closeFiles();
+  showUpload('');
   showError('');
   showNote('');
   el.viewonly.hidden = true;
   el.form.hidden = true;
+  syncAttach();
   showNotice('Choose an agent from the list.');
   if (roster) renderRows();
   if (contacts) renderContacts();
@@ -836,6 +993,7 @@ function poll() {
   if (document.visibilityState !== 'visible') return;
   void reloadList();
   refreshSoon();
+  if (filesOpen) void loadFiles();
   if (!stream || stream.readyState === EventSource.CLOSED) openStream();
 }
 
@@ -1277,6 +1435,21 @@ el.refresh.addEventListener('click', () => void readTranscript(''));
 el.back.addEventListener('click', closeChat);
 el.ask.addEventListener('click', askManager);
 el.push.addEventListener('click', () => void togglePush());
+el.attach.addEventListener('click', () => {
+  el.file.value = '';
+  el.file.click();
+});
+el.file.addEventListener('change', () => void upload(el.file.files && el.file.files[0]));
+el.files.addEventListener('click', () => {
+  if (filesOpen) {
+    closeFiles();
+    return;
+  }
+  filesOpen = true;
+  el.filespanel.hidden = false;
+  setText(el.files, 'Hide files');
+  void loadFiles();
+});
 window.addEventListener('resize', grow);
 
 void start();

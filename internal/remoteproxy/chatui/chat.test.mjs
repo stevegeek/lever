@@ -24,6 +24,8 @@ function hubWith(parts = {}) {
     wake: () => ({ status: 202, body: { state: 'starting' } }),
     contacts: () => ({ status: 200, body: { contacts: [] } }),
     transcript: () => ({ status: 200, body: { contact: 'c@x', agent: 'w1', matched: true, messages: [] } }),
+    upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: 'report.pdf', size: 3, sha256: '0'.repeat(64) }, progress: [50, 100] }),
+    files: () => ({ status: 200, body: { files: [] } }),
     ...parts,
   };
   const fn = (method, path, body) => {
@@ -31,6 +33,7 @@ function hubWith(parts = {}) {
     if (path.startsWith('/lever/api/contacts/')) return h.transcript(path);
     if (path === '/lever/api/agents') return h.agents();
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
+    if (path.startsWith('/lever/api/files/')) return method === 'POST' ? h.upload(body, path) : h.files(path);
     if (method === 'POST' && path.endsWith('/read')) return h.read(body, path);
     if (method === 'POST') return h.post(body, path);
     return h.history(path);
@@ -1717,4 +1720,119 @@ test('push: another login on a shared device does not take the subscription', as
   const envC = await load(c, { push: { registered: true, existing: true, permission: 'granted' }, local: { 'lever-push-optin:op': '1' } });
   assert.equal(c.subs.length, 0, 'the subscription was posted for a login that never opted in');
   assert.equal(envC.els.push.textContent, 'Turn on notifications');
+});
+
+const withFiles = (agents) => () => roster(agents, { files: { maxBytes: 1000, extensions: ['pdf', 'xlsm'] } });
+
+test('files off: no paperclip and no Files button', async () => {
+  const env = await loadChat(hubWith());
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, true);
+});
+
+test('files on: paperclip and Files for a message agent, none for a see-only one', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS(), A('w2', { access: 'see' })]) }));
+  assert.equal(env.els.attach.hidden, false);
+  assert.equal(env.els.files.hidden, false);
+  env.els.agents.children[1].children[0].dispatch('click');
+  await tick(5);
+  assert.equal(env.els.attach.hidden, true);
+  assert.equal(env.els.files.hidden, true);
+});
+
+test('upload: one file field, progress, then the chat note through the normal send', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]) }));
+  env.els.attach.dispatch('click');
+  assert.equal(env.els.file.clicks, 1);
+  await env.pick({ name: 'report.pdf', size: 3 });
+  await env.runTimers();
+  const up = env.calls.find((c) => c.method === 'POST' && c.path === '/lever/api/files/boss');
+  assert.deepEqual(up.body.form, [{ field: 'file', name: 'report.pdf', size: 3 }]);
+  assert.ok(env.uploadNotes.some((t) => /50%/.test(t)), env.uploadNotes.join(' | '));
+  const s = sends(env);
+  assert.equal(s.length, 1);
+  assert.equal(s[0].body.content, '📎 uploaded report.pdf');
+  assert.equal(env.els.upload.hidden, true);
+  assert.equal(env.els.error.hidden, true);
+});
+
+test('a file over the limit or of another type is refused before any request', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]) }));
+  await env.pick({ name: 'big.pdf', size: 5000 });
+  assert.match(env.els.error.textContent, /limit/);
+  await env.pick({ name: 'run.exe', size: 1 });
+  assert.match(env.els.error.textContent, /not accepted/);
+  assert.equal(env.count('POST', '/lever/api/files/'), 0);
+  assert.equal(sends(env).length, 0);
+});
+
+test('an upload refusal shows its words and posts nothing', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]), upload: () => ({ status: 413, body: { error: 'too-large' } }) }));
+  await env.pick({ name: 'a.pdf', size: 3 });
+  await env.runTimers();
+  assert.match(env.els.error.textContent, /^Not uploaded: .*too large/);
+  assert.equal(sends(env).length, 0);
+});
+
+test('uploaded, but the chat note was refused: says so', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]), post: () => ({ status: 403, body: 'forbidden' }) }));
+  await env.pick({ name: 'a.pdf', size: 3 });
+  await env.runTimers();
+  assert.match(env.els.error.textContent, /^Uploaded report\.pdf, but the chat message was not sent/);
+});
+
+test('files panel: names are text, links only to lever\'s download route', async () => {
+  const evil = '<img src=x onerror=alert(1)>.pdf';
+  const id = 'e'.repeat(32);
+  const env = await loadChat(hubWith({
+    agents: withFiles([BOSS()]),
+    files: () => ({ status: 200, body: { files: [
+      { id, name: evil, size: 2048, at: '2026-10-07T10:00:00Z', direction: 'received' },
+      { id: '../../api/v1/x', name: 'bad', size: 1, direction: 'sent' },
+    ] } }),
+  }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.filespanel.hidden, false);
+  const rows = env.els.filelist.children;
+  assert.equal(rows.length, 1);
+  const a = rows[0].children.find((c) => c.tag === 'a');
+  assert.equal(a.textContent, evil);
+  assert.equal(a.attrs.href, `https://mac.ts.net/lever/api/files/boss/${id}`);
+  assert.equal(a.attrs.download, evil);
+  assert.match(rows[0].textContent, /From boss/);
+  assert.match(rows[0].textContent, /2 KB/);
+});
+
+test('files panel closes and clears when the chat changes', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS(), A('w1')]),
+    files: () => ({ status: 200, body: { files: [{ id: 'e'.repeat(32), name: 'a.pdf', size: 1, direction: 'sent' }] } }) }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  env.els.back.dispatch('click');
+  assert.equal(env.els.filespanel.hidden, true);
+  assert.equal(env.els.filelist.children.length, 0);
+});
+
+test('the chat note names the file as the server stored it', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]),
+    upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: '_bashrc.pdf', size: 3, sha256: '0'.repeat(64) } }) }));
+  await env.pick({ name: '.bashrc.pdf', size: 3 });
+  await env.runTimers();
+  assert.equal(sends(env)[0].body.content, '📎 uploaded _bashrc.pdf');
+});
+
+test('push and files together: both buttons work', async () => {
+  const hub = pushHub({ agents: withFiles([BOSS()]) });
+  const env = await load(hub, { push: {}, store: { 'lever-chat-open': 'boss' } });
+  assert.equal(env.els.push.hidden, false);
+  assert.equal(env.els.attach.hidden, false);
+  assert.equal(env.els.files.hidden, false);
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+  await env.pick({ name: 'a.pdf', size: 3 });
+  await env.runTimers();
+  assert.equal(env.count('POST', '/lever/api/files/boss'), 1);
+  assert.equal(sends(env).length, 1);
 });

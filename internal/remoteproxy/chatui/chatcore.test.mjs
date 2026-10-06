@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_MESSAGE,
+  filesConfig,
+  fileList,
+  sizeText,
+  fileCheck,
+  uploadErrorText,
+  uploadNote,
+  downloadPath,
   classify,
   errorText,
   historyItems,
@@ -384,4 +391,51 @@ test('pushView', () => {
   assert.equal(pushView({ available: true, permission: 'granted', subscribed: true }).text, 'Turn off notifications');
   assert.equal(pushView({ available: true, permission: 'granted', busy: true }).disabled, true);
   assert.equal(pushView({ available: true, permission: 'granted', error: 'x' }).note, 'x');
+});
+
+test('filesConfig: only a well-formed object turns files on', () => {
+  assert.deepEqual(filesConfig({ files: { maxBytes: 100, extensions: ['pdf', 'BAD', '.x', 'xlsm', 7] } }), { maxBytes: 100, extensions: ['pdf', 'xlsm'] });
+  for (const body of [{}, { files: null }, { files: { maxBytes: 0, extensions: [] } }, { files: { maxBytes: '5', extensions: [] } }, { files: { maxBytes: 5 } }]) {
+    assert.equal(filesConfig(body), null, JSON.stringify(body));
+  }
+  assert.equal(agentList({ agents: [] }).files, null);
+  assert.deepEqual(agentList({ agents: [], files: { maxBytes: 9, extensions: ['pdf'] } }).files, { maxBytes: 9, extensions: ['pdf'] });
+});
+
+test('fileList: rows need a 32-hex id; names are one line; direction is a fixed word', () => {
+  const id = 'a'.repeat(32);
+  const l = fileList({ files: [
+    { id, name: 'x\n<b>y</b>', size: 3, at: '2026-10-07T10:00:00Z', direction: 'received' },
+    { id: '../../x', name: 'bad' },
+    { id: 'b'.repeat(32), name: '', size: -1, direction: 'evil' },
+  ] });
+  assert.equal(l.length, 2);
+  assert.equal(l[0].name, 'x <b>y</b>');
+  assert.equal(l[0].direction, 'received');
+  assert.deepEqual([l[1].name, l[1].size, l[1].direction], ['file', 0, 'sent']);
+  assert.equal(fileList({ nope: 1 }), null);
+});
+
+test('sizeText, uploadNote, downloadPath', () => {
+  assert.equal(sizeText(512), '512 B');
+  assert.equal(sizeText(2048), '2 KB');
+  assert.equal(sizeText(25 * 1048576), '25.0 MB');
+  assert.equal(uploadNote('a.pdf'), '📎 uploaded a.pdf');
+  assert.equal(downloadPath('deal-1', 'c'.repeat(32)), `/lever/api/files/deal-1/${'c'.repeat(32)}`);
+  for (const [a, i] of [['../x', 'c'.repeat(32)], ['deal-1', '../x'], ['Deal', 'c'.repeat(32)], ['deal-1', 'C'.repeat(32)]]) assert.equal(downloadPath(a, i), '');
+});
+
+test('fileCheck refuses a file over the limit or of another type before any request', () => {
+  const cfg = { maxBytes: 1000, extensions: ['pdf', 'xlsm'] };
+  assert.equal(fileCheck({ name: 'a.PDF', size: 10 }, cfg), '');
+  assert.match(fileCheck({ name: 'a.pdf', size: 1001 }, cfg), /limit/);
+  assert.match(fileCheck({ name: 'a.exe', size: 1 }, cfg), /\.exe.*not accepted/);
+  assert.match(fileCheck({ name: 'noext', size: 1 }, cfg), /not accepted/);
+});
+
+test('uploadErrorText maps the fixed words', () => {
+  assert.match(uploadErrorText(413, { error: 'too-large' }), /too large/);
+  assert.match(uploadErrorText(429, { error: 'rate' }), /many/);
+  assert.match(uploadErrorText(409, { error: 'not-fresh' }), /restart/);
+  assert.match(uploadErrorText(0, 'cannot reach the server'), /cannot reach/);
 });

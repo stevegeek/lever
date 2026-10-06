@@ -36,13 +36,16 @@ class FakeNode {
     this.attrs[k] = v;
   }
   focus() {}
+  click() {
+    this.clicks = (this.clicks || 0) + 1;
+  }
 }
 
 // load starts one page against hub, a function (method, path, body) → {status,
 // body} (or {down: true} for a network fault). It returns the page's parts.
 let loads = 0;
 export async function load(hub, opts = {}) {
-  const env = { els: {}, calls: [], streams: [], intervals: [], timers: [], reloads: 0, store: { ...opts.store }, log: [], pointerFine: true };
+  const env = { els: {}, calls: [], streams: [], intervals: [], timers: [], reloads: 0, store: { ...opts.store }, log: [], pointerFine: true, uploadNotes: [] };
   const doc = new FakeNode('#document');
   doc.getElementById = (id) => (env.els[id] ||= new FakeNode(id));
   doc.createElement = (tag) => new FakeNode(tag);
@@ -51,7 +54,7 @@ export async function load(hub, opts = {}) {
   doc.title = '';
   doc.body = new FakeNode('body');
   // The state chat.html starts in.
-  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote']) doc.getElementById(id).hidden = true;
+  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote', 'attach', 'files', 'filespanel', 'filesnote', 'upload']) doc.getElementById(id).hidden = true;
   // fieldsEnabled: what a browser that restores form state over a reload leaves.
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
@@ -130,6 +133,56 @@ export async function load(hub, opts = {}) {
     }
     const text = typeof r.body === 'string' ? r.body : JSON.stringify(r.body);
     return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => text };
+  };
+  // Files: a FormData that records its parts, and an XMLHttpRequest that
+  // sends them to the scripted hub; the hub's answer may carry progress
+  // percentages, and the text #upload showed after each lands in
+  // env.uploadNotes.
+  globalThis.FormData = class {
+    constructor() {
+      this.entries = [];
+    }
+    append(k, v, n) {
+      this.entries.push([k, v, n]);
+    }
+  };
+  globalThis.XMLHttpRequest = class {
+    constructor() {
+      this.listeners = {};
+      this.upload = { listeners: {}, addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
+      this.headers = {};
+    }
+    open(method, path) {
+      Object.assign(this, { method, path });
+    }
+    setRequestHeader(k, v) {
+      this.headers[k] = v;
+    }
+    addEventListener(t, f) {
+      (this.listeners[t] ||= []).push(f);
+    }
+    emit(t) {
+      for (const f of this.listeners[t] || []) f({});
+    }
+    async send(form) {
+      const body = { form: form.entries.map(([field, v, name]) => ({ field, name, size: v.size })) };
+      env.calls.push({ method: this.method, path: this.path, body });
+      env.log.push(`${this.method} ${this.path}`);
+      const r = await hub(this.method, this.path, body);
+      for (const p of r.progress || []) {
+        for (const f of this.upload.listeners.progress || []) f({ lengthComputable: true, loaded: p, total: 100 });
+        env.uploadNotes.push(env.els.upload ? env.els.upload.textContent : '');
+      }
+      if (r.down) return this.emit('error');
+      this.status = r.status;
+      this.responseText = typeof r.body === 'string' ? r.body : JSON.stringify(r.body);
+      this.emit('load');
+    }
+  };
+  env.pick = async (file) => {
+    env.els.file.files = [file];
+    env.els.file.dispatch('change');
+    await tick(5);
   };
   globalThis.setInterval = (f, ms) => env.intervals.push({ f, ms });
   // Timers are held, not run: a test fires the ones it wants. runTimers

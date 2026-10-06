@@ -186,6 +186,7 @@ export function agentList(body) {
     userId: str(body.userId),
     console: str(body.console),
     agents,
+    files: filesConfig(body),
   };
 }
 
@@ -390,4 +391,86 @@ export function pushView({ available, permission, subscribed, busy, error }) {
   if (!available) return { hidden: true, disabled: true, text: '', note: '' };
   if (permission === 'denied') return { hidden: true, disabled: true, text: '', note: 'Notifications are blocked for this page in the browser settings.' };
   return { hidden: false, disabled: !!busy, text: subscribed ? 'Turn off notifications' : 'Turn on notifications', note: error || '' };
+}
+
+// Files in the chat (remote.files).
+export const FILE_LIST_MAX = 200;
+export const UPLOAD_MS = 600000; // the server's own body deadline is 10 min
+
+const FILE_ID = /^[0-9a-f]{32}$/;
+const AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+// filesConfig is the list's files object, or null when files are off (or
+// the object is not one the page understands).
+export function filesConfig(body) {
+  const f = body && typeof body === 'object' ? body.files : null;
+  if (!f || typeof f !== 'object' || !Number.isInteger(f.maxBytes) || f.maxBytes <= 0 || !Array.isArray(f.extensions)) return null;
+  return { maxBytes: f.maxBytes, extensions: f.extensions.filter((e) => typeof e === 'string' && /^[a-z0-9]{1,10}$/.test(e)) };
+}
+
+// fileList reads /lever/api/files/<agent>: rows with a well-formed id only;
+// the name is one line of text; direction is "sent" or "received".
+export function fileList(body) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.files)) return null;
+  const out = [];
+  for (const f of body.files.slice(0, FILE_LIST_MAX)) {
+    if (!f || typeof f !== 'object' || typeof f.id !== 'string' || !FILE_ID.test(f.id)) continue;
+    out.push({ id: f.id, name: oneLine(f.name, 120) || 'file', size: Number.isInteger(f.size) && f.size >= 0 ? f.size : 0,
+      at: typeof f.at === 'string' ? f.at : '', direction: f.direction === 'received' ? 'received' : 'sent' });
+  }
+  return out;
+}
+
+// sizeText is a byte count for people.
+export function sizeText(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+
+// fileCheck is why a picked file cannot go ('' when it can), before any
+// request: the server checks the same and more.
+export function fileCheck(file, cfg) {
+  const name = typeof file.name === 'string' ? file.name : '';
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+  if (!ext || !cfg.extensions.includes(ext)) {
+    return `Files of type ${ext ? `.${ext}` : 'with no extension'} are not accepted (${cfg.extensions.map((e) => `.${e}`).join(', ')}).`;
+  }
+  if (file.size > cfg.maxBytes) return `The file is ${sizeText(file.size)}; the limit is ${sizeText(cfg.maxBytes)}.`;
+  return '';
+}
+
+const UPLOAD_WORDS = {
+  'too-large': 'the file is too large',
+  extension: 'that file type is not accepted',
+  rate: 'too many uploads this hour; try again later',
+  quota: 'too much uploaded today; try again tomorrow',
+  busy: 'other uploads are under way; try again in a moment',
+  'not-fresh': 'the agent must restart before it takes files; ask the manager',
+  'not-allowed': 'you may not send files to this agent',
+  'one-file': 'send one file at a time',
+  'bad-form': 'the upload was not understood',
+  workspace: "the agent's file folder is not usable; tell the operator",
+  unavailable: 'files are unavailable right now',
+  origin: 'the upload did not come from this page',
+};
+
+// uploadErrorText is what to show for a refused upload: the proxy's fixed
+// word in the page's own words, else errorText.
+export function uploadErrorText(status, body) {
+  const word = body && typeof body === 'object' ? body.error : '';
+  return UPLOAD_WORDS[word] || errorText(status, body);
+}
+
+// uploadNote is the chat message the page sends after an upload: the agent
+// reads it as this login's message and looks the file up (contact_files).
+export function uploadNote(name) {
+  return `📎 uploaded ${name}`;
+}
+
+// downloadPath is lever's download route for a row, or '' when the agent
+// name or the id is not one the page builds a link from.
+export function downloadPath(agent, id) {
+  return AGENT_NAME.test(agent) && FILE_ID.test(id) ? `/lever/api/files/${agent}/${id}` : '';
 }

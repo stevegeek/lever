@@ -423,39 +423,60 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 	}
 }
 
+// chatSinkRE matches the ways a later edit could turn text into markup or
+// code. open( is a page-level or window.open call; a method named open of
+// another object (XMLHttpRequest.open, the file upload) is not one.
+var chatSinkRE = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|(?:^|[^.\w$])open\s*\(|\bwindow\s*\.\s*open\s*\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
+
 // TestChatPageHasNoMarkupSink: the page shows agent text on the operator's
 // origin, so its script may only ever write text. This fails on the ways a
 // later edit could turn text into markup or code.
+// The narrowed open( rule still catches a page-level open and window.open,
+// and lets a method of another object (XMLHttpRequest.open) through.
+func TestMarkupSinkRuleOpen(t *testing.T) {
+	for src, bad := range map[string]bool{"open('x')": true, "window.open('x')": true, " open (u)": true, "window . open(u)": true,
+		"xhr.open('POST', p)": false, "$open(u)": false} {
+		if got := chatSinkRE.MatchString(src); got != bad {
+			t.Errorf("%q: matched %v, want %v", src, got, bad)
+		}
+	}
+}
+
 func TestChatPageHasNoMarkupSink(t *testing.T) {
-	sinks := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\bopen\s*\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
 	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js", "chatui/sw.js"} {
 		b, err := chatUI.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if m := sinks.Find(b); m != nil {
+		if m := chatSinkRE.Find(b); m != nil {
 			t.Errorf("%s contains %q: the chat page writes network text as text only", name, m)
 		}
 	}
 	// What the script may build and where it may reach, counted: every
-	// element it makes is a div, li, ul, button or span, the one attribute
-	// it sets is the href of the two fixed links, and the one fetch is the
-	// api helper's. A new element kind, attribute or request shows up here,
+	// element it makes is a div, li, ul, button, span or a (a file row's
+	// download link), the attributes it sets are the href of the two fixed
+	// links and of a file row (lever's own download route, built from a
+	// checked agent name and id) and that row's download name, the one
+	// fetch is the api helper's, and the one XMLHttpRequest is the upload. A new element kind, attribute or request shows up here,
 	// to be looked at.
 	js, err := chatUI.ReadFile("chatui/chat.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for re, want := range map[string]int{
-		`createElement\(`:           16,
-		`createElement\('div'\)`:    8,
-		`createElement\('li'\)`:     3,
-		`createElement\('button'\)`: 3,
-		`createElement\('ul'\)`:     1,
-		`createElement\('span'\)`:   1,
-		`setAttribute\(`:            1,
-		`setAttribute\('href', `:    1,
-		`\bfetch\(`:                 1,
+		`createElement\(`:            18,
+		`createElement\('div'\)`:     8,
+		`createElement\('li'\)`:      4,
+		`createElement\('a'\)`:       1,
+		`createElement\('button'\)`:  3,
+		`createElement\('ul'\)`:      1,
+		`createElement\('span'\)`:    1,
+		`setAttribute\(`:             3,
+		`setAttribute\('href', `:     2,
+		`setAttribute\('download', `: 1,
+		`new XMLHttpRequest\(`:       1,
+		`\.open\(`:                   1,
+		`\bfetch\(`:                  1,
 		`serviceWorker\.register\('/lever/sw\.js', \{ scope: '/lever/' \}\)`: 1,
 		`serviceWorker\.register\(`: 1,
 		`pushManager\.subscribe\(`:  1,

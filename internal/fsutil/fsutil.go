@@ -240,10 +240,18 @@ func rootNoLinks(tree, dir string, mkdir bool, perm os.FileMode) (*os.Root, erro
 			afterNoLinkStep(p)
 		}
 		next, err := cur.OpenRoot(p)
-		cur.Close()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p, ErrSymlink)
+			// A link swapped in after the Lstat (os.Root refuses one that
+			// leaves it) is ErrSymlink; anything else (EACCES, a removed
+			// directory) is the real error.
+			now, lerr := cur.Lstat(p)
+			cur.Close()
+			if lerr == nil && (now.Mode()&fs.ModeSymlink != 0 || !os.SameFile(now, fi)) {
+				return nil, fmt.Errorf("%s: %w", p, ErrSymlink)
+			}
+			return nil, fmt.Errorf("%s: %w", p, err)
 		}
+		cur.Close()
 		if st, err := next.Stat("."); err != nil || !os.SameFile(st, fi) {
 			next.Close()
 			return nil, fmt.Errorf("%s changed while it was opened: %w", p, ErrSymlink)

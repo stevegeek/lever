@@ -680,3 +680,27 @@ func TestOpenDirInTreeNoLinks(t *testing.T) {
 		}
 	}
 }
+
+// An unreadable directory is its own error, not a link.
+func TestNoLinksWalkReportsAnUnreadableDirAsIs(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root opens a mode 000 directory")
+	}
+	tree := t.TempDir()
+	d := filepath.Join(tree, "a", "b")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(d, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(d, 0o755)
+	for name, err := range map[string]error{
+		"create": func() error { _, err := CreateInTreeNoLinks(tree, "a/b/c.txt", 0o755, 0o644); return err }(),
+		"dir":    func() error { _, err := OpenDirInTreeNoLinks(tree, "a/b"); return err }(),
+	} {
+		if errors.Is(err, ErrSymlink) || !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("%s: %v, want a permission error, not ErrSymlink", name, err)
+		}
+	}
+}

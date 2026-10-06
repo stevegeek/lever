@@ -275,6 +275,58 @@ type VerifiedMessage struct {
 	FirstVerified string `json:"first_verified,omitempty"`
 }
 
+// ---- messages to a contact (remote.agent_messages) ----
+
+// ContactsResponse answers PathContacts: the contacts whose allowed_users
+// entry lists the caller in agents (never see-only, never an operator).
+// Enabled is false when agent messages are off; Note then says why, or is
+// "rate" when the caller is over its call limit.
+type ContactsResponse struct {
+	Enabled  bool          `json:"enabled"`
+	Contacts []ContactInfo `json:"contacts"`
+	Note     string        `json:"note,omitempty"`
+}
+
+// ContactInfo is one contact the caller may message. To is the scion message
+// reference a send goes to ("@" + the contact's hub email). Times are RFC
+// 3339 UTC, "" when none: the contact's last post to the caller, the
+// caller's last initiated authorization to it, and when the initiate rule
+// next allows one (with CanInitiate false).
+type ContactInfo struct {
+	Login           string `json:"login"`
+	To              string `json:"to"`
+	LastFromContact string `json:"last_from_contact,omitempty"`
+	LastInitiated   string `json:"last_initiated,omitempty"`
+	CanInitiate     bool   `json:"can_initiate"`
+	NextAllowedAt   string `json:"next_allowed_at,omitempty"`
+}
+
+// ContactMessageRequest asks PathContactMessage to authorize Text to the
+// contact login To. ReplyToRef, for a reply, is the message_id
+// message_verify returned for that contact's post to the caller.
+type ContactMessageRequest struct {
+	To         string `json:"to"`
+	Text       string `json:"text"`
+	ReplyToRef string `json:"reply_to_ref,omitempty"`
+}
+
+// ContactMessageResponse answers PathContactMessage, always with HTTP 200.
+// OK: Ref is the record id, Kind "initiated" or "reply", To the scion
+// message reference, Expires when the authorization lapses unsent. Refused:
+// Reason is one fixed word (not-a-contact, limit, too-long, empty, bad-ref,
+// rate, bad-text, off, unavailable), with NextAllowedAt on a limit that a
+// reminder will lift.
+type ContactMessageResponse struct {
+	OK            bool   `json:"ok"`
+	Reason        string `json:"reason,omitempty"`
+	Ref           string `json:"ref,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	To            string `json:"to,omitempty"`
+	Expires       string `json:"expires,omitempty"`
+	NextAllowedAt string `json:"next_allowed_at,omitempty"`
+	Note          string `json:"note,omitempty"`
+}
+
 // ---- operator directives: admin side (UDS channel) ----
 
 // DirectiveSubmitRequest is the {statement,signature} envelope of

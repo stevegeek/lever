@@ -62,6 +62,9 @@ type Config struct {
 	Directives  DirectiveConfig
 	Chat        ChatConfig
 	Timeouts    TimeoutConfig
+	// AgentMessages is remote.agent_messages (contactmsg.go): the contacts
+	// an agent may message and the limits. Zero = off.
+	AgentMessages AgentMessagesConfig
 
 	// Log receives the audit decisions; nil ⇒ a discard logger.
 	Log *slog.Logger
@@ -343,6 +346,11 @@ type Broker struct {
 	sent           *sentRecord       // ChatConfig.SentLedgerDir
 	controller     *controllerSender // DispatchConfig.ResolveControllerSender
 
+	// messages to a contact (contactmsg.go, contactmatch.go)
+	agentMsgs   AgentMessagesConfig
+	agentLedger *agentRecord // AgentMessagesConfig.LedgerDir
+	contactRate *rateWindow  // contacts + contact_message calls
+
 	version    string // reported by /epoch (see Config.Version)
 	configHash string // reported by /epoch (see Config.ConfigHash)
 	toolSecret string // presented to first-party tools (see Config.ToolSecret)
@@ -410,6 +418,9 @@ func New(c Config) *Broker {
 		chatUses:   newChatUses(c.Chat.UsedPath, time.Now()),
 		sent:       &sentRecord{dir: c.Chat.SentLedgerDir},
 		controller: &controllerSender{resolve: d.ResolveControllerSender},
+		// messages to a contact
+		agentMsgs: c.AgentMessages.withDefaults(), agentLedger: &agentRecord{dir: c.AgentMessages.LedgerDir},
+		contactRate: newRateWindow(contactCallLimit),
 	}
 }
 

@@ -25,6 +25,10 @@ const (
 	// PathChatVerify is the 0.27 route agent images of that release post
 	// to; it answers like PathMessageVerify.
 	PathChatVerify = "/chat/verify"
+	// PathContacts lists the contacts an agent may message (remote.agent_messages).
+	PathContacts = "/contacts"
+	// PathContactMessage authorizes one message to a contact and records it.
+	PathContactMessage = "/contact/message"
 )
 
 // Admin (loopback) listener routes.

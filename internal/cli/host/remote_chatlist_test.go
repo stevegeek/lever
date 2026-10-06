@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,5 +158,88 @@ func TestRemoteLabelsSource(t *testing.T) {
 	f := remoteLabels(&config.App{Tree: tree, Remote: config.Remote{LabelsFile: "labels.json"}})
 	if f == nil || f()["w1"] != "Via Roma 12" {
 		t.Fatal("labels not read")
+	}
+}
+
+// A caller that gives up (a contact closing the page) must not poison the
+// cache for every other login: the refresh runs on its own context, and a
+// context-class error is never cached.
+func TestCachedAgentRecordsCancelledCallerDoesNotPoison(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	recs, resolve := cachedAgentRecords(func(ctx context.Context) ([]hubapi.Agent, error) {
+		calls.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return []hubapi.Agent{{Slug: "w1", ID: "id-w1", Phase: "running"}}, nil
+	}, time.Now)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := recs(ctx); done <- err }()
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the cancelled caller: %v", err)
+	}
+	close(release)
+	got, err := recs(context.Background())
+	if err != nil || got["w1"].ID != "id-w1" {
+		t.Fatalf("after a cancelled caller: %v %v", got, err)
+	}
+	if ids, err := resolve(context.Background()); err != nil || ids["w1"] != "id-w1" {
+		t.Fatalf("resolver after a cancelled caller: %v %v", ids, err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("hub lists %d, want one shared refresh", n)
+	}
+}
+
+func TestCachedAgentRecordsDoesNotCacheContextErrors(t *testing.T) {
+	var calls atomic.Int32
+	recs, _ := cachedAgentRecords(func(ctx context.Context) ([]hubapi.Agent, error) {
+		if calls.Add(1) == 1 {
+			return nil, fmt.Errorf("list: %w", context.DeadlineExceeded)
+		}
+		return []hubapi.Agent{{Slug: "w1", ID: "id-w1"}}, nil
+	}, time.Now)
+	if _, err := recs(context.Background()); err == nil {
+		t.Fatal("first call should fail")
+	}
+	if got, err := recs(context.Background()); err != nil || got["w1"].ID != "id-w1" || calls.Load() != 2 {
+		t.Fatalf("a timed-out list was cached: %v %v calls=%d", got, err, calls.Load())
+	}
+}
+
+// A slow hub holds no lock: callers wait on the one refresh only as long as
+// their own context allows.
+func TestCachedAgentRecordsSlowHubBlocksNobodyPastTheirContext(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	var calls atomic.Int32
+	recs, resolve := cachedAgentRecords(func(ctx context.Context) ([]hubapi.Agent, error) {
+		calls.Add(1)
+		<-release
+		return nil, nil
+	}, time.Now)
+	for i, f := range []func(context.Context) error{
+		func(c context.Context) error { _, err := recs(c); return err },
+		func(c context.Context) error { _, err := resolve(c); return err },
+		func(c context.Context) error { _, err := recs(c); return err },
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		start := time.Now()
+		err := f(ctx)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+			t.Fatalf("caller %d: %v after %v", i, err, time.Since(start))
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("hub lists %d, want one in flight", n)
 	}
 }

@@ -241,36 +241,86 @@ func remoteHubAgents(st state.State, target *url.URL, dial func(ctx context.Cont
 // polls every few seconds while it waits for a wake.
 const agentRecordsTTL = 3 * time.Second
 
-// cachedAgentRecords wraps one hub agent list in a short cache (its error
-// too, so a down hub is not asked on every poll), keyed by slug, and
-// derives the name → id resolver from it.
+// agentRecordsRefresh bounds one hub list: it runs on its own context, not
+// on any caller's.
+const agentRecordsRefresh = 10 * time.Second
+
+// agentFlight is one hub list in progress; done closes when recs and err
+// are set.
+type agentFlight struct {
+	done chan struct{}
+	recs map[string]remoteproxy.AgentRecord
+	err  error
+}
+
+// cachedAgentRecords wraps one hub agent list in a short cache, keyed by
+// slug, and derives the name → id resolver from it. The cache is shared by
+// every login and by the contact fence, so no caller may spoil it for the
+// others:
+//
+//   - one refresh at a time, on a context of its own (agentRecordsRefresh),
+//     so a caller that gives up does not cancel the list the others wait on;
+//   - a caller waits for that refresh only as long as its own context lets
+//     it, and no lock is held across the hub call;
+//   - a hub error is cached for the TTL (a down hub is not asked on every
+//     poll), but never a context-class error: that says nothing about the
+//     hub's answer.
 func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now func() time.Time) (
 	func(context.Context) (map[string]remoteproxy.AgentRecord, error), func(context.Context) (map[string]string, error)) {
 	var (
-		mu   sync.Mutex
-		at   time.Time
-		recs map[string]remoteproxy.AgentRecord
-		lerr error
+		mu     sync.Mutex
+		at     time.Time
+		recs   map[string]remoteproxy.AgentRecord
+		lerr   error
+		flight *agentFlight
 	)
-	records := func(ctx context.Context) (map[string]remoteproxy.AgentRecord, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if at.IsZero() || now().Sub(at) >= agentRecordsTTL {
-			agents, err := list(ctx)
-			recs, lerr, at = nil, err, now()
-			if err == nil {
-				recs = map[string]remoteproxy.AgentRecord{}
-				for _, a := range agents {
-					if a.Slug != "" && a.ID != "" {
-						recs[a.Slug] = agentRecordOf(a)
-					}
+	refresh := func(f *agentFlight, ctx context.Context) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentRecordsRefresh)
+		defer cancel()
+		agents, err := list(ctx)
+		if err == nil {
+			f.recs = map[string]remoteproxy.AgentRecord{}
+			for _, a := range agents {
+				if a.Slug != "" && a.ID != "" {
+					f.recs[a.Slug] = agentRecordOf(a)
 				}
 			}
 		}
-		if lerr != nil {
-			return nil, lerr
+		f.err = err
+		mu.Lock()
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			recs, lerr, at = f.recs, err, now()
 		}
-		return maps.Clone(recs), nil
+		flight = nil
+		mu.Unlock()
+		close(f.done)
+	}
+	records := func(ctx context.Context) (map[string]remoteproxy.AgentRecord, error) {
+		mu.Lock()
+		if !at.IsZero() && now().Sub(at) < agentRecordsTTL {
+			r, e := recs, lerr
+			mu.Unlock()
+			if e != nil {
+				return nil, e
+			}
+			return maps.Clone(r), nil
+		}
+		f := flight
+		if f == nil {
+			f = &agentFlight{done: make(chan struct{})}
+			flight = f
+			go refresh(f, ctx)
+		}
+		mu.Unlock()
+		select {
+		case <-f.done:
+			if f.err != nil {
+				return nil, f.err
+			}
+			return maps.Clone(f.recs), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	resolve := func(ctx context.Context) (map[string]string, error) {
 		recs, err := records(ctx)

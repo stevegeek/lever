@@ -16,9 +16,10 @@ const maxMatchRows = 200
 // recorded. The proxy sends hashes and times, never text, and drops every
 // row not in keep. A new binding is appended before the answer, so one
 // record never shows two messages. A peek (the operator's view) binds
-// nothing and writes nothing: it answers what the contact's read would keep. Off: 503; a contact that does not list
-// the agent: 403; a body over 256 KiB or more than maxMatchRows rows: 400;
-// a ledger that cannot be opened or written: 503 (the proxy fails closed).
+// nothing and writes nothing: it answers what the contact's read would
+// keep. Off: 503; a contact that does not list the agent: 403; a body over
+// 256 KiB or more than maxMatchRows rows: 400; a ledger that cannot be
+// opened or written: 503 (the proxy fails closed).
 func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request) {
 	var req wire.AgentMessagesMatchRequest
 	if err := decodeBody(w, r, 256<<10, &req); err != nil || len(req.Messages) > maxMatchRows {

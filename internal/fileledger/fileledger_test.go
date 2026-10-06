@@ -1,6 +1,7 @@
 package fileledger
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -177,5 +178,27 @@ func TestOpenTightensAnExistingDir(t *testing.T) {
 	}
 	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
 		t.Fatalf("dir mode %v", fi.Mode().Perm())
+	}
+}
+
+// A valid record of another agent in this agent's file (copied there by
+// hand, or a bug) is not this agent's.
+func TestListSkipsAValidRecordOfAnotherAgent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "fl")
+	l, _ := Open(dir)
+	if err := l.Add(rec(t, OpUpload, "w1", "c@x", t0), nil); err != nil {
+		t.Fatal(err)
+	}
+	other := rec(t, OpUpload, "w2", "c@x", t0)
+	line, _ := json.Marshal(other)
+	f, _ := os.OpenFile(filepath.Join(dir, "w1.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	_, _ = f.Write(append(line, '\n'))
+	f.Close()
+	got, err := l.List("w1")
+	if err != nil || len(got) != 1 || got[0].Agent != "w1" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if _, ok, _ := l.Find("w1", other.ID); ok {
+		t.Fatal("found another agent's id in w1's file")
 	}
 }

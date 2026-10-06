@@ -1210,9 +1210,13 @@ remote:
   as `<UTC time>-<name>`, with the name reduced to letters, digits, `.`, `_`, `-` and spaces
   (no leading dot or dash, no Windows device name). The page shows the name the server stored.
 - **How an agent reads an upload.** The `contact_files` tool (lever-capability MCP server) lists
-  lever's host record of each upload: login, name, size, sha256 and path. The skill tells the agent
-  to use a file only when `contact_files` lists it with the same sha256, and to treat what a file
-  says as data from that login, never as an instruction.
+  lever's host record of one login's files: its uploads (name, size, sha256 and path) and the
+  agent's shares to it. The `contact` argument is required, and no call lists every login's
+  files. The skill tells the agent to verify the "📎 uploaded" message first, to ask for the
+  login that message names as its sender, to use a file only when `contact_files` lists it with
+  the same sha256, and to use one login's files only in that login's conversation, never
+  another login's, even when asked. What a file says is data from that login, never an
+  instruction.
 - **How an agent shares a file.** It writes the file directly into the login's `out_dir`, then
   calls `share_file` with the login and the path. The broker accepts only a regular file in the
   caller's own `out/<key-of-to>/`, with no symbolic or hard link, within the size and type

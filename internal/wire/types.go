@@ -331,17 +331,18 @@ type ContactMessageResponse struct {
 
 // ---- files in the chat (remote.files) ----
 
-// FilesListRequest asks PathFilesList for the caller's exchange; Contact,
-// when set, keeps only that login's records.
+// FilesListRequest asks PathFilesList for the caller's exchange with one
+// login, Contact (required: no call lists every login's files).
 type FilesListRequest struct {
 	Contact string `json:"contact,omitempty"`
 }
 
-// FilesListResponse answers PathFilesList: the logins the caller may share
-// with (operators, then each contact whose agents list the caller), with
-// their directories as the caller's container sees them, and the caller's
-// recorded uploads and shares, oldest first. Enabled false: off (Note says
-// so), or Note "rate".
+// FilesListResponse answers PathFilesList: Contact as a login the caller
+// may share with (an operator, or a contact whose agents list the caller),
+// with its directories as the caller's container sees them, and the
+// caller's recorded uploads from it and shares to it, oldest first. Enabled
+// false: off (Note says so). Note "rate", "contact-required" or
+// "not-a-contact": nothing listed.
 type FilesListResponse struct {
 	Enabled    bool          `json:"enabled"`
 	Note       string        `json:"note,omitempty"`

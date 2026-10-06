@@ -79,21 +79,34 @@ func outPath(login, name string) string {
 	return "/workspace/" + chatfiles.Dir + "/out/" + chatfiles.Key(login) + "/" + name
 }
 
-func TestFilesListNamesTargetsAndDirs(t *testing.T) {
+func TestFilesListNamesOneLoginAndItsDirs(t *testing.T) {
 	f := newFilesFixture(t)
-	out := f.list(t, "scratch", "")
-	if !out.Enabled || out.MaxBytes != 64 || len(out.Contacts) != 2 {
-		t.Fatalf("%+v", out)
-	}
-	want := map[string]string{"op@example.com": "operator", "client@example.org": "contact"}
-	for _, c := range out.Contacts {
-		k := chatfiles.Key(c.Login)
-		if want[c.Login] != c.Tier || c.OutDir != "/workspace/.lever-files/out/"+k+"/" || c.InDir != "/workspace/.lever-files/in/"+k+"/" {
-			t.Fatalf("contact %+v", c)
+	for login, tier := range map[string]string{"op@example.com": "operator", "client@example.org": "contact", "Client@Example.org": "contact"} {
+		out := f.list(t, "scratch", login)
+		k := chatfiles.Key(login)
+		if !out.Enabled || out.Note != "" || out.MaxBytes != 64 || len(out.Contacts) != 1 || out.Contacts[0].Tier != tier ||
+			out.Contacts[0].OutDir != "/workspace/.lever-files/out/"+k+"/" || out.Contacts[0].InDir != "/workspace/.lever-files/in/"+k+"/" {
+			t.Fatalf("%s: %+v", login, out)
 		}
 	}
-	if strings.Contains(fmt.Sprint(out.Contacts), "d@example.org") {
-		t.Fatal("a login that does not list the caller")
+}
+
+// No call lists every login's files: a missing contact, or one that is not
+// the caller's, answers a fixed word and nothing else.
+func TestFilesListNeedsAContactOfTheCaller(t *testing.T) {
+	f := newFilesFixture(t)
+	f.put(t, "workers/scratch", ".lever-files/out/"+chatfiles.Key("client@example.org")+"/a.pdf", "x")
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "a.pdf")); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	for contact, word := range map[string]string{"": "contact-required", "d@example.org": "not-a-contact", "x@example.org": "not-a-contact"} {
+		out := f.list(t, "scratch", contact)
+		if !out.Enabled || out.Note != word || len(out.Contacts) != 0 || len(out.Shares) != 0 || len(out.Uploads) != 0 {
+			t.Fatalf("%q: %+v", contact, out)
+		}
+	}
+	if out := f.list(t, "scratch", "op@example.com"); len(out.Shares) != 0 {
+		t.Fatalf("another login's share listed: %+v", out.Shares)
 	}
 }
 
@@ -108,7 +121,7 @@ func TestFilesShareRecordsAndLists(t *testing.T) {
 	if len(out.Shares) != 1 || out.Shares[0].ID != res.ID || out.Shares[0].Path != outPath("client@example.org", "v3.xlsm") {
 		t.Fatalf("%+v", out.Shares)
 	}
-	if other := f.list(t, "worker", ""); len(other.Shares) != 0 {
+	if other := f.list(t, "worker", "client@example.org"); len(other.Shares) != 0 {
 		t.Fatal("another agent sees the caller's records")
 	}
 	l, _ := fileledger.Open(filepath.Join(f.dir, "files-ledger"))
@@ -244,8 +257,8 @@ func TestFilesListDropsALoginRemovedFromConfig(t *testing.T) {
 	}
 	removed := func(c *Config) { c.Files.Contacts = c.Files.Contacts[1:] } // only d@example.org stays
 	again := &filesFixture{verifyFixture: verifyBroker(t, nil, filesOpt(f.tree, f.dir), removed), tree: f.tree, dir: f.dir}
-	out := again.list(t, "scratch", "")
-	if len(out.Shares) != 0 || strings.Contains(fmt.Sprint(out.Contacts), "client@example.org") {
+	out := again.list(t, "scratch", "client@example.org")
+	if len(out.Shares) != 0 || out.Note != "not-a-contact" || strings.Contains(fmt.Sprint(out.Contacts), "client@example.org") {
 		t.Fatalf("%+v", out)
 	}
 }

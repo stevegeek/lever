@@ -57,12 +57,14 @@ const (
 )
 
 const (
-	refuseBadPath   = "bad-path"
-	refuseNotFound  = "not-found"
-	refuseSymlink   = "symlink"
-	refuseNotFile   = "not-a-file"
-	refuseTooLarge  = "too-large"
-	refuseExtension = "extension"
+	// filesContactRequired: a list call that names no contact.
+	filesContactRequired = "contact-required"
+	refuseBadPath        = "bad-path"
+	refuseNotFound       = "not-found"
+	refuseSymlink        = "symlink"
+	refuseNotFile        = "not-a-file"
+	refuseTooLarge       = "too-large"
+	refuseExtension      = "extension"
 )
 
 // fileRecord opens the files ledger on first use and again after a failure.
@@ -111,23 +113,16 @@ func (b *Broker) fileTarget(login, slug string) (canon, tier string, ok bool) {
 // sameLogin compares two logins as lever does everywhere: lowercased.
 func sameLogin(a, b string) bool { return strings.ToLower(a) == strings.ToLower(b) }
 
-// fileTargets is every login slug may exchange files with, operators first.
-func (b *Broker) fileTargets(slug, ws string) []wire.FileContact {
-	out := []wire.FileContact{}
-	add := func(login, tier string) {
-		out = append(out, wire.FileContact{Login: login, Tier: tier,
-			InDir:  chatfiles.ContainerPath(ws, chatfiles.InDir(ws, login)) + "/",
-			OutDir: chatfiles.ContainerPath(ws, chatfiles.OutDir(ws, login)) + "/"})
+// fileTargets is the entry of login (a target of slug, as fileTarget
+// spells it) with its directories as slug's container sees them.
+func (b *Broker) fileTargets(slug, ws, login string) []wire.FileContact {
+	_, tier, ok := b.fileTarget(login, slug)
+	if !ok {
+		return []wire.FileContact{}
 	}
-	for _, op := range b.files.Operators {
-		add(op, chatledger.TierOperator)
-	}
-	for _, c := range b.files.Contacts {
-		if slices.Contains(c.Agents, slug) {
-			add(c.Login, chatledger.TierContact)
-		}
-	}
-	return out
+	return []wire.FileContact{{Login: login, Tier: tier,
+		InDir:  chatfiles.ContainerPath(ws, chatfiles.InDir(ws, login)) + "/",
+		OutDir: chatfiles.ContainerPath(ws, chatfiles.OutDir(ws, login)) + "/"}}
 }
 
 func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +136,7 @@ func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.FilesListRequest
-	_ = decodeBody(w, r, filesBodyLimit, &req) // an empty or bad body lists everything
+	_ = decodeBody(w, r, filesBodyLimit, &req) // an empty or bad body names no contact
 	empty := wire.FilesListResponse{Contacts: []wire.FileContact{}, Uploads: []wire.FileInfo{}, Shares: []wire.FileInfo{}}
 	if !b.files.Enabled {
 		empty.Note = "files are off on this instance"
@@ -149,6 +144,22 @@ func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, slug, _, _ := b.identity(caller)
+	// One login per call, never every login's files at once: the agent asks
+	// for the login whose verified message it is answering, and gets only
+	// that login's records and directories.
+	if req.Contact == "" {
+		empty.Enabled, empty.Note = true, filesContactRequired
+		b.audit("files", caller, "deny", "list: no contact", "reason", filesContactRequired)
+		writeJSON(w, empty)
+		return
+	}
+	contact, _, isTarget := b.fileTarget(req.Contact, slug)
+	if !isTarget {
+		empty.Enabled, empty.Note = true, refuseNotContact
+		b.audit("files", caller, "deny", "list contact="+boundedLogin(req.Contact), "reason", refuseNotContact)
+		writeJSON(w, empty)
+		return
+	}
 	ws, wsOK := b.files.Workspaces[slug]
 	led, err := b.fileLedger.get()
 	if !wsOK || err != nil {
@@ -169,10 +180,10 @@ func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := wire.FilesListResponse{Enabled: true, MaxBytes: b.files.MaxBytes, Extensions: b.files.Extensions,
-		Contacts: b.fileTargets(slug, ws), Uploads: []wire.FileInfo{}, Shares: []wire.FileInfo{}}
+		Contacts: b.fileTargets(slug, ws, contact), Uploads: []wire.FileInfo{}, Shares: []wire.FileInfo{}}
 	for _, rec := range recs {
-		if _, _, ok := b.fileTarget(rec.Login, slug); !ok || req.Contact != "" && !sameLogin(rec.Login, req.Contact) {
-			continue // another login, or one no longer configured for the caller
+		if !sameLogin(rec.Login, contact) {
+			continue
 		}
 		info := wire.FileInfo{ID: rec.ID, Login: rec.Login, Name: rec.Name, Size: rec.Size, SHA256: rec.SHA256,
 			Path: chatfiles.ContainerPath(ws, rec.Rel), At: rfc(rec.At)}
@@ -183,7 +194,7 @@ func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out.Uploads, out.Shares = lastN(out.Uploads, filesListMax), lastN(out.Shares, filesListMax)
-	b.audit("files", caller, "allow", "list", "uploads", len(out.Uploads), "shares", len(out.Shares))
+	b.audit("files", caller, "allow", "list contact="+boundedLogin(contact), "uploads", len(out.Uploads), "shares", len(out.Shares))
 	writeJSON(w, out)
 }
 

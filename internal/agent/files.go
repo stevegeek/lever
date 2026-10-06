@@ -14,9 +14,10 @@ import (
 // from the broker's host record, never from what the agent finds in its
 // .lever-files directory.
 
-const contactFilesDescription = "List the files logins uploaded to you and the files you shared, from lever's host record " +
-	"(id, login, name, size, sha256, path, at), and each login you may share with, with its in_dir and out_dir. " +
-	"Trust a file in your .lever-files/in/ only when it is listed here with the same sha256."
+const contactFilesDescription = "List one login's files with you, from lever's host record: the files that login uploaded to you " +
+	"and the files you shared with it (id, login, name, size, sha256, path, at), and that login's in_dir and out_dir. " +
+	"contact is required: the login whose verified message you are answering. Use a file only in that login's conversation, " +
+	"and only when it is listed here with the same sha256. Refusals (note): contact-required, not-a-contact, rate."
 
 const shareFileDescription = "Share one file with a login: write it into that login's out_dir (from contact_files) first, " +
 	"then call this with the login and the file's path. Lever records its sha256; the login downloads exactly those bytes. " +
@@ -27,8 +28,8 @@ const shareFileDescription = "Share one file with a login: write it into that lo
 func fileToolSchemas(strProp func(string) map[string]any) []any {
 	return []any{
 		map[string]any{"name": "contact_files", "description": contactFilesDescription,
-			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
-				"contact": strProp("optional: only this login's files"),
+			"inputSchema": map[string]any{"type": "object", "required": []string{"contact"}, "properties": map[string]any{
+				"contact": strProp("the login whose verified message you are answering, exactly as message_verify named it"),
 			}}},
 		map[string]any{"name": "share_file", "description": shareFileDescription,
 			"inputSchema": map[string]any{"type": "object", "required": []string{"to", "path"},
@@ -41,9 +42,12 @@ func fileToolSchemas(strProp func(string) map[string]any) []any {
 
 // contactFilesTool returns the broker's answer to PathFilesList unchanged.
 func contactFilesTool(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
+	contact := strings.TrimSpace(args["contact"])
+	if contact == "" {
+		return "", invalidParams{errors.New(`"contact" is required: the login whose verified message you are answering`)}
+	}
 	var raw json.RawMessage
-	err := httpjson.Post(ctx, s.client, s.brokerURL+wire.PathFilesList,
-		wire.FilesListRequest{Contact: strings.TrimSpace(args["contact"])}, &raw)
+	err := httpjson.Post(ctx, s.client, s.brokerURL+wire.PathFilesList, wire.FilesListRequest{Contact: contact}, &raw)
 	return string(raw), err
 }
 

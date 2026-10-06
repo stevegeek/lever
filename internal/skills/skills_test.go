@@ -205,7 +205,9 @@ func TestFilesOnTeachesTheExchange(t *testing.T) {
 	} {
 		s := string(pair[0])
 		for _, want := range []string{"contact_files", "share_file", "sha256", "out_dir", "📎 uploaded", "data from that login",
-			"not-a-contact", "bad-path", "symlink", "too-large", "extension", "never another login's uploads"} {
+			"not-a-contact", "bad-path", "symlink", "too-large", "extension", "never another login's uploads",
+			"`contact` set to that login", "the login it names as the sender is the uploader", "contact-required",
+			"belong to that login's conversation only", "never use, quote, summarise or disclose another login's"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("%s on: missing %q", name, want)
 			}
@@ -216,5 +218,8 @@ func TestFilesOnTeachesTheExchange(t *testing.T) {
 	}
 	if !strings.Contains(string(Operator("1", true, false, true)), "workers' .lever-files") {
 		t.Error("the manager must be told the workers' exchanges are theirs")
+	}
+	if op := string(Operator("1", true, false, true)); strings.Contains(op, "tell the manager") || !strings.Contains(op, "tell the operator") {
+		t.Error("the manager's skill must send it to the operator, not to itself")
 	}
 }

@@ -60,3 +60,17 @@ func TestFileToolsAreListed(t *testing.T) {
 		}
 	}
 }
+
+func TestContactFilesNeedsTheContact(t *testing.T) {
+	s := NewMCPServer(MCPConfig{BrokerURL: "http://127.0.0.1:1", AgentCN: "worker", Client: http.DefaultClient})
+	for _, args := range []string{`{}`, `{"contact":"  "}`} {
+		reply := string(s.Handle(t.Context(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"contact_files","arguments":`+args+`}}`)))
+		if !strings.Contains(reply, "-32602") {
+			t.Fatalf("%s: %s", args, reply)
+		}
+	}
+	b, _ := json.Marshal(fileToolSchemas(func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }))
+	if !strings.Contains(string(b), `"required":["contact"]`) {
+		t.Fatalf("the schema must require contact: %s", b)
+	}
+}

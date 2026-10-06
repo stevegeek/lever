@@ -1119,6 +1119,30 @@ async function pushRegistration() {
   }
 }
 
+// The per-login opt-in marker. A browser has one push subscription per
+// worker scope, whoever is signed in, so on a shared device another login
+// finds the subscription a first login made. Only the login that turned
+// notifications on here re-sends it at load; any other sees "Turn on" and
+// gets pushes only after it opts in itself.
+const optInKey = () => `lever-push-optin:${roster ? roster.login : ''}`;
+
+function optedIn() {
+  try {
+    return localStorage.getItem(optInKey()) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setOptIn(on) {
+  try {
+    if (on) localStorage.setItem(optInKey(), '1');
+    else localStorage.removeItem(optInKey());
+  } catch {
+    // storage is off: the subscription is then not re-sent at load
+  }
+}
+
 async function setupPush() {
   if (!pushSupported()) return;
   navigator.serviceWorker.addEventListener('message', (ev) => {
@@ -1136,7 +1160,7 @@ async function setupPush() {
   }
   push = { ...push, available: true, key, permission: Notification.permission };
   const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
-  if (sub) {
+  if (sub && optedIn()) {
     push.subscribed = true;
     // lever may have dropped it (the push service said gone): send it again.
     void sendSubscription(sub, 'POST');
@@ -1169,6 +1193,7 @@ async function turnOn() {
     return;
   }
   push.subscribed = true;
+  setOptIn(true);
 }
 
 async function turnOff() {
@@ -1180,6 +1205,7 @@ async function turnOff() {
   }
   if (reg) await reg.unregister().catch(() => {});
   push.subscribed = false;
+  setOptIn(false);
 }
 
 async function togglePush() {

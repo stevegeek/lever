@@ -93,6 +93,8 @@ export async function load(hub, opts = {}) {
     delete globalThis.Notification;
     Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: {} });
   }
+  env.local = { ...opts.local };
+  globalThis.localStorage = { getItem: (k) => env.local[k] ?? null, setItem: (k, v) => (env.local[k] = String(v)), removeItem: (k) => delete env.local[k] };
   globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)), removeItem: (k) => delete env.store[k] };
   globalThis.EventSource = class {
     static CLOSED = 2;

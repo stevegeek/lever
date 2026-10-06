@@ -67,3 +67,22 @@ test('a tap focuses an open chat or opens one', async () => {
   await env.click({ agent: '../evil' });
   assert.deepEqual(env.opened, ['/lever/chat']);
 });
+
+test('a pushed name must match the list exactly', async () => {
+  // The list itself names agents that are not config names: the worker
+  // still shows only a config name it was pushed.
+  const env = await loadSW({ agents: [{ name: 'W1', access: 'message' }, { name: '<b>', access: 'message' }] });
+  for (const raw of ['{"v":1,"agent":"W1"}', '{"v":1,"agent":"<b>"}']) {
+    env.shown.length = 0;
+    await env.push(raw);
+    assert.equal(env.shown[0].title, 'New message', raw);
+  }
+});
+
+test('a tap focuses only an open chat page, not another lever page', async () => {
+  const env = await loadSW({ windows: ['https://mac.ts.net/lever/chatx', 'https://mac.ts.net/agents', 'not a url'] });
+  await env.click({ agent: 'w1' });
+  assert.equal(env.focused, 0);
+  assert.deepEqual(env.posted, []);
+  assert.deepEqual(env.opened, ['/lever/chat#agent=w1']);
+});

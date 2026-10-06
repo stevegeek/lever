@@ -1667,7 +1667,7 @@ test('push: a subscription the server refuses is undone', async () => {
 
 test('push: an existing subscription is sent again at load and can be turned off', async () => {
   const hub = pushHub();
-  const env = await load(hub, { push: { registered: true, existing: true, permission: 'granted' } });
+  const env = await load(hub, { push: { registered: true, existing: true, permission: 'granted' }, local: { 'lever-push-optin:op': '1' } });
   assert.equal(env.els.push.textContent, 'Turn off notifications');
   assert.equal(hub.subs[0].method, 'POST');
   env.els.push.dispatch('click');
@@ -1698,4 +1698,23 @@ test('a message from the worker opens a listed agent', async () => {
   env.swMessage(null);
   await tick(5);
   assert.equal(env.els.agent.textContent, 'w1');
+});
+
+test('push: turning on marks this login, turning off clears the mark', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {} });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.local['lever-push-optin:op'], '1');
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.local['lever-push-optin:op'], undefined);
+});
+
+test('push: another login on a shared device does not take the subscription', async () => {
+  // Login op turned notifications on here; contact c now uses the page.
+  const c = pushHub({ agents: () => roster([A('w1')], { login: 'c', tier: 'contact', console: undefined }) });
+  const envC = await load(c, { push: { registered: true, existing: true, permission: 'granted' }, local: { 'lever-push-optin:op': '1' } });
+  assert.equal(c.subs.length, 0, 'the subscription was posted for a login that never opted in');
+  assert.equal(envC.els.push.textContent, 'Turn on notifications');
 });

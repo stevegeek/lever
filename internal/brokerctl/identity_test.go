@@ -149,3 +149,60 @@ func TestRemoteConfigHashUnchangedWhileFilesOff(t *testing.T) {
 		t.Fatal("off must keep the pre-change proxy hash")
 	}
 }
+
+// The per-direction and per-login switches change both stamps only when
+// set to their non-default value: an instance with files on and neither
+// key keeps the stamps it had.
+func TestFilesSwitchesInTheStamps(t *testing.T) {
+	app := remoteTestApp(t)
+	app.Remote.Files.Enabled = true
+	oldBroker := state.HashJSON(struct {
+		Broker        config.Broker
+		Workers       []config.Worker
+		Scion         config.ScionConfig
+		VerifiedChat  bool
+		WebSenders    []string            `json:",omitempty"`
+		AgentMessages *agentMessagesStamp `json:",omitempty"`
+		Files         *struct {
+			MaxBytes   int64
+			Extensions []string
+			Contacts   []string
+			Operators  []string
+		} `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), nil, &struct {
+		MaxBytes   int64
+		Extensions []string
+		Contacts   []string
+		Operators  []string
+	}{app.EffectiveFilesMaxBytes(), app.EffectiveFilesExtensions(), []string{"c@x=w1"}, []string{"op@x"}}})
+	if ConfigHash(app) != oldBroker {
+		t.Fatal("defaults changed the broker stamp")
+	}
+	b0, p0 := ConfigHash(app), RemoteConfigHash(app)
+	yes, no := true, false
+	app.Remote.Files.Uploads, app.Remote.Files.Shares = &yes, &yes
+	app.Remote.AllowedUsers[1].Files = &yes
+	if ConfigHash(app) != b0 || RemoteConfigHash(app) != p0 {
+		t.Fatal("explicit defaults changed a stamp")
+	}
+	app.Remote.Files.Uploads = &no
+	if ConfigHash(app) != b0 || RemoteConfigHash(app) == p0 {
+		t.Fatal("uploads off: the proxy restarts, the broker does not act on it")
+	}
+	app.Remote.Files.Uploads = &yes
+	app.Remote.Files.Shares = &no
+	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+		t.Fatal("shares off must restart both")
+	}
+	app.Remote.Files.Shares = &yes
+	app.Remote.AllowedUsers[1].Files = &no
+	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+		t.Fatal("a login with files: false must restart both")
+	}
+	app.Remote.Files.Enabled = false
+	off := RemoteConfigHash(app)
+	app.Remote.AllowedUsers[1].Files = nil
+	if RemoteConfigHash(app) != off {
+		t.Fatal("files off: the login switch is ignored")
+	}
+}

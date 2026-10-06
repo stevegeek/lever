@@ -73,6 +73,10 @@ type filesStamp struct {
 	Extensions []string
 	Contacts   []string // "login=agent,agent", config order
 	Operators  []string
+	// Set only when not the default, so an instance that never sets
+	// remote.files.shares or an allowed_users files key keeps its stamp.
+	NoShares bool     `json:",omitempty"`
+	Excluded []string `json:",omitempty"` // logins with files: false
 }
 
 func filesStampOf(app *config.App) *filesStamp {
@@ -86,6 +90,7 @@ func filesStampOf(app *config.App) *filesStamp {
 			s.Contacts = append(s.Contacts, u.Login+"="+strings.Join(u.Agents, ","))
 		}
 	}
+	s.NoShares, s.Excluded = !app.FilesSharesOn(), app.FilesExcludedLogins()
 	return s
 }
 
@@ -127,6 +132,7 @@ func RemoteConfigHash(app *config.App) string {
 			for _, w := range app.Workers {
 				f.Workspaces = append(f.Workspaces, w.Name+"="+app.AgentWorkspaces()[w.Name])
 			}
+			f.NoUploads, f.NoShares, f.Excluded = !app.FilesUploadsOn(), !app.FilesSharesOn(), app.FilesExcludedLogins()
 			id.Files = f
 		}
 	}

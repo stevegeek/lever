@@ -58,6 +58,11 @@ type FilesIdentity struct {
 	MaxBytes   int64
 	Extensions []string
 	Workspaces []string // "name=dir", config order, manager first
+	// Set only when not the default (remote.files.uploads/shares false,
+	// allowed_users files: false), so the stamp is unchanged without them.
+	NoUploads bool     `json:",omitempty"`
+	NoShares  bool     `json:",omitempty"`
+	Excluded  []string `json:",omitempty"`
 }
 
 // RemoteConfigHash identifies the configuration a `lever remote serve` process

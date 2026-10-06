@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -192,6 +193,162 @@ func ReadInTreeNoLinks(tree, rel string, max int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %w", filepath.Join(tree, rel), ErrFileTooLarge)
 	}
 	return b, nil
+}
+
+// afterNoLinkStep, when set, runs between a directory's Lstat and its open
+// in rootNoLinks: a test seam for a component swapped in that window.
+var afterNoLinkStep func(name string)
+
+// rootNoLinks opens the directory dir (slash-separated, relative) below
+// tree as an os.Root, one component at a time, holding a Root per level.
+// Each component is checked with Lstat THROUGH ITS PARENT'S Root (a symbolic
+// link is ErrSymlink), opened with OpenRoot, and must be the directory the
+// Lstat saw (os.SameFile). os.Root alone follows a link that stays inside
+// it; the SameFile check is what refuses a component swapped for any link
+// between the check and the open. With mkdir, a missing component is
+// created with perm (Mkdir never follows a link at its name). "" and "."
+// are the tree itself, which may be a link (the operator's own layout).
+// The caller closes the Root.
+func rootNoLinks(tree, dir string, mkdir bool, perm os.FileMode) (*os.Root, error) {
+	cur, err := os.OpenRoot(tree)
+	if err != nil {
+		return nil, err
+	}
+	if dir == "" || dir == "." {
+		return cur, nil
+	}
+	for _, p := range strings.Split(dir, "/") {
+		fi, err := cur.Lstat(p)
+		if mkdir && errors.Is(err, fs.ErrNotExist) {
+			if err = cur.Mkdir(p, perm); err == nil || errors.Is(err, fs.ErrExist) {
+				fi, err = cur.Lstat(p)
+			}
+		}
+		if err != nil {
+			cur.Close()
+			return nil, err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			cur.Close()
+			return nil, fmt.Errorf("%s: %w", p, ErrSymlink)
+		}
+		if !fi.IsDir() {
+			cur.Close()
+			return nil, fmt.Errorf("%s: not a directory", p)
+		}
+		if afterNoLinkStep != nil {
+			afterNoLinkStep(p)
+		}
+		next, err := cur.OpenRoot(p)
+		cur.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p, ErrSymlink)
+		}
+		if st, err := next.Stat("."); err != nil || !os.SameFile(st, fi) {
+			next.Close()
+			return nil, fmt.Errorf("%s changed while it was opened: %w", p, ErrSymlink)
+		}
+		cur = next
+	}
+	return cur, nil
+}
+
+// splitNoLinks checks rel (clean, local, slash-separated) and splits it
+// into its directory ("." for none) and its leaf.
+func splitNoLinks(rel string) (dir, leaf string, err error) {
+	rel = filepath.ToSlash(rel)
+	if rel == "" || rel == "." || path.Clean(rel) != rel || !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return "", "", fmt.Errorf("%q: %w", rel, ErrEscapesTree)
+	}
+	dir, leaf = path.Split(rel)
+	return strings.TrimSuffix(dir, "/"), leaf, nil
+}
+
+// CreateInTreeNoLinks creates a NEW regular file at rel below tree for a
+// host write into the agent-writable tree: missing parent directories are
+// created with dirPerm, no component below tree may be a symbolic link at
+// check or at open (rootNoLinks), and the leaf is created O_CREATE|O_EXCL,
+// which never follows a link: an existing entry of any kind is
+// fs.ErrExist. The file is chmod-ed to perm (umask does not apply).
+func CreateInTreeNoLinks(tree, rel string, dirPerm, perm os.FileMode) (*os.File, error) {
+	dir, leaf, err := splitNoLinks(rel)
+	if err != nil {
+		return nil, err
+	}
+	r, err := rootNoLinks(tree, dir, true, dirPerm)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	f, err := r.OpenFile(leaf, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NONBLOCK, perm)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s: %w", filepath.Join(tree, rel), ErrNotRegularFile)
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// OpenInTreeNoLinks opens the regular file at rel below tree for reading:
+// no symbolic link on any component (rootNoLinks for the directories, Lstat
+// plus os.SameFile for the leaf), at most max bytes when opened. The file
+// may still grow: the caller reads through io.LimitReader(f, max+1).
+func OpenInTreeNoLinks(tree, rel string, max int64) (*os.File, fs.FileInfo, error) {
+	dir, leaf, err := splitNoLinks(rel)
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err := rootNoLinks(tree, dir, false, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer r.Close()
+	fi, err := r.Lstat(leaf)
+	if err != nil {
+		return nil, nil, err
+	}
+	switch {
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return nil, nil, fmt.Errorf("%s: %w", filepath.Join(tree, rel), ErrSymlink)
+	case !fi.Mode().IsRegular():
+		return nil, nil, fmt.Errorf("%s: %s: %w", filepath.Join(tree, rel), fi.Mode().Type(), ErrNotRegularFile)
+	case fi.Size() > max:
+		return nil, nil, fmt.Errorf("%s: %d bytes: %w", filepath.Join(tree, rel), fi.Size(), ErrFileTooLarge)
+	}
+	if afterNoLinkWalk != nil {
+		afterNoLinkWalk()
+	}
+	f, err := r.OpenFile(leaf, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", filepath.Join(tree, rel), ErrSymlink)
+	}
+	st, err := f.Stat()
+	if err != nil || !os.SameFile(st, fi) || !st.Mode().IsRegular() {
+		f.Close()
+		return nil, nil, fmt.Errorf("%s changed while it was opened: %w", filepath.Join(tree, rel), ErrSymlink)
+	}
+	return f, st, nil
+}
+
+// RemoveInTreeNoLinks removes the entry at rel (a file, or a link itself,
+// never its target), reached with no symbolic link on its directories.
+func RemoveInTreeNoLinks(tree, rel string) error {
+	dir, leaf, err := splitNoLinks(rel)
+	if err != nil {
+		return err
+	}
+	r, err := rootNoLinks(tree, dir, false, 0)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return r.Remove(leaf)
 }
 
 // WriteInTree writes data to rel under tree IN PLACE (truncate + write, never

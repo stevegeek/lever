@@ -155,6 +155,11 @@ type Config struct {
 	AgentRecords func(ctx context.Context) (map[string]AgentRecord, error)
 	// Labels returns the labels by agent name (nil for none). Optional.
 	Labels func() map[string]string
+	// Wake asks the broker to resume a suspended or stopped worker for a
+	// login that may message it (the operator socket's /operator/wake). It
+	// returns when the worker is live or the broker refused; a refusal is a
+	// *WakeError with the broker's status. Nil answers every wake 503.
+	Wake func(ctx context.Context, login, worker string) error
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -373,11 +378,15 @@ type AuditLine struct {
 	// DecisionAllow, DecisionDenyHost, DecisionDenyOrigin, DecisionDenyUser,
 	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
 	// navigation, DecisionLoginRedirect; the contact fence DecisionDenyContact;
-	// the chat page DecisionChatUnavailable; the login driver DecisionOIDCSession
+	// the chat page DecisionChatUnavailable and, for its wake route,
+	// DecisionWake, DecisionDenyWake and DecisionWakeResult; the login driver DecisionOIDCSession
 	// and DecisionOIDCSessionFailed; the provider the DecisionOIDC* values and
 	// DecisionDenyAuthorize.
 	Decision Decision `json:"decision"`
 	Status   int      `json:"status,omitempty"`
+	// Reason is a fixed word for why the chat page's wake route refused or
+	// how a late wake ended (wake.go), never caller or broker text.
+	Reason string `json:"reason,omitempty"`
 	// Error records why an allowed request never got an answer from the hub
 	// (set only on the 502 path). The transport's own diagnosis lands here
 	// rather than in the client's response body: the operator needs to know
@@ -705,6 +714,9 @@ type gate struct {
 	rp       *httputil.ReverseProxy
 	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
 	chat     *chatPage     // nil unless Config.ChatAgent is set
+	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
+	// wakeWaitFor overrides wakeAnswerWait (tests).
+	wakeWaitFor time.Duration
 }
 
 func (g *gate) audit(line AuditLine) {

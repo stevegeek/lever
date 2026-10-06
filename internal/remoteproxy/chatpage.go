@@ -282,7 +282,12 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		return false
 	}
 	v := g.viewerFor(login)
-	if name, ok := wakeTarget(p); ok {
+	if name, under := wakeTarget(p); under {
+		if name == "" {
+			// Under the agents prefix only the wake route exists.
+			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
+			return true
+		}
 		g.serveWake(w, r, line, v, name)
 		return true
 	}

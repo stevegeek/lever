@@ -190,3 +190,20 @@ func TestOperatorWakeOfARunningWorkerIsANoOp(t *testing.T) {
 		t.Fatalf("%d resumed=%d staged=%d", rec.Code, len(rt.resumed), len(rt.staged))
 	}
 }
+
+// A revoked worker is not woken: its identity is withdrawn, and a wake
+// would stage it a fresh ticket.
+func TestOperatorWakeRefusesARevokedWorker(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
+	b := newTestBroker(t, rt, wakeSpec)
+	b.Revoke("worker")
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	rec := postWake(t, b, `{"worker":"worker","login":"c@x"}`)
+	if rec.Code != http.StatusForbidden || strings.TrimSpace(rec.Body.String()) != "revoked" || len(rt.resumed) != 0 || len(rt.staged) != 0 {
+		t.Fatalf("%d %q resumed=%d staged=%d", rec.Code, rec.Body, len(rt.resumed), len(rt.staged))
+	}
+	if !strings.Contains(buf.String(), "decision=deny") || !strings.Contains(buf.String(), "revoked") {
+		t.Fatalf("audit:\n%s", buf.String())
+	}
+}

@@ -88,6 +88,12 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not a worker", http.StatusForbidden)
 		return
 	}
+	if b.isRevoked(spec.Name) {
+		// Its identity is withdrawn: a wake would stage it a fresh ticket.
+		b.audit("worker", actor, "deny", "wake "+spec.Name+": revoked")
+		http.Error(w, "revoked", http.StatusForbidden)
+		return
+	}
 	if !b.runtimeReady(w) {
 		return
 	}

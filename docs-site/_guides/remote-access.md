@@ -1094,6 +1094,65 @@ login never gets it: the page does not show it, and the routes refuse a contact 
   the `contact`, the `agent` and the `count` of rows (or of contacts for the list), or
   `deny-operator-view` with the `reason` word. No line holds message text.
 
+## Notifications
+
+With `landing: chat` and `remote.push` on, a login can have its devices show a notification when
+an agent writes to it while the chat page is closed.
+
+```yaml
+remote:
+  landing: chat
+  push:
+    enabled: true
+    subject: mailto:you@example.com   # the contact the push services see for this sender
+```
+
+- **What a login sees.** "New message from <agent>" (or "New message" when the agent is not in
+  the login's list). A tap opens the chat with that agent. No message text leaves the host, not
+  even encrypted: the push carries only `{"v":1,"agent":"<name>"}`, encrypted for the device
+  (Web Push, VAPID and aes128gcm, on the Go standard library).
+- **Turning it on.** Per device, from **Turn on notifications** in the agent list (the browser
+  asks for permission then). On an iPhone, add the page to the Home Screen first and open it from
+  there (iOS 16.4 or later). On Linux Chrome, the browser tab or the installed app both work.
+  **Turn off notifications** removes the device's subscription. A login keeps at most five
+  devices (the oldest goes); a device endpoint belongs to the last login that turned it on.
+- **Who is told.** A login is told only about agents it may message (an operator: every agent; a
+  contact: its `agents:` list, never a `see:` agent). With `agent_messages` on, a contact is told
+  only about a message it would be shown. No notification for the login's own messages or hub
+  lines, none while the chat is open and read, and at most one per agent a minute (a later
+  message in that minute gets one more when the minute ends).
+- **How it works.** For each login with a device, the proxy holds one hub events stream with
+  that login's own hub session; an event for one of its direct conversations makes the proxy
+  read the newest messages as the login and decide. After a hub or proxy restart it catches up
+  (a message older than one hour is not notified).
+- **The service worker.** `/lever/sw.js` (scope `/lever/`) handles `push` and
+  `notificationclick` only: no fetch handler and no cache, so it never stands between the page
+  and its requests. The page registers it only when a login turns notifications on. The page's
+  CSP gains `worker-src` for `/lever/` only.
+- **Egress.** The host process connects out to the push services: `fcm.googleapis.com`,
+  `*.push.apple.com`, `updates.push.services.mozilla.com` and `*.notify.windows.com`, on 443. A
+  host firewall must allow that. The proxy accepts a subscription only on those hosts, never
+  follows a redirect, uses no HTTP proxy, and connects only to public addresses (never a
+  private, loopback, link-local or tailnet `100.64.0.0/10` address, whatever DNS answers).
+- **State.** `.lever-state/push/` (0700): `vapid.key` (the signing key), `subscriptions.json`
+  and `status.json` (the last send result), each 0600. A file that another user can read keeps
+  push off, and `lever doctor` names it. Deleting `vapid.key` makes every device turn
+  notifications on again. A login removed from `allowed_users` loses its devices at the next
+  proxy start.
+- **Off.** `enabled: false` removes the routes and the worker; the page unregisters the worker on
+  its next load.
+- **Doctor.** The `push` row shows off, or on with the key, the device count per login and the
+  last send result.
+- **Audit.** `push-subscribe`, `push-unsubscribe`, `deny-push`, `push-sent`, `push-gone`,
+  `push-failed` and `push-stream` lines in `.lever-state/remote-audit.jsonl`. A line names the
+  push service's host only, never the endpoint path, a key or a payload.
+
+> **Test only.** `LEVER_PUSH_TEST_HOSTS=127.0.0.1:<port>[,…]` in the proxy's environment admits
+> those exact loopback addresses over plain http, for the end-to-end test with
+> `tools/test/pushrecv` (a fake push service that decrypts what it gets). Any other value stops
+> `lever remote serve`; a set value prints a warning and `lever doctor` warns. Never set it for
+> a real instance.
+
 ## What this does NOT do
 
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —

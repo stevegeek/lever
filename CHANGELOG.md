@@ -9,6 +9,14 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **Notifications for the chat page (`remote.push`).** Off by default. On, a login turns
+  notifications on per device from the agent list; when an agent writes to it while the page is
+  closed, the device shows "New message from <agent>" and a tap opens that chat (Linux Chrome; iPhone
+  as a Home Screen app, iOS 16.4+). Standard Web Push with VAPID and aes128gcm, implemented on the Go
+  standard library; the push carries only the agent's name, encrypted; the service worker handles
+  push and click only (no fetch handler, no cache). The proxy holds one hub event stream per
+  subscribed login; contacts are notified only for messages they would be shown. Push endpoints are
+  limited to the known push services and to public addresses. `lever doctor` has a `push` row.
 - **The operator can read contacts' conversations (chat page, read-only).** With `landing: chat`,
   an operator login's agent list gains a Contacts section: each contact, the agents it may message,
   and each conversation, read-only, with agent messages the contact is not shown (agent messages on)

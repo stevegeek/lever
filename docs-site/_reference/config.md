@@ -394,6 +394,8 @@ access guide](/remote-access/) for the accepted security posture, setup steps, a
 | `agent_messages.enabled` | bool | no | `false` | Lets an agent start a message to a contact that lists it, under a limit and with a host record, and makes the proxy show a contact only the agent messages that record holds (history, events, DM previews, unread counts). The operator's view is unchanged. Needs at least one `tier: contact` entry in `allowed_users` (rejected at config load without one). Off, nothing changes. See the [guide](/remote-access/#messages-agents-start). |
 | `agent_messages.follow_up_after` | duration | no | `24h` | How long after a message an agent started (with no answer from the contact) the agent may send its one reminder. `0` or unset is the default; otherwise `1h` to `720h`. A message from the contact resets the count. |
 | `agent_messages.max_chars` | int | no | `4000` | The longest message, in characters, an agent may send a contact. `0` or unset is the default; otherwise `1` to `16000` (the hub's own limit). |
+| `push.enabled` | bool | no | `false` | Web Push notifications for the chat page: a login's devices show "New message from <agent>" when an agent writes while the page is closed. Needs `landing: chat` (rejected at config load without it). Off, the proxy has no push routes, no service worker and no hub streams, and its config stamp is unchanged. See the [guide](/remote-access/#notifications). |
+| `push.subject` | string | when `push.enabled` | - | The VAPID contact the push services see for this sender (RFC 8292): `mailto:<local>@<domain>` or an absolute `https://` URL, printable ASCII, at most 200 bytes. A change restarts the proxy at the next `lever apply`. |
 
 ```yaml
 remote:
@@ -407,6 +409,9 @@ remote:
   # trust_forwarded_host: false                # optional; see above before turning on
   # landing: console                          # optional; chat = open on lever's chat page (the login's agents)
   # labels_file: workers/labels.json          # optional; manager-written labels for the chat page
+  # push:                                     # optional; chat page notifications (needs landing: chat)
+  #   enabled: true
+  #   subject: mailto:you@example.com
 ```
 
 ## Conventions & derived values

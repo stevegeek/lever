@@ -17,6 +17,7 @@ package remoteproxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"mime"
@@ -107,6 +108,7 @@ func filesTarget(p string) (agent, id string, under bool) {
 type filesState struct {
 	cfg         FilesConfig
 	now         func() time.Time // tests
+	afterCopy   func()           // tests: runs after the copy into the tree
 	bytesPerDay int64            // uploadBytesPerDay; tests shrink it
 
 	mu          sync.Mutex
@@ -523,6 +525,9 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	defer release()
 	st, err := chatfiles.Store(s.cfg.Tree, chatfiles.InDir(ws, v.login), name, staged, s.cfg.MaxBytes, now)
+	if s.afterCopy != nil {
+		s.afterCopy()
+	}
 	if err == nil && (st.SHA256 != sha || st.Size != size) {
 		err = errStagedChanged
 	}
@@ -536,7 +541,12 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		})
 	}
 	if err != nil && st.Rel != "" {
-		_ = fsutil.RemoveInTreeNoLinks(s.cfg.Tree, st.Rel)
+		if rmErr := fsutil.RemoveInTreeNoLinks(s.cfg.Tree, st.Rel); rmErr != nil {
+			// The audit line names the copy left in the agent's tree (its
+			// path, never its content), so the operator can remove it.
+			err = fmt.Errorf("%w; the copy %s was not removed: %v", err, st.Rel, rmErr)
+			line.Error = err.Error()
+		}
 	}
 	switch {
 	case err == nil:
@@ -566,7 +576,8 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 }
 
 // afterStage, when set, runs on the staged file before it is copied into
-// the tree: a test seam for a staged file that changes.
+// the tree: a test seam for a staged file that changes. Tests set it only
+// through setAfterStage, never in parallel.
 var afterStage func(*os.File)
 
 // errStagedChanged: the copy into the tree did not hash to the staged file.

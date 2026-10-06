@@ -702,10 +702,9 @@ func TestUploadRemovesTheCopyWhenTheRecordFails(t *testing.T) {
 func TestUploadComparesTheCopyWithTheStagedFile(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, tree, ledger := filesCfg(t, hub)
-	afterStage = func(f *os.File) {
+	setAfterStage(t, func(f *os.File) {
 		_, _ = f.WriteAt([]byte("Z"), 0)
-	}
-	defer func() { afterStage = nil }()
+	})
 	rw := upload(t, NewHandler(cfg), "c@x", "w1", "a.pdf", "abc")
 	if rw.Code != 500 || !strings.Contains(rw.Body.String(), `"failed"`) {
 		t.Fatalf("%d %s", rw.Code, rw.Body)
@@ -847,5 +846,47 @@ func TestDownloadBusyThroughTheHandler(t *testing.T) {
 	}
 	if rw := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 200 {
 		t.Fatalf("the operator = %d", rw.Code)
+	}
+}
+
+// setAfterStage sets the afterStage seam for one test and restores it.
+// It is a package variable: a test that sets it must not call t.Parallel.
+func setAfterStage(t *testing.T, f func(*os.File)) {
+	t.Helper()
+	prev := afterStage
+	afterStage = f
+	t.Cleanup(func() { afterStage = prev })
+}
+
+// A copy that cannot be removed after a refusal is named in the audit
+// line (its path, never its content).
+func TestUploadAuditsAnOrphanCopy(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root removes from a read-only directory")
+	}
+	hub := newPageHub(t)
+	cfg, tree, _ := filesCfg(t, hub)
+	var lines lockedLines
+	cfg.Audit = lines.add
+	dir := filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))
+	// The staged file changes (the copy is refused), and the directory
+	// cannot be written once the copy is in it (its removal fails).
+	setAfterStage(t, func(f *os.File) {
+		_, _ = f.WriteAt([]byte("Z"), 0)
+	})
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(cfg).(*gate)
+	h.files.afterCopy = func() { _ = os.Chmod(dir, 0o500) }
+	defer os.Chmod(dir, 0o700)
+	rw := upload(t, h, "c@x", "w1", "a.pdf", "secret-bytes")
+	if rw.Code != 500 {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	all := lines.all()
+	last := all[len(all)-1]
+	if !strings.Contains(last.Error, "was not removed") || !strings.Contains(last.Error, "-a.pdf") || strings.Contains(fmt.Sprint(all), "secret-bytes") {
+		t.Fatalf("audit %+v", last)
 	}
 }

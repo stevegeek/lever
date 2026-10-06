@@ -2,6 +2,7 @@ package remoteproxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -383,5 +385,184 @@ func TestContactStillCannotUseHubAttachments(t *testing.T) {
 	rw := chatDo(NewHandler(cfg), "c@x", "POST", "/api/v1/chat/attachments", "Origin", "https://"+testServeHost)
 	if rw.Code != http.StatusForbidden {
 		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+}
+
+// shareRec writes content into agent's out/<key of login>/name and records
+// it as a share, like the broker's share_file.
+func shareRec(t *testing.T, cfg Config, agent, login, name, content string) (string, string) {
+	t.Helper()
+	ws := cfg.Files.Workspaces[agent]
+	st, err := chatfiles.Store(cfg.Files.Tree, chatfiles.OutDir(ws, login), name, strings.NewReader(content), cfg.Files.MaxBytes, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, _ := fileledger.Open(cfg.Files.LedgerDir)
+	id, _ := fileledger.NewID()
+	if err := l.Add(fileledger.Record{V: 1, Op: fileledger.OpShare, ID: id, Agent: agent, Login: login, Name: name, Rel: st.Rel,
+		SHA256: st.SHA256, Size: st.Size, At: time.Now()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	return id, filepath.Join(cfg.Files.Tree, st.Rel)
+}
+
+func TestDownloadHeaders(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	html := "<html><script>alert(1)</script></html>"
+	id, _ := shareRec(t, cfg, "w1", "c@x", "v3 final.xlsm", html)
+	var lines lockedLines
+	cfg.Audit = lines.add
+	rw := chatDo(NewHandler(cfg), "c@x", "GET", "/lever/api/files/w1/"+id)
+	if rw.Code != 200 || rw.Body.String() != html {
+		t.Fatalf("%d %q", rw.Code, rw.Body)
+	}
+	for k, v := range map[string]string{
+		"Content-Type":                 "application/octet-stream",
+		"Content-Disposition":          `attachment; filename="v3 final.xlsm"; filename*=UTF-8''v3%20final.xlsm`,
+		"X-Content-Type-Options":       "nosniff",
+		"Content-Security-Policy":      "sandbox",
+		"Cache-Control":                "no-store",
+		"X-Frame-Options":              "DENY",
+		"Referrer-Policy":              "no-referrer",
+		"Cross-Origin-Resource-Policy": "same-origin",
+		"Content-Length":               strconv.Itoa(len(html)),
+	} {
+		if got := rw.Header().Get(k); got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
+	all := lines.all()
+	if last := all[len(all)-1]; last.Decision != DecisionFileDownload || last.Status != 200 {
+		t.Fatalf("audit %+v", last)
+	}
+	if strings.Contains(fmt.Sprint(all), "alert") {
+		t.Fatal("file content in the audit")
+	}
+}
+
+func TestDownloadRefusesSwappedBytes(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	for name, tc := range map[string]struct {
+		swap   func(t *testing.T, p string)
+		status int
+		word   string
+	}{
+		"same size": {func(t *testing.T, p string) { _ = os.WriteFile(p, []byte("SWAPPED!"), 0o644) }, 409, "changed"},
+		"appended": {func(t *testing.T, p string) {
+			f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0)
+			_, _ = f.WriteString("x")
+			f.Close()
+		}, 409, "changed"},
+		"link":    {func(t *testing.T, p string) { _ = os.Remove(p); _ = os.Symlink("/etc/hosts", p) }, 409, "changed"},
+		"deleted": {func(t *testing.T, p string) { _ = os.Remove(p) }, 410, "gone"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			id, p := shareRec(t, cfg, "w1", "c@x", "v.xlsm", "ORIGINAL")
+			tc.swap(t, p)
+			rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+id)
+			if rw.Code != tc.status || !strings.Contains(rw.Body.String(), tc.word) || strings.Contains(rw.Body.String(), "SWAPPED") {
+				t.Fatalf("%d %s", rw.Code, rw.Body)
+			}
+		})
+	}
+}
+
+func TestDownloadCrossLogin(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	id, _ := shareRec(t, cfg, "w1", "c@x", "c.xlsm", "for c")
+	if rw := chatDo(h, "d@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 404 {
+		t.Fatalf("another contact = %d %s", rw.Code, rw.Body)
+	}
+	unknown := strings.Repeat("0", 32)
+	a := chatDo(h, "d@x", "GET", "/lever/api/files/w1/"+id)
+	b := chatDo(h, "d@x", "GET", "/lever/api/files/w1/"+unknown)
+	if a.Code != b.Code || a.Body.String() != b.Body.String() {
+		t.Fatal("a foreign id and an unknown id must answer the same")
+	}
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w2/"+id); rw.Code != 403 {
+		t.Fatalf("through a see-only agent = %d", rw.Code)
+	}
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/files/boss/"+id); rw.Code != 403 {
+		t.Fatalf("through an unlisted agent = %d", rw.Code)
+	}
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 200 || rw.Body.String() != "for c" {
+		t.Fatalf("operator (spec 5 view) = %d", rw.Code)
+	}
+}
+
+func TestDownloadMethods(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	id, _ := shareRec(t, cfg, "w1", "c@x", "c.xlsm", "x")
+	for _, m := range []string{"POST", "HEAD", "DELETE", "PUT"} {
+		if rw := chatDo(h, "c@x", m, "/lever/api/files/w1/"+id, "Origin", "https://"+testServeHost); rw.Code != 405 {
+			t.Errorf("%s = %d", m, rw.Code)
+		}
+	}
+}
+
+func TestDownloadOwnUpload(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	rw := upload(t, h, "c@x", "w1", "mine.pdf", "%PDF")
+	var ans struct{ ID string }
+	_ = json.Unmarshal(rw.Body.Bytes(), &ans)
+	if got := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+ans.ID); got.Code != 200 || got.Body.String() != "%PDF" {
+		t.Fatalf("%d %s", got.Code, got.Body)
+	}
+}
+
+func TestDownloadRefusesAHardLink(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	id, p := shareRec(t, cfg, "w1", "c@x", "v.xlsm", "ORIGINAL")
+	if err := os.Link(p, p+".2"); err != nil {
+		t.Fatal(err)
+	}
+	if rw := chatDo(NewHandler(cfg), "c@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 409 || !strings.Contains(rw.Body.String(), "changed") {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+}
+
+func TestContentDisposition(t *testing.T) {
+	for name, want := range map[string]string{
+		"a.pdf":      `attachment; filename="a.pdf"; filename*=UTF-8''a.pdf`,
+		"a b-c.xlsm": `attachment; filename="a b-c.xlsm"; filename*=UTF-8''a%20b-c.xlsm`,
+		"_CON.pdf":   `attachment; filename="_CON.pdf"; filename*=UTF-8''_CON.pdf`,
+	} {
+		if got := contentDisposition(name); got != want {
+			t.Errorf("%q: %s", name, got)
+		}
+	}
+}
+
+// A ledger line naming a file outside the login's own directory (written by
+// anything but lever) is not served.
+func TestDownloadRefusesARecordOutsideItsDirectory(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	st, err := chatfiles.Store(cfg.Files.Tree, chatfiles.OutDir("workers/w1", "d@x"), "d.xlsm", strings.NewReader("for d"), 64, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, _ := fileledger.Open(cfg.Files.LedgerDir)
+	id, _ := fileledger.NewID()
+	_ = l.Add(fileledger.Record{V: 1, Op: fileledger.OpShare, ID: id, Agent: "w1", Login: "c@x", Name: "d.xlsm", Rel: st.Rel,
+		SHA256: st.SHA256, Size: st.Size, At: time.Now()}, nil)
+	if rw := chatDo(NewHandler(cfg), "c@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 404 {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+}
+
+func TestContentDispositionRefusesAnUnsanitizedName(t *testing.T) {
+	if got := contentDisposition(`a"b.pdf`); got != `attachment; filename="file"; filename*=UTF-8''file` {
+		t.Fatal(got)
 	}
 }

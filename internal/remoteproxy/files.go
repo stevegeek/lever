@@ -22,8 +22,11 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
+	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -407,7 +410,91 @@ func filesErrText(err error) string {
 	return err.Error()
 }
 
-// serveDownload answers GET /lever/api/files/<agent>/<id> (Task 8).
+// serveDownload answers GET /lever/api/files/<agent>/<id>: the recorded
+// file, from a private copy whose sha256 equals the record, as an
+// attachment no browser renders. Another login's id answers like an
+// unknown one.
 func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent, id string) {
-	g.refuseFile(w, r, line, http.StatusNotFound, "not-found")
+	s := g.files
+	led, err := s.led()
+	if err != nil {
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	rec, found, err := led.Find(agent, id)
+	if err != nil {
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	// One answer for an unknown id, another login's record, and a record
+	// whose path is not where lever puts that login's files for this agent
+	// (a ledger line written by anything but lever).
+	if !found || !mayDownload(v, rec) || !recordedWhereExpected(s.cfg.Workspaces[agent], rec) {
+		g.refuseFile(w, r, line, http.StatusNotFound, "not-found")
+		return
+	}
+	select {
+	case s.downloads <- struct{}{}:
+		defer func() { <-s.downloads }()
+	default:
+		w.Header().Set("Retry-After", "10")
+		g.refuseFile(w, r, line, http.StatusTooManyRequests, "busy")
+		return
+	}
+	f, size, err := chatfiles.CopyVerified(s.cfg.Tree, rec.Rel, rec.SHA256, s.cfg.MaxBytes)
+	switch {
+	case err == nil:
+	case errors.Is(err, fs.ErrNotExist):
+		g.refuseFile(w, r, line, http.StatusGone, "gone")
+		return
+	case errors.Is(err, chatfiles.ErrChanged), errors.Is(err, fsutil.ErrSymlink), errors.Is(err, fsutil.ErrHardLink),
+		errors.Is(err, fsutil.ErrNotRegularFile):
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusConflict, "changed")
+		return
+	default:
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	defer f.Close()
+	line.Decision, line.Status = DecisionFileDownload, http.StatusOK
+	g.audit(*line)
+	h := w.Header()
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Disposition", contentDisposition(rec.Name))
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", "sandbox")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cross-Origin-Resource-Policy", "same-origin")
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(fileBodyDeadline))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, f)
+}
+
+// recordedWhereExpected reports whether rec's file is directly in the
+// directory lever uses for its login and kind in workspace ws: in/<key>/
+// for an upload, out/<key>/ for a share.
+func recordedWhereExpected(ws string, rec fileledger.Record) bool {
+	dir := chatfiles.OutDir(ws, rec.Login)
+	if rec.Op == fileledger.OpUpload {
+		dir = chatfiles.InDir(ws, rec.Login)
+	}
+	return ws != "" && path.Dir(rec.Rel) == dir
+}
+
+// contentDisposition is the attachment header for a recorded name. Names
+// are SanitizeName's ASCII ([A-Za-z0-9._ -]), so the quoted form needs no
+// escape (anything else is sent as "file"); filename* is the RFC 6266/5987
+// form browsers prefer.
+func contentDisposition(name string) string {
+	if chatfiles.SanitizeName(name) != name {
+		name = "file" // never a quote or a byte the header cannot carry
+	}
+	return `attachment; filename="` + name + `"; filename*=UTF-8''` + strings.ReplaceAll(url.PathEscape(name), "+", "%2B")
 }

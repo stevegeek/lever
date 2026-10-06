@@ -1878,3 +1878,16 @@ test('operator view with files off: no files list and no request', async () => {
   assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 0);
   assert.equal(env.els.filespanel.hidden, true);
 });
+
+test('the view poll does not read a not-signed-in contact\'s conversation', async () => {
+  const env = await load(hubWith({ agents: withFiles([BOSS(), A('w1')]), contacts: CONTACTS }));
+  await env.clickContact(1);
+  await env.clickContactAgent(1, 0);
+  assert.equal(env.els.notice.textContent, 'd@x has not signed in yet.');
+  const reads = () => env.count('GET', '/lever/api/contacts/d%40x/');
+  const before = reads();
+  await env.poll();
+  await env.poll();
+  assert.equal(reads(), before, 'no transcript or files read from the poll');
+  assert.equal(env.els.notice.textContent, 'd@x has not signed in yet.');
+});

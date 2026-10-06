@@ -461,7 +461,7 @@ function openTranscript(login, name) {
   const a = c && c.agents.find((x) => x.name === name);
   if (!a) return;
   closeChat();
-  view = { login, name };
+  view = { login, name, signedIn: !!c.signedIn };
   document.body.classList.add('chatting');
   document.title = name;
   setText(el.agent, `${login} · ${name}`);
@@ -481,7 +481,9 @@ function openTranscript(login, name) {
 function pollView() {
   if (document.visibilityState !== 'visible') return;
   void reloadContacts();
-  if (view) {
+  // A contact that has not signed in has no conversation to read (the read
+  // answers not-signed-in): the poll leaves its view and note as they are.
+  if (view && view.signedIn) {
     void readTranscript('');
     void loadViewFiles();
   }

@@ -173,3 +173,136 @@ export function makeCoalescer(fn, gapMs, now = () => Date.now(), setTimer = (f, 
     setTimer(run, wait);
   };
 }
+
+// The agent list (/lever/api/agents). The proxy builds it per login; the
+// page still reads it as data of unknown shape, and shows only fixed words
+// for what an agent reports about itself.
+
+// WAKE_POLL_MS and WAKE_POLLS: after a wake, the list is read every 3 s for
+// up to 90 s. LIST_MS: the list is read again this often while the page shows.
+export const WAKE_POLL_MS = 3000;
+export const WAKE_POLLS = 30;
+export const LIST_MS = 15000;
+
+const STATES = new Set(['running', 'starting', 'suspended', 'stopped', 'error', 'no-record', 'not-fresh', 'unknown']);
+const ACTIVITIES = new Set(['working', 'waiting', 'idle']);
+const LABEL_MAX = 60;
+const UNREAD_MAX = 99;
+
+// agentList reads a list answer: {login, tier, userId, console, agents}, or
+// null when it is not one. A row needs a name and an access the page knows;
+// a later row with the same name is dropped. A see-only row keeps only its
+// name, role, access, state and label, whatever else the answer holds.
+export function agentList(body) {
+  if (!body || typeof body !== 'object' || !Array.isArray(body.agents)) return null;
+  const seen = new Set();
+  const agents = [];
+  for (const r of body.agents) {
+    if (!r || typeof r !== 'object') continue;
+    const name = str(r.name);
+    const access = str(r.access);
+    if (!name || seen.has(name) || (access !== 'message' && access !== 'see')) continue;
+    seen.add(name);
+    const state = STATES.has(str(r.state)) ? r.state : 'unknown';
+    const a = { name, role: r.role === 'manager' ? 'manager' : 'worker', access, state, label: oneLine(r.label, LABEL_MAX) };
+    if (access === 'message') {
+      a.activity = state === 'running' && ACTIVITIES.has(str(r.activity)) ? r.activity : '';
+      a.id = str(r.id);
+      a.conversation = str(r.conversation);
+      a.terminal = str(r.terminal);
+      if (Number.isInteger(r.unread) && r.unread >= 0 && r.unread <= UNREAD_MAX) a.unread = r.unread;
+    }
+    agents.push(a);
+  }
+  return {
+    login: str(body.login),
+    // Only the exact word earns the operator's links.
+    tier: body.tier === 'operator' ? 'operator' : 'contact',
+    userId: str(body.userId),
+    console: str(body.console),
+    agents,
+  };
+}
+
+// rowTitle is the name, then the label: the name always comes first, so a
+// label cannot pass for another agent.
+export function rowTitle(a) {
+  return a.label ? `${a.name} · ${a.label}` : a.name;
+}
+
+const CHIP = {
+  starting: 'starting',
+  suspended: 'asleep',
+  stopped: 'stopped',
+  error: 'error',
+  'no-record': 'no record',
+  'not-fresh': 'not fresh',
+};
+
+// chipText is the state as one of the page's fixed words.
+export function chipText(a) {
+  const state = str(a && a.state);
+  if (state === 'running') return ACTIVITIES.has(str(a.activity)) ? a.activity : 'running';
+  return Object.hasOwn(CHIP, state) ? CHIP[state] : 'unknown';
+}
+
+// badgeText is the unread count to show, or '' for none or not known.
+export function badgeText(unread) {
+  if (!Number.isInteger(unread) || unread <= 0) return '';
+  return unread >= UNREAD_MAX ? `${UNREAD_MAX}+` : String(unread);
+}
+
+const NOTE_STARTING = 'starting – your message waits until it runs';
+const NOTE_ASLEEP = 'asleep – your message wakes it';
+const NOTE_OFFLINE = 'the assistant is offline';
+const NOTE_UNKNOWN = 'state unknown – retrying';
+
+// inputView says what the chat of agent a offers (the spec's state table):
+// input (the composer is on), note (a fixed line under it), ask (the "Ask
+// the manager to start" button; only when the login may message the
+// manager), wake (a send wakes the agent first), viewOnly (no history, no
+// input). The manager is never woken from the page.
+export function inputView(a, canAskManager) {
+  const off = { input: false, note: '', ask: false, wake: false, viewOnly: false };
+  if (!a || a.access !== 'message') return { ...off, viewOnly: true };
+  const manager = a.role === 'manager';
+  switch (a.state) {
+    case 'running':
+      return { ...off, input: true };
+    case 'starting':
+      return { ...off, input: true, note: NOTE_STARTING };
+    case 'suspended':
+    case 'stopped':
+      return manager ? { ...off, note: NOTE_OFFLINE } : { ...off, input: true, note: NOTE_ASLEEP, wake: true };
+    case 'error':
+    case 'no-record':
+    case 'not-fresh':
+      return manager ? { ...off, note: NOTE_OFFLINE } : { ...off, ask: !!canAskManager };
+    default:
+      return { ...off, note: NOTE_UNKNOWN };
+  }
+}
+
+// askDraft is the editable draft the "Ask the manager" button leaves in the
+// manager's chat. Nothing sends it but the person.
+export function askDraft(name) {
+  return `Please start ${name} for me.`;
+}
+
+const WAKE_TEXT = {
+  'not-allowed': 'You are not allowed to wake this agent.',
+  'not-asleep': 'It is not asleep any more.',
+  'rate-limited': 'It was woken a moment ago; try again in a minute.',
+  unavailable: 'Waking is not available on this instance.',
+  refused: 'lever refused to wake it.',
+  failed: 'Waking it failed.',
+  origin: 'The request was refused.',
+};
+
+// wakeText is the page's own sentence for a refused wake: one per reason
+// word the proxy answers with, never the answer's text.
+export function wakeText(status, body, name) {
+  const word = body && typeof body === 'object' ? str(body.error) : '';
+  if (Object.hasOwn(WAKE_TEXT, word)) return WAKE_TEXT[word];
+  return `${name} could not be woken (HTTP ${status || 'no answer'}).`;
+}

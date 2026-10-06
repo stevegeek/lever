@@ -14,6 +14,16 @@ import {
   messageText,
   sortedMessages,
   stateLine,
+  agentList,
+  rowTitle,
+  chipText,
+  badgeText,
+  inputView,
+  askDraft,
+  wakeText,
+  WAKE_POLL_MS,
+  WAKE_POLLS,
+  LIST_MS,
 } from './chatcore.js';
 
 test('historyItems reads either key and drops junk', () => {
@@ -195,4 +205,101 @@ test('makeCoalescer runs a burst once now and once at the end of the gap', () =>
 
 test('MAX_MESSAGE is the hub cap', () => {
   assert.equal(MAX_MESSAGE, 16000);
+});
+
+test('inputView follows the spec table', () => {
+  const w = (state, extra = {}) => ({ name: 'deal-3', role: 'worker', access: 'message', state, ...extra });
+  assert.deepEqual(inputView(w('running'), true), { input: true, note: '', ask: false, wake: false, viewOnly: false });
+  assert.deepEqual(inputView(w('starting'), true), { input: true, note: 'starting – your message waits until it runs', ask: false, wake: false, viewOnly: false });
+  for (const s of ['suspended', 'stopped']) {
+    assert.deepEqual(inputView(w(s), true), { input: true, note: 'asleep – your message wakes it', ask: false, wake: true, viewOnly: false });
+  }
+  for (const s of ['error', 'no-record', 'not-fresh']) {
+    assert.deepEqual(inputView(w(s), true), { input: false, note: '', ask: true, wake: false, viewOnly: false });
+    // A contact who may not message the manager gets no button.
+    assert.equal(inputView(w(s), false).ask, false);
+  }
+  for (const s of ['suspended', 'stopped', 'error', 'no-record', 'not-fresh']) {
+    assert.deepEqual(inputView({ name: 'boss', role: 'manager', access: 'message', state: s }, true),
+      { input: false, note: 'the assistant is offline', ask: false, wake: false, viewOnly: false });
+  }
+  assert.deepEqual(inputView({ name: 'boss', role: 'manager', access: 'message', state: 'running' }, true).input, true);
+  for (const s of ['unknown', 'weird', undefined]) {
+    assert.deepEqual(inputView(w(s), true), { input: false, note: 'state unknown – retrying', ask: false, wake: false, viewOnly: false });
+  }
+  assert.deepEqual(inputView({ ...w('running'), access: 'see' }, true), { input: false, note: '', ask: false, wake: false, viewOnly: true });
+  assert.equal(inputView(null, true).viewOnly, true);
+});
+
+test('agentList keeps only what the page may show', () => {
+  const l = agentList({ login: 'c', tier: 'contact', userId: 'u', agents: [
+    { name: 'w1', role: 'worker', access: 'message', state: 'running', activity: 'working', id: 'a1', conversation: 'dm:agent:a1:user:u', unread: 3, label: 'x‮y' },
+    { name: 'w2', role: 'worker', access: 'see', state: 'weird', id: 'leak', conversation: 'leak', unread: 4, activity: 'working', terminal: '/agents/leak/terminal' },
+    { name: 7, access: 'message', state: 'running' },
+    { name: '', access: 'message', state: 'running' },
+    { name: 'w4', access: 'admin', state: 'running' },
+    null,
+    'w5',
+    { name: 'w1', access: 'message', state: 'error' },
+  ] });
+  assert.equal(l.agents.length, 2, 'junk rows and a repeated name go');
+  assert.equal(l.agents[0].label, 'x y');
+  assert.equal(l.agents[0].activity, 'working');
+  assert.equal(l.agents[0].unread, 3);
+  assert.deepEqual(l.agents[1], { name: 'w2', role: 'worker', access: 'see', state: 'unknown', label: '' });
+  assert.deepEqual([l.login, l.tier, l.userId, l.console], ['c', 'contact', 'u', '']);
+  for (const junk of ['nope', null, 7, {}, { agents: 'x' }]) assert.equal(agentList(junk), null);
+});
+
+test('agentList reads every field as data of unknown shape', () => {
+  const row = (over) => agentList({ tier: 'operator', agents: [{ name: 'w', access: 'message', state: 'running', ...over }] }).agents[0];
+  assert.equal(row({ role: 'manager' }).role, 'manager');
+  assert.equal(row({ role: 'admin' }).role, 'worker');
+  assert.equal(row({ activity: 'thinking' }).activity, '', 'only the page\'s three activity words');
+  assert.equal(row({ state: 'stopped', activity: 'working' }).activity, '', 'activity belongs to a running agent');
+  for (const u of [-1, 100, 2.5, '3', null]) assert.equal(row({ unread: u }).unread, undefined, String(u));
+  assert.equal(row({ unread: 99 }).unread, 99);
+  assert.equal(row({ unread: 0 }).unread, 0);
+  assert.deepEqual([row({ id: 7 }).id, row({ conversation: {} }).conversation, row({ terminal: 1 }).terminal], ['', '', '']);
+  assert.equal(row({ label: 'a'.repeat(80) }).label.length, 60);
+  assert.equal(row({ label: { x: 1 } }).label, '');
+  assert.equal(agentList({ tier: 'root', agents: [] }).tier, 'contact', 'only "operator" earns the operator view');
+  for (const s of ['running', 'starting', 'suspended', 'stopped', 'error', 'no-record', 'not-fresh', 'unknown']) assert.equal(row({ state: s }).state, s);
+});
+
+test('badges, titles, chips, drafts', () => {
+  assert.equal(badgeText(0), '');
+  assert.equal(badgeText(1), '1');
+  assert.equal(badgeText(98), '98');
+  assert.equal(badgeText(99), '99+');
+  assert.equal(badgeText(undefined), '');
+  assert.equal(badgeText('5'), '');
+  assert.equal(rowTitle({ name: 'deal-2', label: 'Via Roma 12' }), 'deal-2 · Via Roma 12');
+  assert.equal(rowTitle({ name: 'deal-2', label: '' }), 'deal-2');
+  assert.equal(chipText({ state: 'running', activity: 'waiting' }), 'waiting');
+  assert.equal(chipText({ state: 'running' }), 'running');
+  assert.equal(chipText({ state: 'running', activity: '<b>' }), 'running');
+  assert.equal(chipText({ state: 'suspended' }), 'asleep');
+  assert.equal(chipText({ state: 'stopped' }), 'stopped');
+  assert.equal(chipText({ state: 'no-record' }), 'no record');
+  assert.equal(chipText({ state: 'not-fresh' }), 'not fresh');
+  assert.equal(chipText({ state: '<script>' }), 'unknown');
+  assert.equal(askDraft('deal-3'), 'Please start deal-3 for me.');
+});
+
+test('wakeText is fixed text per reason, never the server text', () => {
+  assert.match(wakeText(429, { error: 'rate-limited' }, 'w1'), /a minute/);
+  assert.match(wakeText(403, { error: 'not-allowed' }, 'w1'), /not allowed/);
+  assert.match(wakeText(503, { error: 'unavailable' }, 'w1'), /not available/);
+  for (const word of ['not-asleep', 'refused', 'failed', 'origin']) assert.ok(wakeText(409, { error: word }, 'w1'), word);
+  assert.equal(wakeText(500, '<script>x</script>', 'w1').includes('<'), false);
+  assert.equal(wakeText(500, { error: '<b>own words</b>' }, 'w1'), 'w1 could not be woken (HTTP 500).');
+  assert.equal(wakeText(0, null, 'w1'), 'w1 could not be woken (HTTP no answer).');
+  assert.equal(wakeText(500, { error: 'constructor' }, 'w1'), 'w1 could not be woken (HTTP 500).', 'no word from the prototype');
+});
+
+test('the page timings', () => {
+  assert.equal(WAKE_POLL_MS, 3000);
+  assert.equal(WAKE_POLLS * WAKE_POLL_MS, 90000);
+  assert.equal(LIST_MS, 15000);
 });

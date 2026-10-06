@@ -32,6 +32,9 @@ type pageHub struct {
 	mu   sync.Mutex
 	seen []string
 	me   func(w http.ResponseWriter, r *http.Request)
+	// route, when set, answers a request it reports true for (after it is
+	// recorded); the chat list's DM and history reads use it.
+	route func(w http.ResponseWriter, r *http.Request) bool
 }
 
 func newPageHub(t *testing.T) *pageHub {
@@ -50,7 +53,11 @@ func newPageHub(t *testing.T) *pageHub {
 		}
 		h.mu.Lock()
 		h.seen = append(h.seen, r.Method+" "+r.URL.RequestURI())
+		route := h.route
 		h.mu.Unlock()
+		if route != nil && route(w, r) {
+			return
+		}
 		_, _ = io.WriteString(w, `{}`)
 	}))
 	t.Cleanup(h.Close)
@@ -73,7 +80,13 @@ func chatConfig(t *testing.T, hub *pageHub) Config {
 			return map[string]string{"w1": agentW1, "boss": chatMgrID}, nil
 		},
 		ContactSession: func(string) error { return nil },
-		ChatAgent:      "boss"}
+		ChatAgent:      "boss",
+		Workers:        []string{"w1", "w2", "w3"},
+		ContactSee:     map[string][]string{"c@x": {"w2"}},
+		AgentRecords: func(context.Context) (map[string]AgentRecord, error) {
+			return map[string]AgentRecord{"boss": {ID: chatMgrID, Phase: "running"}, "w1": {ID: agentW1, Phase: "running"},
+				"w2": {ID: "id-w2", Phase: "running"}, "w3": {ID: "id-w3", Phase: "suspended"}}, nil
+		}}
 }
 
 func chatDo(h http.Handler, login, method, target string, hdr ...string) *httptest.ResponseRecorder {

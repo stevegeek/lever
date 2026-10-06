@@ -9,6 +9,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 // The chat page.
@@ -55,6 +57,7 @@ const (
 	chatPrefix        = "/lever/"
 	chatPagePath      = "/lever/chat"
 	chatBootstrapPath = "/lever/api/chat"
+	chatAgentsPath    = "/lever/api/agents"
 	chatManifestPath  = "/lever/manifest.webmanifest"
 	// chatConsolePath is where the page's link to the hub's web UI goes: its
 	// agent list, since "/" now leads back to the chat page.
@@ -132,12 +135,20 @@ type chatPage struct {
 	files   map[string]chatFile
 	resolve func(ctx context.Context) (map[string]string, error) // agent name → hub id
 	whoAmI  func(ctx context.Context, cookie string) (string, error)
+	// hubGet reads a hub JSON route with a login's own session (the agent
+	// list's unread counts).
+	hubGet func(ctx context.Context, cookie, path string, out any) (int, error)
+
+	mu    sync.Mutex
+	users map[string]contactUser // login → hub user id, for the agent list
+	nowFn func() time.Time
 }
 
 // newChatPage loads the embedded files. A file that is missing is a build
 // fault, so it panics rather than serve a page with a hole in it.
 func newChatPage(cfg Config) *chatPage {
-	p := &chatPage{agent: cfg.ChatAgent, csp: chatCSPFor(cfg.ServeHost), resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), files: map[string]chatFile{}}
+	p := &chatPage{agent: cfg.ChatAgent, csp: chatCSPFor(cfg.ServeHost), resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg),
+		hubGet: hubGetJSON(cfg), files: map[string]chatFile{}}
 	add := func(route, contentType string, body []byte) {
 		sum := sha256.Sum256(body)
 		p.files[route] = chatFile{contentType: contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
@@ -280,6 +291,10 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	}
 	if p == chatBootstrapPath {
 		g.serveChatBootstrap(w, r, line, operator, cookie)
+		return true
+	}
+	if p == chatAgentsPath {
+		g.serveAgents(w, r, line, g.viewerFor(operator), cookie)
 		return true
 	}
 	f, ok := g.chat.files[p]

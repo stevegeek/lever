@@ -142,6 +142,18 @@ type Config struct {
 	// to find the agent's hub id, and a verified login (AllowedUsers).
 	// Empty leaves every one of those paths to the hub, as before.
 	ChatAgent string
+	// Workers is every configured worker name in config order: the agents an
+	// operator sees beside the manager on the chat page.
+	Workers []string
+	// ContactSee maps a contact login to the agents it may see on the chat
+	// page (name, label, state) but not message.
+	ContactSee map[string][]string
+	// AgentRecords lists the instance's hub agent records by name, with phase
+	// and activity already reduced to scion's known words. The chat page's
+	// agent list needs it; nil answers every state "unknown".
+	AgentRecords func(ctx context.Context) (map[string]AgentRecord, error)
+	// Labels returns the labels by agent name (nil for none). Optional.
+	Labels func() map[string]string
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.

@@ -41,6 +41,9 @@ type FilesConfig struct {
 	LedgerDir string
 	Contacts  []FileContactEntry
 	Operators []string
+	// NoShares (remote.files.shares false): share_file answers shares-off.
+	// A login with files: false is in neither list, so it is no target.
+	NoShares bool
 }
 
 // FileContactEntry is one contact login and the agents it may message.
@@ -63,6 +66,7 @@ const (
 	refuseNotFound       = "not-found"
 	refuseSymlink        = "symlink"
 	refuseHardLink       = "hard-link"
+	refuseSharesOff      = "shares-off"
 	refuseNotFile        = "not-a-file"
 	refuseTooLarge       = "too-large"
 	refuseExtension      = "extension"
@@ -245,6 +249,10 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 	}
 	if !b.files.Enabled {
 		refuse(refuseOff, "files are off on this instance", "off")
+		return
+	}
+	if b.files.NoShares {
+		refuse(refuseSharesOff, "sharing files is off on this instance: tell the login in the chat instead", "shares off")
 		return
 	}
 	_, slug, _, _ := b.identity(caller)

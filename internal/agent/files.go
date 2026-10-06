@@ -21,7 +21,7 @@ const contactFilesDescription = "List one login's files with you, from lever's h
 
 const shareFileDescription = "Share one file with a login: write it into that login's out_dir (from contact_files) first, " +
 	"then call this with the login and the file's path. Lever records its sha256; the login downloads exactly those bytes. " +
-	"Refusals: not-a-contact, bad-path, not-found, symlink, hard-link, not-a-file, too-large, extension, rate, off, unavailable."
+	"Refusals: not-a-contact, bad-path, not-found, symlink, hard-link, not-a-file, too-large, extension, rate, off, shares-off, unavailable."
 
 // fileToolSchemas are the tools/list entries of contact_files and
 // share_file: plain top-level objects (no combinator, #24).

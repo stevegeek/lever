@@ -31,3 +31,17 @@ func TestFilesConfigFromApp(t *testing.T) {
 		t.Fatal("files need landing chat")
 	}
 }
+
+// A login with files: false is no file target: brokerctl leaves it out of
+// both lists, so share_file and contact_files answer not-a-contact for it.
+func TestFilesConfigSwitches(t *testing.T) {
+	no := false
+	app := &config.App{Name: "hello", Tree: t.TempDir(), Workers: []config.Worker{{Name: "w1", Dir: "workers/w1"}},
+		Remote: config.Remote{Enabled: true, Landing: config.RemoteLandingChat, Files: config.Files{Enabled: true, Shares: &no},
+			AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "op2@x", Files: &no},
+				{Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}, {Login: "d@x", Tier: config.TierContact, Agents: []string{"w1"}, Files: &no}}}}
+	c := Files(app, state.State{Dir: t.TempDir()})
+	if !c.NoShares || len(c.Operators) != 1 || c.Operators[0] != "op@x" || len(c.Contacts) != 1 || c.Contacts[0].Login != "c@x" {
+		t.Fatalf("%+v", c)
+	}
+}

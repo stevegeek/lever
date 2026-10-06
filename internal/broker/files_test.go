@@ -333,3 +333,36 @@ func TestShareFaultWords(t *testing.T) {
 		}
 	}
 }
+
+// Shares off: share_file answers shares-off and records nothing; the list
+// still shows uploads and the shares already made.
+func TestFilesSharesOff(t *testing.T) {
+	f := newFilesFixture(t)
+	ck := chatfiles.Key("client@example.org")
+	f.put(t, "workers/scratch", ".lever-files/out/"+ck+"/a.pdf", "x")
+	f.put(t, "workers/scratch", ".lever-files/out/"+ck+"/b.pdf", "y")
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "a.pdf")); !res.OK {
+		t.Fatalf("%+v", res)
+	}
+	off := &filesFixture{verifyFixture: verifyBroker(t, nil, filesOpt(f.tree, f.dir), func(c *Config) { c.Files.NoShares = true }), tree: f.tree, dir: f.dir}
+	if res := off.share(t, "scratch", "client@example.org", outPath("client@example.org", "b.pdf")); res.OK || res.Reason != "shares-off" {
+		t.Fatalf("%+v", res)
+	}
+	if out := off.list(t, "scratch", "client@example.org"); !out.Enabled || len(out.Shares) != 1 {
+		t.Fatalf("the share already made is still listed: %+v", out)
+	}
+}
+
+func TestFilesExcludedLoginIsNoTarget(t *testing.T) {
+	f := &filesFixture{tree: t.TempDir(), dir: t.TempDir()}
+	f.verifyFixture = verifyBroker(t, nil, filesOpt(f.tree, f.dir), func(c *Config) {
+		c.Files.Contacts = c.Files.Contacts[1:] // brokerctl drops a files: false login
+	})
+	f.put(t, "workers/scratch", ".lever-files/out/"+chatfiles.Key("client@example.org")+"/a.pdf", "x")
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "a.pdf")); res.Reason != "not-a-contact" {
+		t.Fatalf("%+v", res)
+	}
+	if out := f.list(t, "scratch", "client@example.org"); out.Note != "not-a-contact" {
+		t.Fatalf("%+v", out)
+	}
+}

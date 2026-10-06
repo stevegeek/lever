@@ -1,6 +1,8 @@
 package remoteproxy
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -39,7 +41,7 @@ const historyBody = `{"messages":[
  {"id":"c1","sender":"user:c@x","senderId":"u-contact","type":"instruction","msg":"mine","createdAt":"2026-10-06T09:59:00Z"},
  {"id":"s1","sender":"system","senderId":"hub","type":"system","msg":"agent started","createdAt":"2026-10-06T09:58:00Z"}],
  "nextCursor":"cur-1","totalCount":5,
- "messageAttachments":{"a2":[{"id":"f1","name":"SECRET.pdf"}],"a1":[{"id":"f2","name":"kept.pdf"}]},
+ "messageAttachments":{"a2":[{"id":"f1","name":"SECRET.pdf"}],"a1":[{"id":"f2","name":"SECRET-kept-row.pdf"}],"c1":[{"id":"f3","name":"mine.pdf"}]},
  "messageExtensions":{"a2":{"messageId":"a2"},"zz":{"messageId":"SECRET-other"}},
  "replyPreviews":{"a2":{"messageId":"a2","senderName":"w1","content":"SECRET unrecorded"}}}`
 
@@ -78,7 +80,7 @@ func TestHistoryFilterKeepsOnlyRecordedAgentRows(t *testing.T) {
 	if rw.Code != 200 || strings.Contains(body, "SECRET") {
 		t.Fatalf("%d %s", rw.Code, body)
 	}
-	for _, want := range []string{`"a1"`, `"c1"`, `"s1"`, `"nextCursor":"cur-1"`, `"totalCount":5`, `kept.pdf`} {
+	for _, want := range []string{`"a1"`, `"c1"`, `"s1"`, `"nextCursor":"cur-1"`, `"totalCount":5`, `mine.pdf`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %s in %s", want, body)
 		}
@@ -132,11 +134,12 @@ func TestHistoryFilterFailsClosed(t *testing.T) {
 		header map[string]string
 		match  func(context.Context, string, string, []AgentMessage) (map[string]bool, error)
 	}{
-		"broker down": {historyBody, nil, down},
-		"gzip":        {historyBody, map[string]string{"Content-Encoding": "gzip"}, recordedOnly("recorded")},
-		"not json":    {`SECRET unrecorded`, nil, recordedOnly("recorded")},
-		"items key":   {`{"items":[{"id":"a2","sender":"agent:w1","senderId":"id-w1","msg":"SECRET"}]}`, nil, recordedOnly("recorded")},
-		"odd row":     {`{"messages":[{"id":["a2"],"sender":"agent:w1","msg":"SECRET"}]}`, nil, recordedOnly("recorded")},
+		"broker down":     {historyBody, nil, down},
+		"gzip":            {historyBody, map[string]string{"Content-Encoding": "gzip"}, recordedOnly("recorded")},
+		"not json":        {`SECRET unrecorded`, nil, recordedOnly("recorded")},
+		"items key":       {`{"items":[{"id":"a2","sender":"agent:w1","senderId":"id-w1","msg":"SECRET"}]}`, nil, recordedOnly("recorded")},
+		"odd row":         {`{"messages":[{"id":["a2"],"sender":"agent:w1","msg":"SECRET"}]}`, nil, recordedOnly("recorded")},
+		"gzip, no header": {gzipped(historyBody), nil, recordedOnly("recorded")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := agentMsgHandler(t, historyHub(t, tc.body, tc.header), tc.match)
@@ -150,8 +153,51 @@ func TestHistoryFilterFailsClosed(t *testing.T) {
 
 func TestHistoryFilterOffIsUnchanged(t *testing.T) {
 	h := agentMsgHandler(t, historyHub(t, historyBody, nil), nil)
-	if !strings.Contains(contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String(), "SECRET unrecorded") {
-		t.Fatal("off: the contact sees the hub's answer as in spec 1")
+	if got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String(); got != historyBody {
+		t.Fatalf("off: the contact gets the hub's answer byte for byte, got %q", got)
+	}
+}
+
+// The broker's answer is checked against the question: an id it was not
+// asked about (a deleted row, a row with no readable time) stays hidden.
+func TestHistoryFilterKeepsOnlyAskedIDs(t *testing.T) {
+	body := `{"messages":[
+ {"id":"d1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"","createdAt":"2026-10-06T10:00:00Z"},
+ {"id":"t1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"SECRET no time","createdAt":"yesterday"},
+ {"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:00Z"}]}`
+	var asked []string
+	everything := func(_ context.Context, _, _ string, msgs []AgentMessage) (map[string]bool, error) {
+		for _, m := range msgs {
+			asked = append(asked, m.ID)
+		}
+		return map[string]bool{"d1": true, "t1": true, "a1": true, "zz": true}, nil
+	}
+	h := agentMsgHandler(t, historyHub(t, body, nil), everything)
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	if strings.Contains(got, `"d1"`) || strings.Contains(got, "SECRET") || !strings.Contains(got, `"a1"`) {
+		t.Fatalf("%s", got)
+	}
+	if len(asked) != 1 || asked[0] != "a1" {
+		t.Fatalf("asked %v, want only a1", asked)
+	}
+}
+
+// A row id that appears twice on a page hides every row with it: the
+// broker binds by id, so a second row could borrow the first one's record.
+func TestHistoryFilterHidesDuplicateIDs(t *testing.T) {
+	body := `{"messages":[
+ {"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:00Z"},
+ {"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"SECRET twin","createdAt":"2026-10-06T10:00:01Z"},
+ {"id":"c1","sender":"user:c@x","senderId":"u-contact","type":"instruction","msg":"mine","createdAt":"2026-10-06T09:59:00Z"}]}`
+	var asked int
+	match := func(ctx context.Context, c, a string, msgs []AgentMessage) (map[string]bool, error) {
+		asked += len(msgs)
+		return recordedOnly("recorded")(ctx, c, a, msgs)
+	}
+	h := agentMsgHandler(t, historyHub(t, body, nil), match)
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	if strings.Contains(got, `"a1"`) || strings.Contains(got, "SECRET") || !strings.Contains(got, `"c1"`) || asked != 0 {
+		t.Fatalf("asked=%d %s", asked, got)
 	}
 }
 
@@ -181,10 +227,12 @@ func TestHistoryFilterAppliesOnTheRetry(t *testing.T) {
 }
 
 func TestDMListPreviewIsRemovedForAContact(t *testing.T) {
-	body := `{"dms":[{"conversationKey":"dm:agent:` + agentW1 + `:user:` + contactUID + `","lastMessagePreview":"SECRET","lastMessageSender":"w1","hasUnread":true}]}`
+	body := `{"dms":[{"conversationKey":"dm:agent:` + agentW1 + `:user:` + contactUID + `","lastMessagePreview":"SECRET","lastMessageSender":"w1",` +
+		`"lastMessageId":"SECRET-id","lastActivityAt":"SECRET-time","hasUnread":true,"peerSlug":"w1"}]}`
 	h := agentMsgHandler(t, historyHub(t, body, nil), recordedOnly("x"))
 	got := contactDo(h, "c@x", "GET", "/api/v1/chat/dms", "").Body.String()
-	if strings.Contains(got, "SECRET") || strings.Contains(got, "lastMessageSender") || !strings.Contains(got, `"hasUnread":true`) {
+	if strings.Contains(got, "SECRET") || strings.Contains(got, "lastMessageSender") || strings.Contains(got, "hasUnread") ||
+		!strings.Contains(got, `"peerSlug":"w1"`) {
 		t.Fatalf("%s", got)
 	}
 	var doc struct {
@@ -221,4 +269,13 @@ func TestAgentRow(t *testing.T) {
 			t.Errorf("agentRow(%+v) = %v, want %v", tc.m, got, tc.want)
 		}
 	}
+}
+
+// gzipped is s gzip-compressed: a body the hub sent encoded without saying so.
+func gzipped(s string) string {
+	var b bytes.Buffer
+	z := gzip.NewWriter(&b)
+	_, _ = z.Write([]byte(s))
+	_ = z.Close()
+	return b.String()
 }

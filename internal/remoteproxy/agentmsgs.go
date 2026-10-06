@@ -21,9 +21,12 @@ import (
 // (Config.MatchAgentMessages, over the operator socket). Every other agent
 // row is removed from the history answer, and nothing else in the answer
 // may carry its text: reply previews go, attachment and extension entries
-// of removed rows go. Paging is the hub's: nextCursor and totalCount stay as
-// they are, so a page may hold fewer rows than asked for. Any answer the
-// proxy cannot read becomes an empty page: failing closed.
+// of removed rows go, and so do the attachment entries of every agent row
+// (their names are agent text no record covers). Paging is the hub's:
+// nextCursor and totalCount stay as they are, so a page may hold fewer rows
+// than asked for, and totalCount can show how many rows a page hid (never
+// their text; accepted). Any answer the proxy cannot read becomes an empty
+// page: failing closed.
 
 // AgentMessage is one agent row the broker is asked about: no text.
 type AgentMessage struct {
@@ -63,11 +66,15 @@ func agentRow(m historyRow, uid, agentID string) bool {
 
 // keepAgentRows asks the broker which agent rows to keep. Rows that are not
 // agent rows are not asked about (and not in the answer); an agent row with
-// no id, no text (a deleted one) or no readable time is never kept.
+// no id, no text (a deleted one), no readable time, or an id that appears
+// more than once in rows is never kept. Only an id the proxy asked about
+// can be in the answer: the broker's keep list is checked against the
+// question, never trusted on its own.
 func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
+	seen := idCounts(rows)
 	var ask []AgentMessage
 	for _, m := range rows {
-		if !agentRow(m, uid, agentID) || m.ID == "" || m.Msg == "" {
+		if !agentRow(m, uid, agentID) || m.ID == "" || m.Msg == "" || seen[m.ID] != 1 {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, m.CreatedAt)
@@ -83,7 +90,26 @@ func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid s
 	if len(ask) > maxMatchRows {
 		ask = ask[:maxMatchRows] // the hub's own page cap; the rest stays hidden
 	}
-	return g.cfg.MatchAgentMessages(ctx, contact, agent, ask)
+	got, err := g.cfg.MatchAgentMessages(ctx, contact, agent, ask)
+	if err != nil {
+		return nil, err
+	}
+	keep := map[string]bool{}
+	for _, m := range ask {
+		if got[m.ID] {
+			keep[m.ID] = true
+		}
+	}
+	return keep, nil
+}
+
+// idCounts counts each row id on a page.
+func idCounts(rows []historyRow) map[string]int {
+	n := map[string]int{}
+	for _, m := range rows {
+		n[m.ID]++
+	}
+	return n
 }
 
 // emptyHistory is the fail-closed answer.
@@ -124,8 +150,16 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	}
 	kept := []json.RawMessage{}
 	removed := map[string]bool{}
+	agentIDs := map[string]bool{} // ids of agent rows, kept or not
+	seen := idCounts(rows)
 	for i, m := range rows {
-		if agentRow(m, uid, agentID) && !keep[m.ID] {
+		isAgent := agentRow(m, uid, agentID)
+		if isAgent {
+			agentIDs[m.ID] = true
+		}
+		// A repeated id is hidden whoever sent it: an entry keyed by it
+		// (attachments, extensions) could belong to either row.
+		if seen[m.ID] != 1 || isAgent && !keep[m.ID] {
 			removed[m.ID] = true
 			continue
 		}
@@ -146,7 +180,10 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 			continue
 		}
 		for id := range m {
-			if removed[id] || !listed[id] {
+			// An attachment's name and type are the agent's own text, which
+			// the ledger never authorized: no agent row keeps one (files
+			// for contacts are a later spec).
+			if removed[id] || !listed[id] || k == "messageAttachments" && agentIDs[id] {
 				delete(m, id)
 			}
 		}
@@ -159,9 +196,15 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	setBody(resp, out)
 }
 
-// stripDMPreviews removes the last message's text and sender from every DM
-// entry: an agent's latest row may be one the contact is not shown. An
-// answer it cannot read becomes an empty list.
+// dmEntryHidden are the DM list keys a contact does not get with agent
+// messages on: each describes the latest row (its text, sender, id, time)
+// or whether one is unread, and that row may be one the contact is not
+// shown. The chat page takes its unread counts from /lever/api/agents,
+// which counts only shown rows.
+var dmEntryHidden = []string{"lastMessagePreview", "lastMessageSender", "lastMessageId", "lastActivityAt", "hasUnread"}
+
+// stripDMPreviews removes dmEntryHidden from every DM entry. An answer it
+// cannot read becomes an empty list.
 func stripDMPreviews(resp *http.Response) {
 	if resp.StatusCode != http.StatusOK {
 		return
@@ -173,8 +216,9 @@ func stripDMPreviews(resp *http.Response) {
 	var dms []map[string]json.RawMessage
 	if err == nil && resp.Header.Get("Content-Encoding") == "" && json.Unmarshal(body, &doc) == nil && json.Unmarshal(doc["dms"], &dms) == nil {
 		for _, d := range dms {
-			delete(d, "lastMessagePreview")
-			delete(d, "lastMessageSender")
+			for _, k := range dmEntryHidden {
+				delete(d, k)
+			}
 		}
 		if dms == nil {
 			dms = []map[string]json.RawMessage{}

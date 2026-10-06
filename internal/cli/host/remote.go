@@ -408,9 +408,16 @@ func remoteAgentMessages(app *config.App, st state.State) func(ctx context.Conte
 		if err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorAgentMessagesMatch, req, &out); err != nil {
 			return nil, err
 		}
+		// Only ids this question named: an id the broker adds is ignored.
+		asked := make(map[string]bool, len(msgs))
+		for _, m := range msgs {
+			asked[m.ID] = true
+		}
 		keep := make(map[string]bool, len(out.Keep))
 		for _, id := range out.Keep {
-			keep[id] = true
+			if asked[id] {
+				keep[id] = true
+			}
 		}
 		return keep, nil
 	}

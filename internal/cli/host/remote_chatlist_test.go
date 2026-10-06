@@ -308,7 +308,7 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 			http.Error(w, "no", s)
 			return
 		}
-		_, _ = io.WriteString(w, `{"keep":["m1"]}`)
+		_, _ = io.WriteString(w, `{"keep":["m1","not-asked"]}`)
 	})}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
@@ -317,7 +317,7 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 	at := time.Date(2026, 10, 6, 10, 0, 0, 0, time.UTC)
 	msgs := []remoteproxy.AgentMessage{{ID: "m1", SHA256: "aa", CreatedAt: at}, {ID: "m2", SHA256: "bb", CreatedAt: at}}
 	keep, err := m(context.Background(), "c@x", "w1", msgs)
-	if err != nil || !keep["m1"] || keep["m2"] || len(keep) != 1 {
+	if err != nil || !keep["m1"] || keep["m2"] || keep["not-asked"] || len(keep) != 1 {
 		t.Fatalf("%v %v", keep, err)
 	}
 	if got.Contact != "c@x" || got.Agent != "w1" || len(got.Messages) != 2 || got.Messages[1] != (wire.AgentMessageRef{ID: "m2", SHA256: "bb", CreatedAt: at}) {

@@ -16,11 +16,12 @@ import (
 //
 // The hub's chat events carry the message text and the sender's name. The
 // page uses an event only as "read the list and the history again"
-// (chat.js openStream), so a contact gets each event reduced to its subject
-// and a few ids: whatever the hub sends, no text reaches the contact this
-// way. The reducer works one event at a time and returns each as soon as it
-// is complete, so the stream stays live (ReverseProxy flushes every write of
-// a text/event-stream answer). Anything it cannot read is dropped.
+// (chat.js openStream) and reads only its subject, so a contact gets each
+// event reduced to its subject (and the stream's numeric event id): whatever
+// the hub sends, no text, no sender and no message id reaches the contact
+// this way. The reducer works one event at a time and returns each as soon
+// as it is complete, so the stream stays live (ReverseProxy flushes every
+// write of a text/event-stream answer). Anything it cannot read is dropped.
 
 const (
 	maxEventLine  = 1 << 20
@@ -31,12 +32,7 @@ var (
 	eventIDRE   = regexp.MustCompile(`^[0-9]{1,20}$`)
 	heartbeatRE = regexp.MustCompile(`^:heartbeat [0-9]{1,20}$`)
 	subjectRE   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
-	idValueRE   = regexp.MustCompile(`^[A-Za-z0-9:._-]{1,200}$`)
 )
-
-// eventKeep are the data fields a contact's event keeps: ids only (each
-// value must also look like an id, idValueRE, so no words pass).
-var eventKeep = []string{"id", "messageId", "threadId", "conversationKey", "conversationId"}
 
 // reduceEvents is the rewrite of a contact's /events answer. An answer that
 // is not a plain event stream becomes an empty body.
@@ -134,8 +130,8 @@ func (e *eventReducer) readLine() (string, bool, error) {
 }
 
 // reduce rewrites one event: a heartbeat and the reconnect hint pass as
-// fixed text; an update keeps its numeric id, its subject (one of this
-// contact's) and the id fields of its data; everything else is dropped.
+// fixed text; an update keeps its numeric id and its subject (one of this
+// contact's) with empty data; everything else is dropped.
 func (e *eventReducer) reduce(lines []string) string {
 	var id, event, data string
 	for _, l := range lines {
@@ -165,20 +161,13 @@ func (e *eventReducer) reduce(lines []string) string {
 		return ""
 	}
 	var in struct {
-		Subject string                     `json:"subject"`
-		Data    map[string]json.RawMessage `json:"data"`
+		Subject string `json:"subject"`
 	}
 	if json.Unmarshal([]byte(data), &in) != nil || !subjectRE.MatchString(in.Subject) || !strings.HasPrefix(in.Subject, e.prefix) {
 		return ""
 	}
-	kept := map[string]string{}
-	for _, k := range eventKeep {
-		var v string
-		if json.Unmarshal(in.Data[k], &v) == nil && idValueRE.MatchString(v) {
-			kept[k] = v
-		}
-	}
-	b, _ := json.Marshal(map[string]any{"subject": in.Subject, "data": kept})
+	// The page reads only the subject: the data is always empty.
+	b, _ := json.Marshal(map[string]any{"subject": in.Subject, "data": struct{}{}})
 	var sb strings.Builder
 	if eventIDRE.MatchString(id) {
 		sb.WriteString("id: " + id + "\n")

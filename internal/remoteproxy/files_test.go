@@ -1009,3 +1009,21 @@ func TestExcludedLoginHasNoFiles(t *testing.T) {
 		t.Fatalf("operator view = %d", rw.Code)
 	}
 }
+
+// An operator cannot fetch an excluded contact's record by a known id: the
+// same 404 as an unknown id.
+func TestOperatorCannotDownloadAnExcludedLoginsRecord(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	id, _ := shareRec(t, cfg, "w1", "c@x", "v.xlsm", "wb")
+	if rw := chatDo(NewHandler(cfg), chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 200 {
+		t.Fatalf("before = %d", rw.Code)
+	}
+	cfg.Files.Excluded = []string{"c@x"}
+	h := NewHandler(cfg)
+	got := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id)
+	unknown := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+strings.Repeat("0", 32))
+	if got.Code != 404 || got.Body.String() != unknown.Body.String() {
+		t.Fatalf("%d %s", got.Code, got.Body)
+	}
+}

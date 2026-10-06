@@ -649,7 +649,9 @@ func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *Audit
 	// One answer for an unknown id, another login's record, and a record
 	// whose path is not where lever puts that login's files for this agent
 	// (a ledger line written by anything but lever).
-	if !found || !mayDownload(v, rec) || !recordedWhereExpected(s.cfg.Workspaces[agent], rec) {
+	// A record of a login with files: false is not served to anyone, the
+	// operator included: that login has no file exchange.
+	if !found || !mayDownload(v, rec) || !g.filesOnFor(rec.Login) || !recordedWhereExpected(s.cfg.Workspaces[agent], rec) {
 		g.refuseFile(w, r, line, http.StatusNotFound, "not-found")
 		return
 	}

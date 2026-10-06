@@ -288,3 +288,24 @@ func TestTreeRefusesNonLocalRel(t *testing.T) {
 	}
 	assertHostUntouched(t, hostFile)
 }
+
+func TestRelOverlapFold(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"a/b", "a/b", true},
+		{"a/b", "A/B", true},
+		{"a", "A/b/c", true},
+		{"a/b/c", "a", true},
+		{"./a/b/", "a/b", true},
+		{".", "x", true},
+		{"a/b", "a/bc", false},
+		{"a/b", "a/c", false},
+		{"workers/w", "assistant/tools", false},
+	} {
+		if got := RelOverlapFold(tc.a, tc.b); got != tc.want {
+			t.Errorf("RelOverlapFold(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

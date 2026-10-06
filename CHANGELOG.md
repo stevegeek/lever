@@ -5,6 +5,88 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **`manager.read_only`: tree paths the manager sees read-only.** The
+  manager mounts the whole tree read-write, so code the host also runs
+  (an operator CLI kept in the tree) was code a jailed agent could
+  rewrite and the operator would then run on the host. Each listed
+  directory (relative to `tree`) is bind-mounted read-only over itself in
+  the manager container, and each directory between the tree root and it
+  is bind-mounted read-write over itself: a mount point cannot be renamed
+  or removed, so the agent cannot rename a parent away and create a
+  writable directory at the protected host path. While the list is set,
+  every worker `dir` and its ancestors are pinned in the manager the same
+  way, so the manager cannot swap a worker dir for a link to a protected
+  directory and dispatch that worker (which mounts its dir read-write).
+  - Config load refuses an unclean, duplicate or nested entry, an entry
+    with `$`, `~`, `:` or `,`, and a worker `dir` that overlaps an entry.
+    The overlap checks fold case (APFS does not tell case apart).
+  - `lever apply` refuses to start the manager when an entry is missing,
+    is not a directory, is reached through a symbolic link, or holds a
+    symbolic link that points outside it; and when a worker dir is
+    reached through a symbolic link. It creates missing worker dirs. It
+    checks before it acts on the manager record and again right before the
+    create (after a `--fresh` delete has removed the old manager).
+  - With the list set, the broker refuses to create a worker workspace
+    through any symbolic link, or one that is, contains or lies inside an
+    entry (403).
+  - `lever apply` warns when a manager it kept or resumed lacks the
+    mounts. A new `lever doctor` row, *manager read-only paths*, fails
+    when the manager container lacks a mount, holds an entry read-write,
+    or mounts one from another source.
+  - A protected directory must hold no hard-linked file and no symbolic
+    link that fails to resolve; entries (and, while the list is set,
+    worker dirs) must be ASCII. The hard-link rule also catches a pnpm
+    `node_modules` and `git clone --local` objects; keep them out of
+    protected directories.
+  - With the list set, the broker also re-checks a worker's path before
+    every resume and healer bounce (the runtime resolves the bind source
+    again on each container start).
+  - `lever doctor` and the `lever apply` warning probe each entry live
+    (`podman exec --user 0 <manager> test -w <entry>`): a directory replaced on the
+    host after the create is still listed as a read-only mount, but the
+    manager can write the new one. A probe that cannot run is reported as
+    unconfirmed, never as protected.
+  - The protection covers the entry directories only. What host code
+    loads from outside an entry (a `Gemfile` beside it, the tree's `.git`
+    hooks and config) is still agent-writable; the config reference and
+    security model §5.1.1 say so.
+
+### Changed
+
+- With `manager.read_only` set, **every** `lever apply` (also one that
+  keeps or resumes the manager) walks every worker dir, refuses one
+  reached through a symbolic link (an in-tree link included, which was
+  allowed before), and creates a missing worker dir. Without the setting
+  nothing changes.
+
+### Upgrade
+
+- Edit protected directories in place. Replacing one on the host (rm -rf
+  and recreate, a rename-based deploy, a git checkout that removes and
+  re-adds it) drops its protection until the next fresh create; the same
+  goes for a worker dir (or an entry's parent) recreated on the host,
+  whose pin in the manager stays on the old directory — and that one is
+  NOT detected: doctor checks pins by inspect only, since no
+  non-mutating live test of a pin is known to be reliable. Never
+  recreate worker dirs or the parents of protected directories on the
+  host.
+- `manager.read_only` is create-time only: scion keeps a record's mounts
+  for life. To protect paths for an existing manager, back up its
+  conversation, then run `lever up --fresh` (the fresh start discards the
+  manager record and its conversation).
+
+### Known issues
+
+- `lever init` writes its scaffold files into the tree through in-tree
+  symbolic links (`skills_scaffold.go`, `WriteInTree`). An agent could
+  point a scaffold path at another tree file and have `lever init`
+  overwrite it with the fixed scaffold content: corruption, not code
+  execution. Not fixed yet.
+
 ## [0.29.1] - 2026-10-02
 
 Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them

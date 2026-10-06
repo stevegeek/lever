@@ -200,12 +200,29 @@ type Manager struct {
 	// The split exists because the task rides scion's argv into a single tmux
 	// word capped at 16 KiB (lever#30); a manual belongs in a file. Host-only
 	// and root-confined like PromptFile. Create-time only, like Model.
-	InstructionsFile string          `yaml:"instructions_file"`
-	AllowPorts       []int           `yaml:"allow_ports"`
-	CredentialFile   string          `yaml:"credential_file"`
-	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
-	Obtain           []Grant         `yaml:"obtain"`
-	Delegate         []DelegateGrant `yaml:"delegate"`
+	InstructionsFile string `yaml:"instructions_file"`
+	// ReadOnly lists tree directories (relative to the tree, forward
+	// slashes) the MANAGER container sees read-only. The manager otherwise
+	// mounts the whole tree read-write, and a tree can hold code the HOST
+	// also runs (an operator CLI kept beside the notes it works on): a
+	// jailed agent that rewrites it gets code execution on the host the next
+	// time the operator runs it. Each entry is bind-mounted read-only over
+	// itself; each strict ancestor between the tree root and an entry is
+	// bind-mounted read-write over itself, because a mount point cannot be
+	// renamed or removed — without that pin the agent renames the parent
+	// away and creates a fresh, writable directory at the protected host
+	// path (verified with podman 2026-10-04). Workers never see these
+	// mounts, so no worker dir may overlap an entry (enforced). Every entry
+	// must exist on the host as a real directory, reached through no
+	// symlink (checked when the manager is started). Create-time only, like
+	// Model: scion stores a record's volumes for life, so the mounts reach a
+	// manager created from now on (`lever up --fresh` for an existing one).
+	ReadOnly       []string        `yaml:"read_only"`
+	AllowPorts     []int           `yaml:"allow_ports"`
+	CredentialFile string          `yaml:"credential_file"`
+	LLMAuth        LLMAuthMode     `yaml:"llm_auth"`
+	Obtain         []Grant         `yaml:"obtain"`
+	Delegate       []DelegateGrant `yaml:"delegate"`
 }
 
 type Worker struct {

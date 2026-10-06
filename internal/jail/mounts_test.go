@@ -41,6 +41,28 @@ func TestContainerMountTargets(t *testing.T) {
 	}
 }
 
+func TestContainerMountsCarriesRW(t *testing.T) {
+	host := proc.NewFakeRunner()
+	host.Script("orb", proc.Result{Stdout: `[{"Type":"bind","Source":"/lever","Destination":"/workspace","RW":true},` +
+		`{"Type":"bind","Source":"/lever/a/tools","Destination":"/workspace/a/tools","RW":false}]` + "\n"})
+	jr := New(Config{Host: host, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	got, err := ContainerMounts(context.Background(), jr, "lever--mgr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Mount{{Source: "/lever", Destination: "/workspace", RW: true}, {Source: "/lever/a/tools", Destination: "/workspace/a/tools", RW: false}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mounts = %v, want %v", got, want)
+	}
+	if _, err := ContainerMounts(context.Background(), jr, "--all"); err == nil {
+		t.Fatal("a flag-shaped ref must be refused")
+	}
+	jr = New(Config{Host: failingRunner{`Error: no such container "x"`}, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	if _, err := ContainerMounts(context.Background(), jr, "x"); !errors.Is(err, ErrNoContainer) {
+		t.Fatalf("err = %v, want ErrNoContainer", err)
+	}
+}
+
 // failingRunner answers every call with a fixed stderr and error, the way a
 // podman exit 125 reaches the jail runner.
 type failingRunner struct{ stderr string }
@@ -154,4 +176,69 @@ func TestContainerEnvScriptFiltersInTheGuest(t *testing.T) {
 	if _, err := run("missing"); err == nil {
 		t.Fatal("podman's failure was swallowed")
 	}
+}
+
+func TestContainerPathWritable(t *testing.T) {
+	probe := func(res proc.Result) (bool, error, *proc.FakeRunner) {
+		host := proc.NewFakeRunner()
+		host.Script("orb", res)
+		jr := New(Config{Host: host, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+		ok, err := ContainerPathWritable(context.Background(), jr, "lever--mgr", "/workspace/kb/tools")
+		return ok, err, host
+	}
+	ok, err, host := probe(proc.Result{})
+	if err != nil || !ok {
+		t.Fatalf("exit 0 = writable; got %v, %v", ok, err)
+	}
+	if argv := host.Calls[0].Argv(); !contains(argv, "podman exec --user 0 lever--mgr test -w /workspace/kb/tools") {
+		t.Fatalf("argv %q", argv)
+	}
+	if ok, err, _ := probe(proc.Result{Code: 1}); err != nil || ok {
+		t.Fatalf("a quiet exit 1 = not writable; got %v, %v", ok, err)
+	}
+	// podman's own warning lines are noise, not a failure.
+	warn := "WARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session available\n" +
+		`time="2026-10-04T10:00:00Z" level=warning msg="some notice"` + "\n"
+	if ok, err, _ := probe(proc.Result{Code: 1, Stderr: warn}); err != nil || ok {
+		t.Fatalf("exit 1 with only podman warnings = not writable; got %v, %v", ok, err)
+	}
+	// A start failure the runner reports with no exit code is an error.
+	jr0 := New(Config{Host: errRunner{}, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	if ok, err := ContainerPathWritable(context.Background(), jr0, "lever--mgr", "/workspace/x"); err == nil || ok {
+		t.Fatalf("a runner error with code 0 must be an error, got %v, %v", ok, err)
+	}
+	// Anything else never reads as "not writable".
+	for _, res := range []proc.Result{
+		{Code: 1, Stderr: warn + "Error: something else\n"},
+		{Code: 125, Stderr: "Error: can only create exec sessions on running containers"},
+		{Code: 127, Stderr: "test: not found"},
+		{Code: 1, Stderr: "orb: machine not running"},
+	} {
+		if _, err, _ := probe(res); err == nil {
+			t.Fatalf("result %+v must be an error, not a verdict", res)
+		}
+	}
+	if _, err, _ := probe(proc.Result{Code: 125, Stderr: `Error: no such container "lever--mgr"`}); !errors.Is(err, ErrNoContainer) {
+		t.Fatalf("err = %v, want ErrNoContainer", err)
+	}
+	jr := New(Config{Host: proc.NewFakeRunner(), Prefix: orbPrefix("lever-x", "u"), UID: "501"})
+	for _, bad := range [][2]string{{"--all", "/x"}, {"c", "relative"}} {
+		if _, err := ContainerPathWritable(context.Background(), jr, bad[0], bad[1]); err == nil {
+			t.Fatalf("ref %q target %q must be refused", bad[0], bad[1])
+		}
+	}
+}
+
+// errRunner fails every call before the command runs: an error with exit
+// code 0 (the binary could not be started).
+type errRunner struct{}
+
+func (errRunner) Run(context.Context, map[string]string, string, ...string) (proc.Result, error) {
+	return proc.Result{}, errors.New("exec: \"orb\": executable file not found in $PATH")
+}
+func (e errRunner) RunIn(ctx context.Context, _ string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return e.Run(ctx, env, name, args...)
+}
+func (e errRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return e.Run(ctx, env, name, args...)
 }

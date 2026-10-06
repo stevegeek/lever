@@ -81,6 +81,16 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
 		return
 	}
+	// manager.read_only: refuse a worker whose workspace is now reached
+	// through a link (or overlaps a protected dir) BEFORE a ticket is
+	// staged for it — a refused heal must not leave a fresh one-use ticket
+	// behind. bounceForReenrol checks again right before the resume.
+	if spec, isWorker := b.workerSpec(cn); isWorker {
+		if err := b.verifyStrictWorkspace(spec); err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": workspace dir: "+err.Error())
+			return
+		}
+	}
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
 	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
 	// audit line.
@@ -183,6 +193,16 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 	if err = b.checkAgentRole(ctx, slug); err != nil {
 		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
 		return "", false
+	}
+	// A worker's resume re-resolves its workspace bind source: with
+	// manager.read_only set, refuse to bounce one whose dir is now reached
+	// through a link or overlaps a protected directory (resumeRecord does
+	// the same for a manager-driven resume).
+	if spec, isWorker := b.workers[slug]; isWorker {
+		if err = b.verifyStrictWorkspace(spec); err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": workspace dir: "+err.Error())
+			return "", false
+		}
 	}
 	switch phase {
 	case scion.PhaseRunning:

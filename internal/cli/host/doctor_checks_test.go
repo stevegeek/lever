@@ -1560,6 +1560,105 @@ func TestCheckWorkerTicketMounts(t *testing.T) {
 	}
 }
 
+func TestCheckManagerReadOnly(t *testing.T) {
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	// inspectOf answers by container ref, like mountsOf in the ticket test.
+	inspectOf := func(m map[string][]jail.Mount, broken ...string) mountInspector {
+		return func(_ context.Context, ref string) ([]jail.Mount, error) {
+			if slices.Contains(broken, ref) {
+				return nil, fmt.Errorf("podman exploded")
+			}
+			mounts, ok := m[ref]
+			if !ok {
+				return nil, fmt.Errorf("inspect %s: %w", ref, jail.ErrNoContainer)
+			}
+			return mounts, nil
+		}
+	}
+	// probeOf answers the live write probe: targets listed in writable are
+	// writable; err, when set, is every probe's answer.
+	probeOf := func(err error, writable ...string) apply.WritableProbe {
+		return func(_ context.Context, _ string, target string) (bool, error) {
+			if err != nil {
+				return false, err
+			}
+			return slices.Contains(writable, target), nil
+		}
+	}
+	refused := probeOf(nil)
+	// A worker dir and its ancestor are pinned too while read_only is set.
+	want := []config.TreeMount{{Rel: "assistant"}, {Rel: "workers", WorkerPin: true}, {Rel: "assistant/tools", ReadOnly: true}, {Rel: "workers/w", WorkerPin: true}}
+	mgr := listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours", ContainerID: "cm"})
+	ws := jail.Mount{Source: "/lever", Destination: "/workspace", RW: true}
+	pin := jail.Mount{Source: "/lever/assistant", Destination: "/workspace/assistant", RW: true}
+	ro := jail.Mount{Source: "/lever/assistant/tools", Destination: "/workspace/assistant/tools", RW: false}
+	wpins := []jail.Mount{
+		{Source: "/lever/workers", Destination: "/workspace/workers", RW: true},
+		{Source: "/lever/workers/w", Destination: "/workspace/workers/w", RW: true},
+	}
+	full := append([]jail.Mount{ws, pin, ro}, wpins...)
+	with := func(ms ...jail.Mount) []jail.Mount { return append(append([]jail.Mount{}, ms...), wpins...) }
+	cases := []struct {
+		label      string
+		want       []config.TreeMount
+		list       agentLister
+		inspect    mountInspector
+		probe      apply.WritableProbe
+		ok         bool
+		warn       bool
+		wantDetail string
+		wantFix    string
+	}{
+		{"all mounted, probe refused", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, false, "1 path(s) read-only in \"assistant\" (mounted, and a write probe refused), 3 pin(s)", ""},
+		{"created before the setting", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, false, false,
+			"assistant/tools not mounted read-only: the agent can write it", "lever up --fresh"},
+		{"entry pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, ro)}), refused, false, false, "assistant not pinned: the agent can rename it away", "back up the manager's conversation"},
+		{"worker pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, ro, wpins[0]}}), refused, false, false,
+			"workers/w (a worker dir) not pinned: the manager can replace it with a symbolic link and have that worker mount a protected directory", "lever up --fresh"},
+		{"entry mounted rw", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, pin, jail.Mount{Source: "/lever/assistant/tools", Destination: "/workspace/assistant/tools", RW: true})}), refused, false, false,
+			"assistant/tools mounted read-write", "lever up --fresh"},
+		{"entry from another source", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, pin, jail.Mount{Source: "/elsewhere", Destination: "/workspace/assistant/tools"})}), refused, false, false,
+			"assistant/tools mounted from another source", "lever up --fresh"},
+		// The false OK the inspect alone gave: the mount is listed, but the
+		// host replaced the directory and a write lands in the new one.
+		{"entry replaced on the host", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(nil, "/workspace/assistant/tools"), false, false,
+			"assistant/tools writable from the container although its read-only mount is listed", "edit protected directories in place"},
+		{"probe cannot run", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(errors.New("podman exec failed")), true, true, "write probe could not run", "re-run doctor"},
+		{"probe not wired", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), nil, true, true, "write probe is not wired", "lever wiring gap"},
+		{"container not running", want, listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "Exited (0) 2 minutes ago", ContainerID: "cm"}),
+			inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, true, "write probe did not run (the manager container is not running)", "lever up"},
+		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
+		{"no container id, found by name", want, listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "running"}),
+			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), refused, true, false, "a write probe refused", ""},
+		{"none configured", nil, mgr, inspectOf(nil), refused, true, false, "none configured", ""},
+		{"no record", want, listing(), inspectOf(nil), refused, true, false, "not checked (no manager record)", ""},
+		{"no container", want, mgr, inspectOf(nil), refused, true, false, "not checked (no manager container)", ""},
+		{"inspect fails", want, mgr, inspectOf(map[string][]jail.Mount{}, "cm"), refused, true, false, "not checked (could not inspect", ""},
+		{"list fails", want, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, inspectOf(nil), refused, true, false, "not checked", ""},
+		{"nil probes", want, nil, nil, nil, true, false, "not checked", ""},
+	}
+	for _, c := range cases {
+		r := checkManagerReadOnly(context.Background(), "/lever", "assistant", c.want, c.list, c.inspect, c.probe)
+		if r.name != "manager read-only paths" {
+			t.Fatalf("%s: name = %q", c.label, r.name)
+		}
+		if r.ok != c.ok {
+			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
+		}
+		if c.warn && (r.fix == "" || !strings.Contains(r.detail, "not") || strings.Contains(r.detail, "refused,")) {
+			t.Errorf("%s: a probe that did not run must not read as confirmed: %q", c.label, r.detail)
+		}
+		if !strings.Contains(r.detail, c.wantDetail) {
+			t.Errorf("%s: detail %q should mention %q", c.label, r.detail, c.wantDetail)
+		}
+		if !strings.Contains(r.fix, c.wantFix) {
+			t.Errorf("%s: fix %q should mention %q", c.label, r.fix, c.wantFix)
+		}
+	}
+}
+
 // lever#34: the guest-DNS row is the one that tells a DNS-dead jail from a
 // healthy idle one.
 func TestCheckGuestDNS(t *testing.T) {

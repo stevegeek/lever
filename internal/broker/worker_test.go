@@ -1262,3 +1262,221 @@ func TestRunningRecordWithADeadContainerIsNotRunning(t *testing.T) {
 		t.Fatalf("running record, no container status: %d, resumed=%v forced=%v; want a no-op", rec.Code, rt.resumed, rt.resumeForced)
 	}
 }
+
+// With manager.read_only set, a worker workspace is created only through
+// real directories, and never over a protected directory. The swaps below
+// all stay INSIDE the tree, which the plain rule (above) allows: a link to a
+// protected directory is exactly the in-tree link that would hand the worker
+// that directory read-write.
+func TestWorkerStart_readOnlyStrictWorkspace(t *testing.T) {
+	type setup func(t *testing.T, tree string)
+	link := func(target, at string) setup {
+		return func(t *testing.T, tree string) {
+			t.Helper()
+			p := filepath.Join(tree, at)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, p); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		subdir  string
+		setup   setup
+		code    int
+		wantLog string
+	}{
+		{"real directories", "workers/worker", func(*testing.T, string) {}, http.StatusOK, ""},
+		{"worker dir is a link to the protected dir", "workers/worker", link("../assistant/tools", "workers/worker"), http.StatusForbidden, "symbolic link refused"},
+		{"workers ancestor is an in-tree link", "workers/worker", link("assistant", "workers"), http.StatusForbidden, "symbolic link refused"},
+		{"workspace inside the protected dir", "assistant/tools/x", func(*testing.T, string) {}, http.StatusForbidden, ErrReadOnlyOverlap.Error()},
+		{"workspace over the protected dir, other case", "Assistant", func(*testing.T, string) {}, http.StatusForbidden, ErrReadOnlyOverlap.Error()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := t.TempDir()
+			tools := filepath.Join(tree, "assistant", "tools")
+			if err := os.MkdirAll(tools, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, tree)
+			spec := WorkerSpec{Name: "worker", WorkspaceSubdir: tc.subdir,
+				HostWorkspace: filepath.Join(tree, filepath.FromSlash(tc.subdir)),
+				TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
+			rt := &fakeRuntime{agents: map[string][]scion.Agent{}} // absent
+			var buf bytes.Buffer
+			b := New(testConfig(t, withAudit(&buf), withManager("test-manager", ""), withRuntime(rt, spec),
+				func(c *Config) { c.Dispatch.Tree = tree; c.Dispatch.ReadOnlyDirs = []string{"assistant/tools"} }))
+
+			rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+			if rec.Code != tc.code {
+				t.Fatalf("status = %d, want %d (%s)", rec.Code, tc.code, rec.Body.String())
+			}
+			if tc.code == http.StatusOK {
+				if len(rt.started) != 1 {
+					t.Fatalf("start calls = %d, want 1", len(rt.started))
+				}
+				return
+			}
+			if entries, _ := os.ReadDir(tools); len(entries) != 0 {
+				t.Fatalf("SECURITY: the broker created %v inside the protected directory", entries)
+			}
+			if _, err := os.Lstat(filepath.Join(tree, "assistant", "worker")); err == nil {
+				t.Fatal("SECURITY: the broker created the workspace through the link")
+			}
+			if len(rt.started) != 0 || len(rt.staged) != 0 {
+				t.Fatalf("no ticket or start for a refused workspace; staged=%d started=%d", len(rt.staged), len(rt.started))
+			}
+			if !strings.Contains(buf.String(), tc.wantLog) {
+				t.Fatalf("refusal must be audited by name (%q); log=%s", tc.wantLog, buf.String())
+			}
+		})
+	}
+}
+
+// strictTree builds a tree with a protected assistant/tools and a real
+// workers/worker dir, and a broker with manager.read_only over it.
+func strictTree(t *testing.T, rt *fakeRuntime, buf *bytes.Buffer) (string, WorkerSpec, *Broker) {
+	t.Helper()
+	tree := t.TempDir()
+	for _, d := range []string{"assistant/tools", "workers/worker", "other"} {
+		if err := os.MkdirAll(filepath.Join(tree, filepath.FromSlash(d)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+		HostWorkspace: filepath.Join(tree, "workers", "worker"),
+		TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
+	b := New(testConfig(t, withAudit(buf), withManager("test-manager", ""), withRuntime(rt, spec),
+		func(c *Config) { c.Dispatch.Tree = tree; c.Dispatch.ReadOnlyDirs = []string{"assistant/tools"} }))
+	return tree, spec, b
+}
+
+// swapToLink replaces dir with a symlink to target.
+func swapToLink(t *testing.T, dir, target string) {
+	t.Helper()
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A resume re-resolves the workspace bind source, so with read_only set a
+// stopped worker whose dir was swapped for a link since its dispatch is
+// refused — before a ticket is spent — and its record is kept.
+func TestWorkerStart_readOnlyResumeRefusesSwappedWorkspace(t *testing.T) {
+	for _, phase := range []string{"stopped", "suspended", "error"} {
+		t.Run(phase, func(t *testing.T) {
+			rt := &fakeRuntime{agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "worker", Phase: phase}},
+			}}
+			var buf bytes.Buffer
+			tree, _, b := strictTree(t, rt, &buf)
+			swapToLink(t, filepath.Join(tree, "workers", "worker"), "../assistant/tools")
+
+			rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+			}
+			if len(rt.resumed) != 0 || len(rt.resumeForced) != 0 || len(rt.staged) != 0 {
+				t.Fatalf("no ticket or resume for a swapped workspace; staged=%d resumed=%d forced=%d", len(rt.staged), len(rt.resumed), len(rt.resumeForced))
+			}
+			if !strings.Contains(buf.String(), "symbolic link refused") {
+				t.Fatalf("refusal must be audited by name; log=%s", buf.String())
+			}
+		})
+	}
+	// The real directory still resumes.
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "stopped"}}}}
+	var buf bytes.Buffer
+	_, _, b := strictTree(t, rt, &buf)
+	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager"); rec.Code != http.StatusOK || len(rt.resumed) != 1 {
+		t.Fatalf("a real workspace must resume; status=%d resumed=%d (%s)", rec.Code, len(rt.resumed), rec.Body.String())
+	}
+}
+
+// The healer's bounce is a resume too: it refuses a swapped worker dir.
+func TestReenrolBounceRefusesSwappedWorkspace(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	swapToLink(t, filepath.Join(tree, "workers"), "assistant")
+	if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker"); ok {
+		t.Fatal("the healer must not bounce a worker whose workspace goes through a link")
+	}
+	if len(rt.resumed) != 0 {
+		t.Fatalf("resumed = %v, want none", rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "refusing to bounce worker") {
+		t.Fatalf("refusal must be audited; log=%s", buf.String())
+	}
+}
+
+// The walk AFTER the mkdir: a workspace swapped for an in-tree link to an
+// UNPROTECTED dir between the mkdir and that walk is still refused (the
+// real-path overlap check alone would let it through).
+func TestWorkerStart_readOnlyRewalksAfterMkdir(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	b.afterWorkspaceMkdir = func() { swapToLink(t, filepath.Join(tree, "workers", "worker"), "../other") }
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.started) != 0 {
+		t.Fatalf("no start for a swapped workspace; got %d", len(rt.started))
+	}
+}
+
+// The healer refuses a swapped worker workspace BEFORE it stages a ticket:
+// a refused heal leaves no fresh one-use ticket behind.
+func TestReenrolHealRefusesSwappedWorkspaceBeforeStaging(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	swapToLink(t, filepath.Join(tree, "workers", "worker"), "../assistant/tools")
+
+	b.healLapse(context.Background(), "worker")
+
+	if len(rt.staged) != 0 {
+		t.Fatalf("staged = %d, want 0: the refusal must come before the ticket", len(rt.staged))
+	}
+	if len(rt.resumed) != 0 {
+		t.Fatalf("resumed = %v, want none", rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "refusing to bounce worker") {
+		t.Fatalf("refusal must be audited; log=%s", buf.String())
+	}
+}
+
+// A worker dir the operator removed on the host: the resume answers a
+// clear 409 naming the directory, not a bare 500, and keeps the record.
+func TestWorkerStart_readOnlyResumeMissingWorkspaceIsNamed(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "stopped"}}}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	if err := os.Remove(filepath.Join(tree, "workers", "worker")); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "workers/worker no longer exists on the host") || !strings.Contains(body, "lever worker purge worker --force") {
+		t.Fatalf("body must name the missing dir and the way out; got %q", body)
+	}
+	if len(rt.staged) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("no ticket or resume; staged=%d resumed=%d", len(rt.staged), len(rt.resumed))
+	}
+}

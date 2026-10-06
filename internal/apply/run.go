@@ -13,6 +13,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
@@ -133,6 +134,11 @@ type run struct {
 	// fresh is PlanOpts.Fresh: discard any present manager record at
 	// start-manager (lever#33).
 	fresh bool
+	// managerCreated records that THIS run created the manager record (a
+	// create that answered "already exists" does not count). Only a created
+	// record is known to carry the manager.read_only mounts; any other is
+	// probed and warned about (warnManagerTreeMounts).
+	managerCreated bool
 }
 
 // StageBootstrapMaterial writes m as the manager's one-time enrolment ticket
@@ -151,8 +157,8 @@ func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 
 // Deps are the executor's collaborators, injected so Run is testable offline.
 // LoadImage and friends are host-side (docker-save|podman-load); Scion runs IN
-// the jail (built on a JailRunner). Every func field except ReadCred and
-// ImageTagPolicy is REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
+// the jail (built on a JailRunner). Every func field except ReadCred,
+// ImageTagPolicy, InspectContainerMounts and ProbeContainerWritable is REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
 // so a wiring gap fails loudly instead of silently skipping a step. The CLI
 // wires all of them (buildApplyDeps); tests fill the ones they do not assert
 // on with inert implementations.
@@ -282,6 +288,16 @@ type Deps struct {
 	// error is logged, not fatal: the manager is up, and without the record
 	// contacts are refused (fail closed). Nil records nothing.
 	BeginSession func(agent string) (commit func() error)
+	// InspectContainerMounts reads a jail container's mounts (id or name),
+	// jail.ContainerMounts in production. Used only to warn when a manager
+	// that apply kept or resumed lacks the manager.read_only mounts, which
+	// only a create can add. nil ⇒ the warning says it could not check.
+	InspectContainerMounts func(ctx context.Context, ref string) ([]jail.Mount, error)
+	// ProbeContainerWritable asks a running container whether its user can
+	// write a path (jail.ContainerPathWritable in production): the live
+	// check that a read_only entry was not replaced on the host after the
+	// manager was created. nil ⇒ the warning says it could not check.
+	ProbeContainerWritable func(ctx context.Context, ref, target string) (bool, error)
 	// StartRemoteProxy backs the remote-proxy step (present only when
 	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
 	// the daemonized `lever remote serve` proxy (a config with remote disabled
@@ -891,6 +907,18 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
+	// The read_only paths must be real directories reached through no
+	// symlink BEFORE anything is acted on: under --fresh the delete runs
+	// ahead of the create, and refusing only at the create would discard
+	// the old session and start no new one. Checked on every path, resume
+	// included — a failure there means the tree changed under a manager
+	// that may hold it writable, which the operator should hear about.
+	// startManagerCreate checks again right before the create: under
+	// --fresh the old manager (which may hold the paths writable) is still
+	// running here, and is gone only after the delete.
+	if err := r.app.PrepareManagerReadOnlyHost(); err != nil {
+		return fmt.Errorf("start-manager: %w", err)
+	}
 	// Gate on runtime-broker readiness before any create/resume: the workstation
 	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
 	// up (waitHubReady only proved the latter), so acting now would race it. This
@@ -912,7 +940,13 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
-	return r.waitManagerLive(ctx, jp, acted)
+	if err := r.waitManagerLive(ctx, jp, acted); err != nil {
+		return err
+	}
+	if !r.managerCreated {
+		r.warnManagerTreeMounts(ctx, jp)
+	}
+	return nil
 }
 
 // managerTask reads the manager's task prompt (when configured).
@@ -985,6 +1019,11 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		// names no file, which sends no config at all. Create-time only, like
 		// Model: a resume re-projects what scion staged at the fresh create.
 		Instructions: instructions,
+		// manager.read_only: the protected tree paths and their ancestor
+		// pins, as inline-config volumes. Nil when none are configured.
+		// Create-time only, like Instructions: a resume redispatches the
+		// volumes scion stored with the record.
+		Volumes: managerTreeVolumes(jp, r.app.ManagerTreeMounts()),
 		// Workspace = the in-jail project tree, so the manager edits the real
 		// host files in place (verified 2026-06-16). Without it scion mounts a
 		// managed copy of the externalized config dir, not the live tree.
@@ -993,6 +1032,184 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		// secret set above); the real credential arrives in-container.
 		APIKey: apiKey,
 	}, nil
+}
+
+// managerTreeVolumes turns the manager's read_only plan into scion volumes:
+// each tree directory bind-mounted over its own place in the workspace —
+// source under jp (the in-jail tree, which scion mounts at /workspace),
+// target under scion.ContainerWorkspace — read-only for an entry and
+// read-write for an ancestor pin. The plan's order (by depth, then path) is
+// kept; podman orders mounts by destination depth anyway.
+func managerTreeVolumes(jp string, mounts []config.TreeMount) []scion.VolumeMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]scion.VolumeMount, 0, len(mounts))
+	for _, m := range mounts {
+		out = append(out, scion.VolumeMount{
+			Source:   path.Join(jp, m.Rel),
+			Target:   path.Join(scion.ContainerWorkspace, m.Rel),
+			ReadOnly: m.ReadOnly,
+		})
+	}
+	return out
+}
+
+// TreeMountGaps is how a manager container falls short of its
+// manager.read_only plan, each list by tree-relative path. The kinds differ
+// in what they let the agent do, so String words each with its consequence:
+//
+//   - Missing: an entry with no mount — the agent writes it;
+//   - Writable: an entry mounted read-write — the agent writes it;
+//   - WrongSource: a mount whose source is not that directory of the
+//     in-jail tree — it covers something else;
+//   - Replaced: an entry the container can write although its read-only
+//     mount is listed — the host replaced the directory after the manager
+//     was created, and the mount still covers the old one (live probe);
+//   - MissingPins: an entry's ancestor with no mount — the agent can
+//     rename it away and recreate the protected path writable;
+//   - MissingWorkerPins: a worker dir (or its ancestor) with no mount —
+//     the manager can replace it with a link and have that worker mount a
+//     protected directory read-write.
+type TreeMountGaps struct {
+	Missing, Writable, WrongSource, Replaced, MissingPins, MissingWorkerPins []string
+}
+
+// Empty reports whether the container matches the plan.
+func (g TreeMountGaps) Empty() bool {
+	return len(g.Missing)+len(g.Writable)+len(g.WrongSource)+len(g.Replaced)+len(g.MissingPins)+len(g.MissingWorkerPins) == 0
+}
+
+// String words the gaps for a doctor row or an apply warning.
+func (g TreeMountGaps) String() string {
+	var parts []string
+	add := func(paths []string, what string) {
+		if len(paths) > 0 {
+			parts = append(parts, strings.Join(paths, ", ")+" "+what)
+		}
+	}
+	add(g.Missing, "not mounted read-only: the agent can write it")
+	add(g.Writable, "mounted read-write: the agent can write it")
+	add(g.WrongSource, "mounted from another source: the mount covers something else")
+	add(g.Replaced, "writable from the container although its read-only mount is listed: the directory was replaced on the host after the manager was created, and the mount still covers the old one")
+	add(g.MissingPins, "not pinned: the agent can rename it away and recreate a protected path writable")
+	add(g.MissingWorkerPins, "(a worker dir) not pinned: the manager can replace it with a symbolic link and have that worker mount a protected directory read-write")
+	return strings.Join(parts, "; ")
+}
+
+// Stale reports whether ANY gap is a replaced directory (others may sit
+// beside it). A fresh create fixes it like the rest, but the operator
+// caused it by replacing a protected directory instead of editing it in
+// place, so the fix text adds that rule.
+func (g TreeMountGaps) Stale() bool { return len(g.Replaced) > 0 }
+
+// ManagerTreeMountGaps compares a manager container's mounts with the
+// read_only plan: every planned directory must be mounted at its place in
+// the workspace from the same place in the in-jail tree jp, and an entry
+// must be read-only. A pin's writability is not checked — what makes it a
+// pin is being a mount point, which cannot be renamed or removed. Shared by
+// `lever doctor` and apply's keep/resume warning. The live write probe
+// (ProbeReplacedEntries) is separate: it needs a running container.
+func ManagerTreeMountGaps(jp string, want []config.TreeMount, got []jail.Mount) TreeMountGaps {
+	byTarget := make(map[string]jail.Mount, len(got))
+	for _, m := range got {
+		byTarget[m.Destination] = m
+	}
+	var g TreeMountGaps
+	for _, w := range want {
+		m, ok := byTarget[path.Join(scion.ContainerWorkspace, w.Rel)]
+		switch {
+		case !ok && w.ReadOnly:
+			g.Missing = append(g.Missing, w.Rel)
+		case !ok && w.WorkerPin:
+			g.MissingWorkerPins = append(g.MissingWorkerPins, w.Rel)
+		case !ok:
+			g.MissingPins = append(g.MissingPins, w.Rel)
+		case m.Source != path.Join(jp, w.Rel):
+			g.WrongSource = append(g.WrongSource, w.Rel)
+		case w.ReadOnly && m.RW:
+			g.Writable = append(g.Writable, w.Rel)
+		}
+	}
+	return g
+}
+
+// WritableProbe asks a running container whether its user can write an
+// in-container path (jail.ContainerPathWritable in production).
+type WritableProbe func(ctx context.Context, ref, target string) (bool, error)
+
+// ProbeReplacedEntries runs the live half of the read_only check on a
+// RUNNING manager container: every entry must refuse a write. A listed
+// read-only mount does not prove it — after the host replaced the
+// directory (rename-based deploy, rm -rf and recreate) the mount stays on
+// the old directory and a write lands in the new one. Returns the entries
+// the container can write; any probe that cannot run is an error, so a
+// failed probe never reads as protected.
+func ProbeReplacedEntries(ctx context.Context, probe WritableProbe, ref string, want []config.TreeMount) ([]string, error) {
+	var replaced []string
+	for _, w := range want {
+		if !w.ReadOnly {
+			continue
+		}
+		writable, err := probe(ctx, ref, path.Join(scion.ContainerWorkspace, w.Rel))
+		if err != nil {
+			return nil, err
+		}
+		if writable {
+			replaced = append(replaced, w.Rel)
+		}
+	}
+	return replaced, nil
+}
+
+// ManagerTreeMountsFix is the operator's way out of every gap: a fresh
+// create (which discards the conversation, so back it up first), and for a
+// replaced directory, editing protected directories in place from now on.
+func ManagerTreeMountsFix(g TreeMountGaps) string {
+	fix := "back up the manager's conversation first, then run `lever up --fresh` to recreate the manager with the mounts (the fresh start deletes the manager record and its conversation)"
+	if g.Stale() {
+		fix += "; from then on edit protected directories in place — replacing one on the host (rm -rf and recreate, a rename-based deploy, a git checkout that removes and re-adds it) drops the protection until the next fresh create"
+	}
+	return fix
+}
+
+// warnManagerTreeMounts runs after apply kept or resumed a manager rather
+// than creating it: manager.read_only is create-time only, so a manager
+// created before the setting (or before an entry was added) does not hold
+// the mounts, and nothing in a resume adds them; and a protected directory
+// replaced on the host since the create is no longer covered. Never fatal —
+// the manager works, it is only unprotected — but loud, naming what is
+// wrong and the way to fix it. The container is found by scion's container
+// name, which a resume keeps (its id changes when scion recreates the
+// container); it is live here (waitManagerLive passed), so the write probe
+// runs too.
+func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
+	want := r.app.ManagerTreeMounts()
+	if len(want) == 0 {
+		return
+	}
+	if r.d.InspectContainerMounts == nil || r.d.ProbeContainerWritable == nil {
+		r.d.Log("start-manager: WARNING: manager.read_only is create-time only and lever could not inspect manager %q's mounts; run `lever doctor` (row \"manager read-only paths\") to see whether it holds them", r.app.Name)
+		return
+	}
+	ref := jail.ContainerName(path.Base(jp), r.app.Name)
+	got, err := r.d.InspectContainerMounts(ctx, ref)
+	if err != nil {
+		r.d.Log("start-manager: WARNING: manager.read_only is create-time only and lever could not inspect manager %q's mounts (%v); run `lever doctor` to check", r.app.Name, err)
+		return
+	}
+	gaps := ManagerTreeMountGaps(jp, want, got)
+	if gaps.Empty() {
+		replaced, err := ProbeReplacedEntries(ctx, WritableProbe(r.d.ProbeContainerWritable), ref, want)
+		if err != nil {
+			r.d.Log("start-manager: WARNING: lever could not probe whether manager %q can write its read-only paths (%v); run `lever doctor` to check", r.app.Name, err)
+			return
+		}
+		gaps.Replaced = replaced
+	}
+	if !gaps.Empty() {
+		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
+	}
 }
 
 // convergeManager acts on the observed manager record (nil when absent, already
@@ -1361,6 +1578,13 @@ func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool 
 // mint-manager-bootstrap succeeded outright, or an earlier create in this
 // same Run already re-armed), or r.d.RearmBootstrap mints one now.
 func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, mustCreate bool) error {
+	// The second read_only host check (startManager ran the first): after a
+	// --fresh delete, the manager that might have held the tree writable is
+	// gone, so this is the look the create can rely on. Cheap, so it runs
+	// before every create rather than only the --fresh one.
+	if err := r.app.PrepareManagerReadOnlyHost(); err != nil {
+		return fmt.Errorf("start-manager: %w", err)
+	}
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
@@ -1393,6 +1617,9 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 		created = startErr == nil
 		return startErr
 	})
+	if err == nil && created {
+		r.managerCreated = true
+	}
 	if err == nil && created && commit != nil {
 		if cerr := commit(); cerr != nil {
 			r.d.Log("start-manager: could not record the manager's fresh session (%v); contacts cannot post to it until the next fresh start", cerr)

@@ -697,6 +697,10 @@ func (o StartOpts) hasInlineConfig() bool {
 	return o.Instructions != "" || len(o.Volumes) > 0 || len(o.Env) > 0
 }
 
+// ContainerWorkspace is where scion mounts an agent's workspace (the
+// --workspace path) inside its container, and the container's CWD.
+const ContainerWorkspace = "/workspace"
+
 // VolumeMount is one container bind mount, in scion's own inline-config
 // shape (`volumes:` entries of type local): source is a guest path, target
 // the path inside the container.

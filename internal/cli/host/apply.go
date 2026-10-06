@@ -29,6 +29,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
@@ -1326,6 +1327,14 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// gate (see sessionrec and remoteContactSession).
 		BeginSession: func(agent string) func() error {
 			return brokerctl.BeginSession(w.app, st, cli.VersionString(), agent)
+		},
+		// InspectContainerMounts lets apply warn when a manager it kept or
+		// resumed lacks the manager.read_only mounts (create-time only).
+		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
+			return jail.ContainerMounts(ctx, b.JailRunner(), ref)
+		},
+		ProbeContainerWritable: func(ctx context.Context, ref, target string) (bool, error) {
+			return jail.ContainerPathWritable(ctx, b.JailRunner(), ref, target)
 		},
 
 		EnsureHubLogin: w.ensureHubLogin,

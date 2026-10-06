@@ -14,17 +14,44 @@ version bump moves the block under the new version heading.
   its terminal, and a link to the hub's web UI, which stays at its own paths. The page sends
   through the hub's existing chat route, so the proxy records each message in the chat ledger and
   the manager verifies it with `message_verify` as before; no message path, signature or ledger
-  is new. Operator logins only: a contact gets the contact fence's answers for every one of the
-  page's paths. The page is embedded in the binary (no build step, no other origin), writes what
-  it reads from the hub as text only, and carries a Content-Security-Policy with no inline
-  script. `landing: chat` needs an operator login in `allowed_users`; unset, nothing changes.
+  is new. (Contacts: see the multi-agent entry below.) The page is embedded in the binary (no
+  build step, no other origin), writes what it reads from the hub as text only, and carries a
+  Content-Security-Policy with no inline script. `landing: chat` needs an operator login in `allowed_users`; unset, nothing changes.
   The page installs as an app (Chrome's "Install page as app", Safari's "Add to Home Screen"): a
-  web app manifest and icons under `/lever/`, operator-only like the page, named after the
-  instance. There is deliberately no service worker: nothing sits between the page and its
-  requests, and no cache can serve a page older than the binary. The manifest link carries
+  web app manifest and icons under `/lever/`, named after the instance for an operator (a
+  contact's manifest is generic). There is deliberately no service worker: nothing sits between
+  the page and its requests, and no cache can serve a page older than the binary. The manifest link carries
   `crossorigin="use-credentials"`, so a front that authenticates by cookie still admits
   the manifest fetch. After upgrading, `lever apply` restarts the proxy once (the key is
   part of its config stamp).
+
+- **A multi-agent chat page.** With `remote.landing: chat` the page opens on the login's list of
+  agents and chats with each one it may message. An operator sees the manager and every worker;
+  a contact sees its `agents:` (to message) and the agents of a new `see:` key (name, label and
+  state only: no history, no input). The list is built per login on the server
+  (`GET /lever/api/agents`): an agent outside the login's lists never appears, not its name, id
+  or conversation. Each row shows a state from a fixed set of words and an unread count; reading
+  a chat moves the hub read marker. A message to a suspended or stopped worker wakes it first
+  (`POST /lever/api/agents/<name>/wake`: worker only, a login that may message it, same-origin,
+  one wake per worker per minute, through the broker's operator socket, audited), then goes out
+  under the idempotency key it had before the wake. A worker in error, with no record, or not
+  fresh offers "Ask the manager to start <name>", an editable draft in the manager chat.
+  Optional `remote.labels_file` names a manager-written JSON file of short labels the page
+  shows after each name (host-side read, no symbolic links, 16 KiB, cleaned and cut to 60
+  characters); a bad file means no labels and a new `chat labels` row in `lever doctor`. Wide
+  screens show the list and the chat side by side.
+
+### Changed
+
+- **Contacts get the chat page with `landing: chat`.** A contact's page navigations redirect to
+  `/lever/chat` instead of the contact landing page or the hub's web UI shell; every hub rule of
+  the contact fence is unchanged. With `landing` unset or `console`, nothing changes.
+- **`/lever/api/chat` is gone**: the page reads `/lever/api/agents`. An open chat whose agent gets
+  a new hub record moves to the new conversation instead of reloading the page, and the page no
+  longer reads the agent's hub record (`GET /api/v1/agents/<id>`) for its state.
+- **Drafts and unsent records are kept per agent** in the tab's session storage
+  (`lever-chat-draft:<name>`, `lever-chat-unsent:<name>`); the one-agent page's records are
+  adopted once, so a send with no clear answer keeps its key across the upgrade.
 
 ## [0.29.1] - 2026-10-02
 

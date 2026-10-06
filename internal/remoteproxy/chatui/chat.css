@@ -27,8 +27,6 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
-  display: flex;
-  flex-direction: column;
   height: 100dvh;
   background: var(--bg);
   color: var(--text);
@@ -36,6 +34,65 @@ body {
   overflow: hidden;
 }
 [hidden] { display: none !important; }
+/* One pane at a time on a phone: the list, or the open chat. From 720px
+   both show side by side. */
+.app { display: flex; height: 100%; }
+.pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+body.chatting #pane-list { display: none; }
+body:not(.chatting) #pane-chat { display: none; }
+@media (min-width: 720px) {
+  #pane-list { flex: 0 0 18rem; display: flex; border-right: 1px solid var(--line); }
+  #pane-chat { display: flex; }
+  #back { display: none; }
+}
+#back {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+.label { font-weight: 400; color: var(--muted); }
+.label::before { content: "· "; }
+.listscroll { padding-left: 0; padding-right: 0; }
+.agents { list-style: none; margin: 0; padding: 0; }
+.agents li { border-bottom: 1px solid var(--line); }
+.agents button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 12px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: start;
+}
+.agents li.current button { background: var(--panel); }
+.agents li.view { opacity: 0.6; }
+.agents .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents .chip { font-size: 13px; color: var(--muted); }
+.agents .chip.running { color: var(--ok); }
+.agents .chip.error, .agents .chip.no-record, .agents .chip.not-fresh { color: var(--bad); }
+.agents .badge { min-width: 22px; padding: 0 6px; border-radius: 11px; background: var(--mine); color: var(--mine-text); font-size: 12px; font-weight: 600; text-align: center; }
+.agents .badge:empty { display: none; }
+.agents .viewtag { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+.note { max-width: 760px; margin: 0 auto 6px; font-size: 14px; color: var(--muted); }
+.ask {
+  display: block;
+  margin: 0 auto 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
 header {
   display: flex;
   align-items: center;

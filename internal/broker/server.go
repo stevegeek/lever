@@ -135,11 +135,14 @@ func (b *Broker) AdminHandler() http.Handler {
 // permissions are the gate, the same boundary as the host records it writes.
 // The remote chat page's wake (handleOperatorWake) is here for the same
 // reason: a resume route on the admin listener would let the jail wake
-// workers.
+// workers. So is the proxy's agent-message match
+// (handleAgentMessagesMatch): it binds ledger records, which nothing in the
+// jail may do.
 func (b *Broker) OperatorHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
 	mux.HandleFunc("POST "+wire.PathOperatorWake, b.handleOperatorWake)
+	mux.HandleFunc("POST "+wire.PathOperatorAgentMessagesMatch, b.handleAgentMessagesMatch)
 	return mux
 }
 

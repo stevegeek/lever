@@ -51,6 +51,11 @@ func (s State) ChatVerified() string { return filepath.Join(s.Dir, "chat-verifie
 // written and read by the broker only.
 func (s State) SentLedger() string { return filepath.Join(s.Dir, "sent-ledger") }
 
+// AgentLedger is the broker's record of messages agents were authorized to
+// send to contacts, and of the hub message each was shown as (package
+// agentledger): written and read by the broker only.
+func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger") }
+
 // Sessions is the record of each agent's last fresh session start and the
 // skill text on disk for it then (package sessionrec): written by apply (the
 // manager) and the broker (workers), read by the remote proxy before it lets

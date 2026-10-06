@@ -1,5 +1,7 @@
 package wire
 
+import "time"
+
 // Request/response bodies of the broker's HTTP routes. Each type is the ONE
 // declaration of its JSON shape: the broker decodes/encodes it and the agent,
 // captool and cli marshal/decode the very same type. Responses whose payload
@@ -325,6 +327,31 @@ type ContactMessageResponse struct {
 	Expires       string `json:"expires,omitempty"`
 	NextAllowedAt string `json:"next_allowed_at,omitempty"`
 	Note          string `json:"note,omitempty"`
+}
+
+// AgentMessagesMatchRequest asks PathOperatorAgentMessagesMatch which of
+// Agent's rows in Contact's DM history the agent ledger recorded. Agent is
+// the scion slug (the app name for the manager, else the worker name), as
+// a contact's agents list names it. No text crosses the socket: each row is
+// its hub id, the sha256 of its text, and the hub's time for it. At most
+// 200 rows (the hub's page cap).
+type AgentMessagesMatchRequest struct {
+	Contact  string            `json:"contact"`
+	Agent    string            `json:"agent"`
+	Messages []AgentMessageRef `json:"messages"`
+}
+
+// AgentMessageRef is one agent row without its text.
+type AgentMessageRef struct {
+	ID        string    `json:"id"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AgentMessagesMatchResponse lists the ids of the rows to keep, in request
+// order; every other agent row is dropped.
+type AgentMessagesMatchResponse struct {
+	Keep []string `json:"keep"`
 }
 
 // ---- operator directives: admin side (UDS channel) ----

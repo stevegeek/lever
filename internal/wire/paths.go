@@ -50,6 +50,12 @@ const PathOperatorNote = "/operator/note"
 // worker, on the same 0600 operator socket (never the admin listener).
 const PathOperatorWake = "/operator/wake"
 
+// PathOperatorAgentMessagesMatch is the remote proxy's question, on the same
+// 0600 operator socket, which agent rows of a contact's history the agent
+// ledger recorded (remote.agent_messages). Never on the jail or admin
+// listener: it binds ledger records.
+const PathOperatorAgentMessagesMatch = "/operator/agent-messages/match"
+
 // Operator-directive (UDS) admin channel routes.
 const (
 	PathDirectiveSend     = "/directive/send"

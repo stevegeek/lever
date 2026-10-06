@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -93,7 +94,8 @@ type LabelSource struct {
 	labels map[string]string
 }
 
-// Labels is the current labels by agent name, nil for none. Nil-safe.
+// Labels is the current labels by agent name, nil for none: a copy, so a
+// caller cannot change the cache. Nil-safe.
 func (s *LabelSource) Labels() map[string]string {
 	if s == nil || s.Rel == "" {
 		return nil
@@ -106,7 +108,7 @@ func (s *LabelSource) Labels() map[string]string {
 	defer s.mu.Unlock()
 	t := now()
 	if !s.at.IsZero() && t.Sub(s.at) < labelsTTL {
-		return s.labels
+		return maps.Clone(s.labels)
 	}
 	s.at = t
 	fi, err := fsutil.StatInTreeNoLinks(s.Tree, s.Rel)
@@ -115,12 +117,12 @@ func (s *LabelSource) Labels() map[string]string {
 		return nil
 	}
 	if s.labels != nil && fi.ModTime().Equal(s.mtime) && fi.Size() == s.size {
-		return s.labels
+		return maps.Clone(s.labels)
 	}
 	labels, err := ReadLabels(s.Tree, s.Rel)
 	if err != nil {
 		labels = nil
 	}
 	s.labels, s.mtime, s.size = labels, fi.ModTime(), fi.Size()
-	return s.labels
+	return maps.Clone(s.labels)
 }

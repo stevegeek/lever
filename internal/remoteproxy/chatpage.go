@@ -314,7 +314,13 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		w.Header().Set("ETag", f.etag)
 		// Revalidate on every load: the files change with the lever binary.
 		// private: the answer at this URL depends on who asks (the manifest
-		// differs per tier), so no shared cache may keep it.
+		// differs per tier), so no shared cache may keep it. No Vary: the
+		// login comes from the front's identity header, not from anything
+		// the browser sends (Vary: Cookie would name the wrong input), and
+		// none is needed: no-cache makes the browser revalidate every load,
+		// and each tier's manifest has its own ETag, so a browser that
+		// changed login sends the other tier's tag and gets a 200 with its
+		// own manifest, never a 304 for the old one.
 		w.Header().Set("Cache-Control", "private, no-cache")
 	}
 	if etagMatches(r.Header.Get("If-None-Match"), f.etag) {

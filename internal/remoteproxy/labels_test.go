@@ -97,3 +97,14 @@ func TestLabelSourceCachesByMtimeAndSize(t *testing.T) {
 		t.Fatal("nil source")
 	}
 }
+
+// A caller that changes the map it got does not change the cache.
+func TestLabelSourceHandsOutACopy(t *testing.T) {
+	tree := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(tree, "labels.json"), []byte(`{"a":"one"}`), 0o644))
+	s := &LabelSource{Tree: tree, Rel: "labels.json"}
+	s.Labels()["a"] = "changed"
+	if got := s.Labels()["a"]; got != "one" {
+		t.Fatalf("the cache was changed through a returned map: %q", got)
+	}
+}

@@ -977,6 +977,63 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   answers `lever` with the kind `manager` and a contact's post answers `web` with the tier
   `contact`, whatever either says.
 
+## Messages agents start
+
+With `remote.agent_messages.enabled: true` an agent can tell a contact something without waiting
+for the contact to write first ("workbook v3 is ready", "I need document X"), in the chat the
+contact already has with it. Lever controls these messages, and replies to a contact too:
+
+```yaml
+remote:
+  allowed_users:
+    - operator@example.com
+    - {login: client@example.com, tier: contact, agents: [deal]}
+  agent_messages:
+    enabled: true
+    follow_up_after: 24h      # default; 1h to 720h
+    max_chars: 4000           # default; 1 to 16000
+```
+
+- **The agent's two steps.** The agent calls `contact_message` (a tool of its `lever-capability`
+  MCP server) with the contact's login, the whole text and, for a reply, the `message_id` that
+  `message_verify` returned for the contact's post. The broker checks that the contact lists
+  this agent, that a reply answers that contact's verified post to this agent, the length and the
+  limit, and records a hash of the exact text in `.lever-state/agent-ledger/` (0700, one 0600
+  file per contact). `lever-agent` writes the text to a 0600 file and the agent runs the
+  `scion message --body-file … -- '@<email>'` command it gets back. `contacts` lists the logins
+  the agent may write to, with when it may start its next message.
+- **What the contact sees.** Only agent messages whose exact text the record holds, each
+  record showing one hub message, sent within 10 minutes of the authorization. A message the
+  agent sent any other way, or edited after it showed, is removed from the contact's history.
+  Reply previews are removed; attachment entries of removed messages too. The contact's event
+  stream carries the subject and ids of each event, never text or a sender; the DM list carries
+  no last-message preview; the chat page's unread count holds only shown messages. Anything the
+  proxy cannot read, or a broker that does not answer, hides every agent message (it fails
+  closed); paging stays the hub's, so a page can hold fewer messages than asked for.
+- **The limit.** Per agent and contact: one message the agent started and the contact has not
+  answered yet, then one reminder after `follow_up_after`; a message from the contact resets
+  it. Every authorization counts, sent or not. Replies are not limited by this rule. Every agent
+  has at most 30 authorizations an hour. Refusals are fixed words: `not-a-contact`, `limit`
+  (with `next_allowed_at`), `too-long`, `empty`, `bad-text` (invalid UTF-8, a control
+  character, or a word that starts with `@`, which the hub would rewrite), `bad-ref`, `rate`,
+  `off`, `unavailable`. The broker audit names the login, agent, kind, record id, length and
+  decision, never the text.
+- **What the operator sees.** Everything, unfiltered, as before. Messages to the operator keep
+  their old path.
+- **Turning it on.** `lever apply` restarts the broker and the proxy (the key is part of their
+  config stamps). `lever init` rewrites both skills (they teach the two steps while it is on).
+  The agent image must contain this release's `lever-agent`, which has the two tools: run `make
+  lever-image` (and rebuild an instance image built from it), then `lever up --fresh` for the
+  manager after you back up its conversation. Each contact agent must start fresh on the new
+  skill: `lever up --fresh` for the manager, purge and start for a worker. Until then a
+  contact's post to it is refused as not fresh. `lever doctor` has an `agent messages` row.
+  Turning it off again restores the earlier behaviour (and again needs `lever init` and fresh
+  sessions).
+- **Known limits.** The hub's own web UI (the console landing) shows a new agent message to a
+  contact only after a reload, since the events carry no text. A message older than the two
+  4 MiB record files of that contact stops showing. An authorization the agent does not send
+  still uses its slot until the reminder time.
+
 ## What this does NOT do
 
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —

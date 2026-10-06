@@ -9,6 +9,16 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **Agents can start a message to a contact (`remote.agent_messages`).** Off by default. On, an
+  agent messages a contact in two steps: `contact_message` (lever-capability MCP tool) checks that
+  the contact lists the agent, that a reply answers that contact's verified post, and the limit (one
+  unanswered message the agent started, one reminder after `follow_up_after`, 24 h by default;
+  replies are not limited), and records a hash of the exact text; the agent then sends it with the
+  returned `scion message` command. The remote proxy shows a contact only agent messages whose text
+  the record holds, removes text from the contact's events stream and DM previews, and counts only
+  shown messages as unread; the operator's view is unchanged. Needs the agent image rebuilt
+  (`make lever-image`) and each contact agent started fresh on the new skill. `lever doctor` has an
+  `agent messages` row. Off, the skills render byte-identical and no config stamp changes.
 - **A chat page for the manager, served by the remote proxy.** `remote.landing: chat` makes the
   remote origin open on a page lever serves itself: your direct chat with the manager, a link to
   its terminal, and a link to the hub's web UI, which stays at its own paths. The page sends

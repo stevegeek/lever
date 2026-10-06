@@ -1,6 +1,7 @@
 package agentledger
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -119,13 +120,15 @@ func TestMatchRules(t *testing.T) {
 		at                   time.Duration // message time after the record
 		want                 bool
 	}{
-		"exact":         {"worker", "c@x", "hello", time.Minute, true},
-		"skew before":   {"worker", "c@x", "hello", -time.Minute, true},
-		"too early":     {"worker", "c@x", "hello", -3 * time.Minute, false},
-		"after expiry":  {"worker", "c@x", "hello", TTL + Skew + time.Second, false},
-		"other text":    {"worker", "c@x", "hello!", time.Minute, false},
-		"other agent":   {"other", "c@x", "hello", time.Minute, false},
-		"other contact": {"worker", "d@x", "hello", time.Minute, false},
+		"exact":           {"worker", "c@x", "hello", time.Minute, true},
+		"skew before":     {"worker", "c@x", "hello", -SkewBefore + time.Second, true},
+		"sent before":     {"worker", "c@x", "hello", -SkewBefore - time.Second, false},
+		"a minute before": {"worker", "c@x", "hello", -time.Minute, false},
+		"skew after":      {"worker", "c@x", "hello", TTL + SkewAfter - time.Second, true},
+		"after expiry":    {"worker", "c@x", "hello", TTL + SkewAfter + time.Second, false},
+		"other text":      {"worker", "c@x", "hello!", time.Minute, false},
+		"other agent":     {"other", "c@x", "hello", time.Minute, false},
+		"other contact":   {"worker", "d@x", "hello", time.Minute, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			l, _ := open(t)
@@ -168,4 +171,127 @@ func TestMatchIgnoresMalformedCandidates(t *testing.T) {
 	if err != nil || len(keep) != 0 {
 		t.Fatalf("keep=%v err=%v", keep, err)
 	}
+}
+
+// The hourly count is per agent: another agent's authorizations never
+// count, also when the count comes from the cache.
+func TestLastHourIsPerAgent(t *testing.T) {
+	l, dir := open(t)
+	for i := range 30 {
+		mustAuthorize(t, l, auth(t, "busy", "c@x", KindReply, "r", t0.Add(time.Duration(i)*time.Second)))
+	}
+	mustAuthorize(t, l, auth(t, "busy", "d@x", KindReply, "r", t0))
+	now := t0.Add(time.Minute)
+	for range 2 { // the second round reads the cache
+		if v, _ := l.View("busy", "c@x", now); v.LastHour != 31 {
+			t.Fatalf("busy = %d, want 31", v.LastHour)
+		}
+		if v, _ := l.View("quiet", "c@x", now); v.LastHour != 0 {
+			t.Fatalf("quiet = %d, want 0", v.LastHour)
+		}
+	}
+	if v, _ := l.View("busy", "c@x", t0.Add(2*time.Hour)); v.LastHour != 0 {
+		t.Fatalf("an hour later = %d, want 0", v.LastHour)
+	}
+	// Another process (a new broker on the same directory) appends: the
+	// cache sees it.
+	l2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAuthorize(t, l2, auth(t, "quiet", "c@x", KindInitiated, "x", t0))
+	if v, _ := l.View("quiet", "c@x", now); v.LastHour != 1 {
+		t.Fatalf("after another writer: %d, want 1", v.LastHour)
+	}
+}
+
+// A second "shown" line for a message already bound (a racing or replaced
+// broker) is ignored on read: the first binding decides what shows.
+func TestReadKeepsTheFirstBindingOfAMessage(t *testing.T) {
+	l, dir := open(t)
+	a1 := auth(t, "worker", "c@x", KindInitiated, "hello", t0)
+	a2 := auth(t, "worker", "c@x", KindInitiated, "other", t0)
+	mustAuthorize(t, l, a1)
+	mustAuthorize(t, l, a2)
+	if keep, _, _ := l.Match("worker", "c@x", []Candidate{{MessageID: "m1", SHA256: HashText("hello"), CreatedAt: t0}}, t0); !keep["m1"] {
+		t.Fatal("m1 binds to a1")
+	}
+	at := t0
+	forged := line{V: 1, Op: "shown", ID: a2.ID, SHA256: HashText("other"), MessageID: "m1", At: &at}
+	if err := (&hostledgerFile{dir: dir}).append(t, FileFor("c@x"), forged); err != nil {
+		t.Fatal(err)
+	}
+	l2, _ := Open(dir)
+	if keep, _, _ := l2.Match("worker", "c@x", []Candidate{{MessageID: "m1", SHA256: HashText("hello"), CreatedAt: t0}}, t0); !keep["m1"] {
+		t.Fatal("the first binding of m1 must stand")
+	}
+	if keep, _, _ := l2.Match("worker", "c@x", []Candidate{{MessageID: "m1", SHA256: HashText("other"), CreatedAt: t0}}, t0); keep["m1"] {
+		t.Fatal("a second binding of m1 must not show other text")
+	}
+}
+
+// A binding that cannot be written is not shown, and is not kept: once the
+// file is writable again the message binds normally.
+func TestMatchKeepsNoBindingItCouldNotWrite(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes a read-only file")
+	}
+	l, dir := open(t)
+	mustAuthorize(t, l, auth(t, "worker", "c@x", KindInitiated, "hello", t0))
+	p := filepath.Join(dir, FileFor("c@x"))
+	if err := os.Chmod(p, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	m := []Candidate{{MessageID: "m1", SHA256: HashText("hello"), CreatedAt: t0}}
+	keep, bound, err := l.Match("worker", "c@x", m, t0)
+	if err == nil || keep["m1"] || len(bound) != 0 {
+		t.Fatalf("keep=%v bound=%v err=%v; want no binding", keep, bound, err)
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keep, bound, err = l.Match("worker", "c@x", m, t0)
+	if err != nil || !keep["m1"] || len(bound) != 1 {
+		t.Fatalf("after the fix: keep=%v bound=%v err=%v", keep, bound, err)
+	}
+}
+
+// Replies to one contact post are counted from the record, so a new ledger
+// on the same directory sees them (the broker caps them at 3).
+func TestReplyRefsSurviveReopen(t *testing.T) {
+	l, dir := open(t)
+	for range 3 {
+		a := auth(t, "worker", "c@x", KindReply, "r", t0)
+		a.ReplyTo = "post-1"
+		mustAuthorize(t, l, a)
+	}
+	l2, _ := Open(dir)
+	v, err := l2.View("worker", "c@x", t0)
+	n := 0
+	for _, a := range v.ForContact {
+		if a.Kind == KindReply && a.ReplyTo == "post-1" {
+			n++
+		}
+	}
+	if err != nil || n != 3 {
+		t.Fatalf("replies to post-1 after reopen = %d (%v)", n, err)
+	}
+}
+
+type hostledgerFile struct{ dir string }
+
+// append writes one raw line to a contact file, as another broker would.
+func (h *hostledgerFile) append(t *testing.T, name string, v any) error {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(h.dir, name), os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(raw, '\n'))
+	return err
 }

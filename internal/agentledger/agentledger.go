@@ -39,12 +39,24 @@ const (
 	KindReply     = "reply"
 	// TTL is how long after an authorization the agent has to send it.
 	TTL = 10 * time.Minute
-	// Skew is the clock difference allowed between the broker (host) and
-	// the hub (guest VM) when a hub message time is compared with a record.
-	Skew = 2 * time.Minute
-	// RotateCap is the size at which a contact's file moves to .1. Bindings
-	// live in the file, so a message older than two files' worth of records
-	// stops showing; at ~250 bytes a line that is about 30000 messages.
+	// SkewBefore is how much earlier than its record a hub message time may
+	// be. Small: the agent sends after it is authorized, so only the clock
+	// difference between the broker (host) and the hub (guest VM, kept in
+	// sync with the host) can put it before; a message sent before the
+	// authorization must not bind to it.
+	SkewBefore = 10 * time.Second
+	// SkewAfter is how much later than the record's expiry a hub message
+	// time may be: the same clock difference plus the send's own delay.
+	SkewAfter = 2 * time.Minute
+	// RotateCap is the size past which a contact's file moves to .1 on the
+	// next append. A move replaces the previous .1, so the second move drops
+	// every line of the first file: those authorizations and their "shown"
+	// bindings. A message bound in a dropped line stops showing (a binding
+	// whose authorization was dropped shows nothing either), and a dropped
+	// authorization no longer counts toward the initiate rule, the replies
+	// to one contact post or the hourly rate. At ~250 bytes a line, a file
+	// holds about 16000 lines; the hourly rate (30) keeps one agent from
+	// filling one in less than about 500 hours.
 	RotateCap = 4 << 20
 	label     = "agent ledger"
 )
@@ -130,6 +142,16 @@ type Ledger struct {
 	dir   string
 	mu    sync.Mutex
 	files map[string]*hostledger.File
+	// hours caches, per contact file, the creation times of its
+	// authorizations by agent, for the hourly rate. An entry is used while
+	// the file and its .1 keep the size and time they had when it was read;
+	// any append (by this broker or another) changes them.
+	hours map[string]hourEntry
+}
+
+type hourEntry struct {
+	sig     string
+	created map[string][]time.Time // agent → authorization times
 }
 
 // Open creates the directory (0700) when it is missing and refuses one
@@ -141,7 +163,7 @@ func Open(dir string) (*Ledger, error) {
 	if err := hostledger.CheckDir(dir, label); err != nil {
 		return nil, err
 	}
-	return &Ledger{dir: dir, files: map[string]*hostledger.File{}}, nil
+	return &Ledger{dir: dir, files: map[string]*hostledger.File{}, hours: map[string]hourEntry{}}, nil
 }
 
 // lock holds the in-process mutex and the directory's flock.
@@ -217,7 +239,9 @@ func (l *Ledger) read(name string) (contactState, error) {
 	return s, nil
 }
 
-// lastHour counts agent's authorizations to anyone since now−1h.
+// lastHour counts agent's authorizations to anyone since now−1h. A file is
+// read again only when it changed since the last count (fileSig), so the
+// cost of a call is one stat per contact file, not a read of every record.
 func (l *Ledger) lastHour(agent string, now time.Time) (int, error) {
 	names, err := os.ReadDir(l.dir)
 	if err != nil {
@@ -225,20 +249,53 @@ func (l *Ledger) lastHour(agent string, now time.Time) (int, error) {
 	}
 	n := 0
 	for _, e := range names {
-		if !fileRE.MatchString(e.Name()) {
+		name := e.Name()
+		if !fileRE.MatchString(name) {
 			continue
 		}
-		s, err := l.read(e.Name())
+		sig, err := l.fileSig(name)
 		if err != nil {
 			return 0, err
 		}
-		for _, a := range s.auths {
-			if a.Agent == agent && now.Sub(a.Created) < time.Hour {
+		h, ok := l.hours[name]
+		if !ok || h.sig != sig {
+			s, err := l.read(name)
+			if err != nil {
+				return 0, err
+			}
+			h = hourEntry{sig: sig, created: map[string][]time.Time{}}
+			for _, a := range s.auths {
+				h.created[a.Agent] = append(h.created[a.Agent], a.Created)
+			}
+			l.hours[name] = h
+		}
+		for _, c := range h.created[agent] {
+			if now.Sub(c) < time.Hour {
 				n++
 			}
 		}
 	}
 	return n, nil
+}
+
+// fileSig is the size, modification time, mode and owner of a contact file
+// and its .1 ("-" for a missing one): a file made unsafe is read (and
+// refused) again.
+func (l *Ledger) fileSig(name string) (string, error) {
+	var b strings.Builder
+	for _, p := range []string{filepath.Join(l.dir, name), filepath.Join(l.dir, name+".1")} {
+		fi, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			b.WriteString("-;")
+		case err != nil:
+			return "", fmt.Errorf("%s: %w", label, err)
+		default:
+			owner, _ := hostledger.FileOwner(fi)
+			fmt.Fprintf(&b, "%d/%d/%v/%d;", fi.Size(), fi.ModTime().UnixNano(), fi.Mode(), owner)
+		}
+	}
+	return b.String(), nil
 }
 
 func (l *Ledger) viewLocked(agent, contact string, now time.Time) (View, error) {
@@ -295,7 +352,7 @@ func (l *Ledger) Authorize(a Auth, now time.Time, allow func(View) error) error 
 // Match answers which candidates (one agent's rows of one contact's
 // history) a record holds. A message already bound shows only while its
 // hash is still the one it was bound with; an unbound one binds the oldest
-// unused record of the same hash whose window [Created-Skew, Expires+Skew]
+// unused record of the same hash whose window [Created-SkewBefore, Expires+SkewAfter]
 // holds its time, earliest message first, and the binding is appended
 // before the answer. bound lists the record ids newly bound (for the audit).
 // A failed append keeps none of this call's new bindings.
@@ -338,7 +395,7 @@ func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (
 			if _, used := s.used[a.ID]; used {
 				continue
 			}
-			if m.CreatedAt.Before(a.Created.Add(-Skew)) || m.CreatedAt.After(a.Expires.Add(Skew)) {
+			if m.CreatedAt.Before(a.Created.Add(-SkewBefore)) || m.CreatedAt.After(a.Expires.Add(SkewAfter)) {
 				continue
 			}
 			if best < 0 || a.Created.Before(s.auths[best].Created) {

@@ -1214,8 +1214,12 @@ remote:
   way, and an upload stays downloadable by its owner. An `allowed_users` entry with `files: false`
   gives that login no file exchange at all: its file routes answer 404 as with files off, its
   page shows no paperclip and no Files panel, `share_file` and `contact_files` answer
-  `not-a-contact` for it, and the operator view lists no files for it (and asks for none). An
-  operator entry with `files: false` has no files of its own and sees no contact's files. Each
+  `not-a-contact` for it, and the operator view lists no files for it (and asks for none). For
+  a contact this is enforced: the contact fence keeps it to the chat page, so it has no other
+  way to the files. For an operator entry, `files: false` only hides lever's chat-page file
+  feature (its own file routes, the operator view's files, being a share target); it is not
+  access control, because an operator has the whole hub (the workspace file API, WebDAV, the
+  terminal) and can reach every file in the tree there. Each
   change restarts the proxy (and, for shares or a login, the broker) at the next `lever apply`;
   a direction change also rewrites the skills, so run `lever init` first.
 - **Where files live.** In the agent's own workspace, under `.lever-files/`: `in/<key>/` holds

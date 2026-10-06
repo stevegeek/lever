@@ -12,8 +12,9 @@ version bump moves the block under the new version heading.
 - **File directions and logins without files.** `remote.files.uploads` and `remote.files.shares`
   (default `true`) turn one direction off: no new upload (`403 uploads-off`, no paperclip), or no
   new share (`share_file` answers `shares-off`, and shares already made are listed but no longer
-  downloadable). An `allowed_users` entry with `files: false` (contact or operator) gives that
-  login no file exchange at all. The `files` doctor row shows both directions and the logins
+  downloadable). An `allowed_users` entry with `files: false` gives that login no file exchange
+  on the chat page: enforced for a contact (the contact fence); for an operator it only hides the
+  feature, since an operator has the whole hub (workspace file API, WebDAV, terminal). The `files` doctor row shows both directions and the logins
   without files; the skills mention a direction only while it is off. Without the new keys the
   config stamps and the skills are unchanged.
 - **Files in the chat (`remote.files`).** Off by default; needs `landing: chat`. A login uploads

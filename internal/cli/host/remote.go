@@ -29,6 +29,7 @@ import (
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/webpush"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -64,17 +65,29 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			// handshake: the handshake IS hub traffic, and must travel the
 			// same route into this instance's own jail.
 			dial := remoteproxy.JailDial(jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr()))
-			provider, handler, err := buildRemoteHandler(app, st, dial, auditFn)
+			provider, handler, push, err := buildRemoteHandler(app, st, dial, auditFn, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+			// The push watchers live as long as the proxy: the same context
+			// ends both, and the serve waits for every hub stream to close.
+			pushDone := make(chan struct{})
+			go func() {
+				defer close(pushDone)
+				if push != nil {
+					push.Run(ctx)
+				}
+			}()
 			printRemoteWarnings(cmd, app)
 			cmd.Printf("remote proxy %q serving on %s, identity header %s (login provider on 127.0.0.1:%d, issuer %s)\n",
 				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader(), provider.Port(), provider.IssuerURL())
-			return serveRemote(ctx, app, st, provider, handler)
+			err = serveRemote(ctx, app, st, provider, handler)
+			stop()
+			<-pushDone
+			return err
 		},
 	}
 }
@@ -101,14 +114,20 @@ func loadRemoteApp(args []string) (string, *config.App, error) {
 
 // buildRemoteHandler assembles the local OIDC provider, the login driver over
 // it, and the proxy handler that fronts the hub.
-func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), auditFn func(remoteproxy.AuditLine)) (*remoteproxy.Provider, http.Handler, error) {
+func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), auditFn func(remoteproxy.AuditLine), warn io.Writer) (*remoteproxy.Provider, http.Handler, *remoteproxy.Push, error) {
 	// The hub's address INSIDE the guest, which is where the dialer
 	// lands — so this is also the correct Host header. It is
 	// deliberately not a host-reachable address: see
 	// scion.DefaultHubEndpoint.
 	target, err := url.Parse(scion.DefaultHubEndpoint)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// remote.push: nil when off. Built before the handler, which serves its
+	// routes and worker only when it is non-nil.
+	push, err := remotePush(app, st, auditFn, warn)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// The local OIDC provider, and the driver that logs in with it.
@@ -174,8 +193,40 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
+		// remote.push: the page's notifications (nil when off).
+		Push: push,
 	})
-	return provider, handler, nil
+	return provider, handler, push, nil
+}
+
+// remotePush builds the Web Push service (remote.push), or nil when off.
+// A malformed LEVER_PUSH_TEST_HOSTS stops the serve: never a silent
+// widening of where the proxy may connect. A fault in the push files keeps
+// the proxy serving with push off, and says so.
+func remotePush(app *config.App, st state.State, auditFn func(remoteproxy.AuditLine), warn io.Writer) (*remoteproxy.Push, error) {
+	if !app.PushOn() {
+		return nil, nil
+	}
+	if brokerctl.StateInsideTree(app, st) {
+		fmt.Fprintf(warn, "lever: warning: remote.push is on, but the state directory is inside the tree, where agents could read "+
+			"the push key and subscriptions: push stays off\n")
+		return nil, nil
+	}
+	test, err := webpush.ParseTestHosts(os.Getenv(webpush.TestHostsEnv))
+	if err != nil {
+		return nil, err
+	}
+	if len(test) > 0 {
+		fmt.Fprintf(warn, "lever: warning: %s=%s: TEST ONLY — this proxy may push over plain http to those loopback addresses\n",
+			webpush.TestHostsEnv, os.Getenv(webpush.TestHostsEnv))
+	}
+	p, err := remoteproxy.NewPush(remoteproxy.PushOptions{Dir: st.PushDir(), Subject: app.Remote.Push.Subject,
+		TestHosts: test, Logins: app.Remote.Logins(), Audit: auditFn})
+	if err != nil {
+		fmt.Fprintf(warn, "lever: warning: remote.push: %v: push stays off (see `lever doctor`)\n", err)
+		return nil, nil
+	}
+	return p, nil
 }
 
 // remoteChatAgent is the agent lever's chat page talks to: the manager, whose

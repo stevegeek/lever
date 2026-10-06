@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -35,6 +36,7 @@ import (
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/webpush"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -704,6 +706,55 @@ func labelFault(err error) string {
 		return "is not a JSON object of strings"
 	}
 	return "cannot be read: " + firstLine(err.Error())
+}
+
+// checkPush reports remote.push the way the proxy reads it. The proxy
+// writes push/status.json at start and after each send, so this row shows
+// the last outcome and whether the running proxy pushes to test hosts.
+func checkPush(app *config.App, st state.State) checkResult {
+	const name = "push"
+	if !app.PushOn() {
+		return checkResult{name, true, "off (no service worker, no push routes, no hub streams)", ""}
+	}
+	if brokerctl.StateInsideTree(app, st) {
+		return checkResult{name, false, "on, but the state directory is inside the tree: push stays off (agents could read its key)",
+			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	}
+	dir := st.PushDir()
+	sum := remoteproxy.ReadPushSummary(dir)
+	switch {
+	case errors.Is(sum.KeyErr, fs.ErrNotExist):
+		return warnResult(name, "on, but no key yet: the remote proxy creates "+stateRel(st, dir)+"/vapid.key when it starts", "run `lever apply`")
+	case sum.KeyErr != nil:
+		return checkResult{name, false, "on, but the push key is unusable: " + sum.KeyErr.Error() + "; push is off", "chmod 600 " + filepath.Join(dir, "vapid.key") + " (or remove it: every device must then turn notifications on again)"}
+	case sum.StoreErr != nil:
+		return checkResult{name, false, "on, but the subscription store is unusable: " + sum.StoreErr.Error() + "; push is off", "chmod 600 " + filepath.Join(dir, "subscriptions.json") + " (or remove it)"}
+	}
+	total, per := 0, []string{}
+	for _, l := range slices.Sorted(maps.Keys(sum.Subs)) {
+		total += sum.Subs[l]
+		per = append(per, fmt.Sprintf("%s %d", l, sum.Subs[l]))
+	}
+	last := "none yet"
+	if sum.Last != nil && sum.Last.Result != "started" {
+		last = fmt.Sprintf("%s %s (%s)", sum.Last.Result, sum.Last.Host, sum.Last.At.Local().Format("2006-01-02 15:04"))
+	}
+	detail := fmt.Sprintf("on (subject %s): key present (0600); %d subscription(s)%s; last send: %s; "+
+		"the proxy connects out to fcm.googleapis.com, *.push.apple.com, updates.push.services.mozilla.com and *.notify.windows.com on 443",
+		app.Remote.Push.Subject, total, func() string {
+			if len(per) == 0 {
+				return ""
+			}
+			return " (" + strings.Join(per, ", ") + ")"
+		}(), last)
+	if sum.Last != nil && sum.Last.TestHosts {
+		return warnResult(name, detail+"; the running proxy has "+webpush.TestHostsEnv+" set (TEST ONLY)",
+			"stop the proxy, unset "+webpush.TestHostsEnv+", and run `lever apply`")
+	}
+	if sum.Last != nil && sum.Last.Result == "failed" {
+		return warnResult(name, detail, "see "+stateRel(st, st.RemoteAudit())+" (decision push-failed)")
+	}
+	return checkResult{name, true, detail, ""}
 }
 
 // warnResult is a warning row: not a failure (doctor's exit status ignores

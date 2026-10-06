@@ -177,6 +177,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkRemoteExposure(app) },
 		func() checkResult { return checkVerifiedChat(app, state) },
 		func() checkResult { return checkChatLabels(app) },
+		func() checkResult { return checkPush(app, state) },
 		func() checkResult { return checkAgentMessages(app, state, liveAgentMessages(ctx, app, state)) },
 		func() checkResult { return checkSentLedger(app, state) },
 		func() checkResult { return checkGuestClock(ctx, jr, time.Now, app.AgentMessagesOn()) },

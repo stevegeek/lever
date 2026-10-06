@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,10 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -49,10 +53,12 @@ func TestStopSuspendsManager(t *testing.T) {
 	if !sb.stopped {
 		t.Fatal("stop must call Backend.Stop")
 	}
-	if len(f.Calls) != 1 {
-		t.Fatalf("expected exactly one scion call (suspend), got %+v", f.Calls)
+	// A list (is the manager's phase stopped over a live harness? see
+	// healStoppedManager), then the suspend.
+	if len(f.Calls) != 2 || f.Calls[0].Args[0] != "list" {
+		t.Fatalf("expected a list then the suspend, got %+v", f.Calls)
 	}
-	call := f.Calls[0]
+	call := f.Calls[1]
 	if call.Name != "scion" || len(call.Args) == 0 || call.Args[0] != "suspend" {
 		t.Fatalf("expected `scion suspend ...`, got %+v", call)
 	}
@@ -86,19 +92,19 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 		{
 			name:     "running worker suspended after the manager",
 			scripts:  map[string]string{"scion suspend": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
 			wantOut:  `worker "scratch" suspended`,
 		},
 		{
 			name:     "list fails",
 			scripts:  map[string]string{"scion suspend": "ok"},
-			wantArgv: []string{"suspend demo", "list"},
+			wantArgv: []string{"list", "suspend demo", "list"},
 			wantOut:  "warning: listing agents failed",
 		},
 		{
 			name:     "worker suspend fails",
 			scripts:  map[string]string{"scion suspend demo": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
 			wantOut:  `warning: scion suspend of worker "scratch" failed`,
 		},
 	} {
@@ -278,5 +284,49 @@ func TestStopHostDaemonsIsQuietWhenNothingRuns(t *testing.T) {
 	stopHostDaemons(cmd, state.ForConfig(t.TempDir()))
 	if errOut.Len() != 0 {
 		t.Fatalf("unexpected warnings: %s", errOut.String())
+	}
+}
+
+// reportProbe is an apply.AgentSessionProbe for healStoppedManager: a valid
+// token, a live harness, and a count of session reports.
+type reportProbe struct{ reports int }
+
+func (p *reportProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
+	now := time.Now()
+	return jail.HubTokenTimes{Expiry: now.Add(time.Hour * 5), Now: now}, nil
+}
+func (p *reportProbe) HarnessAlive(context.Context, string) (bool, error) { return true, nil }
+func (p *reportProbe) ReportSessionRunning(context.Context, string) error {
+	p.reports++
+	return nil
+}
+
+// TestHealStoppedManagerBeforeSuspend: a manager whose hub phase reads
+// stopped while its claude still runs is reported running before `lever
+// stop` suspends it, so the next `lever up` resumes the conversation; any
+// other phase is left to the suspend alone.
+func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
+	for _, tc := range []struct {
+		list        string
+		wantReports int
+	}{
+		{`[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`, 1},
+		{`[{"slug":"demo","phase":"running","containerStatus":"Up 2 hours"}]`, 0},
+		{`[{"slug":"demo","phase":"stopped","containerStatus":"stopped"}]`, 0},
+		{`[]`, 0},
+	} {
+		f := proc.NewFakeRunner()
+		f.Script("scion list", proc.Result{Stdout: tc.list})
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetErr(&out)
+		p := &reportProbe{}
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, "demo", "/lever")
+		if p.reports != tc.wantReports {
+			t.Fatalf("%s: reports = %d, want %d (%s)", tc.list, p.reports, tc.wantReports, out.String())
+		}
+		if tc.wantReports > 0 && !strings.Contains(out.String(), "lever stop: agent \"demo\"") {
+			t.Fatalf("%s: output %q", tc.list, out.String())
+		}
 	}
 }

@@ -5,8 +5,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
@@ -68,6 +70,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// Empty agent role: this client only calls List and Suspend,
 					// and only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
+					healStoppedManager(sctx, cmd, sc, jail.AgentProbe{R: b.JailRunner()}, appName, b.MountDest())
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
 					}
@@ -87,6 +90,27 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
+}
+
+// healStoppedManager runs before the manager's suspend. A manager whose hub
+// phase reads stopped while its claude still runs (another claude process in
+// the container fired the shared SessionEnd hook) cannot be suspended, and
+// scion resumes a stopped record with a FRESH session, so the next `lever up`
+// would lose the conversation's continuity. Reporting the session running
+// first lets the suspend keep it (apply.HealAgentSession). Best-effort, like
+// the suspend: a failure is a warning.
+func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, name, project string) {
+	agents, err := sc.List(ctx, project)
+	if err != nil {
+		return // the suspend that follows reports a hub that cannot answer
+	}
+	rec := scion.FindAgent(agents, name)
+	if rec == nil || rec.Phase != scion.PhaseStopped {
+		return
+	}
+	apply.HealAgentSession(ctx, sc, probe, func(format string, args ...any) {
+		logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...)
+	}, project, rec)
 }
 
 // workerSuspendBudget bounds the whole worker pass of `lever stop`: one list

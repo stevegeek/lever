@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +85,7 @@ type triggerEnv struct {
 	lines *lockedLines
 	now   time.Time
 	sched []string
+	binds atomic.Int32 // calls of the binding matcher
 }
 
 // newTriggerEnv: operator op@x (uid u-op) and contact c@x (agents [w1], see [w2]).
@@ -93,7 +95,18 @@ func newTriggerEnv(t *testing.T, match func(context.Context, string, string, []A
 	e := &triggerEnv{fs: &fakeSender{}, hub: &pushDMHub{}, lines: &lockedLines{}, now: t0}
 	page.route = e.hub.route
 	cfg, p := pushConfig(t, page, e.fs, e.lines)
-	cfg.MatchAgentMessages = match
+	if match != nil {
+		// match answers both questions; the binding one also counts, so a
+		// test sees whether a push check bound anything.
+		cfg.MatchAgentMessages = func(ctx context.Context, c, a string, msgs []AgentMessage) (map[string]bool, error) {
+			e.binds.Add(1)
+			return match(ctx, c, a, msgs)
+		}
+		cfg.PeekAgentMessages = func(ctx context.Context, c, a string, msgs []AgentMessage) (map[string]bool, map[string]bool, error) {
+			keep, err := match(ctx, c, a, msgs)
+			return keep, map[string]bool{}, err
+		}
+	}
 	h := NewHandler(cfg).(*gate)
 	e.p, e.g = p, h
 	p.now = func() time.Time { return e.now }
@@ -435,5 +448,85 @@ func TestCheckReportsWhatToRetry(t *testing.T) {
 	s.end = func() { ended = true }
 	if err := e.p.check(context.Background(), chatOp, tg, s, true); !errors.Is(err, errSessionUnknown) || !ended {
 		t.Fatalf("a rejected session: %v, ended %v", err, ended)
+	}
+}
+
+// pushLedger binds a record to a message id on Match, never on Peek.
+type pushLedger struct {
+	mu    sync.Mutex
+	bound map[string]bool
+}
+
+func (l *pushLedger) match(_ context.Context, _, _ string, msgs []AgentMessage) (map[string]bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := map[string]bool{}
+	for _, m := range msgs {
+		l.bound[m.ID] = true
+		out[m.ID] = true
+	}
+	return out, nil
+}
+
+func (l *pushLedger) peek(_ context.Context, _, _ string, msgs []AgentMessage) (map[string]bool, map[string]bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	keep, pending := map[string]bool{}, map[string]bool{}
+	for _, m := range msgs {
+		keep[m.ID] = true
+		if !l.bound[m.ID] {
+			pending[m.ID] = true
+		}
+	}
+	return keep, pending, nil
+}
+
+// TestCheckContactBindsNoRecord: a push check for a contact uses the peek,
+// so it binds no ledger record; the contact's own read binds later exactly
+// as it would have without the push.
+func TestCheckContactBindsNoRecord(t *testing.T) {
+	led := &pushLedger{bound: map[string]bool{}}
+	page := newPageHub(t)
+	fs, hub := &fakeSender{}, &pushDMHub{}
+	page.route = hub.route
+	cfg, p := pushConfig(t, page, fs, nil)
+	cfg.MatchAgentMessages, cfg.PeekAgentMessages = led.match, led.peek
+	g := NewHandler(cfg).(*gate)
+	p.now = func() time.Time { return t0 }
+	p.store.Add("c@x", sub("c"))
+	ts, err := g.pushTargets(context.Background(), "c@x", "u-c")
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("%v %v", ts, err)
+	}
+	p.store.SetMark("c@x", "w1", PushMark{ID: "m0", At: t0.Add(-time.Minute)})
+	hub.put(ts[0].key, agentMsg("m1", agentW1, "w1", t0))
+	s := &pushSession{uid: "u-c", cookie: testCookie, tier: chatledger.TierContact}
+	if err := p.check(context.Background(), "c@x", ts[0], s, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.all()) != 1 {
+		t.Fatalf("pushes %v: the peek keeps the row", fs.all())
+	}
+	if len(led.bound) != 0 {
+		t.Fatalf("the push check bound %v", led.bound)
+	}
+	// The contact's own read binds it, as it would have without the check.
+	if _, err := g.keepAgentRows(context.Background(), "c@x", "w1", agentW1, "u-c", []historyRow{agentMsg("m1", agentW1, "w1", t0)}); err != nil || !led.bound["m1"] {
+		t.Fatalf("read: %v %v", err, led.bound)
+	}
+}
+
+func TestCheckContactWithoutPeekFailsClosed(t *testing.T) {
+	e := newTriggerEnv(t, func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
+		return map[string]bool{"m1": true}, nil
+	})
+	e.g.cfg.PeekAgentMessages = nil
+	e.p.store.Add("c@x", sub("c"))
+	tg := e.target(t, "c@x", "u-c", "w1")
+	e.p.store.SetMark("c@x", "w1", PushMark{ID: "m0", At: t0.Add(-time.Hour)})
+	e.hub.put(tg.key, agentMsg("m1", agentW1, "w1", t0))
+	e.p.check(context.Background(), "c@x", tg, e.session("u-c", chatledger.TierContact), false)
+	if len(e.fs.all()) != 0 || e.binds.Load() != 0 {
+		t.Fatalf("pushes %v, binds %d", e.fs.all(), e.binds.Load())
 	}
 }

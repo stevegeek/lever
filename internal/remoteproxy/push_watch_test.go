@@ -219,8 +219,11 @@ func TestWatchContactGetsNoPushForUnrecordedRows(t *testing.T) {
 	var asked atomic.Int32
 	e := startWatch(t, func(e *watchEnv) {
 		e.g.cfg.MatchAgentMessages = func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
-			asked.Add(1)
 			return map[string]bool{}, nil
+		}
+		e.g.cfg.PeekAgentMessages = func(context.Context, string, string, []AgentMessage) (map[string]bool, map[string]bool, error) {
+			asked.Add(1)
+			return map[string]bool{}, map[string]bool{}, nil
 		}
 		e.p.store.Add("c@x", sub("c"))
 	})

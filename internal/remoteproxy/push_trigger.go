@@ -103,7 +103,19 @@ func (g *gate) newestForPush(ctx context.Context, login, cookie, uid, tier strin
 	}
 	var keep map[string]bool
 	if tier == chatledger.TierContact && g.cfg.MatchAgentMessages != nil {
-		if keep, err = g.keepAgentRows(ctx, login, t.name, t.id, uid, rows); err != nil {
+		// The peek, never the binding match: a push check must not decide
+		// which row a ledger record shows (on a 20-row page, before the
+		// contact reads anything). It answers what the contact's own read
+		// would keep now; pending rows are kept too, and pending itself is
+		// not needed here. No peek means no answer: fail closed.
+		var peek func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
+		if g.cfg.PeekAgentMessages != nil {
+			peek = func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error) {
+				keep, _, err := g.cfg.PeekAgentMessages(ctx, contact, agent, msgs)
+				return keep, err
+			}
+		}
+		if keep, err = askAgentRows(ctx, peek, login, t.name, t.id, uid, rows); err != nil {
 			return historyRow{}, time.Time{}, false, err // fail closed: no push
 		}
 	}

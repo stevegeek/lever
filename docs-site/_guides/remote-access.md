@@ -1146,8 +1146,9 @@ remote:
 - **What the push services learn.** Google, Apple, Mozilla or Microsoft see when a push goes to
   a device, never what it says. That timing tells them when your agents write to that login.
 - **The broker's record.** With `agent_messages` on, the check for a contact asks the broker
-  the same question the contact's own read asks, so the broker's agent ledger may log an agent
-  message as shown when the push check binds it, before the contact opens the page.
+  what the contact's own read would show now, without binding: the push check never decides
+  which message a ledger record shows, and the operator's view still marks such a message "not
+  yet read" until the contact reads it.
 - **The service worker.** `/lever/sw.js` (scope `/lever/`) handles `push` and
   `notificationclick` only: no fetch handler and no cache, so it never stands between the page
   and its requests. The page registers it only when a login turns notifications on. The page's

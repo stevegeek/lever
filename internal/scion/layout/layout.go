@@ -54,6 +54,9 @@ const (
 	// server stop` signals whatever pid it names after a signal-0 liveness
 	// check only.
 	ServerPIDRel = Dir + "/server.pid"
+	// ServerLogRel is the server daemon's log (pkg/daemon/daemon.go
+	// LogFileName("server")), where a start that failed says why.
+	ServerLogRel = Dir + "/server.log"
 )
 
 // ProjectMarker is the in-tree marker scion writes under a registered

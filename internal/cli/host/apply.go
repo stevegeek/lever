@@ -1361,7 +1361,9 @@ func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error
 func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), patMintOpts{
 		RestartHub: func(ctx context.Context) error {
-			return w.sc.ServerStart(ctx, apply.HubServerOpts(w.app, w.deps.HubSessionSecret))
+			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret)
+			opts.Progress = w.deps.Log
+			return w.sc.ServerStart(ctx, opts)
 		},
 		ScopeKnown: w.sc.KnowsUATScope,
 	})

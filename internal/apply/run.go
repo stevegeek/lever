@@ -588,7 +588,7 @@ func (r *run) disableHubLogin(ctx context.Context, steps []Step) error {
 	if err := r.d.Scion.ServerStop(ctx); err != nil {
 		return fmt.Errorf("restart the hub: %w", err)
 	}
-	return r.d.Scion.ServerStart(ctx, HubServerOpts(r.app, r.d.HubSessionSecret))
+	return r.d.Scion.ServerStart(ctx, r.hubServerOpts())
 }
 
 // planHas reports whether the plan includes a step of this kind.
@@ -684,7 +684,15 @@ func (r *run) scionServer(ctx context.Context) error {
 			return fmt.Errorf("hub login: restart the hub: %w", err)
 		}
 	}
-	return r.d.Scion.ServerStart(ctx, HubServerOpts(r.app, r.d.HubSessionSecret))
+	return r.d.Scion.ServerStart(ctx, r.hubServerOpts())
+}
+
+// hubServerOpts is HubServerOpts with the run's log as the start's progress
+// sink, so a slow cold start prints that it is waiting.
+func (r *run) hubServerOpts() scion.ServerOpts {
+	opts := HubServerOpts(r.app, r.d.HubSessionSecret)
+	opts.Progress = r.d.Log
+	return opts
 }
 
 // HubServerOpts is the ONE description of how lever starts the hub for a given

@@ -469,7 +469,11 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	var tiers []string
 	for _, u := range app.Remote.AllowedUsers {
 		if u.EffectiveTier() == config.TierContact {
-			tiers = append(tiers, u.Login+" contact ("+strings.Join(u.Agents, ", ")+")")
+			reach := strings.Join(u.Agents, ", ")
+			if len(u.See) > 0 {
+				reach += "; see: " + strings.Join(u.See, ", ")
+			}
+			tiers = append(tiers, u.Login+" contact ("+reach+")")
 		} else {
 			tiers = append(tiers, u.Login+" operator")
 		}

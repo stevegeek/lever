@@ -121,3 +121,16 @@ func TestCheckChatLabels(t *testing.T) {
 		t.Fatalf("unset: %+v", r)
 	}
 }
+
+// The row names each contact's reach: the agents it messages and those it
+// may only see.
+func TestCheckVerifiedChatNamesSeeLists(t *testing.T) {
+	app, st := verifiedChatFixture(t, "op@example.com")
+	app.Remote.AllowedUsers = append(app.Remote.AllowedUsers,
+		config.RemoteUser{Login: "c@x", Tier: config.TierContact, Agents: []string{"w1", "w3"}, See: []string{"w2"}},
+		config.RemoteUser{Login: "d@x", Tier: config.TierContact, Agents: []string{"w4"}})
+	r := checkVerifiedChat(app, st)
+	if !strings.Contains(r.detail, "c@x contact (w1, w3; see: w2)") || !strings.Contains(r.detail, "d@x contact (w4)") {
+		t.Fatalf("row = %+v", r)
+	}
+}

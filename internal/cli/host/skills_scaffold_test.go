@@ -649,3 +649,43 @@ func TestSkillTargetsFollowAgentMessages(t *testing.T) {
 		}
 	}
 }
+
+// The file directions reach every rendered skill: each "off" block only
+// while that direction is off.
+func TestSkillTargetsFollowFileDirections(t *testing.T) {
+	app := &config.App{Name: "boss", Tree: t.TempDir(), Workers: []config.Worker{{Name: "w1"}},
+		Remote: config.Remote{Enabled: true, Landing: config.RemoteLandingChat, Files: config.Files{Enabled: true},
+			AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+	no := false
+	has := func(word string) bool {
+		ts := skillTargets(app)
+		if len(ts) != 2 {
+			t.Fatalf("targets %d", len(ts))
+		}
+		n := 0
+		for _, tg := range ts {
+			if bytes.Contains(tg.content, []byte(word)) {
+				n++
+			}
+		}
+		if n != 0 && n != len(ts) {
+			t.Fatalf("%q in %d of %d skills", word, n, len(ts))
+		}
+		return n > 0
+	}
+	if has("uploads-off") || has("shares-off") {
+		t.Fatal("defaults render no direction block")
+	}
+	app.Remote.Files.Uploads = &no
+	if !has("uploads-off") || has("shares-off") {
+		t.Fatal("uploads: false")
+	}
+	app.Remote.Files.Uploads, app.Remote.Files.Shares = nil, &no
+	if has("uploads-off") || !has("shares-off") {
+		t.Fatal("shares: false")
+	}
+	app.Remote.Files.Enabled = false
+	if has("uploads-off") || has("shares-off") {
+		t.Fatal("files off renders no direction block")
+	}
+}

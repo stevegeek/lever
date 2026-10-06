@@ -899,7 +899,8 @@ function fileRow(agent, f, sender = '') {
   const href = localLink(downloadPath(agent, f.id));
   if (href) {
     a.setAttribute('href', href);
-    a.setAttribute('download', f.name);
+    // Bare: the server's Content-Disposition names the file.
+    a.setAttribute('download', '');
   }
   setText(a, f.name);
   li.append(span('who', f.direction === 'received' ? `From ${agent}` : sender ? `From ${sender}` : 'You sent'), a, span('meta', `${sizeText(f.size)} · ${when({ createdAt: f.at })}`));

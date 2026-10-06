@@ -438,4 +438,7 @@ test('uploadErrorText maps the fixed words', () => {
   assert.match(uploadErrorText(429, { error: 'rate' }), /many/);
   assert.match(uploadErrorText(409, { error: 'not-fresh' }), /restart/);
   assert.match(uploadErrorText(0, 'cannot reach the server'), /cannot reach/);
+  for (const word of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    assert.equal(uploadErrorText(400, { error: word }), `${word} (HTTP 400)`);
+  }
 });

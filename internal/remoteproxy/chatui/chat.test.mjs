@@ -1802,7 +1802,7 @@ test('files panel: names are text, links only to lever\'s download route', async
   const a = rows[0].children.find((c) => c.tag === 'a');
   assert.equal(a.textContent, evil);
   assert.equal(a.attrs.href, `https://mac.ts.net/lever/api/files/boss/${id}`);
-  assert.equal(a.attrs.download, evil);
+  assert.equal(a.attrs.download, '');
   assert.match(rows[0].textContent, /From boss/);
   assert.match(rows[0].textContent, /2 KB/);
 });

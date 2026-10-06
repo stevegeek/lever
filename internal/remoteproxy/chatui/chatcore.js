@@ -465,8 +465,8 @@ const UPLOAD_WORDS = {
 // uploadErrorText is what to show for a refused upload: the proxy's fixed
 // word in the page's own words, else errorText.
 export function uploadErrorText(status, body) {
-  const word = body && typeof body === 'object' ? body.error : '';
-  return UPLOAD_WORDS[word] || errorText(status, body);
+  const word = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : '';
+  return Object.hasOwn(UPLOAD_WORDS, word) ? UPLOAD_WORDS[word] : errorText(status, body);
 }
 
 // uploadNote is the chat message the page sends after an upload: the agent

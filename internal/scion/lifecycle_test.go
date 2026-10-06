@@ -993,3 +993,18 @@ func TestLabelsNeverCarryAgentText(t *testing.T) {
 		t.Errorf("BoundedQuote is %d bytes", len(q))
 	}
 }
+
+func TestRunningContainerDown(t *testing.T) {
+	for _, tc := range []struct {
+		phase, status string
+		want          bool
+	}{
+		{"running", "", false}, {"running", "running", false}, {"running", "Up 3 minutes", false},
+		{"running", "created", false}, {"running", "Created", false},
+		{"running", "Exited (1) 4 minutes ago", true}, {"suspended", "Exited (1) 4 minutes ago", false},
+	} {
+		if got := RunningContainerDown(tc.phase, tc.status); got != tc.want {
+			t.Errorf("RunningContainerDown(%q,%q) = %v", tc.phase, tc.status, got)
+		}
+	}
+}

@@ -33,7 +33,9 @@ import (
 //
 //   - static web assets, and the SPA shell for the chat page of one of its
 //     own conversations; every other page gets lever's landing page, which
-//     links those conversations;
+//     links those conversations. With lever's chat page on (Config.ChatAgent)
+//     every page instead redirects to /lever/chat, which the proxy serves
+//     before the fence (chatpage.go); the hub rules below are the same;
 //   - its own identity and the web UI's public settings;
 //   - its DM conversations, dm:agent:<allowed agent>:user:<its own id>, and
 //     only their messages, read, typing, mute and pin routes;
@@ -240,6 +242,16 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 	case (m == http.MethodPut && p == "/api/v1/chat/user-prefs") || (m == http.MethodPost && p == "/auth/logout"):
 		return r
 	case (m == http.MethodGet || m == http.MethodHead) && !strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/auth/"):
+		if g.chat != nil {
+			// The chat page is on: it is the contact's only page. A fixed
+			// target, nothing of the request in Location.
+			line.Decision, line.Status = DecisionAllow, http.StatusFound
+			g.audit(*line)
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Location", chatPagePath)
+			w.WriteHeader(http.StatusFound)
+			return nil
+		}
 		// A page. The chat page of one of its own conversations gets the
 		// SPA shell; every other page gets the landing page, never the
 		// hub's (the hub renders some pages with server-side data).
@@ -351,6 +363,9 @@ func (g *gate) answerContact(w http.ResponseWriter, line *AuditLine, contentType
 	g.audit(*line)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	// The answer depends on who asks: an operator gets another one at the
+	// same URL, so no cache may keep this.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = io.WriteString(w, body)
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -469,7 +470,11 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	var tiers []string
 	for _, u := range app.Remote.AllowedUsers {
 		if u.EffectiveTier() == config.TierContact {
-			tiers = append(tiers, u.Login+" contact ("+strings.Join(u.Agents, ", ")+")")
+			reach := strings.Join(u.Agents, ", ")
+			if len(u.See) > 0 {
+				reach += "; see: " + strings.Join(u.See, ", ")
+			}
+			tiers = append(tiers, u.Login+" contact ("+reach+")")
 		} else {
 			tiers = append(tiers, u.Login+" operator")
 		}
@@ -494,6 +499,50 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	}
 	files, _ := os.ReadDir(p)
 	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s/ (%d files, 0700)", tier, stateRel(st, p), len(files)), ""}
+}
+
+// checkChatLabels reads remote.labels_file the way the proxy does. A bad
+// file is a warning, not a failure: it is agent-written, and its only
+// effect is that the chat page shows no labels. The row names the fault.
+func checkChatLabels(app *config.App) checkResult {
+	const name = "chat labels"
+	rel := app.Remote.LabelsFile
+	if !app.RemoteEnabled() || rel == "" {
+		return checkResult{name, true, "not set (the chat page shows no labels)", ""}
+	}
+	labels, err := remoteproxy.ReadLabels(app.Tree, rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return checkResult{name, true, rel + " absent (no labels)", ""}
+	}
+	if err != nil {
+		return warnResult(name, "labels ignored: "+rel+" "+labelFault(err),
+			"the manager writes "+rel+" as a JSON object {\"<agent>\": \"<label>\"}: a regular file of at most 16 KiB, reached through no symbolic link")
+	}
+	known := 0
+	for n := range labels {
+		if n == app.Name || slices.ContainsFunc(app.Workers, func(w config.Worker) bool { return w.Name == n }) {
+			known++
+		}
+	}
+	return checkResult{name, true, fmt.Sprintf("%d label(s) for known agents in %s (%d other name(s) ignored)", known, rel, len(labels)-known), ""}
+}
+
+// labelFault names a labels-file fault in fixed words: those are what the
+// operator acts on.
+func labelFault(err error) string {
+	switch {
+	case errors.Is(err, fsutil.ErrSymlink):
+		return "is reached through a symbolic link"
+	case errors.Is(err, fsutil.ErrFileTooLarge):
+		return "is larger than 16 KiB"
+	case errors.Is(err, fsutil.ErrNotRegularFile):
+		return "is not a regular file"
+	case errors.Is(err, fsutil.ErrEscapesTree):
+		return "is not inside the tree"
+	case errors.Is(err, remoteproxy.ErrLabelsShape):
+		return "is not a JSON object of strings"
+	}
+	return "cannot be read: " + firstLine(err.Error())
 }
 
 // warnResult is a warning row: not a failure (doctor's exit status ignores

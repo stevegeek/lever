@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,10 +23,12 @@ import (
 	"github.com/stevegeek/lever/internal/chatledger"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func newRemoteCmd(bf BackendFactory) *cobra.Command {
@@ -127,6 +130,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		Audit:       auditFn,
 	})
 
+	records, resolve := remoteHubAgents(st, target, dial)
 	handler := remoteproxy.NewHandler(remoteproxy.Config{
 		Target:      target,
 		DialContext: dial,
@@ -147,15 +151,33 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// remoteproxy/contact.go). Agent names resolve to hub ids with the
 		// remote PAT, used only for GET agent lists.
 		Contacts:      remoteContacts(app),
-		ResolveAgents: remoteAgentResolver(app, st, target, dial),
+		ResolveAgents: resolve,
 		// A contact's post reaches an agent only while that agent's session
 		// started fresh with the skill on disk now (contactSession).
 		ContactSession: func(agent string) error { return contactSession(app, st, agent) },
+		// lever's chat page (remote.landing: chat): the manager, the agent
+		// list per login (the same hub records, labels from the tree) and
+		// the wake of a sleeping worker over the broker's operator socket.
+		ChatAgent:    remoteChatAgent(app),
+		Workers:      remoteWorkers(app),
+		ContactSee:   remoteContactSee(app),
+		AgentRecords: records,
+		Labels:       remoteLabels(app),
+		Wake:         remoteWake(app, st),
 		// The proxy's own log, named the way doctor names it (relative to
 		// the instance root) so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
 	})
 	return provider, handler, nil
+}
+
+// remoteChatAgent is the agent lever's chat page talks to: the manager, whose
+// agent name is the instance name. Empty when the page is off.
+func remoteChatAgent(app *config.App) string {
+	if !app.RemoteLandingChat() {
+		return ""
+	}
+	return app.Name
 }
 
 // remoteContacts maps each contact-tier login to the agents it may chat with.
@@ -169,9 +191,40 @@ func remoteContacts(app *config.App) map[string][]string {
 	return out
 }
 
-// remoteAgentResolver lists the instance project's agents, name → hub id,
-// for the contact fence.
-func remoteAgentResolver(app *config.App, st state.State, target *url.URL, dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(context.Context) (map[string]string, error) {
+// remoteContactSee maps each contact-tier login with a see list to it.
+func remoteContactSee(app *config.App) map[string][]string {
+	out := map[string][]string{}
+	for _, u := range app.Remote.AllowedUsers {
+		if u.EffectiveTier() == config.TierContact && len(u.See) > 0 {
+			out[u.Login] = u.See
+		}
+	}
+	return out
+}
+
+// remoteWorkers is every configured worker name, in config order.
+func remoteWorkers(app *config.App) []string {
+	out := make([]string, len(app.Workers))
+	for i, w := range app.Workers {
+		out[i] = w.Name
+	}
+	return out
+}
+
+// remoteLabels is the chat page's labels source, or nil when
+// remote.labels_file is unset.
+func remoteLabels(app *config.App) func() map[string]string {
+	if app.Remote.LabelsFile == "" {
+		return nil
+	}
+	return (&remoteproxy.LabelSource{Tree: app.Tree, Rel: app.Remote.LabelsFile}).Labels
+}
+
+// remoteHubAgents lists the instance project's agent records with the remote
+// PAT (GET only, through HubDoer): the chat page's records and the contact
+// fence's name → hub id resolver read the same cached list.
+func remoteHubAgents(st state.State, target *url.URL, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (
+	func(context.Context) (map[string]remoteproxy.AgentRecord, error), func(context.Context) (map[string]string, error)) {
 	hc := &hubapi.Client{T: &remoteproxy.HubDoer{Target: target, DialContext: dial, Token: func() (string, error) {
 		tok, err := st.LoadRemotePAT()
 		if err == nil && tok == "" {
@@ -179,18 +232,147 @@ func remoteAgentResolver(app *config.App, st state.State, target *url.URL, dial 
 		}
 		return tok, err
 	}}}
-	return func(ctx context.Context) (map[string]string, error) {
-		agents, err := hc.Agents(ctx, filepath.Base(common.MountDest), scion.DefaultHubEndpoint)
+	return cachedAgentRecords(func(ctx context.Context) ([]hubapi.Agent, error) {
+		return hc.Agents(ctx, filepath.Base(common.MountDest), scion.DefaultHubEndpoint)
+	}, time.Now)
+}
+
+// agentRecordsTTL bounds how stale the chat page's states may be; the page
+// polls every few seconds while it waits for a wake.
+const agentRecordsTTL = 3 * time.Second
+
+// agentRecordsRefresh bounds one hub list: it runs on its own context, not
+// on any caller's.
+const agentRecordsRefresh = 10 * time.Second
+
+// errAgentListPanicked is the fixed error of a hub list that panicked; it
+// is not cached, so the next caller refreshes again.
+var errAgentListPanicked = errors.New("the hub agent list failed unexpectedly")
+
+// agentFlight is one hub list in progress; done closes when recs and err
+// are set.
+type agentFlight struct {
+	done chan struct{}
+	recs map[string]remoteproxy.AgentRecord
+	err  error
+}
+
+// cachedAgentRecords wraps one hub agent list in a short cache, keyed by
+// slug, and derives the name → id resolver from it. The cache is shared by
+// every login and by the contact fence, so no caller may spoil it for the
+// others:
+//
+//   - one refresh at a time, on a context of its own (agentRecordsRefresh),
+//     so a caller that gives up does not cancel the list the others wait on;
+//   - a caller waits for that refresh only as long as its own context lets
+//     it, and no lock is held across the hub call;
+//   - a hub error is cached for the TTL (a down hub is not asked on every
+//     poll), but never a context-class error: that says nothing about the
+//     hub's answer.
+func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now func() time.Time) (
+	func(context.Context) (map[string]remoteproxy.AgentRecord, error), func(context.Context) (map[string]string, error)) {
+	var (
+		mu     sync.Mutex
+		at     time.Time
+		recs   map[string]remoteproxy.AgentRecord
+		lerr   error
+		flight *agentFlight
+	)
+	refresh := func(f *agentFlight, ctx context.Context) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentRecordsRefresh)
+		defer cancel()
+		agents, err := func() (agents []hubapi.Agent, err error) {
+			// A panic in the list is one failed refresh: on this goroutine
+			// it would end the proxy and leave the flight open for good.
+			defer func() {
+				if recover() != nil {
+					agents, err = nil, errAgentListPanicked
+				}
+			}()
+			return list(ctx)
+		}()
+		if err == nil {
+			f.recs = map[string]remoteproxy.AgentRecord{}
+			for _, a := range agents {
+				if a.Slug != "" && a.ID != "" {
+					f.recs[a.Slug] = agentRecordOf(a)
+				}
+			}
+		}
+		f.err = err
+		mu.Lock()
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errAgentListPanicked) {
+			recs, lerr, at = f.recs, err, now()
+		}
+		flight = nil
+		mu.Unlock()
+		close(f.done)
+	}
+	records := func(ctx context.Context) (map[string]remoteproxy.AgentRecord, error) {
+		mu.Lock()
+		if !at.IsZero() && now().Sub(at) < agentRecordsTTL {
+			r, e := recs, lerr
+			mu.Unlock()
+			if e != nil {
+				return nil, e
+			}
+			return maps.Clone(r), nil
+		}
+		f := flight
+		if f == nil {
+			f = &agentFlight{done: make(chan struct{})}
+			flight = f
+			go refresh(f, ctx)
+		}
+		mu.Unlock()
+		select {
+		case <-f.done:
+			if f.err != nil {
+				return nil, f.err
+			}
+			return maps.Clone(f.recs), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	resolve := func(ctx context.Context) (map[string]string, error) {
+		recs, err := records(ctx)
 		if err != nil {
 			return nil, err
 		}
-		out := map[string]string{}
-		for _, a := range agents {
-			if a.Slug != "" && a.ID != "" {
-				out[a.Slug] = a.ID
-			}
+		out := make(map[string]string, len(recs))
+		for name, r := range recs {
+			out[name] = r.ID
 		}
 		return out, nil
+	}
+	return records, resolve
+}
+
+// agentRecordOf reduces a hub record to what the chat page may show. Phase,
+// activity and container status are text an agent can post about itself,
+// so only scion's known words pass (scion.PhaseLabel, ActivityLabel).
+func agentRecordOf(a hubapi.Agent) remoteproxy.AgentRecord {
+	phase := scion.PhaseLabel(a.Phase)
+	return remoteproxy.AgentRecord{ID: a.ID, Phase: phase, Activity: scion.ActivityLabel(a.Activity),
+		ContainerDown: scion.RunningContainerDown(phase, a.ContainerStatus)}
+}
+
+// remoteWake is the chat page's wake: POST /operator/wake on the broker's
+// 0600 operator socket, the host user's own channel. Nil when the state
+// directory is inside the tree: then the broker binds no operator socket
+// (brokerctl.bindListeners), and the page answers every wake "unavailable".
+func remoteWake(app *config.App, st state.State) func(ctx context.Context, login, tier, worker string) error {
+	if brokerctl.StateInsideTree(app, st) {
+		return nil
+	}
+	client := udsClient(st.OperatorSock())
+	return func(ctx context.Context, login, tier, worker string) error {
+		err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorWake, wire.OperatorWakeRequest{Worker: worker, Login: login, Tier: tier}, nil)
+		if err != nil {
+			return &remoteproxy.WakeError{Status: httpjson.Status(err), Err: err}
+		}
+		return nil
 	}
 }
 

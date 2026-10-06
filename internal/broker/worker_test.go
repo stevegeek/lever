@@ -1337,6 +1337,31 @@ func TestWorkerStart_readOnlyStrictWorkspace(t *testing.T) {
 	}
 }
 
+// The remote chat page's wake is a resume too: with read_only set it gets
+// the same strict workspace check, and the refusal names the remote login,
+// not the manager.
+func TestOperatorWake_readOnlyRefusesSwappedWorkspace(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "worker", Phase: "suspended"}},
+	}}
+	var buf bytes.Buffer
+	tree, _, b := strictTree(t, rt, &buf)
+	swapToLink(t, filepath.Join(tree, "workers", "worker"), "../assistant/tools")
+
+	rec := postWake(t, b, `{"worker":"worker","login":"c@x","tier":"contact"}`)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.resumed) != 0 || len(rt.resumeForced) != 0 || len(rt.staged) != 0 {
+		t.Fatalf("no ticket or resume for a swapped workspace; staged=%d resumed=%d forced=%d", len(rt.staged), len(rt.resumed), len(rt.resumeForced))
+	}
+	log := buf.String()
+	if !strings.Contains(log, "symbolic link refused") || !strings.Contains(log, "remote:c@x") || !strings.Contains(log, "decision=deny") {
+		t.Fatalf("the refusal must be audited as the remote login's deny; log=%s", log)
+	}
+}
+
 // strictTree builds a tree with a protected assistant/tools and a real
 // workers/worker dir, and a broker with manager.read_only over it.
 func strictTree(t *testing.T, rt *fakeRuntime, buf *bytes.Buffer) (string, WorkerSpec, *Broker) {

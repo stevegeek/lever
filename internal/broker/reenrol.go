@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"time"
@@ -51,6 +52,9 @@ func (b *Broker) lapseFunc() ca.LapseFunc {
 	}
 }
 
+// reenrolLockWaitDefault bounds the healer's wait for a worker's lock.
+const reenrolLockWaitDefault = 2 * time.Second
+
 // runHealer drains lapse events for the life of ctx. Started by Serve.
 func (b *Broker) runHealer(ctx context.Context) {
 	for {
@@ -66,6 +70,9 @@ func (b *Broker) runHealer(ctx context.Context) {
 // healLapse is one auto-re-enrol attempt for cn. Synchronous; called only
 // from the healer goroutine (and directly by tests). The steps, in order:
 // policy gate, throttle, revocation, ticket re-stage, bounce.
+// reenrolHealTimeout bounds one heal (ticket stage + bounce).
+const reenrolHealTimeout = 5 * time.Minute
+
 func (b *Broker) healLapse(ctx context.Context, cn string) {
 	stage, slug, ok := b.healTarget(cn)
 	if !ok {
@@ -94,11 +101,41 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
 	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
 	// audit line.
-	if err := stage(ctx); err != nil {
+	// A worker's heal holds the worker's lifecycle lock from the stage to
+	// the end of the bounce, like every other start/resume/stop of it: a
+	// bounce must not undo a stop that lands after its phase read, nor
+	// resume a worker a remote wake is resuming. The wait is bounded, since
+	// this goroutine heals every agent; a busy lock skips this heal (not a
+	// failed attempt), and the next lapse event retries.
+	if _, isWorker := b.workerSpec(cn); isWorker {
+		lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
+		unlock, err := b.lockWorker(lctx, cn)
+		cancel()
+		if err != nil {
+			b.reenrolMu.Lock()
+			b.reenrolTries[cn]--
+			b.reenrolMu.Unlock()
+			b.audit("reenrol", cn, "error", "natural lapse: worker busy (another start, resume, wake, stop or suspend of it is under way); heal skipped, the next lapse retries")
+			return
+		}
+		defer unlock()
+		// The lock wait can take seconds: a `lever revoke` that landed
+		// during it must still win, so check again right before the mint.
+		if b.isRevoked(cn) {
+			b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
+			return
+		}
+	}
+	// Bounded: a worker's heal holds that worker's lifecycle lock, and the
+	// scion CLI sets no timeout of its own, so a hung hub would otherwise
+	// hold every start, resume, wake, stop and suspend of it for good.
+	hctx, hcancel := context.WithTimeout(ctx, reenrolHealTimeout)
+	defer hcancel()
+	if err := stage(hctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return
 	}
-	verb, ok := b.bounceForReenrol(ctx, cn, slug)
+	verb, ok := b.bounceForReenrol(hctx, cn, slug)
 	if !ok {
 		return
 	}

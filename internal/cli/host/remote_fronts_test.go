@@ -194,3 +194,18 @@ func TestRemoteStatusTailscaleTargetIsTheListenAddress(t *testing.T) {
 		}
 	}
 }
+
+// remote.landing: chat reaches the proxy as the manager's agent name (the
+// instance name); any other landing leaves the chat page off.
+func TestRemoteChatAgentFollowsLanding(t *testing.T) {
+	users := "  allowed_users: [op@example.com]\n"
+	on := loadInstance(t, remoteBase+users+"  landing: chat\n")
+	if got := remoteChatAgent(on); got == "" || got != on.Name {
+		t.Fatalf("landing chat: chat agent %q, want the instance name %q", got, on.Name)
+	}
+	for _, extra := range []string{users, users + "  landing: console\n"} {
+		if got := remoteChatAgent(loadInstance(t, remoteBase+extra)); got != "" {
+			t.Fatalf("landing %q: chat agent %q, want none", extra, got)
+		}
+	}
+}

@@ -32,20 +32,24 @@ type RemoteUser struct {
 	// an operator: a contact's reach is always explicit, so a new worker
 	// never widens it by accident.
 	Agents []string `yaml:"agents"`
+	// See is the agents a contact may see on the chat page (name, label,
+	// state) but not message: no history, no input, no id. Contact only;
+	// disjoint from Agents.
+	See []string `yaml:"see"`
 }
 
-// UnmarshalYAML accepts a plain login or a {login, tier, agents} map, and
+// UnmarshalYAML accepts a plain login or a {login, tier, agents, see} map, and
 // refuses any other key in the map.
 func (u *RemoteUser) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind == yaml.ScalarNode {
 		return n.Decode(&u.Login)
 	}
 	if n.Kind != yaml.MappingNode {
-		return fmt.Errorf("config: remote: allowed_users entries are a login or a {login, tier, agents} map (line %d)", n.Line)
+		return fmt.Errorf("config: remote: allowed_users entries are a login or a {login, tier, agents, see} map (line %d)", n.Line)
 	}
 	for i := 0; i < len(n.Content); i += 2 {
-		if k := n.Content[i].Value; !slices.Contains([]string{"login", "tier", "agents"}, k) {
-			return fmt.Errorf("config: remote: allowed_users entry has unknown key %q (line %d); keys are login, tier, agents", k, n.Content[i].Line)
+		if k := n.Content[i].Value; !slices.Contains([]string{"login", "tier", "agents", "see"}, k) {
+			return fmt.Errorf("config: remote: allowed_users entry has unknown key %q (line %d); keys are login, tier, agents, see", k, n.Content[i].Line)
 		}
 	}
 	type plain RemoteUser

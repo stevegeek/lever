@@ -26,12 +26,21 @@ type RemoteIdentity struct {
 	Bind               string
 	AllowWildcardBind  bool
 	TrustForwardedHost bool
+	// Landing decides whether the proxy serves lever's chat page and where
+	// "/" goes; captured at startup like the rest.
+	Landing string
 	// Name selects the JAIL the proxy dials and Backend gates which
 	// transport it uses. Renaming the instance would otherwise leave a
 	// running proxy fronting the OLD machine's hub while apply happily
 	// reused it.
 	Name    string
 	Backend string
+	// The chat page's agent list (landing chat only, so a worker change does
+	// not bounce a console-landing proxy): the workers an operator sees, the
+	// tree and the labels file read through it.
+	Workers    []string `json:",omitempty"`
+	Tree       string   `json:",omitempty"`
+	LabelsFile string   `json:",omitempty"`
 }
 
 // RemoteConfigHash identifies the configuration a `lever remote serve` process

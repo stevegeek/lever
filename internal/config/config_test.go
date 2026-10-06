@@ -1884,3 +1884,43 @@ func TestValidateReservesTheOperatorName(t *testing.T) {
 		t.Fatalf("manager_identity operator: %v, want a reserved-name error", err)
 	}
 }
+
+// landing picks what the remote origin opens on: the hub's console (default)
+// or lever's chat page with the manager.
+func TestRemoteLanding(t *testing.T) {
+	const op = "  allowed_users: [op@example.com]\n"
+	for _, body := range []string{remoteOn, remoteOn + "  landing: console\n", remoteOn + op + "  landing: console\n"} {
+		app, err := LoadNoHostChecks(writeConfig(t, body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if app.RemoteLandingChat() || app.EffectiveRemoteLanding() != RemoteLandingConsole {
+			t.Fatalf("landing = %q, chat = %v; want the console", app.EffectiveRemoteLanding(), app.RemoteLandingChat())
+		}
+	}
+	app, err := LoadNoHostChecks(writeConfig(t, remoteOn+op+"  landing: chat\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !app.RemoteLandingChat() {
+		t.Fatal("landing: chat with an operator login must turn the chat page on")
+	}
+	// A disabled remote block is not validated, and serves no page.
+	off, err := LoadNoHostChecks(writeConfig(t, strings.Replace(remoteOn, "enabled: true", "enabled: false", 1)+"  landing: nonsense\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.RemoteLandingChat() {
+		t.Fatal("a disabled remote block must not turn the chat page on")
+	}
+}
+
+func TestRemoteLandingRefusals(t *testing.T) {
+	// An unknown value fails closed instead of reading as the console.
+	rejectNoHost(t, remoteOn+"  landing: Chat\n", "landing")
+	rejectNoHost(t, remoteOn+"  landing: spa\n", "landing")
+	// Without an operator login no message from the page would verify.
+	rejectNoHost(t, remoteOn+"  landing: chat\n", "operator")
+	rejectNoHost(t, strings.Replace(remoteOn, "manager: {}", "manager: {}\nworkers: [{name: w, dir: w}]", 1)+
+		"  allowed_users: [{login: c@example.com, tier: contact, agents: [w]}]\n  landing: chat\n", "operator")
+}

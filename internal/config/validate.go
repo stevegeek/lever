@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -536,6 +538,26 @@ func (a *App) validateRemote() error {
 		}
 		seen[key] = au
 	}
+	switch a.Remote.Landing {
+	case "", RemoteLandingConsole:
+	case RemoteLandingChat:
+		if len(a.Remote.LoginsWithTier(TierOperator)) == 0 {
+			return fmt.Errorf("config: remote: landing: chat needs an operator login in allowed_users (without one no message from the page is verified)")
+		}
+	default:
+		return fmt.Errorf("config: remote: landing %q; use %s or %s", a.Remote.Landing, RemoteLandingConsole, RemoteLandingChat)
+	}
+	// filepath.IsLocal refuses absolute paths and any ".." that leaves the
+	// base; path.Clean(lf) != lf refuses "a/../b", "a//b" and "./a". A
+	// relative, local path is under tree by construction.
+	if lf := a.Remote.LabelsFile; lf != "" {
+		if strings.Contains(lf, `\`) || path.Clean(lf) != lf || lf == "." || !filepath.IsLocal(filepath.FromSlash(lf)) {
+			return fmt.Errorf("config: remote: labels_file %q must be a clean path relative to tree (no leading /, no ..)", lf)
+		}
+		if err := a.validLabelsFileOwner(lf); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -548,6 +570,9 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 		if len(u.Agents) > 0 {
 			return fmt.Errorf("config: remote: allowed_users %q is an operator, which reaches every agent; remove its agents list, or set tier: contact", u.Login)
 		}
+		if len(u.See) > 0 {
+			return fmt.Errorf("config: remote: allowed_users %q is an operator, which sees every agent; remove its see list", u.Login)
+		}
 		return nil
 	case TierContact:
 	default:
@@ -558,11 +583,7 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 	}
 	seen := map[string]bool{}
 	for _, name := range u.Agents {
-		known := name == a.Name
-		for _, w := range a.Workers {
-			known = known || w.Name == name
-		}
-		if !known {
+		if !a.knownAgent(name) {
 			return fmt.Errorf("config: remote: allowed_users %q lists agent %q, which is not a declared worker or the manager (%s)", u.Login, name, a.Name)
 		}
 		if seen[name] {
@@ -570,7 +591,60 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 		}
 		seen[name] = true
 	}
+	seenSee := map[string]bool{}
+	for _, name := range u.See {
+		if !a.knownAgent(name) {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q in see, which is not a declared worker or the manager (%s)", u.Login, name, a.Name)
+		}
+		if slices.Contains(u.Agents, name) {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q in both agents and see; keep it in one", u.Login, name)
+		}
+		if seenSee[name] {
+			return fmt.Errorf("config: remote: allowed_users %q lists agent %q twice in see", u.Login, name)
+		}
+		seenSee[name] = true
+	}
 	return nil
+}
+
+// validLabelsFileOwner refuses a labels file someone other than the manager
+// would write. Whoever writes it sets the text contacts see beside every
+// agent's name (the manager's row included), so it must not be inside a
+// worker's directory (that worker would author it), nor inside the host's
+// own directories (.lever, which holds the manager's bootstrap ticket, or
+// the state directory): those are host-written secrets, never labels.
+// Compared without case, since the tree may sit on a case-insensitive
+// filesystem. Not Unicode-normalised (NFC/NFD, as macOS folds): both sides
+// are operator-written config, not agent input, and the stdlib has no
+// normaliser; a worker dir and a labels_file spelled in different
+// normalisation forms would pass here.
+func (a *App) validLabelsFileOwner(lf string) error {
+	inside := func(p, dir string) bool {
+		p, dir = strings.ToLower(p), strings.ToLower(dir)
+		return p == dir || strings.HasPrefix(p, dir+"/")
+	}
+	for _, w := range a.Workers {
+		if d := filepath.ToSlash(filepath.Clean(w.Dir)); d != "." && inside(lf, d) {
+			return fmt.Errorf("config: remote: labels_file %q is inside worker %q's dir %q; that worker would write the labels contacts see — keep it outside every worker dir", lf, w.Name, w.Dir)
+		}
+	}
+	for _, part := range strings.Split(lf, "/") {
+		if strings.EqualFold(part, ".lever") || strings.EqualFold(part, state.DirName) {
+			return fmt.Errorf("config: remote: labels_file %q is inside %s, a host directory; keep it in the manager's part of the tree", lf, part)
+		}
+	}
+	if a.dir != "" {
+		stateDir := filepath.ToSlash(filepath.Join(a.dir, state.DirName))
+		if inside(filepath.ToSlash(filepath.Join(a.Tree, lf)), stateDir) {
+			return fmt.Errorf("config: remote: labels_file %q is inside the state directory %s, a host directory", lf, stateDir)
+		}
+	}
+	return nil
+}
+
+// knownAgent reports whether name is the manager or a declared worker.
+func (a *App) knownAgent(name string) bool {
+	return name == a.Name || slices.ContainsFunc(a.Workers, func(w Worker) bool { return w.Name == name })
 }
 
 // validateRemoteBind accepts the proxy's listen address only where the jail

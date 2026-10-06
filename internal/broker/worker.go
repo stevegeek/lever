@@ -146,6 +146,48 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, re
 	return spec, true
 }
 
+// lockWorker takes name's lifecycle lock, waiting for it as long as ctx
+// allows. The holder reads the phase and acts on it with no other start,
+// resume or wake of that worker in between.
+func (b *Broker) lockWorker(ctx context.Context, name string) (func(), error) {
+	b.workerLocksMu.Lock()
+	if b.workerLocks == nil {
+		b.workerLocks = map[string]chan struct{}{}
+	}
+	sem := b.workerLocks[name]
+	if sem == nil {
+		sem = make(chan struct{}, 1)
+		b.workerLocks[name] = sem
+	}
+	b.workerLocksMu.Unlock()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	default:
+	}
+	if b.onWorkerLockWait != nil {
+		b.onWorkerLockWait(name)
+	}
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// lockWorkerOrRefuse is lockWorker for a handler: a caller that gave up
+// while it waited gets 503 and an audit line.
+func (b *Broker) lockWorkerOrRefuse(w http.ResponseWriter, ctx context.Context, actor, verb, name string) (func(), bool) {
+	unlock, err := b.lockWorker(ctx, name)
+	if err != nil {
+		b.audit("worker", actor, "error", verb+" "+name+": gave up waiting for another start/resume of it: "+err.Error())
+		http.Error(w, "busy: another start or resume of "+name+" is under way", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return unlock, true
+}
+
 func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
@@ -158,8 +200,7 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 			// so no caller can echo or audit an agent's own words as a
 			// phase.
 			phase := scion.PhaseLabel(a.Phase)
-			if phase == scion.PhaseRunning && a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus) &&
-				!strings.EqualFold(a.ContainerStatus, "created") {
+			if scion.RunningContainerDown(phase, a.ContainerStatus) {
 				// The hub keeps a record "running" for minutes after its
 				// container died (until its own sweep marks it error). In
 				// that window a resume was a no-op and a message was "sent"
@@ -483,6 +524,11 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+	unlock, ok := b.lockWorkerOrRefuse(w, r.Context(), b.manager, "start", spec.Name)
+	if !ok {
+		return
+	}
+	defer unlock()
 	phase, err := b.phaseOf(r.Context(), spec)
 	if err != nil {
 		b.audit("worker", b.manager, "error", "phase: "+err.Error())
@@ -523,7 +569,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	b.resumeRecord(ctx, w, spec, phase)
+	b.resumeRecord(ctx, w, spec, phase, b.manager)
 }
 
 // resumeRecord brings an existing, non-running worker record back up and
@@ -531,19 +577,21 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 // worker is live. The start route (resumeExistingWorker) and the resume verb
 // (handleWorkerResume) share it, so both recover an error-phase record and
 // neither answers before the worker can take a message. It never deletes a
-// record: a purge is the operator's decision.
-func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase string) {
+// record: a purge is the operator's decision. actor names the caller in the
+// audit lines: the manager, or the remote login for a wake
+// (handleOperatorWake).
+func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase, actor string) {
 	if comingUp(phase) {
 		// A start or resume is already under way (scion's interim phases).
 		// A second resume would be refused by the hub, and a fresh ticket
 		// would replace the one the booting worker is about to spend. Only
 		// wait for it.
 		if err := b.waitWorkerLive(ctx, spec); err != nil {
-			b.audit("worker", b.manager, "error", "resume "+spec.Name+" (already "+phase+"): "+err.Error())
+			b.audit("worker", actor, "error", "resume "+spec.Name+" (already "+phase+"): "+err.Error())
 			http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 			return
 		}
-		b.audit("worker", b.manager, "allow", "resume "+spec.Name+" (already "+phase+")")
+		b.audit("worker", actor, "allow", "resume "+spec.Name+" (already "+phase+")")
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
@@ -553,11 +601,11 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	// spent.
 	if err := b.verifyStrictWorkspace(spec); err != nil {
 		if errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, ErrReadOnlyOverlap) {
-			b.audit("worker", b.manager, "deny", "resume "+spec.Name+": workspace dir: "+err.Error())
+			b.audit("worker", actor, "deny", "resume "+spec.Name+": workspace dir: "+err.Error())
 			http.Error(w, "forbidden: worker workspace is reached through a symbolic link or overlaps a manager read-only directory; the record was kept", http.StatusForbidden)
 			return
 		}
-		b.audit("worker", b.manager, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
+		b.audit("worker", actor, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
 		if errors.Is(err, fs.ErrNotExist) {
 			// The record outlived its directory: the operator removed (or
 			// moved) the worker dir on the host. Say so; a generic 500 sends
@@ -580,7 +628,7 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	// something re-stages (lever#36). Harmless when the leaf is still valid:
 	// boot skips enrol and the ticket ages out unspent.
 	if err := b.stageWorkerTicket(ctx, spec); err != nil {
-		b.audit("worker", b.manager, "error", "resume "+err.Error())
+		b.audit("worker", actor, "error", "resume "+err.Error())
 		http.Error(w, "stage error", http.StatusInternalServerError)
 		return
 	}
@@ -595,7 +643,7 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		resume = b.runtime.ResumeForce
 	}
 	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
-		b.audit("worker", b.manager, "error", "resume "+spec.Name+" (phase "+phase+"): "+err.Error())
+		b.audit("worker", actor, "error", "resume "+spec.Name+" (phase "+phase+"): "+err.Error())
 		// Generic wire bodies (the scion error text can echo the container
 		// env): the detail stays in the audit log.
 		if scion.IsRefusedByHub(err) {
@@ -611,11 +659,11 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		return
 	}
 	if err := b.waitWorkerLive(ctx, spec); err != nil {
-		b.audit("worker", b.manager, "error", "resume "+spec.Name+": "+err.Error())
+		b.audit("worker", actor, "error", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
-	b.audit("worker", b.manager, "allow", "resume "+spec.Name)
+	b.audit("worker", actor, "allow", "resume "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
@@ -763,6 +811,13 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 	if !ok {
 		return
 	}
+	// Stop and suspend take the worker's lock too, so neither lands in the
+	// middle of a start, resume or remote wake of it.
+	unlock, ok := b.lockWorkerOrRefuse(w, r.Context(), b.manager, r.URL.Path, spec.Name)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if err := do(r.Context(), spec); err != nil {
 		b.audit("worker", b.manager, "error", r.URL.Path+" "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
@@ -796,6 +851,11 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	unlock, ok := b.lockWorkerOrRefuse(w, ctx, b.manager, "resume", spec.Name)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
 		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -831,7 +891,7 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 	// route does. Answering scion's interim "resumed" phase instead made the
 	// manager's next message fail: the hub refuses a message to an agent that
 	// is not running.
-	b.resumeRecord(ctx, w, spec, phase)
+	b.resumeRecord(ctx, w, spec, phase, b.manager)
 }
 
 // checkAgentRole runs the pre-role record guard for one agent, if wired.

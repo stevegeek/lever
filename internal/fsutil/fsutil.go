@@ -115,6 +115,85 @@ func ReadInTree(tree, rel string) ([]byte, error) {
 	return b, nil
 }
 
+// ErrSymlink reports a symbolic link on a path read with ReadInTreeNoLinks.
+var ErrSymlink = errors.New("symbolic link refused")
+
+// StatInTreeNoLinks walks rel below tree with Lstat and returns the leaf's
+// info. Any symbolic link on the way (in-tree or not) is ErrSymlink; a path
+// that is not local is ErrEscapesTree; an absent component passes
+// fs.ErrNotExist through. The tree path itself may be a link (the
+// operator's own layout); nothing below it may.
+func StatInTreeNoLinks(tree, rel string) (fs.FileInfo, error) {
+	rel = filepath.ToSlash(rel)
+	if rel == "" || rel == "." || !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return nil, fmt.Errorf("%q: %w", rel, ErrEscapesTree)
+	}
+	cur := tree
+	var fi fs.FileInfo
+	for _, p := range strings.Split(rel, "/") {
+		cur = filepath.Join(cur, p)
+		var err error
+		if fi, err = os.Lstat(cur); err != nil {
+			return nil, err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s: %w", cur, ErrSymlink)
+		}
+	}
+	return fi, nil
+}
+
+// afterNoLinkWalk, when set, runs between ReadInTreeNoLinks's walk and its
+// open: a test seam for a leaf swapped in that window.
+var afterNoLinkWalk func()
+
+// ReadInTreeNoLinks reads a jail-written file host-side: a regular file at
+// most max bytes, with no symbolic link on any component of rel. The open
+// goes through an os.Root at tree and must land on the file the walk saw
+// (os.SameFile), so a swap between the walk and the open is refused.
+func ReadInTreeNoLinks(tree, rel string, max int64) ([]byte, error) {
+	leaf, err := StatInTreeNoLinks(tree, rel)
+	if err != nil {
+		return nil, err
+	}
+	if !leaf.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %s: %w", filepath.Join(tree, rel), leaf.Mode().Type(), ErrNotRegularFile)
+	}
+	if leaf.Size() > max {
+		return nil, fmt.Errorf("%s: %d bytes: %w", filepath.Join(tree, rel), leaf.Size(), ErrFileTooLarge)
+	}
+	if afterNoLinkWalk != nil {
+		afterNoLinkWalk()
+	}
+	r, err := os.OpenRoot(tree)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	// O_NONBLOCK: a leaf swapped for a FIFO after the walk does not hang
+	// the open; SameFile below then refuses it.
+	f, err := r.OpenFile(filepath.FromSlash(rel), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(st, leaf) || !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s changed while it was read: %w", filepath.Join(tree, rel), ErrSymlink)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s: %w", filepath.Join(tree, rel), ErrFileTooLarge)
+	}
+	return b, nil
+}
+
 // WriteInTree writes data to rel under tree IN PLACE (truncate + write, never
 // a rename), creating missing parent directories. An existing file keeps its
 // inode and mode; perm applies only when the file is created. A symlink on

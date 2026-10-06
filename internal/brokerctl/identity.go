@@ -44,7 +44,7 @@ func ConfigHash(app *config.App) string {
 // that maps config.App onto state.RemoteIdentity, so state stays free of
 // config types.
 func RemoteConfigHash(app *config.App) string {
-	return state.RemoteConfigHash(state.RemoteIdentity{
+	id := state.RemoteIdentity{
 		Enabled:      app.Remote.Enabled,
 		Port:         app.Remote.Port,
 		BaseURL:      app.Remote.BaseURL,
@@ -56,9 +56,22 @@ func RemoteConfigHash(app *config.App) string {
 		Bind:               app.EffectiveRemoteBind(),
 		AllowWildcardBind:  app.Remote.AllowWildcardBind,
 		TrustForwardedHost: app.Remote.TrustForwardedHost,
+		Landing:            app.EffectiveRemoteLanding(),
 		Name:               app.Name,
 		Backend:            app.Backend,
-	})
+	}
+	// The chat page's list reads the workers, the tree and the labels file;
+	// only a chat-landing proxy captures them, so a console-landing proxy
+	// does not restart on a worker change.
+	if app.RemoteLandingChat() {
+		id.Workers = make([]string, len(app.Workers))
+		for i, w := range app.Workers {
+			id.Workers[i] = w.Name
+		}
+		id.Tree = app.Tree
+		id.LabelsFile = app.Remote.LabelsFile
+	}
+	return state.RemoteConfigHash(id)
 }
 
 // remoteUserKeys is each allowed user as one string for the proxy's config
@@ -71,6 +84,10 @@ func remoteUserKeys(users []config.RemoteUser) []string {
 		out[i] = u.Login
 		if u.EffectiveTier() != config.TierOperator {
 			out[i] += " tier=" + u.EffectiveTier() + " agents=" + strings.Join(u.Agents, ",")
+		}
+		// Only when set, so a config without see lists hashes as before.
+		if len(u.See) > 0 {
+			out[i] += " see=" + strings.Join(u.See, ",")
 		}
 	}
 	return out

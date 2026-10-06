@@ -1,7 +1,9 @@
 package broker
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,5 +215,79 @@ func TestHealCooldownAndCap(t *testing.T) {
 	b.healLapse(context.Background(), "scratch")
 	if len(rt.resumeForced) != reenrolMaxAttempts+3 {
 		t.Fatalf("post-success attempts = %d, want %d", len(rt.resumeForced), reenrolMaxAttempts+3)
+	}
+}
+
+// The healer takes a worker's lifecycle lock before it stages or bounces:
+// while a start, resume, wake, stop or suspend of the worker holds it, the
+// heal is skipped (audited; the next lapse event retries), so it cannot
+// undo a stop that lands after its phase read, or double-resume with a wake.
+func TestHealSkipsAWorkerWhoseLockIsHeld(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "running", ContainerStatus: "Up 2 minutes"}},
+	}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	b.reenrolLockWait = 20 * time.Millisecond
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.healLapse(context.Background(), "scratch")
+	if len(rt.staged) != 0 || len(rt.suspend) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("a heal ran under another holder's lock: staged=%d suspend=%v resume=%v", len(rt.staged), rt.suspend, rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "busy") {
+		t.Fatalf("no audit line for the skipped heal:\n%s", buf.String())
+	}
+	b.reenrolMu.Lock()
+	tries := b.reenrolTries["scratch"]
+	b.reenrolMu.Unlock()
+	if tries != 0 {
+		t.Fatalf("a skipped heal counted as a failed attempt: %d", tries)
+	}
+	// Released, the next lapse heals (after the cooldown).
+	unlock()
+	b.reenrolMu.Lock()
+	delete(b.reenrolLast, "scratch")
+	b.reenrolMu.Unlock()
+	b.healLapse(context.Background(), "scratch")
+	if len(rt.staged) != 1 || len(rt.resumed) != 1 {
+		t.Fatalf("after release: staged=%d resume=%v", len(rt.staged), rt.resumed)
+	}
+	// And the heal holds the lock while it bounces: a verb waits for it.
+	if unlock, err := b.lockWorker(context.Background(), "scratch"); err != nil {
+		t.Fatal("the heal left the lock held")
+	} else {
+		unlock()
+	}
+}
+
+// A `lever revoke` that lands while the heal waits for the worker's lock
+// still wins: the heal checks revocation again once it holds the lock.
+func TestHealRechecksRevocationAfterTheLockWait(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "running", ContainerStatus: "Up 2 minutes"}},
+	}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	b.reenrolLockWait = 5 * time.Second
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// While the heal waits: revoke, then release the lock.
+	b.onWorkerLockWait = func(string) {
+		b.Revoke("scratch")
+		unlock()
+	}
+	b.healLapse(context.Background(), "scratch")
+	if len(rt.staged) != 0 || len(rt.suspend) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("a heal ran for a worker revoked during its lock wait: staged=%d suspend=%v resume=%v", len(rt.staged), rt.suspend, rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "revoked identity") {
+		t.Fatalf("no deny line for the revoked heal:\n%s", buf.String())
 	}
 }

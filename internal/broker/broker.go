@@ -295,6 +295,16 @@ type Broker struct {
 	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
 	workerToWorker  bool
 
+	// workerLocks serialises the read-phase-then-act paths of one worker
+	// (start, the resume verb, the remote wake, stop and suspend, and the
+	// re-enrol healer's bounce): two of them at once would both read
+	// "suspended" and both resume, or a bounce undo a stop (lockWorker).
+	workerLocksMu sync.Mutex
+	workerLocks   map[string]chan struct{}
+	// onWorkerLockWait, when set, runs when lockWorker finds the lock held
+	// and starts to wait (a test seam).
+	onWorkerLockWait func(name string)
+
 	mu           sync.Mutex
 	minEpoch     int
 	revoked      map[string]bool
@@ -310,9 +320,12 @@ type Broker struct {
 	ticketStager        TicketStager
 	reenrolEvents       chan string
 	reenrolNow          func() time.Time
-	reenrolMu           sync.Mutex
-	reenrolLast         map[string]time.Time
-	reenrolTries        map[string]int
+	// reenrolLockWait bounds how long a worker heal waits for the worker's
+	// lifecycle lock before it skips (reenrolLockWaitDefault when zero).
+	reenrolLockWait time.Duration
+	reenrolMu       sync.Mutex
+	reenrolLast     map[string]time.Time
+	reenrolTries    map[string]int
 
 	directiveVerifier  *opsig.Verifier
 	instanceID         string

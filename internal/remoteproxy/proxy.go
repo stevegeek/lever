@@ -136,6 +136,31 @@ type Config struct {
 	// resumed session may still follow an older skill that trusts a marker a
 	// contact can type. Nil refuses every contact post.
 	ContactSession func(agent string) error
+	// ChatAgent, when set, is the manager's agent name, and turns on lever's
+	// chat page for every verified login, operator or contact (chatpage.go):
+	// the proxy answers /lever/* itself and redirects "/" (and, for a
+	// contact, every page) to the page. It needs AgentRecords for the agent
+	// list, and a verified login (AllowedUsers). Empty leaves every one of
+	// those paths to the hub (or, for a contact, the fence), as before.
+	ChatAgent string
+	// Workers is every configured worker name in config order: the agents an
+	// operator sees beside the manager on the chat page.
+	Workers []string
+	// ContactSee maps a contact login to the agents it may see on the chat
+	// page (name, label, state) but not message.
+	ContactSee map[string][]string
+	// AgentRecords lists the instance's hub agent records by name, with phase
+	// and activity already reduced to scion's known words. The chat page's
+	// agent list needs it; nil answers every state "unknown".
+	AgentRecords func(ctx context.Context) (map[string]AgentRecord, error)
+	// Labels returns the labels by agent name (nil for none). Optional.
+	Labels func() map[string]string
+	// Wake asks the broker to resume a suspended (or, for the operator,
+	// stopped) worker for a login that may message it (the operator socket's
+	// /operator/wake); tier is the login's. It returns when the worker is
+	// live or the broker refused; a refusal is a *WakeError with the
+	// broker's status. Nil answers every wake 503.
+	Wake func(ctx context.Context, login, tier, worker string) error
 	// LogPath is where the operator is told to look when the hub login
 	// fails — the proxy's own log, named in that denial's response text.
 	// Optional; "" uses DefaultLogPath.
@@ -353,11 +378,16 @@ type AuditLine struct {
 	// Decision is the outcome: one of the Decision constants. The gate emits
 	// DecisionAllow, DecisionDenyHost, DecisionDenyOrigin, DecisionDenyUser,
 	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
-	// navigation, DecisionLoginRedirect; the login driver DecisionOIDCSession
+	// navigation, DecisionLoginRedirect; the contact fence DecisionDenyContact;
+	// the chat page DecisionChatUnavailable and, for its wake route,
+	// DecisionWake, DecisionDenyWake and DecisionWakeResult; the login driver DecisionOIDCSession
 	// and DecisionOIDCSessionFailed; the provider the DecisionOIDC* values and
 	// DecisionDenyAuthorize.
 	Decision Decision `json:"decision"`
 	Status   int      `json:"status,omitempty"`
+	// Reason is a fixed word for why the chat page's wake route refused or
+	// how a late wake ended (wake.go), never caller or broker text.
+	Reason string `json:"reason,omitempty"`
 	// Error records why an allowed request never got an answer from the hub
 	// (set only on the 502 path). The transport's own diagnosis lands here
 	// rather than in the client's response body: the operator needs to know
@@ -464,6 +494,9 @@ func NewHandler(cfg Config) http.Handler {
 	g := &gate{cfg: cfg, rp: newReverseProxy(cfg)}
 	if len(cfg.Contacts) > 0 && cfg.ResolveAgents != nil {
 		g.contacts = &contactFence{resolve: cfg.ResolveAgents, whoAmI: hubWhoAmI(cfg), session: cfg.ContactSession}
+	}
+	if cfg.ChatAgent != "" {
+		g.chat = newChatPage(cfg)
 	}
 	return g
 }
@@ -681,6 +714,10 @@ type gate struct {
 	cfg      Config
 	rp       *httputil.ReverseProxy
 	contacts *contactFence // nil unless Config.Contacts and ResolveAgents are set
+	chat     *chatPage     // nil unless Config.ChatAgent is set
+	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
+	// wakeWaitFor overrides wakeAnswerWait (tests).
+	wakeWaitFor time.Duration
 }
 
 func (g *gate) audit(line AuditLine) {
@@ -758,6 +795,12 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state.cookie = cookie
+	// lever's chat page, for both tiers. It claims only GET/HEAD "/" and the
+	// /lever prefix, and answers them itself, never from the hub. Every other
+	// request of a contact goes on to the fence below, unchanged.
+	if g.serveChatPage(w, r, &line, operator, cookie) {
+		return
+	}
 	if names, isContact := cfg.Contacts[operator]; isContact && operator != "" {
 		if r = g.fenceContact(w, r, &line, operator, names, &cookie); r == nil {
 			return

@@ -594,7 +594,10 @@ Every request the proxy handles — allowed or denied — is appended as one JSO
 `.lever-state/remote-audit.jsonl`: timestamp, the identity header's value if present (the
 `ts_login` field, whatever the header), method, path, the
 decision (`allow` / `deny-host` when the `Host` header does not match `base_url` / `deny-origin` /
-`deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session`), and the
+`deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session` / `deny-contact` when the
+contact fence refuses a request / `chat-unavailable` when the [chat page](#the-chat-page) cannot
+resolve your hub user / `remote-wake` and `deny-wake` for a [wake](#waking-a-worker), with a
+`reason` word on a refusal, and `remote-wake-result` for the broker's late answer), and the
 upstream status once known. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
@@ -754,6 +757,159 @@ What is not covered:
   up early (the genuine envelope then answers as a repeat). It cannot get text lever did not send
   to that agent.
 
+## The chat page
+
+The hub's web UI is an operator console: projects, agent lists, graphs, settings. To talk to your
+agents from a phone, most of that is in the way. Set
+
+```yaml
+remote:
+  landing: chat
+  labels_file: workers/labels.json   # optional: short labels the manager writes (see below)
+```
+
+and `lever apply`. The origin then opens on a page lever serves itself: the list of agents your
+login has, and a chat with each one you may message.
+
+### What each login sees
+
+The proxy builds the list for each login on the server, from `lever.yaml`; the page shows what it
+is given and nothing else.
+
+- **An operator** sees the manager and every configured worker, and may message all of them.
+  The page also has two links: **Terminal** (per agent) opens the hub web UI's terminal for that
+  agent, for the times you need Claude Code itself; **Console** opens the hub's full web UI,
+  which stays at its own paths (`/agents`, `/chat`, ...). Only `/` leads to the chat page.
+- **A [contact](#contacts-chat-only-logins)** sees the agents of its entry: those in `agents:` it
+  may message, those in `see:` it may only see (name, label and state, greyed as "view only";
+  no history, no input). An agent in neither list never appears: not its name, its id, or its
+  conversation. A contact gets no Terminal and no Console link.
+
+The list comes in this order: the manager (when the login has it), then the agents it may
+message in config order, then the see-only agents. Each row shows the agent's name, then its
+label (`deal-2 · Via Roma 12`; the name always comes first), a state, and a count of unread
+messages from it. On a screen 720 px wide or more, the list and the open chat show side by side;
+on a phone, one at a time, with **Back** to return to the list.
+
+### States
+
+A state is one of a fixed set of words; an agent reports its own activity to the hub, so read it
+as a hint. The composer of a chat follows it:
+
+| State | You can send | The page says |
+|---|---|---|
+| running (working / waiting / idle) | yes | — |
+| starting | yes | "starting – your message waits until it runs" |
+| asleep (suspended), a worker | yes | "asleep – your message wakes it" |
+| stopped, a worker, for an operator | yes | "asleep – your message wakes it" |
+| stopped, a worker, for a contact | no | a button **Ask the manager to start &lt;name&gt;** |
+| error, no record, not fresh, a worker | no | a button **Ask the manager to start &lt;name&gt;** |
+| the manager not running | no | "the assistant is offline" |
+| unknown (the hub cannot be read) | no | "state unknown – retrying" |
+
+A contact never wakes a stopped worker: suspended is the state an idle worker sleeps in, but
+stopped is a decision the operator made, and only the operator's login undoes it from the page.
+"Not fresh" is for a contact only: the agent's session started before the skills on disk now
+(see [Contacts](#contacts-chat-only-logins)), so the fence would refuse the contact's message.
+**Ask the manager to start** opens your chat with the manager with an editable draft ("Please
+start deal-3 for me."); nothing is sent until you press Send. A contact who may not message the
+manager gets no button.
+
+### Waking a worker
+
+A message to an asleep worker wakes it first: a suspended one for any login that may message it,
+a stopped one only for an operator. The page keeps your text,
+asks lever to wake the worker, shows "waking &lt;name&gt;…", and reads the list every 3 seconds
+for up to 90. When the worker runs, the message goes through the normal send, under the same
+idempotency key it was given before the wake, so a reload during the wake cannot store it twice.
+When the wake is refused or the worker is not running after 90 seconds, the page says why and
+keeps the text.
+
+The wake (`POST /lever/api/agents/<name>/wake`) is accepted only:
+
+- for a worker, never the manager;
+- from a login that may **message** that worker (an operator, or a contact with the worker in
+  `agents:`); the same 403 answers a see-only agent, a hidden one, the manager and a name that
+  does not exist;
+- from the page itself: one `Origin` header, and `Sec-Fetch-Site: same-origin` when the browser
+  sends it;
+- while the worker is suspended, or, for an operator's login, stopped (the broker checks this
+  again, with the login's tier, before it resumes anything);
+- once a minute per worker, across all logins (a second wake inside the minute gets 429 with
+  `Retry-After`).
+
+The proxy asks the broker to resume the worker through the broker's operator socket, the same
+resume the manager's `lever-manager agent resume` runs (ticket staging included). That socket
+exists only while the state directory is outside the tree; without it a wake answers 503 and the
+page says waking is not available. Each wake is a line in the [audit log](#audit-log)
+(`remote-wake` or `deny-wake` with a reason word; `remote-wake-result` when the broker's answer
+comes after the page's).
+
+### Labels
+
+A label is a short text the manager keeps beside a worker's name, for example the address a deal
+worker is about. The manager writes them to the file `labels_file` names, inside the tree:
+
+```json
+{"deal-2": "Via Roma 12", "data-scout": "comps, Rome centre"}
+```
+
+The proxy reads the file on the host through the tree, at most every 10 seconds. It must be a
+regular file of at most 16 KiB, with no symbolic link anywhere on its path. Names that are not
+configured agents are ignored. Each label loses its control and format characters, runs of spaces
+become one, and it is cut to 60 characters; an empty label is dropped. A missing file means no
+labels. A file that breaks a rule (too big, not JSON, not an object of strings, a symbolic link)
+also means no labels, and `lever doctor` shows a `chat labels` warning row that names the fault.
+The page writes a label as text, after the name, never in its place.
+
+**Who sets the labels.** Whoever can write `labels_file` sets the text a contact sees beside each
+agent's true name, the manager's row included. By default that is the manager, which owns its
+part of the tree. So `lever.yaml` refuses a `labels_file` equal to or inside any worker's `dir`
+(that worker could then write what a contact reads next to every name), and one inside `.lever`
+or the state directory (host-written files). Keep the file in the manager's own part of the tree,
+and treat a label as the manager's words, not lever's: it can say anything up to 60 characters,
+but never replaces the name.
+
+### What it is, and is not
+
+- **The same conversations.** A chat goes into the agent's one session, the one `lever up`
+  attaches your terminal to for the manager. The page shows your messages and the agent's replies
+  (the final text of each turn). It does not show tool calls; the terminal does.
+- **The same message path.** The page posts to the hub's own chat route, through the proxy, like
+  the hub's web UI does. So the proxy records each message in the chat ledger, and the agent
+  verifies it with `message_verify` (see [Verified web chat](#verified-web-chat)). Nothing about
+  signing, recording or delivery is new. This is why `landing: chat` needs an operator login in
+  `allowed_users`.
+- **The fence still decides for a contact.** The page uses only hub routes the contact fence
+  already admits (its own conversations with its listed agents, their read markers, its own chat
+  events). The list hides what a contact may not see, and the fence refuses it anyway.
+- **Nothing to build.** The page is a few small files inside the lever binary: no framework, no
+  build step, no outside origin. It holds no credential, like every page behind the proxy.
+- **Text only.** A reply is agent-written text on your origin, so the page writes it as plain
+  text and its Content-Security-Policy allows no inline script. Markdown shows as typed.
+- **A display, not a proof.** The page shows what the hub stores. Which bubble a message is in
+  comes from the hub's record of its sender, but the words inside an agent's bubble are the
+  agent's own and can imitate anything, a system notice or a line of yours included. What proves
+  a message is yours is `message_verify` on the agent's side, not the page.
+
+The proxy answers these itself and forwards none of them to the hub: `GET /` (a redirect to
+`/lever/chat`), `/lever/chat`, its `.css` and two `.js` files, the app manifest and icons,
+`GET /lever/api/agents` (the list) and `POST /lever/api/agents/<name>/wake`. Anything else under
+`/lever/` is a 404; `/lever/api/chat`, which the one-agent page read, is gone. With `landing` unset
+or `console`, none of this exists, every path goes to the hub as before, and a contact gets the
+fence's own landing page.
+
+The page reads the open conversation again when the hub's event stream says something changed,
+and reads the list every 15 seconds while it is visible and after each chat event, so a missed
+event costs a short delay, not a lost reply. When you read a chat while it is in view, the page
+moves your hub read marker to the newest message (the hub's own read route), and the agent's
+unread count drops. After a `lever up --fresh` (or a worker's fresh start) the agent has a new
+hub record; the open chat moves to the new conversation by itself, and a message you were about
+to send is not posted to the old one.
+
+Not in the page: file upload, messages that an agent starts to a contact, and notifications while
+the page is closed. Use the Console for files.
+
 ## Contacts: chat-only logins
 
 A contact is an external person (a client, a domain expert) who answers an agent's questions in
@@ -767,7 +923,13 @@ remote:
     - login: contact@example.com
       tier: contact
       agents: [research]                         # required: declared workers or the manager
+      see: [scout]                               # optional: shown on the chat page, never messaged
 ```
+
+`see:` lists agents the contact may only see on the [chat page](#the-chat-page): name, label and
+state, no history and no input. Config load refuses a `see:` name that is not the manager or a
+configured worker, a name in both `agents:` and `see:`, and `see:` on an operator entry. `see:`
+grants no hub route: the fence below admits nothing for a see-only agent.
 
 - **Hub role.** A contact's hub user gets the project role `lever-remote-contact`, which holds
   `agent.message` and nothing else, plus the same project-create ceiling as an operator. It
@@ -778,8 +940,9 @@ remote:
   chat checks only the user half of a conversation. So the proxy allows a contact only an
   allow-list: its own conversations with its listed agents, its own identity, the web UI's
   static files and public settings, and its own chat and notification events. Other pages show
-  a lever page with links to the contact's conversations. Everything else is refused (audit
-  `deny-contact`).
+  a lever page with links to the contact's conversations; with `landing: chat`, they redirect
+  to the [chat page](#the-chat-page) instead, and the contact gets neither that landing page nor
+  the hub's web UI shell. Everything else is refused (audit `deny-contact`).
 - **What a contact may not send.** A word that starts with `@` (scion would route the message to
   another agent), a reply to a message by id, an attachment, or any field other than the text.
   The proxy answers 403 with the reason; the contact rewrites the message. The text itself is not
@@ -818,7 +981,9 @@ remote:
 
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —
   asked for in chat, like any other task — not a button the phone UI exposes as an operator
-  capability of its own.
+  capability of its own. The one exception is narrow: a message to an asleep worker
+  [wakes it](#waking-a-worker) (resume only, a worker the login may message, once a minute). The
+  page cannot start, create, stop or remove an agent.
 - **No new authority.** A remote chat message is text in the agent's session. With verified
   web chat it is provably yours, but it is still not a directive (see the accepted posture above).
 - **No credential on the phone.** The session cookie stays on the host, the hub's `Set-Cookie` is

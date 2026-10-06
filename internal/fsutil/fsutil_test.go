@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -307,5 +308,88 @@ func TestRelOverlapFold(t *testing.T) {
 		if got := RelOverlapFold(tc.a, tc.b); got != tc.want {
 			t.Errorf("RelOverlapFold(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadInTreeNoLinks(t *testing.T) {
+	tree := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(tree, "workers", "real"), 0o755))
+	must(t, os.WriteFile(filepath.Join(tree, "workers", "labels.json"), []byte(`{}`), 0o644))
+	if b, err := ReadInTreeNoLinks(tree, "workers/labels.json", 16); err != nil || string(b) != "{}" {
+		t.Fatalf("plain file: %q %v", b, err)
+	}
+	// A link on any component is refused, even one that stays in the tree.
+	must(t, os.Symlink("real", filepath.Join(tree, "workers", "link")))
+	must(t, os.WriteFile(filepath.Join(tree, "workers", "real", "l.json"), []byte(`{}`), 0o644))
+	if _, err := ReadInTreeNoLinks(tree, "workers/link/l.json", 16); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("dir link: %v, want ErrSymlink", err)
+	}
+	outside := filepath.Join(t.TempDir(), "secret")
+	must(t, os.WriteFile(outside, []byte("x"), 0o644))
+	must(t, os.Symlink(outside, filepath.Join(tree, "workers", "leaf.json")))
+	if _, err := ReadInTreeNoLinks(tree, "workers/leaf.json", 16); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("leaf link: %v, want ErrSymlink", err)
+	}
+	must(t, os.WriteFile(filepath.Join(tree, "big.json"), bytes.Repeat([]byte("x"), 17), 0o644))
+	if _, err := ReadInTreeNoLinks(tree, "big.json", 16); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("big: %v", err)
+	}
+	if _, err := ReadInTreeNoLinks(tree, "workers", 16); !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("dir: %v", err)
+	}
+	if _, err := ReadInTreeNoLinks(tree, "nope.json", 16); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("absent: %v", err)
+	}
+	if _, err := ReadInTreeNoLinks(tree, "../x", 16); !errors.Is(err, ErrEscapesTree) {
+		t.Fatalf("dotdot: %v", err)
+	}
+	if _, err := ReadInTreeNoLinks(tree, "/etc/hosts", 16); !errors.Is(err, ErrEscapesTree) {
+		t.Fatalf("absolute: %v", err)
+	}
+	// A FIFO is not a regular file and never blocks the read.
+	must(t, syscall.Mkfifo(filepath.Join(tree, "fifo"), 0o644))
+	if _, err := ReadInTreeNoLinks(tree, "fifo", 16); !errors.Is(err, ErrNotRegularFile) {
+		t.Fatalf("fifo: %v", err)
+	}
+}
+
+// A leaf swapped between the Lstat walk and the open is refused: the open
+// must land on the file the walk saw. Each swap here passes the walk and
+// the os.Root open, so only the post-open check stands in its way.
+func TestReadInTreeNoLinksRefusesASwapAfterTheWalk(t *testing.T) {
+	for name, swap := range map[string]func(t *testing.T, tree, leaf string){
+		"another regular file": func(t *testing.T, tree, leaf string) {
+			other := filepath.Join(tree, "other.json")
+			must(t, os.WriteFile(other, []byte(`{"x":"swapped"}`), 0o644))
+			must(t, os.Rename(other, leaf))
+		},
+		"an in-tree symlink": func(t *testing.T, tree, leaf string) {
+			must(t, os.WriteFile(filepath.Join(tree, "secret.json"), []byte(`{"x":"secret"}`), 0o644))
+			must(t, os.Remove(leaf))
+			must(t, os.Symlink("secret.json", leaf))
+		},
+		"a FIFO": func(t *testing.T, tree, leaf string) {
+			must(t, os.Remove(leaf))
+			must(t, syscall.Mkfifo(leaf, 0o644))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := t.TempDir()
+			leaf := filepath.Join(tree, "labels.json")
+			must(t, os.WriteFile(leaf, []byte(`{}`), 0o644))
+			afterNoLinkWalk = func() { swap(t, tree, leaf) }
+			t.Cleanup(func() { afterNoLinkWalk = nil })
+			b, err := ReadInTreeNoLinks(tree, "labels.json", 1024)
+			if !errors.Is(err, ErrSymlink) {
+				t.Fatalf("read %q, %v; want ErrSymlink", b, err)
+			}
+		})
 	}
 }

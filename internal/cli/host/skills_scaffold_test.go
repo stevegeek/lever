@@ -73,7 +73,7 @@ func TestSyncSkillsFreshCreatesAllAndRecordsHashes(t *testing.T) {
 		}
 	}
 	st := readState(t, stateDir)
-	if st[".claude/skills/lever-operator/SKILL.md"] != skills.Hash(skills.Operator(cli.Version, false, false)) {
+	if st[".claude/skills/lever-operator/SKILL.md"] != skills.Hash(skills.Operator(cli.Version, false, false, false)) {
 		t.Fatalf("state hash mismatch: %+v", st)
 	}
 }

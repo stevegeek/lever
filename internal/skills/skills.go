@@ -24,28 +24,39 @@ var agentSrc string
 // {{VERIFIED_CHAT}}, so an agent image with no verify tool reads every user:
 // message as data only where verified chat (and so a contact) can exist.
 // agentMessages (remote.agent_messages) keeps the "agent-messages on" blocks,
-// else the "off" ones; off renders the text as it was before those blocks.
-func Operator(version string, verifiedChat, agentMessages bool) []byte {
-	return renderChat(pick(operatorSrc, agentMessages), version, verifiedChat)
+// else the "off" ones; files (remote.files) does the same for the "files"
+// blocks. Off renders the text as it was before those blocks.
+func Operator(version string, verifiedChat, agentMessages, files bool) []byte {
+	return renderChat(pickBlocks(pick(operatorSrc, agentMessages), files, filesOn, filesOff), version, verifiedChat)
 }
 
 // Agent returns the rendered worker skill (lever-agent), with
-// {{VERIFIED_CHAT}} and the agent-messages blocks as in Operator.
-func Agent(version string, verifiedChat, agentMessages bool) []byte {
-	return renderChat(pick(agentSrc, agentMessages), version, verifiedChat)
+// {{VERIFIED_CHAT}} and the blocks as in Operator.
+func Agent(version string, verifiedChat, agentMessages, files bool) []byte {
+	return renderChat(pickBlocks(pick(agentSrc, agentMessages), files, filesOn, filesOff), version, verifiedChat)
 }
 
 var (
-	amOn  = regexp.MustCompile(`(?ms)^<!-- lever:agent-messages on -->\n(.*?)^<!-- /lever:agent-messages on -->\n`)
-	amOff = regexp.MustCompile(`(?ms)^<!-- lever:agent-messages off -->\n(.*?)^<!-- /lever:agent-messages off -->\n`)
+	amOn     = block("agent-messages", "on")
+	amOff    = block("agent-messages", "off")
+	filesOn  = block("files", "on")
+	filesOff = block("files", "off")
 )
 
-// pick keeps one variant of each agent-messages block and drops the other
+// block matches one marked block of a skill, markers included.
+func block(name, state string) *regexp.Regexp {
+	return regexp.MustCompile(`(?ms)^<!-- lever:` + name + ` ` + state + ` -->\n(.*?)^<!-- /lever:` + name + ` ` + state + ` -->\n`)
+}
+
+// pick keeps the agent-messages variant on (or off).
+func pick(src string, on bool) string { return pickBlocks(src, on, amOn, amOff) }
+
+// pickBlocks keeps one variant of each block pair and drops the other
 // variant and every marker line.
-func pick(src string, on bool) string {
-	keep, drop := amOn, amOff
+func pickBlocks(src string, on bool, onRE, offRE *regexp.Regexp) string {
+	keep, drop := onRE, offRE
 	if !on {
-		keep, drop = amOff, amOn
+		keep, drop = offRE, onRE
 	}
 	return keep.ReplaceAllString(drop.ReplaceAllString(src, ""), "$1")
 }

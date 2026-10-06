@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -332,10 +333,7 @@ var errBadUserID = errors.New("the hub named an unusable user id")
 // returns the cookie to use for further calls (the replacement, if any).
 func (g *gate) hubUserID(ctx context.Context, login, cookie string) (string, string, error) {
 	c := g.chat
-	now := time.Now
-	if c.nowFn != nil {
-		now = c.nowFn
-	}
+	now := c.now
 	c.mu.Lock()
 	u, ok := c.users[login]
 	c.mu.Unlock()
@@ -384,8 +382,61 @@ func (g *gate) labels() map[string]string {
 	return g.cfg.Labels()
 }
 
+// agentsAnswerTTL is how long a login's list answer is reused. One list
+// costs up to ten hub calls with the login's own session; the page asks
+// every few seconds at most, so a burst gets the answer of a moment ago.
+const agentsAnswerTTL = 2 * time.Second
+
+type cachedAnswer struct {
+	body []byte
+	at   time.Time
+}
+
+// cachedAgents is login's answer of less than agentsAnswerTTL ago, if any.
+// Keyed by login alone: an answer is never handed to another login.
+func (c *chatPage) cachedAgents(login string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a, ok := c.answers[login]
+	if !ok || c.now().Sub(a.at) >= agentsAnswerTTL {
+		return nil, false
+	}
+	return a.body, true
+}
+
+func (c *chatPage) storeAgents(login string, body []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.answers == nil {
+		c.answers = map[string]cachedAnswer{}
+	}
+	now := c.now()
+	// Old answers go: the map holds at most the logins of the last moment.
+	maps.DeleteFunc(c.answers, func(_ string, a cachedAnswer) bool { return now.Sub(a.at) >= agentsAnswerTTL })
+	c.answers[login] = cachedAnswer{body: body, at: now}
+}
+
+func (c *chatPage) now() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
 // serveAgents answers GET /lever/api/agents for v.
 func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, cookie string) {
+	answer := func(body []byte) {
+		g.answerChat(w, line, DecisionAllow, http.StatusOK, func() {
+			w.Header().Set("Content-Type", "application/json")
+			// Like every /api/ answer the proxy forwards (sandboxAPIDocument):
+			// opened as a page, this is an inert document.
+			w.Header().Set("Content-Security-Policy", "sandbox")
+		}, body, r)
+	}
+	if body, ok := g.chat.cachedAgents(v.login); ok {
+		answer(body)
+		return
+	}
 	ctx := r.Context()
 	uid, cookie, err := g.hubUserID(ctx, v.login, cookie)
 	if err != nil {
@@ -400,12 +451,8 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.answerChat(w, line, DecisionChatUnavailable, http.StatusBadGateway, nil, []byte("cannot encode the agent list\n"), r)
 		return
 	}
-	g.answerChat(w, line, DecisionAllow, http.StatusOK, func() {
-		w.Header().Set("Content-Type", "application/json")
-		// Like every /api/ answer the proxy forwards (sandboxAPIDocument):
-		// opened as a page, this is an inert document.
-		w.Header().Set("Content-Security-Policy", "sandbox")
-	}, body, r)
+	g.chat.storeAgents(v.login, body)
+	answer(body)
 }
 
 // hubGetJSON reads a hub route with a login's own session and decodes a

@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/chatledger"
 )
@@ -381,3 +383,49 @@ func TestAgentsListUnreadReadBudget(t *testing.T) {
 		t.Fatalf("history reads %d", reads)
 	}
 }
+
+// Each list costs several hub calls with the login's session; a page (or a
+// script) asking in a burst gets the answer of a moment ago instead, per
+// login and never another login's.
+func TestAgentsListIsCachedPerLogin(t *testing.T) {
+	hub := newPageHub(t)
+	hub.me = func(w http.ResponseWriter, r *http.Request) {
+		id := strings.NewReplacer("@", "-", ".", "-").Replace(strings.TrimPrefix(r.Header.Get("Cookie"), sessionCookieName+"="))
+		_, _ = io.WriteString(w, `{"id":"u-`+id+`"}`)
+	}
+	cfg := chatConfig(t, hub)
+	var recCalls atomic.Int32
+	inner := cfg.AgentRecords
+	cfg.AgentRecords = func(ctx context.Context) (map[string]AgentRecord, error) { recCalls.Add(1); return inner(ctx) }
+	cfg.Session = perLoginSession{}
+	g := NewHandler(cfg).(*gate)
+	now := time.Unix(1000, 0)
+	g.chat.nowFn = func() time.Time { return now }
+	_, a1 := agentsAs(t, g, chatOp)
+	hubCalls := len(hub.reached())
+	_, a2 := agentsAs(t, g, chatOp)
+	if recCalls.Load() != 1 || len(hub.reached()) != hubCalls || !reflect.DeepEqual(a1, a2) {
+		t.Fatalf("a quick second list asked again: records %d, hub %d → %d", recCalls.Load(), hubCalls, len(hub.reached()))
+	}
+	// Another login gets its own answer, built for it.
+	_, c := agentsAs(t, g, "c@x")
+	if c.Login != "c@x" || c.Tier != "contact" || c.UserID != "u-sess-c-x" || recCalls.Load() != 2 {
+		t.Fatalf("contact got %+v (records %d)", c, recCalls.Load())
+	}
+	if _, o := agentsAs(t, g, chatOp); o.Login != chatOp || o.UserID != "u-sess-op-x" {
+		t.Fatalf("operator after the contact: %+v", o)
+	}
+	now = now.Add(3 * time.Second)
+	agentsAs(t, g, chatOp)
+	if recCalls.Load() != 3 {
+		t.Fatalf("after the cache window: records %d", recCalls.Load())
+	}
+}
+
+// perLoginSession hands each login a cookie of its own.
+type perLoginSession struct{}
+
+func (perLoginSession) Cookie(_ context.Context, login string) (string, error) {
+	return "sess-" + login, nil
+}
+func (perLoginSession) Invalidate(string, string) {}

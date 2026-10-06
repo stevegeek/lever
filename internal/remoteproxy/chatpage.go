@@ -145,9 +145,10 @@ type chatPage struct {
 	// list's unread counts).
 	hubGet func(ctx context.Context, cookie, path string, out any) (int, error)
 
-	mu    sync.Mutex
-	users map[string]contactUser // login → hub user id, for the agent list
-	nowFn func() time.Time
+	mu      sync.Mutex
+	users   map[string]contactUser  // login → hub user id, for the agent list
+	answers map[string]cachedAnswer // login → its last agent list (agentsAnswerTTL)
+	nowFn   func() time.Time
 }
 
 // newChatPage loads the embedded files. A file that is missing is a build

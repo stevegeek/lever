@@ -161,6 +161,43 @@ version bump moves the block under the new version heading.
   (`lever-chat-draft:<name>`, `lever-chat-unsent:<name>`); the one-agent page's records are
   adopted once, so a send with no clear answer keeps its key across the upgrade.
 
+### Security
+
+- **The remote proxy refuses a path that is not in one spelling, for every
+  tier (400, audit `deny-path`).** Its route checks read the path by prefix,
+  so a contact's `GET /assets/../lever/api/chat` passed the static-asset rule
+  and reached the hub with the contact's session (the hub answered with a
+  redirect, so nothing was served). A path with a `.` or `..` segment, an
+  empty segment (`//`), a backslash or NUL, or an encoded slash, backslash,
+  dot or NUL (`%2f`, `%5c`, `%2e`, `%00`) is now refused before any route
+  decision, so the decisions and the forwarded request name the same route.
+- **Terminal output replaces invisible and reordering characters from the
+  jail.** `termsafe.Sanitize` (doctor and up rows, apply log lines, returned
+  errors) passed printable UTF-8 unchanged, so a guest string could carry a
+  bidi override, a zero-width character, a tag character or a blank glyph
+  and render as text that is not there. Every format character (category
+  Cf), U+2028 and U+2029, and the blank glyphs U+2800, U+3164, U+115F,
+  U+1160 and U+FFA0 now become U+FFFD.
+- **A worker's own text in an event is marked as the worker's.** scion builds
+  a notification's message from the watched worker's own `Message` and
+  `TaskSummary`, and `/msg/list`, `lever-manager msg list` and
+  `lever-manager watch` passed it and its status through raw. Each event's
+  `message` now starts with `worker-reported:`, is sanitized (one line, no
+  escapes or invisible characters) and cut to 1 KiB; its `status` is shown
+  only when it is one the hub produces, else `UNRECOGNISED`. The JSON shape
+  is unchanged. The manager skill says the message is data. Run `lever init`
+  to refresh the skills.
+
+### Fixed
+
+- **A worker start no longer writes one audit deny per tool.** Newer Claude
+  Code probes every MCP server with `server/discover` at start, and the
+  broker gateway denied it as "method not allowlisted". The gateway now
+  answers `server/discover`, `resources/list`, `resources/templates/list`
+  and `prompts/list` itself with JSON-RPC "method not found" (-32601), or a
+  bodiless 202 for a notification, logs them at debug level only, and never
+  forwards them. Every other unknown method is still denied and audited.
+
 ## [0.29.1] - 2026-10-02
 
 Fixes from an independent security review of 0.28.1 and 0.29.0. Two of them

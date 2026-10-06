@@ -143,6 +143,22 @@ func newToolProxy(target *url.URL) *httputil.ReverseProxy {
 	return rp
 }
 
+// answerNotFound answers an MCP discovery probe the gateway does not carry
+// (it relays tools only) with JSON-RPC "method not found", the reply the MCP
+// spec gives for an unsupported method, so a client moves on without an
+// audit deny per tool at every start. It is never forwarded: the backend's
+// resources and prompts stay out of reach. A notification (no id) gets no
+// reply, only the 202 Streamable HTTP gives an accepted notification.
+func answerNotFound(w http.ResponseWriter, msg map[string]any) {
+	id, ok := msg["id"]
+	if !ok {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(mcp.Error(id, mcp.CodeMethodNotFound, "method not found"))
+}
+
 // setBody replaces r's body with b for the proxy hop.
 func setBody(r *http.Request, b []byte) {
 	r.Body = io.NopCloser(bytes.NewReader(b))
@@ -154,8 +170,9 @@ func setBody(r *http.Request, b []byte) {
 // capability token, maps the params under the tool's grain, denies a revoked
 // caller, verifies the token, and rewrites r's body for the backend (the
 // verified token is forwarded to a first-party tool, stripped otherwise).
-// The allowlisted non-capability methods are forwarded unchanged; anything
-// else is denied. On every deny it audits, writes the response and returns
+// The allowlisted non-capability methods are forwarded unchanged; the
+// discovery probes are answered "method not found" here (answerNotFound);
+// anything else is denied. On every deny it audits, writes the response and returns
 // false; on true the caller forwards r.
 func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t registry.Tool, caller string, body []byte) bool {
 	toolName := t.Name
@@ -229,6 +246,10 @@ func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t reg
 		// Allowlisted non-capability methods — forward unchanged.
 		setBody(r, body)
 		r.Header.Set("X-Lever-Method", method)
+	case "server/discover", "resources/list", "resources/templates/list", "prompts/list":
+		answerNotFound(w, msg)
+		b.log.Debug("broker.unsupported", "op", toolName, "caller", caller, "method", method)
+		return false
 	default:
 		// Any method not in the explicit allowlist is denied. Fail closed.
 		b.audit(toolName, caller, "deny", "method not allowlisted: "+method)

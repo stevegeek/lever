@@ -5,7 +5,8 @@ import "testing"
 // TestSanitize pins the choke point for guest-supplied strings (scion
 // stderr, hub slugs, container status, the record's image, error text)
 // before they reach the operator's terminal: escape sequences are stripped
-// whole, control bytes are replaced, and ordinary UTF-8 passes unchanged.
+// whole, control bytes, format characters and blank glyphs are replaced, and
+// ordinary UTF-8 passes unchanged.
 func TestSanitize(t *testing.T) {
 	cases := []struct {
 		name, in, want string
@@ -30,6 +31,18 @@ func TestSanitize(t *testing.T) {
 		{"unterminated CSI dropped to end", "abc\x1b[1;2", "abc"},
 		{"unterminated OSC dropped to end", "abc\x1b]0;title", "abc"},
 		{"invalid UTF-8 byte replaced", "a\x9bb", "a�b"},
+		{"bidi override and pop replaced", "ok \u202egnp.exe\u202c", "ok �gnp.exe�"},
+		{"bidi embeddings replaced", "a\u202ab\u202bc\u202dd", "a�b�c�d"},
+		{"bidi isolates replaced", "a\u2066b\u2067c\u2068d\u2069e", "a�b�c�d�e"},
+		{"LRM, RLM and Arabic letter mark replaced", "a\u200eb\u200fc\u061cd", "a�b�c�d"},
+		{"zero-width space, non-joiner and joiner replaced", "a\u200bb\u200cc\u200dd", "a�b�c�d"},
+		{"BOM and word joiner replaced", "\ufeffa\u2060b", "�a�b"},
+		{"soft hyphen replaced", "lev\u00adler", "lev�ler"},
+		{"tag characters replaced", "a\U000e0001\U000e0041\U000e007fb", "a���b"},
+		{"line and paragraph separators replaced", "a\u2028b\u2029c", "a�b�c"},
+		{"blank glyphs replaced", "\u2800\u3164\u115f\u1160\uffa0[lever: x]", "�����[lever: x]"},
+		{"variation selector and combining marks kept", "\u2764\ufe0f e\u0301", "\u2764\ufe0f e\u0301"},
+		{"non-Latin scripts kept", "Ελληνικά 日本語 עברית العربية", "Ελληνικά 日本語 עברית العربية"},
 	}
 	for _, c := range cases {
 		if got := Sanitize(c.in); got != c.want {

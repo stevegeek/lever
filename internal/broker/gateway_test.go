@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -214,6 +215,54 @@ func TestGatewayDeniesUnknownMethodWithoutReachingBackend(t *testing.T) {
 	g := dbRig(t)
 	g.assertDenied(g.post("worker", `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{}}`),
 		"unknown method (fail-open bypass)")
+}
+
+// TestGatewayAnswersDiscoveryProbesLocally: the MCP discovery probes a newer
+// client sends at start (server/discover, and the resources and prompts
+// lists) get JSON-RPC "method not found" from the gateway itself, with no
+// audit deny line, and never reach the backend. As a notification they get
+// a bodiless 202.
+func TestGatewayAnswersDiscoveryProbesLocally(t *testing.T) {
+	for _, method := range []string{"server/discover", "resources/list", "resources/templates/list", "prompts/list"} {
+		var buf bytes.Buffer
+		g := newGatewayRig(t, testConfig(t, withAudit(&buf)), func(u string) registry.Tool { return regTool("db", u, "read") })
+		w := g.post("worker", `{"jsonrpc":"2.0","id":7,"method":"`+method+`","params":{}}`)
+		if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/json" {
+			t.Fatalf("%s: status %d type %q", method, w.Code, w.Header().Get("Content-Type"))
+		}
+		var reply struct {
+			ID    int `json:"id"`
+			Error struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil || reply.ID != 7 || reply.Error.Code != -32601 {
+			t.Fatalf("%s: reply %s, want id 7 and -32601", method, w.Body)
+		}
+		w = g.post("worker", `{"jsonrpc":"2.0","method":"`+method+`"}`)
+		if w.Code != http.StatusAccepted || w.Body.Len() != 0 {
+			t.Fatalf("%s as a notification: %d %q, want a bodiless 202", method, w.Code, w.Body)
+		}
+		if g.reached {
+			t.Fatalf("SECURITY: %s reached the backend", method)
+		}
+		if strings.Contains(buf.String(), "broker.decision") {
+			t.Fatalf("%s: audit line written: %s", method, buf.String())
+		}
+	}
+}
+
+// TestGatewayStillDeniesOtherUnknownMethods: the probe answer is not a
+// catch-all; every other unknown method is a 403 with an audit deny.
+func TestGatewayStillDeniesOtherUnknownMethods(t *testing.T) {
+	for _, method := range []string{"resources/read", "prompts/get", "server/discoverx", "completion/complete", "logging/setLevel", "notifications/cancelled"} {
+		var buf bytes.Buffer
+		g := newGatewayRig(t, testConfig(t, withAudit(&buf)), func(u string) registry.Tool { return regTool("db", u, "read") })
+		g.assertDenied(g.post("worker", `{"jsonrpc":"2.0","id":1,"method":"`+method+`","params":{}}`), method)
+		if !strings.Contains(buf.String(), "method not allowlisted: "+method) {
+			t.Fatalf("%s: no audit deny: %s", method, buf.String())
+		}
+	}
 }
 
 // TestGatewayForwardsInitialize verifies that the allowlisted `initialize` method

@@ -299,7 +299,8 @@ func TestWakeAnswersBeforeTheResumeEnds(t *testing.T) {
 }
 
 // Only a plain agent name routes to the wake; anything else under the
-// agents prefix is a 404, and never reaches the broker.
+// agents prefix is a 404 (or a 400 from unsafePath), and never reaches the
+// broker.
 func TestWakeRouteShape(t *testing.T) {
 	hub := newPageHub(t)
 	wr := &wakeRec{}
@@ -312,7 +313,7 @@ func TestWakeRouteShape(t *testing.T) {
 		req.Header.Set("Origin", "https://"+testServeHost)
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, req)
-		if rw.Code != http.StatusNotFound && rw.Code != http.StatusMethodNotAllowed {
+		if rw.Code != http.StatusNotFound && rw.Code != http.StatusMethodNotAllowed && rw.Code != http.StatusBadRequest {
 			t.Errorf("POST %s: %d", p, rw.Code)
 		}
 	}

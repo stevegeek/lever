@@ -208,8 +208,10 @@ version bump moves the block under the new version heading.
   errors) passed printable UTF-8 unchanged, so a guest string could carry a
   bidi override, a zero-width character, a tag character or a blank glyph
   and render as text that is not there. Every format character (category
-  Cf), U+2028 and U+2029, and the blank glyphs U+2800, U+3164, U+115F,
-  U+1160 and U+FFA0 now become U+FFFD.
+  Cf), U+2028 and U+2029, the blank glyphs U+2800, U+3164, U+115F,
+  U+1160 and U+FFA0, the variation selectors (U+FE00-FE0F,
+  U+E0100-E01EF), U+034F and U+17B4/U+17B5 now become U+FFFD. Other
+  combining marks pass.
 - **A worker's own text in an event is marked as the worker's.** scion builds
   a notification's message from the watched worker's own `Message` and
   `TaskSummary`, and `/msg/list`, `lever-manager msg list` and
@@ -227,7 +229,8 @@ version bump moves the block under the new version heading.
   broker gateway denied it as "method not allowlisted". The gateway now
   answers `server/discover`, `resources/list`, `resources/templates/list`
   and `prompts/list` itself with JSON-RPC "method not found" (-32601), or a
-  bodiless 202 for a notification, logs them at debug level only, and never
+  bodiless 202 for a notification, logs them at debug level only (a revoked
+  caller's probe gets the same answer and an audit deny line), and never
   forwards them. Every other unknown method is still denied and audited.
 
 ## [0.29.1] - 2026-10-02

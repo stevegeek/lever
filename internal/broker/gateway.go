@@ -247,8 +247,14 @@ func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t reg
 		setBody(r, body)
 		r.Header.Set("X-Lever-Method", method)
 	case "server/discover", "resources/list", "resources/templates/list", "prompts/list":
+		// The answer is the same either way, but a revoked caller's probe is
+		// audited: revocation must leave a trace of every later attempt.
+		if b.isRevoked(caller) {
+			b.audit(toolName, caller, "deny", "revoked: "+method)
+		} else {
+			b.log.Debug("broker.unsupported", "op", toolName, "caller", caller, "method", method)
+		}
 		answerNotFound(w, msg)
-		b.log.Debug("broker.unsupported", "op", toolName, "caller", caller, "method", method)
 		return false
 	default:
 		// Any method not in the explicit allowlist is denied. Fail closed.

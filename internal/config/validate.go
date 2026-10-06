@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/opsig"
@@ -546,6 +547,16 @@ func (a *App) validateRemote() error {
 		}
 	default:
 		return fmt.Errorf("config: remote: landing %q; use %s or %s", a.Remote.Landing, RemoteLandingConsole, RemoteLandingChat)
+	}
+	am := a.Remote.AgentMessages
+	if am.FollowUpAfter != 0 && (am.FollowUpAfter < time.Hour || am.FollowUpAfter > 720*time.Hour) {
+		return fmt.Errorf("config: remote: agent_messages.follow_up_after %v; use 1h to 720h (or leave it out for %v)", am.FollowUpAfter, DefaultAgentFollowUpAfter)
+	}
+	if am.MaxChars < 0 || am.MaxChars > MaxAgentMaxChars {
+		return fmt.Errorf("config: remote: agent_messages.max_chars %d; use 1 to %d (or leave it out for %d)", am.MaxChars, MaxAgentMaxChars, DefaultAgentMaxChars)
+	}
+	if am.Enabled && len(a.Remote.LoginsWithTier(TierContact)) == 0 {
+		return fmt.Errorf("config: remote: agent_messages is enabled but allowed_users has no tier: contact entry; agents message only contacts")
 	}
 	// filepath.IsLocal refuses absolute paths and any ".." that leaves the
 	// base; path.Clean(lf) != lf refuses "a/../b", "a//b" and "./a". A

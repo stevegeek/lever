@@ -2,8 +2,10 @@ package brokerctl
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // ConfigHash must be deterministic, sensitive to broker-relevant config
@@ -73,5 +75,35 @@ func TestConfigHashFollowsTheRemoteLogins(t *testing.T) {
 	off.Remote.Enabled = false
 	if got := WebSenders(off); got != nil {
 		t.Fatalf("WebSenders with remote off = %v", got)
+	}
+}
+
+// Off, the broker's stamp is the one it had before agent_messages existed:
+// an upgrade alone never bounces the broker.
+func TestConfigHashUnchangedWhileAgentMessagesOff(t *testing.T) {
+	app := &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Remote: config.Remote{Enabled: true,
+		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+	old := state.HashJSON(struct {
+		Broker       config.Broker
+		Workers      []config.Worker
+		Scion        config.ScionConfig
+		VerifiedChat bool
+		WebSenders   []string `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app)})
+	if ConfigHash(app) != old {
+		t.Fatal("off must keep the pre-change hash")
+	}
+	app.Remote.AgentMessages = config.AgentMessages{FollowUpAfter: 48 * time.Hour} // set but off
+	if ConfigHash(app) != old {
+		t.Fatal("limits without enabled must not change the hash")
+	}
+	app.Remote.AgentMessages.Enabled = true
+	on := ConfigHash(app)
+	if on == old {
+		t.Fatal("turning agent messages on must bounce the broker")
+	}
+	app.Remote.AllowedUsers[1].Agents = []string{"w1", "w2"}
+	if ConfigHash(app) == on {
+		t.Fatal("a contact's agents must be in the stamp while on")
 	}
 }

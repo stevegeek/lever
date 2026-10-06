@@ -203,6 +203,21 @@ func (a *App) RemoteLandingChat() bool {
 	return a.RemoteEnabled() && a.Remote.Landing == RemoteLandingChat
 }
 
+// AgentMessagesOn reports whether agents may start messages to contacts and
+// the proxy filters what contacts see (remote.agent_messages.enabled, with
+// remote access on).
+func (a *App) AgentMessagesOn() bool { return a.RemoteEnabled() && a.Remote.AgentMessages.Enabled }
+
+// EffectiveAgentFollowUpAfter is follow_up_after with its default.
+func (a *App) EffectiveAgentFollowUpAfter() time.Duration {
+	return cmp.Or(a.Remote.AgentMessages.FollowUpAfter, DefaultAgentFollowUpAfter)
+}
+
+// EffectiveAgentMaxChars is max_chars with its default.
+func (a *App) EffectiveAgentMaxChars() int {
+	return cmp.Or(a.Remote.AgentMessages.MaxChars, DefaultAgentMaxChars)
+}
+
 // RemoteBindLoopback reports whether the proxy listens on loopback only — the
 // default, and the posture every other remote-access check assumes.
 func (a *App) RemoteBindLoopback() bool {

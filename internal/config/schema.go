@@ -431,7 +431,30 @@ type Remote struct {
 	// host-side with no symlink on the path, bounded, and only ever shown
 	// as text.
 	LabelsFile string `yaml:"labels_file"`
+	// AgentMessages lets an agent start a message to a contact that lists it
+	// (broker contact_message) and makes the proxy show a contact only the
+	// agent messages lever recorded. Off by default; see AgentMessages.
+	AgentMessages AgentMessages `yaml:"agent_messages"`
 }
+
+// AgentMessages is remote.agent_messages.
+type AgentMessages struct {
+	Enabled bool `yaml:"enabled"`
+	// FollowUpAfter is how long after an unanswered message an agent started
+	// it may send one reminder. Zero = DefaultAgentFollowUpAfter.
+	FollowUpAfter time.Duration `yaml:"follow_up_after"`
+	// MaxChars bounds one message to a contact, in characters. Zero =
+	// DefaultAgentMaxChars.
+	MaxChars int `yaml:"max_chars"`
+}
+
+const (
+	DefaultAgentFollowUpAfter = 24 * time.Hour
+	DefaultAgentMaxChars      = 4000
+	// MaxAgentMaxChars is scion's own cap on one message
+	// (messages.MaxMessageLength): a longer text could never be sent.
+	MaxAgentMaxChars = 16000
+)
 
 type App struct {
 	Name     string      `yaml:"name"`

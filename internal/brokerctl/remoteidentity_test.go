@@ -98,6 +98,11 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 		if f.Name == "AllowedUsers" && g.Type == reflect.TypeFor[[]string]() {
 			continue
 		}
+		// agent_messages is hashed as AgentMessagesOn: the proxy reads only
+		// whether to filter, never the limits (the broker enforces those).
+		if f.Name == "AgentMessages" && g.Type == reflect.TypeFor[bool]() {
+			continue
+		}
 		if g.Type != f.Type {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}
@@ -156,5 +161,20 @@ func TestRemoteHashOfAConsoleInstanceIgnoresWorkers(t *testing.T) {
 	app.Tree = "/other"
 	if RemoteConfigHash(app) != h0 {
 		t.Fatal("a worker change bounced a console-landing proxy")
+	}
+}
+
+func TestRemoteConfigHashCoversAgentMessages(t *testing.T) {
+	app := &config.App{Name: "hello", Backend: "orbstack", Remote: config.Remote{Enabled: true, BaseURL: "https://x.ts.net",
+		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+	off := RemoteConfigHash(app)
+	app.Remote.AgentMessages.Enabled = true
+	if RemoteConfigHash(app) == off {
+		t.Fatal("the proxy filters only while on: turning it on must restart the proxy")
+	}
+	app.Remote.AgentMessages.Enabled = false
+	app.Remote.AgentMessages.MaxChars = 100
+	if RemoteConfigHash(app) != off {
+		t.Fatal("off must keep the proxy's hash")
 	}
 }

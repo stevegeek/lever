@@ -41,6 +41,10 @@ type RemoteIdentity struct {
 	Workers    []string `json:",omitempty"`
 	Tree       string   `json:",omitempty"`
 	LabelsFile string   `json:",omitempty"`
+	// AgentMessages: the proxy filters a contact's history, events and
+	// previews (remote.agent_messages). Omitted when off, so an instance that
+	// never turns it on keeps its stamp.
+	AgentMessages bool `json:",omitempty"`
 }
 
 // RemoteConfigHash identifies the configuration a `lever remote serve` process

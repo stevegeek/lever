@@ -112,8 +112,10 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		unlock, err := b.lockWorker(lctx, cn)
 		cancel()
 		if err != nil {
+			// Not below zero: a manual resume that held the lock may
+			// already have reset the count (resetReenrolTries).
 			b.reenrolMu.Lock()
-			b.reenrolTries[cn]--
+			b.reenrolTries[cn] = max(0, b.reenrolTries[cn]-1)
 			b.reenrolMu.Unlock()
 			b.audit("reenrol", cn, "error", "natural lapse: worker busy (another start, resume, wake, stop or suspend of it is under way); heal skipped, the next lapse retries")
 			return
@@ -141,10 +143,19 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	}
 	// Success resets the cap so the NEXT independent lapse (weeks later) can
 	// heal again; the cap only bounds consecutive failures.
+	b.resetReenrolTries(cn)
+	b.audit("reenrol", cn, "allow", "natural lapse: ticket re-staged, healed via "+verb)
+}
+
+// resetReenrolTries clears cn's count of failed heals. A heal's success
+// calls it, and so does a resume or start of the worker by the manager or a
+// wake (resumeRecord, startFreshWorker): it staged a fresh ticket and saw
+// the worker live, so heals that failed before it must not use up the cap
+// of the next lapse.
+func (b *Broker) resetReenrolTries(cn string) {
 	b.reenrolMu.Lock()
 	b.reenrolTries[cn] = 0
 	b.reenrolMu.Unlock()
-	b.audit("reenrol", cn, "allow", "natural lapse: ticket re-staged, healed via "+verb)
 }
 
 // healTarget applies the policy gates (mode, configured identity) and

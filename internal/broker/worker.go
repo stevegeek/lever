@@ -663,6 +663,7 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
+	b.resetReenrolTries(spec.Name)
 	b.audit("worker", actor, "allow", "resume "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
@@ -755,6 +756,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	b.resetReenrolTries(spec.Name)
 	b.audit("worker", b.manager, "allow", "start "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }

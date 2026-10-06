@@ -78,6 +78,16 @@ version bump moves the block under the new version heading.
   allowed before), and creates a missing worker dir. Without the setting
   nothing changes.
 
+### Fixed
+
+- **A manual resume clears the healer's failed attempts.** The re-enrol
+  healer and the manager's start, resume and wake of a worker already ran
+  under the worker's one lifecycle lock, so the two never interleave (new
+  tests pin both orders, under `-race`). But a successful resume or start
+  left the count of earlier failed heals in place, so the next lapse could
+  find the cap used up. Now the success clears it, and a heal skipped for a
+  busy lock can no longer drive the count below zero.
+
 ### Upgrade
 
 - Edit protected directories in place. Replacing one on the host (rm -rf

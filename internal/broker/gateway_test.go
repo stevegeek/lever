@@ -252,6 +252,29 @@ func TestGatewayAnswersDiscoveryProbesLocally(t *testing.T) {
 	}
 }
 
+// TestGatewayAuditsRevokedDiscoveryProbe: a revoked caller gets the same
+// local answer, but each probe writes an audit deny line.
+func TestGatewayAuditsRevokedDiscoveryProbe(t *testing.T) {
+	for _, method := range []string{"server/discover", "resources/list", "resources/templates/list", "prompts/list"} {
+		var buf bytes.Buffer
+		g := newGatewayRig(t, testConfig(t, withAudit(&buf)), func(u string) registry.Tool { return regTool("db", u, "read") })
+		g.b.Revoke("worker")
+		buf.Reset()
+		w := g.post("worker", `{"jsonrpc":"2.0","id":7,"method":"`+method+`"}`)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "-32601") {
+			t.Fatalf("%s: %d %s, want the local -32601", method, w.Code, w.Body)
+		}
+		if g.reached {
+			t.Fatalf("SECURITY: %s reached the backend", method)
+		}
+		out := buf.String()
+		if !strings.Contains(out, "broker.decision") || !strings.Contains(out, "decision=deny") ||
+			!strings.Contains(out, "revoked: "+method) || !strings.Contains(out, "caller=worker") {
+			t.Fatalf("%s: no audit deny for a revoked caller: %s", method, out)
+		}
+	}
+}
+
 // TestGatewayStillDeniesOtherUnknownMethods: the probe answer is not a
 // catch-all; every other unknown method is a 403 with an audit deny.
 func TestGatewayStillDeniesOtherUnknownMethods(t *testing.T) {

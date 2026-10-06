@@ -167,7 +167,8 @@ version bump moves the block under the new version heading.
   broker gateway denied it as "method not allowlisted". The gateway now
   answers `server/discover`, `resources/list`, `resources/templates/list`
   and `prompts/list` itself with JSON-RPC "method not found" (-32601), or a
-  bodiless 202 for a notification, logs them at debug level only, and never
+  bodiless 202 for a notification, logs them at debug level only (a revoked
+  caller's probe gets the same answer and an audit deny line), and never
   forwards them. Every other unknown method is still denied and audited.
 
 ## [0.29.1] - 2026-10-02

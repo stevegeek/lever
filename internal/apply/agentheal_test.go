@@ -403,3 +403,23 @@ func TestStartManagerHealRunsBeforeTheStaleMountCheck(t *testing.T) {
 		}
 	}
 }
+
+// TestHealAgentSessionSkipsARevokedAgent: `lever revoke` stays the
+// kill-switch for the apply and up heals too — no reset, and the guard is
+// not even asked.
+func TestHealAgentSessionSkipsARevokedAgent(t *testing.T) {
+	f := scionOKRunner()
+	var sink logSink
+	guarded := 0
+	h := SessionHealer{Scion: scion.New(f, scion.Options{}), Probe: &fakeSessionProbe{tok: expiredToken()}, Log: sink.logf,
+		VerifyRole: func(context.Context, string, string) error { guarded++; return nil },
+		Revoked:    func(agent string) bool { return agent == "scratch" }}
+	HealAgentSession(context.Background(), h, "/lever", &scion.Agent{Slug: "scratch", Phase: "running", ContainerStatus: "Up 1 hour"})
+	if countCalls(f, "reset-auth") != 0 || guarded != 0 || !logged(&sink, "is revoked") {
+		t.Fatalf("calls %q guard=%d log %q", joinedCalls(f), guarded, sink.lines)
+	}
+	HealAgentSession(context.Background(), h, "/lever", &scion.Agent{Slug: "hello", Phase: "running", ContainerStatus: "Up 1 hour"})
+	if !sawScionCall(f, "reset-auth hello") {
+		t.Fatalf("an unrevoked agent must still be reset: %q", joinedCalls(f))
+	}
+}

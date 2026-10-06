@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
@@ -1280,5 +1282,36 @@ func TestRecordMounts(t *testing.T) {
 	}
 	if _, err := recordMounts(agents, "nobody"); err == nil {
 		t.Fatal("an absent record must be an error")
+	}
+}
+
+// TestAgentRevoked: the apply heal's revocation check reads the broker's
+// persisted list by cert CN (the manager's slug maps to its CN) and answers
+// revoked when the list cannot be read.
+func TestAgentRevoked(t *testing.T) {
+	dir := writeInstance(t, managerYAML)
+	app, err := config.Load(filepath.Join(dir, config.CanonicalName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	revoked := agentRevoked(app, st)
+	if revoked(app.Name) || revoked("scratch") {
+		t.Fatal("no list, no revocation")
+	}
+	if err := brokerctl.SaveRevocation(st, broker.RevocationState{Revoked: []string{app.ManagerCN(), "scratch"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !revoked(app.Name) || !revoked("scratch") || revoked("other") {
+		t.Fatal("revoked CNs must read as revoked, by the manager's slug too")
+	}
+	if err := os.WriteFile(st.Revocation(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !revoked("other") {
+		t.Fatal("an unreadable list must fail closed")
 	}
 }

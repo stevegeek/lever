@@ -435,7 +435,7 @@ func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
 		var out bytes.Buffer
 		cmd.SetErr(&out)
 		p := &reportProbe{}
-		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, nil, "demo", "/lever")
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, nil, nil, "demo", "/lever")
 		if p.reports != tc.wantReports {
 			t.Fatalf("%s: reports = %d, want %d (%s)", tc.list, p.reports, tc.wantReports, out.String())
 		}
@@ -557,7 +557,7 @@ func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
 		cmd := &cobra.Command{}
 		var out bytes.Buffer
 		cmd.SetErr(&out)
-		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, verify, "demo", "/lever")
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, verify, nil, "demo", "/lever")
 		if len(guarded) != 1 || guarded[0] != "lever/demo" {
 			t.Fatalf("refuse=%v: guard calls %v", refuse, guarded)
 		}

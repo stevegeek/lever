@@ -75,7 +75,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// The heal has its own budget, ahead of the suspend's, so a
 					// slow one cannot cost the manager its suspend.
 					hctx, hcancel := context.WithTimeout(cmd.Context(), stopHealBudget)
-					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), appName, b.MountDest())
+					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), agentRevoked(ia.app, st), appName, b.MountDest())
 					hcancel()
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
@@ -111,7 +111,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 // stopped this way has often also slept past its token's expiry: the heal
 // resets an expired token first (scion reset-auth, behind verifyRole, the
 // pre-role record guard), then reports. verifyRole nil ⇒ no reset.
-func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, name, project string) {
+func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, revoked func(agent string) bool, name, project string) {
 	agents, err := sc.List(ctx, project)
 	if err != nil {
 		return // the suspend that follows reports a hub that cannot answer
@@ -120,7 +120,7 @@ func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Clien
 	if rec == nil || rec.Phase != scion.PhaseStopped {
 		return
 	}
-	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, VerifyRole: verifyRole, Log: func(format string, args ...any) {
+	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, VerifyRole: verifyRole, Revoked: revoked, Log: func(format string, args ...any) {
 		logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...)
 	}}, project, rec)
 }

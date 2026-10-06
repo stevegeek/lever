@@ -313,6 +313,10 @@ type Deps struct {
 	// (HealAgentSession) before it converges the manager, and the workers'
 	// after. nil ⇒ no heal.
 	AgentSession AgentSessionProbe
+	// AgentRevoked reports an agent (by slug) the broker has revoked, read
+	// from the persisted revocation list, so the session heal does not reset
+	// a revoked agent's hub token. nil ⇒ none known.
+	AgentRevoked func(agent string) bool
 	// StartRemoteProxy backs the remote-proxy step (present only when
 	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
 	// the daemonized `lever remote serve` proxy (a config with remote disabled

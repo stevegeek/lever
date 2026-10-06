@@ -1341,6 +1341,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// AgentSession lets start-manager heal an expired agent hub token
 		// and a stopped phase over a live harness (apply.HealAgentSession).
 		AgentSession: jail.AgentProbe{R: b.JailRunner()},
+		AgentRevoked: agentRevoked(w.app, st),
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is
@@ -1533,4 +1534,22 @@ func (w *applyWiring) log(format string, args ...any) {
 		return
 	}
 	logLine(os.Stderr, format, args...)
+}
+
+// agentRevoked answers apply.Deps.AgentRevoked from the broker's persisted
+// revocation list, read at each call (a `lever revoke` may land between two
+// heals). The list holds cert CNs: the manager's slug maps to its CN, a
+// worker's CN is its slug. A list that cannot be read answers revoked.
+func agentRevoked(app *config.App, st state.State) func(agent string) bool {
+	return func(agent string) bool {
+		rs, err := brokerctl.LoadRevocation(st)
+		if err != nil {
+			return true
+		}
+		cn := agent
+		if agent == app.Name {
+			cn = app.ManagerCN()
+		}
+		return slices.Contains(rs.Revoked, cn)
+	}
 }

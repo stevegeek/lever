@@ -118,12 +118,17 @@ type SessionHealer struct {
 	Scion *scion.Client
 	Probe AgentSessionProbe
 	// VerifyRole is the pre-role record guard (Deps.VerifyAgentRole: project
-	// key, agent). The hub mints a reset token from the record's STORED role,
-	// and a record created before scion#1089 stores none, which a later scion
-	// resolves to full hub authority — so the reset runs only once the guard
-	// passes. nil ⇒ no reset (the expiry is still logged with its fix).
+	// key, agent). The hub mints a reset token from the record's stored role,
+	// and a record created before scion#1089 carries a role scion's
+	// migration grandfathered to full (or, on older pins, none, which
+	// resolved to full) — so the reset runs only once the guard passes. nil
+	// ⇒ no reset (the expiry is still logged with its fix).
 	VerifyRole func(ctx context.Context, project, agent string) error
-	Log        func(string, ...any)
+	// Revoked reports an agent (by slug) the broker has revoked: `lever
+	// revoke` stays the kill-switch, so its token is not reset. nil ⇒ no
+	// revocation is known. A read error must answer true (fail closed).
+	Revoked func(agent string) bool
+	Log     func(string, ...any)
 }
 
 // healHubToken runs `scion reset-auth` for an agent whose hub token expired.
@@ -139,6 +144,10 @@ func healHubToken(ctx context.Context, h SessionHealer, project, slug, ref strin
 	}
 	log("agent %q: its hub token expired at %s (guest clock %s) — every reply, status and heartbeat it sends fails with 401; resetting it (scion reset-auth)",
 		slug, tok.Expiry.Format(time.RFC3339), tok.Now.Format(time.RFC3339))
+	if h.Revoked != nil && h.Revoked(slug) {
+		log("agent %q is revoked (lever revoke), or the revocation list cannot be read; its hub token is NOT reset", slug)
+		return
+	}
 	if h.VerifyRole == nil {
 		log("WARNING: agent %q: its hub token was not reset here; run `lever apply`", slug)
 		return
@@ -201,5 +210,5 @@ func workerNames(app *config.App) []string {
 
 // sessionHealer is the SessionHealer apply acts with.
 func (d Deps) sessionHealer() SessionHealer {
-	return SessionHealer{Scion: d.Scion, Probe: d.AgentSession, VerifyRole: d.VerifyAgentRole, Log: d.Log}
+	return SessionHealer{Scion: d.Scion, Probe: d.AgentSession, VerifyRole: d.VerifyAgentRole, Revoked: d.AgentRevoked, Log: d.Log}
 }

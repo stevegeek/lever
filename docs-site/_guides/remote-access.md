@@ -1221,14 +1221,14 @@ remote:
   access control, because an operator has the whole hub (the workspace file API, WebDAV, the
   terminal) and can reach every file in the tree there. Each
   change restarts the proxy (and, for shares or a login, the broker) at the next `lever apply`;
-  a direction change also rewrites the skills, so run `lever init` first.
+  a direction change also rewrites the skills, so run `lever init` first; contacts can then neither post nor upload to an agent until it starts a fresh session (`lever up --fresh` for the manager, purge and start for a worker).
 - **Where files live.** In the agent's own workspace, under `.lever-files/`: `in/<key>/` holds
   uploads and `out/<key>/` holds the files the agent shares, one `<key>` per login (a hash of the
   login, so no login text appears in a path). The manager's exchange is at the tree root
   (`<tree>/.lever-files/`); a worker's is in its `dir`. The manager's workspace is the whole tree,
   so it can see every worker's exchange; its skill tells it not to touch them. An upload is stored
   as `<UTC time>-<name>`, with the name reduced to letters, digits, `.`, `_`, `-` and spaces
-  (no leading dot or dash, no Windows device name). The page shows the name the server stored.
+  (no leading dot or dash, no Windows device name). The page shows the sanitized name; on disk the file is stored as `<UTC timestamp>-<sanitized name>`.
 - **How an agent reads an upload.** The `contact_files` tool (lever-capability MCP server) lists
   lever's host record of one login's files: its uploads (name, size, sha256 and path) and the
   agent's shares to it. The `contact` argument is required, and no call lists every login's

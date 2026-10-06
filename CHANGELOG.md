@@ -99,6 +99,10 @@ version bump moves the block under the new version heading.
   after `lever up`). Now the list has its own 15 s bound, and up to four
   suspends run at once, each under its own 20 s bound. The lines are
   printed in config order once all have returned.
+- **The operator skill names the other resume answers.** Its resume section
+  now says when a forced resume happens and what the 409 (hub refusal or
+  stored role), 503 (busy) and 502 answers mean, and that a message to a
+  worker that is not running answers 409. Run `lever init` to refresh the skills.
 
 ### Upgrade
 

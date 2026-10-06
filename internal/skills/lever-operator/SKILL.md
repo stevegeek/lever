@@ -239,6 +239,15 @@ different task, ask the operator.
   record" (never started, purged, or a new jail), the worker is not broken:
   start it with `agent start <worker> --task "<task>"`. Your own notes can
   list workers the hub does not have; `agent list` is the truth.
+  Other resume answers: a worker in phase error, or one whose record says
+  running while its container is down, gets the forced resume; if the hub
+  refuses it (409 "the hub refused to resume", record kept), the record is
+  still changing phase: check `agent list` and try again. A 409 about the
+  record's stored role is a refusal: tell the operator, do not retry. A 503
+  "busy" means another start or resume of that worker is under way: wait,
+  then try again. A 502 that names `lever worker purge` means the worker did
+  not come back: ask the operator. A message to a worker that is not running
+  answers 409 with its phase: resume it first, then send.
 - Give an existing worker NEW work: don't re-start it — `msg send --to <worker>`
   once it's running (a worker is a persistent agent; `--task` is only its boot
   prompt). A message to a worker that is not running is refused (409) and

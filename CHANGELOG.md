@@ -149,7 +149,11 @@ version bump moves the block under the new version heading.
   Cf), U+2028 and U+2029, the blank glyphs U+2800, U+3164, U+115F,
   U+1160 and U+FFA0, the variation selectors (U+FE00-FE0F,
   U+E0100-E01EF), U+034F and U+17B4/U+17B5 now become U+FFFD. Other
-  combining marks pass.
+  combining marks pass. This includes the zero-width joiner and non-joiner
+  (U+200D, U+200C): an emoji ZWJ sequence shows as its parts with U+FFFD
+  between them (👨‍💻 as 👨�💻), and Persian or Hindi text that uses ZWNJ
+  shows U+FFFD where it stood. The same holds for worker event messages
+  (`msg list`, `watch`).
 - **A worker's own text in an event is marked as the worker's.** scion builds
   a notification's message from the watched worker's own `Message` and
   `TaskSummary`, and `/msg/list`, `lever-manager msg list` and

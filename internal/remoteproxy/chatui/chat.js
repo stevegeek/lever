@@ -18,6 +18,7 @@ import {
   LIST_MS,
   MAX_MESSAGE,
   NOT_SHOWN,
+  NOT_YET,
   WAKE_POLLS,
   WAKE_POLL_MS,
   agentList,
@@ -370,14 +371,15 @@ async function reloadContacts() {
 }
 
 // renderTranscript draws the open transcript, all text. A row the contact
-// is not shown carries the mark.
+// is not shown carries a mark: "not yet read" when a record would show it
+// on the contact's next read, else "not shown".
 function renderTranscript(toBottom) {
   const stick = toBottom || nearBottom();
   const frag = document.createDocumentFragment();
   for (const m of sortedMessages(transcript)) {
     const row = document.createElement('div');
     // m.from is one of transcriptItems' fixed words.
-    row.className = `msg ${m.from}${m.shownToContact ? '' : ' unshown'}`;
+    row.className = `msg ${m.from}${m.shownToContact ? '' : m.pending ? ' pending' : ' unshown'}`;
     const meta = document.createElement('div');
     meta.className = 'meta';
     setText(meta, `${transcriptWho(m, view.login, view.name)} ${when(m)}`.trim());
@@ -388,7 +390,7 @@ function renderTranscript(toBottom) {
     if (!m.shownToContact) {
       const mark = document.createElement('div');
       mark.className = 'mark';
-      setText(mark, NOT_SHOWN);
+      setText(mark, m.pending ? NOT_YET : NOT_SHOWN);
       row.append(mark);
     }
     frag.append(row);

@@ -1498,7 +1498,8 @@ test('operator: a Contacts section; a contact gets none and never asks', async (
 test('a transcript is read-only, marks what the contact is not shown, and writes nothing', async () => {
   const env = await load(hubWith({
     contacts: CONTACTS,
-    transcript: () => ({ status: 200, body: { matched: true, messages: [T(2, 'agent', 'CANARY', false), T(1, 'contact', 'hello', true), T(3, 'system', 'started', true)] } }),
+    transcript: () => ({ status: 200, body: { matched: true, messages: [T(2, 'agent', 'CANARY', false), T(1, 'contact', 'hello', true), T(3, 'system', 'started', true),
+      { ...T(4, 'agent', 'soon', false), pending: true }] } }),
   }));
   await env.clickContact(0);
   await env.clickContactAgent(0, 0);
@@ -1512,6 +1513,7 @@ test('a transcript is read-only, marks what the contact is not shown, and writes
   assert.match(rows[0], /^msg contact: c@x .* \/ hello$/);
   assert.match(rows[1], /^msg agent unshown: w1 .* \/ CANARY \/ not shown to the contact$/);
   assert.match(rows[2], /^msg system: hub .* \/ started$/);
+  assert.match(rows[3], /^msg agent pending: w1 .* \/ soon \/ not yet read by the contact$/);
   await env.poll();
   assert.equal(env.calls.filter((c) => c.method !== 'GET').length, 0, 'no post, no read marker');
 });

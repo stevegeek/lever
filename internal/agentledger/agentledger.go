@@ -368,14 +368,33 @@ func (l *Ledger) Authorize(a Auth, now time.Time, allow func(View) error) error 
 // before the answer. bound lists the record ids newly bound (for the audit).
 // A failed append keeps none of this call's new bindings.
 func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (map[string]bool, []string, error) {
+	keep, _, bound, err := l.match(agent, contact, msgs, now, true)
+	return keep, bound, err
+}
+
+// Peek answers what Match would keep for msgs now, and writes nothing: a
+// bound message by its binding, an unbound one by whether a record would
+// bind it. pending is the kept messages of the second kind: no contact read
+// has bound them yet, and which of them a record finally binds depends on
+// the pages the contact reads. The operator's view of a contact's
+// conversation peeks, so its reads (of any page, in any order) never decide
+// which message a record shows; only the contact's own reads bind.
+func (l *Ledger) Peek(agent, contact string, msgs []Candidate, now time.Time) (keep, pending map[string]bool, err error) {
+	keep, pending, _, err = l.match(agent, contact, msgs, now, false)
+	return keep, pending, err
+}
+
+// match is Match, appending the new bindings only when write is set.
+// pending is the message ids this call bound (or would bind).
+func (l *Ledger) match(agent, contact string, msgs []Candidate, now time.Time, write bool) (keep, pending map[string]bool, bound []string, err error) {
 	unlock, err := l.lock()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer unlock()
 	s, err := l.read(FileFor(contact))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	msgs = slices.Clone(msgs)
 	slices.SortFunc(msgs, func(a, b Candidate) int {
@@ -384,8 +403,7 @@ func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (
 		}
 		return strings.Compare(a.MessageID, b.MessageID)
 	})
-	keep := map[string]bool{}
-	var bound []string
+	keep, pending = map[string]bool{}, map[string]bool{}
 	var lines []line
 	for _, m := range msgs {
 		if !messageRE.MatchString(m.MessageID) || !shaRE.MatchString(m.SHA256) {
@@ -422,7 +440,10 @@ func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (
 		s.used[a.ID], s.shown[m.MessageID] = m.MessageID, ln
 		lines = append(lines, ln)
 		bound = append(bound, a.ID)
-		keep[m.MessageID] = true
+		keep[m.MessageID], pending[m.MessageID] = true, true
+	}
+	if !write {
+		return keep, pending, nil, nil
 	}
 	f := l.file(FileFor(contact))
 	for _, ln := range lines {
@@ -432,8 +453,8 @@ func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (
 			for _, b := range lines {
 				delete(keep, b.MessageID)
 			}
-			return keep, nil, err
+			return keep, map[string]bool{}, nil, err
 		}
 	}
-	return keep, bound, nil
+	return keep, pending, bound, nil
 }

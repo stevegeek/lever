@@ -81,14 +81,19 @@ func TestOperatorMatchPeekBindsNothing(t *testing.T) {
 	m2 := wire.AgentMessageRef{ID: "11111111-0000-0000-0000-000000000002", SHA256: agentledger.HashText("v3 is ready"), CreatedAt: now.Add(time.Second)}
 	audit := f.audit.String()
 	rec, out := postMatch(t, f.b, wire.AgentMessagesMatchRequest{Contact: "client@example.org", Agent: "scratch", Peek: true, Messages: []wire.AgentMessageRef{m2}})
-	if rec.Code != http.StatusOK || len(out.Keep) != 1 || out.Keep[0] != m2.ID {
-		t.Fatalf("peek: %d %s, want the row the contact's read would keep", rec.Code, rec.Body)
+	if rec.Code != http.StatusOK || len(out.Keep) != 1 || out.Keep[0] != m2.ID || len(out.Pending) != 1 || out.Pending[0] != m2.ID {
+		t.Fatalf("peek: %d %s, want the row the contact's read would keep, pending", rec.Code, rec.Body)
 	}
 	if f.audit.String() != audit {
 		t.Fatal("a peek binds nothing, so it audits no binding")
 	}
 	rec, out = postMatch(t, f.b, wire.AgentMessagesMatchRequest{Contact: "client@example.org", Agent: "scratch", Messages: []wire.AgentMessageRef{m2, m1}})
-	if rec.Code != http.StatusOK || len(out.Keep) != 1 || out.Keep[0] != m1.ID {
+	if rec.Code != http.StatusOK || len(out.Keep) != 1 || out.Keep[0] != m1.ID || out.Pending != nil {
 		t.Fatalf("the contact's read after the peek: %d %s, want the earliest bound", rec.Code, rec.Body)
+	}
+	// A peek after the binding: bound, so not pending.
+	rec, out = postMatch(t, f.b, wire.AgentMessagesMatchRequest{Contact: "client@example.org", Agent: "scratch", Peek: true, Messages: []wire.AgentMessageRef{m2, m1}})
+	if rec.Code != http.StatusOK || len(out.Keep) != 1 || out.Keep[0] != m1.ID || len(out.Pending) != 0 {
+		t.Fatalf("peek after the binding: %d %s", rec.Code, rec.Body)
 	}
 }

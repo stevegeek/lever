@@ -324,13 +324,13 @@ func TestPeekWritesNothing(t *testing.T) {
 	m2 := Candidate{MessageID: "m2", SHA256: HashText("hello"), CreatedAt: t0.Add(2 * time.Minute)}
 	files, _ := filepath.Glob(filepath.Join(dir, "c-*.jsonl"))
 	before, _ := os.ReadFile(files[0])
-	keep, err := l.Peek("worker", "c@x", []Candidate{m2}, t0.Add(3*time.Minute))
-	if err != nil || !keep["m2"] {
-		t.Fatalf("peek of the later row alone: %v %v, want it would bind", keep, err)
+	keep, pending, err := l.Peek("worker", "c@x", []Candidate{m2}, t0.Add(3*time.Minute))
+	if err != nil || !keep["m2"] || !pending["m2"] {
+		t.Fatalf("peek of the later row alone: %v %v %v, want it would bind (pending)", keep, pending, err)
 	}
-	keep, err = l.Peek("worker", "c@x", []Candidate{m2, m1}, t0.Add(3*time.Minute))
-	if err != nil || !keep["m1"] || keep["m2"] {
-		t.Fatalf("peek of both: %v %v, want only the earliest", keep, err)
+	keep, pending, err = l.Peek("worker", "c@x", []Candidate{m2, m1}, t0.Add(3*time.Minute))
+	if err != nil || !keep["m1"] || keep["m2"] || !pending["m1"] || len(pending) != 1 {
+		t.Fatalf("peek of both: %v %v %v, want only the earliest, pending", keep, pending, err)
 	}
 	if after, _ := os.ReadFile(files[0]); string(after) != string(before) {
 		t.Fatal("a peek must not write")
@@ -339,8 +339,8 @@ func TestPeekWritesNothing(t *testing.T) {
 	if err != nil || !keep["m1"] || keep["m2"] || len(bound) != 1 || bound[0] != a.ID {
 		t.Fatalf("the contact's match after the peeks: keep=%v bound=%v err=%v", keep, bound, err)
 	}
-	// A peek after the binding sees it.
-	if keep, _ := l.Peek("worker", "c@x", []Candidate{m2, m1}, t0.Add(time.Hour)); !keep["m1"] || keep["m2"] {
-		t.Fatalf("peek after the binding: %v", keep)
+	// A peek after the binding sees it, bound: not pending.
+	if keep, pending, _ := l.Peek("worker", "c@x", []Candidate{m2, m1}, t0.Add(time.Hour)); !keep["m1"] || keep["m2"] || len(pending) != 0 {
+		t.Fatalf("peek after the binding: %v %v", keep, pending)
 	}
 }

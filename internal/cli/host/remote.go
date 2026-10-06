@@ -393,26 +393,34 @@ const agentMessagesTimeout = 10 * time.Second
 // directory inside the tree there is no operator socket: every call fails,
 // and the proxy hides every agent row. Any answer but 200 is an error.
 func remoteAgentMessages(app *config.App, st state.State) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
-	return remoteAgentMatcher(app, st, false)
+	ask := remoteAgentMatcher(app, st, false)
+	if ask == nil {
+		return nil
+	}
+	return func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
+		keep, _, err := ask(ctx, contact, agent, msgs)
+		return keep, err
+	}
 }
 
 // remoteAgentMessagesPeek is remoteAgentMessages without binding (the
-// request's peek): the operator view's question, which writes nothing.
-func remoteAgentMessagesPeek(app *config.App, st state.State) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
+// request's peek): the operator view's question, which writes nothing. It
+// also answers which kept rows are pending (no contact read bound them).
+func remoteAgentMessagesPeek(app *config.App, st state.State) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (keep, pending map[string]bool, err error) {
 	return remoteAgentMatcher(app, st, true)
 }
 
-func remoteAgentMatcher(app *config.App, st state.State, peek bool) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
+func remoteAgentMatcher(app *config.App, st state.State, peek bool) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (keep, pending map[string]bool, err error) {
 	if !app.AgentMessagesOn() {
 		return nil
 	}
 	if brokerctl.StateInsideTree(app, st) {
-		return func(context.Context, string, string, []remoteproxy.AgentMessage) (map[string]bool, error) {
-			return nil, errors.New("no operator socket: the state directory is inside the tree")
+		return func(context.Context, string, string, []remoteproxy.AgentMessage) (map[string]bool, map[string]bool, error) {
+			return nil, nil, errors.New("no operator socket: the state directory is inside the tree")
 		}
 	}
 	client := udsClient(st.OperatorSock())
-	return func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
+	return func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, map[string]bool, error) {
 		ctx, cancel := context.WithTimeout(ctx, agentMessagesTimeout)
 		defer cancel()
 		req := wire.AgentMessagesMatchRequest{Contact: contact, Agent: agent, Peek: peek, Messages: make([]wire.AgentMessageRef, len(msgs))}
@@ -421,7 +429,7 @@ func remoteAgentMatcher(app *config.App, st state.State, peek bool) func(ctx con
 		}
 		var out wire.AgentMessagesMatchResponse
 		if err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorAgentMessagesMatch, req, &out); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		// Only ids this question named: an id the broker adds is ignored.
 		asked := make(map[string]bool, len(msgs))
@@ -434,7 +442,14 @@ func remoteAgentMatcher(app *config.App, st state.State, peek bool) func(ctx con
 				keep[id] = true
 			}
 		}
-		return keep, nil
+		// Pending only for a peek, and only among the kept ids.
+		pending := map[string]bool{}
+		for _, id := range out.Pending {
+			if peek && keep[id] {
+				pending[id] = true
+			}
+		}
+		return keep, pending, nil
 	}
 }
 

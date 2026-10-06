@@ -188,6 +188,11 @@ type viewRow struct {
 	Text           string `json:"text"`
 	CreatedAt      string `json:"createdAt"`
 	ShownToContact bool   `json:"shownToContact"`
+	// Pending marks an agent row a record would bind but no contact read
+	// has bound yet: the contact has not been shown it, and will be when
+	// its read binds this row (the record may bind another of the same
+	// text instead, depending on the page the contact reads).
+	Pending bool `json:"pending,omitempty"`
 }
 
 type viewAnswer struct {
@@ -339,8 +344,9 @@ func (g *gate) staleBinding(ctx context.Context, cookie, uid string) bool {
 // filterHistory applies); with agent messages off the contact sees every
 // row. The broker is asked with a peek: the operator's read binds no
 // record, so which of two same-text messages a record shows is decided by
-// the contact's own reads alone. An unreadable row reads as an agent row with no text, as in
-// filterHistory.
+// the contact's own reads alone, and the peek tells a bound row (shown)
+// from one a record would bind (pending). The marks are per page. An
+// unreadable row reads as an agent row with no text, as in filterHistory.
 func (g *gate) viewRows(ctx context.Context, contact, agent, agentID, uid string, body []byte) (viewAnswer, bool) {
 	var doc struct {
 		Messages   []json.RawMessage `json:"messages"`
@@ -357,16 +363,28 @@ func (g *gate) viewRows(ctx context.Context, contact, agent, agentID, uid string
 	}
 	ans := viewAnswer{Messages: []viewRow{}, NextCursor: doc.NextCursor, Matched: true}
 	var shown map[string]bool // nil: every row is shown
+	pending := map[string]bool{}
 	if g.cfg.MatchAgentMessages != nil {
-		keep, err := askAgentRows(ctx, g.cfg.PeekAgentMessages, contact, agent, agentID, uid, rows)
+		var peek func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
+		if g.cfg.PeekAgentMessages != nil {
+			peek = func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error) {
+				keep, p, err := g.cfg.PeekAgentMessages(ctx, contact, agent, msgs)
+				pending = p
+				return keep, err
+			}
+		}
+		keep, err := askAgentRows(ctx, peek, contact, agent, agentID, uid, rows)
 		if err != nil {
-			keep, ans.Matched = map[string]bool{}, false
+			keep, pending, ans.Matched = map[string]bool{}, map[string]bool{}, false
 		}
 		shown = contactShown(rows, keep, uid, agentID)
 	}
 	for _, m := range rows {
+		// Only a row the contact's rule keeps can be pending: askAgentRows
+		// already dropped every id the question did not name.
+		p := shown != nil && shown[m.ID] && agentRow(m, uid, agentID) && pending[m.ID]
 		ans.Messages = append(ans.Messages, viewRow{ID: m.ID, From: rowFrom(m, uid, agentID), Text: m.Msg,
-			CreatedAt: m.CreatedAt, ShownToContact: shown == nil || shown[m.ID]})
+			CreatedAt: m.CreatedAt, ShownToContact: (shown == nil || shown[m.ID]) && !p, Pending: p})
 	}
 	return ans, true
 }

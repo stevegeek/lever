@@ -1065,7 +1065,11 @@ login never gets it: the page does not show it, and the routes refuse a contact 
   read again every 30 seconds while it is open and with **Refresh**. "Load earlier messages"
   pages back. With `agent_messages` on, every agent message the contact is not shown (see
   [Messages agents start](#messages-agents-start)) is marked "not shown to the contact", so you
-  can spot an agent that writes to a contact outside the rules. When the broker does not answer,
+  can spot an agent that writes to a contact outside the rules. An agent message that a record
+  would show but no read of the contact has bound yet is marked "not yet read by the contact":
+  the contact has not seen it, and sees it on its next read. The marks are per page: when two
+  messages carry the same text and one record, which of them the record finally shows depends on
+  the page the contact reads first, so a "not yet read" mark can turn into "not shown". When the broker does not answer,
   the page says that which agent messages the contact sees is not known (the contact is then
   shown none).
 - **How it reads.** The hub lets a person read only the direct messages that name them, so the

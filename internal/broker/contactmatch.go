@@ -44,10 +44,10 @@ func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request
 	for i, m := range req.Messages {
 		cands[i] = agentledger.Candidate{MessageID: m.ID, SHA256: m.SHA256, CreatedAt: m.CreatedAt}
 	}
-	var keep map[string]bool
+	var keep, pending map[string]bool
 	var bound []string
 	if req.Peek {
-		keep, err = led.Peek(req.Agent, req.Contact, cands, time.Now())
+		keep, pending, err = led.Peek(req.Agent, req.Contact, cands, time.Now())
 	} else {
 		keep, bound, err = led.Match(req.Agent, req.Contact, cands, time.Now())
 	}
@@ -63,6 +63,9 @@ func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request
 	for _, m := range req.Messages {
 		if keep[m.ID] {
 			out.Keep = append(out.Keep, m.ID)
+			if pending[m.ID] {
+				out.Pending = append(out.Pending, m.ID)
+			}
 		}
 	}
 	writeJSON(w, out)

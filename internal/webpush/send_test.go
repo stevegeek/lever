@@ -27,7 +27,8 @@ func TestPublicAddr(t *testing.T) {
 	for _, s := range []string{"10.0.0.5", "172.16.1.1", "192.168.1.1", "127.0.0.1", "0.0.0.0", "169.254.169.254",
 		"100.100.100.100", "100.64.0.1", "192.0.2.1", "198.18.0.1", "224.0.0.1", "255.255.255.255", "240.0.0.1",
 		"::1", "::", "fe80::1", "fd7a:115c:a1e0::1", "fc00::1", "ff02::1", "::ffff:10.0.0.1", "::ffff:127.0.0.1",
-		"64:ff9b::a00:1", "64:ff9b:1::1", "2002:a00:1::", "2001::1", "2001:db8::1"} {
+		"64:ff9b::a00:1", "64:ff9b:1::1", "2002:a00:1::", "2001::1", "2001:db8::1",
+		"::a00:1", "::8efa:b40a", "::ffff:0:a00:1", "::ffff:0:8efa:b40a", "192.88.99.1", "::ffff:100.64.1.1", "::ffff:100.100.100.100"} {
 		if publicAddr(netip.MustParseAddr(s)) {
 			t.Errorf("%s admitted", s)
 		}
@@ -191,5 +192,53 @@ func TestSendErrorNamesTheHostOnly(t *testing.T) {
 	err := (&Sender{Key: key, Subject: "mailto:x@y", Test: th, Client: NewClient(th)}).Send(ctx, sub, []byte(`{}`))
 	if err == nil || strings.Contains(err.Error(), "SECRET-TOKEN") {
 		t.Fatalf("err %v must not carry the endpoint path", err)
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestSendHTTPSAudience: for a real push service the VAPID audience is the
+// https origin with no port, and the request goes to the endpoint as given.
+func TestSendHTTPSAudience(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ua, _ := ecdh.P256().GenerateKey(rand.Reader)
+	auth := make([]byte, 16)
+	rand.Read(auth)
+	now := time.Now()
+	var got *http.Request
+	client := &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		got = r
+		return &http.Response{StatusCode: 201, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	})}
+	s := &Sender{Key: key, Subject: "mailto:x@y", Client: client, Now: func() time.Time { return now }}
+	sub := Subscription{Endpoint: "https://fcm.googleapis.com/fcm/send/abc", P256DH: b64.EncodeToString(ua.PublicKey().Bytes()), Auth: b64.EncodeToString(auth)}
+	if err := s.Send(context.Background(), sub, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got.URL.String() != sub.Endpoint {
+		t.Fatalf("posted to %s", got.URL)
+	}
+	if err := VerifyVAPID(got.Header.Get("Authorization"), "https://fcm.googleapis.com", now); err != nil {
+		t.Fatalf("aud: %v", err)
+	}
+}
+
+// TestClientUsesNoProxy: an HTTP proxy from the environment would make the
+// dial check judge the proxy's address, not the push service's.
+func TestClientUsesNoProxy(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://10.0.0.1:3128")
+	t.Setenv("HTTP_PROXY", "http://10.0.0.1:3128")
+	c := NewClient(nil)
+	tr := c.Transport.(*http.Transport)
+	if tr.Proxy != nil {
+		req, _ := http.NewRequest("POST", "https://fcm.googleapis.com/x", nil)
+		if u, _ := tr.Proxy(req); u != nil {
+			t.Fatalf("the push client goes through %s", u)
+		}
+	}
+	if tr.DialContext == nil || c.CheckRedirect == nil {
+		t.Fatal("the push client lost its guarded dialer or its redirect refusal")
 	}
 }

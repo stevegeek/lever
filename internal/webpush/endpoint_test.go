@@ -12,7 +12,6 @@ const goodAuth = vecAuth
 func TestCheckEndpointAllowList(t *testing.T) {
 	for _, ok := range []string{
 		"https://fcm.googleapis.com/fcm/send/abc:APA91b",
-		"https://fcm.googleapis.com:443/wp/abc",
 		"https://web.push.apple.com/QGy2wDm9",
 		"https://updates.push.services.mozilla.com/wpush/v2/gAAAA",
 		"https://wns2-par02p.notify.windows.com/w/?token=BQYAAA",
@@ -24,6 +23,12 @@ func TestCheckEndpointAllowList(t *testing.T) {
 	for _, bad := range []string{
 		"http://fcm.googleapis.com/fcm/send/x",                    // http
 		"https://fcm.googleapis.com:8443/x",                       // port
+		"https://fcm.googleapis.com:443/wp/abc",                   // explicit default port: a second spelling
+		"https://fcm.googleapis.com:/wp/abc",                      // empty port
+		"HTTPS://fcm.googleapis.com/wp/abc",                       // scheme case
+		"Https://fcm.googleapis.com/wp/abc",                       // scheme case
+		"https://fcm.googleapis.com/wp/%61bc",                     // escaped letter: prints as /wp/abc
+		"https://fcm.googleapis.com/wp/abc?",                      // empty query: prints without it
 		"https://user@fcm.googleapis.com/x",                       // userinfo
 		"https://fcm.googleapis.com.evil.test/x",                  // suffix trick
 		"https://evilfcm.googleapis.com/x",                        // not exact

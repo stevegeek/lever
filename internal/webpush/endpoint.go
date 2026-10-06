@@ -76,19 +76,24 @@ func CheckEndpoint(endpoint string, test TestHosts) (*url.URL, error) {
 		!strings.HasPrefix(u.EscapedPath(), "/") {
 		return nil, ErrEndpoint
 	}
+	// One spelling per endpoint: the scheme in lowercase as written, no
+	// port at all (not even :443 or an empty one), and the URL exactly as
+	// it prints, with no escape a plain path would not have (RawPath) and no
+	// empty query. The store compares endpoints as strings, so a second
+	// spelling of one device's endpoint would be a second subscription.
+	if u.String() != endpoint || u.RawPath != "" || u.ForceQuery {
+		return nil, ErrEndpoint
+	}
 	if test[u.Host] {
-		if u.Scheme != "http" {
+		if !strings.HasPrefix(endpoint, "http://") {
 			return nil, ErrEndpoint
 		}
 		return u, nil
 	}
-	if u.Scheme != "https" || strings.HasPrefix(u.Host, "[") {
+	if !strings.HasPrefix(endpoint, "https://") || strings.HasPrefix(u.Host, "[") || strings.Contains(u.Host, ":") {
 		return nil, ErrEndpoint
 	}
-	host, port := u.Hostname(), u.Port()
-	if port != "" && port != "443" {
-		return nil, ErrEndpoint
-	}
+	host := u.Hostname()
 	if _, err := netip.ParseAddr(host); err == nil {
 		return nil, ErrEndpoint
 	}

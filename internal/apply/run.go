@@ -1218,9 +1218,11 @@ func ManagerTreeMountsFix(g TreeMountGaps) string {
 // the container from them, so a mount lever made at the create stays after
 // the config stops asking for it, each list by tree-relative path:
 //
-//   - Gone: the host directory behind the mount no longer exists. podman
-//     cannot recreate the container ("statfs …: no such file or
-//     directory"), so the next resume fails (card #157);
+//   - Gone: the host directory behind the mount no longer exists, or a
+//     symbolic link now stands in its path (lever does not follow it on the
+//     host; see treePathLinked). podman cannot recreate the container
+//     ("statfs …: no such file or directory"), or would mount whatever the
+//     link points at, so the resume is refused (card #157);
 //   - DroppedReadOnly: an entry no longer in manager.read_only, still
 //     mounted read-only — the manager cannot write it until a fresh create;
 //   - DroppedPins: a pin the plan no longer has (a removed entry's
@@ -1269,7 +1271,7 @@ func (s StaleTreeMounts) String() string {
 		}
 		parts = append(parts, strings.Join(safe, ", ")+" "+what)
 	}
-	add(s.Gone, "mounted by the manager record but no longer on the host: podman cannot recreate the container, so the next resume fails (statfs: no such file or directory)")
+	add(s.Gone, "mounted by the manager record but no longer on the host (missing, or replaced by a symbolic link lever does not follow): podman cannot recreate the container from it, so the next resume fails or would mount what the link points at")
 	add(s.DroppedReadOnly, "still mounted read-only although no longer in manager.read_only (the record keeps its mounts until a fresh create)")
 	add(s.DroppedPins, "still pinned (mounted over itself) although the config no longer asks for it (the record keeps its mounts until a fresh create)")
 	return strings.Join(parts, "; ")
@@ -1281,7 +1283,7 @@ func (s StaleTreeMounts) String() string {
 func (s StaleTreeMounts) Fix() string {
 	const fresh = "back up the manager's conversation first, then run `lever up --fresh` (the fresh start deletes the manager record and its conversation, and creates the manager with the mounts the config names now)"
 	if len(s.Gone) > 0 {
-		return "recreate each missing directory on the host (an empty directory is enough) and run the command again; or, to drop the mounts, " + fresh
+		return "recreate each missing directory on the host as a real directory (an empty one is enough; replace a symbolic link with one) and run the command again; or, to drop the mounts, " + fresh
 	}
 	return "keep these directories until the next fresh create (a missing one blocks the resume); to drop the mounts now, " + fresh
 }
@@ -1303,11 +1305,9 @@ func ManagerStaleTreeMounts(jp, tree string, want []config.TreeMount, got []jail
 		if !ok {
 			continue
 		}
-		// Stat, not Lstat: podman follows a link when it statfs's the
-		// source, so a link to a missing target is as gone as no entry.
-		_, err := os.Stat(filepath.Join(tree, filepath.FromSlash(rel)))
+		linked, err := treePathLinked(tree, rel)
 		switch {
-		case errors.Is(err, os.ErrNotExist):
+		case linked, errors.Is(err, os.ErrNotExist):
 			s.Gone = append(s.Gone, rel)
 		case planned[rel]:
 		case m.RW:
@@ -1320,6 +1320,29 @@ func ManagerStaleTreeMounts(jp, tree string, want []config.TreeMount, got []jail
 	slices.Sort(s.DroppedReadOnly)
 	slices.Sort(s.DroppedPins)
 	return s
+}
+
+// treePathLinked walks rel under tree with Lstat, one component at a time,
+// and reports whether any component is a symbolic link. It never follows a
+// link on the host: the tree is agent-writable, and a link could point at a
+// path whose stat blocks (a macOS autofs path such as /net/<host>/x) or at
+// anything outside the tree, which a resume would then mount into the
+// manager. A link anywhere on the path therefore counts as gone (a dangling
+// one included); the error is the first Lstat's (os.ErrNotExist for a
+// missing component).
+func treePathLinked(tree, rel string) (bool, error) {
+	p := tree
+	for _, part := range strings.Split(rel, "/") {
+		p = filepath.Join(p, part)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return false, err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // treeSelfMount reports whether m is a tree directory mounted over its own

@@ -447,7 +447,7 @@ func TestManagerStaleTreeMounts(t *testing.T) {
 		{Source: "/lever/tmp", Destination: "/tmp"},                 // outside the workspace
 	}
 	// A dropped dir replaced by a symbolic link to a missing target is gone
-	// too: podman follows the link and its statfs fails.
+	// too (lever does not follow links on the host).
 	if err := os.Symlink(filepath.Join(tree, "nowhere"), filepath.Join(tree, "dangling")); err != nil {
 		t.Fatal(err)
 	}
@@ -482,5 +482,42 @@ func TestManagerStaleTreeMounts(t *testing.T) {
 	// Paths are sanitized for the terminal.
 	if str := (StaleTreeMounts{Gone: []string{"x\x1b[2J"}}).String(); strings.Contains(str, "\x1b") {
 		t.Fatalf("unsanitized: %q", str)
+	}
+}
+
+// TestManagerStaleTreeMountsDoesNotFollowLinks: a symbolic link anywhere on
+// a mounted path counts as gone without being followed on the host — even
+// one to an existing directory, which an agent could aim at a path whose
+// stat blocks (macOS autofs /net/<host>/x) or at anything a resume would
+// then mount into the manager.
+func TestManagerStaleTreeMountsDoesNotFollowLinks(t *testing.T) {
+	tree := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(tree, "kb")); err != nil {
+		t.Fatal(err)
+	}
+	// An intermediate component replaced by a link: the leaf exists through
+	// it, but the walk stops at the link.
+	if err := os.MkdirAll(filepath.Join(outside, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(tree, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tree, "real", "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := []config.TreeMount{{Rel: "real/dir", ReadOnly: true}}
+	got := []jail.Mount{
+		{Source: "/lever/kb", Destination: "/workspace/kb"},
+		{Source: "/lever/a/tools", Destination: "/workspace/a/tools"},
+		{Source: "/lever/real/dir", Destination: "/workspace/real/dir"},
+	}
+	s := ManagerStaleTreeMounts("/lever", tree, want, got)
+	if !reflect.DeepEqual(s.Gone, []string{"a/tools", "kb"}) || len(s.DroppedReadOnly) != 0 {
+		t.Fatalf("stale = %+v", s)
+	}
+	if !strings.Contains(s.String(), "replaced by a symbolic link") || !strings.Contains(s.Fix(), "replace a symbolic link") {
+		t.Fatalf("wording: %q / %q", s, s.Fix())
 	}
 }

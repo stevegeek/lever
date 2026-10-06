@@ -580,6 +580,9 @@ func (a *App) validateRemote() error {
 		if !filesExtRE.MatchString(e) {
 			return fmt.Errorf("config: remote: files.extensions %q: lowercase letters and digits only, 1 to 10, no dot", e)
 		}
+		if slices.Contains(filesActiveExts, e) {
+			return fmt.Errorf("config: remote: files.extensions %q is active content a browser runs; share it inside a zip", e)
+		}
 		if seenExt[e] {
 			return fmt.Errorf("config: remote: files.extensions lists %q twice", e)
 		}
@@ -609,6 +612,11 @@ func (a *App) validateRemote() error {
 
 // filesExtRE is one remote.files extension: lowercase, no dot.
 var filesExtRE = regexp.MustCompile(`^[a-z0-9]{1,10}$`)
+
+// filesActiveExts are types a browser renders or runs. Downloads are
+// attachments with nosniff and a sandbox CSP; refusing these too keeps one
+// mistake in those headers from serving a page on lever's origin.
+var filesActiveExts = []string{"html", "htm", "xhtml", "shtml", "svg", "js", "mjs", "xml"}
 
 // validRemoteUserTier checks an entry's tier and agent list: a contact must
 // list the agents it may reach (declared workers or the manager, each once);

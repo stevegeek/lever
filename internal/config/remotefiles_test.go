@@ -29,6 +29,14 @@ func TestRemoteFilesValidation(t *testing.T) {
 		"ext dot":          {func(a *App) { a.Remote.Files.Extensions = []string{".pdf"} }, "extensions"},
 		"ext upper":        {func(a *App) { a.Remote.Files.Extensions = []string{"PDF"} }, "extensions"},
 		"ext dup":          {func(a *App) { a.Remote.Files.Extensions = []string{"pdf", "pdf"} }, "twice"},
+		"ext html":         {func(a *App) { a.Remote.Files.Extensions = []string{"pdf", "html"} }, "active content"},
+		"ext svg":          {func(a *App) { a.Remote.Files.Extensions = []string{"svg"} }, "active content"},
+		"ext mjs":          {func(a *App) { a.Remote.Files.Extensions = []string{"mjs"} }, "active content"},
+		"read_only upper":  {func(a *App) { a.Remote.Files.Enabled = true; a.Manager.ReadOnly = []string{".LEVER-FILES"} }, "read_only"},
+		"read_only inside": {func(a *App) { a.Remote.Files.Enabled = true; a.Manager.ReadOnly = []string{".lever-files/out"} }, "read_only"},
+		"read_only root":   {func(a *App) { a.Remote.Files.Enabled = true; a.Manager.ReadOnly = []string{"."} }, "read_only"},
+		"read_only other":  {func(a *App) { a.Remote.Files.Enabled = true; a.Manager.ReadOnly = []string{"kb"} }, ""},
+		"read_only off":    {func(a *App) { a.Manager.ReadOnly = []string{".lever-files"} }, ""},
 		"worker in files":  {func(a *App) { a.Remote.Files.Enabled = true; a.Workers[0].Dir = ".Lever-Files/w1" }, "overlaps"},
 		"read_only files":  {func(a *App) { a.Remote.Files.Enabled = true; a.Manager.ReadOnly = []string{".lever-files"} }, "read_only"},
 		"worker off files": {func(a *App) { a.Workers[0].Dir = ".lever-files/w1" }, ""},
@@ -64,5 +72,13 @@ func TestFilesGetters(t *testing.T) {
 	ws := a.AgentWorkspaces()
 	if ws["boss"] != "." || ws["w1"] != "workers/w1" || len(ws) != 2 {
 		t.Fatalf("%v", ws)
+	}
+}
+
+func TestDefaultFilesExtensionsHoldNoActiveContent(t *testing.T) {
+	for _, e := range chatfiles.DefaultExtensions {
+		if slices.Contains(filesActiveExts, e) || !filesExtRE.MatchString(e) {
+			t.Errorf("default extension %q", e)
+		}
 	}
 }

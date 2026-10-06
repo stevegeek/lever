@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
@@ -731,5 +732,37 @@ func TestMsgSend_managerToItselfIsMarked(t *testing.T) {
 	rec := callWorker(t, b, "/msg/send", `{"to":"user:manager","body":"note to self"}`, "manager")
 	if rec.Code != 200 || len(rt.sent) != 1 || rt.sent[0].Body != managerMarker+"\nnote to self" {
 		t.Fatalf("status %d, sent %+v", rec.Code, rt.sent)
+	}
+}
+
+// hangingListRuntime is a hub whose agent list never answers: List blocks
+// until its context ends.
+type hangingListRuntime struct{ WorkerRuntime }
+
+func (hangingListRuntime) List(ctx context.Context, _ string) ([]scion.Agent, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// The phase read before a send has its own, shorter bound: a list that
+// hangs costs the send msgPhaseTimeout, not the route's whole deadline, and
+// the send goes on without the check (as for any failed read). Without the
+// bound the hung list held the request until the route timed out (503) and
+// nothing was sent.
+func TestMsgSendPhaseReadHasItsOwnBound(t *testing.T) {
+	b, rt, buf := newMsgTestBroker(t, true)
+	rt.WorkerRuntime = hangingListRuntime{rt.WorkerRuntime}
+	b.timeouts.Control = 2 * time.Second
+	b.msgPhaseTimeout = 20 * time.Millisecond
+	start := time.Now()
+	rec := callWorker(t, b, "/msg/send", `{"to":"scratch","body":"go"}`, "manager")
+	if rec.Code != http.StatusOK || len(rt.sent) != 1 {
+		t.Fatalf("status = %d (%s), sent = %d; want 200 and one send", rec.Code, rec.Body.String(), len(rt.sent))
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("send took %s: the phase read used the route's budget", d)
+	}
+	if !strings.Contains(buf.String(), "sending without the check") {
+		t.Fatalf("no audit line for the skipped check:\n%s", buf.String())
 	}
 }

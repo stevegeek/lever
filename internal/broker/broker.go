@@ -333,6 +333,10 @@ type Broker struct {
 	directiveExpiryMax time.Duration
 	dirRate            *rateWindow
 
+	// msgPhaseTimeout bounds the phase read before a send
+	// (msgPhaseTimeoutDefault when zero; a test seam).
+	msgPhaseTimeout time.Duration
+
 	// message verification (verify.go)
 	chatConfigured bool            // ChatConfig.Configured
 	chatLedger     string          // ChatConfig.LedgerPath; "" = no web post verifies

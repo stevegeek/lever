@@ -87,6 +87,12 @@ version bump moves the block under the new version heading.
   left the count of earlier failed heals in place, so the next lapse could
   find the cap used up. Now the success clears it, and a heal skipped for a
   busy lock can no longer drive the count below zero.
+- **A slow agent list no longer uses up a message's time.** Before a send,
+  the broker reads the recipient's phase (to refuse a send to an agent that
+  is not running). That list call ran inside the route's 30 s deadline with
+  no bound of its own, so a hung list ended the request with 503 and
+  nothing sent. The read now has its own 5 s bound; when it runs out, the
+  send goes on without the check, as for any failed read.
 
 ### Upgrade
 

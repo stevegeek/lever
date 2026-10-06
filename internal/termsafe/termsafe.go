@@ -21,8 +21,9 @@ import (
 // every other C0 byte, DEL, lone C1 code point and invalid UTF-8 byte is
 // replaced by U+FFFD. So is every format character (Unicode category Cf:
 // bidi overrides and isolates, zero-width spaces and joiners, the BOM, tag
-// characters), the line and paragraph separators, and the glyphs that draw
-// as blank (invisible): text that renders reordered or hides between the
+// characters), the line and paragraph separators, the glyphs that draw as
+// blank and the marks that draw nothing (variation selectors, U+034F,
+// U+17B4/U+17B5): text that renders reordered or hides between the
 // words around it could make a jail string read as lever's own. Other
 // printable UTF-8 passes unchanged. Go's %q quoting already escapes control
 // and format characters, but not the blank glyphs, which are printable.
@@ -55,11 +56,17 @@ func Sanitize(s string) string {
 }
 
 // invisible reports whether r is a format character (Cf), a line or
-// paragraph separator, or a letter or symbol that renders as blank: the
-// braille blank and the Hangul fillers.
+// paragraph separator, a letter or symbol that renders as blank (the braille
+// blank and the Hangul fillers), or a mark that draws nothing of its own: the
+// variation selectors, the combining grapheme joiner and the Khmer inherent
+// vowels. Other combining marks pass; scripts need them.
 func invisible(r rune) bool {
 	switch r {
-	case 0x2028, 0x2029, 0x2800, 0x3164, 0x115f, 0x1160, 0xffa0:
+	case 0x2028, 0x2029, 0x2800, 0x3164, 0x115f, 0x1160, 0xffa0,
+		0x034f, 0x17b4, 0x17b5:
+		return true
+	}
+	if (r >= 0xfe00 && r <= 0xfe0f) || (r >= 0xe0100 && r <= 0xe01ef) {
 		return true
 	}
 	return unicode.Is(unicode.Cf, r)

@@ -78,6 +78,37 @@ version bump moves the block under the new version heading.
   allowed before), and creates a missing worker dir. Without the setting
   nothing changes.
 
+### Fixed
+
+- **A manager record that mounts a read_only directory you removed no
+  longer fails inside podman.** scion keeps a record's mounts for life,
+  so after an entry left `manager.read_only` (or a worker left the config
+  while the list was set) the manager still mounted it, and once its
+  directory was deleted the next `lever up` failed with podman's
+  `statfs /lever/<dir>: no such file or directory`. `lever apply` and
+  `lever up` now read the manager container's mounts before a keep or
+  resume: a mounted directory that is gone refuses the bring-up before
+  the resume, naming it, with both fixes (recreate it, empty is enough,
+  or back up the conversation and `lever up --fresh`); a mount the config
+  dropped is a warning. `lever doctor`'s *manager read-only paths* row
+  reports both, even with `read_only` unset.
+- **The first apply after a cold start no longer gives up on a slow
+  hub.** It failed at `scion-server` with "hub not ready after 30
+  attempts" after a Mac restart or a scion pin change, and a retry right
+  after worked. A hub spends about 15 s before it serves (most of it a
+  GCP metadata lookup that times out off GCP), and a cold start takes
+  longer. lever now waits up to 2 minutes, prints a progress line after
+  15 s, and stops at once, pointing at `~/.scion/server.log`, when no
+  scion server is running any more. Before a start it also removes a
+  server pid file that names a live process which is not a scion server
+  (a pid reused after a reboot), which made scion answer "already
+  running" and start nothing.
+- **One warning line for the agents contacts cannot post to yet.** Every
+  bring-up printed one "contacts cannot post to <agent> until its session
+  starts fresh" line per agent (six on a production box). It is now one
+  line: the agents grouped by reason (at most eight names, the rest
+  counted), with the fix for workers and for the manager.
+
 ### Upgrade
 
 - Edit protected directories in place. Replacing one on the host (rm -rf
@@ -92,7 +123,9 @@ version bump moves the block under the new version heading.
 - `manager.read_only` is create-time only: scion keeps a record's mounts
   for life. To protect paths for an existing manager, back up its
   conversation, then run `lever up --fresh` (the fresh start discards the
-  manager record and its conversation).
+  manager record and its conversation). Removing an entry needs the same
+  fresh start to drop its mount, and its directory must stay on the host
+  until then.
 
 ### Known issues
 

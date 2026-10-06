@@ -269,8 +269,16 @@ func (g *gate) serveContactHistory(w http.ResponseWriter, r *http.Request, line 
 		return
 	}
 	key := "dm:agent:" + rec.ID + ":user:" + uid
-	body, err := g.readAsContact(ctx, login, "/api/v1/chat/conversations/"+url.PathEscape(key)+"/messages?"+query)
+	body, cookie, err := g.readAsContact(ctx, login, "/api/v1/chat/conversations/"+url.PathEscape(key)+"/messages?"+query)
 	if err != nil {
+		if errors.Is(err, errViewHub) && g.staleBinding(ctx, cookie, uid) {
+			// The hub refuses a key that does not name the session's user:
+			// apply bound the contact to a hub user it no longer is.
+			line.Reason = "stale-binding"
+			g.answerViewJSON(w, r, line, DecisionDenyOperatorView, http.StatusConflict,
+				map[string]string{"error": "not-signed-in", "hint": "run lever apply"})
+			return
+		}
 		g.refuseView(w, r, line, http.StatusBadGateway, "unavailable")
 		return
 	}
@@ -289,27 +297,41 @@ var errViewHub = errors.New("the hub did not answer the history read")
 
 // readAsContact GETs path with login's session; a session the hub no longer
 // knows (401, or a redirect to its login page: any 3xx, never followed) is
-// replaced once.
-func (g *gate) readAsContact(ctx context.Context, login, path string) ([]byte, error) {
+// replaced once. It returns the session it read with last; errViewHub
+// means the hub answered that session with something other than a 200.
+func (g *gate) readAsContact(ctx context.Context, login, path string) ([]byte, string, error) {
 	cookie, err := g.cfg.Session.Cookie(ctx, login)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	status, body, err := g.chat.hubBody(ctx, cookie, path)
 	if err == nil && (status == http.StatusUnauthorized || status >= 300 && status < 400) {
 		g.cfg.Session.Invalidate(login, cookie)
 		if cookie, err = g.cfg.Session.Cookie(ctx, login); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		status, body, err = g.chat.hubBody(ctx, cookie, path)
 	}
 	if err != nil {
-		return nil, err
+		return nil, cookie, err
 	}
 	if status != http.StatusOK {
-		return nil, errViewHub
+		return nil, cookie, errViewHub
 	}
-	return body, nil
+	return body, cookie, nil
+}
+
+// staleBinding reports whether the contact's session belongs to a hub user
+// other than uid, the one apply bound: the hub then refuses the history of
+// the bound key. It asks only GET /api/v1/auth/me (hubWhoAmI: no redirect
+// followed, a bounded answer), and only after a failed read. A session the
+// hub cannot name is not stale: the read is then "unavailable".
+func (g *gate) staleBinding(ctx context.Context, cookie, uid string) bool {
+	if cookie == "" {
+		return false
+	}
+	id, err := g.chat.whoAmI(ctx, cookie)
+	return err == nil && id != uid
 }
 
 // viewRows maps a hub history answer to the operator's rows. Each agent

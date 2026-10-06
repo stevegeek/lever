@@ -68,13 +68,16 @@ func (s *loginSession) askedFor(login string) int {
 
 // viewHub answers the contact's DM history with historyBody, to the
 // contact's session only, and records "METHOD URI COOKIE" per request.
-// /api/v1/auth/me (the contact fence's own question) is answered with the
-// contact's id and not recorded: the operator view never asks it.
+// /api/v1/auth/me (the contact fence's question, and the operator view's
+// after a failed read) is answered by me (the contact's id when nil) and
+// recorded in meSeen, not seen.
 type viewHub struct {
 	*httptest.Server
 	mu     sync.Mutex
 	seen   []string
+	meSeen []string
 	answer func(w http.ResponseWriter, r *http.Request) bool
+	me     func(w http.ResponseWriter, r *http.Request)
 }
 
 const viewDMPath = "/api/v1/chat/conversations/dm:agent:" + agentW1 + ":user:" + contactUID + "/messages"
@@ -82,13 +85,21 @@ const viewDMPath = "/api/v1/chat/conversations/dm:agent:" + agentW1 + ":user:" +
 func newViewHub(t *testing.T) *viewHub {
 	h := &viewHub{}
 	h.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/auth/me" {
-			_, _ = io.WriteString(w, `{"id":"`+contactUID+`"}`)
-			return
-		}
 		cookie := ""
 		if c, err := r.Cookie(sessionCookieName); err == nil {
 			cookie = c.Value
+		}
+		if r.URL.Path == "/api/v1/auth/me" {
+			h.mu.Lock()
+			h.meSeen = append(h.meSeen, r.Method+" "+cookie)
+			me := h.me
+			h.mu.Unlock()
+			if me != nil {
+				me(w, r)
+				return
+			}
+			_, _ = io.WriteString(w, `{"id":"`+contactUID+`"}`)
+			return
 		}
 		h.mu.Lock()
 		h.seen = append(h.seen, r.Method+" "+r.URL.RequestURI()+" "+cookie)
@@ -534,5 +545,60 @@ func TestOperatorViewAuditHasNoText(t *testing.T) {
 		if strings.Contains(string(b), text) {
 			t.Fatalf("an audit line carries message text %q: %s", text, b)
 		}
+	}
+}
+
+// TestOperatorViewStaleBinding: apply bound the contact to a hub user its
+// session no longer is (the hub forgot it and the login made a new one).
+// The hub refuses the bound key; the view asks who the session is, GET
+// only, and answers "not-signed-in" with the fixed hint, never a 502.
+func TestOperatorViewStaleBinding(t *testing.T) {
+	for name, tc := range map[string]struct {
+		me        func(w http.ResponseWriter, r *http.Request)
+		status    int
+		body, why string
+	}{
+		"another user": {func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"id":"u-new"}`) },
+			http.StatusConflict, `{"error":"not-signed-in","hint":"run lever apply"}`, "stale-binding"},
+		"the bound user": {nil, http.StatusBadGateway, `{"error":"unavailable"}`, "unavailable"},
+		"no answer":      {func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }, http.StatusBadGateway, `{"error":"unavailable"}`, "unavailable"},
+		// A redirect is not followed, even to an answer naming another user.
+		"a redirect": {func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("to") == "" {
+				http.Redirect(w, r, "/api/v1/auth/me?to=1", http.StatusFound)
+				return
+			}
+			_, _ = io.WriteString(w, `{"id":"u-new"}`)
+		}, http.StatusBadGateway, `{"error":"unavailable"}`, "unavailable"},
+	} {
+		hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+		hub.me = tc.me
+		hub.answer = func(w http.ResponseWriter, _ *http.Request) bool { w.WriteHeader(http.StatusForbidden); return true }
+		rw := viewDo(viewHandler(t, viewConfig(t, hub, sess, audit)), "op@x", "GET", viewC)
+		if rw.Code != tc.status || strings.TrimSpace(rw.Body.String()) != tc.body {
+			t.Fatalf("%s: %d %s", name, rw.Code, rw.Body)
+		}
+		if l := audit.last(); l.Reason != tc.why || l.Contact != "c@x" {
+			t.Fatalf("%s: audit %+v", name, l)
+		}
+		hub.mu.Lock()
+		me := slices.Clone(hub.meSeen)
+		hub.mu.Unlock()
+		if len(me) != 1 || me[0] != "GET "+viewCCookie {
+			t.Fatalf("%s: auth/me asked %v, want one GET with the contact's session", name, me)
+		}
+		if got := hub.reached(); len(got) != 1 || !strings.HasPrefix(got[0], "GET "+viewDMPath) {
+			t.Fatalf("%s: hub saw %v", name, got)
+		}
+	}
+}
+
+// TestOperatorViewAsksWhoOnlyAfterAFailedRead: a read that works costs one
+// request.
+func TestOperatorViewAsksWhoOnlyAfterAFailedRead(t *testing.T) {
+	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+	viewMessages(t, viewDo(viewHandler(t, viewConfig(t, hub, sess, audit)), "op@x", "GET", viewC))
+	if len(hub.meSeen) != 0 {
+		t.Fatalf("auth/me asked %v", hub.meSeen)
 	}
 }

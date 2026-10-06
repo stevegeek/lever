@@ -350,6 +350,9 @@ export function mergeRows(map, items) {
 // viewErrorText says why a transcript cannot be read.
 export function viewErrorText(status, body) {
   const word = body && typeof body === 'object' ? str(body.error) : '';
+  // The hint is lever's fixed word: the contact's hub user is not the one
+  // lever apply bound.
+  if (word === 'not-signed-in' && body.hint === 'run lever apply') return 'the contact has a new hub user: run lever apply';
   if (word === 'not-signed-in') return 'has not signed in yet';
   if (word === 'no-record') return 'the agent has no record on the hub yet';
   return errorText(status, body);

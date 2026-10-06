@@ -417,7 +417,9 @@ var errSessionUnknown = errors.New("the hub does not know this session")
 
 // hubWhoAmI asks the hub, with a login's own session, for its user id.
 func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	// No redirect is followed: a session the hub does not know is answered
+	// with one, and the operator view asks this with a contact's session.
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: noRedirect}
 	if cfg.DialContext != nil {
 		client.Transport = jailTransport(cfg.DialContext)
 	}

@@ -1078,7 +1078,13 @@ login never gets it: the page does not show it, and the routes refuse a contact 
 - **"has not signed in yet".** The proxy reads only for a contact that `lever apply` bound to a
   hub user (`.lever-state/remote-role.json`). For any other contact it does not sign in, since a
   sign-in would create the contact's hub user. After a contact signs in for the first time, run
-  `lever apply` again; until then its conversations show "has not signed in yet".
+  `lever apply` again; until then its conversations show "has not signed in yet". When the hub
+  refuses a read and the contact's session belongs to another hub user than the one `apply`
+  bound (the hub forgot the contact, and its next sign-in made a new user), the answer is also
+  `not-signed-in`, with the hint `run lever apply`. To find that out the proxy asks the hub who
+  the session is (`GET /api/v1/auth/me`, no redirect followed), only after a failed read. The
+  proxy's own sign-in for a bound contact can create that new hub user when the hub forgot the
+  old one; this is accepted, since the contact's own next visit does the same.
 - **Side effects.** A bound contact with no live session in the proxy (after a proxy restart, or
   after the 12-hour renewal) is signed in by the proxy, which moves the contact's `last login` on
   the hub. With `agent_messages` on, your read asks the broker with a peek: the answer is what the
@@ -1088,7 +1094,8 @@ login never gets it: the page does not show it, and the routes refuse a contact 
   whether each is bound) and `GET /lever/api/contacts/<login>/agents/<name>/messages?cursor=&limit=`
   (`limit` 1 to 200, default 50), with the login URL-encoded. `HEAD` is answered like `GET`; any
   other method is `405`. Refusals are fixed words: `not-found` (404: not a contact, or not one of
-  its agents), `not-signed-in` (409), `no-record` (409: the agent has no hub record),
+  its agents), `not-signed-in` (409, with `"hint": "run lever apply"` and the audit reason
+  `stale-binding` for a changed hub user), `no-record` (409: the agent has no hub record),
   `bad-query` (400) and `unavailable` (502: the hub or its answer failed).
 - **Audit.** Every answer is one line in `.lever-state/remote-audit.jsonl`: `operator-view` with
   the `contact`, the `agent` and the `count` of rows (or of contacts for the list), or

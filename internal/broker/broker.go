@@ -207,6 +207,11 @@ type DispatchConfig struct {
 	// mounts the whole tree, so nothing a worker must redeem may be written
 	// there. nil ⇒ every worker dispatch fails closed at the staging step.
 	Tickets TicketStager
+	// HubTokens lets the broker heal an agent whose scion hub token expired
+	// (tokenwatch.go): a periodic read of each running agent's token, and
+	// `scion reset-auth` for one that lapsed. Governed by AutoReenrol like
+	// the certificate healer. nil ⇒ no watch.
+	HubTokens HubTokenHealer
 }
 
 // TimeoutConfig bounds request handling on the jail listener, per route
@@ -326,6 +331,11 @@ type Broker struct {
 	reenrolMu       sync.Mutex
 	reenrolLast     map[string]time.Time
 	reenrolTries    map[string]int
+	// Hub-token watch state (tokenwatch.go); tokenHealLast is guarded by
+	// reenrolMu. tokenWatchEvery is tokenWatchInterval outside tests.
+	hubTokens       HubTokenHealer
+	tokenWatchEvery time.Duration
+	tokenHealLast   map[string]time.Time
 
 	directiveVerifier  *opsig.Verifier
 	instanceID         string
@@ -404,6 +414,9 @@ func New(c Config) *Broker {
 		reenrolNow:          time.Now,
 		reenrolLast:         map[string]time.Time{},
 		reenrolTries:        map[string]int{},
+		hubTokens:           d.HubTokens,
+		tokenWatchEvery:     tokenWatchInterval,
+		tokenHealLast:       map[string]time.Time{},
 		// operator directives
 		directiveVerifier: dir.Verifier, instanceID: dir.InstanceID,
 		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,

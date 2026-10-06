@@ -183,6 +183,11 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		// of the serve. Only started when the hook is installed at all.
 		go b.runHealer(ctx)
 	}
+	if b.hubTokens != nil && b.runtime != nil && len(b.tokenWatchAgents()) > 0 {
+		// Expired agent hub tokens (tokenwatch.go): scion's refresh timer
+		// stalls while the host sleeps, and nothing else notices.
+		go b.runTokenWatch(ctx)
+	}
 	// No ReadTimeout/WriteTimeout here: /llm streams. Body and handler
 	// deadlines are per route (JailHandler, b.timeouts).
 	jailSrv := &http.Server{

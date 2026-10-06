@@ -169,6 +169,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
+				// A running manager can still hold an expired hub token (the
+				// refresh timer stalls while the host sleeps), and its workers
+				// too; apply.Run would heal them, but this path bypasses it.
+				apply.HealSessions(ctx, deps, app, project)
 			}
 			// The paths that act on the manager without apply.Run used to reach
 			// the "is up." print with no observation at all, and the apply

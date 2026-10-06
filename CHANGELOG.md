@@ -137,6 +137,44 @@ version bump moves the block under the new version heading.
   starts fresh" line per agent (six on a production box). It is now one
   line: the agents grouped by reason (at most eight names, the rest
   counted), with the fix for workers and for the manager.
+- **An agent's expired hub token is detected and renewed.** scion gives each agent a 10 h hub
+  token and sciontool refreshes it 2 h before expiry with a timer that stands still while the
+  host sleeps; once it expired, every reply, status update and heartbeat of that agent failed
+  with 401 (`AUTH_LOST`) while `lever doctor` stayed green (the hub then marks the manager
+  `stalled`, which the manager row passes for an idle manager). Now:
+  - `lever doctor` reads each running agent's token expiry in its container: only the middle
+    (payload) segment of the token file leaves it, nothing at all for a file without a dot, at most
+    8 KiB, and only the `exp` claim is decoded. The `manager agent` row fails on an expired
+    token whatever the activity, and a new row, *agent hub tokens*, covers the manager and every
+    worker: expired fails, a refresh past due warns.
+  - `lever apply` (and `lever up` on a running manager) runs `scion reset-auth` for each running
+    agent whose token expired: no restart, the conversation is kept.
+  - The broker checks every 5 min and resets a lapsed token itself, at most once per agent per
+    15 min, audited as `op=hub-token`. `broker.auto_reenrol` governs it (`off` disables it);
+    revoked identities are never healed, and a worker busy with a start, resume, stop or suspend
+    is skipped until the next pass.
+  - Every reset (apply, up, broker) first runs the pre-role record guard: a record created before
+    scion#1089 stores no role, which scion resolves to full hub authority, so its token is not
+    reset (a `deny` audit line / a warning instead).
+  - The new token is minted by the hub from the agent's stored role (the same path as a start or
+    a refresh) and written by scion's runtime broker; it is the agent's own token, never a user
+    or controller token. An agent that forges an expired token file gains a reset of its own
+    token and nothing else.
+- **A manager marked stopped while its claude still runs is recovered, and keeps its
+  conversation.** sciontool reports phase `stopped` on any SessionEnd hook in the container, and
+  every claude process there shares the agent's hooks: a `claude mcp list` run through `podman
+  exec` (2026-10-05) marked the manager stopped when it exited. The hub then refused `lever
+  attach`, and the next `lever stop` + `lever up` started claude in a new session, because the
+  hub resumes a stopped record without `--continue`. Now `lever apply` and `lever stop` see the
+  live harness (its tmux pane) and have the agent report its session running again (`sciontool
+  hook SessionStart` in the container, on the agent's own token), so the conversation continues.
+  `lever doctor` names the case ("session ended in the hub, but claude still runs") and tells it
+  apart from a claude that exited. When a stopped record must be resumed, apply says it starts a
+  new session and how to get the old one back (`lever attach`, then `/resume`).
+- **`lever apply` restarts the broker and the remote proxy for a new build of the same release
+  from a git worktree.** Go stamps no VCS information there, so every such build read as the
+  bare release and apply kept the old daemons. The version string of a build with no commit
+  stamp, or a dirty one, now ends in the binary's own hash (`0.29.1 (bin f24a48f494ee)`).
 
 ### Upgrade
 

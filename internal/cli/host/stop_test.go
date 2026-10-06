@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -53,10 +55,12 @@ func TestStopSuspendsManager(t *testing.T) {
 	if !sb.stopped {
 		t.Fatal("stop must call Backend.Stop")
 	}
-	if len(f.Calls) != 1 {
-		t.Fatalf("expected exactly one scion call (suspend), got %+v", f.Calls)
+	// A list (is the manager's phase stopped over a live harness? see
+	// healStoppedManager), then the suspend.
+	if len(f.Calls) != 2 || f.Calls[0].Args[0] != "list" {
+		t.Fatalf("expected a list then the suspend, got %+v", f.Calls)
 	}
-	call := f.Calls[0]
+	call := f.Calls[1]
 	if call.Name != "scion" || len(call.Args) == 0 || call.Args[0] != "suspend" {
 		t.Fatalf("expected `scion suspend ...`, got %+v", call)
 	}
@@ -91,13 +95,13 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 		{
 			name:     "running worker suspended after the manager",
 			scripts:  map[string]string{"scion suspend": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
 			wantOut:  `worker "scratch" suspended`,
 		},
 		{
 			name:     "list fails",
 			scripts:  map[string]string{"scion suspend": "ok"},
-			wantArgv: []string{"suspend demo", "list"},
+			wantArgv: []string{"list", "suspend demo", "list"},
 			wantOut:  "warning: listing agents failed",
 		},
 		{
@@ -105,14 +109,14 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 			// still runs under its own budget, then the power-off.
 			name:     "manager suspend fails",
 			scripts:  map[string]string{"scion suspend scratch": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
 			wantOut:  "warning: scion suspend failed",
 			alsoOut:  `worker "scratch" suspended`,
 		},
 		{
 			name:     "worker suspend fails",
 			scripts:  map[string]string{"scion suspend demo": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
 			wantOut:  `warning: scion suspend of worker "scratch" failed`,
 		},
 	} {
@@ -394,5 +398,114 @@ func TestSuspendRunningWorkersReportsInConfigOrder(t *testing.T) {
 	}
 	if !strings.Contains(got, `warning: scion suspend of worker "second" failed`) || strings.Contains(got, `"asleep"`) {
 		t.Fatalf("unexpected output:\n%s", got)
+	}
+}
+
+// reportProbe is an apply.AgentSessionProbe for healStoppedManager: a valid
+// token, a live harness, and a count of session reports.
+type reportProbe struct{ reports int }
+
+func (p *reportProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
+	now := time.Now()
+	return jail.HubTokenTimes{Expiry: now.Add(time.Hour * 5), Now: now}, nil
+}
+func (p *reportProbe) HarnessAlive(context.Context, string) (bool, error) { return true, nil }
+func (p *reportProbe) ReportSessionRunning(context.Context, string) error {
+	p.reports++
+	return nil
+}
+
+// TestHealStoppedManagerBeforeSuspend: a manager whose hub phase reads
+// stopped while its claude still runs is reported running before `lever
+// stop` suspends it, so the next `lever up` resumes the conversation; any
+// other phase is left to the suspend alone.
+func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
+	for _, tc := range []struct {
+		list        string
+		wantReports int
+	}{
+		{`[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`, 1},
+		{`[{"slug":"demo","phase":"running","containerStatus":"Up 2 hours"}]`, 0},
+		{`[{"slug":"demo","phase":"stopped","containerStatus":"stopped"}]`, 0},
+		{`[]`, 0},
+	} {
+		f := proc.NewFakeRunner()
+		f.Script("scion list", proc.Result{Stdout: tc.list})
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetErr(&out)
+		p := &reportProbe{}
+		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, "demo", "/lever")
+		if p.reports != tc.wantReports {
+			t.Fatalf("%s: reports = %d, want %d (%s)", tc.list, p.reports, tc.wantReports, out.String())
+		}
+		if tc.wantReports > 0 && !strings.Contains(out.String(), "lever stop: agent \"demo\"") {
+			t.Fatalf("%s: output %q", tc.list, out.String())
+		}
+	}
+}
+
+// blockingProbe's harness probe waits for its context to end, like a hung
+// podman exec; it records that context's deadline.
+type blockingProbe struct{ deadline time.Time }
+
+func (p *blockingProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
+	now := time.Now()
+	return jail.HubTokenTimes{Expiry: now.Add(5 * time.Hour), Now: now}, nil
+}
+func (p *blockingProbe) HarnessAlive(ctx context.Context, _ string) (bool, error) {
+	p.deadline, _ = ctx.Deadline()
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+func (p *blockingProbe) ReportSessionRunning(context.Context, string) error { return nil }
+
+// ctxRecordingRunner records, for every scion suspend, whether its context
+// was already done when the call ran.
+type ctxRecordingRunner struct {
+	*proc.FakeRunner
+	suspendCtxErr []error
+}
+
+func (r *ctxRecordingRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if len(args) > 0 && args[0] == "suspend" {
+		r.suspendCtxErr = append(r.suspendCtxErr, ctx.Err())
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+func (r *ctxRecordingRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestStopHealCannotEatTheSuspendBudget: a heal that hangs runs out its own
+// budget, and the manager's suspend still runs with a live context.
+func TestStopHealCannotEatTheSuspendBudget(t *testing.T) {
+	dir := writeInstance(t, managerYAML)
+	t.Chdir(dir)
+	oldBudget, oldProbe := stopHealBudget, stopSessionProbe
+	p := &blockingProbe{}
+	stopHealBudget = 50 * time.Millisecond
+	stopSessionProbe = func(proc.Runner) apply.AgentSessionProbe { return p }
+	t.Cleanup(func() { stopHealBudget, stopSessionProbe = oldBudget, oldProbe })
+
+	f := proc.NewFakeRunner()
+	f.Script("scion list", proc.Result{Stdout: `[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`})
+	f.Script("scion suspend", proc.Result{Stdout: "ok"})
+	r := &ctxRecordingRunner{FakeRunner: f}
+	sb := &stubBackend{runner: r}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop"})
+	start := time.Now()
+	if err := root.Execute(); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out.String())
+	}
+	if p.deadline.IsZero() || p.deadline.Sub(start) > 5*time.Second {
+		t.Fatalf("the heal ran without its own short budget (deadline %v)", p.deadline)
+	}
+	if len(r.suspendCtxErr) != 1 || r.suspendCtxErr[0] != nil {
+		t.Fatalf("suspend calls / ctx errors = %v, want one live-context suspend", r.suspendCtxErr)
 	}
 }

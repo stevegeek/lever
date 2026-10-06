@@ -307,6 +307,12 @@ type Deps struct {
 	// checkStaleTreeMounts' fallback when the manager has no container to
 	// inspect. nil (or an error) ⇒ no fallback.
 	RecordVolumes func(ctx context.Context, project, agent string) ([]jail.Mount, error)
+	// AgentSession reads a running agent's session from inside its container
+	// (jail.AgentProbe in production) so start-manager can heal an expired
+	// hub token and a hub phase "stopped" over a harness that still runs
+	// (HealAgentSession) before it converges the manager, and the workers'
+	// after. nil ⇒ no heal.
+	AgentSession AgentSessionProbe
 	// StartRemoteProxy backs the remote-proxy step (present only when
 	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
 	// the daemonized `lever remote serve` proxy (a config with remote disabled
@@ -953,6 +959,13 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
+	if !r.fresh {
+		// Before converge: a stopped record whose claude still runs must be
+		// reported running again, or the resume below restarts it FRESH.
+		// The stale-mount check then reads the healed record, so a record
+		// the heal turned running is kept (managerKept) and not refused.
+		rec = HealAgentSession(ctx, r.d.sessionHealer(), jp, rec)
+	}
 	if rec != nil && !r.fresh {
 		if err := r.checkStaleTreeMounts(ctx, jp, rec); err != nil {
 			return err
@@ -965,6 +978,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err := r.waitManagerLive(ctx, jp, acted); err != nil {
 		return err
 	}
+	healNamedSessions(ctx, r.d, jp, workerNames(r.app))
 	if !r.managerCreated {
 		r.warnManagerTreeMounts(ctx, jp)
 	}
@@ -1439,6 +1453,12 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// must fail loudly, not silently pass.
 		return false, nil
 	case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
+		if rec.Phase == scion.PhaseStopped {
+			// scion's hub resumes a stopped record with a fresh harness
+			// session (it passes --continue for a suspended one only), so
+			// say so: the old conversation is still in the agent home.
+			r.d.Log("start-manager: manager %q is in phase stopped; scion resumes a stopped record in a new claude session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", r.app.Name)
+		}
 		// Resume rides the SAME runtime-broker-race retry as a create Start
 		// (see scion.IsBrokerUnavailable's doc): on a cold VM the runtime broker may
 		// not have re-registered with the hub yet, and resume hits that

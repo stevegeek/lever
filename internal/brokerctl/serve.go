@@ -301,6 +301,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// runner, never into the tree the manager mounts (jail.StageWorkerTicket;
 	// the spec's TicketDir names the directory the worker container mounts).
 	d.Tickets = jailTicketStager{jr}
+	// Expired agent hub tokens are read in each agent's container and reset
+	// with `scion reset-auth` under the controller PAT (broker tokenwatch.go).
+	d.HubTokens = hubTokenHealer{probe: jail.AgentProbe{R: jr}, sc: sc, project: jailMount}
 	// Worker resume meets the same pre-role record hazard as the manager's
 	// (see broker.DispatchConfig.VerifyAgentRole). The hub read rides the same
 	// jail runner and controller PAT as every other lever hub call.
@@ -418,4 +421,26 @@ type jailTicketStager struct{ r proc.Runner }
 
 func (s jailTicketStager) StageWorkerTicket(ctx context.Context, worker string, payload []byte) error {
 	return jail.StageWorkerTicket(ctx, s.r, worker, payload)
+}
+
+// hubTokenHealer is broker.HubTokenHealer over the jail: the expiry is read
+// in the agent's container by scion's container name, and the reset is the
+// host scion client's `reset-auth`, which mints a token of the agent's own
+// stored role.
+type hubTokenHealer struct {
+	probe   jail.AgentProbe
+	sc      *scion.Client
+	project string
+}
+
+func (h hubTokenHealer) TokenExpired(ctx context.Context, agent string) (bool, error) {
+	t, err := h.probe.HubToken(ctx, jail.ContainerName(filepath.Base(h.project), agent))
+	if err != nil {
+		return false, err
+	}
+	return t.Expired(), nil
+}
+
+func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
+	return h.sc.ResetAuth(ctx, agent, h.project)
 }

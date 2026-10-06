@@ -1338,6 +1338,9 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 			return jail.ContainerPathWritable(ctx, b.JailRunner(), ref, target)
 		},
 		RecordVolumes: w.recordVolumes,
+		// AgentSession lets start-manager heal an expired agent hub token
+		// and a stopped phase over a live harness (apply.HealAgentSession).
+		AgentSession: jail.AgentProbe{R: b.JailRunner()},
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is

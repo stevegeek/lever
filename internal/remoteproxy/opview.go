@@ -52,6 +52,9 @@ type contactEntry struct {
 	Login    string         `json:"login"`
 	SignedIn bool           `json:"signedIn"`
 	Agents   []contactAgent `json:"agents"`
+	// NoFiles: files are on but this contact has files: false, so the page
+	// asks for none of its files.
+	NoFiles bool `json:"noFiles,omitempty"`
 }
 
 type contactsAnswer struct {
@@ -131,7 +134,7 @@ func (g *gate) serveOperatorView(w http.ResponseWriter, r *http.Request, line *A
 		return
 	}
 	if files {
-		g.serveContactFiles(w, r, line, login, name)
+		g.serveContactFiles(w, r, line, v, login, name)
 		return
 	}
 	g.serveContactHistory(w, r, line, login, name)
@@ -142,9 +145,11 @@ func (g *gate) serveOperatorView(w http.ResponseWriter, r *http.Request, line *A
 // contact's own Files panel shows ("sent" = the contact's upload). Each row
 // links to the normal download route, where mayDownload lets an operator
 // fetch any record of an agent it may message.
-func (g *gate) serveContactFiles(w http.ResponseWriter, r *http.Request, line *AuditLine, login, name string) {
+func (g *gate) serveContactFiles(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, login, name string) {
 	line.Contact, line.Agent = truncateAudit(login), truncateAudit(name)
-	if g.files == nil {
+	// Files off, a contact with files: false, or an operator with files:
+	// false: the same 404.
+	if !g.filesOnFor(login) || !g.filesOnFor(v.login) {
 		g.refuseView(w, r, line, http.StatusNotFound, "not-found")
 		return
 	}
@@ -166,7 +171,7 @@ func (g *gate) serveContactList(w http.ResponseWriter, r *http.Request, line *Au
 	labels := g.labels()
 	ans := contactsAnswer{Contacts: []contactEntry{}}
 	for _, login := range g.contactLogins() {
-		e := contactEntry{Login: login, Agents: []contactAgent{}}
+		e := contactEntry{Login: login, Agents: []contactAgent{}, NoFiles: g.files != nil && !g.filesOnFor(login)}
 		_, e.SignedIn = g.contactUser(login)
 		for _, n := range managerFirst(g.cfg.ChatAgent, g.cfg.Contacts[login]) {
 			rec, found := recs[n]

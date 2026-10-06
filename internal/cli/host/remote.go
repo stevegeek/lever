@@ -304,7 +304,8 @@ func remoteFiles(app *config.App, st state.State) *remoteproxy.FilesConfig {
 		return nil
 	}
 	c := &remoteproxy.FilesConfig{Tree: app.Tree, Workspaces: app.AgentWorkspaces(),
-		MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions()}
+		MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions(),
+		NoUploads: !app.FilesUploadsOn(), NoShares: !app.FilesSharesOn(), Excluded: app.FilesExcludedLogins()}
 	if !brokerctl.StateInsideTree(app, st) {
 		c.LedgerDir = st.FilesLedger()
 	}

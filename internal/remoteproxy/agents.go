@@ -70,6 +70,10 @@ type agentsAnswer struct {
 type filesInfo struct {
 	MaxBytes   int64    `json:"maxBytes"`
 	Extensions []string `json:"extensions"`
+	// Uploads false: the page shows no paperclip. Shares false: shares are
+	// listed without a download link.
+	Uploads bool `json:"uploads"`
+	Shares  bool `json:"shares"`
 }
 
 const (
@@ -472,8 +476,9 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	recs, err := g.records(ctx)
 	ans := buildAgents(v, g.cfg.ChatAgent, uid, recs, err != nil, g.labels(), g.cfg.ContactSession)
-	if g.files != nil {
-		ans.Files = &filesInfo{MaxBytes: g.files.cfg.MaxBytes, Extensions: g.files.cfg.Extensions}
+	if g.filesOnFor(v.login) {
+		ans.Files = &filesInfo{MaxBytes: g.files.cfg.MaxBytes, Extensions: g.files.cfg.Extensions,
+			Uploads: !g.files.cfg.NoUploads, Shares: !g.files.cfg.NoShares}
 	}
 	g.addUnread(ctx, v.login, cookie, &ans)
 	body, err := json.Marshal(ans)

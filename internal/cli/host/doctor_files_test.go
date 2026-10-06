@@ -129,3 +129,17 @@ func TestCheckFilesUsageAndLinks(t *testing.T) {
 		t.Fatalf("lock: %+v", r)
 	}
 }
+
+func TestRemoteFilesSwitches(t *testing.T) {
+	app, st := filesApp(t, false)
+	app.Remote.Files.Enabled = true
+	if c := remoteFiles(app, st); c.NoUploads || c.NoShares || len(c.Excluded) != 0 {
+		t.Fatalf("defaults: %+v", c)
+	}
+	no := false
+	app.Remote.Files.Uploads, app.Remote.Files.Shares = &no, &no
+	app.Remote.AllowedUsers[1].Files = &no
+	if c := remoteFiles(app, st); !c.NoUploads || !c.NoShares || len(c.Excluded) != 1 || c.Excluded[0] != "c@x" {
+		t.Fatalf("%+v", c)
+	}
+}

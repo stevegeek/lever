@@ -48,6 +48,27 @@ type FilesConfig struct {
 	// LedgerDir: "" = the state directory is inside the tree; every route
 	// answers unavailable.
 	LedgerDir string
+	// NoUploads (remote.files.uploads false): the upload route answers
+	// uploads-off. NoShares (remote.files.shares false): a share already
+	// made is listed but its download answers shares-off.
+	NoUploads, NoShares bool
+	// Excluded are the logins with files: false: for them every file route
+	// is the 404 files off gives, and the page shows no files.
+	Excluded []string
+}
+
+// filesOnFor reports whether login has a file exchange: files on and the
+// login not excluded (compared lowercased, like every lever login).
+func (g *gate) filesOnFor(login string) bool {
+	if g.files == nil {
+		return false
+	}
+	for _, x := range g.files.cfg.Excluded {
+		if sameLogin(x, login) {
+			return false
+		}
+	}
+	return true
 }
 
 const (
@@ -403,6 +424,11 @@ func (g *gate) serveFileList(w http.ResponseWriter, r *http.Request, line *Audit
 // v.login, the configured spelling the allowlist matched.
 func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent string) {
 	s := g.files
+	if s.cfg.NoUploads {
+		// Before anything reads the body.
+		g.refuseFile(w, r, line, http.StatusForbidden, "uploads-off")
+		return
+	}
 	if !sameOriginWrite(r) || r.Header.Get(uploadHeader) != "1" {
 		g.refuseFile(w, r, line, http.StatusForbidden, "origin")
 		return
@@ -625,6 +651,10 @@ func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *Audit
 	// (a ledger line written by anything but lever).
 	if !found || !mayDownload(v, rec) || !recordedWhereExpected(s.cfg.Workspaces[agent], rec) {
 		g.refuseFile(w, r, line, http.StatusNotFound, "not-found")
+		return
+	}
+	if rec.Op == fileledger.OpShare && s.cfg.NoShares {
+		g.refuseFile(w, r, line, http.StatusForbidden, "shares-off")
 		return
 	}
 	done, ok := s.beginDownload(v.login, v.tier == chatledger.TierOperator)

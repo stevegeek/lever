@@ -326,7 +326,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		return true
 	}
 	if agent, id, under := filesTarget(p); under {
-		if g.files == nil || agent == "" {
+		if !g.filesOnFor(v.login) || agent == "" {
 			// Off, or a path under the prefix that names no agent: the
 			// prefix is lever's either way, never the hub's.
 			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)

@@ -376,7 +376,7 @@ func TestAgentsAnswerCarriesFilesLimits(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, _, _ := filesCfg(t, hub)
 	rw := chatDo(NewHandler(cfg), "c@x", "GET", "/lever/api/agents")
-	if !strings.Contains(rw.Body.String(), `"files":{"maxBytes":64,"extensions":["pdf","xlsm","txt"]}`) {
+	if !strings.Contains(rw.Body.String(), `"files":{"maxBytes":64,"extensions":["pdf","xlsm","txt"],"uploads":true,"shares":true}`) {
 		t.Fatalf("%s", rw.Body)
 	}
 	rw = chatDo(NewHandler(chatConfig(t, hub)), "c@x", "GET", "/lever/api/agents")
@@ -888,5 +888,124 @@ func TestUploadAuditsAnOrphanCopy(t *testing.T) {
 	last := all[len(all)-1]
 	if !strings.Contains(last.Error, "was not removed") || !strings.Contains(last.Error, "-a.pdf") || strings.Contains(fmt.Sprint(all), "secret-bytes") {
 		t.Fatalf("audit %+v", last)
+	}
+}
+
+func TestUploadsOff(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, tree, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	if rw := upload(t, h, "c@x", "w1", "before.pdf", "x"); rw.Code != 201 {
+		t.Fatal(rw.Code)
+	}
+	var ans struct{ ID string }
+	cfg.Files.NoUploads = true
+	off := NewHandler(cfg)
+	rw := upload(t, off, "c@x", "w1", "a.pdf", "x")
+	if rw.Code != 403 || !strings.Contains(rw.Body.String(), `"uploads-off"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))); len(ents) != 1 {
+		t.Fatalf("%v", ents)
+	}
+	// The upload already made stays listed and downloadable by its owner.
+	list := chatDo(off, "c@x", "GET", "/lever/api/files/w1")
+	if list.Code != 200 || !strings.Contains(list.Body.String(), "before.pdf") {
+		t.Fatalf("%d %s", list.Code, list.Body)
+	}
+	var body struct{ Files []struct{ ID string } }
+	_ = json.Unmarshal(list.Body.Bytes(), &body)
+	ans.ID = body.Files[0].ID
+	if rw := chatDo(off, "c@x", "GET", "/lever/api/files/w1/"+ans.ID); rw.Code != 200 {
+		t.Fatalf("download = %d", rw.Code)
+	}
+	if a := chatDo(off, "c@x", "GET", "/lever/api/agents"); !strings.Contains(a.Body.String(), `"uploads":false,"shares":true`) {
+		t.Fatalf("%s", a.Body)
+	}
+}
+
+// The uploads-off answer comes before the body is read: a body far over
+// the limit still gets uploads-off, not too-large.
+func TestUploadsOffBeforeTheBody(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	cfg.Files.NoUploads = true
+	if rw := upload(t, NewHandler(cfg), "c@x", "w1", "a.pdf", strings.Repeat("x", 1000)); rw.Code != 403 || !strings.Contains(rw.Body.String(), `"uploads-off"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+}
+
+func TestSharesOffRefusesShareDownloads(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	id, _ := shareRec(t, cfg, "w1", "c@x", "v.xlsm", "wb")
+	if rw := upload(t, NewHandler(cfg), "c@x", "w1", "mine.pdf", "x"); rw.Code != 201 {
+		t.Fatal(rw.Code)
+	}
+	cfg.Files.NoShares = true
+	h := NewHandler(cfg)
+	list := chatDo(h, "c@x", "GET", "/lever/api/files/w1")
+	if !strings.Contains(list.Body.String(), "v.xlsm") || !strings.Contains(list.Body.String(), "mine.pdf") {
+		t.Fatalf("the records stay listed: %s", list.Body)
+	}
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 403 || !strings.Contains(rw.Body.String(), `"shares-off"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if rw := chatDo(h, "d@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 404 {
+		t.Fatalf("another login's share id still answers like an unknown one: %d", rw.Code)
+	}
+	var body struct{ Files []struct{ ID, Name string } }
+	_ = json.Unmarshal(list.Body.Bytes(), &body)
+	for _, f := range body.Files {
+		if f.Name == "mine.pdf" {
+			if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+f.ID); rw.Code != 200 {
+				t.Fatalf("an upload stays downloadable: %d", rw.Code)
+			}
+		}
+	}
+	if a := chatDo(h, "c@x", "GET", "/lever/api/agents"); !strings.Contains(a.Body.String(), `"uploads":true,"shares":false`) {
+		t.Fatalf("%s", a.Body)
+	}
+}
+
+// A login with files: false gets what files off gives: every file route a
+// 404 like an unknown path, and no files object in its agents answer.
+func TestExcludedLoginHasNoFiles(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	id, _ := shareRec(t, cfg, "w1", "c@x", "v.xlsm", "wb")
+	cfg.Files.Excluded = []string{"C@X"}
+	h := NewHandler(cfg)
+	offBody := chatDo(NewHandler(chatConfig(t, hub)), "c@x", "GET", "/lever/api/files/w1").Body.String()
+	for _, req := range []struct{ method, path string }{{"GET", "/lever/api/files/w1"}, {"GET", "/lever/api/files/w1/" + id}} {
+		if rw := chatDo(h, "c@x", req.method, req.path); rw.Code != 404 || rw.Body.String() != offBody {
+			t.Fatalf("%s %s = %d %s", req.method, req.path, rw.Code, rw.Body)
+		}
+	}
+	if rw := upload(t, h, "c@x", "w1", "a.pdf", "x"); rw.Code != 404 {
+		t.Fatalf("upload = %d %s", rw.Code, rw.Body)
+	}
+	if a := chatDo(h, "c@x", "GET", "/lever/api/agents"); strings.Contains(a.Body.String(), `"files"`) {
+		t.Fatalf("%s", a.Body)
+	}
+	if rw := upload(t, h, "d@x", "w1", "d.pdf", "x"); rw.Code != 201 {
+		t.Fatalf("another login keeps its files: %d", rw.Code)
+	}
+	// The operator view: the excluded contact's files are a 404, and the
+	// contacts list marks it, so the page asks nothing.
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/contacts/c@x/agents/w1/files"); rw.Code != 404 {
+		t.Fatalf("view = %d", rw.Code)
+	}
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/contacts"); !strings.Contains(rw.Body.String(), `"login":"c@x","signedIn":false,"agents":[{"name":"w1","label":"","state":"running"}],"noFiles":true`) {
+		t.Fatalf("%s", rw.Body)
+	}
+	// An operator with files: false has none either, nor the view's files.
+	cfg.Files.Excluded = []string{chatOp}
+	h = NewHandler(cfg)
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 404 {
+		t.Fatalf("operator download = %d", rw.Code)
+	}
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/contacts/c@x/agents/w1/files"); rw.Code != 404 {
+		t.Fatalf("operator view = %d", rw.Code)
 	}
 }

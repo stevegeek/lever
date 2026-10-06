@@ -1718,3 +1718,24 @@ test('push: another login on a shared device does not take the subscription', as
   assert.equal(c.subs.length, 0, 'the subscription was posted for a login that never opted in');
   assert.equal(envC.els.push.textContent, 'Turn on notifications');
 });
+
+test('push: under Trusted Types the worker URL comes from the lever-sw policy', async () => {
+  const hub = pushHub();
+  const env = await load(hub, { push: {}, trustedTypes: true });
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.deepEqual(env.push.registerCalls, [{ url: '/lever/sw.js', scope: '/lever/', trusted: true }]);
+  assert.equal(env.els.push.textContent, 'Turn off notifications');
+  const policy = env.tt.policies['lever-sw'];
+  for (const bad of ['/lever/sw.js?x', '/lever/other.js', '/api/agent.js', 'https://evil.test/sw.js', '']) {
+    assert.throws(() => policy.createScriptURL(bad), /refused/, bad);
+  }
+  // Off, then on again: the policy is made once (a second one would be
+  // refused by the CSP).
+  env.els.push.dispatch('click');
+  await tick(20);
+  env.els.push.dispatch('click');
+  await tick(20);
+  assert.equal(env.push.registerCalls.length, 2);
+  assert.equal(env.tt.refused, 0);
+});

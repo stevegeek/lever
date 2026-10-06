@@ -57,6 +57,22 @@ export async function load(hub, opts = {}) {
   globalThis.document = doc;
   env.document = doc;
   globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener() {} };
+  // Trusted Types as the push-on CSP sets it (opts.trustedTypes): only the
+  // policy name lever-sw, once; a script-URL sink refuses a plain string.
+  if (opts.trustedTypes) {
+    env.tt = { policies: {}, refused: 0 };
+    globalThis.window.trustedTypes = {
+      createPolicy: (name, rules) => {
+        if (name !== 'lever-sw' || env.tt.policies[name]) {
+          env.tt.refused++;
+          throw new TypeError(`policy ${name} refused by the CSP`);
+        }
+        const p = { name, createScriptURL: (u) => ({ trusted: 'TrustedScriptURL', url: rules.createScriptURL(u) }) };
+        env.tt.policies[name] = p;
+        return p;
+      },
+    };
+  }
   globalThis.location = { origin: 'https://mac.ts.net', reload: () => env.reloads++ };
   // Push: present only when a test asks (opts.push), as in a browser
   // without it (iOS outside a Home Screen app).
@@ -84,7 +100,14 @@ export async function load(hub, opts = {}) {
     globalThis.window.PushManager = class {};
     globalThis.Notification = { get permission() { return p.permission; }, requestPermission: async () => (p.permission = opts.push.grant || 'granted') };
     Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: { serviceWorker: {
-      register: async (url, o) => { p.registerCalls.push({ url, scope: o && o.scope }); p.registered = reg; return reg; },
+      register: async (url, o) => {
+        // As Chrome does under require-trusted-types-for 'script'.
+        if (globalThis.window.trustedTypes && typeof url === 'string') throw new TypeError("This document requires 'TrustedScriptURL' assignment.");
+        const trusted = typeof url === 'object';
+        p.registerCalls.push(trusted ? { url: url.url, scope: o && o.scope, trusted } : { url, scope: o && o.scope });
+        p.registered = reg;
+        return reg;
+      },
       get ready() { return Promise.resolve(reg); },
       getRegistration: async () => p.registered || undefined,
       addEventListener: (t, f) => (swListeners[t] ||= []).push(f),

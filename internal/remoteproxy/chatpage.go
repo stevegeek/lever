@@ -86,17 +86,33 @@ const (
 // Opened under another name the Host check admits (the loopback probe
 // address, or a bind address), the browser blocks the page's own files:
 // those names are for probes and fronts, not for a browser.
-func chatCSPFor(serveHost string) string {
+//
+// With push on (remote.push), two directives change and nothing else:
+// worker-src names /lever/ for the push-only worker, and Trusted Types
+// allows exactly one policy, lever-sw, whose only output is the literal
+// worker URL (chat.js): serviceWorker.register is a script-URL sink, so with
+// no policy at all the page could not register its worker. Off, the policy
+// is the one the page had before push existed.
+func chatCSPFor(serveHost string, push bool) string {
 	own, img := "'self'", "'self'"
 	if cspHost(serveHost) {
 		own, img = serveHost+chatPrefix, serveHost+"/favicon.svg "+serveHost+chatPrefix
 	}
+	worker, tt := "", "'none'"
+	if push {
+		worker, tt = "worker-src "+own+"; ", chatSWPolicy
+	}
 	// Trusted Types with no policy allowed makes every markup or script sink
 	// throw where the browser supports it: a second guard on the same rule.
 	return "default-src 'none'; script-src " + own + "; style-src " + own + "; connect-src 'self'; " +
-		"img-src " + img + "; manifest-src " + own + "; worker-src " + own + "; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
-		"require-trusted-types-for 'script'; trusted-types 'none'"
+		"img-src " + img + "; manifest-src " + own + "; " + worker + "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
+		"require-trusted-types-for 'script'; trusted-types " + tt
 }
+
+// chatSWPolicy is the one Trusted Types policy the page may create, with
+// push on: it turns the literal "/lever/sw.js" into a script URL, nothing
+// else (chat.js; TestChatPageHasNoMarkupSink pins it).
+const chatSWPolicy = "lever-sw"
 
 // cspHost reports whether host (a name or an IPv4 address, with an optional
 // port) can be written into a CSP source as it is. An IPv6 literal cannot:
@@ -158,7 +174,7 @@ type chatPage struct {
 // newChatPage loads the embedded files. A file that is missing is a build
 // fault, so it panics rather than serve a page with a hole in it.
 func newChatPage(cfg Config) *chatPage {
-	p := &chatPage{csp: chatCSPFor(cfg.ServeHost), whoAmI: hubWhoAmI(cfg),
+	p := &chatPage{csp: chatCSPFor(cfg.ServeHost, cfg.Push != nil), whoAmI: hubWhoAmI(cfg),
 		hubGet: hubGetJSON(cfg), hubBody: hubGetBody(cfg, maxHistoryAnswer), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
 	file := func(contentType string, body []byte) chatFile {
 		sum := sha256.Sum256(body)

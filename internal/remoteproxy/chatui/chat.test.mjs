@@ -1462,3 +1462,10 @@ test('wake: never for the manager, a see-only agent, or a running worker', async
   await tick(10);
   assert.equal(see.count('POST', ''), 0);
 });
+
+test('with no chat open the chat pane says to choose an agent (a wide screen shows it beside the list)', async () => {
+  const env = await load(hubWith({ agents: () => roster([BOSS(), A('w1')]) }));
+  assert.equal(env.els.notice.textContent, 'Choose an agent from the list.');
+  assert.equal(env.els.notice.hidden, false);
+  assert.equal(env.els.composer.hidden, true);
+});

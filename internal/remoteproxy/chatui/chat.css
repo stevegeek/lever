@@ -34,15 +34,19 @@ body {
   overflow: hidden;
 }
 [hidden] { display: none !important; }
-/* One pane at a time on a phone: the list, or the open chat. From 720px
-   both show side by side. */
+/* One pane at a time on a phone: the list, or the open chat, with Back.
+   From 720px both show side by side and Back is not needed. The one-pane
+   rules live only in the narrow query: outside it, body.chatting #pane-list
+   (1,1,1) would beat a wide-screen #pane-list (1,0,0) and hide the list
+   with Back gone (chatcss.test.mjs). */
 .app { display: flex; height: 100%; }
 .pane { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-body.chatting #pane-list { display: none; }
-body:not(.chatting) #pane-chat { display: none; }
+@media (max-width: 719.98px) {
+  body.chatting #pane-list { display: none; }
+  body:not(.chatting) #pane-chat { display: none; }
+}
 @media (min-width: 720px) {
-  #pane-list { flex: 0 0 18rem; display: flex; border-right: 1px solid var(--line); }
-  #pane-chat { display: flex; }
+  #pane-list { flex: 0 0 18rem; border-right: 1px solid var(--line); }
   #back { display: none; }
 }
 #back {

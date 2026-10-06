@@ -238,7 +238,7 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
 	for _, p := range []string{"/lever", "/lever/", "/lever/nope", "/lever/chat/", "/lever/chat.html", "/lever/chatui/chat.js",
-		"/lever/../api/v1/agents", "/lever/api/", "/lever/api/chat", "/lever/api/chat/x", "/lever/api/agents/", "/lever/api/agents/w1", "/lever/api/agentsx", "/lever/chatcore.test.mjs", "/lever/chat.test.mjs",
+		"/lever/../api/v1/agents", "/lever/api/", "/lever/api/chat", "/lever/api/chat/x", "/lever/api/agents/", "/lever/api/agents/w1", "/lever/api/agentsx", "/lever/chatcore.test.mjs", "/lever/chat.test.mjs", "/lever/chatcss.test.mjs",
 		"/lever/fakebrowser.mjs", "/lever/package.json"} {
 		rw := chatDo(h, chatOp, "GET", p)
 		if rw.Code != http.StatusNotFound || rw.Header().Get("Cache-Control") != "no-store" {

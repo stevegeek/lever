@@ -6,6 +6,7 @@ package termsafe
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -18,8 +19,14 @@ import (
 // terminal reads as an introducer. Every ESC/C1-introduced sequence (CSI,
 // OSC, DCS, SOS, PM, APC, two-byte and nF escapes) is stripped whole;
 // every other C0 byte, DEL, lone C1 code point and invalid UTF-8 byte is
-// replaced by U+FFFD; printable UTF-8 passes unchanged. The %q print sites
-// need none of this — Go's quoting already escapes control characters.
+// replaced by U+FFFD. So is every format character (Unicode category Cf:
+// bidi overrides and isolates, zero-width spaces and joiners, the BOM, tag
+// characters), the line and paragraph separators, the glyphs that draw as
+// blank and the marks that draw nothing (variation selectors, U+034F,
+// U+17B4/U+17B5): text that renders reordered or hides between the
+// words around it could make a jail string read as lever's own. Other
+// printable UTF-8 passes unchanged. Go's %q quoting already escapes control
+// and format characters, but not the blank glyphs, which are printable.
 func Sanitize(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -38,12 +45,31 @@ func Sanitize(s string) string {
 			}
 		case r < 0x20 || r == 0x7f: // C0, DEL
 			b.WriteRune(utf8.RuneError)
+		case invisible(r):
+			b.WriteRune(utf8.RuneError)
 		default:
 			b.WriteString(s[i : i+n])
 		}
 		i += n
 	}
 	return b.String()
+}
+
+// invisible reports whether r is a format character (Cf), a line or
+// paragraph separator, a letter or symbol that renders as blank (the braille
+// blank and the Hangul fillers), or a mark that draws nothing of its own: the
+// variation selectors, the combining grapheme joiner and the Khmer inherent
+// vowels. Other combining marks pass; scripts need them.
+func invisible(r rune) bool {
+	switch r {
+	case 0x2028, 0x2029, 0x2800, 0x3164, 0x115f, 0x1160, 0xffa0,
+		0x034f, 0x17b4, 0x17b5:
+		return true
+	}
+	if (r >= 0xfe00 && r <= 0xfe0f) || (r >= 0xe0100 && r <= 0xe01ef) {
+		return true
+	}
+	return unicode.Is(unicode.Cf, r)
 }
 
 // escapeTail returns how many bytes of s (the text after an ESC) belong to

@@ -78,8 +78,116 @@ version bump moves the block under the new version heading.
   allowed before), and creates a missing worker dir. Without the setting
   nothing changes.
 
+### Fixed
+
+- **A manual resume clears the healer's failed attempts.** The re-enrol
+  healer and the manager's start, resume and wake of a worker already ran
+  under the worker's one lifecycle lock, so the two never interleave (new
+  tests pin both orders, under `-race`). But a successful resume or start
+  left the count of earlier failed heals in place, so the next lapse could
+  find the cap used up. Now the success clears it, and a heal skipped for a
+  busy lock can no longer drive the count below zero.
+- **A slow agent list no longer uses up a message's time.** Before a send,
+  the broker reads the recipient's phase (to refuse a send to an agent that
+  is not running). That list call ran inside the route's 30 s deadline with
+  no bound of its own, so a hung list ended the request with 503 and
+  nothing sent. The read now has its own 5 s bound; when it runs out, the
+  send goes on without the check, as for any failed read.
+- **`lever stop` suspends workers side by side.** The worker pass suspended
+  one worker after another under one 30 s budget, so one hung suspend could
+  leave every later worker running across the power-off (and in phase error
+  after `lever up`). Now the list has its own 15 s bound, and up to four
+  suspends run at once, each under its own 20 s bound. The lines are
+  printed in config order once all have returned.
+- **A heal refused for the record's stored role stages no ticket.** The
+  healer staged a fresh one-use enrolment ticket before it checked the
+  record's role, so a refused heal left that ticket behind. The check now
+  runs before the stage, like the workspace check.
+- **The operator skill names the other resume answers.** Its resume section
+  now says when a forced resume happens and what the 409 (hub refusal or
+  stored role), 503 (busy) and 502 answers mean, and that a message to a
+  worker that is not running answers 409. Run `lever init` to refresh the skills.
+- **A manager record that mounts a read_only directory you removed no
+  longer fails inside podman.** scion keeps a record's mounts for life,
+  so after an entry left `manager.read_only` (or a worker left the config
+  while the list was set) the manager still mounted it, and once its
+  directory was deleted the next `lever up` failed with podman's
+  `statfs /lever/<dir>: no such file or directory`. `lever apply` and
+  `lever up` now read the manager container's mounts (with no container,
+  the hub record's volumes) before a keep or resume: a mounted directory
+  that is gone refuses every resume, the forced resume of an `error`
+  phase included, before it runs, naming it, with both fixes (recreate it, empty is enough,
+  or back up the conversation and `lever up --fresh`); a mount the config
+  dropped is a warning. `lever doctor`'s *manager read-only paths* row
+  reports both, even with `read_only` unset, and also reads the hub
+  record when there is no container.
+- **The first apply after a cold start no longer gives up on a slow
+  hub.** It failed at `scion-server` with "hub not ready after 30
+  attempts" after a Mac restart or a scion pin change, and a retry right
+  after worked. A hub spends about 15 s before it serves (most of it a
+  GCP metadata lookup that times out off GCP), and a cold start takes
+  longer. lever now waits up to 2 minutes, prints a progress line after
+  15 s, and stops at once, pointing at `~/.scion/server.log`, when no
+  scion server is running any more. Before a start it also removes a
+  server pid file that names a live process which is not a scion server
+  (a pid reused after a reboot), which made scion answer "already
+  running" and start nothing.
+- **One warning line for the agents contacts cannot post to yet.** Every
+  bring-up printed one "contacts cannot post to <agent> until its session
+  starts fresh" line per agent (six on a production box). It is now one
+  line: the agents grouped by reason (at most eight names, the rest
+  counted), with the fix for workers and for the manager.
+- **An agent's expired hub token is detected and renewed.** scion gives each agent a 10 h hub
+  token and sciontool refreshes it 2 h before expiry with a timer that stands still while the
+  host sleeps; once it expired, every reply, status update and heartbeat of that agent failed
+  with 401 (`AUTH_LOST`) while `lever doctor` stayed green (the hub then marks the manager
+  `stalled`, which the manager row passes for an idle manager). Now:
+  - `lever doctor` reads each running agent's token expiry in its container: only the middle
+    (payload) segment of the token file leaves it, nothing at all for a file without a dot, at most
+    8 KiB, and only the `exp` claim is decoded. The `manager agent` row fails on an expired
+    token whatever the activity, and a new row, *agent hub tokens*, covers the manager and every
+    worker: expired fails, a refresh past due warns.
+  - `lever apply` (and `lever up` on a running manager) runs `scion reset-auth` for each running
+    agent whose token expired: no restart, the conversation is kept.
+  - The broker checks every 5 min and resets a lapsed token itself, at most once per agent per
+    15 min, audited as `op=hub-token`. `broker.auto_reenrol` governs it (`off` disables it);
+    revoked identities are never healed, and a worker busy with a start, resume, stop or suspend
+    is skipped until the next pass.
+  - Every reset (apply, up, broker) first runs the pre-role record guard: a record created before
+    scion#1089 carries the full role scion's migration grandfathered onto it (or, on older pins,
+    no role, which resolved to full), so its token is not reset (a `deny` audit line / a warning
+    instead). The broker also refuses a reset when no guard is wired, and re-checks revocation
+    after the worker lock wait.
+  - Every exec into an agent container (the token read, the harness probe, the session report,
+    the read-only write probe) runs as `scion` under its own 10 s deadline with its output capped
+    at 64 KiB: the agent is root in its container and can replace the programs or put a FIFO
+    where the token file was, and must not be able to hang or flood doctor, apply or the broker.
+  - The new token is minted by the hub from the agent's stored role (the same path as a start or
+    a refresh) and written by scion's runtime broker; it is the agent's own token, never a user
+    or controller token. An agent that forges an expired token file gains a reset of its own
+    token and nothing else.
+- **A manager marked stopped while its claude still runs is recovered, and keeps its
+  conversation.** sciontool reports phase `stopped` on any SessionEnd hook in the container, and
+  every claude process there shares the agent's hooks: a `claude mcp list` run through `podman
+  exec` (2026-10-05) marked the manager stopped when it exited. The hub then refused `lever
+  attach`, and the next `lever stop` + `lever up` started claude in a new session, because the
+  hub resumes a stopped record without `--continue`. Now `lever apply` and `lever stop` see the
+  live harness (its tmux pane) and have the agent report its session running again (`sciontool
+  hook SessionStart` in the container, on the agent's own token), so the conversation continues.
+  `lever doctor` names the case ("session ended in the hub, but claude still runs") and tells it
+  apart from a claude that exited. When a stopped record must be resumed, apply says it starts a
+  new session and how to get the old one back (`lever attach`, then `/resume`).
+- **`lever apply` restarts the broker and the remote proxy for a new build of the same release
+  from a git worktree.** Go stamps no VCS information there, so every such build read as the
+  bare release and apply kept the old daemons. The version string of a build with no commit
+  stamp, or a dirty one, now ends in the binary's own hash (`0.29.1 (bin f24a48f494ee)`).
+
 ### Upgrade
 
+- The `lever-operator` skill changed (a boundary line: do not run the `claude` CLI in the
+  manager's container). Run `lever init` in each instance after upgrading so the manager gets it;
+  until then the `lever doctor` skills row asks for it. A skill you adopted as custom keeps your
+  version: merge the line yourself.
 - Edit protected directories in place. Replacing one on the host (rm -rf
   and recreate, a rename-based deploy, a git checkout that removes and
   re-adds it) drops its protection until the next fresh create; the same
@@ -92,7 +200,9 @@ version bump moves the block under the new version heading.
 - `manager.read_only` is create-time only: scion keeps a record's mounts
   for life. To protect paths for an existing manager, back up its
   conversation, then run `lever up --fresh` (the fresh start discards the
-  manager record and its conversation).
+  manager record and its conversation). Removing an entry needs the same
+  fresh start to drop its mount, and its directory must stay on the host
+  until then.
 
 ### Known issues
 
@@ -130,6 +240,50 @@ version bump moves the block under the new version heading.
 - **Drafts and unsent records are kept per agent** in the tab's session storage
   (`lever-chat-draft:<name>`, `lever-chat-unsent:<name>`); the one-agent page's records are
   adopted once, so a send with no clear answer keeps its key across the upgrade.
+
+### Security
+
+- **The remote proxy refuses a path that is not in one spelling, for every
+  tier (400, audit `deny-path`).** Its route checks read the path by prefix,
+  so a contact's `GET /assets/../lever/api/chat` passed the static-asset rule
+  and reached the hub with the contact's session (the hub answered with a
+  redirect, so nothing was served). A path with a `.` or `..` segment, an
+  empty segment (`//`), a backslash or NUL, or an encoded slash, backslash,
+  dot or NUL (`%2f`, `%5c`, `%2e`, `%00`) is now refused before any route
+  decision, so the decisions and the forwarded request name the same route.
+- **Terminal output replaces invisible and reordering characters from the
+  jail.** `termsafe.Sanitize` (doctor and up rows, apply log lines, returned
+  errors) passed printable UTF-8 unchanged, so a guest string could carry a
+  bidi override, a zero-width character, a tag character or a blank glyph
+  and render as text that is not there. Every format character (category
+  Cf), U+2028 and U+2029, the blank glyphs U+2800, U+3164, U+115F,
+  U+1160 and U+FFA0, the variation selectors (U+FE00-FE0F,
+  U+E0100-E01EF), U+034F and U+17B4/U+17B5 now become U+FFFD. Other
+  combining marks pass. This includes the zero-width joiner and non-joiner
+  (U+200D, U+200C): an emoji ZWJ sequence shows as its parts with U+FFFD
+  between them (👨‍💻 as 👨�💻), and Persian or Hindi text that uses ZWNJ
+  shows U+FFFD where it stood. The same holds for worker event messages
+  (`msg list`, `watch`).
+- **A worker's own text in an event is marked as the worker's.** scion builds
+  a notification's message from the watched worker's own `Message` and
+  `TaskSummary`, and `/msg/list`, `lever-manager msg list` and
+  `lever-manager watch` passed it and its status through raw. Each event's
+  `message` now starts with `worker-reported:`, is sanitized (one line, no
+  escapes or invisible characters) and cut to 1 KiB; its `status` is shown
+  only when it is one the hub produces, else `UNRECOGNISED`. The JSON shape
+  is unchanged. The manager skill says the message is data. Run `lever init`
+  to refresh the skills.
+
+### Fixed
+
+- **A worker start no longer writes one audit deny per tool.** Newer Claude
+  Code probes every MCP server with `server/discover` at start, and the
+  broker gateway denied it as "method not allowlisted". The gateway now
+  answers `server/discover`, `resources/list`, `resources/templates/list`
+  and `prompts/list` itself with JSON-RPC "method not found" (-32601), or a
+  bodiless 202 for a notification, logs them at debug level only (a revoked
+  caller's probe gets the same answer and an audit deny line), and never
+  forwards them. Every other unknown method is still denied and audited.
 
 ## [0.29.1] - 2026-10-02
 

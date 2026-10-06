@@ -16,6 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // checkContactGate refuses a bring-up that would let a contact (a remote
@@ -136,10 +137,28 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	case !ok:
 		return errors.New("lever has no record of its session starting fresh")
 	case r.SkillHash != hash:
-		return fmt.Errorf("its session started before its current skill was written (at %s, lever %s)",
-			r.Started.UTC().Format(time.RFC3339), r.Version)
+		return staleSessionError{fmt.Sprintf("at %s, lever %s", r.Started.UTC().Format(time.RFC3339), r.Version)}
 	}
 	return nil
+}
+
+// staleSessionError is contactSession's refusal of a session that started
+// before the current skill. Its text carries the start time and version;
+// reason is the part shared by every such agent, which the bring-up
+// warning groups on (after an upgrade every agent has its own start time).
+type staleSessionError struct{ detail string }
+
+const staleSessionReason = "its session started before its current skill was written"
+
+func (e staleSessionError) Error() string { return staleSessionReason + " (" + e.detail + ")" }
+
+// contactRefusalReason is err's text with any per-agent detail dropped.
+func contactRefusalReason(err error) string {
+	var stale staleSessionError
+	if errors.As(err, &stale) {
+		return staleSessionReason
+	}
+	return err.Error()
 }
 
 // contactAgents is every agent some contact login lists, in config order.
@@ -178,13 +197,71 @@ func printContactSessionWarnings(cmd *cobra.Command, app *config.App, st state.S
 				cli.Version, strings.Join(stale, ", "))
 		}
 	}
+	var blocked []blockedContactAgent
 	for _, a := range contactAgents(app) {
 		if err := contactSession(app, st, a); err != nil {
-			how := "it takes contact messages once the broker next creates it fresh"
-			if a == app.Name {
-				how = "run `lever up --fresh` (back up the manager's conversation first), or let this bring-up create it"
-			}
-			cmd.PrintErrf("lever: warning: remote: contacts cannot post to %s until its session starts fresh: %v; %s\n", a, err, how)
+			blocked = append(blocked, blockedContactAgent{a, contactRefusalReason(err)})
 		}
 	}
+	if line := contactSessionWarning(app.Name, blocked); line != "" {
+		cmd.PrintErrln(line)
+	}
+}
+
+// blockedContactAgent is one agent contactSession refuses, with its reason.
+type blockedContactAgent struct{ name, reason string }
+
+// maxWarnedContactAgents bounds the agent names one warning lists.
+const maxWarnedContactAgents = 8
+
+// contactSessionWarning words every refused agent as ONE warning line: a
+// production box lists many contact agents, and a line per agent at every
+// bring-up buried the rest of the output. The agents are grouped by reason,
+// at most maxWarnedContactAgents names are listed, and the line ends with
+// the fix for each kind present (a worker heals at its next fresh create;
+// the manager needs a fresh start). Empty when nothing is blocked. The
+// names come from the config and are sanitized anyway: the line reaches
+// the terminal raw.
+func contactSessionWarning(manager string, blocked []blockedContactAgent) string {
+	if len(blocked) == 0 {
+		return ""
+	}
+	var reasons []string
+	byReason := map[string][]string{}
+	hasManager, hasWorker := false, false
+	for i, b := range blocked {
+		if b.name == manager {
+			hasManager = true
+		} else {
+			hasWorker = true
+		}
+		if i >= maxWarnedContactAgents {
+			continue
+		}
+		if _, ok := byReason[b.reason]; !ok {
+			reasons = append(reasons, b.reason)
+		}
+		byReason[b.reason] = append(byReason[b.reason], termsafe.Sanitize(b.name))
+	}
+	groups := make([]string, 0, len(reasons)+1)
+	for _, r := range reasons {
+		groups = append(groups, strings.Join(byReason[r], ", ")+" ("+termsafe.Sanitize(r)+")")
+	}
+	if more := len(blocked) - maxWarnedContactAgents; more > 0 {
+		groups = append(groups, fmt.Sprintf("and %d more", more))
+	}
+	var how []string
+	if hasWorker {
+		how = append(how, "a worker takes contact messages once the broker next creates it fresh")
+	}
+	if hasManager {
+		how = append(how, fmt.Sprintf("for the manager %s, run `lever up --fresh` (back up the manager's conversation first), or let this bring-up create it",
+			termsafe.Sanitize(manager)))
+	}
+	if len(blocked) == 1 {
+		return fmt.Sprintf("lever: warning: remote: contacts cannot post to %s until its session starts fresh; %s",
+			groups[0], strings.Join(how, "; "))
+	}
+	return fmt.Sprintf("lever: warning: remote: contacts cannot post to %d agents until their sessions start fresh: %s; %s",
+		len(blocked), strings.Join(groups, "; "), strings.Join(how, "; "))
 }

@@ -9,10 +9,15 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"runtime/debug"
+	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/termsafe"
@@ -32,7 +37,17 @@ func VersionCmd() *cobra.Command {
 // version` from masking a stale or local build behind the bare release string
 // (a make-install binary can lag the source it was built from, which the
 // hardcoded const alone hides).
-func VersionString() string {
+//
+// Two builds get the binary's own content hash as well: one with no
+// provenance at all, and a dirty one. Go stamps no VCS info for a build in a
+// git worktree (its .git is a file, which Go's VCS detection does not
+// accept), and every dirty build of one commit carries the same stamp. apply
+// restarts the broker and the remote proxy when this string changes, so
+// without the hash a new build of the same release kept the old daemons
+// running.
+func VersionString() string { return versionString() }
+
+var versionString = sync.OnceValue(func() string {
 	var rev, modVersion string
 	dirty := false
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -46,13 +61,47 @@ func VersionString() string {
 			}
 		}
 	}
-	return formatVersion(Version, rev, dirty, modVersion)
+	bin := ""
+	if needsBinaryHash(rev, dirty, modVersion) {
+		bin = executableHash()
+	}
+	return formatVersion(Version, rev, dirty, modVersion, bin)
+})
+
+// needsBinaryHash reports a build whose stamp does not tell builds apart: no
+// commit and no module version, or a commit with uncommitted changes.
+func needsBinaryHash(rev string, dirty bool, modVersion string) bool {
+	if rev != "" {
+		return dirty
+	}
+	return modVersion == "" || modVersion == "(devel)"
+}
+
+// executableHash is the first 12 hex digits of the running binary's SHA-256,
+// or "" when the binary cannot be read.
+func executableHash() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(exe)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 // formatVersion renders the version line from the release string plus whichever
 // build provenance is available: a VCS commit (local builds) takes precedence
 // over a module version (go install builds); with neither, just the release.
-func formatVersion(base, rev string, dirty bool, modVersion string) string {
+// bin, the binary's content hash, is appended when set (see VersionString).
+func formatVersion(base, rev string, dirty bool, modVersion, bin string) string {
+	var parts []string
 	switch {
 	case rev != "":
 		short := rev
@@ -62,12 +111,17 @@ func formatVersion(base, rev string, dirty bool, modVersion string) string {
 		if dirty {
 			short += "-dirty"
 		}
-		return base + " (" + short + ")"
+		parts = append(parts, short)
 	case modVersion != "" && modVersion != "(devel)":
-		return base + " (" + modVersion + ")"
-	default:
+		parts = append(parts, modVersion)
+	}
+	if bin != "" {
+		parts = append(parts, "bin "+bin)
+	}
+	if len(parts) == 0 {
 		return base
 	}
+	return base + " (" + strings.Join(parts, ", ") + ")"
 }
 
 // Exit codes a command can ask for with WithExitCode. A script that must tell

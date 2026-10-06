@@ -1,6 +1,11 @@
 package scion
 
-import "context"
+import (
+	"context"
+	"strings"
+
+	"github.com/stevegeek/lever/internal/termsafe"
+)
 
 type MsgOpts struct {
 	To        string // "agent:<name>", "user:<name>", or a bare agent name
@@ -14,6 +19,62 @@ type MsgOpts struct {
 type Event map[string]any
 
 func (e Event) ID() string { id, _ := e["id"].(string); return id }
+
+// WorkerReportedPrefix starts every event message lever relays. The hub
+// builds a notification's message from the watched agent's own Message and
+// TaskSummary, which that agent sets: the text is the worker's, never lever's
+// or the hub's statement.
+const WorkerReportedPrefix = "worker-reported: "
+
+// maxEventMessage bounds a relayed event message, prefix included.
+const maxEventMessage = 1024
+
+// WorkerReported returns a copy of e that is safe to show the manager as data:
+// its "message" sanitized (termsafe: one line, no escapes, no invisible
+// characters), cut to maxEventMessage bytes and marked with
+// WorkerReportedPrefix, and its "status" kept only when it is one of the
+// hub's trigger statuses (StatusLabel). Every other field is unchanged, so
+// the JSON shape stays what scion sends. It is idempotent: the broker applies
+// it, and lever-manager applies it again to what the broker answers.
+func WorkerReported(e Event) Event {
+	out := make(Event, len(e))
+	for k, v := range e {
+		out[k] = v
+	}
+	if msg, ok := e["message"].(string); ok {
+		msg = termsafe.Sanitize(strings.TrimPrefix(msg, WorkerReportedPrefix))
+		if limit := maxEventMessage - len(WorkerReportedPrefix); len(msg) > limit {
+			msg = strings.ToValidUTF8(msg[:limit-len("…")], "") + "…"
+		}
+		out["message"] = WorkerReportedPrefix + msg
+	} else if _, has := e["message"]; has {
+		out["message"] = WorkerReportedPrefix
+	}
+	if st, has := e["status"]; has {
+		s, _ := st.(string)
+		out["status"] = StatusLabel(s)
+	}
+	return out
+}
+
+// StatusLabel is a notification status when it is one the hub produces (an
+// activity or a phase in upper case, DELETED, DELIVERY_FAILED), "" when
+// empty, else UNRECOGNISED. The hub derives it from the watched agent's
+// activity or phase, both of which the agent can post as any text.
+func StatusLabel(status string) string {
+	lower := strings.ToLower(status)
+	switch {
+	case status == "":
+		return ""
+	case status != strings.ToUpper(lower):
+		// The hub upper-cases what it stores; any other casing is not its.
+	case status == "DELETED", status == "DELIVERY_FAILED":
+		return status
+	case ActivityLabel(lower) == lower, PhaseLabel(lower) == lower:
+		return status
+	}
+	return strings.ToUpper(LabelUnrecognised)
+}
 
 // Message sends one message through `scion message`.
 //

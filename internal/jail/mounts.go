@@ -88,6 +88,10 @@ func ContainerPathWritable(ctx context.Context, r proc.Runner, ref, target strin
 	// agent user write here". root bypasses permission bits but still gets
 	// EROFS on a read-only mount, so the answer does not depend on the
 	// image's USER or the directory's mode.
+	// The agent controls what `test` is in its container: bounded like
+	// every other exec into it (BoundAgentExec).
+	ctx, cancel := BoundAgentExec(ctx)
+	defer cancel()
 	res, err := r.Run(ctx, nil, "podman", "exec", "--user", "0", ref, "test", "-w", target)
 	quiet := strings.TrimSpace(res.Stdout) == "" && benignStderr(res.Stderr)
 	switch {

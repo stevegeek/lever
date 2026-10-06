@@ -1,0 +1,328 @@
+package broker
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stevegeek/lever/internal/scion"
+)
+
+// fakeHubTokens is a HubTokenHealer: expired names the agents whose token
+// reads expired; resets records every reset in order.
+type fakeHubTokens struct {
+	expired  map[string]bool
+	readErr  error
+	resetErr error
+	reads    []string
+	resets   []string
+}
+
+func (f *fakeHubTokens) TokenExpired(_ context.Context, agent string) (bool, error) {
+	f.reads = append(f.reads, agent)
+	return f.expired[agent], f.readErr
+}
+
+func (f *fakeHubTokens) ResetAuth(_ context.Context, agent string) error {
+	f.resets = append(f.resets, agent)
+	return f.resetErr
+}
+
+// tokenWatchBroker is a reenrol fixture (manager slug "appname", worker
+// "scratch") with a hub-token healer and a captured audit log.
+func tokenWatchBroker(t *testing.T, mode string, agents []scion.Agent, h *fakeHubTokens) (*Broker, *bytes.Buffer) {
+	t.Helper()
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{testInstanceProject: agents}}
+	b, _, _ := reenrolBroker(t, rt, mode)
+	b.hubTokens = h
+	b.verifyRole = func(context.Context, string) error { return nil }
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	return b, &buf
+}
+
+var liveFleet = []scion.Agent{
+	{Slug: "appname", Phase: "running", ContainerStatus: "Up 9 hours"},
+	{Slug: "scratch", Phase: "running", ContainerStatus: "Up 2 hours"},
+}
+
+// An expired token of a running agent is reset, by its slug, and audited
+// under its identity; a valid one is only read.
+func TestHealHubTokensResetsExpired(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true}}
+	b, log := tokenWatchBroker(t, "all", liveFleet, h)
+	b.healHubTokens(context.Background())
+	if strings.Join(h.reads, ",") != "appname,scratch" {
+		t.Fatalf("reads = %v, want the manager then the worker", h.reads)
+	}
+	if strings.Join(h.resets, ",") != "appname" {
+		t.Fatalf("resets = %v, want [appname]", h.resets)
+	}
+	if !strings.Contains(log.String(), "op=hub-token caller=test-manager decision=allow") {
+		t.Fatalf("audit = %q", log.String())
+	}
+}
+
+// Only a running record over a live container is read at all.
+func TestHealHubTokensSkipsAgentsNotRunning(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true, "scratch": true}}
+	b, _ := tokenWatchBroker(t, "all", []scion.Agent{
+		{Slug: "appname", Phase: "suspended", ContainerStatus: "stopped"},
+		{Slug: "scratch", Phase: "running", ContainerStatus: "Exited (1) 3 minutes ago"},
+	}, h)
+	b.healHubTokens(context.Background())
+	if len(h.reads)+len(h.resets) != 0 {
+		t.Fatalf("reads %v resets %v, want none", h.reads, h.resets)
+	}
+}
+
+// The auto_reenrol mode governs the watch like the certificate healer, and a
+// revoked identity is never healed.
+func TestHealHubTokensModeAndRevocation(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true, "scratch": true}}
+	b, _ := tokenWatchBroker(t, "manager", liveFleet, h)
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "appname" {
+		t.Fatalf("mode=manager resets = %v, want [appname]", h.resets)
+	}
+
+	h = &fakeHubTokens{expired: map[string]bool{"appname": true, "scratch": true}}
+	b, _ = tokenWatchBroker(t, "off", liveFleet, h)
+	b.healHubTokens(context.Background())
+	if len(h.reads) != 0 {
+		t.Fatalf("mode=off read %v", h.reads)
+	}
+
+	h = &fakeHubTokens{expired: map[string]bool{"appname": true, "scratch": true}}
+	b, _ = tokenWatchBroker(t, "all", liveFleet, h)
+	b.Revoke("scratch")
+	b.Revoke("test-manager")
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 {
+		t.Fatalf("revoked identities reset: %v", h.resets)
+	}
+}
+
+// One reset per agent per cooldown, whatever the token file keeps claiming;
+// after the cooldown the next pass may try again.
+func TestHealHubTokensCooldown(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"scratch": true}, resetErr: errors.New("scion reset-auth scratch: hub said no")}
+	b, log := tokenWatchBroker(t, "all", liveFleet, h)
+	now := time.Date(2026, 10, 6, 20, 0, 0, 0, time.UTC)
+	b.reenrolNow = func() time.Time { return now }
+	b.healHubTokens(context.Background())
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 1 {
+		t.Fatalf("resets inside the cooldown = %v, want one", h.resets)
+	}
+	if !strings.Contains(log.String(), "decision=error") || !strings.Contains(log.String(), "reset-auth failed") {
+		t.Fatalf("a failed reset must be audited: %q", log.String())
+	}
+	now = now.Add(tokenHealCooldown)
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 2 {
+		t.Fatalf("resets after the cooldown = %v, want two", h.resets)
+	}
+}
+
+// A token that cannot be read, or a listing that fails, resets nothing.
+func TestHealHubTokensReadAndListFailures(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true}, readErr: errors.New("exit status 1")}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 {
+		t.Fatalf("an unreadable token was reset: %v", h.resets)
+	}
+	rt := &fakeRuntime{listErr: errors.New("hub down")}
+	b2, _, _ := reenrolBroker(t, rt, "all")
+	h2 := &fakeHubTokens{expired: map[string]bool{"appname": true}}
+	b2.hubTokens = h2
+	b2.healHubTokens(context.Background())
+	if len(h2.reads) != 0 {
+		t.Fatalf("a failed listing still read tokens: %v", h2.reads)
+	}
+}
+
+// A record the pre-role guard refuses is never reset: the hub would mint the
+// new token from its empty stored role, which a later scion reads as full.
+func TestHealHubTokensRefusesAPreRoleRecord(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true, "scratch": true}}
+	b, log := tokenWatchBroker(t, "all", liveFleet, h)
+	b.verifyRole = func(_ context.Context, agent string) error {
+		if agent == "scratch" {
+			return errors.New("record stores no role \x1b[31m")
+		}
+		return nil
+	}
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "appname" {
+		t.Fatalf("resets = %v, want only the manager", h.resets)
+	}
+	if !strings.Contains(log.String(), "decision=deny") || strings.Contains(log.String(), "\x1b") {
+		t.Fatalf("audit = %q", log.String())
+	}
+}
+
+// A worker whose lifecycle lock is held is skipped without spending its
+// cooldown; the next pass resets it once the lock is free.
+func TestHealHubTokensSkipsABusyWorker(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"scratch": true}}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	b.reenrolLockWait = 10 * time.Millisecond
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 {
+		t.Fatalf("a busy worker was reset: %v", h.resets)
+	}
+	unlock()
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "scratch" {
+		t.Fatalf("resets after the lock freed = %v, want [scratch]", h.resets)
+	}
+}
+
+// Serve starts the watch only with a healer, a runtime, and a mode that
+// covers an agent.
+func TestTokenWatchEnabled(t *testing.T) {
+	h := &fakeHubTokens{}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	if !b.tokenWatchEnabled() {
+		t.Fatal("healer + runtime + mode all must enable the watch")
+	}
+	b.hubTokens = nil
+	if b.tokenWatchEnabled() {
+		t.Fatal("no healer, no watch")
+	}
+	b, _ = tokenWatchBroker(t, "all", liveFleet, h)
+	b.runtime = nil
+	if b.tokenWatchEnabled() {
+		t.Fatal("no runtime, no watch")
+	}
+	b, _ = tokenWatchBroker(t, "off", liveFleet, h)
+	if b.tokenWatchEnabled() {
+		t.Fatal("auto_reenrol off, no watch")
+	}
+	b, _ = tokenWatchBroker(t, "manager", liveFleet, h)
+	if !b.tokenWatchEnabled() {
+		t.Fatal("auto_reenrol manager still watches the manager")
+	}
+}
+
+// runTokenWatch makes one pass at once, then one per tick, and returns when
+// its context ends.
+func TestRunTokenWatchPassesAndStops(t *testing.T) {
+	h := &countingHubTokens{passes: make(chan struct{}, 16)}
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{testInstanceProject: {liveFleet[0]}}}
+	b, _, _ := reenrolBroker(t, rt, "manager")
+	b.hubTokens = h
+	b.tokenWatchEvery = time.Hour // only the immediate pass can run in time
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { b.runTokenWatch(ctx); close(done) }()
+	select {
+	case <-h.passes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no pass at start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch did not stop with its context")
+	}
+
+	b.tokenWatchEvery = 5 * time.Millisecond
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	go b.runTokenWatch(ctx)
+	for i := 0; i < 3; i++ {
+		select {
+		case <-h.passes:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("pass %d did not come on the ticker", i+1)
+		}
+	}
+}
+
+// countingHubTokens signals every token read (one per pass with one agent).
+type countingHubTokens struct{ passes chan struct{} }
+
+func (c *countingHubTokens) TokenExpired(context.Context, string) (bool, error) {
+	select {
+	case c.passes <- struct{}{}:
+	default:
+	}
+	return false, nil
+}
+func (c *countingHubTokens) ResetAuth(context.Context, string) error { return nil }
+
+// With no pre-role guard wired the watch refuses every reset: a guard that
+// cannot run is not a pass.
+func TestHealHubTokensRefusesWithoutAGuard(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true}}
+	b, log := tokenWatchBroker(t, "all", liveFleet, h)
+	b.verifyRole = nil
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 || !strings.Contains(log.String(), "no pre-role record guard") {
+		t.Fatalf("resets %v audit %q", h.resets, log.String())
+	}
+}
+
+// A `lever revoke` that lands while the reset waits for the worker's lock
+// wins: no reset after the wait.
+func TestHealHubTokensRechecksRevocationAfterTheLockWait(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"scratch": true}}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	b.reenrolLockWait = 5 * time.Second
+	unlock, err := b.lockWorker(context.Background(), "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.onWorkerLockWait = func(string) {
+		b.Revoke("scratch")
+		unlock()
+	}
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 {
+		t.Fatalf("a worker revoked during the lock wait was reset: %v", h.resets)
+	}
+}
+
+// slowHubTokens hangs the read of one agent until its context ends, like a
+// FIFO token file in a hostile worker's container.
+type slowHubTokens struct {
+	fakeHubTokens
+	hang string
+}
+
+func (s *slowHubTokens) TokenExpired(ctx context.Context, agent string) (bool, error) {
+	if agent == s.hang {
+		<-ctx.Done()
+		return false, ctx.Err()
+	}
+	return s.fakeHubTokens.TokenExpired(ctx, agent)
+}
+
+// One agent's hanging read ends at its own deadline and does not cost the
+// next agent its reset.
+func TestHealHubTokensOneHangDoesNotStarveTheRest(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{testInstanceProject: liveFleet}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	b.verifyRole = func(context.Context, string) error { return nil }
+	h := &slowHubTokens{fakeHubTokens: fakeHubTokens{expired: map[string]bool{"scratch": true}}, hang: "appname"}
+	b.hubTokens = h
+	old := tokenWatchAgentTimeout
+	tokenWatchAgentTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { tokenWatchAgentTimeout = old })
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "scratch" {
+		t.Fatalf("resets = %v, want the worker after the manager's hung read", h.resets)
+	}
+}

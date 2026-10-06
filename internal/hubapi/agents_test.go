@@ -257,3 +257,22 @@ func TestAgentsDecodesStateFields(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
+
+// The record's inline-config volumes are what a resume recreates the
+// container from; apply reads them when there is no container to inspect.
+func TestAgentsDecodesRecordVolumes(t *testing.T) {
+	f := agentsScript(`{"agents":[
+	  {"slug":"assistant","appliedConfig":{"inlineConfig":{"volumes":[
+	    {"source":"/lever/kb","target":"/workspace/kb","read_only":true},
+	    {"source":"/lever/a","target":"/workspace/a"}]}}},
+	  {"slug":"bare","appliedConfig":{}}
+	]}`)
+	got, err := (&Client{T: f}).Agents(context.Background(), "lever", "hub")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	want := []Volume{{Source: "/lever/kb", Target: "/workspace/kb", ReadOnly: true}, {Source: "/lever/a", Target: "/workspace/a"}}
+	if fmt.Sprint(got[0].Volumes) != fmt.Sprint(want) || got[1].Volumes != nil {
+		t.Fatalf("volumes = %+v / %+v", got[0].Volumes, got[1].Volumes)
+	}
+}

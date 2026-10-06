@@ -773,6 +773,15 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 			"--role baseline (its conversation is LOST), or pin a scion older than scion#1089"}
 }
 
+// agentSessionReader reads an agent's session from inside its container
+// (jail.AgentProbe in production): its hub token expiry and whether its
+// harness still runs. Both answers are the agent's own word; doctor turns
+// them into a verdict and a time, and never prints what the container said.
+type agentSessionReader interface {
+	HubToken(ctx context.Context, ref string) (jail.HubTokenTimes, error)
+	HarnessAlive(ctx context.Context, ref string) (bool, error)
+}
+
 // agentLister reads scion's agent records for the in-jail project: phase and
 // container status, which the hub's own record lacks (hubapi.Agent).
 type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, error)
@@ -795,7 +804,17 @@ type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, er
 // working stays green: real work looks the same from here, and `lever
 // attach` is the way to tell. A list error is "not checked" (a down jail or hub is another
 // check's finding), never a pass.
-func checkManagerLive(ctx context.Context, project, name string, list agentLister, now time.Time) checkResult {
+//
+// Two faults hide behind a live container, and the session reader (nil = not
+// probed) exposes both. An expired agent hub token fails the row whatever
+// the activity: sciontool's refresh timer stands still while the host
+// sleeps, an expired token cannot refresh itself, and the hub's stall
+// sweeper then marks the manager stalled — the very reading that passes
+// above. A phase stopped over a container that is still up is told apart by
+// whether claude still runs: another claude process in the container firing
+// the shared SessionEnd hook leaves the harness running (apply reports it
+// running again), a claude that exited does not.
+func checkManagerLive(ctx context.Context, project, name string, list agentLister, session agentSessionReader, now time.Time) checkResult {
 	const check = "manager agent"
 	if list == nil {
 		return checkResult{check, true, "not checked", ""}
@@ -809,7 +828,16 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		return checkResult{check, false, fmt.Sprintf("no record for manager %q — nothing is running this instance", name),
 			"run `lever up`"}
 	}
+	ref := jail.ContainerName(hubProjectKey(project), name)
 	if a.Phase == "running" && scionpkg.ContainerLive(a.ContainerStatus) {
+		if session != nil {
+			if tok, err := session.HubToken(ctx, ref); err == nil && tok.Expired() {
+				return checkResult{check, false,
+					fmt.Sprintf("%q is running (container %s; %s), but its hub token expired at %s (%s ago by the guest clock): every reply, status update and heartbeat it sends fails with 401 — the agent's token refresh timer stands still while the host sleeps, and an expired token cannot refresh itself",
+						name, scionpkg.ContainerLabel(a.ContainerStatus), activityAge(a, now), tok.Expiry.Format(time.RFC3339), tok.Now.Sub(tok.Expiry).Truncate(time.Second)),
+					hubTokenFix(name, project)}
+			}
+		}
 		if a.Activity == scionpkg.ActivityStalled {
 			// The hub's stall sweeper also marks a manager that sits idle at
 			// its prompt: after a turn that ended without a waiting-for-input
@@ -836,12 +864,127 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		// death and never a pass with a claim attached.
 		return checkResult{check, true, fmt.Sprintf("%q is running; not checked further (no container status reported yet)", name), ""}
 	}
+	if a.Phase == scionpkg.PhaseStopped && scionpkg.ContainerLive(a.ContainerStatus) && session != nil {
+		alive, err := session.HarnessAlive(ctx, ref)
+		switch {
+		case err == nil && alive:
+			return checkResult{check, false,
+				fmt.Sprintf("manager %q's session ended in the hub (phase stopped), but claude still runs in its container (%s) — another claude process in the container (such as `claude mcp list` through podman exec) fired the shared SessionEnd hook; the hub refuses `lever attach`, and a resume would start a new session (no --continue)",
+					name, scionpkg.ContainerLabel(a.ContainerStatus)),
+				"run `lever apply`: it has the agent report its session running again, and the conversation continues (`lever stop` does the same before it suspends)"}
+		case err == nil:
+			return checkResult{check, false,
+				fmt.Sprintf("manager %q's claude has exited (phase stopped; container %s)", name, scionpkg.ContainerLabel(a.ContainerStatus)),
+				stoppedResumeFix}
+		}
+	}
 	fix := "run `lever up` to resume it"
+	if a.Phase == scionpkg.PhaseStopped {
+		fix = stoppedResumeFix
+	}
 	if a.Phase == "error" {
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
 	}
 	return checkResult{check, false,
 		fmt.Sprintf("manager %q is not live: phase %s, container %s", name, scionpkg.BoundedQuote(a.Phase), scionpkg.BoundedQuote(a.ContainerStatus)), fix}
+}
+
+// stoppedResumeFix is the fix for a manager whose session really ended:
+// scion's hub resumes a stopped record with a fresh harness session (only a
+// suspended one gets --continue), so the operator hears how to get the old
+// conversation back.
+const stoppedResumeFix = "run `lever up` — scion resumes a stopped record in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
+
+// hubTokenFix names the heal for an agent whose hub token expired.
+func hubTokenFix(name, project string) string {
+	return "run `lever apply` — it runs `scion reset-auth` for each running agent whose hub token expired (no restart; the conversation is kept). By hand, in the guest: `scion reset-auth " + name + " -g " + project + "` with the controller PAT"
+}
+
+// checkAgentHubTokens reads the hub token of the manager and of every
+// configured worker whose container is live, and fails on any that expired:
+// replies, status updates and heartbeats from that agent all fail with 401,
+// while its container, phase and (for the manager) activity row stay green
+// or merely "stalled". A token past its refresh point (2 h before expiry) is
+// a warning: sciontool's refresh timer counts the guest's monotonic clock,
+// which stands still while the host sleeps, so an overdue refresh turns into
+// an expiry unless it fires in time. An agent whose token cannot be read is
+// "not checked" for that agent, never a pass with a claim.
+//
+// Only a running or stopped agent fails the row: those are the phases
+// `lever apply` heals. An expired token under another phase (error,
+// starting, …) is a warning, since the resume or restart that phase needs
+// issues a new token anyway. A running manager's expired token is the
+// manager row's failure already, so here it is a warning pointing there:
+// one fault, one failed row.
+func checkAgentHubTokens(ctx context.Context, project, manager string, agents []string, list agentLister, session agentSessionReader) checkResult {
+	const check = "agent hub tokens"
+	if list == nil || session == nil {
+		return checkResult{check, true, "not checked", ""}
+	}
+	recs, err := list(ctx, project)
+	if err != nil {
+		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+	}
+	var good, overdue, expired, otherPhase, unread []string
+	managerExpired := false
+	var fixFor string
+	for _, name := range agents {
+		a := scionpkg.FindAgent(recs, name)
+		if a == nil || !scionpkg.ContainerLive(a.ContainerStatus) {
+			continue
+		}
+		tok, err := session.HubToken(ctx, jail.ContainerName(hubProjectKey(project), name))
+		switch {
+		case err != nil:
+			unread = append(unread, name)
+		case tok.Expired() && name == manager && a.Phase == scionpkg.PhaseRunning:
+			managerExpired = true
+		case tok.Expired() && (a.Phase == scionpkg.PhaseRunning || a.Phase == scionpkg.PhaseStopped):
+			expired = append(expired, fmt.Sprintf("%s (expired %s ago)", name, tok.Now.Sub(tok.Expiry).Truncate(time.Second)))
+			if fixFor == "" {
+				fixFor = name
+			}
+		case tok.Expired():
+			otherPhase = append(otherPhase, fmt.Sprintf("%s (expired, phase %s)", name, scionpkg.BoundedQuote(scionpkg.PhaseLabel(a.Phase))))
+		case tok.RefreshOverdue():
+			overdue = append(overdue, fmt.Sprintf("%s (refresh due %s ago, expires in %s)", name,
+				tok.Now.Sub(tok.Expiry.Add(-jail.AgentTokenRefreshMargin)).Truncate(time.Second), tok.Expiry.Sub(tok.Now).Truncate(time.Second)))
+		default:
+			good = append(good, fmt.Sprintf("%s (valid %s)", name, tok.Expiry.Sub(tok.Now).Truncate(time.Minute)))
+		}
+	}
+	notChecked := ""
+	if len(unread) > 0 {
+		notChecked = "; not checked: " + strings.Join(unread, ", ") + " (token unreadable)"
+	}
+	var warns, fixes []string
+	if managerExpired {
+		warns = append(warns, manager+"'s token expired (the manager agent row reports it)")
+		fixes = append(fixes, hubTokenFix(manager, project))
+	}
+	if len(otherPhase) > 0 {
+		warns = append(warns, "expired under a phase `lever apply` does not heal: "+strings.Join(otherPhase, ", "))
+		fixes = append(fixes, "bring the agent back to running (`lever up` for the manager, a resume for a worker): the resume issues it a new token")
+	}
+	if len(overdue) > 0 {
+		warns = append(warns, "refresh overdue: "+strings.Join(overdue, ", ")+" — sciontool's refresh timer stands still while the host sleeps; it may still fire in time")
+		fixes = append(fixes, "if the token expires first, `lever apply` resets it (`scion reset-auth`, no restart)")
+	}
+	switch {
+	case len(expired) > 0:
+		detail := "expired: " + strings.Join(expired, ", ") + " — every reply, status update and heartbeat from these agents fails with 401, and an expired token cannot refresh itself"
+		if len(warns) > 0 {
+			detail += "; also " + strings.Join(warns, "; ")
+		}
+		return checkResult{check, false, detail + notChecked, hubTokenFix(fixFor, project)}
+	case len(warns) > 0:
+		return warnResult(check, strings.Join(warns, "; ")+notChecked, strings.Join(fixes, "; "))
+	case len(good) == 0 && len(unread) == 0:
+		return checkResult{check, true, "no running agent", ""}
+	case len(good) == 0:
+		return checkResult{check, true, strings.TrimPrefix(notChecked, "; "), ""}
+	}
+	return checkResult{check, true, strings.Join(good, ", ") + notChecked, ""}
 }
 
 // guestDNSProbeName is the name doctor resolves from inside the guest: the
@@ -1066,6 +1209,10 @@ func checkWorkerTicketMounts(ctx context.Context, project string, workers []stri
 	return checkResult{check, true, fmt.Sprintf("%d worker container(s) mount %s", checked, workerTicketMount), ""}
 }
 
+// recordVolumeReader returns the extra mounts an agent's hub record was
+// created with (hubRecordVolumes in production).
+type recordVolumeReader func(ctx context.Context, project, agent string) ([]jail.Mount, error)
+
 // mountInspector returns a jail container's mounts with their writability by
 // id or name (jail.ContainerMounts in production); jail.ErrNoContainer when
 // there is none.
@@ -1090,36 +1237,83 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // The container is found by the id scion reports or else by scion's
 // container name, as for the worker ticket mounts. No manager record or
 // container, a listing or an inspect failure, is "not checked".
-func checkManagerReadOnly(ctx context.Context, project, name string, want []config.TreeMount, list agentLister, inspect mountInspector, probe apply.WritableProbe) checkResult {
+//
+// The row also reports the other direction (apply.ManagerStaleTreeMounts):
+// a mount the record still holds for a directory the config dropped, or
+// whose directory is gone from the host tree — the latter fails, because
+// the next resume cannot recreate the container (card #157). That half
+// runs even with read_only unset, since removing the whole list is how a
+// record ends up with mounts the config no longer names; only then is a
+// failed listing or inspect still "none configured".
+//
+// With no container to inspect (or an inspect that fails), that half reads
+// the hub record's volumes instead (record; nil skips it), which a resume
+// recreates the container from; the plan half then stays "not checked".
+func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, record recordVolumeReader, probe apply.WritableProbe) checkResult {
 	const check = "manager read-only paths"
-	if len(want) == 0 {
-		return checkResult{check, true, "none configured", ""}
+	notChecked := func(detail string) checkResult {
+		if len(want) == 0 {
+			detail = "none configured"
+		}
+		return checkResult{check, true, detail, ""}
 	}
 	if list == nil || inspect == nil {
-		return checkResult{check, true, "not checked", ""}
+		return notChecked("not checked")
 	}
 	agents, err := list(ctx, project)
 	if err != nil {
-		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
+		return notChecked("not checked (could not list agents): " + firstLine(err.Error()))
 	}
 	a := scionpkg.FindAgent(agents, name)
 	if a == nil {
-		return checkResult{check, true, "not checked (no manager record)", ""}
+		return notChecked("not checked (no manager record)")
 	}
 	ref := a.ContainerID
 	if ref == "" {
 		ref = jail.ContainerName(hubProjectKey(project), name)
 	}
 	mounts, err := inspect(ctx, ref)
-	if errors.Is(err, jail.ErrNoContainer) {
-		return checkResult{check, true, "not checked (no manager container)", ""}
-	}
 	if err != nil {
-		return checkResult{check, true, "not checked (could not inspect the manager container): " + firstLine(err.Error()), ""}
+		if record != nil {
+			if vols, rerr := record(ctx, hubProjectKey(project), name); rerr == nil {
+				if stale := apply.ManagerStaleTreeMounts(project, tree, want, vols); !stale.Empty() {
+					r := staleTreeMountsResult(check, name, stale)
+					r.detail += " (read from the hub record: no manager container to inspect)"
+					return r
+				}
+			}
+		}
+		if errors.Is(err, jail.ErrNoContainer) {
+			return notChecked("not checked (no manager container)")
+		}
+		return notChecked("not checked (could not inspect the manager container): " + firstLine(err.Error()))
 	}
+	stale := apply.ManagerStaleTreeMounts(project, tree, want, mounts)
+	if len(want) == 0 {
+		if !stale.Empty() {
+			return staleTreeMountsResult(check, name, stale)
+		}
+		return checkResult{check, true, "none configured", ""}
+	}
+	r := managerReadOnlyGaps(ctx, check, project, name, ref, a.ContainerStatus, want, mounts, probe)
+	if stale.Empty() {
+		return r
+	}
+	sr := staleTreeMountsResult(check, name, stale)
+	if r.fix == "" {
+		return sr
+	}
+	// Both: the row fails if either does, and names both, with both fixes.
+	return checkResult{check, r.ok && sr.ok, r.detail + "; also " + stale.String(), r.fix + "; and " + sr.fix}
+}
+
+// managerReadOnlyGaps is checkManagerReadOnly's half for the current plan:
+// every planned mount present, and (on a running container) every entry
+// refusing a write.
+func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, containerStatus string, want []config.TreeMount, mounts []jail.Mount, probe apply.WritableProbe) checkResult {
 	gaps := apply.ManagerTreeMountGaps(project, want, mounts)
 	if gaps.Empty() {
-		if !scionpkg.ContainerLive(a.ContainerStatus) {
+		if !scionpkg.ContainerLive(containerStatus) {
 			return warnResult(check, "the mounts are listed, but the write probe did not run (the manager container is not running), so a protected directory replaced on the host would go unnoticed",
 				"bring the manager up (`lever up`) and re-run doctor")
 		}
@@ -1147,6 +1341,17 @@ func checkManagerReadOnly(ctx context.Context, project, name string, want []conf
 		}
 	}
 	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q (mounted, and a write probe refused), %d pin(s) mounted (pins are checked by inspect only)", entries, name, pins), ""}
+}
+
+// staleTreeMountsResult is checkManagerReadOnly's row for mounts the
+// record holds beyond the config: a gone directory fails (the next resume
+// fails), a dropped mount warns.
+func staleTreeMountsResult(check, name string, stale apply.StaleTreeMounts) checkResult {
+	detail := fmt.Sprintf("manager %q: %s", name, stale)
+	if len(stale.Gone) > 0 {
+		return checkResult{check, false, detail, stale.Fix()}
+	}
+	return warnResult(check, detail, stale.Fix())
 }
 
 // checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own

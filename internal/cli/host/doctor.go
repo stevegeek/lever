@@ -131,6 +131,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	inspectMountsRW := func(ctx context.Context, ref string) ([]jail.Mount, error) {
 		return jail.ContainerMounts(ctx, jr, ref)
 	}
+	// The hub record's volumes, when the manager has no container.
+	recordVolumes := func(ctx context.Context, project, agent string) ([]jail.Mount, error) {
+		return hubRecordVolumes(ctx, hc, project, agent)
+	}
 	// The live half: can the manager's user write a read_only entry?
 	probeWritable := func(ctx context.Context, ref, target string) (bool, error) {
 		return jail.ContainerPathWritable(ctx, jr, ref, target)
@@ -144,6 +148,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	readContainerEnv := func(ctx context.Context, ref, key string) (string, bool, error) {
 		return jail.ContainerEnvValue(ctx, jr, ref, key)
 	}
+	// An agent's hub token expiry and harness liveness, read in its
+	// container (jail.AgentProbe); only a time and a boolean come back.
+	agentSession := jail.AgentProbe{R: jr}
 	workerNames := make([]string, 0, len(app.Workers))
 	workerDirs := make(map[string]string, len(app.Workers))
 	for _, w := range app.Workers {
@@ -153,7 +160,12 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 
 	checks := []func() checkResult{
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
-		func() checkResult { return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, time.Now()) },
+		func() checkResult {
+			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, time.Now())
+		},
+		func() checkResult {
+			return checkAgentHubTokens(ctx, b.MountDest(), app.Name, networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)
+		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
@@ -195,7 +207,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},
 		func() checkResult {
-			return checkManagerReadOnly(ctx, b.MountDest(), app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, probeWritable)
+			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, probeWritable)
 		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult {

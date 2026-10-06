@@ -2,11 +2,16 @@ package host
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
@@ -60,7 +65,6 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// timeout stops a hung scion from blocking power-off.
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
-					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					// st was set alongside appName above; HostScionClient's
 					// HubTokenSource lets suspend authenticate against the real,
 					// dev-auth-off hub with the controller PAT minted by a prior
@@ -68,6 +72,12 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// Empty agent role: this client only calls List and Suspend,
 					// and only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
+					// The heal has its own budget, ahead of the suspend's, so a
+					// slow one cannot cost the manager its suspend.
+					hctx, hcancel := context.WithTimeout(cmd.Context(), stopHealBudget)
+					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), agentRevoked(ia.app, st), appName, b.MountDest())
+					hcancel()
+					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
 						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
 					}
@@ -89,9 +99,66 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 	return cmd
 }
 
-// workerSuspendBudget bounds the whole worker pass of `lever stop`: one list
-// and one suspend per running worker.
-const workerSuspendBudget = 30 * time.Second
+// healStoppedManager runs before the manager's suspend. A manager whose hub
+// phase reads stopped while its claude still runs (another claude process in
+// the container fired the shared SessionEnd hook) cannot be suspended, and
+// scion resumes a stopped record with a FRESH session, so the next `lever up`
+// would lose the conversation's continuity. Reporting the session running
+// first lets the suspend keep it (apply.HealAgentSession). Best-effort, like
+// the suspend: a failure is a warning.
+//
+// The session report travels on the agent's hub token, and a manager left
+// stopped this way has often also slept past its token's expiry: the heal
+// resets an expired token first (scion reset-auth, behind verifyRole, the
+// pre-role record guard), then reports. verifyRole nil ⇒ no reset.
+func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, revoked func(agent string) bool, name, project string) {
+	agents, err := sc.List(ctx, project)
+	if err != nil {
+		return // the suspend that follows reports a hub that cannot answer
+	}
+	rec := scion.FindAgent(agents, name)
+	if rec == nil || rec.Phase != scion.PhaseStopped {
+		return
+	}
+	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, VerifyRole: verifyRole, Revoked: revoked, Log: func(format string, args ...any) {
+		logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...)
+	}}, project, rec)
+}
+
+// stopRoleVerifier is the pre-role record guard for the stop heal's token
+// reset: the hub read apply's guard makes (hubapi.VerifyAgentRole), through
+// the jail with the controller PAT.
+func stopRoleVerifier(jr proc.Runner, st state.State, sc *scion.Client) func(ctx context.Context, project, agent string) error {
+	hc := &hubapi.Client{T: hubJailTransport(jr, st)}
+	return func(ctx context.Context, project, agent string) error {
+		return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, project, agent)
+	}
+}
+
+// stopHealBudget bounds healStoppedManager: a list, a token read, a harness
+// probe, the session report and its re-read. A var so a test can shrink it.
+var stopHealBudget = 20 * time.Second
+
+// stopSessionProbe builds the in-container probe the stop heal uses; a test
+// seam.
+var stopSessionProbe = func(r proc.Runner) apply.AgentSessionProbe { return jail.AgentProbe{R: r} }
+
+// The worker pass of `lever stop`: one list, then up to
+// workerSuspendParallel suspends at a time, each under its own
+// workerSuspendTimeout, so one hung worker cannot cost the others their
+// suspend. workerListTimeout bounds the list.
+const (
+	workerListTimeout     = 15 * time.Second
+	workerSuspendTimeout  = 20 * time.Second
+	workerSuspendParallel = 4
+)
+
+// workerSuspender is the part of *scion.Client the worker pass uses (a
+// test seam).
+type workerSuspender interface {
+	List(ctx context.Context, project string) ([]scion.Agent, error)
+	Suspend(ctx context.Context, worker, project string) error
+}
 
 // suspendRunningWorkers suspends every configured worker the hub shows
 // running, or on its way up, before the power-off. A worker left running
@@ -101,28 +168,54 @@ const workerSuspendBudget = 30 * time.Second
 //
 // Best-effort, like the manager's suspend: every failure is a warning and the
 // caller powers off regardless. No worker is stopped or deleted here.
-func suspendRunningWorkers(cmd *cobra.Command, sc *scion.Client, app *config.App, project string) {
+func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string) {
 	if len(app.Workers) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(cmd.Context(), workerSuspendBudget)
-	defer cancel()
-	agents, err := sc.List(ctx, project)
+	lctx, cancel := context.WithTimeout(cmd.Context(), workerListTimeout)
+	agents, err := sc.List(lctx, project)
+	cancel()
 	if err != nil {
 		cmd.PrintErrf("warning: listing agents failed, no worker was suspended (a running worker may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(err)))
 		return
 	}
+	var names []string
 	for _, wk := range app.Workers {
-		a := scion.FindAgent(agents, wk.Name)
-		if a == nil || !suspendBeforeStop(a.Phase) {
-			continue
+		if a := scion.FindAgent(agents, wk.Name); a != nil && suspendBeforeStop(a.Phase) {
+			names = append(names, wk.Name)
 		}
-		if err := sc.Suspend(ctx, wk.Name, project); err != nil {
-			cmd.PrintErrf("warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", wk.Name, termsafe.Sanitize(scion.ErrSummary(err)))
-			continue
-		}
-		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", wk.Name, wk.Name)
 	}
+	errs := suspendWorkers(cmd.Context(), sc, names, project, workerSuspendParallel, workerSuspendTimeout)
+	// Reported in config order once every suspend has returned, whatever
+	// order they finished in.
+	for i, name := range names {
+		if errs[i] != nil {
+			cmd.PrintErrf("warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", name, termsafe.Sanitize(scion.ErrSummary(errs[i])))
+			continue
+		}
+		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", name, name)
+	}
+}
+
+// suspendWorkers suspends names with at most parallel calls in flight, each
+// under its own timeout, and returns each call's error at its name's index.
+func suspendWorkers(ctx context.Context, sc workerSuspender, names []string, project string, parallel int, timeout time.Duration) []error {
+	errs := make([]error, len(names))
+	sem := make(chan struct{}, max(1, parallel))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			sctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			errs[i] = sc.Suspend(sctx, name, project)
+		}()
+	}
+	wg.Wait()
+	return errs
 }
 
 // suspendBeforeStop reports a phase in which a worker's container is up or

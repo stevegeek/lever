@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sentledger"
@@ -256,8 +258,13 @@ func eventsForAgent(events []scion.Event, agentID string) []scion.Event {
 //
 // It is an early, named answer, not a boundary: when the phase cannot be read
 // the send goes on and the hub decides, as it did before this check.
+//
+// The read has its own bound (msgPhaseTimeout), shorter than the route's: a
+// slow list must not use up the time the send itself needs.
 func (b *Broker) notRunningRefusal(ctx context.Context, actor, slug string, toManager bool) string {
-	phase, err := b.phaseOf(ctx, WorkerSpec{Name: slug})
+	pctx, cancel := context.WithTimeout(ctx, cmp.Or(b.msgPhaseTimeout, msgPhaseTimeoutDefault))
+	phase, err := b.phaseOf(pctx, WorkerSpec{Name: slug})
+	cancel()
 	if err != nil {
 		b.audit("msg", actor, "error", "send->agent:"+slug+": phase: "+err.Error()+" (sending without the check)")
 		return ""
@@ -279,6 +286,11 @@ func (b *Broker) notRunningRefusal(ctx context.Context, actor, slug string, toMa
 	}
 	return "worker " + slug + " is not running (phase " + phase + "); resume it first: `lever-manager agent resume " + slug + "`"
 }
+
+// msgPhaseTimeoutDefault bounds notRunningRefusal's phase read. The control
+// routes that send run under a 30 s deadline (TimeoutConfig.Control); this
+// leaves the send most of it.
+const msgPhaseTimeoutDefault = 5 * time.Second
 
 // operatorActor is the audit actor of the host operator's own sends (the
 // operator socket and the directive channel); notRunningRefusal words its
@@ -419,5 +431,12 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.audit("msg", caller, "allow", "list "+subject)
-	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: eventsForAgent(events, subjectID)})
+	// Each event's message is the worker's own text (scion embeds its
+	// Message and TaskSummary): marked, bounded and sanitized here, so no
+	// reader takes it for lever's statement.
+	kept := eventsForAgent(events, subjectID)
+	for i, e := range kept {
+		kept[i] = scion.WorkerReported(e)
+	}
+	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: kept})
 }

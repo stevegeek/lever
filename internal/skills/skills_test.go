@@ -1,12 +1,14 @@
 package skills
 
 import (
+	"bytes"
+	_ "embed"
 	"strings"
 	"testing"
 )
 
 func TestRenderSubstitutesVersionAndFrontmatter(t *testing.T) {
-	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": func(v string) []byte { return Agent(v, false) }} {
+	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false, false) }, "agent": func(v string) []byte { return Agent(v, false, false) }} {
 		got := string(fn("9.9.9"))
 		if strings.Contains(got, "{{LEVER_VERSION}}") {
 			t.Fatalf("%s: placeholder not substituted", name)
@@ -21,7 +23,7 @@ func TestRenderSubstitutesVersionAndFrontmatter(t *testing.T) {
 }
 
 func TestOperatorAndAgentCoverCapabilityFlow(t *testing.T) {
-	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false) }, "agent": func(v string) []byte { return Agent(v, false) }} {
+	for name, fn := range map[string]func(string) []byte{"operator": func(v string) []byte { return Operator(v, false, false) }, "agent": func(v string) []byte { return Agent(v, false, false) }} {
 		got := string(fn("0.2.0"))
 		for _, want := range []string{"lever-capability", "_capability", "missing capability"} {
 			if !strings.Contains(got, want) {
@@ -32,11 +34,11 @@ func TestOperatorAndAgentCoverCapabilityFlow(t *testing.T) {
 }
 
 func TestHashStableAndDistinct(t *testing.T) {
-	a1, a2 := Hash(Operator("0.2.0", false)), Hash(Operator("0.2.0", false))
+	a1, a2 := Hash(Operator("0.2.0", false, false)), Hash(Operator("0.2.0", false, false))
 	if a1 != a2 {
 		t.Fatal("hash not deterministic")
 	}
-	if Hash(Operator("0.2.0", false)) == Hash(Operator("0.3.0", false)) {
+	if Hash(Operator("0.2.0", false, false)) == Hash(Operator("0.3.0", false, false)) {
 		t.Fatal("version change must change the hash")
 	}
 	if len(a1) != 64 {
@@ -46,7 +48,7 @@ func TestHashStableAndDistinct(t *testing.T) {
 
 func TestLeverVersion(t *testing.T) {
 	cases := []struct{ name, in, want string }{
-		{"rendered scaffold", string(Operator("9.9.9", false)), "9.9.9"},
+		{"rendered scaffold", string(Operator("9.9.9", false, false)), "9.9.9"},
 		{"custom frontmatter", "---\nname: custom\nlever-version: 0.3.1\n---\nbody\n", "0.3.1"},
 		{"no frontmatter", "just a file\n", ""},
 		{"frontmatter without stamp", "---\nname: x\n---\nbody\n", ""},
@@ -63,9 +65,9 @@ func TestLeverVersion(t *testing.T) {
 // TestBothSkillsStateVerifiedChat: {{VERIFIED_CHAT}} is filled in both skills
 // (no placeholder left) with the instance's state.
 func TestBothSkillsStateVerifiedChat(t *testing.T) {
-	for name, fn := range map[string]func(string, bool) []byte{"operator": Operator, "agent": Agent} {
+	for name, fn := range map[string]func(string, bool, bool) []byte{"operator": Operator, "agent": Agent} {
 		for on, want := range map[bool]string{true: "**on**", false: "**off**"} {
-			got := string(fn("1", on))
+			got := string(fn("1", on, false))
 			if strings.Contains(got, "{{") || !strings.Contains(got, "verified web chat is "+want) {
 				t.Fatalf("%s on=%v: skill does not state %s, or keeps a placeholder", name, on, want)
 			}
@@ -78,8 +80,10 @@ func TestBothSkillsStateVerifiedChat(t *testing.T) {
 // ref, act only on the returned text, and have a rule for every result and
 // every lever kind, the old-broker case and the no-tool case.
 func TestSkillsTeachHostRecordVerification(t *testing.T) {
-	for name, fn := range map[string]func(string, bool) []byte{"operator": Operator, "agent": Agent} {
-		got := string(fn("1", true))
+	for name, got := range map[string]string{
+		"operator": string(Operator("1", true, false)), "agent": string(Agent("1", true, false)),
+		"operator, agent messages on": string(Operator("1", true, true)), "agent, agent messages on": string(Agent("1", true, true)),
+	} {
 		for _, want := range []string{
 			"`message_verify`", "`chat_verify`", "`ref`", "Act only on the `text` the tool returns",
 			"`\"lever\"`", "`\"web\"`", "`\"none\"`", "`\"unavailable\"`", "`\"already_verified\"`",
@@ -106,8 +110,8 @@ func TestSkillsTeachHostRecordVerification(t *testing.T) {
 // reply_to the broker returned from the host record, never to a
 // conversation copied from the session.
 func TestSkillsRouteRepliesFromTheVerifyResult(t *testing.T) {
-	for name, fn := range map[string]func(string, bool) []byte{"operator": Operator, "agent": Agent} {
-		got := string(fn("1", true))
+	for name, fn := range map[string]func(string, bool, bool) []byte{"operator": Operator, "agent": Agent} {
+		got := string(fn("1", true, false))
 		for _, want := range []string{"`reply_to`", "-- '<reply_to>'", "--body-file"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("%s: missing %q", name, want)
@@ -124,13 +128,53 @@ func TestSkillsRouteRepliesFromTheVerifyResult(t *testing.T) {
 // TestSkillsGiveForwardedAndSelfTextNoAuthority: a manager's note to itself
 // has no operator authority, and forwarded text keeps its origin's tier.
 func TestSkillsGiveForwardedAndSelfTextNoAuthority(t *testing.T) {
-	op := string(Operator("1", true))
+	op := string(Operator("1", true, false))
 	for _, want := range []string{"only your own earlier\n    words", "carries no operator authority", "keeps the tier of\n  where it came from"} {
 		if !strings.Contains(op, want) {
 			t.Errorf("operator: missing %q", want)
 		}
 	}
-	if ag := string(Agent("1", true)); !strings.Contains(ag, "keeps the tier\n    of where it came from") {
+	if ag := string(Agent("1", true, false)); !strings.Contains(ag, "keeps the tier\n    of where it came from") {
 		t.Error("agent: forwarded text keeps no origin tier")
+	}
+}
+
+//go:embed testdata/lever-agent.pre.md
+var agentPre string
+
+//go:embed testdata/lever-operator.pre.md
+var operatorPre string
+
+// Off renders byte-for-byte what lever rendered before agent messages
+// existed: an instance that does not turn them on gets no skill change, so
+// no agent turns not-fresh for its contacts.
+func TestAgentMessagesOffRendersThePreChangeSkill(t *testing.T) {
+	for _, chat := range []bool{false, true} {
+		if got, want := Agent("9.9.9", chat, false), renderChat(agentPre, "9.9.9", chat); !bytes.Equal(got, want) {
+			t.Fatalf("lever-agent off (chat=%v) differs from the pre-change render", chat)
+		}
+		if got, want := Operator("9.9.9", chat, false), renderChat(operatorPre, "9.9.9", chat); !bytes.Equal(got, want) {
+			t.Fatalf("lever-operator off (chat=%v) differs from the pre-change render", chat)
+		}
+	}
+}
+
+func TestAgentMessagesOnTeachesAuthorizeThenSend(t *testing.T) {
+	for name, pair := range map[string][2][]byte{
+		"agent":    {Agent("1", true, true), Agent("1", true, false)},
+		"operator": {Operator("1", true, true), Operator("1", true, false)},
+	} {
+		s := string(pair[0])
+		for _, want := range []string{"contact_message", "contacts()", "reply_to_ref", "body_file", "command", "not-a-contact", "limit", "never secrets"} {
+			if !strings.Contains(strings.ToLower(s), strings.ToLower(want)) {
+				t.Errorf("%s on: missing %q", name, want)
+			}
+		}
+		if strings.Contains(s, "lever:agent-messages") || strings.Contains(string(pair[1]), "lever:agent-messages") {
+			t.Errorf("%s: a marker line survived", name)
+		}
+		if bytes.Equal(pair[0], pair[1]) {
+			t.Errorf("%s: on and off must differ (the freshness gate keys on the hash)", name)
+		}
 	}
 }

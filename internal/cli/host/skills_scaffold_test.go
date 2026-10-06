@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -72,7 +73,7 @@ func TestSyncSkillsFreshCreatesAllAndRecordsHashes(t *testing.T) {
 		}
 	}
 	st := readState(t, stateDir)
-	if st[".claude/skills/lever-operator/SKILL.md"] != skills.Hash(skills.Operator(cli.Version, false)) {
+	if st[".claude/skills/lever-operator/SKILL.md"] != skills.Hash(skills.Operator(cli.Version, false, false)) {
 		t.Fatalf("state hash mismatch: %+v", st)
 	}
 }
@@ -625,5 +626,26 @@ func TestScaffoldCapsReads(t *testing.T) {
 	}
 	if _, err := adoptSkills(app, stateDir); !errors.Is(err, fsutil.ErrFileTooLarge) {
 		t.Fatalf("adopt oversize CLAUDE.md: err=%v, want fsutil.ErrFileTooLarge", err)
+	}
+}
+
+// TestSkillTargetsFollowAgentMessages: remote.agent_messages picks the skill
+// variant, so turning it on changes every rendered hash (the contact gate
+// then waits for a fresh session on the new skill).
+func TestSkillTargetsFollowAgentMessages(t *testing.T) {
+	app := &config.App{Name: "boss", Tree: t.TempDir(), Workers: []config.Worker{{Name: "w1"}},
+		Remote: config.Remote{Enabled: true, AllowedUsers: []config.RemoteUser{{Login: "op@x"},
+			{Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
+	off := skillTargets(app)
+	app.Remote.AgentMessages.Enabled = true
+	on := skillTargets(app)
+	if len(off) != 2 || len(on) != 2 {
+		t.Fatalf("targets %d %d", len(off), len(on))
+	}
+	for i := range on {
+		if bytes.Equal(on[i].content, off[i].content) || !bytes.Contains(on[i].content, []byte("contact_message")) ||
+			bytes.Contains(off[i].content, []byte("contact_message")) {
+			t.Fatalf("%s: the variant does not follow the config", on[i].relPath)
+		}
 	}
 }

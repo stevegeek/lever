@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"regexp"
 	"strings"
 )
 
@@ -22,14 +23,31 @@ var agentSrc string
 // verifiedChat is whether the instance has verified web chat on; it fills
 // {{VERIFIED_CHAT}}, so an agent image with no verify tool reads every user:
 // message as data only where verified chat (and so a contact) can exist.
-func Operator(version string, verifiedChat bool) []byte {
-	return renderChat(operatorSrc, version, verifiedChat)
+// agentMessages (remote.agent_messages) keeps the "agent-messages on" blocks,
+// else the "off" ones; off renders the text as it was before those blocks.
+func Operator(version string, verifiedChat, agentMessages bool) []byte {
+	return renderChat(pick(operatorSrc, agentMessages), version, verifiedChat)
 }
 
 // Agent returns the rendered worker skill (lever-agent), with
-// {{VERIFIED_CHAT}} filled as in Operator.
-func Agent(version string, verifiedChat bool) []byte {
-	return renderChat(agentSrc, version, verifiedChat)
+// {{VERIFIED_CHAT}} and the agent-messages blocks as in Operator.
+func Agent(version string, verifiedChat, agentMessages bool) []byte {
+	return renderChat(pick(agentSrc, agentMessages), version, verifiedChat)
+}
+
+var (
+	amOn  = regexp.MustCompile(`(?ms)^<!-- lever:agent-messages on -->\n(.*?)^<!-- /lever:agent-messages on -->\n`)
+	amOff = regexp.MustCompile(`(?ms)^<!-- lever:agent-messages off -->\n(.*?)^<!-- /lever:agent-messages off -->\n`)
+)
+
+// pick keeps one variant of each agent-messages block and drops the other
+// variant and every marker line.
+func pick(src string, on bool) string {
+	keep, drop := amOn, amOff
+	if !on {
+		keep, drop = amOff, amOn
+	}
+	return keep.ReplaceAllString(drop.ReplaceAllString(src, ""), "$1")
 }
 
 func renderChat(src, version string, verifiedChat bool) []byte {

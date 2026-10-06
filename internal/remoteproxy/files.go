@@ -62,7 +62,23 @@ const (
 	uploadsAtOnce     = 4
 	uploadsPerLogin   = 2
 	downloadsAtOnce   = 4
-	fileBodyDeadline  = 10 * time.Minute
+	// downloadsPerLogin bounds one login's downloads in flight, and a
+	// contact never takes the last slot: one slow reader (a download may
+	// take fileBodyDeadline) cannot hold every slot, and the operator can
+	// always fetch.
+	downloadsPerLogin = 2
+	// Per login, counted in memory, refused attempts included: each list
+	// reads the ledger, each download copies and hashes up to max_bytes,
+	// each upload attempt reads a body.
+	listsPerMinute     = 60
+	downloadsPerMinute = 20
+	uploadTriesPerHour = 2 * uploadsPerHour
+	// uploadHeader must be on every upload. The page sets it; a browser
+	// sends a custom header across origins only after a CORS preflight,
+	// which the proxy never grants, so a form on another site, or a
+	// redirect (307/308) that resends the body elsewhere, cannot carry it.
+	uploadHeader     = "X-Lever-Upload"
+	fileBodyDeadline = 10 * time.Minute
 	// formOverhead is what a one-file form adds around the file: boundary
 	// lines and part headers, far below this.
 	formOverhead = 64 << 10
@@ -92,17 +108,22 @@ type filesState struct {
 	now         func() time.Time // tests
 	bytesPerDay int64            // uploadBytesPerDay; tests shrink it
 
-	mu        sync.Mutex
-	ledger    *fileledger.Ledger
-	uploading map[string]int
-	total     int
-	downloads chan struct{}
+	mu          sync.Mutex
+	ledger      *fileledger.Ledger
+	uploading   map[string]int
+	total       int
+	downloading map[string]int
+	downTotal   int
+
+	lists, downloads, uploadTries *loginRate
 }
 
 // newFilesState is the file exchange for cfg, its ledger not yet opened.
 func newFilesState(cfg FilesConfig) *filesState {
 	return &filesState{cfg: cfg, now: time.Now, bytesPerDay: uploadBytesPerDay,
-		uploading: map[string]int{}, downloads: make(chan struct{}, downloadsAtOnce)}
+		uploading: map[string]int{}, downloading: map[string]int{},
+		lists: newLoginRate(listsPerMinute, time.Minute), downloads: newLoginRate(downloadsPerMinute, time.Minute),
+		uploadTries: newLoginRate(uploadTriesPerHour, time.Hour)}
 }
 
 // led is the files ledger, opened on first use and again after a failure.
@@ -140,6 +161,67 @@ func (s *filesState) beginUpload(login string) (func(), bool) {
 			delete(s.uploading, login)
 		}
 	}, true
+}
+
+// beginDownload takes a download slot for login, or reports false: a login
+// holds at most downloadsPerLogin, and only an operator takes the last of
+// downloadsAtOnce. done gives it back.
+func (s *filesState) beginDownload(login string, operator bool) (func(), bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	free := downloadsAtOnce - s.downTotal
+	if free <= 0 || !operator && free <= 1 || s.downloading[login] >= downloadsPerLogin {
+		return nil, false
+	}
+	s.downTotal++
+	s.downloading[login]++
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.downTotal--
+		if s.downloading[login]--; s.downloading[login] <= 0 {
+			delete(s.downloading, login)
+		}
+	}, true
+}
+
+// loginRate allows each login limit calls per window (sliding), in memory.
+type loginRate struct {
+	limit  int
+	window time.Duration
+	mu     sync.Mutex
+	hits   map[string][]time.Time
+}
+
+func newLoginRate(limit int, window time.Duration) *loginRate {
+	return &loginRate{limit: limit, window: window, hits: map[string][]time.Time{}}
+}
+
+// take counts one call of login at now, or reports false (not counted)
+// when the login is at its limit. Logins with no call in the window are
+// forgotten, so the map stays as small as the logins in use.
+func (l *loginRate) take(login string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, ts := range l.hits {
+		keep := ts[:0]
+		for _, t := range ts {
+			if now.Sub(t) < l.window {
+				keep = append(keep, t)
+			}
+		}
+		if len(keep) == 0 {
+			delete(l.hits, k)
+		} else {
+			l.hits[k] = keep
+		}
+	}
+	key := strings.ToLower(login)
+	if len(l.hits[key]) >= l.limit {
+		return false
+	}
+	l.hits[key] = append(l.hits[key], now)
+	return true
 }
 
 // uploadLimit is the refusal word for one more upload of size bytes by
@@ -258,6 +340,11 @@ func (g *gate) answerFileJSON(w http.ResponseWriter, r *http.Request, line *Audi
 
 // serveFileList answers GET /lever/api/files/<agent>: v's own exchange.
 func (g *gate) serveFileList(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent string) {
+	if !g.files.lists.take(v.login, g.files.now()) {
+		w.Header().Set("Retry-After", "60")
+		g.refuseFile(w, r, line, http.StatusTooManyRequests, "rate")
+		return
+	}
 	files, err := g.filesFor(agent, v.login)
 	if err != nil {
 		line.Error = err.Error()
@@ -272,8 +359,13 @@ func (g *gate) serveFileList(w http.ResponseWriter, r *http.Request, line *Audit
 // v.login, the configured spelling the allowlist matched.
 func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent string) {
 	s := g.files
-	if !sameOriginWrite(r) {
+	if !sameOriginWrite(r) || r.Header.Get(uploadHeader) != "1" {
 		g.refuseFile(w, r, line, http.StatusForbidden, "origin")
+		return
+	}
+	if !s.uploadTries.take(v.login, s.now()) {
+		w.Header().Set("Retry-After", "600")
+		g.refuseFile(w, r, line, http.StatusTooManyRequests, "rate")
 		return
 	}
 	if v.tier == chatledger.TierContact {
@@ -322,7 +414,7 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	defer done()
 	// The server has no ReadTimeout (serve.go): the body gets its own.
-	_ = http.NewResponseController(w).SetReadDeadline(now.Add(fileBodyDeadline))
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(fileBodyDeadline))
 	mr := multipart.NewReader(http.MaxBytesReader(w, r.Body, limit), params["boundary"])
 	part, err := mr.NextPart()
 	if tooLarge(err) {
@@ -338,28 +430,21 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusUnsupportedMediaType, "extension")
 		return
 	}
-	st, err := chatfiles.Store(s.cfg.Tree, chatfiles.InDir(ws, v.login), name, part, s.cfg.MaxBytes, now)
-	switch {
-	case err == nil:
-	case errors.Is(err, chatfiles.ErrTooLarge) || tooLarge(err):
+	// The body goes to a private file outside the tree first: nothing
+	// reaches the agent's workspace until the whole form was read and every
+	// limit checked.
+	staged, sha, size, err := chatfiles.Stage(part, s.cfg.MaxBytes)
+	if errors.Is(err, chatfiles.ErrTooLarge) || tooLarge(err) {
 		g.refuseFile(w, r, line, http.StatusRequestEntityTooLarge, "too-large")
 		return
-	case errors.Is(err, chatfiles.ErrBusy):
-		w.Header().Set("Retry-After", "1")
-		g.refuseFile(w, r, line, http.StatusTooManyRequests, "busy")
-		return
-	case errors.Is(err, fsutil.ErrSymlink) || errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, fsutil.ErrNotRegularFile) || errors.Is(err, fs.ErrExist):
+	}
+	if err != nil {
 		line.Error = err.Error()
-		g.refuseFile(w, r, line, http.StatusConflict, "workspace")
-		return
-	default:
-		line.Error = err.Error()
-		g.refuseFile(w, r, line, http.StatusInternalServerError, "failed")
+		g.refuseFile(w, r, line, http.StatusBadRequest, "bad-form")
 		return
 	}
-	drop := func() { _ = fsutil.RemoveInTreeNoLinks(s.cfg.Tree, st.Rel) }
+	defer staged.Close()
 	if _, err := mr.NextPart(); err != io.EOF {
-		drop()
 		if tooLarge(err) {
 			g.refuseFile(w, r, line, http.StatusRequestEntityTooLarge, "too-large")
 			return
@@ -369,32 +454,59 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	id, err := fileledger.NewID()
 	if err != nil {
-		drop()
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	rec := fileledger.Record{V: 1, Op: fileledger.OpUpload, ID: id, Agent: agent, Login: v.login, Name: name, Rel: st.Rel,
-		SHA256: st.SHA256, Size: st.Size, At: now}
+	// Under the ledger lock: the limits with this size, then the copy into
+	// in/<key>/ (no link, O_EXCL) and its hash, then the record.
 	var limitWord string
-	err = led.Add(rec, func(prior []fileledger.Record) error {
-		if limitWord = s.uploadLimit(prior, v.login, now, st.Size); limitWord != "" {
-			return errors.New(limitWord)
+	var st chatfiles.Stored
+	err = led.AddWith(agent, func(prior []fileledger.Record) (fileledger.Record, error) {
+		if limitWord = s.uploadLimit(prior, v.login, now, size); limitWord != "" {
+			return fileledger.Record{}, errors.New(limitWord)
 		}
-		return nil
+		var err error
+		if st, err = chatfiles.Store(s.cfg.Tree, chatfiles.InDir(ws, v.login), name, staged, s.cfg.MaxBytes, now); err != nil {
+			return fileledger.Record{}, err
+		}
+		if st.SHA256 != sha || st.Size != size {
+			return fileledger.Record{}, errStagedChanged
+		}
+		return fileledger.Record{V: 1, Op: fileledger.OpUpload, ID: id, Agent: agent, Login: v.login, Name: name, Rel: st.Rel,
+			SHA256: st.SHA256, Size: st.Size, At: now}, nil
 	})
-	if err != nil {
-		drop()
-		if limitWord != "" {
-			g.refuseFile(w, r, line, http.StatusTooManyRequests, limitWord)
-			return
-		}
+	if err != nil && st.Rel != "" {
+		_ = fsutil.RemoveInTreeNoLinks(s.cfg.Tree, st.Rel)
+	}
+	switch {
+	case err == nil:
+	case limitWord != "":
+		g.refuseFile(w, r, line, http.StatusTooManyRequests, limitWord)
+		return
+	case errors.Is(err, chatfiles.ErrBusy):
+		w.Header().Set("Retry-After", "1")
+		g.refuseFile(w, r, line, http.StatusTooManyRequests, "busy")
+		return
+	case errors.Is(err, fsutil.ErrSymlink) || errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, fsutil.ErrNotRegularFile) || errors.Is(err, fs.ErrExist):
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusConflict, "workspace")
+		return
+	case errors.Is(err, fileledger.ErrUnsafe):
 		line.Error = err.Error()
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
+	default:
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusInternalServerError, "failed")
+		return
 	}
+	st.SHA256, st.Size = sha, size
 	g.answerFileJSON(w, r, line, DecisionFileUpload, http.StatusCreated,
 		map[string]any{"id": id, "name": name, "size": st.Size, "sha256": st.SHA256})
 }
+
+// errStagedChanged: the copy into the tree did not hash to the staged file.
+var errStagedChanged = errors.New("the copy into the tree differs from the staged upload")
 
 // tooLarge reports whether err is the body limit (http.MaxBytesReader).
 func tooLarge(err error) bool {
@@ -416,6 +528,11 @@ func filesErrText(err error) string {
 // unknown one.
 func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent, id string) {
 	s := g.files
+	if !s.downloads.take(v.login, s.now()) {
+		w.Header().Set("Retry-After", "60")
+		g.refuseFile(w, r, line, http.StatusTooManyRequests, "rate")
+		return
+	}
 	led, err := s.led()
 	if err != nil {
 		line.Error = err.Error()
@@ -435,14 +552,13 @@ func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *Audit
 		g.refuseFile(w, r, line, http.StatusNotFound, "not-found")
 		return
 	}
-	select {
-	case s.downloads <- struct{}{}:
-		defer func() { <-s.downloads }()
-	default:
+	done, ok := s.beginDownload(v.login, v.tier == chatledger.TierOperator)
+	if !ok {
 		w.Header().Set("Retry-After", "10")
 		g.refuseFile(w, r, line, http.StatusTooManyRequests, "busy")
 		return
 	}
+	defer done()
 	f, size, err := chatfiles.CopyVerified(s.cfg.Tree, rec.Rel, rec.SHA256, s.cfg.MaxBytes)
 	switch {
 	case err == nil:

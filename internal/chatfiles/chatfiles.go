@@ -188,6 +188,32 @@ func Hash(tree, rel string, max int64) (string, int64, error) {
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
+// Stage copies src, at most max bytes, into a private temp file outside the
+// tree (0600, in os.TempDir, unlinked at once) while hashing it, and
+// returns it at offset 0 with its sha256 and size. An upload is staged
+// first, so nothing reaches the agent's tree before the whole body was read
+// and every limit checked. More than max bytes is ErrTooLarge.
+func Stage(src io.Reader, max int64) (*os.File, string, int64, error) {
+	tmp, err := os.CreateTemp("", "lever-upload-*")
+	if err != nil {
+		return nil, "", 0, err
+	}
+	_ = os.Remove(tmp.Name())
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(src, max+1))
+	if err == nil && n > max {
+		err = ErrTooLarge
+	}
+	if err == nil {
+		_, err = tmp.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		tmp.Close()
+		return nil, "", 0, err
+	}
+	return tmp, hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
 // CopyVerified copies the file at rel into a private temp file (0600,
 // unlinked at once, so only the returned handle reaches it) while hashing
 // it, and returns the copy at offset 0 only when its sha256 is want. The

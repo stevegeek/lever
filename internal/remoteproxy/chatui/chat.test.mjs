@@ -1750,6 +1750,7 @@ test('upload: one file field, progress, then the chat note through the normal se
   await env.runTimers();
   const up = env.calls.find((c) => c.method === 'POST' && c.path === '/lever/api/files/boss');
   assert.deepEqual(up.body.form, [{ field: 'file', name: 'report.pdf', size: 3 }]);
+  assert.equal(up.headers['X-Lever-Upload'], '1');
   assert.ok(env.uploadNotes.some((t) => /50%/.test(t)), env.uploadNotes.join(' | '));
   const s = sends(env);
   assert.equal(s.length, 1);

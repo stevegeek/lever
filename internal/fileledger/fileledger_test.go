@@ -202,3 +202,23 @@ func TestListSkipsAValidRecordOfAnotherAgent(t *testing.T) {
 		t.Fatal("found another agent's id in w1's file")
 	}
 }
+
+func TestAddWithBuildsTheRecordUnderTheLock(t *testing.T) {
+	l, _ := Open(filepath.Join(t.TempDir(), "fl"))
+	r := rec(t, OpUpload, "w1", "c@x", t0)
+	ran := false
+	if err := l.AddWith("w1", func(prior []Record) (Record, error) { ran = true; return r, nil }); err != nil || !ran {
+		t.Fatal(err)
+	}
+	no := errors.New("quota")
+	if err := l.AddWith("w1", func([]Record) (Record, error) { return Record{}, no }); !errors.Is(err, no) {
+		t.Fatalf("err = %v", err)
+	}
+	other := rec(t, OpUpload, "w2", "c@x", t0)
+	if err := l.AddWith("w1", func([]Record) (Record, error) { return other, nil }); err == nil {
+		t.Fatal("a record of another agent was appended to w1")
+	}
+	if got, _ := l.List("w1"); len(got) != 1 || got[0].ID != r.ID {
+		t.Fatalf("%+v", got)
+	}
+}

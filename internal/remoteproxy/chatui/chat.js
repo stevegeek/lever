@@ -814,6 +814,9 @@ function sendFile(name, file, progress) {
     xhr.open('POST', `/lever/api/files/${encodeURIComponent(name)}`);
     xhr.timeout = UPLOAD_MS;
     xhr.setRequestHeader('Accept', 'application/json');
+    // The proxy refuses an upload without it: a custom header needs a CORS
+    // preflight across origins, so a resend elsewhere cannot carry it.
+    xhr.setRequestHeader('X-Lever-Upload', '1');
     xhr.upload.addEventListener('progress', (ev) => {
       if (ev.lengthComputable && ev.total > 0) progress(Math.floor((ev.loaded * 100) / ev.total));
     });

@@ -157,19 +157,39 @@ func (l *Ledger) Add(r Record, allow func(prior []Record) error) error {
 	if !r.valid() {
 		return fmt.Errorf("%s: refusing an invalid record", label)
 	}
+	return l.AddWith(r.Agent, func(prior []Record) (Record, error) {
+		if allow != nil {
+			if err := allow(prior); err != nil {
+				return Record{}, err
+			}
+		}
+		return r, nil
+	})
+}
+
+// AddWith is Add for a record that exists only once a step has run under
+// the lock: build reads agent's records, may refuse (its error is returned
+// unchanged, nothing is written), and returns the record to append. The
+// remote proxy checks an upload's limits and only then writes the file
+// into the tree, all under the lock, so a refused upload never touches the
+// tree. When the append fails after build wrote something, the caller
+// removes it.
+func (l *Ledger) AddWith(agent string, build func(prior []Record) (Record, error)) error {
 	unlock, err := l.lock()
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	prior, err := l.read(r.Agent)
+	prior, err := l.read(agent)
 	if err != nil {
 		return err
 	}
-	if allow != nil {
-		if err := allow(prior); err != nil {
-			return err
-		}
+	r, err := build(prior)
+	if err != nil {
+		return err
+	}
+	if !r.valid() || r.Agent != agent {
+		return fmt.Errorf("%s: refusing an invalid record", label)
 	}
 	f := l.files[r.Agent]
 	if f == nil {

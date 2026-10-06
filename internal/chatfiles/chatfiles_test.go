@@ -229,3 +229,20 @@ func TestContainerPath(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestStageIsPrivateAndBounded(t *testing.T) {
+	f, sha, n, err := Stage(strings.NewReader("hello"), 10)
+	if err != nil || n != 5 || len(sha) != 64 {
+		t.Fatal(sha, n, err)
+	}
+	defer f.Close()
+	if _, err := os.Stat(f.Name()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the staged file is still named on disk: %v", err)
+	}
+	if b, _ := io.ReadAll(f); string(b) != "hello" {
+		t.Fatalf("%q", b)
+	}
+	if _, _, _, err := Stage(strings.NewReader("12345"), 4); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+}

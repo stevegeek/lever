@@ -166,7 +166,7 @@ export async function load(hub, opts = {}) {
     }
     async send(form) {
       const body = { form: form.entries.map(([field, v, name]) => ({ field, name, size: v.size })) };
-      env.calls.push({ method: this.method, path: this.path, body });
+      env.calls.push({ method: this.method, path: this.path, body, headers: this.headers });
       env.log.push(`${this.method} ${this.path}`);
       const r = await hub(this.method, this.path, body);
       for (const p of r.progress || []) {

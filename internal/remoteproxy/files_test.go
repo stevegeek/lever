@@ -63,6 +63,7 @@ func uploadDo(t *testing.T, h http.Handler, login, agent string, ctype string, b
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Origin", "https://"+testServeHost)
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set(uploadHeader, "1")
 	for i := 0; i+1 < len(hdr); i += 2 {
 		if hdr[i+1] == "" {
 			req.Header.Del(hdr[i])
@@ -223,7 +224,7 @@ func TestUploadSizeLimits(t *testing.T) {
 	ct, b := multipartBody(t, [3]string{"file", "a.pdf", "x"})
 	req := proxyRequest("POST", "/lever/api/files/w1", b)
 	req.ContentLength = 64 + 64<<10 + 1
-	for k, v := range map[string]string{"Tailscale-User-Login": "c@x", "Content-Type": ct, "Origin": "https://" + testServeHost} {
+	for k, v := range map[string]string{"Tailscale-User-Login": "c@x", "Content-Type": ct, "Origin": "https://" + testServeHost, uploadHeader: "1"} {
 		req.Header.Set(k, v)
 	}
 	rw := httptest.NewRecorder()
@@ -237,7 +238,7 @@ func TestUploadSizeLimits(t *testing.T) {
 		bytes.NewReader(make([]byte, 1<<20)))
 	req = proxyRequest("POST", "/lever/api/files/w1", big)
 	req.ContentLength = -1
-	for k, v := range map[string]string{"Tailscale-User-Login": "c@x", "Content-Type": ct, "Origin": "https://" + testServeHost} {
+	for k, v := range map[string]string{"Tailscale-User-Login": "c@x", "Content-Type": ct, "Origin": "https://" + testServeHost, uploadHeader: "1"} {
 		req.Header.Set(k, v)
 	}
 	rw = httptest.NewRecorder()
@@ -603,5 +604,159 @@ func TestOperatorViewListsAContactsFiles(t *testing.T) {
 	}
 	if rw := chatDo(NewHandler(chatConfig(t, hub)), chatOp, "GET", "/lever/api/contacts/c@x/agents/w1/files"); rw.Code != 404 {
 		t.Fatalf("files off = %d", rw.Code)
+	}
+}
+
+func TestUploadNeedsTheUploadHeader(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, tree, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	for _, v := range []string{"", "0", "true"} {
+		if rw := upload(t, h, "c@x", "w1", "a.pdf", "x", uploadHeader, v); rw.Code != 403 || !strings.Contains(rw.Body.String(), `"origin"`) {
+			t.Fatalf("%q: %d %s", v, rw.Code, rw.Body)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tree, "workers/w1", chatfiles.Dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused upload touched the tree: %v", err)
+	}
+}
+
+// A refusal under the ledger lock (quota, rate) comes before the copy into
+// the tree: nothing of the refused upload is left there.
+func TestUploadRefusedByTheLedgerLeavesNothing(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, tree, _ := filesCfg(t, hub)
+	h := NewHandler(cfg).(*gate)
+	h.files.bytesPerDay = 10
+	if rw := upload(t, h, "c@x", "w1", "q.pdf", strings.Repeat("x", 20)); rw.Code != 429 || !strings.Contains(rw.Body.String(), `"quota"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))); len(ents) != 0 {
+		t.Fatalf("left behind: %v", ents)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "workers/w1", chatfiles.Dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused upload created the exchange: %v", err)
+	}
+}
+
+func TestUploadBusyThroughTheHandler(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, tree, _ := filesCfg(t, hub)
+	h := NewHandler(cfg).(*gate)
+	for i := 0; i < uploadsPerLogin; i++ {
+		if _, ok := h.files.beginUpload("c@x"); !ok {
+			t.Fatal(i)
+		}
+	}
+	rw := upload(t, h, "c@x", "w1", "a.pdf", "x")
+	if rw.Code != 429 || !strings.Contains(rw.Body.String(), `"busy"`) || rw.Header().Get("Retry-After") == "" {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "workers/w1", chatfiles.Dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a busy upload touched the tree: %v", err)
+	}
+	if rw := upload(t, h, "d@x", "w1", "d.pdf", "x"); rw.Code != 201 {
+		t.Fatalf("another login = %d", rw.Code)
+	}
+}
+
+// Refused attempts count: past uploadTriesPerHour a login gets rate even
+// for uploads every other check would refuse.
+func TestUploadAttemptsAreLimited(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	for i := 0; i < uploadTriesPerHour; i++ {
+		if rw := upload(t, h, "c@x", "w1", "a.exe", "x"); rw.Code != 415 {
+			t.Fatalf("%d: %d", i, rw.Code)
+		}
+	}
+	if rw := upload(t, h, "c@x", "w1", "a.pdf", "x"); rw.Code != 429 || !strings.Contains(rw.Body.String(), `"rate"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if rw := upload(t, h, "d@x", "w1", "a.pdf", "x"); rw.Code != 201 {
+		t.Fatalf("another login = %d", rw.Code)
+	}
+}
+
+func TestListAndDownloadRates(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg).(*gate)
+	now := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+	h.files.now = func() time.Time { return now }
+	for i := 0; i < listsPerMinute; i++ {
+		if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1"); rw.Code != 200 {
+			t.Fatal(i, rw.Code)
+		}
+	}
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1"); rw.Code != 429 || rw.Header().Get("Retry-After") == "" {
+		t.Fatalf("list over the rate = %d", rw.Code)
+	}
+	id, _ := shareRec(t, cfg, "w1", "c@x", "a.xlsm", "x")
+	for i := 0; i < downloadsPerMinute; i++ {
+		if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 200 {
+			t.Fatal(i, rw.Code)
+		}
+	}
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 429 {
+		t.Fatalf("download over the rate = %d", rw.Code)
+	}
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 200 {
+		t.Fatalf("another login = %d", rw.Code)
+	}
+	now = now.Add(time.Minute)
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 200 {
+		t.Fatalf("after the window = %d", rw.Code)
+	}
+}
+
+func TestDownloadSlots(t *testing.T) {
+	s := newFilesState(FilesConfig{})
+	d1, ok1 := s.beginDownload("c@x", false)
+	d2, ok2 := s.beginDownload("c@x", false)
+	if !ok1 || !ok2 {
+		t.Fatal("two for one login")
+	}
+	if _, ok := s.beginDownload("c@x", false); ok {
+		t.Fatal("a third for one login")
+	}
+	d3, ok3 := s.beginDownload("d@x", false)
+	if !ok3 {
+		t.Fatal("a second login")
+	}
+	if _, ok := s.beginDownload("e@x", false); ok {
+		t.Fatal("a contact took the operator's slot")
+	}
+	d4, ok4 := s.beginDownload("op@x", true)
+	if !ok4 {
+		t.Fatal("the operator's slot")
+	}
+	if _, ok := s.beginDownload("op2@x", true); ok {
+		t.Fatal("over the total")
+	}
+	for _, d := range []func(){d1, d2, d3, d4} {
+		d()
+	}
+	if _, ok := s.beginDownload("c@x", false); !ok {
+		t.Fatal("slots not given back")
+	}
+}
+
+func TestDownloadBusyThroughTheHandler(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg).(*gate)
+	id, _ := shareRec(t, cfg, "w1", "c@x", "a.xlsm", "x")
+	for i := 0; i < downloadsPerLogin; i++ {
+		if _, ok := h.files.beginDownload("c@x", false); !ok {
+			t.Fatal(i)
+		}
+	}
+	if rw := chatDo(h, "c@x", "GET", "/lever/api/files/w1/"+id); rw.Code != 429 || !strings.Contains(rw.Body.String(), `"busy"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 200 {
+		t.Fatalf("the operator = %d", rw.Code)
 	}
 }

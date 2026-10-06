@@ -396,6 +396,7 @@ access guide](/remote-access/) for the accepted security posture, setup steps, a
 | `agent_messages.max_chars` | int | no | `4000` | The longest message, in characters, an agent may send a contact. `0` or unset is the default; otherwise `1` to `16000` (the hub's own limit). |
 | `push.enabled` | bool | no | `false` | Web Push notifications for the chat page: a login's devices show "New message from <agent>" when an agent writes while the page is closed. Needs `landing: chat` (rejected at config load without it). Off, the proxy has no push routes, no service worker and no hub streams, and its config stamp is unchanged. See the [guide](/remote-access/#notifications). |
 | `push.subject` | string | when `push.enabled` | - | The VAPID contact the push services see for this sender (RFC 8292): `mailto:<local>@<domain>` or an absolute `https://` URL, printable ASCII, at most 200 bytes. A change restarts the proxy at the next `lever apply`. |
+| `push.test_hosts` | list of `127.0.0.1:<port>` | no | - | TEST ONLY: the loopback addresses of a fake push service for lever's end-to-end test. The proxy admits them only when `LEVER_PUSH_TEST_HOSTS` in its environment names the same addresses; either one alone stops `lever remote serve`. Needs `push.enabled`. `lever doctor` fails while it is set. Never set it for a real instance. |
 
 ```yaml
 remote:

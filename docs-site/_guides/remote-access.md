@@ -1127,6 +1127,11 @@ remote:
   there (iOS 16.4 or later). On Linux Chrome, the browser tab or the installed app both work.
   **Turn off notifications** removes the device's subscription. A login keeps at most five
   devices (the oldest goes); a device endpoint belongs to the last login that turned it on.
+- **Shared devices.** A browser keeps one push subscription for the page, whoever is signed in.
+  The page re-sends it at load only for the login that turned notifications on in that browser
+  (a per-login mark in the browser's storage). Another login on the same device sees **Turn on
+  notifications** and gets no notification until it turns them on itself, which moves the
+  device to it. Turning notifications off removes the browser's subscription for every login.
 - **Who is told.** A login is told only about agents it may message (an operator: every agent; a
   contact: its `agents:` list, never a `see:` agent). With `agent_messages` on, a contact is told
   only about a message it would be shown. No notification for the login's own messages or hub
@@ -1135,14 +1140,22 @@ remote:
 - **How it works.** For each login with a device, the proxy holds one hub events stream with
   that login's own hub session; an event for one of its direct conversations makes the proxy
   read the newest messages as the login and decide. After a hub or proxy restart it catches up
-  (a message older than one hour is not notified).
+  (a message older than one hour is not notified); a check the hub or the disk fails is tried
+  again, up to five times. Each stream is one long-lived connection into the jail, so each
+  subscribed login keeps one jail dial process open on the host.
+- **What the push services learn.** Google, Apple, Mozilla or Microsoft see when a push goes to
+  a device, never what it says. That timing tells them when your agents write to that login.
+- **The broker's record.** With `agent_messages` on, the check for a contact asks the broker
+  the same question the contact's own read asks, so the broker's agent ledger may log an agent
+  message as shown when the push check binds it, before the contact opens the page.
 - **The service worker.** `/lever/sw.js` (scope `/lever/`) handles `push` and
   `notificationclick` only: no fetch handler and no cache, so it never stands between the page
   and its requests. The page registers it only when a login turns notifications on. The page's
   CSP gains `worker-src` for `/lever/` only.
 - **Egress.** The host process connects out to the push services: `fcm.googleapis.com`,
   `*.push.apple.com`, `updates.push.services.mozilla.com` and `*.notify.windows.com`, on 443. A
-  host firewall must allow that. The proxy accepts a subscription only on those hosts, never
+  host firewall must allow that. The proxy accepts a subscription only on those hosts (https,
+  no port, one spelling per endpoint), never
   follows a redirect, uses no HTTP proxy, and connects only to public addresses (never a
   private, loopback, link-local or tailnet `100.64.0.0/10` address, whatever DNS answers).
 - **State.** `.lever-state/push/` (0700): `vapid.key` (the signing key), `subscriptions.json`
@@ -1158,11 +1171,12 @@ remote:
   `push-failed` and `push-stream` lines in `.lever-state/remote-audit.jsonl`. A line names the
   push service's host only, never the endpoint path, a key or a payload.
 
-> **Test only.** `LEVER_PUSH_TEST_HOSTS=127.0.0.1:<port>[,…]` in the proxy's environment admits
-> those exact loopback addresses over plain http, for the end-to-end test with
-> `tools/test/pushrecv` (a fake push service that decrypts what it gets). Any other value stops
-> `lever remote serve`; a set value prints a warning and `lever doctor` warns. Never set it for
-> a real instance.
+> **Test only.** For the end-to-end test with `tools/test/pushrecv` (a fake push service that
+> decrypts what it gets), the proxy admits exact loopback addresses over plain http only when
+> both `remote.push.test_hosts: [127.0.0.1:<port>]` in `lever.yaml` and
+> `LEVER_PUSH_TEST_HOSTS=127.0.0.1:<port>` in the proxy's environment name the same addresses.
+> Either one alone, or any other value, stops `lever remote serve`; the proxy prints a warning
+> and `lever doctor` fails while they are set. Never set them for a real instance.
 
 ## What this does NOT do
 

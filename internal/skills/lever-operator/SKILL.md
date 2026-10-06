@@ -300,3 +300,8 @@ lever-capability MCP server.
   filesystem beyond your mounted tree.
 - If a tool backend seems down, report it once rather than thrashing —
   diagnosis is host-side.
+- Do not run the `claude` CLI in your container (`claude mcp list`, `claude
+  -p`, …). Every claude process there shares your session hooks, and when it
+  exits the hub marks YOUR session stopped. If your replies start failing
+  with `401 … token is expired`, tell the operator: `lever apply` renews your
+  hub token without a restart.

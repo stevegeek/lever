@@ -93,6 +93,12 @@ version bump moves the block under the new version heading.
   no bound of its own, so a hung list ended the request with 503 and
   nothing sent. The read now has its own 5 s bound; when it runs out, the
   send goes on without the check, as for any failed read.
+- **`lever stop` suspends workers side by side.** The worker pass suspended
+  one worker after another under one 30 s budget, so one hung suspend could
+  leave every later worker running across the power-off (and in phase error
+  after `lever up`). Now the list has its own 15 s bound, and up to four
+  suspends run at once, each under its own 20 s bound. The lines are
+  printed in config order once all have returned.
 
 ### Upgrade
 

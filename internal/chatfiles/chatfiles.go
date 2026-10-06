@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -196,22 +197,46 @@ func Hash(tree, rel string, max int64) (string, int64, error) {
 func Stage(src io.Reader, max int64) (*os.File, string, int64, error) {
 	tmp, err := os.CreateTemp("", "lever-upload-*")
 	if err != nil {
-		return nil, "", 0, err
+		return nil, "", 0, fmt.Errorf("%w: %w", ErrStage, err)
 	}
 	_ = os.Remove(tmp.Name())
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(src, max+1))
-	if err == nil && n > max {
+	dst := &hostWriter{w: tmp}
+	n, err := io.Copy(io.MultiWriter(dst, h), io.LimitReader(src, max+1))
+	switch {
+	case dst.err != nil:
+		err = fmt.Errorf("%w: %w", ErrStage, dst.err)
+	case err == nil && n > max:
 		err = ErrTooLarge
-	}
-	if err == nil {
-		_, err = tmp.Seek(0, io.SeekStart)
+	case err == nil:
+		if _, serr := tmp.Seek(0, io.SeekStart); serr != nil {
+			err = fmt.Errorf("%w: %w", ErrStage, serr)
+		}
 	}
 	if err != nil {
 		tmp.Close()
 		return nil, "", 0, err
 	}
 	return tmp, hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// ErrStage is a host fault while staging (the temp file), as opposed to
+// an error reading the body.
+var ErrStage = errors.New("staging the upload failed")
+
+// hostWriter keeps the first write error, so Stage can tell a host fault
+// from a body that could not be read.
+type hostWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (h *hostWriter) Write(p []byte) (int, error) {
+	n, err := h.w.Write(p)
+	if err != nil && h.err == nil {
+		h.err = err
+	}
+	return n, err
 }
 
 // CopyVerified copies the file at rel into a private temp file (0600,

@@ -246,3 +246,17 @@ func TestStageIsPrivateAndBounded(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("client went away") }
+
+func TestStageTellsABodyErrorFromAHostFault(t *testing.T) {
+	if _, _, _, err := Stage(failingReader{}, 10); err == nil || errors.Is(err, ErrStage) {
+		t.Fatalf("a body error is not a host fault: %v", err)
+	}
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	if _, _, _, err := Stage(strings.NewReader("x"), 10); !errors.Is(err, ErrStage) {
+		t.Fatalf("no temp dir: %v", err)
+	}
+}

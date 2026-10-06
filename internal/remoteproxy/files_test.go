@@ -303,30 +303,35 @@ func TestUploadRateAndQuota(t *testing.T) {
 func TestUploadConcurrencyCap(t *testing.T) {
 	s := newFilesState(FilesConfig{})
 	var dones []func()
-	for i := 0; i < uploadsPerLogin; i++ {
-		d, ok := s.beginUpload("c@x")
-		if !ok {
-			t.Fatal(i)
+	take := func(login string, op bool) bool {
+		d, ok := s.beginUpload(login, op)
+		if ok {
+			dones = append(dones, d)
 		}
-		dones = append(dones, d)
+		return ok
 	}
-	if _, ok := s.beginUpload("c@x"); ok {
+	if !take("c@x", false) || !take("c@x", false) {
+		t.Fatal("two for one login")
+	}
+	if take("c@x", false) {
 		t.Fatal("a third upload from one login")
 	}
-	for i := 0; i < uploadsAtOnce-uploadsPerLogin; i++ {
-		d, ok := s.beginUpload(fmt.Sprintf("o%d@x", i))
-		if !ok {
-			t.Fatal(i)
-		}
-		dones = append(dones, d)
+	if !take("d@x", false) {
+		t.Fatal("a second login")
 	}
-	if _, ok := s.beginUpload("z@x"); ok {
+	if take("e@x", false) {
+		t.Fatal("a contact took the operator's slot")
+	}
+	if !take("op@x", true) {
+		t.Fatal("the operator's slot")
+	}
+	if take("op2@x", true) {
 		t.Fatal("over the total")
 	}
 	for _, d := range dones {
 		d()
 	}
-	if _, ok := s.beginUpload("c@x"); !ok {
+	if _, ok := s.beginUpload("c@x", false); !ok {
 		t.Fatal("slots not given back")
 	}
 	var wg sync.WaitGroup // race detector: concurrent begin/done
@@ -334,7 +339,7 @@ func TestUploadConcurrencyCap(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if d, ok := s.beginUpload("r@x"); ok {
+			if d, ok := s.beginUpload("r@x", i%2 == 0); ok {
 				d()
 			}
 		}()
@@ -644,7 +649,7 @@ func TestUploadBusyThroughTheHandler(t *testing.T) {
 	cfg, tree, _ := filesCfg(t, hub)
 	h := NewHandler(cfg).(*gate)
 	for i := 0; i < uploadsPerLogin; i++ {
-		if _, ok := h.files.beginUpload("c@x"); !ok {
+		if _, ok := h.files.beginUpload("c@x", false); !ok {
 			t.Fatal(i)
 		}
 	}
@@ -657,6 +662,90 @@ func TestUploadBusyThroughTheHandler(t *testing.T) {
 	}
 	if rw := upload(t, h, "d@x", "w1", "d.pdf", "x"); rw.Code != 201 {
 		t.Fatalf("another login = %d", rw.Code)
+	}
+	// Three slots held (c@x twice, e@x): the last one is the operator's.
+	if _, ok := h.files.beginUpload("e@x", false); !ok {
+		t.Fatal("a third slot")
+	}
+	if rw := upload(t, h, "d@x", "w1", "d2.pdf", "x"); rw.Code != 429 || !strings.Contains(rw.Body.String(), `"busy"`) {
+		t.Fatalf("a contact on the last slot = %d %s", rw.Code, rw.Body)
+	}
+	if rw := upload(t, h, chatOp, "w1", "op.pdf", "x"); rw.Code != 201 {
+		t.Fatalf("the operator on the last slot = %d %s", rw.Code, rw.Body)
+	}
+}
+
+// The append fails after the copy (the agent's ledger file cannot be
+// written): the copy is removed, in/<key>/ is left empty.
+func TestUploadRemovesTheCopyWhenTheRecordFails(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, tree, ledger := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	if rw := upload(t, h, "d@x", "w1", "first.pdf", "x"); rw.Code != 201 {
+		t.Fatal(rw.Code)
+	}
+	if err := os.Chmod(filepath.Join(ledger, "w1.jsonl"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(filepath.Join(ledger, "w1.jsonl"), 0o600)
+	rw := upload(t, h, "c@x", "w1", "a.pdf", "x")
+	if rw.Code != 503 || !strings.Contains(rw.Body.String(), `"unavailable"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))); len(ents) != 0 {
+		t.Fatalf("left behind: %v", ents)
+	}
+}
+
+// The staged file changes before the copy: the copy does not hash to what
+// was staged, so it is removed and nothing is recorded.
+func TestUploadComparesTheCopyWithTheStagedFile(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, tree, ledger := filesCfg(t, hub)
+	afterStage = func(f *os.File) {
+		_, _ = f.WriteAt([]byte("Z"), 0)
+	}
+	defer func() { afterStage = nil }()
+	rw := upload(t, NewHandler(cfg), "c@x", "w1", "a.pdf", "abc")
+	if rw.Code != 500 || !strings.Contains(rw.Body.String(), `"failed"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))); len(ents) != 0 {
+		t.Fatalf("left behind: %v", ents)
+	}
+	l, _ := fileledger.Open(ledger)
+	if recs, _ := l.List("w1"); len(recs) != 0 {
+		t.Fatalf("recorded %+v", recs)
+	}
+}
+
+// Reservations count: with one upload reserved and not yet recorded, a
+// second that would pass only without it is refused.
+func TestUploadReservationsCount(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, _, _ := filesCfg(t, hub)
+	h := NewHandler(cfg).(*gate)
+	h.files.bytesPerDay = 10
+	led, err := h.files.led()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	release, word, err := h.files.reserve(led, "w1", "c@x", now, 6)
+	if err != nil || word != "" {
+		t.Fatal(word, err)
+	}
+	if _, word, _ := h.files.reserve(led, "w1", "C@X", now, 6); word != "quota" {
+		t.Fatalf("second = %q", word)
+	}
+	release()
+	r2, word, _ := h.files.reserve(led, "w1", "c@x", now, 6)
+	if word != "" {
+		t.Fatalf("after release = %q", word)
+	}
+	r2()
+	if len(h.files.pending) != 0 {
+		t.Fatalf("pending %v", h.files.pending)
 	}
 }
 

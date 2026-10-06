@@ -23,6 +23,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"slices"
@@ -114,6 +115,8 @@ type filesState struct {
 	total       int
 	downloading map[string]int
 	downTotal   int
+	reserveMu   sync.Mutex
+	pending     map[string][]int64 // agent NUL lowercase login → sizes reserved, not yet recorded
 
 	lists, downloads, uploadTries *loginRate
 }
@@ -121,7 +124,7 @@ type filesState struct {
 // newFilesState is the file exchange for cfg, its ledger not yet opened.
 func newFilesState(cfg FilesConfig) *filesState {
 	return &filesState{cfg: cfg, now: time.Now, bytesPerDay: uploadBytesPerDay,
-		uploading: map[string]int{}, downloading: map[string]int{},
+		uploading: map[string]int{}, downloading: map[string]int{}, pending: map[string][]int64{},
 		lists: newLoginRate(listsPerMinute, time.Minute), downloads: newLoginRate(downloadsPerMinute, time.Minute),
 		uploadTries: newLoginRate(uploadTriesPerHour, time.Hour)}
 }
@@ -143,12 +146,14 @@ func (s *filesState) led() (*fileledger.Ledger, error) {
 	return s.ledger, nil
 }
 
-// beginUpload takes an upload slot for login, or reports false when the
-// login or the proxy has none free; done gives it back.
-func (s *filesState) beginUpload(login string) (func(), bool) {
+// beginUpload takes an upload slot for login, or reports false: a login
+// holds at most uploadsPerLogin, and only an operator takes the last of
+// uploadsAtOnce (as beginDownload). done gives it back.
+func (s *filesState) beginUpload(login string, operator bool) (func(), bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.total >= uploadsAtOnce || s.uploading[login] >= uploadsPerLogin {
+	free := uploadsAtOnce - s.total
+	if free <= 0 || !operator && free <= 1 || s.uploading[login] >= uploadsPerLogin {
 		return nil, false
 	}
 	s.total++
@@ -161,6 +166,39 @@ func (s *filesState) beginUpload(login string) (func(), bool) {
 			delete(s.uploading, login)
 		}
 	}, true
+}
+
+// reserve checks one more upload of size bytes by login to agent against
+// the ledger and the uploads already reserved but not yet recorded, and
+// reserves it; release gives the reservation back. The check and the
+// reservation are one step (reserveMu), so the copy into the tree can run
+// outside the ledger lock: two uploads at once cannot both pass the last
+// slot. reserveMu is taken before the ledger lock, never inside it.
+func (s *filesState) reserve(led *fileledger.Ledger, agent, login string, now time.Time, size int64) (release func(), word string, err error) {
+	s.reserveMu.Lock()
+	defer s.reserveMu.Unlock()
+	prior, err := led.List(agent)
+	if err != nil {
+		return nil, "", err
+	}
+	key := agent + "\x00" + strings.ToLower(login)
+	if word := s.uploadLimit(prior, login, now, size, s.pending[key]); word != "" {
+		return nil, word, nil
+	}
+	s.pending[key] = append(s.pending[key], size)
+	return func() {
+		s.reserveMu.Lock()
+		defer s.reserveMu.Unlock()
+		p := s.pending[key]
+		if i := slices.Index(p, size); i >= 0 {
+			p = slices.Delete(p, i, i+1)
+		}
+		if len(p) == 0 {
+			delete(s.pending, key)
+		} else {
+			s.pending[key] = p
+		}
+	}, "", nil
 }
 
 // beginDownload takes a download slot for login, or reports false: a login
@@ -225,9 +263,13 @@ func (l *loginRate) take(login string, now time.Time) bool {
 }
 
 // uploadLimit is the refusal word for one more upload of size bytes by
-// login, from the agent's records ("" = allowed).
-func (s *filesState) uploadLimit(prior []fileledger.Record, login string, now time.Time, size int64) string {
-	n, total := 0, size
+// login, from the agent's records and the sizes of login's uploads to it
+// reserved but not yet recorded ("" = allowed).
+func (s *filesState) uploadLimit(prior []fileledger.Record, login string, now time.Time, size int64, pending []int64) string {
+	n, total := len(pending), size
+	for _, p := range pending {
+		total += p
+	}
 	for _, p := range prior {
 		if p.Op != fileledger.OpUpload || !sameLogin(p.Login, login) {
 			continue
@@ -402,11 +444,11 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		line.Error = err.Error()
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
-	} else if word := s.uploadLimit(prior, v.login, now, 0); word != "" {
+	} else if word := s.uploadLimit(prior, v.login, now, 0, nil); word != "" {
 		g.refuseFile(w, r, line, http.StatusTooManyRequests, word)
 		return
 	}
-	done, ok := s.beginUpload(v.login)
+	done, ok := s.beginUpload(v.login, v.tier == chatledger.TierOperator)
 	if !ok {
 		w.Header().Set("Retry-After", "30")
 		g.refuseFile(w, r, line, http.StatusTooManyRequests, "busy")
@@ -438,12 +480,20 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusRequestEntityTooLarge, "too-large")
 		return
 	}
+	if errors.Is(err, chatfiles.ErrStage) {
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
 	if err != nil {
 		line.Error = err.Error()
 		g.refuseFile(w, r, line, http.StatusBadRequest, "bad-form")
 		return
 	}
 	defer staged.Close()
+	if afterStage != nil {
+		afterStage(staged)
+	}
 	if _, err := mr.NextPart(); err != io.EOF {
 		if tooLarge(err) {
 			g.refuseFile(w, r, line, http.StatusRequestEntityTooLarge, "too-large")
@@ -457,24 +507,34 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	// Under the ledger lock: the limits with this size, then the copy into
-	// in/<key>/ (no link, O_EXCL) and its hash, then the record.
-	var limitWord string
-	var st chatfiles.Stored
-	err = led.AddWith(agent, func(prior []fileledger.Record) (fileledger.Record, error) {
-		if limitWord = s.uploadLimit(prior, v.login, now, size); limitWord != "" {
-			return fileledger.Record{}, errors.New(limitWord)
-		}
-		var err error
-		if st, err = chatfiles.Store(s.cfg.Tree, chatfiles.InDir(ws, v.login), name, staged, s.cfg.MaxBytes, now); err != nil {
-			return fileledger.Record{}, err
-		}
-		if st.SHA256 != sha || st.Size != size {
-			return fileledger.Record{}, errStagedChanged
-		}
-		return fileledger.Record{V: 1, Op: fileledger.OpUpload, ID: id, Agent: agent, Login: v.login, Name: name, Rel: st.Rel,
-			SHA256: st.SHA256, Size: st.Size, At: now}, nil
-	})
+	// Reserve against the limits with the real size, copy into in/<key>/
+	// (no link, O_EXCL) outside the ledger lock and compare the hash, then
+	// record under the lock with the limits checked once more. Any refusal
+	// after the copy removes it.
+	release, limitWord, err := s.reserve(led, agent, v.login, now, size)
+	if err != nil {
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	if limitWord != "" {
+		g.refuseFile(w, r, line, http.StatusTooManyRequests, limitWord)
+		return
+	}
+	defer release()
+	st, err := chatfiles.Store(s.cfg.Tree, chatfiles.InDir(ws, v.login), name, staged, s.cfg.MaxBytes, now)
+	if err == nil && (st.SHA256 != sha || st.Size != size) {
+		err = errStagedChanged
+	}
+	if err == nil {
+		err = led.Add(fileledger.Record{V: 1, Op: fileledger.OpUpload, ID: id, Agent: agent, Login: v.login, Name: name, Rel: st.Rel,
+			SHA256: sha, Size: size, At: now}, func(prior []fileledger.Record) error {
+			if limitWord = s.uploadLimit(prior, v.login, now, size, nil); limitWord != "" {
+				return errors.New(limitWord)
+			}
+			return nil
+		})
+	}
 	if err != nil && st.Rel != "" {
 		_ = fsutil.RemoveInTreeNoLinks(s.cfg.Tree, st.Rel)
 	}
@@ -491,19 +551,23 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		line.Error = err.Error()
 		g.refuseFile(w, r, line, http.StatusConflict, "workspace")
 		return
-	case errors.Is(err, fileledger.ErrUnsafe):
-		line.Error = err.Error()
-		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
-		return
-	default:
+	case errors.Is(err, errStagedChanged):
 		line.Error = err.Error()
 		g.refuseFile(w, r, line, http.StatusInternalServerError, "failed")
 		return
+	default:
+		// The ledger (unsafe, unwritable) or the disk: a host fault.
+		line.Error = err.Error()
+		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
+		return
 	}
-	st.SHA256, st.Size = sha, size
 	g.answerFileJSON(w, r, line, DecisionFileUpload, http.StatusCreated,
-		map[string]any{"id": id, "name": name, "size": st.Size, "sha256": st.SHA256})
+		map[string]any{"id": id, "name": name, "size": size, "sha256": sha})
 }
+
+// afterStage, when set, runs on the staged file before it is copied into
+// the tree: a test seam for a staged file that changes.
+var afterStage func(*os.File)
 
 // errStagedChanged: the copy into the tree did not hash to the staged file.
 var errStagedChanged = errors.New("the copy into the tree differs from the staged upload")

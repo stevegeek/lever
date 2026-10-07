@@ -1,6 +1,6 @@
 # lever-dev: develop Lever inside a Lever jail
 
-This runbook is for Stephen on cachyos. The jail is a Lima VM with nested KVM.
+This runbook is for an x86_64 Linux host (the commands are for CachyOS or Arch). The jail is a Lima VM with nested KVM.
 The manager develops Lever in `jail-src/`. It pushes through the `github` host tool and uses the Lever board through the `fizzy` host tool.
 
 Rules for the host:

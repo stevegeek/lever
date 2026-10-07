@@ -5,25 +5,55 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
-## [Unreleased]
+## [0.32.0] - 2026-10-07
 
 ### Added
 
 - **`fizzy` broker tool (`lever-tool-fizzy`).** An agent lists, shows, comments on, moves and
   creates cards on ONE Fizzy board through the broker, with the official fizzy CLI. The jail holds
-  no Fizzy token. Every comment and description carries a `[lever-dev agent] ` prefix. See the
+  no Fizzy token. Every comment and description carries a `[lever-dev agent] ` prefix. A body or
+  description with Action Text attachment markup (`action-text-attachment`, `trix-attachment`) is
+  refused, and `comment` plus `create_card` are limited to 10 calls a minute. See the
   `fizzy-tool` guide.
 - **`github` broker tool (`lever-tool-github`).** An agent pushes a git bundle to `agent/*`
   branches through the broker. The jail holds no GitHub credential. The tool never forces a push.
-  A GitHub App with Contents read+write mints 1 h tokens. See the `github-tool` guide. CI now runs
-  on `agent/**` pushes, and the release workflow refuses a tag that is not on `main`.
-- **`nested_virt`, `cpus`, `memory` (Lima).** `nested_virt` (Linux host only) gives every agent
-  container `/dev/kvm`; `cpus` and `memory` size the jail VM at create time. New doctor row
-  *nested virt*.
+  A GitHub App with Contents read+write mints 1 h tokens. Needs git 2.46 or later on the host
+  (older git does not check the objects of a bundle). See the `github-tool` guide. CI now runs on
+  `agent/**` pushes, and the release workflow refuses a tag that is not on `main`.
+- **`nested_virt`, `cpus`, `memory` (Lima).** `nested_virt` (x86_64 Linux host only) gives the
+  manager container `/dev/kvm` as a volume on its scion record. Workers and the hub do not get the
+  device. The volume is create-time only: to give an existing manager the device or take it away,
+  back up the conversation, then run `lever up --fresh`. `cpus` and `memory` size the jail VM at
+  create time; apply warns when an existing VM has other values. New doctor row *nested virt*.
+- **`examples/lever-dev`**: an instance that develops lever inside a lever jail, with the two
+  new tools.
+- `make install` and the release archives now also hold `lever-tool-github` and
+  `lever-tool-fizzy`.
+
+### Security
+
+From the review of this release (three independent reviews, fixes, a final check; nothing above
+LOW was open at release).
+
+- **The github tool imports each bundle into a temporary repository** that borrows the mirror's
+  objects and is deleted after every call. Before, refused bundles stayed in the shared mirror on
+  the host disk (up to `-max-bundle` per call), and another caller could use them as
+  prerequisites. New `-import-budget` (default 1 GiB a caller an hour, refusals included).
+- **The github tool reads the bundle's pack before git runs** and refuses more than 2,000,000
+  objects, any object, delta base or delta result over 100 MiB, or more than 4 GiB inflated in
+  total (delta data counted). git also runs with `pack.threads=1` and `core.bigFileThreshold=16m`.
+  Before, a 448 KB bundle made git use 847 MB of memory.
+- **The github tool refuses an `-app-key` inside `-tree`**, and errors returned to the agent show
+  `<state>`, `<tmp>`, `<tree>` and `<git-home>` in place of host paths.
+- **`nested_virt` no longer gives `/dev/kvm` to every container in the guest** (the branch
+  before review wrote a podman drop-in for all containers). Apply removes that drop-in.
 
 ### Changed
 
 - The Makefile `LEVER_IMAGE_ARCH` defaults to the host Go arch instead of `arm64`.
+- The `files` doctor row names the allowed types that can carry macros.
+- The operator view's hint for a contact bound to an old hub user now says to run `lever stop`,
+  then `lever up` (apply binds a login only while no agent container runs).
 
 ### Fixed
 
@@ -39,6 +69,23 @@ version bump moves the block under the new version heading.
 - **A doctor row that cannot read a token now names the reason** (no
   container, timed out, output over its limit, unexpected output, or the exit
   status), never any text from the container.
+- Turning `nested_virt` off sets `/dev/kvm` back to mode 0660; apply and doctor warn while the
+  manager still has the device. `lever provision` no longer turns a `nested_virt` setup off.
+- A github push has an overall 10-minute deadline (lock wait included).
+- The chat page waits up to 1 h for an upload, as the server does (it gave up at 10 min).
+- `make test-apikey-e2e` builds the agent image for `LEVER_IMAGE_ARCH`.
+- Tests that waited a fixed time for the push watcher or for a capped CLI run no longer fail
+  under load.
+- The docs were checked page by page against the code; many stale facts and missing features
+  are fixed (see the docs site).
+
+### Known issues
+
+- The manager's `/dev/kvm` comes from a plain bind volume. Nobody has yet tested on a live Lima
+  instance that QEMU can open it in the manager (a `nodev` mount option would block it).
+- Config load does not refuse `credential_file`, `broker.api_key_file`, a tool command or a tool
+  token file inside the tree (documented in the config-trust page).
+- `lever directive send --not-before` accepts at most 2 minutes ahead.
 
 ## [0.31.0] - 2026-10-07
 

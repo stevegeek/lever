@@ -3,6 +3,7 @@ package ghpush
 import (
 	"context"
 	"encoding/base64"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -87,5 +88,23 @@ func TestGitRunErrorIsScrubbed(t *testing.T) {
 		"ls-remote", "https://127.0.0.1:1/ghs_SECRET/repo")
 	if err == nil || strings.Contains(err.Error(), "ghs_SECRET") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestGitRunReturnsAfterTimeoutWithLingeringChild(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/fakegit"
+	body := "#!/bin/sh\nsleep 30 &\nsleep 30\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	g := Git{Bin: script, Home: t.TempDir(), Timeout: 200 * time.Millisecond}
+	start := time.Now()
+	_, err := g.Run(context.Background(), t.TempDir(), RunOpts{}, "version")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if d := time.Since(start); d > 6*time.Second {
+		t.Fatalf("Run took %v after timeout", d)
 	}
 }

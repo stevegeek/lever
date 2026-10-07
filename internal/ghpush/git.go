@@ -96,6 +96,8 @@ func (g Git) Run(ctx context.Context, dir string, o RunOpts, args ...string) (st
 	}
 	cmd := exec.CommandContext(ctx, g.Bin, argv...)
 	cmd.Dir, cmd.Env = dir, env
+	// A child (git-remote-https) can hold the pipes open after the kill.
+	cmd.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

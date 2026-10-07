@@ -113,7 +113,9 @@ defense-by-absence guarantee above. Config validation enforces a non-git tree ro
 | `lever` (Go binary) | operator CLI + entry point; drives Scion; provisions the jail | **core** (runs on host) |
 | Scion server + Scion broker | container lifecycle, sessions, attach/resume, typed messaging | core (runs inside the jail) |
 | rootless podman | the container runtime the Scion broker drives (rootless, see security-model.md) | core (inside the jail) |
-| Lever capability broker | host-side: holds the real model key, mints CN-bound capability tokens, proxies `/llm` and gated MCP tool calls, relays typed agent messaging (`/msg/send`, `/msg/list`), and runs the [operator-directive](/operator-directives/) channel (a 0600 UDS admin socket + agent-facing `directive_consume` over mTLS; see [security-model](/security-model/operator-directives/)) | **core** (runs on host) |
+| Lever capability broker | host-side: holds the real model key (api-key mode), mints CN-bound capability tokens, proxies `/llm` (api-key mode) and gated MCP tool calls, relays typed agent messaging (`/msg/send`, `/msg/list`), and runs the [operator-directive](/operator-directives/) channel (a 0600 UDS admin socket + agent-facing `directive_consume` over mTLS; see [security-model](/security-model/operator-directives/)) | **core** (runs on host) |
+| First-party broker tools | MCP servers the broker supervises on the host (`command:` in `broker.tools`): `lever-tool-github` ([github](/github-tool/)), `lever-tool-fizzy` ([fizzy](/fizzy-tool/)); the jail holds none of their credentials | **core** (runs on host) |
+| Remote proxy (`lever remote serve`) | optional (`remote:`): the credential-injecting web front for the hub and the chat page, on loopback (default port 8445) | **core** (runs on host) |
 | Manager **runtime/role** | a singleton agent with the whole-tree workspace that dispatches work and watches events | **core role** |
 | Manager **prompt / skills / tool (MCP) config** | what makes it *this* manager | **instance-supplied config** |
 | Worker agents | agents in the instance's one Scion project, each bound to its own subdirectory workspace; isolated from siblings by defense-by-absence (§2), not a separate project | core lifecycle; instance defines the workers |
@@ -181,13 +183,13 @@ instance's records remain the authority on what was asked and whether it is done
 2. Ensures the manager agent is up, resuming the prior conversation if it was suspended, creating
    it if absent, attaching if already running.
 3. Hands the terminal to the manager session (the Scion server/broker run inside the jail; `lever`
-   attaches in from the host). On detach, the manager is left **suspended** so the next `lever`
-   resumes the same conversation.
+   attaches in from the host). On detach, the manager keeps **running**; the next `lever up` or
+   `lever attach` re-attaches to the same conversation.
 
 Three lifecycle verbs, at increasing cost:
 
-- **detach** (`Ctrl-b d`) — leave the TTY. The manager stays suspended in memory; the jail machine
-  keeps running.
+- **detach** (`Ctrl-b d`) — leave the TTY. The manager keeps running (lever suspends nothing on
+  detach); the jail machine keeps running.
 - **`lever stop`** — suspend the manager and every running worker (best-effort), stop the host
   broker, power the jail machine off. Disk and session are preserved; `lever up` powers back on and resumes the same
   conversation.

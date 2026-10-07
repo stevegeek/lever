@@ -56,7 +56,7 @@ edited worker list.
    Add `obtain:` grants if it needs brokered tools (see [capabilities](/capabilities/)).
 3. `lever init` — scaffolds the worker's `lever-agent` skill into the new dir.
 4. `lever reload` — the broker must restart to learn the new worker (see above).
-5. Verify: `lever doctor` (skills check covers the new dir), then dispatch it from the manager
+5. Verify: `lever doctor` (the `operator skills` row covers the new dir), then dispatch it from the manager
    (`lever-manager agent start newworker --task "…"`) or message it from the host
    (`lever msg send "…" --to newworker`).
 
@@ -126,10 +126,13 @@ Everything is in `.lever-state/`, mode 0600. Two kinds of file differ in who bou
 | `sent-ledger/` | the text of every message lever sent to an agent, one file per recipient and kind; `message_verify` reads it | lever — each file past 1 MiB moves to `<file>.1` |
 | `chat-ledger/` | verified web-chat posts, one file per login (only with `remote:`) | lever — each file past 1 MiB moves to `<file>.1` |
 | `chat-verified.jsonl` | which messages an agent has already verified (one use each) | lever — past 4 MiB it moves to `.1`, and only once the old `.1` is 48 h stale |
+| `agent-ledger/` | the agent messages to contacts the broker authorized, one file per contact (only with `remote.agent_messages`) | lever — each file past 4 MiB moves to `<file>.1` |
+| `files-ledger/` | every chat upload and share with its sha256, one file per agent (only with `remote.files`) | lever — each file past 8 MiB moves to `<file>.1`; a file shared in a dropped generation can no longer be downloaded |
 | `sessions.jsonl` | each agent's last fresh session start | lever — past 1 MiB it moves to `.1` |
 
 The files lever bounds keep **one** previous generation: the current file plus its `.1`, so at most
-about 2 MiB each (8 MiB for `chat-verified.jsonl`), and older lines are gone. That is enough for
+about 2 MiB each (8 MiB for `chat-verified.jsonl` and an `agent-ledger/` file, 16 MiB for a
+`files-ledger/` file), and older lines are gone. That is enough for
 what lever reads them for (a message verifies for 24 hours), but it is not retention. Leave these
 files to lever: do not point `logrotate` at them, since the broker reads both generations by name.
 
@@ -205,6 +208,81 @@ starts without a login), with the same `PATH` your shell gives `lever` — the b
 commands go in a LaunchAgent (`RunAtLoad`), in the user's session; OrbStack itself must be running
 first.
 
+## Agent session heals
+
+Two faults leave an agent's container up and most doctor rows green. lever heals both on that
+agent's own record, with no restart, and the conversation is kept.
+
+**An expired agent hub token.** scion gives each agent a 10 h hub token, and sciontool refreshes it
+2 h before expiry with a timer that stands still while the host sleeps. An expired token cannot
+refresh itself: every reply, status update and heartbeat of that agent then fails with
+`401 … token is expired`. The heal is `scion reset-auth` under the controller PAT; the hub mints the
+new token from the agent's stored role, so nothing widens.
+
+- `lever apply` (and `lever up` on a running manager) heals the manager and every configured
+  worker whose container is live and whose phase is `running` or `stopped`.
+- `lever stop` heals a manager in phase `stopped` before it suspends it.
+- The broker reads the tokens once at its start and then every 5 minutes, and resets an expired
+  token of a `running` agent itself, at most once per agent in 15 minutes. `broker.auto_reenrol`
+  sets who it covers (`all`, the default; `manager`; `off`). Each outcome is a `broker.log` line
+  with `op=hub-token`.
+- A revoked agent (`lever revoke`) is never healed, and a record from before scion's stored roles
+  is refused (the pre-role record guard).
+
+Doctor's `agent hub tokens` row reads the token of the manager and of every configured worker
+whose container is live. It fails on an expired token of a `running` or `stopped` agent. It warns
+when a refresh is overdue, or when a token expired under another phase (the resume that phase
+needs issues a new token). A running manager's expired token fails the `manager agent` row, and
+this row warns and points there. An agent whose token lever cannot read is listed as
+"not checked (token unreadable)" with the reason: `no container`, `timed out`,
+`output over its limit`, `unexpected output` or `exit status <n>`. Doctor never prints what the
+container wrote.
+
+**A stopped phase over a running claude.** sciontool reports phase `stopped` on any SessionEnd
+hook in the container, and every claude process there shares the agent's hooks. So a `claude`
+command run in the container (for example `podman exec … claude mcp list`) marks the agent stopped
+when it exits. The hub then refuses `lever attach` and resumes the record in a new claude session
+(only a suspended record gets `--continue`). `lever apply` (manager and workers) and `lever stop`
+(manager) have the agent report its session running again, and the conversation continues.
+Doctor's `manager agent` row reports this state.
+
+> **Never run `claude` in an agent container.** Use `lever attach` to see the session and
+> `lever doctor` to check it. The operator skill gives the manager the same rule for its own
+> container.
+
+**Lima: the run user's uid.** The jail's rootless podman finds the agent containers only under
+the run user's `XDG_RUNTIME_DIR`, which comes from that user's uid (1000 in a Lima guest).
+`lever doctor` and `lever worker purge` read the jail run user's uid before they use the jail, as
+`lever apply` and the broker do. Before 0.32.0 they used the default uid (501), so on Lima the
+`agent hub tokens` row read "not checked (token unreadable): … (no container)" for every agent,
+and `worker purge` looked for the worker ticket in the wrong runtime directory.
+
+## Create-time manager settings
+
+scion keeps a record's mounts and devices for life. Two manager settings therefore reach only a
+freshly created manager: change them, back up the manager's conversation, then run
+`lever up --fresh`. `lever stop` + `lever up` and `lever reload` keep the old mounts; `lever apply`
+warns.
+
+- **`manager.read_only`** — the listed tree directories are read-only in the manager, and while
+  the list is set every worker dir and the parents of each entry are pinned (bind-mounted over
+  themselves). Keep host-run code (an operator CLI, scripts) under an entry. Edit a protected
+  directory in place: replacing it on the host (`rm -rf` and recreate, a rename deploy, a
+  `git checkout` that removes it) leaves the read-only mount on the old directory until the next
+  fresh create. Removing an entry, or a worker while the list is set, also needs `--fresh`, and the
+  directory must stay on the host until then (see the troubleshooting row for `cannot be
+  resumed`). Doctor's `manager read-only paths` row probes each entry with a write test in the
+  running manager. Details and limits:
+  [`read_only`](/reference/config/#manager).
+- **`nested_virt`** (Lima on an x86_64 Linux host) — gives the **manager** container `/dev/kvm`;
+  workers and the hub do not get it. `lever apply` checks the host's KVM `nested` module and
+  installs the guest udev rule (`/dev/kvm` mode 0666); a jail VM created without `/dev/kvm` needs a
+  recreate (back up the conversation, `lever destroy`, `lever up`). Doctor's `nested virt` row
+  checks the guest device, the manager's device, and that the old podman drop-in that gave every
+  container the device is gone (`lever apply` removes it; workers created while it was there keep
+  the device until they are recreated). Turned off, the row fails while the manager still holds
+  the device. See [`nested_virt`](/reference/config/#top-level).
+
 ## Troubleshooting quick table
 
 | Symptom | Likely cause | Do |
@@ -212,17 +290,17 @@ first.
 | Tool call denied `missing capability` | agent didn't mint/attach | the agent should follow its skill (`lever-operator` for the manager, `lever-agent` for a worker): mint via `lever-capability`, pass `_capability`; if the skill is missing, run `lever init` |
 | Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then `lever reload` |
 | "unknown recipient" / new worker invisible | broker still running on the old config | `lever reload` |
-| 502 on an external tool call | the host-side server isn't listening | `lever doctor` (external-backends check), start your server |
+| 502 on an external tool call | the host-side server isn't listening | `lever doctor` (`tool backends` row), start your server |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
-| `lever apply`/`up` fails at `scion-server`: "hub not ready after …" | a hub start spends about 15 s before it serves (most of it a GCP metadata lookup that times out off GCP), and a cold start after a reboot or a scion pin change takes longer. lever waits up to 2 minutes and prints a line after 15 s; before this release it gave up after 30 probes (about 30 s), and a retry seconds later found the hub up | run the command again; if it fails again, read `~/.scion/server.log` in the guest (`orb -m lever-<name>` or `limactl shell lever-<name>`). "no scion server is running in the jail any more" means the server exited during start-up: its log says why |
-| `lever up` fails: "manager … cannot be resumed: <dir> mounted by the manager record but no longer on the host" (before this release: podman `statfs /lever/<dir>: no such file or directory`) | the manager was created with `manager.read_only` naming `<dir>` (or a worker dir while the list was set); the record keeps that mount for life, and the directory was deleted after the entry was removed from `lever.yaml`. lever reads the mounts off the stopped manager container, or, with no container, off the hub record, and refuses every resume (the forced resume of an `error` phase too); it only warns when it keeps a running manager as it is | recreate the directory (`mkdir`, empty is enough) and run `lever up` again; to drop the mount, back up the conversation and run `lever up --fresh`. Keep a removed entry's directory until that fresh create |
+| `lever apply`/`up` fails at `scion-server`: "hub not ready after …" | a hub start spends about 15 s before it serves (most of it a GCP metadata lookup that times out off GCP), and a cold start after a reboot or a scion pin change takes longer. lever waits up to 2 minutes and prints a line after 15 s; before 0.30.0 it gave up after 30 probes (about 30 s), and a retry seconds later found the hub up | run the command again; if it fails again, read `~/.scion/server.log` in the guest (`orb -m lever-<name>` or `limactl shell lever-<name>`). "no scion server is running in the jail any more" means the server exited during start-up: its log says why |
+| `lever up` fails: "manager … cannot be resumed: <dir> mounted by the manager record but no longer on the host" (before 0.30.0: podman `statfs /lever/<dir>: no such file or directory`) | the manager was created with `manager.read_only` naming `<dir>` (or a worker dir while the list was set); the record keeps that mount for life, and the directory was deleted after the entry was removed from `lever.yaml`. lever reads the mounts off the stopped manager container, or, with no container, off the hub record, and refuses every resume (the forced resume of an `error` phase too); it only warns when it keeps a running manager as it is | recreate the directory (`mkdir`, empty is enough) and run `lever up` again; to drop the mount, back up the conversation and run `lever up --fresh`. Keep a removed entry's directory until that fresh create |
 | `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, back up the conversation if you want it, then `lever up --fresh`. In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
 | `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever stop`, then `lever up` (re-mints the token), or wait and retry. Do **not** answer exit 4 with `--fresh` |
 | Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (the conversation is discarded; before 0.21 the flag was silently dropped after `stop`) |
 | Doctor's `agent lever version` row fails | the agent image was built from another lever release than the host `lever` — the tag names only the arch, so any `make lever-image` on the host (a throwaway instance, another checkout) replaces it | rebuild from the host lever's source: `make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built `FROM` it; `lever apply`; `lever up --fresh` to recreate the manager on it (the conversation is discarded) |
 | On `lima` with `egress: open`, every agent turn ends in `Request timed out` (about 4.5 min) while `lever up` looks fine; doctor's `guest DNS` row fails | the guest resolver is a nat DNAT to the host alias on a per-boot port, which the `LEVER_EGRESS` alias DROP swallowed (lever < 0.22.2, lever#34); in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows the `-d <alias> DROP` counter climbing with every lookup | upgrade lever and re-run `lever apply` — the open posture now ACCEPTs the live `LIMADNS` DNAT targets ahead of the alias DROP; `lever doctor`'s `guest DNS` row confirms a lookup completes |
 | Doctor's `manager agent` row says the harness is `stalled` (or `crashed`/`offline`) over an `Up` container | the harness stopped completing turns: it cannot reach the model API (guest DNS, an outage), or its credential expired; the hub marks `stalled` after its `stalled_threshold` (default 5 min without an activity event) | `lever attach` shows the harness (a stuck call ends in `Request timed out`); check the `guest DNS` and credential rows; `lever stop` then `lever up` restarts the harness. If scion's `auto_suspend_stalled` is on, the hub suspends the manager itself and `lever up` resumes it into the same state until the cause is fixed |
-| After the host slept, the manager's replies, status updates and heartbeats fail with `401 … token is expired` (agent.log: `AUTH_LOST`); doctor's `manager agent` or `agent hub tokens` row fails with "hub token expired" | scion's agent hub token lives 10 h and sciontool refreshes it 2 h before expiry with a timer that stands still while the host sleeps; an expired token cannot refresh itself. Doctor warns earlier, when a refresh is overdue | `lever apply` (or `lever up` on a running manager) runs `scion reset-auth` for every running agent whose token expired — no restart, the conversation is kept. The broker also checks every 5 min and resets a lapsed token itself (governed by `broker.auto_reenrol`; audit `op=hub-token`). By hand, in the guest: `scion reset-auth <agent> -g <mount>` with the controller PAT |
+| After the host slept, the manager's replies, status updates and heartbeats fail with `401 … token is expired` (agent.log: `AUTH_LOST`); doctor's `manager agent` or `agent hub tokens` row fails with "hub token expired" | scion's agent hub token lives 10 h and sciontool refreshes it 2 h before expiry with a timer that stands still while the host sleeps; an expired token cannot refresh itself. Doctor warns earlier, when a refresh is overdue | `lever apply` (or `lever up` on a running manager) runs `scion reset-auth` for every running or stopped agent whose token expired — no restart, the conversation is kept. The broker also checks every 5 min and resets a running agent's lapsed token itself (governed by `broker.auto_reenrol`; audit `op=hub-token`); see [agent session heals](#agent-session-heals). By hand, in the guest: `scion reset-auth <agent> -g <mount>` with the controller PAT |
 | Doctor's `manager agent` row: "session ended in the hub (phase stopped), but claude still runs in its container"; `lever attach` refuses | another claude process in the manager's container — e.g. `podman exec … claude mcp list` — exited and fired the SessionEnd hook every claude there shares; sciontool reports any SessionEnd as phase stopped. The hub resumes a stopped record in a NEW claude session (only a suspended one gets `--continue`) | `lever apply`: it has the agent report its session running again, and the conversation continues; `lever stop` does the same before it suspends. Do not run `claude` in an agent container through `podman exec` |
 | Doctor's `manager agent` row: "claude has exited (phase stopped)", or `lever up` logs that a stopped record resumes in a new claude session | the session really ended (or the record was stopped while the machine was down); scion's hub resumes a stopped record without `--continue` | `lever up`, then `lever attach` and `/resume` to pick the old conversation (it stays in the agent home) |
 | `lever-manager agent resume <w>` returns 502 after `lever stop && lever up`; the audit detail ends in `statfs …/lever/tickets/<w>: no such file or directory` | the worker's ticket directory is a tmpfs under the run user's `XDG_RUNTIME_DIR` and the jail restart emptied it; before 0.22.4 the resume verb never re-staged a ticket (lever#36) | upgrade lever; on an older version, stage one through the admin route (`curl -X POST 127.0.0.1:8444/worker-ticket -d '{"worker":"<w>"}'`) and resume again |
@@ -261,9 +339,12 @@ resumes the record on the image it was created with.
 
 ## Upgrading lever
 
-1. Pull and rebuild: `cd lever_to && make all` (host binary), and if the agent-side binaries
-   changed, `make lever-image-bins` + rebuild your agent image, then `lever apply` to load it
-   (or re-save it over the `image_tar` archive on a Docker-less host, then `lever apply`).
+1. Pull and rebuild: `cd lever_to && make all` (the host `lever`, `lever-tool-github` and
+   `lever-tool-fizzy`), and if the agent-side binaries changed, rebuild the agent image
+   (`make lever-image`, or `make lever-image-bins` + your instance's own image build), then
+   `lever apply` to load it (or re-save it over the `image_tar` archive on a Docker-less host,
+   then `lever apply`). The manager runs a new image only after `lever up --fresh` (back up its
+   conversation first).
 2. `lever init` — refreshes the scaffolded skills (your edited and adopted copies are left
    alone; `--check` to preview). If you've customized scaffolds and doctor nags about them, accept them once with
    `lever init --adopt`.
@@ -287,6 +368,7 @@ resumes the record on the image it was created with.
   proxy with it.
 - **Four more tools in every instance.** After an image rebuild, every instance's
   `lever-capability` server lists `contacts`, `contact_message`, `contact_files` and
-  `share_file`. While their feature is off they answer `off`.
+  `share_file`. While their feature is off, `contact_message` and `share_file` refuse with `off`,
+  and `contacts` and `contact_files` return an empty answer with a note.
 - **Three new doctor rows:** `agent messages`, `files` and `push`. Each says `off` until you turn
   its feature on.

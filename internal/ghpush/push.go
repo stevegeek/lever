@@ -155,14 +155,19 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	auth := &Auth{BaseURL: p.BaseURL, Token: token}
 	if out, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "ls-remote", remote, "refs/heads/"+branch); err != nil {
 		return res, fmt.Errorf("read remote branch: %w", err)
-	} else if f := strings.Fields(out); len(f) >= 1 {
-		res.OldSHA = f[0]
+	} else {
+		for _, line := range strings.Split(out, "\n") {
+			if f := strings.Fields(line); len(f) == 2 && f[1] == "refs/heads/"+branch {
+				res.OldSHA = f[0]
+				break
+			}
+		}
 	}
 	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "push", remote, res.NewSHA+":refs/heads/"+branch); err != nil {
 		// Without --porcelain, git writes " ! [rejected] … (non-fast-forward)"
 		// to stderr, which Run puts in the error.
 		if s := err.Error(); strings.Contains(s, "non-fast-forward") || strings.Contains(s, "fetch first") || strings.Contains(s, "[rejected]") {
-			return res, ErrBranchMoved
+			return res, fmt.Errorf("%w: %s", ErrBranchMoved, err)
 		}
 		return res, fmt.Errorf("push: %w", err)
 	}

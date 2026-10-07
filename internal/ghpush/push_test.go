@@ -316,3 +316,46 @@ func TestPushRefusesAnnotatedTagHead(t *testing.T) {
 		t.Fatal("tag object was pushed")
 	}
 }
+func TestPushBranchMovedKeepsCause(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	commitOn(t, work, "agent/mc", "m1.txt")
+	bundle(t, work, tree, "mc1.bundle", "agent/mc")
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/mc", "mc1.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, work, "checkout", "main")
+	gitT(t, work, "branch", "-D", "agent/mc")
+	commitOn(t, work, "agent/mc", "m2.txt")
+	bundle(t, work, tree, "mc2.bundle", "agent/mc")
+	_, err := p.Push(context.Background(), "manager", repo, "agent/mc", "mc2.bundle")
+	if !errors.Is(err, ErrBranchMoved) || !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("want ErrBranchMoved with the git cause, got %v", err)
+	}
+}
+
+func TestPushOldSHAExactRefMatch(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	commitOn(t, work, "agent/refs/heads/agent/x", "d1.txt")
+	bundle(t, work, tree, "decoy.bundle", "agent/refs/heads/agent/x")
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/refs/heads/agent/x", "decoy.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, work, "checkout", "main")
+	commitOn(t, work, "agent/x", "x1.txt")
+	bundle(t, work, tree, "x1.bundle", "agent/x")
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/x", "x1.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	first := r.headSHA(t, repo, "agent/x")
+	commitOn(t, work, "agent/x", "x2.txt")
+	bundle(t, work, tree, "x2.bundle", "agent/x")
+	res, err := p.Push(context.Background(), "manager", repo, "agent/x", "x2.bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OldSHA != first {
+		t.Fatalf("OldSHA %s, want %s", res.OldSHA, first)
+	}
+}

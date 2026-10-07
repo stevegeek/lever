@@ -19,6 +19,11 @@ jobs:
           V="${GITHUB_REF_NAME#v}"
           grep -q "const Version = \"$V\"" internal/cli/root.go || {
             echo "internal/cli/root.go const Version does not match tag $GITHUB_REF_NAME"; exit 1; }
+      - name: verify the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "tag $GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"; exit 1; }
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"

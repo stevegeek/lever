@@ -2251,3 +2251,30 @@ func TestShellQuote(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckNestedVirt(t *testing.T) {
+	ctx := context.Background()
+	if r := checkNestedVirt(ctx, false, nil, "", nil); !r.ok || !strings.Contains(r.detail, "not applicable") {
+		t.Fatalf("off: %+v", r)
+	}
+	guestOK := func() *proc.FakeRunner {
+		f := proc.NewFakeRunner()
+		f.Script("stat -c %F %a /dev/kvm", proc.Result{Stdout: "character special file 666\n"})
+		f.Script("sh -c", proc.Result{}) // drop-in test -f
+		return f
+	}
+	has := func(ctx context.Context, ref, p string) (bool, error) { return true, nil }
+	lacks := func(ctx context.Context, ref, p string) (bool, error) { return false, nil }
+
+	if r := checkNestedVirt(ctx, true, guestOK(), "p--m", has); !r.ok {
+		t.Fatalf("all good: %+v", r)
+	}
+	if r := checkNestedVirt(ctx, true, guestOK(), "p--m", lacks); r.ok || !strings.Contains(r.fix, "lever stop") {
+		t.Fatalf("container lacks kvm: %+v", r)
+	}
+	bad := proc.NewFakeRunner()
+	bad.Script("stat -c %F %a /dev/kvm", proc.Result{Stdout: "character special file 660\n"})
+	if r := checkNestedVirt(ctx, true, bad, "p--m", has); r.ok || !strings.Contains(r.detail, "660") {
+		t.Fatalf("wrong mode: %+v", r)
+	}
+}

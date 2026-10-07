@@ -242,3 +242,23 @@ func (e errRunner) RunIn(ctx context.Context, _ string, env map[string]string, n
 func (e errRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return e.Run(ctx, env, name, args...)
 }
+
+func TestContainerHasCharDevice(t *testing.T) {
+	ctx := context.Background()
+	yes := proc.NewFakeRunner()
+	yes.Script("podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 0})
+	if ok, err := ContainerHasCharDevice(ctx, yes, "proj--mgr", "/dev/kvm"); err != nil || !ok {
+		t.Fatalf("present: %v %v", ok, err)
+	}
+	no := proc.NewFakeRunner()
+	no.Script("podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 1})
+	if ok, err := ContainerHasCharDevice(ctx, no, "proj--mgr", "/dev/kvm"); err != nil || ok {
+		t.Fatalf("absent: %v %v", ok, err)
+	}
+	if _, err := ContainerHasCharDevice(ctx, no, "-x", "/dev/kvm"); err == nil {
+		t.Fatal("a ref starting with - must be refused")
+	}
+	if _, err := ContainerHasCharDevice(ctx, no, "proj--mgr", "dev/kvm"); err == nil {
+		t.Fatal("a relative path must be refused")
+	}
+}

@@ -301,6 +301,12 @@ type Deps struct {
 	// check that a read_only entry was not replaced on the host after the
 	// manager was created. nil ⇒ the warning says it could not check.
 	ProbeContainerWritable func(ctx context.Context, ref, target string) (bool, error)
+	// ProbeContainerDevice asks a running container whether path is a
+	// character device in it (jail.ContainerHasCharDevice in production).
+	// Used to warn when nested_virt is on and the manager's container lacks
+	// /dev/kvm (the podman drop-in reaches containers at create time). nil
+	// means the warning says it could not check. Optional.
+	ProbeContainerDevice func(ctx context.Context, ref, path string) (bool, error)
 	// RecordVolumes reads the extra mounts the hub record of agent in
 	// project was created with (its inline-config volumes, through the
 	// controller's read-only agent listing), as jail mounts. It is
@@ -986,6 +992,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if !r.managerCreated {
 		r.warnManagerTreeMounts(ctx, jp)
 	}
+	r.warnManagerNestedVirt(ctx, jp)
 	return nil
 }
 
@@ -1450,6 +1457,27 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 	}
 	if !gaps.Empty() {
 		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
+	}
+}
+
+// warnManagerNestedVirt runs after the manager is live: nested_virt's podman
+// drop-in reaches a container only when podman creates it, so a manager kept
+// or resumed from before the option lacks /dev/kvm. Never fatal.
+func (r *run) warnManagerNestedVirt(ctx context.Context, jp string) {
+	if !r.app.NestedVirt {
+		return
+	}
+	if r.d.ProbeContainerDevice == nil {
+		r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm; run `lever doctor` (row \"nested virt\")", r.app.Name)
+		return
+	}
+	has, err := r.d.ProbeContainerDevice(ctx, jail.ContainerName(path.Base(jp), r.app.Name), "/dev/kvm")
+	if err != nil {
+		r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm (%v); run `lever doctor`", r.app.Name, err)
+		return
+	}
+	if !has {
+		r.d.Log("start-manager: WARNING: nested_virt is on but manager %q has no /dev/kvm; it takes effect when the container is recreated: `lever stop`, then `lever up` (keeps the conversation)", r.app.Name)
 	}
 }
 

@@ -25,6 +25,19 @@ images:
   - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
     arch: "x86_64"
 disk: {{.Disk}}
+{{- if .CPUs}}
+cpus: {{.CPUs}}
+{{- end}}
+{{- if .Memory}}
+memory: {{printf "%q" .Memory}}
+{{- end}}
+{{- if and .NestedVirt (eq .VMType "qemu")}}
+vmOpts:
+  qemu:
+    cpuType:
+      x86_64: host
+      aarch64: host
+{{- end}}
 mounts:
   - location: {{printf "%q" .ProjectTree}}
     mountPoint: "/lever"
@@ -56,18 +69,32 @@ var tpl = template.Must(template.New("lima").Parse(templateText))
 // `limactl disk resize` or a recreate.
 const defaultDisk = "24GiB"
 
-// RenderTemplate renders the jail VM template for this host OS. disk is the
-// guest disk size (e.g. "24GiB"); empty selects defaultDisk.
-func RenderTemplate(projectTree, disk string) (string, error) {
-	if disk == "" {
-		disk = defaultDisk
+// TemplateOpts are the per-instance values the template renders. Zero values
+// select the defaults (defaultDisk; Lima's own CPU/memory defaults; no
+// explicit cpuType).
+type TemplateOpts struct {
+	Disk       string
+	CPUs       int
+	Memory     string
+	NestedVirt bool
+}
+
+// RenderTemplate renders the jail VM template for this host OS.
+func RenderTemplate(projectTree string, o TemplateOpts) (string, error) {
+	if o.Disk == "" {
+		o.Disk = defaultDisk
 	}
 	vmType := "qemu"
 	if runtime.GOOS == "darwin" {
 		vmType = "vz"
 	}
+	data := struct {
+		VMType, ProjectTree, Disk, Memory string
+		CPUs                              int
+		NestedVirt                        bool
+	}{vmType, projectTree, o.Disk, o.Memory, o.CPUs, o.NestedVirt}
 	var buf bytes.Buffer
-	if err := tpl.Execute(&buf, struct{ VMType, ProjectTree, Disk string }{vmType, projectTree, disk}); err != nil {
+	if err := tpl.Execute(&buf, data); err != nil {
 		return "", err
 	}
 	return buf.String(), nil

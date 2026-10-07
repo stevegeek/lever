@@ -128,3 +128,6 @@ workers:
 Start with **A**; move a server to **B** when you want it scoped per agent, audited, and off the
 ambient allowlist. See the [config reference](/reference/config/) for every key and
 [security model §6.2](/security-model/credentials/) for what the gate does and does not protect.
+
+See also: [the github tool](/github-tool/), a first-party broker tool that pushes agent branches
+without a GitHub credential in the jail.

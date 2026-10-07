@@ -1,0 +1,65 @@
+# lever-dev: develop lever inside a lever jail on a Linux host (Lima + nested
+# KVM). Runbook: README.md. Never build or run git inside jail-src/ on the host.
+name: lever-dev
+backend: lima
+tree: jail-src
+disk: 120GiB
+cpus: 8
+memory: 24GiB
+nested_virt: true
+# closed egress needs api-key mode; open still drops the LAN and the tailnet.
+egress: open
+scion:
+  version: 63d5d65d   # the pin of the installed lever release; never `source:` (it would build agent-written scion on the host)
+broker:
+  llm_auth: subscription
+  tools:
+    - name: github
+      # absolute paths: the broker supervisor passes argv as-is
+      command: [/home/YOU/.local/bin/lever-tool-github,
+                -tree, /home/YOU/lever-dev/jail-src,
+                -state, /home/YOU/.local/state/lever-dev-github,
+                -app-id, "APP_ID", -installation-id, "INSTALLATION_ID",
+                -app-key, /home/YOU/lever-dev/secrets/github-app.pem,
+                -repos, stevegeek/lever]
+      backend: 127.0.0.1:3210
+      operations:
+        - {name: push, params: [repo, branch, bundle]}
+      allowed_values:
+        repo: [stevegeek/lever]
+    # name must equal the binary's -name default (fizzy)
+    - name: fizzy
+      command: [/home/YOU/.local/bin/lever-tool-fizzy,
+                -fizzy, /usr/local/bin/fizzy,
+                -token-file, /home/YOU/lever-dev/secrets/fizzy-token,
+                -account, "ACCOUNT_ID",
+                -board, 03gyvmtu0lb2osl1x3h5hkeii,   # your Lever board id
+                -state, /home/YOU/.local/state/lever-dev-fizzy]
+      backend: 127.0.0.1:3211
+      operations:
+        - {name: list_cards, params: [column, search, page]}
+        - {name: show_card, params: [number]}
+        - {name: list_comments, params: [number]}
+        - {name: comment, params: [number, body]}
+        - {name: move_card, params: [number, column]}
+        - {name: create_card, params: [title, description]}
+manager:
+  image: scionlocal/lever-dev-claude:amd64
+  credential_file: secrets/claude-oauth-token
+  instructions_file: instructions.md
+  obtain:
+    - {tool: github, op: push}
+    - {tool: fizzy, op: list_cards}
+    - {tool: fizzy, op: show_card}
+    - {tool: fizzy, op: list_comments}
+    - {tool: fizzy, op: comment}
+    - {tool: fizzy, op: move_card}
+    - {tool: fizzy, op: create_card}
+remote:
+  enabled: true
+  base_url: https://YOUR-HOST.YOUR-TAILNET.ts.net:8445
+  landing: chat
+  allowed_users: [YOU@github]
+  push:
+    enabled: true
+    subject: mailto:YOU@example.com

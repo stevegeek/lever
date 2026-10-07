@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1192,6 +1193,46 @@ func TestValidateDiskFormat(t *testing.T) {
 	}
 }
 
+func TestValidateLimaKeys(t *testing.T) {
+	base := func() *App { return &App{Backend: BackendLima} }
+	cases := []struct {
+		name    string
+		mut     func(a *App)
+		goos    string
+		wantErr string // "" = valid
+	}{
+		{"all unset lima", func(a *App) {}, "linux", ""},
+		{"all set lima linux", func(a *App) { a.NestedVirt, a.CPUs, a.Memory = true, 8, "24GiB" }, "linux", ""},
+		{"nested on darwin", func(a *App) { a.NestedVirt = true }, "darwin", "nested_virt needs the qemu driver"},
+		{"cpus on darwin ok", func(a *App) { a.CPUs = 4 }, "darwin", ""},
+		{"nested on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.NestedVirt = true }, "linux", "nested_virt is Lima-only"},
+		{"cpus on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.CPUs = 2 }, "darwin", "cpus is Lima-only"},
+		{"memory on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.Memory = "8GiB" }, "darwin", "memory is Lima-only"},
+		{"cpus zero is unset", func(a *App) { a.CPUs = 0 }, "linux", ""},
+		{"cpus negative", func(a *App) { a.CPUs = -1 }, "linux", "cpus -1 out of range"},
+		{"cpus too many", func(a *App) { a.CPUs = 257 }, "linux", "cpus 257 out of range"},
+		{"memory bad format", func(a *App) { a.Memory = "lots" }, "linux", `memory "lots" invalid`},
+		{"memory too small", func(a *App) { a.Memory = "1GiB" }, "linux", "at least 2GiB"},
+		{"memory MiB ok", func(a *App) { a.Memory = "4096MiB" }, "linux", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := base()
+			c.mut(a)
+			err := validateLimaKeys(a, c.goos)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("want error containing %q, got %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestToolCheckHostResolvesCommand(t *testing.T) {
 	// A binary guaranteed on the minimal PATH.
 	ok := Tool{Name: "t", Command: []string{"true"}}
@@ -1923,4 +1964,39 @@ func TestRemoteLandingRefusals(t *testing.T) {
 	rejectNoHost(t, remoteOn+"  landing: chat\n", "operator")
 	rejectNoHost(t, strings.Replace(remoteOn, "manager: {}", "manager: {}\nworkers: [{name: w, dir: w}]", 1)+
 		"  allowed_users: [{login: c@example.com, tier: contact, agents: [w]}]\n  landing: chat\n", "operator")
+}
+
+func TestExampleLeverDevLoads(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"lever.yaml", "instructions.md"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "examples", "lever-dev", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, f), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "jail-src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secrets", "claude-oauth-token"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, err := LoadNoHostChecks(filepath.Join(dir, "lever.yaml"))
+	if runtime.GOOS == "darwin" {
+		if err == nil || !strings.Contains(err.Error(), "nested_virt needs the qemu driver") {
+			t.Fatalf("darwin must reject nested_virt, got %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !app.NestedVirt || app.Backend != BackendLima || app.CPUs != 8 || app.Memory != "24GiB" {
+		t.Fatalf("unexpected: %+v", app)
+	}
 }

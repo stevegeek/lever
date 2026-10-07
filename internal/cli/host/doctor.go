@@ -139,6 +139,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	probeWritable := func(ctx context.Context, ref, target string) (bool, error) {
 		return jail.ContainerPathWritable(ctx, jr, ref, target)
 	}
+	probeDevice := func(ctx context.Context, ref, path string) (bool, error) {
+		return jail.ContainerHasCharDevice(ctx, jr, ref, path)
+	}
 	// An agent container's network mode (lever#35), through the jail.
 	inspectNetMode := func(ctx context.Context, ref string) (string, error) {
 		return jail.ContainerNetworkMode(ctx, jr, ref)
@@ -167,6 +170,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkAgentHubTokens(ctx, b.MountDest(), app.Name, networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)
 		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
+		func() checkResult {
+			return checkNestedVirt(ctx, app.NestedVirt, jr, jail.ContainerName(hubProjectKey(b.MountDest()), app.Name), probeDevice)
+		},
 		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
 		},

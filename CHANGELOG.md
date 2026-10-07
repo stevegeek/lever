@@ -5,6 +5,26 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **`fizzy` broker tool (`lever-tool-fizzy`).** An agent lists, shows, comments on, moves and
+  creates cards on ONE Fizzy board through the broker, with the official fizzy CLI. The jail holds
+  no Fizzy token. Every comment and description carries a `[lever-dev agent] ` prefix. See the
+  `fizzy-tool` guide.
+- **`github` broker tool (`lever-tool-github`).** An agent pushes a git bundle to `agent/*`
+  branches through the broker. The jail holds no GitHub credential. The tool never forces a push.
+  A GitHub App with Contents read+write mints 1 h tokens. See the `github-tool` guide. CI now runs
+  on `agent/**` pushes, and the release workflow refuses a tag that is not on `main`.
+- **`nested_virt`, `cpus`, `memory` (Lima).** `nested_virt` (Linux host only) gives every agent
+  container `/dev/kvm`; `cpus` and `memory` size the jail VM at create time. New doctor row
+  *nested virt*.
+
+### Changed
+
+- The Makefile `LEVER_IMAGE_ARCH` defaults to the host Go arch instead of `arm64`.
+
 ## [0.31.0] - 2026-10-07
 
 ### Added

@@ -4062,3 +4062,25 @@ func (r *deleteThenGoneRunner) RunIn(ctx context.Context, dir string, env map[st
 	}
 	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
 }
+
+func TestWarnManagerNestedVirt(t *testing.T) {
+	var logs []string
+	r := &run{app: &config.App{Name: "assistant", NestedVirt: true}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
+	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return false, nil }
+	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
+	if len(logs) != 1 || !strings.Contains(logs[0], "lever stop") || strings.Contains(logs[0], "--fresh") {
+		t.Fatalf("logs = %q", logs)
+	}
+	logs = nil
+	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return true, nil }
+	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
+	if len(logs) != 0 {
+		t.Fatalf("no warning expected, got %q", logs)
+	}
+	r.app.NestedVirt = false
+	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) {
+		t.Fatal("must not probe when off")
+		return false, nil
+	}
+	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
+}

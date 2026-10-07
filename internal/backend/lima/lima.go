@@ -101,6 +101,9 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := l.Provision(ctx, cfg); err != nil {
 		return err
 	}
+	if cfg.NestedVirtUnknown {
+		return nil
+	}
 	return l.Guest().EnsureNestedVirt(ctx, cfg.NestedVirt)
 }
 

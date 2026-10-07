@@ -77,6 +77,10 @@ type Config struct {
 	CPUs       int
 	Memory     string
 	NestedVirt bool
+	// NestedVirtUnknown says the caller has no lever.yaml and so does not
+	// know nested_virt (`lever provision`): EnsureUp leaves the guest's
+	// /dev/kvm setup as it is instead of converging it to NestedVirt.
+	NestedVirtUnknown bool
 }
 
 // HasScion reports whether any scion mode is configured.

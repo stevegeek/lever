@@ -108,6 +108,10 @@ func TestUpCommandCallsEnsureUp(t *testing.T) {
 	if !sb.up {
 		t.Fatal("EnsureUp not called")
 	}
+	// provision reads no lever.yaml, so it must not converge nested_virt off.
+	if !sb.upCfg.NestedVirtUnknown || sb.upCfg.NestedVirt {
+		t.Fatalf("provision must mark nested_virt unknown, got %+v", sb.upCfg)
+	}
 }
 
 func TestDoctorPrintsProfile(t *testing.T) {

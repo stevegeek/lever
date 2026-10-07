@@ -686,7 +686,8 @@ func TestEnsureUpDNATTargetsWinOverResolverUpstream(t *testing.T) {
 }
 
 // EnsureUp ends with the nested-virt step: two guest calls (root, user) after
-// Provision, carrying the drop-in when on and its removal when off.
+// Provision, carrying the udev rule when on and its removal when off; both
+// remove the legacy drop-in.
 func TestEnsureUpNestedVirtStep(t *testing.T) {
 	old := readHostFile
 	readHostFile = func(string) ([]byte, error) { return []byte("1\n"), nil }
@@ -711,11 +712,30 @@ func TestEnsureUpNestedVirtStep(t *testing.T) {
 			t.Errorf("on=%v: second-to-last call must be the root step: %v", on, root.Args)
 		}
 		if on {
-			if !strings.Contains(rs, "/dev/kvm") || !strings.Contains(us, "20-lever-kvm.conf") {
+			if !strings.Contains(rs, "chmod 0666 /dev/kvm") || !strings.Contains(us, `rm -f "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"`) {
 				t.Errorf("on: want kvm scripts, got\n%s\n%s", rs, us)
 			}
-		} else if !strings.Contains(rs, "rm -f /etc/udev/rules.d/65-lever-kvm.rules") || !strings.Contains(us, `rm -f "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"`) {
+		} else if !strings.Contains(rs, "rm -f /etc/udev/rules.d/65-lever-kvm.rules") || !strings.Contains(rs, "chmod 0660 /dev/kvm") || !strings.Contains(us, `rm -f "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"`) {
 			t.Errorf("off: want removal scripts, got\n%s\n%s", rs, us)
+		}
+	}
+}
+
+// TestEnsureUpNestedVirtUnknownLeavesGuest: a caller with no lever.yaml
+// (`lever provision`) cannot know nested_virt, so EnsureUp must not run the
+// off step and strip a nested_virt instance's udev rule.
+func TestEnsureUpNestedVirtUnknownLeavesGuest(t *testing.T) {
+	f := proc.NewFakeRunner()
+	scriptedVM(f)
+	f.Script("limactl shell "+vm+" bash -lc", proc.Result{})
+	f.Script("limactl shell "+vm+" sudo bash -lc", proc.Result{})
+	l := New(f, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree, NestedVirtUnknown: true}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	for _, c := range f.Calls {
+		if strings.Contains(strings.Join(c.Args, " "), "kvm") {
+			t.Fatalf("EnsureUp touched the nested-virt setup: %v", c.Args)
 		}
 	}
 }

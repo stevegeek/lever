@@ -186,15 +186,17 @@ replaceable) by the agent. Config load therefore refuses these paths when they r
 | Kind | Paths | Inside `tree` |
 |---|---|---|
 | Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
-| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`); the value of `-fizzy`; the script of an interpreter (`python`, `python3`, `ruby`, `node`, `sh`, `bash`, `perl`, `deno`, `bun`): its first argument when that is not a flag, or, for `sh` and `bash`, every absolute path in the `-c` command line | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
+| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`), also after an `env` prefix (its flags and `NAME=value` words are skipped); the value of `-fizzy`; the code an interpreter runs (`python`, `ruby`, `node`, `perl`, `sh`, `bash`, `dash`, `zsh`, `deno`, `bun`, a version suffix such as `python3.12` allowed): the script, which is the first argument after the leading flags (and after `run` for `deno` and `bun`), the value of a flag that loads code (`ruby -I`/`-r`, `perl -I`, `node --require`/`--import`/`--loader`), and the paths in inline code (`sh -c`, also in a combined group such as `-ec`; `python -c`; `ruby`/`perl`/`node -e`) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
 
 **This is a best-effort guard, not a sandbox.** Lever cannot know what an unknown flag's value is: a
 secret, a program, or a data file the agent is meant to edit (the example todo tool's `-csv`). So it
 checks only the command itself, the path flags of the tools it ships (above; `-tree`, `-dsn` and
 `-csv` are read and deliberately not checked) and interpreter scripts. It does not check any other
 flag or argument. **For your own tool, keep its secrets and the programs it runs outside the tree
-yourself.** The `-c` command line is split on whitespace, `=`, `:` and `,`; a piece that starts with
-`/`, or a flag with a path glued on (`-I/path`), counts. A path written with a `..` component is
+yourself.** Only the leading flags of an interpreter are read: what follows the script is the
+script's own business. Inline code is split on whitespace, quotes, shell punctuation, `=`, `:` and
+`,`; a piece with a `/` in it counts (a relative one against the instance root, the tool's working
+directory), and so does a flag with a path glued on (`-I/path`). A path written with a `..` component is
 refused: the kernel resolves `..` after it follows links, so `ws/link/../tools/x` can reach somewhere
 other than it reads. A path the check cannot inspect (a directory you may not search) is refused too,
 with the path and the error.

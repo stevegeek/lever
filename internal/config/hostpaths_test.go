@@ -42,7 +42,7 @@ func TestHostPathsRefusedInsideTree(t *testing.T) {
 		{"token-file with =", "manager: {}\n" + supervisedTool("[/usr/bin/true, --token-file=ws/secret]"), "broker.tools[t] -token-file"},
 		{"fizzy cli", "manager: {}\n" + supervisedTool("[/usr/bin/true, -fizzy, ROOT/ws/tools/bin]"), "broker.tools[t] -fizzy"},
 		{"script argument", "manager: {}\n" + supervisedTool("[/usr/bin/ruby, ROOT/ws/tools/bin]"), "broker.tools[t] script"},
-		{"sh -c command", "manager: {}\n" + supervisedTool("[sh, -c, \"exec ROOT/ws/tools/bin --x\"]"), "broker.tools[t] -c command"},
+		{"sh -c command", "manager: {}\n" + supervisedTool("[sh, -c, \"exec ROOT/ws/tools/bin --x\"]"), "broker.tools[t] -c code"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,14 +196,38 @@ func TestToolHostPaths(t *testing.T) {
 	check("command path", paths("/opt/x", "--key-file=/k"), []got{{"broker.tools[t] command", "/opt/x", hostProgram}})
 	// An interpreter's first argument is the script it runs, unless a flag.
 	check("interpreter script", paths("ruby", "/t/x.rb", "/t/y"), []got{{"broker.tools[t] script", "/t/x.rb", hostProgram}})
-	check("interpreter flag first", paths("python3", "-u", "/t/x.py"), nil)
-	// sh/bash -c: every absolute path in the command line.
-	check("sh -c", paths("bash", "-c", "PATH=/p:/q exec /t/x -I/l rel/y"), []got{
-		{"broker.tools[t] -c command", "/p", hostProgram},
-		{"broker.tools[t] -c command", "/q", hostProgram},
-		{"broker.tools[t] -c command", "/t/x", hostProgram},
-		{"broker.tools[t] -c command", "/l", hostProgram},
+	// Leading flags are skipped to find the script (LOW-3).
+	check("interpreter flag first", paths("python3", "-u", "/t/x.py"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
+	check("flag with a value", paths("python3", "-W", "ignore", "/t/x.py", "/t/data"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
+	check("python -m", paths("python3", "-m", "pkg", "/t/x"), nil)
+	check("versioned", paths("python3.12", "/t/x.py"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
+	check("versioned ruby", paths("/usr/bin/ruby3.3", "-Ilib/x", "-r", "/t/r.rb", "/t/x.rb"), []got{
+		{"broker.tools[t] command", "/usr/bin/ruby3.3", hostProgram},
+		{"broker.tools[t] -I", "lib/x", hostProgram},
+		{"broker.tools[t] -r", "/t/r.rb", hostProgram},
+		{"broker.tools[t] script", "/t/x.rb", hostProgram},
 	})
+	// -c counts only among the leading flags, combined groups included.
+	check("script before -c", paths("bash", "/t/evil.sh", "-c", "x"), []got{{"broker.tools[t] script", "/t/evil.sh", hostProgram}})
+	check("combined -ec", paths("bash", "-ec", "/abs/x.sh arg"), []got{{"broker.tools[t] -c code", "/abs/x.sh", hostProgram}})
+	// Relative paths in -c resolve against the instance dir (the tool's cwd).
+	check("relative in -c", paths("sh", "-c", "workspace/run.sh; echo 'done'"), []got{{"broker.tools[t] -c code", "workspace/run.sh", hostProgram}})
+	check("sh -c", paths("bash", "-c", "PATH=/p:/q exec /t/x -I/l rel/y"), []got{
+		{"broker.tools[t] -c code", "/p", hostProgram},
+		{"broker.tools[t] -c code", "/q", hostProgram},
+		{"broker.tools[t] -c code", "/t/x", hostProgram},
+		{"broker.tools[t] -c code", "/l", hostProgram},
+		{"broker.tools[t] -c code", "rel/y", hostProgram},
+	})
+	// env: its flags and assignments are skipped to find the real command.
+	check("env", paths("/usr/bin/env", "-i", "A=b", "python3", "/t/x.py"), []got{
+		{"broker.tools[t] command", "/usr/bin/env", hostProgram},
+		{"broker.tools[t] script", "/t/x.py", hostProgram},
+	})
+	check("env -S", paths("env", "-S", "ruby -w", "/t/x.rb"), []got{{"broker.tools[t] script", "/t/x.rb", hostProgram}})
+	check("env path", paths("env", "-u", "X", "/t/bin/tool", "-x"), []got{{"broker.tools[t] command (after env)", "/t/bin/tool", hostProgram}})
+	check("deno run", paths("deno", "run", "--allow-read", "/t/x.ts"), []got{{"broker.tools[t] script", "/t/x.ts", hostProgram}})
+	check("not an interpreter", paths("pythonic", "/t/x"), nil)
 	if toolHostPaths(Tool{Name: "x", External: true}) != nil {
 		t.Error("an external tool has no host paths")
 	}
@@ -215,6 +239,26 @@ func TestHostPathUnknownArgumentsNotChecked(t *testing.T) {
 	p, _ := hostPathsInstance(t, "manager: {}\n"+supervisedTool("[/usr/bin/true, -db, ws/secret, --key-file=ws/secret, ws/tools/bin]"))
 	if _, err := LoadNoHostChecks(p); err != nil {
 		t.Fatalf("an unknown argument was checked: %v", err)
+	}
+}
+
+// LOW-3: interpreter commands the old parser skipped are refused in the tree.
+func TestHostPathInterpreterVariantsRefused(t *testing.T) {
+	for _, cmd := range []string{
+		"[bash, ws/tools/bin, -c, x]",
+		"[python3, -u, ws/tools/bin]",
+		"[bash, -ec, \"ROOT/ws/tools/bin\"]",
+		"[sh, -c, \"ws/tools/bin --flag\"]",
+		"[python3.12, ws/tools/bin]",
+		"[/usr/bin/env, python3, ws/tools/bin]",
+	} {
+		p, root := hostPathsInstance(t, "")
+		body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + supervisedTool(strings.ReplaceAll(cmd, "ROOT", root))
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadNoHostChecks(p)
+		testutil.WantErrContaining(t, err, "inside the mounted tree")
 	}
 }
 

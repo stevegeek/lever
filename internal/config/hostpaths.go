@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"unicode"
 )
 
 // hostPathKind says what the host does with a path the config names, which
@@ -58,14 +57,6 @@ var toolPathFlags = map[string]hostPathKind{
 	"csv":        hostUnchecked, // todo (example): the agent-editable todo list
 }
 
-// scriptInterpreters are commands whose first argument, when it is not a
-// flag, is a script they run: a program. For sh and bash, the string after
-// -c is a command line whose absolute paths are programs.
-var scriptInterpreters = map[string]bool{
-	"python": true, "python3": true, "ruby": true, "node": true, "sh": true,
-	"bash": true, "perl": true, "deno": true, "bun": true,
-}
-
 // hostPaths lists every host-run program and host secret the config names.
 // Paths are made absolute against the instance dir, which the supervisor
 // also makes every tool's working directory (brokerctl.ToolSpec.Dir).
@@ -101,12 +92,13 @@ func (a *App) hostPaths() []hostPath {
 // can classify — a best-effort guard, not a sandbox:
 //
 //   - the program itself when it is given as a path (a bare name is looked
-//     up on the supervisor's fixed PATH, which is not in the tree);
+//     up on the supervisor's fixed PATH, which is not in the tree), after
+//     an env(1) prefix too (unwrapEnv);
 //   - the value of each known path flag of the shipped tools
 //     (toolPathFlags), as "-f v", "-f=v" or "--f=v";
-//   - an interpreter's script (scriptInterpreters): its first argument
-//     when that is not a flag, or for sh and bash every absolute path in
-//     the -c command line (split on whitespace, '=', ':' and ',').
+//   - the code an interpreter runs (interpreterPaths): its script, the
+//     values of its code-path flags (ruby -I, node --require), and the
+//     paths in inline code (sh -c, -e).
 //
 // Other flags and arguments are not checked: lever cannot tell a secret
 // from a data file in an unknown tool's argv.
@@ -121,18 +113,19 @@ func toolHostPaths(t Tool) []hostPath {
 	if strings.ContainsRune(t.Command[0], '/') {
 		add("command", t.Command[0], hostProgram)
 	}
-	args := t.Command[1:]
-	if base := filepath.Base(t.Command[0]); scriptInterpreters[base] && len(args) > 0 {
-		if c := slices.Index(args, "-c"); (base == "sh" || base == "bash") && c >= 0 {
-			if c+1 < len(args) {
-				for _, p := range absolutePaths(args[c+1]) {
-					add("-c command", p, hostProgram)
-				}
-			}
-		} else if !strings.HasPrefix(args[0], "-") {
-			add("script", args[0], hostProgram)
+	argv := t.Command
+	if real := unwrapEnv(argv); len(real) > 0 && len(real) < len(argv) {
+		argv = real
+		if strings.ContainsRune(argv[0], '/') {
+			add("command (after env)", argv[0], hostProgram)
 		}
 	}
+	if fam := interpreterFamily(baseName(argv[0])); fam != "" {
+		for _, p := range interpreterPaths(fam, argv) {
+			add(p.what, p.path, hostProgram)
+		}
+	}
+	args := t.Command[1:]
 	for i := 0; i < len(args); i++ {
 		name, ok := strings.CutPrefix(args[i], "-")
 		if !ok || name == "" {
@@ -150,22 +143,6 @@ func toolHostPaths(t Tool) []hostPath {
 		if kind != hostUnchecked {
 			add("-"+name, val, kind)
 		}
-	}
-	return out
-}
-
-// absolutePaths are the absolute paths in a shell command line: it is split
-// on whitespace, '=', ':' and ',', and each piece that starts with "/"
-// counts, as does a flag with a path glued on (-I/x: from its first "/").
-func absolutePaths(line string) []string {
-	var out []string
-	sep := func(r rune) bool { return unicode.IsSpace(r) || r == '=' || r == ':' || r == ',' }
-	for _, tok := range strings.FieldsFunc(line, sep) {
-		i := strings.IndexByte(tok, '/')
-		if i < 0 || (i > 0 && tok[0] != '-') || slices.Contains(out, tok[i:]) {
-			continue
-		}
-		out = append(out, tok[i:])
 	}
 	return out
 }

@@ -5,6 +5,64 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
+## [0.33.0] - 2026-10-07
+
+### Security
+
+- **Config load refuses host secrets and host-run programs inside the tree** (Fizzy #161). The
+  tree is mounted read-write into the agents, so a program or secret there is one an agent can
+  replace or read.
+  - Secrets and trust anchors are always refused inside the tree, also under `manager.read_only`
+    (the manager can read a read-only path): `manager.credential_file`, `broker.api_key_file`,
+    `operator.signing_key`, `operator.allowed_signers`, and the `-app-key`, `-token-file` and
+    `-state` values of the shipped tools.
+  - A program (a tool command given as a path, `-fizzy`, an interpreter's script or code-loading
+    flag, absolute and relative paths in an `sh -c` string) is refused unless it is under a
+    `manager.read_only` entry, in no worker dir, and reached through no symbolic link in the tree.
+  - Paths are walked component by component and compared by file identity, so links into or out
+    of the tree and case aliases are seen through. A path with `..` is refused, and a path lever
+    cannot inspect is refused with the reason.
+  - The check reads only what it can classify: other flags and arguments of your own tools are not
+    checked. Keep your own tools' secrets and programs outside the tree.
+- **The broker runs supervised tools in the instance root and resolves a bare command on the
+  supervisor's fixed PATH**, so a relative tool path means what config load checked, from
+  whatever directory `lever apply` ran.
+- **A tool whose program relies on `manager.read_only` starts only when the running manager
+  holds the read-only mounts.** The broker checks from the guest side, with no program run inside
+  the container: the kernel's mount table (each entry a read-only mount point) and the device and
+  inode of each host directory against the container's view, so a protected directory replaced on
+  the host is caught. It retries every 30 s and writes the reason to the tool's log.
+- **The remote proxy's forwarding gate requires an `Origin` of exactly `https://<base_url host>`**
+  (an `http` origin with the same host was accepted).
+
+### Fixed
+
+- `lever directive send` refuses a `--not-before` more than 2 minutes ahead at once (the broker
+  refused it after the send).
+- The push watcher writes one `unknown-dm` audit line per pass with a count; an agent could flood
+  the audit log with made-up keys.
+- A file share that times out while it waits for the ledger lock records nothing.
+- `lever apply` waits for the restarted remote proxy's pid file before it records the reuse stamp
+  (it warned and restarted the proxy again on the next apply).
+- `lever doctor` resolves a relative tool command against the instance root.
+
+### Upgrade
+
+- Run `lever doctor` once before `lever apply`. If config load fails with "inside the mounted
+  tree", move the named file outside `tree`, or, for a program, cover it with `manager.read_only`
+  (the manager gets that mount only when it is created: back up the conversation, then
+  `lever up --fresh`). No image rebuild and no `lever init` are needed.
+- A bare tool command must be on `/usr/local/bin:/usr/bin:/bin` (this was already checked at
+  config load); use an absolute path otherwise.
+
+### Known issues
+
+- The interpreter check reads only the value flags in its table; an unknown value-taking flag can
+  hide the real script. Wrappers such as `nice` or `uv run` are not read.
+- The read-only guard trusts the namespace of the manager's first process (safe today because
+  that process is a multithreaded Go program); see Fizzy #162. Its device and inode match is
+  proved on OrbStack; on Lima it fails closed if the inode is not stable.
+
 ## [0.32.0] - 2026-10-07
 
 ### Added

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ type sseHub struct {
 	subs     []string
 	cookies  []string
 	reject   int // answer the next n /events with 401
+	redirect int // then the next n with a 302 to /login
 	events   chan string
 	closeAll chan struct{}
 }
@@ -41,6 +43,13 @@ func (s *sseHub) route(w http.ResponseWriter, r *http.Request) bool {
 		s.reject--
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
+		return true
+	}
+	if s.redirect > 0 {
+		s.redirect--
+		s.mu.Unlock()
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
 		return true
 	}
 	closeAll := s.closeAll
@@ -231,6 +240,45 @@ func TestWatchRenewsARejectedSession(t *testing.T) {
 	defer sess.mu.Unlock()
 	if len(sess.invalidated) == 0 {
 		t.Fatal("the rejected session was not invalidated")
+	}
+}
+
+// TestWatchRenewsASessionTheHubRedirects: the hub's other answer to a dead
+// session is a 302 to /login; the stream client must see it, not follow it.
+func TestWatchRenewsASessionTheHubRedirects(t *testing.T) {
+	var sess *stubSession
+	e := startWatch(t, func(e *watchEnv) {
+		e.sse.redirect = 1
+		sess = e.g.cfg.Session.(*stubSession)
+		e.p.store.Add(chatOp, sub("op"))
+	})
+	eventually(t, "a second stream", func() bool { return e.sse.count() >= 2 })
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if len(sess.invalidated) == 0 {
+		t.Fatal("the redirected session was not invalidated")
+	}
+}
+
+// TestStreamClientBoundsTheHeaders: with or without the jail dial, the
+// stream client bounds the wait for the response headers and follows no
+// redirect.
+func TestStreamClientBoundsTheHeaders(t *testing.T) {
+	g := &gate{}
+	p := &Push{g: g}
+	for name, dial := range map[string]func(context.Context, string, string) (net.Conn, error){
+		"direct": nil,
+		"jail":   (&net.Dialer{}).DialContext,
+	} {
+		g.cfg.DialContext = dial
+		c := p.streamClient()
+		tr, ok := c.Transport.(*http.Transport)
+		if !ok || tr.ResponseHeaderTimeout != responseHeaderTimeout || tr.Proxy != nil {
+			t.Errorf("%s: transport %+v", name, c.Transport)
+		}
+		if c.CheckRedirect == nil || c.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+			t.Errorf("%s: the client follows redirects", name)
+		}
 	}
 }
 

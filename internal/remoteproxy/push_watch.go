@@ -131,11 +131,19 @@ func streamFault(err error) string {
 	return "connect"
 }
 
+// streamClient bounds the wait for the headers only (the stream itself runs
+// on) and follows no redirect: a 302 to /login is the hub refusing the
+// session, which streamOnce must see.
 func (p *Push) streamClient() *http.Client {
+	var t *http.Transport
 	if p.g.cfg.DialContext != nil {
-		return &http.Client{Transport: jailTransport(p.g.cfg.DialContext)}
+		t = jailTransport(p.g.cfg.DialContext)
+	} else {
+		t = http.DefaultTransport.(*http.Transport).Clone()
+		t.Proxy = nil // as jailTransport: the session never goes off the host
+		t.ResponseHeaderTimeout = responseHeaderTimeout
 	}
-	return &http.Client{}
+	return &http.Client{Transport: t, CheckRedirect: noRedirect}
 }
 
 // streamOnce runs one connection until it ends.

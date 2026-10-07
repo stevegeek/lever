@@ -321,6 +321,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// runner, never into the tree the manager mounts (jail.StageWorkerTicket;
 	// the spec's TicketDir names the directory the worker container mounts).
 	d.Tickets = jailTicketStager{jr}
+	// A recycle deletes the record and the ticket the way `lever worker
+	// purge` does (PurgeWorker), with the same client and runner.
+	d.Purge = jailWorkerPurger{sc: sc, r: jr, project: jailMount}
 	// Expired agent hub tokens are read in each agent's container and reset
 	// with `scion reset-auth` under the controller PAT (broker tokenwatch.go).
 	d.HubTokens = hubTokenHealer{probe: jail.AgentProbe{R: jr}, sc: sc, project: jailMount}

@@ -47,6 +47,7 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathWorkerStop, worker(b.handleWorkerStop))
 	mux.Handle("POST "+wire.PathWorkerSuspend, worker(b.handleWorkerSuspend))
 	mux.Handle("POST "+wire.PathWorkerResume, worker(b.handleWorkerResume))
+	mux.Handle("POST "+wire.PathWorkerRecycle, worker(b.handleWorkerRecycle))
 	mux.Handle("POST "+wire.PathWorkerList, control(b.handleWorkerList))
 	mux.Handle("POST "+wire.PathMsgSend, control(b.handleMsgSend))
 	mux.Handle("POST "+wire.PathMsgList, control(b.handleMsgList))

@@ -226,6 +226,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, probeWritable)
 		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
+		func() checkResult { return checkRecyclableWorkers(app.Workers) },
 		func() checkResult {
 			return checkAgentNetwork(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), jail.ForceHostNetworkFromEnv(), listAgents, inspectNetMode)
 		},

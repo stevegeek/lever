@@ -14,6 +14,7 @@ const (
 	PathWorkerStop       = "/worker/stop"
 	PathWorkerSuspend    = "/worker/suspend"
 	PathWorkerResume     = "/worker/resume"
+	PathWorkerRecycle    = "/worker/recycle"
 	PathWorkerList       = "/worker/list"
 	PathMsgSend          = "/msg/send"
 	PathMsgList          = "/msg/list"

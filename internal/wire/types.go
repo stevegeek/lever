@@ -71,7 +71,8 @@ type ToolsResponse struct {
 
 // ---- workers and messaging (manager ⇄ broker) ----
 
-// WorkerStartRequest is the body of POST /worker/start.
+// WorkerStartRequest is the body of POST /worker/start and POST
+// /worker/recycle.
 type WorkerStartRequest struct {
 	Worker string `json:"worker"`
 	Task   string `json:"task"`
@@ -84,7 +85,7 @@ type WorkerRequest struct {
 }
 
 // WorkerResponse is the reply of the single-worker endpoints
-// (/worker/start|stop|suspend|resume).
+// (/worker/start|stop|suspend|resume|recycle).
 type WorkerResponse struct {
 	Worker string `json:"worker"`
 	Phase  string `json:"phase"`

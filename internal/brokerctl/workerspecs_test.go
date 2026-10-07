@@ -16,7 +16,7 @@ func TestWorkerSpecs(t *testing.T) {
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},
-			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md"},
+			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md", Recyclable: true},
 		},
 	}
 	specs := WorkerSpecs(app, "/lever", "501")
@@ -29,6 +29,9 @@ func TestWorkerSpecs(t *testing.T) {
 		w.TicketDir != "/run/user/501/lever/tickets/worker" ||
 		w.Image != "mgr:img" /* inherits manager */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
 		t.Fatalf("bad worker spec: %+v", w)
+	}
+	if w.Recyclable || !specs[1].Recyclable {
+		t.Fatalf("Recyclable = %v/%v, want workers[].recyclable (false/true)", w.Recyclable, specs[1].Recyclable)
 	}
 	if specs[1].Image != "helper:img" || specs[1].Model != "helper-model" || specs[1].APIKey {
 		t.Fatalf("bad helper spec: %+v", specs[1])

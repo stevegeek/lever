@@ -76,6 +76,9 @@ type WorkerSpec struct {
 	// late lets an edit reach the next fresh start without a broker restart.
 	InstructionsPath string
 	APIKey           bool // true ⇒ api-key LLM mode for this worker
+	// Recyclable is workers[].recyclable: the manager may discard this
+	// worker's record and start it fresh (handleWorkerRecycle).
+	Recyclable bool
 }
 
 // workerSpec looks up a declared worker by name (its cert CN, which is also
@@ -150,16 +153,7 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, re
 // allows. The holder reads the phase and acts on it with no other start,
 // resume or wake of that worker in between.
 func (b *Broker) lockWorker(ctx context.Context, name string) (func(), error) {
-	b.workerLocksMu.Lock()
-	if b.workerLocks == nil {
-		b.workerLocks = map[string]chan struct{}{}
-	}
-	sem := b.workerLocks[name]
-	if sem == nil {
-		sem = make(chan struct{}, 1)
-		b.workerLocks[name] = sem
-	}
-	b.workerLocksMu.Unlock()
+	sem := b.workerSem(name)
 	select {
 	case sem <- struct{}{}:
 		return func() { <-sem }, nil
@@ -174,6 +168,33 @@ func (b *Broker) lockWorker(ctx context.Context, name string) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// tryLockWorker takes name's lifecycle lock only when it is free now, and
+// reports false when another holder has it.
+func (b *Broker) tryLockWorker(name string) (func(), bool) {
+	sem := b.workerSem(name)
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	default:
+		return nil, false
+	}
+}
+
+// workerSem is name's lifecycle lock, created on first use.
+func (b *Broker) workerSem(name string) chan struct{} {
+	b.workerLocksMu.Lock()
+	defer b.workerLocksMu.Unlock()
+	if b.workerLocks == nil {
+		b.workerLocks = map[string]chan struct{}{}
+	}
+	sem := b.workerLocks[name]
+	if sem == nil {
+		sem = make(chan struct{}, 1)
+		b.workerLocks[name] = sem
+	}
+	return sem
 }
 
 // lockWorkerOrRefuse is lockWorker for a handler: a caller that gave up
@@ -559,7 +580,11 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 	// must NOT silently resume the old one. Refuse loudly and point at purge.
 	if strings.TrimSpace(task) != "" {
 		b.audit("worker", b.manager, "deny", "start "+spec.Name+": task given but worker exists (phase "+phase+")")
-		http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. Run `lever worker purge "+spec.Name+"` to start it fresh with a new task, or dispatch with no task to resume.", http.StatusConflict)
+		fresh := "Run `lever worker purge " + spec.Name + "` to start it fresh with a new task"
+		if spec.Recyclable {
+			fresh = "Run `lever-manager agent recycle " + spec.Name + " --task \"…\"` to start it fresh with a new task (its old conversation is discarded)"
+		}
+		http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. "+fresh+", or dispatch with no task to resume.", http.StatusConflict)
 		return
 	}
 	// Refuse a record whose stored role this scion would read as full, BEFORE

@@ -159,14 +159,17 @@ fails at apply with an explanatory error.
 Worker lifecycle is owned by the host-side capability broker, not the in-jail manager, and the
 broker itself is the only holder of the controller PAT ([§4.2](/security-model/worker-isolation/)) — the manager has no Scion hub
 credential of its own, in-jail or otherwise. The manager's `agent start/stop/suspend/resume`
-commands are thin mTLS clients of the broker's `/worker/*` endpoints. Each request is authenticated
+commands (and `agent recycle`) are thin mTLS clients of the broker's `/worker/*` endpoints. Each request is authenticated
 by the manager's certificate CN and authorized against the config: only a worker **declared in the
 config** can be dispatched, and the manager passes a worker **name**, never a filesystem path — the
 broker resolves the subdirectory, image, and LLM-auth mode from the config host-side, within the
 one instance project (there is no separate per-worker project to mount instead). A compromised
 manager therefore cannot start an agent against an arbitrary path, widen a worker's mount beyond
 its declared subdirectory, or inject a host path; the worst it can do is (re)dispatch a worker it
-was already permitted to dispatch. Because the broker (not the mount) is the source of worker
+was already permitted to dispatch, and, for a worker the operator marked `recyclable: true`,
+discard that worker's record and conversation (never its workspace; never while it runs; at most
+once a minute per worker). Without that key only the operator's `lever worker purge` deletes a
+worker record. Because the broker (not the mount) is the source of worker
 configuration, there is no in-jail config file for a compromised manager to tamper with.
 
 **Host daemons keep the config they started with.** The broker and the remote proxy read the

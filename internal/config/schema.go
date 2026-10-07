@@ -242,6 +242,11 @@ type Worker struct {
 	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
 	Obtain           []Grant         `yaml:"obtain"`
 	Delegate         []DelegateGrant `yaml:"delegate"`
+	// Recyclable lets the manager discard this worker's record and start it
+	// fresh with a new task (`lever-manager agent recycle`): the slot's old
+	// conversation is lost, its workspace is kept. Off by default; without
+	// it only the operator's `lever worker purge` discards a record.
+	Recyclable bool `yaml:"recyclable"`
 }
 
 type ScionConfig struct {

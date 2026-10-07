@@ -198,8 +198,43 @@ func TestToolHostPaths(t *testing.T) {
 	check("interpreter script", paths("ruby", "/t/x.rb", "/t/y"), []got{{"broker.tools[t] script", "/t/x.rb", hostProgram}})
 	// Leading flags are skipped to find the script (LOW-3).
 	check("interpreter flag first", paths("python3", "-u", "/t/x.py"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
-	check("flag with a value", paths("python3", "-W", "ignore", "/t/x.py", "/t/data"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
-	check("python -m", paths("python3", "-m", "pkg", "/t/x"), nil)
+	check("flag with a value", paths("python3", "-W", "ignore", "/t/x.py", "/t/data"), []got{
+		{"broker.tools[t] -W value", "ignore", hostProgram},
+		{"broker.tools[t] script", "/t/x.py", hostProgram},
+	})
+	check("python -m", paths("python3", "-m", "pkg", "/t/x"), []got{{"broker.tools[t] -m value", "pkg", hostProgram}})
+	// Value flags the first table missed (node, deno, bun).
+	check("node --env-file", paths("node", "--env-file", ".env", "--title", "t", "--inspect-port=9", "/t/x.js"), []got{
+		{"broker.tools[t] --env-file value", ".env", hostProgram},
+		{"broker.tools[t] --title value", "t", hostProgram},
+		{"broker.tools[t] --inspect-port value", "9", hostProgram},
+		{"broker.tools[t] script", "/t/x.js", hostProgram},
+	})
+	check("deno --config", paths("deno", "run", "--config", "/c.json", "--import-map", "/m.json", "/t/x.ts"), []got{
+		{"broker.tools[t] --config value", "/c.json", hostProgram},
+		{"broker.tools[t] --import-map value", "/m.json", hostProgram},
+		{"broker.tools[t] script", "/t/x.ts", hostProgram},
+	})
+	check("bun --preload", paths("bun", "--preload", "/t/pre.ts", "--cwd", "/w", "/t/x.ts"), []got{
+		{"broker.tools[t] --preload", "/t/pre.ts", hostProgram},
+		{"broker.tools[t] --cwd value", "/w", hostProgram},
+		{"broker.tools[t] script", "/t/x.ts", hostProgram},
+	})
+	// sh: option groups, +flags, -o values, -c in any "-" group, never glued.
+	check("bash -euo pipefail -c", paths("bash", "-euo", "pipefail", "-c", "/t/x"), []got{
+		{"broker.tools[t] -c code", "/t/x", hostProgram},
+		{"broker.tools[t] -o value", "pipefail", hostProgram},
+	})
+	check("bash +e -c", paths("bash", "+e", "-c", "/t/x"), []got{{"broker.tools[t] -c code", "/t/x", hostProgram}})
+	check("sh -ce", paths("sh", "-ce", "/t/x"), []got{{"broker.tools[t] -c code", "/t/x", hostProgram}})
+	check("sh -c then options", paths("sh", "-c", "-e", "/t/x"), []got{{"broker.tools[t] -c code", "/t/x", hostProgram}})
+	check("bash -o script", paths("bash", "-o", "errexit", "/t/s.sh"), []got{
+		{"broker.tools[t] -o value", "errexit", hostProgram},
+		{"broker.tools[t] script", "/t/s.sh", hostProgram},
+	})
+	// env -C: a relative path resolves against env's directory.
+	check("env -C", paths("env", "-C", "/w", "python3", "x.py"), []got{{"broker.tools[t] script", "/w/x.py", hostProgram}})
+	check("env --chdir= relative", paths("env", "--chdir=ws", "ruby", "x.rb"), []got{{"broker.tools[t] script", "ws/x.rb", hostProgram}})
 	check("versioned", paths("python3.12", "/t/x.py"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
 	check("versioned ruby", paths("/usr/bin/ruby3.3", "-Ilib/x", "-r", "/t/r.rb", "/t/x.rb"), []got{
 		{"broker.tools[t] command", "/usr/bin/ruby3.3", hostProgram},
@@ -251,6 +286,11 @@ func TestHostPathInterpreterVariantsRefused(t *testing.T) {
 		"[sh, -c, \"ws/tools/bin --flag\"]",
 		"[python3.12, ws/tools/bin]",
 		"[/usr/bin/env, python3, ws/tools/bin]",
+		"[bash, -euo, pipefail, -c, \"ROOT/ws/tools/bin\"]",
+		"[bash, +e, -c, \"ROOT/ws/tools/bin\"]",
+		"[sh, -ce, \"ROOT/ws/tools/bin\"]",
+		"[env, -C, ws, python3, tools/bin]",
+		"[node, --env-file, x.env, ws/tools/bin]",
 	} {
 		p, root := hostPathsInstance(t, "")
 		body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + supervisedTool(strings.ReplaceAll(cmd, "ROOT", root))

@@ -113,16 +113,18 @@ func toolHostPaths(t Tool) []hostPath {
 	if strings.ContainsRune(t.Command[0], '/') {
 		add("command", t.Command[0], hostProgram)
 	}
-	argv := t.Command
-	if real := unwrapEnv(argv); len(real) > 0 && len(real) < len(argv) {
-		argv = real
+	// After an env prefix, a relative path resolves against env's -C
+	// directory (joinRaw keeps a ".." in it for the refusal).
+	argv, chdir := t.Command, ""
+	if real, dir := unwrapEnv(argv); len(real) > 0 && len(real) < len(argv) {
+		argv, chdir = real, dir
 		if strings.ContainsRune(argv[0], '/') {
-			add("command (after env)", argv[0], hostProgram)
+			add("command (after env)", joinRaw(chdir, argv[0]), hostProgram)
 		}
 	}
 	if fam := interpreterFamily(baseName(argv[0])); fam != "" {
 		for _, p := range interpreterPaths(fam, argv) {
-			add(p.what, p.path, hostProgram)
+			add(p.what, joinRaw(chdir, p.path), hostProgram)
 		}
 	}
 	args := t.Command[1:]

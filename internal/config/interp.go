@@ -27,16 +27,21 @@ const (
 // interpreterFlags are, per interpreter family, the flags whose value is
 // not a flag group of its own. Flags not listed take no value.
 var interpreterFlags = map[string]map[string]flagRole{
-	"python": {"-W": takesValue, "-X": takesValue, "-c": inlineCode, "-m": noScript},
+	"python": {"-W": takesValue, "-X": takesValue, "-Q": takesValue, "-c": inlineCode, "-m": noScript},
 	"ruby": {"-I": codePath, "-r": codePath, "-e": inlineCode, "-C": takesValue, "-E": takesValue,
 		"-F": takesValue, "--encoding": takesValue},
 	"node": {"-r": codePath, "--require": codePath, "--import": codePath, "--loader": codePath,
-		"--experimental-loader": codePath, "-e": inlineCode, "--eval": inlineCode, "-p": inlineCode, "--print": inlineCode},
+		"--experimental-loader": codePath, "-e": inlineCode, "--eval": inlineCode, "-p": inlineCode, "--print": inlineCode,
+		"--env-file": takesValue, "--inspect-port": takesValue, "--title": takesValue},
 	"perl": {"-I": codePath, "-M": takesValue, "-m": takesValue, "-e": inlineCode, "-E": inlineCode},
-	"sh":   {"-c": inlineCode, "-o": takesValue, "-O": takesValue},
-	"deno": {},
-	"bun":  {},
+	"deno": {"--config": takesValue, "-c": takesValue, "--import-map": takesValue, "--cert": takesValue,
+		"--lock": takesValue, "--env-file": takesValue},
+	"bun": {"--preload": codePath, "-r": codePath, "--cwd": takesValue, "--config": takesValue, "-c": takesValue,
+		"--env-file": takesValue},
 }
+
+// shLongValueFlags are the long options of the sh family that take a value.
+var shLongValueFlags = map[string]bool{"--rcfile": true, "--init-file": true}
 
 // interpreterRE matches an interpreter command name, a version suffix
 // allowed (python3.12, ruby3.3, perl5.36): group 1 is the family.
@@ -58,9 +63,11 @@ func interpreterFamily(name string) string {
 }
 
 // unwrapEnv skips an env(1) prefix — its flags and NAME=value assignments —
-// and returns the argv env runs. -S's value is split into words, as env
-// does. Anything else is returned unchanged.
-func unwrapEnv(argv []string) []string {
+// and returns the argv env runs, and the directory env -C/--chdir makes it
+// run in ("" = unchanged). -S's value is split into words, as env does.
+// Anything else is returned unchanged.
+func unwrapEnv(argv []string) ([]string, string) {
+	chdir := ""
 	for len(argv) > 0 && baseName(argv[0]) == "env" {
 		rest := argv[1:]
 		for len(rest) > 0 {
@@ -68,12 +75,23 @@ func unwrapEnv(argv []string) []string {
 			switch {
 			case a == "--":
 				rest = rest[1:]
-			case a == "-u" || a == "--unset" || a == "-C" || a == "--chdir":
+			case a == "-u" || a == "--unset":
 				rest = rest[min(2, len(rest)):]
+				continue
+			case a == "-C" || a == "--chdir":
+				if len(rest) < 2 {
+					return nil, ""
+				}
+				chdir = joinRaw(chdir, rest[1])
+				rest = rest[2:]
+				continue
+			case strings.HasPrefix(a, "--chdir="):
+				chdir = joinRaw(chdir, strings.TrimPrefix(a, "--chdir="))
+				rest = rest[1:]
 				continue
 			case a == "-S" || a == "--split-string":
 				if len(rest) < 2 {
-					return nil
+					return nil, ""
 				}
 				rest = append(strings.Fields(rest[1]), rest[2:]...)
 				continue
@@ -91,7 +109,16 @@ func unwrapEnv(argv []string) []string {
 		}
 		argv = rest
 	}
-	return argv
+	return argv, chdir
+}
+
+// joinRaw is base/p without cleaning (so a ".." stays for the caller's
+// refusal), p itself when it is absolute or base is empty.
+func joinRaw(base, p string) string {
+	if base == "" || strings.HasPrefix(p, "/") || p == "" {
+		return p
+	}
+	return strings.TrimSuffix(base, "/") + "/" + p
 }
 
 // baseName is the last element of a slash-separated command name.
@@ -102,16 +129,30 @@ type interpPath struct {
 	what, path string
 }
 
-// interpreterPaths lists the code an interpreter command line runs:
-// argv[0] is the interpreter, family its interpreterFlags key. Leading
-// flags are read (a combined short group such as -ec counts for sh's -c);
-// a code-path flag's value is code; an inline-code flag's value is scanned
-// for paths (codePaths) and ends the walk; otherwise the first non-flag
-// argument is the script (after deno's or bun's "run"). What follows the
-// script is the script's own business and is not read.
+// interpreterPaths lists the code an interpreter command line runs, argv[0]
+// being the interpreter and family its interpreterFlags key (or "sh",
+// shPaths). Leading flags are read: a code-path flag's value is code; an
+// inline-code flag's value is scanned for paths (codePaths) and ends the
+// walk; otherwise the first non-flag argument is the script (after deno's
+// or bun's "run"). A value-taking flag's value is checked too, so a value
+// read as the script cannot hide the real one. A flag missing from the
+// table that takes a value makes that value read as the script and hides
+// the real one: the table is the limit of this best-effort reading. What
+// follows the script is the script's own business and is not read.
 func interpreterPaths(family string, argv []string) []interpPath {
+	if family == "sh" {
+		return shPaths(argv)
+	}
 	flags := interpreterFlags[family]
 	var out []interpPath
+	add := func(what, p string) {
+		for _, x := range out {
+			if x.path == p {
+				return
+			}
+		}
+		out = append(out, interpPath{what, p})
+	}
 	args := argv[1:]
 	if (family == "deno" || family == "bun") && len(args) > 0 && args[0] == "run" {
 		args = args[1:]
@@ -120,12 +161,13 @@ func interpreterPaths(family string, argv []string) []interpPath {
 		a := args[i]
 		if a == "--" {
 			if i+1 < len(args) {
-				out = append(out, interpPath{"script", args[i+1]})
+				add("script", args[i+1])
 			}
 			return out
 		}
 		if !strings.HasPrefix(a, "-") || a == "-" {
-			return append(out, interpPath{"script", a})
+			add("script", a)
+			return out
 		}
 		name, val, glued := a, "", false
 		if strings.HasPrefix(a, "--") {
@@ -133,8 +175,6 @@ func interpreterPaths(family string, argv []string) []interpPath {
 		} else if len(a) > 2 {
 			if _, ok := flags[a[:2]]; ok {
 				name, val, glued = a[:2], a[2:], true
-			} else if family == "sh" && strings.ContainsRune(a[1:], 'c') {
-				name = "-c" // a combined group: -ec, -xc
 			}
 		}
 		role, ok := flags[name]
@@ -150,13 +190,93 @@ func interpreterPaths(family string, argv []string) []interpPath {
 		}
 		switch role {
 		case codePath:
-			out = append(out, interpPath{name, val})
+			add(name, val)
+		case takesValue, noScript:
+			add(name+" value", val)
+			if role == noScript {
+				return out
+			}
 		case inlineCode:
 			for _, p := range codePaths(val) {
-				out = append(out, interpPath{name + " code", p})
+				add(name+" code", p)
 			}
 			return out
-		case noScript:
+		}
+	}
+	return out
+}
+
+// shPaths reads a sh-family command line as the shell does: options are
+// short groups after "-" or "+" (-euo, +e, -ec), long options, and
+// "-o name"/"+o name" (an 'o' or 'O' in a group takes the next word); a
+// 'c' anywhere in a "-" group makes the first operand the command string
+// (never a glued value: -ce is -c -e). The first operand is otherwise the
+// script. As a fallback, every word after a "-c" or a "-" group with a
+// 'c' anywhere in argv is scanned as inline code, and every option value
+// is checked as a path.
+func shPaths(argv []string) []interpPath {
+	var out []interpPath
+	add := func(what, p string) {
+		for _, x := range out {
+			if x.path == p {
+				return
+			}
+		}
+		out = append(out, interpPath{what, p})
+	}
+	code := func(line string) {
+		for _, p := range codePaths(line) {
+			add("-c code", p)
+		}
+	}
+	args := argv[1:]
+	isGroupWithC := func(a string) bool {
+		return len(a) > 1 && a[0] == '-' && !strings.HasPrefix(a, "--") && strings.ContainsRune(a[1:], 'c')
+	}
+	for i, a := range args {
+		if isGroupWithC(a) && i+1 < len(args) {
+			code(args[i+1])
+		}
+	}
+	inline := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			if i+1 < len(args) {
+				if inline {
+					code(args[i+1])
+				} else {
+					add("script", args[i+1])
+				}
+			}
+			return out
+		case strings.HasPrefix(a, "--"):
+			name, _, glued := strings.Cut(a, "=")
+			if shLongValueFlags[name] && !glued && i+1 < len(args) {
+				i++
+				add(name+" value", args[i])
+			}
+		case len(a) > 1 && (a[0] == '-' || a[0] == '+'):
+			for _, r := range a[1:] {
+				switch r {
+				case 'c':
+					if a[0] == '-' {
+						inline = true
+					}
+				case 'o', 'O':
+					if i+1 < len(args) {
+						i++
+						add("-"+string(r)+" value", args[i])
+					}
+				}
+			}
+		default:
+			if inline {
+				code(a)
+			} else {
+				add("script", a)
+			}
 			return out
 		}
 	}

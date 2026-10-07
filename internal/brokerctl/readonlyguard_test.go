@@ -24,6 +24,10 @@ func TestCheckManagerReadOnly(t *testing.T) {
 	}
 	full := []jail.Mount{mount("assistant", true), mount("assistant/tools", false)}
 	held := func(context.Context, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil }
+	tree := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tree, "assistant", "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	leak := "Error: <container output \x1b[31m>"
 	cases := []struct {
 		name   string
@@ -56,7 +60,7 @@ func TestCheckManagerReadOnly(t *testing.T) {
 				plan = p
 				return tc.live(ctx, p)
 			}
-			err := checkManagerReadOnly(context.Background(), "m", jp, want,
+			err := checkManagerReadOnly(context.Background(), "m", tree, jp, want,
 				func(context.Context) ([]jail.Mount, error) { return tc.mounts, tc.err }, live)
 			switch {
 			case tc.want == "" && err != nil:
@@ -80,6 +84,34 @@ func TestCheckManagerReadOnly(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A planned directory missing on the host is named as missing, before
+// any guest read.
+func TestCheckManagerReadOnlyMissingSource(t *testing.T) {
+	const jp = "/lever"
+	want := []config.TreeMount{{Rel: "assistant"}, {Rel: "assistant/tools", ReadOnly: true}}
+	tree := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tree, "assistant"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mounts := []jail.Mount{
+		{Source: "/lever/assistant", Destination: "/workspace/assistant", RW: true},
+		{Source: "/lever/assistant/tools", Destination: "/workspace/assistant/tools"},
+	}
+	read := false
+	err := checkManagerReadOnly(context.Background(), "m", tree, jp, want,
+		func(context.Context) ([]jail.Mount, error) { return mounts, nil },
+		func(context.Context, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			read = true
+			return nil, errors.New("stat failed")
+		})
+	if err == nil || !strings.Contains(err.Error(), `"assistant/tools" is missing on the host`) {
+		t.Fatalf("want the missing directory named, got %v", err)
+	}
+	if read {
+		t.Fatal("the live read must not run for a missing directory")
 	}
 }
 

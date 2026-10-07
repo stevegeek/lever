@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/apply"
@@ -45,7 +47,7 @@ func readOnlyGuard(app *config.App, jr proc.Runner, jailMount string) ReadOnlyGu
 	ref := jail.ContainerName(path.Base(jailMount), app.Name)
 	want := app.ManagerTreeMounts()
 	return func(ctx context.Context, _ []string) error {
-		return checkManagerReadOnly(ctx, app.Name, jailMount, want,
+		return checkManagerReadOnly(ctx, app.Name, app.Tree, jailMount, want,
 			func(ctx context.Context) ([]jail.Mount, error) { return jail.ContainerMounts(ctx, jr, ref) },
 			func(ctx context.Context, live []jail.LiveMount) ([]jail.LiveMountProblem, error) {
 				return jail.ContainerLiveMounts(ctx, jr, ref, live)
@@ -54,8 +56,9 @@ func readOnlyGuard(app *config.App, jr proc.Runner, jailMount string) ReadOnlyGu
 }
 
 // checkManagerReadOnly is readOnlyGuard's decision, with the two reads
-// injected for tests.
-func checkManagerReadOnly(ctx context.Context, name, jailMount string, want []config.TreeMount,
+// injected for tests. tree is the host tree: a planned directory missing
+// there is named as such, not as an unreadable mount.
+func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, want []config.TreeMount,
 	mounts func(context.Context) ([]jail.Mount, error),
 	live func(context.Context, []jail.LiveMount) ([]jail.LiveMountProblem, error)) error {
 	got, err := mounts(ctx)
@@ -67,6 +70,11 @@ func checkManagerReadOnly(ctx context.Context, name, jailMount string, want []co
 	}
 	if gaps := apply.ManagerTreeMountGaps(jailMount, want, got); !gaps.Empty() {
 		return &guardError{"gaps:" + gaps.String(), fmt.Sprintf("manager %q does not hold that protection: %s", name, gaps)}
+	}
+	for _, w := range want {
+		if fi, err := os.Stat(filepath.Join(tree, filepath.FromSlash(w.Rel))); err != nil || !fi.IsDir() {
+			return &guardError{"missing:" + w.Rel, fmt.Sprintf("the protected directory %q is missing on the host (manager.read_only needs it in place; recreate it, or back up and recreate the manager)", w.Rel)}
+		}
 	}
 	plan := make([]jail.LiveMount, 0, len(want))
 	for _, w := range want {

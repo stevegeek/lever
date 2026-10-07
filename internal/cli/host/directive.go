@@ -178,6 +178,21 @@ func newDirectiveSendCmd() *cobra.Command {
 				return fmt.Errorf("directive send: invalid action: %w", err)
 			}
 
+			now := time.Now()
+			notBefore := now
+			if notBeforeFlag != "" {
+				nb, err := time.Parse(time.RFC3339, notBeforeFlag)
+				if err != nil {
+					return fmt.Errorf("directive send: --not-before: %w", err)
+				}
+				// The broker refuses a not_before beyond its clock leeway,
+				// so a longer delay can never succeed: refuse it here.
+				if nb.Sub(now) > opsig.ClockLeeway {
+					return fmt.Errorf("directive send: --not-before %s is more than %s ahead; the broker refuses a later start", notBeforeFlag, opsig.ClockLeeway)
+				}
+				notBefore = nb
+			}
+
 			app, st, err := loadAppAndState(args[1:])
 			if err != nil {
 				return err
@@ -203,16 +218,6 @@ func newDirectiveSendCmd() *cobra.Command {
 			if err := udsGet(cmd.Context(), st.DirectiveSock(),
 				wire.PathDirectiveResolve+"?agent="+url.QueryEscape(agent), &resolved); err != nil {
 				return err
-			}
-
-			now := time.Now()
-			notBefore := now
-			if notBeforeFlag != "" {
-				nb, err := time.Parse(time.RFC3339, notBeforeFlag)
-				if err != nil {
-					return fmt.Errorf("directive send: --not-before: %w", err)
-				}
-				notBefore = nb
 			}
 
 			id, err := newDirectiveID()
@@ -248,7 +253,7 @@ func newDirectiveSendCmd() *cobra.Command {
 	c.Flags().StringVar(&actionJSON, "action", "", "raw JSON action object (mutually exclusive with --instruction)")
 	c.Flags().StringVar(&key, "key", "", "operator signing key path (default: operator.signing_key from config)")
 	c.Flags().StringVar(&expiresFlag, "expires", "", "directive lifetime, e.g. 10m (default: operator.directive_expiry from config)")
-	c.Flags().StringVar(&notBeforeFlag, "not-before", "", "RFC3339 time before which the directive is not valid (default: now)")
+	c.Flags().StringVar(&notBeforeFlag, "not-before", "", "RFC3339 time before which the directive is not valid, at most "+opsig.ClockLeeway.String()+" ahead (default: now)")
 	return c
 }
 

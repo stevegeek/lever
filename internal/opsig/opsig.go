@@ -25,9 +25,10 @@ const (
 	// maxStatementBytes bounds submitted statements (defence vs log/memory bloat).
 	maxStatementBytes = 64 << 10
 	maxInstructionLen = 4 << 10
-	// clockLeeway absorbs operator-host vs broker-host skew on the
-	// not_before bound only. Expiry stays strict (fail closed).
-	clockLeeway = 2 * time.Minute
+	// ClockLeeway absorbs operator-host vs broker-host skew on the
+	// not_before bound only. Expiry stays strict (fail closed). It is also
+	// the furthest ahead a not_before may be: the CLI refuses more locally.
+	ClockLeeway = 2 * time.Minute
 	// maxJSONDepth bounds walkDupes' recursion. In practice maxStatementBytes
 	// (64KiB) already limits how deep a document can nest, but an explicit
 	// cap is cheap defence-in-depth against a huge-fanout-free, pure-nesting
@@ -190,7 +191,7 @@ func ParseStatement(raw []byte, instance string, now time.Time) (Statement, erro
 	if _, err := parseTime("issued_at", st.IssuedAt); err != nil {
 		return Statement{}, err
 	}
-	if now.Add(clockLeeway).Before(nbf) {
+	if now.Add(ClockLeeway).Before(nbf) {
 		return Statement{}, fmt.Errorf("%w: not yet valid", ErrInvalid)
 	}
 	if !now.Before(exp) {

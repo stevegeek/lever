@@ -247,7 +247,8 @@ func TestDirectiveSendNotBeforeFlag(t *testing.T) {
 		"/directive/send":    {body: `{"id":"x","delivered":true}`},
 	})
 
-	nb := time.Now().Add(30 * time.Minute).Truncate(time.Second).Format(time.RFC3339)
+	// One minute ahead is inside the broker's opsig.ClockLeeway (2m).
+	nb := time.Now().Add(time.Minute).Truncate(time.Second).Format(time.RFC3339)
 	out, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--not-before", nb)
 	if err != nil {
 		t.Fatalf("directive send --not-before: %v\noutput: %s", err, out)
@@ -265,6 +266,23 @@ func TestDirectiveSendNotBeforeFlag(t *testing.T) {
 	_ = json.Unmarshal(raw, &st)
 	if st.NotBefore != nb {
 		t.Errorf("not_before = %q, want %q", st.NotBefore, nb)
+	}
+}
+
+func TestDirectiveSendNotBeforeBeyondLeewayRefusedLocally(t *testing.T) {
+	dir := directiveTestDir(t)
+	priv, _ := genDirectiveKey(t, dir, "testinst")
+	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
+	t.Chdir(dir)
+
+	// No server started: the refusal must come before any broker call.
+	nb := time.Now().Add(3 * time.Minute).Format(time.RFC3339)
+	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--not-before", nb)
+	if err == nil {
+		t.Fatal("a --not-before 3 minutes ahead must be refused")
+	}
+	if !strings.Contains(err.Error(), opsig.ClockLeeway.String()) {
+		t.Errorf("error should name the %s limit: %v", opsig.ClockLeeway, err)
 	}
 }
 

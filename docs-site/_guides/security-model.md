@@ -18,8 +18,8 @@ Validation coverage is on [validation](/security-model/validation/).
 | Section | Page |
 |---|---|
 | §2 The jail (filesystem, network egress, rootless podman, substrates) | [The jail](/security-model/jail/) |
-| §4 Cross-worker isolation (defense by absence, hub authority) | [Worker isolation](/security-model/worker-isolation/) |
-| §5 The operator boundary (config out of the mount, validation, dispatch) | [Config trust](/security-model/config-trust/) |
+| §4 Cross-worker isolation (defense by absence, hub authority, per-agent netns, role ceiling) | [Worker isolation](/security-model/worker-isolation/) |
+| §5 The operator boundary (config out of the mount, `manager.read_only`, validation, dispatch) | [Config trust](/security-model/config-trust/) |
 | §6 Credential blast radius and the capability broker | [Credentials & capabilities](/security-model/credentials/) |
 | §7–§8 What a compromised agent can and cannot do; non-claims | [Compromise scenarios](/security-model/compromise/) |
 | §9 Validation evidence and coverage | [Validation](/security-model/validation/) |

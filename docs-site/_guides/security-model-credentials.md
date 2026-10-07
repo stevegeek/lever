@@ -45,7 +45,7 @@ So in a *mixed* instance (any subscription agent ⇒ `credential_file` set ⇒ t
 key isolation would silently not hold.
 
 Rather than ship that footgun, **an instance must be uniformly api-key OR uniformly subscription**:
-`App.Validate` (`internal/config/config.go:validateBroker`) rejects any config whose *effective*
+`App.Validate` (`internal/config/validate.go:validateBroker`) rejects any config whose *effective*
 agent modes mix the two (`mixedLLMAuth`), so a mixed instance never reaches apply. The two pure cases
 are both clean: **all-api-key** (the default) = no agent holds a real key, capabilities gated by
 signed tokens, and `egress: closed` is available to seal the network jail-wide; **all-subscription**
@@ -83,12 +83,16 @@ The capability model itself — identities, minting, delegation, revocation — 
 - **Forged identity headers are scrubbed.** The broker deletes every inbound `X-Lever-*` header before
   processing a tool call (`internal/broker/gateway.go`), then sets `X-Lever-Caller` itself from the
   verified CN, a jail agent cannot forge broker-internal context.
-- **The admin surface is loopback-only.** `/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`
-  are unauthenticated and protected solely by binding to loopback. `brokerctl.bindListeners` binds it
+- **The admin surface is loopback-only.** `/register`, `/revoke`, `/bump-epoch`, `/bootstrap`, `/epoch`,
+  `/worker-ticket` are unauthenticated and protected solely by binding to loopback. `brokerctl.bindListeners` binds it
   at `127.0.0.1`, and `Broker.ServeListeners` then **refuses to serve** unless the listener it was
   handed reports a loopback address — the one enforcement point, fail-closed, so any future caller
   that binds the admin listener elsewhere is rejected rather than trusted. The jail reaches the
-  broker only via the *separate* mTLS jail listener, never the admin port.
+  broker only via the *separate* mTLS jail listener, never the admin port. The routes that write
+  host records for the operator (`lever msg send`'s operator note, the chat page's wake, the
+  remote proxy's agent-message match) are not on the admin port at all: they sit on a 0600 unix
+  socket (`.lever-state/operator.sock`), and `ServeListeners` refuses any other listener type
+  for it.
 - **`/bootstrap` is single-use.** The first manager-enrolment ticket latches the broker; every later
   `/bootstrap` returns 403 (`internal/broker/bootstrap.go`). `apply` tolerates that 403 so re-apply is
   idempotent, but the latch bounds manager-identity minting to one per broker process.
@@ -129,6 +133,15 @@ boundaries:
   process can still hit the server's `127.0.0.1` port directly — host processes are already
   inside the host trust boundary; the broker does not claim to sandbox them from each other.
 
+**Host-side tool credentials (`github`, `fizzy`).** The two first-party host tools hold their
+credential on the host and never project it. `lever-tool-github` reads a GitHub App private key
+(regular file, mode exactly 0600, owned by the broker user) and mints 1 h installation tokens; it
+refuses to start when the key or its `-state` directory is inside `-tree`. `lever-tool-fizzy`
+reads a Fizzy personal access token from a 0600 file owned by the broker user and passes it to the
+fizzy CLI only in its environment. Both are first-party broker tools: the agent holds only a
+capability token, which the broker verifies and forwards and the tool verifies again. See the [github tool](/github-tool/) and
+[fizzy tool](/fizzy-tool/) guides.
+
 **In-jail hub reachability (residual).** The capability broker above is the audited seam for
 agent lifecycle, but the in-jail scion Hub API itself remains reachable from inside an agent
 container, using that agent's own scion token (distinct from [§4.2](/security-model/worker-isolation/)'s
@@ -152,7 +165,7 @@ also defaults to full and narrows only when the project's maximum agent role (th
 `scion.io/max-agent-role` annotation) is set; the user ceiling is a pass-through. lever sets it:
 the register-project step of `lever apply` writes the project's maximum and default agent role to
 the role it stamps, through the hub's project-settings route under the host-side controller PAT,
-and reads it back (`internal/hubapi/ceiling.go`; [§4.3](/security-model/worker-isolation/)). The hub
+and reads it back (`internal/hubapi/ceiling.go`; [§4.4](/security-model/worker-isolation/)). The hub
 then refuses a create that asks for a higher role, whoever sends it; a failed write fails the apply,
 and `lever doctor`'s `agent role ceiling` row fails on an unset or different value. The ceiling
 bounds creates only: it does not narrow a record that already exists (next paragraph). lever still
@@ -174,6 +187,16 @@ into the stored records in `~/.scion/hub.db` with the hub stopped (this only nar
 `lever doctor` reports unrolled records (`agent authorization roles` check,
 `internal/cli/host/doctor_checks.go`). A resume of a declared worker with no hub record falls through
 to creation, which stamps the role, under the project ceiling above.
+
+**Expired agent tokens are healed, not widened.** scion's agent hub token lives 10 h, and
+sciontool refreshes it 2 h before expiry with a timer that stands still while the host sleeps; an
+expired token cannot refresh itself. `lever apply` and the broker's hub-token watch (every 5 min,
+governed by `broker.auto_reenrol`, audit `op=hub-token`) run `scion reset-auth` for an agent whose
+token expired. The call runs host-side under the controller PAT; the hub mints the new token from
+the agent's **stored** role, and the container receives only that agent token, never a user or
+controller token (`internal/broker/tokenwatch.go`, `scion.Client.ResetAuth`). `lever doctor`'s
+`agent hub tokens` row reports an expired or overdue token. See
+[agent session heals](/operations/#agent-session-heals).
 
 **Egress mode gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically
 so the in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable

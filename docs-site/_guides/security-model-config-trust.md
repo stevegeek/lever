@@ -127,9 +127,10 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `manager.prompt_file` | confined relative path under the root (no `..`, not absolute), and rejected if it resolves inside the mounted `tree`. |
 | `manager.instructions_file`, `workers[].instructions_file` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`. The contents become the agent's standing user-level `~/.claude/CLAUDE.md`; scion re-projects its staged copy on every container start, so an agent that rewrites the managed block gets the host's text back. |
 | `manager.image_tar`, `workers[].image_tar` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`: the archive is the code the agent runs, so an agent must not be able to author the next bring-up's image. Needs a tag-bearing `image` (a digest pin cannot be matched against a tar's tags), the archive must carry that tag (a mismatch is a named error before a byte is streamed), and one image ref may come from only one archive. |
-| `manager.read_only` | each entry a clean ASCII relative path inside `tree` (no `..`, `./`, trailing slash, `.`, `$`, `~`, `:`, `,`); no duplicates or nested entries (case-folded); no worker `dir` equal to, containing or inside an entry; at bring-up, every entry a real directory reached through no symlink, with no symlink inside it pointing out or failing to resolve and no hard-linked file, and every worker dir reached through no symlink (§5.1.1 above). |
+| `manager.read_only` | each entry a clean ASCII relative path inside `tree` (no `..`, `./`, trailing slash, `.`, `$`, `~`, `:`, `,`); no duplicates or nested entries (case-folded); no worker `dir` equal to, containing or inside an entry; at bring-up, every entry a real directory reached through no symlink, with no symlink inside it pointing out or failing to resolve and no hard-linked file, and every worker dir reached through no symlink (§5.1.1 above). While `read_only` is set, every worker `dir` is held to the same character and ASCII rules, because it becomes a pin. |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
-| `credential_file` | read with a **permission check** (rejected unless mode is 0600: any group or world bit fails) and a **size cap**, defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
+| `credential_file` | read with a **permission check** (rejected when any group or world bit is set) and a **size cap** (64 KiB), defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
+| `broker.api_key_file` | must exist at mode exactly 0600, checked at config load for an instance with any api-key agent. |
 | worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |
 | `scion.binary`, `scion.source` | must not resolve inside `tree` (an agent could otherwise supply the engine on the next bring-up); `binary`, `source`, `version` are mutually exclusive (checked in `config.Load`). |
 | `scion.binary` | regular file, Linux ELF, architecture matches the guest's; checked host-side at bring-up (`scionbin.VerifyELFArch`) before the file is copied into the jail. |
@@ -145,8 +146,8 @@ mistake, not a substituted file. Choosing `binary:` makes its provenance yours t
 
 **Execution plumbing:** argv-clean, no shell injection in the hot paths; the `bash -c` scripts in
 internal/backend/guest (scion install, scion settings write, web-assets staging) single-quote every
-dynamic value via `shellSingleQuote`; the remaining two (agent template, login-forwarder disable)
-interpolate only compile-time constants; `jailPath` never fabricates an in-jail path for an
+dynamic value via `shellSingleQuote`; the others interpolate only compile-time constants, plus
+the run user name the guest itself reports (`whoami`) in the subuid/linger step; `jailPath` never fabricates an in-jail path for an
 out-of-tree target; the credential value is scrubbed from error output at its one call site (by
 literal match, so a value that parses as a flag is masked too). The value travels as plaintext argv;
 the scion CLI stores it verbatim (`encoding=raw`). A `scion.version` pin that does not support this
@@ -167,7 +168,21 @@ its declared subdirectory, or inject a host path; the worst it can do is (re)dis
 was already permitted to dispatch. Because the broker (not the mount) is the source of worker
 configuration, there is no in-jail config file for a compromised manager to tamper with.
 
+**Host daemons keep the config they started with.** The broker and the remote proxy read the
+config once, at start. `lever apply` compares a host-side stamp of the lever version and config each one runs
+(the hash the broker reports on its loopback `/epoch` route, the proxy's stamp file under `.lever-state/`, which the running proxy
+itself writes) with the current config, and restarts the daemon on a difference. Until that
+apply runs, a config edit has no effect on them; `lever doctor` names a stale one where a row
+covers the key (for example `agent messages`).
+
 ### 5.5 Residual
+
+**Not every host-side path is refused inside the tree.** Load refuses `scion.binary`,
+`scion.source` and the boot files (§5.3) inside the mounted tree, and `lever-tool-github` refuses
+its app key and state directory there. Lever does not check `credential_file`,
+`broker.api_key_file`, a `broker.tools` `command`, or a path in a tool's `args` (for example the
+fizzy tool's `-token-file`). Keep them outside the tree: an agent can read and write anything
+inside it.
 
 Image **registry allowlist** and **digest pinning** are opt-in `security:` policy
 (§5.3), enable them to bound *which* registry an image comes from and to require vetted, immutable

@@ -13,8 +13,12 @@ Validated (by hand or by an automated gate):
 - Containment primitives (§9 below).
 - Capability broker, mTLS enrolment, CN-bound capability minting, the six-check `lever acceptance`
   gate.
-- Api-key `/llm` strip-and-inject path end-to-end (`make test-apikey-e2e`): the broker verifies the
-  capability token, strips it, and injects the real Console key host-side.
+- Api-key `/llm` strip-and-inject path end-to-end (`make test-apikey-e2e`, OrbStack): the manager's
+  claude turn, under rootless podman, routes through the broker, which verifies the capability
+  token, strips it, and injects the real (fake-upstream) Console key host-side. The same script
+  checks that the real key is in no file under the container home, that the container's
+  `ANTHROPIC_API_KEY` is the placeholder, and, under `egress: closed`, that the jail reaches the
+  broker's jail port but not its admin port or the public internet.
 - Container boot enrols the agent and registers the broker tools over mTLS.
 - Single-project model ([§4](/security-model/worker-isolation/)): one Scion project per instance,
   hub with dev-auth off, lifecycle driven only by a host-only controller PAT, worker isolation via
@@ -32,8 +36,8 @@ Not validated:
 - A live acceptance check for the §4 isolation guarantee against a real `scion start` (sibling
   subdirectories, a stray ancestor `.git`, the controller PAT's exact scopes). The mechanism is
   implemented; `lever acceptance` does not exercise it.
-- The project-tree mount's allow side (exactly the chosen tree is present and nothing else), the
-  manager Claude agent under rootless podman, and the manager's MCP reachability.
+- The project-tree mount's allow side (exactly the chosen tree is present and nothing else), and
+  the manager's MCP reachability.
 
 ## 9. Validation evidence
 

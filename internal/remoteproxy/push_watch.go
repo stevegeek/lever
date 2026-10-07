@@ -2,7 +2,6 @@ package remoteproxy
 
 import (
 	"bufio"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -210,9 +209,11 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	}
 }
 
-// dmEventKey reads one event: a DM update for this login, and the
-// conversation it names (a message's threadId, an edit's or delete's
-// conversationKey; "" = check every DM). Nothing else in the event is read.
+// dmEventKey reads one event: a DM update for this login, and the DM key
+// it names ("" = check every DM). Nothing else in the event is read. The
+// hub publishes only message events on user.<id>.chat.dm (a
+// UserMessageEvent; edits and deletes go to chat.message.edited and
+// .deleted), and a message names its DM in threadId.
 func dmEventKey(lines []string, subject string) (string, bool) {
 	var event, data string
 	for _, l := range lines {
@@ -229,14 +230,13 @@ func dmEventKey(lines []string, subject string) (string, bool) {
 	var in struct {
 		Subject string `json:"subject"`
 		Data    struct {
-			ThreadID        string `json:"threadId"`
-			ConversationKey string `json:"conversationKey"`
+			ThreadID string `json:"threadId"`
 		} `json:"data"`
 	}
 	if json.Unmarshal([]byte(data), &in) != nil || in.Subject != subject {
 		return "", false
 	}
-	return cmp.Or(in.Data.ThreadID, in.Data.ConversationKey), true
+	return in.Data.ThreadID, true
 }
 
 // pushScheduler runs one login's checks, one at a time. key "" means every
@@ -351,6 +351,14 @@ func (q *pushScheduler) runDue() {
 		return
 	}
 	q.done("")
+	// A key that names none of the targets (a spelling the hub changed)
+	// checks every DM: dropped, its message would wait for a reconnect.
+	for k := range keys {
+		if k != "" && !slices.ContainsFunc(targets, func(t pushTarget) bool { return t.key == k }) {
+			q.p.record(q.login, "", "", DecisionPushStream, 0, "unknown-dm")
+			keys[""], catch[""] = true, catch[""] || catch[k]
+		}
+	}
 	for _, t := range targets {
 		if q.ctx.Err() != nil {
 			return

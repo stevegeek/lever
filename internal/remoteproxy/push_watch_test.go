@@ -75,6 +75,20 @@ func pushDMEvent(uid, key string) string {
 	return fmt.Sprintf("id: 1\nevent: update\ndata: {\"subject\":\"user.%s.chat.dm\",\"data\":{\"threadId\":%q,\"msg\":\"SECRET\"}}\n\n", uid, key)
 }
 
+// hubDMEvent is one DM message event as the pinned hub writes it: the SSE
+// frame of pkg/hub/web.go (id, event: update, {"subject","data"}) around a
+// UserMessageEvent (pkg/hub/events.go), published on user.<id>.chat.dm for
+// a web message whose threadId is the DM key.
+func hubDMEvent(uid, agentID, key string) string {
+	data, _ := json.Marshal(map[string]any{
+		"id": "m-evt", "projectId": "p1", "sender": "agent:w1", "senderId": agentID,
+		"recipient": "user:op", "recipientId": uid, "msg": "SECRET", "type": "instruction",
+		"agentId": agentID, "createdAt": "2026-10-07T10:00:00.000Z", "channel": "web",
+		"threadId": key, "dispatchState": "delivered",
+	})
+	return fmt.Sprintf("id: 7\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n", "user."+uid+".chat.dm", data)
+}
+
 type watchEnv struct {
 	*triggerEnv
 	sse    *sseHub
@@ -133,6 +147,37 @@ func TestWatchPushesOnADMEvent(t *testing.T) {
 	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
 	if !strings.HasSuffix(e.fs.all()[0], `{"v":1,"agent":"w1"}`) {
 		t.Fatalf("payload %v", e.fs.all())
+	}
+}
+
+// TestWatchPushesOnAHubShapedDMEvent: the event exactly as the hub sends it.
+func TestWatchPushesOnAHubShapedDMEvent(t *testing.T) {
+	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	time.Sleep(50 * time.Millisecond)
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- hubDMEvent(chatUID, agentW1, key)
+	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
+}
+
+// TestWatchChecksEveryDMForAnUnknownKey: a threadId that names none of the
+// login's DM keys (another spelling of the key) checks every DM of the
+// login instead of being dropped, and leaves an audit line.
+func TestWatchChecksEveryDMForAnUnknownKey(t *testing.T) {
+	e := startWatch(t, func(e *watchEnv) { e.p.idle = time.Minute; e.p.store.Add(chatOp, sub("op")) })
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	time.Sleep(50 * time.Millisecond)
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- hubDMEvent(chatUID, agentW1, "dm:agent:"+strings.ToUpper(agentW1)+":user:"+chatUID)
+	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
+	found := false
+	for _, l := range e.lines.all() {
+		found = found || l.Decision == DecisionPushStream && l.Reason == "unknown-dm"
+	}
+	if !found {
+		t.Fatal("no audit line for the unknown key")
 	}
 }
 
@@ -249,8 +294,9 @@ func TestDMEventKey(t *testing.T) {
 		ok    bool
 	}{
 		"message": {[]string{"id: 3", "event: update", `data: {"subject":"user.u1.chat.dm","data":{"threadId":"dm:agent:a:user:u1"}}`}, "dm:agent:a:user:u1", true},
-		"edit":    {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{"conversationKey":"dm:agent:a:user:u1"}}`}, "dm:agent:a:user:u1", true},
-		"no key":  {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{}}`}, "", true},
+		"hub":     {strings.Split(strings.TrimSpace(hubDMEvent("u1", "a", "dm:agent:a:user:u1")), "\n"), "dm:agent:a:user:u1", true},
+		"no key":  {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{"conversationKey":"dm:agent:a:user:u1"}}`}, "", true},
+		"empty":   {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{}}`}, "", true},
 		"other":   {[]string{"event: update", `data: {"subject":"user.u1.chat.dm.promoted","data":{}}`}, "", false},
 		"bad":     {[]string{"event: update", `data: {`}, "", false},
 		"beat":    {[]string{":heartbeat 5"}, "", false},

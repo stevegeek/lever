@@ -133,11 +133,12 @@ func (p *Push) unsubscribe(login, endpoint string) error {
 }
 
 // sameOriginWrite reports whether a write comes from the page itself: one
-// Origin (the gate already refused another host, and "null" here), and a
-// Sec-Fetch-Site, when sent, of same-origin. A browser always sends Origin
-// on a POST or DELETE.
-func sameOriginWrite(r *http.Request) bool {
-	if o := r.Header.Values("Origin"); len(o) != 1 || o[0] == "" || o[0] == "null" {
+// Origin, the proxy's public origin https://<serveHost> (remote.base_url is
+// https), and a Sec-Fetch-Site, when sent, of same-origin. A browser always
+// sends Origin on a POST or DELETE. The gate's own check compares only the
+// host.
+func sameOriginWrite(r *http.Request, serveHost string) bool {
+	if o := r.Header.Values("Origin"); len(o) != 1 || serveHost == "" || !strings.EqualFold(o[0], "https://"+serveHost) {
 		return false
 	}
 	s := r.Header.Values("Sec-Fetch-Site")
@@ -169,7 +170,7 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 		refuse(http.StatusMethodNotAllowed, "method")
 		return
 	}
-	if !sameOriginWrite(r) {
+	if !sameOriginWrite(r, g.cfg.ServeHost) {
 		refuse(http.StatusForbidden, "origin")
 		return
 	}

@@ -429,7 +429,7 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusForbidden, "uploads-off")
 		return
 	}
-	if !sameOriginWrite(r) || r.Header.Get(uploadHeader) != "1" {
+	if !sameOriginWrite(r, g.cfg.ServeHost) || r.Header.Get(uploadHeader) != "1" {
 		g.refuseFile(w, r, line, http.StatusForbidden, "origin")
 		return
 	}

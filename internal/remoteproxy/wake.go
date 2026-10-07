@@ -126,9 +126,9 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	// The gate let a request with no Origin through (checkOrigin); a wake
 	// is a browser POST, which always carries one, so one is required here,
 	// and Sec-Fetch-Site, when sent, must be same-origin ("none" is a typed
-	// navigation, never a page's fetch). The gate already refused an Origin
-	// for another host.
-	if !sameOriginWrite(r) {
+	// navigation, never a page's fetch). The Origin must be the proxy's own
+	// (sameOriginWrite).
+	if !sameOriginWrite(r, g.cfg.ServeHost) {
 		refuse(http.StatusForbidden, "origin", nil)
 		return
 	}

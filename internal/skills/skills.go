@@ -111,6 +111,11 @@ func Hash(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// stampLine is the exact form lever writes the release stamp in: column 0,
+// one non-space value. ContentHash drops only that form, so an agent cannot
+// hide other text on the dropped line.
+var stampLine = regexp.MustCompile(`^lever-version: [^\s]+\n?$`)
+
 // ContentHash is Hash of b without the `lever-version:` frontmatter line, so
 // two releases that render the same skill text agree. Contact freshness
 // compares it: a session that loaded a skill whose only change since is the
@@ -128,7 +133,7 @@ func ContentHash(b []byte) string {
 			inFrontmatter = true
 			continue
 		}
-		if inFrontmatter && strings.HasPrefix(trimmed, "lever-version:") {
+		if inFrontmatter && stampLine.MatchString(line) {
 			return Hash([]byte(strings.Join(lines[:i], "") + strings.Join(lines[i+1:], "")))
 		}
 	}

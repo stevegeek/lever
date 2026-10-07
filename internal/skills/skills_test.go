@@ -272,6 +272,14 @@ func TestContentHashIgnoresOnlyTheStamp(t *testing.T) {
 	if ContentHash(noStamp) != Hash(noStamp) {
 		t.Fatal("a file with no stamp must hash as itself")
 	}
+	odd := []byte("---\nname: x\nlever-version: 0.33.0 extra words\n---\nBody lever-version: 9\n")
+	if ContentHash(odd) == ContentHash(b) {
+		t.Fatal("a stamp line with extra text was dropped")
+	}
+	indented := []byte("---\nname: x\n  lever-version: 0.33.0\n---\nBody lever-version: 9\n")
+	if ContentHash(indented) == ContentHash(b) {
+		t.Fatal("an indented stamp line was dropped")
+	}
 	bodyOnly := []byte("lever-version: 1\nno frontmatter\n")
 	if ContentHash(bodyOnly) != Hash(bodyOnly) {
 		t.Fatal("a stamp outside the frontmatter must not be dropped")

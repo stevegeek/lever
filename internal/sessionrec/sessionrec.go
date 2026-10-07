@@ -73,8 +73,7 @@ func SkillRel(app *config.App, agent string) (string, bool) {
 
 // SkillHash is skills.ContentHash of agent's lever skill as it is on disk
 // now: the release stamp is left out, so a release that renders the same
-// skill text keeps a session fresh. The
-// read goes through fsutil.ReadInTree, so a skill path an agent replaced
+// skill text keeps a session fresh. The read goes through fsutil.ReadInTree, so a skill path an agent replaced
 // with a symlink out of the tree is refused.
 func SkillHash(app *config.App, agent string) (string, error) {
 	rel, ok := SkillRel(app, agent)

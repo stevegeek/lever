@@ -561,6 +561,9 @@ func (a *App) validateRemote() error {
 	if am.Enabled && len(a.Remote.LoginsWithTier(TierContact)) == 0 {
 		return fmt.Errorf("config: remote: agent_messages is enabled but allowed_users has no tier: contact entry; agents message only contacts")
 	}
+	if am.Enabled && a.ScionVersionPredatesAgentMessages() {
+		return fmt.Errorf("config: remote: agent_messages needs scion %s (2026-08-28) or later, where the hub sets a message's sender itself; scion.version %s is older, so an agent could post as its contact", AgentMessagesScionFloor[:8], a.Scion.Version)
+	}
 	// filepath.IsLocal refuses absolute paths and any ".." that leaves the
 	// base; path.Clean(lf) != lf refuses "a/../b", "a//b" and "./a". A
 	// relative, local path is under tree by construction.

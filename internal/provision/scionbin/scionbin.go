@@ -193,3 +193,17 @@ func FetchModule(ctx context.Context, r proc.Runner, version string) (goBin, dir
 	}
 	return goBin, dl.Dir, nil
 }
+
+// SourceHasCommit reports whether the source checkout's HEAD holds commit
+// (git merge-base --is-ancestor). An error means git cannot tell: not a
+// checkout, or a commit it does not know (a shallow clone, a fork).
+func SourceHasCommit(ctx context.Context, r proc.Runner, source, commit string) (bool, error) {
+	res, err := r.Run(ctx, nil, "git", "-C", source, "merge-base", "--is-ancestor", commit, "HEAD")
+	if err == nil {
+		return true, nil
+	}
+	if res.Code == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base in %s: %w", source, err)
+}

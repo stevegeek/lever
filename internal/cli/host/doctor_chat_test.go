@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,14 +201,14 @@ func TestCheckAgentMessagesNamesAStaleProcess(t *testing.T) {
 		live  agentMsgsLive
 		stale string
 	}{
-		"on, current":            {&on, agentMsgsLive{broker(&on), proxy(&on)}, ""},
-		"on, nothing runs":       {&on, agentMsgsLive{none, noProxy}, ""},
-		"on, both started off":   {&on, agentMsgsLive{broker(off), proxy(off)}, "broker and remote proxy"},
-		"on, proxy started off":  {&on, agentMsgsLive{broker(&on), proxy(off)}, "running remote proxy started"},
-		"off, current":           {off, agentMsgsLive{broker(off), proxy(off)}, ""},
-		"off, both started on":   {off, agentMsgsLive{broker(&on), proxy(&on)}, "broker and remote proxy"},
-		"off, other config":      {off, agentMsgsLive{broker(&other), proxy(&other)}, ""},
-		"off, broker started on": {off, agentMsgsLive{broker(&on), proxy(off)}, "running broker started"},
+		"on, current":            {&on, agentMsgsLive{broker(&on), proxy(&on), nil}, ""},
+		"on, nothing runs":       {&on, agentMsgsLive{none, noProxy, nil}, ""},
+		"on, both started off":   {&on, agentMsgsLive{broker(off), proxy(off), nil}, "broker and remote proxy"},
+		"on, proxy started off":  {&on, agentMsgsLive{broker(&on), proxy(off), nil}, "running remote proxy started"},
+		"off, current":           {off, agentMsgsLive{broker(off), proxy(off), nil}, ""},
+		"off, both started on":   {off, agentMsgsLive{broker(&on), proxy(&on), nil}, "broker and remote proxy"},
+		"off, other config":      {off, agentMsgsLive{broker(&other), proxy(&other), nil}, ""},
+		"off, broker started on": {off, agentMsgsLive{broker(&on), proxy(off), nil}, "running broker started"},
 	} {
 		r := checkAgentMessages(tc.cfg, st, tc.live)
 		if !r.ok || (tc.stale == "") != (r.fix == "") || !strings.Contains(r.detail, tc.stale) {
@@ -259,5 +260,52 @@ func TestCheckAgentMessagesUnsafeContactFile(t *testing.T) {
 	_ = os.Chmod(f+".1", 0o666)
 	if r := checkAgentMessages(app, st, agentMsgsLive{}); r.ok {
 		t.Fatalf("an unsafe .1: %+v", r)
+	}
+}
+
+// The filter trusts the hub's sender, which scion sets itself only from
+// b3562fb1: the row fails on a scion known to be older and notes one it
+// cannot check.
+func TestCheckAgentMessagesScionFloor(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	base := func() *config.App {
+		return &config.App{Name: "x", Tree: t.TempDir(), Remote: config.Remote{Enabled: true, AgentMessages: config.AgentMessages{Enabled: true},
+			AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}}}
+	}
+	has := func(ok bool, err error) func(string, string) (bool, error) {
+		return func(_, commit string) (bool, error) {
+			if commit != config.AgentMessagesScionFloor {
+				t.Fatalf("commit = %s", commit)
+			}
+			return ok, err
+		}
+	}
+	for name, tc := range map[string]struct {
+		scion    config.ScionConfig
+		has      func(string, string) (bool, error)
+		ok, note bool
+		want     string
+	}{
+		"version at the fix":     {config.ScionConfig{Version: "v0.0.0-20260828114021-b3562fb19a97"}, nil, true, false, ""},
+		"version before the fix": {config.ScionConfig{Version: "v0.0.0-20260801000000-0123456789ab"}, nil, false, false, "predates b3562fb1"},
+		"version bare hash":      {config.ScionConfig{Version: "63d5d65d"}, nil, true, true, "cannot tell"},
+		"source with the fix":    {config.ScionConfig{Source: "/s"}, has(true, nil), true, false, ""},
+		"source before the fix":  {config.ScionConfig{Source: "/s"}, has(false, nil), false, false, "checkout predates b3562fb1"},
+		"source git cannot tell": {config.ScionConfig{Source: "/s"}, has(false, errors.New("not a git repository")), true, true, "not a git repository"},
+		"binary":                 {config.ScionConfig{Binary: "/b"}, nil, true, true, "scion.binary"},
+	} {
+		app := base()
+		app.Scion = tc.scion
+		r := checkAgentMessages(app, st, agentMsgsLive{scionHasCommit: tc.has})
+		if r.ok != tc.ok || tc.note != (r.fix != "" && r.ok) || !strings.Contains(r.detail, tc.want) {
+			t.Errorf("%s: %+v", name, r)
+		}
+	}
+	// Off: nothing to check.
+	app := base()
+	app.Remote.AgentMessages.Enabled = false
+	app.Scion.Version = "v0.0.0-20260801000000-0123456789ab"
+	if r := checkAgentMessages(app, st, agentMsgsLive{}); !r.ok || r.fix != "" {
+		t.Fatalf("off: %+v", r)
 	}
 }

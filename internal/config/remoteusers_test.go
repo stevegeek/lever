@@ -120,6 +120,19 @@ func TestRemoteAgentMessagesValidation(t *testing.T) {
 		"max chars 16000":    {func(a *App) { a.Remote.AgentMessages.MaxChars = 16000 }, ""},
 		"max chars 16001":    {func(a *App) { a.Remote.AgentMessages.MaxChars = 16001 }, "max_chars"},
 		"max chars negative": {func(a *App) { a.Remote.AgentMessages.MaxChars = -1 }, "max_chars"},
+		"on, scion before the sender fix": {func(a *App) {
+			a.Remote.AgentMessages.Enabled = true
+			a.Scion.Version = "v0.0.0-20260827090000-0123456789ab"
+		}, "b3562fb1"},
+		"off, scion before the sender fix": {func(a *App) { a.Scion.Version = "v0.0.0-20260827090000-0123456789ab" }, ""},
+		"on, scion at the sender fix": {func(a *App) {
+			a.Remote.AgentMessages.Enabled = true
+			a.Scion.Version = "v0.0.0-20260828114021-b3562fb19a97"
+		}, ""},
+		"on, scion bare hash": {func(a *App) {
+			a.Remote.AgentMessages.Enabled = true
+			a.Scion.Version = "63d5d65d"
+		}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := base()
@@ -129,6 +142,20 @@ func TestRemoteAgentMessagesValidation(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestScionVersionTime(t *testing.T) {
+	for v, want := range map[string]string{
+		"v0.0.0-20260828114021-b3562fb19a97":        "2026-08-28T11:40:21Z",
+		"v1.2.4-0.20260901000000-0123456789ab":      "2026-09-01T00:00:00Z",
+		"v1.3.0-rc.1.0.20260715120000-0123456789ab": "2026-07-15T12:00:00Z",
+		"63d5d65d": "", "v1.2.3": "", "": "",
+	} {
+		got, ok := ScionVersionTime(v)
+		if (want == "") == ok || ok && got.Format(time.RFC3339) != want {
+			t.Errorf("%q: %v %v, want %q", v, got, ok, want)
+		}
 	}
 }
 

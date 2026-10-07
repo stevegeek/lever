@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -208,5 +209,40 @@ func TestResolveFailsWithoutAUserCacheDir(t *testing.T) {
 	}
 	if len(f.Calls) != 0 {
 		t.Fatalf("go must not run without a build directory: %+v", f.Calls)
+	}
+}
+
+func TestSourceHasCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false"}, args...)...)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	git("commit", "-q", "--allow-empty", "-m", "one")
+	first := git("rev-parse", "HEAD")
+	git("commit", "-q", "--allow-empty", "-m", "two")
+	second := git("rev-parse", "HEAD")
+	git("checkout", "-q", first)
+	ctx := context.Background()
+	if ok, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, dir, first); !ok || err != nil {
+		t.Fatalf("HEAD itself: %v %v", ok, err)
+	}
+	if ok, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, dir, second); ok || err != nil {
+		t.Fatalf("a later commit: %v %v", ok, err)
+	}
+	if _, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, dir, "b3562fb19a970a7788bb7aa110c024799506f225"); err == nil {
+		t.Fatal("an unknown commit must be an error (cannot tell)")
+	}
+	if _, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, t.TempDir(), first); err == nil {
+		t.Fatal("not a checkout must be an error")
 	}
 }

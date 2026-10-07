@@ -150,8 +150,9 @@ type remoteController struct {
 	version   string // this binary, for the reuse stamp
 	cfgHash   string // brokerctl.RemoteConfigHash(app), for the reuse stamp
 	// startTimeout/startInterval bound awaitListening's wait for the spawned
-	// proxy to bind; zero means remoteProxyStartTimeout/Interval. Set short by
-	// tests whose stand-in never binds.
+	// proxy to bind, and recordStamp's wait for its pid file; zero means
+	// remoteProxyStartTimeout/Interval. Set short by tests whose stand-in
+	// never binds.
 	startTimeout  time.Duration
 	startInterval time.Duration
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
@@ -236,14 +237,42 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	// Stamp only once the proxy is proven listening, so a stamp never claims a
 	// process that never served. Best-effort: a write failure costs the next
 	// apply a redundant restart, never a stale process kept alive.
-	if err := rc.state.WriteRemoteStamp(rc.version, rc.cfgHash); err != nil {
+	if err := rc.recordStamp(ctx, cmd.Process.Pid); err != nil {
 		rc.log.printf("lever: could not record the remote proxy stamp (%v) — the next apply will restart it", err)
 	}
 	return nil
 }
 
+// recordStamp writes the reuse stamp for the spawned proxy pid. The stamp
+// names the pid in remote.pid, and the proxy binds its port before it writes
+// that file, so a proxy that already answers a dial may not have written it
+// yet: wait (same bounds as awaitListening) until the file names pid.
+func (rc *remoteController) recordStamp(ctx context.Context, pid int) error {
+	timeout := cmp.Or(rc.startTimeout, remoteProxyStartTimeout)
+	interval := cmp.Or(rc.startInterval, remoteProxyStartInterval)
+	var last error
+	err := retry.Until(ctx, int(timeout/interval)+1, interval, func() (bool, error) {
+		got, err := state.ReadPID(rc.state.RemotePID())
+		switch {
+		case err != nil:
+			last = err
+		case got != pid:
+			last = fmt.Errorf("%s names pid %d, not the new proxy %d", rc.state.RemotePID(), got, pid)
+		}
+		return err == nil && got == pid, nil
+	})
+	if errors.Is(err, retry.ErrExhausted) {
+		return fmt.Errorf("after %s: %w", timeout, last)
+	}
+	if err != nil {
+		return err
+	}
+	return rc.state.WriteRemoteStamp(rc.version, rc.cfgHash)
+}
+
 // remoteProxyStartTimeout/Interval are the default bounds on the wait for the
-// spawned proxy to bind (remoteController.startTimeout/startInterval).
+// spawned proxy to bind, and then to write its pid file
+// (remoteController.startTimeout/startInterval).
 // Generous against a loaded host, and still far below anything a human would
 // notice: both listeners are host loopback binds that happen before the proxy
 // touches the jail.

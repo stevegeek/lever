@@ -228,6 +228,8 @@ func TestToolHostPaths(t *testing.T) {
 	check("bash +e -c", paths("bash", "+e", "-c", "/t/x"), []got{{"broker.tools[t] -c code", "/t/x", hostProgram}})
 	check("sh -ce", paths("sh", "-ce", "/t/x"), []got{{"broker.tools[t] -c code", "/t/x", hostProgram}})
 	check("sh -c then options", paths("sh", "-c", "-e", "/t/x"), []got{{"broker.tools[t] -c code", "/t/x", hostProgram}})
+	check("bash --rcfile glued", paths("bash", "--rcfile=/t/rc", "-i"), []got{{"broker.tools[t] --rcfile value", "/t/rc", hostProgram}})
+	check("bash --rcfile spaced", paths("bash", "--rcfile", "/t/rc", "-i"), []got{{"broker.tools[t] --rcfile value", "/t/rc", hostProgram}})
 	check("bash -o script", paths("bash", "-o", "errexit", "/t/s.sh"), []got{
 		{"broker.tools[t] -o value", "errexit", hostProgram},
 		{"broker.tools[t] script", "/t/s.sh", hostProgram},

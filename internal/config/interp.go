@@ -252,8 +252,11 @@ func shPaths(argv []string) []interpPath {
 			}
 			return out
 		case strings.HasPrefix(a, "--"):
-			name, _, glued := strings.Cut(a, "=")
-			if shLongValueFlags[name] && !glued && i+1 < len(args) {
+			name, val, glued := strings.Cut(a, "=")
+			switch {
+			case shLongValueFlags[name] && glued:
+				add(name+" value", val)
+			case shLongValueFlags[name] && i+1 < len(args):
 				i++
 				add(name+" value", args[i])
 			}

@@ -18,6 +18,9 @@ import (
 // uses while the fields/tags live in exactly one place.
 type Bootstrap = wire.Bootstrap
 
+// Claude is the envelope's per-agent Claude Code config (wire.Claude).
+type Claude = wire.Claude
+
 // NormalizeBrokerURL strips trailing slashes so callers can append "/enrol",
 // "/request", ... without producing "//enrol".
 func NormalizeBrokerURL(u string) string {
@@ -71,6 +74,10 @@ type BootConfig struct {
 	// SettingsPath is the claude settings.json whose env block receives the
 	// harness overlay (WriteSettingsEnv). Empty skips the write (enrol-only).
 	SettingsPath string
+	// ManagedSettingsPath is Claude Code's managed-settings file
+	// (ManagedSettingsPath in production), which receives the envelope's
+	// claude block (WriteManagedSettings). Empty skips the write.
+	ManagedSettingsPath string
 	// LLMAuth selects the LLM-auth mode ("api-key" | "subscription" | "").
 	// When "api-key", Boot obtains a capability(llm) token and writes
 	// ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL into the overlay. Any other
@@ -91,9 +98,16 @@ func Boot(ctx context.Context, c BootConfig) error {
 	// (no broker configured) we tolerate it by leaving brokerURL empty — the
 	// broker-tool registration loop will simply register nothing.
 	var brokerURL string
+	var claude *Claude
 	bs, bsErr := LoadBootstrap(c.BootstrapPath)
 	if bsErr == nil {
 		brokerURL = bs.BrokerURL
+		// The host validated it, but the manager's envelope is in the tree
+		// the manager writes, and boot runs as root.
+		if err := bs.Claude.Validate(); err != nil {
+			return fmt.Errorf("agent boot: bootstrap claude block: %w", err)
+		}
+		claude = bs.Claude
 	}
 
 	// Idempotent: a valid existing cert means we already enrolled (resume/restart).
@@ -138,6 +152,9 @@ func Boot(ctx context.Context, c BootConfig) error {
 		}
 	}
 	if err := WriteSettingsEnv(c.SettingsPath, overlay); err != nil {
+		return err
+	}
+	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil {
 		return err
 	}
 	if c.MCPAdd == nil {

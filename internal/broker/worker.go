@@ -76,6 +76,9 @@ type WorkerSpec struct {
 	// late lets an edit reach the next fresh start without a broker restart.
 	InstructionsPath string
 	APIKey           bool // true ⇒ api-key LLM mode for this worker
+	// Claude is the worker's own Claude Code config (config.Worker.Claude),
+	// staged in its envelope before every start and resume. nil = none.
+	Claude *wire.Claude
 }
 
 // workerSpec looks up a declared worker by name (its cert CN, which is also
@@ -223,14 +226,15 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 const phaseRunningContainerDown = "running, container down"
 
 // bootstrapFor mints a one-use enrolment ticket for cn and wraps it in the
-// envelope lever-agent boot consumes: the ONE construction site for a
-// Bootstrap the broker issues (manager and worker alike).
-func (b *Broker) bootstrapFor(cn string) (wire.Bootstrap, error) {
+// envelope lever-agent boot consumes, with the agent's Claude Code config:
+// the ONE construction site for a Bootstrap the broker issues (manager and
+// worker alike).
+func (b *Broker) bootstrapFor(cn string, claude *wire.Claude) (wire.Bootstrap, error) {
 	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
 	if err != nil {
 		return wire.Bootstrap{}, fmt.Errorf("ticket: %w", err)
 	}
-	return wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn}, nil
+	return wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn, Claude: claude}, nil
 }
 
 // stageFreshTicket mints a one-use enrolment ticket for the MANAGER (cn) and
@@ -240,7 +244,7 @@ func (b *Broker) bootstrapFor(cn string) (wire.Bootstrap, error) {
 // by the auto-re-enrol healer. Workers never take this path: see
 // stageWorkerTicket.
 func (b *Broker) stageFreshTicket(cn, dir string) error {
-	bs, err := b.bootstrapFor(cn)
+	bs, err := b.bootstrapFor(cn, b.managerClaude)
 	if err != nil {
 		return err
 	}
@@ -272,7 +276,7 @@ func (b *Broker) stageWorkerTicket(ctx context.Context, spec WorkerSpec) error {
 	if spec.TicketDir == "" {
 		return fmt.Errorf("stage: worker %q has no ticket directory", spec.Name)
 	}
-	bs, err := b.bootstrapFor(spec.Name)
+	bs, err := b.bootstrapFor(spec.Name, spec.Claude)
 	if err != nil {
 		return err
 	}

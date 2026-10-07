@@ -34,6 +34,7 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 			// config.WorkerInstructionsPath). Content is read at dispatch.
 			InstructionsPath: app.WorkerInstructionsPath(g),
 			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
+			Claude:           g.Claude(),
 		})
 	}
 	return specs

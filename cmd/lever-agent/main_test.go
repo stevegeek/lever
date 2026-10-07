@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -484,5 +485,18 @@ func TestGatewayVerbStopsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("gateway verb did not return within 2s of ctx cancel")
+	}
+}
+
+func TestAfterCompactPrintsHookJSON(t *testing.T) {
+	var out strings.Builder
+	if err := cmdAfterCompact([]string{"--note-b64", base64.StdEncoding.EncodeToString([]byte("Re-read NOTES.md"))}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"additionalContext":"[lever: operator note after compaction] Re-read NOTES.md"`) {
+		t.Fatalf("output = %s", out.String())
+	}
+	if err := cmdAfterCompact(nil, &out); err == nil {
+		t.Fatal("no note must be an error")
 	}
 }

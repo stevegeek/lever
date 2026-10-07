@@ -263,7 +263,8 @@ func TestAgentProbeExecsAreBounded(t *testing.T) {
 	_, err2 := p.HarnessAlive(ctx, "lever--x")
 	err3 := p.ReportSessionRunning(ctx, "lever--x")
 	_, err4 := ContainerPathWritable(ctx, h, "lever--x", "/workspace/a")
-	for i, err := range []error{err1, err2, err3, err4} {
+	_, err5 := p.ClaudeSettings(ctx, "lever--x")
+	for i, err := range []error{err1, err2, err3, err4, err5} {
 		if err == nil {
 			t.Fatalf("exec %d: a hung exec must end in an error", i)
 		}
@@ -273,7 +274,7 @@ func TestAgentProbeExecsAreBounded(t *testing.T) {
 			t.Fatalf("exec %d had deadline %s, want within %s", i, d, agentExecTimeout)
 		}
 	}
-	if len(h.deadlines) != 4 || time.Since(start) > 5*time.Second {
+	if len(h.deadlines) != 5 || time.Since(start) > 5*time.Second {
 		t.Fatalf("deadlines %v after %s", h.deadlines, time.Since(start))
 	}
 	for i, n := range h.limits {

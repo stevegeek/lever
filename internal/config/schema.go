@@ -217,12 +217,16 @@ type Manager struct {
 	// symlink (checked when the manager is started). Create-time only, like
 	// Model: scion stores a record's volumes for life, so the mounts reach a
 	// manager created from now on (`lever up --fresh` for an existing one).
-	ReadOnly       []string        `yaml:"read_only"`
-	AllowPorts     []int           `yaml:"allow_ports"`
-	CredentialFile string          `yaml:"credential_file"`
-	LLMAuth        LLMAuthMode     `yaml:"llm_auth"`
-	Obtain         []Grant         `yaml:"obtain"`
-	Delegate       []DelegateGrant `yaml:"delegate"`
+	ReadOnly []string `yaml:"read_only"`
+	// ClaudeSettings and AfterCompactNote configure the agent's Claude Code
+	// (see ClaudeSettings). Applied at every start, a resume included.
+	ClaudeSettings   ClaudeSettings  `yaml:"claude_settings"`
+	AfterCompactNote string          `yaml:"after_compact_note"`
+	AllowPorts       []int           `yaml:"allow_ports"`
+	CredentialFile   string          `yaml:"credential_file"`
+	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
+	Obtain           []Grant         `yaml:"obtain"`
+	Delegate         []DelegateGrant `yaml:"delegate"`
 }
 
 type Worker struct {
@@ -238,7 +242,11 @@ type Worker struct {
 	// Manager.InstructionsFile). Deliberately NOT inherited from the manager —
 	// the manager's manual describes orchestration authority a worker must not
 	// hold — so an unset value means the worker gets no lever instructions.
-	InstructionsFile string          `yaml:"instructions_file"`
+	InstructionsFile string `yaml:"instructions_file"`
+	// ClaudeSettings and AfterCompactNote: this worker's own (see
+	// Manager.ClaudeSettings). Not inherited from the manager.
+	ClaudeSettings   ClaudeSettings  `yaml:"claude_settings"`
+	AfterCompactNote string          `yaml:"after_compact_note"`
 	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
 	Obtain           []Grant         `yaml:"obtain"`
 	Delegate         []DelegateGrant `yaml:"delegate"`

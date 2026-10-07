@@ -6,6 +6,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // ConfigHash digests the broker-relevant configuration: the broker block
@@ -35,6 +36,11 @@ func ConfigHash(app *config.App) string {
 	// AgentMessages (only while on) is the contact list and limits
 	// contact_message enforces; nil while off keeps the hash an instance had
 	// before remote.agent_messages existed. Files likewise (share_file).
+	//
+	// ManagerClaude (nil when unset, the same old hash) is in the manager's
+	// envelope: a change restarts the broker, which reopens the bootstrap
+	// latch, so the next apply re-mints and re-stages the manager's
+	// bootstrap.json with the new block.
 	return state.HashJSON(struct {
 		Broker        config.Broker
 		Workers       []config.Worker
@@ -43,7 +49,8 @@ func ConfigHash(app *config.App) string {
 		WebSenders    []string            `json:",omitempty"`
 		AgentMessages *agentMessagesStamp `json:",omitempty"`
 		Files         *filesStamp         `json:",omitempty"`
-	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app)})
+		ManagerClaude *wire.Claude        `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude()})
 }
 
 // agentMessagesStamp is the part of remote.agent_messages the broker acts on.

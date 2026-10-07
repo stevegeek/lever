@@ -1085,6 +1085,7 @@ func (bc *brokerController) Mint(ctx context.Context) (apply.BootstrapMaterial, 
 		BrokerCA:  string(caPEM),
 		BrokerURL: fmt.Sprintf("https://%s:%d", bc.brokerHost, bc.app.EffectiveJailPort()),
 		AgentCN:   bc.app.ManagerCN(),
+		Claude:    bc.app.ManagerClaude(),
 	}, nil
 }
 
@@ -1384,7 +1385,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ProbeContainerDevice: func(ctx context.Context, ref, path string) (bool, error) {
 			return jail.ContainerHasCharDevice(ctx, b.JailRunner(), ref, path)
 		},
-		RecordVolumes: w.recordVolumes,
+		// ReadClaudeSettings lets apply warn when the kept manager runs with
+		// other claude_settings / after_compact_note than the config.
+		ReadClaudeSettings: jail.AgentProbe{R: b.JailRunner()}.ClaudeSettings,
+		RecordVolumes:      w.recordVolumes,
 		// AgentSession lets start-manager heal an expired agent hub token
 		// and a stopped phase over a live harness (apply.HealAgentSession).
 		AgentSession: jail.AgentProbe{R: b.JailRunner()},

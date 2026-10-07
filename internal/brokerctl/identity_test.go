@@ -46,6 +46,24 @@ func TestConfigHash(t *testing.T) {
 	if ConfigHash(image) != ConfigHash(base) {
 		t.Fatal("a manager-image change must NOT change the hash (no broker restart)")
 	}
+
+	// The manager's claude block rides its envelope: a change must restart
+	// the broker so the next apply re-mints and re-stages it.
+	claude := mk()
+	claude.Manager.ClaudeSettings.AutoCompactWindow = 400000
+	if ConfigHash(claude) == ConfigHash(base) {
+		t.Fatal("changing manager.claude_settings must change the hash")
+	}
+	note := mk()
+	note.Manager.AfterCompactNote = "Re-read NOTES.md"
+	if ConfigHash(note) == ConfigHash(base) || ConfigHash(note) == ConfigHash(claude) {
+		t.Fatal("changing manager.after_compact_note must change the hash")
+	}
+	workerNote := mk()
+	workerNote.Workers[0].AfterCompactNote = "Re-read TASK.md"
+	if ConfigHash(workerNote) == ConfigHash(base) {
+		t.Fatal("changing a worker's after_compact_note must change the hash")
+	}
 }
 
 // TestConfigHashFollowsTheRemoteLogins: the broker routes a message by its

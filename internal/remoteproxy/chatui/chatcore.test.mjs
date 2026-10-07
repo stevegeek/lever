@@ -111,7 +111,12 @@ test('classify', () => {
   assert.equal(classify({ id: '2', msg: 'x', senderId: 'agent-id', type: 'assistant-reply' }, uid), 'agent');
   assert.equal(classify({ id: '3', msg: 'x', senderId: 'agent-id', type: 'something-new' }, uid), 'agent');
   assert.equal(classify({ id: '4', msg: 'working', type: 'state-change' }, uid), 'system');
-  assert.equal(classify({ id: '4a', msg: 'note', type: 'system', senderId: 'agent-id' }, uid), 'system');
+  // A system or state type from the agent's side never makes a hub line:
+  // by the DM agent's id or by an agent sender.
+  assert.equal(classify({ id: '4a', msg: 'note', type: 'system', senderId: 'agent-id' }, uid, 'agent-id'), 'agent');
+  assert.equal(classify({ id: '4b', msg: 'note', type: 'state-change', senderId: 'agent-id' }, uid, 'agent-id'), 'agent');
+  assert.equal(classify({ id: '4c', msg: 'note', type: 'system', sender: 'agent:w2', senderId: 'other' }, uid, 'agent-id'), 'agent');
+  assert.equal(classify({ id: '4d', msg: 'note', type: 'system', sender: 'system', senderId: 'hub' }, uid, 'agent-id'), 'system');
   assert.equal(classify({ id: '5', msg: 'x', type: 'mention', senderId: 'u1' }, uid), 'hidden');
   // The agent picks its own type: it cannot hide a message with one.
   assert.equal(classify({ id: '5a', msg: 'x', type: 'mention', senderId: 'agent-id' }, uid), 'agent');

@@ -67,6 +67,7 @@ const RETRY_MS = 5000; // between attempts to start while the hub is away
 // comes first when there is one.
 const REQUEST_MS = 60000;
 const HOLD_MS = 2000; // Send stays off this long after the replay note
+const SYSTEM_MAX = 500; // characters of a hub line, on one line
 const OPEN_KEY = 'lever-chat-open'; // the name of the open chat
 // Drafts and unsent records are kept per agent name (draftKey, unsentKey).
 // The bare keys are what the one-agent page kept; start adopts them once.
@@ -285,7 +286,7 @@ function render(toBottom) {
   const frag = document.createDocumentFragment();
   let shown = 0;
   for (const m of sortedMessages(messages)) {
-    const kind = classify(m, chat.userId);
+    const kind = classify(m, chat.userId, chat.id);
     if (kind === 'hidden') continue;
     shown++;
     const row = document.createElement('div');
@@ -298,10 +299,9 @@ function render(toBottom) {
     }
     const body = document.createElement('div');
     body.className = 'body';
-    // A system line says who it is from, so an agent's own text cannot
-    // read as a notice from lever or the hub.
-    const from = chat.id && m.senderId === chat.id ? chat.name : 'hub';
-    setText(body, kind === 'system' ? `${from}: ${messageText(m)}` : messageText(m));
+    // A system line is the hub's (classify gives the agent's side none),
+    // on one line: no text can lay out a notice of its own.
+    setText(body, kind === 'system' ? `hub: ${oneLine(messageText(m), SYSTEM_MAX)}` : messageText(m));
     row.append(body);
     if (kind === 'mine' && m.dispatchState === 'failed') {
       const fail = document.createElement('div');

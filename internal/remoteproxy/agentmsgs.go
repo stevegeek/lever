@@ -67,9 +67,9 @@ func agentRow(m historyRow, uid, agentID string) bool {
 
 // keepAgentRows asks the broker which agent rows to keep. Rows that are not
 // agent rows are not asked about (and not in the answer). An agent row is
-// never kept when its sender id is not the DM's agent, or it has no id, no
-// text (a deleted one), no readable time, or an id that appears more than
-// once in rows. Only an id the proxy asked about can be in the answer: the
+// never kept when its sender id is not the DM's agent, or it has a type
+// other than agentTypes, no id, no text (a deleted one), no readable time,
+// or an id that appears more than once in rows. Only an id the proxy asked about can be in the answer: the
 // broker's keep list is checked against the question, never trusted on its
 // own.
 func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
@@ -88,7 +88,7 @@ func askAgentRows(ctx context.Context, match func(ctx context.Context, contact, 
 	for _, m := range rows {
 		// Only the DM agent's own rows are asked about: another sender's row
 		// with the same text must not take the agent's record.
-		if !agentRow(m, uid, agentID) || m.SenderID != agentID || m.ID == "" || m.Msg == "" || seen[m.ID] != 1 {
+		if !agentRow(m, uid, agentID) || m.SenderID != agentID || !agentTypes[m.Type] || m.ID == "" || m.Msg == "" || seen[m.ID] != 1 {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, m.CreatedAt)
@@ -118,6 +118,13 @@ func askAgentRows(ctx context.Context, match func(ctx context.Context, contact, 
 }
 
 var errNoMatcher = errors.New("no agent message matcher")
+
+// agentTypes are the types the hub stamps on a message an agent sends a
+// user: "instruction" (scion message), "input-needed" (the outbound
+// default) and "assistant-reply" (the harness hook). The agent picks the
+// type, and a system or state type would draw its text as a hub notice, so
+// an agent row of any other type is never asked about: never shown.
+var agentTypes = map[string]bool{"instruction": true, "input-needed": true, "assistant-reply": true}
 
 // idCounts counts each row id on a page.
 func idCounts(rows []historyRow) map[string]int {

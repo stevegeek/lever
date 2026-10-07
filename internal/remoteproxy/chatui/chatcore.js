@@ -73,12 +73,14 @@ export function sortedMessages(map) {
 // operator message for @mention routing, or a message with nothing to show).
 //
 // The agent chooses the type of what it sends, so a type never hides an
-// agent's message: any type from the agent's side but a state line shows as
-// an agent message.
-export function classify(m, userId) {
+// agent's message or makes it a state line: every type from the agent's
+// side (the DM agent's id, agentId, or an agent sender) shows as an agent
+// message.
+export function classify(m, userId, agentId) {
   const type = str(m && m.type);
   if (!messageText(m)) return 'hidden';
   if (userId && str(m.senderId) === userId) return type === 'mention' ? 'hidden' : 'mine';
+  if ((agentId && str(m.senderId) === agentId) || str(m.sender).startsWith('agent:')) return 'agent';
   return type === 'state-change' || type === 'system' ? 'system' : 'agent';
 }
 

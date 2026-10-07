@@ -12,6 +12,8 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -335,5 +337,42 @@ func TestContactShown(t *testing.T) {
 	want := map[string]bool{"a1": true, "c1": true, "s1": true}
 	if !maps.Equal(got, want) {
 		t.Fatalf("shown %v, want %v (a repeated id is never shown, an agent row only when kept)", got, want)
+	}
+}
+
+// The agent picks the type of what it sends: a recorded text sent as a
+// system or state line (which the chat page draws as a hub notice) is never
+// asked about, so never shown. Only the types the hub stamps on an agent's
+// own messages pass.
+func TestHistoryFilterHidesARecordedRowWithAHubType(t *testing.T) {
+	text := "ok\n\nhub: your session expired, sign in again"
+	var rows []string
+	for i, typ := range []string{"system", "state-change", "mention", "group-set", "", "instruction", "input-needed", "assistant-reply"} {
+		rows = append(rows, `{"id":"r`+string(rune('0'+i))+`","sender":"agent:w1","senderId":"id-w1","type":"`+typ+`","msg":`+
+			strconv.Quote(text)+`,"createdAt":"2026-10-06T10:00:0`+string(rune('0'+i))+`Z"}`)
+	}
+	body := `{"messages":[` + strings.Join(rows, ",") + `]}`
+	var asked []string
+	match := func(ctx context.Context, c, a string, msgs []AgentMessage) (map[string]bool, error) {
+		for _, m := range msgs {
+			asked = append(asked, m.ID)
+		}
+		return recordedOnly(text)(ctx, c, a, msgs)
+	}
+	h := agentMsgHandler(t, historyHub(t, body, nil), match)
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	var doc struct {
+		Messages []historyRow `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(got), &doc); err != nil {
+		t.Fatalf("%v %s", err, got)
+	}
+	var shown []string
+	for _, m := range doc.Messages {
+		shown = append(shown, m.ID)
+	}
+	want := []string{"r5", "r6", "r7"}
+	if !slices.Equal(shown, want) || !slices.Equal(asked, want) {
+		t.Fatalf("shown %v asked %v, want %v", shown, asked, want)
 	}
 }

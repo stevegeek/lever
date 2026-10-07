@@ -120,7 +120,7 @@ func TestCheckBrokerAliveHealthy(t *testing.T) {
 }
 
 func TestCheckToolBackendsNoneDeclared(t *testing.T) {
-	r := checkToolBackends(nil, failProbes)
+	r := checkToolBackends(nil, t.TempDir(), failProbes)
 	if !r.ok {
 		t.Fatalf("no tools declared => pass (nothing to probe); got %+v", r)
 	}
@@ -132,7 +132,7 @@ func TestCheckToolBackendsAllReachable(t *testing.T) {
 		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
 		{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:3201"},
 	}
-	r := checkToolBackends(tools, okProbes)
+	r := checkToolBackends(tools, t.TempDir(), okProbes)
 	if !r.ok {
 		t.Fatalf("all external backends reachable + supervised command resolvable => pass; got %+v", r)
 	}
@@ -151,7 +151,7 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
 		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
 	}
-	r := checkToolBackends(tools, doctorProbes{dial: dial})
+	r := checkToolBackends(tools, t.TempDir(), doctorProbes{dial: dial})
 	if r.ok {
 		t.Fatal("a down backend must fail the check")
 	}
@@ -172,7 +172,7 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 
 func TestCheckToolBackendsSupervisedMissing(t *testing.T) {
 	tools := []config.Tool{{Name: "db", Command: []string{"definitely-not-on-path-xyz"}}}
-	got := checkToolBackends(tools, okProbes)
+	got := checkToolBackends(tools, t.TempDir(), okProbes)
 	if got.ok {
 		t.Fatalf("supervised tool with missing binary should fail the check")
 	}
@@ -180,7 +180,7 @@ func TestCheckToolBackendsSupervisedMissing(t *testing.T) {
 
 func TestCheckToolBackendsExternalDown(t *testing.T) {
 	tools := []config.Tool{{Name: "x", External: true, Backend: "127.0.0.1:59999"}}
-	got := checkToolBackends(tools, failProbes)
+	got := checkToolBackends(tools, t.TempDir(), failProbes)
 	if got.ok {
 		t.Fatalf("down external backend should fail the check")
 	}
@@ -193,7 +193,7 @@ func TestCheckToolBackendsExternalDown(t *testing.T) {
 // supervised branch ever dialed Backend, this would wrongly fail.
 func TestCheckToolBackendsSupervisedNeverDialed(t *testing.T) {
 	tools := []config.Tool{{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:59999"}}
-	if got := checkToolBackends(tools, failProbes); !got.ok {
+	if got := checkToolBackends(tools, t.TempDir(), failProbes); !got.ok {
 		t.Fatalf("supervised tool's Backend must never be dialed; got %+v", got)
 	}
 }
@@ -205,9 +205,28 @@ func TestCheckToolBackendsSupervisedNeverDialed(t *testing.T) {
 // not-on-PATH bare name.
 func TestCheckToolBackendsSupervisedAbsolutePathMissing(t *testing.T) {
 	tools := []config.Tool{{Name: "db", Command: []string{"/nonexistent/definitely-not-here-xyz"}}}
-	got := checkToolBackends(tools, okProbes)
+	got := checkToolBackends(tools, t.TempDir(), okProbes)
 	if got.ok {
 		t.Fatalf("supervised tool with a missing absolute-path command should fail the check")
+	}
+}
+
+// A relative supervised command resolves against the instance dir (where
+// the supervisor runs the tool), not against doctor's own cwd.
+func TestCheckToolBackendsRelativeCommandUsesInstanceDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin", "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools := []config.Tool{{Name: "rel", Command: []string{"bin/tool"}}}
+	if got := checkToolBackends(tools, dir, failProbes); !got.ok {
+		t.Fatalf("bin/tool under the instance dir should pass: %+v", got)
+	}
+	if got := checkToolBackends(tools, t.TempDir(), failProbes); got.ok {
+		t.Fatal("bin/tool under another dir should fail")
 	}
 }
 

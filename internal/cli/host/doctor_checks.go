@@ -850,7 +850,10 @@ func firstOrEmpty(ss []string) string {
 // validation already rejects an unresolvable supervised command, so a config
 // that loaded is expected to pass the resolution half here — this check is the
 // operator-facing confirmation and the external-liveness probe.
-func checkToolBackends(tools []config.Tool, p doctorProbes) checkResult {
+//
+// dir is the instance dir: the supervisor runs every tool there, so a
+// relative command resolves against it, not against doctor's own cwd.
+func checkToolBackends(tools []config.Tool, dir string, p doctorProbes) checkResult {
 	const name = "tool backends"
 	var down []string
 	probed := 0
@@ -865,11 +868,9 @@ func checkToolBackends(tools []config.Tool, p doctorProbes) checkResult {
 		}
 		if len(t.Command) > 0 {
 			bin := t.Command[0]
-			if !strings.ContainsRune(bin, '/') {
-				if _, err := config.LookPathIn(bin, config.ToolSupervisorPATH); err != nil {
-					down = append(down, fmt.Sprintf("%s (supervised, %q not on PATH)", t.Name, bin))
-				}
-			} else if !config.IsExecutableFile(bin) {
+			if p, err := config.ResolveToolCommand(bin, dir); err != nil {
+				down = append(down, fmt.Sprintf("%s (supervised, %q not on PATH)", t.Name, bin))
+			} else if !config.IsExecutableFile(p) {
 				down = append(down, fmt.Sprintf("%s (supervised, %q is not an executable file)", t.Name, bin))
 			}
 		}

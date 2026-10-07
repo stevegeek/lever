@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -122,6 +123,7 @@ func validateBackend(name string) error {
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 var diskRE = regexp.MustCompile(`^[0-9]+(MiB|GiB|MB|GB)$`)
+var sizeRE = regexp.MustCompile(`^([0-9]+)(MiB|GiB|MB|GB)$`)
 
 // validateDisk checks the optional Lima disk size. Empty is valid (default).
 func validateDisk(d string) error {
@@ -130,6 +132,53 @@ func validateDisk(d string) error {
 	}
 	if !diskRE.MatchString(d) {
 		return fmt.Errorf("config: disk %q invalid (want e.g. 24GiB, 40GiB)", d)
+	}
+	return nil
+}
+
+// sizeBytes parses a disk/memory size accepted by sizeRE.
+func sizeBytes(s string) (int64, bool) {
+	m := sizeRE.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	unit := map[string]int64{"MiB": 1 << 20, "GiB": 1 << 30, "MB": 1e6, "GB": 1e9}[m[2]]
+	return n * unit, true
+}
+
+// validateLimaKeys checks the Lima-only sizing and nested_virt keys. goos is
+// the host OS (runtime.GOOS in production): nested_virt needs the qemu driver,
+// which lever uses on Linux hosts only (vz on darwin).
+func validateLimaKeys(a *App, goos string) error {
+	if a.Backend != BackendLima {
+		for _, k := range []struct {
+			key string
+			set bool
+		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}} {
+			if k.set {
+				return fmt.Errorf("config: %s is Lima-only; OrbStack manages its own machine resources", k.key)
+			}
+		}
+		return nil
+	}
+	if a.NestedVirt && goos == "darwin" {
+		return fmt.Errorf("config: nested_virt needs the qemu driver on a Linux host; Lima's vz nestedVirtualization is not supported yet")
+	}
+	if a.CPUs < 0 || a.CPUs > 256 {
+		return fmt.Errorf("config: cpus %d out of range (1-256, or unset for the Lima default)", a.CPUs)
+	}
+	if a.Memory != "" {
+		n, ok := sizeBytes(a.Memory)
+		if !ok {
+			return fmt.Errorf("config: memory %q invalid (want e.g. 8GiB, 24GiB)", a.Memory)
+		}
+		if n < 2<<30 {
+			return fmt.Errorf("config: memory %q too small: at least 2GiB", a.Memory)
+		}
 	}
 	return nil
 }
@@ -198,6 +247,9 @@ func (a *App) Validate() error {
 		return fmt.Errorf("config: scion.telemetry %q must be one of off|scion-default (or unset = off)", a.Scion.Telemetry)
 	}
 	if err := validateDisk(a.Disk); err != nil {
+		return err
+	}
+	if err := validateLimaKeys(a, runtime.GOOS); err != nil {
 		return err
 	}
 	if a.Tree == "" {

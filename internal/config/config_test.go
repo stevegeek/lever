@@ -1192,6 +1192,46 @@ func TestValidateDiskFormat(t *testing.T) {
 	}
 }
 
+func TestValidateLimaKeys(t *testing.T) {
+	base := func() *App { return &App{Backend: BackendLima} }
+	cases := []struct {
+		name    string
+		mut     func(a *App)
+		goos    string
+		wantErr string // "" = valid
+	}{
+		{"all unset lima", func(a *App) {}, "linux", ""},
+		{"all set lima linux", func(a *App) { a.NestedVirt, a.CPUs, a.Memory = true, 8, "24GiB" }, "linux", ""},
+		{"nested on darwin", func(a *App) { a.NestedVirt = true }, "darwin", "nested_virt needs the qemu driver"},
+		{"cpus on darwin ok", func(a *App) { a.CPUs = 4 }, "darwin", ""},
+		{"nested on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.NestedVirt = true }, "linux", "nested_virt is Lima-only"},
+		{"cpus on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.CPUs = 2 }, "darwin", "cpus is Lima-only"},
+		{"memory on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.Memory = "8GiB" }, "darwin", "memory is Lima-only"},
+		{"cpus zero is unset", func(a *App) { a.CPUs = 0 }, "linux", ""},
+		{"cpus negative", func(a *App) { a.CPUs = -1 }, "linux", "cpus -1 out of range"},
+		{"cpus too many", func(a *App) { a.CPUs = 257 }, "linux", "cpus 257 out of range"},
+		{"memory bad format", func(a *App) { a.Memory = "lots" }, "linux", `memory "lots" invalid`},
+		{"memory too small", func(a *App) { a.Memory = "1GiB" }, "linux", "at least 2GiB"},
+		{"memory MiB ok", func(a *App) { a.Memory = "4096MiB" }, "linux", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := base()
+			c.mut(a)
+			err := validateLimaKeys(a, c.goos)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("want error containing %q, got %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestToolCheckHostResolvesCommand(t *testing.T) {
 	// A binary guaranteed on the minimal PATH.
 	ok := Tool{Name: "t", Command: []string{"true"}}

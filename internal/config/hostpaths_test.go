@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,7 @@ func TestHostPathsRefusedInsideTree(t *testing.T) {
 		{"token-file with =", "manager: {}\n" + supervisedTool("[/usr/bin/true, --token-file=ws/secret]"), "broker.tools[t] -token-file"},
 		{"fizzy cli", "manager: {}\n" + supervisedTool("[/usr/bin/true, -fizzy, ROOT/ws/tools/bin]"), "broker.tools[t] -fizzy"},
 		{"script argument", "manager: {}\n" + supervisedTool("[/usr/bin/ruby, ROOT/ws/tools/bin]"), "broker.tools[t] argument"},
-		{"unknown flag value", "manager: {}\n" + supervisedTool("[/usr/bin/true, -config=ws/tools/bin]"), "broker.tools[t] -config"},
+		{"unknown flag value", "manager: {}\n" + supervisedTool("[/usr/bin/true, -config=ws/tools/bin]"), `broker.tools[t] argument "-config=`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,26 +158,114 @@ func TestHostProgramInWorkerDirRefused(t *testing.T) {
 }
 
 func TestToolHostPaths(t *testing.T) {
-	got := toolHostPaths(Tool{Name: "t", Command: []string{"lever-tool-github", "-tree", "/a/ws", "-app-key", "k.pem",
-		"--state=/s", "-repos", "o/n", "-branch-prefix=agent", "-fizzy", "/bin/fizzy", "plain"}})
-	want := []hostPath{
-		{"broker.tools[t] argument \"/a/ws\"", "/a/ws", hostProgram},
-		{"broker.tools[t] -app-key", "k.pem", hostSecret},
-		{"broker.tools[t] -state", "/s", hostSecret},
-		{"broker.tools[t] argument \"o/n\"", "o/n", hostProgram},
-		{"broker.tools[t] -fizzy", "/bin/fizzy", hostProgram},
+	type got struct {
+		key, path string
+		kind      hostPathKind
 	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d paths %v, want %v", len(got), got, want)
+	paths := func(cmd ...string) []got {
+		var out []got
+		for _, p := range toolHostPaths(Tool{Name: "t", Command: cmd}) {
+			if p.tool != "t" {
+				t.Errorf("%s: tool = %q, want t", p.key, p.tool)
+			}
+			out = append(out, got{p.key, p.path, p.kind})
+		}
+		return out
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("path %d = %+v, want %+v", i, got[i], want[i])
+	check := func(name string, have, want []got) {
+		t.Helper()
+		if len(have) != len(want) {
+			t.Fatalf("%s: got %v, want %v", name, have, want)
+		}
+		for i := range want {
+			if have[i] != want[i] {
+				t.Errorf("%s: path %d = %+v, want %+v", name, i, have[i], want[i])
+			}
 		}
 	}
+	arg := func(a, p string, kind hostPathKind) got {
+		return got{fmt.Sprintf("broker.tools[t] argument %q", a), p, kind}
+	}
+	check("shipped flags", paths("lever-tool-github", "-tree", "/a/ws", "-app-key", "k.pem", "--state=/s",
+		"-repos", "o/n", "-branch-prefix=agent", "-fizzy", "/bin/fizzy", "plain"), []got{
+		arg("/a/ws", "/a/ws", hostSecret), arg("/a/ws", "/ws", hostSecret),
+		{"broker.tools[t] -app-key", "k.pem", hostSecret},
+		{"broker.tools[t] -state", "/s", hostSecret},
+		arg("o/n", "o/n", hostSecret), arg("o/n", "/n", hostSecret),
+		{"broker.tools[t] -fizzy", "/bin/fizzy", hostProgram},
+	})
+	// An unknown flag's file is a secret: no read_only exception (LOW-1).
+	check("unknown flag", paths("/opt/x", "--key-file=/k"), []got{
+		{"broker.tools[t] command", "/opt/x", hostProgram},
+		arg("--key-file=/k", "/k", hostSecret),
+	})
+	// An interpreter's first argument is the script it runs: a program.
+	check("interpreter script", paths("ruby", "/t/x.rb", "/t/y"), []got{
+		arg("/t/x.rb", "/t/x.rb", hostProgram), arg("/t/x.rb", "/x.rb", hostSecret),
+		arg("/t/y", "/t/y", hostSecret), arg("/t/y", "/y", hostSecret),
+	})
+	// Glued flags and shell strings (LOW-2).
+	check("glued and shell", paths("sh", "-c", "exec /t/x", "-I/l"), []got{
+		arg("exec /t/x", "/t/x", hostSecret), arg("exec /t/x", "/x", hostSecret),
+		arg("-I/l", "/l", hostSecret),
+	})
 	if toolHostPaths(Tool{Name: "x", External: true}) != nil {
 		t.Error("an external tool has no host paths")
 	}
+}
+
+// LOW-1: an unknown flag naming a file in the tree is a secret, refused even
+// under read_only; an interpreter's script there is a program, allowed.
+func TestHostPathUnknownFlagInTreeIsSecret(t *testing.T) {
+	p, root := hostPathsInstance(t, "")
+	write := func(cmd string) {
+		body := "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  read_only: [tools]\n" + supervisedTool(strings.ReplaceAll(cmd, "ROOT", root))
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("[/usr/bin/true, --key-file=ROOT/ws/tools/bin]")
+	_, err := LoadNoHostChecks(p)
+	testutil.WantErrContaining(t, err, "--key-file=", "still lets the manager read it")
+	write("[python3, ROOT/ws/tools/bin]")
+	if _, err := LoadNoHostChecks(p); err != nil {
+		t.Fatalf("an interpreter's script under read_only refused: %v", err)
+	}
+	write("[python3, -u, ROOT/ws/tools/bin]")
+	_, err = LoadNoHostChecks(p)
+	testutil.WantErrContaining(t, err, "still lets the manager read it")
+}
+
+// LOW-2: paths glued to a flag or inside a shell string are found.
+func TestHostPathGluedAndShellStringRefused(t *testing.T) {
+	for _, cmd := range []string{
+		"[/usr/bin/ruby, -IROOT/ws/lib, /opt/x.rb]",
+		"[/usr/bin/ruby, -rROOT/ws/evil.rb, /opt/x.rb]",
+		"[/bin/sh, -c, \"exec ROOT/ws/tools/bin\"]",
+		"[/usr/bin/true, \"-path=/opt:ROOT/ws/lib\"]",
+	} {
+		p, root := hostPathsInstance(t, "")
+		body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + supervisedTool(strings.ReplaceAll(cmd, "ROOT", root))
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadNoHostChecks(p)
+		testutil.WantErrContaining(t, err, "inside the mounted tree")
+	}
+}
+
+// LOW-3: ".." in a tool path is refused, because the kernel resolves it
+// after links (ws/link/../tools/bin reads as under tools).
+func TestHostPathDotDotRefused(t *testing.T) {
+	p, root := hostPathsInstance(t, "manager:\n  read_only: [tools]\n"+supervisedTool("[ws/workers/../tools/bin]"))
+	_, err := LoadNoHostChecks(p)
+	testutil.WantErrContaining(t, err, "broker.tools[t] command", `"ws/workers/../tools/bin"`, `".." component`)
+	body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + supervisedTool("[/usr/bin/true, -token-file, "+root+"/../elsewhere/tok]")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadNoHostChecks(p)
+	testutil.WantErrContaining(t, err, "broker.tools[t] -token-file", `".." component`)
 }
 
 // On a case-insensitive filesystem WS is the tree: the walk recognises the

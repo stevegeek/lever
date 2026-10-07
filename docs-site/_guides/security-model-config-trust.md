@@ -185,18 +185,28 @@ replaceable) by the agent. Config load therefore refuses these paths when they r
 
 | Kind | Paths | Inside `tree` |
 |---|---|---|
-| Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
-| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`); the value of `-fizzy`; any other argument with a `/` in it (it may be the script an interpreter runs) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
+| Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state`, and every other path found in an argument (below) | always refused: a `manager.read_only` mount still lets the manager **read** the file |
+| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`); the value of `-fizzy`; the first argument of a script interpreter (`python`, `python3`, `ruby`, `node`, `sh`, `bash`, `perl`, `deno`, `bun`) when it is a path | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
+
+**Finding paths in tool arguments is a best-effort heuristic.** Lever reads the flags of the tools it
+ships only; it cannot know what another program does with its arguments. For every other argument it
+splits the text on whitespace, `=`, `:` and `,`, and checks each piece with a `/` in it (relative
+pieces against the instance root) and every substring of that piece that starts at a `/`. That finds
+a glued flag value (`-I/path`, `--key-file=/path`), a path in a shell string (`sh -c "exec /path"`)
+and a `PATH`-like list, but not, for example, a path a program builds from parts or reads from its
+own config file. Keep the files of other programs outside the tree yourself. A path written with a
+`..` component is refused: the kernel resolves `..` after it follows links, so `ws/link/../tools/x`
+can reach somewhere other than it reads.
 
 The check follows the path one component at a time, as the kernel does. It recognises the tree, the
 `read_only` entries and the worker dirs by identity, not by spelling, so a case alias on a
 case-insensitive host, a link at the instance root that points into the tree, and a link inside the
 tree that points out (an agent can repoint it) are all caught. A path that does not exist yet is
 placed below its deepest existing parent. Relative paths in a tool `command` resolve against the
-instance root, where the broker runs. Lever reads the flags of the tools it ships only; it does not
-parse the flags of other programs, so keep their secret files outside the tree yourself. The error
-names the key, the path and the fix: move the file outside the tree, or, for a program, cover it with
-`manager.read_only`.
+instance root: the broker supervises every tool with the instance root as its working directory,
+whatever directory `lever apply` ran from, and resolves a bare command name on the supervisor's
+fixed `PATH`, the one config load checks. The error names the key, the path and the fix: move the
+file outside the tree, or, for a program, cover it with `manager.read_only`.
 
 A program under `manager.read_only` is safe only while the running manager carries the read-only
 mount (it is create-time only, §5.1.1): `lever doctor`'s *manager read-only paths* row reports a

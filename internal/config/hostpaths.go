@@ -6,7 +6,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"unicode"
 )
 
 // hostPathKind says what the host does with a path the config names, which
@@ -25,17 +27,22 @@ const (
 )
 
 // hostPath is one host-side path from the config, absolute, with the key
-// that named it (for the error).
+// that named it (for the error), and the tool whose command holds it ("" for
+// a top-level key). raw is the path as written; dotDot marks one with a
+// ".." component.
 type hostPath struct {
-	key  string
-	path string
-	kind hostPathKind
+	key    string
+	path   string
+	kind   hostPathKind
+	tool   string
+	raw    string
+	dotDot bool
 }
 
 // toolPathFlags are the path flags of the tools lever ships
 // (cmd/lever-tool-github, cmd/lever-tool-fizzy) and what each names. Only
-// these are read as flag values; any other argument is checked only when it
-// looks like a path itself (toolHostPaths).
+// these are read as flag values; any other argument is checked only for the
+// paths in it (pathCandidates).
 var toolPathFlags = map[string]hostPathKind{
 	"app-key":    hostSecret,  // github: the GitHub App private key
 	"token-file": hostSecret,  // fizzy: the personal access token
@@ -43,78 +50,123 @@ var toolPathFlags = map[string]hostPathKind{
 	"fizzy":      hostProgram, // fizzy: the fizzy CLI it runs
 }
 
+// scriptInterpreters are commands whose first argument is a script they
+// run: that argument is a program (it may sit under manager.read_only),
+// where any other unknown argument is treated as a secret.
+var scriptInterpreters = map[string]bool{
+	"python": true, "python3": true, "ruby": true, "node": true, "sh": true,
+	"bash": true, "perl": true, "deno": true, "bun": true,
+}
+
 // hostPaths lists every host-run program and host secret the config names.
 // Paths are made absolute against the instance dir, which the supervisor
 // also makes every tool's working directory (brokerctl.ToolSpec.Dir).
 func (a *App) hostPaths() []hostPath {
 	var out []hostPath
-	add := func(key, p string, kind hostPathKind) {
-		if p == "" {
+	add := func(p hostPath) {
+		if p.path == "" {
 			return
 		}
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(a.InstanceDir(), p)
+		p.raw = p.path
+		p.dotDot = slices.Contains(strings.Split(filepath.ToSlash(p.path), "/"), "..")
+		if !filepath.IsAbs(p.path) {
+			p.path = filepath.Join(a.InstanceDir(), p.path)
 		}
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
+		if abs, err := filepath.Abs(p.path); err == nil {
+			p.path = abs
 		}
-		out = append(out, hostPath{key, p, kind})
+		out = append(out, p)
 	}
-	add("manager.credential_file", a.Manager.CredentialFile, hostSecret)
-	add("broker.api_key_file", a.Broker.APIKeyFile, hostSecret)
-	add("operator.signing_key", a.Operator.SigningKey, hostSecret)
-	add("operator.allowed_signers", a.OperatorAllowedSignersPath(), hostSecret)
+	add(hostPath{key: "manager.credential_file", path: a.Manager.CredentialFile, kind: hostSecret})
+	add(hostPath{key: "broker.api_key_file", path: a.Broker.APIKeyFile, kind: hostSecret})
+	add(hostPath{key: "operator.signing_key", path: a.Operator.SigningKey, kind: hostSecret})
+	add(hostPath{key: "operator.allowed_signers", path: a.OperatorAllowedSignersPath(), kind: hostSecret})
 	for _, t := range a.Broker.Tools {
 		for _, p := range toolHostPaths(t) {
-			add(p.key, p.path, p.kind)
+			add(p)
 		}
 	}
 	return out
 }
 
-// toolHostPaths lists the paths in one supervised tool's command: the
-// program itself when it is given as a path (a bare name is looked up on
-// the supervisor's fixed PATH, which is not in the tree), the value of each
-// known path flag (toolPathFlags), and any other argument that is a path —
-// absolute, or relative with a "/" in it. An unknown argument is treated as
-// a program (it may be the script an interpreter runs); arbitrary programs'
-// own flags are not parsed.
+// toolHostPaths lists the paths in one supervised tool's command, a
+// best-effort reading (arbitrary programs' own flags are not parsed):
+//
+//   - the program itself when it is given as a path (a bare name is looked
+//     up on the supervisor's fixed PATH, which is not in the tree): a
+//     program;
+//   - the value of each known path flag (toolPathFlags), of the kind the
+//     table gives;
+//   - every path in any other argument (pathCandidates): a secret, except
+//     the first argument of a script interpreter (scriptInterpreters),
+//     which is a program.
 func toolHostPaths(t Tool) []hostPath {
 	if t.External || len(t.Command) == 0 {
 		return nil
 	}
 	var out []hostPath
-	key := func(what string) string { return fmt.Sprintf("broker.tools[%s] %s", t.Name, what) }
-	if strings.ContainsRune(t.Command[0], '/') {
-		out = append(out, hostPath{key("command"), t.Command[0], hostProgram})
+	add := func(what, p string, kind hostPathKind) {
+		out = append(out, hostPath{key: fmt.Sprintf("broker.tools[%s] %s", t.Name, what), path: p, kind: kind, tool: t.Name})
 	}
+	if strings.ContainsRune(t.Command[0], '/') {
+		add("command", t.Command[0], hostProgram)
+	}
+	interpreter := scriptInterpreters[filepath.Base(t.Command[0])]
 	args := t.Command[1:]
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if name, ok := strings.CutPrefix(arg, "-"); ok && name != "" {
-			name = strings.TrimPrefix(name, "-")
-			name, val, hasVal := strings.Cut(name, "=")
-			kind, known := toolPathFlags[name]
-			switch {
-			case known && hasVal:
-				out = append(out, hostPath{key("-" + name), val, kind})
-			case known && i+1 < len(args):
-				i++
-				out = append(out, hostPath{key("-" + name), args[i], kind})
-			case hasVal && looksLikePath(val):
-				out = append(out, hostPath{key("-" + name), val, hostProgram})
+			name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
+			if kind, known := toolPathFlags[name]; known {
+				switch {
+				case hasVal:
+					add("-"+name, val, kind)
+				case i+1 < len(args):
+					i++
+					add("-"+name, args[i], kind)
+				}
+				continue
 			}
-			continue
 		}
-		if looksLikePath(arg) {
-			out = append(out, hostPath{key(fmt.Sprintf("argument %q", arg)), arg, hostProgram})
+		for _, c := range pathCandidates(arg) {
+			kind := hostSecret
+			if interpreter && i == 0 && c == arg {
+				kind = hostProgram
+			}
+			add(fmt.Sprintf("argument %q", arg), c, kind)
 		}
 	}
 	return out
 }
 
-// looksLikePath: absolute, or relative with a directory part.
-func looksLikePath(s string) bool { return strings.ContainsRune(s, '/') }
+// pathCandidates are the paths an argument may hold: it is split on
+// whitespace, '=', ':' and ',' (a shell string, a glued flag value such as
+// -I/x or --x=/y, a PATH-like list), and each piece with a "/" yields itself
+// when it is relative (not a flag) and every substring starting at a "/".
+// A heuristic: it cannot know what a program does with its arguments.
+func pathCandidates(arg string) []string {
+	var out []string
+	add := func(s string) {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	sep := func(r rune) bool { return unicode.IsSpace(r) || r == '=' || r == ':' || r == ',' }
+	for _, tok := range strings.FieldsFunc(arg, sep) {
+		if !strings.ContainsRune(tok, '/') {
+			continue
+		}
+		if tok[0] != '/' && tok[0] != '-' {
+			add(tok)
+		}
+		for j := range len(tok) {
+			if tok[j] == '/' {
+				add(tok[j:])
+			}
+		}
+	}
+	return out
+}
 
 // checkHostPathsOutsideTree refuses a host-run program or host secret that
 // lies in the mounted tree, where an agent can write (and read) it. A
@@ -130,6 +182,10 @@ func (a *App) checkHostPathsOutsideTree() error {
 		return fmt.Errorf("config: tree %s: %w", a.Tree, err)
 	}
 	for _, p := range paths {
+		if p.dotDot {
+			return fmt.Errorf("config: %s %q has a \"..\" component: the kernel resolves \"..\" after following links, so the path "+
+				"may reach somewhere other than it reads — write it without \"..\"", p.key, p.raw)
+		}
 		w, err := a.walkTree(realTree, p.path)
 		if err != nil {
 			return fmt.Errorf("config: %s %q: %w", p.key, p.path, err)

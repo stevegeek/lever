@@ -35,12 +35,16 @@ func TestCLIRunEnvArgvCwd(t *testing.T) {
 func TestCLIOutputCapReturnsFast(t *testing.T) {
 	bin, _ := fakeFizzy(t)
 	c := newCLI(t, bin)
+	// A long timeout and a bound far under it: a child left blocked on a
+	// full pipe holds Run for the whole timeout, while a drained one ends
+	// in well under a second (seconds under -race on a loaded runner).
+	c.Timeout = 60 * time.Second
 	start := time.Now()
 	_, err := c.Run(context.Background(), "big", "out")
 	if err == nil || !strings.Contains(err.Error(), "output larger") {
 		t.Fatalf("want an output-cap error, got %v", err)
 	}
-	if time.Since(start) > 5*time.Second {
+	if time.Since(start) > 30*time.Second {
 		t.Fatalf("cap must not wait for the timeout (took %s)", time.Since(start))
 	}
 }

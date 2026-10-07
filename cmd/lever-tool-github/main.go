@@ -63,7 +63,10 @@ func parseFlags(args []string) (opts, error) {
 	if err := ghpush.ValidatePrefix(o.prefix); err != nil {
 		return o, err
 	}
-	if err := refuseStateInTree(o.tree, o.state); err != nil {
+	if err := refuseInTree(o.tree, "-state", o.state, "the agent could write the mirrors"); err != nil {
+		return o, err
+	}
+	if err := refuseInTree(o.tree, "-app-key", o.appKey, "the agent could read the GitHub App key"); err != nil {
 		return o, err
 	}
 	o.repos = map[string]bool{}
@@ -180,20 +183,20 @@ func resolveExisting(p string) (string, error) {
 	}
 }
 
-// refuseStateInTree: the state dir holds the mirrors and must not sit in the
-// tree the agent can write (or be the tree itself).
-func refuseStateInTree(tree, state string) error {
+// refuseInTree: the state dir (mirrors) and the app key must not sit in the
+// tree the agent can read and write (or be the tree itself).
+func refuseInTree(tree, flag, p, why string) error {
 	t, err := filepath.EvalSymlinks(tree)
 	if err != nil {
 		return fmt.Errorf("-tree: %w", err)
 	}
-	s, err := resolveExisting(state)
+	s, err := resolveExisting(p)
 	if err != nil {
-		return fmt.Errorf("-state: %w", err)
+		return fmt.Errorf("%s: %w", flag, err)
 	}
 	rel, err := filepath.Rel(t, s)
 	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("-state %s is inside -tree %s: the agent could write the mirrors", state, tree)
+		return fmt.Errorf("%s %s is inside -tree %s: %s", flag, p, tree, why)
 	}
 	return nil
 }

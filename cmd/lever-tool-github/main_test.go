@@ -74,3 +74,30 @@ func TestParseFlagsRefusesStateInsideTree(t *testing.T) {
 		t.Errorf("separate state must be accepted: %v", err)
 	}
 }
+
+func TestParseFlagsRefusesAppKeyInsideTree(t *testing.T) {
+	tree := t.TempDir()
+	base := []string{"-tree", tree, "-state", filepath.Join(t.TempDir(), "st"), "-app-id", "1", "-installation-id", "2", "-repos", "a/b"}
+	key := filepath.Join(tree, "secrets", "app.pem")
+	if err := os.MkdirAll(filepath.Dir(key), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseFlags(append(base, "-app-key", key))
+	if err == nil || !strings.Contains(err.Error(), "-app-key") || !strings.Contains(err.Error(), "inside") {
+		t.Fatalf("want an -app-key inside-tree refusal, got %v", err)
+	}
+	// A symlink outside the tree that points at a key inside it is the same file.
+	link := filepath.Join(t.TempDir(), "app.pem")
+	if err := os.Symlink(key, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseFlags(append(base, "-app-key", link)); err == nil {
+		t.Error("a key reached through a symlink into the tree must be refused")
+	}
+	if _, err := parseFlags(append(base, "-app-key", filepath.Join(t.TempDir(), "app.pem"))); err != nil {
+		t.Errorf("a key outside the tree must be accepted: %v", err)
+	}
+}

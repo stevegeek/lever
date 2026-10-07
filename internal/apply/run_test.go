@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -4065,22 +4066,64 @@ func (r *deleteThenGoneRunner) RunIn(ctx context.Context, dir string, env map[st
 
 func TestWarnManagerNestedVirt(t *testing.T) {
 	var logs []string
-	r := &run{app: &config.App{Name: "assistant", NestedVirt: true}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
+	r := &run{app: &config.App{Name: "assistant", Backend: config.BackendLima, NestedVirt: true}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
 	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return false, nil }
 	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
-	if len(logs) != 1 || !strings.Contains(logs[0], "lever stop") || strings.Contains(logs[0], "--fresh") {
-		t.Fatalf("logs = %q", logs)
+	if len(logs) != 1 || !strings.Contains(logs[0], "has no /dev/kvm") || !strings.Contains(logs[0], "lever up --fresh") || !strings.Contains(logs[0], "back up") {
+		t.Fatalf("on, lacks: logs = %q", logs)
 	}
 	logs = nil
 	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return true, nil }
 	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
 	if len(logs) != 0 {
-		t.Fatalf("no warning expected, got %q", logs)
+		t.Fatalf("on, has: no warning expected, got %q", logs)
 	}
+
+	// Off: a manager created while it was on keeps the device.
 	r.app.NestedVirt = false
+	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
+	if len(logs) != 1 || !strings.Contains(logs[0], "still has /dev/kvm") || !strings.Contains(logs[0], "lever up --fresh") {
+		t.Fatalf("off, has: logs = %q", logs)
+	}
+	logs = nil
+	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return false, nil }
+	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
+	if len(logs) != 0 {
+		t.Fatalf("off, lacks: no warning expected, got %q", logs)
+	}
+	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return false, errors.New("boom") }
+	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
+	if len(logs) != 0 {
+		t.Fatalf("off, probe error: stays quiet, got %q", logs)
+	}
+
+	r.app.Backend = config.BackendOrbstack
 	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) {
-		t.Fatal("must not probe when off")
+		t.Fatal("must not probe a non-Lima instance with nested_virt off")
 		return false, nil
 	}
 	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
+}
+
+func TestManagerVolumesNestedVirt(t *testing.T) {
+	app := &config.App{Name: "m"}
+	if got := managerVolumes("/lever", app); got != nil {
+		t.Fatalf("off, no read_only: want no volumes (no inline config), got %v", got)
+	}
+	app.NestedVirt = true
+	want := []scion.VolumeMount{{Source: "/dev/kvm", Target: "/dev/kvm"}}
+	if got := managerVolumes("/lever", app); !reflect.DeepEqual(got, want) {
+		t.Fatalf("on: volumes = %v, want %v", got, want)
+	}
+}
+
+func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
+	r := &run{app: &config.App{Name: "m", Backend: config.BackendLima, NestedVirt: true, Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}}
+	opts, err := r.managerStartOpts(context.Background(), "/lever/proj", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(opts.Volumes, scion.VolumeMount{Source: KVMDevice, Target: KVMDevice}) {
+		t.Fatalf("the manager create must carry the /dev/kvm volume, got %v", opts.Volumes)
+	}
 }

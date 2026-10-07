@@ -2254,27 +2254,44 @@ func TestShellQuote(t *testing.T) {
 
 func TestCheckNestedVirt(t *testing.T) {
 	ctx := context.Background()
-	if r := checkNestedVirt(ctx, false, nil, "", nil); !r.ok || !strings.Contains(r.detail, "not applicable") {
-		t.Fatalf("off: %+v", r)
+	if r := checkNestedVirt(ctx, false, false, nil, "", nil); !r.ok || !strings.Contains(r.detail, "not applicable") {
+		t.Fatalf("off, not lima: %+v", r)
 	}
+	// guestOK answers the legacy drop-in test with exit 1 (absent).
 	guestOK := func() *proc.FakeRunner {
 		f := proc.NewFakeRunner()
 		f.Script("stat -c %F %a /dev/kvm", proc.Result{Stdout: "character special file 666\n"})
-		f.Script("sh -c", proc.Result{}) // drop-in test -f
+		f.Script("sh -c", proc.Result{Code: 1})
 		return f
 	}
 	has := func(ctx context.Context, ref, p string) (bool, error) { return true, nil }
 	lacks := func(ctx context.Context, ref, p string) (bool, error) { return false, nil }
 
-	if r := checkNestedVirt(ctx, true, guestOK(), "p--m", has); !r.ok {
+	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", has); !r.ok {
 		t.Fatalf("all good: %+v", r)
 	}
-	if r := checkNestedVirt(ctx, true, guestOK(), "p--m", lacks); r.ok || !strings.Contains(r.fix, "lever stop") {
+	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", lacks); r.ok || !strings.Contains(r.fix, "lever up --fresh") || !strings.Contains(r.fix, "back up") {
 		t.Fatalf("container lacks kvm: %+v", r)
 	}
 	bad := proc.NewFakeRunner()
 	bad.Script("stat -c %F %a /dev/kvm", proc.Result{Stdout: "character special file 660\n"})
-	if r := checkNestedVirt(ctx, true, bad, "p--m", has); r.ok || !strings.Contains(r.detail, "660") {
+	if r := checkNestedVirt(ctx, true, true, bad, "p--m", has); r.ok || !strings.Contains(r.detail, "660") {
 		t.Fatalf("wrong mode: %+v", r)
+	}
+	legacy := guestOK()
+	legacy.Script("sh -c", proc.Result{})
+	if r := checkNestedVirt(ctx, true, true, legacy, "p--m", has); r.ok || !strings.Contains(r.detail, "legacy") || !strings.Contains(r.fix, "lever apply") {
+		t.Fatalf("legacy drop-in: %+v", r)
+	}
+
+	// Off on Lima: the manager created while it was on keeps the device.
+	if r := checkNestedVirt(ctx, false, true, guestOK(), "p--m", has); r.ok || !strings.Contains(r.detail, "still has /dev/kvm") || !strings.Contains(r.fix, "lever up --fresh") {
+		t.Fatalf("off, manager has kvm: %+v", r)
+	}
+	if r := checkNestedVirt(ctx, false, true, guestOK(), "p--m", lacks); !r.ok {
+		t.Fatalf("off, manager lacks kvm: %+v", r)
+	}
+	if r := checkNestedVirt(ctx, false, true, legacy, "p--m", lacks); r.ok || !strings.Contains(r.detail, "legacy") {
+		t.Fatalf("off, legacy drop-in: %+v", r)
 	}
 }

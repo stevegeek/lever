@@ -34,10 +34,8 @@ func TestEnsureNestedVirtOn(t *testing.T) {
 				t.Errorf("call 1 must use the user prefix %v, got %v", shape.userPrefix, f.Calls[1].Args)
 			}
 			user := f.Calls[1].Args[len(f.Calls[1].Args)-1]
-			for _, want := range []string{kvmDropInPath, `devices = ["/dev/kvm"]`} {
-				if !strings.Contains(user, want) {
-					t.Errorf("user script missing %q:\n%s", want, user)
-				}
+			if !strings.Contains(user, `rm -f "`+legacyKVMDropInPath+`"`) || strings.Contains(user, "devices") {
+				t.Errorf("on user script must only remove the legacy drop-in:\n%s", user)
 			}
 		})
 	}
@@ -58,10 +56,15 @@ func TestEnsureNestedVirtOffRemoves(t *testing.T) {
 			}
 			root := f.Calls[0].Args[len(f.Calls[0].Args)-1]
 			user := f.Calls[1].Args[len(f.Calls[1].Args)-1]
-			if !strings.Contains(root, "rm -f "+KVMUdevRulePath) || strings.Contains(root, "test -c") {
-				t.Errorf("off root script must only remove the rule:\n%s", root)
+			for _, want := range []string{"rm -f " + KVMUdevRulePath, "chmod 0660 /dev/kvm", "exit 0"} {
+				if !strings.Contains(root, want) {
+					t.Errorf("off root script missing %q:\n%s", want, root)
+				}
 			}
-			if !strings.Contains(user, `rm -f "`+kvmDropInPath+`"`) {
+			if strings.Contains(root, "0666") || strings.Contains(root, "exit 4") {
+				t.Errorf("off root script must not grant or require /dev/kvm:\n%s", root)
+			}
+			if !strings.Contains(user, `rm -f "`+legacyKVMDropInPath+`"`) {
 				t.Errorf("off user script must remove the drop-in:\n%s", user)
 			}
 		})

@@ -171,7 +171,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {
-			return checkNestedVirt(ctx, app.NestedVirt, jr, jail.ContainerName(hubProjectKey(b.MountDest()), app.Name), probeDevice)
+			return checkNestedVirt(ctx, app.NestedVirt, app.Backend == config.BackendLima, jr, jail.ContainerName(hubProjectKey(b.MountDest()), app.Name), probeDevice)
 		},
 		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)

@@ -84,13 +84,17 @@ stayed green. Under `egress: closed` DNS stays dropped by design; agents dial th
 is no longer indistinguishable from a healthy idle one. OrbStack is unaffected: its resolver path
 is not in the dropped set.
 
-**Nested virtualization (`nested_virt`).** On a Linux host, `nested_virt: true` gives every agent
-container in the jail `/dev/kvm`, so an agent can run KVM guests (for example Lima, to test lever
-itself). Apply refuses when the host's `kvm_amd`/`kvm_intel` `nested` parameter is off. The
-template renders `vmOpts.qemu.cpuType: host`, which Lima reads at create time only: an existing VM
-needs a recreate. Inside the guest, lever writes a udev rule (`/etc/udev/rules.d/65-lever-kvm.rules`,
-mode 0666) and a podman drop-in (`20-lever-kvm.conf`); it removes both when the key is off, but the
-device keeps mode 0666 until the guest reboots. A running manager gets the device after `lever stop`
-and `lever up`. `lever doctor` has a *nested virt* row. The key is rejected on OrbStack and on
-darwin. `cpus` and `memory` (Lima only, create-time) size the VM. See the
-[`nested_virt` config row](/reference/config/) for the full contract.
+**Nested virtualization (`nested_virt`).** On a Linux host, `nested_virt: true` gives the manager
+container `/dev/kvm`, so the manager can run KVM guests (for example Lima, to test lever itself).
+Workers and the hub do not get the device. Apply refuses when the host's `kvm_amd`/`kvm_intel`
+`nested` parameter is off. The template renders `vmOpts.qemu.cpuType: host`, which Lima reads at
+create time only: an existing VM needs a recreate. Inside the guest, lever writes a udev rule
+(`/etc/udev/rules.d/65-lever-kvm.rules`, mode 0666). The manager gets the device as a bind-mount
+volume on its scion record (scion has no per-agent device field; rootless podman passes a
+`--device` as the same bind mount). The volume is create-time only: to give an existing manager
+the device, or to take it away, back up the conversation, then run `lever up --fresh`. When the
+key is off, apply removes the rule and sets the device back to mode 0660. Each apply also removes
+the podman drop-in (`20-lever-kvm.conf`) that earlier builds wrote, which gave every container the
+device. `lever doctor` has a *nested virt* row. The key is rejected on OrbStack and on darwin.
+`cpus` and `memory` (Lima only, create-time) size the VM; apply warns when they differ from the
+existing VM's. See the [`nested_virt` config row](/reference/config/) for the full contract.

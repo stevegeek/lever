@@ -2,6 +2,7 @@ package remoteproxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,6 +139,12 @@ func TestUploadGate(t *testing.T) {
 	cfg, _, _ := filesCfg(t, hub)
 	stale := cfg
 	stale.ContactSession = func(string) error { return errors.New("old skill") }
+	// The hub's records cannot be read: no freshness answer.
+	hubDown := cfg
+	hubDown.AgentRecords = func(context.Context) (map[string]AgentRecord, error) { return nil, errors.New("hub down") }
+	// No record: the session check still runs, as for a post.
+	noRecord := stale
+	noRecord.AgentRecords = func(context.Context) (map[string]AgentRecord, error) { return map[string]AgentRecord{}, nil }
 	for name, tc := range map[string]struct {
 		cfg          Config
 		login, agent string
@@ -153,11 +160,17 @@ func TestUploadGate(t *testing.T) {
 		"no origin":         {cfg, "c@x", "w1", []string{"Origin", ""}, 403, "origin"},
 		"not fresh":         {stale, "c@x", "w1", nil, 409, "not-fresh"},
 		"operator stale ok": {stale, chatOp, "w1", nil, 201, ""},
+		"hub down":          {hubDown, "c@x", "w1", nil, 503, "try-again"},
+		"operator hub down": {hubDown, chatOp, "w1", nil, 201, ""},
+		"no record, stale":  {noRecord, "c@x", "w1", nil, 409, "not-fresh"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rw := upload(t, NewHandler(tc.cfg), tc.login, tc.agent, "a.pdf", "x", tc.hdr...)
 			if rw.Code != tc.status || tc.word != "" && !strings.Contains(rw.Body.String(), `"error":"`+tc.word+`"`) {
 				t.Fatalf("%d %s", rw.Code, rw.Body)
+			}
+			if tc.status == http.StatusServiceUnavailable && rw.Header().Get("Retry-After") == "" {
+				t.Fatal("a try-again answer says when")
 			}
 		})
 	}

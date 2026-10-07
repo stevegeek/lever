@@ -459,6 +459,7 @@ const UPLOAD_WORDS = {
   quota: 'too much uploaded today; try again tomorrow',
   busy: 'other uploads are under way; try again in a moment',
   'not-fresh': 'the agent must restart before it takes files; ask the manager',
+  'try-again': "the agent's state cannot be checked now; try again in a moment",
   'not-allowed': 'you may not send files to this agent',
   'one-file': 'send one file at a time',
   'bad-form': 'the upload was not understood',

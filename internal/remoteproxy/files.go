@@ -441,11 +441,21 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 	if v.tier == chatledger.TierContact {
 		// The same rule as a contact's post: only to an agent whose session
 		// started fresh on the current skill (the follow-up chat note would
-		// be refused anyway).
+		// be refused anyway). Unlike the agent list, an unknown state or no
+		// record is no pass: with the hub's records unreadable the upload
+		// waits, and the session is checked either way.
 		recs, err := g.records(r.Context())
 		rec, found := recs[agent]
-		state, _ := agentState(rec, found, err != nil)
-		if !contactFresh(state, agent, g.cfg.ContactSession) {
+		if found && !validHubID(rec.ID) {
+			err = errBadUserID
+		}
+		if state, _ := agentState(rec, found, err != nil); state == "unknown" {
+			line.Error = "the agent's hub state cannot be read"
+			w.Header().Set("Retry-After", "30")
+			g.refuseFile(w, r, line, http.StatusServiceUnavailable, "try-again")
+			return
+		}
+		if fresh := g.cfg.ContactSession; fresh == nil || fresh(agent) != nil {
 			g.refuseFile(w, r, line, http.StatusConflict, "not-fresh")
 			return
 		}

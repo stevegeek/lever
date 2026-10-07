@@ -24,6 +24,10 @@
 # lever-renew sidecar) so scion auto-refreshes the cert and, in api-key mode, the
 # LLM token after this hook. scion reads that file just after pre-start hooks; it
 # must be written at runtime because ~/.scion is under the /home/scion bind-mount.
+# Claude config: the bootstrap's optional claude block (the operator's
+# claude_settings and after_compact_note) goes to Claude Code's managed-settings
+# file, which root owns and the agent user cannot write. Boot rewrites it on
+# every start; with no block and no file it touches nothing.
 set -eu
 bootstrap="${LEVER_BOOTSTRAP:-}"
 if [ -z "$bootstrap" ]; then
@@ -37,4 +41,5 @@ lever-agent boot \
   --id-dir "$HOME/.lever-id" \
   --bootstrap "$bootstrap" \
   --llm-auth "${LEVER_LLM_AUTH:-subscription}" \
-  --settings "$HOME/.claude/settings.json"
+  --settings "$HOME/.claude/settings.json" \
+  --managed-settings /etc/claude-code/managed-settings.json

@@ -16,6 +16,7 @@ import (
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 func newDoctorCmd(factory BackendFactory) *cobra.Command {
@@ -163,9 +164,11 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	agentSession := jail.AgentProbe{R: jr}
 	workerNames := make([]string, 0, len(app.Workers))
 	workerDirs := make(map[string]string, len(app.Workers))
+	workerClaude := make(map[string]*wire.Claude, len(app.Workers))
 	for _, w := range app.Workers {
 		workerNames = append(workerNames, w.Name)
 		workerDirs[w.Name] = app.WorkerDir(w)
+		workerClaude[w.Name] = w.Claude()
 	}
 
 	checks := []func() checkResult{
@@ -175,6 +178,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		},
 		func() checkResult {
 			return checkAgentHubTokens(ctx, b.MountDest(), app.Name, networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)
+		},
+		func() checkResult {
+			return checkClaudeSettings(ctx, b.MountDest(), claudeAgents(app.Name, app.ManagerClaude(), workerNames, workerClaude), listAgents, agentSession.ClaudeSettings)
 		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {

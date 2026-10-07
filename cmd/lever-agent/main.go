@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -37,7 +38,7 @@ var errNoIdentity = errors.New("no identity")
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|request|delegate|call>")
+		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|request|delegate|call|after-compact>")
 	}
 	// One signal-bound context for every verb: SIGINT/SIGTERM cancels the
 	// network call in flight (or the renew loop, the gateway listener, the
@@ -58,6 +59,8 @@ func run(argv []string) error {
 		return cmdGateway(ctx, argv[2:])
 	case "request", "delegate", "call":
 		return cmdCLI(ctx, argv[1], argv[2:])
+	case "after-compact":
+		return cmdAfterCompact(argv[2:], os.Stdout)
 	default:
 		return fmt.Errorf("unknown subcommand %q", argv[1])
 	}
@@ -108,6 +111,7 @@ func cmdBoot(ctx context.Context, args []string) error {
 	bootstrapPath := fs.String("bootstrap", defaultBootstrapPath(), "path to bootstrap.json")
 	idDir := fs.String("id-dir", defaultIDDir(), "directory for the agent identity (cert+key+ca)")
 	settingsPath := fs.String("settings", "", "path to the claude settings.json whose env block receives ANTHROPIC_AUTH_TOKEN/BASE_URL (api-key mode)")
+	managedPath := fs.String("managed-settings", "", "path to Claude Code's managed-settings.json, which receives the bootstrap's claude block (auto_compact_window, after_compact_note); empty skips it")
 	var tools toolsFlag
 	fs.Var(&tools, "tools", "comma-separated broker tool names to register via claude mcp add")
 	llmAuth := fs.String("llm-auth", agent.LLMAuthSubscription, "LLM auth mode: 'api-key' obtains a capability(llm) token and writes ANTHROPIC_AUTH_TOKEN/BASE_URL into the claude settings.json env block; 'subscription' (default) leaves those keys absent and uses the user's own key")
@@ -121,10 +125,11 @@ func cmdBoot(ctx context.Context, args []string) error {
 		BrokerTools:   tools.tools,
 		// Auto-discover tools from the broker only when -tools was not given.
 		// When -tools is set (even to ""), the explicit list wins.
-		DiscoverTools: !tools.set,
-		SettingsPath:  *settingsPath,
-		LLMAuth:       *llmAuth,
-		MCPAdd:        newClaudeMCP().Add,
+		DiscoverTools:       !tools.set,
+		SettingsPath:        *settingsPath,
+		ManagedSettingsPath: *managedPath,
+		LLMAuth:             *llmAuth,
+		MCPAdd:              newClaudeMCP().Add,
 	}
 	if *enrolOnly {
 		// Enrol + write identity only: skip the env overlay, the llm token and
@@ -132,6 +137,7 @@ func cmdBoot(ctx context.Context, args []string) error {
 		cfg.BrokerTools = nil
 		cfg.DiscoverTools = false
 		cfg.SettingsPath = ""
+		cfg.ManagedSettingsPath = ""
 		cfg.LLMAuth = ""
 		cfg.MCPAdd = nil
 	}
@@ -155,6 +161,26 @@ func cmdBoot(ctx context.Context, args []string) error {
 		return fmt.Errorf("emit renew sidecar: %w", err)
 	}
 	return nil
+}
+
+// cmdAfterCompact is the command of lever's after-compaction hook, which boot
+// writes into the managed settings (agent.WriteManagedSettings): Claude Code
+// runs it at the session start that follows a compaction, and it prints the
+// operator's note as SessionStart hook context. It reads nothing but its
+// flag (Claude Code's hook input on stdin is ignored) and reaches nothing
+// outside the container.
+func cmdAfterCompact(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("after-compact", flag.ContinueOnError)
+	noteB64 := fs.String("note-b64", "", "the operator's note, base64 (standard encoding)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	b, err := agent.AfterCompactOutput(*noteB64)
+	if err != nil {
+		return err
+	}
+	_, err = out.Write(append(b, '\n'))
+	return err
 }
 
 // mcpAddArgs builds the `claude mcp add` argv. It forces --scope user (global,

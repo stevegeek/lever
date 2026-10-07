@@ -102,9 +102,10 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			ManagerIdentity: app.ManagerCN(),
 			// The manager's scion agent slug is the APP NAME (apply's start-manager
 			// dispatches the manager as Worker: app.Name), not the manager cert CN.
-			ManagerSlug: app.Name,
-			GrantTTL:    app.Broker.GrantTTL,
-			TicketTTL:   app.Broker.TicketTTL,
+			ManagerSlug:   app.Name,
+			ManagerClaude: app.ManagerClaude(),
+			GrantTTL:      app.Broker.GrantTTL,
+			TicketTTL:     app.Broker.TicketTTL,
 		},
 		LLM: broker.LLMConfig{
 			Upstream: app.Broker.LLMUpstream, // empty ⇒ broker defaults to api.anthropic.com

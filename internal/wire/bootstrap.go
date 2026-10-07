@@ -23,6 +23,11 @@ type Bootstrap struct {
 	BrokerCA  string `json:"broker_ca"`
 	BrokerURL string `json:"broker_url"`
 	AgentCN   string `json:"agent_cn"`
+	// Claude is the agent's Claude Code configuration from the host config
+	// (manager.claude_settings / after_compact_note, or the worker's own),
+	// applied by lever-agent boot at every start. nil when none is
+	// configured.
+	Claude *Claude `json:"claude,omitempty"`
 }
 
 // Stage writes b as <root>/<rel>/bootstrap.json — the deposit LoadBootstrap

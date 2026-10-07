@@ -307,6 +307,12 @@ type Deps struct {
 	// /dev/kvm (the podman drop-in reaches containers at create time). nil
 	// means the warning says it could not check. Optional.
 	ProbeContainerDevice func(ctx context.Context, ref, path string) (bool, error)
+	// ReadClaudeSettings reads back the Claude config in a running agent
+	// container (jail.AgentProbe.ClaudeSettings in production). Used to warn
+	// when the live manager holds other claude_settings / after_compact_note
+	// than the config: they apply at start, so a kept manager has the old
+	// ones until its next start. nil skips the warning. Optional.
+	ReadClaudeSettings func(ctx context.Context, ref string) (jail.ClaudeDelivered, error)
 	// RecordVolumes reads the extra mounts the hub record of agent in
 	// project was created with (its inline-config volumes, through the
 	// controller's read-only agent listing), as jail mounts. It is
@@ -993,7 +999,26 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		r.warnManagerTreeMounts(ctx, jp)
 	}
 	r.warnManagerNestedVirt(ctx, jp)
+	r.warnManagerClaude(ctx, jp)
 	return nil
+}
+
+// warnManagerClaude runs after the manager is live: boot applies the
+// manager's claude block at start, so a manager apply kept running holds
+// the values of its last start. Silent when they match, when nothing is
+// configured or delivered, and when the read fails (the doctor row
+// "claude settings" reports that).
+func (r *run) warnManagerClaude(ctx context.Context, jp string) {
+	if r.d.ReadClaudeSettings == nil {
+		return
+	}
+	want := r.app.ManagerClaude()
+	got, err := r.d.ReadClaudeSettings(ctx, jail.ContainerName(path.Base(jp), r.app.Name))
+	if err != nil || got.Matches(want) {
+		return
+	}
+	r.d.Log("start-manager: WARNING: manager %q runs with claude settings %s, but the config sets %s; they apply at its next start (`lever stop && lever up`). If a start does not change them, the image's lever-agent predates them: rebuild it (`make lever-image`)",
+		r.app.Name, got.Describe(), jail.DescribeClaude(want))
 }
 
 // managerTask reads the manager's task prompt (when configured).

@@ -35,6 +35,7 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 			InstructionsPath: app.WorkerInstructionsPath(g),
 			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 			Recyclable:       g.Recyclable,
+			Claude:           g.Claude(),
 		})
 	}
 	return specs

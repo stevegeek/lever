@@ -304,6 +304,9 @@ func (a *App) Validate() error {
 	if err := validateImageTar("manager", a.Manager.Image, a.Manager.ImageTar); err != nil {
 		return err
 	}
+	if err := validateClaude("manager", a.Manager.ClaudeSettings, a.Manager.AfterCompactNote); err != nil {
+		return err
+	}
 	for _, g := range a.Workers {
 		if err := a.validateWorker(g); err != nil {
 			return err
@@ -452,6 +455,9 @@ func (a *App) validateWorker(g Worker) error {
 	}
 	if g.InstructionsFile != "" && !confinedRel(g.InstructionsFile) {
 		return fmt.Errorf("config: worker %q instructions_file %q must be a relative path inside the instance root (no \"..\", not absolute)", g.Name, g.InstructionsFile)
+	}
+	if err := validateClaude(fmt.Sprintf("worker %q", g.Name), g.ClaudeSettings, g.AfterCompactNote); err != nil {
+		return err
 	}
 	return nil
 }

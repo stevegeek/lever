@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 const (
@@ -104,8 +105,12 @@ type IdentityConfig struct {
 	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
 	// (embedders/tests that never message the manager).
 	ManagerSlug string
-	GrantTTL    time.Duration
-	TicketTTL   time.Duration
+	// ManagerClaude is the manager's Claude Code config (config.ManagerClaude),
+	// carried in every envelope the broker stages for the manager (the
+	// auto-re-enrol healer). nil when none is configured.
+	ManagerClaude *wire.Claude
+	GrantTTL      time.Duration
+	TicketTTL     time.Duration
 }
 
 // PersistenceConfig seeds the broker's persisted state at construction and
@@ -307,6 +312,7 @@ type Broker struct {
 
 	instanceProject string
 	managerSlug     string // the manager's scion agent slug (app name), ≠ the cert CN
+	managerClaude   *wire.Claude
 	workerToWorker  bool
 
 	// workerLocks serialises the read-phase-then-act paths of one worker
@@ -414,7 +420,7 @@ func New(c Config) *Broker {
 	return &Broker{
 		// identity, keys and policy
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
-		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug,
+		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
 		log: c.Log, version: c.Version, configHash: c.ConfigHash, toolSecret: c.ToolSecret,
 		timeouts: c.Timeouts.withDefaults(),

@@ -16,7 +16,8 @@ func TestWorkerSpecs(t *testing.T) {
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},
-			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md", Recyclable: true},
+			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md", Recyclable: true,
+				ClaudeSettings: config.ClaudeSettings{AutoCompactWindow: 300000}, AfterCompactNote: "Re-read TASK.md"},
 		},
 	}
 	specs := WorkerSpecs(app, "/lever", "501")
@@ -40,6 +41,13 @@ func TestWorkerSpecs(t *testing.T) {
 	// the manager — and the spec carries the config-resolved host path.
 	if specs[1].InstructionsPath != app.WorkerInstructionsPath(app.Workers[1]) || specs[1].InstructionsPath == "" {
 		t.Fatalf("helper InstructionsPath = %q, want the config-resolved path", specs[1].InstructionsPath)
+	}
+	// claude_settings / after_compact_note: the worker's own, never the manager's.
+	if c := specs[1].Claude; c == nil || c.AutoCompactWindow != 300000 || c.AfterCompactNote != "Re-read TASK.md" {
+		t.Fatalf("helper Claude = %+v", c)
+	}
+	if specs[0].Claude != nil {
+		t.Fatalf("worker Claude = %+v, want nil (none configured)", specs[0].Claude)
 	}
 	if w.InstructionsPath != "" {
 		t.Fatalf("worker without instructions_file must get none, got %q", w.InstructionsPath)

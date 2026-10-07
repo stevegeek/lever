@@ -68,3 +68,11 @@ func TestPreStartHookSelectsBootstrapPath(t *testing.T) {
 		t.Fatalf("llm-auth not forwarded: %q", out)
 	}
 }
+
+// The hook points boot at Claude Code's managed-settings file, the root-owned
+// place the claude block goes (agent.ManagedSettingsPath).
+func TestPreStartHookPassesManagedSettings(t *testing.T) {
+	if out := runHook(t, nil); !strings.Contains(out, "--managed-settings\n/etc/claude-code/managed-settings.json\n") {
+		t.Fatalf("no --managed-settings in %q", out)
+	}
+}

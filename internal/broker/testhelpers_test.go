@@ -372,7 +372,7 @@ func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
 // mints a worker ticket any more (the jail /provision route is gone).
 func mintWorkerTicket(t *testing.T, b *Broker, worker string) string {
 	t.Helper()
-	bs, err := b.bootstrapFor(worker)
+	bs, err := b.bootstrapFor(worker, nil)
 	if err != nil {
 		t.Fatalf("mint worker ticket: %v", err)
 	}

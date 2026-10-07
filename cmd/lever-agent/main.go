@@ -128,8 +128,11 @@ func cmdBoot(ctx context.Context, args []string) error {
 		DiscoverTools:       !tools.set,
 		SettingsPath:        *settingsPath,
 		ManagedSettingsPath: *managedPath,
-		LLMAuth:             *llmAuth,
-		MCPAdd:              newClaudeMCP().Add,
+		Log: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		},
+		LLMAuth: *llmAuth,
+		MCPAdd:  newClaudeMCP().Add,
 	}
 	if *enrolOnly {
 		// Enrol + write identity only: skip the env overlay, the llm token and
@@ -138,6 +141,7 @@ func cmdBoot(ctx context.Context, args []string) error {
 		cfg.DiscoverTools = false
 		cfg.SettingsPath = ""
 		cfg.ManagedSettingsPath = ""
+		cfg.Log = nil
 		cfg.LLMAuth = ""
 		cfg.MCPAdd = nil
 	}

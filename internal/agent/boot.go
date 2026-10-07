@@ -78,6 +78,9 @@ type BootConfig struct {
 	// (ManagedSettingsPath in production), which receives the envelope's
 	// claude block (WriteManagedSettings). Empty skips the write.
 	ManagedSettingsPath string
+	// Log reports a boot decision the operator should see in the agent's
+	// pre-start output. nil discards it.
+	Log func(format string, args ...any)
 	// LLMAuth selects the LLM-auth mode ("api-key" | "subscription" | "").
 	// When "api-key", Boot obtains a capability(llm) token and writes
 	// ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL into the overlay. Any other
@@ -153,6 +156,10 @@ func Boot(ctx context.Context, c BootConfig) error {
 	}
 	if err := WriteSettingsEnv(c.SettingsPath, overlay); err != nil {
 		return err
+	}
+	if bsErr != nil && c.ManagedSettingsPath != "" && c.Log != nil {
+		// No envelope means no claude block: say why lever's values go.
+		c.Log("lever-agent boot: no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any", bsErr, c.ManagedSettingsPath)
 	}
 	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil {
 		return err

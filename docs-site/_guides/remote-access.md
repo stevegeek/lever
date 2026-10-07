@@ -206,6 +206,9 @@ jail-loopback-only, dev-auth-on mint window used for the [controller PAT
 re-mint](/security-model/worker-isolation/): a throwaway hub, reachable only from inside the jail,
 up just long enough to mint the token, then torn down. On a fresh bootstrap with `remote.enabled`
 already set, this happens in the *same* window as the controller-PAT mint — no extra window opens.
+The window cannot open while any agent container runs (an agent could reach the dev-auth hub):
+`apply` then skips the remote mint and the role grant with a warning, and goes on. Run `lever
+stop`, then `lever up`, to run them (the manager conversation is kept).
 
 ### 4. Front it with Tailscale
 
@@ -594,13 +597,16 @@ Every request the proxy handles — allowed or denied — is appended as one JSO
 `.lever-state/remote-audit.jsonl`: timestamp, the identity header's value if present (the
 `ts_login` field, whatever the header), method, path, the
 decision (`allow` / `deny-host` when the `Host` header does not match `base_url` / `deny-origin` /
-`deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session` / `deny-contact` when the
+`deny-user` / `deny-credential-mint` / `deny-route` / `deny-no-session` / `deny-path` for a path
+not in one spelling / `login-redirect` for an intercepted sign-in navigation / `deny-contact` when the
 contact fence refuses a request / `chat-unavailable` when the [chat page](#the-chat-page) cannot
 resolve your hub user / `remote-wake` and `deny-wake` for a [wake](#waking-a-worker), with a
 `reason` word on a refusal, and `remote-wake-result` for the broker's late answer /
 `operator-view` and `deny-operator-view` for the [operator's view of contact
 conversations](#the-operators-view-of-contact-conversations), with `contact`, `agent` and `count`
-fields and a `reason` word on a refusal), and the upstream status once known. The login path writes there too: `oidc-session` when a session is
+fields and a `reason` word on a refusal / the `push-*` and `deny-push` lines of
+[notifications](#notifications) / `file-upload`, `file-download` and `deny-file` for [files in the
+chat](#files-in-the-chat)), and the upstream status once known. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
 refuses one, `oidc-not-found` for an unknown path), and `deny-authorize` for anything that probes `/authorize` — nothing legitimate
@@ -644,7 +650,8 @@ The whole web UI, API included, runs as the **hub user** the sign-in created (se
 [who the hub thinks you are](#how-the-browser-is-logged-in)), and scion gives a new user no role on
 any project. So `apply` also creates a custom project role, `lever-remote`, with the same surface as
 the remote PAT (`agent.read`, `agent.list`, `project.read`, `agent.attach`, `agent.message`) plus
-`project.list`, which only the web UI's project list needs, and binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
+`project.list`, which only the web UI's project list needs (and `agent.lifecycle`, the start, stop
+and suspend controls, on a hub that has that permission), and binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
 unset, it binds the placeholder `lever-operator@lever.local`.
 
 **The web user cannot create projects.** Every hub user also holds scion's `hub-member` system
@@ -669,8 +676,9 @@ ceiling. A record written before the ceiling existed has no ceilings, so the fir
 upgrading opens the window once. `lever doctor`'s `remote web role` row reads the same record.
 
 **A user exists only after its first sign-in.** On a fresh setup, the web UI answers 403 until the
-role is bound: sign in once from the phone, then run `lever apply`. Until then, `apply` warns and
-opens the window on every run to try again.
+role is bound: sign in once from the phone, then run `lever stop` and `lever up` (a `lever apply`
+binds it only while no agent container runs, see [3. Apply](#3-apply)). Until then, `apply` warns
+and tries the window again on every run.
 
 Removing a user from `allowed_users` does **not** remove its binding or its ceiling. The proxy then
 refuses that login before it reaches the hub, but the hub user keeps the role.
@@ -897,8 +905,11 @@ but never replaces the name.
 
 The proxy answers these itself and forwards none of them to the hub: `GET /` (a redirect to
 `/lever/chat`), `/lever/chat`, its `.css` and two `.js` files, the app manifest and icons,
-`GET /lever/api/agents` (the list) and `POST /lever/api/agents/<name>/wake`. Anything else under
-`/lever/` is a 404; `/lever/api/chat`, which the one-agent page read, is gone. With `landing` unset
+`GET /lever/api/agents` (the list), `POST /lever/api/agents/<name>/wake`, the operator's
+`/lever/api/contacts` routes ([below](#the-operators-view-of-contact-conversations)), and, while
+their feature is on, the push routes and `/lever/sw.js` ([Notifications](#notifications)) and
+`/lever/api/files/` ([Files in the chat](#files-in-the-chat)). Anything else under `/lever/` is a
+404; `/lever/api/chat`, which the one-agent page read, is gone. With `landing` unset
 or `console`, none of this exists, every path goes to the hub as before, and a contact gets the
 fence's own landing page.
 
@@ -910,8 +921,10 @@ unread count drops. After a `lever up --fresh` (or a worker's fresh start) the a
 hub record; the open chat moves to the new conversation by itself, and a message you were about
 to send is not posted to the old one.
 
-Not in the page: file upload, messages that an agent starts to a contact, and notifications while
-the page is closed. Use the Console for files.
+Off by default, each with its own key: [messages that an agent starts](#messages-agents-start) to
+a contact (`remote.agent_messages`), [notifications](#notifications) while the page is closed
+(`remote.push`), and [files](#files-in-the-chat) (`remote.files`). With files off, an operator uses
+the Console for files.
 
 ## Contacts: chat-only logins
 
@@ -996,6 +1009,10 @@ remote:
     follow_up_after: 24h      # default; 1h to 720h
     max_chars: 4000           # default; 1 to 16000
 ```
+
+Config load refuses `enabled: true` when `allowed_users` has no `tier: contact` entry (agents
+message only contacts), and on a `scion.version` older than `b3562fb1` (see **Scion version**
+below). It works with either `landing`.
 
 - **The agent's two steps.** The agent calls `contact_message` (a tool of its `lever-capability`
   MCP server) with the contact's login, the whole text and, for a reply, the `message_id` that
@@ -1099,8 +1116,9 @@ encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
   contact's hub user id, never from the request.
 - **"has not signed in yet".** The proxy reads only for a contact that `lever apply` bound to a
   hub user (`.lever-state/remote-role.json`). For any other contact it does not sign in, since a
-  sign-in would create the contact's hub user. After a contact signs in for the first time, run
-  `lever apply` again; until then its conversations show "has not signed in yet". When the hub
+  sign-in would create the contact's hub user. After a contact signs in for the first time, bind
+  it with `lever stop`, then `lever up` (a `lever apply` binds it only while no agent container
+  runs, see [3. Apply](#3-apply)); until then its conversations show "has not signed in yet". When the hub
   refuses a read and the contact's session belongs to another hub user than the one `apply`
   bound (the hub forgot the contact, and its next sign-in made a new user), the answer is also
   `not-signed-in`, with the hint `run lever apply`. To find that out the proxy asks the hub who
@@ -1114,11 +1132,15 @@ encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
   reads bind a record to a message, so your reads never change what the contact sees.
 - **Routes.** `GET /lever/api/contacts` (the contacts, their message agents, labels, states and
   whether each is bound) and `GET /lever/api/contacts/<login>/agents/<name>/messages?cursor=&limit=`
-  (`limit` 1 to 200, default 50), with the login URL-encoded. `HEAD` is answered like `GET`; any
+  (`limit` 1 to 200, default 50), with the login URL-encoded; with
+  [files](#files-in-the-chat) on, also `GET /lever/api/contacts/<login>/agents/<name>/files` (that
+  contact's file exchange with the agent, from the host record only; `404 not-found` when files are
+  off or either login has `files: false`). `HEAD` is answered like `GET`; any
   other method is `405`. Refusals are fixed words: `not-found` (404: not a contact, or not one of
   its agents), `not-signed-in` (409, with `"hint": "run lever apply"` and the audit reason
   `stale-binding` for a changed hub user), `no-record` (409: the agent has no hub record),
-  `bad-query` (400) and `unavailable` (502: the hub or its answer failed).
+  `bad-query` (400) and `unavailable` (502: the hub or its answer failed; 503 for the files
+  route when the record cannot be read).
 - **Audit.** Every answer is one line in `.lever-state/remote-audit.jsonl`: `operator-view` with
   the `contact`, the `agent` and the `count` of rows (or of contacts for the list), or
   `deny-operator-view` with the `reason` word. No line holds message text.
@@ -1135,6 +1157,11 @@ remote:
     enabled: true
     subject: mailto:you@example.com   # the contact the push services see for this sender
 ```
+
+Config load refuses `push.enabled` without `landing: chat`, and a `subject` that is not
+`mailto:<address>` or an `https://` URL (required, at most 200 characters). Run `lever apply`: it
+restarts the proxy. Push needs no image rebuild and no `lever init`. Web push has not been tested
+on a real device yet (Linux Chrome, iPhone).
 
 - **What a login sees.** "New message from <agent>" (or "New message" when the agent is not in
   the login's list). A tap opens the chat with that agent. No message text leaves the host, not
@@ -1221,7 +1248,16 @@ remote:
     enabled: true
     # max_bytes: 26214400                     # one file; default 25 MiB, at most 100 MiB
     # extensions: [pdf, xlsx, xlsm, xls, csv, docx, doc, png, jpg, jpeg, txt, zip]
+    # uploads: true                           # default; false = no new upload
+    # shares: true                            # default; false = no new share, no share download
+  allowed_users:
+    - operator@example.com
+    - {login: client@example.com, tier: contact, agents: [deal], files: false}   # no files for this login
 ```
+
+Config load refuses `files.enabled` without `landing: chat`, a worker `dir` that overlaps
+`.lever-files` at the tree root (the manager's exchange), and a `manager.read_only` entry that
+covers it.
 
 - **What a login does.** In a chat with an agent it may message (never a `see:` agent), the
   paperclip uploads one file at a time, with progress. After the upload, the page sends the chat
@@ -1251,7 +1287,8 @@ remote:
   (`<tree>/.lever-files/`); a worker's is in its `dir`. The manager's workspace is the whole tree,
   so it can see every worker's exchange; its skill tells it not to touch them. An upload is stored
   as `<UTC time>-<name>`, with the name reduced to letters, digits, `.`, `_`, `-` and spaces
-  (no leading dot or dash, no Windows device name). The page shows the sanitized name; on disk the file is stored as `<UTC timestamp>-<sanitized name>`.
+  (no leading dot or dash, no Windows device name, at most 120 bytes). The page shows that
+  sanitized name, without the time.
 - **How an agent reads an upload.** The `contact_files` tool (lever-capability MCP server) lists
   lever's host record of one login's files: its uploads (name, size, sha256 and path) and the
   agent's shares to it. The `contact` argument is required, and no call lists every login's
@@ -1266,7 +1303,8 @@ remote:
   agent can read every file in its own workspace, all logins' uploads included, and the broker
   only scopes each `contact_files` call to the login it names. A worker that must never see one
   contact's files next to another's needs its own worker per contact.
-- **How an agent shares a file.** It writes the file directly into the login's `out_dir`, then
+- **How an agent shares a file.** It writes the file directly into the login's `out_dir` (which
+  `contact_files` returns, with the `in_dir`), then
   calls `share_file` with the login and the path. The broker accepts only a regular file in the
   caller's own `out/<key-of-to>/`, with no symbolic or hard link, within the size and type
   limits, to a login whose `agents:` list names the caller (an operator always). It records the
@@ -1284,7 +1322,10 @@ remote:
 - **Limits.** `max_bytes` and `extensions`; per login and agent, 30 uploads an hour and 1 GiB a
   day; per login, 60 upload attempts an hour (refused ones count), 60 file lists and 20
   downloads a minute; 2 uploads and 2 downloads at once per login, 4 of each in all, the last
-  one only for an operator; 20 shares an hour per agent.
+  one only for an operator; 20 shares an hour per agent. An upload body or a download gets 10
+  minutes plus `max_bytes` at 64 KiB/s, at most 1 hour (about 17 minutes at the 25 MiB default);
+  an upload that passes it answers `408 timeout`. The page itself stops waiting for an upload
+  after 10 minutes.
   The extensions `html`, `htm`, `xhtml`, `shtml`, `svg`, `js`, `mjs` and `xml` are refused at
   config load.
 - **Turning it on or off.** `landing: chat` is required. The skills change with the setting,
@@ -1292,14 +1333,26 @@ remote:
   the proxy). From then on a contact sees every agent as not fresh, and cannot post or upload to
   it, until that agent starts a fresh session on the new skill: `lever up --fresh` for the
   manager (back up its conversation first), purge and start for a worker. The operator is not
-  held back. The agent image must contain this release's lever-agent (`make lever-image`), which
-  has the two tools; they are direct lever-capability tools, called with no `request` mint.
+  held back. The agent image must contain this release's lever-agent: run `make lever-image` (and
+  rebuild an instance image built from it) before the fresh starts. It has the two tools; they are
+  direct lever-capability tools, called with no `request` mint. While files are off,
+  `share_file` refuses with `off` and `contact_files` returns an empty answer with a note.
+- **Routes.** `GET /lever/api/files/<agent>` lists the login's exchange with the agent,
+  `POST /lever/api/files/<agent>` takes one upload (a multipart form with one `file` part; `201`),
+  and `GET /lever/api/files/<agent>/<id>` downloads one recorded file. Refusals are JSON
+  `{"error": "<word>"}`: `not-allowed` (403: an agent the login may not message, see-only, hidden
+  or unknown), `origin` and `uploads-off` / `shares-off` (403), `not-fresh` (409, a contact),
+  `changed` (409) and `gone` (410) for a download, `too-large` (413), `bad-form` (400 or 415),
+  `extension` (415), `timeout` (408), `rate`, `quota` and `busy` (429), `try-again` and
+  `unavailable` (503). With files off, or for a login with `files: false`, every path under
+  `/lever/api/files/` is a 404.
 - **The front.** The page sends every upload with the header `X-Lever-Upload: 1`, and the proxy
   refuses an upload without it. A browser sends such a header to another origin only after a
   CORS preflight, which the proxy never grants. A front must not answer `/lever/api/` with a
   307 or 308 redirect: those resend the request body.
-- **Doctor.** The `files` row shows off, or on with each direction, the logins with no files,
-  the limits and the bytes of uploads stored per agent; it fails when the state directory is inside the tree (then nothing can be recorded
+- **Doctor.** The `files` row shows off, or on with each direction, `max_bytes` and the allowed
+  types, the allowed types that can carry macros (`xlsm`, `xls` and `doc` in the defaults: open
+  them with macros off), the logins with no files, and the bytes of uploads stored per agent; it fails when the state directory is inside the tree (then nothing can be recorded
   and every route refuses), when the ledger (or its `.lock`) is not private, or when an agent's
   `.lever-files`, `in`, `out` or `in/<key>` is a link.
 - **Audit.** `file-upload`, `file-download` and `deny-file` lines in

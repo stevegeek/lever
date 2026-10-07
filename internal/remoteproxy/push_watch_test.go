@@ -126,7 +126,7 @@ func startWatch(t *testing.T, before func(e *watchEnv)) *watchEnv {
 
 func eventually(t *testing.T, what string, f func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second) // generous: -race under load
 	for time.Now().Before(deadline) {
 		if f() {
 			return
@@ -134,6 +134,25 @@ func eventually(t *testing.T, what string, f func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// waitBaseline waits for the first catch-up pass of login: it leaves a mark
+// for every target, so a message stored after it is new and an event after
+// it gets its own (not a catch-up) check.
+func waitBaseline(t *testing.T, e *watchEnv, login string) {
+	t.Helper()
+	ts, err := e.g.pushTargets(context.Background(), login, chatUID)
+	if err != nil || len(ts) == 0 {
+		t.Fatalf("targets %v %v", ts, err)
+	}
+	eventually(t, "the catch-up baseline", func() bool {
+		for _, tg := range ts {
+			if _, ok := e.p.store.Mark(login, tg.name); !ok {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // TestRunRestoresWatchersFromTheStore: a proxy restart with stored
@@ -150,7 +169,7 @@ func TestWatchPushesOnADMEvent(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID
-	time.Sleep(50 * time.Millisecond) // the catch-up pass sets the baseline
+	waitBaseline(t, e, chatOp)
 	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
 	e.sse.events <- pushDMEvent(chatUID, key)
 	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
@@ -164,7 +183,7 @@ func TestWatchPushesOnAHubShapedDMEvent(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID
-	time.Sleep(50 * time.Millisecond)
+	waitBaseline(t, e, chatOp)
 	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
 	e.sse.events <- hubDMEvent(chatUID, agentW1, key)
 	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
@@ -177,7 +196,7 @@ func TestWatchChecksEveryDMForAnUnknownKey(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.idle = time.Minute; e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID
-	time.Sleep(50 * time.Millisecond)
+	waitBaseline(t, e, chatOp)
 	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
 	e.sse.events <- hubDMEvent(chatUID, agentW1, "dm:agent:"+strings.ToUpper(agentW1)+":user:"+chatUID)
 	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
@@ -191,24 +210,25 @@ func TestWatchChecksEveryDMForAnUnknownKey(t *testing.T) {
 }
 
 func TestWatchIgnoresOtherSubjects(t *testing.T) {
-	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
+	// No idle reconnect: its catch-up would read the history too.
+	e := startWatch(t, func(e *watchEnv) { e.p.idle = time.Minute; e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
-	time.Sleep(50 * time.Millisecond)
-	e.hub.mu.Lock()
-	before := e.hub.reads
-	e.hub.mu.Unlock()
+	waitBaseline(t, e, chatOp)
+	before := e.reads()
 	for _, ev := range []string{
 		"event: update\ndata: {\"subject\":\"user." + chatUID + ".chat.read-state\",\"data\":{}}\n\n",
 		"event: update\ndata: {\"subject\":\"user.someone-else.chat.dm\",\"data\":{}}\n\n",
 		":heartbeat 1\n\n",
+		// The stream reads in order: the check for this DM event is
+		// scheduled after the events above were read.
+		pushDMEvent(chatUID, "dm:agent:"+agentW1+":user:"+chatUID),
 	} {
 		e.sse.events <- ev
 	}
+	eventually(t, "the check of the DM event", func() bool { return e.reads() > before })
 	time.Sleep(100 * time.Millisecond)
-	e.hub.mu.Lock()
-	defer e.hub.mu.Unlock()
-	if e.hub.reads != before {
-		t.Fatalf("history read %d times for events that are not this login's DMs", e.hub.reads-before)
+	if n := e.reads() - before; n != 1 {
+		t.Fatalf("history read %d times for one DM event and three that are not this login's DMs", n)
 	}
 }
 
@@ -216,7 +236,7 @@ func TestWatchIgnoresOtherSubjects(t *testing.T) {
 func TestWatchCatchesUpAfterReconnect(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
-	time.Sleep(50 * time.Millisecond)
+	waitBaseline(t, e, chatOp)
 	e.sse.dropAll()                                                                            // hub restart
 	e.hub.put("dm:agent:"+agentW1+":user:"+chatUID, agentMsg("m1", agentW1, "w1", time.Now())) // stored during the gap
 	eventually(t, "a reconnect", func() bool { return e.sse.count() >= 2 })
@@ -323,7 +343,7 @@ func TestWatchContactGetsNoPushForUnrecordedRows(t *testing.T) {
 		e.p.store.Add("c@x", sub("c"))
 	})
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
-	time.Sleep(50 * time.Millisecond)
+	waitBaseline(t, e, "c@x")
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID // the page hub names every login chatUID
 	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
 	e.sse.events <- pushDMEvent(chatUID, key)
@@ -424,7 +444,7 @@ func TestWatchRejectedSessionReconnectsAndCatchesUp(t *testing.T) {
 		e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: time.Now().Add(-time.Minute)})
 	})
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
-	time.Sleep(50 * time.Millisecond)
+	waitBaseline(t, e, chatOp)
 	e.hub.mu.Lock()
 	e.hub.histErr, e.hub.histErrTimes = http.StatusUnauthorized, 1
 	e.hub.mu.Unlock()
@@ -472,7 +492,7 @@ func TestRunWaitsForInFlightSends(t *testing.T) {
 		}
 	})
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
-	time.Sleep(50 * time.Millisecond)
+	waitBaseline(t, e, chatOp)
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID
 	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
 	e.sse.events <- pushDMEvent(chatUID, key)
@@ -502,7 +522,7 @@ func TestRunCapsASlowSendOnShutdown(t *testing.T) {
 		}
 	})
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
-	time.Sleep(50 * time.Millisecond)
+	waitBaseline(t, e, chatOp)
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID
 	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
 	e.sse.events <- pushDMEvent(chatUID, key)

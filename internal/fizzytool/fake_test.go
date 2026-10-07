@@ -36,7 +36,7 @@ case "$1 $2" in
 "comment list") printf '{"ok":true,"data":[]}\n' ;;
 "fail now") printf '{"ok":false,"error":"boom tok_SECRET"}\n'; exit 1 ;;
 "version "|"version --agent") printf '{"ok":true,"data":{"version":"4.0.1"}}\n' ;;
-"big out") head -c 3000000 /dev/zero | tr '\0' 'a'; printf '\n' ;;
+"big out") head -c 3000000 /dev/zero; printf '\n' ;;
 *) printf '{"ok":true,"data":{}}\n' ;;
 esac
 `

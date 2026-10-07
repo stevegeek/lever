@@ -32,6 +32,10 @@ const (
 	pushSubsPath = "/lever/api/push/subscriptions"
 	chatSWPath   = "/lever/sw.js"
 	maxSubBody   = 4 << 10
+
+	// pushWritesPerMinute bounds one login's subscribe and unsubscribe
+	// calls: each rewrites the store file.
+	pushWritesPerMinute = 10
 )
 
 // Push audit decisions. No line carries an endpoint path, a key or text.
@@ -60,15 +64,16 @@ type PushOptions struct {
 
 // Push is the proxy's Web Push service.
 type Push struct {
-	store *PushStore
-	send  pushSender
-	pub   string
-	dir   string
-	test  webpush.TestHosts
-	audit func(AuditLine)
-	now   func() time.Time
-	kicks chan struct{}
-	g     *gate
+	store  *PushStore
+	send   pushSender
+	pub    string
+	dir    string
+	test   webpush.TestHosts
+	audit  func(AuditLine)
+	now    func() time.Time
+	kicks  chan struct{}
+	g      *gate
+	writes *loginRate // subscribe and unsubscribe, per login
 
 	mu   sync.Mutex
 	last map[string]time.Time // login\x00agent → last push (push_trigger.go)
@@ -102,7 +107,7 @@ func NewPush(o PushOptions) (*Push, error) {
 		send = &webpush.Sender{Key: key, Subject: o.Subject, Test: o.TestHosts, Client: webpush.NewClient(o.TestHosts)}
 	}
 	p := &Push{store: store, send: send, pub: pub, dir: o.Dir, test: o.TestHosts, audit: o.Audit, now: time.Now,
-		kicks: make(chan struct{}, 1), last: map[string]time.Time{}, stopping: make(chan struct{}),
+		kicks: make(chan struct{}, 1), last: map[string]time.Time{}, stopping: make(chan struct{}), writes: newLoginRate(pushWritesPerMinute, time.Minute),
 		backoffMin: time.Second, backoffMax: 5 * time.Minute, idle: 90 * time.Second, healthy: 2 * time.Minute, debounce: 2 * time.Second,
 		shutdownGrace: 5 * time.Second}
 	_ = WritePushStatus(o.Dir, PushStatus{At: p.now().UTC(), Result: "started", TestHosts: len(o.TestHosts) > 0})
@@ -203,7 +208,19 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 		refuse(http.StatusBadRequest, "bad-json")
 		return
 	}
+	// Counted only for a write that would reach the store.
+	rated := func() bool {
+		if g.push.writes.take(v.login, g.push.now()) {
+			return true
+		}
+		w.Header().Set("Retry-After", "60")
+		refuse(http.StatusTooManyRequests, "rate")
+		return false
+	}
 	if r.Method == http.MethodDelete {
+		if !rated() {
+			return
+		}
 		if err := g.push.unsubscribe(v.login, in.Endpoint); err != nil {
 			refuse(http.StatusServiceUnavailable, "unavailable")
 			return
@@ -218,6 +235,9 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 		return
 	case err != nil:
 		refuse(http.StatusBadRequest, "keys")
+		return
+	}
+	if !rated() {
 		return
 	}
 	if err := g.push.subscribe(v.login, sub); err != nil {

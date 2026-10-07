@@ -222,3 +222,24 @@ func TestAddWithBuildsTheRecordUnderTheLock(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+// Two uploads at once: the one that started first (its At, the time a list
+// shows) finishes, and is appended, last. List orders by At.
+func TestListOrdersByTheShownTime(t *testing.T) {
+	l, err := Open(filepath.Join(t.TempDir(), "files-ledger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	late := rec(t, OpUpload, "w1", "c@x", t0.Add(time.Minute))
+	early := rec(t, OpUpload, "w1", "c@x", t0)
+	same := rec(t, OpShare, "w1", "c@x", t0.Add(time.Minute))
+	for _, r := range []Record{late, early, same} {
+		if err := l.Add(r, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := l.List("w1")
+	if err != nil || len(got) != 3 || got[0].ID != early.ID || got[1].ID != late.ID || got[2].ID != same.ID {
+		t.Fatalf("list = %+v %v; want early, then late and same in append order", got, err)
+	}
+}

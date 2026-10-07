@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,4 +128,55 @@ func (g Git) Run(ctx context.Context, dir string, o RunOpts, args ...string) (st
 		return stdout.String(), fmt.Errorf("git %s: %v: %s", verb, err, msg)
 	}
 	return stdout.String(), nil
+}
+
+// MinGitVersion is the oldest git whose fetch from a bundle runs fsck on
+// the objects (transfer.fsckObjects, honored for bundles since 2.46.0).
+// Older git imports a bundle unchecked.
+var MinGitVersion = [3]int{2, 46, 0}
+
+// CheckVersion refuses a git older than MinGitVersion.
+func (g Git) CheckVersion(ctx context.Context, dir string) error {
+	out, err := g.Run(ctx, dir, RunOpts{}, "version")
+	if err != nil {
+		return err
+	}
+	v, ok := parseGitVersion(out)
+	if !ok {
+		return fmt.Errorf("cannot read the git version from %q", strings.TrimSpace(out))
+	}
+	for i := range v {
+		if v[i] != MinGitVersion[i] {
+			if v[i] < MinGitVersion[i] {
+				return fmt.Errorf("%s is too old: git %d.%d.%d or newer runs fsck on a bundle import", strings.TrimSpace(out), MinGitVersion[0], MinGitVersion[1], MinGitVersion[2])
+			}
+			break
+		}
+	}
+	return nil
+}
+
+// parseGitVersion reads "git version 2.49.0" (also "2.39.5 (Apple Git-154)"
+// and "2.46.0.windows.1").
+func parseGitVersion(s string) ([3]int, bool) {
+	var v [3]int
+	f := strings.Fields(s)
+	if len(f) < 3 || f[0] != "git" || f[1] != "version" {
+		return v, false
+	}
+	parts := strings.Split(f[2], ".")
+	if len(parts) < 2 {
+		return v, false
+	}
+	for i := 0; i < 3 && i < len(parts); i++ {
+		n, err := strconv.Atoi(parts[i])
+		if err != nil {
+			if i < 2 {
+				return v, false
+			}
+			break // "2.46.rc0": treat the patch level as 0
+		}
+		v[i] = n
+	}
+	return v, true
 }

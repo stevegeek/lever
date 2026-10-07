@@ -134,6 +134,10 @@ func main() {
 		}
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	g := ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute}
+	if err := g.CheckVersion(context.Background(), o.state); err != nil {
+		log.Fatal(err)
+	}
 	p := &ghpush.Pusher{
 		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
 		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
@@ -143,7 +147,7 @@ func main() {
 		// GitHub refuses files over 100 MiB, so a bigger object can never be
 		// pushed; the caps bound what index-pack inflates and holds.
 		Limits: ghpush.PackLimits{MaxObjects: 2_000_000, MaxObjectSize: 100 << 20, MaxInflated: 4 << 30},
-		Git:    ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute},
+		Git:    g,
 		Log:    logger,
 	}
 	srv, err := captool.New(captool.Config{

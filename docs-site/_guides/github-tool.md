@@ -18,6 +18,13 @@ The only operation is `push`, with the arguments `repo`, `branch` and `bundle`. 
 `pr_create`: PR text is outward-facing, so you open the PR yourself. The `push` result includes a
 compare URL for this.
 
+## Requirements
+
+The host needs git 2.46.0 or newer on `PATH`. Older git does not run fsck on the objects that
+`git fetch` imports from a bundle. The tool checks the version and refuses to start with an older
+git. The git that macOS supplies (Apple Git 2.39) is too old: install git from Homebrew or another
+source.
+
 ## 1. Create the GitHub App
 
 Do not use a personal PAT. A PAT acts as you, the repository admin. A leaked PAT could push a `v*`
@@ -121,6 +128,7 @@ A refusal returns to the agent as `{"ok": false, "error": "..."}`. The tool writ
 | Repository not in `-repos` | Named refusal. |
 | Non-fast-forward | GitHub rejects the push. The tool reports that the branch moved and to use a new branch name. |
 | Token mint, GitHub or network error, or git timeout | Redacted error text. The tool does not retry. |
+| git older than 2.46.0 | The tool refuses to start. The broker reports it down, and calls fail with 502. |
 | App key file has the wrong mode or owner | The tool refuses to start. The broker reports it down, and calls fail with 502. |
 
 ## Bundle limits

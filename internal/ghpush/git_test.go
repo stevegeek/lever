@@ -108,3 +108,40 @@ func TestGitRunReturnsAfterTimeoutWithLingeringChild(t *testing.T) {
 		t.Fatalf("Run took %v after timeout", d)
 	}
 }
+
+func TestParseGitVersion(t *testing.T) {
+	for in, want := range map[string][3]int{
+		"git version 2.49.0\n":                 {2, 49, 0},
+		"git version 2.39.5 (Apple Git-154)\n": {2, 39, 5},
+		"git version 2.46.0.windows.1":         {2, 46, 0},
+		"git version 2.46":                     {2, 46, 0},
+	} {
+		if v, ok := parseGitVersion(in); !ok || v != want {
+			t.Errorf("%q: got %v %v", in, v, ok)
+		}
+	}
+	for _, bad := range []string{"", "hub version 2.49.0", "git version x.y"} {
+		if _, ok := parseGitVersion(bad); ok {
+			t.Errorf("%q: want not ok", bad)
+		}
+	}
+}
+
+func TestGitCheckVersion(t *testing.T) {
+	dir := t.TempDir()
+	for v, ok := range map[string]bool{"2.45.2": false, "2.39.5 (Apple Git-154)": false, "1.9.9": false, "2.46.0": true, "2.49.1": true, "3.0.0": true} {
+		script := dir + "/git-" + strings.Fields(v)[0]
+		if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'git version "+v+"'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		g := Git{Bin: script, Home: t.TempDir(), Timeout: time.Minute}
+		err := g.CheckVersion(context.Background(), dir)
+		if ok != (err == nil) {
+			t.Errorf("%s: ok=%v, err=%v", v, ok, err)
+		}
+	}
+	g, _, _ := newGit(t)
+	if err := g.CheckVersion(context.Background(), t.TempDir()); err != nil {
+		t.Logf("the installed git is older than %v: %v", MinGitVersion, err)
+	}
+}

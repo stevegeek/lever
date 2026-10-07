@@ -27,9 +27,9 @@ const (
 	MountDest = "/lever"
 	// DefaultRunUID is the fallback UID used for the rootless Docker socket path
 	// (/run/user/<uid>/docker.sock) before EnsureUp has resolved the real UID.
-	// Both macOS hosts and the OrbStack/Lima guest users map to 501 by default,
-	// so DockerHost() is sensible even before EnsureUp per the interface's "valid
-	// after EnsureUp" contract.
+	// It matches an OrbStack guest user (the macOS uid, 501 by default) but NOT
+	// a Lima guest user (1000): every command that reaches into the jail calls
+	// EnsureUp or ResolveRunUser first, or its XDG_RUNTIME_DIR is wrong on Lima.
 	DefaultRunUID = "501"
 )
 

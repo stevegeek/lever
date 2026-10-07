@@ -26,7 +26,7 @@ import (
 func checkFiles(app *config.App, st state.State) checkResult {
 	const name = "files"
 	if !app.FilesOn() {
-		return checkResult{name, true, "off (no upload or download routes; contact_files and share_file answer off)", ""}
+		return checkResult{name, true, "off (no upload or download routes; share_file answers off and contact_files lists nothing)", ""}
 	}
 	if brokerctl.StateInsideTree(app, st) {
 		return checkResult{name, false, "on, but the state directory is inside the tree: no record can be kept, so every upload, share and download is refused",

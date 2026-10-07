@@ -623,7 +623,7 @@ func TestOperatorViewStaleBinding(t *testing.T) {
 		body, why string
 	}{
 		"another user": {func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"id":"u-new"}`) },
-			http.StatusConflict, `{"error":"not-signed-in","hint":"run lever apply"}`, "stale-binding"},
+			http.StatusConflict, `{"error":"not-signed-in","hint":"rebind"}`, "stale-binding"},
 		"the bound user": {nil, http.StatusBadGateway, `{"error":"unavailable"}`, "unavailable"},
 		"no answer":      {func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }, http.StatusBadGateway, `{"error":"unavailable"}`, "unavailable"},
 		// A redirect is not followed, even to an answer naming another user.

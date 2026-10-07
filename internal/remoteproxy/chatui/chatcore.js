@@ -366,8 +366,9 @@ export function mergeRows(map, items) {
 export function viewErrorText(status, body) {
   const word = body && typeof body === 'object' ? str(body.error) : '';
   // The hint is lever's fixed word: the contact's hub user is not the one
-  // lever apply bound.
-  if (word === 'not-signed-in' && body.hint === 'run lever apply') return 'the contact has a new hub user: run lever apply';
+  // lever apply bound. apply binds a login only while no agent container
+  // runs, so the fix is a stop and an up.
+  if (word === 'not-signed-in' && body.hint === 'rebind') return 'the contact has a new hub user: run lever stop, then lever up';
   if (word === 'not-signed-in') return 'has not signed in yet';
   if (word === 'no-record') return 'the agent has no record on the hub yet';
   return errorText(status, body);
@@ -404,7 +405,7 @@ export function pushView({ available, permission, subscribed, busy, error }) {
 
 // Files in the chat (remote.files).
 export const FILE_LIST_MAX = 200;
-export const UPLOAD_MS = 600000; // the server's own body deadline is 10 min
+export const UPLOAD_MS = 3600000; // the server's own body deadline: 10 min plus max_bytes at 64 KiB/s, at most 1 h
 
 const FILE_ID = /^[0-9a-f]{32}$/;
 const AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;

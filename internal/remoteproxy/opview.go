@@ -317,7 +317,7 @@ func (g *gate) serveContactHistory(w http.ResponseWriter, r *http.Request, line 
 			// apply bound the contact to a hub user it no longer is.
 			line.Reason = "stale-binding"
 			g.answerViewJSON(w, r, line, DecisionDenyOperatorView, http.StatusConflict,
-				map[string]string{"error": "not-signed-in", "hint": "run lever apply"})
+				map[string]string{"error": "not-signed-in", "hint": "rebind"})
 			return
 		}
 		line.Error = viewCause(err)

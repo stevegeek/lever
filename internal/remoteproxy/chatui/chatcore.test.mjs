@@ -361,7 +361,7 @@ test('mergeRows reports a new row, new text and a new mark', () => {
 
 test('viewErrorText reads the fixed words', () => {
   assert.equal(viewErrorText(409, { error: 'not-signed-in' }), 'has not signed in yet');
-  assert.equal(viewErrorText(409, { error: 'not-signed-in', hint: 'run lever apply' }), 'the contact has a new hub user: run lever apply');
+  assert.equal(viewErrorText(409, { error: 'not-signed-in', hint: 'rebind' }), 'the contact has a new hub user: run lever stop, then lever up');
   assert.equal(viewErrorText(409, { error: 'not-signed-in', hint: '<b>other</b>' }), 'has not signed in yet');
   assert.equal(viewErrorText(409, { error: 'no-record' }), 'the agent has no record on the hub yet');
   assert.equal(viewErrorText(502, 'bad gateway\n'), errorText(502, 'bad gateway\n'));

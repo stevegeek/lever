@@ -498,3 +498,49 @@ func TestPushImportBudget(t *testing.T) {
 		t.Fatalf("budget did not refill after the window: %v", err)
 	}
 }
+
+func TestPushErrorsHideHostPaths(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	// fsutil names the tree path for a directory in place of a bundle.
+	if err := os.Mkdir(filepath.Join(tree, BundleDir, "d.bundle"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// git names the state path when it cannot create the mirror.
+	owner := filepath.Join(p.State, "mirrors", "stevegeek")
+	if err := os.MkdirAll(owner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(owner, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(owner, 0o700) })
+	commitOn(t, work, "agent/x", "q.txt")
+	bundle(t, work, tree, "q.bundle", "agent/x")
+	for _, c := range []struct{ bundle, want string }{{"d.bundle", "<tree>"}, {"q.bundle", "<state>"}} {
+		_, err := p.Push(context.Background(), "manager", repo, "agent/x", c.bundle)
+		if err == nil {
+			t.Fatalf("%s: want a refusal", c.bundle)
+		}
+		msg := err.Error()
+		for _, raw := range []string{tree, p.State, os.TempDir()} {
+			if real, e := filepath.EvalSymlinks(raw); e == nil && strings.Contains(msg, real) || strings.Contains(msg, raw) {
+				t.Fatalf("%s: host path %s in %q", c.bundle, raw, msg)
+			}
+		}
+		if !strings.Contains(msg, c.want) {
+			t.Fatalf("%s: want placeholder %s in %q", c.bundle, c.want, msg)
+		}
+	}
+}
+
+func TestHidePathsKeepsErrorsIs(t *testing.T) {
+	p := &Pusher{Tree: "/home/u/tree", State: "/home/u/state", Git: Git{Home: "/home/u/state/home"}}
+	err := p.hidePaths(fmt.Errorf("x /home/u/state/tmp/push-123/work.git and /home/u/tree/a: %w", fsutil.ErrSymlink))
+	if got := err.Error(); got != "x <tmp>/work.git and <tree>/a: "+fsutil.ErrSymlink.Error() {
+		t.Fatalf("got %q", got)
+	}
+	if !errors.Is(err, fsutil.ErrSymlink) {
+		t.Fatal("errors.Is lost")
+	}
+}

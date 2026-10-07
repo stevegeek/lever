@@ -11,6 +11,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +85,10 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		}
 		p.Log.Info("github.push", "caller", caller, "repo", repo, "branch", branch,
 			"old", res.OldSHA, "new", res.NewSHA, "bundle_sha256", bundleSHA, "decision", decision, "detail", detail)
+		// The host log keeps the paths; the agent gets placeholders.
+		if err != nil {
+			err = p.hidePaths(err)
+		}
 	}()
 	if err := ValidateRepo(repo, p.Repos); err != nil {
 		return Result{}, err
@@ -264,6 +270,42 @@ func (p *Pusher) newWorkRepo(ctx context.Context, tmp, mirror string) (string, e
 	}
 	return dir, nil
 }
+
+var tmpPathRE = regexp.MustCompile(`<state>/tmp/push-[0-9]+`)
+
+// hidePaths replaces the host paths (state dir, per-call temp dir, git home,
+// tree) in err's text with placeholders. errors.Is still sees the cause.
+func (p *Pusher) hidePaths(err error) error {
+	msg := err.Error()
+	var pairs [][2]string
+	for _, d := range []struct{ path, name string }{{p.Git.Home, "<git-home>"}, {p.State, "<state>"}, {p.Tree, "<tree>"}} {
+		if d.path == "" {
+			continue
+		}
+		pairs = append(pairs, [2]string{d.path, d.name})
+		if real, e := filepath.EvalSymlinks(d.path); e == nil && real != d.path {
+			pairs = append(pairs, [2]string{real, d.name})
+		}
+	}
+	// Longest first: the git home sits inside the state dir.
+	slices.SortStableFunc(pairs, func(a, b [2]string) int { return len(b[0]) - len(a[0]) })
+	for _, pr := range pairs {
+		msg = strings.ReplaceAll(msg, pr[0], pr[1])
+	}
+	msg = tmpPathRE.ReplaceAllString(msg, "<tmp>")
+	if msg == err.Error() {
+		return err
+	}
+	return &hiddenPathsError{msg: msg, err: err}
+}
+
+type hiddenPathsError struct {
+	msg string
+	err error
+}
+
+func (e *hiddenPathsError) Error() string { return e.msg }
+func (e *hiddenPathsError) Unwrap() error { return e.err }
 
 // importWindow is the period the per-caller ImportBudget covers.
 const importWindow = time.Hour

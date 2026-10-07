@@ -86,7 +86,8 @@ lever-image-bins:
 # image/lever-claude, sync the pre-start hook, then `docker build` FROM the local
 # arch-tagged scion-claude:<arch> base. This is the framework equivalent of the two
 # steps above (lever-image-bins → build-lever-image.sh), self-contained rather than
-# staged into an instance dir. Override LEVER_IMAGE_ARCH for a non-arm64 jail.
+# staged into an instance dir. LEVER_IMAGE_ARCH defaults to the host Go arch;
+# override it for a jail of another arch.
 # Requires scion-claude:<arch> in the local Docker store (see the build script).
 FRAMEWORK_IMAGE_CTX := image/lever-claude
 .PHONY: lever-image
@@ -127,7 +128,7 @@ test-integration:
 
 .PHONY: test-apikey-e2e
 test-apikey-e2e: install lever-image-bins
-	LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
+	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
 	bash tools/test/apikey-e2e.sh
 
 # Live lima-backend e2e: §19 `lever acceptance` six checks under both egress

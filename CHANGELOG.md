@@ -5,6 +5,23 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
+## [0.33.1] - 2026-10-07
+
+### Fixed
+
+- **A release no longer makes every contact agent stale when its skill text did not change.**
+  The session record held the hash of the whole skill file, and the file carries
+  `lever-version: <release>`, so each upgrade (with `lever init`) made contacts unable to post
+  until every contact agent started fresh, which loses the manager's conversation. Contact
+  freshness now compares the skill without the release stamp (only the exact form lever writes).
+  Records written before this release are still accepted for an unchanged file. A change to the
+  skill text still makes the session stale.
+
+### Upgrade
+
+- Install, `lever init`, `lever apply`. Agents that were fresh on 0.33.0 stay fresh. No image
+  rebuild is needed.
+
 ## [0.33.0] - 2026-10-07
 
 ### Security

@@ -15,8 +15,11 @@ import (
 
 // WriteFileAtomic writes data to a temp file in the same directory as path
 // then renames it over path — atomic on POSIX, so a crash mid-write leaves
-// either the old file or the new one, never a torn partial write. The rename
-// replaces whatever path was (a symlink included) with a regular file.
+// either the old file or the new one, never a torn partial write. The temp
+// file is synced before the rename, so a power loss cannot leave path
+// renamed but empty, and the directory is synced after it (best effort) so
+// the rename itself survives. The rename replaces whatever path was (a
+// symlink included) with a regular file.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
@@ -33,10 +36,27 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 		tmp.Close()
 		return err
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
+}
+
+// syncDir flushes dir's entries (a rename) to disk. Best effort: some
+// file systems refuse to sync a directory, and the data is already synced.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
 }
 
 // Tree-confined file access.

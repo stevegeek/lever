@@ -1138,7 +1138,10 @@ remote:
   asks for permission then). On an iPhone, add the page to the Home Screen first and open it from
   there (iOS 16.4 or later). On Linux Chrome, the browser tab or the installed app both work.
   **Turn off notifications** removes the device's subscription. A login keeps at most five
-  devices (the oldest goes); a device endpoint belongs to the last login that turned it on.
+  devices (the oldest goes); a device endpoint belongs to the last login that turned it on in
+  that browser. An endpoint another login holds moves only with the same subscription keys (the
+  same browser): one posted with other keys gets 409 and stays where it is. A login may turn
+  devices on or off ten times a minute (then 429).
 - **Shared devices.** A browser keeps one push subscription for the page, whoever is signed in.
   The page re-sends it at load only for the login that turned notifications on in that browser
   (a per-login mark in the browser's storage). Another login on the same device sees **Turn on
@@ -1154,8 +1157,11 @@ remote:
   read the newest messages as the login and decide. After a hub or proxy restart it catches up
   (a message older than one hour is not notified); a check the hub or the disk fails is tried
   again, up to five times over about 31 seconds (1, 2, 4, 8 and 16 s); then it stops, with a
-  `push-failed` audit line (reason `retries`), until the next event or connect checks again. Each stream is one long-lived connection into the jail, so each
-  subscribed login keeps one jail dial process open on the host.
+  `push-failed` audit line (reason `retries`), until the next event or connect checks again. An
+  event whose conversation matches none of the login's agents checks every agent of the login
+  (a `push-stream` line, reason `unknown-dm`). A push goes to a login's devices at once; on a
+  proxy shutdown a send still under way gets five more seconds. Each stream is one long-lived
+  connection into the jail, so each subscribed login keeps one jail dial process open on the host.
 - **What the push services learn.** Google, Apple, Mozilla or Microsoft see when a push goes to
   a device, never what it says. That timing tells them when your agents write to that login.
 - **The broker's record.** With `agent_messages` on, the check for a contact asks the broker
@@ -1176,8 +1182,10 @@ remote:
   private, loopback, link-local or tailnet `100.64.0.0/10` address, whatever DNS answers).
 - **State.** `.lever-state/push/` (0700): `vapid.key` (the signing key), `subscriptions.json`
   and `status.json` (the last send result), each 0600. A file that another user can read keeps
-  push off, and `lever doctor` names it. Deleting `vapid.key` makes every device turn
-  notifications on again. A login removed from `allowed_users` loses its devices at the next
+  push off, and `lever doctor` names it. Each write is synced to disk before it replaces the
+  file; an empty or damaged `vapid.key` or `subscriptions.json` (an older power loss) also keeps
+  push off, and the start warning and `lever doctor` name the file: stop the proxy, remove it,
+  and run `lever apply`. Deleting `vapid.key` makes every device turn notifications on again. A login removed from `allowed_users` loses its devices at the next
   proxy start.
 - **Off.** `enabled: false` removes the routes and the worker; the page unregisters the worker on
   its next load.

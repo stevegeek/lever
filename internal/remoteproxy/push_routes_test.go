@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/webpush"
 )
@@ -157,6 +158,57 @@ func TestPushRoutesEndpointMovesBetweenLogins(t *testing.T) {
 	pushWrite(h, "c@x", "POST", subBody("same"))
 	if len(p.store.Subs(chatOp)) != 0 || len(p.store.Subs("c@x")) != 1 {
 		t.Fatal("one device endpoint must belong to the last login only")
+	}
+}
+
+// TestPushWritesAreRateLimited: a login may change its subscriptions
+// pushWritesPerMinute times a minute (each one rewrites the store file);
+// another login keeps its own budget, and the window frees up.
+func TestPushWritesAreRateLimited(t *testing.T) {
+	hub := newPageHub(t)
+	var lines lockedLines
+	cfg, p := pushConfig(t, hub, &fakeSender{}, &lines)
+	now := time.Now()
+	p.now = func() time.Time { return now }
+	h := NewHandler(cfg)
+	for i := range pushWritesPerMinute {
+		method, body := "POST", subBody("op")
+		if i%2 == 1 {
+			method, body = "DELETE", `{"endpoint":"https://fcm.googleapis.com/fcm/send/op"}`
+		}
+		if rw := pushWrite(h, chatOp, method, body); rw.Code >= 300 {
+			t.Fatalf("write %d: %d", i+1, rw.Code)
+		}
+	}
+	rw := pushWrite(h, chatOp, "POST", subBody("op"))
+	if rw.Code != http.StatusTooManyRequests || !strings.Contains(rw.Body.String(), `"error":"rate"`) || rw.Header().Get("Retry-After") == "" {
+		t.Fatalf("over the limit: %d %s %v", rw.Code, rw.Body.String(), rw.Header())
+	}
+	if len(p.store.Subs(chatOp)) != 0 {
+		t.Fatal("a refused write reached the store")
+	}
+	if rw := pushWrite(h, "c@x", "POST", subBody("c1")); rw.Code != 201 {
+		t.Fatalf("another login: %d", rw.Code)
+	}
+	now = now.Add(time.Minute)
+	if rw := pushWrite(h, chatOp, "POST", subBody("op")); rw.Code != 201 {
+		t.Fatalf("after the window: %d", rw.Code)
+	}
+}
+
+// TestPushRoutesEndpointTakenWithOtherKeys: an endpoint another login holds
+// does not move to a caller with other keys (409); nothing changes.
+func TestPushRoutesEndpointTakenWithOtherKeys(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, p := pushConfig(t, hub, &fakeSender{}, nil)
+	h := NewHandler(cfg)
+	pushWrite(h, chatOp, "POST", subBody("same"))
+	rw := pushWrite(h, "c@x", "POST", strings.Replace(subBody("same"), testAuth, "AAAAAAAAAAAAAAAAAAAAAA", 1))
+	if rw.Code != http.StatusConflict || !strings.Contains(rw.Body.String(), `"error":"endpoint-taken"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body.String())
+	}
+	if len(p.store.Subs(chatOp)) != 1 || len(p.store.Subs("c@x")) != 0 {
+		t.Fatal("the endpoint moved without its keys")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +64,20 @@ func TestLoadOrCreateKeyRefusesAnOpenKey(t *testing.T) {
 	os.Chmod(p, 0o640)
 	if _, err := LoadOrCreateKey(p); !errors.Is(err, ErrNotPrivate) {
 		t.Fatalf("0640 key: %v", err)
+	}
+}
+
+// TestLoadOrCreateKeyRefusesAnEmptyKey: an empty key file (a power loss
+// before the write was synced) is ErrBadKey with its path, never replaced
+// silently: every device would lose its notifications.
+func TestLoadOrCreateKeyRefusesAnEmptyKey(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "vapid.key")
+	os.WriteFile(p, nil, 0o600)
+	if _, err := LoadOrCreateKey(p); !errors.Is(err, ErrBadKey) || !strings.Contains(err.Error(), p) {
+		t.Fatalf("empty key: %v", err)
+	}
+	if b, _ := os.ReadFile(p); len(b) != 0 {
+		t.Fatal("the empty key was replaced")
 	}
 }
 

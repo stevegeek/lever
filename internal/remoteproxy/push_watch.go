@@ -2,7 +2,6 @@ package remoteproxy
 
 import (
 	"bufio"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,7 +38,7 @@ import (
 //     stream); an idle stream (no event or heartbeat for idle; the hub
 //     beats every 30 s) is dropped and reopened.
 //   - Shutdown: Run's context ends every stream and waits for the
-//     watchers.
+//     watchers; a send still under way gets shutdownGrace more.
 
 func (p *Push) Run(ctx context.Context) {
 	if p.g == nil {
@@ -73,6 +72,7 @@ func (p *Push) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			p.stop()
 			for _, w := range watchers {
 				w.cancel()
 			}
@@ -131,11 +131,19 @@ func streamFault(err error) string {
 	return "connect"
 }
 
+// streamClient bounds the wait for the headers only (the stream itself runs
+// on) and follows no redirect: a 302 to /login is the hub refusing the
+// session, which streamOnce must see.
 func (p *Push) streamClient() *http.Client {
+	var t *http.Transport
 	if p.g.cfg.DialContext != nil {
-		return &http.Client{Transport: jailTransport(p.g.cfg.DialContext)}
+		t = jailTransport(p.g.cfg.DialContext)
+	} else {
+		t = http.DefaultTransport.(*http.Transport).Clone()
+		t.Proxy = nil // as jailTransport: the session never goes off the host
+		t.ResponseHeaderTimeout = responseHeaderTimeout
 	}
-	return &http.Client{}
+	return &http.Client{Transport: t, CheckRedirect: noRedirect}
 }
 
 // streamOnce runs one connection until it ends.
@@ -210,9 +218,11 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	}
 }
 
-// dmEventKey reads one event: a DM update for this login, and the
-// conversation it names (a message's threadId, an edit's or delete's
-// conversationKey; "" = check every DM). Nothing else in the event is read.
+// dmEventKey reads one event: a DM update for this login, and the DM key
+// it names ("" = check every DM). Nothing else in the event is read. The
+// hub publishes only message events on user.<id>.chat.dm (a
+// UserMessageEvent; edits and deletes go to chat.message.edited and
+// .deleted), and a message names its DM in threadId.
 func dmEventKey(lines []string, subject string) (string, bool) {
 	var event, data string
 	for _, l := range lines {
@@ -229,14 +239,13 @@ func dmEventKey(lines []string, subject string) (string, bool) {
 	var in struct {
 		Subject string `json:"subject"`
 		Data    struct {
-			ThreadID        string `json:"threadId"`
-			ConversationKey string `json:"conversationKey"`
+			ThreadID string `json:"threadId"`
 		} `json:"data"`
 	}
 	if json.Unmarshal([]byte(data), &in) != nil || in.Subject != subject {
 		return "", false
 	}
-	return cmp.Or(in.Data.ThreadID, in.Data.ConversationKey), true
+	return in.Data.ThreadID, true
 }
 
 // pushScheduler runs one login's checks, one at a time. key "" means every
@@ -351,6 +360,14 @@ func (q *pushScheduler) runDue() {
 		return
 	}
 	q.done("")
+	// A key that names none of the targets (a spelling the hub changed)
+	// checks every DM: dropped, its message would wait for a reconnect.
+	for k := range keys {
+		if k != "" && !slices.ContainsFunc(targets, func(t pushTarget) bool { return t.key == k }) {
+			q.p.record(q.login, "", "", DecisionPushStream, 0, "unknown-dm")
+			keys[""], catch[""] = true, catch[""] || catch[k]
+		}
+	}
 	for _, t := range targets {
 		if q.ctx.Err() != nil {
 			return

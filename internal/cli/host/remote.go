@@ -250,7 +250,11 @@ func remotePush(app *config.App, st state.State, auditFn func(remoteproxy.AuditL
 	p, err := remoteproxy.NewPush(remoteproxy.PushOptions{Dir: st.PushDir(), Subject: app.Remote.Push.Subject,
 		TestHosts: test, Logins: app.Remote.Logins(), Audit: auditFn})
 	if err != nil {
-		fmt.Fprintf(warn, "lever: warning: remote.push: %v: push stays off (see `lever doctor`)\n", err)
+		fix := ""
+		if errors.Is(err, webpush.ErrBadKey) || errors.Is(err, remoteproxy.ErrBadPushStore) {
+			fix = "; remove that file and restart the proxy"
+		}
+		fmt.Fprintf(warn, "lever: warning: remote.push: %v: push stays off%s (see `lever doctor`)\n", err, fix)
 		return nil, nil
 	}
 	return p, nil

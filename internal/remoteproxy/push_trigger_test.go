@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -295,6 +296,40 @@ func TestCheckCoalescesPerLoginAndAgent(t *testing.T) {
 	}
 }
 
+// TestCheckFailedMarkFreesTheSlot: a mark that could not be stored sends
+// nothing and leaves the slot free, so the retry pushes at once instead of
+// waiting out the window.
+func TestCheckFailedMarkFreesTheSlot(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("op"))
+	tg := e.target(t, chatOp, chatUID, "w1")
+	s := e.session(chatUID, chatledger.TierOperator)
+	e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: t0.Add(-time.Hour)})
+	e.hub.put(tg.key, agentMsg("m1", agentW1, "w1", t0))
+	if err := os.Chmod(e.p.dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(e.p.dir, 0o700) })
+	if err := e.p.check(context.Background(), chatOp, tg, s, false); !errors.Is(err, errCheck) {
+		t.Fatalf("a failed mark write: %v, want errCheck", err)
+	}
+	if len(e.fs.all()) != 0 {
+		t.Fatal("pushed without a stored mark")
+	}
+	os.Chmod(e.p.dir, 0o700)
+	e.now = t0.Add(time.Second)
+	if err := e.p.check(context.Background(), chatOp, tg, s, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.fs.all()) != 1 || len(e.sched) != 0 {
+		t.Fatalf("sent %v, scheduled %v: the failed write kept the slot", e.fs.all(), e.sched)
+	}
+	e.p.check(context.Background(), chatOp, tg, s, false)
+	if len(e.fs.all()) != 1 {
+		t.Fatal("one row pushed twice")
+	}
+}
+
 func TestCheckCatchUp(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))
@@ -399,6 +434,50 @@ func TestNotifyDeletesGoneAndKeepsFailed(t *testing.T) {
 	sum := ReadPushSummary(e.p.dir)
 	if sum.Last == nil || sum.Last.Host != "fcm.googleapis.com" {
 		t.Fatalf("status %+v", sum.Last)
+	}
+}
+
+// TestNotifySendsConcurrently: five slow subscriptions take about one send
+// time, not five: a login's check and shutdown wait for the slowest only.
+func TestNotifySendsConcurrently(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	for i := range maxSubsPerLogin {
+		e.p.store.Add(chatOp, sub(fmt.Sprint("s", i)))
+	}
+	e.fs.hook = func(context.Context) { time.Sleep(200 * time.Millisecond) }
+	start := time.Now()
+	e.p.notify(context.Background(), chatOp, "w1")
+	if d := time.Since(start); d > 600*time.Millisecond {
+		t.Fatalf("notify took %v for %d subscriptions: the sends ran one by one", d, maxSubsPerLogin)
+	}
+	if n := len(e.fs.all()); n != maxSubsPerLogin {
+		t.Fatalf("%d sends", n)
+	}
+}
+
+// TestNotifyShutdownCapsTheSends: once Run stops, an outstanding send gets
+// shutdownGrace more, then its context ends.
+func TestNotifyShutdownCapsTheSends(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("slow"))
+	e.p.shutdownGrace = 50 * time.Millisecond
+	entered := make(chan struct{})
+	e.fs.hook = func(c context.Context) {
+		close(entered)
+		select {
+		case <-c.Done():
+		case <-time.After(5 * time.Second):
+			t.Error("the send outlived the shutdown cap")
+		}
+	}
+	done := make(chan struct{})
+	go func() { e.p.notify(context.Background(), chatOp, "w1"); close(done) }()
+	<-entered
+	start := time.Now()
+	e.p.stop()
+	<-done
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("notify returned %v after the shutdown", d)
 	}
 }
 

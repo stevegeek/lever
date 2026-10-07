@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ type sseHub struct {
 	subs     []string
 	cookies  []string
 	reject   int // answer the next n /events with 401
+	redirect int // then the next n with a 302 to /login
 	events   chan string
 	closeAll chan struct{}
 }
@@ -41,6 +43,13 @@ func (s *sseHub) route(w http.ResponseWriter, r *http.Request) bool {
 		s.reject--
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
+		return true
+	}
+	if s.redirect > 0 {
+		s.redirect--
+		s.mu.Unlock()
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
 		return true
 	}
 	closeAll := s.closeAll
@@ -73,6 +82,20 @@ func (s *sseHub) dropAll() {
 
 func pushDMEvent(uid, key string) string {
 	return fmt.Sprintf("id: 1\nevent: update\ndata: {\"subject\":\"user.%s.chat.dm\",\"data\":{\"threadId\":%q,\"msg\":\"SECRET\"}}\n\n", uid, key)
+}
+
+// hubDMEvent is one DM message event as the pinned hub writes it: the SSE
+// frame of pkg/hub/web.go (id, event: update, {"subject","data"}) around a
+// UserMessageEvent (pkg/hub/events.go), published on user.<id>.chat.dm for
+// a web message whose threadId is the DM key.
+func hubDMEvent(uid, agentID, key string) string {
+	data, _ := json.Marshal(map[string]any{
+		"id": "m-evt", "projectId": "p1", "sender": "agent:w1", "senderId": agentID,
+		"recipient": "user:op", "recipientId": uid, "msg": "SECRET", "type": "instruction",
+		"agentId": agentID, "createdAt": "2026-10-07T10:00:00.000Z", "channel": "web",
+		"threadId": key, "dispatchState": "delivered",
+	})
+	return fmt.Sprintf("id: 7\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n", "user."+uid+".chat.dm", data)
 }
 
 type watchEnv struct {
@@ -136,6 +159,37 @@ func TestWatchPushesOnADMEvent(t *testing.T) {
 	}
 }
 
+// TestWatchPushesOnAHubShapedDMEvent: the event exactly as the hub sends it.
+func TestWatchPushesOnAHubShapedDMEvent(t *testing.T) {
+	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	time.Sleep(50 * time.Millisecond)
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- hubDMEvent(chatUID, agentW1, key)
+	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
+}
+
+// TestWatchChecksEveryDMForAnUnknownKey: a threadId that names none of the
+// login's DM keys (another spelling of the key) checks every DM of the
+// login instead of being dropped, and leaves an audit line.
+func TestWatchChecksEveryDMForAnUnknownKey(t *testing.T) {
+	e := startWatch(t, func(e *watchEnv) { e.p.idle = time.Minute; e.p.store.Add(chatOp, sub("op")) })
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	time.Sleep(50 * time.Millisecond)
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- hubDMEvent(chatUID, agentW1, "dm:agent:"+strings.ToUpper(agentW1)+":user:"+chatUID)
+	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
+	found := false
+	for _, l := range e.lines.all() {
+		found = found || l.Decision == DecisionPushStream && l.Reason == "unknown-dm"
+	}
+	if !found {
+		t.Fatal("no audit line for the unknown key")
+	}
+}
+
 func TestWatchIgnoresOtherSubjects(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
@@ -186,6 +240,45 @@ func TestWatchRenewsARejectedSession(t *testing.T) {
 	defer sess.mu.Unlock()
 	if len(sess.invalidated) == 0 {
 		t.Fatal("the rejected session was not invalidated")
+	}
+}
+
+// TestWatchRenewsASessionTheHubRedirects: the hub's other answer to a dead
+// session is a 302 to /login; the stream client must see it, not follow it.
+func TestWatchRenewsASessionTheHubRedirects(t *testing.T) {
+	var sess *stubSession
+	e := startWatch(t, func(e *watchEnv) {
+		e.sse.redirect = 1
+		sess = e.g.cfg.Session.(*stubSession)
+		e.p.store.Add(chatOp, sub("op"))
+	})
+	eventually(t, "a second stream", func() bool { return e.sse.count() >= 2 })
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if len(sess.invalidated) == 0 {
+		t.Fatal("the redirected session was not invalidated")
+	}
+}
+
+// TestStreamClientBoundsTheHeaders: with or without the jail dial, the
+// stream client bounds the wait for the response headers and follows no
+// redirect.
+func TestStreamClientBoundsTheHeaders(t *testing.T) {
+	g := &gate{}
+	p := &Push{g: g}
+	for name, dial := range map[string]func(context.Context, string, string) (net.Conn, error){
+		"direct": nil,
+		"jail":   (&net.Dialer{}).DialContext,
+	} {
+		g.cfg.DialContext = dial
+		c := p.streamClient()
+		tr, ok := c.Transport.(*http.Transport)
+		if !ok || tr.ResponseHeaderTimeout != responseHeaderTimeout || tr.Proxy != nil {
+			t.Errorf("%s: transport %+v", name, c.Transport)
+		}
+		if c.CheckRedirect == nil || c.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+			t.Errorf("%s: the client follows redirects", name)
+		}
 	}
 }
 
@@ -249,8 +342,9 @@ func TestDMEventKey(t *testing.T) {
 		ok    bool
 	}{
 		"message": {[]string{"id: 3", "event: update", `data: {"subject":"user.u1.chat.dm","data":{"threadId":"dm:agent:a:user:u1"}}`}, "dm:agent:a:user:u1", true},
-		"edit":    {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{"conversationKey":"dm:agent:a:user:u1"}}`}, "dm:agent:a:user:u1", true},
-		"no key":  {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{}}`}, "", true},
+		"hub":     {strings.Split(strings.TrimSpace(hubDMEvent("u1", "a", "dm:agent:a:user:u1")), "\n"), "dm:agent:a:user:u1", true},
+		"no key":  {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{"conversationKey":"dm:agent:a:user:u1"}}`}, "", true},
+		"empty":   {[]string{"event: update", `data: {"subject":"user.u1.chat.dm","data":{}}`}, "", true},
 		"other":   {[]string{"event: update", `data: {"subject":"user.u1.chat.dm.promoted","data":{}}`}, "", false},
 		"bad":     {[]string{"event: update", `data: {`}, "", false},
 		"beat":    {[]string{":heartbeat 5"}, "", false},
@@ -391,6 +485,37 @@ func TestRunWaitsForInFlightSends(t *testing.T) {
 	<-e.done
 	if !finished.Load() {
 		t.Fatal("Run returned while a send was under way")
+	}
+}
+
+// TestRunCapsASlowSendOnShutdown: a send that hangs holds a shutdown for
+// shutdownGrace, not for the whole SendTimeout.
+func TestRunCapsASlowSendOnShutdown(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle, e.p.shutdownGrace = time.Minute, 100*time.Millisecond
+		e.p.store.Add(chatOp, sub("op"))
+		e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: time.Now().Add(-time.Minute)})
+		e.fs.hook = func(c context.Context) {
+			entered <- struct{}{}
+			<-c.Done()
+		}
+	})
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	time.Sleep(50 * time.Millisecond)
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- pushDMEvent(chatUID, key)
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no send")
+	}
+	start := time.Now()
+	e.cancel()
+	<-e.done
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Run returned %v after the shutdown", d)
 	}
 }
 

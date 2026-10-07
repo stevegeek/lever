@@ -684,3 +684,38 @@ func TestEnsureUpDNATTargetsWinOverResolverUpstream(t *testing.T) {
 		t.Fatal("qemu (DNAT) guests must not also open the alias's port 53")
 	}
 }
+
+// EnsureUp ends with the nested-virt step: two guest calls (root, user) after
+// Provision, carrying the drop-in when on and its removal when off.
+func TestEnsureUpNestedVirtStep(t *testing.T) {
+	old := readHostFile
+	readHostFile = func(string) ([]byte, error) { return []byte("1\n"), nil }
+	t.Cleanup(func() { readHostFile = old })
+	for _, on := range []bool{true, false} {
+		f := proc.NewFakeRunner()
+		scriptedVM(f)
+		// Specific keys: a bare "limactl shell <vm>" would prefix-match every probe.
+		f.Script("limactl shell "+vm+" bash -lc", proc.Result{})
+		f.Script("limactl shell "+vm+" sudo bash -lc", proc.Result{})
+		l := New(f, vm, common.Options{})
+		if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree, NestedVirt: on}); err != nil {
+			t.Fatalf("on=%v: EnsureUp: %v", on, err)
+		}
+		n := len(f.Calls)
+		if n < 2 {
+			t.Fatalf("too few calls: %+v", f.Calls)
+		}
+		root, user := f.Calls[n-2], f.Calls[n-1]
+		rs, us := root.Args[len(root.Args)-1], user.Args[len(user.Args)-1]
+		if !strings.Contains(strings.Join(root.Args, " "), "sudo") {
+			t.Errorf("on=%v: second-to-last call must be the root step: %v", on, root.Args)
+		}
+		if on {
+			if !strings.Contains(rs, "/dev/kvm") || !strings.Contains(us, "20-lever-kvm.conf") {
+				t.Errorf("on: want kvm scripts, got\n%s\n%s", rs, us)
+			}
+		} else if !strings.Contains(rs, "rm -f /etc/udev/rules.d/65-lever-kvm.rules") || !strings.Contains(us, `rm -f "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"`) {
+			t.Errorf("off: want removal scripts, got\n%s\n%s", rs, us)
+		}
+	}
+}

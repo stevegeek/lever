@@ -98,7 +98,10 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := l.ensureVM(ctx, cfg); err != nil {
 		return err
 	}
-	return l.Provision(ctx, cfg)
+	if err := l.Provision(ctx, cfg); err != nil {
+		return err
+	}
+	return l.Guest().EnsureNestedVirt(ctx, cfg.NestedVirt)
 }
 
 // ensureVM creates the jail VM from the rendered template (template.go) if it

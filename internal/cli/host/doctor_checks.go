@@ -31,6 +31,7 @@ import (
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
@@ -516,6 +517,9 @@ type agentMsgsLive struct {
 	// started by this lever version with the remote config whose hash is
 	// given.
 	proxyMatches func(hash string) (running, matches bool)
+	// scionHasCommit reports whether the scion.source checkout holds a
+	// commit (an error: git cannot tell).
+	scionHasCommit func(source, commit string) (bool, error)
 }
 
 // liveAgentMessages reads what the running broker and remote proxy were
@@ -543,6 +547,11 @@ func liveAgentMessages(ctx context.Context, app *config.App, st state.State) age
 			}
 			return true, st.RemoteStampMatches(cli.VersionString(), hash)
 		},
+		scionHasCommit: func(source, commit string) (bool, error) {
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			return scionbin.SourceHasCommit(ctx, proc.RealRunner{}, source, commit)
+		},
 	}
 }
 
@@ -559,11 +568,25 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 		return r
 	}
 	on := app.AgentMessagesOn()
+	// scionNote: lever cannot tell whether the scion holds the sender fix.
+	var scionNote string
+	if on {
+		bad, note := agentMessagesScion(app, live.scionHasCommit)
+		if bad {
+			return checkResult{r.name, false, "on, but " + note,
+				"point scion.source/version at " + config.AgentMessagesScionFloor[:8] + " or later, or turn remote.agent_messages off"}
+		}
+		if note != "" {
+			scionNote = "; " + note
+		}
+	}
 	// The hashes a process started with agent messages on would carry.
 	onApp := *app
 	onApp.Remote.AgentMessages.Enabled = true
 	var stale []string
-	if live.brokerHash != nil {
+	// The broker probe (up to 2 s) only answers something while the setting
+	// is on or could be (remote access on): otherwise skip it.
+	if live.brokerHash != nil && (on || onApp.AgentMessagesOn()) {
 		if h, ok := live.brokerHash(); ok && (on && h != brokerctl.ConfigHash(app) || !on && onApp.AgentMessagesOn() && h == brokerctl.ConfigHash(&onApp)) {
 			stale = append(stale, "broker")
 		}
@@ -581,10 +604,47 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 	}
 	if len(stale) > 0 {
 		return warnResult(r.name, r.detail+"; the running "+strings.Join(stale, " and ")+
-			" started with another config; agent message settings take effect after `lever init` + `lever apply`",
+			" started with another config; agent message settings take effect after `lever init` + `lever apply`"+scionNote,
 			"run `lever init`, then `lever apply`")
 	}
+	if scionNote != "" {
+		return warnResult(r.name, r.detail+scionNote,
+			"use a scion at "+config.AgentMessagesScionFloor[:8]+" or later (a scion.source checkout or a pseudo-version lever can check)")
+	}
 	return r
+}
+
+// agentMessagesScion checks the configured scion against
+// config.AgentMessagesScionFloor, the first hub that sets a message's sender
+// itself (the filter trusts it). bad: known to be older (note says why);
+// otherwise note is set when lever cannot tell (a prebuilt binary, a bare
+// commit hash or tag, a checkout git cannot answer for).
+func agentMessagesScion(app *config.App, hasCommit func(source, commit string) (bool, error)) (bad bool, note string) {
+	floor := config.AgentMessagesScionFloor[:8]
+	sc := app.Scion
+	switch {
+	case sc.Version != "":
+		if app.ScionVersionPredatesAgentMessages() {
+			return true, "scion.version " + sc.Version + " predates " + floor + ": its hub takes a message's sender from the caller, so an agent can post as its contact"
+		}
+		if _, ok := config.ScionVersionTime(sc.Version); !ok {
+			return false, "cannot tell whether scion.version " + sc.Version + " holds " + floor + " (the hub sets a message's sender from " + floor + " on)"
+		}
+	case sc.Source != "":
+		if hasCommit == nil {
+			return false, ""
+		}
+		has, err := hasCommit(sc.Source, config.AgentMessagesScionFloor)
+		if err != nil {
+			return false, "cannot tell whether the scion.source checkout holds " + floor + ": " + err.Error()
+		}
+		if !has {
+			return true, "the scion.source checkout predates " + floor + ": its hub takes a message's sender from the caller, so an agent can post as its contact"
+		}
+	case sc.Binary != "":
+		return false, "cannot tell whether the scion.binary holds " + floor + " (the hub sets a message's sender from " + floor + " on)"
+	}
+	return false, ""
 }
 
 func agentMessagesRow(app *config.App, st state.State) checkResult {

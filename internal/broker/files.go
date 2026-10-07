@@ -212,6 +212,10 @@ func lastN[T any](s []T, n int) []T {
 
 var errShareRate = errors.New(refuseRate)
 
+// afterShareHash, when set, runs between a share's hash and its record: a
+// test seam for a call that times out in that window.
+var afterShareHash func()
+
 // shareRate is the hourly share limit over an agent's records.
 func shareRate(now time.Time) func([]fileledger.Record) error {
 	return func(prior []fileledger.Record) error {
@@ -290,7 +294,17 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 		refuse(refuseRate, "too many shares this hour", "hourly rate")
 		return
 	}
-	sha, size, err := chatfiles.Hash(b.files.Tree, rel, b.files.MaxBytes)
+	// The route runs under a TimeoutHandler: past its bound the agent got
+	// 503 and may retry, so a call whose context is done records nothing
+	// (a duplicate share would count toward the hourly rate).
+	sha, size, err := chatfiles.Hash(r.Context(), b.files.Tree, rel, b.files.MaxBytes)
+	if afterShareHash != nil {
+		afterShareHash()
+	}
+	if r.Context().Err() != nil {
+		refuse(refuseUnavailable, "the call timed out", "timed out")
+		return
+	}
 	if word := shareFault(err); word != "" {
 		refuse(word, "see the skill's share rules", "file: "+word)
 		return

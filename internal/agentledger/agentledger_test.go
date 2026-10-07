@@ -344,3 +344,54 @@ func TestPeekWritesNothing(t *testing.T) {
 		t.Fatalf("peek after the binding: %v %v", keep, pending)
 	}
 }
+
+func TestMatchOnAnUnchangedFileDoesNotReparse(t *testing.T) {
+	l, _ := open(t)
+	mustAuthorize(t, l, auth(t, "worker", "c@x", KindInitiated, "hello", t0))
+	mustAuthorize(t, l, auth(t, "worker", "c@x", KindInitiated, "again", t0))
+	bound := []Candidate{{MessageID: "m1", SHA256: HashText("hello"), CreatedAt: t0}}
+	if keep, _, err := l.Match("worker", "c@x", bound, t0); err != nil || !keep["m1"] {
+		t.Fatalf("keep=%v err=%v", keep, err)
+	}
+	// The binding changed the file: the next read parses it once, then the
+	// cache answers while nothing is appended.
+	before := l.reads
+	unbound := []Candidate{{MessageID: "m2", SHA256: HashText("again"), CreatedAt: t0}}
+	for range 5 {
+		keep, _, err := l.Match("worker", "c@x", bound, t0)
+		if err != nil || !keep["m1"] {
+			t.Fatalf("keep=%v err=%v", keep, err)
+		}
+		keep, pending, err := l.Peek("worker", "c@x", unbound, t0)
+		if err != nil || !keep["m2"] || !pending["m2"] {
+			t.Fatalf("peek keep=%v pending=%v err=%v", keep, pending, err)
+		}
+	}
+	if got := l.reads - before; got != 1 {
+		t.Fatalf("reads = %d over 10 matches of an unchanged file, want 1", got)
+	}
+	// A peek's would-be binding never reaches the cache: a contact read
+	// still binds m2.
+	keep, b, err := l.Match("worker", "c@x", unbound, t0)
+	if err != nil || !keep["m2"] || len(b) != 1 {
+		t.Fatalf("keep=%v bound=%v err=%v", keep, b, err)
+	}
+}
+
+func TestMatchSeesAChangeByAnotherLedger(t *testing.T) {
+	l, dir := open(t)
+	mustAuthorize(t, l, auth(t, "worker", "c@x", KindInitiated, "hello", t0))
+	msg := []Candidate{{MessageID: "m1", SHA256: HashText("later"), CreatedAt: t0}}
+	if keep, _, _ := l.Peek("worker", "c@x", msg, t0); keep["m1"] {
+		t.Fatal("no record yet")
+	}
+	// Another broker on the same directory (a restart's replacement) appends.
+	l2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustAuthorize(t, l2, auth(t, "worker", "c@x", KindInitiated, "later", t0))
+	if keep, _, _ := l.Peek("worker", "c@x", msg, t0); !keep["m1"] {
+		t.Fatal("a record appended by another ledger must be seen")
+	}
+}

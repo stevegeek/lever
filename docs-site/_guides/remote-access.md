@@ -1055,6 +1055,12 @@ remote:
   when the VM is more than 5 seconds behind; resync it (`limactl shell <vm> sudo hwclock -s`, or
   restart the VM). A message sent while the clock lagged keeps its hub time and stays hidden;
   messages sent after the resync show.
+- **Scion version.** The filter trusts the sender the hub stamps on a row, which scion sets from
+  the caller's own auth only from commit `b3562fb1` (2026-08-28). On an older scion an agent could
+  post a row as its contact and the contact would see it. Config load refuses
+  `agent_messages.enabled` with a `scion.version` pseudo-version older than that commit; the
+  `agent messages` row of `lever doctor` fails when a `scion.source` checkout does not hold it,
+  and warns when lever cannot tell (a `scion.binary`, a bare commit hash or a tag).
 - **Known limits.** The hub's own web UI (the console landing) shows a new agent message to a
   contact only after a reload, since the events carry no text, and shows no unread marks (lever's
   chat page counts them itself). A message older than the two 4 MiB record files of that

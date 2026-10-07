@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -125,9 +126,11 @@ func (l *Ledger) lock() (func(), error) {
 	return func() { unlock(); l.mu.Unlock() }, nil
 }
 
-// read is agent's records, oldest first: the rotated file, then the main
-// one. A line that does not decode, is not valid, or names another agent is
-// skipped (a torn last line after a crash).
+// read is agent's records, oldest first by At (the time a list shows): a
+// record is appended when its upload or share finishes, so two that ran at
+// once can be in the file in another order. The rotated file is read, then
+// the main one. A line that does not decode, is not valid, or names another
+// agent is skipped (a torn last line after a crash).
 func (l *Ledger) read(agent string) ([]Record, error) {
 	if !agentRE.MatchString(agent) {
 		return nil, fmt.Errorf("%s: bad agent name %q", label, agent)
@@ -146,6 +149,7 @@ func (l *Ledger) read(agent string) ([]Record, error) {
 			return nil, err
 		}
 	}
+	slices.SortStableFunc(out, func(a, b Record) int { return a.At.Compare(b.At) })
 	return out, nil
 }
 
@@ -167,13 +171,12 @@ func (l *Ledger) Add(r Record, allow func(prior []Record) error) error {
 	})
 }
 
-// AddWith is Add for a record that exists only once a step has run under
-// the lock: build reads agent's records, may refuse (its error is returned
-// unchanged, nothing is written), and returns the record to append. The
-// remote proxy checks an upload's limits and only then writes the file
-// into the tree, all under the lock, so a refused upload never touches the
-// tree. When the append fails after build wrote something, the caller
-// removes it.
+// AddWith is Add for a record built under the lock: build reads agent's
+// records, may refuse (its error is returned unchanged, nothing is written),
+// and returns the record to append. Add is the one caller: the remote proxy
+// reserves an upload against the limits, writes the file into the tree
+// outside the lock, then records it with Add, which checks the limits once
+// more; the caller removes the file when that refuses or fails.
 func (l *Ledger) AddWith(agent string, build func(prior []Record) (Record, error)) error {
 	unlock, err := l.lock()
 	if err != nil {

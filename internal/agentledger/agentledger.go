@@ -153,6 +153,18 @@ type Ledger struct {
 	// the file and its .1 keep the size and time they had when it was read;
 	// any append (by this broker or another) changes them.
 	hours map[string]hourEntry
+	// states caches, per contact file, the file read back, under the same
+	// rule: a contact's history reads and unread polls (Match, Peek) and its
+	// authorizations then cost one stat each while nothing was appended, not
+	// a parse of the file and its .1 under the lock. Callers never change a
+	// cached state.
+	states map[string]stateEntry
+	reads  int // files read back (contactState); for tests
+}
+
+type stateEntry struct {
+	sig string
+	s   contactState
 }
 
 type hourEntry struct {
@@ -169,7 +181,7 @@ func Open(dir string) (*Ledger, error) {
 	if err := hostledger.CheckDir(dir, label); err != nil {
 		return nil, err
 	}
-	return &Ledger{dir: dir, files: map[string]*hostledger.File{}, hours: map[string]hourEntry{}}, nil
+	return &Ledger{dir: dir, files: map[string]*hostledger.File{}, hours: map[string]hourEntry{}, states: map[string]stateEntry{}}, nil
 }
 
 // lock holds the in-process mutex and the directory's flock.
@@ -204,7 +216,27 @@ type contactState struct {
 	used  map[string]string // auth id → hub message id
 }
 
+// state is the contact file read back, from the cache while the file and its
+// .1 keep their signature (fileSig). Called under the lock.
+func (l *Ledger) state(name string) (contactState, error) {
+	sig, err := l.fileSig(name)
+	if err != nil {
+		return contactState{}, err
+	}
+	if e, ok := l.states[name]; ok && e.sig == sig {
+		return e.s, nil
+	}
+	s, err := l.read(name)
+	if err != nil {
+		delete(l.states, name)
+		return contactState{}, err
+	}
+	l.states[name] = stateEntry{sig: sig, s: s}
+	return s, nil
+}
+
 func (l *Ledger) read(name string) (contactState, error) {
+	l.reads++
 	s := contactState{byID: map[string]int{}, shown: map[string]line{}, used: map[string]string{}}
 	p := filepath.Join(l.dir, name)
 	for _, path := range []string{p + ".1", p} {
@@ -289,9 +321,9 @@ func (l *Ledger) lastHour(agent string, now time.Time) (int, error) {
 	return n, nil
 }
 
-// fileSig is the size, modification time, mode and owner of a contact file
-// and its .1 ("-" for a missing one): a file made unsafe is read (and
-// refused) again.
+// fileSig is the size, modification time, mode, owner and file id (inode) of
+// a contact file and its .1 ("-" for a missing one): a file made unsafe is
+// read (and refused) again, and a file replaced by another is read again.
 func (l *Ledger) fileSig(name string) (string, error) {
 	var b strings.Builder
 	for _, p := range []string{filepath.Join(l.dir, name), filepath.Join(l.dir, name+".1")} {
@@ -303,14 +335,14 @@ func (l *Ledger) fileSig(name string) (string, error) {
 			return "", fmt.Errorf("%s: %w", label, err)
 		default:
 			owner, _ := hostledger.FileOwner(fi)
-			fmt.Fprintf(&b, "%d/%d/%v/%d;", fi.Size(), fi.ModTime().UnixNano(), fi.Mode(), owner)
+			fmt.Fprintf(&b, "%d/%d/%v/%d/%d;", fi.Size(), fi.ModTime().UnixNano(), fi.Mode(), owner, hostledger.FileID(fi))
 		}
 	}
 	return b.String(), nil
 }
 
 func (l *Ledger) viewLocked(agent, contact string, now time.Time) (View, error) {
-	s, err := l.read(FileFor(contact))
+	s, err := l.state(FileFor(contact))
 	if err != nil {
 		return View{}, err
 	}
@@ -392,10 +424,12 @@ func (l *Ledger) match(agent, contact string, msgs []Candidate, now time.Time, w
 		return nil, nil, nil, err
 	}
 	defer unlock()
-	s, err := l.read(FileFor(contact))
+	s, err := l.state(FileFor(contact))
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// This call's new bindings, over the (cached, unchanged) state.
+	used, shown := map[string]string{}, map[string]bool{}
 	msgs = slices.Clone(msgs)
 	slices.SortFunc(msgs, func(a, b Candidate) int {
 		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
@@ -409,6 +443,9 @@ func (l *Ledger) match(agent, contact string, msgs []Candidate, now time.Time, w
 		if !messageRE.MatchString(m.MessageID) || !shaRE.MatchString(m.SHA256) {
 			continue
 		}
+		if shown[m.MessageID] {
+			continue // a duplicate id in msgs: kept when it was bound
+		}
 		if sh, ok := s.shown[m.MessageID]; ok {
 			i, known := s.byID[sh.ID]
 			if known && s.auths[i].Agent == agent && sh.SHA256 == m.SHA256 {
@@ -421,7 +458,10 @@ func (l *Ledger) match(agent, contact string, msgs []Candidate, now time.Time, w
 			if a.Agent != agent || !strings.EqualFold(a.Contact, contact) || a.SHA256 != m.SHA256 {
 				continue
 			}
-			if _, used := s.used[a.ID]; used {
+			if _, taken := s.used[a.ID]; taken {
+				continue
+			}
+			if _, taken := used[a.ID]; taken {
 				continue
 			}
 			if m.CreatedAt.Before(a.Created.Add(-SkewBefore)) || m.CreatedAt.After(a.Expires.Add(SkewAfter)) {
@@ -437,7 +477,7 @@ func (l *Ledger) match(agent, contact string, msgs []Candidate, now time.Time, w
 		a := s.auths[best]
 		at := now.UTC()
 		ln := line{V: 1, Op: "shown", ID: a.ID, SHA256: m.SHA256, MessageID: m.MessageID, At: &at}
-		s.used[a.ID], s.shown[m.MessageID] = m.MessageID, ln
+		used[a.ID], shown[m.MessageID] = m.MessageID, true
 		lines = append(lines, ln)
 		bound = append(bound, a.ID)
 		keep[m.MessageID], pending[m.MessageID] = true, true

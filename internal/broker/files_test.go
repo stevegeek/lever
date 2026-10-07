@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -364,5 +365,37 @@ func TestFilesExcludedLoginIsNoTarget(t *testing.T) {
 	}
 	if out := f.list(t, "scratch", "client@example.org"); out.Note != "not-a-contact" {
 		t.Fatalf("%+v", out)
+	}
+}
+
+// A share whose call times out (the route's TimeoutHandler answered 503)
+// records nothing, so the agent's retry neither duplicates the share nor
+// counts twice toward the hourly rate.
+func TestFilesShareRecordsNothingAfterATimeout(t *testing.T) {
+	f := newFilesFixture(t)
+	f.put(t, "workers/scratch", ".lever-files/out/"+chatfiles.Key("client@example.org")+"/a.pdf", "x")
+	raw, _ := json.Marshal(wire.FileShareRequest{To: "client@example.org", Path: outPath("client@example.org", "a.pdf")})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	afterShareHash = cancel // the deadline passes while the file is hashed
+	t.Cleanup(func() { afterShareHash = nil })
+	req := httptest.NewRequest("POST", wire.PathFilesShare, strings.NewReader(string(raw))).WithContext(ctx)
+	req.TLS = fakeTLSWithCN("scratch")
+	rec := httptest.NewRecorder()
+	f.b.handleFilesShare(rec, req)
+	var out wire.FileShareResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.OK || out.Reason != "unavailable" {
+		t.Fatalf("%+v", out)
+	}
+	if l := f.list(t, "scratch", "client@example.org"); len(l.Shares) != 0 {
+		t.Fatalf("a timed-out share was recorded: %+v", l.Shares)
+	}
+	afterShareHash = nil
+	if res := f.share(t, "scratch", "client@example.org", outPath("client@example.org", "a.pdf")); !res.OK {
+		t.Fatalf("the retry: %+v", res)
+	}
+	if l := f.list(t, "scratch", "client@example.org"); len(l.Shares) != 1 {
+		t.Fatalf("shares after the retry: %+v", l.Shares)
 	}
 }

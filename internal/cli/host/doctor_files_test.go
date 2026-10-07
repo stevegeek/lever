@@ -157,3 +157,22 @@ func TestCheckFilesShowsTheSwitches(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+// The row names the allowed types that can carry macros (the defaults hold
+// xlsm, xls and doc on purpose): a note, not a warning.
+func TestCheckFilesNamesMacroCapableTypes(t *testing.T) {
+	app, st := filesApp(t, false)
+	app.Remote.Files.Enabled = true
+	r := checkFiles(app, st)
+	if !r.ok || r.fix != "" || !strings.Contains(r.detail, "(xlsm,xls,doc can carry macros") {
+		t.Fatalf("defaults: %+v", r)
+	}
+	app.Remote.Files.Extensions = []string{"pdf", "csv"}
+	if r := checkFiles(app, st); !r.ok || strings.Contains(r.detail, "macros") {
+		t.Fatalf("no macro type: %+v", r)
+	}
+	app.Remote.Files.Extensions = []string{"pdf", "docm"}
+	if r := checkFiles(app, st); !strings.Contains(r.detail, "(docm can carry macros") {
+		t.Fatalf("docm: %+v", r)
+	}
+}

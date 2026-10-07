@@ -75,6 +75,12 @@ The agents write to `jail-src/`. Git run on the host in that tree can execute ag
    - Target `v*`.
    - Restrict creations, updates and deletions.
    - Bypass: Repository admin.
+3. Repo Settings, Actions, General, Workflow permissions: select "Read repository contents and
+   packages permissions". CI runs on `agent/**` pushes, so the `GITHUB_TOKEN` must be read-only.
+
+The tool keeps one mirror per repo under the `-state` directory. The mirror grows, because the tool
+sets `gc.auto=0`. Run `git --git-dir=<mirror> gc` now and then, or delete the mirror directory. The
+tool creates it again on the next push.
 
 ## 7. Image
 

@@ -43,6 +43,9 @@ The tool mints a token from the key for each push. The token lasts 1 hour and st
 The App is not an admin. A leaked key cannot write to `main` and cannot create a release tag. The
 release workflow also refuses a tag whose commit is not on `main`.
 
+CI runs on `agent/**` pushes. In the repo, open Settings, Actions, General, Workflow permissions and
+select "Read repository contents and packages permissions". The `GITHUB_TOKEN` must be read-only.
+
 ## 3. Configure the tool
 
 ```yaml
@@ -125,3 +128,6 @@ host.
 - Build host binaries only from a separate, reviewed clone.
 
 The tool itself never touches these repositories. It uses its own mirror under `-state`.
+
+The mirrors under `-state` grow, because the tool sets `gc.auto=0`. Run `git --git-dir=<mirror> gc`
+now and then, or delete the mirror directory. The tool creates it again on the next push.

@@ -664,3 +664,29 @@ func TestSchedulerSuccessResetsTheRetryCount(t *testing.T) {
 		t.Fatal("the retries did not stop")
 	}
 }
+
+// TestSchedulerAuditsUnknownKeysOncePerPass: many made-up DM keys in one
+// pass write one unknown-dm line with their count, not a line per key.
+func TestSchedulerAuditsUnknownKeysOncePerPass(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("op"))
+	q := newPushScheduler(context.Background(), e.p, chatOp, e.session(chatUID, chatledger.TierOperator))
+	q.mu.Lock()
+	for i := range 5 {
+		q.due[fmt.Sprintf("dm:agent:made-up-%d:user:%s", i, chatUID)] = time.Now().Add(-time.Millisecond)
+	}
+	q.mu.Unlock()
+	q.runDue()
+	var got []AuditLine
+	for _, l := range e.lines.all() {
+		if l.Reason == "unknown-dm" {
+			got = append(got, l)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("%d unknown-dm lines, want 1", len(got))
+	}
+	if got[0].Count == nil || *got[0].Count != 5 {
+		t.Fatalf("count %v, want 5", got[0].Count)
+	}
+}

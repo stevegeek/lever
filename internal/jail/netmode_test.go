@@ -54,3 +54,28 @@ func (f failRunner) RunIn(ctx context.Context, _ string, env map[string]string, 
 func (f failRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return f.Run(ctx, env, name, args...)
 }
+
+func TestContainerRunning(t *testing.T) {
+	for out, want := range map[string]bool{"false false\n": false, "true false\n": true, "true true\n": true, "false true\n": true} {
+		f := proc.NewFakeRunner()
+		f.Script("podman inspect --type container --format {{.State.Running}} {{.State.Paused}} lever--w", proc.Result{Stdout: out})
+		got, err := ContainerRunning(context.Background(), f, "lever--w")
+		if err != nil || got != want {
+			t.Fatalf("%q: got %v err %v, want %v", out, got, err, want)
+		}
+	}
+	f := proc.NewFakeRunner()
+	f.Script("podman", proc.Result{Stdout: "maybe\n"})
+	if _, err := ContainerRunning(context.Background(), f, "lever--w"); err == nil {
+		t.Fatal("an unexpected answer must be an error")
+	}
+	if _, err := ContainerRunning(context.Background(), f, "-rm"); err == nil {
+		t.Fatal("a flag-shaped reference must be refused")
+	}
+	if live, err := ContainerRunning(context.Background(), failRunner{"Error: no such container lever--gone"}, "lever--gone"); err != nil || live {
+		t.Fatalf("no container: live %v err %v, want false, nil", live, err)
+	}
+	if _, err := ContainerRunning(context.Background(), failRunner{"Error: cannot connect to podman"}, "lever--w"); err == nil {
+		t.Fatal("an inspect failure must be an error, never \"not running\"")
+	}
+}

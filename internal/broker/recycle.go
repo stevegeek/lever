@@ -33,7 +33,7 @@ const recycleRateLimit = 1
 const taskPreviewLen = 60
 
 // recyclablePhase reports whether a worker record in phase may be deleted by
-// a recycle. Suspended and stopped are the phases the manager's own verbs
+// a recycle (its container must also be down: handleWorkerRecycle). Suspended and stopped are the phases the manager's own verbs
 // leave. Error is allowed too: the hub sets it for a record whose container
 // is dead (a crash, or a worker left running across `lever stop` + `lever
 // up`), so no live session is lost, and a purge plus a fresh start is the
@@ -106,17 +106,42 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer unlock()
 	ctx := r.Context()
-	phase, err := b.phaseOf(ctx, spec)
+	phase, containerStatus, err := b.recordOf(ctx, spec)
 	if err != nil {
 		b.audit("worker", b.manager, "error", verb+": phase: "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	if phase != "" && !recyclablePhase(phase) {
-		b.audit("worker", b.manager, "deny", verb+": not stopped (phase "+phase+")")
-		http.Error(w, "worker "+spec.Name+" is "+phase+"; a recycle deletes only a suspended, stopped or error record, never a live session. "+
+	notStopped := func(why string) {
+		b.audit("worker", b.manager, "deny", verb+": not stopped ("+why+")")
+		http.Error(w, "worker "+spec.Name+" is "+why+"; a recycle deletes only a suspended, stopped or error record whose container is down, never a live session. "+
 			"Run `lever-manager agent stop "+spec.Name+"` (or `suspend`), then recycle. Nothing was deleted.", http.StatusConflict)
+	}
+	if phase != "" && !recyclablePhase(phase) {
+		notStopped("phase " + phase)
 		return
+	}
+	if phase != "" {
+		// The phase and the container status are both text a running worker
+		// can post about itself, so a phase alone is not proof the session
+		// is down. The hub's container status is checked first, then the
+		// container itself, which no agent can fake.
+		if scion.ContainerLive(containerStatus) {
+			notStopped("phase " + phase + " but its container is live")
+			return
+		}
+		if b.containerRunning != nil {
+			live, err := b.containerRunning(ctx, spec.Name)
+			if err != nil {
+				b.audit("worker", b.manager, "error", verb+": container state: "+err.Error())
+				http.Error(w, "runtime error: could not read the state of worker "+spec.Name+"'s container; nothing was deleted", http.StatusBadGateway)
+				return
+			}
+			if live {
+				notStopped("phase " + phase + " but its container is running")
+				return
+			}
+		}
 	}
 	// The start below reads the same file; read it now so a config that names
 	// an unreadable file fails with the record still in place.

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -339,4 +340,69 @@ func assertNothingRecycled(t *testing.T, rt *fakeRuntime) {
 	if len(rt.purged) != 0 || len(rt.started) != 0 || len(rt.resumed) != 0 || len(rt.resumeForced) != 0 {
 		t.Fatalf("purged %v, started %d, resumed %v/%v: want no lifecycle call", rt.purged, len(rt.started), rt.resumed, rt.resumeForced)
 	}
+}
+
+// A running worker can post its own phase ("stopped", "error") to the hub,
+// so a recyclable phase is not enough: the hub's container status must not
+// be live either.
+func TestWorkerRecycle_refusesARecordWhoseContainerIsLive(t *testing.T) {
+	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError} {
+		for _, status := range []string{"Up 3 minutes", "running"} {
+			t.Run(phase+"/"+status, func(t *testing.T) {
+				b, rt, audit, _ := recycleBroker(t, "", true)
+				rt.agents[testInstanceProject] = []scion.Agent{{Slug: "worker", Phase: phase, ContainerStatus: status}}
+				rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager")
+				if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "Nothing was deleted") {
+					t.Fatalf("status = %d, want 409 (%s)", rec.Code, rec.Body.String())
+				}
+				assertNothingRecycled(t, rt)
+				if !strings.Contains(audit.String(), "container is live") {
+					t.Fatalf("audit:\n%s", audit.String())
+				}
+			})
+		}
+	}
+}
+
+// The hub's container status is agent-settable too: the runtime's own view
+// of the container (DispatchConfig.ContainerRunning) has the last word.
+func TestWorkerRecycle_checksTheContainerItself(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		b, rt, audit, _ := recycleBroker(t, scion.PhaseStopped, true)
+		var asked []string
+		b.containerRunning = func(_ context.Context, w string) (bool, error) { asked = append(asked, w); return true, nil }
+		rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409", rec.Code)
+		}
+		assertNothingRecycled(t, rt)
+		if len(asked) != 1 || asked[0] != "worker" || !strings.Contains(audit.String(), "container is running") {
+			t.Fatalf("asked %v; audit:\n%s", asked, audit.String())
+		}
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		b, rt, _, _ := recycleBroker(t, scion.PhaseStopped, true)
+		b.containerRunning = func(context.Context, string) (bool, error) { return false, errors.New("podman gone") }
+		if rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager"); rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502", rec.Code)
+		}
+		assertNothingRecycled(t, rt)
+	})
+	t.Run("down", func(t *testing.T) {
+		b, rt, _, _ := recycleBroker(t, scion.PhaseStopped, true)
+		b.containerRunning = func(context.Context, string) (bool, error) { return false, nil }
+		if rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager"); rec.Code != http.StatusOK || len(rt.purged) != 1 {
+			t.Fatalf("status = %d, purged %v", rec.Code, rt.purged)
+		}
+	})
+	t.Run("no record is not probed", func(t *testing.T) {
+		b, _, _, _ := recycleBroker(t, "", true)
+		b.containerRunning = func(context.Context, string) (bool, error) {
+			t.Fatal("probed a worker with no record")
+			return false, nil
+		}
+		if rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager"); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+	})
 }

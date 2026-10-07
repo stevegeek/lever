@@ -45,6 +45,12 @@ const (
 // config names none.
 var DefaultExtensions = []string{"pdf", "xlsx", "xlsm", "xls", "csv", "docx", "doc", "png", "jpg", "jpeg", "txt", "zip"}
 
+// MacroExtensions are Office types that can carry macros (VBA): the legacy
+// binary formats and the macro-enabled ones. Some are in DefaultExtensions
+// on purpose (a workbook with macros is the work); doctor names them.
+var MacroExtensions = []string{"doc", "dot", "docm", "dotm", "xls", "xlt", "xla", "xlsm", "xltm", "xlam", "xlsb",
+	"ppt", "pot", "pps", "pptm", "potm", "ppsm", "ppam"}
+
 var (
 	ErrTooLarge = errors.New("too-large")
 	ErrChanged  = errors.New("changed")

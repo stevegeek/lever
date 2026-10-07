@@ -40,6 +40,15 @@ func checkFiles(app *config.App, st state.State) checkResult {
 	}
 	detail := fmt.Sprintf("on: uploads %s, shares %s, max %d MiB, types %s", onOff(app.FilesUploadsOn()), onOff(app.FilesSharesOn()),
 		app.EffectiveFilesMaxBytes()>>20, strings.Join(app.EffectiveFilesExtensions(), ","))
+	var macro []string
+	for _, e := range app.EffectiveFilesExtensions() {
+		if slices.Contains(chatfiles.MacroExtensions, e) {
+			macro = append(macro, e)
+		}
+	}
+	if len(macro) > 0 {
+		detail += " (" + strings.Join(macro, ",") + " can carry macros: open them with macros off)"
+	}
 	if x := app.FilesExcludedLogins(); len(x) > 0 {
 		detail += "; no files for " + strings.Join(x, ", ")
 	}

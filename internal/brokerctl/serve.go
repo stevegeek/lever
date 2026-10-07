@@ -324,6 +324,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// A recycle deletes the record and the ticket the way `lever worker
 	// purge` does (PurgeWorker), with the same client and runner.
 	d.Purge = jailWorkerPurger{sc: sc, r: jr, project: jailMount}
+	d.ContainerRunning = func(ctx context.Context, worker string) (bool, error) {
+		return jail.ContainerRunning(ctx, jr, jail.ContainerName(filepath.Base(jailMount), worker))
+	}
 	// Expired agent hub tokens are read in each agent's container and reset
 	// with `scion reset-auth` under the controller PAT (broker tokenwatch.go).
 	d.HubTokens = hubTokenHealer{probe: jail.AgentProbe{R: jr}, sc: sc, project: jailMount}

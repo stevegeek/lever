@@ -27,3 +27,27 @@ func ContainerNetworkMode(ctx context.Context, r proc.Runner, ref string) (strin
 	}
 	return strings.TrimSpace(res.Stdout), nil
 }
+
+// ContainerRunning reports whether the jail container named by ref is
+// running or paused (podman's State, through r): false, with no error, when
+// podman knows no such container. Unlike the hub's agent record, which the
+// agent can update about itself, this is the runtime's own view.
+func ContainerRunning(ctx context.Context, r proc.Runner, ref string) (bool, error) {
+	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
+		return false, fmt.Errorf("inspecting container state: invalid container reference %q", ref)
+	}
+	res, err := r.Run(ctx, nil, "podman", "inspect", "--type", "container", "--format", "{{.State.Running}} {{.State.Paused}}", ref)
+	if err != nil {
+		if s := strings.ToLower(res.Stderr); strings.Contains(s, "no such container") || strings.Contains(s, "no such object") {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspecting container %s state: %w: %s", ref, err, strings.TrimSpace(res.Stderr))
+	}
+	switch strings.TrimSpace(res.Stdout) {
+	case "false false":
+		return false, nil
+	case "true false", "true true", "false true":
+		return true, nil
+	}
+	return false, fmt.Errorf("inspecting container %s state: unexpected answer %q", ref, strings.TrimSpace(res.Stdout))
+}

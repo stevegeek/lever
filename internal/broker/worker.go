@@ -213,9 +213,17 @@ func (b *Broker) lockWorkerOrRefuse(w http.ResponseWriter, ctx context.Context, 
 }
 
 func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
+	phase, _, err := b.recordOf(ctx, spec)
+	return phase, err
+}
+
+// recordOf is phaseOf with the record's raw container status, which only a
+// caller's own checks may read (scion.ContainerLive); it is hub text the
+// agent can set, so it is never echoed or audited.
+func (b *Broker) recordOf(ctx context.Context, spec WorkerSpec) (phase, containerStatus string, err error) {
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	for _, a := range agents {
 		if a.Slug == spec.Name {
@@ -231,12 +239,12 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 				// to nothing (live-seen on Lima). A blank status is "cannot
 				// tell" and stays running; so does "created", which scion
 				// can report briefly for a record that is running.
-				return phaseRunningContainerDown, nil
+				return phaseRunningContainerDown, a.ContainerStatus, nil
 			}
-			return phase, nil
+			return phase, a.ContainerStatus, nil
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
 // phaseRunningContainerDown is what phaseOf reports for a record the hub

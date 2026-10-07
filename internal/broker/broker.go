@@ -221,6 +221,12 @@ type DispatchConfig struct {
 	// teardown of `lever worker purge` (brokerctl.PurgeWorker in production).
 	// Only the recycle route uses it. nil ⇒ every recycle fails closed.
 	Purge WorkerPurger
+	// ContainerRunning reads, in the jail, whether the worker's container is
+	// running (or paused): podman's own state, which no agent can set, where
+	// the hub's phase and container status are both agent-settable text.
+	// A recycle refuses a running one. nil ⇒ only the hub's record is read
+	// (tests).
+	ContainerRunning func(ctx context.Context, worker string) (bool, error)
 	// HubTokens lets the broker heal an agent whose scion hub token expired
 	// (tokenwatch.go): a periodic read of each running agent's token, and
 	// `scion reset-auth` for one that lapsed. Governed by AutoReenrol like
@@ -339,6 +345,7 @@ type Broker struct {
 	managerBootstrapDir string
 	ticketStager        TicketStager
 	purger              WorkerPurger
+	containerRunning    func(ctx context.Context, worker string) (bool, error)
 	recycleRate         *rateWindow // recycles per worker (recycle.go)
 	reenrolEvents       chan string
 	reenrolNow          func() time.Time
@@ -438,6 +445,7 @@ func New(c Config) *Broker {
 		managerBootstrapDir: d.ManagerBootstrapDir,
 		ticketStager:        d.Tickets,
 		purger:              d.Purge,
+		containerRunning:    d.ContainerRunning,
 		recycleRate:         newRateWindow(recycleRateLimit),
 		reenrolEvents:       make(chan string, reenrolQueueDepth),
 		reenrolNow:          time.Now,

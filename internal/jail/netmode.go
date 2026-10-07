@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -28,6 +29,9 @@ func ContainerNetworkMode(ctx context.Context, r proc.Runner, ref string) (strin
 	return strings.TrimSpace(res.Stdout), nil
 }
 
+// containerStateTimeout bounds ContainerRunning's podman inspect.
+var containerStateTimeout = 10 * time.Second
+
 // ContainerRunning reports whether the jail container named by ref is
 // running or paused (podman's State, through r): false, with no error, when
 // podman knows no such container. Unlike the hub's agent record, which the
@@ -36,6 +40,10 @@ func ContainerRunning(ctx context.Context, r proc.Runner, ref string) (bool, err
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return false, fmt.Errorf("inspecting container state: invalid container reference %q", ref)
 	}
+	// Its own bound: the caller holds the worker lock, so a hung podman
+	// must not hold it until the client goes away.
+	ctx, cancel := context.WithTimeout(ctx, containerStateTimeout)
+	defer cancel()
 	res, err := r.Run(ctx, nil, "podman", "inspect", "--type", "container", "--format", "{{.State.Running}} {{.State.Paused}}", ref)
 	if err != nil {
 		if s := strings.ToLower(res.Stderr); strings.Contains(s, "no such container") || strings.Contains(s, "no such object") {

@@ -271,3 +271,22 @@ resumes the record on the image it was created with.
    binaries/config.
 4. `lever doctor` — every check green means the upgrade landed. The `agent lever version` row
    fails while the agent image still carries the previous release's binaries.
+
+### Upgrading past 0.30.0: contacts, agent messages, files, push
+
+- **The operator view is on with no new key.** With `remote.landing: chat` and at least one
+  `tier: contact` login, an operator login's agent list gains a
+  [Contacts section](/remote-access/#the-operators-view-of-contact-conversations) after the
+  upgrade. The proxy reads a contact's conversation with that contact's own hub session, and only
+  for a contact `lever apply` has bound to a hub user.
+- **Agent messages and files need the new agent image.** `remote.agent_messages`,
+  `remote.files` and `remote.push` are off by default. To turn on agent messages or files:
+  `make lever-image` (and rebuild an instance image built from it), `lever init`, `lever apply`,
+  then start the agents fresh: `lever up --fresh` for the manager after you back up its
+  conversation, purge and start for a worker. Push touches no agent: `lever apply` restarts the
+  proxy with it.
+- **Four more tools in every instance.** After an image rebuild, every instance's
+  `lever-capability` server lists `contacts`, `contact_message`, `contact_files` and
+  `share_file`. While their feature is off they answer `off`.
+- **Three new doctor rows:** `agent messages`, `files` and `push`. Each says `off` until you turn
+  its feature on.

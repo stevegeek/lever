@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -1963,4 +1964,39 @@ func TestRemoteLandingRefusals(t *testing.T) {
 	rejectNoHost(t, remoteOn+"  landing: chat\n", "operator")
 	rejectNoHost(t, strings.Replace(remoteOn, "manager: {}", "manager: {}\nworkers: [{name: w, dir: w}]", 1)+
 		"  allowed_users: [{login: c@example.com, tier: contact, agents: [w]}]\n  landing: chat\n", "operator")
+}
+
+func TestExampleLeverDevLoads(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"lever.yaml", "instructions.md"} {
+		b, err := os.ReadFile(filepath.Join("..", "..", "examples", "lever-dev", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, f), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "jail-src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secrets", "claude-oauth-token"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, err := LoadNoHostChecks(filepath.Join(dir, "lever.yaml"))
+	if runtime.GOOS == "darwin" {
+		if err == nil || !strings.Contains(err.Error(), "nested_virt needs the qemu driver") {
+			t.Fatalf("darwin must reject nested_virt, got %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !app.NestedVirt || app.Backend != BackendLima || app.CPUs != 8 || app.Memory != "24GiB" {
+		t.Fatalf("unexpected: %+v", app)
+	}
 }

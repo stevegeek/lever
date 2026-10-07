@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -250,5 +251,37 @@ func TestBootRefusesInvalidClaudeBlock(t *testing.T) {
 	}
 	if _, err := os.Stat(c.ManagedSettingsPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("wrote managed settings from an invalid block")
+	}
+}
+
+// The marker must not start like the skills' trusted operator-note marker.
+func TestAfterCompactMarkerIsNotTheOperatorNoteMarker(t *testing.T) {
+	if strings.HasPrefix(AfterCompactMarker, "[lever: operator note") || strings.HasPrefix(AfterCompactMarker, "[lever:") {
+		t.Fatalf("AfterCompactMarker %q shares a prefix with lever's message markers", AfterCompactMarker)
+	}
+}
+
+// With no readable envelope, boot removes lever's values and says so.
+func TestBootLogsRemovalWithoutBootstrap(t *testing.T) {
+	env := testBroker(t)
+	c := baseBootConfig(t, env)
+	c.ManagedSettingsPath = managedPath(t)
+	writeBootstrapClaude(t, c.BootstrapPath, &wire.Claude{AutoCompactWindow: 250000})
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	var logs []string
+	c.Log = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	if err := os.Remove(c.BootstrapPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "no readable bootstrap envelope") || !strings.Contains(logs[0], c.ManagedSettingsPath) {
+		t.Fatalf("logs = %q", logs)
+	}
+	if _, err := os.Stat(c.ManagedSettingsPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("lever's values must be removed: %v", err)
 	}
 }

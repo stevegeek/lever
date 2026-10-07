@@ -39,7 +39,8 @@ func TestWarnManagerClaude(t *testing.T) {
 	r.d.ReadClaudeSettings = read(jail.ClaudeDelivered{AutoCompactWindow: 200000}, nil)
 	r.warnManagerClaude(context.Background(), "/lever/proj")
 	if len(logs) != 1 || !strings.Contains(logs[0], "runs with claude settings window 200000, but the config sets window 400000, after-compact note") ||
-		!strings.Contains(logs[0], "lever stop && lever up") {
+		!strings.Contains(logs[0], "lever stop && lever up") || !strings.Contains(logs[0], "make lever-image") ||
+		!strings.Contains(logs[0], "lever up --fresh") || !strings.Contains(logs[0], "back up its conversation") {
 		t.Fatalf("differs: %q", logs)
 	}
 
@@ -50,8 +51,16 @@ func TestWarnManagerClaude(t *testing.T) {
 		t.Fatalf("a failed read is the doctor row's to report: %q", logs)
 	}
 
-	// Nothing configured, nothing delivered: silent.
+	// Config removed while the manager still holds lever's values: warn.
 	r.app = &config.App{Name: "assistant"}
+	r.d.ReadClaudeSettings = read(jail.ClaudeDelivered{AutoCompactWindow: 400000}, nil)
+	r.warnManagerClaude(context.Background(), "/lever/proj")
+	if len(logs) != 1 || !strings.Contains(logs[0], "runs with claude settings window 400000, but the config sets none") {
+		t.Fatalf("removed: %q", logs)
+	}
+	logs = nil
+
+	// Nothing configured, nothing delivered: silent.
 	r.d.ReadClaudeSettings = read(jail.ClaudeDelivered{}, nil)
 	r.warnManagerClaude(context.Background(), "/lever/proj")
 	if len(logs) != 0 {

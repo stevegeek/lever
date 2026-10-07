@@ -40,7 +40,10 @@ func ConfigHash(app *config.App) string {
 	// ManagerClaude (nil when unset, the same old hash) is in the manager's
 	// envelope: a change restarts the broker, which reopens the bootstrap
 	// latch, so the next apply re-mints and re-stages the manager's
-	// bootstrap.json with the new block.
+	// bootstrap.json with the new block. A worker's claude_settings and
+	// after_compact_note are omitted while unset (their json tags on
+	// config.Worker) for the same reason; a new Worker field needs the same
+	// tag, or every instance with workers restarts its broker on upgrade.
 	return state.HashJSON(struct {
 		Broker        config.Broker
 		Workers       []config.Worker

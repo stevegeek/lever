@@ -58,7 +58,7 @@ func (a *App) ManagerClaude() *wire.Claude {
 	return claudeFor(a.Manager.ClaudeSettings, a.Manager.AfterCompactNote)
 }
 
-// WorkerClaude is worker g's own Claude Code config; nil when none is set.
+// Claude is worker g's own Claude Code config; nil when none is set.
 // Deliberately not inherited from the manager: the window and the note
 // describe one agent's work.
 func (g Worker) Claude() *wire.Claude {

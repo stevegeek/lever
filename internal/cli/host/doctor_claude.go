@@ -23,11 +23,12 @@ type claudeAgent struct {
 
 // checkClaudeSettings compares each running agent's managed-settings file
 // (what boot wrote at its last start) with its claude_settings and
-// after_compact_note. The value is applied at start, so a difference on a
-// running agent is a warning: it takes the new value at its next start. A
-// container that lacks the value after a start runs an image whose
-// lever-agent predates the claude block. With nothing configured anywhere
-// the row reads nothing.
+// after_compact_note. The values apply at start, so a difference on a
+// running agent is a warning: it takes the config's values at its next
+// start. That covers a removed config too: a running agent keeps the values
+// lever wrote until it starts again, so the row probes every running agent
+// even when nothing is configured. A container that still differs after a
+// start runs an image whose lever-agent predates the claude block.
 func checkClaudeSettings(ctx context.Context, project string, agents []claudeAgent, list agentLister, read claudeSettingsReader) checkResult {
 	const check = "claude settings"
 	configured := false
@@ -36,10 +37,10 @@ func checkClaudeSettings(ctx context.Context, project string, agents []claudeAge
 			configured = true
 		}
 	}
-	if !configured {
-		return checkResult{check, true, "none configured", ""}
-	}
 	if list == nil || read == nil {
+		if !configured {
+			return checkResult{check, true, "none configured", ""}
+		}
 		return checkResult{check, true, "not checked", ""}
 	}
 	recs, err := list(ctx, project)
@@ -79,17 +80,19 @@ func checkClaudeSettings(ctx context.Context, project string, agents []claudeAge
 		tail = append(tail, "not checked (unreadable): "+strings.Join(unread, ", "))
 	}
 	if len(differ) > 0 {
-		detail := "differs from the config: " + strings.Join(differ, ", ")
+		detail := "differs from the config, and takes effect at the agent's next start (a running agent keeps the values lever wrote at its last start): " + strings.Join(differ, ", ")
 		if len(good) > 0 {
 			detail += "; as configured: " + strings.Join(good, ", ")
 		}
 		if len(tail) > 0 {
 			detail += "; " + strings.Join(tail, "; ")
 		}
-		return warnResult(check, detail,
-			"the settings apply at an agent's next start: `lever stop && lever up` for the manager, a stop and a resume for a worker. If they still differ after a start, the agent image predates this lever (rebuild it with `make lever-image`), or the manager rewrote its own .lever/bootstrap.json")
+		return warnResult(check, detail, claudeSettingsFix)
 	}
 	var parts []string
+	if !configured {
+		parts = append(parts, "none configured")
+	}
 	if len(good) > 0 {
 		parts = append(parts, strings.Join(good, ", "))
 	}
@@ -99,6 +102,15 @@ func checkClaudeSettings(ctx context.Context, project string, agents []claudeAge
 	}
 	return checkResult{check, true, strings.Join(parts, "; "), ""}
 }
+
+// claudeSettingsFix is the claude-settings row's fix. A start applies the
+// config's values; only an image that predates them needs a new container,
+// and `lever stop && lever up` resumes the record on its old image.
+const claudeSettingsFix = "start the agent again: `lever stop && lever up` for the manager, a stop and a resume for a worker. " +
+	"If a start does not change the values, the agent image's lever-agent predates them: rebuild it (`make lever-image`), then " +
+	"recreate the agent on it — the manager with `lever up --fresh` (back up its conversation first: it is discarded), a worker " +
+	"with `lever worker purge <name>` or a recycle. The manager can also have rewritten its own .lever/bootstrap.json; " +
+	"`lever reload` stages a fresh one"
 
 // claudeAgents is the manager and each worker with its configured Claude
 // config, in the row's order.

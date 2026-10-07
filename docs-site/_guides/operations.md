@@ -333,7 +333,8 @@ warns.
 ## Claude Code settings and the after-compaction note
 
 `claude_settings` and `after_compact_note` (under `manager:` or a worker) configure the agent's
-Claude Code. They are **start-time** settings, not create-time ones: no `--fresh` is needed.
+Claude Code. They are **start-time** settings, not create-time ones: once the agent runs an image
+that can deliver them, a change needs no `--fresh`.
 
 ```yaml
 manager:
@@ -349,24 +350,30 @@ manager:
   `auto_compact_window` as `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW`, the note as a `SessionStart` hook
   with matcher `compact` (the session start that follows a compaction), which runs
   `lever-agent after-compact` and gives the agent the note, marked
-  `[lever: operator note after compaction]`. scion's own hooks stay in `~/.claude/settings.json`;
+  `[after compaction: note from this instance's lever.yaml]`. scion's own hooks stay in `~/.claude/settings.json`;
   Claude Code runs both sets. With nothing configured, boot touches nothing.
 - **Changing them.** Edit the config and run `lever reload` (or `lever apply`): the broker
   restarts and the manager's envelope is staged again. A running agent keeps the values of its
   last start; the new ones apply at its next start (`lever stop && lever up` for the manager, a
-  stop and a resume for a worker). `lever apply` warns while the running manager differs, and
-  doctor's `claude settings` row compares each running agent with the config.
+  stop and a resume for a worker). That holds for a removed setting too: a running agent keeps
+  what lever wrote until its next start. `lever apply` warns while the running manager differs,
+  and doctor's `claude settings` row compares each running agent with the config.
 - **What the agent can change.** The managed-settings file belongs to root, and Claude Code runs as
   the `scion` user, which cannot write it; the env value also ranks above the agent's own settings
   files and `/autocompact`. An agent that gains root in its own container can rewrite the file for
   the rest of that container's life; boot writes it again at the next start. The manager's
-  envelope is in the tree it can write, so the manager can also edit the copy staged for its own
-  next start, within the same validated bounds; a broker restart (`lever reload`) stages a fresh
-  one. Nothing in this path goes from the agent to the host: the host only reads back an integer
+  envelope is in the tree it can write, so the manager can rewrite the copy staged for its own
+  next start (`.lever/bootstrap.json`) and give itself another window or its own after-compaction
+  note, within the same validated bounds; a broker restart (`lever reload`) stages a fresh one.
+  This is no new power: the manager can already write a `CLAUDE.md` in its tree, which Claude
+  Code reloads. Nothing in this path goes from the agent to the host: the host only reads back an integer
   and a checksum of the note for doctor and apply.
-- **Images.** The block needs an agent image whose `lever-agent` is from this lever or later
-  (`make lever-image`, then recreate the agent). An older image ignores it, and doctor shows the
-  difference.
+- **Images.** Delivery needs the new `lever-agent` and the new pre-start hook in the agent image.
+  Run `make lever-image` (and rebuild any instance image built `FROM` it), then put each agent on
+  a new container: the manager with `lever up --fresh` (back up its conversation first: it is
+  discarded), a worker with `lever worker purge <name>` or a recycle. `lever stop && lever up`
+  is not enough: it resumes the record on its old image. An older image ignores the block, and
+  doctor's row shows the difference.
 
 ## Troubleshooting quick table
 

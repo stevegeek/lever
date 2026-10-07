@@ -244,9 +244,12 @@ type Worker struct {
 	// hold — so an unset value means the worker gets no lever instructions.
 	InstructionsFile string `yaml:"instructions_file"`
 	// ClaudeSettings and AfterCompactNote: this worker's own (see
-	// Manager.ClaudeSettings). Not inherited from the manager.
-	ClaudeSettings   ClaudeSettings  `yaml:"claude_settings"`
-	AfterCompactNote string          `yaml:"after_compact_note"`
+	// Manager.ClaudeSettings). Not inherited from the manager. The json
+	// tags keep them out of brokerctl.ConfigHash while unset, so an
+	// instance that sets neither keeps the hash it had before they existed
+	// (no broker restart on upgrade).
+	ClaudeSettings   ClaudeSettings  `yaml:"claude_settings" json:",omitzero"`
+	AfterCompactNote string          `yaml:"after_compact_note" json:",omitempty"`
 	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
 	Obtain           []Grant         `yaml:"obtain"`
 	Delegate         []DelegateGrant `yaml:"delegate"`

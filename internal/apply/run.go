@@ -1005,7 +1005,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 
 // warnManagerClaude runs after the manager is live: boot applies the
 // manager's claude block at start, so a manager apply kept running holds
-// the values of its last start. Silent when they match, when nothing is
+// the values of its last start, removed ones included. Silent when they match, when nothing is
 // configured or delivered, and when the read fails (the doctor row
 // "claude settings" reports that).
 func (r *run) warnManagerClaude(ctx context.Context, jp string) {
@@ -1017,7 +1017,7 @@ func (r *run) warnManagerClaude(ctx context.Context, jp string) {
 	if err != nil || got.Matches(want) {
 		return
 	}
-	r.d.Log("start-manager: WARNING: manager %q runs with claude settings %s, but the config sets %s; they apply at its next start (`lever stop && lever up`). If a start does not change them, the image's lever-agent predates them: rebuild it (`make lever-image`)",
+	r.d.Log("start-manager: WARNING: manager %q runs with claude settings %s, but the config sets %s; the config's values take effect at its next start (`lever stop && lever up`). If a start does not change them, the image's lever-agent predates them: rebuild it (`make lever-image`), then recreate the manager with `lever up --fresh` (back up its conversation first: it is discarded) — `lever stop && lever up` resumes it on its old image",
 		r.app.Name, got.Describe(), jail.DescribeClaude(want))
 }
 

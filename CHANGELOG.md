@@ -5,6 +5,59 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
+## [0.34.0] - 2026-10-07
+
+### Added
+
+- **`lever-manager agent recycle NAME --task "..."`: the manager starts a worker slot fresh with a
+  new task.** It discards the worker's scion record and staged ticket and starts it fresh in one
+  call (the worker's conversation is lost, its workspace is kept), for worker slots reused for
+  new work. Opt-in per worker with `workers[].recyclable: true` (default false). The broker
+  refuses a caller that is not the manager, a revoked manager, the manager itself, a worker that
+  is not recyclable (403), a worker that is not suspended, stopped or in phase error, or whose
+  container still runs by the hub's record or by podman's own state (409, nothing deleted), a
+  worker another lifecycle step holds (503), and a second recycle within a minute (429). Every
+  recycle is audited, with the task logged by size and its first 60 bytes only. The `agent start`
+  409 for a recyclable worker points at `agent recycle`. New doctor row *worker recycle*.
+- **Per-agent Claude Code settings: `manager.claude_settings` and `workers[].claude_settings`.**
+  An allowlist; today one key, `auto_compact_window` (100000 to 1000000), delivered as
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. Not inherited by workers.
+- **`manager.after_compact_note` and `workers[].after_compact_note`:** one line (at most 300
+  bytes, no control characters) that the agent gets as context after Claude Code compacts its
+  session, marked `[after compaction: note from this instance's lever.yaml]`.
+- Both settings travel in the agent's bootstrap envelope and `lever-agent boot` writes them into
+  Claude Code's managed-settings file (`/etc/claude-code/managed-settings.json` in the container)
+  at every start, a resume included; scion's own hooks are not touched. `lever apply` warns while
+  the running manager differs, and the new doctor row *claude settings* shows what each running
+  agent holds.
+
+### Changed
+
+- `lever worker purge` and the broker's recycle share one teardown (record, then guest ticket;
+  never the workspace). Its output and errors do not change.
+- The manager skill describes recycling only while some worker is recyclable; with no
+  recyclable worker the skills are byte-identical to 0.33.1.
+
+### Upgrade
+
+- Install, then `lever apply`. An instance with none of the new keys keeps its skills and its
+  broker config hash, so nothing else changes and no agent becomes stale for contacts.
+- `agent recycle` needs the new `lever-manager`, and the Claude settings need the new
+  `lever-agent` boot step, both baked into the agent image: `make lever-image` (and any instance
+  image built from it), then `lever up --fresh` for the manager (back up its conversation first),
+  and a purge or recycle for a worker. `lever stop && lever up` resumes the old image.
+- Setting `recyclable: true` changes the manager's skill: run `lever init`. On an instance with
+  contact logins, contacts cannot post to the manager until it starts fresh, so plan it with the
+  manager's fresh start above.
+- A change to `claude_settings` or `after_compact_note` reaches an agent at its next start.
+
+### Known issues
+
+- A recycle of a real suspended or stopped worker is not yet tested live (podman must answer
+  `false false` or "no such container" for it).
+- The manager can rewrite its own bootstrap envelope in its tree and so give itself an
+  after-compaction note. This adds no power: it can already write its `CLAUDE.md`.
+
 ## [0.33.1] - 2026-10-07
 
 ### Fixed

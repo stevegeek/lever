@@ -309,3 +309,19 @@ func TestCheckAgentMessagesScionFloor(t *testing.T) {
 		t.Fatalf("off: %+v", r)
 	}
 }
+
+// Without remote access the setting cannot be on: the row does not probe
+// the broker.
+func TestCheckAgentMessagesSkipsTheBrokerProbeWhenItCannotBeOn(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	app := &config.App{Name: "x", Tree: t.TempDir()}
+	probed := false
+	live := agentMsgsLive{brokerHash: func() (string, bool) { probed = true; return "", false }}
+	if r := checkAgentMessages(app, st, live); !r.ok || probed {
+		t.Fatalf("remote off: probed=%v %+v", probed, r)
+	}
+	app.Remote = config.Remote{Enabled: true, AllowedUsers: []config.RemoteUser{{Login: "op@x"}}}
+	if checkAgentMessages(app, st, live); !probed {
+		t.Fatal("remote on, setting off: a broker started with it on must still be found")
+	}
+}

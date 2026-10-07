@@ -584,7 +584,9 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 	onApp := *app
 	onApp.Remote.AgentMessages.Enabled = true
 	var stale []string
-	if live.brokerHash != nil {
+	// The broker probe (up to 2 s) only answers something while the setting
+	// is on or could be (remote access on): otherwise skip it.
+	if live.brokerHash != nil && (on || onApp.AgentMessagesOn()) {
 		if h, ok := live.brokerHash(); ok && (on && h != brokerctl.ConfigHash(app) || !on && onApp.AgentMessagesOn() && h == brokerctl.ConfigHash(&onApp)) {
 			stale = append(stale, "broker")
 		}

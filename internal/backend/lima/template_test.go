@@ -1,6 +1,9 @@
 package lima
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -13,7 +16,7 @@ import (
 // writable, at /lever), ALL automatic port-forwarding suppressed (a jailed
 // agent must not be able to squat host-loopback ports), containerd off.
 func TestTemplateContainmentProperties(t *testing.T) {
-	out, err := RenderTemplate("/Users/x/proj", "")
+	out, err := RenderTemplate("/Users/x/proj", TemplateOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,11 +108,76 @@ func TestRenderTemplateDiskOverride(t *testing.T) {
 // assertDiskLine renders the template with disk and checks the disk line.
 func assertDiskLine(t *testing.T, disk, want string) {
 	t.Helper()
-	out, err := RenderTemplate("/tmp/tree", disk)
+	out, err := RenderTemplate("/tmp/tree", TemplateOpts{Disk: disk})
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	if !strings.Contains(out, want) {
 		t.Fatalf("expected %q line, got:\n%s", want, out)
+	}
+}
+
+func TestRenderTemplateSizingAndNested(t *testing.T) {
+	out, err := RenderTemplate("/tmp/tree", TemplateOpts{CPUs: 8, Memory: "24GiB", NestedVirt: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		CPUs    int    `yaml:"cpus"`
+		Memory  string `yaml:"memory"`
+		CPUType any    `yaml:"cpuType"`
+		VMOpts  struct {
+			QEMU struct {
+				CPUType map[string]string `yaml:"cpuType"`
+			} `yaml:"qemu"`
+		} `yaml:"vmOpts"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("yaml: %v\n%s", err, out)
+	}
+	if doc.CPUs != 8 || doc.Memory != "24GiB" {
+		t.Fatalf("cpus/memory = %d/%q, want 8/24GiB\n%s", doc.CPUs, doc.Memory, out)
+	}
+	if doc.CPUType != nil {
+		t.Fatalf("deprecated top-level cpuType must not be rendered\n%s", out)
+	}
+	if runtime.GOOS == "darwin" {
+		if len(doc.VMOpts.QEMU.CPUType) != 0 {
+			t.Fatalf("vz host must not render qemu cpuType\n%s", out)
+		}
+		return
+	}
+	if doc.VMOpts.QEMU.CPUType["x86_64"] != "host" || doc.VMOpts.QEMU.CPUType["aarch64"] != "host" {
+		t.Fatalf("vmOpts.qemu.cpuType = %v, want host for both\n%s", doc.VMOpts.QEMU.CPUType, out)
+	}
+}
+
+func TestRenderTemplateUnsetSizingOmitsKeys(t *testing.T) {
+	out, err := RenderTemplate("/tmp/tree", TemplateOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"\ncpus:", "\nmemory:", "vmOpts:"} {
+		if strings.Contains(out, k) {
+			t.Fatalf("unset option rendered %q:\n%s", k, out)
+		}
+	}
+}
+
+func TestRenderedTemplateLimaValidates(t *testing.T) {
+	limactl, err := exec.LookPath("limactl")
+	if err != nil {
+		t.Skip("limactl not installed")
+	}
+	out, err := RenderTemplate(t.TempDir(), TemplateOpts{CPUs: 8, Memory: "24GiB", NestedVirt: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(t.TempDir(), "lever.yaml")
+	if err := os.WriteFile(p, []byte(out), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := exec.Command(limactl, "validate", p).CombinedOutput(); err != nil {
+		t.Fatalf("limactl validate: %v\n%s\n%s", err, b, out)
 	}
 }

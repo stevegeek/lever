@@ -90,7 +90,7 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if !ok {
 		return fmt.Errorf("lever requires Lima >= 2.0.0 for portForwards ignore semantics; found %s", got)
 	}
-	if err := l.ensureVM(ctx, cfg.ProjectTree, cfg.Disk); err != nil {
+	if err := l.ensureVM(ctx, cfg); err != nil {
 		return err
 	}
 	return l.Provision(ctx, cfg)
@@ -100,13 +100,13 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 // doesn't yet exist, then starts it unless already running. The project tree
 // mount is set only at `limactl create` time; changing it on an existing VM
 // requires Teardown+EnsureUp — the same documented limitation as orbstack.
-func (l *Lima) ensureVM(ctx context.Context, projectTree, disk string) error {
+func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	status, err := l.vmStatus(ctx)
 	if err != nil {
 		return err
 	}
 	if status == "" {
-		if err := l.createVM(ctx, projectTree, disk); err != nil {
+		if err := l.createVM(ctx, cfg); err != nil {
 			return err
 		}
 		status = "Stopped" // freshly created, not yet started
@@ -119,7 +119,7 @@ func (l *Lima) ensureVM(ctx context.Context, projectTree, disk string) error {
 	// containerd are `limactl create`-time only, so without this check an
 	// adopted VM is used wholesale with no drift check even though the
 	// template IS the containment surface (template.go).
-	if err := l.verifyRealizedConfig(ctx, projectTree); err != nil {
+	if err := l.verifyRealizedConfig(ctx, cfg.ProjectTree); err != nil {
 		return err
 	}
 	if status == "Running" {
@@ -238,8 +238,8 @@ func (l *Lima) vmStatus(ctx context.Context) (string, error) {
 // createVM renders the containment template to a temp file and creates the VM
 // from it. `limactl create` reads the config file path as a positional arg;
 // the temp file is removed afterward since lima reads it once at create time.
-func (l *Lima) createVM(ctx context.Context, projectTree, disk string) error {
-	cfg, err := RenderTemplate(projectTree, disk)
+func (l *Lima) createVM(ctx context.Context, cfg backend.Config) error {
+	out, err := RenderTemplate(cfg.ProjectTree, TemplateOpts{Disk: cfg.Disk, CPUs: cfg.CPUs, Memory: cfg.Memory, NestedVirt: cfg.NestedVirt})
 	if err != nil {
 		return fmt.Errorf("render lima template: %w", err)
 	}
@@ -249,7 +249,7 @@ func (l *Lima) createVM(ctx context.Context, projectTree, disk string) error {
 	}
 	path := f.Name()
 	defer os.Remove(path)
-	if _, err := f.WriteString(cfg); err != nil {
+	if _, err := f.WriteString(out); err != nil {
 		f.Close()
 		return fmt.Errorf("write lima config tempfile: %w", err)
 	}

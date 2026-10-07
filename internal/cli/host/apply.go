@@ -1238,6 +1238,9 @@ func backendConfigFor(app *config.App, machine string) backend.Config {
 		ScionWebUI:     app.ScionWebAssets(),
 		ClosedInternet: app.ClosedInternetEgress(),
 		Disk:           app.Disk,
+		CPUs:           app.CPUs,
+		Memory:         app.Memory,
+		NestedVirt:     app.NestedVirt,
 	}
 }
 

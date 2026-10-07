@@ -70,6 +70,12 @@ type Config struct {
 	// lima package default. Ignored by backends that manage their own disk
 	// (OrbStack).
 	Disk string
+	// CPUs and Memory size the Lima guest (0 / "" = Lima default).
+	// NestedVirt gives every agent container /dev/kvm (Lima on a Linux host).
+	// All three are ignored by OrbStack; config load rejects them there.
+	CPUs       int
+	Memory     string
+	NestedVirt bool
 }
 
 // HasScion reports whether any scion mode is configured.

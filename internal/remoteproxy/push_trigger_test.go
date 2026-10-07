@@ -417,6 +417,50 @@ func TestNotifyDeletesGoneAndKeepsFailed(t *testing.T) {
 	}
 }
 
+// TestNotifySendsConcurrently: five slow subscriptions take about one send
+// time, not five: a login's check and shutdown wait for the slowest only.
+func TestNotifySendsConcurrently(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	for i := range maxSubsPerLogin {
+		e.p.store.Add(chatOp, sub(fmt.Sprint("s", i)))
+	}
+	e.fs.hook = func(context.Context) { time.Sleep(200 * time.Millisecond) }
+	start := time.Now()
+	e.p.notify(context.Background(), chatOp, "w1")
+	if d := time.Since(start); d > 600*time.Millisecond {
+		t.Fatalf("notify took %v for %d subscriptions: the sends ran one by one", d, maxSubsPerLogin)
+	}
+	if n := len(e.fs.all()); n != maxSubsPerLogin {
+		t.Fatalf("%d sends", n)
+	}
+}
+
+// TestNotifyShutdownCapsTheSends: once Run stops, an outstanding send gets
+// shutdownGrace more, then its context ends.
+func TestNotifyShutdownCapsTheSends(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("slow"))
+	e.p.shutdownGrace = 50 * time.Millisecond
+	entered := make(chan struct{})
+	e.fs.hook = func(c context.Context) {
+		close(entered)
+		select {
+		case <-c.Done():
+		case <-time.After(5 * time.Second):
+			t.Error("the send outlived the shutdown cap")
+		}
+	}
+	done := make(chan struct{})
+	go func() { e.p.notify(context.Background(), chatOp, "w1"); close(done) }()
+	<-entered
+	start := time.Now()
+	e.p.stop()
+	<-done
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("notify returned %v after the shutdown", d)
+	}
+}
+
 func TestCheckHistory401MarksTheSessionStale(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))

@@ -38,7 +38,7 @@ import (
 //     stream); an idle stream (no event or heartbeat for idle; the hub
 //     beats every 30 s) is dropped and reopened.
 //   - Shutdown: Run's context ends every stream and waits for the
-//     watchers.
+//     watchers; a send still under way gets shutdownGrace more.
 
 func (p *Push) Run(ctx context.Context) {
 	if p.g == nil {
@@ -72,6 +72,7 @@ func (p *Push) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			p.stop()
 			for _, w := range watchers {
 				w.cancel()
 			}

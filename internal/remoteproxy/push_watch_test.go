@@ -440,6 +440,37 @@ func TestRunWaitsForInFlightSends(t *testing.T) {
 	}
 }
 
+// TestRunCapsASlowSendOnShutdown: a send that hangs holds a shutdown for
+// shutdownGrace, not for the whole SendTimeout.
+func TestRunCapsASlowSendOnShutdown(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	e := startWatch(t, func(e *watchEnv) {
+		e.p.idle, e.p.shutdownGrace = time.Minute, 100*time.Millisecond
+		e.p.store.Add(chatOp, sub("op"))
+		e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: time.Now().Add(-time.Minute)})
+		e.fs.hook = func(c context.Context) {
+			entered <- struct{}{}
+			<-c.Done()
+		}
+	})
+	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
+	time.Sleep(50 * time.Millisecond)
+	key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	e.hub.put(key, agentMsg("m1", agentW1, "w1", time.Now()))
+	e.sse.events <- pushDMEvent(chatUID, key)
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no send")
+	}
+	start := time.Now()
+	e.cancel()
+	<-e.done
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Run returned %v after the shutdown", d)
+	}
+}
+
 func TestNextBackoff(t *testing.T) {
 	p := &Push{backoffMin: time.Second, backoffMax: 8 * time.Second, healthy: time.Minute}
 	for _, tc := range []struct{ cur, lived, wait, next time.Duration }{

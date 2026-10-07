@@ -73,8 +73,13 @@ type Push struct {
 	mu   sync.Mutex
 	last map[string]time.Time // login\x00agent → last push (push_trigger.go)
 
+	// stopping closes when Run stops: outstanding sends get shutdownGrace
+	// more (push_trigger.go).
+	stopping chan struct{}
+	stopOnce sync.Once
+
 	// Watcher pacing (push_watch.go); tests shorten them.
-	backoffMin, backoffMax, idle, healthy, debounce time.Duration
+	backoffMin, backoffMax, idle, healthy, debounce, shutdownGrace time.Duration
 }
 
 // NewPush opens the push directory, the key (created on first use) and
@@ -97,8 +102,9 @@ func NewPush(o PushOptions) (*Push, error) {
 		send = &webpush.Sender{Key: key, Subject: o.Subject, Test: o.TestHosts, Client: webpush.NewClient(o.TestHosts)}
 	}
 	p := &Push{store: store, send: send, pub: pub, dir: o.Dir, test: o.TestHosts, audit: o.Audit, now: time.Now,
-		kicks: make(chan struct{}, 1), last: map[string]time.Time{},
-		backoffMin: time.Second, backoffMax: 5 * time.Minute, idle: 90 * time.Second, healthy: 2 * time.Minute, debounce: 2 * time.Second}
+		kicks: make(chan struct{}, 1), last: map[string]time.Time{}, stopping: make(chan struct{}),
+		backoffMin: time.Second, backoffMax: 5 * time.Minute, idle: 90 * time.Second, healthy: 2 * time.Minute, debounce: 2 * time.Second,
+		shutdownGrace: 5 * time.Second}
 	_ = WritePushStatus(o.Dir, PushStatus{At: p.now().UTC(), Result: "started", TestHosts: len(o.TestHosts) > 0})
 	return p, nil
 }
@@ -107,6 +113,15 @@ func NewPush(o PushOptions) (*Push, error) {
 func (p *Push) PublicKey() string { return p.pub }
 
 func (p *Push) attach(g *gate) { p.g = g }
+
+// stop starts the shutdown cap on outstanding sends.
+func (p *Push) stop() {
+	p.stopOnce.Do(func() {
+		if p.stopping != nil {
+			close(p.stopping)
+		}
+	})
+}
 
 // kick asks Run to start or stop watchers for the store's logins.
 func (p *Push) kick() {

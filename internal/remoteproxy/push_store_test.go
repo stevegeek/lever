@@ -1,6 +1,7 @@
 package remoteproxy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,6 +95,33 @@ func TestStoreEndpointBelongsToOneLogin(t *testing.T) {
 	}
 	if got := s.Logins(); len(got) != 0 {
 		t.Fatalf("logins with subscriptions %v", got)
+	}
+}
+
+// TestStoreEndpointMovesOnlyWithItsKeys: the same browser subscription
+// (endpoint and keys) moves to a new login; a caller who knows another
+// login's endpoint but not its keys cannot take it.
+func TestStoreEndpointMovesOnlyWithItsKeys(t *testing.T) {
+	s := openStore(t, privDir(t), "op@x", "c@x")
+	s.Add("op@x", sub("shared"))
+	thief := sub("shared")
+	thief.Auth = "AAAAAAAAAAAAAAAAAAAAAA"
+	if err := s.Add("c@x", thief); !errors.Is(err, errPushEndpointTaken) {
+		t.Fatalf("a move with other keys: %v", err)
+	}
+	if len(s.Subs("op@x")) != 1 || len(s.Subs("c@x")) != 0 {
+		t.Fatalf("op %v, c %v: the endpoint moved without its keys", s.Subs("op@x"), s.Subs("c@x"))
+	}
+	thief = sub("shared")
+	thief.P256DH = "B" + testP256[1:len(testP256)-1] + "A"
+	if err := s.Add("c@x", thief); !errors.Is(err, errPushEndpointTaken) {
+		t.Fatalf("a move with another p256dh: %v", err)
+	}
+	// The login's own record may change its keys.
+	own := sub("shared")
+	own.Auth = "AAAAAAAAAAAAAAAAAAAAAA"
+	if err := s.Add("op@x", own); err != nil || s.Subs("op@x")[0].Auth != own.Auth {
+		t.Fatalf("own replace: %v %v", err, s.Subs("op@x"))
 	}
 }
 

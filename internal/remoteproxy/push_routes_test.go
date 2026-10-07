@@ -196,6 +196,22 @@ func TestPushWritesAreRateLimited(t *testing.T) {
 	}
 }
 
+// TestPushRoutesEndpointTakenWithOtherKeys: an endpoint another login holds
+// does not move to a caller with other keys (409); nothing changes.
+func TestPushRoutesEndpointTakenWithOtherKeys(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, p := pushConfig(t, hub, &fakeSender{}, nil)
+	h := NewHandler(cfg)
+	pushWrite(h, chatOp, "POST", subBody("same"))
+	rw := pushWrite(h, "c@x", "POST", strings.Replace(subBody("same"), testAuth, "AAAAAAAAAAAAAAAAAAAAAA", 1))
+	if rw.Code != http.StatusConflict || !strings.Contains(rw.Body.String(), `"error":"endpoint-taken"`) {
+		t.Fatalf("%d %s", rw.Code, rw.Body.String())
+	}
+	if len(p.store.Subs(chatOp)) != 1 || len(p.store.Subs("c@x")) != 0 {
+		t.Fatal("the endpoint moved without its keys")
+	}
+}
+
 func TestPushSubscribeRefusals(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, p := pushConfig(t, hub, &fakeSender{}, nil)

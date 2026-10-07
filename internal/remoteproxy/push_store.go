@@ -56,7 +56,10 @@ type PushStore struct {
 	f    pushFile
 }
 
-var errBadPushStore = errors.New("the push store is not a lever push store")
+var (
+	errBadPushStore      = errors.New("the push store is not a lever push store")
+	errPushEndpointTaken = errors.New("another login holds this endpoint with other keys")
+)
 
 // checkPrivateDir: the push directory is this user's alone (owner, mode,
 // and not a link).
@@ -116,8 +119,8 @@ func (s *PushStore) save(f pushFile) error {
 }
 
 // update applies change to a copy, writes it, and only then keeps it: a
-// failed write leaves memory as the file is.
-func (s *PushStore) update(change func(f *pushFile)) error {
+// failed write (or change) leaves memory as the file is.
+func (s *PushStore) update(change func(f *pushFile) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := json.Marshal(s.f)
@@ -131,7 +134,9 @@ func (s *PushStore) update(change func(f *pushFile)) error {
 	if next.Logins == nil {
 		next.Logins = map[string]*pushLogin{}
 	}
-	change(&next)
+	if err := change(&next); err != nil {
+		return err
+	}
 	if err := s.save(next); err != nil {
 		return err
 	}
@@ -148,11 +153,22 @@ func entry(f *pushFile, login string) *pushLogin {
 	return e
 }
 
-// Add stores sub for login: replaces the same endpoint, takes it from any
-// other login, and keeps the newest maxSubsPerLogin.
+// Add stores sub for login: replaces the same endpoint, and keeps the
+// newest maxSubsPerLogin. An endpoint another login holds moves to login
+// only with the same keys: that is the same browser subscription (a log
+// out and in as another login). A caller who knows the endpoint alone
+// supplies its own keys and gets errPushEndpointTaken, so it cannot take
+// another login's notifications away.
 func (s *PushStore) Add(login string, sub webpush.Subscription) error {
 	now := s.now().UTC()
-	return s.update(func(f *pushFile) {
+	return s.update(func(f *pushFile) error {
+		for l, e := range f.Logins {
+			for _, x := range e.Subs {
+				if l != login && x.Endpoint == sub.Endpoint && (x.P256DH != sub.P256DH || x.Auth != sub.Auth) {
+					return errPushEndpointTaken
+				}
+			}
+		}
 		for _, e := range f.Logins {
 			e.Subs = slices.DeleteFunc(e.Subs, func(x PushSub) bool { return x.Endpoint == sub.Endpoint })
 		}
@@ -162,18 +178,20 @@ func (s *PushStore) Add(login string, sub webpush.Subscription) error {
 		if n := len(e.Subs); n > maxSubsPerLogin {
 			e.Subs = e.Subs[n-maxSubsPerLogin:]
 		}
+		return nil
 	})
 }
 
 // Remove drops login's subscription with endpoint; another login's stays.
 func (s *PushStore) Remove(login, endpoint string) (bool, error) {
 	found := false
-	err := s.update(func(f *pushFile) {
+	err := s.update(func(f *pushFile) error {
 		if e := f.Logins[login]; e != nil {
 			n := len(e.Subs)
 			e.Subs = slices.DeleteFunc(e.Subs, func(x PushSub) bool { return x.Endpoint == endpoint })
 			found = len(e.Subs) != n
 		}
+		return nil
 	})
 	return found, err
 }
@@ -224,12 +242,13 @@ func (s *PushStore) Mark(login, agent string) (PushMark, bool) {
 }
 
 func (s *PushStore) SetMark(login, agent string, m PushMark) error {
-	return s.update(func(f *pushFile) {
+	return s.update(func(f *pushFile) error {
 		e := entry(f, login)
 		if e.Seen == nil {
 			e.Seen = map[string]PushMark{}
 		}
 		e.Seen[agent] = PushMark{ID: m.ID, At: m.At.UTC()}
+		return nil
 	})
 }
 

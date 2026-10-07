@@ -240,7 +240,11 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 	if !rated() {
 		return
 	}
-	if err := g.push.subscribe(v.login, sub); err != nil {
+	switch err := g.push.subscribe(v.login, sub); {
+	case errors.Is(err, errPushEndpointTaken):
+		refuse(http.StatusConflict, "endpoint-taken")
+		return
+	case err != nil:
 		refuse(http.StatusServiceUnavailable, "unavailable")
 		return
 	}

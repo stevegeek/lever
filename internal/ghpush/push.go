@@ -128,7 +128,7 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	if err := p.charge(caller, size); err != nil {
 		return Result{}, err
 	}
-	if err := scanBundle(copyPath, p.Limits); err != nil {
+	if err := scanBundle(ctx, copyPath, p.Limits); err != nil {
 		return Result{}, err
 	}
 

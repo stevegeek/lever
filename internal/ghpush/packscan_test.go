@@ -78,6 +78,9 @@ func TestScanBundleLimits(t *testing.T) {
 	hugeDelta := append(deltaSize(10), deltaSize(1<<40)...)
 	bigBase := append(deltaSize(1<<40), deltaSize(10)...)
 	okDelta := append(deltaSize(10), deltaSize(10)...)
+	// A delta with a tiny result but 1 MiB of instruction data: git still
+	// inflates the whole stream, so it counts toward the total.
+	fatDelta := append(append(deltaSize(10), deltaSize(10)...), make([]byte, 1<<20-2)...)
 	cases := []struct {
 		name    string
 		header  string
@@ -91,6 +94,10 @@ func TestScanBundleLimits(t *testing.T) {
 		{"delta result too big", "", []packEntry{{typ: 7, size: int64(len(hugeDelta)), data: hugeDelta}}, "delta result 0"},
 		{"delta base too big", "", []packEntry{{typ: 7, size: int64(len(bigBase)), data: bigBase}}, "delta base 0"},
 		{"at the inflated cap", "", []packEntry{blob(1 << 20), blob(1 << 20), blob(1 << 20)}, ""},
+		{"delta data counts toward the total", "", []packEntry{
+			{typ: 7, size: int64(len(fatDelta)), data: fatDelta},
+			{typ: 7, size: int64(len(fatDelta)), data: fatDelta},
+			{typ: 7, size: int64(len(fatDelta)), data: fatDelta}}, "inflate to more than"},
 		{"inflates past size", "", []packEntry{{typ: 3, size: 10, data: make([]byte, 5000)}}, "past its declared size"},
 		{"truncated object", "", []packEntry{{typ: 3, size: 5000, data: make([]byte, 10)}}, "truncated"},
 		{"bad type", "", []packEntry{{typ: 5, size: 1, data: []byte{0}}}, "bad type"},
@@ -98,7 +105,7 @@ func TestScanBundleLimits(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := scanBundle(fakeBundle(t, c.header, c.entries...), l)
+			err := scanBundle(context.Background(), fakeBundle(t, c.header, c.entries...), l)
 			if c.want == "" {
 				if err != nil {
 					t.Fatalf("want accepted, got %v", err)
@@ -111,10 +118,10 @@ func TestScanBundleLimits(t *testing.T) {
 		})
 	}
 	over := PackLimits{MaxInflated: 2<<20 + 1}
-	if err := scanBundle(fakeBundle(t, "", blob(1<<20), blob(1<<20), blob(1)), over); err != nil {
+	if err := scanBundle(context.Background(), fakeBundle(t, "", blob(1<<20), blob(1<<20), blob(1)), over); err != nil {
 		t.Fatalf("at the inflated cap: %v", err)
 	}
-	if err := scanBundle(fakeBundle(t, "", blob(1<<20), blob(1<<20), blob(2)), over); err == nil || !strings.Contains(err.Error(), "inflate to more than") {
+	if err := scanBundle(context.Background(), fakeBundle(t, "", blob(1<<20), blob(1<<20), blob(2)), over); err == nil || !strings.Contains(err.Error(), "inflate to more than") {
 		t.Fatalf("want an inflated-sum refusal, got %v", err)
 	}
 }
@@ -141,7 +148,7 @@ func TestScanBundleAcceptsGitBundles(t *testing.T) {
 		t.Fatal("the full bundle carries no delta")
 	}
 	for _, b := range []string{"full.bundle", "inc.bundle"} {
-		if err := scanBundle(filepath.Join(dir, b), PackLimits{MaxObjects: 100, MaxObjectSize: 1 << 20, MaxInflated: 1 << 20}); err != nil {
+		if err := scanBundle(context.Background(), filepath.Join(dir, b), PackLimits{MaxObjects: 100, MaxObjectSize: 1 << 20, MaxInflated: 1 << 20}); err != nil {
 			t.Errorf("%s: %v", b, err)
 		}
 	}

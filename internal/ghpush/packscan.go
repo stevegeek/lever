@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -33,7 +34,7 @@ const maxBundleHeader = 16 << 20
 // header as git does (read_bundle_header): lines up to the first blank one.
 // It treats more characters as blank than git, so where the two disagree the
 // scanner stops first and git then fails on a "PACK" header line.
-func scanBundle(path string, l PackLimits) error {
+func scanBundle(ctx context.Context, path string, l PackLimits) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -79,6 +80,9 @@ func scanBundle(path string, l PackLimits) error {
 	var total int64
 	var zr io.ReadCloser
 	for i := uint32(0); i < count; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		typ, size, err := readObjectHeader(r)
 		if err != nil {
 			return fmt.Errorf("%w: object %d: %v", ErrPackLimit, i, err)
@@ -126,7 +130,10 @@ func scanBundle(path string, l PackLimits) error {
 			if err := checkSize(l, "delta result", i, result); err != nil {
 				return err
 			}
-			inflated = result
+			// git inflates the delta stream and then builds the result:
+			// both count, or a pack of deltas with tiny results could
+			// carry gigabytes of instruction data past the total cap.
+			inflated = size + result
 		}
 		total += inflated
 		if l.MaxInflated > 0 && total > l.MaxInflated {

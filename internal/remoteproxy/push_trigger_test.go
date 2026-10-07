@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -272,6 +273,40 @@ func TestCheckCoalescesPerLoginAndAgent(t *testing.T) {
 	e.p.check(context.Background(), chatOp, tg, s, false)
 	if len(e.fs.all()) != 2 {
 		t.Fatal("the trailing push after the window did not happen")
+	}
+}
+
+// TestCheckFailedMarkFreesTheSlot: a mark that could not be stored sends
+// nothing and leaves the slot free, so the retry pushes at once instead of
+// waiting out the window.
+func TestCheckFailedMarkFreesTheSlot(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.p.store.Add(chatOp, sub("op"))
+	tg := e.target(t, chatOp, chatUID, "w1")
+	s := e.session(chatUID, chatledger.TierOperator)
+	e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: t0.Add(-time.Hour)})
+	e.hub.put(tg.key, agentMsg("m1", agentW1, "w1", t0))
+	if err := os.Chmod(e.p.dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(e.p.dir, 0o700) })
+	if err := e.p.check(context.Background(), chatOp, tg, s, false); !errors.Is(err, errCheck) {
+		t.Fatalf("a failed mark write: %v, want errCheck", err)
+	}
+	if len(e.fs.all()) != 0 {
+		t.Fatal("pushed without a stored mark")
+	}
+	os.Chmod(e.p.dir, 0o700)
+	e.now = t0.Add(time.Second)
+	if err := e.p.check(context.Background(), chatOp, tg, s, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.fs.all()) != 1 || len(e.sched) != 0 {
+		t.Fatalf("sent %v, scheduled %v: the failed write kept the slot", e.fs.all(), e.sched)
+	}
+	e.p.check(context.Background(), chatOp, tg, s, false)
+	if len(e.fs.all()) != 1 {
+		t.Fatal("one row pushed twice")
 	}
 }
 

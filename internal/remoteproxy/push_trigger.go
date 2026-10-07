@@ -197,13 +197,17 @@ func (p *Push) check(ctx context.Context, login string, t pushTarget, s *pushSes
 		_ = p.store.SetMark(login, t.name, next)
 		return nil
 	}
-	if wait := p.takeSlot(login, t.name); wait > 0 {
+	wait, release := p.takeSlot(login, t.name)
+	if wait > 0 {
 		if s.schedule != nil {
 			s.schedule(t, wait)
 		}
 		return nil
 	}
 	if err := p.store.SetMark(login, t.name, next); err != nil {
+		// Nothing went out: the retry may push at once. The mark is not
+		// stored, so the retry decides the same row again, not a second.
+		release()
 		p.record(login, t.name, "", DecisionPushFailed, 0, "store")
 		return errCheck
 	}
@@ -215,17 +219,29 @@ func (p *Push) check(ctx context.Context, login string, t pushTarget, s *pushSes
 }
 
 // takeSlot spends the (login, agent) push slot, or reports how long until
-// it is free.
-func (p *Push) takeSlot(login, agent string) time.Duration {
+// it is free. release gives a spent slot back (no push went out).
+func (p *Push) takeSlot(login, agent string) (wait time.Duration, release func()) {
 	k := login + "\x00" + agent
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	if t, ok := p.last[k]; ok && now.Sub(t) < pushEvery {
-		return pushEvery - now.Sub(t)
+	prev, had := p.last[k]
+	if had && now.Sub(prev) < pushEvery {
+		return pushEvery - now.Sub(prev), func() {}
 	}
 	p.last[k] = now
-	return 0
+	return 0, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if !p.last[k].Equal(now) {
+			return // spent again since
+		}
+		if had {
+			p.last[k] = prev
+		} else {
+			delete(p.last, k)
+		}
+	}
 }
 
 // notify sends the content-free push to each of login's subscriptions.

@@ -27,12 +27,34 @@ broker:
         - {name: push, params: [repo, branch, bundle]}
       allowed_values:
         repo: [stevegeek/lever]
+    # name must equal the binary's -name default (fizzy)
+    - name: fizzy
+      command: [/home/YOU/.local/bin/lever-tool-fizzy,
+                -fizzy, /usr/local/bin/fizzy,
+                -token-file, /home/YOU/lever-dev/secrets/fizzy-token,
+                -account, "ACCOUNT_ID",
+                -board, 03gyvmtu0lb2osl1x3h5hkeii,   # your Lever board id
+                -state, /home/YOU/.local/state/lever-dev-fizzy]
+      backend: 127.0.0.1:3211
+      operations:
+        - {name: list_cards, params: [column, search, page]}
+        - {name: show_card, params: [number]}
+        - {name: list_comments, params: [number]}
+        - {name: comment, params: [number, body]}
+        - {name: move_card, params: [number, column]}
+        - {name: create_card, params: [title, description]}
 manager:
   image: scionlocal/lever-dev-claude:amd64
   credential_file: secrets/claude-oauth-token
   instructions_file: instructions.md
   obtain:
     - {tool: github, op: push}
+    - {tool: fizzy, op: list_cards}
+    - {tool: fizzy, op: show_card}
+    - {tool: fizzy, op: list_comments}
+    - {tool: fizzy, op: comment}
+    - {tool: fizzy, op: move_card}
+    - {tool: fizzy, op: create_card}
 remote:
   enabled: true
   base_url: https://YOUR-HOST.YOUR-TAILNET.ts.net:8445

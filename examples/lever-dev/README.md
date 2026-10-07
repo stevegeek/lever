@@ -1,7 +1,7 @@
 # lever-dev: develop Lever inside a Lever jail
 
 This runbook is for Stephen on cachyos. The jail is a Lima VM with nested KVM.
-The manager develops Lever in `jail-src/`. It pushes through the `github` host tool.
+The manager develops Lever in `jail-src/`. It pushes through the `github` host tool and uses the Lever board through the `fizzy` host tool.
 
 Rules for the host:
 
@@ -36,7 +36,7 @@ Rules for the host:
 
 1. `mkdir -p ~/lever-dev/{secrets,jail-src} && chmod 700 ~/lever-dev/secrets`
 2. Copy `lever.yaml`, `instructions.md` and `image/` from `~/lever-release/lever/examples/lever-dev/` to `~/lever-dev/`.
-3. Fill the placeholders in `~/lever-dev/lever.yaml`: `YOU`, `APP_ID`, `INSTALLATION_ID`, `YOUR-HOST.YOUR-TAILNET`, the email. Keep `scion.version` equal to the pin of the installed release.
+3. Fill the placeholders in `~/lever-dev/lever.yaml`: `YOU`, `APP_ID`, `INSTALLATION_ID`, `ACCOUNT_ID`, `YOUR-HOST.YOUR-TAILNET`, the email. Keep `scion.version` equal to the pin of the installed release.
 4. `git clone https://github.com/stevegeek/lever ~/lever-dev/jail-src/lever`
 5. `git clone https://github.com/GoogleCloudPlatform/scion ~/lever-dev/jail-src/scion`
 
@@ -58,6 +58,10 @@ The agents write to `jail-src/`. Git run on the host in that tree can execute ag
    - Install it on `stevegeek/lever` only.
 3. Note the App ID and the installation ID. Put them in `lever.yaml`.
 4. Generate a private key. Save it as `~/lever-dev/secrets/github-app.pem` and run `chmod 600` on it.
+5. Install the fizzy CLI from the official release (`https://github.com/basecamp/fizzy-cli/releases`). Verify its checksum. Put it in `/usr/local/bin/fizzy`. Install fizzy 4.x: the tool refuses other major versions.
+6. Create a new Fizzy personal access token only for lever-dev: app.fizzy.do, Profile, API, Personal access tokens. Save it as `~/lever-dev/secrets/fizzy-token` and run `chmod 600` on it.
+7. Put your Fizzy account id in `lever.yaml` (`ACCOUNT_ID`).
+8. Do not keep a `~/.fizzy.yaml` on cachyos: the tool refuses to start when one exists above its state dir.
 
 ## 6. Rulesets
 
@@ -98,5 +102,7 @@ Tick each item. Paste the output into the PR notes.
 - [ ] IPv6 reach: from the manager container, `curl -6 -m 5 http://[<cachyos global IPv6>]:1234/` fails (no route or dropped). If it connects, stop and file the egress fix (spec section 3.6).
 - [ ] The agent pushes `agent/smoke-test` through the tool. CI runs on it. Stephen deletes the branch.
 - [ ] With the App key, a tag push is refused. On cachyos, mint a token with a throwaway script. From a scratch clone outside `jail-src`, run `git push https://x-access-token:$TOKEN@github.com/stevegeek/lever v0.0.0-smoke`. The ruleset must refuse it.
+- [ ] The agent lists the Lever board, comments on a test card (comment shows the `[lever-dev agent]` prefix), and `show_card` on a card of another board returns `{ok: false, error: ...not on the Lever board}`.
+- [ ] Under the broker on cachyos (headless, no desktop session), the fizzy tool's calls finish within seconds and no keyring/Secret Service prompt or hang occurs (the CLI reports `using_keyring` in `fizzy auth status`; with FIZZY_TOKEN set it must not need the keyring).
 - [ ] The chat page loads from the Mac over the tailnet.
 - [ ] Memory and pids: during `make test-lima-e2e`, `podman stats --no-stream` in the guest shows the manager below the guest memory.

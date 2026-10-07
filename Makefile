@@ -29,6 +29,8 @@ install: loginfwd-prebuilt
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
 	go build -ldflags "-X main.Version=$(LEVER_VERSION)" -o $(PREFIX)/lever-tool-github ./cmd/lever-tool-github
 	@echo "installed $(PREFIX)/lever-tool-github"
+	go build -ldflags "-X main.Version=$(LEVER_VERSION)" -o $(PREFIX)/lever-tool-fizzy ./cmd/lever-tool-fizzy
+	@echo "installed $(PREFIX)/lever-tool-fizzy"
 
 # The release version lives in internal/cli/root.go (CI greps that exact file).
 # lever-agent cannot link internal/cli, so it is stamped at build time instead:

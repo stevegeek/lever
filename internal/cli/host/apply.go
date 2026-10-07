@@ -1340,6 +1340,9 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ProbeContainerWritable: func(ctx context.Context, ref, target string) (bool, error) {
 			return jail.ContainerPathWritable(ctx, b.JailRunner(), ref, target)
 		},
+		ProbeContainerDevice: func(ctx context.Context, ref, path string) (bool, error) {
+			return jail.ContainerHasCharDevice(ctx, b.JailRunner(), ref, path)
+		},
 		RecordVolumes: w.recordVolumes,
 		// AgentSession lets start-manager heal an expired agent hub token
 		// and a stopped phase over a live harness (apply.HealAgentSession).

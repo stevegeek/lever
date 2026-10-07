@@ -109,6 +109,37 @@ func ContainerPathWritable(ctx context.Context, r proc.Runner, ref, target strin
 	return false, fmt.Errorf("probing %s in container %s: %w: %s", target, ref, err, strings.TrimSpace(res.Stderr))
 }
 
+// ContainerHasCharDevice reports whether path is a character device inside
+// the running jail container ref (podman exec --user 0 <ref> test -c <path>).
+// Used to tell a manager created before nested_virt (no /dev/kvm) from one
+// that has it. The agent controls what `test` is in its container, so the
+// call is bounded like every other exec into it, and only the exit code is
+// read.
+func ContainerHasCharDevice(ctx context.Context, r proc.Runner, ref, path string) (bool, error) {
+	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
+		return false, fmt.Errorf("probing container device: invalid container reference %q", ref)
+	}
+	if !strings.HasPrefix(path, "/") {
+		return false, fmt.Errorf("probing container device: path %q is not absolute", path)
+	}
+	ctx, cancel := BoundAgentExec(ctx)
+	defer cancel()
+	res, err := r.Run(ctx, nil, "podman", "exec", "--user", "0", ref, "test", "-c", path)
+	switch {
+	case err == nil && res.Code == 0:
+		return true, nil
+	case res.Code == 1:
+		return false, nil
+	}
+	if s := strings.ToLower(res.Stderr); strings.Contains(s, "no such container") || strings.Contains(s, "no such object") {
+		return false, fmt.Errorf("probing container %s: %w", ref, ErrNoContainer)
+	}
+	if err == nil {
+		err = fmt.Errorf("exit %d", res.Code)
+	}
+	return false, fmt.Errorf("probing container %s device %s: %w", ref, path, err)
+}
+
 // benignStderr reports whether stderr holds nothing but podman's own
 // warning lines — `WARN[0000] ...` (the default text format) or a logrus
 // `level=warning` line — which podman prints on some guests for every

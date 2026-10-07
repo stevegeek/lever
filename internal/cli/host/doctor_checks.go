@@ -1303,6 +1303,40 @@ func checkGuestDNS(ctx context.Context, closedEgress bool, jr proc.Runner) check
 		"in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows which DROP the lookups hit; on lima the resolver path is the LIMADNS DNAT to the host alias, which `lever apply` ACCEPTs in the open posture (lever#34) — re-run `lever apply`, then `lever up`"}
 }
 
+// checkNestedVirt reports whether nested_virt reached the jail: /dev/kvm in
+// the guest with mode 0666, lever's podman drop-in, and /dev/kvm in the
+// manager's container (a bounded `test -c` exec; only the exit code is read).
+func checkNestedVirt(ctx context.Context, on bool, jr proc.Runner, managerRef string, probe func(context.Context, string, string) (bool, error)) checkResult {
+	const check = "nested virt"
+	if !on {
+		return checkResult{check, true, "not applicable (nested_virt off)", ""}
+	}
+	res, err := jr.Run(ctx, nil, "stat", "-c", "%F %a", "/dev/kvm")
+	got := strings.TrimSpace(res.Stdout)
+	if err != nil || got != "character special file 666" {
+		if got == "" {
+			got = "missing"
+		}
+		return checkResult{check, false, "guest /dev/kvm: " + got,
+			"`lever apply` installs the rule; if /dev/kvm is missing the VM was created before nested_virt or the host nested module is off: back up the conversation, `lever destroy`, `lever up`"}
+	}
+	if _, err := jr.Run(ctx, nil, "sh", "-c", `test -f "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"`); err != nil {
+		return checkResult{check, false, "lever's podman /dev/kvm drop-in is missing in the guest", "run `lever apply`"}
+	}
+	if probe == nil || managerRef == "" {
+		return checkResult{check, true, "guest ready; manager container not checked", ""}
+	}
+	has, err := probe(ctx, managerRef, "/dev/kvm")
+	if err != nil {
+		return checkResult{check, true, "guest ready; manager container not checked: " + firstLine(err.Error()), ""}
+	}
+	if !has {
+		return checkResult{check, false, "the manager container has no /dev/kvm (created before nested_virt)",
+			"`lever stop`, then `lever up` (recreates the container, keeps the conversation)"}
+	}
+	return checkResult{check, true, "guest /dev/kvm 0666, drop-in present, manager has /dev/kvm", ""}
+}
+
 // activityAge renders an agent's activity with the age of its last change:
 // "activity completed, 3m0s ago", or without the age when the hub reported
 // no event time, or "no activity reported" when the field is empty.

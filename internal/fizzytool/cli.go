@@ -17,7 +17,8 @@ import (
 )
 
 // CLI runs the fizzy CLI: argv only, an empty cwd and HOME, the token in
-// FIZZY_TOKEN (never --token, which /proc would show), the API URL pinned in
+// FIZZY_TOKEN (never --token, which /proc would show), the account in
+// FIZZY_PROFILE, the API URL pinned in
 // FIZZY_API_URL (the CLI walks UP from cwd for a .fizzy.yaml, which could
 // otherwise redirect the token to another host — CheckNoLocalConfig refuses
 // that at startup too), JSON output, a timeout and an output cap.
@@ -59,8 +60,8 @@ func CheckNoLocalConfig(work string) error {
 	}
 }
 
-// CheckVersion requires fizzy CLI major version 4 (the flags and envelope
-// this package relies on; FIZZY_ACCOUNT is deprecated in 4.x).
+// CheckVersion requires fizzy CLI major version 4 (the flags, the envelope
+// and the FIZZY_PROFILE account selection this package relies on).
 func CheckVersion(ctx context.Context, c CLI) error {
 	data, err := c.Run(ctx, "version")
 	if err != nil {
@@ -108,7 +109,13 @@ func (c CLI) Run(ctx context.Context, args ...string) (json.RawMessage, error) {
 	cmd := exec.CommandContext(ctx, c.Bin, append(append([]string{}, args...), "--agent", "--json")...)
 	cmd.Dir = c.Work
 	cmd.WaitDelay = 2 * time.Second
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + c.Home, "FIZZY_TOKEN=" + c.Token, "FIZZY_ACCOUNT=" + c.Account, "FIZZY_API_URL=" + c.APIURL}
+	// FIZZY_PROFILE selects the account: with no profile store in the empty
+	// HOME, CLI 4.x uses the profile name as the account id (FIZZY_ACCOUNT is
+	// its deprecated alias and warns on every call). FIZZY_NO_KEYRING keeps
+	// the CLI out of the OS keyring, and FIZZY_NO_UPDATE_NOTIFIER out of the
+	// network for update checks.
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + c.Home, "FIZZY_TOKEN=" + c.Token, "FIZZY_PROFILE=" + c.Account, "FIZZY_API_URL=" + c.APIURL,
+		"FIZZY_NO_KEYRING=1", "FIZZY_NO_UPDATE_NOTIFIER=1"}
 	out := &capWriter{max: c.MaxOut}
 	errOut := &capWriter{max: 16 << 10}
 	cmd.Stdout, cmd.Stderr = out, errOut

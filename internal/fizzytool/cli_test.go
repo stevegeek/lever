@@ -22,7 +22,7 @@ func TestCLIRunEnvArgvCwd(t *testing.T) {
 	}
 	log := readLog(t, logPath)
 	work, _ := filepath.EvalSymlinks(c.Work) // macOS: /var → /private/var
-	for _, want := range []string{"ARGV [card] [show] [17] [--agent] [--json]", "CWD " + work, "HOME " + c.Home, "TOKEN tok_SECRET", "ACCOUNT 6182510", "API https://app.fizzy.do", "FAKEVAR \n"} {
+	for _, want := range []string{"ARGV [card] [show] [17] [--agent] [--json]", "CWD " + work, "HOME " + c.Home, "TOKEN tok_SECRET", "PROFILE 6182510", "ACCOUNT \n", "API https://app.fizzy.do", "NOUPDATE 1", "NOKEYRING 1", "FAKEVAR \n"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("log missing %q:\n%s", want, log)
 		}

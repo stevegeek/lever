@@ -1539,7 +1539,7 @@ func TestCheckAgentHubTokens(t *testing.T) {
 	}
 	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
 		"lever--assistant": tok(7 * time.Hour)}})
-	if !r.ok || !strings.Contains(r.detail, "not checked: scratch (token unreadable)") {
+	if !r.ok || !strings.Contains(r.detail, "not checked (token unreadable): scratch (error)") {
 		t.Fatalf("unreadable worker token: %+v", r)
 	}
 	// The running manager's expired token is the manager row's failure: here

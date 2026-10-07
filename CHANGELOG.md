@@ -25,6 +25,21 @@ version bump moves the block under the new version heading.
 
 - The Makefile `LEVER_IMAGE_ARCH` defaults to the host Go arch instead of `arm64`.
 
+### Fixed
+
+- **`lever doctor` and `lever worker purge` read the jail run user's uid
+  before they use the jail.** Both used the default uid 501 (the OrbStack host
+  uid) for the jail runner's `XDG_RUNTIME_DIR`, so on Lima (guest uid 1000)
+  rootless podman found no agent container: the `agent hub tokens` row said
+  "not checked (token unreadable)" for every agent, and the other doctor rows
+  that read inside containers could not see them. `worker purge` looked for
+  the worker ticket in the wrong runtime directory. `lever apply` and the
+  broker already used the right uid, so the token heal itself was not
+  affected.
+- **A doctor row that cannot read a token now names the reason** (no
+  container, timed out, output over its limit, unexpected output, or the exit
+  status), never any text from the container.
+
 ## [0.31.0] - 2026-10-07
 
 ### Added

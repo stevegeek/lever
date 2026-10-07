@@ -73,15 +73,18 @@ matters, and why delivery alone does not defend against it.
 The operator signs a canonical JSON statement with an SSH key (`ssh-keygen -Y sign`, a fixed
 namespace) naming the target agent, a time window, and an action. `lever directive send` submits
 the exact bytes and signature over a 0600 unix-domain admin socket in the instance state
-dir — genuinely unreachable from inside the jail; every state-changing admin operation (send, list, revoke, selftest) is operator-signed; the
+dir — genuinely unreachable from inside the jail; every admin operation that carries a statement or an envelope (send, list, revoke, selftest) is operator-signed; the
 read-only `/directive/resolve` lookup of an agent's `{cn, generation}` is gated by the socket's
 0600 mode alone and returns no authority. The socket is defence in depth, not the trust boundary. The broker verifies the
 signature against an `allowed_signers` file (fixed principal, fixed namespace, only exit 0
 accepted) over the exact received bytes, parses those same bytes (rejecting duplicate JSON keys, no
 re-serialize step to smuggle a mismatch through), validates the time window and instance name, and
 stores the directive active in persistent host-side state. It then delivers a **pointer only** — a
-directive id and nothing else — to the target agent's ordinary message channel; no action content
-ever transits that untrusted channel. If (and only if) the agent independently decides to act, it
+notice with the directive id, the fixed `directive_consume` call form and a sent-ledger ref — to the
+target agent's ordinary message channel; no action content ever transits that untrusted channel.
+The broker refuses the send, and stores nothing, while the target is not running; if the notice
+still fails to go out, it revokes the directive, so no active directive exists that its target was
+never told about. If (and only if) the agent independently decides to act, it
 calls the `directive_consume(id)` tool over its own mTLS connection to the broker, which performs an
 atomic compare-and-swap: the action is returned, and the directive flipped to consumed, only if the
 caller's verified identity and current generation (§11.4) match the

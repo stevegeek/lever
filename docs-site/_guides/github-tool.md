@@ -35,10 +35,13 @@ tag and trigger the release workflow on unreviewed code, and an admin bypass def
    GitHub rejects any push that changes `.github/workflows/`. Agents cannot change CI.
 3. Install it on one repository only.
 4. Generate a private key. Save it as a regular file with mode `0600`, owned by the user that runs
-   the broker. The tool refuses to start otherwise.
+   the broker, outside the instance tree (the agent can read the tree). The tool refuses to start
+   otherwise.
 5. Note the app id and the installation id.
 
-The tool mints a token from the key for each push. The token lasts 1 hour and stays in memory.
+The tool mints an installation token from the key, narrowed to the one repository and
+`contents: write`. The token lasts 1 hour and stays in memory. The tool reuses it for later pushes
+to that repository until less than 10 minutes remain, then mints a new one.
 
 ## 2. Add rulesets
 
@@ -80,9 +83,9 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | Flag | Required | Meaning |
 |---|---|---|
 | `-tree` | yes | Absolute path of the instance tree. |
-| `-state` | yes | Absolute path of the state directory. It holds the per-repo mirrors and temporary files. |
+| `-state` | yes | Absolute path of the state directory, outside `-tree`. It holds the per-repo mirrors and temporary files. |
 | `-app-id`, `-installation-id` | yes | The GitHub App. |
-| `-app-key` | yes | Absolute path of the app private key. |
+| `-app-key` | yes | Absolute path of the app private key, outside `-tree`. |
 | `-repos` | yes | Comma list of `owner/name` the tool may push to. |
 | `-branch-prefix` | no | Required branch prefix. Default `agent/`. |
 | `-max-bundle` | no | Bundle size cap. Default 256 MiB. |
@@ -107,7 +110,7 @@ git bundle create /workspace/.lever-files/github/<name>.bundle origin/main..<bra
 
 The agent then calls `push` with `repo`, `branch` and `bundle`. The `bundle` argument is the file
 name only, for example `fix-1.bundle`. It is not a path. The name must match
-`^[A-Za-z0-9._-]{1,93}\.bundle$`. The bundle must contain exactly one ref, `refs/heads/<branch>`,
+`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,92}\.bundle$` (it cannot start with a dot). The bundle must contain exactly one ref, `refs/heads/<branch>`,
 and no tags.
 
 The tool never forces a push. If the agent rebases a branch that is already on GitHub, the push is
@@ -126,10 +129,11 @@ A refusal returns to the agent as `{"ok": false, "error": "..."}`. The tool writ
 | Pack over a size limit (see below) | Named refusal before any git call on the bundle. |
 | Bad branch charset or prefix, or a protected name (`main`, `master`, `HEAD`) | Named refusal before any git call. |
 | Repository not in `-repos` | Named refusal. |
+| Another push to the same repository holds the mirror for more than 30 seconds | Refusal: retry shortly. |
 | Non-fast-forward | GitHub rejects the push. The tool reports that the branch moved and to use a new branch name. |
-| Token mint, GitHub or network error, or git timeout | Redacted error text. The tool does not retry. |
+| Token mint, GitHub or network error, or git timeout (5 minutes for one git call, 10 minutes for the whole call) | Redacted error text. Host paths show as `<state>`, `<tree>` or `<tmp>`. The tool does not retry. |
 | git older than 2.46.0 | The tool refuses to start. The broker reports it down, and calls fail with 502. |
-| App key file has the wrong mode or owner | The tool refuses to start. The broker reports it down, and calls fail with 502. |
+| App key file has the wrong mode or owner, or the key or `-state` is inside `-tree` | The tool refuses to start. The broker reports it down, and calls fail with 502. |
 
 ## Bundle limits
 
@@ -139,7 +143,8 @@ the bundle if:
 
 - the pack has more than 2,000,000 objects,
 - one object, delta base or delta result is larger than 100 MiB (GitHub refuses such files), or
-- the sum of the inflated sizes is larger than 4 GiB.
+- the sum of the inflated sizes is larger than 4 GiB. For a delta, both the inflated delta data and
+  the delta result count toward this sum.
 
 git then runs with `pack.threads=1` and `core.bigFileThreshold=16m`. A bundle at these limits can
 make `index-pack` use approximately 200 to 300 MiB of memory for one call. The tool sets no

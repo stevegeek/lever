@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -48,5 +50,27 @@ func TestParseFlagsRequired(t *testing.T) {
 	_, err = parseFlags([]string{"-tree", "rel/path", "-state", "/s", "-app-id", "1", "-installation-id", "2", "-app-key", "/k", "-repos", "a/b"})
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("want an absolute-path error, got %v", err)
+	}
+}
+
+func TestParseFlagsRefusesStateInsideTree(t *testing.T) {
+	tree := t.TempDir()
+	base := []string{"-app-id", "1", "-installation-id", "2", "-app-key", "/k", "-repos", "a/b"}
+	for _, state := range []string{filepath.Join(tree, "st"), filepath.Join(tree, "a", "b", "st"), tree} {
+		_, err := parseFlags(append([]string{"-tree", tree, "-state", state}, base...))
+		if err == nil || !strings.Contains(err.Error(), "inside") {
+			t.Errorf("state %s: want an inside-tree refusal, got %v", state, err)
+		}
+	}
+	// A symlinked path to the tree is the same tree.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(tree, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseFlags(append([]string{"-tree", tree, "-state", filepath.Join(link, "st")}, base...)); err == nil {
+		t.Error("state under a symlink to the tree must be refused")
+	}
+	if _, err := parseFlags(append([]string{"-tree", tree, "-state", filepath.Join(t.TempDir(), "st")}, base...)); err != nil {
+		t.Errorf("separate state must be accepted: %v", err)
 	}
 }

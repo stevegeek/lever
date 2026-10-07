@@ -107,13 +107,13 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, err
 	}
 	remote := p.BaseURL + "/" + repo
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/main:refs/remotes/origin/main"); err != nil {
+	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/main:refs/remotes/origin/main"); err != nil {
 		return Result{}, fmt.Errorf("refresh mirror: %w", err)
 	}
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{}, "bundle", "verify", "--quiet", copyPath); err != nil {
+	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "bundle", "verify", "--quiet", copyPath); err != nil {
 		return Result{}, fmt.Errorf("bundle does not verify against %s main (missing prerequisites?): %w", repo, err)
 	}
-	heads, err := p.Git.Run(ctx, mirror, RunOpts{}, "bundle", "list-heads", copyPath)
+	heads, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "bundle", "list-heads", copyPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("bundle list-heads: %w", err)
 	}
@@ -130,11 +130,11 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, err
 	}
 	tmpRef := "refs/tmp/" + id
-	defer p.Git.Run(context.Background(), mirror, RunOpts{}, "update-ref", "-d", tmpRef) //nolint:errcheck
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{AllowFile: true}, "fetch", "--no-tags", "--no-write-fetch-head", copyPath, "+refs/heads/"+branch+":"+tmpRef); err != nil {
+	defer p.Git.Run(context.Background(), mirror, RunOpts{GitDir: mirror}, "update-ref", "-d", tmpRef) //nolint:errcheck
+	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, AllowFile: true}, "fetch", "--no-tags", "--no-write-fetch-head", copyPath, "+refs/heads/"+branch+":"+tmpRef); err != nil {
 		return Result{}, fmt.Errorf("import bundle: %w", err)
 	}
-	newSHA, err := p.Git.Run(ctx, mirror, RunOpts{}, "rev-parse", "--verify", tmpRef+"^{commit}")
+	newSHA, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "rev-parse", "--verify", tmpRef+"^{commit}")
 	if err != nil {
 		return Result{}, fmt.Errorf("bundle head is not a commit: %w", err)
 	}
@@ -146,12 +146,12 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return res, err
 	}
 	auth := &Auth{BaseURL: p.BaseURL, Token: token}
-	if out, err := p.Git.Run(ctx, mirror, RunOpts{Auth: auth}, "ls-remote", remote, "refs/heads/"+branch); err != nil {
+	if out, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "ls-remote", remote, "refs/heads/"+branch); err != nil {
 		return res, fmt.Errorf("read remote branch: %w", err)
 	} else if f := strings.Fields(out); len(f) >= 1 {
 		res.OldSHA = f[0]
 	}
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{Auth: auth}, "push", remote, tmpRef+":refs/heads/"+branch); err != nil {
+	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "push", remote, tmpRef+":refs/heads/"+branch); err != nil {
 		// Without --porcelain, git writes " ! [rejected] … (non-fast-forward)"
 		// to stderr, which Run puts in the error.
 		if s := err.Error(); strings.Contains(s, "non-fast-forward") || strings.Contains(s, "fetch first") || strings.Contains(s, "[rejected]") {
@@ -196,8 +196,17 @@ func (p *Pusher) copyBundle(name, dst string) (string, error) {
 // ensureMirror returns the repo's bare, hook-less mirror, creating it once.
 func (p *Pusher) ensureMirror(ctx context.Context, repo string) (string, error) {
 	dir := filepath.Join(p.State, "mirrors", filepath.FromSlash(repo)+".git")
-	if fi, err := os.Lstat(dir); err == nil && fi.IsDir() {
-		return dir, nil
+	if fi, err := os.Lstat(dir); err == nil {
+		// A half-initialised or foreign directory is rebuilt, never trusted.
+		if fi.IsDir() {
+			out, err := p.Git.Run(ctx, p.State, RunOpts{GitDir: dir}, "rev-parse", "--is-bare-repository")
+			if err == nil && strings.TrimSpace(out) == "true" {
+				return dir, nil
+			}
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return "", fmt.Errorf("remove broken mirror: %w", err)
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return "", err

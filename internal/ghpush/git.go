@@ -19,6 +19,7 @@ import (
 type Git struct {
 	Bin       string // absolute path to git
 	Home      string // an empty, private directory
+	Ceiling   string // GIT_CEILING_DIRECTORIES: git never looks above this
 	Timeout   time.Duration
 	AllowHTTP bool                     // tests only: allow plain http remotes
 	Trace     func(args, env []string) // tests only
@@ -29,8 +30,9 @@ type Auth struct{ BaseURL, Token string }
 
 // RunOpts are the per-call exceptions.
 type RunOpts struct {
-	AllowFile bool  // the bundle import reads a local file
-	Auth      *Auth // ls-remote and push only
+	AllowFile bool   // the bundle import reads a local file
+	Auth      *Auth  // ls-remote and push only
+	GitDir    string // pin the repository: git never searches parent directories
 }
 
 var hardening = []string{
@@ -75,6 +77,9 @@ func (g Git) Run(ctx context.Context, dir string, o RunOpts, args ...string) (st
 	if o.AllowFile {
 		argv = append(argv, "-c", "protocol.file.allow=always")
 	}
+	if o.GitDir != "" {
+		argv = append(argv, "--git-dir="+o.GitDir)
+	}
 	argv = append(argv, args...)
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -83,6 +88,9 @@ func (g Git) Run(ctx context.Context, dir string, o RunOpts, args ...string) (st
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0",
+	}
+	if g.Ceiling != "" {
+		env = append(env, "GIT_CEILING_DIRECTORIES="+g.Ceiling)
 	}
 	token := ""
 	if o.Auth != nil {

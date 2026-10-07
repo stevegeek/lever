@@ -63,6 +63,9 @@ func parseFlags(args []string) (opts, error) {
 	if err := ghpush.ValidatePrefix(o.prefix); err != nil {
 		return o, err
 	}
+	if err := refuseStateInTree(o.tree, o.state); err != nil {
+		return o, err
+	}
 	o.repos = map[string]bool{}
 	for _, r := range strings.Split(repos, ",") {
 		o.repos[strings.TrimSpace(r)] = true
@@ -129,7 +132,7 @@ func main() {
 		Repos: o.repos, MaxBundle: o.maxBundle, LockWait: 30 * time.Second,
 		Tokens: &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
 			APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now},
-		Git: ghpush.Git{Bin: gitBin, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute},
+		Git: ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute},
 		Log: logger,
 	}
 	srv, err := captool.New(captool.Config{
@@ -157,4 +160,40 @@ func main() {
 	}
 	log.Printf("lever-tool-github %q serving MCP on %s", o.name, o.backend)
 	log.Fatal(http.ListenAndServe(o.backend, srv.Handler()))
+}
+
+// resolveExisting resolves symlinks of the nearest existing ancestor of p and
+// re-appends the part that does not exist yet.
+func resolveExisting(p string) (string, error) {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, rest), nil
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", fmt.Errorf("cannot resolve %q", p)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
+}
+
+// refuseStateInTree: the state dir holds the mirrors and must not sit in the
+// tree the agent can write (or be the tree itself).
+func refuseStateInTree(tree, state string) error {
+	t, err := filepath.EvalSymlinks(tree)
+	if err != nil {
+		return fmt.Errorf("-tree: %w", err)
+	}
+	s, err := resolveExisting(state)
+	if err != nil {
+		return fmt.Errorf("-state: %w", err)
+	}
+	rel, err := filepath.Rel(t, s)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("-state %s is inside -tree %s: the agent could write the mirrors", state, tree)
+	}
+	return nil
 }

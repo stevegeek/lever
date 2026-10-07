@@ -39,7 +39,7 @@ func newPusher(t *testing.T, r *testRemote) (*Pusher, string, *[][]string) {
 		Tree: tree, State: state, Prefix: "agent/", BaseURL: r.srv.URL,
 		Repos: map[string]bool{repo: true}, MaxBundle: 1 << 20, LockWait: time.Second,
 		Tokens: fixedToken("ghs_TESTTOKEN"),
-		Git:    Git{Bin: bin, Home: t.TempDir(), Timeout: time.Minute, AllowHTTP: true, Trace: func(a, _ []string) { argvs = append(argvs, a) }},
+		Git:    Git{Bin: bin, Ceiling: state, Home: t.TempDir(), Timeout: time.Minute, AllowHTTP: true, Trace: func(a, _ []string) { argvs = append(argvs, a) }},
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	return p, tree, &argvs
@@ -233,5 +233,66 @@ func TestPushLockBusy(t *testing.T) {
 	defer unlock()
 	if _, err := p.lock(context.Background(), repo); !errors.Is(err, ErrBusy) {
 		t.Fatalf("want ErrBusy, got %v", err)
+	}
+}
+
+func TestPushReinitsHalfInitMirror(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	if err := os.MkdirAll(filepath.Join(p.State, "mirrors", repo+".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	commitOn(t, work, "agent/half", "h1.txt")
+	bundle(t, work, tree, "half.bundle", "agent/half")
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/half", "half.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	if r.headSHA(t, repo, "agent/half") == "" {
+		t.Fatal("branch not pushed")
+	}
+}
+
+func TestPushIgnoresRepoAboveState(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, argvs := newPusher(t, r)
+	// A work tree above the state dir, with an origin that must never be used.
+	above := t.TempDir()
+	gitT(t, above, "init", "-b", "main")
+	gitT(t, above, "remote", "add", "origin", "http://127.0.0.1:1/nope.git")
+	state := filepath.Join(above, "state")
+	if err := os.MkdirAll(filepath.Join(state, "tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p.State = state
+	p.Git.Ceiling = state
+	// Half-init mirror: without --git-dir git would discover the repo above.
+	if err := os.MkdirAll(filepath.Join(state, "mirrors", repo+".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	commitOn(t, work, "agent/above", "ab.txt")
+	bundle(t, work, tree, "above.bundle", "agent/above")
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/above", "above.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	if r.headSHA(t, repo, "agent/above") == "" {
+		t.Fatal("branch not pushed to the test remote")
+	}
+	for _, a := range *argvs {
+		if len(a) == 0 {
+			continue
+		}
+		hasDir := false
+		for _, s := range a {
+			if strings.HasPrefix(s, "--git-dir=") {
+				hasDir = true
+			}
+		}
+		isInit := slices.Contains(a, "init")
+		if !hasDir && !isInit {
+			t.Fatalf("git call without --git-dir: %v", a)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(above, ".git", "refs", "tmp")); err == nil {
+		t.Fatal("the repo above the state dir was touched")
 	}
 }

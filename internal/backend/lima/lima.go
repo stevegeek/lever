@@ -90,6 +90,11 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if !ok {
 		return fmt.Errorf("lever requires Lima >= 2.0.0 for portForwards ignore semantics; found %s", got)
 	}
+	if cfg.NestedVirt {
+		if err := checkHostNested(readHostFile); err != nil {
+			return err
+		}
+	}
 	if err := l.ensureVM(ctx, cfg); err != nil {
 		return err
 	}

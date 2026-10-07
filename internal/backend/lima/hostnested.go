@@ -1,0 +1,35 @@
+package lima
+
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+// nestedParamPaths are the KVM module parameters that say whether the host
+// lets a guest run its own KVM guests.
+var nestedParamPaths = []string{
+	"/sys/module/kvm_amd/parameters/nested",
+	"/sys/module/kvm_intel/parameters/nested",
+}
+
+// readHostFile is os.ReadFile; a test seam.
+var readHostFile = os.ReadFile
+
+// checkHostNested refuses nested_virt on a host whose KVM module has nested
+// virtualization off: the jail VM would boot without /dev/kvm and the guest
+// step would fail later with a less direct message.
+func checkHostNested(read func(string) ([]byte, error)) error {
+	for _, p := range nestedParamPaths {
+		b, err := read(p)
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSpace(string(b)) {
+		case "1", "Y", "y":
+			return nil
+		}
+	}
+	return fmt.Errorf("nested_virt: the host's KVM module has nested virtualization off (or KVM is not loaded). " +
+		"On Intel: echo 'options kvm_intel nested=1' | sudo tee /etc/modprobe.d/kvm-nested.conf, then reboot or `sudo modprobe -r kvm_intel && sudo modprobe kvm_intel` with no VM running; on AMD it is on by default (check /sys/module/kvm_amd/parameters/nested)")
+}

@@ -32,8 +32,8 @@ another.
 
 | Backend | Kernel | FS bounded by | Egress enforced at | Version-fragile |
 |---|---|---|---|---|
-| `orbstack` | shared | isolated machine: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables | yes |
-| `lima` | separate | VM: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables | yes |
+| `orbstack` | shared | isolated machine: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables | true |
+| `lima` | separate | VM: no host files + project tree mounted at `/lever` | jail netns iptables/ip6tables | true |
 
 (Columns mirror `lever backends`' own output.)
 
@@ -49,8 +49,9 @@ workers (a kernel-level container escape reaches the whole jail — see [securit
 
 The [Lima](https://lima-vm.io) VM backend: macOS (`vz`) and Linux (QEMU/KVM), for anyone who does
 not run OrbStack. It preserves the VM boundary, its own kernel, not shared with the host or with
-other jails, so its guarantees match `orbstack`'s. The containment surface is a **lever-owned
-template** (stock Lima templates are not used), built from three mechanisms:
+other jails, so its guarantees match `orbstack`'s. The VM type is `vz` (with a `virtiofs` mount)
+on macOS and `qemu` on Linux, booting an Ubuntu 24.04 cloud image. The containment surface is a
+**lever-owned template** (stock Lima templates are not used), built from three mechanisms:
 
 - **Exactly one writable mount**: the project tree, at `/lever`. Nothing else, in particular not
   Lima's stock `~` read-only home mount.
@@ -71,12 +72,19 @@ not depend on Lima's auto-inference.
 `host.lima.internal` (resolving to `192.168.5.2`) is the host alias, the direct analog of OrbStack's `host.orb.internal`: it's how an agent
 reaches the broker and any allowlisted host tool port.
 
-**Guest DNS goes through the host alias too.** Lima's guest resolver (`192.168.5.3`) is a nat-table
-DNAT (Lima's `LIMADNS` chain) to the host agent's DNS server at `host.lima.internal:<per-boot
-port>`, and nat `OUTPUT` runs before filter `OUTPUT`, so every lookup reaches `LEVER_EGRESS` as a
-new dial to the alias on a non-allowlisted port. Under `egress: open`, lever reads the live
-`LIMADNS` chain at apply time and ACCEPTs exactly those DNAT targets ahead of the alias DROP, so the
-guest and every agent container resolve names through the host's own resolver (VPN and split-DNS
+**The run user.** lever reads the guest user's name and uid (`whoami`, `id -u`) from the machine
+instead of assuming them. On OrbStack the guest user carries the host uid (501 on a typical Mac);
+on Lima the guest user is uid 1000, not 501. The rootless podman runtime directory
+(`/run/user/<uid>`) and the staged worker tickets follow that uid.
+
+**Guest DNS goes through the host alias too.** With `qemu`, Lima's guest resolver (`192.168.5.3`)
+is a nat-table DNAT (Lima's `LIMADNS` chain) to the host agent's DNS server at
+`host.lima.internal:<per-boot port>`, and nat `OUTPUT` runs before filter `OUTPUT`, so every lookup
+reaches `LEVER_EGRESS` as a new dial to the alias on a non-allowlisted port. With `vz` the
+`LIMADNS` chain is empty and the guest's systemd-resolved sends to the alias on port 53 directly.
+Under `egress: open`, lever reads the live `LIMADNS` chain at apply time (or, when it has no
+targets, the alias nameservers in `/run/systemd/resolve/resolv.conf`) and ACCEPTs exactly those
+targets ahead of the alias DROP, so the guest and every agent container resolve names through the host's own resolver (VPN and split-DNS
 included). Without that carve-out (lever < 0.22.2) a subscription-mode agent never resolved
 `api.anthropic.com` and every turn ended in `Request timed out` while `lever up` and `lever doctor`
 stayed green. Under `egress: closed` DNS stays dropped by design; agents dial the broker by IP.
@@ -86,8 +94,8 @@ is not in the dropped set.
 
 **Nested virtualization (`nested_virt`).** On an x86_64 Linux host, `nested_virt: true` gives the manager
 container `/dev/kvm`, so the manager can run KVM guests (for example Lima, to test lever itself).
-Workers and the hub do not get the device. Apply refuses when the host's `kvm_amd`/`kvm_intel`
-`nested` parameter is off. The template renders `vmOpts.qemu.cpuType: host`, which Lima reads at
+Workers and the hub do not get the device. Apply refuses on a host that is not x86_64, and when the
+host's `kvm_amd`/`kvm_intel` `nested` parameter is off. The template renders `vmOpts.qemu.cpuType: host`, which Lima reads at
 create time only: an existing VM needs a recreate. Inside the guest, lever writes a udev rule
 (`/etc/udev/rules.d/65-lever-kvm.rules`, mode 0666). The manager gets the device as a bind-mount
 volume on its scion record (scion has no per-agent device field; rootless podman passes a
@@ -96,5 +104,10 @@ the device, or to take it away, back up the conversation, then run `lever up --f
 key is off, apply removes the rule and sets the device back to mode 0660. Each apply also removes
 the podman drop-in (`20-lever-kvm.conf`) that earlier builds wrote, which gave every container the
 device. `lever doctor` has a *nested virt* row. The key is rejected on OrbStack and on darwin.
-`cpus` and `memory` (Lima only, create-time) size the VM; apply warns when they differ from the
-existing VM's. See the [`nested_virt` config row](/reference/config/) for the full contract.
+See the [`nested_virt` config row](/reference/config/) for the full contract.
+
+**Sizing.** `disk` (default `24GiB`; Lima's own default is 100GiB), `cpus` (1-256) and `memory`
+(at least `2GiB`) size the VM. They are Lima only (config load rejects `cpus`, `memory` and
+`nested_virt` on OrbStack, and OrbStack ignores `disk`) and create-time only: apply warns when
+`cpus` or `memory` differ from the existing VM's, and a bigger disk needs `limactl disk resize` or
+a recreate. Unset `cpus` and `memory` keep Lima's defaults.

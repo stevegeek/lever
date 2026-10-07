@@ -2,8 +2,10 @@ package ghpush
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -358,4 +360,217 @@ func TestPushOldSHAExactRefMatch(t *testing.T) {
 	if res.OldSHA != first {
 		t.Fatalf("OldSHA %s, want %s", res.OldSHA, first)
 	}
+}
+
+func dirSize(t *testing.T, d string) (n int64) {
+	t.Helper()
+	filepath.Walk(d, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() {
+			n += fi.Size()
+		}
+		return nil
+	})
+	return n
+}
+
+// tagHeadBundle writes a bundle whose one head is an annotated tag over a new
+// commit with a random blob: it passes verify and the import, then is refused.
+func tagHeadBundle(t *testing.T, work, tree, name string, size int) {
+	t.Helper()
+	gitT(t, work, "checkout", "-q", "-B", "agent/j", "origin/main")
+	b := make([]byte, size)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "junk.bin"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, work, "add", ".")
+	gitT(t, work, "commit", "-q", "-m", "junk "+name)
+	gitT(t, work, "tag", "-f", "-a", "-m", "x", "t-"+name)
+	tagObj := gitT(t, work, "rev-parse", "t-"+name)
+	if err := os.WriteFile(filepath.Join(work, ".git", "refs", "heads", "agent", "tagobj"), []byte(tagObj+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle(t, work, tree, name, "agent/tagobj", "^origin/main")
+}
+
+func TestPushRefusedImportsLeaveMirrorUnchanged(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.MaxBundle = 4 << 20
+	mirror := filepath.Join(p.State, "mirrors", repo+".git")
+	var before int64
+	for i := 0; i < 4; i++ {
+		name := fmt.Sprintf("j%d.bundle", i)
+		tagHeadBundle(t, work, tree, name, 1<<20)
+		if _, err := p.Push(context.Background(), "manager", repo, "agent/tagobj", name); err == nil || !strings.Contains(err.Error(), "not a commit") {
+			t.Fatalf("push %d: want a not-a-commit refusal, got %v", i, err)
+		}
+		if i == 0 {
+			before = dirSize(t, filepath.Join(mirror, "objects"))
+			continue
+		}
+		if got := dirSize(t, filepath.Join(mirror, "objects")); got != before {
+			t.Fatalf("push %d: mirror objects grew from %d to %d bytes", i, before, got)
+		}
+	}
+	if before > 1<<20 {
+		t.Fatalf("the refused bundle reached the mirror: %d bytes", before)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(p.State, "tmp")); len(ents) != 0 {
+		t.Fatalf("temp dirs left behind: %v", ents)
+	}
+}
+
+func TestPushFailedFsckLeavesNoTempPack(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	tree0 := gitT(t, work, "rev-parse", "HEAD^{tree}")
+	parent := gitT(t, work, "rev-parse", "HEAD")
+	obj := "tree " + tree0 + "\nparent " + parent + "\nauthor t <t@t> 0 +0000\n\nbad\n"
+	cmd := exec.Command("git", "-c", "credential.helper=", "hash-object", "-t", "commit", "--literally", "-w", "--stdin")
+	cmd.Dir, cmd.Stdin = work, strings.NewReader(obj)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	sha, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, work, "update-ref", "refs/heads/agent/bad", strings.TrimSpace(string(sha)))
+	bundle(t, work, tree, "bad.bundle", "agent/bad")
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/bad", "bad.bundle"); err == nil || !strings.Contains(err.Error(), "import bundle") {
+		t.Fatalf("want an import (fsck) refusal, got %v", err)
+	}
+	filepath.Walk(p.State, func(path string, fi os.FileInfo, err error) error {
+		if err == nil && strings.HasPrefix(fi.Name(), "tmp_pack_") {
+			t.Errorf("temp pack left behind: %s", path)
+		}
+		return nil
+	})
+}
+
+func TestPushRefusedObjectsAreNoPrerequisiteLater(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	// Caller A: a commit that is imported, then refused (tag head).
+	tagHeadBundle(t, work, tree, "a.bundle", 1024)
+	if _, err := p.Push(context.Background(), "worker-a", repo, "agent/tagobj", "a.bundle"); err == nil {
+		t.Fatal("want a refusal")
+	}
+	// Caller B: a bundle that needs A's refused commit as a prerequisite.
+	gitT(t, work, "checkout", "-q", "-B", "agent/b", "agent/j")
+	commitOn(t, work, "agent/b", "b2.txt")
+	bundle(t, work, tree, "b.bundle", "agent/j..agent/b")
+	_, err := p.Push(context.Background(), "worker-b", repo, "agent/b", "b.bundle")
+	if err == nil || !strings.Contains(err.Error(), "prerequisites") {
+		t.Fatalf("want a prerequisites refusal, got %v", err)
+	}
+	if r.headSHA(t, repo, "agent/b") != "" {
+		t.Fatal("caller B pushed on top of caller A's refused objects")
+	}
+}
+
+func TestPushImportBudget(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	commitOn(t, work, "agent/q", "q.txt")
+	bundle(t, work, tree, "q.bundle", "origin/main..agent/q")
+	fi, err := os.Stat(filepath.Join(tree, BundleDir, "q.bundle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ImportBudget = fi.Size()*2 + 1
+	for i := 0; i < 2; i++ {
+		if _, err := p.Push(context.Background(), "manager", repo, "agent/q", "q.bundle"); err != nil {
+			t.Fatalf("push %d within the budget: %v", i, err)
+		}
+	}
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/q", "q.bundle"); err == nil || !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("want a budget refusal, got %v", err)
+	}
+	// The budget is per caller.
+	if _, err := p.Push(context.Background(), "worker", repo, "agent/q", "q.bundle"); err != nil {
+		t.Fatalf("another caller has its own budget: %v", err)
+	}
+	// Spend older than the window does not count.
+	p.now = func() time.Time { return time.Now().Add(importWindow + time.Minute) }
+	if _, err := p.Push(context.Background(), "manager", repo, "agent/q", "q.bundle"); err != nil {
+		t.Fatalf("budget did not refill after the window: %v", err)
+	}
+}
+
+func TestPushErrorsHideHostPaths(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	// fsutil names the tree path for a directory in place of a bundle.
+	if err := os.Mkdir(filepath.Join(tree, BundleDir, "d.bundle"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// git names the state path when it cannot create the mirror.
+	owner := filepath.Join(p.State, "mirrors", "stevegeek")
+	if err := os.MkdirAll(owner, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(owner, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(owner, 0o700) })
+	commitOn(t, work, "agent/x", "q.txt")
+	bundle(t, work, tree, "q.bundle", "agent/x")
+	for _, c := range []struct{ bundle, want string }{{"d.bundle", "<tree>"}, {"q.bundle", "<state>"}} {
+		_, err := p.Push(context.Background(), "manager", repo, "agent/x", c.bundle)
+		if err == nil {
+			t.Fatalf("%s: want a refusal", c.bundle)
+		}
+		msg := err.Error()
+		for _, raw := range []string{tree, p.State, os.TempDir()} {
+			if real, e := filepath.EvalSymlinks(raw); e == nil && strings.Contains(msg, real) || strings.Contains(msg, raw) {
+				t.Fatalf("%s: host path %s in %q", c.bundle, raw, msg)
+			}
+		}
+		if !strings.Contains(msg, c.want) {
+			t.Fatalf("%s: want placeholder %s in %q", c.bundle, c.want, msg)
+		}
+	}
+}
+
+func TestHidePathsKeepsErrorsIs(t *testing.T) {
+	p := &Pusher{Tree: "/home/u/tree", State: "/home/u/state", Git: Git{Home: "/home/u/state/home"}}
+	err := p.hidePaths(fmt.Errorf("x /home/u/state/tmp/push-123/work.git and /home/u/tree/a: %w", fsutil.ErrSymlink))
+	if got := err.Error(); got != "x <tmp>/work.git and <tree>/a: "+fsutil.ErrSymlink.Error() {
+		t.Fatalf("got %q", got)
+	}
+	if !errors.Is(err, fsutil.ErrSymlink) {
+		t.Fatal("errors.Is lost")
+	}
+}
+
+type blockingToken struct{}
+
+func (blockingToken) Token(ctx context.Context, _ string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestPushOverallDeadline(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Tokens = blockingToken{}
+	p.Deadline = 2 * time.Second
+	commitOn(t, work, "agent/dl", "dl.txt")
+	bundle(t, work, tree, "dl.bundle", "agent/dl")
+	start := time.Now()
+	_, err := p.Push(context.Background(), "manager", repo, "agent/dl", "dl.bundle")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("push took %v past a %v deadline", d, p.Deadline)
+	}
+	// The lock is free again.
+	unlock, err := p.lock(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
 }

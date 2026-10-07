@@ -29,7 +29,7 @@ var Version = "dev"
 type opts struct {
 	name, backend, admin, tree, state, appID, instID, appKey, prefix string
 	repos                                                            map[string]bool
-	maxBundle                                                        int64
+	maxBundle, importBudget                                          int64
 }
 
 func parseFlags(args []string) (opts, error) {
@@ -47,6 +47,7 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&repos, "repos", "", "comma list of owner/name")
 	fs.StringVar(&o.prefix, "branch-prefix", "agent/", "required branch prefix")
 	fs.Int64Var(&o.maxBundle, "max-bundle", 256<<20, "bundle size cap in bytes")
+	fs.Int64Var(&o.importBudget, "import-budget", 1<<30, "bundle bytes one caller may import per hour, refusals included (0 = no cap)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -63,7 +64,10 @@ func parseFlags(args []string) (opts, error) {
 	if err := ghpush.ValidatePrefix(o.prefix); err != nil {
 		return o, err
 	}
-	if err := refuseStateInTree(o.tree, o.state); err != nil {
+	if err := refuseInTree(o.tree, "-state", o.state, "the agent could write the mirrors"); err != nil {
+		return o, err
+	}
+	if err := refuseInTree(o.tree, "-app-key", o.appKey, "the agent could read the GitHub App key"); err != nil {
 		return o, err
 	}
 	o.repos = map[string]bool{}
@@ -72,6 +76,9 @@ func parseFlags(args []string) (opts, error) {
 	}
 	if o.maxBundle <= 0 {
 		return o, fmt.Errorf("-max-bundle must be positive")
+	}
+	if o.importBudget < 0 {
+		return o, fmt.Errorf("-import-budget must not be negative")
 	}
 	return o, nil
 }
@@ -127,13 +134,21 @@ func main() {
 		}
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	g := ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute}
+	if err := g.CheckVersion(context.Background(), o.state); err != nil {
+		log.Fatal(err)
+	}
 	p := &ghpush.Pusher{
 		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
-		Repos: o.repos, MaxBundle: o.maxBundle, LockWait: 30 * time.Second,
+		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
+		Deadline: 10 * time.Minute,
 		Tokens: &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
 			APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now},
-		Git: ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute},
-		Log: logger,
+		// GitHub refuses files over 100 MiB, so a bigger object can never be
+		// pushed; the caps bound what index-pack inflates and holds.
+		Limits: ghpush.PackLimits{MaxObjects: 2_000_000, MaxObjectSize: 100 << 20, MaxInflated: 4 << 30},
+		Git:    g,
+		Log:    logger,
 	}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,
@@ -180,20 +195,20 @@ func resolveExisting(p string) (string, error) {
 	}
 }
 
-// refuseStateInTree: the state dir holds the mirrors and must not sit in the
-// tree the agent can write (or be the tree itself).
-func refuseStateInTree(tree, state string) error {
+// refuseInTree: the state dir (mirrors) and the app key must not sit in the
+// tree the agent can read and write (or be the tree itself).
+func refuseInTree(tree, flag, p, why string) error {
 	t, err := filepath.EvalSymlinks(tree)
 	if err != nil {
 		return fmt.Errorf("-tree: %w", err)
 	}
-	s, err := resolveExisting(state)
+	s, err := resolveExisting(p)
 	if err != nil {
-		return fmt.Errorf("-state: %w", err)
+		return fmt.Errorf("%s: %w", flag, err)
 	}
 	rel, err := filepath.Rel(t, s)
 	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("-state %s is inside -tree %s: the agent could write the mirrors", state, tree)
+		return fmt.Errorf("%s %s is inside -tree %s: %s", flag, p, tree, why)
 	}
 	return nil
 }

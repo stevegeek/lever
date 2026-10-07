@@ -18,6 +18,13 @@ The only operation is `push`, with the arguments `repo`, `branch` and `bundle`. 
 `pr_create`: PR text is outward-facing, so you open the PR yourself. The `push` result includes a
 compare URL for this.
 
+## Requirements
+
+The host needs git 2.46.0 or newer on `PATH`. Older git does not run fsck on the objects that
+`git fetch` imports from a bundle. The tool checks the version and refuses to start with an older
+git. The git that macOS supplies (Apple Git 2.39) is too old: install git from Homebrew or another
+source.
+
 ## 1. Create the GitHub App
 
 Do not use a personal PAT. A PAT acts as you, the repository admin. A leaked PAT could push a `v*`
@@ -79,10 +86,15 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-repos` | yes | Comma list of `owner/name` the tool may push to. |
 | `-branch-prefix` | no | Required branch prefix. Default `agent/`. |
 | `-max-bundle` | no | Bundle size cap. Default 256 MiB. |
+| `-import-budget` | no | Bundle bytes that one caller can import in one hour. Refused pushes count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
 | `-name` | no | Tool name. Default `github`. It must equal the `name` in the config. |
 
 The tool keeps a bare mirror of each repository under `-state`. The mirror has no hooks and no
-checkout, so no code from a bundle runs on the host. Install the binary with `make install`.
+checkout, so no code from a bundle runs on the host. The mirror receives only `main` from GitHub.
+Each push imports the bundle into a new temporary repository under `-state/tmp`, which borrows the
+mirror objects. The tool deletes this repository after each call, also after a refusal. Thus a
+refused bundle uses no disk space after the call, and one caller cannot use the objects of another
+caller as prerequisites. Install the binary with `make install`.
 
 ## 4. The agent workflow
 
@@ -109,12 +121,29 @@ A refusal returns to the agent as `{"ok": false, "error": "..."}`. The tool writ
 | Cause | Result |
 |---|---|
 | Bad bundle name, symlink, hard link, or file too big | Named refusal. Nothing is fetched. |
-| Wrong ref set, tags, missing prerequisites, or an fsck failure | Named refusal. The tool removes the temporary ref and directory. |
+| Wrong ref set, tags, missing prerequisites, or an fsck failure | Named refusal. The tool deletes the temporary repository. |
+| Caller over `-import-budget` | Named refusal before any git call on the bundle. |
+| Pack over a size limit (see below) | Named refusal before any git call on the bundle. |
 | Bad branch charset or prefix, or a protected name (`main`, `master`, `HEAD`) | Named refusal before any git call. |
 | Repository not in `-repos` | Named refusal. |
 | Non-fast-forward | GitHub rejects the push. The tool reports that the branch moved and to use a new branch name. |
 | Token mint, GitHub or network error, or git timeout | Redacted error text. The tool does not retry. |
+| git older than 2.46.0 | The tool refuses to start. The broker reports it down, and calls fail with 502. |
 | App key file has the wrong mode or owner | The tool refuses to start. The broker reports it down, and calls fail with 502. |
+
+## Bundle limits
+
+A small, highly compressible bundle can declare very large objects. git `index-pack` holds a delta
+base and its result in memory, so the tool reads the pack in the bundle before git does. It refuses
+the bundle if:
+
+- the pack has more than 2,000,000 objects,
+- one object, delta base or delta result is larger than 100 MiB (GitHub refuses such files), or
+- the sum of the inflated sizes is larger than 4 GiB.
+
+git then runs with `pack.threads=1` and `core.bigFileThreshold=16m`. A bundle at these limits can
+make `index-pack` use approximately 200 to 300 MiB of memory for one call. The tool sets no
+operating-system memory limit on git.
 
 ## Hazard: never run git in the tree on the host
 
@@ -129,5 +158,6 @@ host.
 
 The tool itself never touches these repositories. It uses its own mirror under `-state`.
 
-The mirrors under `-state` grow, because the tool sets `gc.auto=0`. Run `git --git-dir=<mirror> gc`
-now and then, or delete the mirror directory. The tool creates it again on the next push.
+The mirrors under `-state` grow with the history of `main`, because the tool sets `gc.auto=0`. Run
+`git --git-dir=<mirror> gc` now and then, or delete the mirror directory. The tool creates it again
+on the next push.

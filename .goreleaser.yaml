@@ -29,7 +29,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -X main.Version={{ .Version }}
+      - -s -w -X main.Version={{ .Version }}
     goos: [darwin, linux]
     goarch: [amd64, arm64]
 
@@ -41,7 +41,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -X main.Version={{ .Version }}
+      - -s -w -X main.Version={{ .Version }}
     goos: [darwin, linux]
     goarch: [amd64, arm64]
 

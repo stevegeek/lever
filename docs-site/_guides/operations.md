@@ -82,11 +82,26 @@ then `lever init` (the manager's skill gains the recycle directions) and `lever 
 `lever-manager agent recycle deal-1 --task "…"`: the broker deletes the worker's scion record
 and staged ticket (what `lever worker purge` deletes) and starts it fresh with the new task.
 
+**Plan the change with the manager's next fresh start.** Two parts of it reach the manager only
+when it is created again:
+
+- **The verb is in the manager image.** `lever-manager agent recycle` exists only in a
+  `lever-manager` binary of this release or later. Rebuild the image (`make lever-image`, and
+  rebuild an instance image built from it), then give the manager the new image with
+  `lever up --fresh`. A fresh start **discards the manager's conversation**: back it up first.
+  Until then the manager's old binary has no `recycle` command.
+- **The skill changes on an instance with contact logins.** Setting `recyclable: true` on the
+  first worker and running `lever init` changes the manager's `lever-operator` skill. While the
+  manager's session was started on the old skill, contacts cannot post to the manager; that ends
+  only when the manager starts fresh, which loses its conversation unless you back it up. Make
+  the config change, the image rebuild and the backup together, then run one `lever up --fresh`.
+
 - **What is lost:** the worker's conversation. Nothing can resume it afterwards.
 - **What is kept:** the worker's `dir` (its work product). The next piece of work sees the files
   the last one left there; clear them in the task or from the host if it must not.
 - **What the broker refuses:** a worker without `recyclable: true` (403), the manager, a worker
-  that is running or changing phase (409, nothing deleted), a revoked manager, a worker that
+  that is running or changing phase, or whose container is still running whatever phase the hub
+  shows (409, nothing deleted), a revoked manager, a worker that
   another start, resume, stop, wake or heal holds (503), and a second recycle of the same worker
   within a minute (429).
 - **Audit:** each recycle is a `broker.decision` line with `op=worker`, `decision=allow` and a

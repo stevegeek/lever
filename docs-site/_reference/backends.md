@@ -84,7 +84,7 @@ stayed green. Under `egress: closed` DNS stays dropped by design; agents dial th
 is no longer indistinguishable from a healthy idle one. OrbStack is unaffected: its resolver path
 is not in the dropped set.
 
-**Nested virtualization (`nested_virt`).** On a Linux host, `nested_virt: true` gives the manager
+**Nested virtualization (`nested_virt`).** On an x86_64 Linux host, `nested_virt: true` gives the manager
 container `/dev/kvm`, so the manager can run KVM guests (for example Lima, to test lever itself).
 Workers and the hub do not get the device. Apply refuses when the host's `kvm_amd`/`kvm_intel`
 `nested` parameter is off. The template renders `vmOpts.qemu.cpuType: host`, which Lima reads at

@@ -690,8 +690,10 @@ func TestEnsureUpDNATTargetsWinOverResolverUpstream(t *testing.T) {
 // remove the legacy drop-in.
 func TestEnsureUpNestedVirtStep(t *testing.T) {
 	old := readHostFile
+	oldArch := hostArch
 	readHostFile = func(string) ([]byte, error) { return []byte("1\n"), nil }
-	t.Cleanup(func() { readHostFile = old })
+	hostArch = "amd64"
+	t.Cleanup(func() { readHostFile, hostArch = old, oldArch })
 	for _, on := range []bool{true, false} {
 		f := proc.NewFakeRunner()
 		scriptedVM(f)

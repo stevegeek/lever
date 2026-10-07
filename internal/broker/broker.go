@@ -212,6 +212,10 @@ type DispatchConfig struct {
 	// mounts the whole tree, so nothing a worker must redeem may be written
 	// there. nil ⇒ every worker dispatch fails closed at the staging step.
 	Tickets TicketStager
+	// Purge deletes a worker's scion record and its staged guest ticket, the
+	// teardown of `lever worker purge` (brokerctl.PurgeWorker in production).
+	// Only the recycle route uses it. nil ⇒ every recycle fails closed.
+	Purge WorkerPurger
 	// HubTokens lets the broker heal an agent whose scion hub token expired
 	// (tokenwatch.go): a periodic read of each running agent's token, and
 	// `scion reset-auth` for one that lapsed. Governed by AutoReenrol like
@@ -306,8 +310,8 @@ type Broker struct {
 	workerToWorker  bool
 
 	// workerLocks serialises the read-phase-then-act paths of one worker
-	// (start, the resume verb, the remote wake, stop and suspend, and the
-	// re-enrol healer's bounce): two of them at once would both read
+	// (start, the resume verb, the remote wake, stop and suspend, recycle,
+	// and the re-enrol healer's bounce): two of them at once would both read
 	// "suspended" and both resume, or a bounce undo a stop (lockWorker).
 	workerLocksMu sync.Mutex
 	workerLocks   map[string]chan struct{}
@@ -328,6 +332,8 @@ type Broker struct {
 	autoReenrol         string
 	managerBootstrapDir string
 	ticketStager        TicketStager
+	purger              WorkerPurger
+	recycleRate         *rateWindow // recycles per worker (recycle.go)
 	reenrolEvents       chan string
 	reenrolNow          func() time.Time
 	// reenrolLockWait bounds how long a worker heal waits for the worker's
@@ -425,6 +431,8 @@ func New(c Config) *Broker {
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
 		ticketStager:        d.Tickets,
+		purger:              d.Purge,
+		recycleRate:         newRateWindow(recycleRateLimit),
 		reenrolEvents:       make(chan string, reenrolQueueDepth),
 		reenrolNow:          time.Now,
 		reenrolLast:         map[string]time.Time{},

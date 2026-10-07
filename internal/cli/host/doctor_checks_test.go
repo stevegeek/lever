@@ -2314,3 +2314,17 @@ func TestCheckNestedVirt(t *testing.T) {
 		t.Fatalf("off, legacy drop-in: %+v", r)
 	}
 }
+
+func TestCheckRecyclableWorkers(t *testing.T) {
+	if r := checkRecyclableWorkers(nil); !r.ok || r.detail != "no workers declared" {
+		t.Fatalf("no workers: %+v", r)
+	}
+	ws := []config.Worker{{Name: "deal-2", Recyclable: true}, {Name: "scratch"}, {Name: "deal-1", Recyclable: true}}
+	r := checkRecyclableWorkers(ws)
+	if !r.ok || !strings.Contains(r.detail, "worker {deal-1,deal-2} recyclable") || strings.Contains(r.detail, "scratch") {
+		t.Fatalf("two recyclable: %+v", r)
+	}
+	if r := checkRecyclableWorkers(ws[1:2]); !r.ok || !strings.Contains(r.detail, "no worker is recyclable") {
+		t.Fatalf("none recyclable: %+v", r)
+	}
+}

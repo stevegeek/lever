@@ -160,6 +160,9 @@ func withRuntime(rt WorkerRuntime, specs ...WorkerSpec) configOpt {
 		if s, ok := rt.(TicketStager); ok {
 			c.Dispatch.Tickets = s
 		}
+		if p, ok := rt.(WorkerPurger); ok {
+			c.Dispatch.Purge = p
+		}
 		c.Dispatch.BrokerCAPEM, c.Dispatch.BrokerURL = "CA-PEM", "https://10.0.0.2:8080"
 		c.Dispatch.InstanceProject = testInstanceProject
 	}

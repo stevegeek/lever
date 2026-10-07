@@ -1766,6 +1766,28 @@ func underRealTree(tree, p string) string {
 	return filepath.Join(real, rest)
 }
 
+// checkRecyclableWorkers names the workers the config marks recyclable:
+// the manager may discard their records (and so their conversations) and
+// start them fresh with `lever-manager agent recycle`. Informational, never a
+// failure: it shows the operator a power the config hands the manager.
+func checkRecyclableWorkers(workers []config.Worker) checkResult {
+	const check = "worker recycle"
+	if len(workers) == 0 {
+		return checkResult{check, true, "no workers declared", ""}
+	}
+	var names []string
+	for _, w := range workers {
+		if w.Recyclable {
+			names = append(names, w.Name)
+		}
+	}
+	if len(names) == 0 {
+		return checkResult{check, true, "no worker is recyclable (only `lever worker purge` discards a worker record)", ""}
+	}
+	slices.Sort(names)
+	return checkResult{check, true, fmt.Sprintf("worker %s recyclable: the manager may discard the record (its conversation, never its workspace) and start it fresh with `lever-manager agent recycle`", braceList(names)), ""}
+}
+
 // braceList renders names as a shell brace-expansion hint ({a,b}) for the fix
 // text, or the bare name for a single entry.
 func braceList(names []string) string {

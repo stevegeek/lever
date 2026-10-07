@@ -323,9 +323,17 @@ Review the queue with `lever-manager msg list`.
 ## Dispatching workers
 
 Workers are sibling jailed agents, declared by the operator in the instance
+<!-- lever:recycle off -->
 config. You can start, resume, and message them but NOT create or purge them —
 if a needed worker doesn't exist, or one must be discarded and recreated with a
 different task, ask the operator.
+<!-- /lever:recycle off -->
+<!-- lever:recycle on -->
+config. You can start, resume, and message them but NOT create them. You can
+discard and restart only a worker the operator marked recyclable (`agent
+recycle`, below) — if a needed worker doesn't exist, or another one must be
+discarded and recreated with a different task, ask the operator.
+<!-- /lever:recycle on -->
 
 - Start (first time): `lever-manager agent start <worker> --task "<task>"` —
   for a worker with no existing record. Its task is FIXED at creation; `--task`
@@ -357,8 +365,31 @@ different task, ask the operator.
   names its phase: resume it, then send again; nothing was sent or queued.
   `lever-manager msg recipients` lists the addresses you may send to.
   After the operator's `lever stop` + `lever up`, workers that were running
+<!-- lever:recycle off -->
   are suspended: resume the ones you need. Replacing the pinned task entirely means discarding the worker, which
   only the operator can do (`lever worker purge`) — ask them.
+<!-- /lever:recycle off -->
+<!-- lever:recycle on -->
+  are suspended: resume the ones you need. Replacing the pinned task entirely means discarding the worker:
+  `agent recycle` for a recyclable worker, else only the operator can do it
+  (`lever worker purge`) — ask them.
+- Reuse a worker slot for new work with a FRESH context:
+  `lever-manager agent recycle <worker> --task "<task>"` deletes the worker's
+  record and starts it fresh with the new task, in one call. The worker's old
+  conversation is LOST: it can never be resumed after this. Its workspace (the
+  files it wrote) is kept. Recycle when the slot's piece of work is finished
+  and the next one must not see the old context; resume instead to continue
+  the old conversation, or `msg send` to add work to a running worker. Before
+  you recycle, have the worker write down anything from its conversation that
+  you still need. Only for a worker the operator marked `recyclable: true`
+  (403 otherwise: ask the operator). The worker must be suspended, stopped or
+  in phase error: a running one answers 409 and nothing is deleted, so run
+  `agent stop <worker>` first. A 503 "busy" means another start, resume or
+  heal of it is under way: try again shortly. A 429 means it was recycled
+  less than a minute ago: wait, then try again. Recycle answers when the new
+  worker is running. If it fails after the delete (`agent list` shows no
+  record), start the worker with `agent start <worker> --task "<task>"`.
+<!-- /lever:recycle on -->
 - Suspend / stop: `lever-manager agent suspend|stop <worker>`.
 - Observe: `lever-manager agent list`; for live events run
   `lever-manager watch --events-file <path> &` and tail that file.

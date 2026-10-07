@@ -65,6 +65,38 @@ the manager included, on scion `cf16e4b0` (2026-09) and later. A create or start
 Stop idle workers (`lever-manager agent stop <name>`) rather than keeping many running; the cap
 itself is a hub limit only a hub admin can raise.
 
+## Worker slots the manager recycles
+
+A worker's task is fixed when its record is created. For fixed worker slots that take one piece of
+work after another (`deal-1` … `deal-5`, each reused when its deal ends), the manager needs a fresh
+context per piece of work. Mark such a slot recyclable:
+
+```yaml
+workers:
+  - name: deal-1
+    dir: workers/deal-1
+    recyclable: true
+```
+
+then `lever init` (the manager's skill gains the recycle directions) and `lever reload`. The manager can now run `lever-manager agent stop deal-1` and
+`lever-manager agent recycle deal-1 --task "…"`: the broker deletes the worker's scion record
+and staged ticket (what `lever worker purge` deletes) and starts it fresh with the new task.
+
+- **What is lost:** the worker's conversation. Nothing can resume it afterwards.
+- **What is kept:** the worker's `dir` (its work product). The next piece of work sees the files
+  the last one left there; clear them in the task or from the host if it must not.
+- **What the broker refuses:** a worker without `recyclable: true` (403), the manager, a worker
+  that is running or changing phase (409, nothing deleted), a revoked manager, a worker that
+  another start, resume, stop, wake or heal holds (503), and a second recycle of the same worker
+  within a minute (429).
+- **Audit:** each recycle is a `broker.decision` line with `op=worker`, `decision=allow` and a
+  `recycle <name>` detail; a refusal is a `deny` (or `error`) line with its reason. The task is
+  logged by size and its first 60 bytes only.
+
+Leave `recyclable` off for a worker whose conversation is worth keeping: without it, only you can
+discard a record (`lever worker purge NAME --force`). `lever doctor`'s *worker recycle* row lists
+the recyclable workers.
+
 ## Where the logs are
 
 All host-side state lives in `.lever-state/` at the instance root:

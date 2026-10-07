@@ -180,6 +180,10 @@ func TestAgentMessagesOnTeachesAuthorizeThenSend(t *testing.T) {
 	}
 }
 
+// operatorNoRecycle is the manager skill source with the recycle variant
+// picked off, the base the other block tests compare with.
+var operatorNoRecycle = pickBlocks(operatorSrc, false, recycleOn, recycleOff)
+
 // filesBlocks cuts every files block (on and off) with its markers.
 var filesBlocks = regexp.MustCompile(`(?ms)^<!-- lever:files (on|off) -->\n.*?^<!-- /lever:files (on|off) -->\n`)
 
@@ -191,7 +195,7 @@ func TestFilesOffRendersUnchanged(t *testing.T) {
 			if got, want := Agent("9.9.9", chat, am, false), renderChat(pick(filesBlocks.ReplaceAllString(agentSrc, ""), am), "9.9.9", chat); !bytes.Equal(got, want) {
 				t.Fatalf("lever-agent files off (chat=%v am=%v) changed", chat, am)
 			}
-			if got, want := Operator("9.9.9", chat, am, false), renderChat(pick(filesBlocks.ReplaceAllString(operatorSrc, ""), am), "9.9.9", chat); !bytes.Equal(got, want) {
+			if got, want := Operator("9.9.9", chat, am, false), renderChat(pick(filesBlocks.ReplaceAllString(operatorNoRecycle, ""), am), "9.9.9", chat); !bytes.Equal(got, want) {
 				t.Fatalf("lever-operator files off (chat=%v am=%v) changed", chat, am)
 			}
 		}
@@ -228,12 +232,12 @@ func TestFilesOnTeachesTheExchange(t *testing.T) {
 // the files skill is exactly what it was before the blocks existed.
 func TestFilesDirectionBlocks(t *testing.T) {
 	dirBlocks := regexp.MustCompile(`(?ms)^<!-- lever:(uploads|shares) off -->\n.*?^<!-- /lever:(uploads|shares) off -->\n`)
-	for name, pair := range map[string][2]string{"agent": {agentSrc, "a"}, "operator": {operatorSrc, "o"}} {
+	for name, pair := range map[string][2]string{"agent": {agentSrc, "a"}, "operator": {operatorNoRecycle, "o"}} {
 		render := func(f Files) string {
 			if pair[1] == "a" {
 				return string(AgentWith("1", true, false, f))
 			}
-			return string(OperatorWith("1", true, false, f))
+			return string(OperatorWith("1", true, false, f, false))
 		}
 		want := string(renderChat(pickBlocks(pick(dirBlocks.ReplaceAllString(pair[0], ""), false), true, filesOn, filesOff), "1", true))
 		if got := render(Files{On: true}); got != want {
@@ -283,5 +287,28 @@ func TestContentHashIgnoresOnlyTheStamp(t *testing.T) {
 	bodyOnly := []byte("lever-version: 1\nno frontmatter\n")
 	if ContentHash(bodyOnly) != Hash(bodyOnly) {
 		t.Fatal("a stamp outside the frontmatter must not be dropped")
+	}
+}
+
+// The recycle text renders only for an instance with a recyclable worker; off,
+// the skill is byte-for-byte the text before it (the pre-change render).
+func TestOperatorRecycleBlocks(t *testing.T) {
+	for _, chat := range []bool{false, true} {
+		if got, want := OperatorWith("9.9.9", chat, false, Files{}, false), renderChat(operatorPre, "9.9.9", chat); !bytes.Equal(got, want) {
+			t.Fatalf("recycle off (chat=%v) differs from the pre-change render", chat)
+		}
+	}
+	off := string(OperatorWith("1", true, true, Files{On: true}, false))
+	on := string(OperatorWith("1", true, true, Files{On: true}, true))
+	if strings.Contains(off, "agent recycle") {
+		t.Error("recycle off teaches agent recycle")
+	}
+	for _, want := range []string{"lever-manager agent recycle <worker>", "conversation is LOST", "workspace", "recyclable: true", "agent stop <worker>"} {
+		if !strings.Contains(on, want) {
+			t.Errorf("recycle on: missing %q", want)
+		}
+	}
+	if strings.Contains(on, "NOT create or purge them") || strings.Contains(on, "lever:recycle") || strings.Contains(off, "lever:recycle") {
+		t.Error("a recycle variant or marker line survived")
 	}
 }

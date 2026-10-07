@@ -65,6 +65,31 @@ type fakeRuntime struct {
 	// channel (TicketStager), newest last; stageErr makes the channel fail.
 	staged   map[string][][]byte
 	stageErr error
+	// purged records every PurgeWorker (WorkerPurger) call; purgeErr fails
+	// the record delete, ticketErr the ticket removal after it.
+	purged    []string
+	purgeErr  error
+	ticketErr error
+}
+
+// PurgeWorker satisfies WorkerPurger: it drops the worker's record from
+// every project and its staged tickets, as the real purge does.
+func (f *fakeRuntime) PurgeWorker(_ context.Context, worker string) (error, error) {
+	f.purged = append(f.purged, worker)
+	if f.purgeErr != nil {
+		return nil, f.purgeErr
+	}
+	for p, as := range f.agents {
+		kept := as[:0:0]
+		for _, a := range as {
+			if a.Slug != worker {
+				kept = append(kept, a)
+			}
+		}
+		f.agents[p] = kept
+	}
+	delete(f.staged, worker)
+	return f.ticketErr, nil
 }
 
 // StageWorkerTicket satisfies TicketStager: the fake is also the guest

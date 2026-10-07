@@ -27,7 +27,7 @@ var agentSrc string
 // else the "off" ones; files (remote.files) does the same for the "files"
 // blocks. Off renders the text as it was before those blocks.
 func Operator(version string, verifiedChat, agentMessages, files bool) []byte {
-	return OperatorWith(version, verifiedChat, agentMessages, Files{On: files})
+	return OperatorWith(version, verifiedChat, agentMessages, Files{On: files}, false)
 }
 
 // Agent returns the rendered worker skill (lever-agent), with
@@ -43,9 +43,12 @@ type Files struct {
 	On, NoUploads, NoShares bool
 }
 
-// OperatorWith is Operator with the file directions.
-func OperatorWith(version string, verifiedChat, agentMessages bool, f Files) []byte {
-	return renderChat(pickFiles(pick(operatorSrc, agentMessages), f), version, verifiedChat)
+// OperatorWith is Operator with the file directions. recycle (some worker
+// has workers[].recyclable) keeps the "recycle on" blocks, which teach
+// `lever-manager agent recycle`; off renders the text as it was before them.
+func OperatorWith(version string, verifiedChat, agentMessages bool, f Files, recycle bool) []byte {
+	src := pickBlocks(pickFiles(pick(operatorSrc, agentMessages), f), recycle, recycleOn, recycleOff)
+	return renderChat(src, version, verifiedChat)
 }
 
 // AgentWith is Agent with the file directions.
@@ -72,6 +75,8 @@ var (
 	uploadsOff = block("uploads", "off")
 	sharesOn   = block("shares", "on")
 	sharesOff  = block("shares", "off")
+	recycleOn  = block("recycle", "on")
+	recycleOff = block("recycle", "off")
 )
 
 // block matches one marked block of a skill, markers included.

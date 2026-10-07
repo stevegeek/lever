@@ -689,3 +689,24 @@ func TestSkillTargetsFollowFileDirections(t *testing.T) {
 		t.Fatal("files off renders no direction block")
 	}
 }
+
+// workers[].recyclable on any worker adds the recycle text to the manager's
+// skill only; with none, every rendered skill is the plain base render.
+func TestSkillTargetsFollowRecyclable(t *testing.T) {
+	app := &config.App{Name: "boss", Tree: t.TempDir(), Workers: []config.Worker{{Name: "w1"}, {Name: "w2"}}}
+	off := skillTargets(app)
+	if !bytes.Equal(off[0].content, skills.Operator(cli.Version, false, false, false)) ||
+		!bytes.Equal(off[1].content, skills.Agent(cli.Version, false, false, false)) {
+		t.Fatal("no recyclable worker: the skills differ from the base render")
+	}
+	app.Workers[1].Recyclable = true
+	on := skillTargets(app)
+	if !bytes.Contains(on[0].content, []byte("lever-manager agent recycle")) || bytes.Contains(off[0].content, []byte("agent recycle")) {
+		t.Fatal("the manager skill does not follow workers[].recyclable")
+	}
+	for i := 1; i < len(on); i++ {
+		if !bytes.Equal(on[i].content, off[i].content) {
+			t.Fatalf("%s: a worker skill changed with recyclable", on[i].relPath)
+		}
+	}
+}

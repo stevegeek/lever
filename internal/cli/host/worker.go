@@ -7,7 +7,6 @@ import (
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/jail"
 )
 
 // newWorkerCmd is the host-side worker admin command. Distinct from the
@@ -65,20 +64,19 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			}
 
 			// Delete the scion record via the same runtime seam newDestroyCmd
-			// reaches through: a host-side scion client over the jail runner,
-			// authenticating with the controller PAT.
-			project := b.MountDest()
+			// reaches through (a host-side scion client over the jail runner,
+			// authenticating with the controller PAT), then the staged ticket
+			// in the guest runtime dir. brokerctl.PurgeWorker is shared with
+			// the broker's recycle route. HostWorkspace holds the worker's
+			// work product and is never touched; nothing of the worker's
+			// lives in the tree but that.
 			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
-			if err := sc.Delete(cmd.Context(), spec.Name, project); err != nil {
-				return fmt.Errorf("deleting worker %q scion record: %w", spec.Name, err)
+			ticketErr, err := brokerctl.PurgeWorker(cmd.Context(), sc, b.JailRunner(), spec.Name, b.MountDest())
+			if err != nil {
+				return err
 			}
-
-			// Remove the staged ticket (a spent, worker-specific envelope) from
-			// the guest runtime dir. HostWorkspace holds the worker's work
-			// product and is never touched; nothing of the worker's lives in
-			// the tree but that.
-			if err := jail.RemoveWorkerTicket(cmd.Context(), b.JailRunner(), spec.Name); err != nil {
-				cmd.PrintErrf("warning: removing staged ticket for %q: %v\n", spec.Name, err)
+			if ticketErr != nil {
+				cmd.PrintErrf("warning: removing staged ticket for %q: %v\n", spec.Name, ticketErr)
 			}
 
 			cmd.Printf("worker %q purged — scion record deleted; work product in %s kept.\n", spec.Name, spec.HostWorkspace)

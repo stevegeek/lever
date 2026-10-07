@@ -83,3 +83,14 @@ stayed green. Under `egress: closed` DNS stays dropped by design; agents dial th
 `lever doctor`'s `guest DNS` row resolves a public name from inside the guest so a DNS-dead jail
 is no longer indistinguishable from a healthy idle one. OrbStack is unaffected: its resolver path
 is not in the dropped set.
+
+**Nested virtualization (`nested_virt`).** On a Linux host, `nested_virt: true` gives every agent
+container in the jail `/dev/kvm`, so an agent can run KVM guests (for example Lima, to test lever
+itself). Apply refuses when the host's `kvm_amd`/`kvm_intel` `nested` parameter is off. The
+template renders `vmOpts.qemu.cpuType: host`, which Lima reads at create time only: an existing VM
+needs a recreate. Inside the guest, lever writes a udev rule (`/etc/udev/rules.d/65-lever-kvm.rules`,
+mode 0666) and a podman drop-in (`20-lever-kvm.conf`); it removes both when the key is off, but the
+device keeps mode 0666 until the guest reboots. A running manager gets the device after `lever stop`
+and `lever up`. `lever doctor` has a *nested virt* row. The key is rejected on OrbStack and on
+darwin. `cpus` and `memory` (Lima only, create-time) size the VM. See the
+[`nested_virt` config row](/reference/config/) for the full contract.

@@ -5,6 +5,18 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Added
+
+- **`nested_virt`, `cpus`, `memory` (Lima).** `nested_virt` (Linux host only) gives every agent
+  container `/dev/kvm`; `cpus` and `memory` size the jail VM at create time. New doctor row
+  *nested virt*.
+
+### Changed
+
+- The Makefile `LEVER_IMAGE_ARCH` defaults to the host Go arch instead of `arm64`.
+
 ## [0.31.0] - 2026-10-07
 
 ### Added

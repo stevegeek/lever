@@ -112,6 +112,9 @@ so a containment posture is never silently substituted.
 
 **Lima operational notes**, from the T13 security review:
 
+- **`nested_virt: true` widens the host kernel's exposure.** The host's nested SVM/VMX emulation
+  is reachable from the guest (it has had CVEs, e.g. CVE-2021-29657). It is off by default; use it
+  for dev instances only.
 - **Lima's in-guest kernel attack surface is intentionally widened for rootless runtimes.**
   Provisioning re-enables the unprivileged user-namespace knob
   (`kernel.apparmor_restrict_unprivileged_userns=0`) that Ubuntu ≥ 23.10 disables by default, a

@@ -212,6 +212,10 @@ func lastN[T any](s []T, n int) []T {
 
 var errShareRate = errors.New(refuseRate)
 
+// errShareTimedOut aborts a share's record whose call context ended while
+// it waited for the ledger lock.
+var errShareTimedOut = errors.New("timed out")
+
 // afterShareHash, when set, runs between a share's hash and its record: a
 // test seam for a call that times out in that window.
 var afterShareHash func()
@@ -316,8 +320,19 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := fileledger.Record{V: 1, Op: fileledger.OpShare, ID: id, Agent: slug, Login: to, Name: name, Rel: rel,
 		SHA256: sha, Size: size, At: now}
-	err = led.Add(rec, shareRate(now))
+	// The wait for the ledger lock can pass the bound too: check the
+	// context again under the lock, where nothing can be recorded after.
+	rate := shareRate(now)
+	err = led.Add(rec, func(prior []fileledger.Record) error {
+		if r.Context().Err() != nil {
+			return errShareTimedOut
+		}
+		return rate(prior)
+	})
 	switch {
+	case errors.Is(err, errShareTimedOut):
+		refuse(refuseUnavailable, "the call timed out", "timed out")
+		return
 	case errors.Is(err, errShareRate):
 		refuse(refuseRate, "too many shares this hour", "hourly rate")
 		return

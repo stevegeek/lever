@@ -12,10 +12,12 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/fileledger"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -397,5 +399,46 @@ func TestFilesShareRecordsNothingAfterATimeout(t *testing.T) {
 	}
 	if l := f.list(t, "scratch", "client@example.org"); len(l.Shares) != 1 {
 		t.Fatalf("shares after the retry: %+v", l.Shares)
+	}
+}
+
+// A share whose call times out while it waits for the ledger lock records
+// nothing: the context is checked again once the lock is held.
+func TestFilesShareRecordsNothingAfterATimeoutInTheLockWait(t *testing.T) {
+	f := newFilesFixture(t)
+	f.put(t, "workers/scratch", ".lever-files/out/"+chatfiles.Key("client@example.org")+"/a.pdf", "x")
+	raw, _ := json.Marshal(wire.FileShareRequest{To: "client@example.org", Path: outPath("client@example.org", "a.pdf")})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// After the hash another writer (the remote proxy) takes the ledger's
+	// flock, so the share's record waits for it.
+	var unlock func()
+	hashed := make(chan struct{})
+	afterShareHash = func() {
+		var err error
+		if unlock, err = hostledger.LockFile(filepath.Join(f.dir, "files-ledger", ".lock")); err != nil {
+			panic(err)
+		}
+		close(hashed)
+	}
+	t.Cleanup(func() { afterShareHash = nil })
+	req := httptest.NewRequest("POST", wire.PathFilesShare, strings.NewReader(string(raw))).WithContext(ctx)
+	req.TLS = fakeTLSWithCN("scratch")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { f.b.handleFilesShare(rec, req); close(done) }()
+	<-hashed
+	time.Sleep(50 * time.Millisecond) // the handler is past its context check, waiting for the lock
+	cancel()
+	unlock()
+	<-done
+	var out wire.FileShareResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.OK || out.Reason != "unavailable" {
+		t.Fatalf("%+v", out)
+	}
+	afterShareHash = nil
+	if l := f.list(t, "scratch", "client@example.org"); len(l.Shares) != 0 {
+		t.Fatalf("a share that timed out in the lock wait was recorded: %+v", l.Shares)
 	}
 }

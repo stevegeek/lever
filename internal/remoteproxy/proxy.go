@@ -634,6 +634,9 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 		// the hub sent or what case it used.
 		resp.Header.Del("Set-Cookie")
 		sandboxAPIDocument(resp)
+		if s := stateFrom(resp.Request); s != nil && (s.keepDM != nil || s.rewrite != nil) {
+			failOtherSuccess(resp)
+		}
 		if s := stateFrom(resp.Request); s != nil && s.keepDM != nil {
 			filterDMList(resp, s.keepDM)
 		}
@@ -664,6 +667,19 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 		}
 		return nil
 	}
+}
+
+// failOtherSuccess makes a 2xx answer other than 200 a bodiless 502. The
+// contact filters (keepDM, rewrite) read only a 200 answer and pass any
+// other unread, so another success must not keep the hub's body.
+func failOtherSuccess(resp *http.Response) {
+	if resp.StatusCode == http.StatusOK || resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return
+	}
+	_ = resp.Body.Close()
+	resp.StatusCode, resp.Status = http.StatusBadGateway, "502 Bad Gateway"
+	resp.Header.Del("Content-Type")
+	setBody(resp, nil)
 }
 
 // sandboxAPIDocument puts every /api/ response in a CSP sandbox.

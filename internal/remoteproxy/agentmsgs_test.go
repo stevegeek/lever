@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -411,5 +412,39 @@ func TestHistoryFilterKeepsOnlyListedFields(t *testing.T) {
 	if doc.NextCursor != "cur-1" || doc.TotalCount != 2 || doc.Attachments["c1"][0]["name"] != "mine.pdf" ||
 		doc.Attachments["c1"][0]["size"] != 3.0 || doc.Ext["a1"]["editedAt"] == nil {
 		t.Fatalf("%s", got)
+	}
+}
+
+// The filters read only a 200 answer: any other success on a filtered
+// route (history, the DM list, events) becomes a bodiless 502, never the
+// hub's body unread.
+func TestFilteredRoutesFailClosedOnAnotherSuccess(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo, http.StatusPartialContent} {
+		for name, tc := range map[string]struct {
+			path  string
+			match func(context.Context, string, string, []AgentMessage) (map[string]bool, error)
+		}{
+			"history":           {dmPath(agentW1, contactUID, "/messages"), recordedOnly("recorded")},
+			"dm list":           {"/api/v1/chat/dms", recordedOnly("recorded")},
+			"dm list, msgs off": {"/api/v1/chat/dms", nil},
+			"events":            {"/events", recordedOnly("recorded")},
+		} {
+			t.Run(fmt.Sprintf("%s %d", name, status), func(t *testing.T) {
+				hub := &contactHub{}
+				hub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/api/v1/auth/me" {
+						_, _ = io.WriteString(w, `{"id":"`+contactUID+`"}`)
+						return
+					}
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, `{"messages":[{"id":"a2","sender":"agent:w1","msg":"SECRET"}],"dms":[{"conversationKey":"SECRET"}]}`)
+				}))
+				t.Cleanup(hub.Close)
+				rw := contactDo(agentMsgHandler(t, hub, tc.match), "c@x", "GET", tc.path, "")
+				if rw.Code != http.StatusBadGateway || strings.Contains(rw.Body.String(), "SECRET") {
+					t.Fatalf("%d %s", rw.Code, rw.Body)
+				}
+			})
+		}
 	}
 }

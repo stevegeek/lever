@@ -78,7 +78,7 @@ workers:
     recyclable: true
 ```
 
-then `lever reload`. The manager can now run `lever-manager agent stop deal-1` and
+then `lever init` (the manager's skill gains the recycle directions) and `lever reload`. The manager can now run `lever-manager agent stop deal-1` and
 `lever-manager agent recycle deal-1 --task "…"`: the broker deletes the worker's scion record
 and staged ticket (what `lever worker purge` deletes) and starts it fresh with the new task.
 

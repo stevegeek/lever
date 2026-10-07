@@ -69,6 +69,12 @@ func (a *App) AnyAPIKeyAgent() bool {
 	return anyAPIKey
 }
 
+// AnyRecyclableWorker reports whether some worker sets recyclable: the
+// manager's skill teaches `lever-manager agent recycle` only then.
+func (a *App) AnyRecyclableWorker() bool {
+	return slices.ContainsFunc(a.Workers, func(w Worker) bool { return w.Recyclable })
+}
+
 // WorkerDir returns the absolute path of a worker dir (tree + relative dir).
 func (a *App) WorkerDir(g Worker) string { return filepath.Join(a.Tree, g.Dir) }
 

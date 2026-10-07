@@ -61,7 +61,7 @@ type skillTarget struct {
 // sessionrec.SkillRel names for it (the session record hashes the same file).
 func skillTargets(app *config.App) []skillTarget {
 	rel, _ := sessionrec.SkillRel(app, app.Name)
-	ts := []skillTarget{{relPath: rel, content: skills.OperatorWith(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), skillFiles(app))}}
+	ts := []skillTarget{{relPath: rel, content: skills.OperatorWith(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), skillFiles(app), app.AnyRecyclableWorker())}}
 	for _, g := range app.Workers {
 		rel, _ := sessionrec.SkillRel(app, g.Name)
 		ts = append(ts, skillTarget{relPath: rel, content: skills.AgentWith(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), skillFiles(app))})

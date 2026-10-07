@@ -323,10 +323,17 @@ Review the queue with `lever-manager msg list`.
 ## Dispatching workers
 
 Workers are sibling jailed agents, declared by the operator in the instance
+<!-- lever:recycle off -->
+config. You can start, resume, and message them but NOT create or purge them —
+if a needed worker doesn't exist, or one must be discarded and recreated with a
+different task, ask the operator.
+<!-- /lever:recycle off -->
+<!-- lever:recycle on -->
 config. You can start, resume, and message them but NOT create them. You can
 discard and restart only a worker the operator marked recyclable (`agent
 recycle`, below) — if a needed worker doesn't exist, or another one must be
 discarded and recreated with a different task, ask the operator.
+<!-- /lever:recycle on -->
 
 - Start (first time): `lever-manager agent start <worker> --task "<task>"` —
   for a worker with no existing record. Its task is FIXED at creation; `--task`
@@ -358,6 +365,11 @@ discarded and recreated with a different task, ask the operator.
   names its phase: resume it, then send again; nothing was sent or queued.
   `lever-manager msg recipients` lists the addresses you may send to.
   After the operator's `lever stop` + `lever up`, workers that were running
+<!-- lever:recycle off -->
+  are suspended: resume the ones you need. Replacing the pinned task entirely means discarding the worker, which
+  only the operator can do (`lever worker purge`) — ask them.
+<!-- /lever:recycle off -->
+<!-- lever:recycle on -->
   are suspended: resume the ones you need. Replacing the pinned task entirely means discarding the worker:
   `agent recycle` for a recyclable worker, else only the operator can do it
   (`lever worker purge`) — ask them.
@@ -377,6 +389,7 @@ discarded and recreated with a different task, ask the operator.
   less than a minute ago: wait, then try again. Recycle answers when the new
   worker is running. If it fails after the delete (`agent list` shows no
   record), start the worker with `agent start <worker> --task "<task>"`.
+<!-- /lever:recycle on -->
 - Suspend / stop: `lever-manager agent suspend|stop <worker>`.
 - Observe: `lever-manager agent list`; for live events run
   `lever-manager watch --events-file <path> &` and tail that file.

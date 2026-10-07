@@ -493,7 +493,7 @@ func TestAfterCompactPrintsHookJSON(t *testing.T) {
 	if err := cmdAfterCompact([]string{"--note-b64", base64.StdEncoding.EncodeToString([]byte("Re-read NOTES.md"))}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), `"additionalContext":"[lever: operator note after compaction] Re-read NOTES.md"`) {
+	if !strings.Contains(out.String(), `"additionalContext":"[after compaction: note from this instance's lever.yaml] Re-read NOTES.md"`) {
 		t.Fatalf("output = %s", out.String())
 	}
 	if err := cmdAfterCompact(nil, &out); err == nil {

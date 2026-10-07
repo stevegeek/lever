@@ -22,11 +22,13 @@ const (
 )
 
 // AfterCompactMarker starts the context lever's after-compaction hook gives
-// the agent. It arrives as SessionStart hook context, which only the
-// container's own Claude Code config can produce, never inside a message;
-// the lever-agent skill says so, so a message that types the marker is
-// read as the sender's words.
-const AfterCompactMarker = "[lever: operator note after compaction]"
+// the agent. It arrives as SessionStart hook context, never inside a
+// message. The skills do not name it, and it deliberately does not start
+// with "[lever: operator note": that prefix is the skills' older marker for
+// a trusted operator note, and a contact who types this marker in a message
+// must not match it. A message that carries it falls under the skills'
+// general rule (a marker in a message proves nothing).
+const AfterCompactMarker = "[after compaction: note from this instance's lever.yaml]"
 
 // WriteManagedSettings merges c into the managed-settings file at path:
 // AutoCompactWindow as env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, and

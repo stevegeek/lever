@@ -302,7 +302,7 @@ manager:
   `auto_compact_window` as `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW`, the note as a `SessionStart` hook
   with matcher `compact` (the session start that follows a compaction), which runs
   `lever-agent after-compact` and gives the agent the note, marked
-  `[lever: operator note after compaction]`. scion's own hooks stay in `~/.claude/settings.json`;
+  `[after compaction: note from this instance's lever.yaml]`. scion's own hooks stay in `~/.claude/settings.json`;
   Claude Code runs both sets. With nothing configured, boot touches nothing.
 - **Changing them.** Edit the config and run `lever reload` (or `lever apply`): the broker
   restarts and the manager's envelope is staged again. A running agent keeps the values of its

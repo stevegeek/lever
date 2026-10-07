@@ -252,3 +252,10 @@ func TestBootRefusesInvalidClaudeBlock(t *testing.T) {
 		t.Fatal("wrote managed settings from an invalid block")
 	}
 }
+
+// The marker must not start like the skills' trusted operator-note marker.
+func TestAfterCompactMarkerIsNotTheOperatorNoteMarker(t *testing.T) {
+	if strings.HasPrefix(AfterCompactMarker, "[lever: operator note") || strings.HasPrefix(AfterCompactMarker, "[lever:") {
+		t.Fatalf("AfterCompactMarker %q shares a prefix with lever's message markers", AfterCompactMarker)
+	}
+}

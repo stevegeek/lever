@@ -17,7 +17,9 @@ func newProvisionCmd(factory BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := b.EnsureUp(cmd.Context(), backend.Config{MachineName: machine, ProjectTree: tree, AllowedPorts: allow}); err != nil {
+			// No lever.yaml here, so nested_virt is unknown: leave the
+			// guest's /dev/kvm setup alone rather than turn it off.
+			if err := b.EnsureUp(cmd.Context(), backend.Config{MachineName: machine, ProjectTree: tree, AllowedPorts: allow, NestedVirtUnknown: true}); err != nil {
 				return err
 			}
 			cmd.Printf("jail %q up; DOCKER_HOST=%s; alias=%s\n", machine, b.DockerHost(), b.HostToolAlias())

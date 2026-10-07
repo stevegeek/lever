@@ -62,7 +62,7 @@ image build context like `lever-agent` would remove that requirement; that chang
 
 ```bash
 make install          # host `lever` → $PREFIX (default ~/.local/bin)
-make lever-image      # cross-compile in-jail binaries + docker build the agent image (LEVER_IMAGE_ARCH=arm64)
+make lever-image      # cross-compile in-jail binaries + docker build the agent image (LEVER_IMAGE_ARCH, default: host Go arch)
 make lever-image-bins # cross-compile in-jail binaries into an instance's image build context only
 ```
 

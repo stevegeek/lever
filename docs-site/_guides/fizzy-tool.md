@@ -15,8 +15,10 @@ operations take a card number and not a board. This tool wraps the official fizz
 the board.
 
 **The guarantee:** the tool touches only the board given by `-board`. Every card operation first
-checks that the card is on that board. The tool passes the token to the CLI only as `FIZZY_TOKEN`.
-It runs the CLI with an empty working directory and an empty HOME.
+checks that the card is on that board. The tool passes the token to the CLI only as `FIZZY_TOKEN`
+and the account as `FIZZY_PROFILE`. It runs the CLI with an empty working directory and an empty
+HOME, with the OS keyring (`FIZZY_NO_KEYRING`) and the update check (`FIZZY_NO_UPDATE_NOTIFIER`)
+off.
 
 ## Operations
 
@@ -31,6 +33,12 @@ It runs the CLI with an empty working directory and an empty HOME.
 
 A refusal comes back as `{"ok": false, "error": "..."}`, for example when a card is not on the
 board. The tool never closes a card.
+
+The CLI turns a body or description from markdown into HTML and passes raw HTML through. The tool
+refuses a body or description that contains `action-text-attachment` or `trix-attachment` (any
+case): with that markup an agent could @mention an account user, which notifies them as the token
+owner, or re-embed an attachment it saw. `comment` and `create_card` together are limited to 10
+calls per minute per tool process; a call over the limit gets an error that starts with `rate`.
 
 ## Configure the tool
 

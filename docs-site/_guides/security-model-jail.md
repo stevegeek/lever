@@ -114,7 +114,12 @@ so a containment posture is never silently substituted.
 
 - **`nested_virt: true` widens the host kernel's exposure.** The host's nested SVM/VMX emulation
   is reachable from the guest (it has had CVEs, e.g. CVE-2021-29657). It is off by default; use it
-  for dev instances only.
+  for dev instances only. Only the manager container gets `/dev/kvm` (a bind-mount volume on its
+  scion record), so only the manager can reach the guest kernel's KVM ioctl surface. A worker has
+  no device node and cannot make one in its user namespace. The guest kernel is the boundary
+  between agents, so a KVM bug would let the manager break it; the VM boundary to the host still
+  holds. Builds before this change used a podman drop-in that gave every container the device,
+  workers included; apply now removes it.
 - **Lima's in-guest kernel attack surface is intentionally widened for rootless runtimes.**
   Provisioning re-enables the unprivileged user-namespace knob
   (`kernel.apparmor_restrict_unprivileged_userns=0`) that Ubuntu ≥ 23.10 disables by default, a

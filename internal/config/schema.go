@@ -515,7 +515,7 @@ type App struct {
 	Operator   Operator    `yaml:"operator"`
 	Remote     Remote      `yaml:"remote"`
 	Disk       string      `yaml:"disk"`        // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
-	NestedVirt bool        `yaml:"nested_virt"` // Lima-only: every agent container gets /dev/kvm (nested KVM guests). Linux hosts only.
+	NestedVirt bool        `yaml:"nested_virt"` // Lima-only: the manager container gets /dev/kvm (nested KVM guests). Linux hosts only.
 	CPUs       int         `yaml:"cpus"`        // Lima guest vCPUs; 0 = Lima default. Lima-only.
 	Memory     string      `yaml:"memory"`      // Lima guest memory (e.g. "24GiB"); empty = Lima default. Lima-only.
 

@@ -71,11 +71,20 @@ type Config struct {
 	// (OrbStack).
 	Disk string
 	// CPUs and Memory size the Lima guest (0 / "" = Lima default).
-	// NestedVirt gives every agent container /dev/kvm (Lima on a Linux host).
+	// NestedVirt makes the guest /dev/kvm usable by the run user (Lima on a
+	// Linux host); apply bind-mounts it into the manager container only.
 	// All three are ignored by OrbStack; config load rejects them there.
 	CPUs       int
 	Memory     string
 	NestedVirt bool
+	// NestedVirtUnknown says the caller has no lever.yaml and so does not
+	// know nested_virt (`lever provision`): EnsureUp leaves the guest's
+	// /dev/kvm setup as it is instead of converging it to NestedVirt.
+	NestedVirtUnknown bool
+	// Warn prints a loud, user-facing line (apply's log). EnsureUp uses it
+	// for advice that must not fail the bring-up, e.g. a cpus or memory
+	// value an existing Lima VM does not have. Nil discards.
+	Warn func(format string, args ...any)
 }
 
 // HasScion reports whether any scion mode is configured.

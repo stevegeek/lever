@@ -29,7 +29,7 @@ func TestCheckHostNested(t *testing.T) {
 		{"no kvm module", map[string]string{}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			err := checkHostNested(files(c.m))
+			err := checkHostNested("amd64", files(c.m))
 			if c.ok != (err == nil) {
 				t.Fatalf("ok=%v, err=%v", c.ok, err)
 			}
@@ -37,5 +37,13 @@ func TestCheckHostNested(t *testing.T) {
 				t.Fatalf("error must carry the fix: %v", err)
 			}
 		})
+	}
+}
+
+func TestCheckHostNestedRefusesOtherArch(t *testing.T) {
+	read := func(string) ([]byte, error) { return []byte("1\n"), nil }
+	err := checkHostNested("arm64", read)
+	if err == nil || !strings.Contains(err.Error(), "only on x86_64") || !strings.Contains(err.Error(), "arm64") || strings.Contains(err.Error(), "modprobe") {
+		t.Fatalf("arm64 must get the arch refusal, not the Intel/AMD fix: %v", err)
 	}
 }

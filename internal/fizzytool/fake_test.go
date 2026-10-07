@@ -20,7 +20,7 @@ func fakeFizzy(t *testing.T) (bin, logPath string) {
 	script := `#!/bin/sh
 LOG='` + logPath + `'
 { printf 'ARGV'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'
-  printf 'CWD %s\nHOME %s\nTOKEN %s\nACCOUNT %s\nAPI %s\nFAKEVAR %s\n' "$(pwd -P)" "$HOME" "$FIZZY_TOKEN" "$FIZZY_ACCOUNT" "$FIZZY_API_URL" "$FAKE_VAR"
+  printf 'CWD %s\nHOME %s\nTOKEN %s\nPROFILE %s\nACCOUNT %s\nAPI %s\nNOUPDATE %s\nNOKEYRING %s\nFAKEVAR %s\n' "$(pwd -P)" "$HOME" "$FIZZY_TOKEN" "$FIZZY_PROFILE" "$FIZZY_ACCOUNT" "$FIZZY_API_URL" "$FIZZY_NO_UPDATE_NOTIFIER" "$FIZZY_NO_KEYRING" "$FAKE_VAR"
   for a in "$@"; do case "$a" in --body_file=*|--description_file=*) printf 'FILE '; cat "${a#*=}"; printf '\n';; esac; done
 } >> "$LOG"
 case "$1 $2" in

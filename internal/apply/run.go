@@ -1067,10 +1067,11 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		// Model: a resume re-projects what scion staged at the fresh create.
 		Instructions: instructions,
 		// manager.read_only: the protected tree paths and their ancestor
-		// pins, as inline-config volumes. Nil when none are configured.
-		// Create-time only, like Instructions: a resume redispatches the
-		// volumes scion stored with the record.
-		Volumes: managerTreeVolumes(jp, r.app.ManagerTreeMounts()),
+		// pins, as inline-config volumes, plus /dev/kvm under nested_virt.
+		// Nil when neither is configured. Create-time only, like
+		// Instructions: a resume redispatches the volumes scion stored with
+		// the record.
+		Volumes: managerVolumes(jp, r.app),
 		// Workspace = the in-jail project tree, so the manager edits the real
 		// host files in place (verified 2026-06-16). Without it scion mounts a
 		// managed copy of the externalized config dir, not the live tree.
@@ -1079,6 +1080,23 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		// secret set above); the real credential arrives in-container.
 		APIKey: apiKey,
 	}, nil
+}
+
+// KVMDevice is the device nested_virt gives the manager container.
+const KVMDevice = "/dev/kvm"
+
+// managerVolumes is the manager's inline-config volumes: its read_only plan
+// (managerTreeVolumes) and, under nested_virt, KVMDevice bind-mounted to
+// itself. Scion has no per-agent device field; rootless podman passes a
+// --device as this same bind mount (it cannot mknod, and sets no device
+// cgroup), so the manager gets a working /dev/kvm while the hub and the
+// workers get none.
+func managerVolumes(jp string, app *config.App) []scion.VolumeMount {
+	out := managerTreeVolumes(jp, app.ManagerTreeMounts())
+	if app.NestedVirt {
+		out = append(out, scion.VolumeMount{Source: KVMDevice, Target: KVMDevice})
+	}
+	return out
 }
 
 // managerTreeVolumes turns the manager's read_only plan into scion volumes:
@@ -1460,26 +1478,43 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 	}
 }
 
-// warnManagerNestedVirt runs after the manager is live: nested_virt's podman
-// drop-in reaches a container only when podman creates it, so a manager kept
-// or resumed from before the option lacks /dev/kvm. Never fatal.
+// warnManagerNestedVirt runs after the manager is live: nested_virt's
+// /dev/kvm volume is create-time only, so a manager created before the key
+// was turned on lacks the device, and one created while it was on keeps the
+// device after it is turned off (a resume recreates the container from the
+// record's volumes). Both need a fresh create. Off, it probes Lima instances
+// only: nested_virt is Lima-only, so no other manager can hold the device.
+// Never fatal.
 func (r *run) warnManagerNestedVirt(ctx context.Context, jp string) {
-	if !r.app.NestedVirt {
+	on := r.app.NestedVirt
+	if !on && r.app.Backend != config.BackendLima {
 		return
 	}
 	if r.d.ProbeContainerDevice == nil {
-		r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm; run `lever doctor` (row \"nested virt\")", r.app.Name)
+		if on {
+			r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm; run `lever doctor` (row \"nested virt\")", r.app.Name)
+		}
 		return
 	}
-	has, err := r.d.ProbeContainerDevice(ctx, jail.ContainerName(path.Base(jp), r.app.Name), "/dev/kvm")
+	has, err := r.d.ProbeContainerDevice(ctx, jail.ContainerName(path.Base(jp), r.app.Name), KVMDevice)
 	if err != nil {
-		r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm (%v); run `lever doctor`", r.app.Name, err)
+		if on {
+			r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm (%v); run `lever doctor`", r.app.Name, err)
+		}
 		return
 	}
-	if !has {
-		r.d.Log("start-manager: WARNING: nested_virt is on but manager %q has no /dev/kvm; it takes effect when the container is recreated: `lever stop`, then `lever up` (keeps the conversation)", r.app.Name)
+	switch {
+	case on && !has:
+		r.d.Log("start-manager: WARNING: nested_virt is on but manager %q has no /dev/kvm; %s", r.app.Name, NestedVirtRecreateFix)
+	case !on && has:
+		r.d.Log("start-manager: WARNING: nested_virt is off but the manager %q still has /dev/kvm; %s", r.app.Name, NestedVirtRecreateFix)
 	}
 }
+
+// NestedVirtRecreateFix is how a manager gains or drops /dev/kvm: a fresh
+// create, which discards the conversation (a stop and up keeps the record's
+// volumes).
+const NestedVirtRecreateFix = "recreate it to apply the change: back up the conversation first, then `lever up --fresh` (discards the conversation; `lever stop` + `lever up` keeps the old devices)"
 
 // convergeManager acts on the observed manager record (nil when absent, already
 // settled out of any transitional phase by observeManager): create, keep,

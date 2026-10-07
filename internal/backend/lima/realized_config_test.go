@@ -2,6 +2,7 @@ package lima
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func TestVerifyRealizedConfigAcceptsMatch(t *testing.T) {
 	scriptRealizedConfig(f, "lever-x", matchingRealizedConfigJSON("lever-x", "/Users/x/tree"))
 	l := New(f, "lever-x", common.Options{})
 
-	if err := l.verifyRealizedConfig(context.Background(), "/Users/x/tree"); err != nil {
+	if _, err := l.verifyRealizedConfig(context.Background(), "/Users/x/tree"); err != nil {
 		t.Fatalf("verifyRealizedConfig on a matching config: %v", err)
 	}
 }
@@ -140,7 +141,7 @@ func TestVerifyRealizedConfigDetectsDrift(t *testing.T) {
 			scriptRealizedConfig(f, "lever-x", tc.json)
 			l := New(f, "lever-x", common.Options{})
 
-			err := l.verifyRealizedConfig(context.Background(), "/Users/x/tree")
+			_, err := l.verifyRealizedConfig(context.Background(), "/Users/x/tree")
 			if err == nil {
 				t.Fatal("expected a drift error, got nil")
 			}
@@ -225,4 +226,66 @@ func TestEnsureUpIsIdempotentWhenRunningAndMatching(t *testing.T) {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	backendtest.AssertNoSubcommand(t, f, "limactl", "create", "start")
+}
+
+func TestSizingDrift(t *testing.T) {
+	four, mem := 4, "4GiB"
+	var inst realizedInstance
+	inst.Config.CPUs, inst.Config.Memory = &four, &mem
+	if d := inst.sizingDrift(0, ""); d != nil {
+		t.Fatalf("unset keys must not warn, got %q", d)
+	}
+	if d := inst.sizingDrift(4, "4096MiB"); d != nil {
+		t.Fatalf("equal sizes in other units must not warn, got %q", d)
+	}
+	d := inst.sizingDrift(8, "24GiB")
+	if len(d) != 2 || !strings.Contains(d[0], "cpus is 8 but the existing VM has 4") || !strings.Contains(d[1], "memory is 24GiB but the existing VM has 4GiB") {
+		t.Fatalf("drift = %q", d)
+	}
+	frac := "3.906GiB"
+	inst.Config.Memory = &frac
+	if d := inst.sizingDrift(0, "4GiB"); len(d) != 1 {
+		t.Fatalf("Lima's fractional default must parse and differ, got %q", d)
+	}
+	odd := "lots"
+	inst.Config.Memory, inst.Config.CPUs = &odd, nil
+	if d := inst.sizingDrift(8, "4GiB"); d != nil {
+		t.Fatalf("an unreadable realized value must not warn, got %q", d)
+	}
+}
+
+// TestEnsureUpWarnsOnSizingDrift: an existing VM keeps its create-time cpus
+// and memory, so a changed config value only earns a warning — and a fresh
+// create none.
+func TestEnsureUpWarnsOnSizingDrift(t *testing.T) {
+	sized := strings.TrimSuffix(matchingRealizedConfigJSON(vm, tree), "}}") + `,"cpus":4,"memory":"4GiB"}}`
+	f := proc.NewFakeRunner()
+	limaVersionScript(f)
+	scriptList(f, listRunning)
+	scriptRealizedConfig(f, vm, sized)
+	limaGuest.ScriptProvision(f, "501", backendtest.AhostsDual)
+	var warns []string
+	warn := func(format string, a ...any) { warns = append(warns, fmt.Sprintf(format, a...)) }
+	l := New(f, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree, CPUs: 8, Memory: "4GiB", Warn: warn}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "cpus is 8 but the existing VM has 4") || !strings.Contains(warns[0], "only when it creates the VM") {
+		t.Fatalf("warns = %q", warns)
+	}
+
+	f = proc.NewFakeRunner()
+	limaVersionScript(f)
+	scriptList(f, listAbsent)
+	scriptLifecycle(f)
+	scriptRealizedConfig(f, vm, sized)
+	limaGuest.ScriptProvision(f, "501", backendtest.AhostsV4)
+	warns = nil
+	l = New(f, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree, CPUs: 8, Warn: warn}); err != nil {
+		t.Fatalf("EnsureUp (create): %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("a fresh create must not warn, got %q", warns)
+	}
 }

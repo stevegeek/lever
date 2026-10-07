@@ -3,10 +3,12 @@ package host
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -108,6 +110,10 @@ func TestUpCommandCallsEnsureUp(t *testing.T) {
 	if !sb.up {
 		t.Fatal("EnsureUp not called")
 	}
+	// provision reads no lever.yaml, so it must not converge nested_virt off.
+	if !sb.upCfg.NestedVirtUnknown || sb.upCfg.NestedVirt {
+		t.Fatalf("provision must mark nested_virt unknown, got %+v", sb.upCfg)
+	}
 }
 
 func TestDoctorPrintsProfile(t *testing.T) {
@@ -138,5 +144,24 @@ func TestFactoryReceivesConfiguredBackendName(t *testing.T) {
 	}
 	if gotName != "orbstack" {
 		t.Fatalf("factory got name %q, want %q", gotName, "orbstack")
+	}
+}
+
+// TestBringUpBackendPassesWarn: apply hands EnsureUp its log, so the
+// backend's sizing-drift advice reaches the operator.
+func TestBringUpBackendPassesWarn(t *testing.T) {
+	sb := &stubBackend{}
+	app := &config.App{Name: "x", Backend: config.BackendLima, CPUs: 8, Memory: "24GiB", NestedVirt: true}
+	var got []string
+	warn := func(format string, a ...any) { got = append(got, fmt.Sprintf(format, a...)) }
+	if _, err := bringUpBackend(context.Background(), app, func(string, string) (backend.Backend, error) { return sb, nil }, warn); err != nil {
+		t.Fatal(err)
+	}
+	if sb.upCfg.Warn == nil || sb.upCfg.CPUs != 8 || sb.upCfg.Memory != "24GiB" || !sb.upCfg.NestedVirt || sb.upCfg.NestedVirtUnknown {
+		t.Fatalf("cfg = %+v", sb.upCfg)
+	}
+	sb.upCfg.Warn("w %d", 1)
+	if len(got) != 1 || got[0] != "w 1" {
+		t.Fatalf("warn sink = %q", got)
 	}
 }

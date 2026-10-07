@@ -137,6 +137,7 @@ func main() {
 	p := &ghpush.Pusher{
 		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
 		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
+		Deadline: 10 * time.Minute,
 		Tokens: &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
 			APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now},
 		// GitHub refuses files over 100 MiB, so a bigger object can never be

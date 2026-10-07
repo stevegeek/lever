@@ -39,6 +39,9 @@ type Pusher struct {
 	Tokens    TokenSource
 	Git       Git
 	Log       *slog.Logger
+	// Deadline bounds one whole call, lock wait included (0 = none). Each
+	// git call also has Git.Timeout.
+	Deadline time.Duration
 	// Limits bound what the import inflates (checked before any git call).
 	Limits PackLimits
 	// ImportBudget caps the bundle bytes one caller may import per hour,
@@ -98,6 +101,11 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	}
 	if err := ValidateBundleName(bundle); err != nil {
 		return Result{}, err
+	}
+	if p.Deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.Deadline)
+		defer cancel()
 	}
 	unlock, err := p.lock(ctx, repo)
 	if err != nil {

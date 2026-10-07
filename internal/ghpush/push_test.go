@@ -544,3 +544,33 @@ func TestHidePathsKeepsErrorsIs(t *testing.T) {
 		t.Fatal("errors.Is lost")
 	}
 }
+
+type blockingToken struct{}
+
+func (blockingToken) Token(ctx context.Context, _ string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestPushOverallDeadline(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Tokens = blockingToken{}
+	p.Deadline = 2 * time.Second
+	commitOn(t, work, "agent/dl", "dl.txt")
+	bundle(t, work, tree, "dl.bundle", "agent/dl")
+	start := time.Now()
+	_, err := p.Push(context.Background(), "manager", repo, "agent/dl", "dl.bundle")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("push took %v past a %v deadline", d, p.Deadline)
+	}
+	// The lock is free again.
+	unlock, err := p.lock(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+}

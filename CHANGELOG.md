@@ -5,7 +5,7 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [0.12.0] - 2026-07-31`; a
 version bump moves the block under the new version heading.
 
-## [Unreleased]
+## [0.31.0] - 2026-10-07
 
 ### Added
 
@@ -50,6 +50,99 @@ version bump moves the block under the new version heading.
   shown messages as unread; the operator's view is unchanged. Needs the agent image rebuilt
   (`make lever-image`) and each contact agent started fresh on the new skill. `lever doctor` has an
   `agent messages` row. Off, the skills render byte-identical and no config stamp changes.
+
+### Security
+
+From the review of the client UI range before this release (four security
+reviews and a final check; nothing above LOW was open).
+
+- **A contact sees only normal agent message types.** An agent could send
+  recorded text with type `system`, and the chat page drew it as a hub notice.
+  The proxy now keeps an agent row for a contact only with type `instruction`,
+  `input-needed` or `assistant-reply`; the chat page never draws an agent's row
+  as a system line, and draws hub lines on one line.
+- **A contact's history answer keeps only listed fields** in the answer, in each
+  row, extension and attachment, so `threadId`, `channel` and future hub fields
+  do not reach the contact. The unread count and the push check read rows only
+  under `messages`.
+- **A filtered contact route (history, DM list, events) answers 502** when the
+  hub sends a 2xx other than 200, so an unfiltered body cannot pass.
+- **The chat page's push, wake and upload writes need an `Origin` of exactly
+  `https://<base_url host>`**, with or without `Sec-Fetch-Site`.
+- **A contact upload fails closed** (503 `try-again`) when the agent's hub state
+  cannot be read, and checks the session freshness also for an agent with no
+  record, as a contact post does.
+- **Agent messages need scion `b3562fb1` (2026-08-28) or later**, where the hub
+  sets a message's sender itself; on older scion an agent could forge a row as
+  the contact. Config load refuses `remote.agent_messages.enabled` with an older
+  `scion.version` pseudo-version; the `agent messages` doctor row fails on an
+  older `scion.source` checkout and warns when lever cannot tell (a
+  `scion.binary`, a bare hash or a tag).
+- **A contact reloading in a loop cannot stall `contact_message`.** The broker
+  caches each contact's parsed ledger file by size, mtime and inode instead of
+  parsing it under the ledger lock on every history read and unread poll.
+- **A push endpoint moves to another login only with the same subscription
+  keys**; other keys get 409, so knowing an endpoint URL no longer lets a login
+  take another login's notifications. Subscribe and unsubscribe are limited to
+  10 a minute per login (429).
+
+### Fixed
+
+- **Push no longer waits for a reconnect after a DM event with an unknown key.**
+  The watcher reads the hub's `threadId` (confirmed in the scion source); a key
+  that matches no agent makes it check every agent of the login (audit
+  `push-stream`, reason `unknown-dm`).
+- **A failed read-mark write no longer holds the push slot**, so the retry
+  pushes at once instead of after about 60 s.
+- **A login's devices are sent to at the same time**, and a proxy shutdown gives
+  sends still under way at most 5 s more.
+- **Atomic state writes are synced to disk** before the rename (and the
+  directory after), so a power loss cannot leave `vapid.key`,
+  `subscriptions.json` or another state file empty. An empty or damaged
+  `vapid.key` or `subscriptions.json` now fails the doctor `push` row and the
+  start warning with the file name and the fix.
+- **The push event stream follows no redirect**, so a hub redirect to the login
+  page renews the session; the direct stream client bounds the wait for
+  response headers.
+- **A `share_file` call that timed out (503) no longer records the share**, so
+  the agent's retry does not count twice toward 20 shares an hour.
+- **Chat page uploads and downloads get 10 min plus `max_bytes` at 64 KiB/s (at
+  most 1 h)** instead of a fixed 10 min. An upload that stops at the deadline
+  answers 408 `timeout` ("the upload took too long"), not `bad-form`.
+- **File lists are ordered by the time they show**, also when two uploads run at
+  once.
+- **A failed operator-view history read records its cause in `remote.log`** (hub
+  status, unreadable or oversize answer, no session, transport error), never hub
+  body text or the session.
+
+### Changed
+
+- The `files` doctor row names the allowed types that can carry macros (`xlsm`,
+  `xls`, `doc` in the defaults).
+- `lever doctor` skips the broker probe of the `agent messages` row when remote
+  access is off.
+
+### Upgrade
+
+- With `remote.landing: chat` and contact logins, **the operator view is on with
+  no new key**: the operator's agent list gets a Contacts section, and an
+  operator read uses the bound contact's own hub session. Nothing else changes
+  for an unchanged `lever.yaml`: the skills render as in 0.30.0, the config
+  stamps are the same, and the three new doctor rows (`agent messages`, `files`,
+  `push`) pass as off.
+- Agent messages and files need `make lever-image`, `lever init`, `lever apply`
+  and a fresh start of the agents. Push needs only `lever apply`.
+- After an image rebuild, every instance's lever-capability server lists
+  `contacts`, `contact_message`, `contact_files` and `share_file`; they answer
+  off while their feature is off.
+
+### Known issues
+
+- An agent that sends messages with many made-up DM keys can add one
+  `unknown-dm` audit line per key and push pass (hub reads stay bounded).
+- A share whose ledger lock wait passes the broker's 30 s bound can still be
+  recorded after the agent got a 503 (one extra count against the hourly limit).
+- Web push has not been tested on a real device yet (Linux Chrome, iPhone).
 
 ## [0.30.0] - 2026-10-06
 

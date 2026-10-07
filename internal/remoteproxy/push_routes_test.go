@@ -226,8 +226,8 @@ func TestPushSubscribeRefusals(t *testing.T) {
 		"put":                  {"PUT", subBody("x"), nil, 405, "method"},
 		"no origin":            {"POST", subBody("x"), []string{"Origin", ""}, 403, "origin"},
 		"null origin":          {"POST", subBody("x"), []string{"Origin", "null"}, 403, ""},
-		"http origin":          {"POST", subBody("x"), []string{"Origin", "http://" + testServeHost}, 403, "origin"},
-		"http, no fetch site":  {"POST", subBody("x"), []string{"Origin", "http://" + testServeHost, "Sec-Fetch-Site", ""}, 403, "origin"},
+		"http origin":          {"POST", subBody("x"), []string{"Origin", "http://" + testServeHost}, 403, ""}, // the gate's checkOrigin
+		"http, no fetch site":  {"POST", subBody("x"), []string{"Origin", "http://" + testServeHost, "Sec-Fetch-Site", ""}, 403, ""},
 		"same-site":            {"POST", subBody("x"), []string{"Sec-Fetch-Site", "same-site"}, 403, ""},
 		"form type":            {"POST", subBody("x"), []string{"Content-Type", "application/x-www-form-urlencoded"}, 415, "content-type"},
 		"text type":            {"POST", subBody("x"), []string{"Content-Type", "text/plain"}, 415, "content-type"},

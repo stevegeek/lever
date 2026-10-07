@@ -71,7 +71,8 @@ would let a jailed agent dial the proxy, set the identity header (`Tailscale-Use
 itself, and ride the injected session.
 
 **`base_url` is required whenever `enabled: true`.** The proxy matches every request's
-`Origin`/`Sec-Fetch-Site` against the host `base_url` resolves to; with `base_url` unset, that host
+`Origin`/`Sec-Fetch-Site` against the host `base_url` resolves to (an `Origin` must be exactly
+`https://` and that host, the host compared without case); with `base_url` unset, that host
 is empty and the proxy's fail-closed default would refuse **every** request, Origin-bearing or not
 — a proxy that could never serve anything. Rather than let that config "succeed" into a proxy that
 403s 100% of traffic, `lever.yaml` fails to load at all: `remote.enabled: true` with no `base_url`

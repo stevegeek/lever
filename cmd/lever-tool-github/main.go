@@ -139,8 +139,11 @@ func main() {
 		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
 		Tokens: &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
 			APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now},
-		Git: ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute},
-		Log: logger,
+		// GitHub refuses files over 100 MiB, so a bigger object can never be
+		// pushed; the caps bound what index-pack inflates and holds.
+		Limits: ghpush.PackLimits{MaxObjects: 2_000_000, MaxObjectSize: 100 << 20, MaxInflated: 4 << 30},
+		Git:    ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute},
+		Log:    logger,
 	}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,

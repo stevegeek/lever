@@ -47,6 +47,11 @@ var hardening = []string{
 	"credential.helper=",
 	"protocol.allow=never",
 	"protocol.https.allow=always",
+	// index-pack streams blobs over 16 MiB instead of holding them, and
+	// resolves deltas on one thread: one delta base and result in memory at
+	// a time (PackLimits caps their size).
+	"core.bigFileThreshold=16m",
+	"pack.threads=1",
 }
 
 func basicHeader(token string) string {

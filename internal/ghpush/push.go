@@ -37,6 +37,8 @@ type Pusher struct {
 	Tokens    TokenSource
 	Git       Git
 	Log       *slog.Logger
+	// Limits bound what the import inflates (checked before any git call).
+	Limits PackLimits
 	// ImportBudget caps the bundle bytes one caller may import per hour,
 	// refused pushes included (0 = no cap).
 	ImportBudget int64
@@ -110,6 +112,9 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, err
 	}
 	if err := p.charge(caller, size); err != nil {
+		return Result{}, err
+	}
+	if err := scanBundle(copyPath, p.Limits); err != nil {
 		return Result{}, err
 	}
 

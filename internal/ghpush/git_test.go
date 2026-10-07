@@ -29,7 +29,7 @@ func TestGitRunHardening(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, e := (*argvs)[0], (*envs)[0]
-	for _, want := range []string{"core.hooksPath=/dev/null", "protocol.allow=never", "protocol.https.allow=always", "transfer.fsckObjects=true", "gc.auto=0", "maintenance.auto=false", "http.followRedirects=false", "fetch.recurseSubmodules=false"} {
+	for _, want := range []string{"core.hooksPath=/dev/null", "protocol.allow=never", "protocol.https.allow=always", "transfer.fsckObjects=true", "gc.auto=0", "maintenance.auto=false", "http.followRedirects=false", "fetch.recurseSubmodules=false", "core.bigFileThreshold=16m", "pack.threads=1"} {
 		if !slices.Contains(a, want) {
 			t.Errorf("argv missing -c %s: %v", want, a)
 		}

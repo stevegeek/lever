@@ -116,11 +116,26 @@ A refusal returns to the agent as `{"ok": false, "error": "..."}`. The tool writ
 | Bad bundle name, symlink, hard link, or file too big | Named refusal. Nothing is fetched. |
 | Wrong ref set, tags, missing prerequisites, or an fsck failure | Named refusal. The tool deletes the temporary repository. |
 | Caller over `-import-budget` | Named refusal before any git call on the bundle. |
+| Pack over a size limit (see below) | Named refusal before any git call on the bundle. |
 | Bad branch charset or prefix, or a protected name (`main`, `master`, `HEAD`) | Named refusal before any git call. |
 | Repository not in `-repos` | Named refusal. |
 | Non-fast-forward | GitHub rejects the push. The tool reports that the branch moved and to use a new branch name. |
 | Token mint, GitHub or network error, or git timeout | Redacted error text. The tool does not retry. |
 | App key file has the wrong mode or owner | The tool refuses to start. The broker reports it down, and calls fail with 502. |
+
+## Bundle limits
+
+A small, highly compressible bundle can declare very large objects. git `index-pack` holds a delta
+base and its result in memory, so the tool reads the pack in the bundle before git does. It refuses
+the bundle if:
+
+- the pack has more than 2,000,000 objects,
+- one object, delta base or delta result is larger than 100 MiB (GitHub refuses such files), or
+- the sum of the inflated sizes is larger than 4 GiB.
+
+git then runs with `pack.threads=1` and `core.bigFileThreshold=16m`. A bundle at these limits can
+make `index-pack` use approximately 200 to 300 MiB of memory for one call. The tool sets no
+operating-system memory limit on git.
 
 ## Hazard: never run git in the tree on the host
 

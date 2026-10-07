@@ -121,19 +121,68 @@ func TestSupervisorPerToolLogs(t *testing.T) {
 }
 
 func TestToolSpecsCarriesWhatTheSupervisorNeeds(t *testing.T) {
-	got := ToolSpecs([]config.Tool{
+	app := &config.App{Broker: config.Broker{Tools: []config.Tool{
 		{Name: "db", Command: []string{"db-server", "-x"}, Backend: "127.0.0.1:3201", Gate: config.GateCoarse},
 		{Name: "ext", External: true, Backend: "127.0.0.1:3300"},
-	})
+	}}}
+	dir := app.InstanceDir()
+	if !filepath.IsAbs(dir) {
+		t.Fatalf("InstanceDir = %q, want an absolute path", dir)
+	}
+	got := ToolSpecs(app)
 	want := []ToolSpec{
-		{Name: "db", Command: []string{"db-server", "-x"}, Backend: "127.0.0.1:3201"},
-		{Name: "ext", External: true, Backend: "127.0.0.1:3300"},
+		{Name: "db", Command: []string{"db-server", "-x"}, Backend: "127.0.0.1:3201", Dir: dir},
+		{Name: "ext", External: true, Backend: "127.0.0.1:3300", Dir: dir},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ToolSpecs = %+v, want %+v", got, want)
 	}
-	if len(ToolSpecs(nil)) != 0 {
+	if len(ToolSpecs(&config.App{})) != 0 {
 		t.Fatal("no tools must map to no specs")
+	}
+}
+
+// A tool runs in its spec's Dir, and a relative command resolves there:
+// config load's tree check resolves the same paths against the instance dir,
+// so the two agree whatever directory the broker was started from.
+func TestSupervisorRunsToolInItsDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "tool.sh"), []byte("#!/bin/sh\npwd\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logs := filepath.Join(t.TempDir(), "tool-logs")
+	s := NewSupervisor([]ToolSpec{{Name: "rel", Command: []string{"./tool.sh"}, Dir: dir}}, "http://127.0.0.1:0", logs, testToolSecret)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	s.mu.Lock()
+	cmd := s.cmds[0]
+	s.mu.Unlock()
+	_ = cmd.Wait()
+	s.Stop()
+	out, _ := os.ReadFile(filepath.Join(logs, "rel.log"))
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != dir && got != real {
+		t.Fatalf("tool ran in %q, want %q", got, dir)
+	}
+}
+
+// A bare command is looked up on the supervisor's fixed PATH, not on the
+// broker process's own: a name found only on the broker's PATH is refused.
+func TestSupervisorResolvesBareCommandOnSupervisorPATH(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "lever-only-here"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	s := NewSupervisor([]ToolSpec{{Name: "x", Command: []string{"lever-only-here"}}}, "http://127.0.0.1:0", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
+	err := s.Start(context.Background())
+	s.Stop()
+	if err == nil || !strings.Contains(err.Error(), config.ToolSupervisorPATH) {
+		t.Fatalf("Start = %v, want a not-found error naming the supervisor PATH", err)
 	}
 }
 

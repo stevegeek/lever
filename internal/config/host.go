@@ -53,7 +53,7 @@ func (a *App) CheckHost() error {
 		return err
 	}
 	for _, t := range a.Broker.Tools {
-		if err := t.checkHost(); err != nil {
+		if err := t.checkHost(a.InstanceDir()); err != nil {
 			return err
 		}
 	}
@@ -65,18 +65,46 @@ func (a *App) CheckHost() error {
 	return a.checkRemoteToolchain()
 }
 
+// ResolveToolCommand is the program a supervised tool's command names, as
+// the supervisor executes it: a bare name looked up on ToolSupervisorPATH
+// (never the caller's own PATH), a relative path joined onto dir (the
+// instance dir, which the supervisor also makes the tool's working
+// directory), an absolute path as is.
+func ResolveToolCommand(bin, dir string) (string, error) {
+	switch {
+	case !strings.ContainsRune(bin, '/'):
+		return LookPathIn(bin, ToolSupervisorPATH)
+	case filepath.IsAbs(bin):
+		return bin, nil
+	default:
+		return filepath.Join(dir, bin), nil
+	}
+}
+
+// InstanceDir is the instance root (the config file's directory), absolute.
+// Supervised tools run with it as their working directory, so a relative
+// path in a tool command means the same thing to the tree check
+// (checkHostPathsOutsideTree) as to the tool.
+func (a *App) InstanceDir() string {
+	if abs, err := filepath.Abs(a.dir); err == nil {
+		return abs
+	}
+	return a.dir
+}
+
 // checkHost verifies a supervised tool's command is spawnable on the
-// supervisor's fixed PATH (or is an executable file when given as a path).
-func (t Tool) checkHost() error {
+// supervisor's fixed PATH (or is an executable file when given as a path,
+// relative ones against dir).
+func (t Tool) checkHost(dir string) error {
 	if t.External || len(t.Command) == 0 {
 		return nil
 	}
 	bin := t.Command[0]
-	if !strings.ContainsRune(bin, '/') {
-		if _, err := LookPathIn(bin, ToolSupervisorPATH); err != nil {
-			return fmt.Errorf("config: broker tool %q command %q not found on the supervisor PATH (%s); use an absolute path or install it there", t.Name, bin, ToolSupervisorPATH)
-		}
-	} else if !IsExecutableFile(bin) {
+	p, err := ResolveToolCommand(bin, dir)
+	if err != nil {
+		return fmt.Errorf("config: broker tool %q command %q not found on the supervisor PATH (%s); use an absolute path or install it there", t.Name, bin, ToolSupervisorPATH)
+	}
+	if !IsExecutableFile(p) {
 		return fmt.Errorf("config: broker tool %q command %q is not an executable file", t.Name, bin)
 	}
 	return nil

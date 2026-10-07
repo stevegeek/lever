@@ -1236,31 +1236,50 @@ func TestValidateLimaKeys(t *testing.T) {
 func TestToolCheckHostResolvesCommand(t *testing.T) {
 	// A binary guaranteed on the minimal PATH.
 	ok := Tool{Name: "t", Command: []string{"true"}}
-	if err := ok.checkHost(); err != nil {
+	if err := ok.checkHost(t.TempDir()); err != nil {
 		t.Fatalf("`true` is on the minimal PATH, should validate: %v", err)
 	}
 	// A binary that is not on the minimal PATH.
 	bad := Tool{Name: "t", Command: []string{missingBinary}}
-	err := bad.checkHost()
+	err := bad.checkHost(t.TempDir())
 	testutil.WantErrContaining(t, err, missingBinary, "PATH")
 }
 
 // TestToolCheckHostRejectsNonExecutableAbsolutePath: the slash-containing
-// (absolute path) branch of Tool.checkHost() must apply the same
+// (absolute path) branch of Tool.checkHost must apply the same
 // executable-file check as the PATH-scoped branch — a directory or a
 // non-executable file is exactly the #9 failure mode (opaque spawn failure),
 // just via an absolute path instead of a bare PATH-resolved name.
 func TestToolCheckHostRejectsNonExecutableAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
-	if err := (Tool{Name: "t", Command: []string{dir}}).checkHost(); err == nil {
+	if err := (Tool{Name: "t", Command: []string{dir}}).checkHost(t.TempDir()); err == nil {
 		t.Fatalf("a directory command path should be rejected")
 	}
 	notExec := filepath.Join(dir, "not-exec")
 	if err := os.WriteFile(notExec, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := (Tool{Name: "t", Command: []string{notExec}}).checkHost(); err == nil {
+	if err := (Tool{Name: "t", Command: []string{notExec}}).checkHost(t.TempDir()); err == nil {
 		t.Fatalf("a non-executable file command path should be rejected")
+	}
+}
+
+// A relative command resolves against the instance dir, the tool's working
+// directory, not against the caller's.
+func TestToolCheckHostRelativeCommandUsesInstanceDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin", "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tool := Tool{Name: "t", Command: []string{"bin/tool"}}
+	if err := tool.checkHost(dir); err != nil {
+		t.Fatalf("bin/tool under the instance dir should validate: %v", err)
+	}
+	if err := tool.checkHost(t.TempDir()); err == nil {
+		t.Fatal("bin/tool under another dir should not validate")
 	}
 }
 

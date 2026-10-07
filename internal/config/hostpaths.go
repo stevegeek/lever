@@ -44,8 +44,8 @@ var toolPathFlags = map[string]hostPathKind{
 }
 
 // hostPaths lists every host-run program and host secret the config names.
-// Paths are made absolute against the instance dir, which is also the
-// broker's working directory (it runs where lever runs: the instance root).
+// Paths are made absolute against the instance dir, which the supervisor
+// also makes every tool's working directory (brokerctl.ToolSpec.Dir).
 func (a *App) hostPaths() []hostPath {
 	var out []hostPath
 	add := func(key, p string, kind hostPathKind) {
@@ -53,7 +53,7 @@ func (a *App) hostPaths() []hostPath {
 			return
 		}
 		if !filepath.IsAbs(p) {
-			p = filepath.Join(a.dir, p)
+			p = filepath.Join(a.InstanceDir(), p)
 		}
 		if abs, err := filepath.Abs(p); err == nil {
 			p = abs

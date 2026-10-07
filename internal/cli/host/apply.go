@@ -72,7 +72,16 @@ func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 // created by EnsureKeys inside the spawned child, too late for this open —
 // so the log's parent is created here, or the whole bring-up hard-fails
 // before the daemon is ever spawned.
-func detachedSelfCmd(self, outLog string, env []string, args ...string) (*exec.Cmd, *os.File, error) {
+//
+// The child runs in configPath's directory (the instance root), given
+// absolute, whatever directory apply was run from: the broker's supervised
+// tools inherit it, and config load checks a relative tool path against
+// the instance root.
+func detachedSelfCmd(self, outLog, configPath string, env []string, args ...string) (*exec.Cmd, *os.File, error) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: config path: %w", args[0], err)
+	}
 	if err := os.MkdirAll(filepath.Dir(outLog), 0o700); err != nil {
 		return nil, nil, fmt.Errorf("%s: log dir: %w", args[0], err)
 	}
@@ -80,7 +89,8 @@ func detachedSelfCmd(self, outLog string, env []string, args ...string) (*exec.C
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: out log: %w", args[0], err)
 	}
-	cmd := exec.Command(self, args...)
+	cmd := exec.Command(self, append(args, abs)...)
+	cmd.Dir = filepath.Dir(abs)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout = f
@@ -91,11 +101,11 @@ func detachedSelfCmd(self, outLog string, env []string, args ...string) (*exec.C
 // brokerServeCmd builds the detached `lever broker serve` command with the env
 // the broker needs to issue its cert + reach the jail.
 func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (*exec.Cmd, *os.File, error) {
-	return detachedSelfCmd(self, outLog, []string{
+	return detachedSelfCmd(self, outLog, configPath, []string{
 		"LEVER_HOST_ALIAS_IP=" + aliasV4,
 		"LEVER_JAIL_USER=" + runUser,
 		"LEVER_JAIL_UID=" + runUID,
-	}, "broker", "serve", configPath)
+	}, "broker", "serve")
 }
 
 // remoteServeCmd builds the detached `lever remote serve <config>` command. No
@@ -103,7 +113,7 @@ func brokerServeCmd(self, configPath, outLog, aliasV4, runUser, runUID string) (
 // dial (jailPrefixFn in remote.go), so it needs nothing beyond the parent's
 // environment — which is where the jail transport binary is found on PATH.
 func remoteServeCmd(self, configPath, outLog string) (*exec.Cmd, *os.File, error) {
-	return detachedSelfCmd(self, outLog, nil, "remote", "serve", configPath)
+	return detachedSelfCmd(self, outLog, configPath, nil, "remote", "serve")
 }
 
 // logFunc is the sink for apply's loud, user-facing lines (Deps.Log and the

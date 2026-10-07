@@ -172,7 +172,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 
-	sup := NewSupervisor(ToolSpecs(app.Broker.Tools), adminURL, st.ToolLogDir(), toolSecret)
+	sup := NewSupervisor(ToolSpecs(app), adminURL, st.ToolLogDir(), toolSecret)
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}

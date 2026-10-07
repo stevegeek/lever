@@ -535,7 +535,7 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: "/x/lever.yaml", port: 48997, selfExe: selfExe})
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: 48997, selfExe: selfExe})
 	err := rc.Start(context.Background())
 	if err == nil {
 		t.Fatal("a stand-in that never listens must not report the proxy as serving")
@@ -562,7 +562,7 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	dir := t.TempDir()
 	st := state.ForConfig(dir) // no remote.pid at all
 
-	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: "/x/lever.yaml", port: 48996, selfExe: selfExe})
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: 48996, selfExe: selfExe})
 	// As above: the stand-in never binds, so the spawn is proved by the
 	// liveness check's complaint rather than by a nil.
 	err := rc.Start(context.Background())
@@ -1210,11 +1210,12 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 }
 
 // TestDetachedSelfCmd pins the shared daemon spawn shape both serve commands
-// ride on: argv = self + args, Setsid, extra env appended to the parent's,
+// ride on: argv = self + args + the absolute config path, the instance root
+// as working directory, Setsid, extra env appended to the parent's,
 // and the out log created (parent dir included) and wired to both streams.
 func TestDetachedSelfCmd(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "state", "x.log")
-	cmd, f, err := detachedSelfCmd("/usr/local/bin/lever", out, []string{"K=v"}, "remote", "serve", "/x/lever.yaml")
+	cmd, f, err := detachedSelfCmd("/usr/local/bin/lever", out, "/x/lever.yaml", []string{"K=v"}, "remote", "serve")
 	if err != nil {
 		t.Fatalf("detachedSelfCmd: %v", err)
 	}
@@ -1225,6 +1226,9 @@ func TestDetachedSelfCmd(t *testing.T) {
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
 		t.Fatal("child must be Setsid")
 	}
+	if cmd.Dir != "/x" {
+		t.Fatalf("child dir = %q, want the instance root /x (supervised tools inherit it)", cmd.Dir)
+	}
 	if !slices.Contains(cmd.Env, "K=v") || len(cmd.Env) != len(os.Environ())+1 {
 		t.Fatalf("env must be the parent's plus K=v, got %d entries", len(cmd.Env))
 	}
@@ -1233,6 +1237,29 @@ func TestDetachedSelfCmd(t *testing.T) {
 	}
 	if _, err := os.Stat(out); err != nil {
 		t.Fatalf("out log not created: %v", err)
+	}
+}
+
+// A relative config path (lever apply ../lever.yaml from inside the tree)
+// reaches the child absolute, and the child runs in the instance root, not
+// in the directory apply was run from.
+func TestDetachedSelfCmdRelativeConfigRunsInInstanceRoot(t *testing.T) {
+	root := t.TempDir()
+	tree := filepath.Join(root, "ws")
+	if err := os.MkdirAll(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(tree)
+	cmd, f, err := brokerServeCmd("/usr/local/bin/lever", "../lever.yaml", filepath.Join(t.TempDir(), "out.log"), "", "", "")
+	if err != nil {
+		t.Fatalf("brokerServeCmd: %v", err)
+	}
+	defer f.Close()
+	if cmd.Dir != root {
+		t.Fatalf("child dir = %q, want the instance root %q", cmd.Dir, root)
+	}
+	if got := cmd.Args[len(cmd.Args)-1]; got != filepath.Join(root, "lever.yaml") {
+		t.Fatalf("config arg = %q, want it absolute", got)
 	}
 }
 

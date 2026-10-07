@@ -16,21 +16,25 @@ import (
 
 // ToolSpec is what the Supervisor needs to know about one configured tool:
 // the name (for logs and errors), the command to spawn, the loopback backend
-// it serves on, and whether it is external (fronted by the broker, never
-// spawned). ToolSpecs builds them from config so the Supervisor itself holds
-// no config types.
+// it serves on, whether it is external (fronted by the broker, never
+// spawned), and the directory it runs in. ToolSpecs builds them from config
+// so the Supervisor itself holds no config types.
 type ToolSpec struct {
 	Name     string
 	Command  []string
 	Backend  string
 	External bool
+	// Dir is the tool's working directory and the base of a relative
+	// command: the instance dir, where config load's tree check resolves
+	// the same paths. Empty = the broker's own (tests).
+	Dir string
 }
 
 // ToolSpecs maps the configured broker tools onto the Supervisor's ToolSpec.
-func ToolSpecs(tools []config.Tool) []ToolSpec {
-	specs := make([]ToolSpec, 0, len(tools))
-	for _, t := range tools {
-		specs = append(specs, ToolSpec{Name: t.Name, Command: t.Command, Backend: t.Backend, External: t.External})
+func ToolSpecs(app *config.App) []ToolSpec {
+	specs := make([]ToolSpec, 0, len(app.Broker.Tools))
+	for _, t := range app.Broker.Tools {
+		specs = append(specs, ToolSpec{Name: t.Name, Command: t.Command, Backend: t.Backend, External: t.External, Dir: app.InstanceDir()})
 	}
 	return specs
 }
@@ -96,9 +100,18 @@ func (s *Supervisor) Start(ctx context.Context) error {
 			s.stopLocked()
 			return fmt.Errorf("brokerctl: tool %q has no command", t.Name)
 		}
+		// Resolved here, not by exec: exec.Command would look a bare name
+		// up on the broker's own PATH, not the fixed one config load
+		// validated it against.
+		bin, err := config.ResolveToolCommand(t.Command[0], t.Dir)
+		if err != nil {
+			s.stopLocked()
+			return fmt.Errorf("brokerctl: tool %q: %w", t.Name, err)
+		}
 		args := append([]string{}, t.Command[1:]...)
 		args = append(args, "-backend", t.Backend, "-admin", s.adminURL)
-		cmd := exec.CommandContext(ctx, t.Command[0], args...)
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Dir = t.Dir
 		cmd.Env = []string{"PATH=" + config.ToolSupervisorPATH} // minimal, no inherited secrets
 		if s.toolSecret != "" {
 			cmd.Env = append(cmd.Env, toolSecretEnv+"="+s.toolSecret)

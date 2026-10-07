@@ -309,9 +309,14 @@ func sendFault(err error) string {
 // record audits one push decision and keeps the last outcome for doctor.
 // Path names the agent; the endpoint appears as its host only.
 func (p *Push) record(login, agent, host string, d Decision, status int, reason string) {
+	p.recordCount(login, agent, host, d, status, reason, nil)
+}
+
+// recordCount is record with the line's Count set (nil leaves it out).
+func (p *Push) recordCount(login, agent, host string, d Decision, status int, reason string, count *int) {
 	if p.audit != nil {
 		p.audit(AuditLine{Time: p.now().UTC(), TSLogin: truncateAudit(login), Method: "PUSH", Path: "/lever/push/" + agent,
-			Decision: d, Status: status, Reason: reason, Error: host})
+			Decision: d, Status: status, Reason: reason, Error: host, Count: count})
 	}
 	if host != "" {
 		result := map[Decision]string{DecisionPushSent: "sent", DecisionPushGone: "gone"}[d]

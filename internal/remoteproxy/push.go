@@ -152,13 +152,20 @@ func (p *Push) unsubscribe(login, endpoint string) error {
 	return nil
 }
 
+// isServeOrigin reports whether origin is the proxy's public origin
+// https://<serveHost> (remote.base_url is https), the host compared without
+// case.
+func isServeOrigin(origin, serveHost string) bool {
+	return serveHost != "" && strings.EqualFold(origin, "https://"+serveHost)
+}
+
 // sameOriginWrite reports whether a write comes from the page itself: one
 // Origin, the proxy's public origin https://<serveHost> (remote.base_url is
 // https), and a Sec-Fetch-Site, when sent, of same-origin. A browser always
-// sends Origin on a POST or DELETE. The gate's own check compares only the
-// host.
+// sends Origin on a POST or DELETE. The gate's own check (checkOrigin)
+// accepts the same origin but lets a request without one through.
 func sameOriginWrite(r *http.Request, serveHost string) bool {
-	if o := r.Header.Values("Origin"); len(o) != 1 || serveHost == "" || !strings.EqualFold(o[0], "https://"+serveHost) {
+	if o := r.Header.Values("Origin"); len(o) != 1 || !isServeOrigin(o[0], serveHost) {
 		return false
 	}
 	s := r.Header.Values("Sec-Fetch-Site")

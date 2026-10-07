@@ -71,7 +71,8 @@ would let a jailed agent dial the proxy, set the identity header (`Tailscale-Use
 itself, and ride the injected session.
 
 **`base_url` is required whenever `enabled: true`.** The proxy matches every request's
-`Origin`/`Sec-Fetch-Site` against the host `base_url` resolves to; with `base_url` unset, that host
+`Origin`/`Sec-Fetch-Site` against the host `base_url` resolves to (an `Origin` must be exactly
+`https://` and that host, the host compared without case); with `base_url` unset, that host
 is empty and the proxy's fail-closed default would refuse **every** request, Origin-bearing or not
 — a proxy that could never serve anything. Rather than let that config "succeed" into a proxy that
 403s 100% of traffic, `lever.yaml` fails to load at all: `remote.enabled: true` with no `base_url`
@@ -1192,7 +1193,8 @@ on a real device yet (Linux Chrome, iPhone).
   again, up to five times over about 31 seconds (1, 2, 4, 8 and 16 s); then it stops, with a
   `push-failed` audit line (reason `retries`), until the next event or connect checks again. An
   event whose conversation matches none of the login's agents checks every agent of the login
-  (a `push-stream` line, reason `unknown-dm`). A push goes to a login's devices at once; on a
+  (one `push-stream` line per check pass, reason `unknown-dm`, with `count` = the number of
+  unknown conversation keys). A push goes to a login's devices at once; on a
   proxy shutdown a send still under way gets five more seconds. Each stream is one long-lived
   connection into the jail, so each subscribed login keeps one jail dial process open on the host.
 - **What the push services learn.** Google, Apple, Mozilla or Microsoft see when a push goes to

@@ -362,11 +362,17 @@ func (q *pushScheduler) runDue() {
 	q.done("")
 	// A key that names none of the targets (a spelling the hub changed)
 	// checks every DM: dropped, its message would wait for a reconnect.
+	// One audit line per pass counts them: the keys come from agent-sent
+	// events, so a line per key would let an agent flood the audit log.
+	unknown := 0
 	for k := range keys {
 		if k != "" && !slices.ContainsFunc(targets, func(t pushTarget) bool { return t.key == k }) {
-			q.p.record(q.login, "", "", DecisionPushStream, 0, "unknown-dm")
+			unknown++
 			keys[""], catch[""] = true, catch[""] || catch[k]
 		}
+	}
+	if unknown > 0 {
+		q.p.recordCount(q.login, "", "", DecisionPushStream, 0, "unknown-dm", &unknown)
 	}
 	for _, t := range targets {
 		if q.ctx.Err() != nil {

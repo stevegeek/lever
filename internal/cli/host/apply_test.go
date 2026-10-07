@@ -1236,6 +1236,53 @@ func TestDetachedSelfCmd(t *testing.T) {
 	}
 }
 
+// TestRemoteRecordStampWaitsForThePIDFile: the proxy binds its port before
+// it writes remote.pid, so apply can see it listening first. The stamp must
+// wait for the new proxy's pid file instead of failing to read it.
+func TestRemoteRecordStampWaitsForThePIDFile(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const pid = 4242
+	rc := &remoteController{state: st, version: "v-test", cfgHash: "hash-test",
+		startTimeout: 2 * time.Second, startInterval: 10 * time.Millisecond}
+	// A stale file first (another pid), then the new proxy's, after a delay.
+	if err := os.WriteFile(st.RemotePID(), []byte("4241\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrote := make(chan error, 1)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		wrote <- os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(pid)+"\n"), 0o600)
+	}()
+	if err := rc.recordStamp(context.Background(), pid); err != nil {
+		t.Fatalf("recordStamp: %v", err)
+	}
+	if err := <-wrote; err != nil {
+		t.Fatal(err)
+	}
+	if !st.RemoteStampMatches("v-test", "hash-test") {
+		t.Fatal("no stamp for the new proxy")
+	}
+}
+
+// TestRemoteRecordStampTimesOut: a proxy that never writes its pid file
+// gets no stamp, and the error says why (apply prints it as a warning).
+func TestRemoteRecordStampTimesOut(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rc := &remoteController{state: st, version: "v-test", cfgHash: "hash-test",
+		startTimeout: 50 * time.Millisecond, startInterval: 5 * time.Millisecond}
+	err := rc.recordStamp(context.Background(), 4242)
+	testutil.WantErrContaining(t, err, "remote.pid")
+	if _, serr := os.Stat(st.RemoteStamp()); serr == nil {
+		t.Fatal("a stamp was written for a proxy that never wrote its pid file")
+	}
+}
+
 // TestAwaitListeningHonoursContext: a cancelled apply must not keep polling
 // for the proxy's bind.
 func TestAwaitListeningHonoursContext(t *testing.T) {

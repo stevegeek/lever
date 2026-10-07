@@ -111,7 +111,7 @@ func TestParseStatementRejections(t *testing.T) {
 		"malformed expiry": mutate(func(s *Statement) { s.ExpiresAt = "tomorrow" }),
 		"malformed nbf":    mutate(func(s *Statement) { s.NotBefore = "12:00" }),
 		"expired":          mutate(func(s *Statement) { s.ExpiresAt = now.Add(-time.Second).Format(time.RFC3339) }),
-		"not yet valid":    mutate(func(s *Statement) { s.NotBefore = now.Add(time.Hour).Format(time.RFC3339) }), // beyond the 2-min clockLeeway
+		"not yet valid":    mutate(func(s *Statement) { s.NotBefore = now.Add(time.Hour).Format(time.RFC3339) }), // beyond the 2-min ClockLeeway
 
 		"expiry>24h cap":    mutate(func(s *Statement) { s.ExpiresAt = now.Add(25 * time.Hour).Format(time.RFC3339) }),
 		"bad action kind":   mutate(func(s *Statement) { s.Action = Action{Kind: "sudo"} }),

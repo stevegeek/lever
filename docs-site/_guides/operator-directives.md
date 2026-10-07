@@ -143,8 +143,9 @@ anything. `<agent>` is the manager (`manager` or the app name) or a declared wor
 `operator.directive_expiry` and is hard-capped at `operator.directive_expiry_max` (itself capped at
 24h). The lifetime counts from the send time, not from `--not-before`. `--key PATH` overrides
 `operator.signing_key` (on send/list/revoke/selftest). `--not-before RFC3339` sets the start of
-validity (default: now); the broker refuses a statement whose start is more than 2 minutes in the
-future (`invalid statement`), so the flag only absorbs clock skew. `--state` on `list` accepts
+validity (default: now); a start more than 2 minutes in the future is refused by `lever directive
+send` before it contacts the broker (the broker enforces the same limit), so the flag only absorbs
+clock skew. `--state` on `list` accepts
 `active|consumed|revoked|invalidated|expired`. Every `directive` subcommand takes an optional
 trailing `[CONFIG]` path and otherwise reads `./lever.yaml`, like the other `lever` commands.
 

@@ -104,6 +104,18 @@ func TestSameOriginAllowed(t *testing.T) {
 	assertGateForwards(t, "mac.ts.net", http.Header{"Origin": {"https://mac.ts.net"}})
 }
 
+// TestHTTPOriginRejected: the public origin is https (remote.base_url must
+// be), so the serve host over http is another origin.
+func TestHTTPOriginRejected(t *testing.T) {
+	assertGateRefuses(t, "mac.ts.net", http.Header{"Origin": {"http://mac.ts.net"}})
+}
+
+// TestHubSPARequestAllowed: a fetch from the hub's web UI served through
+// the proxy carries the https origin and same-origin; it reaches the hub.
+func TestHubSPARequestAllowed(t *testing.T) {
+	assertGateForwards(t, "mac.ts.net", http.Header{"Origin": {"https://mac.ts.net"}, "Sec-Fetch-Site": {"same-origin"}})
+}
+
 func TestSecFetchCrossSiteRejected(t *testing.T) {
 	assertGateRefuses(t, "mac.ts.net", http.Header{"Sec-Fetch-Site": {"cross-site"}})
 }

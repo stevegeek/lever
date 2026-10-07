@@ -65,7 +65,8 @@ type Config struct {
 	// could own. Nil uses the default net dialer (tests).
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	// ServeHost is the public origin's host (e.g. "mac.tail1234.ts.net").
-	// Requests with an Origin header for any other host are rejected. An
+	// Requests with an Origin header other than https://<ServeHost> are
+	// rejected (the host compared without case). An
 	// empty ServeHost fails closed: EVERY request is refused, Origin-bearing
 	// or not — an unconfigured host can never legitimately match, so treat
 	// "unconfigured" as "deny all" rather than risk a silent empty-string
@@ -752,7 +753,7 @@ func jailTransport(dial func(ctx context.Context, network, addr string) (net.Con
 }
 
 // checkOrigin applies the browser-provenance rules (see the package doc):
-// at most one Origin header, and it must name serveHost; at most one
+// at most one Origin header, and it must be https://<serveHost>; at most one
 // Sec-Fetch-Site header, and it must be a same-site value. It returns the
 // denial and its response text, or "" when the request passes. A request
 // carrying neither header passes — that is what hostAllowed is for.
@@ -761,8 +762,7 @@ func checkOrigin(r *http.Request, serveHost string) (Decision, string) {
 		if len(origins) > 1 {
 			return DecisionDenyOrigin, "multiple Origin headers refused"
 		}
-		u, err := url.Parse(origins[0])
-		if err != nil || u.Host == "" || !strings.EqualFold(u.Host, serveHost) {
+		if !isServeOrigin(origins[0], serveHost) {
 			return DecisionDenyOrigin, "cross-origin request refused"
 		}
 	}

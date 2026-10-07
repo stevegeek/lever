@@ -29,7 +29,7 @@ var Version = "dev"
 type opts struct {
 	name, backend, admin, tree, state, appID, instID, appKey, prefix string
 	repos                                                            map[string]bool
-	maxBundle                                                        int64
+	maxBundle, importBudget                                          int64
 }
 
 func parseFlags(args []string) (opts, error) {
@@ -47,6 +47,7 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&repos, "repos", "", "comma list of owner/name")
 	fs.StringVar(&o.prefix, "branch-prefix", "agent/", "required branch prefix")
 	fs.Int64Var(&o.maxBundle, "max-bundle", 256<<20, "bundle size cap in bytes")
+	fs.Int64Var(&o.importBudget, "import-budget", 1<<30, "bundle bytes one caller may import per hour, refusals included (0 = no cap)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -75,6 +76,9 @@ func parseFlags(args []string) (opts, error) {
 	}
 	if o.maxBundle <= 0 {
 		return o, fmt.Errorf("-max-bundle must be positive")
+	}
+	if o.importBudget < 0 {
+		return o, fmt.Errorf("-import-budget must not be negative")
 	}
 	return o, nil
 }
@@ -132,7 +136,7 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	p := &ghpush.Pusher{
 		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
-		Repos: o.repos, MaxBundle: o.maxBundle, LockWait: 30 * time.Second,
+		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
 		Tokens: &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
 			APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now},
 		Git: ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute},

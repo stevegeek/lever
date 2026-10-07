@@ -2,7 +2,6 @@ package ghpush
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -38,8 +37,14 @@ type Pusher struct {
 	Tokens    TokenSource
 	Git       Git
 	Log       *slog.Logger
+	// ImportBudget caps the bundle bytes one caller may import per hour,
+	// refused pushes included (0 = no cap).
+	ImportBudget int64
 
-	locks sync.Map // repo → chan struct{} (capacity 1)
+	locks   sync.Map // repo → chan struct{} (capacity 1)
+	spentMu sync.Mutex
+	spent   map[string][]spend
+	now     func() time.Time // tests only
 }
 
 // Result is what the agent gets back.
@@ -96,9 +101,15 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	if err != nil {
 		return Result{}, fmt.Errorf("temp dir: %w", err)
 	}
+	// The bundle's objects live only in tmp: removing it on every path
+	// (success, refusal, error, panic) keeps them off the host disk.
 	defer os.RemoveAll(tmp)
 	copyPath := filepath.Join(tmp, "in.bundle")
-	if bundleSHA, err = p.copyBundle(bundle, copyPath); err != nil {
+	var size int64
+	if bundleSHA, size, err = p.copyBundle(bundle, copyPath); err != nil {
+		return Result{}, err
+	}
+	if err := p.charge(caller, size); err != nil {
 		return Result{}, err
 	}
 
@@ -110,10 +121,18 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/main:refs/remotes/origin/main"); err != nil {
 		return Result{}, fmt.Errorf("refresh mirror: %w", err)
 	}
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "bundle", "verify", "--quiet", copyPath); err != nil {
+	// The mirror only ever receives main from GitHub. The bundle goes into a
+	// per-call repo that borrows the mirror's objects (alternates), so a
+	// refused bundle never lands in the shared mirror, and one caller's
+	// objects are never another caller's prerequisites.
+	work, err := p.newWorkRepo(ctx, tmp, mirror)
+	if err != nil {
+		return Result{}, err
+	}
+	if _, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "bundle", "verify", "--quiet", copyPath); err != nil {
 		return Result{}, fmt.Errorf("bundle does not verify against %s main (missing prerequisites?): %w", repo, err)
 	}
-	heads, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "bundle", "list-heads", copyPath)
+	heads, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "bundle", "list-heads", copyPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("bundle list-heads: %w", err)
 	}
@@ -125,23 +144,18 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, fmt.Errorf("bundle must carry exactly one ref, refs/heads/%s; found %q", branch, lines[0])
 	}
 
-	id, err := randomID()
-	if err != nil {
-		return Result{}, err
-	}
-	tmpRef := "refs/tmp/" + id
-	defer p.Git.Run(context.Background(), mirror, RunOpts{GitDir: mirror}, "update-ref", "-d", tmpRef) //nolint:errcheck
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, AllowFile: true}, "fetch", "--no-tags", "--no-write-fetch-head", copyPath, "+refs/heads/"+branch+":"+tmpRef); err != nil {
+	tmpRef := "refs/tmp/import"
+	if _, err := p.Git.Run(ctx, work, RunOpts{GitDir: work, AllowFile: true}, "fetch", "--no-tags", "--no-write-fetch-head", copyPath, "+refs/heads/"+branch+":"+tmpRef); err != nil {
 		return Result{}, fmt.Errorf("import bundle: %w", err)
 	}
 	// The head must be a commit itself: an annotated tag (or any other
 	// object) would peel to a commit and push a different object than the
 	// one checked.
-	rawSHA, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "rev-parse", "--verify", tmpRef)
+	rawSHA, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "rev-parse", "--verify", tmpRef)
 	if err != nil {
 		return Result{}, fmt.Errorf("bundle head is missing: %w", err)
 	}
-	newSHA, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "rev-parse", "--verify", tmpRef+"^{commit}")
+	newSHA, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "rev-parse", "--verify", tmpRef+"^{commit}")
 	if err != nil || strings.TrimSpace(rawSHA) != strings.TrimSpace(newSHA) {
 		return Result{}, fmt.Errorf("bundle head is not a commit (an annotated tag or another object): refused")
 	}
@@ -153,7 +167,7 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return res, err
 	}
 	auth := &Auth{BaseURL: p.BaseURL, Token: token}
-	if out, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "ls-remote", remote, "refs/heads/"+branch); err != nil {
+	if out, err := p.Git.Run(ctx, work, RunOpts{GitDir: work, Auth: auth}, "ls-remote", remote, "refs/heads/"+branch); err != nil {
 		return res, fmt.Errorf("read remote branch: %w", err)
 	} else {
 		for _, line := range strings.Split(out, "\n") {
@@ -163,7 +177,7 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 			}
 		}
 	}
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "push", remote, res.NewSHA+":refs/heads/"+branch); err != nil {
+	if _, err := p.Git.Run(ctx, work, RunOpts{GitDir: work, Auth: auth}, "push", remote, res.NewSHA+":refs/heads/"+branch); err != nil {
 		// Without --porcelain, git writes " ! [rejected] … (non-fast-forward)"
 		// to stderr, which Run puts in the error.
 		if s := err.Error(); strings.Contains(s, "non-fast-forward") || strings.Contains(s, "fetch first") || strings.Contains(s, "[rejected]") {
@@ -177,32 +191,32 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 // copyBundle copies the agent's bundle into a private file: no symlink on any
 // path component, no hard link, at most MaxBundle bytes. git then reads only
 // the private copy, so the agent cannot swap the file mid-flow.
-func (p *Pusher) copyBundle(name, dst string) (string, error) {
+func (p *Pusher) copyBundle(name, dst string) (string, int64, error) {
 	f, _, err := fsutil.OpenInTreeNoLinks(p.Tree, path.Join(BundleDir, name), p.MaxBundle)
 	if err != nil {
 		if errors.Is(err, fsutil.ErrSymlink) || errors.Is(err, fsutil.ErrHardLink) {
-			return "", fmt.Errorf("bundle %s: refused (a symbolic or hard link): %w", name, err)
+			return "", 0, fmt.Errorf("bundle %s: refused (a symbolic or hard link): %w", name, err)
 		}
 		if errors.Is(err, fsutil.ErrFileTooLarge) {
-			return "", fmt.Errorf("bundle %s: too big (max %d bytes): %w", name, p.MaxBundle, err)
+			return "", 0, fmt.Errorf("bundle %s: too big (max %d bytes): %w", name, p.MaxBundle, err)
 		}
-		return "", fmt.Errorf("bundle %s: %w", name, err)
+		return "", 0, fmt.Errorf("bundle %s: %w", name, err)
 	}
 	defer f.Close()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer out.Close()
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(out, h), io.LimitReader(f, p.MaxBundle+1))
 	if err != nil {
-		return "", fmt.Errorf("copy bundle: %w", err)
+		return "", 0, fmt.Errorf("copy bundle: %w", err)
 	}
 	if n > p.MaxBundle {
-		return "", fmt.Errorf("bundle %s: too big (max %d bytes)", name, p.MaxBundle)
+		return "", 0, fmt.Errorf("bundle %s: too big (max %d bytes)", name, p.MaxBundle)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
 // ensureMirror returns the repo's bare, hook-less mirror, creating it once.
@@ -229,10 +243,59 @@ func (p *Pusher) ensureMirror(ctx context.Context, repo string) (string, error) 
 	return dir, nil
 }
 
-func randomID() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
+// newWorkRepo creates the per-call bare repo in tmp. It reads the mirror's
+// objects through objects/info/alternates and writes only its own.
+func (p *Pusher) newWorkRepo(ctx context.Context, tmp, mirror string) (string, error) {
+	dir := filepath.Join(tmp, "work.git")
+	if _, err := p.Git.Run(ctx, tmp, RunOpts{}, "init", "--bare", "--template=", "-b", "main", dir); err != nil {
+		return "", fmt.Errorf("create work repo: %w", err)
+	}
+	info := filepath.Join(dir, "objects", "info")
+	if err := os.MkdirAll(info, 0o700); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(b), nil
+	if err := os.WriteFile(filepath.Join(info, "alternates"), []byte(filepath.Join(mirror, "objects")+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// importWindow is the period the per-caller ImportBudget covers.
+const importWindow = time.Hour
+
+type spend struct {
+	at time.Time
+	n  int64
+}
+
+// charge books n imported bundle bytes to caller, or refuses when the
+// caller's bytes in the last importWindow would exceed ImportBudget. Refused
+// pushes count too: the cost is the import, not the push.
+func (p *Pusher) charge(caller string, n int64) error {
+	if p.ImportBudget <= 0 {
+		return nil
+	}
+	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
+	p.spentMu.Lock()
+	defer p.spentMu.Unlock()
+	if p.spent == nil {
+		p.spent = map[string][]spend{}
+	}
+	var kept []spend
+	var total int64
+	for _, s := range p.spent[caller] {
+		if now.Sub(s.at) < importWindow {
+			kept = append(kept, s)
+			total += s.n
+		}
+	}
+	if total+n > p.ImportBudget {
+		p.spent[caller] = kept
+		return fmt.Errorf("import budget: %s imported %d bytes in the last hour (max %d); retry later", caller, total, p.ImportBudget)
+	}
+	p.spent[caller] = append(kept, spend{now, n})
+	return nil
 }

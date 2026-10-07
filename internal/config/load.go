@@ -234,8 +234,9 @@ func LoadNoHostChecks(path string) (*App, error) {
 	}
 	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
 	// APIKeyFile is a host-side secret like CredentialFile: expanded against
-	// the instance dir (and ~/), not confined, because the key should live
-	// outside the agent-writable tree.
+	// the instance dir (and ~/), not confined to the root, because the key
+	// should live outside the agent-writable tree (checkHostPathsOutsideTree
+	// refuses it there).
 	app.Broker.APIKeyFile = resolvePath(app.Broker.APIKeyFile, app.dir)
 	// SigningKey is a host-side path OUTSIDE the instance tree by design (the
 	// operator's private key must never live where a compromised agent could
@@ -244,6 +245,13 @@ func LoadNoHostChecks(path string) (*App, error) {
 	app.Operator.SigningKey = resolvePath(app.Operator.SigningKey, app.dir)
 	app.injectLLMGrants()
 	if err := app.Validate(); err != nil {
+		return nil, err
+	}
+	// Host-run programs and host secrets (credential files, broker tool
+	// commands and their path arguments): the same tree test as the engine
+	// and the boot files above, after Validate so manager.read_only and the
+	// worker dirs it consults are well formed (Fizzy #161).
+	if err := app.checkHostPathsOutsideTree(); err != nil {
 		return nil, err
 	}
 	return &app, nil

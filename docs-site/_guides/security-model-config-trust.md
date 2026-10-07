@@ -129,6 +129,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `manager.image_tar`, `workers[].image_tar` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`: the archive is the code the agent runs, so an agent must not be able to author the next bring-up's image. Needs a tag-bearing `image` (a digest pin cannot be matched against a tar's tags), the archive must carry that tag (a mismatch is a named error before a byte is streamed), and one image ref may come from only one archive. |
 | `manager.read_only` | each entry a clean ASCII relative path inside `tree` (no `..`, `./`, trailing slash, `.`, `$`, `~`, `:`, `,`); no duplicates or nested entries (case-folded); no worker `dir` equal to, containing or inside an entry; at bring-up, every entry a real directory reached through no symlink, with no symlink inside it pointing out or failing to resolve and no hard-linked file, and every worker dir reached through no symlink (§5.1.1 above). While `read_only` is set, every worker `dir` is held to the same character and ASCII rules, because it becomes a pin. |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
+| host-run programs and host secrets | rejected at config load if they resolve inside `tree` (§5.5 below): `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`, each supervised `broker.tools` `command`, and the path arguments in it. |
 | `credential_file` | read with a **permission check** (rejected when any group or world bit is set) and a **size cap** (64 KiB), defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
 | `broker.api_key_file` | must exist at mode exactly 0600, checked at config load for an instance with any api-key agent. |
 | worker `dir` | rejected if absolute or containing `..`; two workers' dirs must not overlap, and the name `manager` is rejected ([§4.1](/security-model/worker-isolation/)). |
@@ -175,14 +176,34 @@ itself writes) with the current config, and restarts the daemon on a difference.
 apply runs, a config edit has no effect on them; `lever doctor` names a stale one where a row
 covers the key (for example `agent messages`).
 
-### 5.5 Residual
+### 5.5 Host-run programs and host secrets
 
-**Not every host-side path is refused inside the tree.** Load refuses `scion.binary`,
-`scion.source` and the boot files (§5.3) inside the mounted tree, and `lever-tool-github` refuses
-its app key and state directory there. Lever does not check `credential_file`,
-`broker.api_key_file`, a `broker.tools` `command`, or a path in a tool's `args` (for example the
-fizzy tool's `-token-file`). Keep them outside the tree: an agent can read and write anything
-inside it.
+An agent can read and write anything inside the mounted tree. A program the host runs from there
+runs agent code outside the jail, and a secret the host reads from there is readable (and
+replaceable) by the agent. Config load therefore refuses these paths when they resolve inside
+`tree`, in addition to `scion.binary`, `scion.source` and the boot files (§5.3):
+
+| Kind | Paths | Inside `tree` |
+|---|---|---|
+| Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
+| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`); the value of `-fizzy`; any other argument with a `/` in it (it may be the script an interpreter runs) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
+
+The check follows the path one component at a time, as the kernel does. It recognises the tree, the
+`read_only` entries and the worker dirs by identity, not by spelling, so a case alias on a
+case-insensitive host, a link at the instance root that points into the tree, and a link inside the
+tree that points out (an agent can repoint it) are all caught. A path that does not exist yet is
+placed below its deepest existing parent. Relative paths in a tool `command` resolve against the
+instance root, where the broker runs. Lever reads the flags of the tools it ships only; it does not
+parse the flags of other programs, so keep their secret files outside the tree yourself. The error
+names the key, the path and the fix: move the file outside the tree, or, for a program, cover it with
+`manager.read_only`.
+
+A program under `manager.read_only` is safe only while the running manager carries the read-only
+mount (it is create-time only, §5.1.1): `lever doctor`'s *manager read-only paths* row reports a
+manager that lacks it. `lever-tool-github` refuses its `-app-key` and `-state` inside its `-tree` on
+its own as well.
+
+### 5.6 Residual
 
 Image **registry allowlist** and **digest pinning** are opt-in `security:` policy
 (§5.3), enable them to bound *which* registry an image comes from and to require vetted, immutable

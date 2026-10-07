@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,11 +30,25 @@ type CLI struct {
 // CheckNoLocalConfig refuses a work dir with a fizzy config file in it or in
 // any ancestor: the CLI reads the nearest one walking up from cwd.
 func CheckNoLocalConfig(work string) error {
-	dir := work
+	// The child's cwd resolves to the real path and the CLI walks the real
+	// ancestors, so check those, not the lexical ones.
+	abs, err := filepath.Abs(work)
+	if err != nil {
+		return fmt.Errorf("fizzy: resolve work dir %s: %w", work, err)
+	}
+	dir, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return fmt.Errorf("fizzy: resolve work dir %s: %w", work, err)
+	}
 	for {
 		for _, n := range []string{".fizzy.yaml", ".fizzy.yml"} {
-			if _, err := os.Lstat(filepath.Join(dir, n)); err == nil {
-				return fmt.Errorf("fizzy: %s exists; the CLI would read it from %s — remove it or move -state elsewhere", filepath.Join(dir, n), work)
+			p := filepath.Join(dir, n)
+			_, err := os.Lstat(p)
+			if err == nil {
+				return fmt.Errorf("fizzy: %s exists; the CLI would read it from %s — remove it or move -state elsewhere", p, work)
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("fizzy: cannot check %s: %w", p, err)
 			}
 		}
 		parent := filepath.Dir(dir)

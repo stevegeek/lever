@@ -73,3 +73,36 @@ func TestCLIRunErrorScrubbed(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestCheckNoLocalConfigRelative(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "a", "b"), 0o700)
+	os.WriteFile(filepath.Join(root, ".fizzy.yaml"), []byte("x: y\n"), 0o600)
+	t.Chdir(filepath.Join(root, "a", "b"))
+	for _, w := range []string{".", "../b"} {
+		if err := CheckNoLocalConfig(w); err == nil || !strings.Contains(err.Error(), ".fizzy.yaml") {
+			t.Fatalf("relative %q: ancestor config must be refused, got %v", w, err)
+		}
+	}
+}
+
+func TestCheckNoLocalConfigSymlinkRealAncestor(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real", "w")
+	os.MkdirAll(realDir, 0o700)
+	os.WriteFile(filepath.Join(root, "real", ".fizzy.yaml"), []byte("x: y\n"), 0o600)
+	clean := t.TempDir()
+	link := filepath.Join(clean, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckNoLocalConfig(link); err == nil || !strings.Contains(err.Error(), ".fizzy.yaml") {
+		t.Fatalf("real ancestor config must be refused via symlink, got %v", err)
+	}
+}
+
+func TestCheckNoLocalConfigMissingDir(t *testing.T) {
+	if err := CheckNoLocalConfig(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("unresolvable work dir must fail closed")
+	}
+}

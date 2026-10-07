@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // ToolSpec is what the Supervisor needs to know about one configured tool:
@@ -174,13 +175,16 @@ func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
 				return
 			}
 			if err != nil {
-				// One line per distinct reason, not one per retry.
-				if msg := err.Error(); reported[t.Name] != msg {
-					reported[t.Name] = msg
+				// One line per reason class, not one per retry: the class
+				// is fixed text (guardClass), so changing output cannot
+				// defeat the dedupe; the message is sanitised and bounded.
+				if class := guardClass(err); reported[t.Name] != class {
+					reported[t.Name] = class
 					s.logTool(t.Name, fmt.Sprintf("lever: not starting tool %q: its program lies in the tree under manager.read_only %v, "+
 						"and %s. A manager without those read-only mounts could have rewritten it. To fix it, back up the manager's "+
-						"conversation, then run `lever up --fresh` to recreate the manager with the mounts. Retrying every %s.",
-						t.Name, t.ReadOnly, msg, retry))
+						"conversation, then run `lever up --fresh` to recreate the manager with the mounts, and check the program "+
+						"before you trust it again. Retrying every %s.",
+						t.Name, t.ReadOnly, boundedReason(err), retry))
 				}
 				still = append(still, t)
 				continue
@@ -202,6 +206,19 @@ func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
 		case <-time.After(retry):
 		}
 	}
+}
+
+// maxReasonBytes bounds a guard refusal in a tool log line.
+const maxReasonBytes = 512
+
+// boundedReason is a guard refusal for a log line: terminal-safe and cut to
+// maxReasonBytes, whatever produced it.
+func boundedReason(err error) string {
+	r := termsafe.Sanitize(err.Error())
+	if len(r) > maxReasonBytes {
+		r = strings.ToValidUTF8(r[:maxReasonBytes], "") + "…"
+	}
+	return r
 }
 
 // logTool appends one line to the tool's own log (best effort).

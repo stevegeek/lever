@@ -214,9 +214,14 @@ file outside the tree, or, for a program, cover it with `manager.read_only`.
 A program under `manager.read_only` is safe only while the running manager carries the read-only
 mount, and that mount is create-time only (§5.1.1). So the broker does not start a tool whose program
 relies on it until it has read the manager container's mounts and found the whole `read_only` plan in
-place (entries read-only, their parents and the worker dirs pinned), and a write probe in the running
-container has found every entry read-only. It fails closed: no container yet, a stopped manager, or
-mounts it cannot read all hold the tool back. It asks again every 30 seconds (apply starts the broker
+place (entries read-only, their parents and the worker dirs pinned), and then checked the running
+container from the guest side, without running any program inside it (the agent is root there and
+could replace it): the kernel's `/proc/<pid>/mountinfo` for the container's process must list every
+planned directory as a mount point, the entries read-only, and `stat` must find the same device and
+inode at the guest path and at `/proc/<pid>/root/<target>`, so a protected directory replaced on the
+host (the mount stays on the old one) is caught. It fails closed: no container yet, a stopped manager,
+or anything it cannot read or parse holds the tool back. The reasons it logs are fixed text, never
+container output. It asks again every 30 seconds (apply starts the broker
 before the manager, so a fresh create gains the mounts after the first ask), and writes the reason
 into the tool's log once per reason. `lever apply` names the held tools when it keeps or resumes a
 manager that lacks the mounts. The fix is the one for the mounts themselves: back up the

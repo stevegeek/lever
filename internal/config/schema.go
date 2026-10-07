@@ -256,8 +256,10 @@ type Worker struct {
 	// Recyclable lets the manager discard this worker's record and start it
 	// fresh with a new task (`lever-manager agent recycle`): the slot's old
 	// conversation is lost, its workspace is kept. Off by default; without
-	// it only the operator's `lever worker purge` discards a record.
-	Recyclable bool `yaml:"recyclable"`
+	// it only the operator's `lever worker purge` discards a record. The
+	// json tag keeps it out of brokerctl.ConfigHash while false (see
+	// ClaudeSettings).
+	Recyclable bool `yaml:"recyclable" json:",omitempty"`
 }
 
 type ScionConfig struct {

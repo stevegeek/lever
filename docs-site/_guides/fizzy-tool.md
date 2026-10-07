@@ -76,7 +76,7 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | Flag | Required | Meaning |
 |---|---|---|
 | `-fizzy` | yes | Absolute path of the fizzy CLI. The tool refuses a CLI that is not major version 4. |
-| `-token-file` | yes | Absolute path of the Fizzy personal access token. Regular file, mode `0600`, owned by the broker user. |
+| `-token-file` | yes | Absolute path of the Fizzy personal access token. Regular file, mode `0600`, owned by the broker user. Config load refuses it inside the instance `tree` (the tool takes no `-tree` of its own), and refuses `-state` and `-fizzy` there too. |
 | `-account` | yes | The Fizzy account id (digits). |
 | `-board` | yes | The only board id the tool may touch (10 to 40 lowercase letters and digits). |
 | `-state` | yes | Absolute path of a private directory. It holds empty `home/` and `work/` directories and temporary body files. |

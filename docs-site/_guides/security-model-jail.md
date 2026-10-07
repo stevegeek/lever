@@ -26,6 +26,12 @@ tree** in (a single bind mount). Therefore:
   that is present. No mount-allowlist patch to the runtime is required; the path simply does not
   exist to mount.
 
+The tree is mounted in the jail at `/lever` (writable). Each agent container then gets only part
+of it: the manager the whole tree, a worker its own `dir` ([§4.1](/security-model/worker-isolation/)).
+A worker also gets its enrolment-ticket directory read-only at `/run/lever`, from the guest's run
+user tmpfs, not from the tree. The manager also gets the `manager.read_only` mounts
+([§5.1.1](/security-model/config-trust/)) and, under `nested_virt`, `/dev/kvm` (§2.4).
+
 ### 2.2 Network: the LAN is unreachable; egress is allowlisted
 
 Inside the jail, containers that use host networking share the *jail's* network namespace, not the
@@ -79,7 +85,7 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
   (already allowlisted), and the broker mints its server cert with that **IP as a SAN** so TLS still
   validates (`internal/cap/ca/rotate.go NewServerCertSource`, which mints via `IssueServerCertSANs`;
   `internal/brokerctl/serve.go` passes the IP from `$LEVER_HOST_ALIAS_IP`, which
-  `internal/cli/apply.go` sets on the broker child). Re-applying a *live* closed instance detects the active catch-all DROP
+  `internal/cli/host/apply.go` sets on the broker child). Re-applying a *live* closed instance detects the active catch-all DROP
   in both the IPv4 and the IPv6 chain and leaves them untouched.
 
 **Enforcement** lives in the jail's network namespace, for both postures. A **non-privileged** agent
@@ -114,8 +120,11 @@ so a containment posture is never silently substituted.
 
 - **`nested_virt: true` widens the host kernel's exposure.** The host's nested SVM/VMX emulation
   is reachable from the guest (it has had CVEs, e.g. CVE-2021-29657). It is off by default; use it
-  for dev instances only. Only the manager container gets `/dev/kvm` (a bind-mount volume on its
-  scion record), so only the manager can reach the guest kernel's KVM ioctl surface. A worker has
+  for dev instances only, and it needs an x86_64 Linux host (the qemu driver; config load refuses
+  it on macOS). Only the manager container gets `/dev/kvm` (a bind-mount volume on its
+  scion record), so only the manager can reach the guest kernel's KVM ioctl surface. The volume
+  is create-time only: a manager gains or loses the device only at a fresh create (`lever up
+  --fresh`, which discards its conversation); `lever stop` + `lever up` keeps the old devices. A worker has
   no device node and cannot make one in its user namespace. The guest kernel is the boundary
   between agents, so a KVM bug would let the manager break it; the VM boundary to the host still
   holds. Builds before this change used a podman drop-in that gave every container the device,

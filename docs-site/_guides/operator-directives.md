@@ -19,10 +19,10 @@ signature; all cryptography is host-side. The rationale and threat model are in
 
 | Step | Actor | What happens |
 |---|---|---|
-| 1. Sign | operator, host-side | `lever directive send` builds a canonical JSON statement (target `{cn, generation}`, validity window, an `action`) and signs it with an SSH key, namespace `lever-operator-directive@lever.dev`. |
-| 2. Submit | operator CLI → broker | The exact signed bytes go to the broker over a **0600 UNIX-domain socket** in the instance state dir — unreachable from inside the jail. Every admin op (send/list/revoke) is signed regardless; the socket is defence in depth, not the trust boundary. |
+| 1. Sign | operator, host-side | `lever directive send` asks the broker for the target's current `{cn, generation}`, then builds a canonical JSON statement (target `{cn, generation}`, validity window, an `action`) and signs it with an SSH key, namespace `lever-operator-directive@lever.dev`. |
+| 2. Submit | operator CLI → broker | The exact signed bytes go to the broker over a **0600 UNIX-domain socket** in the instance state dir — unreachable from inside the jail. Every admin op (send/list/revoke/selftest) is signed regardless; only the read-only target lookup is not; the socket is defence in depth, not the trust boundary. |
 | 3. Verify + store | broker, host-side | The broker verifies the signature with `ssh-keygen -Y verify` against `allowed_signers`, parses the *exact* received bytes (no re-serialize, duplicate JSON keys rejected), validates instance/window/target, and stores the directive `active`. |
-| 4. Deliver a pointer | broker → agent | The agent's inbox gets only a `directive_id` — never the action content. No directive content ever transits the message channel an attacker could also write to. |
+| 4. Deliver a pointer | broker → agent | The agent's inbox gets only a notice: the `directive_id`, the `directive_consume` call form and a sent-ledger ref that `message_verify` can check — never the action content. No directive content ever transits the message channel an attacker could also write to. |
 | 4a. Preview (optional) | agent, over its own mTLS | `directive_preview(id)` returns the verified action **without** consuming it, so the agent can decide first. It is not authority; see [Preview before consume](#preview-before-consume). |
 | 5. Consume | agent, over its own mTLS | If the agent independently decides to act, it calls `directive_consume(id)` on the `lever-capability` MCP server (the same server that mints capability tokens — see [capabilities](/capabilities/)). |
 | 6. Atomic CAS | broker | Returns the action **only if** the caller's mTLS-verified CN + current enrolment generation match the directive's target, it's active, and it's inside its time window — and flips it to `consumed` in the same step. Single use. |
@@ -139,12 +139,19 @@ lever directive revoke <directive-id>
 ```
 
 `send` prints the exact statement bytes it's about to sign, for operator review, before it sends
-anything. `<agent>` is the manager (the app name) or a declared worker name; `--expires` defaults to
+anything. `<agent>` is the manager (`manager` or the app name) or a declared worker name; `--expires` defaults to
 `operator.directive_expiry` and is hard-capped at `operator.directive_expiry_max` (itself capped at
-24h). `--key PATH` overrides `operator.signing_key` (on send/list/revoke/selftest). `--not-before
-RFC3339` delays validity (default: now). `--state` on `list` accepts
+24h). The lifetime counts from the send time, not from `--not-before`. `--key PATH` overrides
+`operator.signing_key` (on send/list/revoke/selftest). `--not-before RFC3339` sets the start of
+validity (default: now); the broker refuses a statement whose start is more than 2 minutes in the
+future (`invalid statement`), so the flag only absorbs clock skew. `--state` on `list` accepts
 `active|consumed|revoked|invalidated|expired`. Every `directive` subcommand takes an optional
 trailing `[CONFIG]` path and otherwise reads `./lever.yaml`, like the other `lever` commands.
+
+The broker refuses a send, and stores nothing, when the target is not enrolled yet, when the
+target is not running (bring it up and send again), or when a `tool_call`/`approval` names a tool
+the broker does not know. If the notice does not reach the agent, the broker revokes the directive
+and `send` exits non-zero with the next step to take.
 
 `lever doctor` reports an "operator directives" check: unconfigured is a pass (most instances never
 touch this), and once configured it verifies `allowed_signers` has at least one key, `ssh-keygen` is

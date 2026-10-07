@@ -2,7 +2,7 @@
 # boot hook + the in-jail lever binaries. This is the minimal, instance-agnostic
 # base every lever instance can run as-is. Instances that need extra runtimes or
 # tools (a language toolchain, a KB CLI) extend it with their own Dockerfile
-# `FROM lever-claude:<arch>` (images are tagged by arch, not :latest) — see
+# `FROM scionlocal/lever-claude:<arch>` (images are tagged by arch, not :latest) — see
 # docs-site "Building the agent image".
 #
 # The bin/ and scionhook/ build-context dirs are staged by `make lever-image`

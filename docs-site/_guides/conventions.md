@@ -5,8 +5,9 @@ nav_order: 8
 # Conventions (recommended, not enforced)
 
 Lever's core ships **no opinion in code** about how you organise your tree. The `lever` binary
-requires only `name`, `backend`, and `tree` (workers are optional); everything below is a *pattern*,
-not a rule.
+requires only `name`, `backend`, and `tree`, plus `broker.api_key_file` under the default
+`llm_auth: api-key` and one `scion` source at bring-up (workers are optional); everything below is
+a *pattern*, not a rule.
 
 The one convention that is genuinely framework-relevant is **workers**. The rest of this page
 documents how the **reference instance** (the authors' personal assistant) organises itself — one

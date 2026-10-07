@@ -98,7 +98,7 @@ and default-deny:
 ```yaml
 manager:
   obtain:
-    - {tool: calendar, op: "*"}                     # the manager may use calendar itself
+    - {tool: things3, op: "*"}                      # the manager may use things3 itself
   delegate:
     - {tool: devonthink, op: search, to: [worker]}  # …and may hand worker this at dispatch
 workers:
@@ -130,4 +130,5 @@ ambient allowlist. See the [config reference](/reference/config/) for every key 
 [security model §6.2](/security-model/credentials/) for what the gate does and does not protect.
 
 See also: [the github tool](/github-tool/), a first-party broker tool that pushes agent branches
-without a GitHub credential in the jail.
+without a GitHub credential in the jail, and [the fizzy tool](/fizzy-tool/), which gives agents a
+fixed set of operations on one Fizzy board without the Fizzy token.

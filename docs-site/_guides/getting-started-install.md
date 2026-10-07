@@ -13,9 +13,11 @@ cd /path/to/lever_to
 make all
 ```
 
-This builds the host binary:
+This builds the host binaries into `~/.local/bin` (make sure that's on your `PATH`):
 
-- **`lever`** (host control plane) → `~/.local/bin/lever` (make sure that's on your `PATH`).
+- **`lever`** (host control plane).
+- **`lever-tool-github`** and **`lever-tool-fizzy`**, optional host-side broker tools (see the
+  [github tool](/github-tool/) and the [fizzy tool](/fizzy-tool/)).
 
 The in-jail orchestration binary, **`lever-manager`**, isn't built here; it's baked into your agent
 image. `make lever-image-bins` cross-compiles `lever-manager` (alongside `lever-agent` and
@@ -23,7 +25,10 @@ image. `make lever-image-bins` cross-compiles `lever-manager` (alongside `lever-
 Dockerfile `COPY`s them to `/usr/local/bin`, so it's already on `PATH` inside the manager and worker
 containers when they boot.
 
-Verify: `lever version`.
+Verify: `lever version` (or `lever --version`). It prints the release plus the build provenance,
+for example `0.31.0 (21ff051f651f)`: the short commit, with `-dirty` for an uncommitted tree. A
+dirty build, or a build with no commit stamp (Go stamps none in a git worktree), also adds the
+binary's own hash: `0.31.0 (bin 3f2a…)`. A `go install …@vX.Y.Z` build shows the module version.
 
 ## 1a. Build the agent image
 
@@ -51,8 +56,8 @@ last rebuilt.
 
 **lever version:** the image tag names only the arch, so a rebuild from another lever checkout
 replaces `scionlocal/lever-claude:<arch>` for every instance on the host. `make lever-image` records
-the lever version the in-jail binaries were built from in a second label, `lever_version` (the string
-`lever version` prints for that source, e.g. `0.28.1 (21ff051f651f)`). `lever doctor`'s `agent lever
+the lever version the in-jail binaries were built from in a second label, `lever_version` (the
+release and short commit of that source, e.g. `0.28.1 (21ff051f651f)`; never a binary hash). `lever doctor`'s `agent lever
 version` row compares its release with the host `lever` and fails when they differ; the fix is to
 rebuild the image from the host lever's source, `lever apply`, then `lever up --fresh`. An image with
 no label (built before the label existed, or by running `build-lever-image.sh` without
@@ -82,12 +87,12 @@ for detail; scion owns this step.
 
 **Extending the image for your instance.** The generic image is minimal: scion's harness plus
 lever's binaries and boot hook. If your agents need a language toolchain or a project CLI, write an
-instance Dockerfile `FROM lever-claude:<arch>` that adds it, and point `manager.image` (and any
+instance Dockerfile `FROM scionlocal/lever-claude:<arch>` that adds it, and point `manager.image` (and any
 worker `image:`) at your tag. If your added layer does root-level work
 under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and `USER scion`.
 The jail runs rootless podman, where a root-owned home is unwritable by the agent and silently
 breaks its boot hook. Keep instance-specific tooling in that layer, not in the framework image.
-An image built `FROM lever-claude:<arch>` inherits both labels (`claude_code_version`,
+An image built `FROM scionlocal/lever-claude:<arch>` inherits both labels (`claude_code_version`,
 `lever_version`), so doctor reads them from your tag with no extra step; rebuild it after each
 `make lever-image`. An instance Dockerfile that copies the binaries in itself (`make
 lever-image-bins`) sets the label itself: `LABEL lever_version="..."` with the value `make -s

@@ -88,7 +88,7 @@ dev-auth-on hub that is killed before any agent exists; `scion-server` then star
 (present because this example sets `credential_file`) stages the manager's Claude OAuth token.
 `register-project` is the one `scion init`/`hub link` for the whole instance; the manager and every
 worker are agents inside it, and the step also strips scion's default shared scratchpad and writes
-the project's agent-role ceiling (see [security model §4.3](/security-model/worker-isolation/)). Workers are not started here; the manager dispatches them on demand
+the project's agent-role ceiling (see [security model §4.4](/security-model/worker-isolation/)). Workers are not started here; the manager dispatches them on demand
 (step 6).
 
 ## 4. Scaffold the operator skills (`lever init`)
@@ -121,7 +121,8 @@ you its terminal. **First boot takes ~10-15 minutes** (runtimes + a multi-GB ima
 that it is fast.
 
 `up` is idempotent: re-running it resumes a suspended manager and re-attaches. Detach with
-`Ctrl-b d`; the manager is left suspended and the next `lever up` resumes the same conversation.
+`Ctrl-b d`; the manager keeps running in the jail, and `lever attach` or the next `lever up`
+re-attaches to the same conversation.
 `--fresh` starts a new manager thread; `--no-attach` brings up without attaching.
 
 To reattach without re-provisioning, run `lever attach` from the instance root in a separate
@@ -150,7 +151,7 @@ Notes:
 
 `agent start` is for a fresh worker only; a worker's task is fixed at creation, so `agent start`
 against an existing record returns HTTP 409. Use `lever-manager agent resume|suspend|stop NAME` for
-lifecycle, and `lever worker purge NAME` (host) to discard the record before starting it again with
+lifecycle, and `lever worker purge NAME --force` (host) to discard the record before starting it again with
 a new task.
 
 Watch progress and relay events:
@@ -181,13 +182,13 @@ Three levels, from lightest to heaviest:
 | | detach | `lever stop` | `lever destroy` |
 |---|---|---|---|
 | What happens | leave your TTY (`Ctrl-b d`) | power the jail machine off | delete the jail machine |
-| Manager state | suspended, in memory | suspended, then the VM halts | gone |
+| Manager state | still running | suspended, then the VM halts | gone |
 | Disk (image, containers) | untouched | untouched | deleted |
-| Host broker | still running | stopped | stopped, staged state cleared |
+| Host broker (and remote proxy) | still running | stopped | stopped, staged state cleared |
 | Resume with | `lever up` / `lever attach` | `lever up` (powers back on, **same conversation**) | `lever up` (full re-provision) |
 
-`stop` suspends the manager and every running worker (best-effort), stops the host broker, then
-powers the jail off; the
+`stop` stops the host broker (and the remote proxy), suspends the manager and every running worker
+(best-effort), then powers the jail off; the
 next `lever up` resumes the same manager conversation. `destroy` removes the jail machine
 `lever-<name>`; your tree on disk is untouched, and the next `lever up` re-provisions from scratch.
 See the [CLI reference](/reference/cli/#everyday-lifecycle).

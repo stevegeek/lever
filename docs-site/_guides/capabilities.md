@@ -47,6 +47,15 @@ Agents mint through the **`lever-capability`** MCP tool (available in every agen
   delegator's `delegate:` list; a delegated token is strictly narrower than what the delegator
   holds, and extra `key=value` arguments become constraints baked into the token.
 
+The same server has the agent's other broker calls, none of which mints or widens a capability:
+`directive_consume`, `directive_check` and `directive_preview` ([operator
+directives](/operator-directives/)); `message_verify` (alias `chat_verify`), which asks the broker
+who wrote a message; `contacts` and `contact_message` ([messages agents
+start](/remote-access/#messages-agents-start)); and `contact_files` and `share_file` ([files in the
+chat](/remote-access/#files-in-the-chat)). While their `remote:` feature is off,
+`contact_message` and `share_file` refuse with `off`, and `contacts` and `contact_files` return an
+empty answer with a note that says so.
+
 Two **gate grains** exist for an `external: true` tool (`gate:` in the tool's config entry); a
 broker-supervised first-party tool is always fine-gated:
 
@@ -59,7 +68,10 @@ broker-supervised first-party tool is always fine-gated:
 
 ## Using a token: calling a brokered tool
 
-Brokered tools are MCP servers the broker fronts over mTLS at `/mcp/<name>/`. To call a
+Brokered tools are MCP servers the broker fronts over mTLS at `/mcp/<name>/`: your own external
+servers, and the first-party tools lever ships, such as [`github`](/github-tool/) (op `push`) and
+[`fizzy`](/fizzy-tool/) (`list_cards`, `show_card`, `list_comments`, `comment`, `move_card`,
+`create_card`). To call a
 gated operation, the agent passes the token as an extra **`_capability`** string argument on the
 tool call (the broker advertises this argument in every tool schema). The broker then:
 

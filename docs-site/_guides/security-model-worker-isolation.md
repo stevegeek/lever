@@ -24,7 +24,7 @@ permission (container UIDs are synced to the host UID, so file permissions alone
 inter-agent isolation here).
 
 Config validation also rejects two workers whose `dir`s overlap (the same subtree, or one an
-ancestor of the other; `validateWorkerDirsDisjoint`, `internal/config/config.go`), since the outer
+ancestor of the other; `validateWorkerDirsDisjoint`, `internal/config/validate.go`), since the outer
 worker would otherwise mount the inner one's whole workspace. A worker named `manager` is rejected separately: the
 operator-directive channel resolves that literal name to the manager regardless of
 `broker.manager_identity`, so such a worker could never be addressed.
@@ -38,7 +38,7 @@ that supports this; an unsupported pin fails at `lever apply` with an explanator
 This guarantee also holds only on a **non-git tree root**: a git repository at the tree root can
 pull Scion's mount builder into a worktree branch that also bind-mounts the whole `.git` object
 store, through which a worker could read *committed* sibling content. Config validation refuses a git
-tree root at load time (`validateNonGitTree`, `internal/config/config.go`); it checks only the tree
+tree root at load time (`checkNonGitTree`, `internal/config/host.go`); it checks only the tree
 itself, not ancestor directories. The relative-`--workspace` guard likewise resolves within the
 project root regardless of a stray ancestor `.git`. A worker's *own* subdirectory may still contain
 its own git repository; that is unaffected.
@@ -106,12 +106,14 @@ it do exactly that. Lever closes this: the real, long-lived Scion hub inside the
 Instead, every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
 capability broker on the manager's behalf, and by `lever` itself for attach/msg/stop) is
 authenticated with a **controller PAT**: a Scion hub token scoped to exactly
-`agent:manage,agent:attach,agent:message,project:read,project:update` (`agent:attach` is
+`agent:manage,agent:attach,agent:message,project:read,project:update`, plus `agent:lifecycle`
+when the jail's scion knows that scope (scion `f7155ecb` and later gate start, stop, suspend and
+resume of an existing agent on it; an older hub rejects the unknown scope) (`agent:attach` is
 load-bearing — the `agent:manage` alias alone 403s on `start`, since scion gates the lifecycle
 actions on `agent:attach`; `agent:message` is what newer scions gate a token's message sends on,
 and the alias did not expand to it when older tokens were minted; `project:update` is required
 because the shared-dirs endpoint used for the scratchpad removal in §4.1 and the project-settings
-route used for the role ceiling in §4.3 both gate on project update, and `agent:manage` does not
+route used for the role ceiling in §4.4 both gate on project update, and `agent:manage` does not
 expand to it). It is:
 
 - **Minted through a throwaway, jail-local hub, with no container running.** Bring-up stops the
@@ -160,32 +162,15 @@ expand to it). It is:
   host does not show it.
 - **Not the only host-side PAT.** A second, narrower host-side PAT
   (`agent:read,agent:list,project:read,agent:attach,agent:message`) is minted in the same window when
-  `remote.enabled: true`, for the remote-access proxy only; it is also stored under `.lever-state/`
-  and never enters the jail. See [remote access](/remote-access/).
+  `remote.enabled: true`; it is also stored under `.lever-state/` and never enters the jail. The
+  remote proxy no longer sends it (every remote request rides the signed-in user's own hub
+  session); its scope set is what the `lever-remote` web role is derived from. See
+  [remote access](/remote-access/#the-remote-pat).
 
 The result: even a fully compromised worker or manager container has no credential that lets it
 talk to the Scion hub directly. It cannot register a project, request an arbitrary mount, or
 list/attach to another agent. All of that is host-side-only, gated by the controller PAT, and, for
 dispatch specifically, further gated by the config-declared subdirectory per [§5.4](/security-model/config-trust/).
-
-### 4.3 The hub enforces the role ceiling too
-
-Every agent lever creates is stamped `--role baseline` ([config `agent_role`](/reference/config/)),
-which bounds the scopes in the agent's own hub token. On its own that stamp is the only bound: a
-create issued by anything other than lever — a manager holding a stolen controller PAT, a scion
-path lever does not drive — could ask for `full`. So `register-project` also writes the project's
-**maximum and default agent role** to the same role, through scion's project-settings route (gated
-on `project:update`), and verifies the hub kept it. The hub then refuses any create above the
-ceiling regardless of who asks. `lever doctor`'s `agent role ceiling` row reads it back; an unset
-ceiling is a finding, because scion reads unset as `full`.
-
-**Residual.** This closes the isolation gap between workers, and between an agent and the hub
-itself. It does not change the manager's own trust position: the manager legitimately mounts the
-whole tree (§4.1), so a compromised manager can still read and write everything the instance keeps
-there, including the knowledge base and every worker's subdirectory, that is an inherent cost of
-giving the manager whole-tree oversight ([§7](/security-model/compromise/)), not a gap in the
-worker-isolation model above. No automated live gate exercises this guarantee yet; see
-[validation](/security-model/validation/).
 
 ### 4.3 Per-agent network namespace: a private loopback per agent
 
@@ -225,3 +210,22 @@ Two properties a shared namespace would give for free are preserved without it:
 
 Escape hatch: setting `LEVER_FORCE_HOST_NETWORK=1` on the host restores `--network=host` for
 debugging — this reopens the shared-loopback gap above and is not isolation-safe.
+
+### 4.4 The hub enforces the role ceiling too
+
+Every agent lever creates is stamped `--role baseline` ([config `agent_role`](/reference/config/)),
+which bounds the scopes in the agent's own hub token. On its own that stamp is the only bound: a
+create issued by anything other than lever — a manager holding a stolen controller PAT, a scion
+path lever does not drive — could ask for `full`. So `register-project` also writes the project's
+**maximum and default agent role** to the same role, through scion's project-settings route (gated
+on `project:update`), and verifies the hub kept it. The hub then refuses any create above the
+ceiling regardless of who asks. `lever doctor`'s `agent role ceiling` row reads it back; an unset
+ceiling is a finding, because scion reads unset as `full`.
+
+**Residual.** This closes the isolation gap between workers, and between an agent and the hub
+itself. It does not change the manager's own trust position: the manager legitimately mounts the
+whole tree (§4.1), so a compromised manager can still read and write everything the instance keeps
+there, including the knowledge base and every worker's subdirectory, that is an inherent cost of
+giving the manager whole-tree oversight ([§7](/security-model/compromise/)), not a gap in the
+worker-isolation model above. No automated live gate exercises this guarantee yet; see
+[validation](/security-model/validation/).

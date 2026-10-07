@@ -24,6 +24,15 @@ not.
   elsewhere, and `lever revoke <agent>` cuts it off at use time (see [capabilities](/capabilities/)).
 - Other agents' trees and tokens are not reachable — cross-agent authority goes through the broker,
   default-deny.
+- It cannot speak to a remote contact outside the contact fence. With `remote.agent_messages` on,
+  the proxy shows a contact only agent messages whose exact text the broker authorized through
+  `contact_message` (within its limit), and only of type `instruction`, `input-needed` or
+  `assistant-reply`; everything else is removed from the contact's view. This needs scion
+  `b3562fb1` or later, where the hub sets a message's sender itself; config load refuses
+  `remote.agent_messages` on an older `scion.version`. A file reaches a contact only through
+  `share_file`, to a login that may message that agent, and is downloaded only from a host-side
+  copy that still matches its recorded sha256. See [remote access](/remote-access/#messages-agents-start)
+  and [files in the chat](/remote-access/#files-in-the-chat).
 
 **What it can do, and you must assume it did:**
 

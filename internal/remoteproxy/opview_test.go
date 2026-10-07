@@ -682,3 +682,53 @@ func TestOperatorViewOversizeAnswer(t *testing.T) {
 		t.Fatalf("audit %+v", l)
 	}
 }
+
+// Each history failure leaves its cause on the audit line: bounded, and
+// never the hub's body or the contact's session.
+func TestOperatorViewFailureHasACause(t *testing.T) {
+	const body = "SECRET hub body"
+	status := func(code int) func(http.ResponseWriter) {
+		return func(w http.ResponseWriter) { w.WriteHeader(code); _, _ = io.WriteString(w, body) }
+	}
+	for name, tc := range map[string]struct {
+		answer  func(http.ResponseWriter)
+		records func(context.Context) (map[string]AgentRecord, error)
+		closed  bool
+		want    string
+	}{
+		"forbidden":  {answer: status(http.StatusForbidden), want: "HTTP 403"},
+		"hub error":  {answer: status(http.StatusInternalServerError), want: "HTTP 500"},
+		"lapsed":     {answer: status(http.StatusUnauthorized), want: "HTTP 401"},
+		"not json":   {answer: func(w http.ResponseWriter) { _, _ = io.WriteString(w, body) }, want: "unreadable"},
+		"too big":    {answer: func(w http.ResponseWriter) { _, _ = io.WriteString(w, strings.Repeat("x", maxHistoryAnswer+1)) }, want: "too big"},
+		"no hub":     {closed: true, want: "hub history: "},
+		"no records": {records: func(context.Context) (map[string]AgentRecord, error) { return nil, errors.New(body) }, want: "agent records"},
+		"bad id": {records: func(context.Context) (map[string]AgentRecord, error) {
+			return map[string]AgentRecord{"w1": {ID: "../" + body}}, nil
+		}, want: "hub id"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
+			if tc.answer != nil {
+				hub.answer = func(w http.ResponseWriter, _ *http.Request) bool { tc.answer(w); return true }
+			}
+			cfg := viewConfig(t, hub, sess, audit)
+			if tc.records != nil {
+				cfg.AgentRecords = tc.records
+			}
+			h := viewHandler(t, cfg)
+			if tc.closed {
+				hub.Close()
+			}
+			rw := viewDo(h, "op@x", "GET", viewC)
+			if rw.Code != http.StatusBadGateway {
+				t.Fatalf("%d %s", rw.Code, rw.Body)
+			}
+			l := audit.last()
+			if l.Reason != "unavailable" || !strings.Contains(l.Error, tc.want) || len(l.Error) > maxAuditFieldLen+len("…") ||
+				strings.Contains(l.Error, "SECRET") || strings.Contains(l.Error, viewCCookie) {
+				t.Fatalf("audit %+v, want a cause with %q", l, tc.want)
+			}
+		})
+	}
+}

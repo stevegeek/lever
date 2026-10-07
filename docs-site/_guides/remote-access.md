@@ -833,8 +833,9 @@ The wake (`POST /lever/api/agents/<name>/wake`) is accepted only:
 - from a login that may **message** that worker (an operator, or a contact with the worker in
   `agents:`); the same 403 answers a see-only agent, a hidden one, the manager and a name that
   does not exist;
-- from the page itself: one `Origin` header, and `Sec-Fetch-Site: same-origin` when the browser
-  sends it;
+- from the page itself: one `Origin` header that is exactly `https://` and the host of
+  `base_url`, and `Sec-Fetch-Site: same-origin` when the browser sends it (the push and upload
+  routes use the same rule);
 - while the worker is suspended, or, for an operator's login, stopped (the broker checks this
   again, with the login's tier, before it resumes anything);
 - once a minute per worker, across all logins (a second wake inside the minute gets 429 with
@@ -1007,15 +1008,23 @@ remote:
 - **What the contact sees.** Only agent messages whose exact text the record holds, each
   record showing one hub message, sent within 10 minutes of the authorization (the hub's time
   for it may be at most 10 seconds before the authorization and 2 minutes after its expiry). A message the
-  agent sent any other way, or edited after it showed, is removed from the contact's history.
-  Reply previews are removed, and so are the attachment entries of every agent message (their
-  names are agent text no record covers). A row id that appears twice on a page hides both rows.
+  agent sent any other way, or edited after it showed, is removed from the contact's history,
+  and so is an agent message of any type but `instruction`, `input-needed` or `assistant-reply`
+  (the agent picks the type, and a system or state type would read as a hub notice). Each row,
+  and the answer, keeps only the fields the chat pages read (an agent's `threadId` and
+  `channel` go). Reply previews are removed, and so are the attachment entries of every agent
+  message (their names are agent text no record covers). A row id that appears twice on a page
+  hides both rows.
   The contact's event stream carries only the subject of each event (and the stream's event id),
   never text, a sender or a message id; the DM list carries no last-message preview, sender, id
   or time and no unread flag; the chat page's unread count holds only shown messages. Anything
   the proxy cannot read, or a broker that does not answer, hides every agent message (it fails
   closed); paging stays the hub's, so a page can hold fewer messages than asked for, and its
-  `totalCount` can show how many rows the page hid (never their text).
+  `totalCount` can show how many rows the page hid (never their text). Also accepted: the
+  paging cursor (`nextCursor`, base64 of the oldest row's send time and hub message id) can
+  reveal the time and id of a hidden row, and the live event subjects reveal that an agent the
+  contact does not list sent it a direct message, when, and that agent's hub id. No message
+  text leaks either way.
 - **The limit.** Per agent and contact: one message the agent started and the contact has not
   answered yet, then one reminder after `follow_up_after`; a message from the contact resets
   it. Every authorization counts, sent or not. A reply to a contact message is not limited by

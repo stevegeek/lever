@@ -337,13 +337,14 @@ func TestWakeRefusesTheManagerByName(t *testing.T) {
 	}
 }
 
-// The route's own Origin rule, past the gate: one Origin header, never
-// "null" or empty (a sandboxed or opaque origin is no page of ours).
+// The route's own Origin rule, past the gate: one Origin header, the
+// proxy's own https origin (never "null", empty, http or another host).
 func TestWakeRouteOriginRuleItself(t *testing.T) {
 	hub := newPageHub(t)
 	wr := &wakeRec{}
 	g := NewHandler(wakeConfig(t, hub, wr)).(*gate)
-	for name, origins := range map[string][]string{"null": {"null"}, "empty": {""}, "none": nil, "two": {"https://" + testServeHost, "https://" + testServeHost}} {
+	for name, origins := range map[string][]string{"null": {"null"}, "empty": {""}, "none": nil, "two": {"https://" + testServeHost, "https://" + testServeHost},
+		"http": {"http://" + testServeHost}, "other host": {"https://evil.test"}, "other port": {"https://" + testServeHost + ":8443"}} {
 		req := proxyRequest("POST", "/lever/api/agents/w1/wake", nil)
 		for _, o := range origins {
 			req.Header.Add("Origin", o)

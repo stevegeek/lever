@@ -79,8 +79,7 @@ func newerRow(at time.Time, id string, than time.Time, thanID string) bool {
 // newestForPush is the newest pushable row of t's DM for login, or ok=false.
 func (g *gate) newestForPush(ctx context.Context, login, cookie, uid, tier string, t pushTarget) (historyRow, time.Time, bool, error) {
 	var page struct {
-		Messages []historyRow `json:"messages"`
-		Items    []historyRow `json:"items"`
+		Messages json.RawMessage `json:"messages"`
 	}
 	// hubBody, not hubGet: a page of long agent rows can pass hubGet's 1 MiB
 	// bound, and a decode failure would silence every push for the DM.
@@ -94,12 +93,12 @@ func (g *gate) newestForPush(ctx context.Context, login, cookie, uid, tier strin
 	case st != http.StatusOK:
 		return historyRow{}, time.Time{}, false, fmt.Errorf("hub history: HTTP %d", st)
 	}
+	var rows []historyRow
 	if err := json.Unmarshal(body, &page); err != nil {
 		return historyRow{}, time.Time{}, false, err
 	}
-	rows := page.Messages
-	if rows == nil {
-		rows = page.Items
+	if err := historyMessages(page.Messages, &rows); err != nil {
+		return historyRow{}, time.Time{}, false, err
 	}
 	var keep map[string]bool
 	if tier == chatledger.TierContact && g.cfg.MatchAgentMessages != nil {

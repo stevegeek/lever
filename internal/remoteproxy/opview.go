@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -294,6 +295,7 @@ func (g *gate) serveContactHistory(w http.ResponseWriter, r *http.Request, line 
 	}
 	recs, err := g.records(ctx)
 	if err != nil {
+		line.Error = "cannot read the agent records"
 		g.refuseView(w, r, line, http.StatusBadGateway, "unavailable")
 		return
 	}
@@ -303,6 +305,7 @@ func (g *gate) serveContactHistory(w http.ResponseWriter, r *http.Request, line 
 		return
 	}
 	if !validHubID(rec.ID) {
+		line.Error = "the agent record has an unusable hub id"
 		g.refuseView(w, r, line, http.StatusBadGateway, "unavailable")
 		return
 	}
@@ -317,11 +320,13 @@ func (g *gate) serveContactHistory(w http.ResponseWriter, r *http.Request, line 
 				map[string]string{"error": "not-signed-in", "hint": "run lever apply"})
 			return
 		}
+		line.Error = viewCause(err)
 		g.refuseView(w, r, line, http.StatusBadGateway, "unavailable")
 		return
 	}
 	ans, ok := g.viewRows(ctx, login, name, rec.ID, uid, body)
 	if !ok {
+		line.Error = "hub history: unreadable answer"
 		g.refuseView(w, r, line, http.StatusBadGateway, "unavailable")
 		return
 	}
@@ -331,22 +336,40 @@ func (g *gate) serveContactHistory(w http.ResponseWriter, r *http.Request, line 
 	g.answerViewJSON(w, r, line, DecisionOperatorView, http.StatusOK, ans)
 }
 
-var errViewHub = errors.New("the hub did not answer the history read")
+var (
+	errViewHub     = errors.New("hub history: no 200 answer")
+	errViewSession = errors.New("no hub session for the contact")
+)
+
+// viewCause is a failed history read's cause for the audit line: never the
+// hub's body (hubGetBody reads none on a failure) or the session, which no
+// error here carries; a transport error keeps only its cause, not the URL.
+func viewCause(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		err = ue.Err
+	}
+	if errors.Is(err, errViewHub) || errors.Is(err, errViewSession) || errors.Is(err, errHistoryTooBig) {
+		return truncateAudit(err.Error())
+	}
+	return truncateAudit("hub history: " + err.Error())
+}
 
 // readAsContact GETs path with login's session; a session the hub no longer
 // knows (401, or a redirect to its login page: any 3xx, never followed) is
 // replaced once. It returns the session it read with last; errViewHub
 // means the hub answered that session with something other than a 200.
 func (g *gate) readAsContact(ctx context.Context, login, path string) ([]byte, string, error) {
+	// The login driver audits its own failure: only that it failed here.
 	cookie, err := g.cfg.Session.Cookie(ctx, login)
 	if err != nil {
-		return nil, "", err
+		return nil, "", errViewSession
 	}
 	status, body, err := g.chat.hubBody(ctx, cookie, path)
 	if err == nil && (status == http.StatusUnauthorized || status >= 300 && status < 400) {
 		g.cfg.Session.Invalidate(login, cookie)
 		if cookie, err = g.cfg.Session.Cookie(ctx, login); err != nil {
-			return nil, "", err
+			return nil, "", errViewSession
 		}
 		status, body, err = g.chat.hubBody(ctx, cookie, path)
 	}
@@ -354,7 +377,7 @@ func (g *gate) readAsContact(ctx context.Context, login, path string) ([]byte, s
 		return nil, cookie, err
 	}
 	if status != http.StatusOK {
-		return nil, cookie, errViewHub
+		return nil, cookie, fmt.Errorf("%w: HTTP %d", errViewHub, status)
 	}
 	return body, cookie, nil
 }

@@ -174,6 +174,8 @@ func TestPushSubscribeRefusals(t *testing.T) {
 		"put":                  {"PUT", subBody("x"), nil, 405, "method"},
 		"no origin":            {"POST", subBody("x"), []string{"Origin", ""}, 403, "origin"},
 		"null origin":          {"POST", subBody("x"), []string{"Origin", "null"}, 403, ""},
+		"http origin":          {"POST", subBody("x"), []string{"Origin", "http://" + testServeHost}, 403, "origin"},
+		"http, no fetch site":  {"POST", subBody("x"), []string{"Origin", "http://" + testServeHost, "Sec-Fetch-Site", ""}, 403, "origin"},
 		"same-site":            {"POST", subBody("x"), []string{"Sec-Fetch-Site", "same-site"}, 403, ""},
 		"form type":            {"POST", subBody("x"), []string{"Content-Type", "application/x-www-form-urlencoded"}, 415, "content-type"},
 		"text type":            {"POST", subBody("x"), []string{"Content-Type", "text/plain"}, 415, "content-type"},
@@ -265,5 +267,46 @@ func TestPushStrictBodyKeepsNesting(t *testing.T) {
 	b := `{"endpoint":"https://fcm.googleapis.com/fcm/send/x","keys":{"endpoint":"x","p256dh":"` + testP256 + `","auth":"` + testAuth + `"}}`
 	if err := noDuplicateKeys([]byte(b)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A write is the page's own only when its one Origin is the proxy's public
+// origin, https://<serve host>, whether or not Sec-Fetch-Site is sent.
+func TestSameOriginWrite(t *testing.T) {
+	own := "https://" + testServeHost
+	for name, tc := range map[string]struct {
+		origins []string
+		site    string
+		want    bool
+	}{
+		"own, same-origin":      {[]string{own}, "same-origin", true},
+		"own, no fetch site":    {[]string{own}, "", true},
+		"own, capitals":         {[]string{"HTTPS://" + strings.ToUpper(testServeHost)}, "", true},
+		"own, same-site":        {[]string{own}, "same-site", false},
+		"http":                  {[]string{"http://" + testServeHost}, "", false},
+		"other host":            {[]string{"https://evil.test"}, "", false},
+		"other host, same-orig": {[]string{"https://evil.test"}, "same-origin", false},
+		"suffix host":           {[]string{"https://" + testServeHost + ".evil.test"}, "", false},
+		"other port":            {[]string{own + ":8443"}, "", false},
+		"with a path":           {[]string{own + "/"}, "", false},
+		"null":                  {[]string{"null"}, "", false},
+		"empty":                 {[]string{""}, "", false},
+		"none":                  {nil, "same-origin", false},
+		"none, no fetch site":   {nil, "", false},
+		"two":                   {[]string{own, own}, "", false},
+	} {
+		r := httptest.NewRequest("POST", pushSubsPath, nil)
+		for _, o := range tc.origins {
+			r.Header.Add("Origin", o)
+		}
+		if tc.site != "" {
+			r.Header.Set("Sec-Fetch-Site", tc.site)
+		}
+		if got := sameOriginWrite(r, testServeHost); got != tc.want {
+			t.Errorf("%s: %v, want %v", name, got, tc.want)
+		}
+	}
+	if sameOriginWrite(httptest.NewRequest("POST", pushSubsPath, nil), "") {
+		t.Error("an unset serve host matches no origin")
 	}
 }

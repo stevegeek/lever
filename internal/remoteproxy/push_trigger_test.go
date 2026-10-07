@@ -26,6 +26,7 @@ type pushDMHub struct {
 	// the reads answer 200 again.
 	histErrTimes int
 	reads        int
+	itemsKey     bool // answer history rows under "items", not "messages"
 }
 
 func (d *pushDMHub) route(w http.ResponseWriter, r *http.Request) bool {
@@ -55,7 +56,11 @@ func (d *pushDMHub) route(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 		key = strings.TrimSuffix(key, "/messages")
-		_ = json.NewEncoder(w).Encode(map[string]any{"messages": d.rows[key]})
+		field := "messages"
+		if d.itemsKey {
+			field = "items"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{field: d.rows[key]})
 		return true
 	}
 	return false
@@ -192,6 +197,21 @@ func TestCheckIgnoresOwnAndHubRows(t *testing.T) {
 		if len(e.fs.all()) != 0 {
 			t.Errorf("%s: pushed", name)
 		}
+	}
+}
+
+// The hub answers history under "messages": rows under any other key push
+// nothing, as the contact's history filter shows nothing.
+func TestCheckIgnoresRowsUnderItems(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.hub.itemsKey = true
+	e.p.store.Add(chatOp, sub("op"))
+	tg := e.target(t, chatOp, chatUID, "w1")
+	e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: t0.Add(-time.Minute)})
+	e.hub.put(tg.key, agentMsg("m1", agentW1, "w1", t0))
+	e.p.check(context.Background(), chatOp, tg, e.session(chatUID, chatledger.TierOperator), false)
+	if sent := e.fs.all(); len(sent) != 0 {
+		t.Fatalf("sent %v", sent)
 	}
 }
 

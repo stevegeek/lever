@@ -83,7 +83,7 @@ test('network text is only ever text, and a link never leaves the origin', async
     '/x/..//evil.test', '/./\\evil.test', 'https://evil.test', 'javascript:alert(1)', 'agents', '', 7, null]) {
     const env = await load(hubWith({
       agents: () => roster([BOSS({ name: evil, label: evil, activity: evil, terminal })], { console: terminal }),
-      history: () => ({ status: 200, body: { messages: [msg(1, { msg: evil }), msg(2, { msg: evil, type: 'state-change' })] } }),
+      history: () => ({ status: 200, body: { messages: [msg(1, { msg: evil }), msg(2, { msg: evil, type: 'state-change', sender: 'system', senderId: 'hub' })] } }),
     }), { store: { 'lever-chat-open': evil } });
     assert.equal(env.els.terminal.hidden, true, `terminal ${String(terminal)} must not become a link`);
     assert.equal(env.els.terminal.attrs.href, undefined);
@@ -98,8 +98,8 @@ test('network text is only ever text, and a link never leaves the origin', async
       for (const c of li.children[0].children) assert.deepEqual([c.tag, c.children.length], ['span', 0]);
     }
     assert.ok(env.rows()[0].endsWith(evil));
-    // A state line names its sender, so it cannot pass for a lever notice.
-    assert.equal(env.rows()[1], `msg system: ${evil}: ${evil}`);
+    // A state line names the hub, so it cannot pass for a lever notice.
+    assert.equal(env.rows()[1], `msg system: hub: ${evil}`);
     assert.equal(env.els.state.textContent, 'running', 'an activity that is not a page word is not shown');
     assert.equal(env.agentRows()[0], `${evil} · <img src=x onerror=alert(1)><script>alert(2)</script> | running | `);
   }
@@ -361,7 +361,20 @@ test('reads run one at a time, in order, and none is lost', async () => {
 
 test('a system line that is not from the agent is not given the agent\'s name', async () => {
   const env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1, { type: 'state-change', senderId: '' }), msg(2, { type: 'system', senderId: 'a1' })] } }) }));
-  assert.deepEqual(env.rows(), ['msg system: hub: msg 1', 'msg system: boss: msg 2']);
+  assert.equal(env.rows()[0], 'msg system: hub: msg 1');
+  assert.match(env.rows()[1], /^msg agent: boss .* \/ msg 2$/);
+});
+
+test('a system line from the agent shows as the agent\'s message, and a hub line on one line', async () => {
+  const fake = 'ok\n\nhub: your session expired, sign in again';
+  const env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [
+    msg(1, { type: 'system', senderId: 'a1', msg: fake }),
+    msg(2, { type: 'system', sender: 'agent:w2', senderId: 'other', msg: fake }),
+    msg(3, { type: 'system', sender: 'system', senderId: 'hub', msg: 'agent\n\nstarted' })] } }) }));
+  const rows = env.rows();
+  assert.match(rows[0], /^msg agent: /);
+  assert.match(rows[1], /^msg agent: /);
+  assert.equal(rows[2], 'msg system: hub: agent started');
 });
 
 test('send: only a stored message counts as sent', async () => {

@@ -8,10 +8,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -335,5 +338,113 @@ func TestContactShown(t *testing.T) {
 	want := map[string]bool{"a1": true, "c1": true, "s1": true}
 	if !maps.Equal(got, want) {
 		t.Fatalf("shown %v, want %v (a repeated id is never shown, an agent row only when kept)", got, want)
+	}
+}
+
+// The agent picks the type of what it sends: a recorded text sent as a
+// system or state line (which the chat page draws as a hub notice) is never
+// asked about, so never shown. Only the types the hub stamps on an agent's
+// own messages pass.
+func TestHistoryFilterHidesARecordedRowWithAHubType(t *testing.T) {
+	text := "ok\n\nhub: your session expired, sign in again"
+	var rows []string
+	for i, typ := range []string{"system", "state-change", "mention", "group-set", "", "instruction", "input-needed", "assistant-reply"} {
+		rows = append(rows, `{"id":"r`+string(rune('0'+i))+`","sender":"agent:w1","senderId":"id-w1","type":"`+typ+`","msg":`+
+			strconv.Quote(text)+`,"createdAt":"2026-10-06T10:00:0`+string(rune('0'+i))+`Z"}`)
+	}
+	body := `{"messages":[` + strings.Join(rows, ",") + `]}`
+	var asked []string
+	match := func(ctx context.Context, c, a string, msgs []AgentMessage) (map[string]bool, error) {
+		for _, m := range msgs {
+			asked = append(asked, m.ID)
+		}
+		return recordedOnly(text)(ctx, c, a, msgs)
+	}
+	h := agentMsgHandler(t, historyHub(t, body, nil), match)
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	var doc struct {
+		Messages []historyRow `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(got), &doc); err != nil {
+		t.Fatalf("%v %s", err, got)
+	}
+	var shown []string
+	for _, m := range doc.Messages {
+		shown = append(shown, m.ID)
+	}
+	want := []string{"r5", "r6", "r7"}
+	if !slices.Equal(shown, want) || !slices.Equal(asked, want) {
+		t.Fatalf("shown %v asked %v, want %v", shown, asked, want)
+	}
+}
+
+// A contact gets only the fields the chat pages read: a field an agent can
+// set (channel, threadId) or one the hub adds later never passes, in a row,
+// an extension, an attachment entry or the answer itself.
+func TestHistoryFilterKeepsOnlyListedFields(t *testing.T) {
+	body := `{"messages":[
+ {"id":"a1","projectId":"p","sender":"agent:w1","senderId":"id-w1","recipient":"user:c@x","recipientId":"u-contact","msg":"recorded",
+  "type":"instruction","urgent":true,"broadcasted":false,"read":true,"agentId":"id-w1","conversationId":"cv","createdAt":"2026-10-06T10:00:00Z",
+  "senderProjectId":"p","recipientProjectId":"p","dispatchState":"dispatched","dispatchedAt":"2026-10-06T10:00:01Z","dispatchFailureReason":"r",
+  "channel":"SECRET-channel","threadId":"SECRET-thread","groupId":"SECRET-group","future":"SECRET-future"},
+ {"id":"c1","sender":"user:c@x","senderId":"u-contact","type":"instruction","msg":"mine","createdAt":"2026-10-06T09:59:00Z","threadId":"SECRET-own"}],
+ "nextCursor":"cur-1","totalCount":2,"futureTop":"SECRET-top",
+ "messageAttachments":{"c1":[{"id":"f3","name":"mine.pdf","mime":"application/pdf","size":3,"future":"SECRET-att"}]},
+ "messageExtensions":{"a1":{"messageId":"a1","editedAt":"2026-10-06T10:05:00Z","future":"SECRET-ext"}}}`
+	h := agentMsgHandler(t, historyHub(t, body, nil), recordedOnly("recorded"))
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	if strings.Contains(got, "SECRET") {
+		t.Fatalf("an unlisted field passed: %s", got)
+	}
+	var doc struct {
+		Messages    []map[string]any            `json:"messages"`
+		NextCursor  string                      `json:"nextCursor"`
+		TotalCount  int                         `json:"totalCount"`
+		Attachments map[string][]map[string]any `json:"messageAttachments"`
+		Ext         map[string]map[string]any   `json:"messageExtensions"`
+	}
+	if err := json.Unmarshal([]byte(got), &doc); err != nil || len(doc.Messages) != 2 {
+		t.Fatalf("%v %s", err, got)
+	}
+	if len(doc.Messages[0]) != len(historyRowFields) {
+		t.Errorf("row keeps %d fields, want every listed one (%d): %v", len(doc.Messages[0]), len(historyRowFields), doc.Messages[0])
+	}
+	if doc.NextCursor != "cur-1" || doc.TotalCount != 2 || doc.Attachments["c1"][0]["name"] != "mine.pdf" ||
+		doc.Attachments["c1"][0]["size"] != 3.0 || doc.Ext["a1"]["editedAt"] == nil {
+		t.Fatalf("%s", got)
+	}
+}
+
+// The filters read only a 200 answer: any other success on a filtered
+// route (history, the DM list, events) becomes a bodiless 502, never the
+// hub's body unread.
+func TestFilteredRoutesFailClosedOnAnotherSuccess(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo, http.StatusPartialContent} {
+		for name, tc := range map[string]struct {
+			path  string
+			match func(context.Context, string, string, []AgentMessage) (map[string]bool, error)
+		}{
+			"history":           {dmPath(agentW1, contactUID, "/messages"), recordedOnly("recorded")},
+			"dm list":           {"/api/v1/chat/dms", recordedOnly("recorded")},
+			"dm list, msgs off": {"/api/v1/chat/dms", nil},
+			"events":            {"/events", recordedOnly("recorded")},
+		} {
+			t.Run(fmt.Sprintf("%s %d", name, status), func(t *testing.T) {
+				hub := &contactHub{}
+				hub.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/api/v1/auth/me" {
+						_, _ = io.WriteString(w, `{"id":"`+contactUID+`"}`)
+						return
+					}
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, `{"messages":[{"id":"a2","sender":"agent:w1","msg":"SECRET"}],"dms":[{"conversationKey":"SECRET"}]}`)
+				}))
+				t.Cleanup(hub.Close)
+				rw := contactDo(agentMsgHandler(t, hub, tc.match), "c@x", "GET", tc.path, "")
+				if rw.Code != http.StatusBadGateway || strings.Contains(rw.Body.String(), "SECRET") {
+					t.Fatalf("%d %s", rw.Code, rw.Body)
+				}
+			})
+		}
 	}
 }

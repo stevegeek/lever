@@ -87,7 +87,7 @@ const (
 	downloadsAtOnce   = 4
 	// downloadsPerLogin bounds one login's downloads in flight, and a
 	// contact never takes the last slot: one slow reader (a download may
-	// take fileBodyDeadline) cannot hold every slot, and the operator can
+	// take bodyDeadline) cannot hold every slot, and the operator can
 	// always fetch.
 	downloadsPerLogin = 2
 	// Per login, counted in memory, refused attempts included: each list
@@ -100,8 +100,13 @@ const (
 	// sends a custom header across origins only after a CORS preflight,
 	// which the proxy never grants, so a form on another site, or a
 	// redirect (307/308) that resends the body elsewhere, cannot carry it.
-	uploadHeader     = "X-Lever-Upload"
-	fileBodyDeadline = 10 * time.Minute
+	uploadHeader = "X-Lever-Upload"
+	// An upload body or a download gets fileBodyBase plus max_bytes at
+	// fileBodyMinRate (64 KiB/s, about 0.5 Mbit/s), at most fileBodyMax:
+	// about 37 min at the 100 MiB maximum, 17 min at the 25 MiB default.
+	fileBodyBase    = 10 * time.Minute
+	fileBodyMinRate = 64 << 10
+	fileBodyMax     = time.Hour
 	// formOverhead is what a one-file form adds around the file: boundary
 	// lines and part headers, far below this.
 	formOverhead = 64 << 10
@@ -150,6 +155,18 @@ func newFilesState(cfg FilesConfig) *filesState {
 		uploading: map[string]int{}, downloading: map[string]int{}, pending: map[string][]int64{},
 		lists: newLoginRate(listsPerMinute, time.Minute), downloads: newLoginRate(downloadsPerMinute, time.Minute),
 		uploadTries: newLoginRate(uploadTriesPerHour, time.Hour)}
+}
+
+// bodyDeadline is how long an upload body or a download of up to max_bytes
+// may take.
+func (s *filesState) bodyDeadline() time.Duration {
+	return min(fileBodyBase+time.Duration(s.cfg.MaxBytes/fileBodyMinRate)*time.Second, fileBodyMax)
+}
+
+// timedOut reports whether err is the upload body's read deadline passing:
+// a slow connection, answered 408 "timeout", not a malformed form.
+func timedOut(err error) bool {
+	return errors.Is(err, os.ErrDeadlineExceeded)
 }
 
 // led is the files ledger, opened on first use and again after a failure.
@@ -484,11 +501,15 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	defer done()
 	// The server has no ReadTimeout (serve.go): the body gets its own.
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(fileBodyDeadline))
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(s.bodyDeadline()))
 	mr := multipart.NewReader(http.MaxBytesReader(w, r.Body, limit), params["boundary"])
 	part, err := mr.NextPart()
 	if tooLarge(err) {
 		g.refuseFile(w, r, line, http.StatusRequestEntityTooLarge, "too-large")
+		return
+	}
+	if timedOut(err) {
+		g.refuseFile(w, r, line, http.StatusRequestTimeout, "timeout")
 		return
 	}
 	if err != nil || part.FormName() != "file" || part.FileName() == "" {
@@ -513,6 +534,10 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
+	if timedOut(err) {
+		g.refuseFile(w, r, line, http.StatusRequestTimeout, "timeout")
+		return
+	}
 	if err != nil {
 		line.Error = err.Error()
 		g.refuseFile(w, r, line, http.StatusBadRequest, "bad-form")
@@ -525,6 +550,10 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 	if _, err := mr.NextPart(); err != io.EOF {
 		if tooLarge(err) {
 			g.refuseFile(w, r, line, http.StatusRequestEntityTooLarge, "too-large")
+			return
+		}
+		if timedOut(err) {
+			g.refuseFile(w, r, line, http.StatusRequestTimeout, "timeout")
 			return
 		}
 		g.refuseFile(w, r, line, http.StatusBadRequest, "one-file")
@@ -695,7 +724,7 @@ func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *Audit
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cross-Origin-Resource-Policy", "same-origin")
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(fileBodyDeadline))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.bodyDeadline()))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, f)
 }

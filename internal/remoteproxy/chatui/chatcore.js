@@ -460,6 +460,7 @@ const UPLOAD_WORDS = {
   'not-allowed': 'you may not send files to this agent',
   'one-file': 'send one file at a time',
   'bad-form': 'the upload was not understood',
+  timeout: 'the upload took too long; try again on a faster connection',
   workspace: "the agent's file folder is not usable; tell the operator",
   unavailable: 'files are unavailable right now',
   origin: 'the upload did not come from this page',

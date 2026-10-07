@@ -1027,3 +1027,55 @@ func TestOperatorCannotDownloadAnExcludedLoginsRecord(t *testing.T) {
 		t.Fatalf("%d %s", got.Code, got.Body)
 	}
 }
+
+// The body deadline grows with max_bytes (64 KiB/s past the 10 min base),
+// up to an hour.
+func TestFileBodyDeadlineScalesWithMaxBytes(t *testing.T) {
+	for maxBytes, want := range map[int64]time.Duration{
+		64:        10 * time.Minute,
+		25 << 20:  10*time.Minute + 400*time.Second,
+		100 << 20: 10*time.Minute + 1600*time.Second,
+		1 << 30:   time.Hour,
+	} {
+		s := newFilesState(FilesConfig{MaxBytes: maxBytes})
+		if got := s.bodyDeadline(); got != want {
+			t.Errorf("max_bytes %d: %v, want %v", maxBytes, got, want)
+		}
+	}
+}
+
+// deadlineBody is an upload whose connection read deadline passes after
+// the given bytes.
+type deadlineBody struct{ r io.Reader }
+
+func (d *deadlineBody) Read(p []byte) (int, error) {
+	n, err := d.r.Read(p)
+	if err == io.EOF {
+		return n, os.ErrDeadlineExceeded
+	}
+	return n, err
+}
+
+// An upload whose body does not arrive within the deadline answers 408
+// "timeout", not 400 "bad-form", wherever the read stops.
+func TestUploadBodyDeadlineIsATimeout(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, tree, _ := filesCfg(t, hub)
+	h := NewHandler(cfg)
+	ct, full := multipartBody(t, [3]string{"file", "a.pdf", "0123456789"})
+	whole := full.String()
+	head := whole[:strings.Index(whole, "0123")]
+	for name, body := range map[string]string{
+		"before the part": "",
+		"in the file":     head + "01234",
+		"after the file":  whole[:strings.LastIndex(whole, "--")],
+	} {
+		rw := uploadDo(t, h, "c@x", "w1", ct, &deadlineBody{strings.NewReader(body)})
+		if rw.Code != http.StatusRequestTimeout || !strings.Contains(rw.Body.String(), `"error":"timeout"`) {
+			t.Errorf("%s: %d %s", name, rw.Code, rw.Body)
+		}
+	}
+	if ents, _ := os.ReadDir(filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))); len(ents) != 0 {
+		t.Fatalf("left behind: %v", ents)
+	}
+}

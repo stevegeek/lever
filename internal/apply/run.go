@@ -1475,7 +1475,26 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 	}
 	if !gaps.Empty() {
 		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
+		if tools := r.toolsOnReadOnly(); len(tools) > 0 {
+			r.d.Log("start-manager: the broker does not start tool(s) %s until then: each runs a program from a protected directory, which this manager could have rewritten", strings.Join(tools, ", "))
+		}
 	}
+}
+
+// toolsOnReadOnly names the broker tools whose program relies on
+// manager.read_only (config.App.ToolsOnReadOnly), sorted; the broker holds
+// them back while the manager lacks the mounts (brokerctl.ReadOnlyGuard).
+func (r *run) toolsOnReadOnly() []string {
+	m, err := r.app.ToolsOnReadOnly()
+	if err != nil {
+		return nil
+	}
+	tools := make([]string, 0, len(m))
+	for name := range m {
+		tools = append(tools, name)
+	}
+	slices.Sort(tools)
+	return tools
 }
 
 // warnManagerNestedVirt runs after the manager is live: nested_virt's

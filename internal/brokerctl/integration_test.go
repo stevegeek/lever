@@ -235,7 +235,11 @@ broker:
 	// ── Supervise the REAL lever-tool-db subprocess ────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sup := NewSupervisor(ToolSpecs(app), adminURL, st.ToolLogDir(), toolSecret)
+	specs, err := ToolSpecs(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(specs, adminURL, st.ToolLogDir(), toolSecret)
 	if err := sup.Start(ctx); err != nil {
 		t.Fatalf("supervisor start: %v", err)
 	}

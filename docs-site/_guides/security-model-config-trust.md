@@ -209,9 +209,17 @@ fixed `PATH`, the one config load checks. The error names the key, the path and 
 file outside the tree, or, for a program, cover it with `manager.read_only`.
 
 A program under `manager.read_only` is safe only while the running manager carries the read-only
-mount (it is create-time only, §5.1.1): `lever doctor`'s *manager read-only paths* row reports a
-manager that lacks it. `lever-tool-github` refuses its `-app-key` and `-state` inside its `-tree` on
-its own as well.
+mount, and that mount is create-time only (§5.1.1). So the broker does not start a tool whose program
+relies on it until it has read the manager container's mounts and found the whole `read_only` plan in
+place (entries read-only, their parents and the worker dirs pinned), and a write probe in the running
+container has found every entry read-only. It fails closed: no container yet, a stopped manager, or
+mounts it cannot read all hold the tool back. It asks again every 30 seconds (apply starts the broker
+before the manager, so a fresh create gains the mounts after the first ask), and writes the reason
+into the tool's log once per reason. `lever apply` names the held tools when it keeps or resumes a
+manager that lacks the mounts. The fix is the one for the mounts themselves: back up the
+conversation, then `lever up --fresh`. A manager that lacked the mounts before could already have
+rewritten the program; check it before you trust it again. `lever-tool-github` refuses its `-app-key`
+and `-state` inside its `-tree` on its own as well.
 
 ### 5.6 Residual
 

@@ -218,6 +218,36 @@ func (a *App) checkHostPathsOutsideTree() error {
 	return nil
 }
 
+// ToolsOnReadOnly maps each supervised tool whose command runs a program
+// from inside the tree to the manager.read_only entries that excuse it
+// (checkHostPathsOutsideTree). That excuse holds only while the running
+// manager carries those read-only mounts, which are create-time only, so the
+// broker starts such a tool only after it has seen them (brokerctl).
+func (a *App) ToolsOnReadOnly() (map[string][]string, error) {
+	out := map[string][]string{}
+	paths := a.hostPaths()
+	if len(paths) == 0 {
+		return out, nil
+	}
+	realTree, err := resolveExisting(a.Tree)
+	if err != nil {
+		return nil, fmt.Errorf("config: tree %s: %w", a.Tree, err)
+	}
+	for _, p := range paths {
+		if p.tool == "" || p.kind != hostProgram {
+			continue
+		}
+		w, err := a.walkTree(realTree, p.path)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s %q: %w", p.key, p.path, err)
+		}
+		if w.inTree && w.entry != "" && !slices.Contains(out[p.tool], w.entry) {
+			out[p.tool] = append(out[p.tool], w.entry)
+		}
+	}
+	return out, nil
+}
+
 // treeWalk is what walkTree learnt about one path.
 type treeWalk struct {
 	inTree  bool   // the path is the tree, lies in it, or reaches it through a link

@@ -521,3 +521,40 @@ func TestManagerStaleTreeMountsDoesNotFollowLinks(t *testing.T) {
 		t.Fatalf("wording: %q / %q", s, s.Fix())
 	}
 }
+
+// A kept manager that lacks the mounts also names the broker tools held
+// back for it: their program sits in the protected directory.
+func TestStartManagerWarnsAboutToolsOnReadOnly(t *testing.T) {
+	dir, _ := readOnlyConfig(t, true)
+	if err := os.WriteFile(filepath.Join(dir, "workspace", "assistant", "tools", "asst"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, config.CanonicalName)
+	body := "name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\n  tools:\n" +
+		"    - {name: asst, backend: 127.0.0.1:3201, command: [workspace/assistant/tools/asst]}\n" +
+		"manager:\n  image: img\n  read_only:\n    - assistant/tools\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := config.Load(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jp := JailPath(app.Tree, app.Tree, "")
+	var logs []string
+	f := scionOKRunner()
+	deps := Deps{
+		Scion: scion.New(&agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "suspended", initContainerStatus: "stopped"}, scion.Options{}),
+		Log:   func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) {
+			return []jail.Mount{{Source: jp, Destination: "/workspace", RW: true}}, nil
+		},
+		ProbeContainerWritable: func(context.Context, string, string) (bool, error) { return false, nil },
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, "does not start tool(s) asst") {
+		t.Fatalf("want the held tool named, got %q", joined)
+	}
+}

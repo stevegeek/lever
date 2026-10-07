@@ -2,10 +2,12 @@ package brokerctl
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,7 +131,10 @@ func TestToolSpecsCarriesWhatTheSupervisorNeeds(t *testing.T) {
 	if !filepath.IsAbs(dir) {
 		t.Fatalf("InstanceDir = %q, want an absolute path", dir)
 	}
-	got := ToolSpecs(app)
+	got, err := ToolSpecs(app)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []ToolSpec{
 		{Name: "db", Command: []string{"db-server", "-x"}, Backend: "127.0.0.1:3201", Dir: dir},
 		{Name: "ext", External: true, Backend: "127.0.0.1:3300", Dir: dir},
@@ -137,7 +142,7 @@ func TestToolSpecsCarriesWhatTheSupervisorNeeds(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ToolSpecs = %+v, want %+v", got, want)
 	}
-	if len(ToolSpecs(&config.App{})) != 0 {
+	if none, err := ToolSpecs(&config.App{}); err != nil || len(none) != 0 {
 		t.Fatal("no tools must map to no specs")
 	}
 }
@@ -225,5 +230,86 @@ func TestNewToolSecretIsRandomHex(t *testing.T) {
 		if !strings.ContainsRune("0123456789abcdef", r) {
 			t.Fatalf("NewToolSecret produced a non-hex rune %q in %q", r, a)
 		}
+	}
+}
+
+// A tool that relies on manager.read_only is held back while the guard
+// fails, says why in its log, and starts once the guard passes; the other
+// tools start at once.
+func TestSupervisorHoldsReadOnlyToolUntilGuardPasses(t *testing.T) {
+	logs := filepath.Join(t.TempDir(), "tool-logs")
+	tools := []ToolSpec{
+		{Name: "free", Command: []string{"/bin/sleep", "60"}},
+		{Name: "ro", Command: []string{"/bin/sleep", "60"}, ReadOnly: []string{"tools"}},
+	}
+	s := NewSupervisor(tools, "http://127.0.0.1:0", logs, testToolSecret)
+	s.retry = 10 * time.Millisecond
+	var mu sync.Mutex
+	pass := false
+	s.ReadOnlyGuard = func(_ context.Context, entries []string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if !reflect.DeepEqual(entries, []string{"tools"}) {
+			t.Errorf("guard entries = %v", entries)
+		}
+		if !pass {
+			return errors.New("manager \"m\" does not hold that protection: tools not mounted read-only")
+		}
+		return nil
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+	if n := trackedCount(s); n != 1 {
+		t.Fatalf("tracked = %d right after Start, want 1 (the read_only tool is held)", n)
+	}
+	waitFor(t, func() bool {
+		b, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
+		return strings.Contains(string(b), "not starting tool \"ro\"") && strings.Contains(string(b), "lever up --fresh")
+	})
+	time.Sleep(50 * time.Millisecond)
+	if n := trackedCount(s); n != 1 {
+		t.Fatalf("tracked = %d while the guard fails, want 1", n)
+	}
+	b, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
+	if c := strings.Count(string(b), "not starting tool"); c != 1 {
+		t.Fatalf("the refusal was logged %d times, want once per reason", c)
+	}
+	mu.Lock()
+	pass = true
+	mu.Unlock()
+	waitFor(t, func() bool { return trackedCount(s) == 2 })
+}
+
+// Without a guard (no way to read the manager's mounts) a read_only tool
+// never starts: fail closed. Stop ends the retry loop.
+func TestSupervisorWithoutGuardNeverStartsReadOnlyTool(t *testing.T) {
+	logs := filepath.Join(t.TempDir(), "tool-logs")
+	s := NewSupervisor([]ToolSpec{{Name: "ro", Command: []string{"/bin/sleep", "60"}, ReadOnly: []string{"tools"}}}, "http://127.0.0.1:0", logs, testToolSecret)
+	s.retry = 10 * time.Millisecond
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool {
+		b, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
+		return strings.Contains(string(b), "no read-only check")
+	})
+	time.Sleep(50 * time.Millisecond)
+	if n := trackedCount(s); n != 0 {
+		t.Fatalf("tracked = %d, want 0", n)
+	}
+	s.Stop()
+}
+
+// waitFor polls cond for up to two seconds.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 2s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

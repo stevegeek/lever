@@ -172,7 +172,22 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 
-	sup := NewSupervisor(ToolSpecs(app), adminURL, st.ToolLogDir(), toolSecret)
+	specs, err := ToolSpecs(app)
+	if err != nil {
+		return err
+	}
+	sup := NewSupervisor(specs, adminURL, st.ToolLogDir(), toolSecret)
+	// A tool whose program sits in the tree under manager.read_only starts
+	// only once the running manager holds those mounts. Without the jail
+	// run-user (a manual `broker serve`) there is no way to look, and such
+	// a tool stays down.
+	if env.JailUser != "" && env.JailUID != "" {
+		jr, err := registry.JailRunner(app.Backend, proc.RealRunner{}, machineName(app), env.JailUser, env.JailUID)
+		if err != nil {
+			return err
+		}
+		sup.ReadOnlyGuard = readOnlyGuard(app, jr, be.MountDest())
+	}
 	if err := sup.Start(ctx); err != nil {
 		return err
 	}

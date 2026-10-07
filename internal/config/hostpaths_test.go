@@ -291,3 +291,28 @@ func TestHostPathsRefusedThroughCaseAlias(t *testing.T) {
 	_, err := LoadNoHostChecks(p)
 	testutil.WantErrContaining(t, err, "manager.credential_file", "inside the mounted tree")
 }
+
+// ToolsOnReadOnly names the tools whose in-tree program relies on a
+// read_only entry, and only those.
+func TestToolsOnReadOnly(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "bin")
+	mustWrite(t, outside)
+	body := "manager:\n  read_only: [tools]\nbroker:\n  llm_auth: subscription\n  tools:\n" +
+		"    - {name: in, backend: 127.0.0.1:3201, command: [ws/tools/bin]}\n" +
+		"    - {name: script, backend: 127.0.0.1:3202, command: [ruby, ws/tools/bin]}\n" +
+		"    - {name: out, backend: 127.0.0.1:3203, command: [" + outside + "]}\n" +
+		"    - {name: ext, external: true, gate: coarse, backend: 127.0.0.1:3204}\n"
+	p, _ := hostPathsInstance(t, body)
+	a, err := LoadNoHostChecks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.ToolsOnReadOnly()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{"in": {"tools"}, "script": {"tools"}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ToolsOnReadOnly = %v, want %v", got, want)
+	}
+}

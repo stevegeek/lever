@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 )
@@ -28,16 +30,36 @@ type ToolSpec struct {
 	// command: the instance dir, where config load's tree check resolves
 	// the same paths. Empty = the broker's own (tests).
 	Dir string
+	// ReadOnly lists the manager.read_only entries the tool's in-tree
+	// program relies on (config.App.ToolsOnReadOnly). Such a tool starts
+	// only once Supervisor.ReadOnlyGuard has seen the running manager
+	// hold them read-only.
+	ReadOnly []string
 }
 
 // ToolSpecs maps the configured broker tools onto the Supervisor's ToolSpec.
-func ToolSpecs(app *config.App) []ToolSpec {
+func ToolSpecs(app *config.App) ([]ToolSpec, error) {
+	onRO, err := app.ToolsOnReadOnly()
+	if err != nil {
+		return nil, err
+	}
 	specs := make([]ToolSpec, 0, len(app.Broker.Tools))
 	for _, t := range app.Broker.Tools {
-		specs = append(specs, ToolSpec{Name: t.Name, Command: t.Command, Backend: t.Backend, External: t.External, Dir: app.InstanceDir()})
+		specs = append(specs, ToolSpec{Name: t.Name, Command: t.Command, Backend: t.Backend, External: t.External,
+			Dir: app.InstanceDir(), ReadOnly: onRO[t.Name]})
 	}
-	return specs
+	return specs, nil
 }
+
+// ReadOnlyGuard reports, as nil, that the running manager holds every
+// listed manager.read_only entry read-only; any other answer, including
+// "cannot tell", is an error that holds the tool back.
+type ReadOnlyGuard func(ctx context.Context, entries []string) error
+
+// readOnlyRetry is how often the supervisor asks ReadOnlyGuard again for a
+// tool it holds back: apply starts the broker before the manager, so a
+// fresh create gains the mounts only after the first ask.
+const readOnlyRetry = 30 * time.Second
 
 // toolSecretEnv is the environment variable a supervised tool reads its
 // broker-to-tool shared secret from (captool.ToolSecretEnv — spelled here so
@@ -64,10 +86,18 @@ type Supervisor struct {
 	adminURL   string
 	toolLogDir string
 	toolSecret string
+	// ReadOnlyGuard vets each tool with ReadOnly entries before it starts
+	// (nil = such a tool never starts: fail closed). retry is how often a
+	// held-back tool is vetted again (readOnlyRetry when zero).
+	ReadOnlyGuard ReadOnlyGuard
+	retry         time.Duration
 
-	mu    sync.Mutex
-	cmds  []*exec.Cmd
-	files []*os.File
+	mu      sync.Mutex
+	cmds    []*exec.Cmd
+	files   []*os.File
+	stopped bool
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 // NewSupervisor builds a supervisor for tools, injecting adminURL as each
@@ -85,6 +115,12 @@ func NewSupervisor(tools []ToolSpec, adminURL, toolLogDir, toolSecret string) *S
 // flags. It does not wait for registration (the caller health-checks the broker).
 // If any tool fails to start, all already-started tools are force-killed and
 // reaped before returning the error, leaving the supervisor clean.
+//
+// A tool whose program relies on manager.read_only (ToolSpec.ReadOnly) is
+// held back until ReadOnlyGuard passes: a manager created before the
+// entry, or one whose mounts cannot be read, could have rewritten the
+// program. Its log says why; the guard is asked again every retry interval
+// until it passes or Stop runs.
 func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -92,6 +128,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		s.stopLocked()
 		return fmt.Errorf("brokerctl: tool log dir: %w", err)
 	}
+	var held []ToolSpec
 	for _, t := range s.tools {
 		if t.External {
 			continue // fronted, not spawned — lifecycle stays with the user session
@@ -100,43 +137,126 @@ func (s *Supervisor) Start(ctx context.Context) error {
 			s.stopLocked()
 			return fmt.Errorf("brokerctl: tool %q has no command", t.Name)
 		}
-		// Resolved here, not by exec: exec.Command would look a bare name
-		// up on the broker's own PATH, not the fixed one config load
-		// validated it against.
-		bin, err := config.ResolveToolCommand(t.Command[0], t.Dir)
-		if err != nil {
+		if len(t.ReadOnly) > 0 {
+			held = append(held, t)
+			continue
+		}
+		if err := s.spawnLocked(ctx, t); err != nil {
 			s.stopLocked()
-			return fmt.Errorf("brokerctl: tool %q: %w", t.Name, err)
+			return err
 		}
-		args := append([]string{}, t.Command[1:]...)
-		args = append(args, "-backend", t.Backend, "-admin", s.adminURL)
-		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.Dir = t.Dir
-		cmd.Env = []string{"PATH=" + config.ToolSupervisorPATH} // minimal, no inherited secrets
-		if s.toolSecret != "" {
-			cmd.Env = append(cmd.Env, toolSecretEnv+"="+s.toolSecret)
-		}
-		lf, err := os.OpenFile(filepath.Join(s.toolLogDir, toolLogName(t.Name)),
-			os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			s.stopLocked()
-			return fmt.Errorf("brokerctl: open log for tool %q: %w", t.Name, err)
-		}
-		s.files = append(s.files, lf)
-		cmd.Stdout = lf
-		cmd.Stderr = lf
-		if err := cmd.Start(); err != nil {
-			s.stopLocked()
-			return fmt.Errorf("brokerctl: start tool %q: %w", t.Name, err)
-		}
-		s.cmds = append(s.cmds, cmd)
 	}
+	if len(held) > 0 {
+		loopCtx, cancel := context.WithCancel(ctx)
+		s.cancel, s.done = cancel, make(chan struct{})
+		go s.vetHeld(loopCtx, held)
+	}
+	return nil
+}
+
+// vetHeld asks ReadOnlyGuard for each held-back tool, starts those it
+// passes, and asks again every retry interval for the rest.
+func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
+	defer close(s.done)
+	retry := s.retry
+	if retry <= 0 {
+		retry = readOnlyRetry
+	}
+	reported := map[string]string{}
+	for {
+		var still []ToolSpec
+		for _, t := range held {
+			err := errors.New("no read-only check is wired into this broker")
+			if s.ReadOnlyGuard != nil {
+				err = s.ReadOnlyGuard(ctx, t.ReadOnly)
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				// One line per distinct reason, not one per retry.
+				if msg := err.Error(); reported[t.Name] != msg {
+					reported[t.Name] = msg
+					s.logTool(t.Name, fmt.Sprintf("lever: not starting tool %q: its program lies in the tree under manager.read_only %v, "+
+						"and %s. A manager without those read-only mounts could have rewritten it. To fix it, back up the manager's "+
+						"conversation, then run `lever up --fresh` to recreate the manager with the mounts. Retrying every %s.",
+						t.Name, t.ReadOnly, msg, retry))
+				}
+				still = append(still, t)
+				continue
+			}
+			s.mu.Lock()
+			if !s.stopped {
+				if err := s.spawnLocked(ctx, t); err != nil {
+					s.logTool(t.Name, "lever: "+err.Error())
+				}
+			}
+			s.mu.Unlock()
+		}
+		if held = still; len(held) == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retry):
+		}
+	}
+}
+
+// logTool appends one line to the tool's own log (best effort).
+func (s *Supervisor) logTool(name, line string) {
+	f, err := os.OpenFile(filepath.Join(s.toolLogDir, toolLogName(name)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, line)
+}
+
+// spawnLocked starts one tool. Caller must hold s.mu.
+func (s *Supervisor) spawnLocked(ctx context.Context, t ToolSpec) error {
+	// Resolved here, not by exec: exec.Command would look a bare name
+	// up on the broker's own PATH, not the fixed one config load
+	// validated it against.
+	bin, err := config.ResolveToolCommand(t.Command[0], t.Dir)
+	if err != nil {
+		return fmt.Errorf("brokerctl: tool %q: %w", t.Name, err)
+	}
+	args := append([]string{}, t.Command[1:]...)
+	args = append(args, "-backend", t.Backend, "-admin", s.adminURL)
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = t.Dir
+	cmd.Env = []string{"PATH=" + config.ToolSupervisorPATH} // minimal, no inherited secrets
+	if s.toolSecret != "" {
+		cmd.Env = append(cmd.Env, toolSecretEnv+"="+s.toolSecret)
+	}
+	lf, err := os.OpenFile(filepath.Join(s.toolLogDir, toolLogName(t.Name)),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("brokerctl: open log for tool %q: %w", t.Name, err)
+	}
+	s.files = append(s.files, lf)
+	cmd.Stdout = lf
+	cmd.Stderr = lf
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("brokerctl: start tool %q: %w", t.Name, err)
+	}
+	s.cmds = append(s.cmds, cmd)
 	return nil
 }
 
 // Stop force-kills (SIGKILL) every launched tool and reaps it.
 // It is safe to call after a failed Start or multiple times.
 func (s *Supervisor) Stop() {
+	s.mu.Lock()
+	s.stopped = true
+	cancel, done := s.cancel, s.done
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopLocked()

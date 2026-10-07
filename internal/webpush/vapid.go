@@ -105,6 +105,23 @@ func VerifyVAPID(header, audience string, now time.Time) error {
 	return nil
 }
 
+// ErrBadKey reports a key file that holds no VAPID key (empty after a
+// power loss, or edited).
+var ErrBadKey = errors.New("not a VAPID key")
+
+// ParseKey reads a key file's contents: base64url of the 32-byte scalar.
+func ParseKey(b []byte) (*ecdsa.PrivateKey, error) {
+	raw, err := b64.DecodeString(strings.TrimSpace(string(b)))
+	if err != nil {
+		return nil, ErrBadKey
+	}
+	key, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), raw)
+	if err != nil {
+		return nil, ErrBadKey
+	}
+	return key, nil
+}
+
 // LoadOrCreateKey reads the VAPID key at path (base64url of the 32-byte
 // scalar), creating it when absent. Its directory must exist.
 func LoadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
@@ -126,13 +143,9 @@ func LoadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := b64.DecodeString(strings.TrimSpace(string(b)))
+	key, err := ParseKey(b)
 	if err != nil {
-		return nil, fmt.Errorf("%s: not a VAPID key", path)
-	}
-	key, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), raw)
-	if err != nil {
-		return nil, fmt.Errorf("%s: not a VAPID key", path)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return key, nil
 }

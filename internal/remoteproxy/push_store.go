@@ -57,7 +57,9 @@ type PushStore struct {
 }
 
 var (
-	errBadPushStore      = errors.New("the push store is not a lever push store")
+	// ErrBadPushStore reports a store file that is not one (empty after a
+	// power loss, or edited).
+	ErrBadPushStore      = errors.New("the push store is not a lever push store")
 	errPushEndpointTaken = errors.New("another login holds this endpoint with other keys")
 )
 
@@ -92,7 +94,7 @@ func OpenPushStore(dir string, logins []string) (*PushStore, error) {
 		return nil, err
 	default:
 		if json.Unmarshal(b, &s.f) != nil || s.f.V != 1 || s.f.Logins == nil {
-			return nil, fmt.Errorf("%s: %w", s.path, errBadPushStore)
+			return nil, fmt.Errorf("%s: %w", s.path, ErrBadPushStore)
 		}
 	}
 	gone := false
@@ -286,10 +288,14 @@ func ReadPushSummary(dir string) PushSummary {
 		sum.KeyErr, sum.StoreErr = err, err
 		return sum
 	}
-	if _, err := webpush.ReadPrivateFile(filepath.Join(dir, pushKeyFile), 128); err != nil {
+	keyPath := filepath.Join(dir, pushKeyFile)
+	if b, err := webpush.ReadPrivateFile(keyPath, 128); err != nil {
 		sum.KeyErr = err
+	} else if _, err := webpush.ParseKey(b); err != nil {
+		sum.KeyErr = fmt.Errorf("%s: %w", keyPath, err)
 	}
-	b, err := webpush.ReadPrivateFile(filepath.Join(dir, pushStoreFile), maxPushStore)
+	storePath := filepath.Join(dir, pushStoreFile)
+	b, err := webpush.ReadPrivateFile(storePath, maxPushStore)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		sum.Subs = map[string]int{}
@@ -298,7 +304,7 @@ func ReadPushSummary(dir string) PushSummary {
 	default:
 		var f pushFile
 		if json.Unmarshal(b, &f) != nil || f.V != 1 {
-			sum.StoreErr = errBadPushStore
+			sum.StoreErr = fmt.Errorf("%s: %w", storePath, ErrBadPushStore)
 			break
 		}
 		sum.Subs = map[string]int{}

@@ -729,8 +729,14 @@ func checkPush(app *config.App, st state.State) checkResult {
 	switch {
 	case errors.Is(sum.KeyErr, fs.ErrNotExist):
 		return warnResult(name, "on, but no key yet: the remote proxy creates "+stateRel(st, dir)+"/vapid.key when it starts", "run `lever apply`")
+	case errors.Is(sum.KeyErr, webpush.ErrBadKey):
+		return checkResult{name, false, "on, but " + sum.KeyErr.Error() + " (empty after a power loss?); push is off",
+			"stop the proxy, remove " + filepath.Join(dir, "vapid.key") + ", and run `lever apply`: the proxy creates a new key, and every device must turn notifications on again"}
 	case sum.KeyErr != nil:
 		return checkResult{name, false, "on, but the push key is unusable: " + sum.KeyErr.Error() + "; push is off", "chmod 600 " + filepath.Join(dir, "vapid.key") + " (or remove it: every device must then turn notifications on again)"}
+	case errors.Is(sum.StoreErr, remoteproxy.ErrBadPushStore):
+		return checkResult{name, false, "on, but " + sum.StoreErr.Error() + " (empty after a power loss?); push is off",
+			"stop the proxy, remove " + filepath.Join(dir, "subscriptions.json") + ", and run `lever apply`: a device that turned notifications on sends its subscription again when its page loads"}
 	case sum.StoreErr != nil:
 		return checkResult{name, false, "on, but the subscription store is unusable: " + sum.StoreErr.Error() + "; push is off", "chmod 600 " + filepath.Join(dir, "subscriptions.json") + " (or remove it)"}
 	}

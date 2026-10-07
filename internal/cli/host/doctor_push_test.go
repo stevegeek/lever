@@ -60,6 +60,26 @@ func TestCheckPush(t *testing.T) {
 			t.Fatalf("%+v", r)
 		}
 	})
+	// A power loss before the writes were synced could leave either file
+	// empty: the row names the file and the fix, never "key present".
+	t.Run("empty key fails with its fix", func(t *testing.T) {
+		app, st := pushApp(t)
+		remotePush(app, st, nil, &bytes.Buffer{})
+		os.WriteFile(filepath.Join(st.PushDir(), "vapid.key"), nil, 0o600)
+		r := checkPush(app, st)
+		if r.ok || !strings.Contains(r.detail, "vapid.key") || !strings.Contains(r.fix, "remove") || strings.Contains(r.fix, "chmod") {
+			t.Fatalf("%+v", r)
+		}
+	})
+	t.Run("empty store fails with its fix", func(t *testing.T) {
+		app, st := pushApp(t)
+		remotePush(app, st, nil, &bytes.Buffer{})
+		os.WriteFile(filepath.Join(st.PushDir(), "subscriptions.json"), nil, 0o600)
+		r := checkPush(app, st)
+		if r.ok || !strings.Contains(r.detail, "subscriptions.json") || !strings.Contains(r.fix, "remove") || strings.Contains(r.fix, "chmod") {
+			t.Fatalf("%+v", r)
+		}
+	})
 	t.Run("state inside the tree fails", func(t *testing.T) {
 		app, st := pushApp(t)
 		app.Tree = filepath.Dir(st.Dir)

@@ -47,6 +47,26 @@ func TestRemotePushOnCreatesKeyAndStore(t *testing.T) {
 	}
 }
 
+// TestRemotePushNamesAnEmptyFile: an empty key or store (a power loss)
+// keeps push off with a warning that names the file and the fix.
+func TestRemotePushNamesAnEmptyFile(t *testing.T) {
+	for _, file := range []string{"vapid.key", "subscriptions.json"} {
+		app, st := pushApp(t)
+		if _, err := remotePush(app, st, nil, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(st.PushDir(), file), nil, 0o600)
+		var warn bytes.Buffer
+		p, err := remotePush(app, st, nil, &warn)
+		if p != nil || err != nil {
+			t.Fatalf("%s: %v %v", file, p, err)
+		}
+		if w := warn.String(); !strings.Contains(w, filepath.Join(st.PushDir(), file)) || !strings.Contains(w, "remove") {
+			t.Fatalf("%s: %q", file, w)
+		}
+	}
+}
+
 func TestRemotePushRefusesBadTestHosts(t *testing.T) {
 	app, st := pushApp(t)
 	t.Setenv(webpush.TestHostsEnv, "example.com:443")

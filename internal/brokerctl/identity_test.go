@@ -66,6 +66,25 @@ func TestConfigHash(t *testing.T) {
 	}
 }
 
+// A config that sets none of the claude keys hashes exactly as on 673beaa
+// (v0.33.1, before they existed), so upgrading lever does not restart the
+// broker for them. The golden value was computed on that commit.
+func TestConfigHashUnchangedWithoutClaudeKeys(t *testing.T) {
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: "/tmp/tree",
+		Manager: config.Manager{Image: "img"},
+		Broker: config.Broker{
+			JailPort: 8443, AdminPort: 8444,
+			Tools: []config.Tool{{Name: "db", Command: []string{"db-server"}}},
+		},
+		Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch", Model: "m", InstructionsFile: "w.md"}},
+	}
+	const golden = "52dcb0680131c2514bd5fb09896b8ca1241469397b55f1af30011323c17112ce"
+	if got := ConfigHash(app); got != golden {
+		t.Fatalf("ConfigHash = %s, want the v0.33.1 hash %s (an unset new field must not change it)", got, golden)
+	}
+}
+
 // TestConfigHashFollowsTheRemoteLogins: the broker routes a message by its
 // sender label, so replacing one allowed login with another (same count, same
 // on/off) must restart it.

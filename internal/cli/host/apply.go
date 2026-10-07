@@ -1156,7 +1156,7 @@ type applyOpts struct {
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, opts applyOpts) (*applyWiring, error) {
-	b, err := bringUpBackend(ctx, app, bf)
+	b, err := bringUpBackend(ctx, app, bf, (&applyWiring{cmd: opts.Cmd}).log)
 	if err != nil {
 		return nil, err
 	}
@@ -1213,14 +1213,16 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 
 // bringUpBackend constructs the backend for app's machine and brings the jail
 // up, so the run-user/uid and host alias are resolved before anything is
-// built over the jail runner.
-func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory) (backend.Backend, error) {
+// built over the jail runner. warn gets the backend's non-fatal advice.
+func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, warn logFunc) (backend.Backend, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)
 	if err != nil {
 		return nil, err
 	}
-	if err := b.EnsureUp(ctx, backendConfigFor(app, machine)); err != nil {
+	cfg := backendConfigFor(app, machine)
+	cfg.Warn = warn
+	if err := b.EnsureUp(ctx, cfg); err != nil {
 		return nil, err
 	}
 	return b, nil

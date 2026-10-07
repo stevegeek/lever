@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend"
@@ -116,7 +117,8 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	if err != nil {
 		return err
 	}
-	if status == "" {
+	created := status == ""
+	if created {
 		if err := l.createVM(ctx, cfg); err != nil {
 			return err
 		}
@@ -130,8 +132,14 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	// containerd are `limactl create`-time only, so without this check an
 	// adopted VM is used wholesale with no drift check even though the
 	// template IS the containment surface (template.go).
-	if err := l.verifyRealizedConfig(ctx, cfg.ProjectTree); err != nil {
+	inst, err := l.verifyRealizedConfig(ctx, cfg.ProjectTree)
+	if err != nil {
 		return err
+	}
+	if !created && cfg.Warn != nil {
+		for _, d := range inst.sizingDrift(cfg.CPUs, cfg.Memory) {
+			cfg.Warn("jail: WARNING: %s; Lima applies it only when it creates the VM (back up the conversation, then `lever destroy` and `lever up` to recreate)", d)
+		}
 	}
 	if status == "Running" {
 		// Idempotent: already up (and just verified un-drifted).
@@ -170,7 +178,47 @@ type realizedInstance struct {
 			System bool `json:"system"`
 			User   bool `json:"user"`
 		} `json:"containerd"`
+		// CPUs and Memory are read for the sizing-drift warning only, never
+		// for the containment check.
+		CPUs   *int    `json:"cpus"`
+		Memory *string `json:"memory"`
 	} `json:"config"`
+}
+
+// sizingDrift describes each configured size (cpus, memory; 0 and "" mean
+// unset) that differs from the realized VM's. A value lever cannot read or
+// parse is not reported: the warning is advice, and a wrong one is worse
+// than none.
+func (inst realizedInstance) sizingDrift(cpus int, memory string) []string {
+	var out []string
+	if c := inst.Config.CPUs; cpus != 0 && c != nil && *c != cpus {
+		out = append(out, fmt.Sprintf("cpus is %d but the existing VM has %d", cpus, *c))
+	}
+	if m := inst.Config.Memory; memory != "" && m != nil {
+		want, ok1 := memBytes(memory)
+		got, ok2 := memBytes(*m)
+		if ok1 && ok2 && want != got {
+			out = append(out, fmt.Sprintf("memory is %s but the existing VM has %s", memory, *m))
+		}
+	}
+	return out
+}
+
+var memRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*(B|KiB|MiB|GiB|TiB|KB|MB|GB|TB)$`)
+
+// memBytes parses a size as lever's config and Lima write it ("24GiB",
+// "4096MiB", Lima's fractional "3.906GiB"), to whole bytes.
+func memBytes(s string) (int64, bool) {
+	m := memRE.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	unit := map[string]float64{"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}[m[2]]
+	return int64(n * unit), true
 }
 
 // matchesContainment reports whether the realized config is exactly the
@@ -214,20 +262,20 @@ func (inst realizedInstance) matchesContainment(projectTree string) bool {
 
 // verifyRealizedConfig reads back the VM's realized config (see
 // realizedInstance) and fails closed unless it matches the containment
-// template's intent for projectTree.
-func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) error {
+// template's intent for projectTree. It returns the config it read.
+func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) (realizedInstance, error) {
+	var inst realizedInstance
 	res, err := l.Runner().Run(ctx, nil, "limactl", "list", "--json", l.Machine())
 	if err != nil {
-		return fmt.Errorf("read back realized config for %q: %w", l.Machine(), err)
+		return inst, fmt.Errorf("read back realized config for %q: %w", l.Machine(), err)
 	}
-	var inst realizedInstance
 	if err := json.Unmarshal([]byte(strings.TrimSpace(res.Stdout)), &inst); err != nil {
-		return fmt.Errorf("parse realized config for %q: %w", l.Machine(), err)
+		return inst, fmt.Errorf("parse realized config for %q: %w", l.Machine(), err)
 	}
 	if !inst.matchesContainment(projectTree) {
-		return fmt.Errorf("lima VM %q exists with a mismatched containment config (mounts/port-forwards/containerd drifted from the lever template); run 'lever down' then 'lever up' to recreate", l.Machine())
+		return inst, fmt.Errorf("lima VM %q exists with a mismatched containment config (mounts/port-forwards/containerd drifted from the lever template); run 'lever down' then 'lever up' to recreate", l.Machine())
 	}
-	return nil
+	return inst, nil
 }
 
 // vmStatus returns this VM's status field from `limactl list`, or "" if the

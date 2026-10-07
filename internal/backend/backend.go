@@ -81,6 +81,10 @@ type Config struct {
 	// know nested_virt (`lever provision`): EnsureUp leaves the guest's
 	// /dev/kvm setup as it is instead of converging it to NestedVirt.
 	NestedVirtUnknown bool
+	// Warn prints a loud, user-facing line (apply's log). EnsureUp uses it
+	// for advice that must not fail the bring-up, e.g. a cpus or memory
+	// value an existing Lima VM does not have. Nil discards.
+	Warn func(format string, args ...any)
 }
 
 // HasScion reports whether any scion mode is configured.

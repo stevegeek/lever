@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTool(t *testing.T) (*Tool, string) {
@@ -137,5 +138,68 @@ func TestMoveCardRefusalListsColumns(t *testing.T) {
 	_, err := tl.MoveCard(context.Background(), "m", "17", "zzzzzzzzzzzzz")
 	if err == nil || !strings.Contains(err.Error(), "col00000000001") || !strings.Contains(err.Error(), "In progress") {
 		t.Fatalf("refusal must list column ids and names, got %v", err)
+	}
+}
+
+func TestCommentRefusesAttachmentMarkup(t *testing.T) {
+	tl, logPath := newTool(t)
+	ctx := context.Background()
+	body := `ping <action-text-attachment sgid="BAh7" content-type="application/vnd.actiontext.mention"></action-text-attachment>`
+	if _, err := tl.Comment(ctx, "m", "17", body); err == nil || !strings.Contains(err.Error(), "action-text-attachment") {
+		t.Fatalf("comment: want the markup refusal, got %v", err)
+	}
+	if _, err := tl.CreateCard(ctx, "m", "t", `<figure data-trix-attachment='{"sgid":"x"}'></figure>`); err == nil {
+		t.Fatal("create_card: want the markup refusal")
+	}
+	if log := readLog(t, logPath); log != "" {
+		t.Fatalf("a refused body must not reach the CLI:\n%s", log)
+	}
+}
+
+func TestWriteRateLimit(t *testing.T) {
+	tl, logPath := newTool(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	tl.Now = func() time.Time { return now }
+	tl.WriteLimit = 3
+	for i := range 2 {
+		if _, err := tl.Comment(ctx, "m", "17", "hi"); err != nil {
+			t.Fatalf("comment %d: %v", i, err)
+		}
+	}
+	if _, err := tl.CreateCard(ctx, "m", "t", "d"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	_, err := tl.Comment(ctx, "m", "17", "hi")
+	if err == nil || !strings.HasPrefix(err.Error(), "rate") {
+		t.Fatalf("4th write in the minute: want a rate refusal, got %v", err)
+	}
+	if _, err := tl.CreateCard(ctx, "m", "t", "d"); err == nil || !strings.HasPrefix(err.Error(), "rate") {
+		t.Fatalf("create over the cap: want a rate refusal, got %v", err)
+	}
+	if got := strings.Count(readLog(t, logPath), "[create]"); got != 3 {
+		t.Fatalf("want 3 creates sent, got %d", got)
+	}
+	// Reads are not limited.
+	if _, err := tl.ShowCard(ctx, "m", "17"); err != nil {
+		t.Fatalf("show over the write cap: %v", err)
+	}
+	now = now.Add(time.Minute)
+	if _, err := tl.Comment(ctx, "m", "17", "hi"); err != nil {
+		t.Fatalf("after a minute the cap must reset: %v", err)
+	}
+}
+
+func TestWriteRateLimitDefault(t *testing.T) {
+	tl, _ := newTool(t)
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	tl.Now = func() time.Time { return now }
+	for i := range DefaultWriteLimit {
+		if err := tl.takeWrite(); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	if err := tl.takeWrite(); err == nil {
+		t.Fatalf("write %d must be refused", DefaultWriteLimit+1)
 	}
 }

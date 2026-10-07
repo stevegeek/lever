@@ -63,9 +63,24 @@ func ValidTitle(s string) error {
 	return nil
 }
 
+// attachmentMarkers are the Action Text markup a body could use to make an
+// attachment: the CLI turns markdown into HTML but passes raw HTML through,
+// and the server turns an <action-text-attachment sgid=...> (or a Trix
+// <figure data-trix-attachment=...>) into a real attachment — a mention
+// notifies an account user as the token owner, and a seen sgid re-embeds
+// an attachment. Other raw HTML gives nothing markdown does not, so it is
+// left alone.
+var attachmentMarkers = []string{"action-text-attachment", "trix-attachment"}
+
 func ValidText(s string) error {
 	if utf8.RuneCountInString(s) > 20000 || !noControl(s, true) {
 		return fmt.Errorf("text must be at most 20000 characters with no control characters other than newline and tab")
+	}
+	low := strings.ToLower(s)
+	for _, m := range attachmentMarkers {
+		if strings.Contains(low, m) {
+			return fmt.Errorf("text must not contain %q: attachment and mention markup is refused (write plain markdown)", m)
+		}
 	}
 	return nil
 }

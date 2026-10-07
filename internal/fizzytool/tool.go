@@ -8,10 +8,16 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ErrOtherBoard: the card is not on the configured board.
 var ErrOtherBoard = errors.New("card is not on the Lever board")
+
+// DefaultWriteLimit is how many comments and created cards together the
+// tool sends in any one minute when Tool.WriteLimit is 0.
+const DefaultWriteLimit = 10
 
 // Tool is the six operations of spec §4b.3.
 type Tool struct {
@@ -20,6 +26,43 @@ type Tool struct {
 	Prefix string // prepended to every comment and description
 	TmpDir string // private (0700) dir for body files
 	Log    *slog.Logger
+	// WriteLimit caps comment + create_card calls per sliding minute for
+	// this process, so a looping agent cannot flood the board (and its
+	// watchers' notifications). 0 means DefaultWriteLimit.
+	WriteLimit int
+	// Now is time.Now; a test seam.
+	Now func() time.Time
+
+	mu     sync.Mutex
+	writes []time.Time // send times within the last minute, oldest first
+}
+
+// takeWrite counts one comment or card create against the per-minute cap,
+// or refuses it.
+func (t *Tool) takeWrite() error {
+	now := time.Now
+	if t.Now != nil {
+		now = t.Now
+	}
+	limit := t.WriteLimit
+	if limit <= 0 {
+		limit = DefaultWriteLimit
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := now()
+	keep := t.writes[:0]
+	for _, w := range t.writes {
+		if n.Sub(w) < time.Minute {
+			keep = append(keep, w)
+		}
+	}
+	t.writes = keep
+	if len(t.writes) >= limit {
+		return fmt.Errorf("rate: at most %d comments and new cards per minute; try again in a minute", limit)
+	}
+	t.writes = append(t.writes, n)
+	return nil
 }
 
 func (t *Tool) audit(op, caller, card, column string, err error) {
@@ -146,6 +189,9 @@ func (t *Tool) Comment(ctx context.Context, caller, number, body string) (res an
 	if _, err := t.checkCard(ctx, number); err != nil {
 		return nil, err
 	}
+	if err := t.takeWrite(); err != nil {
+		return nil, err
+	}
 	var out json.RawMessage
 	err = t.withTextFile(t.Prefix+body, func(p string) error {
 		var e error
@@ -199,6 +245,9 @@ func (t *Tool) CreateCard(ctx context.Context, caller, title, description string
 		return nil, err
 	}
 	if err := ValidText(description); err != nil {
+		return nil, err
+	}
+	if err := t.takeWrite(); err != nil {
 		return nil, err
 	}
 	var out json.RawMessage

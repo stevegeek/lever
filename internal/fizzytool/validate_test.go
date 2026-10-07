@@ -37,4 +37,12 @@ func TestValidators(t *testing.T) {
 	ok(ValidText("line 1\nline 2"), "body")
 	bad(ValidText(strings.Repeat("a", 20001)), "long body")
 	bad(ValidText("a\x00b"), "NUL body")
+	for _, b := range []string{
+		`hi <action-text-attachment sgid="BAh7CEkiCGdpZAY"></action-text-attachment>`,
+		`<ACTION-TEXT-ATTACHMENT sgid="x" content-type="application/vnd.actiontext.mention">`,
+		`<figure data-trix-attachment='{"sgid":"x"}'></figure>`,
+	} {
+		bad(ValidText(b), b)
+	}
+	ok(ValidText("see `Vec<T>` and <b>bold</b>, a < b"), "other markup")
 }

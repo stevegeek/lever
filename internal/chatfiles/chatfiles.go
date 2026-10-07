@@ -10,6 +10,7 @@
 package chatfiles
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -171,15 +172,15 @@ func Store(tree, dirRel, name string, src io.Reader, max int64, now time.Time) (
 }
 
 // Hash is the sha256 and size of the regular file at rel (no link on its
-// path), at most max bytes.
-func Hash(tree, rel string, max int64) (string, int64, error) {
+// path), at most max bytes. It stops with ctx's error once ctx is done.
+func Hash(ctx context.Context, tree, rel string, max int64) (string, int64, error) {
 	f, _, err := fsutil.OpenInTreeNoLinks(tree, rel, max)
 	if err != nil {
 		return "", 0, err
 	}
 	defer f.Close()
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(f, max+1))
+	n, err := io.Copy(h, ctxReader{ctx, io.LimitReader(f, max+1)})
 	if err != nil {
 		return "", 0, err
 	}
@@ -187,6 +188,19 @@ func Hash(tree, rel string, max int64) (string, int64, error) {
 		return "", 0, ErrTooLarge
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// ctxReader reads r until ctx is done, then answers ctx's error.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 // Stage copies src, at most max bytes, into a private temp file outside the

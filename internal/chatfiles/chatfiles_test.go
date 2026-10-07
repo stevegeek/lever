@@ -2,6 +2,7 @@ package chatfiles
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -100,9 +101,14 @@ func TestStoreWritesHashesAndRetriesATakenName(t *testing.T) {
 	if err != nil || s2.Rel != dir+"/20261007T101500Z-2-a.pdf" {
 		t.Fatalf("second = %+v %v", s2, err)
 	}
-	sha, size, err := Hash(tree, s1.Rel, 100)
+	sha, size, err := Hash(context.Background(), tree, s1.Rel, 100)
 	if err != nil || sha != s1.SHA256 || size != 6 {
 		t.Fatalf("hash %s %d %v", sha, size, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := Hash(ctx, tree, s1.Rel, 100); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a done context: %v", err)
 	}
 }
 

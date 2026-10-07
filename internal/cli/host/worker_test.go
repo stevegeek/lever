@@ -45,7 +45,8 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 
 	f := scionOKRunner()
 	f.Script("sh", proc.Result{})
-	root := stubRoot(&stubBackend{runner: f})
+	sb := &stubBackend{runner: f}
+	root := stubRoot(sb)
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetErr(&out)
@@ -53,6 +54,11 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 
 	if err := root.Execute(); err != nil {
 		t.Fatalf("purge: %v (%s)", err, out.String())
+	}
+	// The ticket dir and the runner's XDG_RUNTIME_DIR come from the run
+	// user's uid, so purge reads it before it builds the jail runner.
+	if !sb.resolvedRunUser || sb.runnerBeforeUser {
+		t.Fatalf("purge: resolved=%v, runner before the user=%v", sb.resolvedRunUser, sb.runnerBeforeUser)
 	}
 
 	// scion delete scratch -g /lever ... was called, then the guest ticket

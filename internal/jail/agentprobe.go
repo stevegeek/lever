@@ -100,41 +100,77 @@ func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, er
 	defer cancel()
 	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
 	if err != nil {
-		if noSuchContainer(res.Stderr) {
+		switch {
+		case noSuchContainer(res.Stderr):
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrNoContainer)
+		case errors.Is(err, proc.ErrOutputLimit):
+			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, proc.ErrOutputLimit)
+		case ctx.Err() != nil:
+			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrProbeTimedOut)
 		}
-		return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: exit status %d", ref, res.Code)
+		return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, &ProbeExitError{Code: res.Code})
 	}
 	return parseHubTokenTimes(res.Stdout)
 }
 
-// errTokenShape is every way the probe's output can fail to parse. It names
+// ErrProbeTimedOut is a probe exec that passed its deadline.
+var ErrProbeTimedOut = errors.New("the probe timed out")
+
+// ProbeExitError is a probe exec that exited non-zero. It carries only the
+// exit code: the output is the agent's word.
+type ProbeExitError struct{ Code int }
+
+func (e *ProbeExitError) Error() string { return "exit status " + strconv.Itoa(e.Code) }
+
+// ProbeErrorClass names the class of a probe error in fixed words, for an
+// operator line that must say why a check could not run without repeating
+// anything the container printed.
+func ProbeErrorClass(err error) string {
+	var exit *ProbeExitError
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrNoContainer):
+		return "no container"
+	case errors.Is(err, ErrProbeTimedOut):
+		return "timed out"
+	case errors.Is(err, proc.ErrOutputLimit):
+		return "output over its limit"
+	case errors.Is(err, ErrTokenShape):
+		return "unexpected output"
+	case errors.As(err, &exit):
+		return exit.Error()
+	}
+	return "error"
+}
+
+// ErrTokenShape is every way the probe's output can fail to parse. It names
 // no part of the output.
-var errTokenShape = errors.New("reading agent hub token: unexpected output (no clock line, or a token without a readable exp claim)")
+var ErrTokenShape = errors.New("reading agent hub token: unexpected output (no clock line, or a token without a readable exp claim)")
 
 // parseHubTokenTimes decodes agentTokenScript's two lines.
 func parseHubTokenTimes(out string) (HubTokenTimes, error) {
 	clock, payload, ok := strings.Cut(strings.TrimSpace(out), "\n")
 	if !ok {
-		return HubTokenTimes{}, errTokenShape
+		return HubTokenTimes{}, ErrTokenShape
 	}
 	now, err := strconv.ParseInt(strings.TrimSpace(clock), 10, 64)
 	if err != nil {
-		return HubTokenTimes{}, errTokenShape
+		return HubTokenTimes{}, ErrTokenShape
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(strings.TrimSpace(payload), "="))
 	if err != nil {
-		return HubTokenTimes{}, errTokenShape
+		return HubTokenTimes{}, ErrTokenShape
 	}
 	var claims struct {
 		Exp json.Number `json:"exp"`
 	}
 	if err := json.Unmarshal(raw, &claims); err != nil {
-		return HubTokenTimes{}, errTokenShape
+		return HubTokenTimes{}, ErrTokenShape
 	}
 	exp, err := claims.Exp.Int64()
 	if err != nil || exp <= 0 {
-		return HubTokenTimes{}, errTokenShape
+		return HubTokenTimes{}, ErrTokenShape
 	}
 	return HubTokenTimes{Expiry: time.Unix(exp, 0).UTC(), Now: time.Unix(now, 0).UTC()}, nil
 }

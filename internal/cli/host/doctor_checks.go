@@ -1218,7 +1218,7 @@ func checkAgentHubTokens(ctx context.Context, project, manager string, agents []
 		tok, err := session.HubToken(ctx, jail.ContainerName(hubProjectKey(project), name))
 		switch {
 		case err != nil:
-			unread = append(unread, name)
+			unread = append(unread, name+" ("+jail.ProbeErrorClass(err)+")")
 		case tok.Expired() && name == manager && a.Phase == scionpkg.PhaseRunning:
 			managerExpired = true
 		case tok.Expired() && (a.Phase == scionpkg.PhaseRunning || a.Phase == scionpkg.PhaseStopped):
@@ -1237,7 +1237,7 @@ func checkAgentHubTokens(ctx context.Context, project, manager string, agents []
 	}
 	notChecked := ""
 	if len(unread) > 0 {
-		notChecked = "; not checked: " + strings.Join(unread, ", ") + " (token unreadable)"
+		notChecked = "; not checked (token unreadable): " + strings.Join(unread, ", ")
 	}
 	var warns, fixes []string
 	if managerExpired {

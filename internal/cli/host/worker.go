@@ -49,6 +49,12 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The ticket dir and the jail runner's XDG_RUNTIME_DIR both come
+			// from the run user's uid; unread, it is the default (501), which
+			// is wrong on Lima (guest uid 1000).
+			if err := b.ResolveRunUser(cmd.Context()); err != nil {
+				return fmt.Errorf("reading the jail run user: %w", err)
+			}
 
 			// Resolve the worker spec from config with the SAME derivation the
 			// broker/apply use (brokerctl.WorkerSpecs), so HostWorkspace/TicketDir

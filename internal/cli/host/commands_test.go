@@ -7,7 +7,9 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/types"
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 type stubBackend struct {
@@ -15,6 +17,8 @@ type stubBackend struct {
 	scionState        types.ScionProjectState
 	scionErr          error
 	resolveRunUserErr error       // when set, ResolveRunUser returns it instead of nil
+	resolvedRunUser   bool        // ResolveRunUser was called
+	runnerBeforeUser  bool        // JailRunner was called before ResolveRunUser
 	runner            proc.Runner // JailRunner override; nil ⇒ proc.RealRunner{}
 	removeScionCalls  []string    // workspace paths passed to RemoveScionProjectConfigs
 	removeScionErr    error
@@ -46,8 +50,14 @@ func (s *stubBackend) Profile() backend.Profile                       { return b
 func (s *stubBackend) HostAliasV4() string                            { return "" }
 func (s *stubBackend) RunUser() string                                { return "stub" }
 func (s *stubBackend) RunUID() string                                 { return "501" }
-func (s *stubBackend) ResolveRunUser(context.Context) error           { return s.resolveRunUserErr }
+func (s *stubBackend) ResolveRunUser(context.Context) error {
+	s.resolvedRunUser = true
+	return s.resolveRunUserErr
+}
 func (s *stubBackend) JailRunner() proc.Runner {
+	if !s.resolvedRunUser {
+		s.runnerBeforeUser = true
+	}
 	if s.runner != nil {
 		return s.runner
 	}
@@ -138,5 +148,19 @@ func TestFactoryReceivesConfiguredBackendName(t *testing.T) {
 	}
 	if gotName != "orbstack" {
 		t.Fatalf("factory got name %q, want %q", gotName, "orbstack")
+	}
+}
+
+// Doctor reads the run user before it builds the jail runner: the runner's
+// XDG_RUNTIME_DIR comes from that uid, and on Lima (guest uid 1000, not the
+// default 501) rootless podman found no agent container without it.
+func TestDoctorResolvesTheRunUserBeforeTheJailRunner(t *testing.T) {
+	sb := &stubBackend{runner: proc.NewFakeRunner()}
+	app := &config.App{Name: "assistant"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runDoctorChecks(ctx, app, state.State{Dir: t.TempDir()}, sb, productionProbes(proc.NewFakeRunner()))
+	if !sb.resolvedRunUser || sb.runnerBeforeUser {
+		t.Fatalf("resolved=%v, runner before the user=%v", sb.resolvedRunUser, sb.runnerBeforeUser)
 	}
 }

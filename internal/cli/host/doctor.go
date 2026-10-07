@@ -94,6 +94,13 @@ func printDoctorReport(cmd *cobra.Command, checks []checkResult) int {
 // the order an operator reads: process liveness first, then the pieces each
 // later check depends on. Tests pin it.
 func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b backend.Backend, probes doctorProbes) []checkResult {
+	// The jail runner sets XDG_RUNTIME_DIR from the run user's uid, and
+	// rootless podman finds the agent containers only under the right one.
+	// Without this read the uid stays the default (501, the OrbStack host
+	// uid), so on Lima (guest uid 1000) every exec into an agent container
+	// missed it. A machine that is down keeps the default; the checks that
+	// need it then report it.
+	_ = b.ResolveRunUser(ctx)
 	jr := b.JailRunner()
 	project := hubProjectKey(b.MountDest())
 

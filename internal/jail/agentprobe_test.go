@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -278,6 +279,34 @@ func TestAgentProbeExecsAreBounded(t *testing.T) {
 	for i, n := range h.limits {
 		if n != agentExecOutputLimit {
 			t.Fatalf("exec %d output cap = %d, want %d", i, n, agentExecOutputLimit)
+		}
+	}
+}
+
+func TestProbeErrorClass(t *testing.T) {
+	var calls []string
+	_, err := AgentProbe{R: codeRunner{res: proc.Result{Code: 2, Stderr: "SECRET"}, calls: &calls}}.HubToken(context.Background(), "x")
+	if got := ProbeErrorClass(err); got != "exit status 2" {
+		t.Fatalf("exit class = %q (%v)", got, err)
+	}
+	_, err = AgentProbe{R: codeRunner{res: proc.Result{Stdout: "1791307956\n"}, calls: &calls}}.HubToken(context.Background(), "x")
+	if got := ProbeErrorClass(err); got != "unexpected output" {
+		t.Fatalf("shape class = %q (%v)", got, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = AgentProbe{R: codeRunner{res: proc.Result{Code: -1}, calls: &calls}}.HubToken(ctx, "x")
+	if got := ProbeErrorClass(err); got != "timed out" {
+		t.Fatalf("timeout class = %q (%v)", got, err)
+	}
+	for err, want := range map[error]string{
+		nil:                                 "",
+		fmt.Errorf("w: %w", ErrNoContainer): "no container",
+		proc.ErrOutputLimit:                 "output over its limit",
+		errors.New("other"):                 "error",
+	} {
+		if got := ProbeErrorClass(err); got != want {
+			t.Fatalf("ProbeErrorClass(%v) = %q, want %q", err, got, want)
 		}
 	}
 }

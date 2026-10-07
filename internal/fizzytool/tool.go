@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 )
 
 // ErrOtherBoard: the card is not on the configured board.
@@ -91,7 +92,28 @@ func (t *Tool) ListCards(ctx context.Context, caller, column, search, page strin
 		}
 		args = append(args, "--search="+search)
 	}
-	return t.CLI.Run(ctx, args...)
+	data, err := t.CLI.Run(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	// The CLI may return cards of other boards; keep only this board's.
+	var items []json.RawMessage
+	if err := json.Unmarshal(data, &items); err != nil {
+		return nil, fmt.Errorf("card list: unreadable response")
+	}
+	kept := make([]json.RawMessage, 0, len(items))
+	for _, it := range items {
+		var c struct {
+			Board struct {
+				ID string `json:"id"`
+			} `json:"board"`
+		}
+		if json.Unmarshal(it, &c) == nil && c.Board.ID == t.Board {
+			kept = append(kept, it)
+		}
+	}
+	out, err := json.Marshal(kept)
+	return json.RawMessage(out), err
 }
 
 func (t *Tool) ShowCard(ctx context.Context, caller, number string) (res any, err error) {
@@ -149,17 +171,24 @@ func (t *Tool) MoveCard(ctx context.Context, caller, number, column string) (res
 		return nil, err
 	}
 	var list []struct {
-		ID string `json:"id"`
+		ID   string `json:"id"`
+		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(cols, &list); err != nil {
 		return nil, fmt.Errorf("column list: unreadable response")
 	}
 	found := false
+	var opts []string
 	for _, c := range list {
 		found = found || c.ID == column
+		o := c.ID
+		if c.Name != "" {
+			o += " (" + c.Name + ")"
+		}
+		opts = append(opts, o)
 	}
 	if !found {
-		return nil, fmt.Errorf("column %s is not a column of the board", column)
+		return nil, fmt.Errorf("column %s is not a column of the board; columns: %s", column, strings.Join(opts, ", "))
 	}
 	return t.CLI.Run(ctx, "card", "column", number, "--column="+column)
 }

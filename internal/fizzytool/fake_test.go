@@ -27,8 +27,12 @@ case "$1 $2" in
 "card show")
   if [ "$3" = "99" ]; then b=otherboard0000000000000; else b=` + testBoard + `; fi
   printf '{"ok":true,"data":{"number":%s,"board":{"id":"%s"},"title":"t"}}\n' "$3" "$b" ;;
-"column list") printf '{"ok":true,"data":[{"id":"col00000000001"}]}\n' ;;
-"card list") printf '{"ok":true,"data":[{"number":17}]}\n' ;;
+"column list") printf '{"ok":true,"data":[{"id":"col00000000001","name":"In progress"}]}\n' ;;
+"card list")
+  case "$*" in
+  *--search=mixed*) printf '{"ok":true,"data":[{"number":17,"title":"mine","board":{"id":"` + testBoard + `"}},{"number":99,"board":{"id":"otherboard0000000000000"}},{"number":5}]}\n' ;;
+  *) printf '{"ok":true,"data":[{"number":17,"board":{"id":"` + testBoard + `"}}]}\n' ;;
+  esac ;;
 "comment list") printf '{"ok":true,"data":[]}\n' ;;
 "fail now") printf '{"ok":false,"error":"boom tok_SECRET"}\n'; exit 1 ;;
 "version "|"version --agent") printf '{"ok":true,"data":{"version":"4.0.1"}}\n' ;;

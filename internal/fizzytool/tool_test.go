@@ -2,6 +2,7 @@ package fizzytool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -109,5 +110,32 @@ func TestValidationBeforeAnyCall(t *testing.T) {
 	}
 	if log := readLog(t, logPath); log != "" {
 		t.Fatalf("no CLI call expected, got:\n%s", log)
+	}
+}
+
+func TestListCardsDropsOtherBoards(t *testing.T) {
+	tl, _ := newTool(t)
+	res, err := tl.ListCards(context.Background(), "m", "", "mixed", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := res.(json.RawMessage)
+	if !ok {
+		t.Fatalf("want json.RawMessage, got %T", res)
+	}
+	var cards []map[string]any
+	if err := json.Unmarshal(raw, &cards); err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 || cards[0]["number"] != float64(17) || cards[0]["title"] != "mine" {
+		t.Fatalf("want only card 17 with its fields kept, got %s", raw)
+	}
+}
+
+func TestMoveCardRefusalListsColumns(t *testing.T) {
+	tl, _ := newTool(t)
+	_, err := tl.MoveCard(context.Background(), "m", "17", "zzzzzzzzzzzzz")
+	if err == nil || !strings.Contains(err.Error(), "col00000000001") || !strings.Contains(err.Error(), "In progress") {
+		t.Fatalf("refusal must list column ids and names, got %v", err)
 	}
 }

@@ -21,9 +21,10 @@ import (
 // recorded its exact text for that agent and contact
 // (Config.MatchAgentMessages, over the operator socket). Every other agent
 // row is removed from the history answer, and nothing else in the answer
-// may carry its text: reply previews go, attachment and extension entries
-// of removed rows go, and so do the attachment entries of every agent row
-// (their names are agent text no record covers). Paging is the hub's:
+// may carry its text: the answer and each kept row keep only listed
+// fields, reply previews go, attachment and extension entries of removed
+// rows go, and so do the attachment entries of every agent row (their names
+// are agent text no record covers). Paging is the hub's:
 // nextCursor and totalCount stay as they are, so a page may hold fewer rows
 // than asked for, and totalCount can show how many rows a page hid (never
 // their text; accepted). Any answer the proxy cannot read becomes an empty
@@ -160,6 +161,51 @@ func setBody(resp *http.Response, b []byte) {
 	resp.Header.Del("Content-Encoding")
 }
 
+// The fields a contact's history answer keeps: what lever's chat page and
+// the hub's own chat page read. Each kept row, extension and attachment
+// entry, and the answer itself, is rebuilt from its list, so a field the
+// hub adds later reaches no contact until it is listed here. A row loses
+// channel and threadId (an agent sets both) and groupId; the answer loses
+// replyPreviews (each quotes ANOTHER row's text, which may be one this
+// contact is not shown).
+var (
+	historyFields    = []string{"messages", "nextCursor", "totalCount", "messageAttachments", "messageExtensions"}
+	historyRowFields = []string{"id", "projectId", "sender", "senderId", "recipient", "recipientId", "msg", "type", "urgent",
+		"broadcasted", "read", "agentId", "conversationId", "createdAt", "senderProjectId", "recipientProjectId",
+		"dispatchState", "dispatchedAt", "dispatchFailureReason"}
+	extensionFields  = []string{"messageId", "replyToId", "editedAt", "deletedAt"}
+	attachmentFields = []string{"id", "name", "mime", "size"}
+)
+
+var errNoHistoryRows = errors.New("the hub's history answer has no messages list")
+
+// historyMessages decodes the rows of a hub history answer into out: the
+// list under "messages" (null is an empty page), the one key filterHistory
+// reads. An answer without it is an error, so rows under any other key
+// never count.
+func historyMessages(raw json.RawMessage, out any) error {
+	if len(raw) == 0 {
+		return errNoHistoryRows
+	}
+	return json.Unmarshal(raw, out)
+}
+
+// pickFields is the object raw with only the keys in fields, or ok=false
+// when raw is not an object.
+func pickFields(raw json.RawMessage, fields []string) (map[string]json.RawMessage, bool) {
+	var in map[string]json.RawMessage
+	if json.Unmarshal(raw, &in) != nil || in == nil {
+		return nil, false
+	}
+	out := make(map[string]json.RawMessage, len(fields))
+	for _, k := range fields {
+		if v, ok := in[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, true
+}
+
 // filterHistory rewrites a 200 history answer for contact.
 func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid string) {
 	if resp.StatusCode != http.StatusOK {
@@ -167,10 +213,10 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHistoryAnswer+1))
 	_ = resp.Body.Close()
-	var doc map[string]json.RawMessage
 	var raws []json.RawMessage
+	doc, ok := pickFields(body, historyFields)
 	if err != nil || len(body) > maxHistoryAnswer || resp.Header.Get("Content-Encoding") != "" ||
-		json.Unmarshal(body, &doc) != nil || json.Unmarshal(doc["messages"], &raws) != nil {
+		!ok || json.Unmarshal(doc["messages"], &raws) != nil {
 		setBody(resp, emptyHistory)
 		return
 	}
@@ -186,7 +232,7 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	if err != nil {
 		keep = map[string]bool{}
 	}
-	kept := []json.RawMessage{}
+	kept := []map[string]json.RawMessage{}
 	removed := map[string]bool{}
 	agentIDs := map[string]bool{} // ids of agent rows, kept or not
 	shown := contactShown(rows, keep, uid, agentID)
@@ -200,13 +246,14 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 			removed[m.ID] = true
 			continue
 		}
-		kept = append(kept, raws[i])
+		row, ok := pickFields(raws[i], historyRowFields)
+		if !ok {
+			removed[m.ID] = true
+			continue
+		}
+		kept = append(kept, row)
 	}
 	doc["messages"], _ = json.Marshal(kept)
-	delete(doc, "items")
-	// A reply preview quotes ANOTHER row's text, which may be one this
-	// contact is not shown: none passes.
-	delete(doc, "replyPreviews")
 	for _, k := range []string{"messageAttachments", "messageExtensions"} {
 		var m map[string]json.RawMessage
 		if _, ok := doc[k]; !ok {
@@ -226,6 +273,8 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 			}
 			if k == "messageExtensions" {
 				m[id] = dropHiddenReplyTo(m[id], shown)
+			} else {
+				m[id] = pickAttachments(m[id])
 			}
 		}
 		doc[k], _ = json.Marshal(m)
@@ -237,6 +286,22 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	setBody(resp, out)
 }
 
+// pickAttachments rebuilds a row's attachment list from attachmentFields.
+// A list it cannot read, or an entry that is not an object, is dropped.
+func pickAttachments(raw json.RawMessage) json.RawMessage {
+	var in []json.RawMessage
+	out := []map[string]json.RawMessage{}
+	if json.Unmarshal(raw, &in) == nil {
+		for _, a := range in {
+			if e, ok := pickFields(a, attachmentFields); ok {
+				out = append(out, e)
+			}
+		}
+	}
+	b, _ := json.Marshal(out)
+	return b
+}
+
 // dmEntryHidden are the DM list keys a contact does not get with agent
 // messages on: each describes the latest row (its text, sender, id, time)
 // or whether one is unread, and that row may be one the contact is not
@@ -244,12 +309,13 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 // which counts only shown rows.
 var dmEntryHidden = []string{"lastMessagePreview", "lastMessageSender", "lastMessageId", "lastActivityAt", "hasUnread"}
 
-// dropHiddenReplyTo removes an extension entry's replyToId unless it names
-// a row the contact is shown on this page: the id of a hidden row is not
-// the contact's to see. An entry that is not an object is dropped.
+// dropHiddenReplyTo rebuilds an extension entry from extensionFields and
+// removes its replyToId unless it names a row the contact is shown on this
+// page: the id of a hidden row is not the contact's to see. An entry that
+// is not an object becomes an empty one.
 func dropHiddenReplyTo(raw json.RawMessage, shown map[string]bool) json.RawMessage {
-	var e map[string]json.RawMessage
-	if json.Unmarshal(raw, &e) != nil || e == nil {
+	e, ok := pickFields(raw, extensionFields)
+	if !ok {
 		return json.RawMessage(`{}`)
 	}
 	var to string

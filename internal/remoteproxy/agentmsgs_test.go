@@ -376,3 +376,40 @@ func TestHistoryFilterHidesARecordedRowWithAHubType(t *testing.T) {
 		t.Fatalf("shown %v asked %v, want %v", shown, asked, want)
 	}
 }
+
+// A contact gets only the fields the chat pages read: a field an agent can
+// set (channel, threadId) or one the hub adds later never passes, in a row,
+// an extension, an attachment entry or the answer itself.
+func TestHistoryFilterKeepsOnlyListedFields(t *testing.T) {
+	body := `{"messages":[
+ {"id":"a1","projectId":"p","sender":"agent:w1","senderId":"id-w1","recipient":"user:c@x","recipientId":"u-contact","msg":"recorded",
+  "type":"instruction","urgent":true,"broadcasted":false,"read":true,"agentId":"id-w1","conversationId":"cv","createdAt":"2026-10-06T10:00:00Z",
+  "senderProjectId":"p","recipientProjectId":"p","dispatchState":"dispatched","dispatchedAt":"2026-10-06T10:00:01Z","dispatchFailureReason":"r",
+  "channel":"SECRET-channel","threadId":"SECRET-thread","groupId":"SECRET-group","future":"SECRET-future"},
+ {"id":"c1","sender":"user:c@x","senderId":"u-contact","type":"instruction","msg":"mine","createdAt":"2026-10-06T09:59:00Z","threadId":"SECRET-own"}],
+ "nextCursor":"cur-1","totalCount":2,"futureTop":"SECRET-top",
+ "messageAttachments":{"c1":[{"id":"f3","name":"mine.pdf","mime":"application/pdf","size":3,"future":"SECRET-att"}]},
+ "messageExtensions":{"a1":{"messageId":"a1","editedAt":"2026-10-06T10:05:00Z","future":"SECRET-ext"}}}`
+	h := agentMsgHandler(t, historyHub(t, body, nil), recordedOnly("recorded"))
+	got := contactDo(h, "c@x", "GET", dmPath(agentW1, contactUID, "/messages"), "").Body.String()
+	if strings.Contains(got, "SECRET") {
+		t.Fatalf("an unlisted field passed: %s", got)
+	}
+	var doc struct {
+		Messages    []map[string]any            `json:"messages"`
+		NextCursor  string                      `json:"nextCursor"`
+		TotalCount  int                         `json:"totalCount"`
+		Attachments map[string][]map[string]any `json:"messageAttachments"`
+		Ext         map[string]map[string]any   `json:"messageExtensions"`
+	}
+	if err := json.Unmarshal([]byte(got), &doc); err != nil || len(doc.Messages) != 2 {
+		t.Fatalf("%v %s", err, got)
+	}
+	if len(doc.Messages[0]) != len(historyRowFields) {
+		t.Errorf("row keeps %d fields, want every listed one (%d): %v", len(doc.Messages[0]), len(historyRowFields), doc.Messages[0])
+	}
+	if doc.NextCursor != "cur-1" || doc.TotalCount != 2 || doc.Attachments["c1"][0]["name"] != "mine.pdf" ||
+		doc.Attachments["c1"][0]["size"] != 3.0 || doc.Ext["a1"]["editedAt"] == nil {
+		t.Fatalf("%s", got)
+	}
+}

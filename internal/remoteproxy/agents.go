@@ -326,16 +326,12 @@ func (g *gate) addUnread(ctx context.Context, login, cookie string, ans *agentsA
 		}
 		reads++
 		var page struct {
-			Messages []hubMessage `json:"messages"`
-			Items    []hubMessage `json:"items"`
+			Messages json.RawMessage `json:"messages"`
 		}
+		var items []hubMessage
 		p := "/api/v1/chat/conversations/" + url.PathEscape(e.Conversation) + fmt.Sprintf("/messages?limit=%d", unreadPage)
-		if st, err := c.hubGet(ctx, cookie, p, &page); err != nil || st != http.StatusOK {
+		if st, err := c.hubGet(ctx, cookie, p, &page); err != nil || st != http.StatusOK || historyMessages(page.Messages, &items) != nil {
 			continue
-		}
-		items := page.Messages
-		if items == nil {
-			items = page.Items
 		}
 		var keep func(hubMessage) bool
 		if g.cfg.MatchAgentMessages != nil && ans.Tier == chatledger.TierContact {

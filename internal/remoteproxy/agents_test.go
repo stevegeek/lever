@@ -503,3 +503,19 @@ func TestUnreadOmittedWhenTheBrokerIsDown(t *testing.T) {
 		t.Fatal("the contact's count never asked the broker")
 	}
 }
+
+// The hub answers history under "messages": an answer with its rows under
+// any other key gives no count, as the contact's history filter shows
+// nothing.
+func TestUnreadOmittedForRowsUnderItems(t *testing.T) {
+	w1Key := "dm:agent:" + agentW1 + ":user:" + chatUID
+	dms := `{"dms":[{"conversationKey":"` + w1Key + `","hasUnread":true}]}`
+	history := map[string]string{w1Key: `{"items":[` +
+		`{"id":"m1","sender":"agent:w1","senderId":"` + agentW1 + `","type":"instruction","msg":"x","createdAt":"2026-10-06T10:01:00Z"}]}`}
+	rw, ans := agentsAs(t, NewHandler(chatConfig(t, dmHub(t, dms, history))), chatOp)
+	for _, a := range ans.Agents {
+		if a.Name == "w1" && a.Unread != nil {
+			t.Fatalf("unread %d, want none: %s", *a.Unread, rw.Body)
+		}
+	}
+}

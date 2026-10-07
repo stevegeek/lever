@@ -9,6 +9,10 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **`github` broker tool (`lever-tool-github`).** An agent pushes a git bundle to `agent/*`
+  branches through the broker. The jail holds no GitHub credential. The tool never forces a push.
+  A GitHub App with Contents read+write mints 1 h tokens. See the `github-tool` guide. CI now runs
+  on `agent/**` pushes, and the release workflow refuses a tag that is not on `main`.
 - **`nested_virt`, `cpus`, `memory` (Lima).** `nested_virt` (Linux host only) gives every agent
   container `/dev/kvm`; `cpus` and `memory` size the jail VM at create time. New doctor row
   *nested virt*.

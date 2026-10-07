@@ -136,7 +136,10 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	switch {
 	case !ok:
 		return errors.New("lever has no record of its session starting fresh")
-	case r.SkillHash != hash:
+	case r.SkillHash != skills.ContentHash(onDisk) && r.SkillHash != hash:
+		// ContentHash leaves out the release stamp, so a release that
+		// renders the same skill text keeps the session fresh; the full
+		// hash is what records written before 0.33.1 hold.
 		return staleSessionError{fmt.Sprintf("at %s, lever %s", r.Started.UTC().Format(time.RFC3339), r.Version)}
 	}
 	return nil

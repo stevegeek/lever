@@ -254,3 +254,26 @@ func TestFilesDirectionBlocks(t *testing.T) {
 		}
 	}
 }
+
+func TestContentHashIgnoresOnlyTheStamp(t *testing.T) {
+	a := []byte("---\nname: x\nlever-version: 0.32.0\n---\nBody lever-version: 9\n")
+	b := []byte("---\nname: x\nlever-version: 0.33.0\n---\nBody lever-version: 9\n")
+	if ContentHash(a) != ContentHash(b) {
+		t.Fatal("two stamps of the same text hash apart")
+	}
+	if ContentHash(a) == Hash(a) {
+		t.Fatal("the stamp line was not left out")
+	}
+	c := []byte("---\nname: x\nlever-version: 0.33.0\n---\nOther body\n")
+	if ContentHash(c) == ContentHash(b) {
+		t.Fatal("a body change was hidden")
+	}
+	noStamp := []byte("---\nname: x\n---\nBody\n")
+	if ContentHash(noStamp) != Hash(noStamp) {
+		t.Fatal("a file with no stamp must hash as itself")
+	}
+	bodyOnly := []byte("lever-version: 1\nno frontmatter\n")
+	if ContentHash(bodyOnly) != Hash(bodyOnly) {
+		t.Fatal("a stamp outside the frontmatter must not be dropped")
+	}
+}

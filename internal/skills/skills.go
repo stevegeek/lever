@@ -111,6 +111,30 @@ func Hash(b []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// ContentHash is Hash of b without the `lever-version:` frontmatter line, so
+// two releases that render the same skill text agree. Contact freshness
+// compares it: a session that loaded a skill whose only change since is the
+// release stamp has loaded the same instructions. Only the first stamp line
+// inside the frontmatter is dropped, as LeverVersion reads it.
+func ContentHash(b []byte) string {
+	lines := strings.SplitAfter(string(b), "\n")
+	inFrontmatter := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "---" {
+			if inFrontmatter {
+				break
+			}
+			inFrontmatter = true
+			continue
+		}
+		if inFrontmatter && strings.HasPrefix(trimmed, "lever-version:") {
+			return Hash([]byte(strings.Join(lines[:i], "") + strings.Join(lines[i+1:], "")))
+		}
+	}
+	return Hash(b)
+}
+
 // LeverVersion extracts the `lever-version:` frontmatter stamp from a
 // scaffolded (or adopted) SKILL.md. Empty when the stamp is absent — a
 // pre-frontmatter or hand-built file, which callers treat as an unknown

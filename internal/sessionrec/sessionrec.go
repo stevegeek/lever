@@ -34,8 +34,9 @@ type Record struct {
 	// Agent is the agent's name: the app name for the manager, else the
 	// declared worker's name.
 	Agent string `json:"agent"`
-	// SkillHash is skills.Hash of the agent's lever skill as it was on disk
-	// when the session was created.
+	// SkillHash is skills.ContentHash of the agent's lever skill as it was on
+	// disk when the session was created (skills.Hash, with the release stamp,
+	// in records written before 0.33.1).
 	SkillHash string `json:"skill_hash"`
 	// Version is the lever version that created the session.
 	Version string `json:"version"`
@@ -70,7 +71,9 @@ func SkillRel(app *config.App, agent string) (string, bool) {
 	return "", false
 }
 
-// SkillHash is skills.Hash of agent's lever skill as it is on disk now. The
+// SkillHash is skills.ContentHash of agent's lever skill as it is on disk
+// now: the release stamp is left out, so a release that renders the same
+// skill text keeps a session fresh. The
 // read goes through fsutil.ReadInTree, so a skill path an agent replaced
 // with a symlink out of the tree is refused.
 func SkillHash(app *config.App, agent string) (string, error) {
@@ -82,7 +85,7 @@ func SkillHash(app *config.App, agent string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: reading %s: %w", label, rel, err)
 	}
-	return skills.Hash(b), nil
+	return skills.ContentHash(b), nil
 }
 
 // Append records r at path. The directory must be safe (hostledger.CheckDir);

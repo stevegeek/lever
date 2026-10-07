@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/sessionrec"
+	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -266,5 +267,57 @@ func TestContactSessionWarningGroupsStaleSessions(t *testing.T) {
 	printContactSessionWarnings(cmd, app, st)
 	if !strings.Contains(out.String(), "scratch, hello (its session started before its current skill was written)") || strings.Contains(out.String(), "2026-09") {
 		t.Fatalf("warning %q: want one group with no per-agent time", out.String())
+	}
+}
+
+// TestContactSessionSurvivesAStampOnlyRelease: an upgrade that renders the
+// same skill text with a new lever-version stamp keeps a fresh session
+// fresh, and a record written before 0.33.1 (the full-file hash) is still
+// accepted for an unchanged file.
+func TestContactSessionSurvivesAStampOnlyRelease(t *testing.T) {
+	app, tree, st := scaffoldFixture(t)
+	app.Name = "hello"
+	withContact(app)
+	rel := "workers/scratch/.claude/skills/lever-agent/SKILL.md"
+	var want []byte
+	for _, tg := range skillTargets(app) {
+		if tg.relPath == rel {
+			want = tg.content
+		}
+	}
+	if want == nil || skills.LeverVersion(want) == "" {
+		t.Fatal("no stamped lever-agent scaffold")
+	}
+	// The previous release rendered the same text with its own stamp, and
+	// the worker's session started on it.
+	prev := []byte(strings.Replace(string(want), "lever-version: "+skills.LeverVersion(want), "lever-version: 0.0.1", 1))
+	if err := fsutil.WriteInTree(tree, rel, prev, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := brokerctl.BeginSession(app, st, "0.0.1", "scratch")(); err != nil {
+		t.Fatal(err)
+	}
+	// The upgrade's lever init rewrites only the stamp.
+	if _, err := syncSkills(app, st, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := contactSession(app, st, "scratch"); err != nil {
+		t.Fatalf("a stamp-only release made the session stale: %v", err)
+	}
+	// A record from before 0.33.1 holds the full-file hash of the current file.
+	r := sessionrec.Record{Agent: "scratch", SkillHash: skills.Hash(want), Version: "0.33.0", Started: time.Now().UTC()}
+	if err := sessionrec.Append(st.Sessions(), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := contactSession(app, st, "scratch"); err != nil {
+		t.Fatalf("a full-hash record for the current file: %v", err)
+	}
+	// A record of different skill text is still stale.
+	r.SkillHash = skills.ContentHash([]byte("---\nname: lever-agent\nlever-version: 0.0.1\n---\nOther text.\n"))
+	if err := sessionrec.Append(st.Sessions(), r); err != nil {
+		t.Fatal(err)
+	}
+	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "started before its current skill") {
+		t.Fatalf("changed skill text: %v", err)
 	}
 }

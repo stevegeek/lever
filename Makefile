@@ -43,13 +43,17 @@ LEVER_GIT_REV = $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 LEVER_GIT_DIRTY = $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
 LEVER_IMAGE_VERSION = $(LEVER_VERSION)$(if $(LEVER_GIT_REV), ($(LEVER_GIT_REV)$(LEVER_GIT_DIRTY)))
 
-# Cross-compile the in-jail agent helper for the OrbStack arm64 VM. Used by the
+# The jail's Linux arch. Defaults to this host's Go arch (arm64 on Apple
+# silicon, amd64 on an x86_64 Linux host); override for a cross build.
+LEVER_IMAGE_ARCH ?= $(shell go env GOARCH)
+
+# Cross-compile the in-jail agent helper for the jail's arch (LEVER_IMAGE_ARCH). Used by the
 # acceptance gate (run directly in the VM) and, baked into the
 # agent image.
 .PHONY: lever-agent-linux
 lever-agent-linux:
 	@mkdir -p $(LEVER_INSTANCE)/vendor/bin
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
 	@file $(LEVER_INSTANCE)/vendor/bin/lever-agent
 
@@ -57,17 +61,17 @@ lever-agent-linux:
 # build). Instance-specific — override to point at your image build dir.
 LEVER_IMAGE_CTX ?= $(LEVER_INSTANCE)/image/lever-claude
 
-# Cross-compile the agent helper + the reference db tool (linux/arm64) into the
+# Cross-compile the agent helper + the reference db tool (the jail's arch, LEVER_IMAGE_ARCH) into the
 # lever-claude image build context, and sync the scion pre-start hook there. Run
 # before build-lever-image.sh so the Dockerfile can COPY them.
 .PHONY: lever-image-bins
 lever-image-bins:
 	@mkdir -p $(LEVER_IMAGE_CTX)/bin $(LEVER_IMAGE_CTX)/scionhook
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(LEVER_IMAGE_CTX)/scionhook/pre-start
@@ -80,7 +84,6 @@ lever-image-bins:
 # steps above (lever-image-bins → build-lever-image.sh), self-contained rather than
 # staged into an instance dir. Override LEVER_IMAGE_ARCH for a non-arm64 jail.
 # Requires scion-claude:<arch> in the local Docker store (see the build script).
-LEVER_IMAGE_ARCH ?= arm64
 FRAMEWORK_IMAGE_CTX := image/lever-claude
 .PHONY: lever-image
 lever-image:

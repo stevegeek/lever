@@ -134,9 +134,16 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, AllowFile: true}, "fetch", "--no-tags", "--no-write-fetch-head", copyPath, "+refs/heads/"+branch+":"+tmpRef); err != nil {
 		return Result{}, fmt.Errorf("import bundle: %w", err)
 	}
-	newSHA, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "rev-parse", "--verify", tmpRef+"^{commit}")
+	// The head must be a commit itself: an annotated tag (or any other
+	// object) would peel to a commit and push a different object than the
+	// one checked.
+	rawSHA, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "rev-parse", "--verify", tmpRef)
 	if err != nil {
-		return Result{}, fmt.Errorf("bundle head is not a commit: %w", err)
+		return Result{}, fmt.Errorf("bundle head is missing: %w", err)
+	}
+	newSHA, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "rev-parse", "--verify", tmpRef+"^{commit}")
+	if err != nil || strings.TrimSpace(rawSHA) != strings.TrimSpace(newSHA) {
+		return Result{}, fmt.Errorf("bundle head is not a commit (an annotated tag or another object): refused")
 	}
 	res = Result{Repo: repo, Branch: branch, NewSHA: strings.TrimSpace(newSHA),
 		CompareURL: p.BaseURL + "/" + repo + "/compare/main..." + branch}
@@ -151,7 +158,7 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	} else if f := strings.Fields(out); len(f) >= 1 {
 		res.OldSHA = f[0]
 	}
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "push", remote, tmpRef+":refs/heads/"+branch); err != nil {
+	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "push", remote, res.NewSHA+":refs/heads/"+branch); err != nil {
 		// Without --porcelain, git writes " ! [rejected] … (non-fast-forward)"
 		// to stderr, which Run puts in the error.
 		if s := err.Error(); strings.Contains(s, "non-fast-forward") || strings.Contains(s, "fetch first") || strings.Contains(s, "[rejected]") {

@@ -296,3 +296,23 @@ func TestPushIgnoresRepoAboveState(t *testing.T) {
 		t.Fatal("the repo above the state dir was touched")
 	}
 }
+func TestPushRefusesAnnotatedTagHead(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	commitOn(t, work, "agent/tagh", "t1.txt")
+	gitT(t, work, "tag", "-a", "-m", "annotated", "vt1")
+	tagObj := gitT(t, work, "rev-parse", "vt1")
+	// update-ref refuses a non-commit under refs/heads; write the ref file.
+	refFile := filepath.Join(work, ".git", "refs", "heads", "agent", "tagobj")
+	if err := os.WriteFile(refFile, []byte(tagObj+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bundle(t, work, tree, "tagobj.bundle", "agent/tagobj")
+	_, err := p.Push(context.Background(), "manager", repo, "agent/tagobj", "tagobj.bundle")
+	if err == nil || !strings.Contains(err.Error(), "not a commit") {
+		t.Fatalf("want a not-a-commit refusal, got %v", err)
+	}
+	if r.headSHA(t, repo, "agent/tagobj") != "" {
+		t.Fatal("tag object was pushed")
+	}
+}

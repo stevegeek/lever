@@ -24,6 +24,10 @@ const (
 	// or a private state dir a host tool keeps. Never safe in the tree: a
 	// read-only mount still lets the manager read it.
 	hostSecret
+	// hostTreeRef names the tree itself for a tool to compare against (the
+	// github tool's -tree): not a file the host runs or reads, so not
+	// checked.
+	hostTreeRef
 )
 
 // hostPath is one host-side path from the config, absolute, with the key
@@ -48,6 +52,7 @@ var toolPathFlags = map[string]hostPathKind{
 	"token-file": hostSecret,  // fizzy: the personal access token
 	"state":      hostSecret,  // github, fizzy: the tool's private state dir
 	"fizzy":      hostProgram, // fizzy: the fizzy CLI it runs
+	"tree":       hostTreeRef, // github: the tree, to refuse -state and -app-key inside it
 }
 
 // scriptInterpreters are commands whose first argument is a script they
@@ -118,12 +123,12 @@ func toolHostPaths(t Tool) []hostPath {
 		if name, ok := strings.CutPrefix(arg, "-"); ok && name != "" {
 			name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
 			if kind, known := toolPathFlags[name]; known {
-				switch {
-				case hasVal:
-					add("-"+name, val, kind)
-				case i+1 < len(args):
+				if !hasVal && i+1 < len(args) {
 					i++
-					add("-"+name, args[i], kind)
+					val = args[i]
+				}
+				if kind != hostTreeRef {
+					add("-"+name, val, kind)
 				}
 				continue
 			}

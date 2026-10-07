@@ -188,7 +188,6 @@ func TestToolHostPaths(t *testing.T) {
 	}
 	check("shipped flags", paths("lever-tool-github", "-tree", "/a/ws", "-app-key", "k.pem", "--state=/s",
 		"-repos", "o/n", "-branch-prefix=agent", "-fizzy", "/bin/fizzy", "plain"), []got{
-		arg("/a/ws", "/a/ws", hostSecret), arg("/a/ws", "/ws", hostSecret),
 		{"broker.tools[t] -app-key", "k.pem", hostSecret},
 		{"broker.tools[t] -state", "/s", hostSecret},
 		arg("o/n", "o/n", hostSecret), arg("o/n", "/n", hostSecret),
@@ -234,6 +233,20 @@ func TestHostPathUnknownFlagInTreeIsSecret(t *testing.T) {
 	write("[python3, -u, ROOT/ws/tools/bin]")
 	_, err = LoadNoHostChecks(p)
 	testutil.WantErrContaining(t, err, "still lets the manager read it")
+}
+
+// The github tool's -tree names the tree itself on purpose (to refuse its
+// key and state there); it is not a host path.
+func TestHostPathGithubTreeFlagAccepted(t *testing.T) {
+	outside := t.TempDir()
+	p, root := hostPathsInstance(t, "")
+	body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + supervisedTool("[lever-tool-github, -tree, "+root+"/ws, -state, "+outside+"/state, -app-key, "+outside+"/key.pem, -repos, \"o/a,o/b\", -branch-prefix, agent/]")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadNoHostChecks(p); err != nil {
+		t.Fatalf("the github tool's documented command refused: %v", err)
+	}
 }
 
 // LOW-2: paths glued to a flag or inside a shell string are found.

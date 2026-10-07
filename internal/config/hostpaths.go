@@ -24,10 +24,11 @@ const (
 	// or a private state dir a host tool keeps. Never safe in the tree: a
 	// read-only mount still lets the manager read it.
 	hostSecret
-	// hostTreeRef names the tree itself for a tool to compare against (the
-	// github tool's -tree): not a file the host runs or reads, so not
-	// checked.
-	hostTreeRef
+	// hostUnchecked is a known flag whose value is not a host program or
+	// secret: the github tool's -tree (it names the tree on purpose) or a
+	// data file the agent may edit by design (-csv, -dsn). Consumed so it
+	// is not mistaken for anything else, and not checked.
+	hostUnchecked
 )
 
 // hostPath is one host-side path from the config, absolute, with the key
@@ -44,20 +45,22 @@ type hostPath struct {
 }
 
 // toolPathFlags are the path flags of the tools lever ships
-// (cmd/lever-tool-github, cmd/lever-tool-fizzy) and what each names. Only
-// these are read as flag values; any other argument is checked only for the
-// paths in it (pathCandidates).
+// (cmd/lever-tool-github, cmd/lever-tool-fizzy, cmd/lever-tool-db, and the
+// assistant-demo example's lever-tool-todo) and what each names. Lever
+// cannot know what an unknown flag's value is, so no other flag is checked.
 var toolPathFlags = map[string]hostPathKind{
-	"app-key":    hostSecret,  // github: the GitHub App private key
-	"token-file": hostSecret,  // fizzy: the personal access token
-	"state":      hostSecret,  // github, fizzy: the tool's private state dir
-	"fizzy":      hostProgram, // fizzy: the fizzy CLI it runs
-	"tree":       hostTreeRef, // github: the tree, to refuse -state and -app-key inside it
+	"app-key":    hostSecret,    // github: the GitHub App private key
+	"token-file": hostSecret,    // fizzy: the personal access token
+	"state":      hostSecret,    // github, fizzy: the tool's private state dir
+	"fizzy":      hostProgram,   // fizzy: the fizzy CLI it runs
+	"tree":       hostUnchecked, // github: the tree, to refuse -state and -app-key inside it
+	"dsn":        hostUnchecked, // db: its sqlite data
+	"csv":        hostUnchecked, // todo (example): the agent-editable todo list
 }
 
-// scriptInterpreters are commands whose first argument is a script they
-// run: that argument is a program (it may sit under manager.read_only),
-// where any other unknown argument is treated as a secret.
+// scriptInterpreters are commands whose first argument, when it is not a
+// flag, is a script they run: a program. For sh and bash, the string after
+// -c is a command line whose absolute paths are programs.
 var scriptInterpreters = map[string]bool{
 	"python": true, "python3": true, "ruby": true, "node": true, "sh": true,
 	"bash": true, "perl": true, "deno": true, "bun": true,
@@ -94,17 +97,19 @@ func (a *App) hostPaths() []hostPath {
 	return out
 }
 
-// toolHostPaths lists the paths in one supervised tool's command, a
-// best-effort reading (arbitrary programs' own flags are not parsed):
+// toolHostPaths lists the paths in one supervised tool's command that lever
+// can classify — a best-effort guard, not a sandbox:
 //
 //   - the program itself when it is given as a path (a bare name is looked
-//     up on the supervisor's fixed PATH, which is not in the tree): a
-//     program;
-//   - the value of each known path flag (toolPathFlags), of the kind the
-//     table gives;
-//   - every path in any other argument (pathCandidates): a secret, except
-//     the first argument of a script interpreter (scriptInterpreters),
-//     which is a program.
+//     up on the supervisor's fixed PATH, which is not in the tree);
+//   - the value of each known path flag of the shipped tools
+//     (toolPathFlags), as "-f v", "-f=v" or "--f=v";
+//   - an interpreter's script (scriptInterpreters): its first argument
+//     when that is not a flag, or for sh and bash every absolute path in
+//     the -c command line (split on whitespace, '=', ':' and ',').
+//
+// Other flags and arguments are not checked: lever cannot tell a secret
+// from a data file in an unknown tool's argv.
 func toolHostPaths(t Tool) []hostPath {
 	if t.External || len(t.Command) == 0 {
 		return nil
@@ -116,59 +121,51 @@ func toolHostPaths(t Tool) []hostPath {
 	if strings.ContainsRune(t.Command[0], '/') {
 		add("command", t.Command[0], hostProgram)
 	}
-	interpreter := scriptInterpreters[filepath.Base(t.Command[0])]
 	args := t.Command[1:]
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if name, ok := strings.CutPrefix(arg, "-"); ok && name != "" {
-			name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
-			if kind, known := toolPathFlags[name]; known {
-				if !hasVal && i+1 < len(args) {
-					i++
-					val = args[i]
+	if base := filepath.Base(t.Command[0]); scriptInterpreters[base] && len(args) > 0 {
+		if c := slices.Index(args, "-c"); (base == "sh" || base == "bash") && c >= 0 {
+			if c+1 < len(args) {
+				for _, p := range absolutePaths(args[c+1]) {
+					add("-c command", p, hostProgram)
 				}
-				if kind != hostTreeRef {
-					add("-"+name, val, kind)
-				}
-				continue
 			}
+		} else if !strings.HasPrefix(args[0], "-") {
+			add("script", args[0], hostProgram)
 		}
-		for _, c := range pathCandidates(arg) {
-			kind := hostSecret
-			if interpreter && i == 0 && c == arg {
-				kind = hostProgram
-			}
-			add(fmt.Sprintf("argument %q", arg), c, kind)
+	}
+	for i := 0; i < len(args); i++ {
+		name, ok := strings.CutPrefix(args[i], "-")
+		if !ok || name == "" {
+			continue
+		}
+		name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
+		kind, known := toolPathFlags[name]
+		if !known {
+			continue
+		}
+		if !hasVal && i+1 < len(args) {
+			i++
+			val = args[i]
+		}
+		if kind != hostUnchecked {
+			add("-"+name, val, kind)
 		}
 	}
 	return out
 }
 
-// pathCandidates are the paths an argument may hold: it is split on
-// whitespace, '=', ':' and ',' (a shell string, a glued flag value such as
-// -I/x or --x=/y, a PATH-like list), and each piece with a "/" yields itself
-// when it is relative (not a flag) and every substring starting at a "/".
-// A heuristic: it cannot know what a program does with its arguments.
-func pathCandidates(arg string) []string {
+// absolutePaths are the absolute paths in a shell command line: it is split
+// on whitespace, '=', ':' and ',', and each piece that starts with "/"
+// counts, as does a flag with a path glued on (-I/x: from its first "/").
+func absolutePaths(line string) []string {
 	var out []string
-	add := func(s string) {
-		if !slices.Contains(out, s) {
-			out = append(out, s)
-		}
-	}
 	sep := func(r rune) bool { return unicode.IsSpace(r) || r == '=' || r == ':' || r == ',' }
-	for _, tok := range strings.FieldsFunc(arg, sep) {
-		if !strings.ContainsRune(tok, '/') {
+	for _, tok := range strings.FieldsFunc(line, sep) {
+		i := strings.IndexByte(tok, '/')
+		if i < 0 || (i > 0 && tok[0] != '-') || slices.Contains(out, tok[i:]) {
 			continue
 		}
-		if tok[0] != '/' && tok[0] != '-' {
-			add(tok)
-		}
-		for j := range len(tok) {
-			if tok[j] == '/' {
-				add(tok[j:])
-			}
-		}
+		out = append(out, tok[i:])
 	}
 	return out
 }
@@ -193,7 +190,12 @@ func (a *App) checkHostPathsOutsideTree() error {
 		}
 		w, err := a.walkTree(realTree, p.path)
 		if err != nil {
-			return fmt.Errorf("config: %s %q: %w", p.key, p.path, err)
+			class := "unreadable"
+			if errors.Is(err, fs.ErrPermission) {
+				class = "permission denied"
+			}
+			return fmt.Errorf("config: %s: lever cannot tell whether it lies in the mounted tree (%s: %w), and it refuses "+
+				"what it cannot check — make the path's directories readable by you, or move it", p.key, class, err)
 		}
 		if !w.inTree {
 			continue

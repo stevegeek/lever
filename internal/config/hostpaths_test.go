@@ -41,8 +41,8 @@ func TestHostPathsRefusedInsideTree(t *testing.T) {
 		{"app-key", "manager: {}\n" + supervisedTool("[/usr/bin/true, -app-key, ROOT/ws/secret]"), "broker.tools[t] -app-key"},
 		{"token-file with =", "manager: {}\n" + supervisedTool("[/usr/bin/true, --token-file=ws/secret]"), "broker.tools[t] -token-file"},
 		{"fizzy cli", "manager: {}\n" + supervisedTool("[/usr/bin/true, -fizzy, ROOT/ws/tools/bin]"), "broker.tools[t] -fizzy"},
-		{"script argument", "manager: {}\n" + supervisedTool("[/usr/bin/ruby, ROOT/ws/tools/bin]"), "broker.tools[t] argument"},
-		{"unknown flag value", "manager: {}\n" + supervisedTool("[/usr/bin/true, -config=ws/tools/bin]"), `broker.tools[t] argument "-config=`},
+		{"script argument", "manager: {}\n" + supervisedTool("[/usr/bin/ruby, ROOT/ws/tools/bin]"), "broker.tools[t] script"},
+		{"sh -c command", "manager: {}\n" + supervisedTool("[sh, -c, \"exec ROOT/ws/tools/bin --x\"]"), "broker.tools[t] -c command"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,88 +183,64 @@ func TestToolHostPaths(t *testing.T) {
 			}
 		}
 	}
-	arg := func(a, p string, kind hostPathKind) got {
-		return got{fmt.Sprintf("broker.tools[t] argument %q", a), p, kind}
-	}
+	// The shipped tools' path flags in every spelling; -tree, -csv and -dsn
+	// are consumed, not checked; other flags and arguments are not read.
 	check("shipped flags", paths("lever-tool-github", "-tree", "/a/ws", "-app-key", "k.pem", "--state=/s",
-		"-repos", "o/n", "-branch-prefix=agent", "-fizzy", "/bin/fizzy", "plain"), []got{
+		"-repos", "o/n", "-branch-prefix=agent", "-fizzy=/bin/fizzy", "--token-file", "/t", "-tree=/a/ws",
+		"-csv", "ws/x.csv", "-dsn", "file:ws/x.db", "-key-file", "/k", "plain/path"), []got{
 		{"broker.tools[t] -app-key", "k.pem", hostSecret},
 		{"broker.tools[t] -state", "/s", hostSecret},
-		arg("o/n", "o/n", hostSecret), arg("o/n", "/n", hostSecret),
 		{"broker.tools[t] -fizzy", "/bin/fizzy", hostProgram},
+		{"broker.tools[t] -token-file", "/t", hostSecret},
 	})
-	// An unknown flag's file is a secret: no read_only exception (LOW-1).
-	check("unknown flag", paths("/opt/x", "--key-file=/k"), []got{
-		{"broker.tools[t] command", "/opt/x", hostProgram},
-		arg("--key-file=/k", "/k", hostSecret),
-	})
-	// An interpreter's first argument is the script it runs: a program.
-	check("interpreter script", paths("ruby", "/t/x.rb", "/t/y"), []got{
-		arg("/t/x.rb", "/t/x.rb", hostProgram), arg("/t/x.rb", "/x.rb", hostSecret),
-		arg("/t/y", "/t/y", hostSecret), arg("/t/y", "/y", hostSecret),
-	})
-	// Glued flags and shell strings (LOW-2).
-	check("glued and shell", paths("sh", "-c", "exec /t/x", "-I/l"), []got{
-		arg("exec /t/x", "/t/x", hostSecret), arg("exec /t/x", "/x", hostSecret),
-		arg("-I/l", "/l", hostSecret),
+	check("command path", paths("/opt/x", "--key-file=/k"), []got{{"broker.tools[t] command", "/opt/x", hostProgram}})
+	// An interpreter's first argument is the script it runs, unless a flag.
+	check("interpreter script", paths("ruby", "/t/x.rb", "/t/y"), []got{{"broker.tools[t] script", "/t/x.rb", hostProgram}})
+	check("interpreter flag first", paths("python3", "-u", "/t/x.py"), nil)
+	// sh/bash -c: every absolute path in the command line.
+	check("sh -c", paths("bash", "-c", "PATH=/p:/q exec /t/x -I/l rel/y"), []got{
+		{"broker.tools[t] -c command", "/p", hostProgram},
+		{"broker.tools[t] -c command", "/q", hostProgram},
+		{"broker.tools[t] -c command", "/t/x", hostProgram},
+		{"broker.tools[t] -c command", "/l", hostProgram},
 	})
 	if toolHostPaths(Tool{Name: "x", External: true}) != nil {
 		t.Error("an external tool has no host paths")
 	}
 }
 
-// LOW-1: an unknown flag naming a file in the tree is a secret, refused even
-// under read_only; an interpreter's script there is a program, allowed.
-func TestHostPathUnknownFlagInTreeIsSecret(t *testing.T) {
-	p, root := hostPathsInstance(t, "")
-	write := func(cmd string) {
-		body := "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  read_only: [tools]\n" + supervisedTool(strings.ReplaceAll(cmd, "ROOT", root))
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
+// Unknown flags and arguments are not checked: lever cannot tell an
+// agent-editable data file (-db workspace/x.db) from a secret.
+func TestHostPathUnknownArgumentsNotChecked(t *testing.T) {
+	p, _ := hostPathsInstance(t, "manager: {}\n"+supervisedTool("[/usr/bin/true, -db, ws/secret, --key-file=ws/secret, ws/tools/bin]"))
+	if _, err := LoadNoHostChecks(p); err != nil {
+		t.Fatalf("an unknown argument was checked: %v", err)
 	}
-	write("[/usr/bin/true, --key-file=ROOT/ws/tools/bin]")
-	_, err := LoadNoHostChecks(p)
-	testutil.WantErrContaining(t, err, "--key-file=", "still lets the manager read it")
-	write("[python3, ROOT/ws/tools/bin]")
+}
+
+// An interpreter's script under read_only is a program and allowed.
+func TestHostPathInterpreterScriptUnderReadOnly(t *testing.T) {
+	p, _ := hostPathsInstance(t, "manager:\n  read_only: [tools]\n"+supervisedTool("[python3, ws/tools/bin]"))
 	if _, err := LoadNoHostChecks(p); err != nil {
 		t.Fatalf("an interpreter's script under read_only refused: %v", err)
 	}
-	write("[python3, -u, ROOT/ws/tools/bin]")
-	_, err = LoadNoHostChecks(p)
-	testutil.WantErrContaining(t, err, "still lets the manager read it")
 }
 
-// The github tool's -tree names the tree itself on purpose (to refuse its
-// key and state there); it is not a host path.
-func TestHostPathGithubTreeFlagAccepted(t *testing.T) {
-	outside := t.TempDir()
-	p, root := hostPathsInstance(t, "")
-	body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + supervisedTool("[lever-tool-github, -tree, "+root+"/ws, -state, "+outside+"/state, -app-key, "+outside+"/key.pem, -repos, \"o/a,o/b\", -branch-prefix, agent/]")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+// A path the check cannot inspect (a directory it may not search) fails
+// closed, naming the key, the path and the error class.
+func TestHostPathUnreadableRefused(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	locked := filepath.Join(t.TempDir(), "locked")
+	mustWrite(t, filepath.Join(locked, "tok"))
+	if err := os.Chmod(locked, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadNoHostChecks(p); err != nil {
-		t.Fatalf("the github tool's documented command refused: %v", err)
-	}
-}
-
-// LOW-2: paths glued to a flag or inside a shell string are found.
-func TestHostPathGluedAndShellStringRefused(t *testing.T) {
-	for _, cmd := range []string{
-		"[/usr/bin/ruby, -IROOT/ws/lib, /opt/x.rb]",
-		"[/usr/bin/ruby, -rROOT/ws/evil.rb, /opt/x.rb]",
-		"[/bin/sh, -c, \"exec ROOT/ws/tools/bin\"]",
-		"[/usr/bin/true, \"-path=/opt:ROOT/ws/lib\"]",
-	} {
-		p, root := hostPathsInstance(t, "")
-		body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + supervisedTool(strings.ReplaceAll(cmd, "ROOT", root))
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		_, err := LoadNoHostChecks(p)
-		testutil.WantErrContaining(t, err, "inside the mounted tree")
-	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	p, _ := hostPathsInstance(t, "manager:\n  credential_file: "+locked+"/tok\n")
+	_, err := LoadNoHostChecks(p)
+	testutil.WantErrContaining(t, err, "manager.credential_file", "permission denied", locked, "cannot tell whether it lies in the mounted tree")
 }
 
 // LOW-3: ".." in a tool path is refused, because the kernel resolves it

@@ -185,18 +185,19 @@ replaceable) by the agent. Config load therefore refuses these paths when they r
 
 | Kind | Paths | Inside `tree` |
 |---|---|---|
-| Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state`, and every other path found in an argument (below) | always refused: a `manager.read_only` mount still lets the manager **read** the file |
-| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`); the value of `-fizzy`; the first argument of a script interpreter (`python`, `python3`, `ruby`, `node`, `sh`, `bash`, `perl`, `deno`, `bun`) when it is a path | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
+| Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
+| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`); the value of `-fizzy`; the script of an interpreter (`python`, `python3`, `ruby`, `node`, `sh`, `bash`, `perl`, `deno`, `bun`): its first argument when that is not a flag, or, for `sh` and `bash`, every absolute path in the `-c` command line | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
 
-**Finding paths in tool arguments is a best-effort heuristic.** Lever reads the flags of the tools it
-ships only; it cannot know what another program does with its arguments. For every other argument it
-splits the text on whitespace, `=`, `:` and `,`, and checks each piece with a `/` in it (relative
-pieces against the instance root) and every substring of that piece that starts at a `/`. That finds
-a glued flag value (`-I/path`, `--key-file=/path`), a path in a shell string (`sh -c "exec /path"`)
-and a `PATH`-like list, but not, for example, a path a program builds from parts or reads from its
-own config file. Keep the files of other programs outside the tree yourself. A path written with a
-`..` component is refused: the kernel resolves `..` after it follows links, so `ws/link/../tools/x`
-can reach somewhere other than it reads.
+**This is a best-effort guard, not a sandbox.** Lever cannot know what an unknown flag's value is: a
+secret, a program, or a data file the agent is meant to edit (the example todo tool's `-csv`). So it
+checks only the command itself, the path flags of the tools it ships (above; `-tree`, `-dsn` and
+`-csv` are read and deliberately not checked) and interpreter scripts. It does not check any other
+flag or argument. **For your own tool, keep its secrets and the programs it runs outside the tree
+yourself.** The `-c` command line is split on whitespace, `=`, `:` and `,`; a piece that starts with
+`/`, or a flag with a path glued on (`-I/path`), counts. A path written with a `..` component is
+refused: the kernel resolves `..` after it follows links, so `ws/link/../tools/x` can reach somewhere
+other than it reads. A path the check cannot inspect (a directory you may not search) is refused too,
+with the path and the error.
 
 The check follows the path one component at a time, as the kernel does. It recognises the tree, the
 `read_only` entries and the worker dirs by identity, not by spelling, so a case alias on a

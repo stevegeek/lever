@@ -5,6 +5,15 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
+## [Unreleased]
+
+### Changed
+
+- **The examples and docs pin scion `e0f61f2d` (2026-09-30), not `63d5d65d`.** `63d5d65d` lacks
+  scion #2119: after `lever stop` + `lever up`, the hub made no message broker subscription for an
+  agent that started after it, so an agent's reply to a user was reported as sent and then dropped.
+  `e0f61f2d` is the pin that Lima production runs. Build the harness images from the same commit.
+
 ## [0.34.1] - 2026-10-08
 
 ### Fixed

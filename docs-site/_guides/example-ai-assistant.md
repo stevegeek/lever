@@ -33,7 +33,7 @@ backend: orbstack
 tree: workspace
 egress: closed                            # seal the jail: agents reach only the broker
 scion:
-  version: 63d5d65d                       # pin a scion commit; fetched + cross-compiled into the jail
+  version: e0f61f2d                       # pin a scion commit; fetched + cross-compiled into the jail
 manager:
   image: scionlocal/lever-claude
   prompt_file: manager.md

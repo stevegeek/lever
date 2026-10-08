@@ -104,7 +104,7 @@ backend: orbstack                    # containment backend
 tree: workspace                      # bind-mounted SUBDIR (the root is not mounted)
 egress: closed                       # seal the jail to the broker only (api-key instances only)
 scion:
-  version: 63d5d65d                  # pin a scion commit; fetched + cross-compiled into the jail
+  version: e0f61f2d                  # pin a scion commit; fetched + cross-compiled into the jail
 manager:
   image: scionlocal/lever-claude
   # image_tar: images/lever-claude.tar   # optional; ship the image as a docker archive, no host docker needed

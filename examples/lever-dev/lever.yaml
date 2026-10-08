@@ -10,7 +10,7 @@ nested_virt: true
 # closed egress needs api-key mode; open still drops the LAN and the tailnet.
 egress: open
 scion:
-  version: 63d5d65d   # the pin of the installed lever release; never `source:` (it would build agent-written scion on the host)
+  version: e0f61f2d   # the pin of the installed lever release; never `source:` (it would build agent-written scion on the host)
 broker:
   llm_auth: subscription
   tools:

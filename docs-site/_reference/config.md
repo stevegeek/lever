@@ -118,7 +118,7 @@ manager:
   # Host ports the jail may reach DIRECTLY (an MCP server you run yourself).
   # Never a first-party tool's backend port (3201 below): the jail would dial
   # the tool past the broker, and config load rejects it.
-  allow_ports: [3101]
+  allow_ports: [3901]
 broker:
   llm_auth: api-key                  # the default; no real key in any container
   api_key_file: ~/.secrets/anthropic-key   # 0600; injected host-side by the /llm proxy
@@ -332,7 +332,7 @@ broker:
       gate: coarse
     - name: qmd                   # the server mounts its MCP endpoint under a path
       external: true
-      backend: 127.0.0.1:3101/mcp
+      backend: 127.0.0.1:3901/mcp
       gate: coarse
 workers:
   - name: agent-y

@@ -129,7 +129,7 @@ func TestCheckToolBackendsNoneDeclared(t *testing.T) {
 func TestCheckToolBackendsAllReachable(t *testing.T) {
 	tools := []config.Tool{
 		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
-		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
+		{Name: "qmd", External: true, Backend: "127.0.0.1:3901/mcp"},
 		{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:3201"},
 	}
 	r := checkToolBackends(tools, t.TempDir(), okProbes)
@@ -149,7 +149,7 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 	}
 	tools := []config.Tool{
 		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
-		{Name: "qmd", External: true, Backend: "127.0.0.1:3101/mcp"},
+		{Name: "qmd", External: true, Backend: "127.0.0.1:3901/mcp"},
 	}
 	r := checkToolBackends(tools, t.TempDir(), doctorProbes{dial: dial})
 	if r.ok {
@@ -161,7 +161,7 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 	// qmd's path must be stripped before dialing (dial a host:port, not a URL path).
 	found := false
 	for _, a := range dialed {
-		if a == "127.0.0.1:3101" {
+		if a == "127.0.0.1:3901" {
 			found = true
 		}
 	}

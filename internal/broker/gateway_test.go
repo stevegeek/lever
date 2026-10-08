@@ -544,7 +544,7 @@ func TestGatewayRejectsOversizedBody(t *testing.T) {
 func TestBackendURL(t *testing.T) {
 	cases := map[string]string{
 		"127.0.0.1:3201":        "http://127.0.0.1:3201",
-		"[::1]:3101/mcp":        "http://[::1]:3101/mcp",
+		"[::1]:3901/mcp":        "http://[::1]:3901/mcp",
 		"https://h.example/mcp": "https://h.example/mcp",
 	}
 	for in, want := range cases {

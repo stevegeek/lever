@@ -115,7 +115,7 @@ func newToolProxy(target *url.URL) *httputil.ReverseProxy {
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
 		remainder := pr.In.URL.Path // post-StripPrefix, before the backend-path join
 		rewriteUpstream(pr, target)
-		// A backend that carries its own path (e.g. qmd's "[::1]:3101/mcp") must
+		// A backend that carries its own path (e.g. qmd's "[::1]:3901/mcp") must
 		// receive that path EXACTLY when the MCP client hits the tool root: the
 		// default join turns "/mcp"+"/" into "/mcp/", which a strict streamable-
 		// HTTP endpoint 404s. Collapse a bare-root remainder to the backend path.

@@ -38,13 +38,13 @@ name: demo
 backend: orbstack
 tree: work
 manager:
-  allow_ports: [3101]
+  allow_ports: [3901]
 broker:
   llm_auth: subscription
   tools:
     - name: qmd
       external: true
-      backend: "[::1]:3101/mcp"
+      backend: "[::1]:3901/mcp"
       operations: [{name: search}]
 `
 	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
@@ -68,7 +68,7 @@ func TestBackendPort(t *testing.T) {
 		ok      bool
 	}{
 		{"127.0.0.1:3201", 3201, true},
-		{"[::1]:3101/mcp", 3101, true},
+		{"[::1]:3901/mcp", 3901, true},
 		{"http://127.0.0.1:3201/x", 3201, true},
 		{"127.0.0.1", 0, false},
 		{"", 0, false},

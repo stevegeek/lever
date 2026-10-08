@@ -1005,7 +1005,7 @@ func TestLoadAcceptsIPv6LoopbackBackend(t *testing.T) {
 }
 
 func TestLoadAcceptsBackendWithPath(t *testing.T) {
-	cfg := strings.Replace(extCfg, "backend: 127.0.0.1:3300", "backend: 127.0.0.1:3101/mcp", 1)
+	cfg := strings.Replace(extCfg, "backend: 127.0.0.1:3300", "backend: 127.0.0.1:3901/mcp", 1)
 	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("a loopback backend with a path (qmd-style) must be accepted: %v", err)
 	}
@@ -1477,7 +1477,7 @@ func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 	// The default proxy port, and an explicitly configured one: the check must
 	// follow EffectiveRemotePort, not the literal 8445.
 	for name, body := range map[string]string{
-		"default proxy port":  base + "manager:\n  allow_ports: [3101, 8445]\n",
+		"default proxy port":  base + "manager:\n  allow_ports: [3901, 8445]\n",
 		"explicit proxy port": base + "  port: 9445\nmanager:\n  allow_ports: [9445]\n",
 	} {
 		t.Run(name, func(t *testing.T) {

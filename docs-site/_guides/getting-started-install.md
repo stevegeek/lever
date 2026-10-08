@@ -71,7 +71,8 @@ scion's stock Claude harness image. Build it once from a scion checkout:
 
 ```sh
 git clone https://github.com/GoogleCloudPlatform/scion
-cd scion && image-build/scripts/build-images.sh --target harnesses
+cd scion && git checkout e0f61f2d   # the same commit as scion.version in lever.yaml
+image-build/scripts/build-images.sh --target harnesses
 ```
 
 `--target harnesses` builds `scion-claude` (among the harness images); if you're starting from

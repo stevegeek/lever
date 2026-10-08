@@ -1,7 +1,7 @@
 # lever-dev: develop Lever inside a Lever jail
 
 This runbook is for an x86_64 Linux host with KVM (the package commands are for Arch Linux; use your distribution's equivalents). The jail is a Lima VM with nested KVM.
-The manager develops Lever in `jail-src/`. It pushes through the `github` host tool and uses the Lever board through the `fizzy` host tool.
+The manager develops Lever in `jail-src/`. It pushes through the `github` host tool and uses your Fizzy board through the `fizzy` host tool.
 
 Rules for the host:
 

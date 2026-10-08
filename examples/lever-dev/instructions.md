@@ -1,6 +1,6 @@
 # Standing instructions: lever-dev manager
 
-You develop Lever inside this jail. Stephen reviews, merges and releases.
+You develop Lever inside this jail. The operator reviews, merges and releases.
 Follow these rules in every session.
 
 ## Workflow
@@ -15,8 +15,8 @@ Follow these rules in every session.
 - Call the `github.push` tool with the repo, the branch and the bundle name.
 - A host tool refusal comes back as `{"ok": false, "error": "..."}`. Read the
   error, fix the cause, and try again.
-- Report the compare URL after a push. Stephen opens the PR, merges it and
-  makes the release.
+- Report the compare URL after a push. The operator opens the PR, merges it
+  and makes the release.
 - Do not force push. If you rebase a branch, push it to a new branch name.
 
 ## Live end-to-end tests
@@ -39,13 +39,13 @@ Follow these rules in every session.
 
 ## Fizzy
 
-- Use the `fizzy` tool for the Lever board only.
+- Use the `fizzy` tool for the configured board only.
 - Move a card to the in-progress column when you start work.
-- Ask Stephen for the in-progress column id, or read it from a `move_card` refusal.
+- Ask the operator for the in-progress column id, or read it from a `move_card` refusal.
 - Comment on the card with the compare URL when you push.
-- Never close a card. Stephen closes cards after the release.
+- Never close a card. The operator closes cards after the release.
 
-## Stephen only
+## Operator only
 
 - Releases, tags, workflow changes, upstream PR comments, and installs on any
-  host are for Stephen only. Do not do them. Ask him.
+  host are for the operator only. Do not do them. Ask the operator.

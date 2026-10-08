@@ -1599,7 +1599,7 @@ func TestScionWebAssets(t *testing.T) {
 			Remote: Remote{Enabled: true},
 		}, true},
 		{"remote + source", App{
-			Scion:  ScionConfig{Source: "/Users/stephen/ai/scion"},
+			Scion:  ScionConfig{Source: "/home/devuser/scion"},
 			Remote: Remote{Enabled: true},
 		}, true},
 		{"remote off", App{Scion: ScionConfig{Version: "e82a2a08"}}, false},

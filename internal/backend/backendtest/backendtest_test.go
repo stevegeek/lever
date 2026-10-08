@@ -48,7 +48,7 @@ func TestClosedChainRunnerOpenFallsThrough(t *testing.T) {
 
 func TestGuestScriptRunUser(t *testing.T) {
 	f := proc.NewFakeRunner()
-	orb.ScriptRunUser(f, "stephen", "501")
+	orb.ScriptRunUser(f, "devuser", "501")
 	res, _ := f.Run(context.Background(), nil, "orb", "-m", "m", "id", "-u")
 	if res.Stdout != "501\n" {
 		t.Fatalf("uid = %q", res.Stdout)

@@ -21,19 +21,19 @@ broker:
                 -state, /home/YOU/.local/state/lever-dev-github,
                 -app-id, "APP_ID", -installation-id, "INSTALLATION_ID",
                 -app-key, /home/YOU/lever-dev/secrets/github-app.pem,
-                -repos, stevegeek/lever]
+                -repos, OWNER/lever]
       backend: 127.0.0.1:3210
       operations:
         - {name: push, params: [repo, branch, bundle]}
       allowed_values:
-        repo: [stevegeek/lever]
+        repo: [OWNER/lever]
     # name must equal the binary's -name default (fizzy)
     - name: fizzy
       command: [/home/YOU/.local/bin/lever-tool-fizzy,
                 -fizzy, /usr/local/bin/fizzy,
                 -token-file, /home/YOU/lever-dev/secrets/fizzy-token,
                 -account, "ACCOUNT_ID",
-                -board, 03gyvmtu0lb2osl1x3h5hkeii,   # your Lever board id
+                -board, BOARD_ID,   # your Fizzy board id
                 -state, /home/YOU/.local/state/lever-dev-fizzy]
       backend: 127.0.0.1:3211
       operations:

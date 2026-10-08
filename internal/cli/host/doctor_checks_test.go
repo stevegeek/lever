@@ -426,7 +426,7 @@ func TestCheckCredentialFile(t *testing.T) {
 	}
 }
 
-// TestCheckMcpJsonInTree covers the real bug Stephen hit: a .mcp.json
+// TestCheckMcpJsonInTree covers a real bug: a .mcp.json
 // anywhere under the instance tree is auto-loaded by Claude as PROJECT
 // scope inside every jailed agent, colliding with the brokered USER-scope
 // tools lever-agent registers (duplicate localhost:PORT endpoints).
@@ -478,7 +478,7 @@ func TestCheckMcpJsonInTreeNested(t *testing.T) {
 	}
 }
 
-// TestCheckGoToolchain covers the real pain point Stephen hit: `lever
+// TestCheckGoToolchain covers a real pain point: `lever
 // up`/`apply` cross-compile scion and shell out to `go`, and an asdf shim on
 // PATH that isn't actually resolvable blows up as "exit status 126" deep
 // inside apply instead of an up-front, actionable diagnosis.
@@ -507,7 +507,7 @@ func TestCheckGoToolchainProbeOK(t *testing.T) {
 func TestCheckGoToolchainProbeError(t *testing.T) {
 	p := doctorProbes{goVersion: func() (string, error) { return "", errors.New("exit status 126") }}
 
-	r := checkGoToolchain(config.ScionConfig{Source: "/Users/stephen/ai/scion"}, p)
+	r := checkGoToolchain(config.ScionConfig{Source: "/home/devuser/scion"}, p)
 	if r.ok {
 		t.Fatal("a broken go (e.g. a dead asdf shim) must fail the check")
 	}
@@ -1252,7 +1252,7 @@ func TestCheckNodeToolchainProbeError(t *testing.T) {
 	}}
 
 	r := checkNodeToolchain(&config.App{
-		Scion:  config.ScionConfig{Source: "/Users/stephen/ai/scion"},
+		Scion:  config.ScionConfig{Source: "/home/devuser/scion"},
 		Remote: config.Remote{Enabled: true},
 	}, p)
 	if r.ok {

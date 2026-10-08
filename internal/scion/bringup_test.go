@@ -281,7 +281,7 @@ func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
 //
 // A test rather than only a comment because the comment on ServerOpts.EnableWeb
 // asserted the opposite of the truth for the length of the branch, and prose is
-// one refactor away from being lost (docs/2026-08-18-comment-drift-remote-access.md).
+// one refactor away from being lost.
 func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 	for _, o := range []ServerOpts{
 		{},

@@ -31,7 +31,7 @@ func TestResolveMsgTarget(t *testing.T) {
 		{"manager to manager by CN", "manager", "manager", true, "agent:assistant", "/lever", false, nil},
 		{"manager to user alias+CN", "manager", "user:manager", true, "agent:assistant", "/lever", false, nil},
 		{"manager to user slug", "manager", "user:assistant", true, "agent:assistant", "/lever", false, nil},
-		{"manager to user other", "manager", "user:stephen", true, "", "", true, nil},
+		{"manager to user other", "manager", "user:devuser", true, "", "", true, nil},
 		{"manager to unknown worker", "manager", "nope", true, "", "", true, nil},
 		{"worker to manager by slug", "scratch", "agent:assistant", true, "agent:assistant", "/lever", false, nil},
 		{"worker to manager by CN", "scratch", "agent:manager", true, "agent:assistant", "/lever", false, nil},
@@ -166,7 +166,7 @@ func TestMsgSend_workerToWorkerDisabled(t *testing.T) {
 // TestMsgRuntimeError_genericBody, whose scion-runtime branch MUST stay opaque.
 func TestMsgSendDenyLeaksReason(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(t, true)
-	rec := callWorker(t, b, "/msg/send", `{"to":"user:stephen"}`, "manager")
+	rec := callWorker(t, b, "/msg/send", `{"to":"user:devuser"}`, "manager")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
@@ -263,7 +263,7 @@ func TestMsgSend_refusalNamesTheCallersRecipients(t *testing.T) {
 	}{
 		{"manager, unknown name", "manager", "nope", true,
 			`unknown recipient "nope"; you may send to: agent:assistant, agent:scratch, agent:worker`, nil},
-		{"manager, user form", "manager", "user:stephen", true,
+		{"manager, user form", "manager", "user:devuser", true,
 			"message the manager agent instead; you may send to: agent:assistant, agent:scratch, agent:worker", nil},
 		{"worker, worker→worker on", "scratch", "nope", true,
 			`unknown recipient "nope"; you may send to: user:manager, agent:scratch, agent:worker`, []string{"assistant"}},

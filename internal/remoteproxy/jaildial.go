@@ -53,7 +53,7 @@ const stderrLimit = 512
 // forwarded port.
 //
 // prefixFn returns the backend's jail argv prefix, e.g.
-// ["orb","-m","lever-x","-u","stephen"] or ["limactl","shell","lever-x"]. It
+// ["orb","-m","lever-x","-u","devuser"] or ["limactl","shell","lever-x"]. It
 // is a func rather than a value so a jail that was down, rebuilt, or renamed
 // when the proxy started is resolved on a later dial instead of pinned at
 // construction; an empty return means "cannot resolve the jail right now" and

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const testBoard = "03gyvmtu0lb2osl1x3h5hkeii"
+const testBoard = "0testboard00000000000001"
 
 // fakeFizzy writes a shell script that records argv, cwd, HOME and the
 // token to a log (the path is baked in: the tool passes no other env), copies

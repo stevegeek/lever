@@ -517,9 +517,9 @@ func TestHubLoginSettingsNamesAnOperator(t *testing.T) {
 // re-apply cannot rename a user.
 func TestHubLoginSettingsKeepsAnOperatorsOwnIdentity(t *testing.T) {
 	for _, existing := range []string{
-		"server:\n  auth:\n    display_name: Stephen\n",
+		"server:\n  auth:\n    display_name: Dev User\n",
 		"server:\n  auth:\n    email: me@example.com\n",
-		"server:\n  auth:\n    username: stephen\n",
+		"server:\n  auth:\n    username: devuser\n",
 	} {
 		out, _, err := hubSettingsConverged([]byte(existing), testHubLogin(), false)
 		if err != nil {
@@ -580,7 +580,7 @@ func TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote(t *testing.T) {
 
 	// An operator's own identity survives the removal, and so does an unrelated
 	// key sitting beside lever's.
-	mine, _, err := hubSettingsConverged([]byte("server:\n  auth:\n    display_name: Stephen\n"), testHubLogin(), false)
+	mine, _, err := hubSettingsConverged([]byte("server:\n  auth:\n    display_name: Dev User\n"), testHubLogin(), false)
 	if err != nil {
 		t.Fatalf("hubSettingsConverged: %v", err)
 	}
@@ -588,7 +588,7 @@ func TestHubLoginSettingsWithoutUnnamesOnlyWhatLeverWrote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hubSettingsWithoutLogin: %v", err)
 	}
-	if authBlock(t, out)["display_name"] != "Stephen" {
+	if authBlock(t, out)["display_name"] != "Dev User" {
 		t.Fatalf("removal took an operator's identity with it:\n%s", out)
 	}
 

@@ -41,7 +41,7 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			f.Script(strings.Join(shape.userPrefix, " "), proc.Result{})
 			g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-x"}
 
-			if err := g.EnsureRuntimes(context.Background(), "stephen"); err != nil {
+			if err := g.EnsureRuntimes(context.Background(), "devuser"); err != nil {
 				t.Fatalf("EnsureRuntimes: %v", err)
 			}
 			if len(f.Calls) != 6 {
@@ -75,7 +75,7 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 				t.Fatalf("call 2 should be root-prefixed, got %+v", second)
 			}
 			secondScript := second.Args[len(second.Args)-1]
-			if !strings.Contains(secondScript, "stephen") || !strings.Contains(secondScript, "loginctl enable-linger") {
+			if !strings.Contains(secondScript, "devuser") || !strings.Contains(secondScript, "loginctl enable-linger") {
 				t.Errorf("call 2 script missing subid/linger for runUser: %q", secondScript)
 			}
 
@@ -511,7 +511,7 @@ func aptPrereqScript(t *testing.T) string {
 	f.Script(strings.Join(shape.rootPrefix, " "), proc.Result{})
 	f.Script(strings.Join(shape.userPrefix, " "), proc.Result{})
 	g := Guest{Host: f, UserPrefix: shape.userPrefix, RootPrefix: shape.rootPrefix, Machine: "lever-x"}
-	if err := g.EnsureRuntimes(context.Background(), "stephen"); err != nil {
+	if err := g.EnsureRuntimes(context.Background(), "devuser"); err != nil {
 		t.Fatalf("EnsureRuntimes: %v", err)
 	}
 	return f.Calls[0].Args[len(f.Calls[0].Args)-1]

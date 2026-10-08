@@ -25,7 +25,7 @@ func TestParseFlagsFizzy(t *testing.T) {
 	if _, err := parseFlags([]string{"-fizzy", "/usr/local/bin/fizzy"}); err == nil {
 		t.Fatal("missing flags must fail")
 	}
-	_, err := parseFlags([]string{"-fizzy", "fizzy", "-token-file", "/t", "-account", "1", "-board", "03gyvmtu0lb2osl1x3h5hkeii", "-state", "/s"})
+	_, err := parseFlags([]string{"-fizzy", "fizzy", "-token-file", "/t", "-account", "1", "-board", "0testboard00000000000001", "-state", "/s"})
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("relative -fizzy must fail: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestParseFlagsFizzy(t *testing.T) {
 	if err == nil {
 		t.Fatal("an invalid board id must fail")
 	}
-	_, err = parseFlags([]string{"-fizzy", "/f", "-token-file", "/t", "-account", "1", "-board", "03gyvmtu0lb2osl1x3h5hkeii", "-state", "/s", "-prefix", " "})
+	_, err = parseFlags([]string{"-fizzy", "/f", "-token-file", "/t", "-account", "1", "-board", "0testboard00000000000001", "-state", "/s", "-prefix", " "})
 	if err == nil {
 		t.Fatal("an empty prefix must fail")
 	}
@@ -42,7 +42,7 @@ func TestParseFlagsFizzy(t *testing.T) {
 	if err == nil {
 		t.Fatal("an empty board must fail")
 	}
-	o, err := parseFlags([]string{"-fizzy", "/f", "-token-file", "/t", "-account", "1", "-board", "03gyvmtu0lb2osl1x3h5hkeii", "-state", "/s"})
+	o, err := parseFlags([]string{"-fizzy", "/f", "-token-file", "/t", "-account", "1", "-board", "0testboard00000000000001", "-state", "/s"})
 	if err != nil || o.prefix != "[lever-dev agent] " || o.backend != "127.0.0.1:3211" || o.name != "fizzy" {
 		t.Fatalf("defaults: %+v %v", o, err)
 	}

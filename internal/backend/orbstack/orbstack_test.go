@@ -457,11 +457,11 @@ func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	}
 }
 
-// resolvedOrb returns a backend whose run user is resolved (stephen/501)
+// resolvedOrb returns a backend whose run user is resolved (devuser/501)
 // through the same probes EnsureUp issues, without provisioning anything.
 func resolvedOrb(t *testing.T, f *proc.FakeRunner, machine string) *OrbStack {
 	t.Helper()
-	backendtest.Guest{User: "orb -m " + machine}.ScriptRunUser(f, "stephen", "501")
+	backendtest.Guest{User: "orb -m " + machine}.ScriptRunUser(f, "devuser", "501")
 	o := New(f, machine, common.Options{})
 	if err := o.ReadRunUser(context.Background()); err != nil {
 		t.Fatalf("ReadRunUser: %v", err)
@@ -473,7 +473,7 @@ func resolvedOrb(t *testing.T, f *proc.FakeRunner, machine string) *OrbStack {
 func TestJailTransportMethods(t *testing.T) {
 	o := resolvedOrb(t, proc.NewFakeRunner(), "lever-x")
 
-	if got := JailPrefix("lever-x", "stephen"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
+	if got := JailPrefix("lever-x", "devuser"); !reflect.DeepEqual(got, []string{"orb", "-m", "lever-x", "-u", "devuser"}) {
 		t.Fatalf("JailPrefix = %v", got)
 	}
 	if o.JailRunner() == nil {
@@ -528,11 +528,11 @@ func TestJailRunnerArgv(t *testing.T) {
 	}
 	c := f.Calls[len(f.Calls)-1]
 	// jail.Runner uses prefix[0] as the host command and prefix[1:]+env as args:
-	// `orb -m lever-x -u stephen env <jailenv...> true`.
+	// `orb -m lever-x -u devuser env <jailenv...> true`.
 	if c.Name != "orb" {
 		t.Fatalf("host command = %q, want orb", c.Name)
 	}
-	if wantPrefix := []string{"-m", "lever-x", "-u", "stephen", "env"}; !reflect.DeepEqual(c.Args[:5], wantPrefix) {
+	if wantPrefix := []string{"-m", "lever-x", "-u", "devuser", "env"}; !reflect.DeepEqual(c.Args[:5], wantPrefix) {
 		t.Fatalf("jail prefix mis-wired: %v", c.Args[:5])
 	}
 	if c.Args[len(c.Args)-1] != "true" {
@@ -543,7 +543,7 @@ func TestJailRunnerArgv(t *testing.T) {
 func TestAttachArgvFullPrefix(t *testing.T) {
 	o := resolvedOrb(t, proc.NewFakeRunner(), "lever-x")
 	attach := o.AttachArgv([]string{"scion", "attach"})
-	if wantPrefix := []string{"orb", "-m", "lever-x", "-u", "stephen", "env"}; !reflect.DeepEqual(attach[:6], wantPrefix) {
+	if wantPrefix := []string{"orb", "-m", "lever-x", "-u", "devuser", "env"}; !reflect.DeepEqual(attach[:6], wantPrefix) {
 		t.Fatalf("attach prefix mis-wired: %v", attach[:6])
 	}
 	if last2 := attach[len(attach)-2:]; !reflect.DeepEqual(last2, []string{"scion", "attach"}) {

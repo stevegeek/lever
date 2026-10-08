@@ -21,18 +21,18 @@ func TestJailRunnerKnownAndUnknown(t *testing.T) {
 }
 
 func TestJailArgvKnownAndUnknown(t *testing.T) {
-	got, err := JailArgv("orbstack", "lever-x", "stephen")
+	got, err := JailArgv("orbstack", "lever-x", "devuser")
 	if err != nil {
 		t.Fatalf("JailArgv(orbstack): %v", err)
 	}
-	if !slices.Equal(got, []string{"orb", "-m", "lever-x", "-u", "stephen"}) {
+	if !slices.Equal(got, []string{"orb", "-m", "lever-x", "-u", "devuser"}) {
 		t.Fatalf("JailArgv(orbstack) = %v", got)
 	}
 	if got, err := JailArgv("lima", "lever-x", "ignored"); err != nil ||
 		!slices.Equal(got, []string{"limactl", "shell", "lever-x"}) {
 		t.Fatalf("JailArgv(lima) = %v, %v", got, err)
 	}
-	if got, err := JailArgv("", "lever-x", "stephen"); err != nil || len(got) == 0 {
+	if got, err := JailArgv("", "lever-x", "devuser"); err != nil || len(got) == 0 {
 		t.Fatalf("JailArgv(\"\") should use the default backend, got %v, %v", got, err)
 	}
 	if _, err := JailArgv("nope", "m", "u"); !errors.Is(err, ErrUnknownBackend) {

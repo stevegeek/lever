@@ -360,7 +360,7 @@ func TestBrokerServeCmdIsDetachedAndLogged(t *testing.T) {
 	// A non-existent .lever-state subdir mirrors a fresh apply: brokerServeCmd
 	// must MkdirAll the log's parent, or the open (and the whole bring-up) fails.
 	out := filepath.Join(dir, ".lever-state", "broker.out.log")
-	cmd, f, err := brokerServeCmd("/usr/local/bin/lever", "/x/lever.yaml", out, "198.51.100.7", "stephen", "501")
+	cmd, f, err := brokerServeCmd("/usr/local/bin/lever", "/x/lever.yaml", out, "198.51.100.7", "devuser", "501")
 	if err != nil {
 		t.Fatalf("brokerServeCmd: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestBrokerServeCmdIsDetachedAndLogged(t *testing.T) {
 		t.Fatalf("out log not created: %v", err)
 	}
 	joined := strings.Join(cmd.Env, "\n")
-	for _, want := range []string{"LEVER_HOST_ALIAS_IP=198.51.100.7", "LEVER_JAIL_USER=stephen", "LEVER_JAIL_UID=501"} {
+	for _, want := range []string{"LEVER_HOST_ALIAS_IP=198.51.100.7", "LEVER_JAIL_USER=devuser", "LEVER_JAIL_UID=501"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("env missing %q", want)
 		}

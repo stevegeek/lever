@@ -205,8 +205,7 @@ its workers need. Two patterns, both instance choices:
 - **Per-worker on demand:** agents install language runtimes inside their containers as needed (a
   Ruby version manager, Node, Python). Keeps the image small; pays a cold-start.
 - **Baked:** the instance builds an image with its common runtimes pre-installed. Faster start; less
-  generic. (The reference instance bakes a default toolchain, an *instance* artifact, not part of
-  the core.)
+  generic. (A baked toolchain is an *instance* artifact, not part of the core.)
 
 **Images are tagged by architecture.** Agent images carry an arch tag
 (`scionlocal/lever-claude:arm64` / `:amd64`), never a shared `:latest`, so a host that cross-builds

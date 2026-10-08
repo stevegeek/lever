@@ -319,18 +319,18 @@ Per-tool capability grain, `gate`:
 ```yaml
 broker:
   tools:
-    - name: devonthink            # fine: only search is callable, database pinnable
+    - name: docs-search            # fine: only search is callable, database pinnable
       external: true
       backend: 127.0.0.1:3302
       operations:
         - {name: search}
       allowed_values:
         database: [work, personal]
-    - name: things3               # coarse: whole surface behind one wildcard grant
+    - name: tasks               # coarse: whole surface behind one wildcard grant
       external: true
       backend: 127.0.0.1:3300
       gate: coarse
-    - name: qmd                   # the server mounts its MCP endpoint under a path
+    - name: notes                   # the server mounts its MCP endpoint under a path
       external: true
       backend: 127.0.0.1:3901/mcp
       gate: coarse
@@ -338,10 +338,10 @@ workers:
   - name: agent-y
     dir: workers/agent-y
     obtain:
-      - {tool: devonthink, op: search}   # Y: devonthink search ONLY
+      - {tool: docs-search, op: search}   # Y: docs-search search ONLY
 manager:
   obtain:
-    - {tool: things3, op: "*"}           # manager: full things3
+    - {tool: tasks, op: "*"}           # manager: full tasks
 ```
 
 `backend` must be a **literal loopback IP** (`127.0.0.1` / `[::1]`; hostnames are rejected):

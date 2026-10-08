@@ -200,17 +200,17 @@ func TestRegisterPreservesFirstParty(t *testing.T) {
 func TestRegisterRoundTripsExternalCoarse(t *testing.T) {
 	r := New()
 	err := r.Register(Tool{
-		Name: "things3", Backend: "127.0.0.1:3300", External: true, Coarse: true,
+		Name: "tasks", Backend: "127.0.0.1:3300", External: true, Coarse: true,
 		Operations: map[string]Operation{WildcardOp: {Name: WildcardOp}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := r.Lookup("things3")
+	got, ok := r.Lookup("tasks")
 	if !ok || !got.External || !got.Coarse || got.FirstParty {
 		t.Fatalf("lookup = %+v ok=%v; want External+Coarse, not FirstParty", got, ok)
 	}
-	if !r.HasOperation("things3", WildcardOp) {
+	if !r.HasOperation("tasks", WildcardOp) {
 		t.Fatal("coarse tool must expose the wildcard op (mint path relies on HasOperation)")
 	}
 }

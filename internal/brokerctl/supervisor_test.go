@@ -68,7 +68,7 @@ func TestSupervisorStartCleansUpOnPartialFailure(t *testing.T) {
 
 func TestSupervisorSkipsExternalTools(t *testing.T) {
 	tools := []ToolSpec{
-		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
+		{Name: "tasks", External: true, Backend: "127.0.0.1:3300"},
 	}
 	s := NewSupervisor(tools, "http://127.0.0.1:1", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
 	if err := s.Start(context.Background()); err != nil {

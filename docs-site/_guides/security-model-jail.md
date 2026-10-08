@@ -169,7 +169,7 @@ so a containment posture is never silently substituted.
   global-scope address. `make test-lima-e2e` could assert `getent ahosts host.lima.internal` returns no
   global-scope v6 today, to catch this drifting silently in the future.
 
-The reference-instance trade today (`orbstack`) is a **single shared kernel** across the manager and
+The `orbstack` trade is a **single shared kernel** across the manager and
 all workers ([§8](/security-model/compromise/)); `lima` carries the same trade one level up (its own
 kernel is separate from the host, but still one kernel shared within the jail). That trade is a
 property of the backend, not of Lever; run `lever backends` for the live matrix.

@@ -14,8 +14,6 @@ Lever separates the reusable framework from a particular operator's setup.
   core-built in-jail binaries into its own agent image via `make lever-image-bins`, but never forks
   the core itself).
 
-The reference instance is the authors' personal assistant.
-
 {% raw %}
 ```mermaid
 graph TD

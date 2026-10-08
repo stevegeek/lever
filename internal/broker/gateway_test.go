@@ -390,23 +390,23 @@ func mintOp(t *testing.T, b *Broker, agent, tool, op string) string {
 	return base64urlNoPad(tok)
 }
 
-// things3Rig is the coarse-tool rig: an external tool with only the wildcard op.
-func things3Rig(t *testing.T) *gatewayRig {
+// tasksRig is the coarse-tool rig: an external tool with only the wildcard op.
+func tasksRig(t *testing.T) *gatewayRig {
 	t.Helper()
-	return newGatewayRig(t, testConfig(t), func(u string) registry.Tool { return regCoarseTool("things3", u) })
+	return newGatewayRig(t, testConfig(t), func(u string) registry.Tool { return regCoarseTool("tasks", u) })
 }
 
 func TestGatewayCoarseToolAcceptsWildcardCapability(t *testing.T) {
-	g := things3Rig(t)
-	cap := mintOp(t, g.b, "worker", "things3", registry.WildcardOp)
+	g := tasksRig(t)
+	cap := mintOp(t, g.b, "worker", "tasks", registry.WildcardOp)
 	g.assertForwarded(g.post("worker", toolsCall("add-todo", `"title":"x"`, cap)), "wildcard capability on a coarse tool")
 }
 
 func TestGatewayCoarseToolDeniesPerOpCapability(t *testing.T) {
-	g := things3Rig(t)
+	g := tasksRig(t)
 	// A token naming the specific MCP tool must NOT satisfy a coarse tool: the
-	// gateway requires exactly {things3, "*"} there.
-	cap := mintOp(t, g.b, "worker", "things3", "add-todo")
+	// gateway requires exactly {tasks, "*"} there.
+	cap := mintOp(t, g.b, "worker", "tasks", "add-todo")
 	g.assertDenied(g.post("worker", toolsCall("add-todo", "", cap)), "a non-wildcard token on a coarse tool")
 }
 
@@ -419,8 +419,8 @@ func TestGatewayFineToolDeniesWildcardCapability(t *testing.T) {
 }
 
 func TestGatewayCoarseCapabilityIsIdentityBound(t *testing.T) {
-	g := things3Rig(t)
-	cap := mintOp(t, g.b, "worker", "things3", registry.WildcardOp) // bound to worker
+	g := tasksRig(t)
+	cap := mintOp(t, g.b, "worker", "tasks", registry.WildcardOp) // bound to worker
 	// replay by a different agent
 	g.assertDenied(g.post("analyst", toolsCall("add-todo", "", cap)), "a cross-agent coarse replay")
 }
@@ -433,28 +433,28 @@ func TestGatewayComposesBackendPath(t *testing.T) {
 	}))
 	defer up.Close()
 	b := New(testConfig(t))
-	// qmd-style: the server mounts its MCP endpoint under /mcp; the config
+	// notes-style: the server mounts its MCP endpoint under /mcp; the config
 	// backend carries the path, scheme-less (host:port/path).
 	backend := strings.TrimPrefix(up.URL, "http://") + "/mcp"
-	_ = b.reg.Register(regCoarseTool("qmd", backend))
+	_ = b.reg.Register(regCoarseTool("notes", backend))
 
-	cap := mintOp(t, b, "worker", "qmd", registry.WildcardOp)
+	cap := mintOp(t, b, "worker", "notes", registry.WildcardOp)
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"_capability":"` + cap + `"}}}`
-	r := httptest.NewRequest("POST", "/mcp/qmd/", bytes.NewReader([]byte(body)))
+	r := httptest.NewRequest("POST", "/mcp/notes/", bytes.NewReader([]byte(body)))
 	r.TLS = leafFor(t, b, "worker")
 	w := httptest.NewRecorder()
-	h, err := b.gatewayHandler("qmd")
+	h, err := b.gatewayHandler("notes")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Serve exactly as JailHandler does: prefix-stripped.
-	http.StripPrefix("/mcp/qmd", h).ServeHTTP(w, r)
+	http.StripPrefix("/mcp/notes", h).ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 	// Hitting the tool root must forward to the backend's path EXACTLY ("/mcp"),
 	// not "/mcp/": the trailing slash is an artifact of the broker's subtree mux,
-	// and a strict streamable-HTTP endpoint (qmd) 404s on it (verified live).
+	// and a strict streamable-HTTP endpoint (notes) 404s on it (verified live).
 	if gotPath != "/mcp" {
 		t.Fatalf("upstream path = %q, want %q (trailing slash is a mux artifact; strict MCP endpoints 404 on it)", gotPath, "/mcp")
 	}

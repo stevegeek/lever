@@ -57,14 +57,14 @@ config reference. Pick a capability grain:
 broker:
   tools:
     # fine: only the listed operations are callable; arguments can be pinned.
-    - name: devonthink
+    - name: docs-search
       external: true
       backend: 127.0.0.1:3302
       operations:
         - {name: search}
       allowed_values: {database: [work, personal]}
     # coarse: one wildcard capability admits the server's WHOLE surface.
-    - name: things3
+    - name: tasks
       external: true
       gate: coarse
       backend: 127.0.0.1:3300
@@ -98,9 +98,9 @@ and default-deny:
 ```yaml
 manager:
   obtain:
-    - {tool: things3, op: "*"}                      # the manager may use things3 itself
+    - {tool: tasks, op: "*"}                      # the manager may use tasks itself
   delegate:
-    - {tool: devonthink, op: search, to: [worker]}  # …and may hand worker this at dispatch
+    - {tool: docs-search, op: search, to: [worker]}  # …and may hand worker this at dispatch
 workers:
   - name: worker
     dir: workers/worker

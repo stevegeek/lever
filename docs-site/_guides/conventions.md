@@ -9,9 +9,7 @@ requires only `name`, `backend`, and `tree`, plus `broker.api_key_file` under th
 `llm_auth: api-key` and one `scion` source at bring-up (workers are optional); everything below is
 a *pattern*, not a rule.
 
-The one convention that is genuinely framework-relevant is **workers**. The rest of this page
-documents how the **reference instance** (the authors' personal assistant) organises itself — one
-worked example, not something the framework expects you to adopt.
+Two conventions are framework-relevant: **workers** and the **task ↔ agent invariant**.
 
 ## Workers (framework-relevant)
 
@@ -21,41 +19,6 @@ non-git directory; any git repositories live *inside* it. This keeps the runtime
 simple (one instance, one Scion project, in-place subdirectory workspaces) and lets a worker's
 directory hold one or several repos. Workers are how the manager hands isolated, bounded work to
 agents.
-
-## Reference-instance conventions (not enforced)
-
-The patterns below are **the reference instance's** — one illustration of structure an instance
-might layer on the core. None of it is in the `lever` binary.
-
-### Projects vs areas
-
-The reference instance separates two kinds of long-lived concern into different directories:
-
-- **Project**, has a finish line. It ships, completes, and gets archived (a feature, a migration, a
-  one-off deliverable). Triage question: *"is it still active, and when does it ship?"*
-- **Area**, an ongoing responsibility with no finish line (maintenance, administration, a domain
-  kept healthy). Triage question: *"am I keeping it healthy?"* An area never "completes."
-
-### Archive convention
-
-When a project leaves the active set, the reference instance moves it to an archive directory with a
-one-word **outcome tag** at the top, drawn from a small fixed vocabulary so the archive stays
-greppable:
-
-| Tag | Meaning |
-|---|---|
-| `completed` | shipped, nothing more to do |
-| `abandoned` | considered, decided against |
-| `on-ice` | paused, may revive (note the revival trigger) |
-| `superseded` | folded into another effort (name it) |
-| `maintenance` | shipped, alive but quiet |
-
-### A goals layer (optional)
-
-Above projects and areas, an optional **goals** layer captures long-running aspirations that are
-never "done" — they get *served*. Each goal lists the projects and areas serving it. The value is
-triage: when a project drifts, ask not only "is it active?" but "does it still serve any goal?" A
-project serving no goal is a candidate to archive.
 
 ## Task ↔ agent invariant (framework-relevant)
 

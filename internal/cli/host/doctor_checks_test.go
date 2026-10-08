@@ -128,8 +128,8 @@ func TestCheckToolBackendsNoneDeclared(t *testing.T) {
 
 func TestCheckToolBackendsAllReachable(t *testing.T) {
 	tools := []config.Tool{
-		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
-		{Name: "qmd", External: true, Backend: "127.0.0.1:3901/mcp"},
+		{Name: "tasks", External: true, Backend: "127.0.0.1:3300"},
+		{Name: "notes", External: true, Backend: "127.0.0.1:3901/mcp"},
 		{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:3201"},
 	}
 	r := checkToolBackends(tools, t.TempDir(), okProbes)
@@ -148,17 +148,17 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 		return nil
 	}
 	tools := []config.Tool{
-		{Name: "things3", External: true, Backend: "127.0.0.1:3300"},
-		{Name: "qmd", External: true, Backend: "127.0.0.1:3901/mcp"},
+		{Name: "tasks", External: true, Backend: "127.0.0.1:3300"},
+		{Name: "notes", External: true, Backend: "127.0.0.1:3901/mcp"},
 	}
 	r := checkToolBackends(tools, t.TempDir(), doctorProbes{dial: dial})
 	if r.ok {
 		t.Fatal("a down backend must fail the check")
 	}
-	if !strings.Contains(r.detail, "things3") {
+	if !strings.Contains(r.detail, "tasks") {
 		t.Fatalf("detail must name the down tool: %q", r.detail)
 	}
-	// qmd's path must be stripped before dialing (dial a host:port, not a URL path).
+	// notes's path must be stripped before dialing (dial a host:port, not a URL path).
 	found := false
 	for _, a := range dialed {
 		if a == "127.0.0.1:3901" {
@@ -166,7 +166,7 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("qmd backend path must be stripped for the dial; dialed=%v", dialed)
+		t.Fatalf("notes backend path must be stripped for the dial; dialed=%v", dialed)
 	}
 }
 

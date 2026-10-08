@@ -905,13 +905,13 @@ func TestClosedInternetEgress(t *testing.T) {
 
 // extCfg is baseCfg plus a fine and a coarse external tool appended to its
 // broker.tools list (baseCfg ends inside that list, 4-space item indent).
-var extCfg = baseCfg + `    - name: devonthink
+var extCfg = baseCfg + `    - name: docs-search
       external: true
       backend: 127.0.0.1:3302
       operations:
         - {name: search}
       allowed_values: {database: [work, personal]}
-    - name: things3
+    - name: tasks
       external: true
       backend: 127.0.0.1:3300
       gate: coarse
@@ -925,23 +925,23 @@ func TestLoadAcceptsExternalTools(t *testing.T) {
 	var dt, th Tool
 	for _, tl := range app.Broker.Tools {
 		switch tl.Name {
-		case "devonthink":
+		case "docs-search":
 			dt = tl
-		case "things3":
+		case "tasks":
 			th = tl
 		}
 	}
 	if !dt.External || dt.EffectiveGate() != GateFine {
-		t.Fatalf("devonthink = %+v; want external fine", dt)
+		t.Fatalf("docs-search = %+v; want external fine", dt)
 	}
 	if !th.External || th.EffectiveGate() != GateCoarse {
-		t.Fatalf("things3 = %+v; want external coarse", th)
+		t.Fatalf("tasks = %+v; want external coarse", th)
 	}
 }
 
 func TestLoadAcceptsWildcardGrantOnCoarseTool(t *testing.T) {
 	cfg := strings.Replace(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
-		"workers:\n  - {name: worker, dir: work, obtain: [{tool: things3, op: \"*\"}]}", 1)
+		"workers:\n  - {name: worker, dir: work, obtain: [{tool: tasks, op: \"*\"}]}", 1)
 	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
 		t.Fatalf("a wildcard grant on a coarse tool must load: %v", err)
 	}
@@ -949,7 +949,7 @@ func TestLoadAcceptsWildcardGrantOnCoarseTool(t *testing.T) {
 
 func TestLoadRejectsWildcardGrantOnFineTool(t *testing.T) {
 	cfg := strings.Replace(extCfg, "workers:\n  - {name: worker, dir: work, obtain: []}",
-		"workers:\n  - {name: worker, dir: work, obtain: [{tool: devonthink, op: \"*\"}]}", 1)
+		"workers:\n  - {name: worker, dir: work, obtain: [{tool: docs-search, op: \"*\"}]}", 1)
 	rejectNoHost(t, cfg) // a wildcard grant on a fine tool must be rejected at load
 }
 
@@ -1007,7 +1007,7 @@ func TestLoadAcceptsIPv6LoopbackBackend(t *testing.T) {
 func TestLoadAcceptsBackendWithPath(t *testing.T) {
 	cfg := strings.Replace(extCfg, "backend: 127.0.0.1:3300", "backend: 127.0.0.1:3901/mcp", 1)
 	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
-		t.Fatalf("a loopback backend with a path (qmd-style) must be accepted: %v", err)
+		t.Fatalf("a loopback backend with a path (notes-style) must be accepted: %v", err)
 	}
 }
 
@@ -1049,7 +1049,7 @@ func TestLoadAcceptsExistingValidToolNames(t *testing.T) {
 		t.Fatalf("tool name %q (db) should remain valid: %v", "db", err)
 	}
 	if _, err := Load(writeConfig(t, extCfg)); err != nil {
-		t.Fatalf("tool names devonthink/things3 should remain valid: %v", err)
+		t.Fatalf("tool names docs-search/tasks should remain valid: %v", err)
 	}
 }
 

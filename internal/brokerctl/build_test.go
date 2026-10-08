@@ -194,28 +194,28 @@ func TestBuildBrokerRegistersExternalTools(t *testing.T) {
 	app := sampleApp()
 	app.Broker.Tools = append(app.Broker.Tools,
 		config.Tool{
-			Name: "devonthink", External: true, Backend: "127.0.0.1:3302",
+			Name: "docs-search", External: true, Backend: "127.0.0.1:3302",
 			Operations:    []config.Op{{Name: "search"}},
 			AllowedValues: map[string][]string{"database": {"work"}},
 		},
-		config.Tool{Name: "things3", External: true, Backend: "127.0.0.1:3300", Gate: config.GateCoarse},
+		config.Tool{Name: "tasks", External: true, Backend: "127.0.0.1:3300", Gate: config.GateCoarse},
 	)
 	cfg, err := BuildBroker(app, kp, caInst, ca.NewTicketStore())
 	if err != nil {
 		t.Fatal(err)
 	}
-	dt, ok := cfg.Identity.Registry.Lookup("devonthink")
+	dt, ok := cfg.Identity.Registry.Lookup("docs-search")
 	if !ok || dt.FirstParty || !dt.External || dt.Coarse {
-		t.Fatalf("devonthink envelope = %+v ok=%v; want external fine, NOT first-party", dt, ok)
+		t.Fatalf("docs-search envelope = %+v ok=%v; want external fine, NOT first-party", dt, ok)
 	}
-	if !cfg.Identity.Registry.HasOperation("devonthink", "search") || cfg.Identity.Registry.HasOperation("devonthink", registry.WildcardOp) {
+	if !cfg.Identity.Registry.HasOperation("docs-search", "search") || cfg.Identity.Registry.HasOperation("docs-search", registry.WildcardOp) {
 		t.Fatal("fine external tool must expose exactly its declared ops — and never the wildcard")
 	}
-	th, ok := cfg.Identity.Registry.Lookup("things3")
+	th, ok := cfg.Identity.Registry.Lookup("tasks")
 	if !ok || th.FirstParty || !th.External || !th.Coarse {
-		t.Fatalf("things3 envelope = %+v ok=%v; want external coarse, NOT first-party", th, ok)
+		t.Fatalf("tasks envelope = %+v ok=%v; want external coarse, NOT first-party", th, ok)
 	}
-	if !cfg.Identity.Registry.HasOperation("things3", registry.WildcardOp) {
+	if !cfg.Identity.Registry.HasOperation("tasks", registry.WildcardOp) {
 		t.Fatal("coarse tool must expose the wildcard op (the /request mint path gates on HasOperation)")
 	}
 	db, _ := cfg.Identity.Registry.Lookup("db")

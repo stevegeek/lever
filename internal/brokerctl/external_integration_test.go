@@ -2,8 +2,8 @@ package brokerctl
 
 // external_integration_test.go drives the EXTERNAL-tool path end to end:
 //
-//	config.Load(lever.yaml with two external tools — fine "devonthink" and
-//	coarse "things3") → BuildBroker (registers them from config,
+//	config.Load(lever.yaml with two external tools — fine "docs-search" and
+//	coarse "tasks") → BuildBroker (registers them from config,
 //	FirstParty=false) → broker.New → ServeListeners → agents (CA-issued client
 //	certs) mint via /request and call through the gated /mcp/<name>/ gateway
 //	over mTLS to plain httptest MCP servers, which the broker did NOT spawn.
@@ -86,14 +86,14 @@ func mcpCall(t *testing.T, client *http.Client, jailURL, gatewayTool, mcpTool, t
 
 func TestExternalToolsIntegration(t *testing.T) {
 	var dtBody, thBody string
-	dtSrv := fakeMCP(t, &dtBody) // fine: devonthink
+	dtSrv := fakeMCP(t, &dtBody) // fine: docs-search
 	defer dtSrv.Close()
-	thSrv := fakeMCP(t, &thBody) // coarse: things3
+	thSrv := fakeMCP(t, &thBody) // coarse: tasks
 	defer thSrv.Close()
 	dtBackend := strings.TrimPrefix(dtSrv.URL, "http://")
 	thBackend := strings.TrimPrefix(thSrv.URL, "http://")
 
-	// manager: coarse things3; worker: fine devonthink/search ONLY.
+	// manager: coarse tasks; worker: fine docs-search/search ONLY.
 	work := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(work, "tree"), 0o755); err != nil {
 		t.Fatal(err)
@@ -103,23 +103,23 @@ backend: orbstack
 tree: tree
 manager:
   obtain:
-    - {tool: things3, op: "*"}
+    - {tool: tasks, op: "*"}
 workers:
   - name: worker
     dir: w
     obtain:
-      - {tool: devonthink, op: search}
+      - {tool: docs-search, op: search}
 broker:
   llm_auth: subscription
   jail_port: 0
   admin_port: 0
   tools:
-    - name: devonthink
+    - name: docs-search
       external: true
       backend: %q
       operations:
         - {name: search}
-    - name: things3
+    - name: tasks
       external: true
       backend: %q
       gate: coarse
@@ -165,49 +165,49 @@ broker:
 	manager := workerClient(t, caInst, workerCert(t, caInst, "manager"))
 	worker := workerClient(t, caInst, workerCert(t, caInst, "worker"))
 
-	// 1. Coarse: manager mints {things3,"*"} and calls an ARBITRARY MCP tool.
-	code, thTok := requestToken(t, manager, jailURL, "things3", "*")
+	// 1. Coarse: manager mints {tasks,"*"} and calls an ARBITRARY MCP tool.
+	code, thTok := requestToken(t, manager, jailURL, "tasks", "*")
 	if code != http.StatusOK || thTok == "" {
-		t.Fatalf("manager mint things3/*: status %d", code)
+		t.Fatalf("manager mint tasks/*: status %d", code)
 	}
-	if got := mcpCall(t, manager, jailURL, "things3", "add-todo", thTok); got != http.StatusOK {
+	if got := mcpCall(t, manager, jailURL, "tasks", "add-todo", thTok); got != http.StatusOK {
 		t.Fatalf("coarse call = %d, want 200", got)
 	}
 	if thBody == "" || strings.Contains(thBody, "_capability") {
 		t.Fatalf("upstream must be reached WITHOUT the token; got %q", thBody)
 	}
 
-	// 2. Fine: worker mints {devonthink,search} and calls it.
-	code, dtTok := requestToken(t, worker, jailURL, "devonthink", "search")
+	// 2. Fine: worker mints {docs-search,search} and calls it.
+	code, dtTok := requestToken(t, worker, jailURL, "docs-search", "search")
 	if code != http.StatusOK || dtTok == "" {
-		t.Fatalf("worker mint devonthink/search: status %d", code)
+		t.Fatalf("worker mint docs-search/search: status %d", code)
 	}
-	if got := mcpCall(t, worker, jailURL, "devonthink", "search", dtTok); got != http.StatusOK {
+	if got := mcpCall(t, worker, jailURL, "docs-search", "search", dtTok); got != http.StatusOK {
 		t.Fatalf("fine call = %d, want 200", got)
 	}
 	if dtBody == "" || strings.Contains(dtBody, "_capability") {
 		t.Fatalf("upstream must be reached WITHOUT the token; got %q", dtBody)
 	}
 
-	// 3. Absent grant: worker has NO grant on things3 — mint is denied.
-	if code, _ := requestToken(t, worker, jailURL, "things3", "*"); code != http.StatusForbidden {
-		t.Fatalf("worker mint things3/* = %d, want 403 (no grant = no access)", code)
+	// 3. Absent grant: worker has NO grant on tasks — mint is denied.
+	if code, _ := requestToken(t, worker, jailURL, "tasks", "*"); code != http.StatusForbidden {
+		t.Fatalf("worker mint tasks/* = %d, want 403 (no grant = no access)", code)
 	}
 
 	// 4a. Wildcard mint against a fine tool is denied (no grant AND no "*" op).
-	if code, _ := requestToken(t, manager, jailURL, "devonthink", "*"); code != http.StatusForbidden {
-		t.Fatalf("manager mint devonthink/* = %d, want 403 (wildcard only on coarse)", code)
+	if code, _ := requestToken(t, manager, jailURL, "docs-search", "*"); code != http.StatusForbidden {
+		t.Fatalf("manager mint docs-search/* = %d, want 403 (wildcard only on coarse)", code)
 	}
 	// 4b. Even a broker-key-signed wildcard token cannot satisfy a fine tool.
 	forged, err := token.Mint(kp.Private, token.Grant{
-		Agent: "worker", Capability: token.Capability{Tool: "devonthink", Operation: "*"},
+		Agent: "worker", Capability: token.Capability{Tool: "docs-search", Operation: "*"},
 		Expiry: time.Now().Add(time.Hour), Epoch: 0,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	dtBody = ""
-	if got := mcpCall(t, worker, jailURL, "devonthink", "search",
+	if got := mcpCall(t, worker, jailURL, "docs-search", "search",
 		base64.RawURLEncoding.EncodeToString(forged)); got != http.StatusForbidden {
 		t.Fatalf("wildcard token on fine tool = %d, want 403", got)
 	}
@@ -232,8 +232,8 @@ broker:
 	for _, n := range tl.Tools {
 		listed[n] = true
 	}
-	if !listed["devonthink"] || !listed["things3"] {
-		t.Fatalf("/tools = %v, want devonthink + things3 listed", tl.Tools)
+	if !listed["docs-search"] || !listed["tasks"] {
+		t.Fatalf("/tools = %v, want docs-search + tasks listed", tl.Tools)
 	}
 
 	cancel()

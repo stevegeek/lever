@@ -74,6 +74,13 @@ ENV DISABLE_AUTOUPDATER=1
 # as scion (uid 1000) maps writable under rootless.
 RUN chown -R scion:scion /home/scion
 
+# Claude Code's managed-settings directory, where lever-agent boot writes the
+# agent's claude_settings and after_compact_note at every start. Under
+# rootless podman the pre-start hook runs as scion, not root, so the directory
+# must be scion's: the agent can therefore change the file during a session,
+# and boot rewrites it from lever.yaml at the next start.
+RUN install -d -o scion -g scion -m 0755 /etc/claude-code
+
 # The lever version the binaries above were built from (what `lever version`
 # prints for that source; build-lever-image.sh passes it). `lever doctor`
 # compares it with the host lever: the image tag names only the arch, so a

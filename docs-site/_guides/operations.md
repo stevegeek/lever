@@ -345,8 +345,9 @@ manager:
 
 - **How they arrive.** The host puts them in the agent's enrolment envelope (`bootstrap.json`): for
   the manager when apply mints its ticket, for a worker before every dispatch and resume. At every
-  container start, `lever-agent boot` (root, in scion's pre-start hook) writes them into Claude
-  Code's managed-settings file, `/etc/claude-code/managed-settings.json`:
+  container start, `lever-agent boot` (in scion's pre-start hook) writes them into Claude
+  Code's managed-settings file, `/etc/claude-code/managed-settings.json` (lever's image creates
+  that directory for the `scion` user, because under rootless podman the hook runs as that user):
   `auto_compact_window` as `env.CLAUDE_CODE_AUTO_COMPACT_WINDOW`, the note as a `SessionStart` hook
   with matcher `compact` (the session start that follows a compaction), which runs
   `lever-agent after-compact` and gives the agent the note, marked
@@ -358,10 +359,15 @@ manager:
   stop and a resume for a worker). That holds for a removed setting too: a running agent keeps
   what lever wrote until its next start. `lever apply` warns while the running manager differs,
   and doctor's `claude settings` row compares each running agent with the config.
-- **What the agent can change.** The managed-settings file belongs to root, and Claude Code runs as
-  the `scion` user, which cannot write it; the env value also ranks above the agent's own settings
-  files and `/autocompact`. An agent that gains root in its own container can rewrite the file for
-  the rest of that container's life; boot writes it again at the next start. The manager's
+- **What the agent can change.** The settings are a configuration aid, not a boundary. The
+  managed-settings file is in the agent's own container and belongs to the `scion` user that runs
+  Claude Code, so the agent can change it during a session; boot writes it again from your
+  lever.yaml at the next start. The env value ranks above the agent's own settings files and
+  `/autocompact`.
+- **A failed delivery never stops the agent.** If boot cannot write the file (an image built
+  before 0.34.1 has no `/etc/claude-code`) or the envelope's block is invalid, it logs
+  `claude settings not delivered` and the agent starts without them; doctor's `claude settings`
+  row shows what the agent got. The manager's
   envelope is in the tree it can write, so the manager can rewrite the copy staged for its own
   next start (`.lever/bootstrap.json`) and give itself another window or its own after-compaction
   note, within the same validated bounds; a broker restart (`lever reload`) stages a fresh one.

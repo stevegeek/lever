@@ -106,11 +106,16 @@ func Boot(ctx context.Context, c BootConfig) error {
 	if bsErr == nil {
 		brokerURL = bs.BrokerURL
 		// The host validated it, but the manager's envelope is in the tree
-		// the manager writes, and boot runs as root.
+		// the manager writes. An invalid block is dropped (lever's settings
+		// are then removed) and logged: the settings are optional and must
+		// not stop the agent.
 		if err := bs.Claude.Validate(); err != nil {
-			return fmt.Errorf("agent boot: bootstrap claude block: %w", err)
+			if c.Log != nil {
+				c.Log("lever-agent boot: bootstrap claude block refused, not delivered: %v", err)
+			}
+		} else {
+			claude = bs.Claude
 		}
-		claude = bs.Claude
 	}
 
 	// Idempotent: a valid existing cert means we already enrolled (resume/restart).
@@ -161,8 +166,12 @@ func Boot(ctx context.Context, c BootConfig) error {
 		// No envelope means no claude block: say why lever's values go.
 		c.Log("lever-agent boot: no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any", bsErr, c.ManagedSettingsPath)
 	}
-	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil {
-		return err
+	// The Claude settings are optional: a failed write must not stop the
+	// agent (on rootless podman the pre-start hook runs as the agent user, and
+	// an image without lever's /etc/claude-code cannot take the file). It is
+	// logged, and doctor's claude settings row shows what the agent got.
+	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil && c.Log != nil {
+		c.Log("lever-agent boot: claude settings not delivered: %v", err)
 	}
 	if c.MCPAdd == nil {
 		return nil

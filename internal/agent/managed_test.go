@@ -238,19 +238,45 @@ func TestBootWritesManagedSettingsFromBootstrap(t *testing.T) {
 	}
 }
 
-// The manager's envelope is in the tree it writes: boot (root) refuses a
-// block the host would never have staged.
-func TestBootRefusesInvalidClaudeBlock(t *testing.T) {
+// The manager's envelope is in the tree it writes: boot drops a block the
+// host would never have staged, logs it, and still boots the agent.
+func TestBootDropsInvalidClaudeBlock(t *testing.T) {
 	env := testBroker(t)
 	c := baseBootConfig(t, env)
 	c.ManagedSettingsPath = managedPath(t)
+	var logged []string
+	c.Log = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
 	writeBootstrapClaude(t, c.BootstrapPath, &wire.Claude{AfterCompactNote: "a\nb"})
-	err := Boot(context.Background(), c)
-	if !errors.Is(err, wire.ErrAfterCompactNoteText) {
-		t.Fatalf("err = %v, want ErrAfterCompactNoteText", err)
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatalf("an invalid claude block stopped the boot: %v", err)
 	}
 	if _, err := os.Stat(c.ManagedSettingsPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("wrote managed settings from an invalid block")
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "claude block refused") {
+		t.Fatalf("no log line for the refused block: %q", logged)
+	}
+}
+
+// Under rootless podman the pre-start hook runs as the agent user; a managed
+// settings directory it cannot create must not stop the agent.
+func TestBootSurvivesAnUnwritableManagedSettingsDir(t *testing.T) {
+	env := testBroker(t)
+	c := baseBootConfig(t, env)
+	ro := t.TempDir()
+	if err := os.Chmod(ro, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(ro, 0o755) })
+	c.ManagedSettingsPath = filepath.Join(ro, "claude-code", "managed-settings.json")
+	var logged []string
+	c.Log = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	writeBootstrapClaude(t, c.BootstrapPath, &wire.Claude{AutoCompactWindow: 250000})
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatalf("an unwritable managed settings dir stopped the boot: %v", err)
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "claude settings not delivered") {
+		t.Fatalf("no log line for the failed write: %q", logged)
 	}
 }
 

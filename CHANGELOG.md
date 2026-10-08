@@ -5,6 +5,28 @@ All notable changes to lever are documented here. The format follows
 to `main` that changes behavior adds an entry under `## [Unreleased]`; a
 version bump moves the block under the new version heading.
 
+## [0.34.1] - 2026-10-08
+
+### Fixed
+
+- **An agent with `claude_settings` or `after_compact_note` no longer fails to start on rootless
+  podman.** 0.34.0 assumed that scion's pre-start hook runs as root, but under rootless podman it
+  runs as the agent user (uid 1000), so `lever-agent boot` could not create
+  `/etc/claude-code`, the hook failed and the agent went to phase error (seen on Lima). lever's
+  image now creates `/etc/claude-code` for the agent user, and a failed write or an invalid
+  `claude` block in the envelope is logged (`claude settings not delivered`) instead of stopping
+  the agent: the settings are optional.
+- The docs now say what the agent can change: the managed-settings file is in the agent's own
+  container and belongs to its user, so the agent can change it during a session; boot rewrites
+  it from lever.yaml at the next start.
+
+### Upgrade
+
+- Rebuild the agent image (`make lever-image`, then any instance image built from it), then put
+  the agents on it as in 0.34.0 (`lever up --fresh` for the manager after a backup; a purge or
+  recycle for a worker). An instance image that already creates `/etc/claude-code` for the agent
+  user works with 0.34.0 too.
+
 ## [0.34.0] - 2026-10-07
 
 ### Added

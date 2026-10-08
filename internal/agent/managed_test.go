@@ -261,6 +261,9 @@ func TestBootDropsInvalidClaudeBlock(t *testing.T) {
 // Under rootless podman the pre-start hook runs as the agent user; a managed
 // settings directory it cannot create must not stop the agent.
 func TestBootSurvivesAnUnwritableManagedSettingsDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only directory")
+	}
 	env := testBroker(t)
 	c := baseBootConfig(t, env)
 	ro := t.TempDir()

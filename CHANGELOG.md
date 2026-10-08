@@ -26,6 +26,9 @@ version bump moves the block under the new version heading.
   the agents on it as in 0.34.0 (`lever up --fresh` for the manager after a backup; a purge or
   recycle for a worker). An instance image that already creates `/etc/claude-code` for the agent
   user works with 0.34.0 too.
+- To unblock an agent at once without a rebuild: remove `claude_settings` and
+  `after_compact_note` from its config, run `lever apply` (the envelope is staged again with no
+  settings, and boot then writes nothing), then start it.
 
 ## [0.34.0] - 2026-10-07
 

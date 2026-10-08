@@ -78,12 +78,13 @@ func ValidateAfterCompactNote(note string) error {
 // user's). lever-agent boot writes the agent's Claude here, at every
 // start, from the envelope the host staged.
 //
-// Why here and not in ~/.claude/settings.json: the home is the agent's own
-// (uid 1000 owns it, and scion's harness writes its hooks there), while
-// /etc/claude-code is root's. Boot runs as root in scion's pre-start hook;
-// claude runs as the scion user, which can read this file but not change
-// it. An agent that gains root in its own container can still rewrite it,
-// and boot rewrites it again at the next start.
+// Why here and not in ~/.claude/settings.json: managed settings rank above
+// the agent's own settings files, and scion's harness writes its hooks in
+// the home. It is not a boundary: under rootless podman boot runs as the
+// agent user (uid 1000) in scion's pre-start hook, and lever's image gives
+// that user /etc/claude-code, so the agent can change the file during a
+// session; boot rewrites it at the next start, unless it cannot (see the
+// boot log).
 const ManagedSettingsPath = "/etc/claude-code/managed-settings.json"
 
 // AutoCompactWindowEnv is the Claude Code variable Claude's

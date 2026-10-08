@@ -362,18 +362,21 @@ manager:
 - **What the agent can change.** The settings are a configuration aid, not a boundary. The
   managed-settings file is in the agent's own container and belongs to the `scion` user that runs
   Claude Code, so the agent can change it during a session; boot writes it again from your
-  lever.yaml at the next start. The env value ranks above the agent's own settings files and
-  `/autocompact`.
-- **A failed delivery never stops the agent.** If boot cannot write the file (an image built
-  before 0.34.1 has no `/etc/claude-code`) or the envelope's block is invalid, it logs
+  lever.yaml at the next start, unless it cannot (the agent can also make the file or its
+  directory unwritable; boot then logs `claude settings not delivered`). The env value ranks above
+  the agent's own settings files and `/autocompact`. The manager's envelope is in the tree it can
+  write, so the manager can rewrite the copy staged for its own next start
+  (`.lever/bootstrap.json`) and give itself another window or its own after-compaction note,
+  within the same validated bounds; a broker restart (`lever reload`) stages a fresh one. This is
+  no new power: the manager can already write a `CLAUDE.md` in its tree, which Claude Code
+  reloads. Nothing in this path goes from the agent to the host: the host only reads back an
+  integer and a checksum of the note for doctor and apply.
+- **A failed delivery never stops the agent** (lever-agent 0.34.1 or later, in the image). If
+  boot cannot write the file or the envelope's block is invalid, it logs
   `claude settings not delivered` and the agent starts without them; doctor's `claude settings`
-  row shows what the agent got. The manager's
-  envelope is in the tree it can write, so the manager can rewrite the copy staged for its own
-  next start (`.lever/bootstrap.json`) and give itself another window or its own after-compaction
-  note, within the same validated bounds; a broker restart (`lever reload`) stages a fresh one.
-  This is no new power: the manager can already write a `CLAUDE.md` in its tree, which Claude
-  Code reloads. Nothing in this path goes from the agent to the host: the host only reads back an integer
-  and a checksum of the note for doctor and apply.
+  row shows what the file holds (the agent's own file, so read it as the agent's word). An image
+  with the 0.34.0 lever-agent and no `/etc/claude-code` still fails to start: rebuild it, or
+  remove the two settings and run `lever apply` to unblock the agent at once.
 - **Images.** Delivery needs the new `lever-agent` and the new pre-start hook in the agent image.
   Run `make lever-image` (and rebuild any instance image built `FROM` it), then put each agent on
   a new container: the manager with `lever up --fresh` (back up its conversation first: it is

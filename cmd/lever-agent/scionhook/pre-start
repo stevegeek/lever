@@ -1,7 +1,8 @@
 #!/bin/sh
 # scion pre-start hook: enrol this agent + configure the harness BEFORE claude
 # launches. Runs in the pre-start phase, as the agent user (uid 1000) under
-# rootless podman, so it writes only paths that user owns; lever-agent writes 0600 key
+# rootless podman, so it writes only paths that user owns (sciontool chowns
+# the key files only when it runs as root); lever-agent writes 0600 key
 # files which sciontool then chowns to the agent user.
 #
 # Bootstrap path — two layouts, one reader (lever-agent boot):

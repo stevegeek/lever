@@ -38,8 +38,8 @@ const AfterCompactMarker = "[after compaction: note from this instance's lever.y
 // no longer sets them. nil c with no file is a no-op, so an agent with no
 // claude config is never touched. An empty path is a no-op (enrol-only boot).
 //
-// The file is replaced, not rewritten in place: removed, then created 0644,
-// so it is root's whoever owned the old one. Like WriteSettingsEnv, the work
+// The file is replaced, not rewritten in place: removed, then created 0644
+// with O_EXCL, so a planted symbolic link is refused. Like WriteSettingsEnv, the work
 // goes through an os.Root two levels up (/etc), refusing a symbolic link at
 // /etc/claude-code or at the file.
 func WriteManagedSettings(path string, c *wire.Claude) error {
@@ -91,7 +91,17 @@ func WriteManagedSettings(path string, c *wire.Claude) error {
 	if err := r.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("managed settings %s: remove old: %w", path, err)
 	}
-	return r.WriteFile(rel, b, 0o644)
+	// O_EXCL: a symbolic link the agent plants between the Remove and this
+	// create (it owns /etc/claude-code) is refused, never followed.
+	f, err := r.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("managed settings %s: create: %w", path, err)
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return fmt.Errorf("managed settings %s: write: %w", path, err)
+	}
+	return f.Close()
 }
 
 // mergeManagedSettings applies c to settings in place (see

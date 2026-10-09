@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.34.2] - 2026-10-09
+
 ### Changed
 
 - **The examples and docs pin scion `e0f61f2d` (2026-09-30), not `63d5d65d`.** `63d5d65d` lacks
@@ -44,6 +46,11 @@ version bump moves the block under the new version heading.
   (after 5, 10 and 20 s), for a broker that takes longer than the wait on a cold start.
 - **`lever-tool-fizzy`: `create_card` with an empty description writes `<prefix>(no description)`**
   instead of the bare prefix, which read like a truncated text.
+
+### Upgrade
+
+- A plain upgrade: install the release, then `lever apply` (or `lever up`). No image rebuild and no
+  fresh agents are needed. The first apply warms every image once.
 
 ## [0.34.1] - 2026-10-08
 

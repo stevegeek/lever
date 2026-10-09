@@ -14,6 +14,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/opsig"
+	"github.com/stevegeek/lever/internal/voice"
 )
 
 // Default broker ports, used when the config leaves jail_port/admin_port unset
@@ -32,6 +33,10 @@ const (
 const (
 	DefaultRemotePort      = 8445
 	DefaultRemoteLoginPort = 8447
+	// DefaultRemoteVoicePort is where whisper-server listens on host
+	// loopback when remote.voice is on (remote.voice.port unset). The jail
+	// never reaches it: validation refuses it in manager.allow_ports.
+	DefaultRemoteVoicePort = 8448
 )
 
 // DefaultDirectiveExpiry is operator.directive_expiry when unset.
@@ -470,4 +475,45 @@ func (a *App) EffectiveDirectiveExpiryMax() time.Duration {
 // instance's operator identity.
 func (a *App) OperatorPrincipal() string {
 	return "operator@" + a.Name
+}
+
+// VoiceOn reports whether the chat page offers dictation (remote.voice on,
+// with the chat page).
+func (a *App) VoiceOn() bool { return a.RemoteLandingChat() && a.Remote.Voice.Enabled }
+
+// EffectiveVoiceModel is remote.voice.model with its default.
+func (a *App) EffectiveVoiceModel() string {
+	return cmp.Or(strings.TrimSpace(a.Remote.Voice.Model), voice.DefaultModel)
+}
+
+// EffectiveVoiceMaxSeconds is remote.voice.max_seconds with its default.
+func (a *App) EffectiveVoiceMaxSeconds() int {
+	return cmp.Or(max(a.Remote.Voice.MaxSeconds, 0), DefaultVoiceMaxSeconds)
+}
+
+// EffectiveVoicePort is the host loopback port whisper-server binds.
+func (a *App) EffectiveVoicePort() int {
+	return cmp.Or(max(a.Remote.Voice.Port, 0), DefaultRemoteVoicePort)
+}
+
+// VoiceGPU is remote.voice.gpu with nil read as true.
+func (a *App) VoiceGPU() bool { return a.Remote.Voice.GPU == nil || *a.Remote.Voice.GPU }
+
+// VoicePrompt is the vocabulary as Whisper's prompt: the words, comma
+// separated ("" for none).
+func (a *App) VoicePrompt() string { return strings.Join(a.Remote.Voice.Vocabulary, ", ") }
+
+// VoiceExcludedLogins is every allowed_users login with voice: false, in
+// config order, while voice is on (nil otherwise).
+func (a *App) VoiceExcludedLogins() []string {
+	if !a.VoiceOn() {
+		return nil
+	}
+	var out []string
+	for _, u := range a.Remote.AllowedUsers {
+		if !u.VoiceAllowed() {
+			out = append(out, u.Login)
+		}
+	}
+	return out
 }

@@ -23,6 +23,10 @@ const (
 	// or a private state dir a host tool keeps. Never safe in the tree: a
 	// read-only mount still lets the manager read it.
 	hostSecret
+	// hostProgramOutside is code the host runs that must lie outside the
+	// tree altogether (remote.voice.whisper_server): a manager.read_only
+	// mount does not excuse it.
+	hostProgramOutside
 	// hostUnchecked is a known flag whose value is not a host program or
 	// secret: the github tool's -tree (it names the tree on purpose) or a
 	// data file the agent may edit by design (-csv, -dsn). Consumed so it
@@ -84,6 +88,9 @@ func (a *App) hostPaths() []hostPath {
 		for _, p := range toolHostPaths(t) {
 			add(p)
 		}
+	}
+	if a.Remote.Voice.Enabled {
+		add(hostPath{key: "remote.voice.whisper_server", path: a.Remote.Voice.WhisperServer, kind: hostProgramOutside})
 	}
 	return out
 }
@@ -178,6 +185,10 @@ func (a *App) checkHostPathsOutsideTree() error {
 		}
 		if !w.inTree {
 			continue
+		}
+		if p.kind == hostProgramOutside {
+			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent could replace the program the host runs — "+
+				"install it outside the tree (a manager.read_only mount does not excuse it)", p.key, p.path, a.Tree)
 		}
 		if p.kind == hostSecret {
 			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent can read and replace it there, "+

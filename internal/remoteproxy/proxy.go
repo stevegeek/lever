@@ -196,6 +196,11 @@ type Config struct {
 	// shared with it (files.go). Nil = off: every /lever/api/files/ path is
 	// a 404. Needs ChatAgent.
 	Files *FilesConfig
+	// Voice (remote.voice) turns on dictation: the page records a clip and
+	// /lever/api/voice/transcribe turns it into text for the message box
+	// (voice.go). Nil = off: the route is a 404 and the roster carries no
+	// voice. Needs ChatAgent.
+	Voice *VoiceConfig
 	// Push, when non-nil, is the Web Push service (remote.push, push.go):
 	// the page's subscription routes and worker, and the hub streams that
 	// turn agent messages into pushes (the caller runs Push.Run). It needs
@@ -437,6 +442,11 @@ type AuditLine struct {
 	Contact string `json:"contact,omitempty"`
 	Agent   string `json:"agent,omitempty"`
 	Count   *int   `json:"count,omitempty"`
+	// AudioSeconds and LatencyMS describe a dictation clip (voice.go): its
+	// length, and how long the transcription took. Never the audio, never
+	// the text.
+	AudioSeconds float64 `json:"audio_seconds,omitempty"`
+	LatencyMS    int64   `json:"latency_ms,omitempty"`
 	// Error records why an allowed request never got an answer from the hub
 	// (set only on the 502 path). The transport's own diagnosis lands here
 	// rather than in the client's response body: the operator needs to know
@@ -633,6 +643,9 @@ func NewHandler(cfg Config) http.Handler {
 		g.chat = newChatPage(cfg)
 		if cfg.Files != nil {
 			g.files = newFilesState(*cfg.Files)
+		}
+		if cfg.Voice != nil {
+			g.voice = newVoiceState(*cfg.Voice)
 		}
 		if cfg.Push != nil {
 			g.push = cfg.Push
@@ -879,6 +892,7 @@ type gate struct {
 	chat     *chatPage     // nil unless Config.ChatAgent is set
 	push     *Push         // nil unless Config.Push and ChatAgent are set
 	files    *filesState   // nil unless Config.Files and ChatAgent are set
+	voice    *voiceState   // nil unless Config.Voice and ChatAgent are set
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration

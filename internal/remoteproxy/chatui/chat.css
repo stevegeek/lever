@@ -213,3 +213,36 @@ textarea {
 .filelist .file:first-child { border-top: 0; }
 .filelist .file a { color: var(--mine); overflow-wrap: anywhere; }
 .filelist .who, .filelist .meta { font-size: 12px; color: var(--muted); }
+#mic {
+  height: 42px;
+  min-width: 2.75rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+#mic:disabled { opacity: 0.45; }
+#mic.recording { border-color: var(--bad); color: var(--bad); }
+.msg .speak {
+  align-self: flex-start;
+  margin: 2px 2px 0;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+#readvoice {
+  max-width: 9rem;
+  padding: 6px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}

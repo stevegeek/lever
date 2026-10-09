@@ -481,22 +481,26 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		}
 	}
 	// What the script may build and where it may reach, counted: every
-	// element it makes is a div, li, ul, button, span or a (a file row's
-	// download link), the attributes it sets are the href of the two fixed
-	// links and of a file row (lever's own download route, built from a
-	// checked agent name and id) and that row's download name, the one
-	// fetch is the api helper's, and the one XMLHttpRequest is the upload. A new element kind, attribute or request shows up here,
-	// to be looked at.
+	// element it makes is a div, li, ul, button, span, a (a file row's
+	// download link) or option (a read-aloud voice, its text set as text),
+	// the attributes it sets are the href of the two fixed links and of a
+	// file row (lever's own download route, built from a checked agent name
+	// and id) and that row's download name, the one fetch is the api
+	// helper's (the dictation clip goes through it too, to lever's own
+	// route with its custom header), and the one XMLHttpRequest is the
+	// upload. A new element kind, attribute or request shows up here, to be
+	// looked at.
 	js, err := chatUI.ReadFile("chatui/chat.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for re, want := range map[string]int{
-		`createElement\(`:            18,
+		`createElement\(`:            20,
 		`createElement\('div'\)`:     8,
 		`createElement\('li'\)`:      4,
 		`createElement\('a'\)`:       1,
-		`createElement\('button'\)`:  3,
+		`createElement\('button'\)`:  4,
+		`createElement\('option'\)`:  1,
 		`createElement\('ul'\)`:      1,
 		`createElement\('span'\)`:    1,
 		`setAttribute\(`:             3,
@@ -515,7 +519,14 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`serviceWorker\.register\(`:                    1,
 		`pushManager\.subscribe\(`:                     1,
 		`new EventSource\(`:                            1,
-		`location\.reload\(\)`:                         0,
+		// Dictation posts only to lever's route, with its header; speech
+		// is the browser's own synthesis, never a network voice.
+		`'/lever/api/voice/transcribe'`: 1,
+		`'X-Lever-Voice': '1'`:          1,
+		`getUserMedia\(`:                1,
+		`speechSynthesis\.speak\(`:      1,
+		`pickVoice\(`:                   2,
+		`location\.reload\(\)`:          0,
 	} {
 		if got := len(regexp.MustCompile(re).FindAll(js, -1)); got != want {
 			t.Errorf("chat.js has %d of %s, want %d: review what the new one writes or requests", got, re, want)

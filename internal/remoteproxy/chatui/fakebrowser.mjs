@@ -36,6 +36,10 @@ class FakeNode {
     this.attrs[k] = v;
   }
   focus() {}
+  setSelectionRange(a, b) {
+    this.selectionStart = a;
+    this.selectionEnd = b;
+  }
   click() {
     this.clicks = (this.clicks || 0) + 1;
   }
@@ -119,6 +123,85 @@ export async function load(hub, opts = {}) {
     delete globalThis.Notification;
     Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: {} });
   }
+  // Dictation (opts.media): a microphone, a MediaRecorder and the audio
+  // contexts, as far as the page uses them. The recorder hands over one
+  // chunk on stop; decoding gives opts.media.decoded ({length, sampleRate},
+  // default 1 s at 48 kHz), or throws with opts.media.decodeFails. The
+  // render is a ramp of the requested length, recorded in env.media.
+  if (opts.media) {
+    const m = (env.media = { streams: 0, stopped: 0, recorders: [], renders: [], denied: !!opts.media.denied });
+    globalThis.navigator.mediaDevices = {
+      getUserMedia: async (c) => {
+        m.constraints = c;
+        if (m.denied) throw new Error('NotAllowedError');
+        m.streams++;
+        return { getTracks: () => [{ stop: () => m.stopped++ }] };
+      },
+    };
+    globalThis.window.MediaRecorder = class {
+      constructor(stream) {
+        Object.assign(this, { stream, state: 'inactive', mimeType: 'audio/webm', listeners: {} });
+        m.recorders.push(this);
+      }
+      addEventListener(t, f) {
+        (this.listeners[t] ||= []).push(f);
+      }
+      start(slice) {
+        this.slice = slice;
+        this.state = 'recording';
+      }
+      stop() {
+        this.state = 'inactive';
+        for (const f of this.listeners.dataavailable || []) f({ data: new Blob([new Uint8Array(100)]) });
+        for (const f of this.listeners.stop || []) f({});
+      }
+    };
+    globalThis.window.OfflineAudioContext = class {
+      constructor(channels, length, rate) {
+        Object.assign(this, { channels, length, rate, destination: { kind: 'destination' } });
+      }
+      async decodeAudioData(buf) {
+        m.decodedBytes = buf.byteLength;
+        if (opts.media.decodeFails) throw new Error('EncodingError');
+        const d = opts.media.decoded || { length: 48000, sampleRate: 48000 };
+        return { ...d, numberOfChannels: 1 };
+      }
+      createBufferSource() {
+        const ctx = this;
+        return { connect(dest) { this.dest = dest; }, start() { ctx.started = true; } };
+      }
+      async startRendering() {
+        m.renders.push({ channels: this.channels, length: this.length, rate: this.rate });
+        const data = new Float32Array(this.length).map((_, i) => (i % 2 ? 0.5 : -0.5));
+        return { getChannelData: () => data };
+      }
+    };
+  } else {
+    delete globalThis.window.MediaRecorder;
+  }
+  // Read-aloud (opts.speech): speechSynthesis with opts.speech.voices,
+  // recording each utterance spoken and each cancel in env.speech.
+  if (opts.speech) {
+    const sp = (env.speech = { spoken: [], cancels: 0, listeners: {} });
+    globalThis.window.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        Object.assign(this, { text, listeners: {} });
+      }
+      addEventListener(t, f) {
+        (this.listeners[t] ||= []).push(f);
+      }
+    };
+    globalThis.window.speechSynthesis = {
+      getVoices: () => opts.speech.voices || [],
+      speak: (u) => sp.spoken.push(u),
+      cancel: () => sp.cancels++,
+      addEventListener: (t, f) => (sp.listeners[t] ||= []).push(f),
+    };
+    env.endSpeech = () => {
+      const u = sp.spoken[sp.spoken.length - 1];
+      for (const f of u.listeners.end || []) f({});
+    };
+  }
   // The browser's sticky activation (opts.activation): absent unless a test
   // asks, as in a browser without navigator.userActivation.
   if (opts.activation) globalThis.navigator.userActivation = opts.activation;
@@ -149,11 +232,13 @@ export async function load(hub, opts = {}) {
   };
   globalThis.fetch = async (path, init = {}) => {
     const method = init.method || 'GET';
-    env.calls.push({ method, path, body: init.body ? JSON.parse(init.body) : undefined });
+    // A string body is JSON; any other (a clip) is passed on as it is.
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
+    env.calls.push({ method, path, body, headers: init.headers });
     env.log.push(`${method} ${path}`);
     // As a browser does: an aborted request rejects, however far it got.
     const aborted = new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
-    const r = await Promise.race([hub(method, path, init.body ? JSON.parse(init.body) : undefined), aborted]);
+    const r = await Promise.race([hub(method, path, body), aborted]);
     if (r.down) throw new Error('network');
     if (r.redirect) {
       // As a browser does: an unfollowed redirect is opaque, a followed one
@@ -215,7 +300,14 @@ export async function load(hub, opts = {}) {
     env.els.file.dispatch('change');
     await tick(5);
   };
-  globalThis.setInterval = (f, ms) => env.intervals.push({ f, ms });
+  let intervalIds = 0;
+  globalThis.setInterval = (f, ms) => {
+    env.intervals.push({ f, ms, id: ++intervalIds });
+    return intervalIds;
+  };
+  globalThis.clearInterval = (id) => {
+    env.intervals = env.intervals.filter((i) => i.id !== id);
+  };
   // Timers are held, not run: a test fires the ones it wants. runTimers
   // fires the short ones (the page's own pacing); a request's time limit is
   // long, and runs only when a test asks for it (runTimers(Infinity)).

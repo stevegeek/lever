@@ -27,6 +27,7 @@ function hubWith(parts = {}) {
     upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: 'report.pdf', size: 3, sha256: '0'.repeat(64) }, progress: [50, 100] }),
     files: () => ({ status: 200, body: { files: [] } }),
     viewFiles: () => ({ status: 200, body: { files: [] } }),
+    transcribe: () => ({ status: 200, body: { text: 'hello from the mic' } }),
     ...parts,
   };
   const fn = (method, path, body) => {
@@ -36,6 +37,7 @@ function hubWith(parts = {}) {
     if (path === '/lever/api/agents') return h.agents();
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
     if (path.startsWith('/lever/api/files/')) return method === 'POST' ? h.upload(body, path) : h.files(path);
+    if (path === '/lever/api/voice/transcribe') return h.transcribe(body, path);
     if (method === 'POST' && path.endsWith('/read')) return h.read(body, path);
     if (method === 'POST') return h.post(body, path);
     return h.history(path);
@@ -2002,4 +2004,189 @@ test('operator view: a contact with files off gets no files request', async () =
   await env.poll();
   assert.equal(env.count('GET', '/lever/api/contacts/c%40x/agents/w1/files'), 0);
   assert.equal(env.els.filespanel.hidden, true);
+});
+
+// Dictation (remote.voice) and read-aloud.
+const withVoice = (agents, voice = { maxSeconds: 300 }) => () => roster(agents, { voice });
+const transcribes = (env) => env.calls.filter((c) => c.path === '/lever/api/voice/transcribe');
+const LOCAL = { name: 'Local', lang: 'en-GB', voiceURI: 'local-en', localService: true };
+const NETWORK = { name: 'Cloud', lang: 'en-US', voiceURI: 'cloud-en', localService: false, default: true };
+
+test('mic: shown only when the list carries voice and the browser can record', async () => {
+  let env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: {} });
+  assert.equal(env.els.mic.hidden, false);
+  assert.equal(env.els.mic.disabled, false);
+  env = await loadChat(hubWith(), { media: {} });
+  assert.equal(env.els.mic.hidden, true, 'no voice in the list: no mic');
+  env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }));
+  assert.equal(env.els.mic.hidden, true, 'a browser that cannot record: no mic');
+  for (const voice of [{ maxSeconds: 0 }, { maxSeconds: 601 }, { maxSeconds: '300' }, 'yes', null]) {
+    env = await loadChat(hubWith({ agents: withVoice([BOSS()], voice) }), { media: {} });
+    assert.equal(env.els.mic.hidden, true, JSON.stringify(voice));
+  }
+  // A see-only agent or no chat open: no mic.
+  env = await load(hubWith({ agents: withVoice([BOSS()]) }), { media: {} });
+  assert.equal(env.els.mic.hidden, true);
+  // Input off (no hub record): the mic is off too.
+  env = await loadChat(hubWith({ agents: withVoice([BOSS({ conversation: '', id: '', state: 'no-record' })]) }), { media: {} });
+  assert.equal(env.els.mic.disabled, true);
+});
+
+test('mic: record, stop, post a 16 kHz mono WAV, put the text at the cursor, send nothing', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: { decoded: { length: 96000, sampleRate: 48000 } } });
+  await type(env, 'Before after');
+  env.els.text.selectionStart = 6;
+  env.els.text.selectionEnd = 6;
+  env.els.mic.dispatch('click');
+  await tick(5);
+  assert.equal(env.media.recorders.length, 1);
+  assert.equal(env.media.recorders[0].state, 'recording');
+  assert.equal(env.els.mic.className, 'recording');
+  assert.equal(env.els.mic.textContent, '■');
+  assert.match(env.els.voice.textContent, /^Recording 0:00 of 5:00/);
+  env.els.mic.dispatch('click');
+  await tick(20);
+  assert.equal(env.media.stopped, 1, 'the microphone is released');
+  // 2 s at 48 kHz becomes 32000 samples at 16 kHz, one channel.
+  assert.deepEqual(env.media.renders, [{ channels: 1, length: 32000, rate: 16000 }]);
+  const t = transcribes(env);
+  assert.equal(t.length, 1);
+  assert.equal(t[0].method, 'POST');
+  assert.equal(t[0].headers['X-Lever-Voice'], '1');
+  assert.equal(t[0].headers['Content-Type'], 'audio/wav');
+  const wav = t[0].body;
+  assert.ok(wav instanceof Uint8Array);
+  assert.equal(wav.length, 44 + 2 * 32000);
+  assert.equal(String.fromCharCode(...wav.slice(0, 4)), 'RIFF');
+  assert.equal(env.els.text.value, 'Before hello from the mic after');
+  assert.equal(env.els.text.selectionStart, 'Before hello from the mic'.length);
+  assert.equal(sends(env).length, 0, 'a transcript is never sent by itself');
+  assert.equal(env.store['lever-chat-draft:boss'], 'Before hello from the mic after');
+  assert.equal(env.els.voice.hidden, true);
+  assert.equal(env.els.mic.textContent, '🎤');
+  assert.equal(env.els.error.hidden, true);
+});
+
+test('mic: a clip longer than the limit is cut to it; one too short is not sent', async () => {
+  let env = await loadChat(hubWith({ agents: withVoice([BOSS()], { maxSeconds: 2 }) }), { media: { decoded: { length: 48000 * 5, sampleRate: 48000 } } });
+  env.els.mic.dispatch('click');
+  await tick(5);
+  env.els.mic.dispatch('click');
+  await tick(20);
+  assert.equal(env.media.renders[0].length, 32000);
+  env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: { decoded: { length: 100, sampleRate: 48000 } } });
+  env.els.mic.dispatch('click');
+  await tick(5);
+  env.els.mic.dispatch('click');
+  await tick(20);
+  assert.equal(transcribes(env).length, 0);
+  assert.equal(env.els.error.textContent, 'Nothing was recorded.');
+});
+
+test('mic: stops by itself at the clip limit', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS()], { maxSeconds: 1 }) }), { media: {} });
+  const realNow = Date.now;
+  try {
+    env.els.mic.dispatch('click');
+    await tick(5);
+    const start = Date.now();
+    Date.now = () => start + 1500;
+    for (const i of env.intervals.filter((x) => x.ms === 500)) i.f();
+    await tick(20);
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(env.media.recorders[0].state, 'inactive');
+  assert.equal(transcribes(env).length, 1);
+  assert.equal(env.intervals.filter((x) => x.ms === 500).length, 0, 'the timer is cleared');
+});
+
+test('mic: a refusal shows its words and leaves the draft alone', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS()]), transcribe: () => ({ status: 429, body: { error: 'quota' } }) }), { media: {} });
+  await type(env, 'draft');
+  env.els.mic.dispatch('click');
+  await tick(5);
+  env.els.mic.dispatch('click');
+  await tick(20);
+  assert.equal(env.els.error.textContent, 'Not transcribed: too much dictation today; try again tomorrow');
+  assert.equal(env.els.text.value, 'draft');
+  assert.equal(env.els.mic.disabled, false);
+});
+
+test('mic: a denied microphone or an unreadable clip says so', async () => {
+  let env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: { denied: true } });
+  env.els.mic.dispatch('click');
+  await tick(5);
+  assert.match(env.els.error.textContent, /microphone is not available/);
+  assert.equal(env.media.recorders.length, 0);
+  env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: { decodeFails: true } });
+  env.els.mic.dispatch('click');
+  await tick(5);
+  env.els.mic.dispatch('click');
+  await tick(20);
+  assert.match(env.els.error.textContent, /could not be read/);
+  assert.equal(transcribes(env).length, 0);
+});
+
+test('mic: leaving the chat while recording drops the clip', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS(), A('w1')]) }), { media: {} });
+  env.els.mic.dispatch('click');
+  await tick(5);
+  env.els.back.dispatch('click');
+  await tick(20);
+  assert.equal(env.media.stopped, 1);
+  assert.equal(transcribes(env).length, 0);
+  assert.equal(env.els.voice.hidden, true);
+});
+
+test('read-aloud: a speaker on each agent message, on-device voices only, cleaned text, stop control', async () => {
+  const hist = () => ({ status: 200, body: { messages: [msg(1, { msg: 'See **this**:\n```\nrm -rf /\n```\nand [docs](https://example.com/x)' }), msg(2, { senderId: 'u1', msg: 'mine' }), msg(3, { msg: 'second' })] } });
+  const env = await loadChat(hubWith({ history: hist }), { speech: { voices: [NETWORK, LOCAL] } });
+  const speakers = () => env.els.list.children.map((r) => r.children.find((c) => c.className === 'speak'));
+  const [first, mine, third] = speakers();
+  assert.ok(first && third);
+  assert.equal(mine, undefined, 'no speaker on the login\'s own message');
+  first.dispatch('click');
+  assert.equal(env.speech.spoken.length, 1);
+  const u = env.speech.spoken[0];
+  assert.equal(u.text, 'See this:\ncode block skipped.\nand docs');
+  assert.equal(u.voice, LOCAL, 'never a network voice, even the default');
+  assert.equal(first.textContent, '⏹');
+  // Tapping again stops.
+  first.dispatch('click');
+  assert.equal(env.speech.cancels, 1);
+  assert.equal(env.speech.spoken.length, 1);
+  assert.equal(first.textContent, '🔊');
+  // Another message: the first stops, the second reads.
+  first.dispatch('click');
+  third.dispatch('click');
+  assert.equal(env.speech.spoken.length, 3);
+  assert.equal(env.speech.spoken[2].text, 'second');
+  assert.equal(first.textContent, '🔊');
+  assert.equal(third.textContent, '⏹');
+  env.endSpeech();
+  assert.equal(third.textContent, '🔊');
+});
+
+test('read-aloud: no on-device voice reads nothing; no speech API shows no speaker', async () => {
+  let env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [NETWORK] } });
+  env.els.list.children[0].children.find((c) => c.className === 'speak').dispatch('click');
+  assert.equal(env.speech.spoken.length, 0);
+  assert.match(env.els.error.textContent, /no on-device voice/);
+  env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }));
+  assert.equal(env.els.list.children[0].children.some((c) => c.className === 'speak'), false);
+});
+
+test('read-aloud: the voice choice is offered with two local voices and kept per device', async () => {
+  const other = { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true };
+  const env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, other, NETWORK] } });
+  assert.equal(env.els.readvoice.hidden, false);
+  assert.deepEqual(env.els.readvoice.children.map((o) => o.value), ['local-en', 'local-de']);
+  env.els.readvoice.value = 'local-de';
+  env.els.readvoice.dispatch('change');
+  assert.equal(env.local['lever-read-voice'], 'local-de');
+  env.els.list.children[0].children.find((c) => c.className === 'speak').dispatch('click');
+  assert.equal(env.speech.spoken[0].voice, other);
+  const one = await loadChat(hubWith(), { speech: { voices: [LOCAL, NETWORK] } });
+  assert.equal(one.els.readvoice.hidden, true, 'one local voice: nothing to choose');
 });

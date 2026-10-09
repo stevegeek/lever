@@ -42,6 +42,19 @@ import {
   hashAgent,
   pushKeyBytes,
   pushView,
+  CODE_SKIPPED,
+  VOICE_MIN_SAMPLES,
+  clockText,
+  encodeWAV,
+  insertText,
+  localVoices,
+  pickVoice,
+  resampledLength,
+  speechText,
+  transcriptOf,
+  voiceConfig,
+  voiceErrorText,
+  voiceRequestMs,
 } from './chatcore.js';
 
 test('historyItems reads either key and drops junk', () => {
@@ -454,4 +467,110 @@ test('filesConfig: uploads and shares are on unless the answer says false', () =
   assert.deepEqual(filesConfig({ files: { maxBytes: 9, extensions: ['pdf'] } }), { maxBytes: 9, extensions: ['pdf'], uploads: true, shares: true });
   assert.deepEqual(filesConfig({ files: { maxBytes: 9, extensions: [], uploads: false, shares: false } }), { maxBytes: 9, extensions: [], uploads: false, shares: false });
   assert.equal(contactList({ contacts: [{ login: 'c@x', agents: [], noFiles: true }, { login: 'd@x', agents: [] }] }).map((c) => !!c.noFiles).join(), 'true,false');
+});
+
+test('voiceConfig: only a well-formed object turns the mic on', () => {
+  assert.deepEqual(voiceConfig({ voice: { maxSeconds: 300 } }), { maxSeconds: 300 });
+  for (const body of [null, {}, { voice: true }, { voice: { maxSeconds: 0 } }, { voice: { maxSeconds: 601 } }, { voice: { maxSeconds: 1.5 } }, { voice: { maxSeconds: '300' } }]) {
+    assert.equal(voiceConfig(body), null, JSON.stringify(body));
+  }
+  assert.deepEqual(agentList({ agents: [], voice: { maxSeconds: 60 } }).voice, { maxSeconds: 60 });
+  assert.equal(agentList({ agents: [] }).voice, null);
+});
+
+test('resampledLength is the clip at 16 kHz', () => {
+  assert.equal(resampledLength(48000, 48000), 16000);
+  assert.equal(resampledLength(44100 * 2, 44100), 32000);
+  assert.equal(resampledLength(1, 48000), 1, 'never zero for a clip with a sample');
+  assert.equal(resampledLength(16000, 16000), 16000);
+  assert.equal(resampledLength(100, 44100), 37, 'rounded up');
+  assert.equal(resampledLength(0, 48000), 0);
+  assert.equal(resampledLength(10, 0), 0);
+  assert.equal(VOICE_MIN_SAMPLES, 1600);
+});
+
+test('encodeWAV writes the header the proxy checks, then s16le samples', () => {
+  const wav = encodeWAV(new Float32Array([0, 1, -1, 0.5, 2, -2, NaN]));
+  const v = new DataView(wav.buffer);
+  const ascii = (a, b) => String.fromCharCode(...wav.slice(a, b));
+  assert.equal(wav.length, 44 + 14);
+  assert.equal(ascii(0, 4), 'RIFF');
+  assert.equal(v.getUint32(4, true), wav.length - 8);
+  assert.equal(ascii(8, 16), 'WAVEfmt ');
+  assert.equal(v.getUint32(16, true), 16);
+  assert.equal(v.getUint16(20, true), 1, 'PCM');
+  assert.equal(v.getUint16(22, true), 1, 'mono');
+  assert.equal(v.getUint32(24, true), 16000);
+  assert.equal(v.getUint32(28, true), 32000);
+  assert.equal(v.getUint16(32, true), 2);
+  assert.equal(v.getUint16(34, true), 16);
+  assert.equal(ascii(36, 40), 'data');
+  assert.equal(v.getUint32(40, true), 14);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 6].map((i) => v.getInt16(44 + 2 * i, true)), [0, 32767, -32768, 16384, 32767, -32768, 0]);
+  assert.equal(encodeWAV(new Float32Array(0)).length, 44);
+});
+
+test('insertText puts the text at the cursor with spaces where words would run on', () => {
+  assert.deepEqual(insertText('', 0, 0, ' hello '), { value: 'hello', cursor: 5 });
+  assert.deepEqual(insertText('Before after', 6, 6, 'mid'), { value: 'Before mid after', cursor: 10 });
+  assert.deepEqual(insertText('Before after', 7, 7, 'mid'), { value: 'Before mid after', cursor: 11 });
+  assert.deepEqual(insertText('abc', 3, 3, 'x'), { value: 'abc x', cursor: 5 });
+  assert.deepEqual(insertText('replace THIS now', 8, 12, 'that'), { value: 'replace that now', cursor: 12 });
+  assert.deepEqual(insertText('line\n', 5, 5, 'next'), { value: 'line\nnext', cursor: 9 });
+  assert.deepEqual(insertText('abc', undefined, undefined, 'x'), { value: 'abc x', cursor: 5 }, 'no cursor: at the end');
+  assert.deepEqual(insertText('abc', 1, 1, '  '), { value: 'abc', cursor: 1 });
+});
+
+test('voice words, the clock, the answer and the request time limit', () => {
+  assert.equal(voiceErrorText(429, { error: 'busy' }), 'other clips are being transcribed; try again in a moment');
+  assert.equal(voiceErrorText(503, { error: 'unavailable' }), 'transcription is unavailable right now');
+  assert.equal(voiceErrorText(502, 'bad gateway'), 'bad gateway (HTTP 502)');
+  assert.equal(voiceErrorText(400, { error: 'toString' }), 'toString (HTTP 400)');
+  assert.equal(clockText(0), '0:00');
+  assert.equal(clockText(65.9), '1:05');
+  assert.equal(clockText(600), '10:00');
+  assert.equal(transcriptOf({ text: '  hi  ' }), 'hi');
+  assert.equal(transcriptOf({ text: '' }), '');
+  assert.equal(transcriptOf({ text: 'x'.repeat(MAX_MESSAGE + 5) }).length, MAX_MESSAGE);
+  for (const junk of [null, 'hi', {}, { text: 7 }]) assert.equal(transcriptOf(junk), null);
+  assert.ok(voiceRequestMs(300) > 300000 && voiceRequestMs(600) > voiceRequestMs(300));
+});
+
+test('speechText reads the words, not the markup', () => {
+  const cases = [
+    ['# Title\nBody', 'Title\nBody'],
+    ['**bold**, __strong__, *it*, _it_ and ~~gone~~', 'bold, strong, it, it and gone'],
+    ['run `make test` now', 'run make test now'],
+    ['before\n```go\nfunc main() {}\n```\nafter', `before\n${CODE_SKIPPED}.\nafter`],
+    ['open\n~~~\ncode', `open\n${CODE_SKIPPED}.`],
+    ['para\n\n    indented()\n    more()\n\nafter', `para\n${CODE_SKIPPED}.\nafter`],
+    ['see [the docs](https://example.com/a) and ![a chart](x.png)', 'see the docs and a chart'],
+    ['bare https://www.example.org/a/b?c=d and <https://sub.example.net/x>', 'bare example.org and sub.example.net'],
+    ['> quoted\n- one\n* two\n1. three', 'quoted\none\ntwo\nthree'],
+    ['| a | b |\n|---|:-:|\n| 1 | 2 |', 'a, b\n1, 2'],
+    ['above\n---\nbelow', 'above\nbelow'],
+    ['snake_case and 2*3*4 stay', 'snake_case and 2*3*4 stay'],
+    ['tag <b>bold</b> stays text', 'tag bold stays text'],
+    ['zero​width\u0007bell', 'zero width bell'],
+    ['', ''],
+  ];
+  for (const [input, want] of cases) assert.equal(speechText(input), want, input);
+  assert.equal(speechText(null), '');
+  assert.ok(speechText('x'.repeat(50000)).length <= 20000);
+});
+
+test('pickVoice uses on-device voices only', () => {
+  const net = { voiceURI: 'n', lang: 'en-US', localService: false, default: true };
+  const en = { voiceURI: 'en', lang: 'en-GB', localService: true };
+  const de = { voiceURI: 'de', lang: 'de-DE', localService: true };
+  const dflt = { voiceURI: 'fr', lang: 'fr-FR', localService: true, default: true };
+  assert.equal(pickVoice([net], '', 'en'), null);
+  assert.equal(pickVoice([], '', 'en'), null);
+  assert.equal(pickVoice('junk', '', 'en'), null);
+  assert.equal(pickVoice([net, en, de], 'n', 'en'), en, 'a saved network voice is not used');
+  assert.equal(pickVoice([net, en, de], 'de', 'en'), de, 'the saved choice first');
+  assert.equal(pickVoice([net, en, de, dflt], '', 'en'), dflt, 'then the default');
+  assert.equal(pickVoice([net, de, en], '', 'en-US'), en, 'then the page language');
+  assert.equal(pickVoice([net, de, en], '', ''), de, 'then the first');
+  assert.deepEqual(localVoices([net, en, null, { localService: true }]), [en]);
 });

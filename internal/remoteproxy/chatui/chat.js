@@ -16,6 +16,18 @@
 import {
   CONTACTS_MS,
   UPLOAD_MS,
+  VOICE_MIN_SAMPLES,
+  VOICE_RATE,
+  clockText,
+  encodeWAV,
+  insertText,
+  localVoices,
+  pickVoice,
+  resampledLength,
+  speechText,
+  transcriptOf,
+  voiceErrorText,
+  voiceRequestMs,
   downloadPath,
   fileCheck,
   fileList,
@@ -110,6 +122,9 @@ const el = {
   filespanel: $('filespanel'),
   filelist: $('filelist'),
   filesnote: $('filesnote'),
+  mic: $('mic'),
+  voice: $('voice'),
+  readvoice: $('readvoice'),
 };
 
 let roster = null; // the list as last applied (agentList shape)
@@ -171,9 +186,9 @@ const transcript = new Map();
 // A redirect is never followed. The hub answers a session it no longer knows
 // with a redirect to its login page; followed, that ends in a page and a
 // 200, which would read as success. It comes back as {redirect: true}.
-async function api(path, init) {
+async function api(path, init, ms = REQUEST_MS) {
   const limit = new AbortController();
-  const timer = setTimeout(() => limit.abort(), REQUEST_MS);
+  const timer = setTimeout(() => limit.abort(), ms);
   try {
     const res = await fetch(path, { credentials: 'same-origin', redirect: 'manual', signal: limit.signal, headers: { Accept: 'application/json' }, ...init });
     if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
@@ -303,6 +318,7 @@ function render(toBottom) {
     // on one line: no text can lay out a notice of its own.
     setText(body, kind === 'system' ? `hub: ${oneLine(messageText(m), SYSTEM_MAX)}` : messageText(m));
     row.append(body);
+    if (kind === 'agent' && speechOn()) row.append(speakButton(m));
     if (kind === 'mine' && m.dispatchState === 'failed') {
       const fail = document.createElement('div');
       fail.className = 'fail';
@@ -810,6 +826,284 @@ function syncAttach() {
   el.attach.hidden = !on || !roster.files.uploads;
   el.files.hidden = !on;
   el.attach.disabled = uploading || sending || !chat || !chat.view || !chat.view.input;
+  syncMic();
+  syncReadVoice();
+}
+
+// Dictation (remote.voice). The mic records a clip in the browser; on stop
+// the page decodes it, resamples it to 16 kHz mono (OfflineAudioContext),
+// encodes WAV and posts it to lever, which answers its text. The text goes
+// into the message box at the cursor, for the login to review: the page
+// never sends it by itself.
+let recording = null; // {recorder, stream, chunks, started, max, agent, timer, discard, done}
+let transcribing = false;
+
+const micSupported = () => !!(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') &&
+  typeof window.MediaRecorder === 'function' && typeof window.OfflineAudioContext === 'function';
+
+function showVoice(text) {
+  setText(el.voice, text);
+  el.voice.hidden = !text;
+}
+
+// syncMic shows the mic for an open chat while the list carries voice for
+// this login and the browser can record. It is off while the message box
+// is, and while a clip is being transcribed.
+function syncMic() {
+  el.mic.hidden = !(roster && roster.voice && chat && micSupported());
+  el.mic.disabled = transcribing || (!recording && (!chat || !chat.view || !chat.view.input));
+  el.mic.className = recording ? 'recording' : '';
+  setText(el.mic, recording ? '■' : '🎤');
+}
+
+function stopTracks(stream) {
+  for (const t of stream && typeof stream.getTracks === 'function' ? stream.getTracks() : []) t.stop();
+}
+
+async function toggleMic() {
+  if (recording) {
+    stopDictation();
+    return;
+  }
+  const c = chat;
+  const cfg = roster && roster.voice;
+  if (!c || !cfg || transcribing || !micSupported()) return;
+  showError('');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch {
+    showError('The microphone is not available: allow it for this page in the browser\'s settings.');
+    return;
+  }
+  if (chat !== c || recording) {
+    stopTracks(stream);
+    return;
+  }
+  let recorder;
+  try {
+    recorder = new window.MediaRecorder(stream);
+  } catch {
+    stopTracks(stream);
+    showError('This browser cannot record here.');
+    return;
+  }
+  const r = { recorder, stream, chunks: [], started: Date.now(), max: cfg.maxSeconds, agent: c.name, timer: 0, discard: false, done: false };
+  recorder.addEventListener('dataavailable', (ev) => {
+    if (ev.data && ev.data.size) r.chunks.push(ev.data);
+  });
+  recorder.addEventListener('stop', () => void finishDictation(r));
+  recording = r;
+  recorder.start(1000);
+  r.timer = setInterval(() => tickDictation(r), 500);
+  tickDictation(r);
+  syncMic();
+}
+
+// tickDictation shows the time recorded, and stops at the clip limit.
+function tickDictation(r) {
+  if (recording !== r) return;
+  const s = (Date.now() - r.started) / 1000;
+  showVoice(`Recording ${clockText(s)} of ${clockText(r.max)}. Tap ■ to stop.`);
+  if (s >= r.max) stopDictation();
+}
+
+// stopDictation ends the recording; its clip is transcribed (finishDictation
+// runs on the recorder's stop event).
+function stopDictation() {
+  const r = recording;
+  if (!r) return;
+  recording = null;
+  clearInterval(r.timer);
+  stopTracks(r.stream);
+  showVoice('');
+  try {
+    if (r.recorder.state === 'inactive') void finishDictation(r);
+    else r.recorder.stop();
+  } catch {
+    void finishDictation(r);
+  }
+  syncMic();
+}
+
+// cancelDictation ends a recording without transcribing it (the chat it was
+// for closed).
+function cancelDictation() {
+  if (recording) recording.discard = true;
+  stopDictation();
+}
+
+async function finishDictation(r) {
+  if (r.done) return;
+  r.done = true;
+  if (r.discard) return;
+  transcribing = true;
+  showVoice('Transcribing…');
+  syncMic();
+  try {
+    const clip = new Blob(r.chunks, { type: r.recorder.mimeType || '' });
+    const wav = await toWAV(await clip.arrayBuffer(), r.max);
+    if (!wav) {
+      showError('Nothing was recorded.');
+      return;
+    }
+    const res = await api('/lever/api/voice/transcribe', {
+      method: 'POST',
+      // The proxy refuses a clip without X-Lever-Voice, as an upload without
+      // X-Lever-Upload: no other site can send it.
+      headers: { Accept: 'application/json', 'Content-Type': 'audio/wav', 'X-Lever-Voice': '1' },
+      body: wav,
+    }, voiceRequestMs(r.max));
+    const text = res.ok ? transcriptOf(res.body) : null;
+    if (text === null) {
+      showError(`Not transcribed: ${voiceErrorText(res.status, res.body)}`);
+      return;
+    }
+    if (!text) {
+      showError('Nothing was heard in the recording.');
+      return;
+    }
+    placeTranscript(r.agent, text);
+  } catch {
+    showError('The recording could not be read in this browser.');
+  } finally {
+    transcribing = false;
+    showVoice('');
+    syncMic();
+  }
+}
+
+// toWAV decodes a recorded clip and resamples it to 16 kHz mono WAV, at most
+// max seconds; null for a clip too short to hold a word.
+async function toWAV(buf, max) {
+  const decoder = new window.OfflineAudioContext(1, 1, VOICE_RATE);
+  const audio = await decoder.decodeAudioData(buf);
+  const length = Math.min(resampledLength(audio.length, audio.sampleRate), max * VOICE_RATE);
+  if (length < VOICE_MIN_SAMPLES) return null;
+  const mix = new window.OfflineAudioContext(1, length, VOICE_RATE);
+  const source = mix.createBufferSource();
+  source.buffer = audio;
+  source.connect(mix.destination);
+  source.start();
+  const out = await mix.startRendering();
+  return encodeWAV(out.getChannelData(0));
+}
+
+// placeTranscript inserts text at the cursor of agent's message box, or,
+// when another chat is open by now, at the end of agent's draft. Nothing is
+// sent.
+function placeTranscript(agent, text) {
+  if (chat && chat.name === agent) {
+    const { value, cursor } = insertText(el.text.value, el.text.selectionStart, el.text.selectionEnd, text);
+    el.text.value = value;
+    try {
+      el.text.setSelectionRange(cursor, cursor);
+    } catch {
+      // no selection to set: the text is in all the same
+    }
+    saveDraft();
+    grow();
+    el.text.focus();
+    return;
+  }
+  const draft = stored(draftKey(agent)) || '';
+  store(draftKey(agent), insertText(draft, draft.length, draft.length, text).value);
+}
+
+// Read-aloud: the browser's speech synthesis, with on-device voices only
+// (localService true), so the text never goes to a speech service. The
+// voice chosen is kept per device.
+const READ_VOICE_KEY = 'lever-read-voice';
+let speaking = null; // {id, button}: the message being read
+
+const speechOn = () => !!(window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function');
+
+function savedReadVoice() {
+  try {
+    return localStorage.getItem(READ_VOICE_KEY) || '';
+  } catch {
+    return ''; // storage is off
+  }
+}
+
+function saveReadVoice(uri) {
+  try {
+    localStorage.setItem(READ_VOICE_KEY, uri);
+  } catch {
+    // storage is off: the choice lasts for this page load
+  }
+}
+
+function speechLang() {
+  return (document.documentElement && document.documentElement.lang) || navigator.language || '';
+}
+
+function speakButton(m) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'speak';
+  b.title = 'Read aloud';
+  const on = !!speaking && speaking.id === m.id;
+  if (on) speaking.button = b;
+  setText(b, on ? '⏹' : '🔊');
+  b.addEventListener('click', () => speak(m, b));
+  return b;
+}
+
+function stopSpeaking() {
+  const s = speaking;
+  speaking = null;
+  if (s && s.button) setText(s.button, '🔊');
+  if (s && speechOn()) window.speechSynthesis.cancel();
+}
+
+// speak reads m aloud; a tap on the message being read stops it, a tap on
+// another stops it and reads that one.
+function speak(m, button) {
+  const again = !!speaking && speaking.id === m.id;
+  stopSpeaking();
+  if (again || !speechOn()) return;
+  const v = pickVoice(window.speechSynthesis.getVoices(), savedReadVoice(), speechLang());
+  if (!v) {
+    showError('This device has no on-device voice to read with.');
+    return;
+  }
+  const text = speechText(messageText(m));
+  if (!text) return;
+  const u = new window.SpeechSynthesisUtterance(text);
+  u.voice = v;
+  u.lang = v.lang;
+  const s = { id: m.id, button };
+  const done = () => {
+    if (speaking !== s) return;
+    speaking = null;
+    setText(s.button, '🔊');
+  };
+  u.addEventListener('end', done);
+  u.addEventListener('error', done);
+  speaking = s;
+  setText(button, '⏹');
+  window.speechSynthesis.speak(u);
+}
+
+// syncReadVoice offers the voice choice in an open chat when the device has
+// more than one on-device voice. The options are built again only when the
+// voices change.
+let readVoices = '';
+function syncReadVoice() {
+  const voices = speechOn() ? localVoices(window.speechSynthesis.getVoices()) : [];
+  el.readvoice.hidden = !chat || voices.length < 2;
+  const key = voices.map((v) => v.voiceURI).join('\n');
+  if (el.readvoice.hidden || key === readVoices) return;
+  readVoices = key;
+  const chosen = pickVoice(voices, savedReadVoice(), speechLang());
+  el.readvoice.replaceChildren(...voices.map((v) => {
+    const o = document.createElement('option');
+    o.value = v.voiceURI;
+    setText(o, `${oneLine(v.name, 60)} (${oneLine(v.lang, 20)})`);
+    return o;
+  }));
+  el.readvoice.value = chosen ? chosen.voiceURI : '';
 }
 
 function closeFiles() {
@@ -935,6 +1229,7 @@ function fileRow(agent, f, sender = '') {
 }
 
 function resetHistory() {
+  stopSpeaking();
   messages.clear();
   fromHistory.clear();
   generation++;
@@ -948,6 +1243,7 @@ function resetHistory() {
 // label and state, and nothing is read for it.
 function openChat(name) {
   leaveTranscript();
+  cancelDictation();
   const a = roster && roster.agents.find((x) => x.name === name);
   if (!a) {
     closeChat();
@@ -993,6 +1289,7 @@ function openChat(name) {
 // closeChat goes back to the list.
 function closeChat() {
   leaveTranscript();
+  cancelDictation();
   current = '';
   chat = null;
   store(OPEN_KEY, null);
@@ -1522,6 +1819,12 @@ el.attach.addEventListener('click', () => {
   el.file.click();
 });
 el.file.addEventListener('change', () => void upload(el.file.files && el.file.files[0]));
+el.mic.addEventListener('click', () => void toggleMic());
+el.readvoice.addEventListener('change', () => saveReadVoice(el.readvoice.value));
+if (speechOn() && typeof window.speechSynthesis.addEventListener === 'function') {
+  // Voices load late in some browsers.
+  window.speechSynthesis.addEventListener('voiceschanged', syncReadVoice);
+}
 el.files.addEventListener('click', () => {
   if (filesOpen) {
     closeFiles();

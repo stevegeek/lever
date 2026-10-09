@@ -48,6 +48,7 @@
     <nav>
       <button id="refresh" type="button" hidden>Refresh</button>
       <button id="files" type="button" hidden>Files</button>
+      <select id="readvoice" aria-label="Read-aloud voice" hidden></select>
       <a id="terminal" hidden>Terminal</a>
     </nav>
   </header>
@@ -63,9 +64,11 @@
     <p id="error" class="error" role="alert" hidden></p>
     <p id="note" class="note" hidden></p>
     <p id="upload" class="note" role="status" hidden></p>
+    <p id="voice" class="note" role="status" hidden></p>
     <button id="ask" class="ask" type="button" hidden></button>
     <div class="row">
       <button id="attach" type="button" aria-label="Attach a file" hidden>📎</button><input id="file" type="file" hidden>
+      <button id="mic" type="button" aria-label="Dictate: tap to record, tap again to stop" hidden>🎤</button>
       <textarea id="text" rows="1" placeholder="Message" aria-label="Message" disabled></textarea>
       <button id="send" type="submit" disabled>Send</button>
     </div>

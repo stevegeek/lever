@@ -189,6 +189,7 @@ export function agentList(body) {
     console: str(body.console),
     agents,
     files: filesConfig(body),
+    voice: voiceConfig(body),
   };
 }
 
@@ -487,4 +488,171 @@ export function uploadNote(name) {
 // name or the id is not one the page builds a link from.
 export function downloadPath(agent, id) {
   return AGENT_NAME.test(agent) && FILE_ID.test(id) ? `/lever/api/files/${agent}/${id}` : '';
+}
+
+// Dictation and read-aloud (remote.voice). The page records a clip, turns it
+// into WAV (16 kHz, mono, 16-bit) here, and posts it; the text that comes
+// back goes into the message box, never straight to the agent. Read-aloud
+// uses the browser's own on-device voices only.
+export const VOICE_RATE = 16000;
+export const VOICE_MAX_SECONDS = 600; // the config's ceiling
+export const VOICE_MIN_SAMPLES = VOICE_RATE / 10; // the server refuses less
+
+// voiceConfig is the list's voice object, or null when the login has no
+// dictation (or the object is not one the page understands).
+export function voiceConfig(body) {
+  const v = body && typeof body === 'object' ? body.voice : null;
+  if (!v || typeof v !== 'object' || !Number.isInteger(v.maxSeconds) || v.maxSeconds <= 0 || v.maxSeconds > VOICE_MAX_SECONDS) return null;
+  return { maxSeconds: v.maxSeconds };
+}
+
+// voiceRequestMs bounds the transcription request: the server's own body
+// deadline for a clip of maxSeconds, plus the transcription.
+export function voiceRequestMs(maxSeconds) {
+  return (120 + 2 * maxSeconds) * 1000;
+}
+
+// resampledLength is how many samples a clip of inLength samples at inRate
+// has at outRate: the OfflineAudioContext's length.
+export function resampledLength(inLength, inRate, outRate = VOICE_RATE) {
+  if (!(inLength > 0) || !(inRate > 0)) return 0;
+  return Math.max(1, Math.ceil((inLength * outRate) / inRate));
+}
+
+// encodeWAV is samples (floats in [-1, 1]) as a WAV file: the canonical
+// 44-byte header the proxy checks byte for byte (voice.go checkWAV), then
+// PCM s16le, mono, at rate.
+export function encodeWAV(samples, rate = VOICE_RATE) {
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + 2 * n);
+  const v = new DataView(buf);
+  const ascii = (at, s) => {
+    for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i));
+  };
+  ascii(0, 'RIFF');
+  v.setUint32(4, 36 + 2 * n, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); // PCM
+  v.setUint16(22, 1, true); // mono
+  v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  ascii(36, 'data');
+  v.setUint32(40, 2 * n, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, Number.isFinite(samples[i]) ? samples[i] : 0));
+    v.setInt16(44 + 2 * i, s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff), true);
+  }
+  return new Uint8Array(buf);
+}
+
+// clockText is seconds as m:ss.
+export function clockText(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// insertText puts text into value at the selection [start, end), with a
+// space on each side where a word would otherwise run on. It answers the
+// new value and where the cursor goes (after the text).
+export function insertText(value, start, end, text) {
+  const v = typeof value === 'string' ? value : '';
+  const t = typeof text === 'string' ? text.trim() : '';
+  const a = Number.isInteger(start) && start >= 0 && start <= v.length ? start : v.length;
+  const b = Number.isInteger(end) && end >= a && end <= v.length ? end : a;
+  if (!t) return { value: v, cursor: b };
+  const before = v.slice(0, a);
+  const after = v.slice(b);
+  const pre = before && !/\s$/.test(before) ? ' ' : '';
+  const post = after && !/^\s/.test(after) ? ' ' : '';
+  const out = `${before}${pre}${t}${post}`;
+  return { value: out + after, cursor: out.length };
+}
+
+const VOICE_WORDS = {
+  'voice-off': 'dictation is off for this login',
+  origin: 'the clip did not come from this page',
+  rate: 'too many clips this hour; try again later',
+  quota: 'too much dictation today; try again tomorrow',
+  busy: 'other clips are being transcribed; try again in a moment',
+  'too-long': 'the clip is too long',
+  'bad-audio': 'the recording could not be read',
+  timeout: 'the clip took too long to send; try again on a faster connection',
+  unavailable: 'transcription is unavailable right now',
+};
+
+// voiceErrorText is what to show for a refused clip: the proxy's fixed word
+// in the page's own words, else errorText.
+export function voiceErrorText(status, body) {
+  const word = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : '';
+  return Object.hasOwn(VOICE_WORDS, word) ? VOICE_WORDS[word] : errorText(status, body);
+}
+
+// transcriptOf is the text of a transcription answer, or null.
+export function transcriptOf(body) {
+  if (!body || typeof body !== 'object' || typeof body.text !== 'string') return null;
+  return [...body.text.trim()].slice(0, MAX_MESSAGE).join('');
+}
+
+export const CODE_SKIPPED = 'code block skipped';
+const SPEAK_MAX = 20000; // characters read from one message
+
+// hostOf is a URL's host name, for reading a link aloud ('' when it is not
+// a URL).
+function hostOf(u) {
+  try {
+    return new URL(u).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+// speechText is a message as it is read aloud: markdown formatting removed,
+// a code block replaced by "code block skipped", a link read as its text
+// (or, bare, as its host name), on-screen-only characters dropped.
+export function speechText(text) {
+  let t = str(text).slice(0, SPEAK_MAX).replace(/\r\n?/g, '\n');
+  // Fenced code blocks (``` or ~~~), closed or running to the end.
+  t = t.replace(/(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[ \t]*(?=\n|$)|$)/g, `$1${CODE_SKIPPED}.\n`);
+  // Indented code: lines indented four spaces or a tab, after a blank line.
+  t = t.replace(/(^|\n\n)(?:(?: {4}|\t)[^\n]*(?:\n|$))+/g, `$1${CODE_SKIPPED}.\n`);
+  // Images: their alt text. Links: their text.
+  t = t.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');
+  t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+  // Bare URLs and <URL>: the host name.
+  t = t.replace(/<?\bhttps?:\/\/[^\s<>)\]]+>?/g, (m) => hostOf(m.replace(/^<|>$/g, '')) || 'link');
+  // Inline code keeps its words; emphasis, headings, quotes, rules, list
+  // markers and table pipes go.
+  t = t.replace(/`+([^`\n]*)`+/g, '$1');
+  t = t.replace(/(\*\*|__)(.+?)\1/g, '$2').replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s).,;:!?]|$)/gm, '$1$2').replace(/~~(.+?)~~/g, '$1');
+  t = t.replace(/^[ \t]*#{1,6}[ \t]+/gm, '').replace(/^[ \t]*>[ \t]?/gm, '');
+  t = t.replace(/^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, '');
+  t = t.replace(/^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*:?-*:?[ \t]*$/gm, '');
+  t = t.replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/gm, '');
+  t = t.replace(/^[ \t]*\|/gm, '').replace(/\|[ \t]*$/gm, '').replace(/[ \t]*\|[ \t]*/g, ', ');
+  t = t.replace(/<\/?[a-zA-Z][^<>]*>/g, ' ');
+  t = t.replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c === '\n' ? '\n' : ' '));
+  return t.replace(/[ \t]+/g, ' ').replace(/ *\n+ */g, '\n').trim();
+}
+
+// localVoices is the on-device voices (localService true): read-aloud never
+// uses a voice that sends the text to a service.
+export function localVoices(voices) {
+  return (Array.isArray(voices) ? voices : []).filter((v) => v && v.localService === true && typeof v.voiceURI === 'string');
+}
+
+// pickVoice chooses the read-aloud voice among the on-device ones: the one
+// saved on this device, then the browser's default, then one in the page's
+// language, then the first. null when there is none.
+export function pickVoice(voices, savedURI, lang) {
+  const local = localVoices(voices);
+  if (!local.length) return null;
+  const want = str(lang).toLowerCase().split('-')[0];
+  return local.find((v) => v.voiceURI === savedURI) ||
+    local.find((v) => v.default === true) ||
+    (want && local.find((v) => str(v.lang).toLowerCase().split('-')[0] === want)) ||
+    local[0];
 }

@@ -11,7 +11,11 @@
 // provenance alone must never authenticate a browser-borne cross-site request: any website open on a
 // tailnet device can make the browser send requests that arrive "from the
 // tailnet". The origin rules below are therefore load-bearing security, not
-// CORS hygiene. An unconfigured ServeHost fails closed: every request is
+// CORS hygiene. The one cross-site request they admit is a top-level page
+// load (GET or HEAD, Sec-Fetch-Mode navigate, Sec-Fetch-Dest document, no
+// Origin) of an entry page, "/" or the chat page: a link tapped in another app
+// arrives that way, and the page itself changes nothing (see entryNavigation).
+// An unconfigured ServeHost fails closed: every request is
 // refused, Origin-bearing or not, rather than let an accidental
 // empty-string match decide. The hub also mints a fresh session cookie on
 // every cookie-less request; that cookie is stripped from every response
@@ -39,6 +43,8 @@ package remoteproxy
 import (
 	"cmp"
 	"context"
+	"html"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -421,7 +427,9 @@ type AuditLine struct {
 	Decision Decision `json:"decision"`
 	Status   int      `json:"status,omitempty"`
 	// Reason is a fixed word for why the chat page's wake route refused or
-	// how a late wake ended (wake.go), never caller or broker text.
+	// how a late wake ended (wake.go), or, on an allowed line, that the
+	// request was a cross-site or same-site page load the gate admitted
+	// (entryNavigation); never caller or broker text.
 	Reason string `json:"reason,omitempty"`
 	// Contact and Agent name the conversation an operator-view read was for,
 	// and Count how many rows (or contacts) it answered (opview.go). Never
@@ -482,6 +490,88 @@ func secFetchSiteAllowed(v string) bool {
 		return true
 	}
 	return false
+}
+
+// The one exception to secFetchSiteAllowed: a top-level page load of an
+// entry page, from a link in another app or site (Messages, mail) or from
+// the redirect back from a front's login page. Those carry Sec-Fetch-Site
+// cross-site (same-site for a sibling name), and stay cross-site across
+// every redirect after, so the strict rule alone answers a tapped link with
+// a 403. entryNavigation admits exactly that, and nothing else:
+//
+//   - GET or HEAD, with exactly one Sec-Fetch-Mode, "navigate", and exactly
+//     one Sec-Fetch-Dest, "document" (topLevelNavigation). A frame's load
+//     says iframe, frame, embed or object, and a fetch, a subresource or a
+//     WebSocket says another mode, so none of them is admitted.
+//   - No Origin header. A browser sends none on a GET navigation; an Origin
+//     on one ("null" from a sandboxed or redirected document included) is
+//     not a plain page load.
+//   - Only to an entry page (entryPage): "/" and, with the chat page on,
+//     /lever/chat. Neither changes anything on GET: "/" is the chat page's
+//     fixed redirect, the hub's SPA shell or a contact's landing page, and
+//     /lever/chat is a file from the binary. Each answer forbids framing
+//     (frame-ancestors 'none' and X-Frame-Options: DENY), and a cross-site
+//     opener cannot read a cross-origin page. The page's own requests after
+//     it loads are same-origin, and meet the strict rule as before.
+//
+// The hub session is injected only on forward, as for every request, so the
+// navigation gains nothing a typed URL would not. The audit line records it
+// (navigationReason).
+func entryNavigation(r *http.Request, site string, chatPage bool) bool {
+	switch strings.ToLower(site) {
+	case "cross-site", "same-site":
+	default:
+		return false
+	}
+	return (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		len(r.Header.Values("Origin")) == 0 &&
+		topLevelNavigation(r) && entryPage(r.URL.Path, chatPage)
+}
+
+// topLevelNavigation reports whether r says it is a top-level page load:
+// exactly one Sec-Fetch-Mode, "navigate", and exactly one Sec-Fetch-Dest,
+// "document".
+func topLevelNavigation(r *http.Request) bool {
+	mode, dest := r.Header.Values("Sec-Fetch-Mode"), r.Header.Values("Sec-Fetch-Dest")
+	return len(mode) == 1 && strings.EqualFold(mode[0], "navigate") &&
+		len(dest) == 1 && strings.EqualFold(dest[0], "document")
+}
+
+// entryPage reports whether p is a page a link from outside may open: "/",
+// and the chat page when it is on. p is the decoded path.
+func entryPage(p string, chatPage bool) bool {
+	return p == "/" || (chatPage && p == chatPagePath)
+}
+
+// Audit reasons for a request entryNavigation admitted, by its
+// Sec-Fetch-Site.
+const (
+	ReasonCrossSiteNavigation = "cross-site-navigation"
+	ReasonSameSiteNavigation  = "same-site-navigation"
+)
+
+// navigationReason is the audit reason for a request checkOrigin admitted:
+// a navigation word when its Sec-Fetch-Site is one only entryNavigation
+// admits, "" otherwise.
+func navigationReason(r *http.Request) string {
+	switch strings.ToLower(r.Header.Get("Sec-Fetch-Site")) {
+	case "cross-site":
+		return ReasonCrossSiteNavigation
+	case "same-site":
+		return ReasonSameSiteNavigation
+	}
+	return ""
+}
+
+// denyFraming forbids framing a hub answer to an entry page. The hub sends
+// X-Frame-Options already; the proxy does not lean on that. A second CSP
+// header only narrows the hub's own.
+func denyFraming(resp *http.Response) {
+	if resp.Request == nil || !entryPage(resp.Request.URL.Path, true) {
+		return
+	}
+	resp.Header.Add("Content-Security-Policy", "frame-ancestors 'none'")
+	resp.Header.Set("X-Frame-Options", "DENY")
 }
 
 // ctxState carries the session and the in-flight AuditLine from the gate
@@ -635,6 +725,7 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 		// the hub sent or what case it used.
 		resp.Header.Del("Set-Cookie")
 		sandboxAPIDocument(resp)
+		denyFraming(resp)
 		if s := stateFrom(resp.Request); s != nil && (s.keepDM != nil || s.rewrite != nil) {
 			failOtherSuccess(resp)
 		}
@@ -754,10 +845,12 @@ func jailTransport(dial func(ctx context.Context, network, addr string) (net.Con
 
 // checkOrigin applies the browser-provenance rules (see the package doc):
 // at most one Origin header, and it must be https://<serveHost>; at most one
-// Sec-Fetch-Site header, and it must be a same-site value. It returns the
-// denial and its response text, or "" when the request passes. A request
-// carrying neither header passes — that is what hostAllowed is for.
-func checkOrigin(r *http.Request, serveHost string) (Decision, string) {
+// Sec-Fetch-Site header, and it must be same-origin or none, except on a
+// top-level navigation to an entry page (entryNavigation; chatPage says
+// whether /lever/chat is one). It returns the denial and its response text,
+// or "" when the request passes. A request carrying neither header passes —
+// that is what hostAllowed is for.
+func checkOrigin(r *http.Request, serveHost string, chatPage bool) (Decision, string) {
 	if origins := r.Header.Values("Origin"); len(origins) > 0 {
 		if len(origins) > 1 {
 			return DecisionDenyOrigin, "multiple Origin headers refused"
@@ -770,7 +863,7 @@ func checkOrigin(r *http.Request, serveHost string) (Decision, string) {
 		if len(sfs) > 1 {
 			return DecisionDenyOrigin, "multiple Sec-Fetch-Site headers refused"
 		}
-		if !secFetchSiteAllowed(sfs[0]) {
+		if !secFetchSiteAllowed(sfs[0]) && !entryNavigation(r, sfs[0], chatPage) {
 			return DecisionDenyOrigin, "cross-site request refused"
 		}
 	}
@@ -802,6 +895,34 @@ func (g *gate) deny(w http.ResponseWriter, line *AuditLine, status int, decision
 	line.Decision, line.Status = decision, status
 	g.audit(*line)
 	http.Error(w, msg, status)
+}
+
+// denyNavigation is deny for a top-level page load: the same status and
+// decision, answered as a small page with a link back to the landing path
+// instead of text/plain, which a phone may offer as a download. The page has
+// no script, and msg is lever's own text, escaped all the same.
+func (g *gate) denyNavigation(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, decision Decision, msg string) {
+	line.Decision, line.Status = decision, status
+	g.audit(*line)
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	if r.Method != http.MethodHead {
+		_, _ = io.WriteString(w, refusalPage(msg))
+	}
+}
+
+// refusalPage is denyNavigation's body. Its link is a same-origin navigation
+// from this page, which the gate admits.
+func refusalPage(msg string) string {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+		`<meta name="viewport" content="width=device-width, initial-scale=1"><title>Refused</title></head>` +
+		`<body><p>` + html.EscapeString(msg) + `</p><p><a href="/">Open the chat</a></p></body></html>` + "\n"
 }
 
 // denyNoSession is the one denial three paths share: the hub login failed.
@@ -935,10 +1056,15 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 		return false
 	}
 
-	if decision, msg := checkOrigin(r, cfg.ServeHost); decision != "" {
-		g.deny(w, line, http.StatusForbidden, decision, msg)
+	if decision, msg := checkOrigin(r, cfg.ServeHost, g.chat != nil); decision != "" {
+		if topLevelNavigation(r) {
+			g.denyNavigation(w, r, line, http.StatusForbidden, decision, msg)
+		} else {
+			g.deny(w, line, http.StatusForbidden, decision, msg)
+		}
 		return false
 	}
+	line.Reason = navigationReason(r)
 	if len(cfg.AllowedUsers) > 0 {
 		hdr := cfg.identityHeader()
 		// Duplicates are refused for the same reason Origin and

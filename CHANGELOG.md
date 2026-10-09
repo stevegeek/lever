@@ -7,6 +7,27 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A link to the chat from another app no longer gets a 403.** The remote proxy refused every
+  request whose `Sec-Fetch-Site` was not `same-origin` or `none`. A link tapped in Messages or
+  mail, or the redirect back from a front's login page, is a top-level `GET` navigation with
+  `Sec-Fetch-Site: cross-site`, so a client contact behind an exe.dev front got
+  `403 cross-site request refused` on `GET /`, and iOS offered the text as a `document.txt`
+  download. The proxy now admits a cross-site or same-site top-level page load of an entry page
+  only: `GET` or `HEAD`, exactly one `Sec-Fetch-Mode: navigate` and one `Sec-Fetch-Dest: document`,
+  no `Origin` header, and the path `/` or (with the chat page on) `/lever/chat`. Neither page
+  changes anything on `GET`, and every answer to them now forbids framing
+  (`frame-ancestors 'none'` and `X-Frame-Options: DENY`, added to the hub's `/` answer and to a
+  contact's landing page too). Every other cross-site request stays refused: the `/lever/api/`
+  and hub `/api/` routes, every other page, every write, frames, subresources and WebSockets. The
+  audit line of an admitted page load carries the `reason` `cross-site-navigation` or
+  `same-site-navigation`.
+- **A refused page load is a page, not a download.** When the proxy's origin check refuses a
+  top-level navigation, it answers a small HTML page (no script) with an "Open the chat" link to
+  `/`, with the same status and decision and `Cache-Control: no-store`. Every other refusal is
+  text as before.
+
 ## [0.34.2] - 2026-10-09
 
 ### Changed

@@ -1113,3 +1113,249 @@ func TestClientIdentityHeader(t *testing.T) {
 		}
 	}
 }
+
+// navRequest is a top-level page load from another site: Sec-Fetch-Site
+// cross-site, Sec-Fetch-Mode navigate, Sec-Fetch-Dest document and no Origin,
+// as a browser sends for a link tapped in another app. hdr then replaces or
+// adds headers: a pair with an empty value deletes the header, and a key
+// repeated in hdr sends every value.
+func navRequest(method, target, login string, hdr ...string) *http.Request {
+	req := proxyRequest(method, target, nil)
+	if login != "" {
+		req.Header.Set("Tailscale-User-Login", login)
+	}
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	set := map[string]bool{}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		k, v := http.CanonicalHeaderKey(hdr[i]), hdr[i+1]
+		if !set[k] {
+			req.Header.Del(k)
+			set[k] = true
+		}
+		if v != "" {
+			req.Header.Add(k, v)
+		}
+	}
+	return req
+}
+
+// TestEntryNavigation: a cross-site (or same-site) top-level GET or HEAD
+// navigation with no Origin may open an entry page, "/" or the chat page,
+// and the audit line says so. Every other cross-site request stays refused:
+// another path, another method, a frame, a fetch, a WebSocket, a missing or
+// repeated Fetch Metadata header, or an Origin.
+func TestEntryNavigation(t *testing.T) {
+	cases := []struct {
+		name, method, path string
+		hdr                []string
+		want               int
+		reason             string
+	}{
+		{"cross-site GET /", "GET", "/", nil, http.StatusFound, ReasonCrossSiteNavigation},
+		{"cross-site GET chat page", "GET", chatPagePath, nil, http.StatusOK, ReasonCrossSiteNavigation},
+		{"same-site GET /", "GET", "/", []string{"Sec-Fetch-Site", "same-site"}, http.StatusFound, ReasonSameSiteNavigation},
+		{"cross-site HEAD /", "HEAD", "/", nil, http.StatusFound, ReasonCrossSiteNavigation},
+		{"cross-site HEAD chat page", "HEAD", chatPagePath, nil, http.StatusOK, ReasonCrossSiteNavigation},
+		{"query on /", "GET", "/?from=mail", nil, http.StatusFound, ReasonCrossSiteNavigation},
+		{"user activation", "GET", "/", []string{"Sec-Fetch-User", "?1"}, http.StatusFound, ReasonCrossSiteNavigation},
+		{"upper-case values", "GET", "/", []string{"Sec-Fetch-Mode", "Navigate", "Sec-Fetch-Dest", "Document"}, http.StatusFound, ReasonCrossSiteNavigation},
+		{"same-origin keeps no reason", "GET", "/", []string{"Sec-Fetch-Site", "same-origin"}, http.StatusFound, ""},
+
+		{"lever API", "GET", chatAgentsPath, nil, http.StatusForbidden, ""},
+		{"operator view", "GET", chatContactsPath, nil, http.StatusForbidden, ""},
+		{"push key", "GET", "/lever/api/push/key", nil, http.StatusForbidden, ""},
+		{"chat script", "GET", "/lever/chat.js", nil, http.StatusForbidden, ""},
+		{"manifest", "GET", chatManifestPath, nil, http.StatusForbidden, ""},
+		{"lever prefix", "GET", "/lever", nil, http.StatusForbidden, ""},
+		{"chat page with a slash", "GET", chatPagePath + "/", nil, http.StatusForbidden, ""},
+		{"hub API", "GET", "/api/v1/agents", nil, http.StatusForbidden, ""},
+		{"hub page", "GET", "/agents", nil, http.StatusForbidden, ""},
+		{"hub chat page", "GET", "/chat/dm/x", nil, http.StatusForbidden, ""},
+		{"sign-in route", "GET", "/auth/login", nil, http.StatusForbidden, ""},
+		{"POST navigation", "POST", "/", nil, http.StatusForbidden, ""},
+		{"PUT", "PUT", "/", nil, http.StatusForbidden, ""},
+		{"DELETE", "DELETE", chatPagePath, nil, http.StatusForbidden, ""},
+		{"iframe", "GET", "/", []string{"Sec-Fetch-Dest", "iframe"}, http.StatusForbidden, ""},
+		{"frame", "GET", "/", []string{"Sec-Fetch-Dest", "frame"}, http.StatusForbidden, ""},
+		{"embed", "GET", "/", []string{"Sec-Fetch-Dest", "embed", "Sec-Fetch-Mode", "no-cors"}, http.StatusForbidden, ""},
+		{"object", "GET", "/", []string{"Sec-Fetch-Dest", "object"}, http.StatusForbidden, ""},
+		{"fetch", "GET", "/", []string{"Sec-Fetch-Mode", "cors", "Sec-Fetch-Dest", "empty"}, http.StatusForbidden, ""},
+		{"subresource", "GET", chatPagePath, []string{"Sec-Fetch-Mode", "no-cors", "Sec-Fetch-Dest", "script"}, http.StatusForbidden, ""},
+		{"WebSocket", "GET", "/", []string{"Sec-Fetch-Mode", "websocket", "Sec-Fetch-Dest", "empty", "Upgrade", "websocket", "Connection", "Upgrade"}, http.StatusForbidden, ""},
+		{"no Sec-Fetch-Mode", "GET", "/", []string{"Sec-Fetch-Mode", ""}, http.StatusForbidden, ""},
+		{"no Sec-Fetch-Dest", "GET", "/", []string{"Sec-Fetch-Dest", ""}, http.StatusForbidden, ""},
+		{"two Sec-Fetch-Mode", "GET", "/", []string{"Sec-Fetch-Mode", "navigate", "Sec-Fetch-Mode", "navigate"}, http.StatusForbidden, ""},
+		{"two Sec-Fetch-Dest", "GET", "/", []string{"Sec-Fetch-Dest", "document", "Sec-Fetch-Dest", "iframe"}, http.StatusForbidden, ""},
+		{"two Sec-Fetch-Site", "GET", "/", []string{"Sec-Fetch-Site", "cross-site", "Sec-Fetch-Site", "cross-site"}, http.StatusForbidden, ""},
+		{"unknown Sec-Fetch-Site", "GET", "/", []string{"Sec-Fetch-Site", "cross-origin"}, http.StatusForbidden, ""},
+		{"Origin of another site", "GET", "/", []string{"Origin", "https://evil.test"}, http.StatusForbidden, ""},
+		{"Origin null", "GET", "/", []string{"Origin", "null"}, http.StatusForbidden, ""},
+		{"own Origin on a cross-site load", "GET", "/", []string{"Origin", "https://" + testServeHost}, http.StatusForbidden, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := newPageHub(t)
+			var lines []AuditLine
+			cfg := chatConfig(t, hub)
+			cfg.Audit = func(l AuditLine) { lines = append(lines, l) }
+			rw := httptest.NewRecorder()
+			NewHandler(cfg).ServeHTTP(rw, navRequest(tc.method, tc.path, chatOp, tc.hdr...))
+			if rw.Code != tc.want {
+				t.Fatalf("status %d, want %d (%s)", rw.Code, tc.want, rw.Body)
+			}
+			if len(lines) != 1 {
+				t.Fatalf("audit lines = %d, want 1", len(lines))
+			}
+			if lines[0].Reason != tc.reason {
+				t.Errorf("audit reason = %q, want %q", lines[0].Reason, tc.reason)
+			}
+			if tc.want == http.StatusForbidden {
+				if lines[0].Decision != DecisionDenyOrigin {
+					t.Errorf("decision = %q, want %q", lines[0].Decision, DecisionDenyOrigin)
+				}
+				if got := hub.reached(); len(got) != 0 {
+					t.Errorf("a refused navigation reached the hub: %v", got)
+				}
+				return
+			}
+			if lines[0].Decision != DecisionAllow {
+				t.Errorf("decision = %q, want allow", lines[0].Decision)
+			}
+			if !strings.Contains(rw.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") || rw.Header().Get("X-Frame-Options") != "DENY" {
+				t.Errorf("an entry page may be framed: %v", rw.Header())
+			}
+		})
+	}
+}
+
+// TestEntryNavigationToTheHub: with the chat page off, "/" is the hub's SPA
+// shell (an operator) or lever's landing page (a contact). A cross-site page
+// load may open it, and the answer forbids framing whatever the hub sent;
+// /lever/chat is then no entry page.
+func TestEntryNavigationToTheHub(t *testing.T) {
+	hub := newRecordingHub(t)
+	var lines []AuditLine
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
+		Audit: func(l AuditLine) { lines = append(lines, l) }})
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, navRequest("GET", "/", ""))
+	if rw.Code != http.StatusOK || hub.hits() != 1 {
+		t.Fatalf("GET /: status %d, hub hits %d; want 200 and 1", rw.Code, hub.hits())
+	}
+	if len(lines) != 1 || lines[0].Decision != DecisionAllow || lines[0].Reason != ReasonCrossSiteNavigation {
+		t.Errorf("audit = %+v, want allow with %q", lines, ReasonCrossSiteNavigation)
+	}
+	csp := rw.Header().Values("Content-Security-Policy")
+	if len(csp) != 1 || csp[0] != "frame-ancestors 'none'" || rw.Header().Get("X-Frame-Options") != "DENY" {
+		t.Errorf("hub entry page framing headers: CSP %q, XFO %q", csp, rw.Header().Get("X-Frame-Options"))
+	}
+	rw = httptest.NewRecorder()
+	h.ServeHTTP(rw, navRequest("GET", chatPagePath, ""))
+	if rw.Code != http.StatusForbidden || hub.hits() != 1 {
+		t.Errorf("GET %s with the chat page off: status %d, hub hits %d; want 403 and still 1", chatPagePath, rw.Code, hub.hits())
+	}
+	// A forwarded answer to any other path is left as the hub sent it.
+	rw = httptest.NewRecorder()
+	h.ServeHTTP(rw, proxyRequest("GET", "/agents", nil))
+	if v := rw.Header().Values("Content-Security-Policy"); len(v) != 0 {
+		t.Errorf("GET /agents: CSP %q added, want none", v)
+	}
+}
+
+// TestEntryNavigationContactLanding: a contact with the chat page off opens
+// "/" from a link and gets lever's landing page, which may not be framed.
+func TestEntryNavigationContactLanding(t *testing.T) {
+	hub := newPageHub(t)
+	cfg := chatConfig(t, hub)
+	cfg.ChatAgent = ""
+	rw := httptest.NewRecorder()
+	NewHandler(cfg).ServeHTTP(rw, navRequest("GET", "/", "c@x"))
+	if rw.Code != http.StatusOK || !strings.HasPrefix(rw.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("status %d, type %q; want the landing page", rw.Code, rw.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(rw.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") || rw.Header().Get("X-Frame-Options") != "DENY" {
+		t.Errorf("the contact landing page may be framed: %v", rw.Header())
+	}
+}
+
+// TestRefusedNavigationIsAPage: a refused top-level page load gets a small
+// HTML page with a link back to "/", not text/plain (which a phone offers as
+// a download), with the same status and decision and nothing cached. Every
+// other refusal is unchanged.
+func TestRefusedNavigationIsAPage(t *testing.T) {
+	hub := newPageHub(t)
+	var lines []AuditLine
+	cfg := chatConfig(t, hub)
+	cfg.Audit = func(l AuditLine) { lines = append(lines, l) }
+	h := NewHandler(cfg)
+
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, navRequest("GET", "/agents", chatOp))
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", rw.Code)
+	}
+	for k, want := range map[string]string{
+		"Content-Type":            "text/html; charset=utf-8",
+		"Cache-Control":           "no-store",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+	} {
+		if got := rw.Header().Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	body := rw.Body.String()
+	for _, want := range []string{"<p>cross-site request refused</p>", `<a href="/">Open the chat</a>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body %q lacks %q", body, want)
+		}
+	}
+	if strings.Contains(strings.ToLower(body), "<script") {
+		t.Errorf("refusal page has a script: %q", body)
+	}
+	if len(lines) != 1 || lines[0].Decision != DecisionDenyOrigin || lines[0].Status != http.StatusForbidden {
+		t.Errorf("audit = %+v, want one deny-origin 403", lines)
+	}
+
+	// A POST navigation, and one with a foreign Origin, get the page too.
+	for _, req := range []*http.Request{navRequest("POST", "/", chatOp), navRequest("GET", "/", chatOp, "Origin", "https://evil.test")} {
+		rw = httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		if rw.Code != http.StatusForbidden || rw.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+			t.Errorf("%s %s Origin %q: %d %q, want a 403 page", req.Method, req.URL.Path, req.Header.Get("Origin"), rw.Code, rw.Header().Get("Content-Type"))
+		}
+	}
+
+	// HEAD: the same answer without a body.
+	rw = httptest.NewRecorder()
+	h.ServeHTTP(rw, navRequest("HEAD", "/agents", chatOp))
+	if rw.Code != http.StatusForbidden || rw.Header().Get("Content-Type") != "text/html; charset=utf-8" || rw.Body.Len() != 0 {
+		t.Errorf("HEAD: %d %q %d bytes, want a bodiless 403 page", rw.Code, rw.Header().Get("Content-Type"), rw.Body.Len())
+	}
+
+	// Not a top-level page load: the plain-text refusal as before.
+	for name, hdr := range map[string][]string{
+		"iframe":          {"Sec-Fetch-Dest", "iframe"},
+		"fetch":           {"Sec-Fetch-Mode", "cors", "Sec-Fetch-Dest", "empty"},
+		"no fetch mode":   {"Sec-Fetch-Mode", ""},
+		"two fetch modes": {"Sec-Fetch-Mode", "navigate", "Sec-Fetch-Mode", "navigate"},
+	} {
+		rw = httptest.NewRecorder()
+		h.ServeHTTP(rw, navRequest("GET", "/agents", chatOp, hdr...))
+		if rw.Code != http.StatusForbidden || !strings.HasPrefix(rw.Header().Get("Content-Type"), "text/plain") {
+			t.Errorf("%s: %d %q, want a text/plain 403", name, rw.Code, rw.Header().Get("Content-Type"))
+		}
+	}
+}
+
+// TestRefusalPageEscapes: the refusal text is lever's own, but the page
+// escapes it all the same.
+func TestRefusalPageEscapes(t *testing.T) {
+	got := refusalPage(`<b>"x"</b>`)
+	if strings.Contains(got, "<b>") || !strings.Contains(got, "&lt;b&gt;&#34;x&#34;&lt;/b&gt;") {
+		t.Errorf("refusalPage did not escape: %q", got)
+	}
+}

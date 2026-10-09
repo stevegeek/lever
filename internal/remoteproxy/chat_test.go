@@ -227,16 +227,21 @@ func TestASandboxedDocumentCannotPost(t *testing.T) {
 }
 
 // TestCrossSiteNavigationRefused: a navigation from a sandboxed document
-// (opaque origin) carries Sec-Fetch-Site: cross-site and is refused, so a
-// sandboxed page cannot even load the app with the operator's session.
+// (opaque origin) carries Sec-Fetch-Site: cross-site. It may load an entry
+// page like any link (TestEntryNavigation), but nothing else: not an /api/
+// route, where the agent's own files live, and not a hub page.
 func TestCrossSiteNavigationRefused(t *testing.T) {
 	hub := chatHub(t, http.StatusOK, "<html>")
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost})
-	req := proxyRequest("GET", "/", nil)
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	rw := httptest.NewRecorder()
-	h.ServeHTTP(rw, req)
-	if rw.Code != http.StatusForbidden {
-		t.Fatalf("status %d, want 403", rw.Code)
+	for _, p := range []string{"/api/v1/agents/a1/workspace/files/report.html", "/agents", "/lever/chat"} {
+		req := proxyRequest("GET", p, nil)
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-Dest", "document")
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		if rw.Code != http.StatusForbidden {
+			t.Fatalf("GET %s: status %d, want 403", p, rw.Code)
+		}
 	}
 }

@@ -310,7 +310,29 @@ decide:
 - `/auth/callback/*`. The login driver dials the hub's callback directly, never through the proxy.
 
 The proxy also accepts `Sec-Fetch-Site` only as `same-origin` or `none`: a page on a sibling
-tailnet name is `same-site` and is refused. Before it forwards a request, the proxy removes every
+tailnet name is `same-site` and is refused. There is one exception, a top-level page load of an
+entry page. A link tapped in another app (Messages, mail), or the redirect back from a front's
+login page, arrives as a `cross-site` navigation, and stays `cross-site` across every redirect
+after it. The proxy admits such a request only when all of these hold:
+
+- the method is `GET` or `HEAD`;
+- it carries exactly one `Sec-Fetch-Mode: navigate` and exactly one `Sec-Fetch-Dest: document`
+  (a frame says `iframe`, `frame`, `embed` or `object`; a fetch, a script or a WebSocket says
+  another mode);
+- `Sec-Fetch-Site` is `cross-site` or `same-site`, and there is no `Origin` header (a browser
+  sends none on a `GET` navigation);
+- the path is `/`, or `/lever/chat` while the [chat page](#the-chat-page) is on.
+
+Neither page changes anything on `GET`. `/` is the chat page's fixed redirect, the hub's web UI
+shell, or a contact's landing page; `/lever/chat` is a file from the lever binary. Every answer
+to them forbids framing (`frame-ancestors 'none'` and `X-Frame-Options: DENY`), and a page on
+another site cannot read what a cross-origin page shows. The requests the page makes after it
+loads are same-origin, and meet the strict rule. Every other cross-site request stays refused:
+any `/lever/api/` or hub `/api/` route, every other hub page, every write, frames and
+subresources. When the proxy refuses a top-level page load, it answers a small HTML page with
+an "Open the chat" link to `/` instead of plain text, which a phone can offer as a download.
+
+Before it forwards a request, the proxy removes every
 client header that names an identity to the hub: `Authorization`, `Cookie`, `Tailscale-*`,
 `X-Scion-*` (the agent token and the broker signature headers among them), `X-Forwarded-User-*`,
 `X-Goog-IAP-JWT-Assertion` and `X-API-Key`.
@@ -607,7 +629,9 @@ resolve your hub user / `remote-wake` and `deny-wake` for a [wake](#waking-a-wor
 conversations](#the-operators-view-of-contact-conversations), with `contact`, `agent` and `count`
 fields and a `reason` word on a refusal / the `push-*` and `deny-push` lines of
 [notifications](#notifications) / `file-upload`, `file-download` and `deny-file` for [files in the
-chat](#files-in-the-chat)), and the upstream status once known. The login path writes there too: `oidc-session` when a session is
+chat](#files-in-the-chat)), and the upstream status once known. An `allow` line for a cross-site
+or same-site [page load of an entry page](#how-the-browser-is-logged-in) carries the `reason`
+`cross-site-navigation` or `same-site-navigation`. The login path writes there too: `oidc-session` when a session is
 obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
 `oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
 refuses one, `oidc-not-found` for an unknown path), and `deny-authorize` for anything that probes `/authorize` — nothing legitimate

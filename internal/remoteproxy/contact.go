@@ -379,7 +379,9 @@ func (g *gate) answerContact(w http.ResponseWriter, line *AuditLine, contentType
 	line.Decision, line.Status = DecisionAllow, http.StatusOK
 	g.audit(*line)
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+	// The landing page is an entry page (entryNavigation): never framed.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
 	// The answer depends on who asks: an operator gets another one at the
 	// same URL, so no cache may keep this.
 	w.Header().Set("Cache-Control", "no-store")

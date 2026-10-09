@@ -49,8 +49,13 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- A plain upgrade: install the release, then `lever apply` (or `lever up`). No image rebuild and no
-  fresh agents are needed. The first apply warms every image once.
+- A plain upgrade: install the release, then `lever apply` (or `lever up`) and `lever init` (the
+  operator skill carries the version stamp, so doctor reports it stale until `lever init`). No
+  image rebuild and no fresh agents are needed: the in-jail binaries (lever-agent, lever-manager)
+  have no code change since 0.34.1. The first apply warms every image once.
+- `lever doctor`'s `agent lever version` row still fails for an image built from 0.34.1 ("built from
+  another release"). For 0.34.2 that finding is safe to ignore; rebuild the image at the next
+  release that changes the in-jail binaries.
 
 ## [0.34.1] - 2026-10-08
 

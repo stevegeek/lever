@@ -953,8 +953,8 @@ to send is not posted to the old one.
 Off by default, each with its own key: [messages that an agent starts](#messages-agents-start) to
 a contact (`remote.agent_messages`), [notifications](#notifications) while the page is closed
 (`remote.push`), [files](#files-in-the-chat) (`remote.files`) and
-[dictation](#dictation-and-read-aloud) (`remote.voice`). With files off, an operator uses the
-Console for files. Read-aloud of agent messages needs no setting.
+[dictation](#dictation-and-read-aloud) (`remote.voice`, which also turns on read-aloud). With
+files off, an operator uses the Console for files.
 
 ## Contacts: chat-only logins
 
@@ -1402,8 +1402,9 @@ and the text lands in the message box at the cursor. **It is never sent by itsel
 reads it, corrects what Whisper got wrong, and presses Send. What is sent is an ordinary typed
 message, with the usual chat ledger and provenance.
 
-Read-aloud needs no setting: each agent message has a speaker button that reads it with the
-browser's own speech synthesis.
+While voice is on, each agent message also has a speaker button that reads it aloud with the
+browser's own on-device speech synthesis (`read_aloud: false` turns that off). With voice off,
+the page shows neither.
 
 ```yaml
 remote:
@@ -1416,14 +1417,21 @@ remote:
     # vocabulary: [Lever, Scion, podman, mTLS] # words Whisper should expect
     # max_seconds: 300                        # one clip; at most 600
     # gpu: true                               # false = --no-gpu
-    # port: 8448                              # host loopback only
+    # read_aloud: true                        # the speaker button on agent messages
+    # port: 8448                              # host loopback only; one per instance on a host
   allowed_users:
     - operator@example.com
     - {login: client@example.com, tier: contact, agents: [deal], voice: false}   # no dictation for this login
 ```
 
-Every login gets dictation while it is on, operators and contacts alike, except an
-`allowed_users` entry with `voice: false`.
+Every login gets dictation and read-aloud while voice is on, operators and contacts alike,
+except an `allowed_users` entry with `voice: false`. Two instances on one host each need their
+own `voice.port`, as they need their own `remote.port`.
+
+**Browsers.** Dictation needs MediaRecorder and OfflineAudioContext: current Chrome, Edge, Firefox,
+and Safari 14.1 or later (iOS included). The microphone needs a secure context (the HTTPS front);
+without one, or without those APIs, the page simply shows no mic. Read-aloud needs the Web Speech
+synthesis API and at least one on-device voice.
 
 ### Setting it up
 
@@ -1431,7 +1439,9 @@ Every login gets dictation while it is on, operators and contacts alike, except 
    `whisper-server` from whisper.cpp with GPU support: CUDA on a Linux host with an NVIDIA GPU,
    Metal on Apple Silicon (its default there). Install it outside the tree, owned by you or root
    and writable by no one else, for example under `/usr/local/bin`. Without a GPU it still works
-   with `gpu: false`, much more slowly.
+   with `gpu: false`, much more slowly. The model needs disk space (about 1.6 GB for
+   `large-v3-turbo`, 0.55 GB for `large-v3-turbo-q5_0`) and about as much GPU memory, or memory
+   with `gpu: false`.
 2. **Set `remote.voice`** as above.
 3. **Fetch the model:** `lever voice fetch` (or `lever voice fetch large-v3-turbo-q5_0`). It
    downloads the model from Hugging Face at the commit lever pins and keeps it only if its size
@@ -1450,14 +1460,18 @@ Every login gets dictation while it is on, operators and contacts alike, except 
   at `max_seconds`. While lever transcribes, the page shows "Transcribing…". The browser asks for
   the microphone the first time; the page needs the HTTPS front (a secure context).
 - **The host.** `lever remote serve` runs whisper-server as its child, bound to `127.0.0.1` on
-  `voice.port`, with the model loaded once. It restarts the child with a growing delay if it
-  exits, and stops it with the proxy. The child gets a reduced environment (what a GPU build
+  `voice.port`, with the model loaded once and every route under a random path prefix that is
+  new at each proxy start and never logged. It restarts the child with a growing delay if it
+  exits (checking the program and the model's sha256 again first), and stops it with the
+  proxy. The child runs in the model directory, inside the state directory. The child gets a reduced environment (what a GPU build
   needs to find its libraries, no credentials), and its output is discarded, because whisper.cpp
   prints what it transcribes. If something else already listens on the port, the proxy does not
   start the child, sends it nothing, and the page shows no mic. On Linux the proxy also checks,
   before it sends anything, that the listener is its own child's (a process that bound the port
   while the model loaded is refused); on macOS it cannot tell. On Linux the child also dies with
-  the proxy, even when the proxy is killed.
+  the proxy, even when the proxy is killed. On macOS a proxy killed hard (`lever stop` sends
+  SIGKILL after 2 s) can leave the child running and holding the port, and dictation then stays
+  off: find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN` and stop it, then restart the proxy.
 - **The route.** Only for a verified login, like the rest of the chat page. The page sends
   `X-Lever-Voice: 1` with each clip and the proxy refuses a clip without it (a browser sends such
   a header to another origin only after a CORS preflight, which the proxy never grants). The
@@ -1469,10 +1483,14 @@ Every login gets dictation while it is on, operators and contacts alike, except 
   (413), `timeout` (408), `rate`, `quota` and `busy` (429), `unavailable` (503). With voice off,
   every path under `/lever/api/voice/` is a 404.
 - **Limits.** One transcription at a time, and two more waiting: three slots in all, of which a
-  contact never takes the last, so an operator can always dictate. One clip at a time per
-  login. Per login, 30 clips an hour, 60 minutes of audio a day, and 60 attempts an hour
-  (refused ones count). These counts are kept in memory and start again when the proxy
-  restarts. Sending a clip may take one minute plus the time for the largest clip at 64 KiB/s.
+  contact never takes the last, so an operator can always dictate. A transcription keeps its
+  slot until whisper-server answers, even if the browser gave up meanwhile (the server would go
+  on working on it). One clip at a time per login. Per login, 30 transcribed clips an hour, 60
+  minutes of transcribed audio a day, and 60 attempts an hour (clips that fail their checks count
+  as attempts). A clip that fails to transcribe, or whose browser gave up before its turn, does
+  not count against the clips or the minutes. These counts are kept in memory and start again
+  when the proxy restarts. Whisper's non-speech markers such as `[BLANK_AUDIO]` are removed from
+  the text. Sending a clip may take one minute plus the time for the largest clip at 64 KiB/s.
 - **Read-aloud.** The page uses the browser's speech synthesis with **on-device voices only**
   (those the browser marks as local): a voice that would send the text to a speech service is
   never used, even if it is the browser's default. Before reading, the page removes markdown
@@ -1493,8 +1511,15 @@ Every login gets dictation while it is on, operators and contacts alike, except 
   because it listens on host loopback only, the jail's egress rules drop every host loopback port
   that is not on the allowlist, and config load refuses the voice port in `manager.allow_ports`
   (and the `voice` row of `lever doctor` checks it again). Nothing new is mounted into an agent,
-  and no agent can call the route: it is the chat page's, behind the login gate. Other processes
-  on your host can reach the port, as with any loopback service.
+  and no agent can call the route: it is the chat page's, behind the login gate.
+- **Other host processes and web pages.** whisper-server allows cross-origin requests from any
+  site and has a `/load` route that loads a model from any path it is given. Lever therefore puts
+  every route under a random 128-bit path prefix, new at each proxy start: a web page open on the
+  host, or a name rebound to `127.0.0.1`, finds only 404s. A process running as you on the host
+  can still connect to the port (and, on macOS, could bind it first while the model loads and
+  receive clips); treat the host as trusted, as for every loopback service. A second instance's
+  `manager.allow_ports` on the same host is not checked against this instance's voice port: keep
+  the ports distinct.
 - **The model and the program are checked.** The proxy starts whisper-server only with a model
   whose size and sha256 match lever's pinned table, and only if the program's real file is an
   executable owned by you or root that no one else can change. Config load refuses a
@@ -1502,6 +1527,10 @@ Every login gets dictation while it is on, operators and contacts alike, except 
   the tree, so an agent cannot steer the prompt.
 - **Whisper can invent text**, especially on silence or noise. That is why the text always goes
   into the message box for review first.
+- **In the browser.** The transcript is text in the message box: like typed text, an unsent
+  draft is kept in the browser's local storage for that chat until it is sent or cleared. The
+  audio is never stored in the browser. A crash of whisper-server could leave a core dump with
+  audio in it, under your system's core dump settings.
 - **Doctor.** The `voice` row shows off, or on with the model, the clip limit, the language, the
   GPU setting, the logins with no dictation, and the port; it fails if the jail could reach the
   port. The `voice model` row fails when the model is missing, is not the pinned file, or lever's

@@ -35,6 +35,8 @@ type Service struct {
 	usable atomic.Bool
 	sup    atomic.Pointer[Supervisor]
 	client http.Client
+	// path is the child's secret route prefix, fresh per Run (never logged).
+	path string
 }
 
 // Run checks the model (pinned table entry, size, sha256) and the program,
@@ -56,7 +58,13 @@ func (s *Service) Run(ctx context.Context) {
 	if s.Supervisor != nil {
 		sup = s.Supervisor
 	}
-	sup.Program, sup.Args, sup.Port = real, ServerArgs(p, s.Port, s.GPU), s.Port
+	path, err := NewRequestPath()
+	if err != nil {
+		s.logf("voice: dictation stays off: no random route prefix: %v", err)
+		return
+	}
+	s.path = path
+	sup.Program, sup.Args, sup.Port = real, ServerArgs(p, s.Port, s.GPU, path), s.Port
 	// The model directory: in the state directory, host-only, so the
 	// server's relative static-file path resolves nowhere an agent writes.
 	sup.Dir = s.ModelDir
@@ -69,6 +77,10 @@ func (s *Service) Run(ctx context.Context) {
 		again, err := CheckServer(s.Server)
 		if err == nil && again != real {
 			err = fmt.Errorf("voice: whisper_server now resolves to %s, not %s; restart the proxy to accept it", again, real)
+		}
+		if err == nil {
+			// The model too: the child loads it again on every start.
+			err = Verify(p, s.Model)
 		}
 		return err
 	}
@@ -107,7 +119,11 @@ func (s *Service) Transcribe(ctx context.Context, wav []byte) (string, error) {
 	if wait <= 0 {
 		wait = 10 * time.Minute
 	}
-	ctx, cancel := context.WithTimeout(ctx, wait)
+	// Detached from the caller: whisper-server goes on with a clip after
+	// the browser gives up, so the caller's GPU slot must stay taken until
+	// the child answers (bounded by wait), or abandoned clips would queue
+	// inside the child, beyond lever's slots.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), wait)
 	defer cancel()
-	return Transcribe(ctx, &s.client, sup.Addr(), Request{WAV: wav, Prompt: s.Prompt, Language: s.Language})
+	return Transcribe(ctx, &s.client, sup.Addr(), Request{Path: s.path, WAV: wav, Prompt: s.Prompt, Language: s.Language})
 }

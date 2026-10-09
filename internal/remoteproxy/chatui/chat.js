@@ -318,7 +318,7 @@ function render(toBottom) {
     // on one line: no text can lay out a notice of its own.
     setText(body, kind === 'system' ? `hub: ${oneLine(messageText(m), SYSTEM_MAX)}` : messageText(m));
     row.append(body);
-    if (kind === 'agent' && speechOn()) row.append(speakButton(m));
+    if (kind === 'agent' && readAloudOn()) row.append(speakButton(m));
     if (kind === 'mine' && m.dispatchState === 'failed') {
       const fail = document.createElement('div');
       fail.className = 'fail';
@@ -861,6 +861,8 @@ function stopTracks(stream) {
   for (const t of stream && typeof stream.getTracks === 'function' ? stream.getTracks() : []) t.stop();
 }
 
+let micStarting = false; // a getUserMedia prompt is up
+
 async function toggleMic() {
   if (recording) {
     stopDictation();
@@ -868,14 +870,19 @@ async function toggleMic() {
   }
   const c = chat;
   const cfg = roster && roster.voice;
-  if (!c || !cfg || transcribing || !micSupported()) return;
+  if (!c || !cfg || transcribing || micStarting || !micSupported()) return;
   showError('');
   let stream;
+  // One permission prompt at a time: a second tap while it is up does
+  // nothing.
+  micStarting = true;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
   } catch {
     showError('The microphone is not available: allow it for this page in the browser\'s settings.');
     return;
+  } finally {
+    micStarting = false;
   }
   if (chat !== c || recording) {
     stopTracks(stream);
@@ -895,7 +902,9 @@ async function toggleMic() {
   });
   recorder.addEventListener('stop', () => void finishDictation(r));
   try {
-    recorder.start(1000);
+    // No timeslice: one chunk at the stop. Safari writes fragmented MP4
+    // when asked for chunks, which its own decoder may not take whole.
+    recorder.start();
   } catch {
     stopTracks(stream);
     showError('This browser cannot record here.');
@@ -1025,6 +1034,9 @@ const READ_VOICE_KEY = 'lever-read-voice';
 let speaking = null; // {id, button}: the message being read
 
 const speechOn = () => !!(window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function');
+// readAloudOn: the device can speak, and lever offers read-aloud to this
+// login (remote.voice on and read_aloud not off; the roster says so).
+const readAloudOn = () => speechOn() && !!(roster && roster.readAloud);
 
 function savedReadVoice() {
   try {
@@ -1099,7 +1111,7 @@ function speak(m, button) {
 // voices change.
 let readVoices = '';
 function syncReadVoice() {
-  const voices = speechOn() ? localVoices(window.speechSynthesis.getVoices()) : [];
+  const voices = readAloudOn() ? localVoices(window.speechSynthesis.getVoices()) : [];
   el.readvoice.hidden = !chat || voices.length < 2;
   const key = voices.map((v) => v.voiceURI).join('\n');
   if (el.readvoice.hidden || key === readVoices) return;

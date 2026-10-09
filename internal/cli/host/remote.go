@@ -252,6 +252,7 @@ func remoteVoiceConfig(app *config.App, vs *voice.Service) *remoteproxy.VoiceCon
 		return nil
 	}
 	return &remoteproxy.VoiceConfig{MaxSeconds: app.EffectiveVoiceMaxSeconds(), Excluded: app.VoiceExcludedLogins(),
+		ReadAloud: app.Remote.Voice.ReadAloud == nil || *app.Remote.Voice.ReadAloud,
 		Available: vs.Usable, Transcribe: vs.Transcribe}
 }
 

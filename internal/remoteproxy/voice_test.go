@@ -429,6 +429,50 @@ func TestVoiceTranscriberFailure(t *testing.T) {
 	}
 }
 
+// A failed transcription gives its use of the limits back: a crash loop
+// in the transcriber must not spend a login's daily allowance.
+func TestVoiceFailureRefundsTheLimits(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, rec := voiceCfg(t, hub)
+	rec.err = errors.New("whisper-server: HTTP 500")
+	h := NewHandler(cfg)
+	for range 3 {
+		if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%d %s", rw.Code, rw.Body)
+		}
+	}
+	g := h.(*gate)
+	g.voice.mu.Lock()
+	n := len(g.voice.used[strings.ToLower(chatOp)])
+	g.voice.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d uses recorded after failures, want 0", n)
+	}
+	rec.err = nil
+	if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusOK {
+		t.Fatalf("%d %s", rw.Code, rw.Body)
+	}
+	g.voice.mu.Lock()
+	n = len(g.voice.used[strings.ToLower(chatOp)])
+	g.voice.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d uses after a success, want 1", n)
+	}
+}
+
+func TestVoiceTextDropsWhisperMarkers(t *testing.T) {
+	for in, want := range map[string]string{
+		" [BLANK_AUDIO]\n":              "",
+		"hello [MUSIC] world":           "hello world",
+		"[ Silence ] ok":                "ok",
+		"keep [x86_64] and [1] as said": "keep [x86_64] and [1] as said",
+	} {
+		if got := voiceText(in); got != want {
+			t.Errorf("voiceText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestVoiceText(t *testing.T) {
 	if got := voiceText(" \n hi there \t"); got != "hi there" {
 		t.Fatalf("%q", got)
@@ -457,6 +501,28 @@ func TestAgentsAnswerCarriesVoice(t *testing.T) {
 	}
 	if rw := chatDo(NewHandler(chatConfig(t, hub)), chatOp, "GET", "/lever/api/agents"); strings.Contains(rw.Body.String(), `"voice"`) {
 		t.Fatalf("off: %s", rw.Body)
+	}
+}
+
+// readAloud rides the roster for logins with voice on, transcriber or not,
+// unless read_aloud is off; never with voice off.
+func TestAgentsAnswerCarriesReadAloud(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, rec := voiceCfg(t, hub)
+	cfg.Voice.ReadAloud = true
+	rec.up.Store(false)
+	for login, want := range map[string]bool{chatOp: true, "c@x": true, "nov@x": false} {
+		rw := chatDo(NewHandler(cfg), login, "GET", "/lever/api/agents")
+		if got := strings.Contains(rw.Body.String(), `"readAloud":true`); got != want {
+			t.Fatalf("%s: %v: %s", login, got, rw.Body)
+		}
+	}
+	cfg.Voice.ReadAloud = false
+	if rw := chatDo(NewHandler(cfg), chatOp, "GET", "/lever/api/agents"); strings.Contains(rw.Body.String(), `readAloud`) {
+		t.Fatalf("read_aloud off: %s", rw.Body)
+	}
+	if rw := chatDo(NewHandler(chatConfig(t, hub)), chatOp, "GET", "/lever/api/agents"); strings.Contains(rw.Body.String(), `readAloud`) {
+		t.Fatalf("voice off: %s", rw.Body)
 	}
 }
 

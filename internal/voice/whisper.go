@@ -29,6 +29,11 @@ package voice
 //     host processes reach its loopback port (the jail's egress drops it),
 //     and lever runs it in the model directory, inside the state
 //     directory, so the static path resolves nowhere an agent can write.
+//  8. --request-path P puts every route under P (P + "/inference", P +
+//     "/load"). The server answers CORS requests from any origin and checks
+//     no Host header, so without a secret prefix any web page open on the
+//     host could post to /load. lever passes a fresh random prefix per
+//     proxy start and never logs it.
 //
 // Checked against whisper.cpp's examples/server/server.cpp (master,
 // 2026-10): flags at its argument parser, the /inference handler's form
@@ -38,6 +43,8 @@ package voice
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,8 +57,15 @@ import (
 
 // ServerArgs is the whisper-server argument list for model on
 // 127.0.0.1:port (assumption 1).
-func ServerArgs(modelPath string, port int, gpu bool) []string {
+//
+// requestPath is the secret prefix of every route (assumption 8): a fresh
+// random value per proxy start (NewRequestPath), so a page in a browser on
+// the host, or a DNS-rebound name, cannot reach /load or /inference.
+func ServerArgs(modelPath string, port int, gpu bool, requestPath string) []string {
 	args := []string{"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-m", modelPath}
+	if requestPath != "" {
+		args = append(args, "--request-path", requestPath)
+	}
 	if !gpu {
 		args = append(args, "--no-gpu")
 	}
@@ -67,6 +81,8 @@ const maxAnswer = 1 << 20
 // Request is one transcription: a WAV clip lever has checked, and the
 // optional prompt and language from the host config.
 type Request struct {
+	// Path is the server's secret route prefix (ServerArgs); "" = none.
+	Path     string
 	WAV      []byte
 	Prompt   string
 	Language string // "" = auto-detect
@@ -98,7 +114,7 @@ func Transcribe(ctx context.Context, client *http.Client, addr string, r Request
 	tail := "\r\n--" + mw.Boundary() + "--\r\n"
 	body := io.MultiReader(&head, bytes.NewReader(r.WAV), strings.NewReader(tail))
 	size := int64(head.Len()) + int64(len(r.WAV)) + int64(len(tail))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/inference", body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+r.Path+"/inference", body)
 	if err != nil {
 		return "", err
 	}
@@ -128,4 +144,14 @@ func Transcribe(ctx context.Context, client *http.Client, addr string, r Request
 		return "", fmt.Errorf("%w: no transcript in the answer", ErrServer)
 	}
 	return *ans.Text, nil
+}
+
+// NewRequestPath is a fresh secret route prefix: "/" and 32 hex digits
+// (128 bits from crypto/rand).
+func NewRequestPath() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return "/" + hex.EncodeToString(b[:]), nil
 }

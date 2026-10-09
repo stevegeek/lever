@@ -190,6 +190,7 @@ export function agentList(body) {
     agents,
     files: filesConfig(body),
     voice: voiceConfig(body),
+    readAloud: !!(body && typeof body === 'object' && body.readAloud === true),
   };
 }
 

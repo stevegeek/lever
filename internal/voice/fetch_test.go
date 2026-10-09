@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // loopbackOnly lets a download reach only the test servers named.
@@ -287,5 +288,28 @@ func TestCheckServer(t *testing.T) {
 	defer os.Chmod(dir, 0o755)
 	if _, err := CheckServer(prog); err == nil {
 		t.Fatal("a program in a world-writable directory was accepted")
+	}
+}
+
+func TestRemoveStaleFetches(t *testing.T) {
+	dir := t.TempDir()
+	old, fresh, other := filepath.Join(dir, ".fetch-1"), filepath.Join(dir, ".fetch-2"), filepath.Join(dir, "ggml-x.bin")
+	for _, p := range []string{old, fresh, other} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(other, past, past); err != nil {
+		t.Fatal(err)
+	}
+	removeStaleFetches(dir, time.Now())
+	for p, want := range map[string]bool{old: false, fresh: true, other: true} {
+		if _, err := os.Stat(p); (err == nil) != want {
+			t.Errorf("%s exists = %v, want %v", filepath.Base(p), err == nil, want)
+		}
 	}
 }

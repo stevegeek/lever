@@ -25,6 +25,7 @@ func main() {
 	exitAfter := flag.Duration("exit-after", 0, "TEST: exit with status 3 after this long (0 = never)")
 	fail := flag.Bool("fail", false, "TEST: answer every request with HTTP 500")
 	delay := flag.Duration("listen-delay", 0, "TEST: wait this long before binding, as a model load does")
+	reqPath := flag.String("request-path", "", "route prefix, as whisper-server's --request-path")
 	flag.Parse()
 	if _, err := os.Stat(*model); err != nil {
 		log.Fatalf("fakewhisper: model: %v", err)
@@ -38,7 +39,7 @@ func main() {
 		log.Fatalf("fakewhisper: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /inference", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+*reqPath+"/inference", func(w http.ResponseWriter, r *http.Request) {
 		if *fail {
 			http.Error(w, "failed", http.StatusInternalServerError)
 			return

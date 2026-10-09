@@ -12,14 +12,14 @@ import (
 )
 
 func TestServerArgs(t *testing.T) {
-	got := ServerArgs("/s/ggml.bin", 8448, true)
+	got := ServerArgs("/s/ggml.bin", 8448, true, "")
 	if want := []string{"--host", "127.0.0.1", "--port", "8448", "-m", "/s/ggml.bin"}; !slices.Equal(got, want) {
 		t.Fatalf("%q", got)
 	}
-	if got := ServerArgs("/m", 1, false); got[len(got)-1] != "--no-gpu" {
+	if got := ServerArgs("/m", 1, false, ""); got[len(got)-1] != "--no-gpu" {
 		t.Fatalf("%q", got)
 	}
-	for _, a := range ServerArgs("/m", 1, false) {
+	for _, a := range ServerArgs("/m", 1, false, "") {
 		if strings.Contains(a, "convert") {
 			t.Fatal("lever must never ask whisper-server to convert (ffmpeg)")
 		}
@@ -84,5 +84,33 @@ func TestTranscribeFailures(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "secret") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// The secret route prefix reaches the flags and the request URL.
+func TestRequestPath(t *testing.T) {
+	p, err := NewRequestPath()
+	if err != nil || len(p) != 33 || p[0] != '/' {
+		t.Fatalf("NewRequestPath = %q, %v", p, err)
+	}
+	if q, _ := NewRequestPath(); q == p {
+		t.Fatal("two prefixes alike")
+	}
+	args := ServerArgs("/m", 1, true, p)
+	if args[len(args)-2] != "--request-path" || args[len(args)-1] != p {
+		t.Fatalf("args = %q", args)
+	}
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"ok"}`))
+	}))
+	defer srv.Close()
+	if _, err := Transcribe(context.Background(), srv.Client(), strings.TrimPrefix(srv.URL, "http://"), Request{Path: p, WAV: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	if got != p+"/inference" {
+		t.Fatalf("path = %q, want %q", got, p+"/inference")
 	}
 }

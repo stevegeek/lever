@@ -494,6 +494,10 @@ type Voice struct {
 	MaxSeconds int `yaml:"max_seconds"`
 	// GPU false runs whisper-server with --no-gpu. nil = true.
 	GPU *bool `yaml:"gpu"`
+	// ReadAloud turns the read-aloud button on agent messages on or off
+	// (the browser's on-device voices; nothing leaves the device). nil =
+	// on while voice is enabled; never shown while it is off.
+	ReadAloud *bool `yaml:"read_aloud"`
 	// Port is the HOST loopback port whisper-server binds. Zero =
 	// DefaultRemoteVoicePort. Never one the jail may reach: validated
 	// against manager.allow_ports and lever's own listeners.

@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"mime"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,9 @@ type VoiceConfig struct {
 	// passed their checks at start and the child is supervised. False: the
 	// roster carries no voice and the route answers unavailable.
 	Available func() bool
+	// ReadAloud: the roster tells the page to offer read-aloud to every
+	// login with voice on (remote.voice.read_aloud).
+	ReadAloud bool
 	// Transcribe turns one checked clip (WAV, PCM s16le, 16 kHz, mono) into
 	// text. Its error goes to the audit line, so it must never carry the
 	// transcript.
@@ -124,6 +128,13 @@ type voiceInfo struct {
 	MaxSeconds int `json:"maxSeconds"`
 }
 
+// readAloudFor reports whether the page offers read-aloud to login: voice
+// on for it and remote.voice.read_aloud not turned off. Independent of the
+// transcriber: read-aloud runs on the device.
+func (g *gate) readAloudFor(login string) bool {
+	return g.voiceOnFor(login) && g.voice.cfg.ReadAloud
+}
+
 func (g *gate) voiceInfoFor(login string) *voiceInfo {
 	if !g.voiceOnFor(login) || g.voice.cfg.Available == nil || !g.voice.cfg.Available() {
 		return nil
@@ -166,8 +177,16 @@ func (s *voiceState) begin(login string, operator bool) (func(), bool) {
 // allowed), and with take it also counts the clip. Uses older than a day
 // are forgotten.
 func (s *voiceState) limit(login string, seconds float64, take bool) string {
+	return s.check(login, seconds, s.now(), take)
+}
+
+// limitAt is limit with take, recording the use at now (refund finds it).
+func (s *voiceState) limitAt(login string, seconds float64, now time.Time) string {
+	return s.check(login, seconds, now, true)
+}
+
+func (s *voiceState) check(login string, seconds float64, now time.Time, take bool) string {
 	key := strings.ToLower(login)
-	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, us := range s.used {
@@ -200,6 +219,22 @@ func (s *voiceState) limit(login string, seconds float64, take bool) string {
 		s.used[key] = append(s.used[key], voiceUse{at: now, seconds: seconds})
 	}
 	return ""
+}
+
+// refund gives back a use limit took (take true) at the same moment for the
+// same length: the clip never reached the transcriber, or the transcriber
+// failed. The attempt cap (voiceTriesPerHour) still counts it.
+func (s *voiceState) refund(login string, seconds float64, at time.Time) {
+	key := strings.ToLower(login)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	us := s.used[key]
+	for i := len(us) - 1; i >= 0; i-- {
+		if us[i].at.Equal(at) && us[i].seconds == seconds {
+			s.used[key] = append(us[:i], us[i+1:]...)
+			return
+		}
+	}
 }
 
 // checkWAV checks a clip: the canonical 44-byte header of PCM s16le, 16 kHz,
@@ -240,13 +275,21 @@ func voiceAudio(ct string) bool {
 // voiceText is the transcript as the page gets it: trimmed, and cut to the
 // chat message limit.
 func voiceText(s string) string {
-	s = strings.TrimSpace(strings.ToValidUTF8(s, "�"))
+	s = strings.ToValidUTF8(s, "�")
+	// Whisper writes non-speech as bracketed markers ([BLANK_AUDIO],
+	// [MUSIC], [ Silence ]); they are not words the login said.
+	s = whisperMarker.ReplaceAllString(s, " ")
+	s = strings.Join(strings.Fields(s), " ")
 	if utf8.RuneCountInString(s) <= voiceMaxText {
 		return s
 	}
 	r := []rune(s)
 	return strings.TrimSpace(string(r[:voiceMaxText]))
 }
+
+// whisperMarker is one of Whisper's non-speech markers: square brackets
+// around letters, spaces and underscores only.
+var whisperMarker = regexp.MustCompile(`\[[A-Za-z_ ]{1,40}\]`)
 
 // refuseVoice answers the route with one fixed error word.
 func (g *gate) refuseVoice(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, word string) {
@@ -340,25 +383,31 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		return
 	}
 	line.AudioSeconds = float64(int64(seconds*10)) / 10
-	if word := s.limit(v.login, seconds, true); word != "" {
+	takenAt := s.now()
+	if word := s.limitAt(v.login, seconds, takenAt); word != "" {
 		w.Header().Set("Retry-After", "600")
 		g.refuseVoice(w, r, line, http.StatusTooManyRequests, word)
 		return
 	}
 	// Wait for the GPU: a queued clip holds its slot meanwhile. A browser
-	// that gives up ends the wait.
+	// that gives up ends the wait, and the clip does not count.
 	select {
 	case s.gpu <- struct{}{}:
 	case <-r.Context().Done():
+		s.refund(v.login, seconds, takenAt)
 		line.Error = "the request ended while it waited for its turn"
 		g.refuseVoice(w, r, line, http.StatusServiceUnavailable, "busy")
 		return
 	}
 	start := time.Now()
+	// Transcribe runs on until the child answers even if the browser gives
+	// up (voice.Service detaches it), so the GPU token is held for exactly
+	// as long as the child works on this clip.
 	text, err := s.cfg.Transcribe(r.Context(), clip)
 	<-s.gpu
 	line.LatencyMS = max(time.Since(start).Milliseconds(), 1)
 	if err != nil {
+		s.refund(v.login, seconds, takenAt)
 		line.Error = "transcription failed: " + err.Error()
 		g.refuseVoice(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return

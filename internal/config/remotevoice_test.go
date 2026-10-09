@@ -71,9 +71,9 @@ func TestVoiceGetters(t *testing.T) {
 		t.Fatal("defaults: off, 300 s, port 8448, GPU on, large-v3-turbo")
 	}
 	no := false
-	a.Remote.Voice = Voice{Enabled: true, MaxSeconds: 60, Port: 9100, GPU: &no, Model: "large-v3-turbo-q5_0", Vocabulary: []string{"Lever", "Fizzy"}}
+	a.Remote.Voice = Voice{Enabled: true, MaxSeconds: 60, Port: 9100, GPU: &no, Model: "large-v3-turbo-q5_0", Vocabulary: []string{"Lever", "Scion"}}
 	if !a.VoiceOn() || a.EffectiveVoiceMaxSeconds() != 60 || a.EffectiveVoicePort() != 9100 || a.VoiceGPU() ||
-		a.EffectiveVoiceModel() != "large-v3-turbo-q5_0" || a.VoicePrompt() != "Lever, Fizzy" {
+		a.EffectiveVoiceModel() != "large-v3-turbo-q5_0" || a.VoicePrompt() != "Lever, Scion" {
 		t.Fatal("set")
 	}
 	a.Remote.AllowedUsers[1].Voice = &no

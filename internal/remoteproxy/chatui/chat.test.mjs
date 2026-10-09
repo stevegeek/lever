@@ -13,6 +13,8 @@ const A = (name, over = {}) => ({ name, role: 'worker', label: '', access: 'mess
   conversation: `dm:agent:${name}id:user:u1`, terminal: `/agents/${name}id/terminal`, ...over });
 const BOSS = (over = {}) => A('boss', { role: 'manager', activity: 'working', id: 'a1', conversation: KEY, terminal: '/agents/a1/terminal', ...over });
 const defaultAgents = () => roster([BOSS(), A('w1')]);
+// readAloudAgents is the roster of a login offered read-aloud.
+const readAloudAgents = () => roster([BOSS(), A('w1')], { readAloud: true });
 
 // hubWith builds a scripted hub; each part can be replaced by a test.
 function hubWith(parts = {}) {
@@ -2155,7 +2157,7 @@ test('mic: leaving the chat while recording drops the clip', async () => {
 
 test('read-aloud: a speaker on each agent message, on-device voices only, cleaned text, stop control', async () => {
   const hist = () => ({ status: 200, body: { messages: [msg(1, { msg: 'See **this**:\n```\nrm -rf /\n```\nand [docs](https://example.com/x)' }), msg(2, { senderId: 'u1', msg: 'mine' }), msg(3, { msg: 'second' })] } });
-  const env = await loadChat(hubWith({ history: hist }), { speech: { voices: [NETWORK, LOCAL] } });
+  const env = await loadChat(hubWith({ agents: readAloudAgents, history: hist }), { speech: { voices: [NETWORK, LOCAL] } });
   const speakers = () => env.els.list.children.map((r) => r.children.find((c) => c.className === 'speak'));
   const [first, mine, third] = speakers();
   assert.ok(first && third);
@@ -2183,17 +2185,17 @@ test('read-aloud: a speaker on each agent message, on-device voices only, cleane
 });
 
 test('read-aloud: no on-device voice reads nothing; no speech API shows no speaker', async () => {
-  let env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [NETWORK] } });
+  let env = await loadChat(hubWith({ agents: readAloudAgents, history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [NETWORK] } });
   env.els.list.children[0].children.find((c) => c.className === 'speak').dispatch('click');
   assert.equal(env.speech.spoken.length, 0);
   assert.match(env.els.error.textContent, /no on-device voice/);
-  env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }));
+  env = await loadChat(hubWith({ agents: readAloudAgents, history: () => ({ status: 200, body: { messages: [msg(1)] } }) }));
   assert.equal(env.els.list.children[0].children.some((c) => c.className === 'speak'), false);
 });
 
 test('read-aloud: the voice choice is offered with two local voices and kept per device', async () => {
   const other = { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true };
-  const env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, other, NETWORK] } });
+  const env = await loadChat(hubWith({ agents: readAloudAgents, history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, other, NETWORK] } });
   assert.equal(env.els.readvoice.hidden, false);
   assert.deepEqual(env.els.readvoice.children.map((o) => o.value), ['local-en', 'local-de']);
   env.els.readvoice.value = 'local-de';
@@ -2201,6 +2203,22 @@ test('read-aloud: the voice choice is offered with two local voices and kept per
   assert.equal(env.local['lever-read-voice'], 'local-de');
   env.els.list.children[0].children.find((c) => c.className === 'speak').dispatch('click');
   assert.equal(env.speech.spoken[0].voice, other);
-  const one = await loadChat(hubWith(), { speech: { voices: [LOCAL, NETWORK] } });
+  const one = await loadChat(hubWith({ agents: readAloudAgents }), { speech: { voices: [LOCAL, NETWORK] } });
   assert.equal(one.els.readvoice.hidden, true, 'one local voice: nothing to choose');
+});
+test('read-aloud: off unless the roster offers it (remote.voice off or read_aloud false)', async () => {
+  const env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true }] } });
+  assert.equal(env.els.list.children[0].children.some((c) => c.className === 'speak'), false);
+  assert.equal(env.els.readvoice.hidden, true);
+});
+
+
+test('mic: a second tap while the permission prompt is up opens no second stream; one chunk at the stop', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: {} });
+  env.els.mic.dispatch('click');
+  env.els.mic.dispatch('click');
+  await tick(5);
+  assert.equal(env.media.streams, 1);
+  assert.equal(env.media.recorders.length, 1);
+  assert.equal(env.media.recorders[0].slice, undefined, 'no timeslice (Safari writes fragmented MP4 for chunks)');
 });

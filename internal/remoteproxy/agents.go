@@ -64,6 +64,8 @@ type agentsAnswer struct {
 	Agents  []agentEntry `json:"agents"`
 	Files   *filesInfo   `json:"files,omitempty"` // remote.files on
 	Voice   *voiceInfo   `json:"voice,omitempty"` // remote.voice on for this login, transcriber up
+	// ReadAloud: remote.voice on for this login and read_aloud not off.
+	ReadAloud bool `json:"readAloud,omitempty"`
 }
 
 // filesInfo is the upload limits the page checks before it sends a file
@@ -478,6 +480,7 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 			Uploads: !g.files.cfg.NoUploads, Shares: !g.files.cfg.NoShares}
 	}
 	ans.Voice = g.voiceInfoFor(v.login)
+	ans.ReadAloud = g.readAloudFor(v.login)
 	g.addUnread(ctx, v.login, cookie, &ans)
 	body, err := json.Marshal(ans)
 	if err != nil {

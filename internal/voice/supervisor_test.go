@@ -121,7 +121,7 @@ func TestSupervisorStartsServesAndStops(t *testing.T) {
 	bin := fakeWhisper(t)
 	port := freePort(t)
 	var l logs
-	s := &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false), Port: port, Log: l.f, ProbeEvery: 20 * time.Millisecond}
+	s := &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false, "/secret"), Port: port, Log: l.f, ProbeEvery: 20 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -129,7 +129,7 @@ func TestSupervisorStartsServesAndStops(t *testing.T) {
 		s.Run(ctx)
 	}()
 	eventually(t, "ready", s.Ready)
-	text, err := Transcribe(ctx, &http.Client{}, s.Addr(), Request{WAV: []byte("RIFF....WAVE"), Language: "en", Prompt: "Lever"})
+	text, err := Transcribe(ctx, &http.Client{}, s.Addr(), Request{Path: "/secret", WAV: []byte("RIFF....WAVE"), Language: "en", Prompt: "Lever"})
 	if err != nil || !strings.Contains(text, "heard RIFF 12 bytes; language en; prompt Lever; format json; gpu false") {
 		t.Fatalf("%q %v", text, err)
 	}
@@ -151,7 +151,7 @@ func TestSupervisorRestartsWithBackoff(t *testing.T) {
 	bin := fakeWhisper(t)
 	port := freePort(t)
 	var l logs
-	s := &Supervisor{Program: bin, Args: append(ServerArgs(modelFile(t), port, true), "-exit-after", "200ms"), Port: port, Log: l.f,
+	s := &Supervisor{Program: bin, Args: append(ServerArgs(modelFile(t), port, true, "/secret"), "-exit-after", "200ms"), Port: port, Log: l.f,
 		MinBackoff: 20 * time.Millisecond, MaxBackoff: 50 * time.Millisecond, ProbeEvery: 10 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -179,7 +179,7 @@ func TestSupervisorLeavesATakenPortAlone(t *testing.T) {
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 	var l logs
-	s := &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false), Port: port, Log: l.f, MinBackoff: 20 * time.Millisecond}
+	s := &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false, "/secret"), Port: port, Log: l.f, MinBackoff: 20 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -226,7 +226,7 @@ func TestServiceRunsAVerifiedModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	var l logs
-	s := &Service{Model: m, ModelDir: dir, Server: bin, Port: freePort(t), GPU: true, Prompt: "Fizzy", Log: l.f,
+	s := &Service{Model: m, ModelDir: dir, Server: bin, Port: freePort(t), GPU: true, Prompt: "Scion", Log: l.f,
 		Supervisor: &Supervisor{ProbeEvery: 10 * time.Millisecond}}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -237,7 +237,7 @@ func TestServiceRunsAVerifiedModel(t *testing.T) {
 	eventually(t, "usable", s.Usable)
 	eventually(t, "ready", func() bool { return s.Supervisor.Ready() })
 	text, err := s.Transcribe(ctx, []byte("RIFFxxxx"))
-	if err != nil || !strings.Contains(text, "language auto; prompt Fizzy; format json; gpu true") {
+	if err != nil || !strings.Contains(text, "language auto; prompt Scion; format json; gpu true") {
 		t.Fatalf("%q %v", text, err)
 	}
 	cancel()
@@ -262,7 +262,7 @@ func TestChildOutputIsNeverKept(t *testing.T) {
 	bin := fakeWhisper(t)
 	port := freePort(t)
 	var l logs
-	s = &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false), Port: port, Log: l.f, ProbeEvery: 10 * time.Millisecond}
+	s = &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false, "/secret"), Port: port, Log: l.f, ProbeEvery: 10 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -270,7 +270,7 @@ func TestChildOutputIsNeverKept(t *testing.T) {
 		s.Run(ctx)
 	}()
 	eventually(t, "ready", s.Ready)
-	if _, err := Transcribe(ctx, &http.Client{}, s.Addr(), Request{WAV: []byte("RIFFsecret")}); err != nil {
+	if _, err := Transcribe(ctx, &http.Client{}, s.Addr(), Request{Path: "/secret", WAV: []byte("RIFFsecret")}); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
@@ -284,7 +284,7 @@ func TestSupervisorCheckBlocksTheStart(t *testing.T) {
 	bin := fakeWhisper(t)
 	port := freePort(t)
 	var l logs
-	s := &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false), Port: port, Log: l.f, MinBackoff: 10 * time.Millisecond,
+	s := &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false, "/secret"), Port: port, Log: l.f, MinBackoff: 10 * time.Millisecond,
 		Check: func() error { return fmt.Errorf("the program changed") }}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -310,7 +310,7 @@ func TestSupervisorIgnoresASquatter(t *testing.T) {
 	bin := fakeWhisper(t)
 	port := freePort(t)
 	var l logs
-	s := &Supervisor{Program: bin, Args: append(ServerArgs(modelFile(t), port, false), "-listen-delay", "300ms"), Port: port, Log: l.f,
+	s := &Supervisor{Program: bin, Args: append(ServerArgs(modelFile(t), port, false, "/secret"), "-listen-delay", "300ms"), Port: port, Log: l.f,
 		MinBackoff: 20 * time.Millisecond, ProbeEvery: 10 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

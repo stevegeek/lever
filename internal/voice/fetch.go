@@ -115,6 +115,7 @@ func (f Fetcher) FetchFrom(ctx context.Context, m Model, src, dir string) (strin
 	if resp.ContentLength >= 0 && resp.ContentLength != m.Size {
 		return "", fmt.Errorf("voice: download %s: the server announces %d bytes, the pinned size is %d", m.Name, resp.ContentLength, m.Size)
 	}
+	removeStaleFetches(dir, time.Now())
 	tmp, err := os.CreateTemp(dir, ".fetch-*")
 	if err != nil {
 		return "", err
@@ -287,4 +288,22 @@ func safeOwned(p string, fi fs.FileInfo) error {
 		return fmt.Errorf("voice: whisper_server: %s belongs to uid %d, neither you nor root", p, owner)
 	}
 	return nil
+}
+
+// removeStaleFetches deletes partial downloads a killed fetch left in dir:
+// regular files named .fetch-*, untouched for a day (a fetch running now
+// writes its own file continuously). Best effort.
+func removeStaleFetches(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".fetch-") || !e.Type().IsRegular() {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > 24*time.Hour {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }

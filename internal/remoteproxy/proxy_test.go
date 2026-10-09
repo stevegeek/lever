@@ -1359,3 +1359,24 @@ func TestRefusalPageEscapes(t *testing.T) {
 		t.Errorf("refusalPage did not escape: %q", got)
 	}
 }
+
+// TestRefusedNavigationCarriesNoReason: a cross-site page load that passes
+// the origin check but fails a later one is audited as that denial, with no
+// navigation reason.
+func TestRefusedNavigationCarriesNoReason(t *testing.T) {
+	hub := newPageHub(t)
+	var lines []AuditLine
+	cfg := chatConfig(t, hub)
+	cfg.Audit = func(l AuditLine) { lines = append(lines, l) }
+	rw := httptest.NewRecorder()
+	NewHandler(cfg).ServeHTTP(rw, navRequest("GET", "/", "stranger@x"))
+	if rw.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", rw.Code)
+	}
+	if len(lines) != 1 || lines[0].Decision != DecisionDenyUser || lines[0].Reason != "" {
+		t.Fatalf("audit = %+v, want one deny-user line with no reason", lines)
+	}
+	if got := hub.reached(); len(got) != 0 {
+		t.Errorf("the hub was reached: %v", got)
+	}
+}

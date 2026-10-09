@@ -2337,8 +2337,8 @@ func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess
 	if !remote.Enabled {
 		return checkResult{name, true, "disabled", ""}
 	}
-	const fix = "run `lever apply` (it grants the role in the bootstrap dev-auth window, which opens only while no agent container runs; " +
-		"with agents running, `lever stop`, then `lever up`)"
+	const fix = "run `lever apply` (it grants the role in the bootstrap dev-auth window, which opens only while " +
+		"no container runs in the jail, the manager included; otherwise run `lever stop`, then `lever up`)"
 	rec, found, err := st.LoadRemoteRoleRecord()
 	if err != nil {
 		return checkResult{name, false, err.Error(), fix}

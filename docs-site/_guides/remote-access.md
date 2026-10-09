@@ -207,7 +207,8 @@ jail-loopback-only, dev-auth-on mint window used for the [controller PAT
 re-mint](/security-model/worker-isolation/): a throwaway hub, reachable only from inside the jail,
 up just long enough to mint the token, then torn down. On a fresh bootstrap with `remote.enabled`
 already set, this happens in the *same* window as the controller-PAT mint — no extra window opens.
-The window cannot open while any agent container runs (an agent could reach the dev-auth hub):
+The window cannot open while any container runs in the jail, the manager included (an agent
+could reach the dev-auth hub), or when lever cannot list the containers:
 `apply` then skips the remote mint and the role grant with a warning, and goes on. Run `lever
 stop`, then `lever up`, to run them (the manager conversation is kept).
 
@@ -327,9 +328,11 @@ Neither page changes anything on `GET`. `/` is the chat page's fixed redirect, t
 shell, or a contact's landing page; `/lever/chat` is a file from the lever binary. Every answer
 to them forbids framing (`frame-ancestors 'none'` and `X-Frame-Options: DENY`), and a page on
 another site cannot read what a cross-origin page shows. The requests the page makes after it
-loads are same-origin, and meet the strict rule. Every other cross-site request stays refused:
-any `/lever/api/` or hub `/api/` route, every other hub page, every write, frames and
-subresources. When the proxy refuses a top-level page load, it answers a small HTML page with
+loads are same-origin, and meet the strict rule. The chat page marks no conversation read until
+the user taps or types on it (or taps one of its notifications while it is open), so a link that
+opens it, and picks a chat with `#agent=`, clears no unread badge. Every other cross-site request
+stays refused: any `/lever/api/` or hub `/api/` route, every other hub page, every write, frames
+and subresources. When the proxy refuses a top-level page load, it answers a small HTML page with
 an "Open the chat" link to `/` instead of plain text, which a phone can offer as a download.
 
 Before it forwards a request, the proxy removes every
@@ -702,7 +705,8 @@ upgrading opens the window once. `lever doctor`'s `remote web role` row reads th
 
 **A user exists only after its first sign-in.** On a fresh setup, the web UI answers 403 until the
 role is bound: sign in once from the phone, then run `lever stop` and `lever up` (a `lever apply`
-binds it only while no agent container runs, see [3. Apply](#3-apply)). Until then, `apply` warns
+binds it only while no container runs in the jail, the manager included, see
+[3. Apply](#3-apply)). Until then, `apply` warns
 and tries the window again on every run.
 
 Removing a user from `allowed_users` does **not** remove its binding or its ceiling. The proxy then
@@ -1142,8 +1146,8 @@ encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
 - **"has not signed in yet".** The proxy reads only for a contact that `lever apply` bound to a
   hub user (`.lever-state/remote-role.json`). For any other contact it does not sign in, since a
   sign-in would create the contact's hub user. After a contact signs in for the first time, bind
-  it with `lever stop`, then `lever up` (a `lever apply` binds it only while no agent container
-  runs, see [3. Apply](#3-apply)); until then its conversations show "has not signed in yet". When the hub
+  it with `lever stop`, then `lever up` (a `lever apply` binds it only while no container runs
+  in the jail, the manager included, see [3. Apply](#3-apply)); until then its conversations show "has not signed in yet". When the hub
   refuses a read and the contact's session belongs to another hub user than the one `apply`
   bound (the hub forgot the contact, and its next sign-in made a new user), the answer is also
   `not-signed-in`, with the hint `run lever apply`. To find that out the proxy asks the hub who

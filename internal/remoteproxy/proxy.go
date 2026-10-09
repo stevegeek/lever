@@ -1064,7 +1064,6 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 		}
 		return false
 	}
-	line.Reason = navigationReason(r)
 	if len(cfg.AllowedUsers) > 0 {
 		hdr := cfg.identityHeader()
 		// Duplicates are refused for the same reason Origin and
@@ -1103,6 +1102,8 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 		g.deny(w, line, http.StatusForbidden, DecisionDenyRoute, "the remote proxy does not forward this route")
 		return false
 	}
+	// Only now: a line some later check denies carries no reason.
+	line.Reason = navigationReason(r)
 	return true
 }
 

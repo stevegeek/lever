@@ -177,10 +177,11 @@ func contactRolePermissions() []string { return []string{"agent.message"} }
 
 // remoteRoleFix is the one repair for a pending user: the hub user exists
 // only after its first sign-in, and only a dev-auth window can bind it. The
-// window never opens beside a running container (windowBlocked), so with
-// agents running only `lever stop` + `lever up` binds it.
-const remoteRoleFix = "after the first sign-in from the phone, run `lever apply` if no agent runs, " +
-	"or `lever stop`, then `lever up` (apply binds the role only while no agent container runs)"
+// window never opens beside any running container, the manager's included,
+// or when lever cannot list them (windowBlocked), so otherwise only
+// `lever stop` + `lever up` binds it.
+const remoteRoleFix = "after the first sign-in from the phone, run `lever apply`; it binds the role only while " +
+	"no container runs in the jail (the manager included); otherwise run `lever stop`, then `lever up`"
 
 // remoteRoleReason says why the remote web role grant must (re)run, or ""
 // when the record covers every email with the current permission set and a

@@ -573,11 +573,35 @@ function applyHistory(res) {
   if (mergeMessages(messages, items) || restart) render(first);
 }
 
+// acted is set by the user's first tap or key on this page load (onAct).
+let acted = false;
+
+// hasActed reports whether the user has acted on this page load. Until then
+// the page marks nothing read: a link from another site can open the page,
+// even in a window it closes again, and choose the chat with #agent=, so
+// opening and showing a chat is no sign that anyone read it. A tap on one of
+// lever's notifications counts too, when the service worker sends it to this
+// page (onWorkerMessage). The browser's own sticky activation is used where
+// it exists.
+function hasActed() {
+  return acted || Boolean(navigator.userActivation && navigator.userActivation.hasBeenActive);
+}
+
+// onAct records the first act and marks the open chat read then, as a read
+// that was held back for it.
+function onAct() {
+  if (acted) return;
+  acted = true;
+  if (chat && chat.conversation) void markRead(chat);
+}
+for (const type of ['pointerdown', 'keydown', 'touchstart']) document.addEventListener(type, onAct, { capture: true, passive: true });
+
 // markRead moves the login's read marker to the newest message a history
-// read showed, while the chat is in view, so the agent's badge drops. It
-// uses the hub's own read route; the list is read again after it.
+// read showed, while the chat is in view and once the user has acted on the
+// page (hasActed), so the agent's badge drops. It uses the hub's own read
+// route; the list is read again after it.
 async function markRead(c) {
-  if (document.visibilityState !== 'visible') return;
+  if (document.visibilityState !== 'visible' || !hasActed()) return;
   const newest = sortedMessages(messages).filter((m) => fromHistory.has(m.id)).pop();
   if (!newest || typeof newest.id !== 'string' || lastMarked.get(c.conversation) === newest.id) return;
   lastMarked.set(c.conversation, newest.id);
@@ -1350,13 +1374,19 @@ function setOptIn(on) {
   }
 }
 
+// onWorkerMessage handles the service worker's one message: a tap on a
+// notification while this page is loaded (sw.js). Only lever's own worker can
+// send it, so it counts as the user acting on the page (hasActed).
+function onWorkerMessage(ev) {
+  const d = ev && ev.data;
+  const name = d && typeof d.agent === 'string' ? hashAgent(`#agent=${d.agent}`) : '';
+  if (name && roster && roster.agents.some((a) => a.name === name)) openChat(name);
+  onAct();
+}
+
 async function setupPush() {
   if (!pushSupported()) return;
-  navigator.serviceWorker.addEventListener('message', (ev) => {
-    const d = ev && ev.data;
-    const name = d && typeof d.agent === 'string' ? hashAgent(`#agent=${d.agent}`) : '';
-    if (name && roster && roster.agents.some((a) => a.name === name)) openChat(name);
-  });
+  navigator.serviceWorker.addEventListener('message', onWorkerMessage);
   const res = await api('/lever/api/push/key');
   const key = res.ok && res.body ? pushKeyBytes(res.body.key) : null;
   const reg = await pushRegistration();

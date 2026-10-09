@@ -1163,6 +1163,8 @@ test('opening a chat marks it read and the badge drops on the next list', async 
     },
   }), { store: { 'lever-chat-open': 'boss' } });
   const marks = () => env.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/read'));
+  assert.equal(marks().length, 0, 'nothing is marked read before the user acts');
+  await env.act();
   assert.equal(marks().length, 1);
   assert.equal(marks()[0].path, `/api/v1/chat/conversations/${encodeURIComponent(KEY)}/read`);
   assert.deepEqual(marks()[0].body, { messageId: 'm002' });
@@ -1175,12 +1177,53 @@ test('a hidden page marks nothing read', async () => {
   const hub = hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
   const env = await loadChat(hub);
   const marks = () => env.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/read')).length;
+  await env.act();
   assert.equal(marks(), 1);
   hub.parts.history = () => ({ status: 200, body: { messages: [msg(2), msg(1)] } });
   document.visibilityState = 'hidden';
   env.streams[0].emit('update', { data: JSON.stringify({ subject: 'user.u1.chat.dm' }) });
   await env.runTimers();
   assert.equal(marks(), 1);
+});
+
+// A link from another site can open the page and choose the chat with
+// #agent=, even in a window it closes again: nothing is marked read until
+// the user acts on the page.
+test('a page nobody has acted on marks nothing read', async () => {
+  const hub = hubWith({ history: () => ({ status: 200, body: { messages: [msg(2), msg(1)] } }) });
+  const marks = (env) => env.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/read'));
+  const env = await load(hub, { hash: '#agent=boss' });
+  assert.equal(env.els.agent.textContent, 'boss', 'the hash still opens the chat');
+  env.streams[0].emit('update', { data: JSON.stringify({ subject: 'user.u1.chat.dm' }) });
+  await env.poll();
+  assert.equal(marks(env).length, 0);
+  // The first key marks the open chat read at once, and the next history read
+  // with a newer message marks again.
+  await env.act('keydown');
+  assert.deepEqual(marks(env).map((c) => c.body), [{ messageId: 'm002' }]);
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(3), msg(2), msg(1)] } });
+  env.streams[0].emit('update', { data: JSON.stringify({ subject: 'user.u1.chat.dm' }) });
+  await env.runTimers();
+  assert.deepEqual(marks(env).map((c) => c.body), [{ messageId: 'm002' }, { messageId: 'm003' }]);
+  await env.act('touchstart');
+  assert.equal(marks(env).length, 2, 'only the first act marks by itself');
+  // A browser's sticky activation counts as an act.
+  const active = await loadChat(hub, { activation: { hasBeenActive: true } });
+  assert.equal(marks(active).length, 1);
+  const inactive = await loadChat(hub, { activation: { hasBeenActive: false } });
+  assert.equal(marks(inactive).length, 0);
+});
+
+// A tap on one of lever's notifications reaches an open page as a message
+// from its own service worker, which counts as an act.
+test('a notification tap on an open page marks its chat read', async () => {
+  const hub = hubWith({ agents: () => roster([BOSS(), A('w1')]), history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
+  const env = await load(hub, { push: { permission: 'granted' } });
+  const marks = () => env.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/read'));
+  assert.equal(marks().length, 0);
+  env.swMessage({ agent: 'w1' });
+  await env.runTimers();
+  assert.deepEqual(marks().map((c) => c.path), ['/api/v1/chat/conversations/dm%3Aagent%3Aw1id%3Auser%3Au1/read']);
 });
 
 test('a chat event reloads the list and the open history', async () => {

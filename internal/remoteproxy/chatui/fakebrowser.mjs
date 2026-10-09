@@ -119,6 +119,14 @@ export async function load(hub, opts = {}) {
     delete globalThis.Notification;
     Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: {} });
   }
+  // The browser's sticky activation (opts.activation): absent unless a test
+  // asks, as in a browser without navigator.userActivation.
+  if (opts.activation) globalThis.navigator.userActivation = opts.activation;
+  // act is the user's first tap on the page.
+  env.act = async (type = 'pointerdown') => {
+    doc.dispatch(type);
+    await tick(5);
+  };
   env.local = { ...opts.local };
   globalThis.localStorage = { getItem: (k) => env.local[k] ?? null, setItem: (k, v) => (env.local[k] = String(v)), removeItem: (k) => delete env.local[k] };
   globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)), removeItem: (k) => delete env.store[k] };

@@ -22,7 +22,10 @@ version bump moves the block under the new version heading.
   contact's landing page too). Every other cross-site request stays refused: the `/lever/api/`
   and hub `/api/` routes, every other page, every write, frames, subresources and WebSockets. The
   audit line of an admitted page load carries the `reason` `cross-site-navigation` or
-  `same-site-navigation`.
+  `same-site-navigation` (a line that a later check denies carries none). The chat page now marks
+  no conversation read until the user taps or types on it, or taps one of its notifications while
+  it is open: a link from another site could open the page, pick a chat with `#agent=` and close
+  it again, which cleared that chat's unread badge and the push it would have sent.
 - **A refused page load is a page, not a download.** When the proxy's origin check refuses a
   top-level navigation, it answers a small HTML page (no script) with an "Open the chat" link to
   `/`, with the same status and decision and `Cache-Control: no-store`. Every other refusal is
@@ -32,8 +35,8 @@ version bump moves the block under the new version heading.
   doctor cannot ask the hub. A user who signed in after the grant still showed as "never signed
   in", and the row said the web UI "will answer 403". It now says "no hub user at the last grant
   (not signed in then)" and "the role is not bound yet". The fix text (in doctor and in the
-  `apply` warning) now says that `lever apply` binds the role only while no agent container runs,
-  and to run `lever stop`, then `lever up` when agents run.
+  `apply` warning) now says that `lever apply` binds the role only while no container runs in the
+  jail (the manager included), and to run `lever stop`, then `lever up` otherwise.
 
 ## [0.34.2] - 2026-10-09
 

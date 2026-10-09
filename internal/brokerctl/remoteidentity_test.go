@@ -108,6 +108,11 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 		if f.Name == "Files" && g.Type == reflect.TypeFor[*state.FilesIdentity]() {
 			continue
 		}
+		// voice is hashed as its effective settings, and only while on
+		// (VoiceOn).
+		if f.Name == "Voice" && g.Type == reflect.TypeFor[*state.VoiceIdentity]() {
+			continue
+		}
 		// push is hashed as its subject while on: the proxy captures only
 		// whether to push and the VAPID subject.
 		if f.Name == "Push" && g.Type == reflect.TypeFor[string]() {

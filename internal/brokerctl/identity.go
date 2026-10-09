@@ -145,6 +145,11 @@ func RemoteConfigHash(app *config.App) string {
 			f.NoUploads, f.NoShares, f.Excluded = !app.FilesUploadsOn(), !app.FilesSharesOn(), app.FilesExcludedLogins()
 			id.Files = f
 		}
+		if app.VoiceOn() {
+			id.Voice = &state.VoiceIdentity{WhisperServer: app.Remote.Voice.WhisperServer, Model: app.EffectiveVoiceModel(),
+				Language: app.Remote.Voice.Language, Vocabulary: app.Remote.Voice.Vocabulary, MaxSeconds: app.EffectiveVoiceMaxSeconds(),
+				GPU: app.VoiceGPU(), Port: app.EffectiveVoicePort(), Excluded: app.VoiceExcludedLogins()}
+		}
 	}
 	if app.PushOn() {
 		id.Push = app.Remote.Push.Subject

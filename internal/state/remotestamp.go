@@ -51,6 +51,21 @@ type RemoteIdentity struct {
 	// Files (remote.files, landing chat only): the limits and every agent's
 	// workspace the proxy writes uploads into. Omitted when off.
 	Files *FilesIdentity `json:",omitempty"`
+	// Voice (remote.voice, landing chat only): what the proxy starts
+	// whisper-server with and the route's limits. Omitted when off.
+	Voice *VoiceIdentity `json:",omitempty"`
+}
+
+// VoiceIdentity is the part of remote.voice a running proxy captured.
+type VoiceIdentity struct {
+	WhisperServer string
+	Model         string
+	Language      string   `json:",omitempty"`
+	Vocabulary    []string `json:",omitempty"`
+	MaxSeconds    int
+	GPU           bool
+	Port          int
+	Excluded      []string `json:",omitempty"` // allowed_users voice: false
 }
 
 // FilesIdentity is the part of remote.files a running proxy captured.

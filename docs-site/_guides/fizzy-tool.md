@@ -30,7 +30,7 @@ off.
 | `list_comments` | `number` | List the comments of a card. |
 | `comment` | `number`, `body` | Add a markdown comment. |
 | `move_card` | `number`, `column` | Move a card to a column of the board. `column` is a column id; a column of another board is refused with the list of valid columns. |
-| `create_card` | `title`, `description` | Create a card on the board. |
+| `create_card` | `title`, `description` | Create a card on the board. An empty description is written as `(no description)` after the prefix. |
 
 A refusal comes back as `{"ok": false, "error": "..."}`, for example when a card is not on the
 board. The tool never closes a card.

@@ -239,6 +239,10 @@ func (t *Tool) MoveCard(ctx context.Context, caller, number, column string) (res
 	return t.CLI.Run(ctx, "card", "column", number, "--column="+column)
 }
 
+// noDescription is the description CreateCard writes after the prefix when
+// the caller gives none.
+const noDescription = "(no description)"
+
 func (t *Tool) CreateCard(ctx context.Context, caller, title, description string) (res any, err error) {
 	defer func() { t.audit("create_card", caller, "", "", err) }()
 	if err := ValidTitle(title); err != nil {
@@ -249,6 +253,11 @@ func (t *Tool) CreateCard(ctx context.Context, caller, title, description string
 	}
 	if err := t.takeWrite(); err != nil {
 		return nil, err
+	}
+	// An empty description would leave the card with the bare prefix,
+	// which reads like a truncated text.
+	if strings.TrimSpace(description) == "" {
+		description = noDescription
 	}
 	var out json.RawMessage
 	err = t.withTextFile(t.Prefix+description, func(p string) error {

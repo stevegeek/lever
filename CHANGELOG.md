@@ -40,6 +40,8 @@ version bump moves the block under the new version heading.
   again only after the hub serves; the steps after it (`register-project`'s hub link) raced it.
   The `scion-server` step now waits (up to 30 s, and it never fails the apply on its own) for an
   online runtime broker after it restarts the hub.
+- **`lever-tool-fizzy`: `create_card` with an empty description writes `<prefix>(no description)`**
+  instead of the bare prefix, which read like a truncated text.
 
 ## [0.34.1] - 2026-10-08
 

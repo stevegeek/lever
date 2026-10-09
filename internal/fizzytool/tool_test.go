@@ -58,6 +58,20 @@ func TestCommentAddsPrefixViaFile(t *testing.T) {
 	}
 }
 
+// TestCreateCardEmptyDescription: a card created with no description gets
+// the prefix and "(no description)", not the bare prefix.
+func TestCreateCardEmptyDescription(t *testing.T) {
+	for _, desc := range []string{"", " \n\t"} {
+		tl, logPath := newTool(t)
+		if _, err := tl.CreateCard(context.Background(), "m", "t", desc); err != nil {
+			t.Fatal(err)
+		}
+		if log := readLog(t, logPath); !strings.Contains(log, "FILE [lever-dev agent] (no description)") {
+			t.Fatalf("description %q: want the prefix and (no description):\n%s", desc, log)
+		}
+	}
+}
+
 func TestMoveCardChecksColumn(t *testing.T) {
 	tl, logPath := newTool(t)
 	_, err := tl.MoveCard(context.Background(), "m", "17", "zzzzzzzzzzzzz")

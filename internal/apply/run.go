@@ -223,7 +223,8 @@ type Deps struct {
 	// a valid PAT is already persisted, no-op.
 	EnsureControllerPAT func(ctx context.Context) error
 	// WaitBrokerReady blocks until the scion runtime broker is registered AND
-	// online, right before start-manager acts. The workstation daemon brings up
+	// online, right before start-manager acts, and after the scion-server
+	// step restarts the hub. The workstation daemon brings up
 	// its Hub API (confirmed by scion-server's waitHubReady) and its runtime
 	// broker separately, so without this gate the first create/resume races the
 	// broker's async registration — the flakiness that made first-boot need a
@@ -722,8 +723,24 @@ func (r *run) scionServer(ctx context.Context) error {
 			return fmt.Errorf("hub login: restart the hub: %w", err)
 		}
 	}
-	return r.d.Scion.ServerStart(ctx, r.hubServerOpts())
+	if err := r.d.Scion.ServerStart(ctx, r.hubServerOpts()); err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	// The restart took the runtime broker down with the hub, and it
+	// registers again only after the hub serves. register-project's hub
+	// link and the steps after it would race that and fail with a 422
+	// no_runtime_broker (lever#166). The wait is fail-soft, like the one
+	// before start-manager. It asks scion's global settings, because the
+	// tree may not be a scion project yet.
+	return r.d.WaitBrokerReady(ctx, scionGlobalProject)
 }
+
+// scionGlobalProject is the value of scion's -g flag that names its global
+// settings (~/.scion, made by init-machine) instead of a project directory.
+const scionGlobalProject = "global"
 
 // hubServerOpts is HubServerOpts with the run's log as the start's progress
 // sink, so a slow cold start prints that it is waiting.

@@ -3058,6 +3058,44 @@ func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
 	}
 }
 
+// TestScionServerWaitsForTheBrokerAfterARestart (lever#166): a hub restart
+// takes the runtime broker down with it, so the scion-server step waits for
+// the broker to register again before register-project's hub link — through
+// scion's global settings, since the tree may not be a project yet. Without
+// a restart the step does not wait (start-manager's own wait still runs).
+func TestScionServerWaitsForTheBrokerAfterARestart(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		f := scionOKRunner()
+		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+			Manager: config.Manager{Image: "img"},
+			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
+		var waits []string
+		deps := Deps{
+			Scion:          hubScion(f, app),
+			EnsureHubLogin: func(context.Context) (bool, error) { return changed, nil },
+			WaitBrokerReady: func(_ context.Context, project string) error {
+				waits = append(waits, project)
+				return nil
+			},
+		}
+		if err := runApply(app, deps); err != nil {
+			t.Fatalf("changed=%v: Run: %v", changed, err)
+		}
+		globals := 0
+		for _, w := range waits {
+			if w == "global" {
+				globals++
+			}
+		}
+		if want := map[bool]int{false: 0, true: 1}[changed]; globals != want {
+			t.Errorf("changed=%v: waits = %q, want %d wait on scion's global settings", changed, waits, want)
+		}
+		if changed && (len(waits) < 1 || waits[0] != "global") {
+			t.Errorf("waits = %q, want the post-restart wait first (before register-project)", waits)
+		}
+	}
+}
+
 // TestScionServerConvergesTelemetryWithoutRestarting pins the telemetry
 // edit's place and its restraint: it runs in the scion-server step before the
 // hub starts (so a first bring-up creates hub and manager with it in place),

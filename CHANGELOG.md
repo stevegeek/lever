@@ -30,6 +30,11 @@ version bump moves the block under the new version heading.
   runs on every apply; an image that is already warm takes under a second and prints nothing, and
   a slow warm-up prints a line after 3 s. A failed warm-up is a warning, not an error. The
   "stayed in phase created" error now names this cause and the manual warm-up.
+- **`lever apply` no longer fails with `no_runtime_broker` (422) right after "restarting the
+  hub".** The restart takes scion's runtime broker down with the hub, and the broker registers
+  again only after the hub serves; the steps after it (`register-project`'s hub link) raced it.
+  The `scion-server` step now waits (up to 30 s, and it never fails the apply on its own) for an
+  online runtime broker after it restarts the hub.
 
 ## [0.34.1] - 2026-10-08
 

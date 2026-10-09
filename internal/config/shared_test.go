@@ -210,14 +210,17 @@ func TestPrepareSharedFoldersHostHardLinks(t *testing.T) {
 	if err := app.CheckSharedFolderLinks(); err != nil {
 		t.Fatalf("links inside the folder: %v", err)
 	}
-	// An unreadable directory a writer made does not block the check.
+	// An unreadable directory is refused, with the fix: it could hide an
+	// old name that readers can still open.
 	locked := filepath.Join(pub, "locked")
-	if err := os.Mkdir(locked, 0o000); err != nil {
+	if err := os.Mkdir(locked, 0o311); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	if err := app.CheckSharedFolderLinks(); err != nil {
-		t.Fatalf("unreadable directory: %v", err)
+	if os.Geteuid() != 0 {
+		testutil.WantErrContaining(t, app.CheckSharedFolderLinks(), "cannot be read", "chmod")
+	}
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Link(filepath.Join(pub, "tool"), filepath.Join(app.Tree, "outside")); err != nil {
 		t.Fatal(err)

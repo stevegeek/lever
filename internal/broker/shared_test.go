@@ -241,3 +241,16 @@ func TestWorkerStart_sharedGuard(t *testing.T) {
 		})
 	}
 }
+
+// A recycle refused by the shared guard deletes nothing.
+func TestWorkerRecycle_sharedGuardRefusesBeforePurge(t *testing.T) {
+	b, rt, _, _ := recycleBroker(t, scion.PhaseSuspended, true)
+	b.sharedGuard = func(context.Context) error { return errors.New("manager lacks pins") }
+	rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager")
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "Nothing was deleted") {
+		t.Fatalf("status = %d, want 403 saying nothing was deleted (%s)", rec.Code, rec.Body.String())
+	}
+	if len(rt.purged)+len(rt.started) != 0 {
+		t.Fatalf("purged=%v started=%d, want neither", rt.purged, len(rt.started))
+	}
+}

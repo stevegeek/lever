@@ -302,14 +302,19 @@ func refuseOutsideHardLinks(dir string) error {
 	files := map[inode]*seen{}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// A writer controls the contents: an entry removed during the
-			// walk, or a directory it made unreadable, must not block a
-			// bring-up. Neither can hold a link a container could make.
-			if p != dir && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission)) {
+			// An entry removed during the walk is gone: skip it. An
+			// unreadable directory is refused, not skipped: it may hold a
+			// name made before the folder was shared, which a reader can
+			// still open (the same uid keeps the search bit, and container
+			// root reads past the mode).
+			if p != dir && errors.Is(err, fs.ErrNotExist) {
 				if d != nil && d.IsDir() {
 					return fs.SkipDir
 				}
 				return nil
+			}
+			if errors.Is(err, fs.ErrPermission) {
+				return fmt.Errorf("%s cannot be read, so lever cannot check it for hard links that leave the folder; make it readable (chmod -R u+rX on the folder) and try again", p)
 			}
 			return err
 		}

@@ -299,14 +299,15 @@ At least one of `writers` and `readers` must name an agent, and nobody may be in
   manager, and the broker before every worker start and resume, refuse a folder that is missing or
   reached through a symbolic link. Create the folder before you start the agents. Right before it
   creates the manager, `lever apply` also refuses a file in a folder that has a hard link
-  **outside** it (another name for it elsewhere could edit it): copy such a file in instead of
-  linking it. Hard links with every name inside the folder are fine. Nothing re-checks hard links
+  **outside** it (another name for it elsewhere could edit it), and a directory in it that it
+  cannot read: copy such a file in instead of linking it, and keep the folder readable. Hard links with every name inside the folder are fine. Nothing re-checks hard links
   later: no new link across the folder's boundary can be made from a container.
 - **Workers wait for the manager's pins.** While any folder is configured, the broker refuses to
   start or resume **any** worker unless the manager container holds its whole tree plan (checked
   as the `manager.read_only` tool guard checks it: the configured mounts, then, for a running
   manager, its live mounts from the guest side). A manager with no container, or a stopped one
-  whose configured mounts hold the plan, passes. A manager created before the current plan (a
+  whose configured mounts hold the plan and whose planned directories all exist on the host,
+  passes. A manager created before the current plan (a
   folder or a worker added since) lacks pins: back up its conversation and run `lever up --fresh`.
   When lever cannot read the mounts or the worker's hub record, the start or resume is refused with
   "retry".

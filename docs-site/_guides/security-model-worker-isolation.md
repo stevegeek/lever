@@ -266,8 +266,8 @@ a worker mounts only its own subdirectory. What an entry changes, and what still
   one whose configured mounts hold the plan, passes: it cannot act while it is down.
 - **Old names are refused.** A hard link made before the folder was shared would let its other
   name edit a file inside the folder. Right before it creates the manager, `lever apply` refuses a
-  file in a folder with a link count higher than its names inside the folder (unreadable
-  directories a writer made are skipped: they cannot hold a link a container could make). New links across the boundary cannot be made from a
+  file in a folder with a link count higher than its names inside the folder, and a directory in
+  it that it cannot read (such a directory could hide an old name that readers can still open). New links across the boundary cannot be made from a
   container: a hard link between two mounts fails (`EXDEV`). Links that stay inside the folder,
   and symbolic links inside it, are the writers' business: a link resolves in the container that
   follows it, which reaches only what that agent already sees.

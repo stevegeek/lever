@@ -162,6 +162,14 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task := fmt.Sprintf("task %d bytes, begins %q", len(req.Task), taskPreview(req.Task))
+	// shared_folders: the fresh start would be refused while the manager
+	// lacks its pins; refuse before the purge, so nothing is deleted.
+	if err := b.checkSharedAccess(ctx, spec, false); err != nil {
+		b.recycleRate.refund(spec.Name)
+		b.audit("worker", b.manager, "deny", verb+": "+err.Error())
+		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err)+". Nothing was deleted.", http.StatusForbidden)
+		return
+	}
 	if phase == "" {
 		// No record (never started, purged, a new jail): nothing to delete,
 		// and the recycle is a fresh start.

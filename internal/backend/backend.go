@@ -138,6 +138,11 @@ type Backend interface {
 	// jail's container store — the layers a rebuilt tag orphans on the grow-only
 	// jail disk. Never touches a tagged or container-referenced image.
 	PruneJailImages(ctx context.Context) error
+	// WarmJailImage starts imageRef once, with `true` as its entrypoint, under
+	// the user-namespace mapping scion starts agents with, so the first agent
+	// start does not spend scion's start timeout on podman's id-mapped layer
+	// copy (lever#165). Fast when the copy already exists.
+	WarmJailImage(ctx context.Context, imageRef string) error
 	// InstallGuestBinary streams a host-local executable into the guest at
 	// destPath as root (used by the acceptance gate to place lever-agent). The
 	// transport is the backend's root prefix, so callers stay backend-agnostic.

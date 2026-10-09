@@ -74,6 +74,7 @@ func (s *stubBackend) LoadImageTar(context.Context, string, string, func(string)
 }
 func (s *stubBackend) ImageLoadedTar(context.Context, string, string) bool      { return false }
 func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
+func (s *stubBackend) WarmJailImage(context.Context, string) error              { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
 func (s *stubBackend) EnsureHubLogin(_ context.Context, spec types.HubLogin) (bool, error) {
 	s.hubLoginCalls = append(s.hubLoginCalls, spec)

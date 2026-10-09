@@ -18,6 +18,19 @@ version bump moves the block under the new version heading.
   and the Fizzy board (`BOARD_ID`), and no live-validation checklist. The instructions name the
   operator, not a person. The dated session notes under `docs/` are removed.
 
+### Fixed
+
+- **The first start of a large agent image no longer loops forever in phase created.** The first
+  rootless podman start of an image under scion's user-namespace mapping
+  (`--userns=keep-id:uid=1000,gid=1000`) builds an id-mapped copy of every layer. For a 5 GB image
+  on Lima this took 44 s, and scion cancels an agent start after about 30 s, deletes the partial
+  work and starts again from zero, so `lever up` failed with "stayed in phase created … did not
+  settle". `lever apply`'s `load-image` step now starts every image once with that mapping and
+  `true` as its entrypoint (no claude, no pre-start hook, no network), bounded at 15 minutes. It
+  runs on every apply; an image that is already warm takes under a second and prints nothing, and
+  a slow warm-up prints a line after 3 s. A failed warm-up is a warning, not an error. The
+  "stayed in phase created" error now names this cause and the manual warm-up.
+
 ## [0.34.1] - 2026-10-08
 
 ### Fixed

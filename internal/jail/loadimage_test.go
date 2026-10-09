@@ -172,6 +172,43 @@ func TestPruneImagesArgs(t *testing.T) {
 	}
 }
 
+// TestWarmImageArgs pins the warm-up argv (lever#165): scion's exact keep-id
+// flag (a different mapping builds a different layer copy), `true` as the
+// entrypoint so neither sciontool's hook nor claude runs, and no pull or
+// network.
+func TestWarmImageArgs(t *testing.T) {
+	got := warmImageArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64")
+	want := []string{
+		"orb", "-m", "lever-demo", "-u", "leveruser",
+		"env",
+		"XDG_RUNTIME_DIR=/run/user/501",
+		"podman", "run", "--rm", "--pull=never", "--network=none",
+		"--userns=keep-id:uid=1000,gid=1000", "--entrypoint", "true", "scionlocal/lever-claude:arm64",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("warmImageArgs:\n got  %v\n want %v", got, want)
+	}
+}
+
+// TestWarmImage drives the warm-up through the host runner and wraps a
+// failure with the image.
+func TestWarmImage(t *testing.T) {
+	r := proc.NewFakeRunner()
+	r.Script("orb", proc.Result{})
+	if err := WarmImage(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", "img"); err != nil {
+		t.Fatalf("WarmImage: %v", err)
+	}
+	if len(r.Calls) != 1 || r.Calls[0].Name != "orb" {
+		t.Fatalf("expected one orb-prefixed call, got %+v", r.Calls)
+	}
+
+	r = proc.NewFakeRunner() // no script for the prefix binary -> Run errors
+	err := WarmImage(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", "img")
+	if !errors.Is(err, proc.ErrUnscripted) || !strings.Contains(err.Error(), "warm image img") {
+		t.Fatalf("WarmImage error = %v, want the runner error wrapped with the image", err)
+	}
+}
+
 // TestLoadImageStreamsSaveIntoPodmanLoad: the producer's bytes reach the jail's
 // `podman load` as stdin, through the prefix argv — no host shell, no pipeline
 // string.

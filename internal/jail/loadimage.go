@@ -53,6 +53,26 @@ func pruneImagesArgs(prefix []string, uid string) []string {
 	})
 }
 
+// ScionKeepIDUserns is the user-namespace flag scion's rootless podman runtime
+// starts every agent container with (pkg/runtime/podman.go, PodmanRuntime.Run,
+// at the pinned scion): the calling user maps to the image's scion user, uid
+// and gid 1000. A warm-up run must use exactly this flag, because podman
+// keeps one id-mapped layer copy per mapping.
+const ScionKeepIDUserns = "--userns=keep-id:uid=1000,gid=1000"
+
+// warmImageArgs returns the host argv that starts imageRef once under scion's
+// user-namespace mapping and exits at once: the entrypoint is `true`, so
+// neither the image's entrypoint (sciontool, its pre-start hook) nor claude
+// runs. --pull=never and --network=none keep it from reaching out.
+func warmImageArgs(prefix []string, uid, imageRef string) []string {
+	return slices.Concat(prefix, []string{
+		"env",
+		"XDG_RUNTIME_DIR=/run/user/" + uid,
+		"podman", "run", "--rm", "--pull=never", "--network=none",
+		ScionKeepIDUserns, "--entrypoint", "true", imageRef,
+	})
+}
+
 // normalizeImageID canonicalizes a docker/podman image ID for comparison. The
 // image ID is content-addressed over the image config and so IS identical on
 // both sides of a `docker save` | `podman load` (verified empirically) — EXCEPT
@@ -114,6 +134,23 @@ func PruneImages(ctx context.Context, r proc.Runner, prefix []string, uid string
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
 		return fmt.Errorf("prune images: %w: %s", err, strings.TrimSpace(res.Stderr+res.Stdout))
+	}
+	return nil
+}
+
+// WarmImage makes rootless podman build the id-mapped layer copy of imageRef
+// for scion's keep-id mapping (lever#165). The first container of an image
+// under a mapping copies every layer with its ownership shifted, which takes
+// most of a minute for a multi-GB image; scion's start of an agent has about
+// 30 s before its control-channel request is cancelled, the partial work is
+// deleted, and the next start begins again from zero. Done here first, the
+// agent start finds the copy and takes well under a second. A run on an image
+// that is already warm is as fast, so there is nothing to detect first.
+func WarmImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) error {
+	args := warmImageArgs(prefix, uid, imageRef)
+	res, err := r.Run(ctx, nil, args[0], args[1:]...)
+	if err != nil {
+		return fmt.Errorf("warm image %s: %w: %s", imageRef, err, strings.TrimSpace(res.Stderr+res.Stdout))
 	}
 	return nil
 }

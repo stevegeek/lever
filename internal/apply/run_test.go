@@ -59,6 +59,9 @@ func fillDeps(d Deps) Deps {
 	if d.PruneImages == nil {
 		d.PruneImages = func(context.Context) error { return nil }
 	}
+	if d.WarmImage == nil {
+		d.WarmImage = func(context.Context, string) error { return nil }
+	}
 	if d.StartBroker == nil {
 		d.StartBroker = func(context.Context) error { return nil }
 	}
@@ -1016,6 +1019,22 @@ func TestStartManagerTransitionalPhaseNeverSettlesFailsWithoutDelete(t *testing.
 			}
 		})
 	}
+}
+
+// TestStartManagerCreatedNeverSettlesNamesWarmUp (lever#165): a manager
+// stuck in phase created is the first start of a large image losing to
+// scion's start timeout; the error names the cause and the manual warm-up
+// with the exact userns flag scion uses.
+func TestStartManagerCreatedNeverSettlesNamesWarmUp(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "created", initContainerStatus: ""}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		PhaseSettleRetry: RetryBudget{Attempts: 2, Interval: time.Millisecond},
+	}
+	err := runApply(app, deps)
+	testutil.WantErrContaining(t, err, "user-namespace layer copy",
+		"podman run --rm --userns=keep-id:uid=1000,gid=1000 --entrypoint true "+app.ManagerImage(), "lever up --fresh")
 }
 
 // TestStartManagerUnknownPhaseFailsWithoutDelete (P6): a phase string lever
@@ -2774,6 +2793,75 @@ func TestLoadImageStepPruneErrorIsNonFatal(t *testing.T) {
 	}
 	if err := loadImageStep(d); err != nil {
 		t.Fatalf("runStep: a prune failure must be non-fatal, got %v", err)
+	}
+}
+
+// TestLoadImageStepWarmsEveryImage (lever#165): the warm-up runs after a
+// load and on an image that was already loaded, so an apply that loaded the
+// image and then died before its warm-up finished is completed by the next.
+func TestLoadImageStepWarmsEveryImage(t *testing.T) {
+	for _, loaded := range []bool{false, true} {
+		var warmed []string
+		d := Deps{
+			ImageLoaded: func(context.Context, string) bool { return loaded },
+			WarmImage: func(ctx context.Context, ref string) error {
+				if _, ok := ctx.Deadline(); !ok {
+					t.Errorf("loaded=%v: the warm-up must be bounded (no deadline on its context)", loaded)
+				}
+				warmed = append(warmed, ref)
+				return nil
+			},
+		}
+		if err := loadImageStep(d); err != nil {
+			t.Fatalf("loaded=%v: runStep: %v", loaded, err)
+		}
+		if !slices.Equal(warmed, []string{"img"}) {
+			t.Errorf("loaded=%v: warmed %v, want [img]", loaded, warmed)
+		}
+	}
+}
+
+// TestLoadImageStepWarmErrorIsNonFatal: a failed warm-up warns and the step
+// still succeeds.
+func TestLoadImageStepWarmErrorIsNonFatal(t *testing.T) {
+	var logs []string
+	d := Deps{
+		WarmImage: func(context.Context, string) error { return errBoom },
+		Log:       func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	}
+	if err := loadImageStep(d); err != nil {
+		t.Fatalf("runStep: a warm-up failure must be non-fatal, got %v", err)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "warning: warming img failed") || !strings.Contains(logs[0], "boom") {
+		t.Errorf("logs = %q, want one warning naming the image and the cause", logs)
+	}
+}
+
+// TestLoadImageStepWarmNotice: a warm-up that runs past the notice delay says
+// what it waits for; a fast one (an image already warm) prints nothing.
+func TestLoadImageStepWarmNotice(t *testing.T) {
+	old := imageWarmNoticeAfter
+	imageWarmNoticeAfter = 10 * time.Millisecond
+	t.Cleanup(func() { imageWarmNoticeAfter = old })
+	for _, tc := range []struct {
+		name  string
+		delay time.Duration
+		want  int
+	}{{"fast", 0, 0}, {"slow", 100 * time.Millisecond, 1}} {
+		var logs []string
+		d := Deps{
+			WarmImage: func(context.Context, string) error { time.Sleep(tc.delay); return nil },
+			Log:       func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+		}
+		if err := loadImageStep(d); err != nil {
+			t.Fatalf("%s: runStep: %v", tc.name, err)
+		}
+		if len(logs) != tc.want {
+			t.Fatalf("%s: logs = %q, want %d line(s)", tc.name, logs, tc.want)
+		}
+		if tc.want == 1 && !strings.Contains(logs[0], "warming the user-namespace layer copy of img") {
+			t.Errorf("%s: notice = %q", tc.name, logs[0])
+		}
 	}
 }
 

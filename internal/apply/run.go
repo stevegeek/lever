@@ -194,9 +194,15 @@ type Deps struct {
 	// new image. Best-effort: a prune failure is logged, not fatal to the
 	// bring-up.
 	PruneImages func(ctx context.Context) error
-	Scion       *scion.Client
-	ReadCred    func(path string) (string, error) // nil ⇒ defaultReadCred
-	JailMount   string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
+	// WarmImage starts imageRef once under scion's user-namespace mapping so
+	// the first agent start finds podman's id-mapped layer copy built
+	// (lever#165). The load-image step runs it on every image, loaded this
+	// apply or not, bounded by imageWarmTimeout. Best-effort: a failure is
+	// logged, not fatal to the bring-up.
+	WarmImage func(ctx context.Context, imageRef string) error
+	Scion     *scion.Client
+	ReadCred  func(path string) (string, error) // nil ⇒ defaultReadCred
+	JailMount string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
 	// HubSessionSecret is the hub's session-cookie signing key, threaded into
 	// every hub start this package orders (HubServerOpts). The CLI ensures it
 	// host-side before Run (state.State.EnsureSessionSecret), so the same
@@ -446,6 +452,7 @@ func (d Deps) check() error {
 		{"LoadImageTar", d.LoadImageTar == nil},
 		{"ImageLoadedTar", d.ImageLoadedTar == nil},
 		{"PruneImages", d.PruneImages == nil},
+		{"WarmImage", d.WarmImage == nil},
 		{"Scion", d.Scion == nil},
 		{"StartBroker", d.StartBroker == nil},
 		{"BrokerHealthy", d.BrokerHealthy == nil},
@@ -788,21 +795,53 @@ func runLoadImage(ctx context.Context, s Step, d Deps) error {
 			return d.LoadImageTar(ctx, ref, s.TarPath, d.ImageTagPolicy)
 		}
 	}
-	if loaded(ctx, s.Target) {
-		return nil
+	if !loaded(ctx, s.Target) {
+		if err := load(ctx, s.Target); err != nil {
+			return err
+		}
+		// After a load, prune dangling images: when this load superseded a tag
+		// (a rebuilt image), the old copy is now untagged and would otherwise
+		// ratchet the grow-only jail disk. A no-op when the load just added a
+		// brand-new image. Best-effort — a prune failure must never fail the
+		// bring-up.
+		if err := d.PruneImages(ctx); err != nil {
+			d.Log("load-image: pruning superseded jail images failed: %v", err)
+		}
 	}
-	if err := load(ctx, s.Target); err != nil {
-		return err
-	}
-	// After a load, prune dangling images: when this load superseded a tag
-	// (a rebuilt image), the old copy is now untagged and would otherwise
-	// ratchet the grow-only jail disk. A no-op when the load just added a
-	// brand-new image. Best-effort — a prune failure must never fail the
-	// bring-up.
-	if err := d.PruneImages(ctx); err != nil {
-		d.Log("load-image: pruning superseded jail images failed: %v", err)
-	}
+	// Warm an image that was already loaded too: an earlier apply may have
+	// loaded it and then failed or timed out before its warm-up finished.
+	warmImage(ctx, s.Target, d)
 	return nil
+}
+
+// imageWarmTimeout bounds one image's warm-up. The measured first run of a
+// 5 GB image took 44 s; the bound leaves room for a slow disk.
+const imageWarmTimeout = 15 * time.Minute
+
+// imageWarmNoticeAfter is how long a warm-up runs before the step says what
+// it is waiting for. A warm image takes well under a second, so a re-apply
+// prints nothing. A variable so tests can shorten it.
+var imageWarmNoticeAfter = 3 * time.Second
+
+// warmImage runs d.WarmImage for ref, bounded by imageWarmTimeout. A failure
+// only warns: the agent start may still succeed (a small image, a podman
+// with native id-mapped mounts), and the start-manager error names the cause
+// if it does not.
+func warmImage(ctx context.Context, ref string, d Deps) {
+	wctx, cancel := context.WithTimeout(ctx, imageWarmTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.WarmImage(wctx, ref) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(imageWarmNoticeAfter):
+		d.Log("load-image: warming the user-namespace layer copy of %s (the first run of a large image can take a minute)", ref)
+		err = <-done
+	}
+	if err != nil {
+		d.Log("load-image: warning: warming %s failed: %v. The first agent start on it may not settle in phase created; see the start-manager error if it does", ref, err)
+	}
 }
 
 // runCredential runs the credential step: read the manager credential file
@@ -1666,8 +1705,24 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 		return nil, fmt.Errorf("start-manager: manager %q was in phase %q and could not be re-observed within %s (last error: %v); nothing was changed. Retry, or run `lever up --fresh` to discard the session and start over",
 			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, listErr)
 	}
+	if cur.Phase == "created" {
+		return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. %s",
+			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, createdStuckHint(r.app.ManagerImage()))
+	}
 	return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. Retry once it settles (is a `lever stop` still running?), or run `lever up --fresh` to discard the session and start over",
 		r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval)
+}
+
+// createdStuckHint explains the usual cause of a manager that never leaves
+// phase created (lever#165): scion's start gives up after about 30 s, and the
+// first rootless start of a large image spends longer than that on podman's
+// id-mapped layer copy, so every retry starts again from zero. The load-image
+// step warms the copy; this names the manual warm-up for when that failed.
+func createdStuckHint(image string) string {
+	return fmt.Sprintf("The usual cause is the first start of a large image: podman builds a user-namespace layer copy that takes longer than scion's ~30 s start timeout, so scion retries from zero. "+
+		"Check the `load-image` lines of this apply for a warm-up warning; then, in the guest as the jail user, run `podman run --rm %s --entrypoint true %s` (it can take a few minutes) and run `lever up --fresh` (a manager in phase created has no conversation to lose). "+
+		"The guest's ~/.scion/server.log shows `context canceled` on each failed start",
+		jail.ScionKeepIDUserns, image)
 }
 
 // prepareAPIKeyMode conveys LEVER_LLM_AUTH=api-key to the manager container so

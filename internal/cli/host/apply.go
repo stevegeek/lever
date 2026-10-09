@@ -1305,7 +1305,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ImageTagPolicy: w.app.Security.ImageTagPolicy(),
 		// PruneImages reclaims the dangling image a rebuilt tag orphans, after a
 		// load. Best-effort (the apply step logs, never fails, on error).
-		PruneImages:      b.PruneJailImages,
+		PruneImages: b.PruneJailImages,
+		// WarmImage builds podman's id-mapped layer copy before scion's
+		// ~30 s agent start needs it (lever#165). Best-effort, like the prune.
+		WarmImage:        b.WarmJailImage,
 		Scion:            sc,
 		JailMount:        b.MountDest(),
 		HubSessionSecret: sessionSecret,

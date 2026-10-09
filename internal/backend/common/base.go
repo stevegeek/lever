@@ -244,6 +244,12 @@ func (b *Base) PruneJailImages(ctx context.Context) error {
 	return jail.PruneImages(ctx, b.r, b.jailPrefix(), b.RunUID())
 }
 
+// WarmJailImage builds the jail's id-mapped layer copy of imageRef for
+// scion's keep-id mapping; see jail.WarmImage.
+func (b *Base) WarmJailImage(ctx context.Context, imageRef string) error {
+	return jail.WarmImage(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
+}
+
 // InstallGuestBinary streams a host-local executable into the machine at
 // destPath as root, via the shared guest provisioner (RootPrefix).
 func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {

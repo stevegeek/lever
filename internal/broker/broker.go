@@ -217,10 +217,10 @@ type DispatchConfig struct {
 	// the config no longer grants (refuseStaleShares). nil skips it.
 	RecordVolumes RecordVolumesFunc
 	// SharedGuard checks that the running manager holds its tree plan
-	// (config.App.ManagerTreeMounts: the pins over every shared folder),
-	// before a worker that mounts a shared folder starts or resumes. It
-	// answers nil when the manager is not running (it cannot act then).
-	// nil skips the check.
+	// (config.App.ManagerTreeMounts: the pins over every shared folder and
+	// worker dir) before any worker starts or resumes. Wired only while
+	// shared folders are configured; nil skips the check. A refusal that
+	// wraps ErrSharedCheckUnavailable means the mounts could not be read.
 	SharedGuard func(ctx context.Context) error
 	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
 	// instance tree (jail.StageWorkerTicket in production). The manager

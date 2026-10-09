@@ -258,13 +258,16 @@ a worker mounts only its own subdirectory. What an entry changes, and what still
   `dir`: a mount point cannot be renamed or removed. lever also walks each folder's path from the
   tree root on the host and refuses a missing folder or a link on the path: before the manager is
   started or resumed by `lever apply`/`lever up`, and before every worker start and resume. And
-  while the manager is running, the broker starts or resumes a worker that mounts a shared folder
-  only after reading the manager container's mounts (configuration and, from the guest side, the
-  kernel's mount table) and finding its whole tree plan in place; a manager created before the
-  folder existed lacks the pins and must be recreated first.
+  while any folder is configured, the broker starts or resumes a worker (any worker: a worker dir
+  the manager swapped for a link to a folder would mount it read-write) only after reading the
+  manager container's mounts (its configuration and, for a running manager, the kernel's mount
+  table from the guest side) and finding its whole tree plan in place; a manager created before the
+  current plan lacks pins and must be recreated first. A manager with no container, or a stopped
+  one whose configured mounts hold the plan, passes: it cannot act while it is down.
 - **Old names are refused.** A hard link made before the folder was shared would let its other
-  name edit a file inside the folder. `lever apply` refuses a file in a folder with a link count
-  higher than its names inside the folder. New links across the boundary cannot be made from a
+  name edit a file inside the folder. Right before it creates the manager, `lever apply` refuses a
+  file in a folder with a link count higher than its names inside the folder (unreadable
+  directories a writer made are skipped: they cannot hold a link a container could make). New links across the boundary cannot be made from a
   container: a hard link between two mounts fails (`EXDEV`). Links that stay inside the folder,
   and symbolic links inside it, are the writers' business: a link resolves in the container that
   follows it, which reaches only what that agent already sees.
@@ -279,8 +282,8 @@ a worker mounts only its own subdirectory. What an entry changes, and what still
   for life. A worker created under an older plan could get back access the config has withdrawn on
   its next resume, so the broker reads the worker's hub record before every resume (a dispatch, an
   operator wake, the re-enrolment healer's bounce) and refuses one that holds a shared mount the
-  plan does not grant, or grants only read-only. A record it cannot read is refused too: a record
-  outlives the config that made it. The fix is to discard the record (`lever worker purge`, or the
+  plan does not grant, or grants only read-only. A record it cannot read is refused too (with
+  "retry", not a purge): a record outlives the config that made it. The fix is to discard the record (`lever worker purge`, or the
   manager's `agent recycle` for a recyclable worker).
 - **Replace the contents, not the folder.** A mount stays on the directory that existed when the
   container started. `lever doctor` reads each running reader's mounts from the guest (the kernel's

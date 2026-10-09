@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -99,13 +100,15 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 	return nil
 }
 
-// sharedGuard is the broker's check before a worker that mounts a shared
-// folder starts or resumes (broker.DispatchConfig.SharedGuard): the running
-// manager must hold its whole tree plan (ManagerTreeMounts: the pins over
-// every shared folder and its ancestors, and the worker dirs), read the way
-// the tool guard reads it. A manager with no container, or one that is not
-// running, passes: it cannot swap a folder while it is down. nil when no
-// shared folder is configured.
+// sharedGuard is the broker's check before any worker starts or resumes
+// while shared folders are configured (broker.DispatchConfig.SharedGuard):
+// the manager container must hold its whole tree plan (ManagerTreeMounts:
+// the pins over every shared folder and its ancestors, and the worker
+// dirs), read the way the tool guard reads it. With no manager container,
+// or a stopped one whose configured mounts hold the plan, it passes: the
+// live half needs a running process, and a manager that is down cannot
+// swap anything. A mount table it cannot read is ErrSharedCheckUnavailable.
+// nil when no shared folder is configured.
 func sharedGuard(app *config.App, jr proc.Runner, jailMount string) func(context.Context) error {
 	if len(app.SharedFolders) == 0 {
 		return nil
@@ -123,11 +126,18 @@ func sharedGuard(app *config.App, jr proc.Runner, jailMount string) func(context
 }
 
 // sharedGuardDecision maps a tree-plan check to the shared guard's answer:
-// a manager that is down passes; every other refusal stands.
+// a manager that is down passes; an unreadable mount table is
+// ErrSharedCheckUnavailable (retry); every other refusal stands.
 func sharedGuardDecision(err error) error {
 	var g *guardError
-	if errors.As(err, &g) && (g.class == "no-container" || g.class == "not-running") {
+	if !errors.As(err, &g) {
+		return err
+	}
+	switch g.class {
+	case "no-container", "not-running":
 		return nil
+	case "mounts-unreadable", "live-unreadable":
+		return fmt.Errorf("%s: %w", g.msg, broker.ErrSharedCheckUnavailable)
 	}
 	return err
 }

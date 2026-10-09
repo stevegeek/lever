@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -166,8 +167,13 @@ func TestWorkerResume_unreadableRecordRefusedWithShares(t *testing.T) {
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
 	var buf bytes.Buffer
 	_, b := sharedTree(t, rt, &buf, false, nil, errors.New("hub down"))
-	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager"); rec.Code != http.StatusForbidden || len(rt.resumed) != 0 {
+	rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusForbidden || len(rt.resumed) != 0 {
 		t.Fatalf("status=%d resumed=%d, want 403 and no resume (%s)", rec.Code, len(rt.resumed), rec.Body.String())
+	}
+	// A failed read is not a stale record: no purge advice.
+	if !strings.Contains(rec.Body.String(), "retry") || strings.Contains(rec.Body.String(), "purge") {
+		t.Fatalf("answer must say retry, not purge: %s", rec.Body.String())
 	}
 }
 
@@ -185,7 +191,10 @@ func TestWorkerStart_sharedGuard(t *testing.T) {
 		{"start refused", "", true, guardErr, http.StatusForbidden},
 		{"resume refused", "stopped", true, guardErr, http.StatusForbidden},
 		{"start allowed", "", true, nil, http.StatusOK},
-		{"no shared folder, not held", "", false, guardErr, http.StatusOK},
+		// Every worker waits while folders are configured: a worker dir the
+		// manager could swap for a link to a folder would mount it.
+		{"worker without a folder held too", "", false, guardErr, http.StatusForbidden},
+		{"unreadable mounts", "", true, fmt.Errorf("cannot read: %w", ErrSharedCheckUnavailable), http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			agents := map[string][]scion.Agent{}
@@ -221,8 +230,12 @@ func TestWorkerStart_sharedGuard(t *testing.T) {
 				if len(rt.started)+len(rt.resumed)+len(rt.staged) != 0 {
 					t.Fatal("nothing may be staged, started or resumed")
 				}
-				if !strings.Contains(rec.Body.String(), "lever up --fresh") {
-					t.Fatalf("answer must name the fix: %s", rec.Body.String())
+				want := "lever up --fresh"
+				if errors.Is(tc.guard, ErrSharedCheckUnavailable) {
+					want = "retry"
+				}
+				if !strings.Contains(rec.Body.String(), want) || (want == "retry" && strings.Contains(rec.Body.String(), "purge")) {
+					t.Fatalf("answer must name the fix %q: %s", want, rec.Body.String())
 				}
 			}
 		})

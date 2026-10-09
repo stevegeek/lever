@@ -53,7 +53,7 @@ func (b *Broker) verifySharedSources(spec WorkerSpec) error {
 			if errors.Is(err, fs.ErrNotExist) {
 				return fmt.Errorf("shared folder %q does not exist on the host: %w", m.Rel, ErrSharedFolder)
 			}
-			return err
+			return fmt.Errorf("shared folder %q: %v: %w", m.Rel, err, ErrSharedFolder)
 		}
 		if !fi.IsDir() {
 			return fmt.Errorf("shared folder %q is not a directory: %w", m.Rel, ErrSharedFolder)
@@ -73,13 +73,23 @@ type RecordVolumesFunc func(ctx context.Context, agent string) ([]scion.VolumeMo
 // guest mounts it.
 var ErrManagerUnpinned = errors.New("the running manager does not hold its shared folder pins")
 
+// ErrSharedCheckUnavailable: lever could not read what a shared_folders
+// check needs (the worker's hub record, the manager container's mounts).
+// The start or resume is refused, but nothing is known to be wrong: retry.
+var ErrSharedCheckUnavailable = errors.New("lever could not complete the shared folder check")
+
 // checkSharedAccess is the shared_folders gate before a worker start
-// (resume false) or resume: the manager's pins (SharedGuard) when the
-// worker mounts any folder, then, for a resume, the record against the
-// plan (refuseStaleShares).
+// (resume false) or resume: the running manager's pins (SharedGuard, wired
+// only while shared folders are configured; it guards every worker, since
+// a worker dir the manager could swap for a link to a folder would mount
+// that folder read-write), then, for a resume, the record against the plan
+// (refuseStaleShares).
 func (b *Broker) checkSharedAccess(ctx context.Context, spec WorkerSpec, resume bool) error {
-	if len(spec.Shared) > 0 && b.sharedGuard != nil {
+	if b.sharedGuard != nil {
 		if err := b.sharedGuard(ctx); err != nil {
+			if errors.Is(err, ErrSharedCheckUnavailable) {
+				return err
+			}
 			return fmt.Errorf("%v: %w", err, ErrManagerUnpinned)
 		}
 	}
@@ -91,8 +101,11 @@ func (b *Broker) checkSharedAccess(ctx context.Context, spec WorkerSpec, resume 
 
 // sharedAccessHint is the answer text for a refused checkSharedAccess.
 func sharedAccessHint(worker string, err error) string {
-	if errors.Is(err, ErrManagerUnpinned) {
-		return "the running manager does not hold the mounts that protect worker " + worker + "'s shared folders (it was created before they were configured); the operator must back up its conversation and run lever up --fresh"
+	switch {
+	case errors.Is(err, ErrSharedCheckUnavailable):
+		return "lever could not read what it needs to check worker " + worker + "'s shared folder access (the hub record or the manager's mounts); retry, and if it persists ask the operator to run lever doctor"
+	case errors.Is(err, ErrManagerUnpinned):
+		return "the running manager does not hold the mounts that protect the shared folders and worker dirs (it was created before the current plan, or a protected directory was replaced on the host); the operator should run lever doctor, then back up the manager's conversation and run lever up --fresh"
 	}
 	return sharedFolderHint(worker)
 }
@@ -111,7 +124,7 @@ func (b *Broker) refuseStaleShares(ctx context.Context, spec WorkerSpec) error {
 	}
 	vols, err := b.recordVolumes(ctx, spec.Name)
 	if err != nil {
-		return fmt.Errorf("reading worker %q's record to check its shared folder mounts: %v: %w", spec.Name, err, ErrStaleSharedMount)
+		return fmt.Errorf("reading worker %q's record to check its shared folder mounts: %v: %w", spec.Name, err, ErrSharedCheckUnavailable)
 	}
 	return staleShares(spec, vols)
 }

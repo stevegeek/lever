@@ -17,10 +17,11 @@ version bump moves the block under the new version heading.
   overlaps a worker `dir`, another folder or a `manager.read_only` entry, one inside `.lever`, the
   state directory or `.lever-files`, a host tool program inside one, and a `labels_file` in a
   folder a worker writes. Before the manager starts or resumes, lever refuses a folder that is
-  missing, reached through a symbolic link, or holding a file with a hard link outside it. Before
-  every worker start and resume the broker refuses a missing or linked folder, waits for the
-  running manager to hold its pins, and (on a resume) refuses a record that holds a shared mount
-  the config no longer grants or that it cannot read. New doctor row *shared folders*. Changes need
+  missing or reached through a symbolic link, and before it creates the manager, one holding a
+  file with a hard link outside it. While folders are configured, the broker refuses every worker
+  start and resume until the manager holds its pins, refuses a missing or linked folder, and (on a
+  resume) refuses a record that holds a shared mount the config no longer grants, or that it
+  cannot read (with "retry"). New doctor row *shared folders*. Changes need
   `lever reload` and fresh agents. A writer can steer what its readers and the manager run: grant
   `writers` accordingly. See the config reference, the operations guide and security model §4.5.
 

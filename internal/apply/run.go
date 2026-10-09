@@ -1597,7 +1597,7 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 		gaps.Replaced = replaced
 	}
 	if !gaps.Empty() {
-		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
+		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only or shared_folders protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
 		if tools := r.toolsOnReadOnly(); len(tools) > 0 {
 			r.d.Log("start-manager: the broker does not start tool(s) %s until then: each runs a program from a protected directory, which this manager could have rewritten", strings.Join(tools, ", "))
 		}
@@ -2051,6 +2051,11 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	// gone, so this is the look the create can rely on. Cheap, so it runs
 	// before every create rather than only the --fresh one.
 	if err := r.app.PrepareManagerReadOnlyHost(); err != nil {
+		return fmt.Errorf("start-manager: %w", err)
+	}
+	// shared_folders: hard links out of a folder, checked when the
+	// manager's protection begins (config.App.CheckSharedFolderLinks).
+	if err := r.app.CheckSharedFolderLinks(); err != nil {
 		return fmt.Errorf("start-manager: %w", err)
 	}
 	if err := r.ensureFreshBootstrap(ctx); err != nil {

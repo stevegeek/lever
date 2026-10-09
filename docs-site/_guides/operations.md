@@ -346,7 +346,7 @@ between workers, build outputs, or reviewed tools that one agent publishes for t
 3. Recreate the agents that should mount it: mounts are create-time only. The manager comes
    first, because it mounts every folder (read-only unless it writes it) and holds the pins that
    protect the folder: back up its conversation and run `lever up --fresh`. Until it has them, the
-   broker refuses to start or resume any worker that mounts the folder. Then, for each worker,
+   broker refuses to start or resume any worker. Then, for each worker,
    `lever worker purge <worker>` (or `lever-manager agent recycle` from the manager for a
    recyclable worker), and dispatch it again.
 4. Run `lever doctor`: the *shared folders* row lists the agents whose mounts match and names any
@@ -358,9 +358,10 @@ between workers, build outputs, or reviewed tools that one agent publishes for t
 recreate the agents whose access changed. Until then the broker refuses to resume a worker whose
 record holds access the config withdrew, and doctor fails for any agent that still holds it. Keep a
 removed folder on the host until every agent that mounted it is recreated: a resume needs the mount
-source. Adding or removing a **worker** while any folder is configured also needs a fresh manager,
-as with `manager.read_only`: the manager pins every worker dir, and the broker holds back workers
-that mount a shared folder until the running manager has the new plan.
+source. Adding a **worker** while any folder is configured also needs a fresh manager, as with
+`manager.read_only`: the manager pins every worker dir, and the broker holds back every worker until
+the running manager has the new plan. (Removing one leaves an unused pin, which `lever apply` only
+warns about.)
 
 **Updating a folder's contents.** Bind mounts show new files at once, so readers see a change at
 their next read without a restart. Change the folder's contents, never the folder itself: a mount

@@ -207,13 +207,26 @@ func TestPrepareSharedFoldersHostHardLinks(t *testing.T) {
 	if err := os.Link(filepath.Join(pub, "v1", "tool"), filepath.Join(pub, "tool")); err != nil {
 		t.Fatal(err)
 	}
-	if err := app.PrepareSharedFoldersHost(); err != nil {
+	if err := app.CheckSharedFolderLinks(); err != nil {
 		t.Fatalf("links inside the folder: %v", err)
+	}
+	// An unreadable directory a writer made does not block the check.
+	locked := filepath.Join(pub, "locked")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if err := app.CheckSharedFolderLinks(); err != nil {
+		t.Fatalf("unreadable directory: %v", err)
 	}
 	if err := os.Link(filepath.Join(pub, "tool"), filepath.Join(app.Tree, "outside")); err != nil {
 		t.Fatal(err)
 	}
-	testutil.WantErrContaining(t, app.PrepareSharedFoldersHost(), "hard links", "outside")
+	testutil.WantErrContaining(t, app.CheckSharedFolderLinks(), "hard links", "outside")
+	// The path checks do not walk the contents.
+	if err := app.PrepareSharedFoldersHost(); err != nil {
+		t.Fatalf("PrepareSharedFoldersHost walks no contents: %v", err)
+	}
 }
 
 // labels_file may not sit in a folder a worker writes: that worker would

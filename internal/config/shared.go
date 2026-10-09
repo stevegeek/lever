@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -254,26 +255,34 @@ func firstDuplicate(xs []string) string {
 }
 
 // PrepareSharedFoldersHost checks the host tree before an agent that
-// mounts a shared folder is created: each folder must exist as a real
-// directory reached through no symbolic link (the guest resolves a mount
-// source through links, and the tree is agent-writable). It does not walk
-// the folder's contents: a writer may change them at any time, and a link
-// inside resolves in the reading container, where it reaches only what
-// that container already sees. Host programs inside a folder are refused
-// at config load (checkHostPathsOutsideTree): no shared folder excuses one.
-//
-// It does refuse a file with a name OUTSIDE the folder (a hard link whose
-// other name lies elsewhere in the tree): an agent that made such a name
-// before the folder was shared could edit the file through it, whatever
-// the folder's writers list says. New names across the boundary cannot be
-// made from a container (a hard link across two mounts fails with EXDEV),
-// so the check at create closes the gap. Hard links with every name inside
-// the folder are the writers' business, like symbolic links.
+// mounts a shared folder is created or resumed: each folder must exist as a
+// real directory reached through no symbolic link (the guest resolves a
+// mount source through links, and the tree is agent-writable). It does not
+// walk the folder's contents: a writer may change them at any time, and a
+// link inside resolves in the reading container, where it reaches only
+// what that container already sees. Host programs inside a folder are
+// refused at config load (checkHostPathsOutsideTree): no shared folder
+// excuses one.
 func (a *App) PrepareSharedFoldersHost() error {
 	for _, s := range a.SharedFolders {
 		if err := walkNoSymlink(a.Tree, cleanRel(s.Path), false); err != nil {
 			return fmt.Errorf("config: shared_folders %q: %w (create it as a real directory before starting the agents that mount it)", s.Path, err)
 		}
+	}
+	return nil
+}
+
+// CheckSharedFolderLinks refuses, right before the manager is created, a
+// file in a shared folder with a name OUTSIDE the folder (a hard link whose
+// other name lies elsewhere): an agent that made such a name before the
+// folder was shared could edit the file through it, whatever the writers
+// list says. No new name across the boundary can be made from a container
+// afterwards (a hard link between two mounts fails with EXDEV), so the
+// check at create, when the manager's protection begins, closes the gap.
+// Hard links with every name inside the folder are the writers' business,
+// like symbolic links.
+func (a *App) CheckSharedFolderLinks() error {
+	for _, s := range a.SharedFolders {
 		if err := refuseOutsideHardLinks(filepath.Join(a.Tree, filepath.FromSlash(cleanRel(s.Path)))); err != nil {
 			return fmt.Errorf("config: shared_folders %q: %w", s.Path, err)
 		}
@@ -293,12 +302,24 @@ func refuseOutsideHardLinks(dir string) error {
 	files := map[inode]*seen{}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// A writer controls the contents: an entry removed during the
+			// walk, or a directory it made unreadable, must not block a
+			// bring-up. Neither can hold a link a container could make.
+			if p != dir && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission)) {
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			return err
 		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
 		fi, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -319,7 +340,7 @@ func refuseOutsideHardLinks(dir string) error {
 	}
 	for _, f := range files {
 		if f.names < f.nlink {
-			return fmt.Errorf("%s has %d hard links but only %d inside the folder: another name for the same file lies outside it, where an agent that is not a writer may edit it; replace it with a copy (cp, then mv over it)", f.path, f.nlink, f.names)
+			return fmt.Errorf("%s has %d hard links but only %d inside the folder: another name for the same file lies outside the folder (elsewhere in the tree, where an agent that is not a writer may edit it, or outside the tree), and lever cannot tell which; replace it with a copy (cp, then mv over it)", f.path, f.nlink, f.names)
 		}
 	}
 	return nil

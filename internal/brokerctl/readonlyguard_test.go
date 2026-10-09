@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
@@ -153,9 +154,14 @@ func TestSharedGuardDecision(t *testing.T) {
 			t.Errorf("%s: %v, want nil", class, err)
 		}
 	}
-	for _, class := range []string{"gaps:x", "live:x", "missing:x", "mounts-unreadable", "live-unreadable"} {
-		if err := sharedGuardDecision(&guardError{class, "refused"}); err == nil {
-			t.Errorf("%s: want the refusal kept", class)
+	for _, class := range []string{"gaps:x", "live:x", "missing:x"} {
+		if err := sharedGuardDecision(&guardError{class, "refused"}); err == nil || errors.Is(err, broker.ErrSharedCheckUnavailable) {
+			t.Errorf("%s: %v, want the refusal kept as a gap", class, err)
+		}
+	}
+	for _, class := range []string{"mounts-unreadable", "live-unreadable"} {
+		if err := sharedGuardDecision(&guardError{class, "unreadable"}); !errors.Is(err, broker.ErrSharedCheckUnavailable) {
+			t.Errorf("%s: %v, want ErrSharedCheckUnavailable", class, err)
 		}
 	}
 	if err := sharedGuardDecision(nil); err != nil {

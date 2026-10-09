@@ -15,5 +15,6 @@ docker build \
   --build-arg LIMA_VERSION="$LIMA_VERSION" --build-arg LIMA_SHA256="$LIMA_SHA256" \
   --build-arg PLAYWRIGHT_VERSION="$PLAYWRIGHT_VERSION" \
   -t "scionlocal/lever-dev-claude:${ARCH}" .
-# Smoke test: the toolchain is there (never run claude here).
-docker run --rm "scionlocal/lever-dev-claude:${ARCH}" bash -c 'go version && limactl --version && qemu-system-x86_64 --version | head -1 && test -d /usr/share/OVMF'
+# Smoke test: the toolchain is there (never run claude here). --entrypoint bash skips
+# sciontool's init and the scion pre-start hook, which print errors outside scion.
+docker run --rm --entrypoint bash "scionlocal/lever-dev-claude:${ARCH}" -c 'go version && limactl --version && qemu-system-x86_64 --version | head -1 && test -d /usr/share/OVMF'

@@ -6,6 +6,7 @@ Follow these rules in every session.
 ## Workflow
 
 - Work on a branch named `agent/<topic>`.
+- Commit with the git author identity of the clone. Do not change it.
 - Run `go test ./...` and `gofmt -l .` before every push.
 - Push with a git bundle. Create it with
   `git bundle create /workspace/.lever-files/github/<name>.bundle origin/main..<branch>`.
@@ -31,6 +32,9 @@ Follow these rules in every session.
 ## Safety
 
 - Never run `claude` inside the agent container of a nested Lever (#156).
+- Claude Code can offer to run `claude` in a workspace directory (the
+  background-agent view, or a trust prompt). Never accept it. Never run
+  `claude` inside an agent container.
 - Never print `podman inspect` environment values or secret values. Prove a
   secret with its size and file mode.
 - Never put a backtick in `git commit -m`. Write the message to a file with a

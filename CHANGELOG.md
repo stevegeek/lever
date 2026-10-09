@@ -17,6 +17,11 @@ version bump moves the block under the new version heading.
 - **`examples/lever-dev` is a generic example.** It has placeholders for the fork (`OWNER/lever`)
   and the Fizzy board (`BOARD_ID`), and no live-validation checklist. The instructions name the
   operator, not a person. The dated session notes under `docs/` are removed.
+- **`examples/lever-dev`: bring-up fixes.** The runbook clones the fork with a git author identity
+  for the agent (`git clone -c user.name=... -c user.email=...`, so git never runs inside
+  `jail-src` on the host). The instructions tell the manager to keep that identity and never to
+  accept Claude Code's offer to run `claude` in a workspace directory. The image smoke test runs
+  with `--entrypoint bash`, so the scion pre-start hook no longer prints errors there.
 
 ### Fixed
 

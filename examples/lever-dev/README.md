@@ -37,7 +37,14 @@ Rules for the host:
 1. `mkdir -p ~/lever-dev/{secrets,jail-src} && chmod 700 ~/lever-dev/secrets`
 2. Copy `lever.yaml`, `instructions.md` and `image/` from `~/lever-release/lever/examples/lever-dev/` to `~/lever-dev/`.
 3. Fill the placeholders in `~/lever-dev/lever.yaml`: `YOU`, `OWNER`, `APP_ID`, `INSTALLATION_ID`, `ACCOUNT_ID`, `BOARD_ID`, `YOUR-HOST.YOUR-TAILNET`, the email. Keep `scion.version` equal to the pin of the installed release.
-4. `git clone https://github.com/OWNER/lever ~/lever-dev/jail-src/lever` (your fork)
+4. Clone your fork with a git author identity for the agent:
+   ```
+   git clone -c user.name="lever-dev agent" -c user.email=agent@example.invalid \
+     https://github.com/OWNER/lever ~/lever-dev/jail-src/lever
+   ```
+   `git clone -c` writes the identity into the new clone's config, so you never run git inside
+   `jail-src` (see section 4). Without it, the manager picks an identity of its own. Use any
+   name and address; `example.invalid` never resolves.
 5. `git clone https://github.com/GoogleCloudPlatform/scion ~/lever-dev/jail-src/scion`
 
 ## 4. Hazard: git inside jail-src

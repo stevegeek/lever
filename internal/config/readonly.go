@@ -22,7 +22,7 @@ import (
 // directory mounted read-write over itself so the agent cannot rename or
 // remove it (a mount point answers EBUSY). Pins are every strict ancestor of
 // an entry (so the protected directory cannot be moved away from its host
-// path) and, while read_only is set, every worker dir and its ancestors (so
+// path) and, while read_only or shared_folders is set, every worker dir and its ancestors (so
 // the manager cannot swap a worker dir for a link to a protected one before
 // dispatching that worker, which mounts its dir read-write).
 type TreeMount struct {
@@ -52,7 +52,8 @@ const readOnlyForbiddenChars = "$~:,"
 // an entry, so no directory is both an entry and a pin. Empty when nothing
 // is configured: worker dirs are pinned only to protect read_only entries.
 func (a *App) ManagerTreeMounts() []TreeMount {
-	if len(a.Manager.ReadOnly) == 0 {
+	dirs := a.managerReadOnlyDirs()
+	if len(dirs) == 0 {
 		return nil
 	}
 	seen := make(map[string]bool)
@@ -68,7 +69,7 @@ func (a *App) ManagerTreeMounts() []TreeMount {
 		seen[rel] = true
 		out = append(out, TreeMount{Rel: rel, ReadOnly: readOnly, WorkerPin: workerPin})
 	}
-	for _, e := range a.Manager.ReadOnly {
+	for _, e := range dirs {
 		add(cleanRel(e), true, false)
 	}
 	pinWithAncestors := func(rel string, self, workerPin bool) {
@@ -79,7 +80,7 @@ func (a *App) ManagerTreeMounts() []TreeMount {
 			add(dir, false, workerPin)
 		}
 	}
-	for _, e := range a.Manager.ReadOnly {
+	for _, e := range dirs {
 		pinWithAncestors(cleanRel(e), false, false)
 	}
 	for _, g := range a.Workers {
@@ -130,7 +131,7 @@ func parentRel(rel string) string {
 // worker to. Every comparison folds case: on a case-insensitive host
 // `Assistant/tools` and `assistant/tools` are one directory.
 func (a *App) validateManagerReadOnly() error {
-	if len(a.Manager.ReadOnly) == 0 {
+	if len(a.managerReadOnlyDirs()) == 0 {
 		return nil
 	}
 	for i, e := range a.Manager.ReadOnly {
@@ -164,10 +165,10 @@ func (a *App) validateManagerReadOnly() error {
 	// it is subject to the same character rule as an entry.
 	for _, g := range a.Workers {
 		if strings.ContainsAny(g.Dir, readOnlyForbiddenChars) {
-			return fmt.Errorf("config: worker %q dir %q must not contain any of %q while manager.read_only is set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", g.Name, g.Dir, readOnlyForbiddenChars)
+			return fmt.Errorf("config: worker %q dir %q must not contain any of %q while manager.read_only or shared_folders is set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", g.Name, g.Dir, readOnlyForbiddenChars)
 		}
 		if !isASCII(g.Dir) {
-			return fmt.Errorf("config: worker %q dir %q must be ASCII while manager.read_only is set — APFS treats the composed and decomposed spellings of an accented name as one directory, so the overlap check with the read_only entries could miss an alias", g.Name, g.Dir)
+			return fmt.Errorf("config: worker %q dir %q must be ASCII while manager.read_only or shared_folders is set — APFS treats the composed and decomposed spellings of an accented name as one directory, so the overlap check with the read_only entries could miss an alias", g.Name, g.Dir)
 		}
 	}
 	return nil
@@ -199,7 +200,12 @@ func (a *App) validateManagerReadOnly() error {
 // paths writable (a manager from before read_only was set — and the second
 // call runs after a --fresh delete has removed that one).
 func (a *App) PrepareManagerReadOnlyHost() error {
-	if len(a.Manager.ReadOnly) == 0 {
+	// Shared folders the manager mounts: no link on the path, but their
+	// contents are the writers' (PrepareSharedFoldersHost).
+	if err := a.PrepareSharedFoldersHost(); err != nil {
+		return err
+	}
+	if len(a.managerReadOnlyDirs()) == 0 {
 		return nil
 	}
 	for _, e := range a.Manager.ReadOnly {
@@ -221,7 +227,7 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 	for _, g := range a.Workers {
 		rel := filepath.Clean(g.Dir)
 		if err := walkNoSymlink(a.Tree, rel, true); err != nil {
-			return fmt.Errorf("config: worker %q dir %q (pinned while manager.read_only is set): %w", g.Name, g.Dir, err)
+			return fmt.Errorf("config: worker %q dir %q (pinned while manager.read_only or shared_folders is set): %w", g.Name, g.Dir, err)
 		}
 		if err := root.MkdirAll(rel, 0o755); err != nil {
 			return fmt.Errorf("config: worker %q dir %q: creating it: %w", g.Name, g.Dir, err)
@@ -230,7 +236,7 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 			afterWorkerDirMkdir(rel)
 		}
 		if err := walkNoSymlink(a.Tree, rel, false); err != nil {
-			return fmt.Errorf("config: worker %q dir %q (pinned while manager.read_only is set): %w", g.Name, g.Dir, err)
+			return fmt.Errorf("config: worker %q dir %q (pinned while manager.read_only or shared_folders is set): %w", g.Name, g.Dir, err)
 		}
 	}
 	return nil

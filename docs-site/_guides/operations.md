@@ -330,6 +330,43 @@ warns.
   the device until they are recreated). Turned off, the row fails while the manager still holds
   the device. See [`nested_virt`](/reference/config/#top-level).
 
+## Shared folders
+
+`shared_folders` gives a set of agents one common directory at `/shared/<name>`: writers mount it
+read-write, readers read-only, and nobody else mounts it ([reference](/reference/config/#shared_folders)).
+Use it when one agent produces files the others consume, for example a reviewer that publishes
+tested tool releases which the manager and the other workers run.
+
+**Adding a folder:**
+
+1. Create the folder in the tree as a real directory (not a symbolic link), outside every worker
+   `dir`.
+2. Add the entry to `lever.yaml` and run `lever apply`.
+3. Recreate the agents that should mount it: mounts are create-time only. For a worker,
+   `lever worker purge <worker>` (or `lever-manager agent recycle` from the manager for a
+   recyclable worker), then dispatch it again. For the manager, which mounts every folder it does
+   not write read-only, back up its conversation and run `lever up --fresh`.
+4. Run `lever doctor`: the *shared folders* row lists the agents whose mounts match, and names any
+   that still need recreating.
+5. Tell the agents about it: lever's skills do not mention shared folders, so say in each agent's
+   `instructions_file` (or task) what `/shared/<name>` holds and whether that agent may write it.
+
+**Changing or removing a folder** works the same way: edit `lever.yaml`, then recreate the agents
+whose access changed. Until then the broker refuses to resume a worker whose record holds access
+the config withdrew, and doctor fails for any agent that still holds it. Keep a removed folder on
+the host until every agent that mounted it is recreated: a resume needs the mount source.
+
+**Publishing into a folder.** Bind mounts show new files at once, so readers pick up a change at
+their next read without a restart. Change the folder's contents, never the folder: a mount stays on
+the directory that existed when the agent was created, so replacing it on the host strands every
+agent on the old one until it is recreated. For versioned releases, add a new subdirectory per
+version and move a pointer (a relative symbolic link such as `current -> releases/7`, or a file
+naming the version); rolling back is moving the pointer back. Write a release completely before you
+move the pointer, so a reader never sees a half-written one.
+
+**Before you add a writer**, read [security model §4.5](/security-model/worker-isolation/#45-opt-in-shared-folders):
+whatever a writer publishes, the readers and the manager may run.
+
 ## Claude Code settings and the after-compaction note
 
 `claude_settings` and `after_compact_note` (under `manager:` or a worker) configure the agent's

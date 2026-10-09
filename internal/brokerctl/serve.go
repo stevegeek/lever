@@ -283,7 +283,10 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		Tree: app.Tree,
 		// manager.read_only: worker workspaces may not be created through a
 		// symlink, nor over a protected directory (see the field doc).
-		ReadOnlyDirs: app.Manager.ReadOnly,
+		// shared_folders count too: a worker workspace over one would write
+		// it whatever its writers list says.
+		ReadOnlyDirs:     app.ProtectedDirs(),
+		SharesConfigured: len(app.SharedFolders) > 0,
 		// A dispatched worker must hold live for this long before the manager
 		// hears "running" (lever#31): scion reports the record running before
 		// the harness runs a line, and every observed harness death landed
@@ -353,6 +356,25 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// stamps it (the email, else the user id), rather than assuming the dev
 	// user's default address.
 	d.ResolveControllerSender = controllerSenderFrom(hc)
+	// shared_folders: a resume is refused when the worker's record holds a
+	// shared mount the config no longer grants (broker.refuseStaleShares).
+	d.RecordVolumes = func(ctx context.Context, agent string) ([]scion.VolumeMount, error) {
+		agents, err := hc.Agents(ctx, projectKey, scion.DefaultHubEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range agents {
+			if a.Slug != agent {
+				continue
+			}
+			out := make([]scion.VolumeMount, 0, len(a.Volumes))
+			for _, v := range a.Volumes {
+				out = append(out, scion.VolumeMount{Source: v.Source, Target: v.Target, ReadOnly: v.ReadOnly})
+			}
+			return out, nil
+		}
+		return nil, fmt.Errorf("no hub record for worker %q", agent)
+	}
 	return d, nil
 }
 

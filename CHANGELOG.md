@@ -7,6 +7,23 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Shared folders (`shared_folders`, opt-in).** A tree folder that the agents you name mount at
+  `/shared/<name>`: read-write for its `writers`, read-only for its `readers` (`"*"` for every
+  worker), and not at all for anyone else. The manager always sees the folder and gets it
+  read-only, at its tree path too, unless it is a writer, with the same pins as
+  `manager.read_only`. Config load refuses a folder that overlaps a worker `dir`, another folder,
+  a `manager.read_only` entry or `.lever-files`, and a host tool program inside one. Before an
+  agent that mounts a folder is created, and before every worker start and resume, lever refuses
+  a folder that is missing or reached through a symbolic link. Mounts are create-time only; the
+  broker refuses to resume a worker whose record holds a shared mount the config no longer grants
+  (and, while folders are configured, one whose record it cannot read). New doctor row
+  *shared folders*: every agent's mounts against the plan, and the read-only mounts of running
+  agents checked from the guest side. See the config reference, the operations guide and
+  security model §4.5. A writer can steer what its readers and the manager run: grant `writers`
+  accordingly.
+
 ## [0.34.3] - 2026-10-09
 
 ### Fixed

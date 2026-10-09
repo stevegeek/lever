@@ -43,6 +43,9 @@ itself, not ancestor directories. The relative-`--workspace` guard likewise reso
 project root regardless of a stray ancestor `.git`. A worker's *own* subdirectory may still contain
 its own git repository; that is unaffected.
 
+The one opt-in exception is a **shared folder** (`shared_folders`, [§4.5](#45-opt-in-shared-folders)):
+a tree directory the config names, mounted into the agents it lists and no others.
+
 **The manager still sees everything, by design.** Because the manager's mount is the whole tree,
 and Scion does not shadow child workspace dirs inside a broader mount, the manager's live view
 legitimately includes every worker's in-place edits — the same "mount only your own workspace"
@@ -229,3 +232,50 @@ there, including the knowledge base and every worker's subdirectory, that is an 
 giving the manager whole-tree oversight ([§7](/security-model/compromise/)), not a gap in the
 worker-isolation model above. No automated live gate exercises this guarantee yet; see
 [validation](/security-model/validation/).
+
+### 4.5 Opt-in shared folders
+
+`shared_folders` lets the operator give some agents one common directory. Each entry names a tree
+folder, its **writers** (mount it read-write) and its **readers** (mount it read-only), and every
+agent that has access mounts it at `/shared/<name>`. With no entry the rest of §4.1 holds unchanged:
+a worker mounts only its own subdirectory. What an entry changes, and what still holds:
+
+- **It is a deliberate write path between agents.** Content a writer puts in the folder is read,
+  and may be run, by every reader and by the manager. A compromised writer can therefore steer
+  them, for instance by publishing a changed script that a reader runs next. This is the point of
+  the feature, so lever does not filter the contents; the boundary is who may write. Name as
+  writers only agents you would trust with that reach, and keep the manager's own tools out of a
+  folder a worker writes unless that is the intent.
+- **Nobody else can write it.** A reader's mount is read-only (the runtime enforces it), and an
+  unlisted worker does not mount the folder at all. The manager, which mounts the whole tree, gets
+  the folder read-only at its tree path unless it is a writer, with the pins `manager.read_only` uses
+  ([§5.1.1](/security-model/config-trust/)): every directory between the tree root and the folder,
+  and every worker `dir`, is a mount point the manager cannot rename or replace, so it cannot move
+  the folder away or point a worker dir at it. Config load refuses a folder that overlaps any worker
+  `dir`, another folder, a `manager.read_only` entry or `.lever-files`.
+- **The source is checked on the host.** Before an agent that mounts a folder is created, and
+  before every worker start and resume, lever walks the folder's path from the tree root and refuses
+  a missing folder or a symbolic link anywhere on the path: the guest resolves a mount source
+  through links, and the tree is agent-writable. Links inside the folder are not checked: they
+  resolve in the container that follows them, which reaches only what that agent already sees.
+- **No host code runs from it.** Config load refuses a broker tool whose program or script lies in
+  a shared folder; unlike `manager.read_only`, no shared folder excuses one, since a worker may
+  write it.
+- **Access changes need fresh agents, and stale access is refused.** scion keeps a record's mounts
+  for life. A worker created under an older plan could get back access the config has withdrawn on
+  its next resume, so the broker reads the worker's hub record before every resume (a dispatch, an
+  operator wake, the re-enrolment healer's bounce) and refuses one that holds a shared mount the
+  plan does not grant, or grants only read-only. With shared folders configured, a record it
+  cannot read is refused too. The fix is to discard the record (`lever worker purge`, or the
+  manager's `agent recycle` for a recyclable worker). A running worker is not stopped:
+  `lever doctor`'s *shared folders* row fails for it, and for a manager whose mounts no longer
+  match.
+- **Replace the contents, not the folder.** A mount stays on the directory that existed when the
+  agent was created. A folder replaced on the host leaves running agents on the old one; doctor's
+  row reads each running agent's mounts from the guest (the kernel's mount table and the
+  directory's device and inode, never a program in the container) and fails when they differ.
+
+Residual risks: a running worker keeps its mounts until it is recreated, so withdrawing access is
+complete only after the purge; and doctor checks writers' mounts by the container's configuration
+only, since a writer is meant to write.
+

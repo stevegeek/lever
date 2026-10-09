@@ -1203,8 +1203,21 @@ const KVMDevice = "/dev/kvm"
 // workers get none.
 func managerVolumes(jp string, app *config.App) []scion.VolumeMount {
 	out := managerTreeVolumes(jp, app.ManagerTreeMounts())
+	out = append(out, SharedVolumes(jp, app.SharedMountsFor(app.Name))...)
 	if app.NestedVirt {
 		out = append(out, scion.VolumeMount{Source: KVMDevice, Target: KVMDevice})
+	}
+	return out
+}
+
+// SharedVolumes turns an agent's shared_folders plan into scion volumes:
+// each folder of the in-jail tree jp mounted at its /shared/<name> target,
+// read-only unless the agent writes it. The broker builds a worker's from
+// the same function, so the two plans cannot drift.
+func SharedVolumes(jp string, mounts []config.SharedMount) []scion.VolumeMount {
+	out := make([]scion.VolumeMount, 0, len(mounts))
+	for _, m := range mounts {
+		out = append(out, scion.VolumeMount{Source: path.Join(jp, m.Rel), Target: m.Target, ReadOnly: m.ReadOnly})
 	}
 	return out
 }

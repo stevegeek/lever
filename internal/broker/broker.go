@@ -212,6 +212,13 @@ type DispatchConfig struct {
 	// a protected directory would undo the protection. Empty ⇒ today's
 	// in-tree-symlinks-allowed behaviour.
 	ReadOnlyDirs []string
+	// RecordVolumes reads a worker's hub record volumes, for the check that
+	// refuses to resume a worker whose record holds a shared folder mount
+	// the config no longer grants (refuseStaleShares). nil skips it.
+	RecordVolumes RecordVolumesFunc
+	// SharesConfigured is whether shared_folders lists any folder: a
+	// record read that fails then refuses the resume.
+	SharesConfigured bool
 	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
 	// instance tree (jail.StageWorkerTicket in production). The manager
 	// mounts the whole tree, so nothing a worker must redeem may be written
@@ -303,6 +310,9 @@ type Broker struct {
 	beginSession   func(agent string) (commit func() error)
 	tree           string
 	readOnlyDirs   []string
+	// shared_folders (refuseStaleShares).
+	recordVolumes    RecordVolumesFunc
+	sharesConfigured bool
 	// afterWorkspaceMkdir is a test seam: called between a strict worker
 	// workspace mkdir and the walk that follows it. nil outside tests.
 	afterWorkspaceMkdir func()
@@ -440,6 +450,7 @@ func New(c Config) *Broker {
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
+		recordVolumes: d.RecordVolumes, sharesConfigured: d.SharesConfigured,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,

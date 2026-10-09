@@ -138,6 +138,10 @@ workers:
     # model: <alias|id>             # optional; defaults to manager.model
     obtain:
       - { tool: db, op: read }       # this worker may obtain db/read capabilities
+shared_folders:                      # optional; off unless listed
+  - path: tools/releases             # a tree folder, outside every worker dir
+    writers: [scratch]               # mount it read-write at /shared/releases
+    readers: ["*"]                   # every other worker mounts it read-only; the manager always does
 security:                            # optional image policy (both default off)
   allowed_image_registries: [scionlocal]   # only run images from these registries/namespaces
   require_image_digest: false              # true -> every image must be @sha256:-pinned
@@ -158,6 +162,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `scion` | object | no | - | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | - | The manager agent (see below). |
 | `workers` | list | no | `[]` | Project agents the manager orchestrates (see below). |
+| `shared_folders` | list | no | `[]` | Opt-in tree folders that named agents mount at `/shared/<name>`, read-write for writers and read-only for readers (see below). Unset: a worker mounts only its own `dir`. |
 | `egress` | enum | no | `open` | Jail outbound network posture (`open` \| `closed`), applied jail-wide and **independent of `llm_auth`**. `open`: LAN and non-allowlisted host ports dropped, public internet reachable. `closed`: catch-all DROP so the jail reaches **only** the broker port; requires a uniformly `api-key` instance. See [security-model §2.2](/security-model/jail/). |
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
@@ -264,6 +269,59 @@ failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-h
 | `llm_auth` | enum | no | inherits `broker.llm_auth` | Same as `manager.llm_auth`, per worker, but the instance-uniform rule still applies. |
 | `obtain` / `delegate` | list | no | `[]` | Same shape and meaning as `manager.obtain` / `manager.delegate`. |
 | `recyclable` | bool | no | `false` | Lets the manager discard this worker's record and start it fresh with a new task (`lever-manager agent recycle NAME --task "…"`), for a worker slot reused for new work that needs a fresh context. The recycle deletes what `lever worker purge` deletes: the scion record (so the worker's **conversation is lost**) and the staged ticket, never the worker's `dir`. The broker allows it only for a worker that is suspended, stopped or in phase `error` and whose container is not running (read from the hub record and from podman in the jail), never the manager, and at most once a minute per worker. Off, only the operator's `lever worker purge` discards a record. The broker reads it at start: `lever reload` after a change. While at least one worker sets it, the manager's `lever-operator` skill carries the recycle directions (`lever init` renders them); with none, the skill is unchanged. **On an instance with contact logins, setting it (and `lever init`) changes the manager's skill, so contacts cannot post to the manager until it starts fresh**, which loses its conversation unless you back it up: plan the change with the manager's next fresh start (`lever up --fresh`), which it also needs to get a manager image whose `lever-manager` has the `recycle` verb. See [worker slots the manager recycles](/operations/#worker-slots-the-manager-recycles). `lever doctor`'s *worker recycle* row lists the recyclable workers. |
+
+### `shared_folders[]`
+
+A shared folder is a tree directory that the agents you name mount at the same path,
+`/shared/<name>`: read-write for each writer, read-only for each reader. It is the one way to give
+workers a common directory; without it a worker mounts only its own `dir`. A typical use is one
+agent publishing files that the others only read, such as reviewed tool releases, reference data or
+build outputs. **Off unless listed**, and every mount is opt-in per agent.
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `path` | path | **yes** | - | The folder, relative to `tree`, spelt like a `manager.read_only` entry: a clean ASCII relative path, no `..`, `./`, trailing slash or `.`, none of `$ ~ : ,`. It must exist as a real directory reached through no symbolic link when an agent that mounts it is created, started or resumed. Must not overlap another shared folder, a `manager.read_only` entry, `.lever-files`, or **any worker `dir`** (compared case-insensitively): a worker mounts its own dir read-write, so a folder in or over one would be writable whatever `writers` says. |
+| `name` | string | no | last component of `path` | The mount name: the folder appears at `/shared/<name>` in every agent that mounts it. Must match `^[a-z0-9][a-z0-9._-]{0,62}$` and be unique. |
+| `writers` | list of agent | no | `[]` | Agents that mount the folder **read-write**: declared worker names, or the instance `name` for the manager. May be empty when only the host writes the folder. |
+| `readers` | list of agent | no | `[]` | Workers that mount it **read-only**: declared worker names, or `"*"` alone for every worker that is not a writer. The manager may be named but need not be (see below). |
+
+At least one of `writers` and `readers` must name an agent, and nobody may be in both.
+
+- **The manager always sees the folder.** It mounts the whole tree, so unless it is a writer it
+  gets the folder read-only at **both** its tree path and `/shared/<name>`, with the same protection
+  as a `manager.read_only` entry: every directory between the tree root and the folder, and every
+  worker `dir`, is pinned with a mount so the manager cannot move the folder away or swap a worker
+  dir for a link to it. A manager that is a writer mounts it read-write at `/shared/<name>` and sees
+  it in the tree as usual.
+- **A worker that is not listed sees nothing of it.**
+- **New contents show at once.** It is a bind mount: files a writer adds appear in every reader
+  without a restart; a resumed agent mounts the folder again from the host, so it sees the current contents too. **Change the folder's contents in place;
+  never replace the folder itself** (`rm -rf` and recreate, a rename-based deploy): every mount
+  stays on the directory that existed when the agent was created. `lever doctor` finds a replaced
+  folder in a running agent.
+- **Symbolic links inside the folder are the writers' business.** A link resolves in the container
+  that follows it, so it reaches only what that agent can already see. For a release pointer, a
+  relative link to a sibling directory (`current -> releases/7`) or a small file naming the version
+  both work.
+- **No host program may live in a shared folder.** Config load refuses a tool `command` whose
+  program or script resolves inside one: a writer could change it, and no shared folder excuses
+  one the way `manager.read_only` does.
+- **Create-time only.** scion keeps an agent's mounts for life, so adding a folder, or changing who
+  may read or write it, reaches only an agent created afterwards: a worker after `lever worker purge`
+  (or the manager's `agent recycle` for a recyclable worker) and a new dispatch; the manager after
+  `lever up --fresh`, which **discards its conversation** (back it up first). Until then an agent
+  keeps the mounts it was created with. **The broker refuses to resume a worker whose record holds
+  a shared mount the config no longer grants** (removed, or read-write where it is now read-only),
+  and names the purge; while shared folders are configured it also refuses a resume when it cannot
+  read the record. A mount the config adds that an older worker lacks is not refused: that worker
+  simply goes without it until it is created again. `lever doctor`'s *shared folders* row compares
+  every agent's mounts with the plan (a leftover or wider mount fails, a missing one warns) and, for
+  a running agent, checks the read-only mounts from the guest side.
+
+**Security:** a shared folder is a deliberate channel from its writers to its readers. Whatever a
+writer puts there, every reader (and the manager) can read and may run, so a compromised writer can
+influence what the other agents do. Grant `writers` only to agents you would trust with that, and
+see [security model §4.5](/security-model/worker-isolation/#45-opt-in-shared-folders).
 
 ### `security`
 

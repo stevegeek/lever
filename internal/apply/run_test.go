@@ -4327,3 +4327,24 @@ func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
 		t.Fatalf("the manager create must carry the /dev/kvm volume, got %v", opts.Volumes)
 	}
 }
+
+// The manager mounts each shared folder at /shared/<name>: read-only, and
+// over its tree path read-only too, unless it writes the folder.
+func TestManagerVolumesSharedFolders(t *testing.T) {
+	app := &config.App{Name: "m", Workers: []config.Worker{{Name: "w", Dir: "workers/w"}},
+		SharedFolders: []config.SharedFolder{
+			{Path: "tools/releases", Writers: []string{"w"}},
+			{Path: "out", Writers: []string{"m"}, Readers: []string{"w"}},
+		}}
+	want := []scion.VolumeMount{
+		{Source: "/lever/tools", Target: "/workspace/tools"},
+		{Source: "/lever/workers", Target: "/workspace/workers"},
+		{Source: "/lever/tools/releases", Target: "/workspace/tools/releases", ReadOnly: true},
+		{Source: "/lever/workers/w", Target: "/workspace/workers/w"},
+		{Source: "/lever/tools/releases", Target: "/shared/releases", ReadOnly: true},
+		{Source: "/lever/out", Target: "/shared/out"},
+	}
+	if got := managerVolumes("/lever", app); !reflect.DeepEqual(got, want) {
+		t.Fatalf("volumes = %+v\nwant %+v", got, want)
+	}
+}

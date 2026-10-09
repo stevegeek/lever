@@ -97,6 +97,10 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": workspace dir: "+err.Error())
 			return
 		}
+		if err := b.refuseStaleShares(ctx, spec); err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": "+err.Error())
+			return
+		}
 	}
 	// Re-stage a fresh one-use ticket (host authority, same as `lever up`). The
 	// helper's "ticket:"/"stage:" wrap prefixes name the failed step in the
@@ -251,6 +255,10 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 	if spec, isWorker := b.workers[slug]; isWorker {
 		if err = b.verifyStrictWorkspace(spec); err != nil {
 			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": workspace dir: "+err.Error())
+			return "", false
+		}
+		if err = b.refuseStaleShares(ctx, spec); err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
 			return "", false
 		}
 	}

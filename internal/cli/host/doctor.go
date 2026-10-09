@@ -231,6 +231,12 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, probeWritable)
 		},
+		func() checkResult {
+			return checkSharedFolders(ctx, b.MountDest(), app, listAgents, inspectMountsRW, recordVolumes,
+				func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+					return jail.ContainerLiveMounts(ctx, jr, ref, want)
+				})
+		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult { return checkRecyclableWorkers(app.Workers) },
 		func() checkResult {

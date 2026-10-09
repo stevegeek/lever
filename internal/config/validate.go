@@ -318,6 +318,9 @@ func (a *App) Validate() error {
 	if err := a.validateManagerReadOnly(); err != nil {
 		return err
 	}
+	if err := a.validateSharedFolders(); err != nil {
+		return err
+	}
 	if err := a.validateImageTarsDistinct(); err != nil {
 		return err
 	}

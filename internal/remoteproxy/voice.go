@@ -82,8 +82,9 @@ const (
 
 // voiceState holds the route's slots and per-login counts.
 type voiceState struct {
-	cfg VoiceConfig
-	now func() time.Time // tests
+	cfg      VoiceConfig
+	now      func() time.Time // tests
+	deadline time.Duration    // tests: the body deadline (0 = bodyDeadline)
 
 	mu    sync.Mutex
 	total int
@@ -302,9 +303,21 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 	defer done()
 	// The server has no ReadTimeout (serve.go): the body gets its own. The
 	// clip is read into memory only: never a file.
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(s.bodyDeadline()))
+	rc := http.NewResponseController(w)
+	deadline := s.bodyDeadline()
+	if s.deadline > 0 {
+		deadline = s.deadline
+	}
+	_ = rc.SetReadDeadline(time.Now().Add(deadline))
 	var buf bytes.Buffer
+	if r.ContentLength > 0 {
+		buf.Grow(int(r.ContentLength))
+	}
 	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, limit))
+	// The body is in: the deadline is for the upload, not for the wait for
+	// the GPU or the transcription. net/http lifts it itself when the body
+	// hits EOF; lifting it here too keeps that true for a body cut short.
+	_ = rc.SetReadDeadline(time.Time{})
 	switch {
 	case tooLarge(err):
 		g.refuseVoice(w, r, line, http.StatusRequestEntityTooLarge, "too-long")

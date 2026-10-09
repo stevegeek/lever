@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -30,18 +31,27 @@ type Supervisor struct {
 	Env []string
 	// Log receives lever's own lines; nil drops them.
 	Log func(format string, a ...any)
+	// Check, when set, runs before every start: a failure skips the start
+	// and is retried after the backoff (Service checks the program again,
+	// so a restart never runs a file someone replaced).
+	Check func() error
 	// Zero values take the defaults below (tests shorten them).
 	MinBackoff, MaxBackoff, StableAfter, StopGrace, ProbeEvery time.Duration
 
-	ready atomic.Bool
+	ready   atomic.Bool
+	blocked atomic.Bool // the last start found the port taken, or Check failed
 }
 
 const (
 	defaultMinBackoff  = time.Second
 	defaultMaxBackoff  = time.Minute
 	defaultStableAfter = time.Minute // a run this long resets the backoff
-	defaultStopGrace   = 5 * time.Second
-	defaultProbeEvery  = 250 * time.Millisecond
+	// defaultStopGrace is short: `lever stop` SIGKILLs a proxy that has not
+	// exited 2 s after its SIGTERM, and the child must be gone by then
+	// (off Linux nothing else kills it). whisper-server keeps no state worth
+	// a graceful stop.
+	defaultStopGrace  = time.Second
+	defaultProbeEvery = 250 * time.Millisecond
 )
 
 // Addr is the child's address.
@@ -49,6 +59,10 @@ func (s *Supervisor) Addr() string { return net.JoinHostPort("127.0.0.1", strcon
 
 // Ready reports whether the child is running and accepting connections.
 func (s *Supervisor) Ready() bool { return s.ready.Load() }
+
+// Blocked reports whether the last attempt could not start the child: the
+// port was taken by another process, or Check failed.
+func (s *Supervisor) Blocked() bool { return s.blocked.Load() }
 
 func (s *Supervisor) logf(format string, a ...any) {
 	if s.Log != nil {
@@ -121,13 +135,25 @@ func (s *Supervisor) Run(ctx context.Context) {
 		}
 	}
 	for ctx.Err() == nil {
+		if s.Check != nil {
+			if err := s.Check(); err != nil {
+				s.blocked.Store(true)
+				s.logf("voice: whisper-server not started: %v (retrying in %s)", err, backoff)
+				if !wait() {
+					return
+				}
+				continue
+			}
+		}
 		if s.portTaken() {
+			s.blocked.Store(true)
 			s.logf("voice: 127.0.0.1:%d is already in use by another process; whisper-server not started, dictation unavailable (retrying in %s)", s.Port, backoff)
 			if !wait() {
 				return
 			}
 			continue
 		}
+		s.blocked.Store(false)
 		ran, err := s.runOnce(ctx)
 		if ctx.Err() != nil {
 			return
@@ -142,15 +168,28 @@ func (s *Supervisor) Run(ctx context.Context) {
 	}
 }
 
-// runOnce starts the child once and waits for it to exit or ctx to end.
-func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
+// command is the child's command: Stdin, Stdout and Stderr nil (the null
+// device, never a log: whisper.cpp prints transcripts), a reduced
+// environment, and Pdeathsig on Linux.
+func (s *Supervisor) command() *exec.Cmd {
 	cmd := exec.Command(s.Program, s.Args...)
 	cmd.Env = s.Env
-	cmd.SysProcAttr = childSysProcAttr()
 	if cmd.Env == nil {
 		cmd.Env = ChildEnv(os.Environ())
 	}
-	// Stdin, Stdout and Stderr nil: the null device. Never a log.
+	cmd.SysProcAttr = childSysProcAttr()
+	return cmd
+}
+
+// runOnce starts the child once and waits for it to exit or ctx to end.
+func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
+	cmd := s.command()
+	//
+	// On Linux the child gets Pdeathsig, which the kernel ties to the thread
+	// that started it: this goroutine keeps that thread until the child is
+	// gone, so the signal fires only when the proxy dies.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		return 0, err
@@ -162,7 +201,7 @@ func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 	probed := make(chan struct{})
 	go func() {
 		defer close(probed)
-		s.probe(probeCtx)
+		s.probe(probeCtx, cmd.Process.Pid)
 	}()
 	defer func() {
 		stopProbe()
@@ -188,10 +227,12 @@ func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 	}
 }
 
-// probe marks the child ready once its port accepts a connection.
-func (s *Supervisor) probe(ctx context.Context) {
+// probe marks the child (pid) ready once its port accepts a connection
+// and, where the platform can tell, the listener is the child's own.
+func (s *Supervisor) probe(ctx context.Context, pid int) {
 	tick := time.NewTicker(dur(s.ProbeEvery, defaultProbeEvery))
 	defer tick.Stop()
+	warned := false
 	for {
 		var d net.Dialer
 		dctx, cancel := context.WithTimeout(ctx, time.Second)
@@ -199,11 +240,20 @@ func (s *Supervisor) probe(ctx context.Context) {
 		cancel()
 		if err == nil {
 			c.Close()
-			if ctx.Err() == nil {
+			owned, known := listenerOwnedBy(pid, s.Port)
+			if known && !owned {
+				// Another process took the port while the child loaded its
+				// model: nothing is sent there. The child fails to bind and
+				// exits, and the next start finds the port taken.
+				if !warned {
+					warned = true
+					s.logf("voice: 127.0.0.1:%d answers, but not from whisper-server (pid %d): another process holds it; nothing is sent there", s.Port, pid)
+				}
+			} else if ctx.Err() == nil {
 				s.ready.Store(true)
 				s.logf("voice: whisper-server ready on %s", s.Addr())
+				return
 			}
-			return
 		}
 		select {
 		case <-ctx.Done():

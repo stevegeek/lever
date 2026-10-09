@@ -89,7 +89,7 @@ func (a *App) hostPaths() []hostPath {
 			add(p)
 		}
 	}
-	if a.Remote.Voice.Enabled {
+	if a.RemoteEnabled() && a.Remote.Voice.Enabled {
 		add(hostPath{key: "remote.voice.whisper_server", path: a.Remote.Voice.WhisperServer, kind: hostProgramOutside})
 	}
 	return out

@@ -1454,7 +1454,10 @@ Every login gets dictation while it is on, operators and contacts alike, except 
   exits, and stops it with the proxy. The child gets a reduced environment (what a GPU build
   needs to find its libraries, no credentials), and its output is discarded, because whisper.cpp
   prints what it transcribes. If something else already listens on the port, the proxy does not
-  start the child and sends it nothing.
+  start the child, sends it nothing, and the page shows no mic. On Linux the proxy also checks,
+  before it sends anything, that the listener is its own child's (a process that bound the port
+  while the model loaded is refused); on macOS it cannot tell. On Linux the child also dies with
+  the proxy, even when the proxy is killed.
 - **The route.** Only for a verified login, like the rest of the chat page. The page sends
   `X-Lever-Voice: 1` with each clip and the proxy refuses a clip without it (a browser sends such
   a header to another origin only after a CORS preflight, which the proxy never grants). The

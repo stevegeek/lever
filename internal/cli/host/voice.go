@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/brokerctl"
@@ -47,7 +49,10 @@ func newVoiceFetchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runVoiceFetch(cmd.Context(), app, stateFor(path), name, voice.Fetcher{Progress: cmd.OutOrStdout()}.Fetch, cmd.OutOrStdout())
+			// Ctrl-C ends the download, and the temp file goes with it.
+			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			return runVoiceFetch(ctx, app, stateFor(path), name, voice.Fetcher{Progress: cmd.OutOrStdout()}.Fetch, cmd.OutOrStdout())
 		},
 	}
 }

@@ -24,6 +24,7 @@ func main() {
 	noGPU := flag.Bool("no-gpu", false, "accepted, as whisper-server does")
 	exitAfter := flag.Duration("exit-after", 0, "TEST: exit with status 3 after this long (0 = never)")
 	fail := flag.Bool("fail", false, "TEST: answer every request with HTTP 500")
+	delay := flag.Duration("listen-delay", 0, "TEST: wait this long before binding, as a model load does")
 	flag.Parse()
 	if _, err := os.Stat(*model); err != nil {
 		log.Fatalf("fakewhisper: model: %v", err)
@@ -31,6 +32,7 @@ func main() {
 	if *exitAfter > 0 {
 		time.AfterFunc(*exitAfter, func() { os.Exit(3) })
 	}
+	time.Sleep(*delay)
 	ln, err := net.Listen("tcp", net.JoinHostPort(*host, strconv.Itoa(*port)))
 	if err != nil {
 		log.Fatalf("fakewhisper: %v", err)
@@ -57,6 +59,10 @@ func main() {
 		size, _ := f.Seek(0, 2)
 		text := fmt.Sprintf(" heard %s %d bytes; language %s; prompt %s; format %s; gpu %v \n", head[:n], size,
 			r.FormValue("language"), r.FormValue("prompt"), r.FormValue("response_format"), !*noGPU)
+		// As whisper.cpp does: the transcript on the console too. lever must
+		// discard it (internal/voice/whisper.go, assumption 5).
+		fmt.Println("transcript:", text)
+		fmt.Fprintln(os.Stderr, "transcript:", text)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"text": text})
 	})

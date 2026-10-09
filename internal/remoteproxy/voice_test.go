@@ -469,3 +469,43 @@ func TestVoiceAnswersAreNotCached(t *testing.T) {
 		t.Fatalf("%d %v", rw.Code, rw.Header())
 	}
 }
+
+// TestVoiceSlowTranscriptionOutlivesTheBodyDeadline: the body deadline is
+// for the upload only. Left set, net/http's background read would cancel
+// the request once it passed, while the clip waits or is transcribed.
+func TestVoiceSlowTranscriptionOutlivesTheBodyDeadline(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, rec := voiceCfg(t, hub)
+	slow := rec.transcribe
+	cfg.Voice.Transcribe = func(ctx context.Context, wav []byte) (string, error) {
+		select {
+		case <-time.After(400 * time.Millisecond):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return slow(ctx, wav)
+	}
+	h := NewHandler(cfg)
+	h.(*gate).voice.deadline = 100 * time.Millisecond
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	req, err := http.NewRequest("POST", srv.URL+voicePath, bytes.NewReader(wavClip(16000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = testServeHost
+	for k, v := range map[string]string{"Tailscale-User-Login": chatOp, "Content-Type": "audio/wav", "Origin": "https://" + testServeHost,
+		"Sec-Fetch-Site": "same-origin", voiceHeader: "1"} {
+		req.Header.Set(k, v)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body bytes.Buffer
+	_, _ = body.ReadFrom(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(body.String(), "hello Lever") {
+		t.Fatalf("%d %s", resp.StatusCode, body.String())
+	}
+}

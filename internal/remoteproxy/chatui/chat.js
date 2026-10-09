@@ -847,10 +847,11 @@ function showVoice(text) {
 }
 
 // syncMic shows the mic for an open chat while the list carries voice for
-// this login and the browser can record. It is off while the message box
-// is, and while a clip is being transcribed.
+// this login and the browser can record, and always while it records (it is
+// the stop control). It is off while the message box is, and while a clip
+// is being transcribed.
 function syncMic() {
-  el.mic.hidden = !(roster && roster.voice && chat && micSupported());
+  el.mic.hidden = !recording && !(roster && roster.voice && chat && micSupported());
   el.mic.disabled = transcribing || (!recording && (!chat || !chat.view || !chat.view.input));
   el.mic.className = recording ? 'recording' : '';
   setText(el.mic, recording ? '■' : '🎤');
@@ -893,8 +894,14 @@ async function toggleMic() {
     if (ev.data && ev.data.size) r.chunks.push(ev.data);
   });
   recorder.addEventListener('stop', () => void finishDictation(r));
+  try {
+    recorder.start(1000);
+  } catch {
+    stopTracks(stream);
+    showError('This browser cannot record here.');
+    return;
+  }
   recording = r;
-  recorder.start(1000);
   r.timer = setInterval(() => tickDictation(r), 500);
   tickDictation(r);
   syncMic();
@@ -909,13 +916,13 @@ function tickDictation(r) {
 }
 
 // stopDictation ends the recording; its clip is transcribed (finishDictation
-// runs on the recorder's stop event).
+// runs on the recorder's stop event, after the last chunk, and releases the
+// microphone).
 function stopDictation() {
   const r = recording;
   if (!r) return;
   recording = null;
   clearInterval(r.timer);
-  stopTracks(r.stream);
   showVoice('');
   try {
     if (r.recorder.state === 'inactive') void finishDictation(r);
@@ -936,6 +943,7 @@ function cancelDictation() {
 async function finishDictation(r) {
   if (r.done) return;
   r.done = true;
+  stopTracks(r.stream);
   if (r.discard) return;
   transcribing = true;
   showVoice('Transcribing…');

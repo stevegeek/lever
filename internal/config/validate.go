@@ -694,8 +694,9 @@ func (a *App) validateRemote() error {
 // letters ("en", "de", "haw").
 var voiceLanguageRE = regexp.MustCompile(`^[a-z]{2,3}$`)
 
-// validateVoice checks remote.voice. Its shape is checked even while it is
-// off; the rest only when it is on.
+// validateVoice checks remote.voice (with remote access on: validateRemote
+// returns early otherwise). Its shape is checked even while voice is off;
+// the rest only when it is on.
 //
 // The port matters most. whisper-server has no authentication of its own:
 // it is safe only because it listens on host loopback and the jail's egress

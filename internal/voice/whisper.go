@@ -33,6 +33,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // ServerArgs is the whisper-server argument list for model on
@@ -62,15 +63,11 @@ type Request struct {
 // Transcribe sends r to the whisper-server at addr (host:port) and returns
 // its transcript, as the server gave it (assumptions 2 and 3).
 func Transcribe(ctx context.Context, client *http.Client, addr string, r Request) (string, error) {
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	fw, err := mw.CreateFormFile("file", "audio.wav")
-	if err != nil {
-		return "", err
-	}
-	if _, err := fw.Write(r.WAV); err != nil {
-		return "", err
-	}
+	// The form is built around the clip, not copied with it: the text
+	// fields and the file part's header, then the clip itself, then the
+	// closing boundary (what multipart.Writer.Close writes).
+	var head bytes.Buffer
+	mw := multipart.NewWriter(&head)
 	fields := [][2]string{{"response_format", "json"}, {"language", r.Language}}
 	if r.Language == "" {
 		fields[1][1] = "auto"
@@ -83,13 +80,17 @@ func Transcribe(ctx context.Context, client *http.Client, addr string, r Request
 			return "", err
 		}
 	}
-	if err := mw.Close(); err != nil {
+	if _, err := mw.CreateFormFile("file", "audio.wav"); err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/inference", &body)
+	tail := "\r\n--" + mw.Boundary() + "--\r\n"
+	body := io.MultiReader(&head, bytes.NewReader(r.WAV), strings.NewReader(tail))
+	size := int64(head.Len()) + int64(len(r.WAV)) + int64(len(tail))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/inference", body)
 	if err != nil {
 		return "", err
 	}
+	req.ContentLength = size
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := client.Do(req)
 	if err != nil {

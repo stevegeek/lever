@@ -3,6 +3,7 @@ package voice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,15 @@ func (s *Service) Run(ctx context.Context) {
 	if sup.Log == nil {
 		sup.Log = s.Log
 	}
+	// Before every restart too: the program must still be the one checked,
+	// and must still resolve to the same real file.
+	sup.Check = func() error {
+		again, err := CheckServer(s.Server)
+		if err == nil && again != real {
+			err = fmt.Errorf("voice: whisper_server now resolves to %s, not %s; restart the proxy to accept it", again, real)
+		}
+		return err
+	}
 	// Never through a proxy from the environment: loopback only.
 	s.client = http.Client{Transport: &http.Transport{MaxIdleConns: 1}}
 	s.sup.Store(sup)
@@ -74,9 +84,14 @@ func (s *Service) logf(format string, a ...any) {
 }
 
 // Usable reports whether the checks at start passed and the proxy is
-// supervising the child: the page then shows the mic. A child that is
-// restarting still counts; a request then answers unavailable.
-func (s *Service) Usable() bool { return s.usable.Load() }
+// supervising the child, and the last start was not blocked (the port taken
+// by another process, or the program failing its check): the page then
+// shows the mic. A child that is restarting still counts; a request then
+// answers unavailable.
+func (s *Service) Usable() bool {
+	sup := s.sup.Load()
+	return s.usable.Load() && sup != nil && !sup.Blocked()
+}
 
 // Transcribe sends one checked WAV clip to the child and returns the
 // transcript.

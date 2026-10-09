@@ -2128,6 +2128,20 @@ test('mic: a denied microphone or an unreadable clip says so', async () => {
   assert.equal(transcribes(env).length, 0);
 });
 
+test('mic: stays as the stop control while recording, even if the list drops voice', async () => {
+  const hub = hubWith({ agents: withVoice([BOSS()]) });
+  const env = await loadChat(hub, { media: {} });
+  env.els.mic.dispatch('click');
+  await tick(5);
+  hub.parts.agents = defaultAgents;
+  await env.poll();
+  assert.equal(env.els.mic.hidden, false);
+  env.els.mic.dispatch('click');
+  await tick(20);
+  assert.equal(env.media.recorders[0].state, 'inactive');
+  assert.equal(env.els.mic.hidden, true, 'stopped: the list has no voice now');
+});
+
 test('mic: leaving the chat while recording drops the clip', async () => {
   const env = await loadChat(hubWith({ agents: withVoice([BOSS(), A('w1')]) }), { media: {} });
   env.els.mic.dispatch('click');

@@ -249,3 +249,108 @@ func TestServiceRunsAVerifiedModel(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestChildOutputIsNeverKept: whisper.cpp prints what it transcribes, so the
+// child's stdout and stderr are the null device, and lever's own lines
+// never carry it.
+func TestChildOutputIsNeverKept(t *testing.T) {
+	s := &Supervisor{Program: "/bin/true", Env: []string{"PATH=/bin"}}
+	cmd := s.command()
+	if cmd.Stdout != nil || cmd.Stderr != nil || cmd.Stdin != nil {
+		t.Fatal("the child's standard streams must be the null device")
+	}
+	bin := fakeWhisper(t)
+	port := freePort(t)
+	var l logs
+	s = &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false), Port: port, Log: l.f, ProbeEvery: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	eventually(t, "ready", s.Ready)
+	if _, err := Transcribe(ctx, &http.Client{}, s.Addr(), Request{WAV: []byte("RIFFsecret")}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	<-done
+	if l.count("transcript") != 0 || l.count("heard") != 0 {
+		t.Fatalf("a transcript reached lever's log: %q", l.lines)
+	}
+}
+
+func TestSupervisorCheckBlocksTheStart(t *testing.T) {
+	bin := fakeWhisper(t)
+	port := freePort(t)
+	var l logs
+	s := &Supervisor{Program: bin, Args: ServerArgs(modelFile(t), port, false), Port: port, Log: l.f, MinBackoff: 10 * time.Millisecond,
+		Check: func() error { return fmt.Errorf("the program changed") }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	eventually(t, "two refusals", func() bool { return l.count("the program changed") >= 2 })
+	if !s.Blocked() || s.Ready() || l.count("started on") != 0 {
+		t.Fatalf("%q", l.lines)
+	}
+	cancel()
+	<-done
+}
+
+// TestSupervisorIgnoresASquatter: another process binds the port while the
+// child is still loading its model; the probe sees the listener is not the
+// child's and sends nothing there (Linux, where /proc tells).
+func TestSupervisorIgnoresASquatter(t *testing.T) {
+	if _, known := listenerOwnedBy(os.Getpid(), 1); !known {
+		t.Skip("this platform cannot tell who owns a listener")
+	}
+	bin := fakeWhisper(t)
+	port := freePort(t)
+	var l logs
+	s := &Supervisor{Program: bin, Args: append(ServerArgs(modelFile(t), port, false), "-listen-delay", "300ms"), Port: port, Log: l.f,
+		MinBackoff: 20 * time.Millisecond, ProbeEvery: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Run(ctx)
+	}()
+	eventually(t, "the start", func() bool { return l.count("started on") >= 1 })
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	eventually(t, "the squatter seen", func() bool { return l.count("not from whisper-server") >= 1 })
+	if s.Ready() {
+		t.Fatal("a squatter's port was marked ready")
+	}
+	eventually(t, "the port seen taken", func() bool { return l.count("already in use") >= 1 })
+	if s.Ready() || !s.Blocked() {
+		t.Fatal("still usable with the port taken")
+	}
+	cancel()
+	<-done
+}
+
+func TestListenerOwnedBy(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	owned, known := listenerOwnedBy(os.Getpid(), port)
+	if !known {
+		t.Skip("this platform cannot tell who owns a listener")
+	}
+	if !owned {
+		t.Fatal("this process's own listener is not seen as its own")
+	}
+	if owned, known := listenerOwnedBy(os.Getpid(), freePort(t)); owned || !known {
+		t.Fatalf("no listener: %v %v", owned, known)
+	}
+}

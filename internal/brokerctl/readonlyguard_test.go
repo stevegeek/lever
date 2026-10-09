@@ -144,3 +144,24 @@ func TestSupervisorLogsGuardRefusalOncePerClass(t *testing.T) {
 		t.Fatalf("the fix text lacks the check: %q", b)
 	}
 }
+
+// The shared guard passes a manager that is down (it cannot swap a folder
+// then) and keeps every other refusal.
+func TestSharedGuardDecision(t *testing.T) {
+	for _, class := range []string{"no-container", "not-running"} {
+		if err := sharedGuardDecision(&guardError{class, "down"}); err != nil {
+			t.Errorf("%s: %v, want nil", class, err)
+		}
+	}
+	for _, class := range []string{"gaps:x", "live:x", "missing:x", "mounts-unreadable", "live-unreadable"} {
+		if err := sharedGuardDecision(&guardError{class, "refused"}); err == nil {
+			t.Errorf("%s: want the refusal kept", class)
+		}
+	}
+	if err := sharedGuardDecision(nil); err != nil {
+		t.Errorf("nil: %v", err)
+	}
+	if sharedGuard(&config.App{Name: "m"}, nil, "/lever") != nil {
+		t.Error("no shared folders: the guard must be nil")
+	}
+}

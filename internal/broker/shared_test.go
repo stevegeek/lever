@@ -32,7 +32,6 @@ func sharedTree(t *testing.T, rt *fakeRuntime, buf *bytes.Buffer, writer bool, v
 	b := New(testConfig(t, withAudit(buf), withManager("test-manager", ""), withRuntime(rt, spec), func(c *Config) {
 		c.Dispatch.Tree = tree
 		c.Dispatch.ReadOnlyDirs = []string{"tools/releases"}
-		c.Dispatch.SharesConfigured = true
 		c.Dispatch.RecordVolumes = func(context.Context, string) ([]scion.VolumeMount, error) { return vols, readErr }
 	}))
 	return tree, b
@@ -121,8 +120,8 @@ func TestWorkerStart_sharedFolderSourceChecked(t *testing.T) {
 				body = `{"worker":"worker","task":"t"}`
 			}
 			rec := callWorker(t, b, "/worker/start", body, "test-manager")
-			if rec.Code < 400 {
-				t.Fatalf("status = %d, want a refusal (%s)", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (%s)", rec.Code, rec.Body.String())
 			}
 			if len(rt.started)+len(rt.resumed)+len(rt.resumeForced)+len(rt.staged) != 0 {
 				t.Fatalf("nothing may be staged, started or resumed; started=%d resumed=%d staged=%d", len(rt.started), len(rt.resumed), len(rt.staged))
@@ -161,13 +160,71 @@ func TestWorkerResume_refusesStaleSharedMount(t *testing.T) {
 	}
 }
 
-// With shared folders configured, a record that cannot be read refuses the
-// resume (fail closed).
+// A record that cannot be read refuses the resume (fail closed): a record
+// outlives the config that made it.
 func TestWorkerResume_unreadableRecordRefusedWithShares(t *testing.T) {
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
 	var buf bytes.Buffer
 	_, b := sharedTree(t, rt, &buf, false, nil, errors.New("hub down"))
 	if rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager"); rec.Code != http.StatusForbidden || len(rt.resumed) != 0 {
 		t.Fatalf("status=%d resumed=%d, want 403 and no resume (%s)", rec.Code, len(rt.resumed), rec.Body.String())
+	}
+}
+
+// No worker that mounts a shared folder starts or resumes while the
+// running manager lacks its pins; a worker with none is not held back.
+func TestWorkerStart_sharedGuard(t *testing.T) {
+	guardErr := errors.New("manager \"m\" does not hold that protection")
+	for _, tc := range []struct {
+		name   string
+		phase  string
+		shared bool
+		guard  error
+		code   int
+	}{
+		{"start refused", "", true, guardErr, http.StatusForbidden},
+		{"resume refused", "stopped", true, guardErr, http.StatusForbidden},
+		{"start allowed", "", true, nil, http.StatusOK},
+		{"no shared folder, not held", "", false, guardErr, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agents := map[string][]scion.Agent{}
+			body := `{"worker":"worker","task":"t"}`
+			if tc.phase != "" {
+				agents[testInstanceProject] = []scion.Agent{{Slug: "worker", Phase: tc.phase}}
+				body = `{"worker":"worker"}`
+			}
+			rt := &fakeRuntime{agents: agents}
+			var buf bytes.Buffer
+			tree := t.TempDir()
+			for _, d := range []string{"tools/releases", "workers/worker"} {
+				if err := os.MkdirAll(filepath.Join(tree, filepath.FromSlash(d)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+				HostWorkspace: filepath.Join(tree, "workers", "worker"),
+				TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
+			if tc.shared {
+				spec.Shared = []SharedMount{{Rel: "tools/releases", Volume: scion.VolumeMount{Source: "/lever/tools/releases", Target: "/shared/releases", ReadOnly: true}}}
+			}
+			b := New(testConfig(t, withAudit(&buf), withManager("test-manager", ""), withRuntime(rt, spec), func(c *Config) {
+				c.Dispatch.Tree = tree
+				c.Dispatch.SharedGuard = func(context.Context) error { return tc.guard }
+				c.Dispatch.RecordVolumes = func(context.Context, string) ([]scion.VolumeMount, error) { return nil, nil }
+			}))
+			rec := callWorker(t, b, "/worker/start", body, "test-manager")
+			if rec.Code != tc.code {
+				t.Fatalf("status = %d, want %d (%s)", rec.Code, tc.code, rec.Body.String())
+			}
+			if tc.code == http.StatusForbidden {
+				if len(rt.started)+len(rt.resumed)+len(rt.staged) != 0 {
+					t.Fatal("nothing may be staged, started or resumed")
+				}
+				if !strings.Contains(rec.Body.String(), "lever up --fresh") {
+					t.Fatalf("answer must name the fix: %s", rec.Body.String())
+				}
+			}
+		})
 	}
 }

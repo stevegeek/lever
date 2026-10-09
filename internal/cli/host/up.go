@@ -154,6 +154,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
+				// shared_folders: the resume re-resolves every mount source,
+				// as apply's start-manager step checks before its resume.
+				if err := app.PrepareSharedFoldersHost(); err != nil {
+					return err
+				}
 				if err := sc.Resume(ctx, app.Name, project); err != nil {
 					if scion.IsRefusedByHub(err) {
 						return apply.HubRefusedResume("resume", err)

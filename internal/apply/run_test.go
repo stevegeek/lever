@@ -4337,6 +4337,7 @@ func TestManagerVolumesSharedFolders(t *testing.T) {
 			{Path: "out", Writers: []string{"m"}, Readers: []string{"w"}},
 		}}
 	want := []scion.VolumeMount{
+		{Source: "/lever/out", Target: "/workspace/out"}, // pinned: the manager writes it
 		{Source: "/lever/tools", Target: "/workspace/tools"},
 		{Source: "/lever/workers", Target: "/workspace/workers"},
 		{Source: "/lever/tools/releases", Target: "/workspace/tools/releases", ReadOnly: true},

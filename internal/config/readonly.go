@@ -51,9 +51,27 @@ const readOnlyForbiddenChars = "$~:,"
 // Validate has already rejected nested entries and worker dirs that overlap
 // an entry, so no directory is both an entry and a pin. Empty when nothing
 // is configured: worker dirs are pinned only to protect read_only entries.
+//
+// Shared folders join the plan: one the manager does not write is an entry
+// like a read_only one; one it writes is pinned (mounted read-write over
+// itself, with its ancestors), so the manager cannot swap it for a link
+// that a worker would then mount in its place.
 func (a *App) ManagerTreeMounts() []TreeMount {
-	dirs := a.managerReadOnlyDirs()
-	if len(dirs) == 0 {
+	return a.treeMountPlan(a.managerReadOnlyDirs(), a.managerWrittenShared())
+}
+
+// ReadOnlyEntryMounts is the manager.read_only part of the plan alone:
+// what the broker's tool guard requires before it starts a tool whose
+// program lies under a read_only entry. A shared folder does not change
+// what protects such a tool, so adding one does not hold the tool back.
+func (a *App) ReadOnlyEntryMounts() []TreeMount {
+	return a.treeMountPlan(a.Manager.ReadOnly, nil)
+}
+
+// treeMountPlan is ManagerTreeMounts for the given read-only entries and
+// read-write pinned directories (each with its ancestors).
+func (a *App) treeMountPlan(dirs, pinned []string) []TreeMount {
+	if len(dirs) == 0 && len(pinned) == 0 {
 		return nil
 	}
 	seen := make(map[string]bool)
@@ -82,6 +100,9 @@ func (a *App) ManagerTreeMounts() []TreeMount {
 	}
 	for _, e := range dirs {
 		pinWithAncestors(cleanRel(e), false, false)
+	}
+	for _, p := range pinned {
+		pinWithAncestors(cleanRel(p), true, false)
 	}
 	for _, g := range a.Workers {
 		pinWithAncestors(cleanRel(g.Dir), true, true)
@@ -131,7 +152,7 @@ func parentRel(rel string) string {
 // worker to. Every comparison folds case: on a case-insensitive host
 // `Assistant/tools` and `assistant/tools` are one directory.
 func (a *App) validateManagerReadOnly() error {
-	if len(a.managerReadOnlyDirs()) == 0 {
+	if len(a.ManagerTreeMounts()) == 0 {
 		return nil
 	}
 	for i, e := range a.Manager.ReadOnly {
@@ -205,7 +226,7 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 	if err := a.PrepareSharedFoldersHost(); err != nil {
 		return err
 	}
-	if len(a.managerReadOnlyDirs()) == 0 {
+	if len(a.ManagerTreeMounts()) == 0 {
 		return nil
 	}
 	for _, e := range a.Manager.ReadOnly {

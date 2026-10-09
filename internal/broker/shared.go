@@ -66,23 +66,52 @@ func (b *Broker) verifySharedSources(spec WorkerSpec) error {
 // resume recreates the container from.
 type RecordVolumesFunc func(ctx context.Context, agent string) ([]scion.VolumeMount, error)
 
+// ErrManagerUnpinned refuses to start or resume a worker with shared
+// folders while the running manager does not hold its tree plan (the pins
+// over every shared folder and its ancestors): without them the manager
+// could swap a folder for a link between lever's check and the moment the
+// guest mounts it.
+var ErrManagerUnpinned = errors.New("the running manager does not hold its shared folder pins")
+
+// checkSharedAccess is the shared_folders gate before a worker start
+// (resume false) or resume: the manager's pins (SharedGuard) when the
+// worker mounts any folder, then, for a resume, the record against the
+// plan (refuseStaleShares).
+func (b *Broker) checkSharedAccess(ctx context.Context, spec WorkerSpec, resume bool) error {
+	if len(spec.Shared) > 0 && b.sharedGuard != nil {
+		if err := b.sharedGuard(ctx); err != nil {
+			return fmt.Errorf("%v: %w", err, ErrManagerUnpinned)
+		}
+	}
+	if resume {
+		return b.refuseStaleShares(ctx, spec)
+	}
+	return nil
+}
+
+// sharedAccessHint is the answer text for a refused checkSharedAccess.
+func sharedAccessHint(worker string, err error) string {
+	if errors.Is(err, ErrManagerUnpinned) {
+		return "the running manager does not hold the mounts that protect worker " + worker + "'s shared folders (it was created before they were configured); the operator must back up its conversation and run lever up --fresh"
+	}
+	return sharedFolderHint(worker)
+}
+
 // refuseStaleShares compares the worker's record with its shared_folders
 // plan before a resume: every mount the record holds under /shared must be
 // one the plan holds, with the same source and no more access. A mount the
 // plan adds that the record lacks is not refused (it is less access); the
-// worker gets it when it is next created. With no reader wired it does
-// nothing; a failed read refuses only when shared folders are configured,
-// since only then can a record hold one.
+// worker gets it when it is next created. With no reader wired (tests) it
+// does nothing. A failed read refuses the resume whatever the config says
+// now: a record outlives the config that made it, so an instance that
+// removed every folder may still hold a worker that mounts one.
 func (b *Broker) refuseStaleShares(ctx context.Context, spec WorkerSpec) error {
 	if b.recordVolumes == nil {
 		return nil
 	}
 	vols, err := b.recordVolumes(ctx, spec.Name)
 	if err != nil {
-		if b.sharesConfigured {
-			return fmt.Errorf("reading worker %q's record to check its shared folder mounts: %v: %w", spec.Name, err, ErrStaleSharedMount)
-		}
-		return nil
+		return fmt.Errorf("reading worker %q's record to check its shared folder mounts: %v: %w", spec.Name, err, ErrStaleSharedMount)
 	}
 	return staleShares(spec, vols)
 }

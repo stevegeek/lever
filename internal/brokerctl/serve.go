@@ -285,8 +285,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		// symlink, nor over a protected directory (see the field doc).
 		// shared_folders count too: a worker workspace over one would write
 		// it whatever its writers list says.
-		ReadOnlyDirs:     app.ProtectedDirs(),
-		SharesConfigured: len(app.SharedFolders) > 0,
+		ReadOnlyDirs: app.ProtectedDirs(),
 		// A dispatched worker must hold live for this long before the manager
 		// hears "running" (lever#31): scion reports the record running before
 		// the harness runs a line, and every observed harness death landed
@@ -356,6 +355,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// stamps it (the email, else the user id), rather than assuming the dev
 	// user's default address.
 	d.ResolveControllerSender = controllerSenderFrom(hc)
+	// shared_folders: no worker that mounts one starts or resumes while the
+	// running manager lacks the pins that keep it from swapping a folder.
+	d.SharedGuard = sharedGuard(app, jr, jailMount)
 	// shared_folders: a resume is refused when the worker's record holds a
 	// shared mount the config no longer grants (broker.refuseStaleShares).
 	d.RecordVolumes = func(ctx context.Context, agent string) ([]scion.VolumeMount, error) {

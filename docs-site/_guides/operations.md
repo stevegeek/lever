@@ -334,35 +334,41 @@ warns.
 
 `shared_folders` gives a set of agents one common directory at `/shared/<name>`: writers mount it
 read-write, readers read-only, and nobody else mounts it ([reference](/reference/config/#shared_folders)).
-Use it when one agent produces files the others consume, for example a reviewer that publishes
-tested tool releases which the manager and the other workers run.
+Use it when some agents produce files that others consume: reference material, a hand-off folder
+between workers, build outputs, or reviewed tools that one agent publishes for the rest.
 
 **Adding a folder:**
 
 1. Create the folder in the tree as a real directory (not a symbolic link), outside every worker
    `dir`.
-2. Add the entry to `lever.yaml` and run `lever apply`.
-3. Recreate the agents that should mount it: mounts are create-time only. For a worker,
+2. Add the entry to `lever.yaml` and run `lever reload`: the broker reads the config only when it
+   starts.
+3. Recreate the agents that should mount it: mounts are create-time only. The manager comes
+   first, because it mounts every folder (read-only unless it writes it) and holds the pins that
+   protect the folder: back up its conversation and run `lever up --fresh`. Until it has them, the
+   broker refuses to start or resume any worker that mounts the folder. Then, for each worker,
    `lever worker purge <worker>` (or `lever-manager agent recycle` from the manager for a
-   recyclable worker), then dispatch it again. For the manager, which mounts every folder it does
-   not write read-only, back up its conversation and run `lever up --fresh`.
-4. Run `lever doctor`: the *shared folders* row lists the agents whose mounts match, and names any
-   that still need recreating.
+   recyclable worker), and dispatch it again.
+4. Run `lever doctor`: the *shared folders* row lists the agents whose mounts match and names any
+   that still need recreating; the *manager read-only paths* row checks the manager's pins.
 5. Tell the agents about it: lever's skills do not mention shared folders, so say in each agent's
    `instructions_file` (or task) what `/shared/<name>` holds and whether that agent may write it.
 
-**Changing or removing a folder** works the same way: edit `lever.yaml`, then recreate the agents
-whose access changed. Until then the broker refuses to resume a worker whose record holds access
-the config withdrew, and doctor fails for any agent that still holds it. Keep a removed folder on
-the host until every agent that mounted it is recreated: a resume needs the mount source.
+**Changing or removing a folder** works the same way: edit `lever.yaml`, run `lever reload`, then
+recreate the agents whose access changed. Until then the broker refuses to resume a worker whose
+record holds access the config withdrew, and doctor fails for any agent that still holds it. Keep a
+removed folder on the host until every agent that mounted it is recreated: a resume needs the mount
+source. Adding or removing a **worker** while any folder is configured also needs a fresh manager,
+as with `manager.read_only`: the manager pins every worker dir, and the broker holds back workers
+that mount a shared folder until the running manager has the new plan.
 
-**Publishing into a folder.** Bind mounts show new files at once, so readers pick up a change at
-their next read without a restart. Change the folder's contents, never the folder: a mount stays on
-the directory that existed when the agent was created, so replacing it on the host strands every
-agent on the old one until it is recreated. For versioned releases, add a new subdirectory per
-version and move a pointer (a relative symbolic link such as `current -> releases/7`, or a file
-naming the version); rolling back is moving the pointer back. Write a release completely before you
-move the pointer, so a reader never sees a half-written one.
+**Updating a folder's contents.** Bind mounts show new files at once, so readers see a change at
+their next read without a restart. Change the folder's contents, never the folder itself: a mount
+stays on the directory that existed when the container started, so replacing the folder on the host
+leaves agents on the old one (doctor's *shared folders* row names the readers affected; recreate
+them). Write a file under a temporary name and rename it into place, so a reader never sees half of
+it. For versioned content, add a new subdirectory per version and point at it with a relative
+symbolic link or a small file naming the version; switching back is moving the pointer back.
 
 **Before you add a writer**, read [security model §4.5](/security-model/worker-isolation/#45-opt-in-shared-folders):
 whatever a writer publishes, the readers and the manager may run.

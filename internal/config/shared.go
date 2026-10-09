@@ -2,14 +2,17 @@ package config
 
 import (
 	"fmt"
+	"io/fs"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // SharedFolder is one shared_folders entry: a tree directory that the
@@ -110,6 +113,18 @@ func (a *App) managerReadOnlyDirs() []string {
 	return out
 }
 
+// managerWrittenShared is every shared folder the manager writes: pinned
+// in the manager's tree plan (ManagerTreeMounts).
+func (a *App) managerWrittenShared() []string {
+	var out []string
+	for _, s := range a.SharedFolders {
+		if s.writes(a.Name) {
+			out = append(out, cleanRel(s.Path))
+		}
+	}
+	return out
+}
+
 // ProtectedDirs is every tree directory a worker's workspace must stay
 // clear of, as the broker checks it on each start and resume:
 // manager.read_only and every shared folder. A worker whose workspace
@@ -178,11 +193,21 @@ func (a *App) validateSharedFolders() error {
 				return fmt.Errorf("config: shared folder %q overlaps worker %q (dir %q) — the worker mounts its dir read-write, so it would write the folder whatever writers says; name it in writers instead and move the folder out of its dir", p, g.Name, g.Dir)
 			}
 		}
-		if fsutil.RelOverlapFold(p, chatfiles.Dir) {
-			return fmt.Errorf("config: shared_folders %q overlaps %s, the manager's file exchange", p, chatfiles.Dir)
+		for _, part := range strings.Split(filepath.ToSlash(p), "/") {
+			// Host-written places, wherever they sit: .lever holds the
+			// manager's enrolment ticket, the state directory the broker's
+			// secrets, .lever-files the chat file exchange.
+			for _, host := range []string{".lever", state.DirName, chatfiles.Dir} {
+				if strings.EqualFold(part, host) {
+					return fmt.Errorf("config: shared_folders %q is or lies inside %s, a directory lever writes for the host; keep shared folders out of it", p, part)
+				}
+			}
+		}
+		if lf := a.Remote.LabelsFile; lf != "" && len(s.Writers) > 0 && !(len(s.Writers) == 1 && s.Writers[0] == a.Name) && fsutil.RelOverlapFold(filepath.ToSlash(filepath.Clean(lf)), p) {
+			return fmt.Errorf("config: remote: labels_file %q is inside shared folder %q, which a worker writes; that worker would write the labels contacts see", lf, p)
 		}
 		if len(s.Writers) == 0 && len(s.Readers) == 0 {
-			return fmt.Errorf("config: shared_folders %q names no writers and no readers; list at least one agent (the manager alone already sees the tree)", p)
+			return fmt.Errorf("config: shared_folders %q names no writers and no readers; list at least one agent", p)
 		}
 		for _, w := range s.Writers {
 			if w == SharedAllWorkers {
@@ -236,10 +261,65 @@ func firstDuplicate(xs []string) string {
 // inside resolves in the reading container, where it reaches only what
 // that container already sees. Host programs inside a folder are refused
 // at config load (checkHostPathsOutsideTree): no shared folder excuses one.
+//
+// It does refuse a file with a name OUTSIDE the folder (a hard link whose
+// other name lies elsewhere in the tree): an agent that made such a name
+// before the folder was shared could edit the file through it, whatever
+// the folder's writers list says. New names across the boundary cannot be
+// made from a container (a hard link across two mounts fails with EXDEV),
+// so the check at create closes the gap. Hard links with every name inside
+// the folder are the writers' business, like symbolic links.
 func (a *App) PrepareSharedFoldersHost() error {
 	for _, s := range a.SharedFolders {
 		if err := walkNoSymlink(a.Tree, cleanRel(s.Path), false); err != nil {
 			return fmt.Errorf("config: shared_folders %q: %w (create it as a real directory before starting the agents that mount it)", s.Path, err)
+		}
+		if err := refuseOutsideHardLinks(filepath.Join(a.Tree, filepath.FromSlash(cleanRel(s.Path)))); err != nil {
+			return fmt.Errorf("config: shared_folders %q: %w", s.Path, err)
+		}
+	}
+	return nil
+}
+
+// refuseOutsideHardLinks walks dir (never following a link) and fails on a
+// regular file whose link count exceeds the names it has inside dir.
+func refuseOutsideHardLinks(dir string) error {
+	type inode struct{ dev, ino uint64 }
+	type seen struct {
+		path  string
+		names uint64
+		nlink uint64
+	}
+	files := map[inode]*seen{}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || st.Nlink <= 1 {
+			return nil
+		}
+		k := inode{uint64(st.Dev), uint64(st.Ino)}
+		if f := files[k]; f != nil {
+			f.names++
+		} else {
+			files[k] = &seen{p, 1, uint64(st.Nlink)}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if f.names < f.nlink {
+			return fmt.Errorf("%s has %d hard links but only %d inside the folder: another name for the same file lies outside it, where an agent that is not a writer may edit it; replace it with a copy (cp, then mv over it)", f.path, f.nlink, f.names)
 		}
 	}
 	return nil

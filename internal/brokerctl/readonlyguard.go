@@ -45,7 +45,9 @@ func guardClass(err error) string {
 // — no container yet, a stopped one — is a refusal, so the tool waits.
 func readOnlyGuard(app *config.App, jr proc.Runner, jailMount string) ReadOnlyGuard {
 	ref := jail.ContainerName(path.Base(jailMount), app.Name)
-	want := app.ManagerTreeMounts()
+	// read_only's own plan: a shared folder does not change what protects
+	// a tool under a read_only entry, so adding one does not hold it back.
+	want := app.ReadOnlyEntryMounts()
 	return func(ctx context.Context, _ []string) error {
 		return checkManagerReadOnly(ctx, app.Name, app.Tree, jailMount, want,
 			func(ctx context.Context) ([]jail.Mount, error) { return jail.ContainerMounts(ctx, jr, ref) },
@@ -73,7 +75,7 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 	}
 	for _, w := range want {
 		if fi, err := os.Stat(filepath.Join(tree, filepath.FromSlash(w.Rel))); err != nil || !fi.IsDir() {
-			return &guardError{"missing:" + w.Rel, fmt.Sprintf("the protected directory %q is missing on the host (manager.read_only needs it in place; recreate it, or back up and recreate the manager)", w.Rel)}
+			return &guardError{"missing:" + w.Rel, fmt.Sprintf("the protected directory %q is missing on the host (manager.read_only or shared_folders needs it in place; recreate it, or back up and recreate the manager)", w.Rel)}
 		}
 	}
 	plan := make([]jail.LiveMount, 0, len(want))
@@ -95,4 +97,37 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 		return &guardError{"live:" + msg, fmt.Sprintf("manager %q does not hold that protection: %s", name, msg)}
 	}
 	return nil
+}
+
+// sharedGuard is the broker's check before a worker that mounts a shared
+// folder starts or resumes (broker.DispatchConfig.SharedGuard): the running
+// manager must hold its whole tree plan (ManagerTreeMounts: the pins over
+// every shared folder and its ancestors, and the worker dirs), read the way
+// the tool guard reads it. A manager with no container, or one that is not
+// running, passes: it cannot swap a folder while it is down. nil when no
+// shared folder is configured.
+func sharedGuard(app *config.App, jr proc.Runner, jailMount string) func(context.Context) error {
+	if len(app.SharedFolders) == 0 {
+		return nil
+	}
+	ref := jail.ContainerName(path.Base(jailMount), app.Name)
+	want := app.ManagerTreeMounts()
+	return func(ctx context.Context) error {
+		err := checkManagerReadOnly(ctx, app.Name, app.Tree, jailMount, want,
+			func(ctx context.Context) ([]jail.Mount, error) { return jail.ContainerMounts(ctx, jr, ref) },
+			func(ctx context.Context, live []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+				return jail.ContainerLiveMounts(ctx, jr, ref, live)
+			})
+		return sharedGuardDecision(err)
+	}
+}
+
+// sharedGuardDecision maps a tree-plan check to the shared guard's answer:
+// a manager that is down passes; every other refusal stands.
+func sharedGuardDecision(err error) error {
+	var g *guardError
+	if errors.As(err, &g) && (g.class == "no-container" || g.class == "not-running") {
+		return nil
+	}
+	return err
 }

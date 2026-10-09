@@ -97,7 +97,7 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": workspace dir: "+err.Error())
 			return
 		}
-		if err := b.refuseStaleShares(ctx, spec); err != nil {
+		if err := b.checkSharedAccess(ctx, spec, true); err != nil {
 			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": "+err.Error())
 			return
 		}
@@ -257,7 +257,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": workspace dir: "+err.Error())
 			return "", false
 		}
-		if err = b.refuseStaleShares(ctx, spec); err != nil {
+		if err = b.checkSharedAccess(ctx, spec, true); err != nil {
 			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
 			return "", false
 		}

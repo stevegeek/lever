@@ -61,6 +61,10 @@ func TestValidateRejectsBadSharedFolders(t *testing.T) {
 		{"over worker dir", []SharedFolder{{Path: "workers", Readers: []string{"*"}}}, nil, []string{`worker "alpha"`, "read-write"}},
 		{"inside worker dir", []SharedFolder{{Path: "workers/w/out", Readers: []string{"*"}}}, nil, []string{`worker "alpha"`}},
 		{"file exchange", []SharedFolder{{Path: ".lever-files", Readers: []string{"*"}}}, nil, []string{".lever-files"}},
+		{"bootstrap dir", []SharedFolder{{Path: ".lever", Name: "lever", Readers: []string{"*"}}}, nil, []string{".lever", "lever writes for the host"}},
+		{"inside bootstrap dir, case", []SharedFolder{{Path: ".Lever/x", Readers: []string{"*"}}}, nil, []string{".Lever"}},
+		{"state dir anywhere", []SharedFolder{{Path: "a/.lever-state", Name: "st", Readers: []string{"*"}}}, nil, []string{".lever-state"}},
+		{"nested file exchange", []SharedFolder{{Path: "x/.lever-files", Name: "xf", Readers: []string{"*"}}}, nil, []string{".lever-files"}},
 		{"nobody", []SharedFolder{{Path: "x"}}, nil, []string{"no writers and no readers"}},
 		{"unknown writer", []SharedFolder{{Path: "x", Writers: []string{"ghost"}}}, nil, []string{"writer", `"ghost"`}},
 		{"star writer", []SharedFolder{{Path: "x", Writers: []string{"*"}}}, nil, []string{"writers must name each agent"}},
@@ -118,6 +122,7 @@ func TestManagerTreeMountsIncludeSharedFolders(t *testing.T) {
 		SharedFolder{Path: "out", Writers: []string{"demo"}, Readers: []string{"alpha"}},
 	)
 	want := []TreeMount{
+		{Rel: "out", ReadOnly: false},
 		{Rel: "tools", ReadOnly: false},
 		{Rel: "workers", ReadOnly: false, WorkerPin: true},
 		{Rel: "tools/releases", ReadOnly: true},
@@ -130,9 +135,23 @@ func TestManagerTreeMountsIncludeSharedFolders(t *testing.T) {
 	if got, want := app.ProtectedDirs(), []string{"tools/releases", "out"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ProtectedDirs = %q, want %q", got, want)
 	}
-	only := sharedApp(t, SharedFolder{Path: "out", Writers: []string{"demo"}, Readers: []string{"alpha"}})
-	if got := only.ManagerTreeMounts(); got != nil {
-		t.Fatalf("manager-written folder: ManagerTreeMounts = %+v, want none", got)
+	// A folder the manager writes is pinned with its ancestors, and the
+	// worker dirs with it: the manager cannot swap it for a link that a
+	// reader would mount in its place.
+	only := sharedApp(t, SharedFolder{Path: "pub/out", Writers: []string{"demo"}, Readers: []string{"alpha"}})
+	wantOnly := []TreeMount{
+		{Rel: "pub"},
+		{Rel: "workers", WorkerPin: true},
+		{Rel: "pub/out"},
+		{Rel: "workers/v", WorkerPin: true},
+		{Rel: "workers/w", WorkerPin: true},
+	}
+	if got := only.ManagerTreeMounts(); !reflect.DeepEqual(got, wantOnly) {
+		t.Fatalf("manager-written folder: ManagerTreeMounts = %+v, want %+v", got, wantOnly)
+	}
+	// The tool guard's plan is read_only's alone.
+	if got := app.ReadOnlyEntryMounts(); got != nil {
+		t.Fatalf("ReadOnlyEntryMounts with no read_only = %+v, want none", got)
 	}
 }
 
@@ -172,4 +191,52 @@ func TestHostProgramInSharedFolderRefused(t *testing.T) {
 	p, _ := hostPathsInstance(t, "workers:\n  - name: alpha\n    dir: workers/w\nshared_folders:\n  - path: tools\n    writers: [alpha]\n"+supervisedTool("[ws/tools/bin]"))
 	_, err := LoadNoHostChecks(p)
 	testutil.WantErrContaining(t, err, "broker.tools[t] command", "inside the mounted tree")
+}
+
+// A hard link whose other name lies outside the folder is refused; links
+// with every name inside are the writers' business.
+func TestPrepareSharedFoldersHostHardLinks(t *testing.T) {
+	app := sharedApp(t, SharedFolder{Path: "pub", Writers: []string{"alpha"}})
+	pub := filepath.Join(app.Tree, "pub")
+	if err := os.MkdirAll(filepath.Join(pub, "v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pub, "v1", "tool"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(filepath.Join(pub, "v1", "tool"), filepath.Join(pub, "tool")); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.PrepareSharedFoldersHost(); err != nil {
+		t.Fatalf("links inside the folder: %v", err)
+	}
+	if err := os.Link(filepath.Join(pub, "tool"), filepath.Join(app.Tree, "outside")); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WantErrContaining(t, app.PrepareSharedFoldersHost(), "hard links", "outside")
+}
+
+// labels_file may not sit in a folder a worker writes: that worker would
+// write the labels contacts see. A folder only the manager writes is fine.
+func TestSharedFolderLabelsFile(t *testing.T) {
+	app := sharedApp(t, SharedFolder{Path: "pub", Writers: []string{"alpha"}})
+	app.Remote.LabelsFile = "pub/labels.json"
+	testutil.WantErrContaining(t, app.validateSharedFolders(), "labels_file", `"pub"`)
+	app.SharedFolders[0].Writers = []string{"demo"}
+	app.SharedFolders[0].Readers = []string{"alpha"}
+	if err := app.validateSharedFolders(); err != nil {
+		t.Fatalf("manager-written folder: %v", err)
+	}
+}
+
+// readers: ["*"] loads; an unquoted * is YAML alias syntax and fails to
+// parse, which the docs warn about.
+func TestSharedFoldersStarFromYAML(t *testing.T) {
+	head := "name: demo\nbackend: orbstack\ntree: ws\nworkers:\n  - name: alpha\n    dir: workers/w\nshared_folders:\n  - path: pub\n"
+	if _, err := LoadNoHostChecks(writeConfig(t, head+"    readers: [\"*\"]\n")); err != nil {
+		t.Fatalf("quoted star: %v", err)
+	}
+	if _, err := LoadNoHostChecks(writeConfig(t, head+"    readers: [*]\n")); err == nil {
+		t.Fatal("unquoted star must not load")
+	}
 }

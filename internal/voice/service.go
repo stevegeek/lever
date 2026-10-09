@@ -113,17 +113,17 @@ func (s *Service) Usable() bool {
 func (s *Service) Transcribe(ctx context.Context, wav []byte) (string, error) {
 	sup := s.sup.Load()
 	if !s.Usable() || sup == nil || !sup.Ready() {
-		return "", ErrNotReady
+		return "", fmt.Errorf("%w: %w", ErrNotSent, ErrNotReady)
 	}
 	wait := s.MaxWait
 	if wait <= 0 {
 		wait = 10 * time.Minute
 	}
-	// Detached from the caller: whisper-server goes on with a clip after
-	// the browser gives up, so the caller's GPU slot must stay taken until
-	// the child answers (bounded by wait), or abandoned clips would queue
-	// inside the child, beyond lever's slots.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), wait)
+	// Bound to the caller: when the browser gives up, the request to the
+	// child is closed, and whisper-server stops work on a clip whose
+	// connection closed (its abort callback, whisper.go assumption 9), so
+	// the caller's GPU slot frees with the work.
+	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	return Transcribe(ctx, &s.client, sup.Addr(), Request{Path: s.path, WAV: wav, Prompt: s.Prompt, Language: s.Language})
 }

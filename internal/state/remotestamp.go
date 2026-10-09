@@ -66,6 +66,7 @@ type VoiceIdentity struct {
 	GPU           bool
 	Port          int
 	Excluded      []string `json:",omitempty"` // allowed_users voice: false
+	NoReadAloud   bool     `json:",omitempty"` // remote.voice.read_aloud: false
 }
 
 // FilesIdentity is the part of remote.files a running proxy captured.

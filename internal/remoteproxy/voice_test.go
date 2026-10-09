@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -429,43 +430,47 @@ func TestVoiceTranscriberFailure(t *testing.T) {
 	}
 }
 
-// A failed transcription gives its use of the limits back: a crash loop
-// in the transcriber must not spend a login's daily allowance.
-func TestVoiceFailureRefundsTheLimits(t *testing.T) {
+// A clip that never reached the transcriber gives its use of the limits
+// back; a transcription that ran and failed (a timeout, a server error)
+// counts: otherwise over-long clips could dodge the daily minutes.
+func TestVoiceFailureRefundsOnlyUnsentClips(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, rec := voiceCfg(t, hub)
-	rec.err = errors.New("whisper-server: HTTP 500")
+	notSent := errors.New("not sent")
+	cfg.Voice.NotSent = func(err error) bool { return errors.Is(err, notSent) }
 	h := NewHandler(cfg)
+	g := h.(*gate)
+	uses := func() int {
+		g.voice.mu.Lock()
+		defer g.voice.mu.Unlock()
+		return len(g.voice.used[strings.ToLower(chatOp)])
+	}
+	rec.err = fmt.Errorf("dial: %w", notSent)
 	for range 3 {
 		if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%d %s", rw.Code, rw.Body)
 		}
 	}
-	g := h.(*gate)
-	g.voice.mu.Lock()
-	n := len(g.voice.used[strings.ToLower(chatOp)])
-	g.voice.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("%d uses recorded after failures, want 0", n)
+	if n := uses(); n != 0 {
+		t.Fatalf("%d uses after unsent clips, want 0", n)
 	}
-	rec.err = nil
-	if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusOK {
+	rec.err = errors.New("context deadline exceeded")
+	if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusServiceUnavailable {
 		t.Fatalf("%d %s", rw.Code, rw.Body)
 	}
-	g.voice.mu.Lock()
-	n = len(g.voice.used[strings.ToLower(chatOp)])
-	g.voice.mu.Unlock()
-	if n != 1 {
-		t.Fatalf("%d uses after a success, want 1", n)
+	if n := uses(); n != 1 {
+		t.Fatalf("%d uses after a timed-out transcription, want 1", n)
 	}
 }
 
 func TestVoiceTextDropsWhisperMarkers(t *testing.T) {
 	for in, want := range map[string]string{
-		" [BLANK_AUDIO]\n":              "",
-		"hello [MUSIC] world":           "hello world",
-		"[ Silence ] ok":                "ok",
-		"keep [x86_64] and [1] as said": "keep [x86_64] and [1] as said",
+		" [BLANK_AUDIO]\n":                  "",
+		"hello [MUSIC] world":               "hello world",
+		"[ Silence ] ok":                    "ok",
+		"(inaudible)":                       "",
+		"keep a[i], [TODO] and (x) as said": "keep a[i], [TODO] and (x) as said",
+		"line one\nline two":                "line one\nline two",
 	} {
 		if got := voiceText(in); got != want {
 			t.Errorf("voiceText(%q) = %q, want %q", in, got, want)

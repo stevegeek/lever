@@ -2,6 +2,7 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -213,7 +214,7 @@ func TestServiceRefusesAnUnverifiedModel(t *testing.T) {
 	if s.Usable() || l.count("does not verify") != 1 || l.count("not verified yet") != 1 {
 		t.Fatalf("%v %q", s.Usable(), l.lines)
 	}
-	if _, err := s.Transcribe(context.Background(), []byte("RIFF")); err != ErrNotReady {
+	if _, err := s.Transcribe(context.Background(), []byte("RIFF")); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrNotSent) {
 		t.Fatal(err)
 	}
 }
@@ -245,7 +246,7 @@ func TestServiceRunsAVerifiedModel(t *testing.T) {
 	if s.Usable() {
 		t.Fatal("still usable after the stop")
 	}
-	if _, err := s.Transcribe(context.Background(), []byte("RIFF")); err != ErrNotReady {
+	if _, err := s.Transcribe(context.Background(), []byte("RIFF")); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrNotSent) {
 		t.Fatal(err)
 	}
 }

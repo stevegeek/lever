@@ -39,6 +39,10 @@ type VoiceConfig struct {
 	// passed their checks at start and the child is supervised. False: the
 	// roster carries no voice and the route answers unavailable.
 	Available func() bool
+	// NotSent reports whether a Transcribe error means the clip never
+	// reached the transcriber (voice.ErrNotSent): only then is its use of
+	// the limits given back. nil = never.
+	NotSent func(error) bool
 	// ReadAloud: the roster tells the page to offer read-aloud to every
 	// login with voice on (remote.voice.read_aloud).
 	ReadAloud bool
@@ -276,10 +280,13 @@ func voiceAudio(ct string) bool {
 // chat message limit.
 func voiceText(s string) string {
 	s = strings.ToValidUTF8(s, "�")
-	// Whisper writes non-speech as bracketed markers ([BLANK_AUDIO],
-	// [MUSIC], [ Silence ]); they are not words the login said.
-	s = whisperMarker.ReplaceAllString(s, " ")
-	s = strings.Join(strings.Fields(s), " ")
+	// Whisper writes non-speech as markers ([BLANK_AUDIO], [MUSIC],
+	// (silence)); they are not words the login said. Only known ones are
+	// removed, so dictated code such as a[i] or [TODO] stays.
+	if whisperMarker.MatchString(s) {
+		s = strings.TrimSpace(spaceRun.ReplaceAllString(whisperMarker.ReplaceAllString(s, " "), " "))
+	}
+	s = strings.TrimSpace(s)
 	if utf8.RuneCountInString(s) <= voiceMaxText {
 		return s
 	}
@@ -287,9 +294,12 @@ func voiceText(s string) string {
 	return strings.TrimSpace(string(r[:voiceMaxText]))
 }
 
-// whisperMarker is one of Whisper's non-speech markers: square brackets
-// around letters, spaces and underscores only.
-var whisperMarker = regexp.MustCompile(`\[[A-Za-z_ ]{1,40}\]`)
+// whisperMarker is one of Whisper's known non-speech markers, in square
+// brackets or parentheses, with the spaces around it.
+var whisperMarker = regexp.MustCompile(`(?i)[ \t]*[\[(]\s*(blank_audio|music|silence|noise|inaudible|applause|laughter|sound effect|sound-effect|no speech)\s*[\])][ \t]*`)
+
+// spaceRun is a run of spaces or tabs (line breaks are kept).
+var spaceRun = regexp.MustCompile(`[ \t]{2,}`)
 
 // refuseVoice answers the route with one fixed error word.
 func (g *gate) refuseVoice(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, word string) {
@@ -400,14 +410,17 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		return
 	}
 	start := time.Now()
-	// Transcribe runs on until the child answers even if the browser gives
-	// up (voice.Service detaches it), so the GPU token is held for exactly
-	// as long as the child works on this clip.
+	// A browser that gives up ends the request to the child, which stops
+	// work on the clip; the GPU token is freed with it.
 	text, err := s.cfg.Transcribe(r.Context(), clip)
 	<-s.gpu
 	line.LatencyMS = max(time.Since(start).Milliseconds(), 1)
 	if err != nil {
-		s.refund(v.login, seconds, takenAt)
+		// Only a clip that never reached the transcriber is given back: a
+		// timeout or a failed transcription used it.
+		if s.cfg.NotSent != nil && s.cfg.NotSent(err) {
+			s.refund(v.login, seconds, takenAt)
+		}
 		line.Error = "transcription failed: " + err.Error()
 		g.refuseVoice(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return

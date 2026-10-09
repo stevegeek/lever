@@ -148,7 +148,8 @@ func RemoteConfigHash(app *config.App) string {
 		if app.VoiceOn() {
 			id.Voice = &state.VoiceIdentity{WhisperServer: app.Remote.Voice.WhisperServer, Model: app.EffectiveVoiceModel(),
 				Language: app.Remote.Voice.Language, Vocabulary: app.Remote.Voice.Vocabulary, MaxSeconds: app.EffectiveVoiceMaxSeconds(),
-				GPU: app.VoiceGPU(), Port: app.EffectiveVoicePort(), Excluded: app.VoiceExcludedLogins()}
+				GPU: app.VoiceGPU(), Port: app.EffectiveVoicePort(), Excluded: app.VoiceExcludedLogins(),
+				NoReadAloud: app.Remote.Voice.ReadAloud != nil && !*app.Remote.Voice.ReadAloud}
 		}
 	}
 	if app.PushOn() {

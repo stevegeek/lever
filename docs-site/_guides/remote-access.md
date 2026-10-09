@@ -1483,14 +1483,15 @@ synthesis API and at least one on-device voice.
   (413), `timeout` (408), `rate`, `quota` and `busy` (429), `unavailable` (503). With voice off,
   every path under `/lever/api/voice/` is a 404.
 - **Limits.** One transcription at a time, and two more waiting: three slots in all, of which a
-  contact never takes the last, so an operator can always dictate. A transcription keeps its
-  slot until whisper-server answers, even if the browser gave up meanwhile (the server would go
-  on working on it). One clip at a time per login. Per login, 30 transcribed clips an hour, 60
-  minutes of transcribed audio a day, and 60 attempts an hour (clips that fail their checks count
-  as attempts). A clip that fails to transcribe, or whose browser gave up before its turn, does
-  not count against the clips or the minutes. These counts are kept in memory and start again
-  when the proxy restarts. Whisper's non-speech markers such as `[BLANK_AUDIO]` are removed from
-  the text. Sending a clip may take one minute plus the time for the largest clip at 64 KiB/s.
+  contact never takes the last, so an operator can always dictate. When a browser gives up, the
+  proxy closes its request to whisper-server, which stops work on that clip, and the slot frees.
+  One clip at a time per login. Per login, 30 clips an hour, 60 minutes of audio a day, and 60
+  attempts an hour (clips that fail their checks count as attempts). A clip that never reached
+  whisper-server (it was down, or the browser gave up before the clip's turn) does not count
+  against the clips or the minutes; one that timed out or failed in whisper-server does. These
+  counts are kept in memory and start again when the proxy restarts. Whisper's known non-speech
+  markers (such as `[BLANK_AUDIO]`, `[MUSIC]`, `(inaudible)`) are removed from the text; other
+  brackets, such as dictated code, stay. Sending a clip may take one minute plus the time for the largest clip at 64 KiB/s.
 - **Read-aloud.** The page uses the browser's speech synthesis with **on-device voices only**
   (those the browser marks as local): a voice that would send the text to a speech service is
   never used, even if it is the browser's default. Before reading, the page removes markdown
@@ -1515,9 +1516,12 @@ synthesis API and at least one on-device voice.
 - **Other host processes and web pages.** whisper-server allows cross-origin requests from any
   site and has a `/load` route that loads a model from any path it is given. Lever therefore puts
   every route under a random 128-bit path prefix, new at each proxy start: a web page open on the
-  host, or a name rebound to `127.0.0.1`, finds only 404s. A process running as you on the host
-  can still connect to the port (and, on macOS, could bind it first while the model loads and
-  receive clips); treat the host as trusted, as for every loopback service. A second instance's
+  host, or a name rebound to `127.0.0.1`, finds only 404s. The prefix is not a defence against
+  other users of the host: whisper-server takes it on its command line, so anyone who can list
+  processes can read it, and any local user can connect to a loopback port (and, on macOS, could
+  bind it first while the model loads and receive clips). With the prefix, such a user can make
+  whisper-server load a model file of their choice, as your user. Run voice only on a host where
+  you trust every local user, as for every loopback service. A second instance's
   `manager.allow_ports` on the same host is not checked against this instance's voice port: keep
   the ports distinct.
 - **The model and the program are checked.** The proxy starts whisper-server only with a model

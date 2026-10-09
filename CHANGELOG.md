@@ -26,7 +26,7 @@ version bump moves the block under the new version heading.
   message also gets a speaker button that reads it aloud with the browser's on-device voices
   only (`remote.voice.read_aloud: false` turns it off). whisper-server's routes sit under a
   random path prefix, new at each proxy start, so a web page in a browser on the host cannot
-  reach its `/load` route. Clips that fail to transcribe do not count against the limits.
+  reach its `/load` route. A clip that never reached whisper-server does not count against the limits.
 
 ## [0.34.3] - 2026-10-09
 

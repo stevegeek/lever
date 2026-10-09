@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -112,5 +113,20 @@ func TestRequestPath(t *testing.T) {
 	}
 	if got != p+"/inference" {
 		t.Fatalf("path = %q, want %q", got, p+"/inference")
+	}
+}
+
+// A failed request never carries the URL (the secret prefix); a refused
+// dial is ErrNotSent.
+func TestTranscribeErrorHidesThePath(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	_, err = Transcribe(context.Background(), &http.Client{}, addr, Request{Path: "/s3cr3tpath", WAV: []byte("x")})
+	if err == nil || strings.Contains(err.Error(), "s3cr3tpath") || !errors.Is(err, ErrNotSent) {
+		t.Fatalf("err = %v", err)
 	}
 }

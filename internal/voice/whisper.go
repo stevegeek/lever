@@ -34,6 +34,9 @@ package voice
 //     no Host header, so without a secret prefix any web page open on the
 //     host could post to /load. lever passes a fresh random prefix per
 //     proxy start and never logs it.
+//  9. The server stops transcribing a clip whose client connection closed
+//     (an abort callback that checks the connection), so lever frees its
+//     GPU slot when the browser gives up.
 //
 // Checked against whisper.cpp's examples/server/server.cpp (master,
 // 2026-10): flags at its argument parser, the /inference handler's form
@@ -50,7 +53,9 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -71,6 +76,11 @@ func ServerArgs(modelPath string, port int, gpu bool, requestPath string) []stri
 	}
 	return args
 }
+
+// ErrNotSent: the clip never reached whisper-server (it is not running or
+// not listening). Unlike a timeout or a failed transcription, no work was
+// done, so the proxy gives the clip's use of the limits back.
+var ErrNotSent = errors.New("the clip did not reach whisper-server")
 
 // ErrServer: whisper-server answered, but not with a transcript.
 var ErrServer = errors.New("whisper-server")
@@ -122,6 +132,17 @@ func Transcribe(ctx context.Context, client *http.Client, addr string, r Request
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	resp, err := client.Do(req)
 	if err != nil {
+		// Never the URL: it carries the secret route prefix, and this error
+		// reaches the audit log. A failed dial means the clip never reached
+		// the server (ErrNotSent).
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		var oe *net.OpError
+		if errors.As(err, &oe) && oe.Op == "dial" {
+			return "", fmt.Errorf("%w: %v", ErrNotSent, err)
+		}
 		return "", err
 	}
 	defer resp.Body.Close()

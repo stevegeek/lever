@@ -39,7 +39,9 @@ version bump moves the block under the new version heading.
   hub".** The restart takes scion's runtime broker down with the hub, and the broker registers
   again only after the hub serves; the steps after it (`register-project`'s hub link) raced it.
   The `scion-server` step now waits (up to 30 s, and it never fails the apply on its own) for an
-  online runtime broker after it restarts the hub.
+  online runtime broker after every hub start; with the broker already online that is one call.
+  `register-project` also retries a hub link that fails with `no_runtime_broker` three times
+  (after 5, 10 and 20 s), for a broker that takes longer than the wait on a cold start.
 - **`lever-tool-fizzy`: `create_card` with an empty description writes `<prefix>(no description)`**
   instead of the bare prefix, which read like a truncated text.
 

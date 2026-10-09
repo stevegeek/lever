@@ -794,6 +794,9 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
 		WaitBrokerReady: func(ctx context.Context, project string) error {
+			if project == "global" {
+				return nil // scion-server's wait after the hub start
+			}
 			waitCalls++
 			startCallsAtGate = r.startCalls
 			return nil
@@ -822,11 +825,14 @@ func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
 		WaitBrokerReady: func(ctx context.Context, project string) error {
+			if project == "global" {
+				return nil // scion-server's wait after the hub start
+			}
 			return context.Canceled
 		},
 	}
 	err := runApply(app, deps)
-	testutil.WantErrContaining(t, err, "runtime broker")
+	testutil.WantErrContaining(t, err, "start-manager: waiting for runtime broker")
 	if r.startCalls != 0 || r.resumeCalls != 0 {
 		t.Errorf("startCalls=%d resumeCalls=%d, want 0/0 (no action when the gate errors)", r.startCalls, r.resumeCalls)
 	}
@@ -3058,12 +3064,13 @@ func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
 	}
 }
 
-// TestScionServerWaitsForTheBrokerAfterARestart (lever#166): a hub restart
-// takes the runtime broker down with it, so the scion-server step waits for
-// the broker to register again before register-project's hub link — through
-// scion's global settings, since the tree may not be a project yet. Without
-// a restart the step does not wait (start-manager's own wait still runs).
-func TestScionServerWaitsForTheBrokerAfterARestart(t *testing.T) {
+// TestScionServerWaitsForTheBroker (lever#166): a hub the step just started
+// has its runtime broker register only after the hub serves, so the step
+// waits for it before register-project's hub link — through scion's global
+// settings, since the tree may not be a project yet. It waits on a restart
+// (the login config changed) and without one: the dev-auth bootstrap window
+// and a cold start after `lever stop` also leave a hub that just started.
+func TestScionServerWaitsForTheBroker(t *testing.T) {
 	for _, changed := range []bool{false, true} {
 		f := scionOKRunner()
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
@@ -3081,18 +3088,85 @@ func TestScionServerWaitsForTheBrokerAfterARestart(t *testing.T) {
 		if err := runApply(app, deps); err != nil {
 			t.Fatalf("changed=%v: Run: %v", changed, err)
 		}
-		globals := 0
-		for _, w := range waits {
-			if w == "global" {
-				globals++
+		if len(waits) < 1 || waits[0] != "global" || slices.Index(waits[1:], "global") >= 0 {
+			t.Errorf("changed=%v: waits = %q, want one wait on scion's global settings, first (before register-project)", changed, waits)
+		}
+	}
+}
+
+// flakyHubLinkRunner fails the first fails `scion hub link` calls with
+// errText and passes everything else to inner.
+type flakyHubLinkRunner struct {
+	inner   *agentLifecycleRunner
+	fails   int
+	errText string
+	links   int
+}
+
+func (r *flakyHubLinkRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.inner.RunStdin(ctx, stdin, env, name, args...)
+}
+
+func (r *flakyHubLinkRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "scion" && len(args) >= 2 && args[0] == "hub" && args[1] == "link" {
+		r.links++
+		if r.links <= r.fails {
+			return proc.Result{Code: 1, Stderr: r.errText}, fmt.Errorf("exit status 1: %s", r.errText)
+		}
+	}
+	return r.inner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *flakyHubLinkRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestHubLinkRetriesNoRuntimeBroker (lever#166): register-project's hub link
+// retries a 422 no_runtime_broker a bounded number of times, logging each
+// retry, and fails at once on any other error.
+func TestHubLinkRetriesNoRuntimeBroker(t *testing.T) {
+	old := hubLinkRetryDelays
+	hubLinkRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { hubLinkRetryDelays = old })
+	const brokerErr = `failed to register agent 'hello': 422 no_runtime_broker: No runtime brokers available for this project`
+	for _, tc := range []struct {
+		name      string
+		fails     int
+		errText   string
+		wantErr   bool
+		wantLinks int
+	}{
+		{"succeeds after two 422s", 2, brokerErr, false, 3},
+		{"gives up after three retries", 9, brokerErr, true, 4},
+		{"other error is not retried", 9, "not authenticated to Hub", true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := scionOKRunner()
+			app := helloApp(t.TempDir())
+			runner := &flakyHubLinkRunner{inner: &agentLifecycleRunner{FakeRunner: f, slug: app.Name}, fails: tc.fails, errText: tc.errText}
+			var sink logSink
+			deps := Deps{
+				JailMount: "/lever",
+				Scion:     scion.New(runner, scion.Options{HubEndpoint: testHubEndpoint}),
+				Log:       sink.logf,
 			}
-		}
-		if want := map[bool]int{false: 0, true: 1}[changed]; globals != want {
-			t.Errorf("changed=%v: waits = %q, want %d wait on scion's global settings", changed, waits, want)
-		}
-		if changed && (len(waits) < 1 || waits[0] != "global") {
-			t.Errorf("waits = %q, want the post-restart wait first (before register-project)", waits)
-		}
+			err := runApply(app, deps)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if runner.links != tc.wantLinks {
+				t.Errorf("hub link calls = %d, want %d", runner.links, tc.wantLinks)
+			}
+			retries := 0
+			for _, l := range sink.lines {
+				if strings.Contains(l, "retrying the hub link") {
+					retries++
+				}
+			}
+			if retries != tc.wantLinks-1 {
+				t.Errorf("retry log lines = %d, want %d", retries, tc.wantLinks-1)
+			}
+		})
 	}
 }
 

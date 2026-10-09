@@ -224,7 +224,7 @@ type Deps struct {
 	EnsureControllerPAT func(ctx context.Context) error
 	// WaitBrokerReady blocks until the scion runtime broker is registered AND
 	// online, right before start-manager acts, and after the scion-server
-	// step restarts the hub. The workstation daemon brings up
+	// step starts the hub. The workstation daemon brings up
 	// its Hub API (confirmed by scion-server's waitHubReady) and its runtime
 	// broker separately, so without this gate the first create/resume races the
 	// broker's async registration — the flakiness that made first-boot need a
@@ -726,16 +726,18 @@ func (r *run) scionServer(ctx context.Context) error {
 	if err := r.d.Scion.ServerStart(ctx, r.hubServerOpts()); err != nil {
 		return err
 	}
-	if !changed {
-		return nil
+	// A hub that was just started — the restart above, the end of the
+	// dev-auth bootstrap window, a cold start after `lever stop` or a
+	// reboot — has its runtime broker register only after the hub serves.
+	// register-project's hub link and the steps after it would race that
+	// and fail with a 422 no_runtime_broker (lever#166). So wait on every
+	// apply: with the broker online it is one `hub brokers` call. The wait
+	// is fail-soft, like the one before start-manager. It asks scion's
+	// global settings, because the tree may not be a scion project yet.
+	if err := r.d.WaitBrokerReady(ctx, scionGlobalProject); err != nil {
+		return fmt.Errorf("scion-server: waiting for runtime broker: %w", err)
 	}
-	// The restart took the runtime broker down with the hub, and it
-	// registers again only after the hub serves. register-project's hub
-	// link and the steps after it would race that and fail with a 422
-	// no_runtime_broker (lever#166). The wait is fail-soft, like the one
-	// before start-manager. It asks scion's global settings, because the
-	// tree may not be a scion project yet.
-	return r.d.WaitBrokerReady(ctx, scionGlobalProject)
+	return nil
 }
 
 // scionGlobalProject is the value of scion's -g flag that names its global
@@ -857,7 +859,7 @@ func warmImage(ctx context.Context, ref string, d Deps) {
 		err = <-done
 	}
 	if err != nil {
-		d.Log("load-image: warning: warming %s failed: %v. The first agent start on it may not settle in phase created; see the start-manager error if it does", ref, err)
+		d.Log("load-image: warning: warming %s failed: %v. The first agent start on it may stay in phase created; see the start-manager error if it does", ref, err)
 	}
 }
 
@@ -936,10 +938,37 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	if err := r.d.Scion.InitProject(ctx, jp); err != nil {
 		return err
 	}
-	if err := r.d.Scion.HubLink(ctx, jp); err != nil {
+	if err := r.hubLink(ctx, jp); err != nil {
 		return err
 	}
 	return r.settleProject(ctx, path.Base(jp))
+}
+
+// hubLinkRetryDelays are the waits before each retry of a hub link that
+// failed with no_runtime_broker. A variable so tests can shorten it.
+var hubLinkRetryDelays = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
+
+// hubLink runs `scion hub link`, retrying a 422 no_runtime_broker a few
+// times (lever#166): the link's agent sync creates agents on the hub, which
+// fails while the runtime broker has not registered. The scion-server
+// step's wait for the broker is fail-soft at 30 s, and a cold Lima start
+// can take longer, so this is the backstop. Only that error is retried; a
+// re-link of a linked project is scion's "already linked" path.
+func (r *run) hubLink(ctx context.Context, jp string) error {
+	err := r.d.Scion.HubLink(ctx, jp)
+	for _, d := range hubLinkRetryDelays {
+		if err == nil || !strings.Contains(err.Error(), "no_runtime_broker") {
+			return err
+		}
+		r.d.Log("register-project: the hub has no runtime broker yet (no_runtime_broker); retrying the hub link in %s", d)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+		}
+		err = r.d.Scion.HubLink(ctx, jp)
+	}
+	return err
 }
 
 // settleProject is the hub-side project state both register paths converge

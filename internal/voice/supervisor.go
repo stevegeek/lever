@@ -29,6 +29,10 @@ type Supervisor struct {
 	Port    int
 	// Env is the child's environment; nil = ChildEnv(os.Environ()).
 	Env []string
+	// Dir is the child's working directory. whisper-server serves static
+	// files from a path relative to it (whisper.go, assumption 7), so it
+	// must be a private host directory, never the tree. "" = inherit.
+	Dir string
 	// Log receives lever's own lines; nil drops them.
 	Log func(format string, a ...any)
 	// Check, when set, runs before every start: a failure skips the start
@@ -173,6 +177,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 // environment, and Pdeathsig on Linux.
 func (s *Supervisor) command() *exec.Cmd {
 	cmd := exec.Command(s.Program, s.Args...)
+	cmd.Dir = s.Dir
 	cmd.Env = s.Env
 	if cmd.Env == nil {
 		cmd.Env = ChildEnv(os.Environ())

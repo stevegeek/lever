@@ -57,6 +57,9 @@ func (s *Service) Run(ctx context.Context) {
 		sup = s.Supervisor
 	}
 	sup.Program, sup.Args, sup.Port = real, ServerArgs(p, s.Port, s.GPU), s.Port
+	// The model directory: in the state directory, host-only, so the
+	// server's relative static-file path resolves nowhere an agent writes.
+	sup.Dir = s.ModelDir
 	if sup.Log == nil {
 		sup.Log = s.Log
 	}

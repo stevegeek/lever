@@ -21,7 +21,19 @@ package voice
 //     discards the child's stdout and stderr (supervisor.go): a transcript
 //     must never reach remote.log.
 //  6. Readiness: the server accepts TCP connections on --port once the model
-//     is loaded. lever probes with a connect, not an HTTP route.
+//     is loaded (it binds after loading). lever probes with a connect.
+//  7. The server also has routes lever never uses: /load (loads a model
+//     from any path the request names, and exits when that fails),
+//     /health, and static files from --public, default
+//     "examples/server/public" relative to its working directory. Only
+//     host processes reach its loopback port (the jail's egress drops it),
+//     and lever runs it in the model directory, inside the state
+//     directory, so the static path resolves nowhere an agent can write.
+//
+// Checked against whisper.cpp's examples/server/server.cpp (master,
+// 2026-10): flags at its argument parser, the /inference handler's form
+// fields and its json answer {"text": ...}, and {"error": ...} with a
+// non-200 status on failure.
 
 import (
 	"bytes"

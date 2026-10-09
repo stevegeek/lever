@@ -30,6 +30,7 @@ import (
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/voice"
 	"github.com/stevegeek/lever/internal/webpush"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -66,7 +67,10 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			// handshake: the handshake IS hub traffic, and must travel the
 			// same route into this instance's own jail.
 			dial := remoteproxy.JailDial(jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr()))
-			provider, handler, push, err := buildRemoteHandler(app, st, dial, auditFn, cmd.ErrOrStderr())
+			// remote.voice: the model and whisper-server are checked when
+			// the service runs; nil when off.
+			vs := remoteVoice(app, st, cmd.ErrOrStderr())
+			provider, handler, push, err := buildRemoteHandler(app, st, dial, auditFn, cmd.ErrOrStderr(), vs)
 			if err != nil {
 				return err
 			}
@@ -82,12 +86,25 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 					push.Run(ctx)
 				}
 			}()
+			// whisper-server lives as long as the proxy, too: the serve
+			// returns only after the child has exited.
+			voiceDone := make(chan struct{})
+			go func() {
+				defer close(voiceDone)
+				if vs != nil {
+					vs.Run(ctx)
+				}
+			}()
 			printRemoteWarnings(cmd, app)
 			cmd.Printf("remote proxy %q serving on %s, identity header %s (login provider on 127.0.0.1:%d, issuer %s)\n",
 				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader(), provider.Port(), provider.IssuerURL())
+			if vs != nil {
+				cmd.Printf("dictation on: model %s, whisper-server on %s (host loopback only)\n", vs.Model.Name, net.JoinHostPort("127.0.0.1", fmt.Sprint(vs.Port)))
+			}
 			err = serveRemote(ctx, app, st, provider, handler)
 			stop()
 			<-pushDone
+			<-voiceDone
 			return err
 		},
 	}
@@ -115,7 +132,7 @@ func loadRemoteApp(args []string) (string, *config.App, error) {
 
 // buildRemoteHandler assembles the local OIDC provider, the login driver over
 // it, and the proxy handler that fronts the hub.
-func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), auditFn func(remoteproxy.AuditLine), warn io.Writer) (*remoteproxy.Provider, http.Handler, *remoteproxy.Push, error) {
+func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), auditFn func(remoteproxy.AuditLine), warn io.Writer, vs *voice.Service) (*remoteproxy.Provider, http.Handler, *remoteproxy.Push, error) {
 	// The hub's address INSIDE the guest, which is where the dialer
 	// lands — so this is also the correct Host header. It is
 	// deliberately not a host-reachable address: see
@@ -200,8 +217,42 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// remote.files: uploads into each agent's .lever-files/in/, and
 		// downloads of the files it shares. Nil when off.
 		Files: remoteFiles(app, st),
+		// remote.voice: dictation through whisper-server on host
+		// loopback. Nil when off.
+		Voice: remoteVoiceConfig(app, vs),
 	})
 	return provider, handler, push, nil
+}
+
+// remoteVoice is the dictation service (remote.voice), or nil when off. The
+// state directory inside the tree keeps it off: the model would sit where
+// an agent can write.
+func remoteVoice(app *config.App, st state.State, warn io.Writer) *voice.Service {
+	if !app.VoiceOn() {
+		return nil
+	}
+	if brokerctl.StateInsideTree(app, st) {
+		fmt.Fprintf(warn, "lever: warning: remote.voice is on, but the state directory is inside the tree, where agents could "+
+			"write the model: dictation stays off\n")
+		return nil
+	}
+	m, ok := voice.Lookup(app.EffectiveVoiceModel())
+	if !ok {
+		// Validation refuses an unknown name; this is only a guard.
+		return nil
+	}
+	return &voice.Service{Model: m, ModelDir: st.VoiceModels(), Server: app.Remote.Voice.WhisperServer,
+		Port: app.EffectiveVoicePort(), GPU: app.VoiceGPU(), Prompt: app.VoicePrompt(), Language: app.Remote.Voice.Language,
+		Log: func(format string, a ...any) { fmt.Fprintf(warn, "lever: "+format+"\n", a...) }}
+}
+
+// remoteVoiceConfig is the proxy's side of vs (nil when vs is).
+func remoteVoiceConfig(app *config.App, vs *voice.Service) *remoteproxy.VoiceConfig {
+	if vs == nil {
+		return nil
+	}
+	return &remoteproxy.VoiceConfig{MaxSeconds: app.EffectiveVoiceMaxSeconds(), Excluded: app.VoiceExcludedLogins(),
+		Available: vs.Usable, Transcribe: vs.Transcribe}
 }
 
 // pushTestHosts is the TEST ONLY exception: both remote.push.test_hosts and

@@ -146,6 +146,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 	cmd := exec.Command(s.Program, s.Args...)
 	cmd.Env = s.Env
+	cmd.SysProcAttr = childSysProcAttr()
 	if cmd.Env == nil {
 		cmd.Env = ChildEnv(os.Environ())
 	}

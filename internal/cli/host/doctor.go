@@ -210,6 +210,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkChatLabels(app) },
 		func() checkResult { return checkPush(app, state) },
 		func() checkResult { return checkFiles(app, state) },
+		func() checkResult { return checkVoice(app) },
+		func() checkResult { return checkVoiceModel(app, state) },
+		func() checkResult { return checkVoiceServer(app) },
 		func() checkResult { return checkAgentMessages(app, state, liveAgentMessages(ctx, app, state)) },
 		func() checkResult { return checkSentLedger(app, state) },
 		func() checkResult { return checkGuestClock(ctx, jr, time.Now, app.AgentMessagesOn()) },
@@ -240,7 +243,11 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	}
 	out := make([]checkResult, 0, len(checks))
 	for _, run := range checks {
-		out = append(out, run())
+		// A check with nothing to say (the voice rows while voice is off)
+		// answers no row at all.
+		if r := run(); r.name != "" {
+			out = append(out, r)
+		}
 	}
 	return out
 }

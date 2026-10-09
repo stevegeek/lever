@@ -90,6 +90,7 @@ directory.
 |---|---|
 | `lever remote serve [CONFIG]` | Run the proxy in the foreground. Normally `up`/`apply` daemonize this for you when `remote.enabled: true` (`lever stop` stops it alongside the rest of the instance); this is for debugging. Refuses to start with remote access disabled. Prints the remote-settings warnings (a non-loopback `bind`, `trust_forwarded_host`) to stderr, which is `.lever-state/remote.log` when daemonized. |
 | `lever remote status [CONFIG]` | Proxy liveness (pid + listening on its bind address), the identity header, the `tailscale serve` command to run (loopback bind only), any remote-settings warnings, the serve URL from `base_url`, and whether the remote PAT is present — never its value. |
+| `lever voice fetch [MODEL] [CONFIG]` | Download a Whisper model for [dictation](/remote-access/#dictation-and-read-aloud) into `.lever-state/voice-models/` (`0700`, the file `0600`). `MODEL` is a name from lever's pinned table (default: `remote.voice.model`, else `large-v3-turbo`). The URL names a fixed commit of the model repository on Hugging Face; the download goes to a temporary file, and only a file of the pinned size and sha256 is renamed into place. A redirect to a host that is not Hugging Face's own is refused. Refuses a table entry that is not verified yet, and a state directory inside the tree. A file already there that verifies is kept. Never run by `up`, `apply` or the proxy: restart the proxy after a fetch. |
 
 ## `lever-manager` — in-jail orchestration
 

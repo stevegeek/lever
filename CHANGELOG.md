@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Dictation and read-aloud on the chat page (`remote.voice`, off by default).** With
+  `landing: chat` and `remote.voice.enabled`, the chat page has a mic beside the message box: the
+  clip is resampled to 16 kHz mono WAV in the browser, posted to the new
+  `POST /lever/api/voice/transcribe` route (`X-Lever-Voice: 1` required) and transcribed by a
+  whisper.cpp `whisper-server` that `lever remote serve` runs as its child on `127.0.0.1`
+  (`remote.voice.port`, default 8448, refused in `manager.allow_ports`). The text lands in the
+  message box for review and is never sent by itself. Audio and transcripts are never stored;
+  the audit line has the login, the clip length, the outcome and the latency only. Per login:
+  30 clips an hour, 60 audio-minutes a day; three slots, of which a contact never takes the
+  last; `voice: false` on an `allowed_users` entry turns it off for that login. You install
+  whisper-server yourself (outside the tree; CUDA or Metal), and fetch a model with the new
+  `lever voice fetch`, which downloads from Hugging Face at a pinned commit and keeps the file
+  only if its size and sha256 match lever's table. The proxy never downloads. `lever doctor`
+  gains `voice`, `voice model` and `voice whisper-server` rows. Each agent message also gets a
+  speaker button that reads it aloud with the browser's on-device voices only. **Before release:**
+  the model table's revision, sizes and sha256 values (`internal/voice/models.go`) are
+  placeholders, and every model is refused until they are filled in.
+
 ## [0.34.3] - 2026-10-09
 
 ### Fixed

@@ -952,8 +952,9 @@ to send is not posted to the old one.
 
 Off by default, each with its own key: [messages that an agent starts](#messages-agents-start) to
 a contact (`remote.agent_messages`), [notifications](#notifications) while the page is closed
-(`remote.push`), and [files](#files-in-the-chat) (`remote.files`). With files off, an operator uses
-the Console for files.
+(`remote.push`), [files](#files-in-the-chat) (`remote.files`) and
+[dictation](#dictation-and-read-aloud) (`remote.voice`). With files off, an operator uses the
+Console for files. Read-aloud of agent messages needs no setting.
 
 ## Contacts: chat-only logins
 
@@ -1392,6 +1393,117 @@ covers it.
   those files are no longer listed or downloadable. Lever never deletes a file, uploads included:
   the doctor row shows how much each agent holds; remove old ones from `.lever-files/in/` by
   hand. Disk space is the host's.
+
+## Dictation and read-aloud
+
+With `landing: chat` and `remote.voice` on, the chat page has a mic beside the message box. A
+login taps it, speaks, and taps again; the clip is transcribed on your host by a Whisper model,
+and the text lands in the message box at the cursor. **It is never sent by itself**: the login
+reads it, corrects what Whisper got wrong, and presses Send. What is sent is an ordinary typed
+message, with the usual chat ledger and provenance.
+
+Read-aloud needs no setting: each agent message has a speaker button that reads it with the
+browser's own speech synthesis.
+
+```yaml
+remote:
+  landing: chat
+  voice:
+    enabled: true
+    whisper_server: /usr/local/bin/whisper-server   # you install it; outside the tree
+    # model: large-v3-turbo                   # or large-v3-turbo-q5_0 (smaller)
+    # language: en                            # unset: detected per clip
+    # vocabulary: [Lever, Scion, podman, mTLS] # words Whisper should expect
+    # max_seconds: 300                        # one clip; at most 600
+    # gpu: true                               # false = --no-gpu
+    # port: 8448                              # host loopback only
+  allowed_users:
+    - operator@example.com
+    - {login: client@example.com, tier: contact, agents: [deal], voice: false}   # no dictation for this login
+```
+
+Every login gets dictation while it is on, operators and contacts alike, except an
+`allowed_users` entry with `voice: false`.
+
+### Setting it up
+
+1. **Install whisper.cpp's server yourself.** Lever does not build or install it. Build
+   `whisper-server` from whisper.cpp with GPU support: CUDA on a Linux host with an NVIDIA GPU,
+   Metal on Apple Silicon (its default there). Install it outside the tree, owned by you or root
+   and writable by no one else, for example under `/usr/local/bin`. Without a GPU it still works
+   with `gpu: false`, much more slowly.
+2. **Set `remote.voice`** as above.
+3. **Fetch the model:** `lever voice fetch` (or `lever voice fetch large-v3-turbo-q5_0`). It
+   downloads the model from Hugging Face at the commit lever pins and keeps it only if its size
+   and sha256 match. The proxy never downloads a model.
+4. **Apply:** `lever apply` restarts the proxy with the new config; after a fetch alone, restart it
+   with `lever stop` and `lever up`.
+5. **Check:** `lever doctor` shows the `voice`, `voice model` and `voice whisper-server` rows.
+
+### How it works
+
+- **The page.** The mic shows only when the agent list carries voice for the login (voice on, the
+  login not excluded, the model and program checked at the proxy's start) and the browser can
+  record. The page records with the browser's MediaRecorder, then decodes the clip, resamples it
+  to 16 kHz mono and encodes it as WAV, all in the browser, and posts it to
+  `POST /lever/api/voice/transcribe`. A timer shows the time recorded; recording stops by itself
+  at `max_seconds`. While lever transcribes, the page shows "Transcribing…". The browser asks for
+  the microphone the first time; the page needs the HTTPS front (a secure context).
+- **The host.** `lever remote serve` runs whisper-server as its child, bound to `127.0.0.1` on
+  `voice.port`, with the model loaded once. It restarts the child with a growing delay if it
+  exits, and stops it with the proxy. The child gets a reduced environment (what a GPU build
+  needs to find its libraries, no credentials), and its output is discarded, because whisper.cpp
+  prints what it transcribes. If something else already listens on the port, the proxy does not
+  start the child and sends it nothing.
+- **The route.** Only for a verified login, like the rest of the chat page. The page sends
+  `X-Lever-Voice: 1` with each clip and the proxy refuses a clip without it (a browser sends such
+  a header to another origin only after a CORS preflight, which the proxy never grants). The
+  body must be WAV in exactly the form the page writes (PCM, 16-bit, 16 kHz, mono, the plain
+  44-byte header), at most `max_seconds` long and `2 × 16000 × max_seconds` bytes plus 1 KiB. So
+  whisper.cpp only ever parses a header lever has checked byte for byte, never a compressed
+  file. The answer is `{"text": "..."}`, trimmed and cut to the chat message limit, or
+  `{"error": "<word>"}`: `voice-off` and `origin` (403), `bad-audio` (400 or 415), `too-long`
+  (413), `timeout` (408), `rate`, `quota` and `busy` (429), `unavailable` (503). With voice off,
+  every path under `/lever/api/voice/` is a 404.
+- **Limits.** One transcription at a time, and two more waiting: three slots in all, of which a
+  contact never takes the last, so an operator can always dictate. One clip at a time per
+  login. Per login, 30 clips an hour, 60 minutes of audio a day, and 60 attempts an hour
+  (refused ones count). These counts are kept in memory and start again when the proxy
+  restarts. Sending a clip may take one minute plus the time for the largest clip at 64 KiB/s.
+- **Read-aloud.** The page uses the browser's speech synthesis with **on-device voices only**
+  (those the browser marks as local): a voice that would send the text to a speech service is
+  never used, even if it is the browser's default. Before reading, the page removes markdown
+  formatting, reads a code block as "code block skipped" and a link as its text or host name.
+  Tapping the button again, or another message's, stops it. With more than one on-device voice,
+  the chat header offers a choice, which the browser keeps for that device. A device with no
+  on-device voice cannot read aloud.
+
+### Security notes
+
+- **Audio stays on your host and is never stored.** The clip goes from the browser to the
+  proxy, which holds it in memory, checks it, and passes it over loopback to whisper-server. No
+  audio and no transcript is written to the tree, the state directory, a ledger or a log. The
+  transcript goes back only to the login that sent the clip. The audit line
+  (`voice-transcribe` or `deny-voice` in `.lever-state/remote-audit.jsonl`) has the login, the
+  clip's length, the outcome and the latency; never the audio or the text.
+- **The jail cannot reach whisper-server.** It has no authentication of its own. It is safe
+  because it listens on host loopback only, the jail's egress rules drop every host loopback port
+  that is not on the allowlist, and config load refuses the voice port in `manager.allow_ports`
+  (and the `voice` row of `lever doctor` checks it again). Nothing new is mounted into an agent,
+  and no agent can call the route: it is the chat page's, behind the login gate. Other processes
+  on your host can reach the port, as with any loopback service.
+- **The model and the program are checked.** The proxy starts whisper-server only with a model
+  whose size and sha256 match lever's pinned table, and only if the program's real file is an
+  executable owned by you or root that no one else can change. Config load refuses a
+  `whisper_server` inside the tree. The vocabulary comes from `lever.yaml`, never from a file in
+  the tree, so an agent cannot steer the prompt.
+- **Whisper can invent text**, especially on silence or noise. That is why the text always goes
+  into the message box for review first.
+- **Doctor.** The `voice` row shows off, or on with the model, the clip limit, the language, the
+  GPU setting, the logins with no dictation, and the port; it fails if the jail could reach the
+  port. The `voice model` row fails when the model is missing, is not the pinned file, or lever's
+  table entry for it is not verified. The `voice whisper-server` row fails when the program is
+  missing, not executable, or writable by someone else.
 
 ## What this does NOT do
 

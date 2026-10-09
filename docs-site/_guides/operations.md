@@ -176,6 +176,7 @@ Everything is in `.lever-state/`, mode 0600. Two kinds of file differ in who bou
 | `agent-ledger/` | the agent messages to contacts the broker authorized, one file per contact (only with `remote.agent_messages`) | lever — each file past 4 MiB moves to `<file>.1` |
 | `files-ledger/` | every chat upload and share with its sha256, one file per agent (only with `remote.files`) | lever — each file past 8 MiB moves to `<file>.1`; a file shared in a dropped generation can no longer be downloaded |
 | `sessions.jsonl` | each agent's last fresh session start | lever — past 1 MiB it moves to `.1` |
+| `voice-models/` | the Whisper models `lever voice fetch` downloaded (only with `remote.voice`); never audio or a transcript | **you** — lever never removes a model; delete one you no longer use |
 
 The files lever bounds keep **one** previous generation: the current file plus its `.1`, so at most
 about 2 MiB each (8 MiB for `chat-verified.jsonl` and an `agent-ledger/` file, 16 MiB for a

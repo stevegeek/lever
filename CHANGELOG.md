@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.34.3] - 2026-10-09
+
 ### Fixed
 
 - **A link to the chat from another app no longer gets a 403.** The remote proxy refused every
@@ -37,6 +39,14 @@ version bump moves the block under the new version heading.
   (not signed in then)" and "the role is not bound yet". The fix text (in doctor and in the
   `apply` warning) now says that `lever apply` binds the role only while no container runs in the
   jail (the manager included), and to run `lever stop`, then `lever up` otherwise.
+
+### Upgrade
+
+- A plain upgrade: install the release, then `lever apply` (it restarts the remote proxy, which
+  serves the chat page) and `lever init`. No image rebuild and no fresh agents are needed: the
+  in-jail binaries have no code change. Reload the chat page once on each device to get the new
+  page script. As with 0.34.2, doctor's `agent lever version` finding for an image built from
+  0.34.1 or 0.34.2 is safe to ignore.
 
 ## [0.34.2] - 2026-10-09
 

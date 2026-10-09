@@ -27,6 +27,13 @@ version bump moves the block under the new version heading.
   top-level navigation, it answers a small HTML page (no script) with an "Open the chat" link to
   `/`, with the same status and decision and `Cache-Control: no-store`. Every other refusal is
   text as before.
+- **`lever doctor` no longer says a remote user "never signed in" after it did.** The `remote web
+  role` row reads the grant record, which says only what the hub reported at the last grant, and
+  doctor cannot ask the hub. A user who signed in after the grant still showed as "never signed
+  in", and the row said the web UI "will answer 403". It now says "no hub user at the last grant
+  (not signed in then)" and "the role is not bound yet". The fix text (in doctor and in the
+  `apply` warning) now says that `lever apply` binds the role only while no agent container runs,
+  and to run `lever stop`, then `lever up` when agents run.
 
 ## [0.34.2] - 2026-10-09
 

@@ -733,7 +733,7 @@ func TestCheckRemoteWebRole(t *testing.T) {
 		{"no record", true, nil, []string{"you@github"}, false, "no grant recorded", "lever apply"},
 		{"complete", true, &complete, []string{"you@github"}, true, "you@github", ""},
 		{"new user", true, &complete, []string{"you@github", "partner@github"}, false, "partner@github", "lever apply"},
-		{"pending user", true, &state.RemoteRoleRecord{Permissions: perms, Bound: map[string]string{}, Pending: []string{"you@github"}}, []string{"you@github"}, false, "never signed in", "sign in once"},
+		{"pending user", true, &state.RemoteRoleRecord{Permissions: perms, Bound: map[string]string{}, Pending: []string{"you@github"}}, []string{"you@github"}, false, "no hub user at the last grant (not signed in then): you@github", "`lever stop`, then `lever up`"},
 		{"drift", true, &state.RemoteRoleRecord{Permissions: []string{"agent.read"}, Bound: complete.Bound}, []string{"you@github"}, false, "agent.read", "lever apply"},
 		{"no ceiling (pre-ceiling record)", true, &uncapped, []string{"you@github"}, false, "can create projects: you@github", "lever apply"},
 		{"ceiling allows project.create", true, &loose, []string{"you@github"}, false, "project-create ceiling was written with", "lever apply"},

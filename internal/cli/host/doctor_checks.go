@@ -2337,7 +2337,8 @@ func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess
 	if !remote.Enabled {
 		return checkResult{name, true, "disabled", ""}
 	}
-	const fix = "run `lever apply` (it grants the role in the bootstrap dev-auth window)"
+	const fix = "run `lever apply` (it grants the role in the bootstrap dev-auth window, which opens only while no agent container runs; " +
+		"with agents running, `lever stop`, then `lever up`)"
 	rec, found, err := st.LoadRemoteRoleRecord()
 	if err != nil {
 		return checkResult{name, false, err.Error(), fix}
@@ -2370,7 +2371,10 @@ func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess
 		}
 	}
 	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, perms) {
-		return checkResult{name, false, detail, remoteRoleFix}
+		// Not "will answer 403": a pending user may have signed in since
+		// the grant, and the hub's default role may let it use some of the
+		// web UI. What is certain is that lever's role is not bound.
+		return checkResult{name, false, "the role is not bound yet: " + reason, remoteRoleFix}
 	}
 	return checkResult{name, false, detail, fix}
 }

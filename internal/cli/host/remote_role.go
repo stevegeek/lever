@@ -176,8 +176,11 @@ const contactRoleDescription = "Managed by lever: a remote contact may send dire
 func contactRolePermissions() []string { return []string{"agent.message"} }
 
 // remoteRoleFix is the one repair for a pending user: the hub user exists
-// only after its first sign-in, and only a dev-auth window can bind it.
-const remoteRoleFix = "sign in once from the phone, then run `lever apply`"
+// only after its first sign-in, and only a dev-auth window can bind it. The
+// window never opens beside a running container (windowBlocked), so with
+// agents running only `lever stop` + `lever up` binds it.
+const remoteRoleFix = "after the first sign-in from the phone, run `lever apply` if no agent runs, " +
+	"or `lever stop`, then `lever up` (apply binds the role only while no agent container runs)"
 
 // remoteRoleReason says why the remote web role grant must (re)run, or ""
 // when the record covers every email with the current permission set and a
@@ -218,7 +221,10 @@ func remoteRoleReason(rec state.RemoteRoleRecord, found bool, emails, contacts, 
 	case len(uncapped) > 0:
 		return remoteCeilingMissing + ": " + strings.Join(uncapped, ", ")
 	case len(pending) > 0:
-		return "no hub user yet (never signed in): " + strings.Join(pending, ", ")
+		// Pending is what the hub said at the last grant. lever cannot ask
+		// it again without a dev-auth window, so a user who signed in since
+		// still reads as pending until the next grant binds it.
+		return "no hub user at the last grant (not signed in then): " + strings.Join(pending, ", ")
 	}
 	return ""
 }

@@ -56,7 +56,7 @@ Linux/Lima path is validated end-to-end. `lever stop` -> `lever up` resumes the 
 `remote:` loads on both backends; on Lima it is not yet live-validated (see the
 [remote access guide](/remote-access/#lima)).
 
-Prebuilt `lever`, `lever-tool-github` and `lever-tool-fizzy` binaries ship per release
+Prebuilt `lever`, `lever-tool-github`, `lever-tool-fizzy` and `lever-tool-whisper` binaries ship per release
 (darwin/linux, amd64/arm64). A Go
 1.26+ toolchain is required at runtime with `scion.version`/`scion.source` (Scion
 is compiled at `lever apply`); `scion.binary` needs none. The agent image is built

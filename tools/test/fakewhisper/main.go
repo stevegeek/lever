@@ -2,7 +2,7 @@
 // whisper-server: it takes the flags lever passes (internal/voice/whisper.go)
 // and answers POST /inference with a fixed transcript that names what it
 // was sent, so a test can check the form without a model or a GPU. Never
-// part of a release (.goreleaser.yaml builds ./cmd/lever only).
+// part of a release (.goreleaser.yaml builds only binaries under ./cmd).
 package main
 
 import (

@@ -442,8 +442,8 @@ resumes the record on the image it was created with.
 
 ## Upgrading lever
 
-1. Pull and rebuild: `cd lever_to && make all` (the host `lever`, `lever-tool-github` and
-   `lever-tool-fizzy`), and if the agent-side binaries changed, rebuild the agent image
+1. Pull and rebuild: `cd lever_to && make all` (the host `lever`, `lever-tool-github`,
+   `lever-tool-fizzy` and `lever-tool-whisper`), and if the agent-side binaries changed, rebuild the agent image
    (`make lever-image`, or `make lever-image-bins` + your instance's own image build), then
    `lever apply` to load it (or re-save it over the `image_tar` archive on a Docker-less host,
    then `lever apply`). The manager runs a new image only after `lever up --fresh` (back up its

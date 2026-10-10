@@ -50,7 +50,7 @@ graph TD
 | Entry point | the `lever` binary | a thin personal CLI that delegates orchestration to `lever` |
 | Notification bridge | the mechanism (event stream → sink) | the **sink path** (the `--events-file` flag the manager passes to `lever-manager watch`, not a config key) + what consumes it |
 | Conventions | documented patterns (see below), not enforced code | how you actually organise your tree |
-| Tools | no personal tools; only generic broker tools (`lever-tool-github`, `lever-tool-fizzy`, the reference `lever-tool-db`) | your own (task tracking, content, domain logic, …) |
+| Tools | no personal tools; only generic broker tools (`lever-tool-github`, `lever-tool-fizzy`, `lever-tool-whisper`, the reference `lever-tool-db`) | your own (task tracking, content, domain logic, …) |
 | Knowledge base | none | all of it |
 
 ## The boundary rules

@@ -16,8 +16,9 @@ make all
 This builds the host binaries into `~/.local/bin` (make sure that's on your `PATH`):
 
 - **`lever`** (host control plane).
-- **`lever-tool-github`** and **`lever-tool-fizzy`**, optional host-side broker tools (see the
-  [github tool](/github-tool/) and the [fizzy tool](/fizzy-tool/)).
+- **`lever-tool-github`**, **`lever-tool-fizzy`** and **`lever-tool-whisper`**, optional host-side
+  broker tools (see the [github tool](/github-tool/), the [fizzy tool](/fizzy-tool/) and the
+  [whisper tool](/whisper-tool/)).
 
 The in-jail orchestration binary, **`lever-manager`**, isn't built here; it's baked into your agent
 image. `make lever-image-bins` cross-compiles `lever-manager` (alongside `lever-agent` and

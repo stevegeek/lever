@@ -1472,7 +1472,8 @@ synthesis API and at least one on-device voice.
 5. **Reload:** `lever reload` starts the tool with the broker and restarts the proxy with the new
    config. A model fetched later is picked up by the running tool within a minute.
 6. **Check:** `lever doctor` shows the `voice`, `voice tool` and `voice model` rows, and the
-   tool's own row.
+   tool's own row. The `voice tool` and `voice model` rows also run with `remote.voice` off, for a
+   whisper tool that only agents use.
 
 ### How it works
 
@@ -1496,7 +1497,10 @@ synthesis API and at least one on-device voice.
   child, sends it nothing, and the page shows no mic. On Linux the tool also checks, before it
   sends anything, that the listener is its own child's (a process that bound the port while the
   model loaded is refused); on macOS it cannot tell. The tool checks each clip again and lets one
-  clip at a time reach whisper-server, dictation before any agent's.
+  clip at a time reach whisper-server. Dictation goes first in queue order: a waiting dictation
+  clip is taken before any waiting agent clip, but a clip already running is never interrupted, so
+  dictation can wait for up to one agent clip (at most the tool's `-agent-max-seconds` long, 120 s
+  by default).
 - **Stopping.** The broker stops the tool with SIGTERM, and the tool stops its child before it
   exits. On Linux the child also dies with the tool, even when the tool is killed. On macOS a
   tool killed hard (the broker sends SIGKILL after 1.5 s, and `lever stop` kills a broker that is
@@ -1514,12 +1518,16 @@ synthesis API and at least one on-device voice.
   every path under `/lever/api/voice/` is a 404.
 - **Limits.** One transcription at a time, and two more waiting: three slots in all, of which a
   contact never takes the last, so an operator can always dictate. When a browser gives up, the
-  proxy closes its request to the tool, which closes its request to whisper-server, which stops
-  work on that clip, and the slot frees. One clip at a time per login. Per login, 30 clips an
-  hour, 60 minutes of audio a day, and 60 attempts an hour (clips that fail their checks count as
-  attempts). A clip that never reached whisper-server (the tool or its child was down, the tool
-  refused the clip, or the browser gave up before the clip's turn) does not count against the
-  clips or the minutes; one that timed out or failed in whisper-server does. These counts are kept
+  proxy closes its request to the tool: a clip still waiting in the tool's queue leaves it, and a
+  clip being transcribed ends the tool's request to whisper-server, which stops work on it; the
+  slot frees. One clip at a time per login. Per login, 30 clips an hour, 60 minutes of audio a
+  day, and 60 attempts an hour (clips that fail their checks count as attempts). The rule for the
+  clips and the minutes: a clip counts once the tool has told the proxy that its transcription
+  started (the tool sends that signal when the clip leaves its queue, just before it hands the
+  clip to whisper-server). A clip given up before that does not count: the tool or its child was
+  down, the tool refused the clip, or the browser gave up (or the proxy's wait ran out) while the
+  clip waited for its turn in the proxy or in the tool's queue. A clip whose transcription started
+  counts even if it then failed, timed out or the browser gave up. These counts are kept
   in memory and start again when the proxy restarts. Whisper's known non-speech markers (such as
   `[BLANK_AUDIO]`, `[MUSIC]`, `(inaudible)`) are removed from the text; other brackets, such as
   dictated code, stay. Sending a clip may take one minute plus the time for the largest clip at
@@ -1546,7 +1554,10 @@ synthesis API and at least one on-device voice.
   `0700` (it refuses a directory that is a symbolic link, belongs to someone else or is open to
   other users), so only processes of your user reach it; config load refuses it inside the tree,
   and the jail reaches no host Unix socket. The tool's TCP backend is reached through the broker,
-  as for every first-party tool, and offers agents only `transcribe`, and only with a grant.
+  as for every first-party tool, and offers agents only `transcribe`, and only with a capability.
+  Any agent with a whisper `transcribe` capability (obtained, or delegated to it) reads files from
+  one folder, the tree root's `.lever-files/whisper/`, which only the manager can write: grant and
+  delegate it only to agents that may read what the manager puts there.
   whisper-server has no authentication of its own: it is safe because it listens on host
   loopback only, the jail's egress rules drop every host loopback port that is not on the
   allowlist, and config load refuses `-whisper-port` in `manager.allow_ports`, on the broker's
@@ -1576,12 +1587,15 @@ synthesis API and at least one on-device voice.
   draft is kept in the browser's local storage for that chat until it is sent or cleared. The
   audio is never stored in the browser. A crash of whisper-server could leave a core dump with
   audio in it, under your system's core dump settings.
-- **Doctor.** The `voice` row shows off, or on with the socket, the clip limit, the whisper tool
-  and its port, and the logins with no dictation; it fails if the jail could reach the port. The
-  `voice tool` row asks the socket for the tool's health: not running, running with
-  whisper-server not ready (starting, or the program or the model failed a check; the reason is
-  in the tool's log), or ready with the model. The `voice model` row fails when the model is
-  missing from `-models`, is not the pinned file, or lever's table entry for it is not verified.
+- **Doctor.** The `voice` row is about dictation: off, or on with the socket, the clip limit, the
+  whisper tool and its port, and the logins with no dictation; it fails if the jail could reach
+  the port. The `voice tool` and `voice model` rows run for any configured whisper tool, with
+  `remote.voice` on or off: with it on they check the tool that serves `remote.voice.socket`, with
+  it off the first whisper tool in `broker.tools` (agents only). The `voice tool` row asks the
+  tool's dictation socket for its health: not running, running with whisper-server not ready
+  (starting, or the program or the model failed a check; the reason is in the tool's log), or
+  ready with the model. The `voice model` row fails when the model is missing from `-models`, is
+  not the pinned file, or lever's table entry for it is not verified.
 
 ## What this does NOT do
 

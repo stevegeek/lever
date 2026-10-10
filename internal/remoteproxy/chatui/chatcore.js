@@ -521,7 +521,7 @@ export function resampledLength(inLength, inRate, outRate = VOICE_RATE) {
 }
 
 // encodeWAV is samples (floats in [-1, 1]) as a WAV file: the canonical
-// 44-byte header the proxy checks byte for byte (voice.go checkWAV), then
+// 44-byte header the proxy checks byte for byte (voice.CheckWAV), then
 // PCM s16le, mono, at rate.
 export function encodeWAV(samples, rate = VOICE_RATE) {
   const n = samples.length;

@@ -189,19 +189,25 @@ replaceable) by the agent. Config load therefore refuses these paths when they r
 | Kind | Paths | Inside `tree` |
 |---|---|---|
 | Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
-| Private host path | in a tool `command`, the value of `-models` and `-dictate-socket` (`lever-tool-whisper`'s model directory and dictation socket); `remote.voice.socket` while voice is on | always refused: an agent could replace the model whisper-server loads, or reach or replace the socket, and a `manager.read_only` mount does not excuse it |
-| Program outside the tree | in a tool `command`, the value of `-server` (the `whisper-server` program `lever-tool-whisper` runs) | always refused: a `manager.read_only` mount does not excuse it |
+| Private host path | in a `lever-tool-whisper` `command`, the value of `-models` and `-dictate-socket` (its model directory and dictation socket); `remote.voice.socket` while voice is on | always refused: an agent could replace the model whisper-server loads, or reach or replace the socket, and a `manager.read_only` mount does not excuse it |
+| Program outside the tree | in a `lever-tool-whisper` `command`, the value of `-server` (the `whisper-server` program it runs) | always refused: a `manager.read_only` mount does not excuse it |
 | Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`), also after an `env` prefix (its flags and `NAME=value` words are skipped); the value of `-fizzy`; the code an interpreter runs (`python`, `ruby`, `node`, `perl`, `sh`, `bash`, `dash`, `zsh`, `deno`, `bun`, a version suffix such as `python3.12` allowed): the script, which is the first argument after the leading flags (and after `run` for `deno` and `bun`; a relative one after `env -C dir` resolves against `dir`), the value of every value-taking flag before it (`python -W`, `node --env-file`, `deno --config`, `bun --cwd` and the like: a value read as the script must not hide the real one), the value of a flag that loads code (`ruby -I`/`-r`, `perl -I`, `node --require`/`--import`/`--loader`, `bun --preload`), and the paths in inline code (`python -c`; `ruby`/`perl`/`node -e`; for the `sh` family, the command string of `-c` in any option group such as `-ec`, `-ce` or `-euo pipefail -c`, and, as a fallback, the word after any `-c` group anywhere in the command) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
 
 **This is a best-effort guard, not a sandbox.** Lever cannot know what an unknown flag's value is: a
 secret, a program, or a data file the agent is meant to edit (the example todo tool's `-csv`). So it
 checks only the command itself, the path flags of the tools it ships (above; `-tree`, `-dsn` and
-`-csv` are read and deliberately not checked as paths) and interpreter scripts. These flag names
-are read in every supervised tool's command, so your own tool's `-server` or `-models` is checked
-the same way. For `lever-tool-whisper` (a command naming `-dictate-socket` or `-whisper-port`),
-config load also refuses a `-whisper-port` the jail may reach (`manager.allow_ports`, the broker's
+`-csv` are read and deliberately not checked as paths) and interpreter scripts. `-app-key`,
+`-token-file`, `-state` and `-fizzy` are read in every supervised tool's command, so your own
+tool's `-state` is checked the same way. `lever-tool-whisper`'s flags (`-server`, `-models`,
+`-dictate-socket`, `-model`, `-whisper-port`, `-max-seconds`, `-agent-max-seconds`) are read only in
+the command of a whisper tool: one whose program, after an `env` prefix, has the base name
+`lever-tool-whisper`. Another tool's `-server` or `-models` means something else and is not read.
+A word that starts with `-` is never taken as the previous flag's value, so `-model -state x` still
+checks `x`. For a whisper tool, config load also requires `-tree` and refuses one that is not the
+instance's tree, checks `-max-seconds` (1 to 600) and `-agent-max-seconds` (1 to `-max-seconds`), and
+refuses a `-whisper-port` the jail may reach (`manager.allow_ports`, the broker's
 jail port, the login port) or that collides with the broker's admin port, the remote proxy's port,
-port 8446 or a tool backend, and a `-tree` that is not the instance's tree. It does not check any other
+port 8446 or a tool backend. It does not check any other
 flag or argument. **For your own tool, keep its secrets and the programs it runs outside the tree
 yourself.** Only the leading flags of an interpreter are read: what follows the script is the
 script's own business. Lever knows which of an interpreter's flags take a value from a fixed table; a

@@ -61,8 +61,9 @@ func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger"
 func (s State) FilesLedger() string { return filepath.Join(s.Dir, "files-ledger") }
 
 // VoiceModels holds the pinned Whisper models `lever voice fetch` downloads
-// (0700, each file 0600); the remote proxy checks one before it starts
-// whisper-server with it. Never audio or a transcript.
+// when no lever-tool-whisper entry names its own -models (0700, each file
+// 0600); a tool whose -models points here checks the model before each
+// start of its whisper-server child. Never audio or a transcript.
 func (s State) VoiceModels() string { return filepath.Join(s.Dir, "voice-models") }
 
 // Sessions is the record of each agent's last fresh session start and the

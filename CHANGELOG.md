@@ -19,9 +19,10 @@ version bump moves the block under the new version heading.
   sent by itself. Audio and transcripts are never stored; the audit line has the login, the clip
   length, the outcome and the latency only. Per login: 30 clips an hour, 60 audio-minutes a day;
   three slots, of which a contact never takes the last; `voice: false` on an `allowed_users`
-  entry turns it off for that login. A clip that never reached whisper-server does not count
-  against the limits. While voice is on, each agent message also gets a speaker button that reads
-  it aloud with the browser's on-device voices only (`remote.voice.read_aloud: false` turns it
+  entry turns it off for that login. A clip given up before the tool reports that its
+  transcription started (including one canceled while it waited in the tool's queue) does not
+  count against the limits. While voice is on, each agent message also gets a speaker button that
+  reads it aloud with the browser's on-device voices only (`remote.voice.read_aloud: false` turns it
   off). `remote.voice` has only `enabled`, `socket`, `max_seconds` and `read_aloud`.
 - **`lever-tool-whisper`, a first-party broker tool for speech to text.** It runs whisper.cpp's
   `whisper-server` (which you install yourself, outside the tree; CUDA or Metal) as its child on
@@ -29,22 +30,30 @@ version bump moves the block under the new version heading.
   sha256 before every start, every route under a random path prefix that is new at each start
   and never logged, its output discarded, a reduced environment, and, on Linux, Pdeathsig and a
   check that the port's listener is its own child. Settings are flags in its `command`
-  (`-server`, `-models`, `-model`, `-language`, `-vocabulary`, `-gpu`, `-max-seconds`). Config
-  load refuses `-server`, `-models` and `-dictate-socket` inside the tree (no `read_only`
-  excuse), a `-whisper-port` the jail may reach or that collides with lever's own listeners or a
-  tool backend, and a `remote.voice.socket` that is not a whisper tool's `-dictate-socket`.
+  (`-server`, `-models`, `-model`, `-language`, `-vocabulary`, `-gpu`, `-max-seconds`,
+  `-agent-max-seconds`). Config
+  load recognises it by its program's base name and refuses `-server`, `-models` and
+  `-dictate-socket` inside the tree (no `read_only` excuse), a missing `-tree`, a `-max-seconds`
+  or `-agent-max-seconds` out of range, a `-whisper-port` the jail may reach or that collides with
+  lever's own listeners or a tool backend, and a `remote.voice.socket` that is not a whisper
+  tool's `-dictate-socket`.
   Optionally, with an `obtain` grant for `{tool: whisper, op: transcribe}`, an agent can
-  transcribe a canonical WAV file from `/workspace/.lever-files/whisper/` (read with no link
-  followed; 30 clips an hour and 60 audio-minutes a day per caller; dictation goes first). New
+  transcribe a canonical WAV file from the tree root's `.lever-files/whisper/`, which only the
+  manager can write, whoever the caller is (read with no link followed; at most `-agent-max-seconds`, default 120; 30 clips an hour and 60 audio-minutes a
+  day per caller; dictation goes first in the queue, but a running clip is never interrupted). New
   `lever voice fetch` downloads a model into the tool's `-models` directory from Hugging Face at
   a pinned commit and keeps it only if its size and sha256 match; the tool never downloads and
-  picks up a fetched model within a minute. `lever doctor` gains `voice`, `voice tool` and
-  `voice model` rows. Shipped in releases and built by `make install`.
+  picks up a fetched model within a minute. `lever doctor` gains a `voice` row for dictation.
+  Shipped in releases and built by `make install`.
 
 ### Changed
 
-- **The broker stops its tools with SIGTERM and 1.5 s of grace before SIGKILL** (it sent SIGKILL
-  at once), so a tool can stop a child of its own.
+- **The broker stops every supervised tool with SIGTERM and 1.5 s of grace before SIGKILL** (it
+  sent SIGKILL at once), so a tool can stop a child of its own.
+- **`lever doctor` gains `voice tool` and `voice model` rows** that check any configured
+  `lever-tool-whisper` entry (its dictation socket's health, and its model's pinned size and
+  sha256), also with `remote.voice` off, when only agents use the tool. The `voice` row stays
+  about dictation.
 
 ## [0.34.3] - 2026-10-09
 

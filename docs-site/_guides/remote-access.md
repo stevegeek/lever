@@ -1402,6 +1402,11 @@ and the text lands in the message box at the cursor. **It is never sent by itsel
 reads it, corrects what Whisper got wrong, and presses Send. What is sent is an ordinary typed
 message, with the usual chat ledger and provenance.
 
+The transcription runs in the first-party broker tool [`lever-tool-whisper`](/whisper-tool/),
+which runs whisper.cpp's `whisper-server` as its child. The proxy hands each clip to the tool over
+a Unix socket on the host that only your user can reach. It does not go through the broker, and
+agents cannot reach the socket.
+
 While voice is on, each agent message also has a speaker button that reads it aloud with the
 browser's own on-device speech synthesis (`read_aloud: false` turns that off). With voice off,
 the page shows neither.
@@ -1411,22 +1416,16 @@ remote:
   landing: chat
   voice:
     enabled: true
-    whisper_server: /usr/local/bin/whisper-server   # you install it; outside the tree
-    # model: large-v3-turbo                   # or large-v3-turbo-q5_0 (smaller)
-    # language: en                            # unset: detected per clip
-    # vocabulary: [Lever, Scion, podman, mTLS] # words Whisper should expect
-    # max_seconds: 300                        # one clip; at most 600
-    # gpu: true                               # false = --no-gpu
+    socket: /home/you/my-instance/.lever-state/whisper/dictate.sock   # the tool's -dictate-socket
+    # max_seconds: 300                        # one clip; at most 600, and at most the tool's -max-seconds
     # read_aloud: true                        # the speaker button on agent messages
-    # port: 8448                              # host loopback only; one per instance on a host
   allowed_users:
     - operator@example.com
     - {login: client@example.com, tier: contact, agents: [deal], voice: false}   # no dictation for this login
 ```
 
 Every login gets dictation and read-aloud while voice is on, operators and contacts alike,
-except an `allowed_users` entry with `voice: false`. Two instances on one host each need their
-own `voice.port`, as they need their own `remote.port`.
+except an `allowed_users` entry with `voice: false`.
 
 **Browsers.** Dictation needs MediaRecorder and OfflineAudioContext: current Chrome, Edge, Firefox,
 and Safari 14.1 or later (iOS included). The microphone needs a secure context (the HTTPS front);
@@ -1439,39 +1438,70 @@ synthesis API and at least one on-device voice.
    `whisper-server` from whisper.cpp with GPU support: CUDA on a Linux host with an NVIDIA GPU,
    Metal on Apple Silicon (its default there). Install it outside the tree, owned by you or root
    and writable by no one else, for example under `/usr/local/bin`. Without a GPU it still works
-   with `gpu: false`, much more slowly. The model needs disk space (about 1.6 GB for
+   with `-gpu=false`, much more slowly. The model needs disk space (about 1.6 GB for
    `large-v3-turbo`, 0.55 GB for `large-v3-turbo-q5_0`) and about as much GPU memory, or memory
-   with `gpu: false`.
-2. **Set `remote.voice`** as above.
-3. **Fetch the model:** `lever voice fetch` (or `lever voice fetch large-v3-turbo-q5_0`). It
-   downloads the model from Hugging Face at the commit lever pins and keeps it only if its size
-   and sha256 match. The proxy never downloads a model.
-4. **Apply:** `lever apply` restarts the proxy with the new config; after a fetch alone, restart it
-   with `lever stop` and `lever up`.
-5. **Check:** `lever doctor` shows the `voice`, `voice model` and `voice whisper-server` rows.
+   with `-gpu=false`.
+2. **Add the tool to `broker.tools`.** `make install` builds `lever-tool-whisper` next to
+   `lever`. All paths are absolute; `-models`, `-server` and `-dictate-socket` must be outside the
+   tree. The [whisper tool guide](/whisper-tool/) lists every flag.
+
+   ```yaml
+   broker:
+     tools:
+       - name: whisper
+         command: [/home/you/.local/bin/lever-tool-whisper,
+                   -tree, /home/you/my-instance/workspace,
+                   -models, /home/you/my-instance/.lever-state/voice-models,
+                   -server, /usr/local/bin/whisper-server,
+                   -model, large-v3-turbo,
+                   -whisper-port, "8448",
+                   -dictate-socket, /home/you/my-instance/.lever-state/whisper/dictate.sock]
+         backend: 127.0.0.1:3212
+         operations:
+           - {name: transcribe, params: [file]}
+   ```
+
+   The `transcribe` operation must be listed (the tool registers it), but no agent can use it
+   without an `obtain` grant: see [agents](/whisper-tool/#agents-the-transcribe-operation).
+3. **Set `remote.voice`** as above, with `socket` equal to the tool's `-dictate-socket`. Config
+   load refuses a `socket` that is no whisper tool's `-dictate-socket`.
+4. **Fetch the model:** `lever voice fetch` (or `lever voice fetch large-v3-turbo-q5_0`). It
+   downloads into the tool's `-models` directory, from Hugging Face at the commit lever pins, and
+   keeps the file only if its size and sha256 match. Neither the tool nor the proxy ever
+   downloads a model.
+5. **Reload:** `lever reload` starts the tool with the broker and restarts the proxy with the new
+   config. A model fetched later is picked up by the running tool within a minute.
+6. **Check:** `lever doctor` shows the `voice`, `voice tool` and `voice model` rows, and the
+   tool's own row.
 
 ### How it works
 
 - **The page.** The mic shows only when the agent list carries voice for the login (voice on, the
-  login not excluded, the model and program checked at the proxy's start) and the browser can
-  record. The page records with the browser's MediaRecorder, then decodes the clip, resamples it
-  to 16 kHz mono and encodes it as WAV, all in the browser, and posts it to
-  `POST /lever/api/voice/transcribe`. A timer shows the time recorded; recording stops by itself
-  at `max_seconds`. While lever transcribes, the page shows "Transcribing…". The browser asks for
-  the microphone the first time; the page needs the HTTPS front (a secure context).
-- **The host.** `lever remote serve` runs whisper-server as its child, bound to `127.0.0.1` on
-  `voice.port`, with the model loaded once and every route under a random path prefix that is
-  new at each proxy start and never logged. It restarts the child with a growing delay if it
-  exits (checking the program and the model's sha256 again first), and stops it with the
-  proxy. The child runs in the model directory, inside the state directory. The child gets a reduced environment (what a GPU build
-  needs to find its libraries, no credentials), and its output is discarded, because whisper.cpp
-  prints what it transcribes. If something else already listens on the port, the proxy does not
-  start the child, sends it nothing, and the page shows no mic. On Linux the proxy also checks,
-  before it sends anything, that the listener is its own child's (a process that bound the port
-  while the model loaded is refused); on macOS it cannot tell. On Linux the child also dies with
-  the proxy, even when the proxy is killed. On macOS a proxy killed hard (`lever stop` sends
-  SIGKILL after 2 s) can leave the child running and holding the port, and dictation then stays
-  off: find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN` and stop it, then restart the proxy.
+  login not excluded, and the tool answering ready on its socket; the proxy asks at most every 5
+  seconds) and the browser can record. The page records with the browser's MediaRecorder, then
+  decodes the clip, resamples it to 16 kHz mono and encodes it as WAV, all in the browser, and
+  posts it to `POST /lever/api/voice/transcribe`. A timer shows the time recorded; recording
+  stops by itself at `max_seconds`. While lever transcribes, the page shows "Transcribing…". The
+  browser asks for the microphone the first time; the page needs the HTTPS front (a secure
+  context).
+- **The proxy.** It checks the login, the request and the clip (below), then posts the clip to
+  the tool's socket and returns the text. It runs no transcriber of its own.
+- **The tool.** `lever-tool-whisper` runs whisper-server as its child, bound to `127.0.0.1` on
+  `-whisper-port`, with the model loaded once and every route under a random path prefix that is
+  new at each tool start and never logged. Before each start of the child it checks the program
+  and the model's size and sha256 again; it restarts the child with a growing delay if it exits.
+  The child runs in the `-models` directory, gets a reduced environment (what a GPU build needs to
+  find its libraries, no credentials), and its output is discarded, because whisper.cpp prints
+  what it transcribes. If something else already listens on the port, the tool does not start the
+  child, sends it nothing, and the page shows no mic. On Linux the tool also checks, before it
+  sends anything, that the listener is its own child's (a process that bound the port while the
+  model loaded is refused); on macOS it cannot tell. The tool checks each clip again and lets one
+  clip at a time reach whisper-server, dictation before any agent's.
+- **Stopping.** The broker stops the tool with SIGTERM, and the tool stops its child before it
+  exits. On Linux the child also dies with the tool, even when the tool is killed. On macOS a
+  tool killed hard (the broker sends SIGKILL after 1.5 s, and `lever stop` kills a broker that is
+  slow to exit) can leave the child running and holding the port, and dictation then stays off:
+  find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN` and stop it, then `lever reload`.
 - **The route.** Only for a verified login, like the rest of the chat page. The page sends
   `X-Lever-Voice: 1` with each clip and the proxy refuses a clip without it (a browser sends such
   a header to another origin only after a CORS preflight, which the proxy never grants). The
@@ -1484,14 +1514,16 @@ synthesis API and at least one on-device voice.
   every path under `/lever/api/voice/` is a 404.
 - **Limits.** One transcription at a time, and two more waiting: three slots in all, of which a
   contact never takes the last, so an operator can always dictate. When a browser gives up, the
-  proxy closes its request to whisper-server, which stops work on that clip, and the slot frees.
-  One clip at a time per login. Per login, 30 clips an hour, 60 minutes of audio a day, and 60
-  attempts an hour (clips that fail their checks count as attempts). A clip that never reached
-  whisper-server (it was down, or the browser gave up before the clip's turn) does not count
-  against the clips or the minutes; one that timed out or failed in whisper-server does. These
-  counts are kept in memory and start again when the proxy restarts. Whisper's known non-speech
-  markers (such as `[BLANK_AUDIO]`, `[MUSIC]`, `(inaudible)`) are removed from the text; other
-  brackets, such as dictated code, stay. Sending a clip may take one minute plus the time for the largest clip at 64 KiB/s.
+  proxy closes its request to the tool, which closes its request to whisper-server, which stops
+  work on that clip, and the slot frees. One clip at a time per login. Per login, 30 clips an
+  hour, 60 minutes of audio a day, and 60 attempts an hour (clips that fail their checks count as
+  attempts). A clip that never reached whisper-server (the tool or its child was down, the tool
+  refused the clip, or the browser gave up before the clip's turn) does not count against the
+  clips or the minutes; one that timed out or failed in whisper-server does. These counts are kept
+  in memory and start again when the proxy restarts. Whisper's known non-speech markers (such as
+  `[BLANK_AUDIO]`, `[MUSIC]`, `(inaudible)`) are removed from the text; other brackets, such as
+  dictated code, stay. Sending a clip may take one minute plus the time for the largest clip at
+  64 KiB/s.
 - **Read-aloud.** The page uses the browser's speech synthesis with **on-device voices only**
   (those the browser marks as local): a voice that would send the text to a speech service is
   never used, even if it is the browser's default. Before reading, the page removes markdown
@@ -1503,43 +1535,53 @@ synthesis API and at least one on-device voice.
 ### Security notes
 
 - **Audio stays on your host and is never stored.** The clip goes from the browser to the
-  proxy, which holds it in memory, checks it, and passes it over loopback to whisper-server. No
-  audio and no transcript is written to the tree, the state directory, a ledger or a log. The
-  transcript goes back only to the login that sent the clip. The audit line
-  (`voice-transcribe` or `deny-voice` in `.lever-state/remote-audit.jsonl`) has the login, the
-  clip's length, the outcome and the latency; never the audio or the text.
-- **The jail cannot reach whisper-server.** It has no authentication of its own. It is safe
-  because it listens on host loopback only, the jail's egress rules drop every host loopback port
-  that is not on the allowlist, and config load refuses the voice port in `manager.allow_ports`
-  (and the `voice` row of `lever doctor` checks it again). Nothing new is mounted into an agent,
-  and no agent can call the route: it is the chat page's, behind the login gate.
+  proxy, which holds it in memory, checks it, and passes it over the socket to the tool, which
+  passes it over loopback to whisper-server. No audio and no transcript is written to the tree,
+  the state directory, a ledger or a log. The transcript goes back only to the login that sent
+  the clip. The proxy's audit line (`voice-transcribe` or `deny-voice` in
+  `.lever-state/remote-audit.jsonl`) has the login, the clip's length, the outcome and the
+  latency, and the tool's log line has the length, the outcome and the latency; never the audio or
+  the text.
+- **Who reaches what.** The dictation socket is created `0600` in a directory the tool creates
+  `0700` (it refuses a directory that is a symbolic link, belongs to someone else or is open to
+  other users), so only processes of your user reach it; config load refuses it inside the tree,
+  and the jail reaches no host Unix socket. The tool's TCP backend is reached through the broker,
+  as for every first-party tool, and offers agents only `transcribe`, and only with a grant.
+  whisper-server has no authentication of its own: it is safe because it listens on host
+  loopback only, the jail's egress rules drop every host loopback port that is not on the
+  allowlist, and config load refuses `-whisper-port` in `manager.allow_ports`, on the broker's
+  jail and admin ports, the login and proxy ports, port 8446 and every tool backend (and the
+  `voice` row of `lever doctor` checks it again). Nothing new is mounted into an agent, and no
+  agent can call the dictation route: it is the chat page's, behind the login gate.
 - **Other host processes and web pages.** whisper-server allows cross-origin requests from any
   site and has a `/load` route that loads a model from any path it is given. Lever therefore puts
-  every route under a random 128-bit path prefix, new at each proxy start: a web page open on the
+  every route under a random 128-bit path prefix, new at each tool start: a web page open on the
   host, or a name rebound to `127.0.0.1`, finds only 404s. The prefix is not a defence against
   other users of the host: whisper-server takes it on its command line, so anyone who can list
   processes can read it, and any local user can connect to a loopback port (and, on macOS, could
   bind it first while the model loads and receive clips). With the prefix, such a user can make
   whisper-server load a model file of their choice, as your user. Run voice only on a host where
   you trust every local user, as for every loopback service. A second instance's
-  `manager.allow_ports` on the same host is not checked against this instance's voice port: keep
-  the ports distinct.
-- **The model and the program are checked.** The proxy starts whisper-server only with a model
+  `manager.allow_ports` on the same host is not checked against this instance's `-whisper-port`:
+  keep the ports distinct.
+- **The model and the program are checked.** The tool starts whisper-server only with a model
   whose size and sha256 match lever's pinned table, and only if the program's real file is an
-  executable owned by you or root that no one else can change. Config load refuses a
-  `whisper_server` inside the tree. The vocabulary comes from `lever.yaml`, never from a file in
-  the tree, so an agent cannot steer the prompt.
+  executable owned by you or root that no one else can change, and still the same real file as at
+  the tool's first good check. Config load and the tool refuse `-server`, `-models` and `-dictate-socket`
+  inside the tree; a `manager.read_only` entry does not excuse them. The vocabulary is a flag in
+  `lever.yaml`, never read from a file in the tree, so an agent cannot steer the prompt.
 - **Whisper can invent text**, especially on silence or noise. That is why the text always goes
   into the message box for review first.
 - **In the browser.** The transcript is text in the message box: like typed text, an unsent
   draft is kept in the browser's local storage for that chat until it is sent or cleared. The
   audio is never stored in the browser. A crash of whisper-server could leave a core dump with
   audio in it, under your system's core dump settings.
-- **Doctor.** The `voice` row shows off, or on with the model, the clip limit, the language, the
-  GPU setting, the logins with no dictation, and the port; it fails if the jail could reach the
-  port. The `voice model` row fails when the model is missing, is not the pinned file, or lever's
-  table entry for it is not verified. The `voice whisper-server` row fails when the program is
-  missing, not executable, or writable by someone else.
+- **Doctor.** The `voice` row shows off, or on with the socket, the clip limit, the whisper tool
+  and its port, and the logins with no dictation; it fails if the jail could reach the port. The
+  `voice tool` row asks the socket for the tool's health: not running, running with
+  whisper-server not ready (starting, or the program or the model failed a check; the reason is
+  in the tool's log), or ready with the model. The `voice model` row fails when the model is
+  missing from `-models`, is not the pinned file, or lever's table entry for it is not verified.
 
 ## What this does NOT do
 

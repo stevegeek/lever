@@ -12,21 +12,39 @@ version bump moves the block under the new version heading.
 - **Dictation and read-aloud on the chat page (`remote.voice`, off by default).** With
   `landing: chat` and `remote.voice.enabled`, the chat page has a mic beside the message box: the
   clip is resampled to 16 kHz mono WAV in the browser, posted to the new
-  `POST /lever/api/voice/transcribe` route (`X-Lever-Voice: 1` required) and transcribed by a
-  whisper.cpp `whisper-server` that `lever remote serve` runs as its child on `127.0.0.1`
-  (`remote.voice.port`, default 8448, refused in `manager.allow_ports`). The text lands in the
-  message box for review and is never sent by itself. Audio and transcripts are never stored;
-  the audit line has the login, the clip length, the outcome and the latency only. Per login:
-  30 clips an hour, 60 audio-minutes a day; three slots, of which a contact never takes the
-  last; `voice: false` on an `allowed_users` entry turns it off for that login. You install
-  whisper-server yourself (outside the tree; CUDA or Metal), and fetch a model with the new
-  `lever voice fetch`, which downloads from Hugging Face at a pinned commit and keeps the file
-  only if its size and sha256 match lever's table. The proxy never downloads. `lever doctor`
-  gains `voice`, `voice model` and `voice whisper-server` rows. While voice is on, each agent
-  message also gets a speaker button that reads it aloud with the browser's on-device voices
-  only (`remote.voice.read_aloud: false` turns it off). whisper-server's routes sit under a
-  random path prefix, new at each proxy start, so a web page in a browser on the host cannot
-  reach its `/load` route. A clip that never reached whisper-server does not count against the limits.
+  `POST /lever/api/voice/transcribe` route (`X-Lever-Voice: 1` required), checked by the proxy
+  and handed to the new broker tool `lever-tool-whisper` over its Unix socket
+  (`remote.voice.socket`, the tool's `-dictate-socket`: `0600` in a private directory, outside
+  the tree, never through the broker). The text lands in the message box for review and is never
+  sent by itself. Audio and transcripts are never stored; the audit line has the login, the clip
+  length, the outcome and the latency only. Per login: 30 clips an hour, 60 audio-minutes a day;
+  three slots, of which a contact never takes the last; `voice: false` on an `allowed_users`
+  entry turns it off for that login. A clip that never reached whisper-server does not count
+  against the limits. While voice is on, each agent message also gets a speaker button that reads
+  it aloud with the browser's on-device voices only (`remote.voice.read_aloud: false` turns it
+  off). `remote.voice` has only `enabled`, `socket`, `max_seconds` and `read_aloud`.
+- **`lever-tool-whisper`, a first-party broker tool for speech to text.** It runs whisper.cpp's
+  `whisper-server` (which you install yourself, outside the tree; CUDA or Metal) as its child on
+  `127.0.0.1` (`-whisper-port`), with a model from lever's pinned table checked by size and
+  sha256 before every start, every route under a random path prefix that is new at each start
+  and never logged, its output discarded, a reduced environment, and, on Linux, Pdeathsig and a
+  check that the port's listener is its own child. Settings are flags in its `command`
+  (`-server`, `-models`, `-model`, `-language`, `-vocabulary`, `-gpu`, `-max-seconds`). Config
+  load refuses `-server`, `-models` and `-dictate-socket` inside the tree (no `read_only`
+  excuse), a `-whisper-port` the jail may reach or that collides with lever's own listeners or a
+  tool backend, and a `remote.voice.socket` that is not a whisper tool's `-dictate-socket`.
+  Optionally, with an `obtain` grant for `{tool: whisper, op: transcribe}`, an agent can
+  transcribe a canonical WAV file from `/workspace/.lever-files/whisper/` (read with no link
+  followed; 30 clips an hour and 60 audio-minutes a day per caller; dictation goes first). New
+  `lever voice fetch` downloads a model into the tool's `-models` directory from Hugging Face at
+  a pinned commit and keeps it only if its size and sha256 match; the tool never downloads and
+  picks up a fetched model within a minute. `lever doctor` gains `voice`, `voice tool` and
+  `voice model` rows. Shipped in releases and built by `make install`.
+
+### Changed
+
+- **The broker stops its tools with SIGTERM and 1.5 s of grace before SIGKILL** (it sent SIGKILL
+  at once), so a tool can stop a child of its own.
 
 ## [0.34.3] - 2026-10-09
 

@@ -186,7 +186,12 @@ func toolHostPaths(t Tool) []hostPath {
 	}
 	for _, f := range toolFlags(t) {
 		if f.kind != hostUnchecked {
-			add("-"+f.name, f.val, f.kind)
+			if f.val != "" {
+				add("-"+f.name, f.val, f.kind)
+			}
+			if f.dashNext != "" {
+				add("-"+f.name, f.dashNext, f.kind)
+			}
 		}
 	}
 	return out
@@ -197,13 +202,19 @@ func toolHostPaths(t Tool) []hostPath {
 type toolFlag struct {
 	name, val string
 	kind      hostPathKind
+	// dashNext is the following word when it starts with "-" and so was
+	// not taken as the value: Go's flag package would take it, so a path
+	// flag's check covers it too (toolHostPaths).
+	dashNext string
 }
 
 // toolFlags lists the known flags in t's command (knownFlag), as "-f v",
 // "-f=v", "--f v" or "--f=v", in order. Unknown flags and other arguments
 // are skipped. A following word that starts with "-" is never taken as a
 // flag's value: it is read as a flag itself, so "-model -state x" cannot
-// hide -state from its check (the flag before it then has no value).
+// hide -state from its check (the flag before it then has no value; a path
+// flag's check still covers that word as its value, as Go's flag package
+// would read it).
 func toolFlags(t Tool) []toolFlag {
 	if len(t.Command) == 0 {
 		return nil
@@ -221,11 +232,16 @@ func toolFlags(t Tool) []toolFlag {
 		if !known {
 			continue
 		}
-		if !hasVal && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			i++
-			val = args[i]
+		dashNext := ""
+		if !hasVal && i+1 < len(args) {
+			if strings.HasPrefix(args[i+1], "-") {
+				dashNext = args[i+1]
+			} else {
+				i++
+				val = args[i]
+			}
 		}
-		out = append(out, toolFlag{name, val, kind})
+		out = append(out, toolFlag{name: name, val: val, kind: kind, dashNext: dashNext})
 	}
 	return out
 }

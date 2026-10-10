@@ -664,7 +664,7 @@ func TestVoiceRefundWhenCanceledInTheToolQueue(t *testing.T) {
 	ctx, cancel = context.WithCancel(context.Background())
 	go func() {
 		<-svc.started
-		time.Sleep(100 * time.Millisecond) // the tool's 102 reaches the proxy
+		time.Sleep(300 * time.Millisecond) // the tool's 102 reaches the proxy
 		cancel()
 	}()
 	rw = post(ctx)

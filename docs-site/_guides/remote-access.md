@@ -1524,7 +1524,7 @@ synthesis API and at least one on-device voice.
   day, and 60 attempts an hour (clips that fail their checks count as attempts). The rule for the
   clips and the minutes: a clip counts once the tool has told the proxy that its transcription
   started (the tool sends that signal when the clip leaves its queue, just before it hands the
-  clip to whisper-server). A clip given up before that does not count: the tool or its child was
+  clip to whisper-server). A clip given up before that signal reaches the proxy does not count: the tool or its child was
   down, the tool refused the clip, or the browser gave up (or the proxy's wait ran out) while the
   clip waited for its turn in the proxy or in the tool's queue. A clip whose transcription started
   counts even if it then failed, timed out or the browser gave up. These counts are kept

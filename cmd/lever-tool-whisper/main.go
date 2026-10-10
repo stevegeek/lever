@@ -171,7 +171,8 @@ func main() {
 	svc := &voice.Service{Model: o.model, ModelDir: o.models, Server: o.server, Port: o.whisperPort,
 		GPU: o.gpu, Prompt: o.prompt, Language: o.language, Log: vlog}
 	queue := &voice.Queue{}
-	agents := &voice.AgentTranscriber{Tree: o.tree, MaxSeconds: o.agentMaxSeconds, Svc: svc, Queue: queue, Log: vlog}
+	agents := &voice.AgentTranscriber{Tree: o.tree, MaxSeconds: o.agentMaxSeconds, MaxWait: voice.AgentMaxWait(o.agentMaxSeconds, o.gpu),
+		Svc: svc, Queue: queue, Log: vlog}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,
 		Operations: []captool.Operation{{

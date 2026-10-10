@@ -201,9 +201,12 @@ checks only the command itself, the path flags of the tools it ships (above; `-t
 tool's `-state` is checked the same way. `lever-tool-whisper`'s flags (`-server`, `-models`,
 `-dictate-socket`, `-model`, `-whisper-port`, `-max-seconds`, `-agent-max-seconds`) are read only in
 the command of a whisper tool: one whose program, after an `env` prefix, has the base name
-`lever-tool-whisper`. Another tool's `-server` or `-models` means something else and is not read.
+`lever-tool-whisper`. Another tool's `-server` or `-models` means something else and is not read;
+so a renamed binary or a wrapper script around `lever-tool-whisper` gets none of the whisper checks
+below: run the tool under its own name.
 A word that starts with `-` is never taken as the previous flag's value, so `-model -state x` still
-checks `x`. For a whisper tool, config load also requires `-tree` and refuses one that is not the
+checks `x`; after a path flag such a word is also checked as that flag's value, as Go's flag package
+would read it. For a whisper tool, config load also requires `-tree` and refuses one that is not the
 instance's tree, checks `-max-seconds` (1 to 600) and `-agent-max-seconds` (1 to `-max-seconds`), and
 refuses a `-whisper-port` the jail may reach (`manager.allow_ports`, the broker's
 jail port, the login port) or that collides with the broker's admin port, the remote proxy's port,

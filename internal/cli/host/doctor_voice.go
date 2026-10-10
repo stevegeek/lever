@@ -92,7 +92,7 @@ func checkVoiceTool(ctx context.Context, app *config.App) checkResult {
 	}
 	detail := fmt.Sprintf("ready: model %s, at most %d s a clip", h.Model, h.MaxSeconds)
 	if !app.VoiceOn() {
-		detail += fmt.Sprintf(" (broker tool %q, for agents; remote.voice is off)", w.Name)
+		detail += fmt.Sprintf(", agent clips at most %d s (broker tool %q, for agents; remote.voice is off)", w.EffectiveAgentMaxSeconds(), w.Name)
 	}
 	return checkResult{name, true, detail, ""}
 }

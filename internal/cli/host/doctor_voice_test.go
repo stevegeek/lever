@@ -93,7 +93,7 @@ func TestCheckVoiceRowsWithVoiceOff(t *testing.T) {
 	srv := voice.NewDictateServer(&voice.DictateHandler{Svc: stub, Queue: &voice.Queue{}, Model: "large-v3-turbo", MaxSeconds: 300})
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
-	if r := checkVoiceTool(context.Background(), app); !r.ok || !strings.Contains(r.detail, "for agents; remote.voice is off") {
+	if r := checkVoiceTool(context.Background(), app); !r.ok || !strings.Contains(r.detail, "agent clips at most 120 s") || !strings.Contains(r.detail, "for agents; remote.voice is off") {
 		t.Fatalf("tool row, ready: %+v", r)
 	}
 }

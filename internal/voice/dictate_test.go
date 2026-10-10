@@ -312,7 +312,7 @@ func TestDictateCanceledDuringTranscriptionIsSent(t *testing.T) {
 	go func() {
 		<-svc.started
 		// Let the tool's 102 reach the client before it gives up.
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 		cancel()
 	}()
 	_, err := (&DictateClient{Socket: sock}).Transcribe(ctx, CanonicalWAV(16000))

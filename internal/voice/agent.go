@@ -54,7 +54,7 @@ type AgentTranscriber struct {
 	// QueueWait bounds the wait for the GPU; zero = 2 minutes.
 	QueueWait time.Duration
 	// MaxWait bounds one transcription once it has the GPU; zero =
-	// AgentMaxWait(MaxSeconds). An agent's call cannot be cancelled from its
+	// AgentMaxWait(MaxSeconds, true). An agent's call cannot be cancelled from its
 	// side (the handler has no request context), and a running clip is
 	// never interrupted for dictation, so this also bounds how long an agent
 	// clip can keep a dictation clip waiting.
@@ -139,7 +139,7 @@ func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) 
 	}
 	maxWait := a.MaxWait
 	if maxWait <= 0 {
-		maxWait = AgentMaxWait(a.MaxSeconds)
+		maxWait = AgentMaxWait(a.MaxSeconds, true)
 	}
 	tctx, tcancel := context.WithTimeout(ctx, maxWait)
 	raw, err := a.Svc.Transcribe(tctx, clip)
@@ -190,9 +190,14 @@ func (a *AgentTranscriber) tooLong(file string) error {
 }
 
 // AgentMaxWait is how long one agent clip of at most maxSeconds may keep
-// the GPU: as long as the clip, at least 30 s. A GPU transcribes far faster
-// than real time; a clip that takes longer is cut off as failed.
-func AgentMaxWait(maxSeconds int) time.Duration {
+// whisper-server: with a GPU, as long as the clip, at least 30 s (a GPU
+// transcribes far faster than real time); on the CPU (gpu false), which can
+// be slower than real time, four times the clip, at least 2 minutes. A clip
+// that takes longer is cut off as failed.
+func AgentMaxWait(maxSeconds int, gpu bool) time.Duration {
+	if !gpu {
+		return time.Duration(max(4*maxSeconds, 120)) * time.Second
+	}
 	return time.Duration(max(maxSeconds, 30)) * time.Second
 }
 

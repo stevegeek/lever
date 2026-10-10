@@ -148,7 +148,8 @@ again when the tool restarts). A caller over a limit is refused before its file 
 at a time reaches whisper-server. "Dictation goes first" means queue order: a waiting dictation clip
 is taken before any waiting agent clip, but a clip already running is never interrupted, so
 dictation can wait for up to one agent clip. An agent clip waits at most 2 minutes for its turn and
-then gets as many seconds to finish as `-agent-max-seconds` (at least 30). A clip that never
+then gets as many seconds to finish as `-agent-max-seconds` (at least 30; with `-gpu=false`, four
+times that, at least 2 minutes, since a CPU can be slower than real time). A clip that never
 reached whisper-server (it was not ready, or the wait ran out) does not count.
 
 **Refusals** come back as `{"ok": false, "error": "..."}` and never name a host path, except a

@@ -253,6 +253,12 @@ func TestToolHostPaths(t *testing.T) {
 		{"broker.tools[t] -state", "/s", hostSecret},
 		{"broker.tools[t] -app-key", "/k", hostSecret},
 	})
+	// A path flag followed by a dash word: Go's flag package would take it
+	// as the value, so it is checked as one too (and still read as a flag).
+	check("path flag before a dash word", paths("my-tool", "-state", "-app-key", "/k"), []got{
+		{"broker.tools[t] -state", "-app-key", hostSecret},
+		{"broker.tools[t] -app-key", "/k", hostSecret},
+	})
 	check("command path", paths("/opt/x", "--key-file=/k"), []got{{"broker.tools[t] command", "/opt/x", hostProgram}})
 	// An interpreter's first argument is the script it runs, unless a flag.
 	check("interpreter script", paths("ruby", "/t/x.rb", "/t/y"), []got{{"broker.tools[t] script", "/t/x.rb", hostProgram}})

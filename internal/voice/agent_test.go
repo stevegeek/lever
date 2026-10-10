@@ -198,8 +198,11 @@ func TestAgentQueueWait(t *testing.T) {
 // An agent clip holds the GPU at most about as long as the longest agent
 // clip: dictation waits behind it no longer.
 func TestAgentMaxWait(t *testing.T) {
-	if AgentMaxWait(120) != 120*time.Second || AgentMaxWait(5) != 30*time.Second {
-		t.Fatal(AgentMaxWait(120), AgentMaxWait(5))
+	if AgentMaxWait(120, true) != 120*time.Second || AgentMaxWait(5, true) != 30*time.Second {
+		t.Fatal(AgentMaxWait(120, true), AgentMaxWait(5, true))
+	}
+	if AgentMaxWait(120, false) != 480*time.Second || AgentMaxWait(5, false) != 2*time.Minute {
+		t.Fatal(AgentMaxWait(120, false), AgentMaxWait(5, false))
 	}
 	if AgentMaxSeconds(0, 300) != DefaultAgentMaxSeconds || AgentMaxSeconds(0, 60) != 60 || AgentMaxSeconds(30, 300) != 30 {
 		t.Fatal("AgentMaxSeconds")

@@ -222,9 +222,11 @@ func (s *voiceState) check(login string, seconds float64, now time.Time, take bo
 // same length, for a clip that never reached whisper-server: the browser
 // gave up while it waited for the proxy's GPU token, or Transcribe's error
 // is NotSent (the socket did not answer, the tool refused the clip, or the
-// browser gave up while it waited in the tool's queue). A clip whose
-// transcription started is never given back, even when it failed, timed out
-// or the browser gave up. The attempt cap (voiceTriesPerHour) still counts
+// browser gave up while it waited in the tool's queue, before the tool's
+// signal that its transcription started reached the proxy). A clip whose
+// start signal arrived is never given back, even when it failed, timed out
+// or the browser gave up. (A cancel in the microseconds between the tool
+// sending that signal and the proxy reading it is given back.) The attempt cap (voiceTriesPerHour) still counts
 // it.
 func (s *voiceState) refund(login string, seconds float64, at time.Time) {
 	key := strings.ToLower(login)

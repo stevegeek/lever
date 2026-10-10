@@ -15,10 +15,11 @@ import (
 	"time"
 )
 
-// Supervisor runs whisper-server as a child of the remote proxy, bound to
+// Supervisor runs whisper-server as a child of lever-tool-whisper, bound to
 // host loopback, restarts it with backoff when it exits, and stops it when
 // its context ends. The jail never reaches the port: config validation
-// refuses it in every allow_ports, so the egress rules drop it.
+// refuses -whisper-port in every port the jail may reach, so the egress
+// rules drop it.
 //
 // The child's stdout and stderr are discarded, never logged: whisper.cpp
 // prints what it transcribes (whisper.go, assumption 5). Log gets lever's
@@ -50,10 +51,10 @@ const (
 	defaultMinBackoff  = time.Second
 	defaultMaxBackoff  = time.Minute
 	defaultStableAfter = time.Minute // a run this long resets the backoff
-	// defaultStopGrace is short: `lever stop` SIGKILLs a proxy that has not
-	// exited 2 s after its SIGTERM, and the child must be gone by then
-	// (off Linux nothing else kills it). whisper-server keeps no state worth
-	// a graceful stop.
+	// defaultStopGrace is short: the broker SIGKILLs a tool that has not
+	// exited 1.5 s after its SIGTERM (brokerctl's toolStopGrace), and the
+	// child must be gone by then (off Linux nothing else kills it).
+	// whisper-server keeps no state worth a graceful stop.
 	defaultStopGrace  = time.Second
 	defaultProbeEvery = 250 * time.Millisecond
 )
@@ -81,9 +82,11 @@ func dur(d, def time.Duration) time.Duration {
 	return def
 }
 
-// childEnvKeys are what the child keeps of the proxy's environment: what a
+// childEnvKeys are what the child keeps of the tool's environment: what a
 // GPU build needs to find its libraries and devices, and nothing that could
-// carry a credential.
+// carry a credential (the broker's tool secret included). The broker starts
+// a tool with PATH only; a GPU build that needs more (LD_LIBRARY_PATH,
+// CUDA_VISIBLE_DEVICES) gets it from an env(1) prefix in the tool's command.
 var childEnvKeys = []string{"PATH", "HOME", "TMPDIR", "LANG", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"}
 
 // childEnvPrefixes likewise, by prefix.
@@ -192,7 +195,7 @@ func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 	//
 	// On Linux the child gets Pdeathsig, which the kernel ties to the thread
 	// that started it: this goroutine keeps that thread until the child is
-	// gone, so the signal fires only when the proxy dies.
+	// gone, so the signal fires only when the tool dies.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	start := time.Now()

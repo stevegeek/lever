@@ -1,14 +1,15 @@
-// Package voice is the host side of the chat page's dictation
-// (remote.voice): lever's table of pinned Whisper models, their download
-// (`lever voice fetch`) and check, and the supervisor of the whisper.cpp
-// server the remote proxy runs as a child on host loopback.
+// Package voice is lever's speech to text on the host: lever's table of
+// pinned Whisper models, their download (`lever voice fetch`) and check, the
+// supervisor of the whisper.cpp server that lever-tool-whisper runs as its
+// child on host loopback, the dictation socket between the remote proxy and
+// that tool (dictate.go), and the tool's agent operation (agent.go).
 //
 // Every assumption about whisper.cpp itself (its flags, its HTTP form, its
 // answer) lives in whisper.go, and nowhere else.
 //
-// Nothing here stores audio or a transcript: the audio goes from the
-// proxy's memory to the child over loopback, and the text comes back the
-// same way.
+// Nothing here stores audio or a transcript: a dictation clip goes from the
+// proxy's memory over the socket to the tool and on to the child over
+// loopback, and the text comes back the same way.
 package voice
 
 import (
@@ -19,7 +20,8 @@ import (
 
 // Unverified marks a table value nobody has checked against the published
 // file yet. A model with any Unverified value is refused by `lever voice
-// fetch`, by the proxy and by `lever doctor`: nothing runs unpinned.
+// fetch`, by lever-tool-whisper and by `lever doctor`: nothing runs
+// unpinned.
 const Unverified = "UNVERIFIED"
 
 // Model is one pinned model: a whisper.cpp ggml file on Hugging Face, at a
@@ -59,7 +61,7 @@ const (
 	largeV3TurboQ5SHA256       = "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
 )
 
-// DefaultModel is remote.voice.model when unset.
+// DefaultModel is lever-tool-whisper's -model when unset.
 const DefaultModel = "large-v3-turbo"
 
 // Models is lever's table; every lookup reads it. Tests swap it for one

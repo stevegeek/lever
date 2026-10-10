@@ -5,124 +5,125 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// ErrNotReady: dictation is configured, but whisper-server is not running
-// (starting, restarting, or refused at start).
+// ErrNotReady: whisper-server is not running (starting, restarting, or held
+// back because the program or the model failed its check).
 var ErrNotReady = errors.New("whisper-server is not ready")
 
-// Service is remote.voice as the proxy runs it: the model and program
-// checked once at start, then the supervised child. The proxy asks Usable
-// (whether the page shows the mic) and Transcribe.
+// Service is whisper-server as lever-tool-whisper runs it: the program and
+// the model checked before every start, then the supervised child on host
+// loopback. The tool asks Ready (its /health) and Transcribe.
 type Service struct {
 	Model    Model
-	ModelDir string
-	Server   string // remote.voice.whisper_server
-	Port     int
+	ModelDir string // -models: the model's directory, and the child's working directory
+	Server   string // -server: the whisper-server program
+	Port     int    // -whisper-port
 	GPU      bool
 	Prompt   string // the vocabulary, as Whisper's prompt
 	Language string // "" = auto-detect
 	// Log receives lever's own lines; nil drops them.
 	Log func(format string, a ...any)
-	// Supervisor overrides the child's timings (tests); its Program, Args
-	// and Port are set by Run.
+	// Supervisor overrides the child's timings (tests); its Program, Args,
+	// Port, Dir and Check are set by Run.
 	Supervisor *Supervisor
 	// MaxWait bounds one transcription; zero = 10 minutes.
 	MaxWait time.Duration
 
-	usable atomic.Bool
 	sup    atomic.Pointer[Supervisor]
 	client http.Client
 	// path is the child's secret route prefix, fresh per Run (never logged).
 	path string
+
+	mu   sync.Mutex
+	real string // the program's real path, pinned at its first good check
 }
 
-// Run checks the model (pinned table entry, size, sha256) and the program,
-// then supervises the child until ctx ends. A failed check logs why and
-// leaves dictation off for this run (the page shows no mic); nothing is
+// Run supervises the child until ctx ends. Before every start, the program
+// (CheckServer) and the model (pinned table entry, size, sha256) are
+// checked again; a failed check logs why and is retried after the backoff,
+// so a model fetched later is picked up without a restart. Nothing is
 // downloaded here, ever: that is `lever voice fetch`.
-func (s *Service) Run(ctx context.Context) {
-	p := ModelPath(s.ModelDir, s.Model)
-	if err := Verify(p, s.Model); err != nil {
-		s.logf("voice: dictation stays off: the model %s does not verify: %v (run `lever voice fetch %s`, then restart the proxy)", s.Model.Name, err, s.Model.Name)
-		return
-	}
-	real, err := CheckServer(s.Server)
-	if err != nil {
-		s.logf("voice: dictation stays off: %v", err)
-		return
-	}
+func (s *Service) Run(ctx context.Context) error {
 	sup := &Supervisor{}
 	if s.Supervisor != nil {
 		sup = s.Supervisor
 	}
 	path, err := NewRequestPath()
 	if err != nil {
-		s.logf("voice: dictation stays off: no random route prefix: %v", err)
-		return
+		return fmt.Errorf("voice: no random route prefix: %w", err)
 	}
 	s.path = path
-	sup.Program, sup.Args, sup.Port = real, ServerArgs(p, s.Port, s.GPU, path), s.Port
-	// The model directory: in the state directory, host-only, so the
-	// server's relative static-file path resolves nowhere an agent writes.
+	p := ModelPath(s.ModelDir, s.Model)
+	sup.Args, sup.Port = ServerArgs(p, s.Port, s.GPU, path), s.Port
+	// The model directory: outside the tree (config load and the tool's
+	// flags refuse it inside), so the server's relative static-file path
+	// resolves nowhere an agent writes (whisper.go, assumption 7).
 	sup.Dir = s.ModelDir
 	if sup.Log == nil {
 		sup.Log = s.Log
 	}
-	// Before every restart too: the program must still be the one checked,
-	// and must still resolve to the same real file.
-	sup.Check = func() error {
-		again, err := CheckServer(s.Server)
-		if err == nil && again != real {
-			err = fmt.Errorf("voice: whisper_server now resolves to %s, not %s; restart the proxy to accept it", again, real)
-		}
-		if err == nil {
-			// The model too: the child loads it again on every start.
-			err = Verify(p, s.Model)
-		}
-		return err
-	}
+	sup.Check = s.check
 	// Never through a proxy from the environment: loopback only.
 	s.client = http.Client{Transport: &http.Transport{MaxIdleConns: 1}}
 	s.sup.Store(sup)
-	s.usable.Store(true)
-	defer s.usable.Store(false)
 	sup.Run(ctx)
+	return nil
 }
 
-func (s *Service) logf(format string, a ...any) {
-	if s.Log != nil {
-		s.Log(format, a...)
+// check runs before every start: the program must pass CheckServer and
+// still resolve to the real file it resolved to the first time, and the
+// model must verify (the child loads it again on every start).
+func (s *Service) check() error {
+	if why := s.Model.Pinned(); why != "" {
+		return fmt.Errorf("%w: %s", ErrUnpinned, why)
 	}
+	real, err := CheckServer(s.Server)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if s.real == "" {
+		s.real = real
+	}
+	pinned := s.real
+	s.mu.Unlock()
+	if real != pinned {
+		return fmt.Errorf("voice: -server now resolves to %s, not %s; restart the tool (lever reload) to accept it", real, pinned)
+	}
+	if err := Verify(ModelPath(s.ModelDir, s.Model), s.Model); err != nil {
+		return fmt.Errorf("the model %s does not verify: %w (run `lever voice fetch %s`)", s.Model.Name, err, s.Model.Name)
+	}
+	if sup := s.sup.Load(); sup != nil {
+		sup.Program = real
+	}
+	return nil
 }
 
-// Usable reports whether the checks at start passed and the proxy is
-// supervising the child, and the last start was not blocked (the port taken
-// by another process, or the program failing its check): the page then
-// shows the mic. A child that is restarting still counts; a request then
-// answers unavailable.
-func (s *Service) Usable() bool {
+// Ready reports whether the child is running and answers on its port.
+func (s *Service) Ready() bool {
 	sup := s.sup.Load()
-	return s.usable.Load() && sup != nil && !sup.Blocked()
+	return sup != nil && sup.Ready()
 }
 
 // Transcribe sends one checked WAV clip to the child and returns the
-// transcript.
+// transcript as whisper-server gave it.
 func (s *Service) Transcribe(ctx context.Context, wav []byte) (string, error) {
 	sup := s.sup.Load()
-	if !s.Usable() || sup == nil || !sup.Ready() {
+	if sup == nil || !sup.Ready() {
 		return "", fmt.Errorf("%w: %w", ErrNotSent, ErrNotReady)
 	}
 	wait := s.MaxWait
 	if wait <= 0 {
 		wait = 10 * time.Minute
 	}
-	// Bound to the caller: when the browser gives up, the request to the
+	// Bound to the caller: when the caller gives up, the request to the
 	// child is closed, and whisper-server stops work on a clip whose
 	// connection closed (its abort callback, whisper.go assumption 9), so
-	// the caller's GPU slot frees with the work.
+	// the GPU frees with the work.
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	return Transcribe(ctx, &s.client, sup.Addr(), Request{Path: s.path, WAV: wav, Prompt: s.Prompt, Language: s.Language})

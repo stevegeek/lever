@@ -1,93 +1,102 @@
 package host
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/voice"
 )
 
-// checkVoice reports remote.voice: off, or on with its limits, and that the
-// jail cannot reach the voice port (it is in no allow_ports: config
-// validation refuses that, and this row says so again).
+// checkVoice reports remote.voice: off, or on with its socket and limits,
+// the lever-tool-whisper entry that serves the socket, and that the jail
+// cannot reach the tool's -whisper-port (config validation refuses that,
+// and this row says so again).
 func checkVoice(app *config.App) checkResult {
 	const name = "voice"
 	if !app.VoiceOn() {
-		return checkResult{name, true, "off (no mic on the chat page, no whisper-server)", ""}
+		return checkResult{name, true, "off (no mic on the chat page)", ""}
 	}
-	port := app.EffectiveVoicePort()
-	if slices.Contains(app.EffectiveAllowedPorts(), port) {
-		return checkResult{name, false, fmt.Sprintf("the voice port %d is one the jail may reach: agents could talk to whisper-server, which has no authentication", port),
-			"remove it from manager.allow_ports, or set remote.voice.port to another"}
+	detail := fmt.Sprintf("on: max %d s a clip, through the socket %s", app.EffectiveVoiceMaxSeconds(), app.Remote.Voice.Socket)
+	w, ok := app.VoiceTool()
+	switch {
+	case ok:
+		if slices.Contains(app.EffectiveAllowedPorts(), w.Port) {
+			return checkResult{name, false, fmt.Sprintf("broker tool %q's -whisper-port %d is one the jail may reach: agents could talk to whisper-server, which has no authentication", w.Name, w.Port),
+				"remove it from manager.allow_ports, or give the tool another -whisper-port"}
+		}
+		detail += fmt.Sprintf(" of broker tool %q; whisper-server on 127.0.0.1:%d, not reachable from the jail", w.Name, w.Port)
+	default:
+		detail += " (no lever-tool-whisper entry in broker.tools: the tool serving it is yours to run)"
 	}
-	lang := app.Remote.Voice.Language
-	if lang == "" {
-		lang = "detected per clip"
-	}
-	gpu := "on"
-	if !app.VoiceGPU() {
-		gpu = "off (--no-gpu)"
-	}
-	detail := fmt.Sprintf("on: model %s, max %d s a clip, language %s, GPU %s, %d vocabulary words; whisper-server on 127.0.0.1:%d, not reachable from the jail",
-		app.EffectiveVoiceModel(), app.EffectiveVoiceMaxSeconds(), lang, gpu, len(app.Remote.Voice.Vocabulary), port)
 	if x := app.VoiceExcludedLogins(); len(x) > 0 {
 		detail += "; no dictation for " + strings.Join(x, ", ")
 	}
 	return checkResult{name, true, detail + "; audio and transcripts are never stored", ""}
 }
 
-// checkVoiceModel reports the configured model: pinned in lever's table,
-// present in the state directory, and of the pinned size and sha256 (the
-// whole file is hashed, which takes a few seconds for a large model).
-func checkVoiceModel(app *config.App, st state.State) checkResult {
+// toolLogHint names the log of dictation's broker tool, for a fix line.
+func toolLogHint(app *config.App) string {
+	if w, ok := app.VoiceTool(); ok {
+		return "see " + filepath.Join("tool-logs", w.Name+".log") + " in the state directory"
+	}
+	return "see the log of the lever-tool-whisper that serves " + app.Remote.Voice.Socket
+}
+
+// checkVoiceTool asks lever-tool-whisper's socket for its health: not
+// running, running with whisper-server not ready, or ready (with the model).
+func checkVoiceTool(ctx context.Context, app *config.App) checkResult {
+	const name = "voice tool"
+	if !app.VoiceOn() {
+		return checkResult{}
+	}
+	h, err := (&voice.DictateClient{Socket: app.Remote.Voice.Socket}).Health(ctx)
+	switch {
+	case err != nil:
+		return checkResult{name, false, fmt.Sprintf("not running: %s does not answer (%v): no dictation", app.Remote.Voice.Socket, err),
+			"start the broker (lever up or lever reload); if the tool is configured, " + toolLogHint(app)}
+	case !h.Ready:
+		return checkResult{name, false, fmt.Sprintf("running, but whisper-server is not ready (starting, or its program or the model %s failed a check): no dictation", h.Model),
+			toolLogHint(app) + "; fetch the model with lever voice fetch if it is missing"}
+	}
+	return checkResult{name, true, fmt.Sprintf("ready: model %s, at most %d s a clip", h.Model, h.MaxSeconds), ""}
+}
+
+// checkVoiceModel reports the tool's model: pinned in lever's table,
+// present in the tool's -models directory, and of the pinned size and
+// sha256 (the whole file is hashed, which takes a few seconds for a large
+// model).
+func checkVoiceModel(app *config.App) checkResult {
 	const name = "voice model"
 	if !app.VoiceOn() {
 		return checkResult{}
 	}
-	m, ok := voice.Lookup(app.EffectiveVoiceModel())
+	w, ok := app.VoiceTool()
 	if !ok {
-		return checkResult{name, false, fmt.Sprintf("%q is not in lever's model table", app.EffectiveVoiceModel()), "use one of " + strings.Join(voice.Names(), ", ")}
+		return checkResult{name, true, "not checked: no lever-tool-whisper entry in broker.tools serves " + app.Remote.Voice.Socket, ""}
+	}
+	m, found := voice.Lookup(w.EffectiveModel())
+	if !found {
+		return checkResult{name, false, fmt.Sprintf("broker tool %q's -model %q is not in lever's model table", w.Name, w.EffectiveModel()), "use one of " + strings.Join(voice.Names(), ", ")}
 	}
 	if why := m.Pinned(); why != "" {
-		return checkResult{name, false, why + ": dictation stays off", "use a lever release whose model table pins " + m.Name}
+		return checkResult{name, false, why + ": no dictation", "use a lever release whose model table pins " + m.Name}
 	}
-	if brokerctl.StateInsideTree(app, st) {
-		return checkResult{name, false, "the state directory is inside the tree, where agents could replace the model: dictation stays off",
-			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	if !filepath.IsAbs(w.Models) {
+		return checkResult{name, false, fmt.Sprintf("broker tool %q's -models %q is not an absolute path", w.Name, w.Models), "point -models at the absolute path lever voice fetch downloads into"}
 	}
-	p := voice.ModelPath(st.VoiceModels(), m)
+	p := voice.ModelPath(w.Models, m)
 	err := voice.Verify(p, m)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return checkResult{name, false, m.Name + " is not downloaded: dictation stays off", "lever voice fetch " + m.Name + ", then restart the remote proxy"}
+		return checkResult{name, false, m.Name + " is not downloaded into " + w.Models + ": no dictation", "lever voice fetch " + m.Name + " (the tool picks it up within a minute)"}
 	case err != nil:
-		return checkResult{name, false, err.Error() + ": dictation stays off", "remove " + p + " and run lever voice fetch " + m.Name}
+		return checkResult{name, false, err.Error() + ": no dictation", "remove " + p + " and run lever voice fetch " + m.Name}
 	}
-	return checkResult{name, true, fmt.Sprintf("%s: %s, %d bytes, sha256 matches lever's pin", m.Name, stateRel(st, p), m.Size), ""}
-}
-
-// checkVoiceServer reports remote.voice.whisper_server: an executable that
-// only you or root can change (voice.CheckServer). Config load already
-// refused one inside the tree.
-func checkVoiceServer(app *config.App) checkResult {
-	const name = "voice whisper-server"
-	if !app.VoiceOn() {
-		return checkResult{}
-	}
-	real, err := voice.CheckServer(app.Remote.Voice.WhisperServer)
-	if err != nil {
-		return checkResult{name, false, err.Error() + ": dictation stays off",
-			"install whisper.cpp's whisper-server (built with CUDA or Metal) outside the tree, owned by you or root and writable by no one else, and point remote.voice.whisper_server at it"}
-	}
-	detail := real
-	if real != app.Remote.Voice.WhisperServer {
-		detail = app.Remote.Voice.WhisperServer + " → " + real
-	}
-	return checkResult{name, true, detail + " (executable, writable only by its owner)", ""}
+	return checkResult{name, true, fmt.Sprintf("%s: %s, %d bytes, sha256 matches lever's pin", m.Name, p, m.Size), ""}
 }

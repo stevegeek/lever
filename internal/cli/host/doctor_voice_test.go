@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -30,33 +31,34 @@ func pinTestModel(t *testing.T, content string) voice.Model {
 	return m
 }
 
-// voiceDoctorApp is filesApp with voice on, and an executable
-// whisper-server outside the tree.
+// voiceDoctorApp is filesApp with voice on, served by a lever-tool-whisper
+// entry whose models directory and socket are outside the tree.
 func voiceDoctorApp(t *testing.T) (*config.App, state.State) {
 	t.Helper()
 	app, st := filesApp(t, false)
-	dir := filepath.Join(t.TempDir(), "bin")
-	if err := os.Mkdir(dir, 0o755); err != nil {
+	run, err := os.MkdirTemp("", "dv")
+	if err != nil {
 		t.Fatal(err)
 	}
-	prog := filepath.Join(dir, "whisper-server")
-	if err := os.WriteFile(prog, []byte("#!/bin/sh\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	app.Remote.Voice = config.Voice{Enabled: true, WhisperServer: prog}
+	t.Cleanup(func() { os.RemoveAll(run) })
+	sock := filepath.Join(run, "s", "d.sock")
+	models := filepath.Join(t.TempDir(), "models")
+	app.Remote.Voice = config.Voice{Enabled: true, Socket: sock}
+	app.Broker.Tools = []config.Tool{{Name: "whisper", Backend: "127.0.0.1:3212", Command: []string{"/opt/lever-tool-whisper",
+		"-tree", app.Tree, "-models", models, "-server", "/opt/w/whisper-server", "-whisper-port", "8448", "-dictate-socket", sock}}}
 	return app, st
 }
 
 func TestCheckVoiceOff(t *testing.T) {
-	app, st := filesApp(t, false)
+	app, _ := filesApp(t, false)
 	if r := checkVoice(app); !r.ok || !strings.HasPrefix(r.detail, "off") {
 		t.Fatalf("%+v", r)
 	}
-	if r := checkVoiceModel(app, st); r.name != "" {
+	if r := checkVoiceModel(app); r.name != "" {
 		t.Fatalf("off: a model row %+v", r)
 	}
-	if r := checkVoiceServer(app); r.name != "" {
-		t.Fatalf("off: a server row %+v", r)
+	if r := checkVoiceTool(context.Background(), app); r.name != "" {
+		t.Fatalf("off: a tool row %+v", r)
 	}
 }
 
@@ -65,70 +67,93 @@ func TestCheckVoiceConfigAndPort(t *testing.T) {
 	no := false
 	app.Remote.AllowedUsers[1].Voice = &no
 	r := checkVoice(app)
-	if !r.ok || !strings.Contains(r.detail, "127.0.0.1:8448") || !strings.Contains(r.detail, "no dictation for c@x") || !strings.Contains(r.detail, "never stored") {
+	if !r.ok || !strings.Contains(r.detail, "127.0.0.1:8448") || !strings.Contains(r.detail, `broker tool "whisper"`) ||
+		!strings.Contains(r.detail, "no dictation for c@x") || !strings.Contains(r.detail, "never stored") {
 		t.Fatalf("%+v", r)
 	}
 	// A config that bypassed validation: the row still fails.
-	app.Manager.AllowPorts = []int{config.DefaultRemoteVoicePort}
+	app.Manager.AllowPorts = []int{8448}
 	if r := checkVoice(app); r.ok || !strings.Contains(r.detail, "jail may reach") {
 		t.Fatalf("%+v", r)
+	}
+	app.Manager.AllowPorts = nil
+	app.Broker.Tools = nil
+	if r := checkVoice(app); !r.ok || !strings.Contains(r.detail, "yours to run") {
+		t.Fatalf("no tool: %+v", r)
+	}
+}
+
+type readyStub struct{ ready atomic.Bool }
+
+func (s *readyStub) Ready() bool { return s.ready.Load() }
+func (s *readyStub) Transcribe(context.Context, []byte) (string, error) {
+	return "", voice.ErrNotSent
+}
+
+func TestCheckVoiceTool(t *testing.T) {
+	app, _ := voiceDoctorApp(t)
+	if r := checkVoiceTool(context.Background(), app); r.ok || !strings.Contains(r.detail, "not running") || !strings.Contains(r.fix, "tool-logs/whisper.log") {
+		t.Fatalf("no socket: %+v", r)
+	}
+	ln, err := voice.ListenDictate(app.Remote.Voice.Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &readyStub{}
+	srv := voice.NewDictateServer(&voice.DictateHandler{Svc: stub, Queue: &voice.Queue{}, Model: "large-v3-turbo", MaxSeconds: 300})
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+	if r := checkVoiceTool(context.Background(), app); r.ok || !strings.Contains(r.detail, "not ready") {
+		t.Fatalf("not ready: %+v", r)
+	}
+	stub.ready.Store(true)
+	if r := checkVoiceTool(context.Background(), app); !r.ok || !strings.Contains(r.detail, "ready: model large-v3-turbo, at most 300 s") {
+		t.Fatalf("ready: %+v", r)
 	}
 }
 
 func TestCheckVoiceModel(t *testing.T) {
-	app, st := voiceDoctorApp(t)
+	app, _ := voiceDoctorApp(t)
+	w, _ := app.VoiceTool()
 	// The real table, while its values are UNVERIFIED: refused.
 	if m, _ := voice.Lookup(voice.DefaultModel); m.Pinned() != "" {
-		if r := checkVoiceModel(app, st); r.ok || !strings.Contains(r.detail, "not verified") {
+		if r := checkVoiceModel(app); r.ok || !strings.Contains(r.detail, "not verified") {
 			t.Fatalf("unverified table: %+v", r)
 		}
 	}
 	m := pinTestModel(t, "weights")
-	if r := checkVoiceModel(app, st); r.ok || !strings.Contains(r.fix, "lever voice fetch "+m.Name) {
+	if r := checkVoiceModel(app); r.ok || !strings.Contains(r.fix, "lever voice fetch "+m.Name) {
 		t.Fatalf("missing: %+v", r)
 	}
-	if err := os.MkdirAll(st.VoiceModels(), 0o700); err != nil {
+	if err := os.MkdirAll(w.Models, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	p := voice.ModelPath(st.VoiceModels(), m)
+	p := voice.ModelPath(w.Models, m)
 	if err := os.WriteFile(p, []byte("weightz"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := checkVoiceModel(app, st); r.ok || !strings.Contains(r.detail, "sha256") {
+	if r := checkVoiceModel(app); r.ok || !strings.Contains(r.detail, "sha256") {
 		t.Fatalf("wrong file: %+v", r)
 	}
 	if err := os.WriteFile(p, []byte("weights"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if r := checkVoiceModel(app, st); !r.ok || !strings.Contains(r.detail, "sha256 matches") {
+	if r := checkVoiceModel(app); !r.ok || !strings.Contains(r.detail, "sha256 matches") {
 		t.Fatalf("good: %+v", r)
 	}
-	inApp, inSt := filesApp(t, true)
-	inApp.Remote.Voice = app.Remote.Voice
-	if r := checkVoiceModel(inApp, inSt); r.ok || !strings.Contains(r.detail, "inside the tree") {
-		t.Fatalf("state in tree: %+v", r)
+	app.Broker.Tools[0].Command = append(app.Broker.Tools[0].Command, "-model", "medium")
+	if r := checkVoiceModel(app); r.ok || !strings.Contains(r.detail, "not in lever's model table") {
+		t.Fatalf("unknown model: %+v", r)
 	}
-}
-
-func TestCheckVoiceServer(t *testing.T) {
-	app, _ := voiceDoctorApp(t)
-	if r := checkVoiceServer(app); !r.ok {
-		t.Fatalf("%+v", r)
-	}
-	if err := os.Chmod(app.Remote.Voice.WhisperServer, 0o766); err != nil {
-		t.Fatal(err)
-	}
-	if r := checkVoiceServer(app); r.ok || !strings.Contains(r.fix, "outside the tree") {
-		t.Fatalf("writable by others: %+v", r)
-	}
-	app.Remote.Voice.WhisperServer = filepath.Join(t.TempDir(), "missing")
-	if r := checkVoiceServer(app); r.ok {
-		t.Fatalf("missing: %+v", r)
+	app.Broker.Tools = nil
+	if r := checkVoiceModel(app); !r.ok || !strings.Contains(r.detail, "not checked") {
+		t.Fatalf("no tool: %+v", r)
 	}
 }
 
 func TestRunVoiceFetch(t *testing.T) {
 	app, st := voiceDoctorApp(t)
+	w, _ := app.VoiceTool()
 	m := pinTestModel(t, "weights")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("weights")) }))
 	defer srv.Close()
@@ -137,20 +162,30 @@ func TestRunVoiceFetch(t *testing.T) {
 		return f.FetchFrom(ctx, m, srv.URL+"/x", dir)
 	}
 	var out bytes.Buffer
+	// Into the tool's -models.
 	if err := runVoiceFetch(context.Background(), app, st, "", fetch, &out); err != nil {
 		t.Fatal(err)
 	}
-	if err := voice.Verify(voice.ModelPath(st.VoiceModels(), m), m); err != nil {
+	if err := voice.Verify(voice.ModelPath(w.Models, m), m); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "verified") || !strings.Contains(out.String(), "restart the remote proxy") {
+	if !strings.Contains(out.String(), "verified") || !strings.Contains(out.String(), "picks it up") {
 		t.Fatalf("%s", out.String())
 	}
-	if r := checkVoiceModel(app, st); !r.ok {
+	if r := checkVoiceModel(app); !r.ok {
 		t.Fatalf("doctor after the fetch: %+v", r)
 	}
 	if err := runVoiceFetch(context.Background(), app, st, "medium", fetch, &out); err == nil || !strings.Contains(err.Error(), "not in lever's pinned model table") {
 		t.Fatalf("unknown model: %v", err)
+	}
+	// No tool configured: the state directory, which must be outside the tree.
+	app.Broker.Tools = nil
+	out.Reset()
+	if err := runVoiceFetch(context.Background(), app, st, "", fetch, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := voice.Verify(voice.ModelPath(st.VoiceModels(), m), m); err != nil || !strings.Contains(out.String(), "-models "+st.VoiceModels()) {
+		t.Fatalf("%v %s", err, out.String())
 	}
 	inApp, inSt := filesApp(t, true)
 	if err := runVoiceFetch(context.Background(), inApp, inSt, "", fetch, &out); err == nil || !strings.Contains(err.Error(), "inside the tree") {
@@ -171,28 +206,17 @@ func TestRunVoiceFetchRefusesUnverified(t *testing.T) {
 	}
 }
 
-func TestRemoteVoiceService(t *testing.T) {
-	app, st := voiceDoctorApp(t)
-	pinTestModel(t, "weights")
-	app.Remote.Voice.Vocabulary = []string{"Lever", "Scion"}
-	app.Remote.Voice.Language = "en"
-	vs := remoteVoice(app, st, &bytes.Buffer{})
-	if vs == nil || vs.Port != config.DefaultRemoteVoicePort || vs.Prompt != "Lever, Scion" || vs.Language != "en" || !vs.GPU ||
-		vs.ModelDir != st.VoiceModels() || vs.Server != app.Remote.Voice.WhisperServer {
-		t.Fatalf("%+v", vs)
+func TestRemoteVoiceConfig(t *testing.T) {
+	app, _ := voiceDoctorApp(t)
+	vc := remoteVoiceConfig(app)
+	if vc == nil || vc.MaxSeconds != 300 || !vc.ReadAloud || vc.Available() {
+		t.Fatalf("%+v (not available without the tool)", vc)
 	}
-	vc := remoteVoiceConfig(app, vs)
-	if vc.MaxSeconds != 300 || vc.Available() {
-		t.Fatalf("%+v (not usable before it runs)", vc)
-	}
-	var warn bytes.Buffer
-	inApp, inSt := filesApp(t, true)
-	inApp.Remote.Voice = app.Remote.Voice
-	if remoteVoice(inApp, inSt, &warn) != nil || !strings.Contains(warn.String(), "dictation stays off") {
-		t.Fatalf("state in tree: %q", warn.String())
+	if !vc.NotSent(voice.ErrNotSent) {
+		t.Fatal("NotSent")
 	}
 	app.Remote.Voice.Enabled = false
-	if remoteVoice(app, st, &warn) != nil || remoteVoiceConfig(app, nil) != nil {
+	if remoteVoiceConfig(app) != nil {
 		t.Fatal("off")
 	}
 }

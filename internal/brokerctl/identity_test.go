@@ -251,7 +251,7 @@ func TestFilesSwitchesInTheStamps(t *testing.T) {
 func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 	app := remoteTestApp(t)
 	b0, off := ConfigHash(app), RemoteConfigHash(app)
-	app.Remote.Voice = config.Voice{WhisperServer: "/opt/w/whisper-server", MaxSeconds: 60}
+	app.Remote.Voice = config.Voice{Socket: "/run/lever/whisper.sock", MaxSeconds: 60}
 	no := false
 	app.Remote.AllowedUsers[1].Voice = &no
 	if RemoteConfigHash(app) != off || ConfigHash(app) != b0 {
@@ -267,17 +267,12 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 		t.Fatal("voice must not bounce the broker")
 	}
 	for name, mut := range map[string]func(a *config.App){
-		"program":    func(a *config.App) { a.Remote.Voice.WhisperServer = "/opt/x/whisper-server" },
-		"model":      func(a *config.App) { a.Remote.Voice.Model = "large-v3-turbo-q5_0" },
-		"language":   func(a *config.App) { a.Remote.Voice.Language = "de" },
-		"vocabulary": func(a *config.App) { a.Remote.Voice.Vocabulary = []string{"Lever"} },
+		"socket":     func(a *config.App) { a.Remote.Voice.Socket = "/run/lever/other.sock" },
 		"max":        func(a *config.App) { a.Remote.Voice.MaxSeconds = 120 },
-		"gpu":        func(a *config.App) { a.Remote.Voice.GPU = &no },
-		"port":       func(a *config.App) { a.Remote.Voice.Port = 9100 },
+		"read aloud": func(a *config.App) { a.Remote.Voice.ReadAloud = &no },
 		"login":      func(a *config.App) { a.Remote.AllowedUsers[1].Voice = &no },
 	} {
 		c := *app
-		c.Remote.Voice.Vocabulary = nil
 		c.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
 		mut(&c)
 		if RemoteConfigHash(&c) == on {

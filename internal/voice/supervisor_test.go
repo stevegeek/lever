@@ -204,19 +204,52 @@ func TestChildEnvKeepsOnlyWhatAGPUBuildNeeds(t *testing.T) {
 	}
 }
 
-func TestServiceRefusesAnUnverifiedModel(t *testing.T) {
+func TestServiceHoldsBackAnUnverifiedModel(t *testing.T) {
 	bin := fakeWhisper(t)
 	m := testModel("m")
 	m.SHA256 = Unverified
 	var l logs
-	s := &Service{Model: m, ModelDir: t.TempDir(), Server: bin, Port: freePort(t), Log: l.f}
-	s.Run(context.Background()) // returns at once
-	if s.Usable() || l.count("does not verify") != 1 || l.count("not verified yet") != 1 {
-		t.Fatalf("%v %q", s.Usable(), l.lines)
+	s := &Service{Model: m, ModelDir: t.TempDir(), Server: bin, Port: freePort(t), Log: l.f,
+		Supervisor: &Supervisor{MinBackoff: 10 * time.Millisecond, MaxBackoff: 10 * time.Millisecond}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = s.Run(ctx)
+	}()
+	eventually(t, "a held-back start", func() bool { return l.count("not verified yet") >= 2 })
+	cancel()
+	<-done
+	if s.Ready() {
+		t.Fatal("ready with an unverified model")
 	}
 	if _, err := s.Transcribe(context.Background(), []byte("RIFF")); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrNotSent) {
 		t.Fatal(err)
 	}
+}
+
+// A model fetched while the service runs is picked up at the next check,
+// without a restart.
+func TestServicePicksUpAModelFetchedLater(t *testing.T) {
+	bin := fakeWhisper(t)
+	m := testModel("model")
+	dir := t.TempDir()
+	var l logs
+	s := &Service{Model: m, ModelDir: dir, Server: bin, Port: freePort(t), Log: l.f,
+		Supervisor: &Supervisor{MinBackoff: 10 * time.Millisecond, MaxBackoff: 20 * time.Millisecond, ProbeEvery: 10 * time.Millisecond}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = s.Run(ctx)
+	}()
+	eventually(t, "a missing model refused", func() bool { return l.count("does not verify") >= 1 })
+	if err := os.WriteFile(ModelPath(dir, m), []byte("model"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "ready", s.Ready)
+	cancel()
+	<-done
 }
 
 func TestServiceRunsAVerifiedModel(t *testing.T) {
@@ -233,18 +266,17 @@ func TestServiceRunsAVerifiedModel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.Run(ctx)
+		_ = s.Run(ctx)
 	}()
-	eventually(t, "usable", s.Usable)
-	eventually(t, "ready", func() bool { return s.Supervisor.Ready() })
+	eventually(t, "ready", s.Ready)
 	text, err := s.Transcribe(ctx, []byte("RIFFxxxx"))
 	if err != nil || !strings.Contains(text, "language auto; prompt Scion; format json; gpu true") {
 		t.Fatalf("%q %v", text, err)
 	}
 	cancel()
 	<-done
-	if s.Usable() {
-		t.Fatal("still usable after the stop")
+	if s.Ready() {
+		t.Fatal("still ready after the stop")
 	}
 	if _, err := s.Transcribe(context.Background(), []byte("RIFF")); !errors.Is(err, ErrNotReady) || !errors.Is(err, ErrNotSent) {
 		t.Fatal(err)

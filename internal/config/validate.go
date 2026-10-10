@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/egress"
@@ -324,6 +323,9 @@ func (a *App) Validate() error {
 		return err
 	}
 	if err := a.validateBroker(); err != nil {
+		return err
+	}
+	if err := a.validateWhisperTools(); err != nil {
 		return err
 	}
 	if err := a.validateOperator(); err != nil {
@@ -690,43 +692,16 @@ func (a *App) validateRemote() error {
 	return a.validateVoice()
 }
 
-// voiceLanguageRE is a Whisper language code: two or three lowercase
-// letters ("en", "de", "haw").
-var voiceLanguageRE = regexp.MustCompile(`^[a-z]{2,3}$`)
-
 // validateVoice checks remote.voice (with remote access on: validateRemote
 // returns early otherwise). Its shape is checked even while voice is off;
-// the rest only when it is on.
-//
-// The port matters most. whisper-server has no authentication of its own:
-// it is safe only because it listens on host loopback and the jail's egress
-// rules drop every host-loopback port that is not allowlisted. So the voice
-// port must never be one the jail may reach (EffectiveAllowedPorts: the
-// broker's jail port, manager.allow_ports, the login port), nor collide
-// with one of lever's own host listeners.
+// the rest only when it is on. The transcription runs in the broker tool
+// lever-tool-whisper; remote.voice names its dictation socket, which must be
+// the -dictate-socket of a whisper tool in broker.tools when there is one
+// (the tool may also be run by hand, outside the broker).
 func (a *App) validateVoice() error {
 	v := a.Remote.Voice
 	if v.MaxSeconds < 0 || v.MaxSeconds > MaxVoiceMaxSeconds {
 		return fmt.Errorf("config: remote: voice.max_seconds %d; use 1 to %d (or leave it out for %d)", v.MaxSeconds, MaxVoiceMaxSeconds, DefaultVoiceMaxSeconds)
-	}
-	if m := strings.TrimSpace(v.Model); m != "" {
-		if _, ok := voice.Lookup(m); !ok {
-			return fmt.Errorf("config: remote: voice.model %q is not in lever's pinned model table; use one of %s", v.Model, strings.Join(voice.Names(), ", "))
-		}
-	}
-	if v.Language != "" && !voiceLanguageRE.MatchString(v.Language) {
-		return fmt.Errorf("config: remote: voice.language %q: a Whisper language code such as en or de (leave it out to detect the language)", v.Language)
-	}
-	for _, w := range v.Vocabulary {
-		if strings.TrimSpace(w) == "" || len(w) > 64 || strings.ContainsFunc(w, unicode.IsControl) {
-			return fmt.Errorf("config: remote: voice.vocabulary entry %q: one word or short phrase, 1 to 64 bytes, no control characters", w)
-		}
-	}
-	if n := len(a.VoicePrompt()); n > MaxVoiceVocabulary {
-		return fmt.Errorf("config: remote: voice.vocabulary is %d bytes as a prompt; keep it under %d (Whisper reads only a short prompt)", n, MaxVoiceVocabulary)
-	}
-	if v.Port < 0 || v.Port > 65535 {
-		return fmt.Errorf("config: remote: voice.port %d is not a port", v.Port)
 	}
 	if !v.Enabled {
 		return nil
@@ -734,34 +709,28 @@ func (a *App) validateVoice() error {
 	if a.Remote.Landing != RemoteLandingChat {
 		return fmt.Errorf("config: remote: voice needs landing: chat (the mic is on the chat page)")
 	}
-	ws := v.WhisperServer
-	if ws == "" {
-		return fmt.Errorf("config: remote: voice.whisper_server is required when voice is on: the absolute path of whisper.cpp's whisper-server, which you install")
+	if v.Socket == "" {
+		return fmt.Errorf("config: remote: voice.socket is required when voice is on: the -dictate-socket of the lever-tool-whisper entry in broker.tools")
 	}
-	if !filepath.IsAbs(ws) || filepath.Clean(ws) != ws {
-		return fmt.Errorf("config: remote: voice.whisper_server %q must be a clean absolute host path (outside the tree)", ws)
+	if err := voice.CheckSocketPath(v.Socket); err != nil {
+		return fmt.Errorf("config: remote: voice.socket: %w", err)
 	}
-	vp := a.EffectiveVoicePort()
-	if slices.Contains(a.EffectiveAllowedPorts(), vp) {
-		return fmt.Errorf("config: remote: voice.port %d is a port the jail may reach (manager.allow_ports, the broker's jail port or the login port): "+
-			"whisper-server has no authentication, and only the egress rules keep agents from it; pick another port, or remove it from manager.allow_ports", vp)
+	tools := a.WhisperTools()
+	if len(tools) == 0 {
+		return nil
 	}
-	for _, own := range []struct {
-		port int
-		what string
-	}{
-		{a.EffectiveRemotePort(), "the remote proxy's port"},
-		{a.EffectiveAdminPort(), "the broker's admin port"},
-		{GuestLoginIssuerPort, "the port the jail's login forwarder is mirrored onto"},
-	} {
-		if vp == own.port {
-			return fmt.Errorf("config: remote: voice.port %d collides with %s; pick another", vp, own.what)
+	w, ok := a.VoiceTool()
+	if !ok {
+		var names []string
+		for _, t := range tools {
+			names = append(names, fmt.Sprintf("%s (-dictate-socket %s)", t.Name, t.Socket))
 		}
+		return fmt.Errorf("config: remote: voice.socket %s is not the -dictate-socket of any whisper tool in broker.tools: %s; set them to the same path",
+			v.Socket, strings.Join(names, ", "))
 	}
-	for _, t := range a.Broker.Tools {
-		if port, ok := backendPort(t.Backend); ok && port == vp {
-			return fmt.Errorf("config: remote: voice.port %d collides with broker tool %q's backend port; pick another", vp, t.Name)
-		}
+	if a.EffectiveVoiceMaxSeconds() > w.EffectiveMaxSeconds() {
+		return fmt.Errorf("config: remote: voice.max_seconds %d is more than broker tool %q's -max-seconds %d, which would refuse such a clip",
+			a.EffectiveVoiceMaxSeconds(), w.Name, w.EffectiveMaxSeconds())
 	}
 	return nil
 }

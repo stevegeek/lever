@@ -463,53 +463,35 @@ type Remote struct {
 	// landing: chat. See Files.
 	Files Files `yaml:"files"`
 	// Voice turns on dictation on the chat page: a login records a clip,
-	// a whisper.cpp server the proxy runs on host loopback transcribes it,
-	// and the text lands in the message box for review (never sent by
-	// itself). Off by default; needs landing: chat. See Voice.
+	// the broker tool lever-tool-whisper transcribes it, and the text lands
+	// in the message box for review (never sent by itself). Off by default;
+	// needs landing: chat. See Voice.
 	Voice Voice `yaml:"voice"`
 }
 
-// Voice is remote.voice. Audio and transcripts are never stored: the proxy
-// passes a checked clip from memory to the child over loopback and returns
-// the text to the login that sent it.
+// Voice is remote.voice: dictation on the chat page. The transcription
+// itself runs in the broker tool lever-tool-whisper (whisper-server is its
+// child); the proxy posts each checked clip to the tool's dictation socket
+// and returns the text to the login that sent it. Audio and transcripts are
+// never stored.
 type Voice struct {
 	Enabled bool `yaml:"enabled"`
-	// WhisperServer is the whisper.cpp server program (whisper-server): an
-	// absolute host path outside the tree, which the operator installs
-	// (with CUDA or Metal). Lever never builds or installs it. Required
-	// when enabled.
-	WhisperServer string `yaml:"whisper_server"`
-	// Model is a name from lever's pinned model table (internal/voice).
-	// Empty = voice.DefaultModel. `lever voice fetch` downloads it; the
-	// proxy never does.
-	Model string `yaml:"model"`
-	// Language is a Whisper language code ("en", "de", ...). Empty =
-	// detect it per clip.
-	Language string `yaml:"language"`
-	// Vocabulary is words Whisper should expect (names, jargon), passed as
-	// its prompt. Host config only: the jail must not steer it.
-	Vocabulary []string `yaml:"vocabulary"`
+	// Socket is the tool's dictation socket: an absolute host path outside
+	// the tree, equal to the -dictate-socket of the lever-tool-whisper entry
+	// in broker.tools. Required when enabled.
+	Socket string `yaml:"socket"`
 	// MaxSeconds bounds one clip. Zero = DefaultVoiceMaxSeconds; at most
-	// MaxVoiceMaxSeconds.
+	// MaxVoiceMaxSeconds, and at most the tool's -max-seconds.
 	MaxSeconds int `yaml:"max_seconds"`
-	// GPU false runs whisper-server with --no-gpu. nil = true.
-	GPU *bool `yaml:"gpu"`
 	// ReadAloud turns the read-aloud button on agent messages on or off
 	// (the browser's on-device voices; nothing leaves the device). nil =
 	// on while voice is enabled; never shown while it is off.
 	ReadAloud *bool `yaml:"read_aloud"`
-	// Port is the HOST loopback port whisper-server binds. Zero =
-	// DefaultRemoteVoicePort. Never one the jail may reach: validated
-	// against manager.allow_ports and lever's own listeners.
-	Port int `yaml:"port"`
 }
 
 const (
 	DefaultVoiceMaxSeconds = 300
 	MaxVoiceMaxSeconds     = 600
-	// MaxVoiceVocabulary bounds the vocabulary as a prompt, in bytes
-	// (Whisper reads a short prompt; the rest would be cut anyway).
-	MaxVoiceVocabulary = 800
 )
 
 // Push is remote.push.

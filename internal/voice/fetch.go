@@ -251,26 +251,26 @@ func ModelPath(dir string, m Model) string { return filepath.Join(dir, m.File) }
 // else may write to. It returns the real path.
 func CheckServer(p string) (string, error) {
 	if !filepath.IsAbs(p) {
-		return "", fmt.Errorf("voice: whisper_server %q is not an absolute path", p)
+		return "", fmt.Errorf("voice: -server %q is not an absolute path", p)
 	}
 	real, err := filepath.EvalSymlinks(p)
 	if err != nil {
-		return "", fmt.Errorf("voice: whisper_server: %w", err)
+		return "", fmt.Errorf("voice: -server: %w", err)
 	}
 	fi, err := os.Stat(real)
 	if err != nil {
-		return "", fmt.Errorf("voice: whisper_server: %w", err)
+		return "", fmt.Errorf("voice: -server: %w", err)
 	}
 	if err := safeOwned(real, fi); err != nil {
 		return "", err
 	}
 	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("voice: whisper_server %s is not an executable file", real)
+		return "", fmt.Errorf("voice: -server %s is not an executable file", real)
 	}
 	dir := filepath.Dir(real)
 	di, err := os.Stat(dir)
 	if err != nil {
-		return "", fmt.Errorf("voice: whisper_server: %w", err)
+		return "", fmt.Errorf("voice: -server: %w", err)
 	}
 	if err := safeOwned(dir, di); err != nil {
 		return "", err
@@ -282,10 +282,10 @@ func CheckServer(p string) (string, error) {
 // someone other than the caller or root.
 func safeOwned(p string, fi fs.FileInfo) error {
 	if fi.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("voice: whisper_server: %s is %v: another user can replace what lever runs", p, fi.Mode().Perm())
+		return fmt.Errorf("voice: -server: %s is %v: another user can replace what lever runs", p, fi.Mode().Perm())
 	}
 	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() && owner != 0 {
-		return fmt.Errorf("voice: whisper_server: %s belongs to uid %d, neither you nor root", p, owner)
+		return fmt.Errorf("voice: -server: %s belongs to uid %d, neither you nor root", p, owner)
 	}
 	return nil
 }

@@ -4,9 +4,9 @@ package remoteproxy
 // takes one recorded clip and answers its text, which the page puts into the
 // message box for the login to review and send itself. Nothing is sent to an
 // agent here, and nothing is stored: the clip is read into memory, checked,
-// handed to the transcriber (a whisper.cpp server on host loopback, package
-// voice) and dropped; the text goes back only to the login that sent the
-// clip. The audit line has the login, the clip's length, the outcome and the
+// handed to the transcriber (the broker tool lever-tool-whisper, over its
+// dictation socket: package voice) and dropped; the text goes back only to
+// the login that sent the clip. The audit line has the login, the clip's length, the outcome and the
 // latency; never the audio, never the text.
 //
 // The shape follows the upload route (files.go): the login gate, a custom
@@ -16,16 +16,14 @@ package remoteproxy
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"mime"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/stevegeek/lever/internal/chatledger"
+	"github.com/stevegeek/lever/internal/voice"
 )
 
 // VoiceConfig is remote.voice as the proxy needs it.
@@ -35,13 +33,14 @@ type VoiceConfig struct {
 	// Excluded are the logins with voice: false: no mic, and the route
 	// answers voice-off.
 	Excluded []string
-	// Available reports whether dictation can run: the model and program
-	// passed their checks at start and the child is supervised. False: the
-	// roster carries no voice and the route answers unavailable.
+	// Available reports whether dictation can run: lever-tool-whisper
+	// answers its health route ready (voice.DictateClient, cached briefly).
+	// False: the roster carries no voice and the route answers unavailable.
 	Available func() bool
 	// NotSent reports whether a Transcribe error means the clip never
-	// reached the transcriber (voice.ErrNotSent): only then is its use of
-	// the limits given back. nil = never.
+	// reached whisper-server (voice.ErrNotSent: the socket did not answer,
+	// or the tool refused the clip before whisper-server): only then is its
+	// use of the limits given back. nil = never.
 	NotSent func(error) bool
 	// ReadAloud: the roster tells the page to offer read-aloud to every
 	// login with voice on (remote.voice.read_aloud).
@@ -71,21 +70,13 @@ const (
 	voicePerLogin = 1
 	// Per login, in memory: clips transcribed per hour, audio per day, and
 	// attempts (refused ones included) per hour.
-	voiceClipsPerHour   = 30
-	voiceSecondsPerDay  = 60 * 60
-	voiceTriesPerHour   = 2 * voiceClipsPerHour
-	voiceSampleRate     = 16000
-	voiceBytesPerSecond = 2 * voiceSampleRate // s16le mono
-	wavHeaderLen        = 44
-	// voiceMinBytes is a tenth of a second: anything shorter holds no word.
-	voiceMinBytes = voiceBytesPerSecond / 10
+	voiceClipsPerHour  = 30
+	voiceSecondsPerDay = 60 * 60
+	voiceTriesPerHour  = 2 * voiceClipsPerHour
 	// voiceBodyBase plus the body at fileBodyMinRate, at most voiceBodyMax:
 	// about 3.5 min for a 300 s clip.
 	voiceBodyBase = time.Minute
 	voiceBodyMax  = 30 * time.Minute
-	// voiceMaxText is the chat message limit (scion's
-	// messages.MaxMessageLength, chatcore.js MAX_MESSAGE), in characters.
-	voiceMaxText = 16000
 )
 
 // voiceState holds the route's slots and per-login counts.
@@ -148,7 +139,7 @@ func (g *gate) voiceInfoFor(login string) *voiceInfo {
 
 // maxBody is the largest body a clip of MaxSeconds can be.
 func (s *voiceState) maxBody() int64 {
-	return int64(voiceBytesPerSecond)*int64(s.cfg.MaxSeconds) + 1024
+	return int64(voice.BytesPerSecond)*int64(s.cfg.MaxSeconds) + 1024
 }
 
 func (s *voiceState) bodyDeadline() time.Duration {
@@ -241,65 +232,11 @@ func (s *voiceState) refund(login string, seconds float64, at time.Time) {
 	}
 }
 
-// checkWAV checks a clip: the canonical 44-byte header of PCM s16le, 16 kHz,
-// mono (what the page encodes), every header field exact, the sizes
-// matching the body, at least voiceMinBytes of samples and at most
-// maxSeconds. whisper.cpp then parses only a header lever has checked byte
-// for byte. It answers the clip's length, or a refusal word.
-func checkWAV(b []byte, maxSeconds int) (float64, string) {
-	if len(b) < wavHeaderLen+voiceMinBytes {
-		return 0, "bad-audio"
-	}
-	le := binary.LittleEndian
-	data := len(b) - wavHeaderLen
-	ok := string(b[0:4]) == "RIFF" && le.Uint32(b[4:8]) == uint32(len(b)-8) && string(b[8:12]) == "WAVE" &&
-		string(b[12:16]) == "fmt " && le.Uint32(b[16:20]) == 16 &&
-		le.Uint16(b[20:22]) == 1 && // PCM
-		le.Uint16(b[22:24]) == 1 && // mono
-		le.Uint32(b[24:28]) == voiceSampleRate &&
-		le.Uint32(b[28:32]) == voiceBytesPerSecond &&
-		le.Uint16(b[32:34]) == 2 && // block align
-		le.Uint16(b[34:36]) == 16 && // bits per sample
-		string(b[36:40]) == "data" && le.Uint32(b[40:44]) == uint32(data) && data%2 == 0
-	if !ok {
-		return 0, "bad-audio"
-	}
-	if data > voiceBytesPerSecond*maxSeconds {
-		return 0, "too-long"
-	}
-	return float64(data) / voiceBytesPerSecond, ""
-}
-
 // voiceAudio reports whether a Content-Type names a WAV body.
 func voiceAudio(ct string) bool {
 	mt, _, err := mime.ParseMediaType(ct)
 	return err == nil && (mt == "audio/wav" || mt == "audio/wave" || mt == "audio/x-wav")
 }
-
-// voiceText is the transcript as the page gets it: trimmed, and cut to the
-// chat message limit.
-func voiceText(s string) string {
-	s = strings.ToValidUTF8(s, "�")
-	// Whisper writes non-speech as markers ([BLANK_AUDIO], [MUSIC],
-	// (silence)); they are not words the login said. Only known ones are
-	// removed, so dictated code such as a[i] or [TODO] stays.
-	if whisperMarker.MatchString(s) {
-		s = strings.TrimSpace(spaceRun.ReplaceAllString(whisperMarker.ReplaceAllString(s, " "), " "))
-	}
-	s = strings.TrimSpace(s)
-	if utf8.RuneCountInString(s) <= voiceMaxText {
-		return s
-	}
-	r := []rune(s)
-	return strings.TrimSpace(string(r[:voiceMaxText]))
-}
-
-// whisperMarker is one of Whisper's known non-speech markers, in square
-// brackets or parentheses, with the spaces around it.
-var whisperMarker = regexp.MustCompile(`(?i)[ \t]*[\[(]\s*(blank_audio|music|silence|noise|inaudible|applause|laughter|sound effect|sound-effect|no speech)\s*[\])][ \t]*`)
-
-// spaceRun is a run of spaces or tabs (line breaks are kept).
-var spaceRun = regexp.MustCompile(`[ \t]{2,}`)
 
 // refuseVoice answers the route with one fixed error word.
 func (g *gate) refuseVoice(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, word string) {
@@ -329,7 +266,7 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		return
 	}
 	if s.cfg.Available == nil || !s.cfg.Available() || s.cfg.Transcribe == nil {
-		line.Error = "the transcriber is not running (see the proxy log)"
+		line.Error = "lever-tool-whisper is not ready (see lever doctor and the tool log)"
 		g.refuseVoice(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
@@ -383,7 +320,7 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		return
 	}
 	clip := buf.Bytes()
-	seconds, word := checkWAV(clip, s.cfg.MaxSeconds)
+	seconds, word := voice.CheckWAV(clip, s.cfg.MaxSeconds)
 	if word == "too-long" {
 		g.refuseVoice(w, r, line, http.StatusRequestEntityTooLarge, word)
 		return
@@ -410,13 +347,14 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		return
 	}
 	start := time.Now()
-	// A browser that gives up ends the request to the child, which stops
-	// work on the clip; the GPU token is freed with it.
+	// A browser that gives up ends the request to the tool, which ends its
+	// request to whisper-server, which stops work on the clip; the GPU token
+	// is freed with it.
 	text, err := s.cfg.Transcribe(r.Context(), clip)
 	<-s.gpu
 	line.LatencyMS = max(time.Since(start).Milliseconds(), 1)
 	if err != nil {
-		// Only a clip that never reached the transcriber is given back: a
+		// Only a clip that never reached whisper-server is given back: a
 		// timeout or a failed transcription used it.
 		if s.cfg.NotSent != nil && s.cfg.NotSent(err) {
 			s.refund(v.login, seconds, takenAt)
@@ -425,5 +363,5 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		g.refuseVoice(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	g.answerFileJSON(w, r, line, DecisionVoice, http.StatusOK, map[string]any{"text": voiceText(text)})
+	g.answerFileJSON(w, r, line, DecisionVoice, http.StatusOK, map[string]any{"text": voice.CleanText(text)})
 }

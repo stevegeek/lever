@@ -34,7 +34,7 @@ func hostDecision(t *testing.T, yaml, host string) remoteproxy.Decision {
 	dial := func(context.Context, string, string) (net.Conn, error) {
 		return nil, errors.New("no jail in this test")
 	}
-	_, h, _, err := buildRemoteHandler(app, st, dial, audit, io.Discard, nil)
+	_, h, _, err := buildRemoteHandler(app, st, dial, audit, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestRemoteHandlerWiresTrustForwardedHost(t *testing.T) {
 			}
 		}
 		dial := func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("no jail") }
-		_, h, _, err := buildRemoteHandler(app, state.ForConfig(t.TempDir()), dial, audit, io.Discard, nil)
+		_, h, _, err := buildRemoteHandler(app, state.ForConfig(t.TempDir()), dial, audit, io.Discard)
 		if err != nil {
 			t.Fatal(err)
 		}

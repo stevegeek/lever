@@ -16,24 +16,25 @@ package voice
 //     the transcript. A failure is a non-200 status, or a JSON object with
 //     an "error" field.
 //  4. The server answers one request at a time; lever queues in front of it
-//     anyway (remoteproxy's voice slots).
+//     anyway (the tool's Queue, behind the remote proxy's voice slots).
 //  5. The server prints what it transcribes to its console. lever therefore
 //     discards the child's stdout and stderr (supervisor.go): a transcript
-//     must never reach remote.log.
+//     must never reach the tool's log.
 //  6. Readiness: the server accepts TCP connections on --port once the model
 //     is loaded (it binds after loading). lever probes with a connect.
 //  7. The server also has routes lever never uses: /load (loads a model
 //     from any path the request names, and exits when that fails),
 //     /health, and static files from --public, default
 //     "examples/server/public" relative to its working directory. Only
-//     host processes reach its loopback port (the jail's egress drops it),
-//     and lever runs it in the model directory, inside the state
-//     directory, so the static path resolves nowhere an agent can write.
+//     host processes reach its loopback port (the jail's egress drops it:
+//     config load refuses -whisper-port in every port the jail may reach),
+//     and lever runs it in the model directory (-models, refused inside
+//     the tree), so the static path resolves nowhere an agent can write.
 //  8. --request-path P puts every route under P (P + "/inference", P +
 //     "/load"). The server answers CORS requests from any origin and checks
 //     no Host header, so without a secret prefix any web page open on the
 //     host could post to /load. lever passes a fresh random prefix per
-//     proxy start and never logs it.
+//     tool start and never logs it.
 //  9. The server stops transcribing a clip whose client connection closed
 //     (an abort callback that checks the connection), so lever frees its
 //     GPU slot when the browser gives up.
@@ -64,7 +65,7 @@ import (
 // 127.0.0.1:port (assumption 1).
 //
 // requestPath is the secret prefix of every route (assumption 8): a fresh
-// random value per proxy start (NewRequestPath), so a page in a browser on
+// random value per tool start (NewRequestPath), so a page in a browser on
 // the host, or a DNS-rebound name, cannot reach /load or /inference.
 func ServerArgs(modelPath string, port int, gpu bool, requestPath string) []string {
 	args := []string{"--host", "127.0.0.1", "--port", strconv.Itoa(port), "-m", modelPath}
@@ -78,8 +79,9 @@ func ServerArgs(modelPath string, port int, gpu bool, requestPath string) []stri
 }
 
 // ErrNotSent: the clip never reached whisper-server (it is not running or
-// not listening). Unlike a timeout or a failed transcription, no work was
-// done, so the proxy gives the clip's use of the limits back.
+// not listening, or the tool refused the clip first). Unlike a timeout or a
+// failed transcription, no work was done, so the clip's use of the limits
+// is given back (the proxy's per-login limits, the tool's per-agent ones).
 var ErrNotSent = errors.New("the clip did not reach whisper-server")
 
 // ErrServer: whisper-server answered, but not with a transcript.

@@ -43,6 +43,8 @@ func TestHostPathsRefusedInsideTree(t *testing.T) {
 		{"fizzy cli", "manager: {}\n" + supervisedTool("[/usr/bin/true, -fizzy, ROOT/ws/tools/bin]"), "broker.tools[t] -fizzy"},
 		{"script argument", "manager: {}\n" + supervisedTool("[/usr/bin/ruby, ROOT/ws/tools/bin]"), "broker.tools[t] script"},
 		{"sh -c command", "manager: {}\n" + supervisedTool("[sh, -c, \"exec ROOT/ws/tools/bin --x\"]"), "broker.tools[t] -c code"},
+		{"whisper models", "manager: {}\n" + supervisedTool("[/usr/bin/true, -models, ROOT/ws/models]"), "broker.tools[t] -models"},
+		{"whisper socket", "manager: {}\n" + supervisedTool("[/usr/bin/true, -whisper-port, \"9100\", -models, /m, -server, /s, -dictate-socket, ROOT/ws/d.sock]"), "broker.tools[t] -dictate-socket"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -192,6 +194,14 @@ func TestToolHostPaths(t *testing.T) {
 		{"broker.tools[t] -state", "/s", hostSecret},
 		{"broker.tools[t] -fizzy", "/bin/fizzy", hostProgram},
 		{"broker.tools[t] -token-file", "/t", hostSecret},
+	})
+	// lever-tool-whisper: the program it runs, its models and its socket;
+	// the port, model and max-seconds values are consumed, not paths.
+	check("whisper flags", paths("lever-tool-whisper", "-tree", "/a/ws", "-server", "/w/whisper-server", "--models=/m",
+		"-model", "x/y", "-whisper-port", "8448", "-dictate-socket", "/r/d.sock", "-max-seconds", "60", "-gpu=false"), []got{
+		{"broker.tools[t] -server", "/w/whisper-server", hostProgramOutside},
+		{"broker.tools[t] -models", "/m", hostPrivate},
+		{"broker.tools[t] -dictate-socket", "/r/d.sock", hostPrivate},
 	})
 	check("command path", paths("/opt/x", "--key-file=/k"), []got{{"broker.tools[t] command", "/opt/x", hostProgram}})
 	// An interpreter's first argument is the script it runs, unless a flag.

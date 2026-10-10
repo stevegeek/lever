@@ -3,37 +3,24 @@ package remoteproxy
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stevegeek/lever/internal/voice"
 )
 
 // wavClip is a canonical clip of n samples (PCM s16le, 16 kHz, mono).
-func wavClip(n int) []byte {
-	b := make([]byte, wavHeaderLen+2*n)
-	le := binary.LittleEndian
-	copy(b[0:], "RIFF")
-	le.PutUint32(b[4:], uint32(len(b)-8))
-	copy(b[8:], "WAVEfmt ")
-	le.PutUint32(b[16:], 16)
-	le.PutUint16(b[20:], 1)
-	le.PutUint16(b[22:], 1)
-	le.PutUint32(b[24:], 16000)
-	le.PutUint32(b[28:], 32000)
-	le.PutUint16(b[32:], 2)
-	le.PutUint16(b[34:], 16)
-	copy(b[36:], "data")
-	le.PutUint32(b[40:], uint32(2*n))
-	return b
-}
+func wavClip(n int) []byte { return voice.CanonicalWAV(n) }
 
 // voiceRec is a transcriber that records what it was sent.
 type voiceRec struct {
@@ -231,51 +218,6 @@ func TestVoiceBodyLimitAndDeadline(t *testing.T) {
 	}
 }
 
-func TestCheckWAV(t *testing.T) {
-	good := wavClip(16000)
-	if sec, word := checkWAV(good, 1); sec != 1 || word != "" {
-		t.Fatalf("%v %q", sec, word)
-	}
-	if _, word := checkWAV(wavClip(16001), 1); word != "too-long" {
-		t.Fatalf("over max: %q", word)
-	}
-	le := binary.LittleEndian
-	for name, mut := range map[string]func(b []byte) []byte{
-		"riff":        func(b []byte) []byte { copy(b, "RIFX"); return b },
-		"riff size":   func(b []byte) []byte { le.PutUint32(b[4:], 1); return b },
-		"wave":        func(b []byte) []byte { copy(b[8:], "AVI "); return b },
-		"fmt size":    func(b []byte) []byte { le.PutUint32(b[16:], 18); return b },
-		"float":       func(b []byte) []byte { le.PutUint16(b[20:], 3); return b },
-		"extensible":  func(b []byte) []byte { le.PutUint16(b[20:], 0xfffe); return b },
-		"stereo":      func(b []byte) []byte { le.PutUint16(b[22:], 2); return b },
-		"44.1 kHz":    func(b []byte) []byte { le.PutUint32(b[24:], 44100); return b },
-		"byte rate":   func(b []byte) []byte { le.PutUint32(b[28:], 16000); return b },
-		"block align": func(b []byte) []byte { le.PutUint16(b[32:], 4); return b },
-		"8 bit":       func(b []byte) []byte { le.PutUint16(b[34:], 8); return b },
-		"list chunk":  func(b []byte) []byte { copy(b[36:], "LIST"); return b },
-		"data size":   func(b []byte) []byte { le.PutUint32(b[40:], uint32(len(b))); return b },
-		"trailing":    func(b []byte) []byte { return append(b, 0, 0) },
-		"odd data": func(b []byte) []byte {
-			b = append(b, 0)
-			le.PutUint32(b[4:], uint32(len(b)-8))
-			le.PutUint32(b[40:], uint32(len(b)-44))
-			return b
-		},
-		"header only":  func(b []byte) []byte { return wavClip(0) },
-		"truncated":    func(b []byte) []byte { return b[:30] },
-		"empty":        func(b []byte) []byte { return nil },
-		"short clip":   func(b []byte) []byte { return wavClip(799) },
-		"riff in data": func(b []byte) []byte { return append([]byte("RIFF"), b...) },
-	} {
-		if _, word := checkWAV(mut(bytes.Clone(good)), 1); word != "bad-audio" {
-			t.Errorf("%s: %q", name, word)
-		}
-	}
-	if _, word := checkWAV(wavClip(1600), 1); word != "" {
-		t.Fatalf("a tenth of a second: %q", word)
-	}
-}
-
 func TestVoiceSlots(t *testing.T) {
 	s := newVoiceState(VoiceConfig{MaxSeconds: 1})
 	d1, ok := s.begin("op@x", true)
@@ -463,34 +405,6 @@ func TestVoiceFailureRefundsOnlyUnsentClips(t *testing.T) {
 	}
 }
 
-func TestVoiceTextDropsWhisperMarkers(t *testing.T) {
-	for in, want := range map[string]string{
-		" [BLANK_AUDIO]\n":                  "",
-		"hello [MUSIC] world":               "hello world",
-		"[ Silence ] ok":                    "ok",
-		"(inaudible)":                       "",
-		"keep a[i], [TODO] and (x) as said": "keep a[i], [TODO] and (x) as said",
-		"line one\nline two":                "line one\nline two",
-	} {
-		if got := voiceText(in); got != want {
-			t.Errorf("voiceText(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestVoiceText(t *testing.T) {
-	if got := voiceText(" \n hi there \t"); got != "hi there" {
-		t.Fatalf("%q", got)
-	}
-	long := strings.Repeat("é", voiceMaxText+10)
-	if got := voiceText(long); len([]rune(got)) != voiceMaxText {
-		t.Fatalf("%d", len([]rune(got)))
-	}
-	if got := voiceText("a\xffb"); got != "a�b" {
-		t.Fatalf("%q", got)
-	}
-}
-
 func TestAgentsAnswerCarriesVoice(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, rec := voiceCfg(t, hub)
@@ -578,5 +492,98 @@ func TestVoiceSlowTranscriptionOutlivesTheBodyDeadline(t *testing.T) {
 	_, _ = body.ReadFrom(resp.Body)
 	if resp.StatusCode != 200 || !strings.Contains(body.String(), "hello Lever") {
 		t.Fatalf("%d %s", resp.StatusCode, body.String())
+	}
+}
+
+// fakeTool is a stand-in for lever-tool-whisper's dictation socket: health
+// answers ready, and each clip gets the answer set in word ("" = a
+// transcript).
+type fakeTool struct {
+	mu    sync.Mutex
+	word  string
+	clips int
+}
+
+func (f *fakeTool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.URL.Path {
+	case "/health":
+		_ = json.NewEncoder(w).Encode(voice.Health{Ready: true, Model: "m", MaxSeconds: 2})
+	case "/dictate":
+		f.mu.Lock()
+		word := f.word
+		f.clips++
+		f.mu.Unlock()
+		if word == "" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"text": " hi [BLANK_AUDIO] there "})
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": word})
+	}
+}
+
+// The proxy over the real socket client, against a fake tool: the text is
+// cleaned, and only a clip that never reached whisper-server (the tool
+// answers not-ready, or the socket is gone) gives its use back.
+func TestVoiceThroughTheDictationSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("", "rp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s", "d.sock")
+	ln, err := voice.ListenDictate(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := &fakeTool{}
+	srv := &http.Server{Handler: tool}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	hub := newPageHub(t)
+	cfg, _ := voiceCfg(t, hub)
+	client := &voice.DictateClient{Socket: sock, HealthTTL: time.Millisecond}
+	cfg.Voice.Available, cfg.Voice.Transcribe = client.Available, client.Transcribe
+	cfg.Voice.NotSent = func(err error) bool { return errors.Is(err, voice.ErrNotSent) }
+	h := NewHandler(cfg)
+	g := h.(*gate)
+	uses := func() int {
+		g.voice.mu.Lock()
+		defer g.voice.mu.Unlock()
+		return len(g.voice.used[strings.ToLower(chatOp)])
+	}
+	if rw := chatDo(h, chatOp, "GET", "/lever/api/agents"); !strings.Contains(rw.Body.String(), `"voice":{"maxSeconds":2}`) {
+		t.Fatalf("roster: %s", rw.Body)
+	}
+	rw := voicePost(h, chatOp, wavClip(16000))
+	if rw.Code != http.StatusOK || !strings.Contains(rw.Body.String(), `"text":"hi there"`) || uses() != 1 {
+		t.Fatalf("%d %s %d", rw.Code, rw.Body, uses())
+	}
+	tool.word = voice.WordNotReady
+	if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusServiceUnavailable || uses() != 1 {
+		t.Fatalf("not ready: %d %s, %d uses", rw.Code, rw.Body, uses())
+	}
+	tool.word = voice.WordFailed
+	if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusServiceUnavailable || uses() != 2 {
+		t.Fatalf("failed: %d %s, %d uses", rw.Code, rw.Body, uses())
+	}
+	// The tool goes away between the health check and the clip: given back.
+	tool.word = ""
+	h2 := &voice.DictateClient{Socket: sock, HealthTTL: time.Hour}
+	if !h2.Available() {
+		t.Fatal("not available")
+	}
+	cfg.Voice.Available, cfg.Voice.Transcribe = h2.Available, h2.Transcribe
+	h = NewHandler(cfg)
+	g = h.(*gate)
+	srv.Close()
+	if rw := voicePost(h, chatOp, wavClip(16000)); rw.Code != http.StatusServiceUnavailable || uses() != 0 {
+		t.Fatalf("socket gone: %d %s, %d uses", rw.Code, rw.Body, uses())
+	}
+	time.Sleep(5 * time.Millisecond) // past client's HealthTTL
+	if client.Available() {
+		t.Fatal("available with the socket gone")
 	}
 }

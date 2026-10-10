@@ -24,9 +24,14 @@ const (
 	// read-only mount still lets the manager read it.
 	hostSecret
 	// hostProgramOutside is code the host runs that must lie outside the
-	// tree altogether (remote.voice.whisper_server): a manager.read_only
+	// tree altogether (lever-tool-whisper's -server): a manager.read_only
 	// mount does not excuse it.
 	hostProgramOutside
+	// hostPrivate is a host path an agent must neither replace nor reach:
+	// lever-tool-whisper's -models (the model whisper-server loads, and its
+	// working directory) and -dictate-socket (remote.voice.socket). Never
+	// safe in the tree, read-only or not.
+	hostPrivate
 	// hostUnchecked is a known flag whose value is not a host program or
 	// secret: the github tool's -tree (it names the tree on purpose) or a
 	// data file the agent may edit by design (-csv, -dsn). Consumed so it
@@ -48,17 +53,26 @@ type hostPath struct {
 }
 
 // toolPathFlags are the path flags of the tools lever ships
-// (cmd/lever-tool-github, cmd/lever-tool-fizzy, cmd/lever-tool-db, and the
-// assistant-demo example's lever-tool-todo) and what each names. Lever
-// cannot know what an unknown flag's value is, so no other flag is checked.
+// (cmd/lever-tool-github, cmd/lever-tool-fizzy, cmd/lever-tool-whisper,
+// cmd/lever-tool-db, and the assistant-demo example's lever-tool-todo) and
+// what each names. Lever cannot know what an unknown flag's value is, so no
+// other flag is checked.
 var toolPathFlags = map[string]hostPathKind{
-	"app-key":    hostSecret,    // github: the GitHub App private key
-	"token-file": hostSecret,    // fizzy: the personal access token
-	"state":      hostSecret,    // github, fizzy: the tool's private state dir
-	"fizzy":      hostProgram,   // fizzy: the fizzy CLI it runs
-	"tree":       hostUnchecked, // github: the tree, to refuse -state and -app-key inside it
-	"dsn":        hostUnchecked, // db: its sqlite data
-	"csv":        hostUnchecked, // todo (example): the agent-editable todo list
+	"app-key":        hostSecret,         // github: the GitHub App private key
+	"token-file":     hostSecret,         // fizzy: the personal access token
+	"state":          hostSecret,         // github, fizzy: the tool's private state dir
+	"fizzy":          hostProgram,        // fizzy: the fizzy CLI it runs
+	"server":         hostProgramOutside, // whisper: the whisper-server program it runs
+	"models":         hostPrivate,        // whisper: the model directory
+	"dictate-socket": hostPrivate,        // whisper: the dictation socket (remote.voice.socket)
+	"tree":           hostUnchecked,      // github, whisper: the tree, to refuse paths inside it
+	"dsn":            hostUnchecked,      // db: its sqlite data
+	"csv":            hostUnchecked,      // todo (example): the agent-editable todo list
+	// whisper's non-path flags config load reads (WhisperTools): consumed
+	// with their values, never checked as paths.
+	"whisper-port": hostUnchecked,
+	"model":        hostUnchecked,
+	"max-seconds":  hostUnchecked,
 }
 
 // hostPaths lists every host-run program and host secret the config names.
@@ -90,7 +104,7 @@ func (a *App) hostPaths() []hostPath {
 		}
 	}
 	if a.RemoteEnabled() && a.Remote.Voice.Enabled {
-		add(hostPath{key: "remote.voice.whisper_server", path: a.Remote.Voice.WhisperServer, kind: hostProgramOutside})
+		add(hostPath{key: "remote.voice.socket", path: a.Remote.Voice.Socket, kind: hostPrivate})
 	}
 	return out
 }
@@ -134,6 +148,26 @@ func toolHostPaths(t Tool) []hostPath {
 			add(p.what, joinRaw(chdir, p.path), hostProgram)
 		}
 	}
+	for _, f := range toolFlags(t) {
+		if kind := toolPathFlags[f.name]; kind != hostUnchecked {
+			add("-"+f.name, f.val, kind)
+		}
+	}
+	return out
+}
+
+// toolFlag is one known flag (toolPathFlags) in a tool's command, and its
+// value.
+type toolFlag struct{ name, val string }
+
+// toolFlags lists the known flags in t's command, as "-f v", "-f=v",
+// "--f v" or "--f=v", in order. Unknown flags and other arguments are
+// skipped.
+func toolFlags(t Tool) []toolFlag {
+	if len(t.Command) == 0 {
+		return nil
+	}
+	var out []toolFlag
 	args := t.Command[1:]
 	for i := 0; i < len(args); i++ {
 		name, ok := strings.CutPrefix(args[i], "-")
@@ -141,17 +175,14 @@ func toolHostPaths(t Tool) []hostPath {
 			continue
 		}
 		name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
-		kind, known := toolPathFlags[name]
-		if !known {
+		if _, known := toolPathFlags[name]; !known {
 			continue
 		}
 		if !hasVal && i+1 < len(args) {
 			i++
 			val = args[i]
 		}
-		if kind != hostUnchecked {
-			add("-"+name, val, kind)
-		}
+		out = append(out, toolFlag{name, val})
 	}
 	return out
 }
@@ -189,6 +220,10 @@ func (a *App) checkHostPathsOutsideTree() error {
 		if p.kind == hostProgramOutside {
 			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent could replace the program the host runs — "+
 				"install it outside the tree (a manager.read_only mount does not excuse it)", p.key, p.path, a.Tree)
+		}
+		if p.kind == hostPrivate {
+			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent could replace or reach it there, "+
+				"and a manager.read_only mount does not excuse it — move it outside the tree", p.key, p.path, a.Tree)
 		}
 		if p.kind == hostSecret {
 			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent can read and replace it there, "+

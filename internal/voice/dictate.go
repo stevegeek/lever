@@ -43,7 +43,8 @@ const (
 	// the wait ended while it worked).
 	WordFailed = "failed"
 	// WordCanceled: the caller went away while the clip waited in the
-	// queue; it never reached whisper-server (not sent).
+	// queue. The clip counts (the tool took it), though whisper-server
+	// never saw it.
 	WordCanceled = "canceled"
 	// WordInterrupted: the caller went away while whisper-server worked on
 	// the clip (sent: its transcription had started).

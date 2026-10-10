@@ -47,6 +47,13 @@ version bump moves the block under the new version heading.
 
 ### Changed
 
+- **Tool commands are read past `env -S`.** The host-path checks (a program or secret inside the
+  tree) now read a tool's flags past an `env` prefix with a plain `-S` string split into words, so
+  a flag such as `-app-key` or `-state` can no longer hide inside one word. Config load refuses the
+  `env` forms lever cannot read as `env` does: quotes, backslashes or `$` in an `-S` string, a
+  combined option group such as `-vS`, and `--split-string=`; write such a command as separate
+  words.
+
 - **The broker stops every supervised tool with SIGTERM and 1.5 s of grace before SIGKILL** (it
   sent SIGKILL at once), so a tool can stop a child of its own.
 - **`lever doctor` gains `voice tool` and `voice model` rows** that check any configured

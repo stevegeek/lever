@@ -295,3 +295,41 @@ func TestWhisperPathsRefusedInsideTree(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// env forms lever cannot read as env does are refused for any tool; plain
+// ones load.
+func TestEnvFormsLeverCannotRead(t *testing.T) {
+	for cmd, bad := range map[string]bool{
+		"env -S 'tool -state /s'":            false,
+		"env -vS tool":                       true,
+		"env --split-string=tool":            true,
+		"env -u X tool -state /s":            false,
+		"env CUDA_VISIBLE_DEVICES=0 tool -x": false,
+	} {
+		var argv []string
+		switch cmd {
+		case "env -S 'tool -state /s'":
+			argv = []string{"env", "-S", "tool -state /s"}
+		default:
+			argv = strings.Fields(cmd)
+		}
+		if got := envFormUnread(argv) != ""; got != bad {
+			t.Errorf("%q: unread=%v, want %v", argv, got, bad)
+		}
+	}
+	for _, argv := range [][]string{
+		{"env", "-S", "tool '-state' /s"},
+		{"env", "-S", `tool \-state /s`},
+		{"env", "-S", "tool -state $HOME/s"},
+		{"env", "-Stool -state '/s'"},
+	} {
+		if envFormUnread(argv) == "" {
+			t.Errorf("%q: want refused", argv)
+		}
+	}
+	a := testApp(t, "workers/w", "workers/v")
+	a.Broker.Tools = []Tool{{Name: "x", Command: []string{"env", "-vS", "/opt/x -state /s"}, Backend: "127.0.0.1:3300"}}
+	if err := a.validateWhisperTools(); err == nil || !strings.Contains(err.Error(), "separate words") {
+		t.Fatalf("err = %v", err)
+	}
+}

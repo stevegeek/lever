@@ -61,7 +61,8 @@ func (w WhisperTool) EffectiveAgentMaxSeconds() int {
 }
 
 // WhisperTools lists the broker tools that run lever-tool-whisper, in
-// config order.
+// config order: the program's base name (after an env prefix) is
+// lever-tool-whisper, or the command takes -dictate-socket (isWhisperCommand).
 func (a *App) WhisperTools() []WhisperTool {
 	var out []WhisperTool
 	for _, t := range a.Broker.Tools {
@@ -126,12 +127,17 @@ func (a *App) VoiceTool() (WhisperTool, bool) {
 // login port), nor collide with one of lever's own host listeners or a tool
 // backend.
 func (a *App) validateWhisperTools() error {
+	for _, t := range a.Broker.Tools {
+		if form := envFormUnread(t.Command); form != "" {
+			return fmt.Errorf("config: broker.tools[%s] command uses %s, which lever cannot read the way env does, so its flags would escape the host-path checks; write the command as separate words (env NAME=value program -flag value)", t.Name, form)
+		}
+	}
 	tools := a.WhisperTools()
 	seen := map[int]string{}
 	for _, w := range tools {
 		key := fmt.Sprintf("broker.tools[%s]", w.Name)
 		if w.PortRaw == "" {
-			return fmt.Errorf("config: %s -whisper-port is required: the host loopback port of its whisper-server child", key)
+			return fmt.Errorf("config: %s -whisper-port is required: the host loopback port of its whisper-server child (a tool that runs lever-tool-whisper, or takes -dictate-socket, is checked as the whisper tool)", key)
 		}
 		if w.Port < 1 || w.Port > 65535 {
 			return fmt.Errorf("config: %s -whisper-port %q is not a port", key, w.PortRaw)

@@ -87,7 +87,8 @@ var whisperToolFlags = map[string]hostPathKind{
 const whisperProgram = "lever-tool-whisper"
 
 // isWhisperCommand reports whether t runs lever-tool-whisper: its program,
-// after an env(1) prefix, has that base name.
+// after an env(1) prefix, has that base name, or its command takes
+// -dictate-socket (a renamed copy or wrapper keeps the whisper checks).
 func isWhisperCommand(t Tool) bool {
 	if t.External || len(t.Command) == 0 {
 		return false
@@ -235,8 +236,10 @@ func toolFlags(t Tool) []toolFlag {
 	}
 	whisper := isWhisperCommand(t)
 	var out []toolFlag
-	// The words the tool itself gets: past an env(1) prefix, with an
-	// env -S string split as env splits it, so no flag hides in one word.
+	// The words the tool itself gets: past an env(1) prefix, with a plain
+	// env -S string split into words. The env forms this cannot read as env
+	// does (quotes, escapes or $ in -S, -vS, --split-string=) are refused
+	// at config load (envFormUnread).
 	argv, _ := unwrapEnv(t.Command)
 	if len(argv) == 0 {
 		argv = t.Command

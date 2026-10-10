@@ -201,9 +201,12 @@ checks only the command itself, the path flags of the tools it ships (above; `-t
 tool's `-state` is checked the same way. `lever-tool-whisper`'s flags (`-server`, `-models`,
 `-dictate-socket`, `-model`, `-whisper-port`, `-max-seconds`, `-agent-max-seconds`) are read only in
 the command of a whisper tool: one whose program, after an `env` prefix, has the base name
-`lever-tool-whisper`. Another tool's `-server` or `-models` means something else and is not read;
-so a renamed binary or a wrapper script around `lever-tool-whisper` gets none of the whisper checks
-below: run the tool under its own name.
+`lever-tool-whisper`, or whose command takes `-dictate-socket` (no other lever tool does), so a
+renamed binary or a wrapper script that passes the tool's flags keeps the whisper checks. Another
+tool's `-server` or `-models` means something else and is not read. Flags are read past an `env`
+prefix, with a plain `env -S` string split into words; config load refuses an `env` form lever
+cannot read the way `env` does (quotes, backslashes or `$` in an `-S` string, a combined option
+group such as `-vS`, `--split-string=`), since a flag hidden in it would escape these checks.
 A word that starts with `-` is never taken as the previous flag's value, so `-model -state x` still
 checks `x`; after a path flag such a word is also checked as that flag's value, as Go's flag package
 would read it. For a whisper tool, config load also requires `-tree` and refuses one that is not the

@@ -313,3 +313,37 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// TestSupervisorStopsToolsGracefully: a tool gets SIGTERM first (time to
+// stop a child of its own, as lever-tool-whisper stops whisper-server), and
+// SIGKILL only when it outlives toolStopGrace.
+func TestSupervisorStopsToolsGracefully(t *testing.T) {
+	dir := t.TempDir()
+	mark := filepath.Join(dir, "term")
+	script := filepath.Join(dir, "tool.sh")
+	body := "#!/bin/sh\ntrap 'echo term > " + mark + "; exit 0' TERM\nwhile :; do sleep 0.05; done\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stubborn := filepath.Join(dir, "stubborn.sh")
+	if err := os.WriteFile(stubborn, []byte("#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 0.05; done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := NewSupervisor([]ToolSpec{{Name: "w", Command: []string{script}}, {Name: "s", Command: []string{stubborn}}},
+		"http://127.0.0.1:0", filepath.Join(dir, "logs"), testToolSecret)
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // the traps are set
+	start := time.Now()
+	s.Stop()
+	if took := time.Since(start); took > toolStopGrace+time.Second {
+		t.Fatalf("stop took %s", took)
+	}
+	if b, err := os.ReadFile(mark); err != nil || strings.TrimSpace(string(b)) != "term" {
+		t.Fatalf("the tool got no SIGTERM: %q %v", b, err)
+	}
+	if trackedCount(s) != 0 {
+		t.Fatal("tools still tracked")
+	}
+}

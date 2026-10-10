@@ -53,26 +53,61 @@ type hostPath struct {
 }
 
 // toolPathFlags are the path flags of the tools lever ships
-// (cmd/lever-tool-github, cmd/lever-tool-fizzy, cmd/lever-tool-whisper,
-// cmd/lever-tool-db, and the assistant-demo example's lever-tool-todo) and
-// what each names. Lever cannot know what an unknown flag's value is, so no
-// other flag is checked.
+// (cmd/lever-tool-github, cmd/lever-tool-fizzy, cmd/lever-tool-db, and the
+// assistant-demo example's lever-tool-todo) and what each names, read in
+// every supervised tool's command. Lever cannot know what an unknown flag's
+// value is, so no other flag is checked.
 var toolPathFlags = map[string]hostPathKind{
-	"app-key":        hostSecret,         // github: the GitHub App private key
-	"token-file":     hostSecret,         // fizzy: the personal access token
-	"state":          hostSecret,         // github, fizzy: the tool's private state dir
-	"fizzy":          hostProgram,        // fizzy: the fizzy CLI it runs
-	"server":         hostProgramOutside, // whisper: the whisper-server program it runs
-	"models":         hostPrivate,        // whisper: the model directory
-	"dictate-socket": hostPrivate,        // whisper: the dictation socket (remote.voice.socket)
-	"tree":           hostUnchecked,      // github, whisper: the tree, to refuse paths inside it
-	"dsn":            hostUnchecked,      // db: its sqlite data
-	"csv":            hostUnchecked,      // todo (example): the agent-editable todo list
-	// whisper's non-path flags config load reads (WhisperTools): consumed
-	// with their values, never checked as paths.
-	"whisper-port": hostUnchecked,
-	"model":        hostUnchecked,
-	"max-seconds":  hostUnchecked,
+	"app-key":    hostSecret,    // github: the GitHub App private key
+	"token-file": hostSecret,    // fizzy: the personal access token
+	"state":      hostSecret,    // github, fizzy: the tool's private state dir
+	"fizzy":      hostProgram,   // fizzy: the fizzy CLI it runs
+	"tree":       hostUnchecked, // github, whisper: the tree, to refuse paths inside it
+	"dsn":        hostUnchecked, // db: its sqlite data
+	"csv":        hostUnchecked, // todo (example): the agent-editable todo list
+}
+
+// whisperToolFlags are lever-tool-whisper's flags config load reads, read
+// only in the command of a tool that runs lever-tool-whisper
+// (isWhisperCommand): generic names such as -server or -model mean
+// something else to another tool.
+var whisperToolFlags = map[string]hostPathKind{
+	"server":         hostProgramOutside, // the whisper-server program it runs
+	"models":         hostPrivate,        // the model directory
+	"dictate-socket": hostPrivate,        // the dictation socket (remote.voice.socket)
+	// Non-path flags (WhisperTools): consumed with their values, never
+	// checked as paths.
+	"whisper-port":      hostUnchecked,
+	"model":             hostUnchecked,
+	"max-seconds":       hostUnchecked,
+	"agent-max-seconds": hostUnchecked,
+}
+
+// whisperProgram is the base name of lever-tool-whisper's program.
+const whisperProgram = "lever-tool-whisper"
+
+// isWhisperCommand reports whether t runs lever-tool-whisper: its program,
+// after an env(1) prefix, has that base name.
+func isWhisperCommand(t Tool) bool {
+	if t.External || len(t.Command) == 0 {
+		return false
+	}
+	argv, _ := unwrapEnv(t.Command)
+	return len(argv) > 0 && baseName(argv[0]) == whisperProgram
+}
+
+// knownFlag is the kind of a flag name, and whether lever reads it in a
+// command: toolPathFlags in every tool's, whisperToolFlags in a
+// whisper tool's.
+func knownFlag(whisper bool, name string) (hostPathKind, bool) {
+	if k, ok := toolPathFlags[name]; ok {
+		return k, true
+	}
+	if whisper {
+		k, ok := whisperToolFlags[name]
+		return k, ok
+	}
+	return 0, false
 }
 
 // hostPaths lists every host-run program and host secret the config names.
@@ -116,7 +151,8 @@ func (a *App) hostPaths() []hostPath {
 //     up on the supervisor's fixed PATH, which is not in the tree), after
 //     an env(1) prefix too (unwrapEnv);
 //   - the value of each known path flag of the shipped tools
-//     (toolPathFlags), as "-f v", "-f=v" or "--f=v";
+//     (toolPathFlags; whisperToolFlags only in lever-tool-whisper's
+//     command), as "-f v", "-f=v" or "--f=v";
 //   - the code an interpreter runs (interpreterPaths): its script, the
 //     values of its code-path flags (ruby -I, node --require), and the
 //     paths in inline code (sh -c, -e).
@@ -149,24 +185,30 @@ func toolHostPaths(t Tool) []hostPath {
 		}
 	}
 	for _, f := range toolFlags(t) {
-		if kind := toolPathFlags[f.name]; kind != hostUnchecked {
-			add("-"+f.name, f.val, kind)
+		if f.kind != hostUnchecked {
+			add("-"+f.name, f.val, f.kind)
 		}
 	}
 	return out
 }
 
-// toolFlag is one known flag (toolPathFlags) in a tool's command, and its
-// value.
-type toolFlag struct{ name, val string }
+// toolFlag is one known flag in a tool's command (knownFlag), its kind,
+// and its value ("" when it has none).
+type toolFlag struct {
+	name, val string
+	kind      hostPathKind
+}
 
-// toolFlags lists the known flags in t's command, as "-f v", "-f=v",
-// "--f v" or "--f=v", in order. Unknown flags and other arguments are
-// skipped.
+// toolFlags lists the known flags in t's command (knownFlag), as "-f v",
+// "-f=v", "--f v" or "--f=v", in order. Unknown flags and other arguments
+// are skipped. A following word that starts with "-" is never taken as a
+// flag's value: it is read as a flag itself, so "-model -state x" cannot
+// hide -state from its check (the flag before it then has no value).
 func toolFlags(t Tool) []toolFlag {
 	if len(t.Command) == 0 {
 		return nil
 	}
+	whisper := isWhisperCommand(t)
 	var out []toolFlag
 	args := t.Command[1:]
 	for i := 0; i < len(args); i++ {
@@ -175,14 +217,15 @@ func toolFlags(t Tool) []toolFlag {
 			continue
 		}
 		name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
-		if _, known := toolPathFlags[name]; !known {
+		kind, known := knownFlag(whisper, name)
+		if !known {
 			continue
 		}
-		if !hasVal && i+1 < len(args) {
+		if !hasVal && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 			i++
 			val = args[i]
 		}
-		out = append(out, toolFlag{name, val})
+		out = append(out, toolFlag{name, val, kind})
 	}
 	return out
 }

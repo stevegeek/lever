@@ -17,10 +17,37 @@ func hostPathsInstance(t *testing.T, body string) (string, string) {
 	t.Helper()
 	p := writeConfig(t, "name: demo\nbackend: orbstack\ntree: ws\n"+body)
 	root := filepath.Dir(p)
+	hostPathsTree(t, root)
+	return p, root
+}
+
+// hostPathsTree writes ws/tools/bin, ws/secret and ws/workers/w/bin under
+// root.
+func hostPathsTree(t *testing.T, root string) {
+	t.Helper()
 	mustWrite(t, filepath.Join(root, "ws", "tools", "bin"))
 	mustWrite(t, filepath.Join(root, "ws", "secret"))
 	mustWrite(t, filepath.Join(root, "ws", "workers", "w", "bin"))
-	return p, root
+}
+
+// shortTemp is a temporary directory under /tmp, so that a Unix socket path
+// in it stays within the platform's limit however long TMPDIR is (macOS
+// /var/folders/...): the tree check, not the length check, is what a test
+// of a socket path reaches.
+func shortTemp(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "lv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
+// whisperCmd is a lever-tool-whisper command for the tree ROOT/ws with
+// models, program and socket outside it, then extra.
+func whisperCmd(extra string) string {
+	return "[/opt/lever/lever-tool-whisper, -tree, ROOT/ws, -whisper-port, \"9100\", -models, /m, -server, /s, -dictate-socket, /run/lv/d.sock" + extra + "]"
 }
 
 // supervisedTool is a broker block with one supervised tool running cmd.
@@ -43,12 +70,19 @@ func TestHostPathsRefusedInsideTree(t *testing.T) {
 		{"fizzy cli", "manager: {}\n" + supervisedTool("[/usr/bin/true, -fizzy, ROOT/ws/tools/bin]"), "broker.tools[t] -fizzy"},
 		{"script argument", "manager: {}\n" + supervisedTool("[/usr/bin/ruby, ROOT/ws/tools/bin]"), "broker.tools[t] script"},
 		{"sh -c command", "manager: {}\n" + supervisedTool("[sh, -c, \"exec ROOT/ws/tools/bin --x\"]"), "broker.tools[t] -c code"},
-		{"whisper models", "manager: {}\n" + supervisedTool("[/usr/bin/true, -models, ROOT/ws/models]"), "broker.tools[t] -models"},
-		{"whisper socket", "manager: {}\n" + supervisedTool("[/usr/bin/true, -whisper-port, \"9100\", -models, /m, -server, /s, -dictate-socket, ROOT/ws/d.sock]"), "broker.tools[t] -dictate-socket"},
+		{"whisper models", "manager: {}\n" + supervisedTool(whisperCmd(", -models, ROOT/ws/models")), "broker.tools[t] -models"},
+		{"whisper socket", "manager: {}\n" + supervisedTool(whisperCmd(", -dictate-socket, ROOT/ws/d.sock")), "broker.tools[t] -dictate-socket"},
+		// A value-taking flag never takes a following flag as its value.
+		{"state after a valueless flag", "manager: {}\n" + supervisedTool(whisperCmd(", -model, -state, ROOT/ws/secret")), "broker.tools[t] -state"},
+		{"state after a valueless github flag", "manager: {}\n" + supervisedTool("[/usr/bin/true, -tree, -state, ROOT/ws/secret]"), "broker.tools[t] -state"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p, root := hostPathsInstance(t, "")
+			// A short root: the socket case stays within the Unix socket
+			// path limit with any TMPDIR.
+			root := shortTemp(t)
+			p := filepath.Join(root, "lever.yaml")
+			hostPathsTree(t, root)
 			body := "name: demo\nbackend: orbstack\ntree: ws\n" + strings.ReplaceAll(tc.body, "ROOT", root)
 			if !strings.Contains(body, "broker:") {
 				body += "broker:\n  llm_auth: subscription\n"
@@ -202,6 +236,22 @@ func TestToolHostPaths(t *testing.T) {
 		{"broker.tools[t] -server", "/w/whisper-server", hostProgramOutside},
 		{"broker.tools[t] -models", "/m", hostPrivate},
 		{"broker.tools[t] -dictate-socket", "/r/d.sock", hostPrivate},
+	})
+	// Whisper's flags are read only in lever-tool-whisper's command (after
+	// an env prefix too); another tool's -server or -models is its own.
+	check("whisper flags after env", paths("env", "LD_LIBRARY_PATH=/l", "/o/lever-tool-whisper", "-server", "/w/s", "-models=/m"), []got{
+		{"broker.tools[t] command (after env)", "/o/lever-tool-whisper", hostProgram},
+		{"broker.tools[t] -server", "/w/s", hostProgramOutside},
+		{"broker.tools[t] -models", "/m", hostPrivate},
+	})
+	check("whisper names in another tool", paths("my-tool", "-server", "https://x", "-models", "ws/m", "-dictate-socket", "ws/s",
+		"-model", "-state", "/s"), []got{
+		{"broker.tools[t] -state", "/s", hostSecret},
+	})
+	// A following flag is never a value: -model and -tree take none here.
+	check("valueless flag before a path flag", paths("lever-tool-whisper", "-model", "-state", "/s", "-tree", "--app-key=/k"), []got{
+		{"broker.tools[t] -state", "/s", hostSecret},
+		{"broker.tools[t] -app-key", "/k", hostSecret},
 	})
 	check("command path", paths("/opt/x", "--key-file=/k"), []got{{"broker.tools[t] command", "/opt/x", hostProgram}})
 	// An interpreter's first argument is the script it runs, unless a flag.
@@ -386,5 +436,25 @@ func TestToolsOnReadOnly(t *testing.T) {
 	want := map[string][]string{"in": {"tools"}, "script": {"tools"}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("ToolsOnReadOnly = %v, want %v", got, want)
+	}
+}
+
+// A third-party tool may use generic flag names such as -server or -models:
+// lever reads them only in lever-tool-whisper's command.
+func TestNonWhisperToolGenericFlagsLoad(t *testing.T) {
+	root := shortTemp(t)
+	hostPathsTree(t, root)
+	p := filepath.Join(root, "lever.yaml")
+	body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" +
+		supervisedTool("[/opt/x/my-tool, -server, \"https://x\", -models, "+root+"/ws/tools, -model, small]")
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadNoHostChecks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws := a.WhisperTools(); len(ws) != 0 {
+		t.Fatalf("a third-party tool read as whisper: %+v", ws)
 	}
 }

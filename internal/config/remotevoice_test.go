@@ -109,10 +109,23 @@ func TestWhisperToolValidation(t *testing.T) {
 			c[slices.Index(c, "-tree")+1] = "/elsewhere"
 			a.Broker.Tools[0].Command = c
 		}, "not the instance's tree"},
-		"no port":   {without("-whisper-port"), "-whisper-port is required"},
-		"no socket": {without("-dictate-socket"), "-dictate-socket is required"},
-		"no models": {without("-models"), "-models and -server"},
-		"no server": {without("-server"), "-models and -server"},
+		"no port":    {without("-whisper-port"), "-whisper-port is required"},
+		"no socket":  {without("-dictate-socket"), "-dictate-socket is required"},
+		"no models":  {without("-models"), "-models and -server"},
+		"no tree":    {without("-tree"), "-tree is required"},
+		"max ok":     {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-max-seconds", "600")} }, ""},
+		"max zero":   {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-max-seconds", "0")} }, "-max-seconds: max seconds 0"},
+		"max over":   {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-max-seconds=601")} }, "-max-seconds: max seconds 601"},
+		"max text":   {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-max-seconds", "x")} }, "not a number"},
+		"max empty":  {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-max-seconds", "-gpu=false")} }, "not a number"},
+		"agent ok":   {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-agent-max-seconds", "300")} }, ""},
+		"agent over": {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-agent-max-seconds", "301")} }, "-agent-max-seconds"},
+		"agent over tool max": {func(a *App) {
+			a.Broker.Tools = []Tool{whisperTool("-max-seconds", "60", "-agent-max-seconds", "61")}
+		}, "use 1 to 60"},
+		"agent zero": {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-agent-max-seconds", "0")} }, "-agent-max-seconds"},
+		"agent text": {func(a *App) { a.Broker.Tools = []Tool{whisperTool("-agent-max-seconds", "2m")} }, "not a number"},
+		"no server":  {without("-server"), "-models and -server"},
 		"two tools, one port": {func(a *App) {
 			w := whisperTool()
 			w.Name, w.Backend = "whisper2", "127.0.0.1:3213"
@@ -150,8 +163,25 @@ func TestWhisperToolsAndVoiceTool(t *testing.T) {
 	if v, ok := a.VoiceTool(); !ok || v.Name != "whisper" {
 		t.Fatalf("%+v %v", v, ok)
 	}
-	if (WhisperTool{}).EffectiveModel() != "large-v3-turbo" || (WhisperTool{}).EffectiveMaxSeconds() != 300 {
+	if (WhisperTool{}).EffectiveModel() != "large-v3-turbo" || (WhisperTool{}).EffectiveMaxSeconds() != 300 || (WhisperTool{}).EffectiveAgentMaxSeconds() != 120 {
 		t.Fatal("defaults")
+	}
+	if (WhisperTool{MaxSeconds: 60}).EffectiveAgentMaxSeconds() != 60 || (WhisperTool{AgentMaxSeconds: 30}).EffectiveAgentMaxSeconds() != 30 {
+		t.Fatal("agent max seconds")
+	}
+	// Found by the program's base name only: another program with the same
+	// flags is not a whisper tool; one behind env is.
+	other := whisperTool()
+	other.Command[0] = "/opt/lever/my-whisper-wrapper"
+	envd := whisperTool()
+	envd.Command = append([]string{"env", "CUDA_VISIBLE_DEVICES=0"}, envd.Command...)
+	a.Broker.Tools = []Tool{other}
+	if ws := a.WhisperTools(); len(ws) != 0 {
+		t.Fatalf("by flags: %+v", ws)
+	}
+	a.Broker.Tools = []Tool{envd}
+	if ws := a.WhisperTools(); len(ws) != 1 || ws[0].Socket != testSocket {
+		t.Fatalf("behind env: %+v", ws)
 	}
 	a.Remote.Voice.Socket = "/other.sock"
 	if _, ok := a.VoiceTool(); ok {

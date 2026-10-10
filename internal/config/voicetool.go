@@ -10,9 +10,10 @@ import (
 )
 
 // WhisperTool is what config load reads of a broker tool that runs
-// lever-tool-whisper: a supervised tool whose command names -dictate-socket
-// or -whisper-port. Values are as written ("" or 0 when absent); the tool
-// checks its own flags again at start.
+// lever-tool-whisper: a supervised tool whose program, after an env(1)
+// prefix, has the base name lever-tool-whisper (isWhisperCommand). Values
+// are as written ("" or 0 when absent); the tool checks its own flags again
+// at start.
 type WhisperTool struct {
 	Name   string
 	Tree   string // -tree
@@ -25,8 +26,16 @@ type WhisperTool struct {
 	Port    int
 	PortRaw string
 	// MaxSeconds is -max-seconds (0 when absent or not a number: the
-	// tool's default, voice.DefaultMaxSeconds).
-	MaxSeconds int
+	// tool's default, voice.DefaultMaxSeconds); MaxSecondsSet says the flag
+	// is there, MaxSecondsRaw has what was written.
+	MaxSeconds    int
+	MaxSecondsSet bool
+	MaxSecondsRaw string
+	// AgentMaxSeconds is -agent-max-seconds, likewise (0: the tool's
+	// default, voice.DefaultAgentMaxSeconds within -max-seconds).
+	AgentMaxSeconds    int
+	AgentMaxSecondsSet bool
+	AgentMaxSecondsRaw string
 }
 
 // EffectiveModel is -model with the tool's default.
@@ -45,15 +54,21 @@ func (w WhisperTool) EffectiveMaxSeconds() int {
 	return w.MaxSeconds
 }
 
+// EffectiveAgentMaxSeconds is -agent-max-seconds with the tool's default
+// (voice.AgentMaxSeconds).
+func (w WhisperTool) EffectiveAgentMaxSeconds() int {
+	return voice.AgentMaxSeconds(w.AgentMaxSeconds, w.EffectiveMaxSeconds())
+}
+
 // WhisperTools lists the broker tools that run lever-tool-whisper, in
 // config order.
 func (a *App) WhisperTools() []WhisperTool {
 	var out []WhisperTool
 	for _, t := range a.Broker.Tools {
-		if t.External {
+		if !isWhisperCommand(t) {
 			continue
 		}
-		w, found := WhisperTool{Name: t.Name}, false
+		w := WhisperTool{Name: t.Name}
 		for _, f := range toolFlags(t) {
 			switch f.name {
 			case "tree":
@@ -65,21 +80,25 @@ func (a *App) WhisperTools() []WhisperTool {
 			case "model":
 				w.Model = f.val
 			case "dictate-socket":
-				w.Socket, found = f.val, true
+				w.Socket = f.val
 			case "whisper-port":
-				w.PortRaw, found = f.val, true
+				w.PortRaw, w.Port = f.val, 0
 				if n, err := strconv.Atoi(f.val); err == nil {
 					w.Port = n
 				}
 			case "max-seconds":
+				w.MaxSecondsSet, w.MaxSecondsRaw, w.MaxSeconds = true, f.val, 0
 				if n, err := strconv.Atoi(f.val); err == nil {
 					w.MaxSeconds = n
 				}
+			case "agent-max-seconds":
+				w.AgentMaxSecondsSet, w.AgentMaxSecondsRaw, w.AgentMaxSeconds = true, f.val, 0
+				if n, err := strconv.Atoi(f.val); err == nil {
+					w.AgentMaxSeconds = n
+				}
 			}
 		}
-		if found {
-			out = append(out, w)
-		}
+		out = append(out, w)
 	}
 	return out
 }
@@ -126,9 +145,30 @@ func (a *App) validateWhisperTools() error {
 		if w.Models == "" || w.Server == "" {
 			return fmt.Errorf("config: %s needs -models and -server (absolute host paths outside the tree)", key)
 		}
+		if w.MaxSecondsSet {
+			n, err := strconv.Atoi(w.MaxSecondsRaw)
+			if err != nil {
+				return fmt.Errorf("config: %s -max-seconds %q is not a number of seconds", key, w.MaxSecondsRaw)
+			}
+			if err := voice.CheckMaxSeconds(n); err != nil {
+				return fmt.Errorf("config: %s -max-seconds: %w", key, err)
+			}
+		}
+		if w.AgentMaxSecondsSet {
+			n, err := strconv.Atoi(w.AgentMaxSecondsRaw)
+			if err != nil {
+				return fmt.Errorf("config: %s -agent-max-seconds %q is not a number of seconds", key, w.AgentMaxSecondsRaw)
+			}
+			if err := voice.CheckAgentMaxSeconds(n, w.EffectiveMaxSeconds()); err != nil {
+				return fmt.Errorf("config: %s -agent-max-seconds: %w", key, err)
+			}
+		}
 		// The tool checks its paths against -tree and reads agent files
 		// below it: it must be this instance's tree.
-		if w.Tree != "" && !sameTree(w.Tree, a.Tree) {
+		if w.Tree == "" {
+			return fmt.Errorf("config: %s -tree is required: the instance's tree, %s", key, a.Tree)
+		}
+		if !sameTree(w.Tree, a.Tree) {
 			return fmt.Errorf("config: %s -tree %s is not the instance's tree %s", key, w.Tree, a.Tree)
 		}
 		if other, dup := seen[w.Port]; dup {

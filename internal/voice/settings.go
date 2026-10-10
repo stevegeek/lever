@@ -12,6 +12,11 @@ import (
 const (
 	DefaultMaxSeconds = 300
 	MaxMaxSeconds     = 600
+	// DefaultAgentMaxSeconds is lever-tool-whisper's -agent-max-seconds
+	// when unset (and -max-seconds is not smaller): the longest clip of the
+	// agent operation transcribe, which bounds how long one agent clip can
+	// hold the GPU ahead of a waiting dictation clip.
+	DefaultAgentMaxSeconds = 120
 	// MaxVocabulary bounds the vocabulary as a prompt, in bytes (Whisper
 	// reads a short prompt; the rest would be cut anyway).
 	MaxVocabulary = 800
@@ -61,4 +66,21 @@ func CheckMaxSeconds(n int) error {
 		return fmt.Errorf("max seconds %d; use 1 to %d", n, MaxMaxSeconds)
 	}
 	return nil
+}
+
+// CheckAgentMaxSeconds accepts 1 to maxSeconds (the tool's -max-seconds).
+func CheckAgentMaxSeconds(n, maxSeconds int) error {
+	if n < 1 || n > maxSeconds {
+		return fmt.Errorf("agent max seconds %d; use 1 to %d (the tool's -max-seconds)", n, maxSeconds)
+	}
+	return nil
+}
+
+// AgentMaxSeconds is -agent-max-seconds as the tool runs it: n when set
+// (n > 0), else DefaultAgentMaxSeconds, never more than maxSeconds.
+func AgentMaxSeconds(n, maxSeconds int) int {
+	if n <= 0 {
+		n = DefaultAgentMaxSeconds
+	}
+	return min(n, maxSeconds)
 }

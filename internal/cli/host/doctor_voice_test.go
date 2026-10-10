@@ -36,7 +36,9 @@ func pinTestModel(t *testing.T, content string) voice.Model {
 func voiceDoctorApp(t *testing.T) (*config.App, state.State) {
 	t.Helper()
 	app, st := filesApp(t, false)
-	run, err := os.MkdirTemp("", "dv")
+	// Under /tmp: a long TMPDIR (macOS) must not push the socket path over
+	// the Unix socket limit.
+	run, err := os.MkdirTemp("/tmp", "dv")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +61,40 @@ func TestCheckVoiceOff(t *testing.T) {
 	}
 	if r := checkVoiceTool(context.Background(), app); r.name != "" {
 		t.Fatalf("off: a tool row %+v", r)
+	}
+}
+
+// remote.voice off with a whisper tool configured (agents only): the tool
+// and model rows still run, against the tool's own -dictate-socket; the
+// voice row says off.
+func TestCheckVoiceRowsWithVoiceOff(t *testing.T) {
+	app, _ := voiceDoctorApp(t)
+	sock := app.Remote.Voice.Socket
+	app.Remote.Voice = config.Voice{}
+	if r := checkVoice(app); !r.ok || !strings.HasPrefix(r.detail, "off") {
+		t.Fatalf("voice row: %+v", r)
+	}
+	m := pinTestModel(t, "weights")
+	r := checkVoiceModel(app)
+	if r.name != "voice model" || r.ok || !strings.Contains(r.detail, "agents cannot transcribe") || !strings.Contains(r.fix, "lever voice fetch "+m.Name) {
+		t.Fatalf("model row: %+v", r)
+	}
+	r = checkVoiceTool(context.Background(), app)
+	if r.name != "voice tool" || r.ok || !strings.Contains(r.detail, sock) || !strings.Contains(r.detail, "agents cannot transcribe") ||
+		!strings.Contains(r.fix, "tool-logs/whisper.log") {
+		t.Fatalf("tool row, not running: %+v", r)
+	}
+	ln, err := voice.ListenDictate(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &readyStub{}
+	stub.ready.Store(true)
+	srv := voice.NewDictateServer(&voice.DictateHandler{Svc: stub, Queue: &voice.Queue{}, Model: "large-v3-turbo", MaxSeconds: 300})
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+	if r := checkVoiceTool(context.Background(), app); !r.ok || !strings.Contains(r.detail, "for agents; remote.voice is off") {
+		t.Fatalf("tool row, ready: %+v", r)
 	}
 }
 

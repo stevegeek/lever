@@ -40,44 +40,75 @@ func checkVoice(app *config.App) checkResult {
 	return checkResult{name, true, detail + "; audio and transcripts are never stored", ""}
 }
 
-// toolLogHint names the log of dictation's broker tool, for a fix line.
-func toolLogHint(app *config.App) string {
-	if w, ok := app.VoiceTool(); ok {
+// doctorWhisperTool is the whisper tool the `voice tool` and `voice model`
+// rows check: with remote.voice on, dictation's (VoiceTool: ok false when
+// no lever-tool-whisper entry serves remote.voice.socket); with it off, the
+// first lever-tool-whisper entry in broker.tools, which agents may use on
+// their own (ok false: none). lost names what a failure costs.
+func doctorWhisperTool(app *config.App) (w config.WhisperTool, ok bool, lost string) {
+	if app.VoiceOn() {
+		w, ok = app.VoiceTool()
+		return w, ok, "no dictation"
+	}
+	if ws := app.WhisperTools(); len(ws) > 0 {
+		return ws[0], true, "agents cannot transcribe"
+	}
+	return config.WhisperTool{}, false, ""
+}
+
+// toolLogHint names the log of the whisper tool w (ok false: none
+// configured; socket is the one it should serve), for a fix line.
+func toolLogHint(w config.WhisperTool, ok bool, socket string) string {
+	if ok {
 		return "see " + filepath.Join("tool-logs", w.Name+".log") + " in the state directory"
 	}
-	return "see the log of the lever-tool-whisper that serves " + app.Remote.Voice.Socket
+	return "see the log of the lever-tool-whisper that serves " + socket
 }
 
 // checkVoiceTool asks lever-tool-whisper's socket for its health: not
 // running, running with whisper-server not ready, or ready (with the model).
+// With remote.voice on it asks remote.voice.socket; with it off, the
+// -dictate-socket of the first whisper tool, so a tool used by agents alone
+// is checked too. No whisper tool and voice off: no row.
 func checkVoiceTool(ctx context.Context, app *config.App) checkResult {
 	const name = "voice tool"
-	if !app.VoiceOn() {
+	w, ok, lost := doctorWhisperTool(app)
+	socket := app.Remote.Voice.Socket
+	switch {
+	case app.VoiceOn():
+	case !ok || w.Socket == "":
 		return checkResult{}
+	default:
+		socket = w.Socket
 	}
-	h, err := (&voice.DictateClient{Socket: app.Remote.Voice.Socket}).Health(ctx)
+	h, err := (&voice.DictateClient{Socket: socket}).Health(ctx)
 	switch {
 	case err != nil:
-		return checkResult{name, false, fmt.Sprintf("not running: %s does not answer (%v): no dictation", app.Remote.Voice.Socket, err),
-			"start the broker (lever up or lever reload); if the tool is configured, " + toolLogHint(app)}
+		return checkResult{name, false, fmt.Sprintf("not running: %s does not answer (%v): %s", socket, err, lost),
+			"start the broker (lever up or lever reload); if the tool is configured, " + toolLogHint(w, ok, socket)}
 	case !h.Ready:
-		return checkResult{name, false, fmt.Sprintf("running, but whisper-server is not ready (starting, or its program or the model %s failed a check): no dictation", h.Model),
-			toolLogHint(app) + "; fetch the model with lever voice fetch if it is missing"}
+		return checkResult{name, false, fmt.Sprintf("running, but whisper-server is not ready (starting, or its program or the model %s failed a check): %s", h.Model, lost),
+			toolLogHint(w, ok, socket) + "; fetch the model with lever voice fetch if it is missing"}
 	}
-	return checkResult{name, true, fmt.Sprintf("ready: model %s, at most %d s a clip", h.Model, h.MaxSeconds), ""}
+	detail := fmt.Sprintf("ready: model %s, at most %d s a clip", h.Model, h.MaxSeconds)
+	if !app.VoiceOn() {
+		detail += fmt.Sprintf(" (broker tool %q, for agents; remote.voice is off)", w.Name)
+	}
+	return checkResult{name, true, detail, ""}
 }
 
-// checkVoiceModel reports the tool's model: pinned in lever's table,
-// present in the tool's -models directory, and of the pinned size and
-// sha256 (the whole file is hashed, which takes a few seconds for a large
-// model).
+// checkVoiceModel reports the tool's model (doctorWhisperTool): pinned in
+// lever's table, present in the tool's -models directory, and of the pinned
+// size and sha256 (the whole file is hashed, which takes a few seconds for
+// a large model). It runs for any configured whisper tool, remote.voice on
+// or off.
 func checkVoiceModel(app *config.App) checkResult {
 	const name = "voice model"
-	if !app.VoiceOn() {
-		return checkResult{}
-	}
-	w, ok := app.VoiceTool()
+	w, ok, lost := doctorWhisperTool(app)
 	if !ok {
+		if !app.VoiceOn() {
+			return checkResult{}
+		}
 		return checkResult{name, true, "not checked: no lever-tool-whisper entry in broker.tools serves " + app.Remote.Voice.Socket, ""}
 	}
 	m, found := voice.Lookup(w.EffectiveModel())
@@ -85,7 +116,7 @@ func checkVoiceModel(app *config.App) checkResult {
 		return checkResult{name, false, fmt.Sprintf("broker tool %q's -model %q is not in lever's model table", w.Name, w.EffectiveModel()), "use one of " + strings.Join(voice.Names(), ", ")}
 	}
 	if why := m.Pinned(); why != "" {
-		return checkResult{name, false, why + ": no dictation", "use a lever release whose model table pins " + m.Name}
+		return checkResult{name, false, why + ": " + lost, "use a lever release whose model table pins " + m.Name}
 	}
 	if !filepath.IsAbs(w.Models) {
 		return checkResult{name, false, fmt.Sprintf("broker tool %q's -models %q is not an absolute path", w.Name, w.Models), "point -models at the absolute path lever voice fetch downloads into"}
@@ -94,9 +125,9 @@ func checkVoiceModel(app *config.App) checkResult {
 	err := voice.Verify(p, m)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return checkResult{name, false, m.Name + " is not downloaded into " + w.Models + ": no dictation", "lever voice fetch " + m.Name + " (the tool picks it up within a minute)"}
+		return checkResult{name, false, m.Name + " is not downloaded into " + w.Models + ": " + lost, "lever voice fetch " + m.Name + " (the tool picks it up within a minute)"}
 	case err != nil:
-		return checkResult{name, false, err.Error() + ": no dictation", "remove " + p + " and run lever voice fetch " + m.Name}
+		return checkResult{name, false, err.Error() + ": " + lost, "remove " + p + " and run lever voice fetch " + m.Name}
 	}
 	return checkResult{name, true, fmt.Sprintf("%s: %s, %d bytes, sha256 matches lever's pin", m.Name, p, m.Size), ""}
 }

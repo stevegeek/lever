@@ -244,8 +244,19 @@ func TestToolHostPaths(t *testing.T) {
 		{"broker.tools[t] -server", "/w/s", hostProgramOutside},
 		{"broker.tools[t] -models", "/m", hostPrivate},
 	})
-	check("whisper names in another tool", paths("my-tool", "-server", "https://x", "-models", "ws/m", "-dictate-socket", "ws/s",
+	check("whisper names in another tool", paths("my-tool", "-server", "https://x", "-models", "ws/m",
 		"-model", "-state", "/s"), []got{
+		{"broker.tools[t] -state", "/s", hostSecret},
+	})
+	// A renamed copy that takes the dictation socket is checked as the
+	// whisper tool.
+	check("renamed whisper tool", paths("/o/my-whisper", "-server", "/w/s", "-dictate-socket", "ws/s"), []got{
+		{"broker.tools[t] command", "/o/my-whisper", hostProgram},
+		{"broker.tools[t] -server", "/w/s", hostProgramOutside},
+		{"broker.tools[t] -dictate-socket", "ws/s", hostPrivate},
+	})
+	// env -S: flags inside the split string are read.
+	check("env -S", paths("env", "-S", "my-tool -state /s"), []got{
 		{"broker.tools[t] -state", "/s", hostSecret},
 	})
 	// A following flag is never a value: -model and -tree take none here.

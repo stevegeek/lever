@@ -13,14 +13,9 @@ package voice
 //
 // Routes:
 //
-//	POST /dictate  body: one WAV clip (CheckWAV). When the clip leaves the
-//	               queue and its transcription starts, an informational
-//	               102 Processing answer (StatusStarted); then 200
-//	               {"text": "..."} (the transcript as whisper-server gave
-//	               it), or an error status with {"error": word}, word one of
-//	               the Word* constants. The 102 tells the client whether a
-//	               clip it gives up on had started (counted) or was still
-//	               queued (not sent).
+//	POST /dictate  body: one WAV clip (CheckWAV). 200 {"text": "..."} (the
+//	               transcript as whisper-server gave it), or an error status
+//	               with {"error": word}, word one of the Word* constants.
 //	GET  /health   200 {"ready": bool, "model": name, "maxSeconds": n}.
 
 import (
@@ -33,13 +28,10 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"net/http/httptrace"
-	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -57,10 +49,6 @@ const (
 	// the clip (sent: its transcription had started).
 	WordInterrupted = "interrupted"
 )
-
-// StatusStarted is the informational answer the dictation socket sends when
-// a clip's transcription starts.
-const StatusStarted = http.StatusProcessing
 
 // MaxSocketPath bounds the socket path: sun_path holds 104 bytes on macOS
 // and 108 on Linux, the terminating NUL included.
@@ -219,9 +207,6 @@ func (h *DictateHandler) dictate(w http.ResponseWriter, r *http.Request) {
 		answerJSON(w, http.StatusServiceUnavailable, map[string]string{"error": WordCanceled})
 		return
 	}
-	// From here the clip counts: tell the client before whisper-server
-	// sees it (1xx headers are sent at once).
-	w.WriteHeader(StatusStarted)
 	start := time.Now()
 	text, err := h.Svc.Transcribe(r.Context(), clip)
 	h.Queue.Release()
@@ -364,12 +349,11 @@ func (c *DictateClient) Available() bool {
 
 // Transcribe sends one checked clip to the tool. An error wraps ErrNotSent
 // when the clip never reached whisper-server: the socket did not answer,
-// the tool refused it before whisper-server (not ready, or the clip failed
-// the tool's own check), or ctx ended (the browser gave up, or MaxWait ran
-// out) while the clip still waited in the tool's queue, before the tool
-// reported its transcription started (StatusStarted). Once started, a clip
-// that ends early is not ErrNotSent. The error never carries the
-// transcript.
+// or the tool refused it before whisper-server (not ready, or the clip
+// failed the tool's own check). A clip whose caller gave up (the browser
+// went away, or MaxWait ran out) counts, wherever it was: in the tool's
+// queue it only waited, and a refund there is not worth the bookkeeping.
+// The error never carries the transcript.
 func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, error) {
 	wait := c.MaxWait
 	if wait <= 0 {
@@ -377,15 +361,6 @@ func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
-	var started atomic.Bool
-	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
-			if code == StatusStarted {
-				started.Store(true)
-			}
-			return nil
-		},
-	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dictateBase+"/dictate", bytes.NewReader(wav))
 	if err != nil {
 		return "", err
@@ -393,9 +368,6 @@ func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, err
 	req.Header.Set("Content-Type", "audio/wav")
 	resp, err := c.http().Do(req)
 	if err != nil {
-		if ctx.Err() != nil && !started.Load() {
-			return "", fmt.Errorf("%w: canceled while it waited in the tool's queue (%v)", ErrNotSent, ctx.Err())
-		}
 		return "", plainErr(err)
 	}
 	defer resp.Body.Close()
@@ -418,12 +390,10 @@ func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, err
 		return "", fmt.Errorf("%w: %w", ErrNotSent, ErrNotReady)
 	case WordBadAudio, WordTooLong:
 		return "", fmt.Errorf("%w: lever-tool-whisper refused the clip (%s)", ErrNotSent, ans.Error)
-	case WordCanceled:
-		return "", fmt.Errorf("%w: canceled while it waited in the tool's queue", ErrNotSent)
 	}
 	// A fixed word only: the tool's answer is never quoted beyond it.
 	word := ans.Error
-	if word != WordFailed && word != WordInterrupted {
+	if word != WordFailed && word != WordInterrupted && word != WordCanceled {
 		word = "an unknown answer"
 	}
 	return "", fmt.Errorf("%w: HTTP %d, %s", ErrTool, resp.StatusCode, word)

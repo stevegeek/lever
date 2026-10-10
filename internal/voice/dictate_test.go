@@ -277,8 +277,9 @@ func (s *blockSvc) Transcribe(ctx context.Context, _ []byte) (string, error) {
 }
 
 // A clip the caller gives up on while it waits in the tool's queue never
-// reached whisper-server: not sent (the proxy gives its use back).
-func TestDictateCanceledWhileQueuedIsNotSent(t *testing.T) {
+// reaches whisper-server, but it counts (it is not ErrNotSent): a refund
+// there is not worth the bookkeeping.
+func TestDictateCanceledWhileQueuedCounts(t *testing.T) {
 	svc := &blockSvc{started: make(chan struct{})}
 	q := &Queue{}
 	var l logs
@@ -291,15 +292,10 @@ func TestDictateCanceledWhileQueuedIsNotSent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_, err := (&DictateClient{Socket: sock}).Transcribe(ctx, CanonicalWAV(16000))
-	if !errors.Is(err, ErrNotSent) || svc.calls.Load() != 0 {
+	if err == nil || errors.Is(err, ErrNotSent) || svc.calls.Load() != 0 {
 		t.Fatalf("%v, %d calls", err, svc.calls.Load())
 	}
 	eventually(t, "the tool logs the cancel", func() bool { return l.count("canceled while queued") == 1 })
-	// A MaxWait that runs out in the queue is not sent either.
-	_, err = (&DictateClient{Socket: sock, MaxWait: 100 * time.Millisecond}).Transcribe(context.Background(), CanonicalWAV(16000))
-	if !errors.Is(err, ErrNotSent) || svc.calls.Load() != 0 {
-		t.Fatalf("MaxWait in the queue: %v", err)
-	}
 }
 
 // A clip whose transcription started counts, even when the caller gives up
@@ -311,8 +307,6 @@ func TestDictateCanceledDuringTranscriptionIsSent(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-svc.started
-		// Let the tool's 102 reach the client before it gives up.
-		time.Sleep(300 * time.Millisecond)
 		cancel()
 	}()
 	_, err := (&DictateClient{Socket: sock}).Transcribe(ctx, CanonicalWAV(16000))
@@ -322,10 +316,10 @@ func TestDictateCanceledDuringTranscriptionIsSent(t *testing.T) {
 	eventually(t, "the tool logs the cancel", func() bool { return l.count("canceled during transcription") == 1 })
 }
 
-// The tool's answer words: canceled (queued) is not sent; interrupted
-// (during transcription) is sent.
-func TestDictateClientCancelWords(t *testing.T) {
-	for word, notSent := range map[string]bool{WordCanceled: true, WordInterrupted: false, WordFailed: false} {
+// The tool's answer words for a clip it took count; not-ready and the
+// tool's own clip refusals are not sent.
+func TestDictateClientAnswerWords(t *testing.T) {
+	for word, notSent := range map[string]bool{WordCanceled: false, WordInterrupted: false, WordFailed: false, WordNotReady: true, WordBadAudio: true, WordTooLong: true} {
 		h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			answerJSON(w, http.StatusServiceUnavailable, map[string]string{"error": word})
 		})

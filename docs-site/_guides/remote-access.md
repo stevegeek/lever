@@ -1521,13 +1521,12 @@ synthesis API and at least one on-device voice.
   proxy closes its request to the tool: a clip still waiting in the tool's queue leaves it, and a
   clip being transcribed ends the tool's request to whisper-server, which stops work on it; the
   slot frees. One clip at a time per login. Per login, 30 clips an hour, 60 minutes of audio a
-  day, and 60 attempts an hour (clips that fail their checks count as attempts). The rule for the
-  clips and the minutes: a clip counts once the tool has told the proxy that its transcription
-  started (the tool sends that signal when the clip leaves its queue, just before it hands the
-  clip to whisper-server). A clip given up before that signal reaches the proxy does not count: the tool or its child was
-  down, the tool refused the clip, or the browser gave up (or the proxy's wait ran out) while the
-  clip waited for its turn in the proxy or in the tool's queue. A clip whose transcription started
-  counts even if it then failed, timed out or the browser gave up. These counts are kept
+  day, and 60 attempts an hour (clips that fail their checks count as attempts). A clip does not
+  count against the clips or the minutes when the tool never took it: the tool or its socket was
+  down, the tool refused the clip before whisper-server, or the browser gave up (or the proxy's
+  wait ran out) while the clip waited for its turn in the proxy. Once the tool has taken a clip
+  it counts, even if it then waited in the tool's queue, failed, timed out or the browser gave
+  up. These counts are kept
   in memory and start again when the proxy restarts. Whisper's known non-speech markers (such as
   `[BLANK_AUDIO]`, `[MUSIC]`, `(inaudible)`) are removed from the text; other brackets, such as
   dictated code, stay. Sending a clip may take one minute plus the time for the largest clip at

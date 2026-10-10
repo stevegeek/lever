@@ -599,10 +599,11 @@ func (s *slowSvc) Transcribe(ctx context.Context, _ []byte) (string, error) {
 	return "", ctx.Err()
 }
 
-// A browser that gives up while its clip waits in the tool's queue (behind
-// an agent clip) gets its use back; one that gives up after the clip's
-// transcription started does not.
-func TestVoiceRefundWhenCanceledInTheToolQueue(t *testing.T) {
+// A browser that gives up counts its clip, whether it waited in the tool's
+// queue (behind an agent clip) or its transcription had started: only a
+// clip that never reached the tool, or that the tool refused before
+// whisper-server, is given back.
+func TestVoiceCanceledClipsCount(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "rp")
 	if err != nil {
 		t.Fatal(err)
@@ -651,7 +652,7 @@ func TestVoiceRefundWhenCanceledInTheToolQueue(t *testing.T) {
 	rw := post(ctx)
 	cancel()
 	queue.Release()
-	if rw.Code != http.StatusServiceUnavailable || uses() != 0 {
+	if rw.Code != http.StatusServiceUnavailable || uses() != 1 {
 		t.Fatalf("canceled while queued: %d %s, %d uses", rw.Code, rw.Body, uses())
 	}
 	select {
@@ -664,12 +665,11 @@ func TestVoiceRefundWhenCanceledInTheToolQueue(t *testing.T) {
 	ctx, cancel = context.WithCancel(context.Background())
 	go func() {
 		<-svc.started
-		time.Sleep(300 * time.Millisecond) // the tool's 102 reaches the proxy
 		cancel()
 	}()
 	rw = post(ctx)
 	cancel()
-	if rw.Code != http.StatusServiceUnavailable || uses() != 1 {
+	if rw.Code != http.StatusServiceUnavailable || uses() != 2 {
 		t.Fatalf("canceled during transcription: %d %s, %d uses", rw.Code, rw.Body, uses())
 	}
 }

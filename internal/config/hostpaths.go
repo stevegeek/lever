@@ -93,7 +93,21 @@ func isWhisperCommand(t Tool) bool {
 		return false
 	}
 	argv, _ := unwrapEnv(t.Command)
-	return len(argv) > 0 && baseName(argv[0]) == whisperProgram
+	if len(argv) == 0 {
+		return false
+	}
+	if baseName(argv[0]) == whisperProgram {
+		return true
+	}
+	// A renamed copy or wrapper still gets the whisper checks when it
+	// takes the dictation socket flag, which no other lever tool has.
+	for _, a := range argv[1:] {
+		name := strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
+		if a != name && (name == "dictate-socket" || strings.HasPrefix(name, "dictate-socket=")) {
+			return true
+		}
+	}
+	return false
 }
 
 // knownFlag is the kind of a flag name, and whether lever reads it in a
@@ -221,7 +235,13 @@ func toolFlags(t Tool) []toolFlag {
 	}
 	whisper := isWhisperCommand(t)
 	var out []toolFlag
-	args := t.Command[1:]
+	// The words the tool itself gets: past an env(1) prefix, with an
+	// env -S string split as env splits it, so no flag hides in one word.
+	argv, _ := unwrapEnv(t.Command)
+	if len(argv) == 0 {
+		argv = t.Command
+	}
+	args := argv[1:]
 	for i := 0; i < len(args); i++ {
 		name, ok := strings.CutPrefix(args[i], "-")
 		if !ok || name == "" {

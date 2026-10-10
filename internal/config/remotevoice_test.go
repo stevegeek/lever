@@ -169,15 +169,28 @@ func TestWhisperToolsAndVoiceTool(t *testing.T) {
 	if (WhisperTool{MaxSeconds: 60}).EffectiveAgentMaxSeconds() != 60 || (WhisperTool{AgentMaxSeconds: 30}).EffectiveAgentMaxSeconds() != 30 {
 		t.Fatal("agent max seconds")
 	}
-	// Found by the program's base name only: another program with the same
-	// flags is not a whisper tool; one behind env is.
+	// Found by the program's base name, behind env too, or by the
+	// dictation socket flag, which only the whisper tool takes: a renamed
+	// copy or wrapper still gets the whisper checks.
 	other := whisperTool()
 	other.Command[0] = "/opt/lever/my-whisper-wrapper"
 	envd := whisperTool()
 	envd.Command = append([]string{"env", "CUDA_VISIBLE_DEVICES=0"}, envd.Command...)
 	a.Broker.Tools = []Tool{other}
+	if ws := a.WhisperTools(); len(ws) != 1 || ws[0].Socket != testSocket {
+		t.Fatalf("renamed, by its socket flag: %+v", ws)
+	}
+	plain := Tool{Name: "mine", Command: []string{"/opt/mine", "-server", "https://x"}, Backend: "127.0.0.1:3300"}
+	a.Broker.Tools = []Tool{plain}
 	if ws := a.WhisperTools(); len(ws) != 0 {
-		t.Fatalf("by flags: %+v", ws)
+		t.Fatalf("a tool with generic flags only: %+v", ws)
+	}
+	// env -S: the flags inside the split string are read.
+	split := Tool{Name: "whisper", Backend: "127.0.0.1:3212",
+		Command: []string{"env", "-S", strings.Join(whisperTool().Command, " ")}}
+	a.Broker.Tools = []Tool{split}
+	if ws := a.WhisperTools(); len(ws) != 1 || ws[0].Socket != testSocket || ws[0].Port != 8448 {
+		t.Fatalf("env -S: %+v", ws)
 	}
 	a.Broker.Tools = []Tool{envd}
 	if ws := a.WhisperTools(); len(ws) != 1 || ws[0].Socket != testSocket {

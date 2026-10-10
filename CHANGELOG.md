@@ -19,9 +19,8 @@ version bump moves the block under the new version heading.
   sent by itself. Audio and transcripts are never stored; the audit line has the login, the clip
   length, the outcome and the latency only. Per login: 30 clips an hour, 60 audio-minutes a day;
   three slots, of which a contact never takes the last; `voice: false` on an `allowed_users`
-  entry turns it off for that login. A clip given up before the tool reports that its
-  transcription started (including one canceled while it waited in the tool's queue) does not
-  count against the limits. While voice is on, each agent message also gets a speaker button that
+  entry turns it off for that login. A clip the tool never took (it was down, or it refused the
+  clip) does not count against the limits. While voice is on, each agent message also gets a speaker button that
   reads it aloud with the browser's on-device voices only (`remote.voice.read_aloud: false` turns it
   off). `remote.voice` has only `enabled`, `socket`, `max_seconds` and `read_aloud`.
 - **`lever-tool-whisper`, a first-party broker tool for speech to text.** It runs whisper.cpp's

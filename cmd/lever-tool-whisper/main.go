@@ -58,7 +58,7 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&o.backend, "backend", "127.0.0.1:3212", "MCP listen address (set by the broker)")
 	fs.StringVar(&o.admin, "admin", "", "broker admin base URL (set by the broker)")
 	fs.StringVar(&o.tree, "tree", "", "absolute instance tree path")
-	fs.StringVar(&o.models, "models", "", "absolute directory holding the models `lever voice fetch` downloads (outside -tree)")
+	fs.StringVar(&o.models, "models", "", "absolute directory holding the models lever voice fetch downloads (outside -tree)")
 	fs.StringVar(&o.server, "server", "", "absolute path of whisper.cpp's whisper-server (outside -tree)")
 	fs.StringVar(&model, "model", voice.DefaultModel, "model name from lever's pinned table: "+strings.Join(voice.Names(), ", "))
 	fs.StringVar(&o.language, "language", "", "Whisper language code (empty = detect per clip)")

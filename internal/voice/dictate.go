@@ -240,6 +240,9 @@ func (c *DictateClient) http() *http.Client {
 			// Never a proxy from the environment, never TCP: the socket.
 			Proxy: nil,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				if err := checkSocketOwner(c.Socket); err != nil {
+					return nil, err
+				}
 				var d net.Dialer
 				return d.DialContext(ctx, "unix", c.Socket)
 			},
@@ -347,12 +350,44 @@ func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, err
 	return "", fmt.Errorf("%w: HTTP %d, %s", ErrTool, resp.StatusCode, word)
 }
 
+// checkSocketOwner refuses a socket the proxy should not send audio to: one
+// whose directory is not a private directory of the caller's (another user
+// could have made it and listen there), or that is not the caller's own
+// socket. The clip is then not sent (ErrNotSent).
+func checkSocketOwner(p string) error {
+	dir := filepath.Dir(p)
+	di, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("%w: the dictation socket's directory: %v", ErrNotSent, err)
+	}
+	if !di.IsDir() || di.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%w: the dictation socket's directory %s is not a private directory (mode %v)", ErrNotSent, dir, di.Mode())
+	}
+	if owner, ok := fileOwner(di); ok && owner != os.Getuid() {
+		return fmt.Errorf("%w: the dictation socket's directory %s belongs to uid %d, not to you", ErrNotSent, dir, owner)
+	}
+	si, err := os.Lstat(p)
+	if err != nil {
+		return fmt.Errorf("%w: the dictation socket: %v", ErrNotSent, err)
+	}
+	if si.Mode()&fs.ModeSocket == 0 {
+		return fmt.Errorf("%w: %s is not a socket", ErrNotSent, p)
+	}
+	if owner, ok := fileOwner(si); ok && owner != os.Getuid() {
+		return fmt.Errorf("%w: the dictation socket %s belongs to uid %d, not to you", ErrNotSent, p, owner)
+	}
+	return nil
+}
+
 // plainErr drops the URL from a client error, and marks a failed dial (the
 // socket missing, or nothing listening) as ErrNotSent.
 func plainErr(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		err = ue.Err
+	}
+	if errors.Is(err, ErrNotSent) {
+		return err
 	}
 	var oe *net.OpError
 	if errors.As(err, &oe) && oe.Op == "dial" {

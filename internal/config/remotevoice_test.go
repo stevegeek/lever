@@ -104,6 +104,11 @@ func TestWhisperToolValidation(t *testing.T) {
 		"other backend": {func(a *App) {
 			a.Broker.Tools = append(a.Broker.Tools, Tool{Name: "fizzy", Command: []string{"/x"}, Backend: "http://127.0.0.1:8448"})
 		}, "broker tool \"fizzy\""},
+		"other tree": {func(a *App) {
+			c := slices.Clone(a.Broker.Tools[0].Command)
+			c[slices.Index(c, "-tree")+1] = "/elsewhere"
+			a.Broker.Tools[0].Command = c
+		}, "not the instance's tree"},
 		"no port":   {without("-whisper-port"), "-whisper-port is required"},
 		"no socket": {without("-dictate-socket"), "-dictate-socket is required"},
 		"no models": {without("-models"), "-models and -server"},

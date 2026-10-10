@@ -142,6 +142,10 @@ func TestAgentLimits(t *testing.T) {
 	if _, err := a.Transcribe(context.Background(), "w1", "short.wav"); err == nil || !strings.Contains(err.Error(), "clips an hour") {
 		t.Fatalf("over the hourly count: %v", err)
 	}
+	// Over a limit, the file is not even read.
+	if _, err := a.Transcribe(context.Background(), "w1", "missing.wav"); err == nil || !strings.Contains(err.Error(), "clips an hour") {
+		t.Fatalf("over the hourly count, a missing file: %v", err)
+	}
 	// Per caller: another agent is not affected.
 	if _, err := a.Transcribe(context.Background(), "w2", "short.wav"); err != nil {
 		t.Fatal(err)

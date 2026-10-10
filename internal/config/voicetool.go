@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 
@@ -14,6 +15,7 @@ import (
 // checks its own flags again at start.
 type WhisperTool struct {
 	Name   string
+	Tree   string // -tree
 	Server string // -server
 	Models string // -models
 	Model  string // -model ("" = the tool's default, voice.DefaultModel)
@@ -54,6 +56,8 @@ func (a *App) WhisperTools() []WhisperTool {
 		w, found := WhisperTool{Name: t.Name}, false
 		for _, f := range toolFlags(t) {
 			switch f.name {
+			case "tree":
+				w.Tree = f.val
 			case "server":
 				w.Server = f.val
 			case "models":
@@ -122,6 +126,11 @@ func (a *App) validateWhisperTools() error {
 		if w.Models == "" || w.Server == "" {
 			return fmt.Errorf("config: %s needs -models and -server (absolute host paths outside the tree)", key)
 		}
+		// The tool checks its paths against -tree and reads agent files
+		// below it: it must be this instance's tree.
+		if w.Tree != "" && !sameTree(w.Tree, a.Tree) {
+			return fmt.Errorf("config: %s -tree %s is not the instance's tree %s", key, w.Tree, a.Tree)
+		}
 		if other, dup := seen[w.Port]; dup {
 			return fmt.Errorf("config: %s -whisper-port %d is also broker tool %q's", key, w.Port, other)
 		}
@@ -162,4 +171,15 @@ func (a *App) validateWhisperTools() error {
 		}
 	}
 	return nil
+}
+
+// sameTree reports whether p names the tree: the same clean path, or the
+// same path once symbolic links are followed.
+func sameTree(p, tree string) bool {
+	if filepath.Clean(p) == filepath.Clean(tree) {
+		return true
+	}
+	rp, err1 := resolveExisting(p)
+	rt, err2 := resolveExisting(tree)
+	return err1 == nil && err2 == nil && rp == rt
 }

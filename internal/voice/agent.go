@@ -49,6 +49,11 @@ type AgentTranscriber struct {
 	Queue      *Queue
 	// QueueWait bounds the wait for the GPU; zero = 2 minutes.
 	QueueWait time.Duration
+	// MaxWait bounds one transcription once it has the GPU; zero = 5
+	// minutes. An agent's call cannot be cancelled from its side (the
+	// handler has no request context), so this also bounds how long an
+	// agent clip can keep a dictation clip waiting.
+	MaxWait time.Duration
 	// Log receives one line per call: the caller, the file name, the
 	// clip's length, the outcome and the latency; never the text.
 	Log func(format string, a ...any)
@@ -93,6 +98,10 @@ func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) 
 	if err := CheckAgentFile(file); err != nil {
 		return "", err
 	}
+	// Over a limit already: refused before the file is read.
+	if err := a.check(caller, 0, a.now(), false); err != nil {
+		return "", err
+	}
 	clip, err := a.read(file)
 	if err != nil {
 		return "", err
@@ -105,7 +114,7 @@ func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) 
 		return "", fmt.Errorf("file %s is not a canonical WAV of PCM s16le, 16 kHz, mono with a 44-byte header and at least 0.1 s of audio", file)
 	}
 	at := a.now()
-	if err := a.take(caller, seconds, at); err != nil {
+	if err := a.check(caller, seconds, at, true); err != nil {
 		return "", err
 	}
 	if !a.Svc.Ready() {
@@ -123,7 +132,13 @@ func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) 
 		a.refund(caller, seconds, at)
 		return "", errors.New("the transcriber is busy; try again later")
 	}
-	raw, err := a.Svc.Transcribe(ctx, clip)
+	maxWait := a.MaxWait
+	if maxWait <= 0 {
+		maxWait = 5 * time.Minute
+	}
+	tctx, tcancel := context.WithTimeout(ctx, maxWait)
+	raw, err := a.Svc.Transcribe(tctx, clip)
+	tcancel()
 	a.Queue.Release()
 	if err != nil {
 		// Only a clip that never reached whisper-server is given back.
@@ -164,10 +179,10 @@ func (a *AgentTranscriber) read(file string) ([]byte, error) {
 	return b, nil
 }
 
-// take counts one clip of seconds for caller, or refuses it over
-// AgentClipsPerHour or AgentSecondsPerDay. Uses older than a day are
-// forgotten.
-func (a *AgentTranscriber) take(caller string, seconds float64, now time.Time) error {
+// check refuses one more clip of seconds by caller over AgentClipsPerHour
+// or AgentSecondsPerDay, and with take also counts it. Uses older than a
+// day are forgotten.
+func (a *AgentTranscriber) check(caller string, seconds float64, now time.Time, take bool) error {
 	key := strings.ToLower(caller)
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -200,7 +215,9 @@ func (a *AgentTranscriber) take(caller string, seconds float64, now time.Time) e
 	case total > AgentSecondsPerDay:
 		return fmt.Errorf("limit: %d minutes of audio a day; try again later", AgentSecondsPerDay/60)
 	}
-	a.used[key] = append(a.used[key], agentUse{at: now, seconds: seconds})
+	if take {
+		a.used[key] = append(a.used[key], agentUse{at: now, seconds: seconds})
+	}
 	return nil
 }
 

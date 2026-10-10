@@ -67,8 +67,10 @@ func (s *Service) Run(ctx context.Context) error {
 		sup.Log = s.Log
 	}
 	sup.Check = s.check
-	// Never through a proxy from the environment: loopback only.
-	s.client = http.Client{Transport: &http.Transport{MaxIdleConns: 1}}
+	// Never through a proxy from the environment: loopback only. A fresh
+	// connection per clip: a pooled one could be dead after the child
+	// restarted, and a clip sent on it would fail as sent (no refund).
+	s.client = http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	s.sup.Store(sup)
 	sup.Run(ctx)
 	return nil

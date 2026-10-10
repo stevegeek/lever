@@ -218,6 +218,25 @@ func TestDictateClientErrors(t *testing.T) {
 	}
 }
 
+// The client sends nothing to a socket in a directory that is not a private
+// directory of its user's: another user could have made it.
+func TestDictateClientRefusesAnOpenDirectory(t *testing.T) {
+	svc := &stubSvc{text: "hi"}
+	svc.ready.Store(true)
+	sock := serveDictate(t, &DictateHandler{Svc: svc, Queue: &Queue{}, MaxSeconds: 2})
+	if err := os.Chmod(filepath.Dir(sock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &DictateClient{Socket: sock}
+	_, err := c.Transcribe(context.Background(), CanonicalWAV(16000))
+	if !errors.Is(err, ErrNotSent) || !strings.Contains(err.Error(), "private") || svc.calls.Load() != 0 {
+		t.Fatalf("%v %d", err, svc.calls.Load())
+	}
+	if c.Available() {
+		t.Fatal("available behind an open directory")
+	}
+}
+
 func TestDictateHandlerRoutes(t *testing.T) {
 	sock := serveDictate(t, &DictateHandler{Svc: &stubSvc{}, Queue: &Queue{}, MaxSeconds: 1})
 	c := &DictateClient{Socket: sock}

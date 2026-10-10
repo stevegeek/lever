@@ -7,13 +7,16 @@
 //     the tool's Unix socket (-dictate-socket, remote.voice.socket), which
 //     only the operator's user reaches; never through the broker gateway;
 //   - the MCP operation transcribe for agents, through the broker like any
-//     first-party tool: a WAV file the agent wrote into
-//     /workspace/.lever-files/whisper/, with a capability from an obtain
-//     grant {tool: whisper, op: transcribe}. Without a grant, no agent can
-//     use it.
+//     first-party tool, with a capability from an obtain grant {tool:
+//     whisper, op: transcribe}: a WAV file in the tree root's
+//     .lever-files/whisper/ (/workspace/.lever-files/whisper/ in the
+//     manager's container, which only the manager can write), whoever the
+//     caller is. Without a capability, no agent can use it.
 //
 // One clip at a time reaches whisper-server; a waiting dictation clip goes
-// first. Audio and transcripts are never stored or logged.
+// first in the queue, but a clip already running is never interrupted, so
+// an agent clip (at most -agent-max-seconds long) can keep dictation waiting
+// for one transcription. Audio and transcripts are never stored or logged.
 package main
 
 import (
@@ -44,7 +47,7 @@ type opts struct {
 	model                                                        voice.Model
 	prompt                                                       string
 	gpu                                                          bool
-	whisperPort, maxSeconds                                      int
+	whisperPort, maxSeconds, agentMaxSeconds                     int
 }
 
 func parseFlags(args []string) (opts, error) {
@@ -64,6 +67,7 @@ func parseFlags(args []string) (opts, error) {
 	fs.IntVar(&o.whisperPort, "whisper-port", 0, "host loopback port for the whisper-server child")
 	fs.StringVar(&o.socket, "dictate-socket", "", "absolute path of the dictation Unix socket (outside -tree)")
 	fs.IntVar(&o.maxSeconds, "max-seconds", voice.DefaultMaxSeconds, "longest clip, in seconds")
+	fs.IntVar(&o.agentMaxSeconds, "agent-max-seconds", 0, fmt.Sprintf("longest clip of the agent operation transcribe, in seconds, at most -max-seconds (default %d, or -max-seconds if smaller)", voice.DefaultAgentMaxSeconds))
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -115,6 +119,14 @@ func parseFlags(args []string) (opts, error) {
 	if err := voice.CheckMaxSeconds(o.maxSeconds); err != nil {
 		return o, fmt.Errorf("-max-seconds: %w", err)
 	}
+	agentSet := false
+	fs.Visit(func(f *flag.Flag) { agentSet = agentSet || f.Name == "agent-max-seconds" })
+	if agentSet {
+		if err := voice.CheckAgentMaxSeconds(o.agentMaxSeconds, o.maxSeconds); err != nil {
+			return o, fmt.Errorf("-agent-max-seconds: %w", err)
+		}
+	}
+	o.agentMaxSeconds = voice.AgentMaxSeconds(o.agentMaxSeconds, o.maxSeconds)
 	return o, nil
 }
 
@@ -159,13 +171,13 @@ func main() {
 	svc := &voice.Service{Model: o.model, ModelDir: o.models, Server: o.server, Port: o.whisperPort,
 		GPU: o.gpu, Prompt: o.prompt, Language: o.language, Log: vlog}
 	queue := &voice.Queue{}
-	agents := &voice.AgentTranscriber{Tree: o.tree, MaxSeconds: o.maxSeconds, Svc: svc, Queue: queue, Log: vlog}
+	agents := &voice.AgentTranscriber{Tree: o.tree, MaxSeconds: o.agentMaxSeconds, Svc: svc, Queue: queue, Log: vlog}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,
 		Operations: []captool.Operation{{
 			Name: "transcribe",
 			Description: fmt.Sprintf("transcribe one WAV file from /workspace/%s/ (PCM s16le, 16 kHz, mono, canonical 44-byte header, at most %d s); returns {\"text\": ...}",
-				voice.AgentDir, o.maxSeconds),
+				voice.AgentDir, o.agentMaxSeconds),
 			Params: []captool.ParamSpec{
 				{Name: "file", Type: "string", Description: "file name in /workspace/" + voice.AgentDir + "/, e.g. note-1.wav"},
 			},

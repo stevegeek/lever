@@ -39,8 +39,10 @@ type VoiceConfig struct {
 	Available func() bool
 	// NotSent reports whether a Transcribe error means the clip never
 	// reached whisper-server (voice.ErrNotSent: the socket did not answer,
-	// or the tool refused the clip before whisper-server): only then is its
-	// use of the limits given back. nil = never.
+	// the tool refused the clip before whisper-server, or the request ended
+	// while the clip waited in the tool's queue, before the tool reported
+	// its transcription started): only then is its use of the limits given
+	// back. nil = never.
 	NotSent func(error) bool
 	// ReadAloud: the roster tells the page to offer read-aloud to every
 	// login with voice on (remote.voice.read_aloud).
@@ -217,8 +219,13 @@ func (s *voiceState) check(login string, seconds float64, now time.Time, take bo
 }
 
 // refund gives back a use limit took (take true) at the same moment for the
-// same length: the clip never reached the transcriber, or the transcriber
-// failed. The attempt cap (voiceTriesPerHour) still counts it.
+// same length, for a clip that never reached whisper-server: the browser
+// gave up while it waited for the proxy's GPU token, or Transcribe's error
+// is NotSent (the socket did not answer, the tool refused the clip, or the
+// browser gave up while it waited in the tool's queue). A clip whose
+// transcription started is never given back, even when it failed, timed out
+// or the browser gave up. The attempt cap (voiceTriesPerHour) still counts
+// it.
 func (s *voiceState) refund(login string, seconds float64, at time.Time) {
 	key := strings.ToLower(login)
 	s.mu.Lock()
@@ -347,15 +354,17 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		return
 	}
 	start := time.Now()
-	// A browser that gives up ends the request to the tool, which ends its
-	// request to whisper-server, which stops work on the clip; the GPU token
-	// is freed with it.
+	// A browser that gives up ends the request to the tool: a clip still in
+	// the tool's queue leaves it (not sent), and one being transcribed ends
+	// the tool's request to whisper-server, which stops work on it; the GPU
+	// token is freed with it.
 	text, err := s.cfg.Transcribe(r.Context(), clip)
 	<-s.gpu
 	line.LatencyMS = max(time.Since(start).Milliseconds(), 1)
 	if err != nil {
-		// Only a clip that never reached whisper-server is given back: a
-		// timeout or a failed transcription used it.
+		// Only a clip that never reached whisper-server is given back
+		// (NotSent, a clip canceled in the tool's queue included): one whose
+		// transcription started used it, failed, timed out or canceled.
 		if s.cfg.NotSent != nil && s.cfg.NotSent(err) {
 			s.refund(v.login, seconds, takenAt)
 		}

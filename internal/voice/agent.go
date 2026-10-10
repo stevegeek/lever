@@ -15,10 +15,13 @@ import (
 	"github.com/stevegeek/lever/internal/fsutil"
 )
 
-// AgentDir is the tree-relative directory an agent writes the clips it wants
-// transcribed into (/workspace/.lever-files/whisper in the manager's
-// container). It is at the tree root, so in practice it is the manager's: a
-// worker mounts only its own dir.
+// AgentDir is the tree-relative directory the clips of the agent operation
+// are read from (/workspace/.lever-files/whisper in the manager's
+// container). It is at the tree root, so only the manager can write it (a
+// worker mounts only its own dir); but it is read for every caller, so any
+// agent with a transcribe capability (a delegated or obtained one included)
+// reads the files the manager put there. Like the github tool's bundle
+// directory, it does not depend on the caller.
 const AgentDir = ".lever-files/whisper"
 
 // The per-caller limits of the agent operation, in memory (they start again
@@ -43,16 +46,18 @@ func CheckAgentFile(name string) error {
 // hard link, checked like a dictation clip, and transcribed after any
 // waiting dictation.
 type AgentTranscriber struct {
-	Tree       string
+	Tree string
+	// MaxSeconds is the longest agent clip (-agent-max-seconds).
 	MaxSeconds int
 	Svc        Transcriber
 	Queue      *Queue
 	// QueueWait bounds the wait for the GPU; zero = 2 minutes.
 	QueueWait time.Duration
-	// MaxWait bounds one transcription once it has the GPU; zero = 5
-	// minutes. An agent's call cannot be cancelled from its side (the
-	// handler has no request context), so this also bounds how long an
-	// agent clip can keep a dictation clip waiting.
+	// MaxWait bounds one transcription once it has the GPU; zero =
+	// AgentMaxWait(MaxSeconds). An agent's call cannot be cancelled from its
+	// side (the handler has no request context), and a running clip is
+	// never interrupted for dictation, so this also bounds how long an agent
+	// clip can keep a dictation clip waiting.
 	MaxWait time.Duration
 	// Log receives one line per call: the caller, the file name, the
 	// clip's length, the outcome and the latency; never the text.
@@ -109,7 +114,7 @@ func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) 
 	seconds, word := CheckWAV(clip, a.MaxSeconds)
 	switch word {
 	case WordTooLong:
-		return "", fmt.Errorf("file %s is longer than %d seconds", file, a.MaxSeconds)
+		return "", a.tooLong(file)
 	case WordBadAudio:
 		return "", fmt.Errorf("file %s is not a canonical WAV of PCM s16le, 16 kHz, mono with a 44-byte header and at least 0.1 s of audio", file)
 	}
@@ -134,7 +139,7 @@ func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) 
 	}
 	maxWait := a.MaxWait
 	if maxWait <= 0 {
-		maxWait = 5 * time.Minute
+		maxWait = AgentMaxWait(a.MaxSeconds)
 	}
 	tctx, tcancel := context.WithTimeout(ctx, maxWait)
 	raw, err := a.Svc.Transcribe(tctx, clip)
@@ -160,7 +165,7 @@ func (a *AgentTranscriber) read(file string) ([]byte, error) {
 	case errors.Is(err, fsutil.ErrSymlink) || errors.Is(err, fsutil.ErrHardLink):
 		return nil, fmt.Errorf("file %s: refused (a symbolic or hard link)", file)
 	case errors.Is(err, fsutil.ErrFileTooLarge):
-		return nil, fmt.Errorf("file %s is longer than %d seconds", file, a.MaxSeconds)
+		return nil, a.tooLong(file)
 	case errors.Is(err, fsutil.ErrNotRegularFile):
 		return nil, fmt.Errorf("file %s is not a regular file", file)
 	case errors.Is(err, fs.ErrNotExist):
@@ -174,9 +179,21 @@ func (a *AgentTranscriber) read(file string) ([]byte, error) {
 		return nil, fmt.Errorf("file %s: cannot be read", file)
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("file %s is longer than %d seconds", file, a.MaxSeconds)
+		return nil, a.tooLong(file)
 	}
 	return b, nil
+}
+
+// tooLong is the refusal of a file over MaxSeconds.
+func (a *AgentTranscriber) tooLong(file string) error {
+	return fmt.Errorf("file %s is too long: the agent operation takes at most %d seconds of audio (the tool's -agent-max-seconds); split it into shorter clips", file, a.MaxSeconds)
+}
+
+// AgentMaxWait is how long one agent clip of at most maxSeconds may keep
+// the GPU: as long as the clip, at least 30 s. A GPU transcribes far faster
+// than real time; a clip that takes longer is cut off as failed.
+func AgentMaxWait(maxSeconds int) time.Duration {
+	return time.Duration(max(maxSeconds, 30)) * time.Second
 }
 
 // check refuses one more clip of seconds by caller over AgentClipsPerHour

@@ -527,7 +527,7 @@ func (f *fakeTool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // cleaned, and only a clip that never reached whisper-server (the tool
 // answers not-ready, or the socket is gone) gives its use back.
 func TestVoiceThroughTheDictationSocket(t *testing.T) {
-	dir, err := os.MkdirTemp("", "rp")
+	dir, err := os.MkdirTemp("/tmp", "rp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,5 +585,91 @@ func TestVoiceThroughTheDictationSocket(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // past client's HealthTTL
 	if client.Available() {
 		t.Fatal("available with the socket gone")
+	}
+}
+
+// slowSvc is a ready transcriber for the real dictation handler that
+// reports each start and works until its context ends.
+type slowSvc struct{ started chan struct{} }
+
+func (s *slowSvc) Ready() bool { return true }
+func (s *slowSvc) Transcribe(ctx context.Context, _ []byte) (string, error) {
+	s.started <- struct{}{}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// A browser that gives up while its clip waits in the tool's queue (behind
+// an agent clip) gets its use back; one that gives up after the clip's
+// transcription started does not.
+func TestVoiceRefundWhenCanceledInTheToolQueue(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "rp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "s", "d.sock")
+	ln, err := voice.ListenDictate(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &slowSvc{started: make(chan struct{}, 1)}
+	queue := &voice.Queue{}
+	srv := voice.NewDictateServer(&voice.DictateHandler{Svc: svc, Queue: queue, MaxSeconds: 2})
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	hub := newPageHub(t)
+	cfg, _ := voiceCfg(t, hub)
+	client := &voice.DictateClient{Socket: sock}
+	cfg.Voice.Transcribe = client.Transcribe
+	cfg.Voice.NotSent = func(err error) bool { return errors.Is(err, voice.ErrNotSent) }
+	h := NewHandler(cfg)
+	g := h.(*gate)
+	uses := func() int {
+		g.voice.mu.Lock()
+		defer g.voice.mu.Unlock()
+		return len(g.voice.used[strings.ToLower(chatOp)])
+	}
+	post := func(ctx context.Context) *httptest.ResponseRecorder {
+		req := proxyRequest("POST", voicePath, bytes.NewReader(wavClip(16000))).WithContext(ctx)
+		req.Header.Set("Tailscale-User-Login", chatOp)
+		req.Header.Set("Content-Type", "audio/wav")
+		req.Header.Set("Origin", "https://"+testServeHost)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set(voiceHeader, "1")
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		return rw
+	}
+
+	// An agent clip holds the tool's GPU; the browser gives up meanwhile.
+	if err := queue.Acquire(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	rw := post(ctx)
+	cancel()
+	queue.Release()
+	if rw.Code != http.StatusServiceUnavailable || uses() != 0 {
+		t.Fatalf("canceled while queued: %d %s, %d uses", rw.Code, rw.Body, uses())
+	}
+	select {
+	case <-svc.started:
+		t.Fatal("the clip reached the transcriber")
+	default:
+	}
+
+	// The transcription starts, then the browser gives up: counted.
+	ctx, cancel = context.WithCancel(context.Background())
+	go func() {
+		<-svc.started
+		time.Sleep(100 * time.Millisecond) // the tool's 102 reaches the proxy
+		cancel()
+	}()
+	rw = post(ctx)
+	cancel()
+	if rw.Code != http.StatusServiceUnavailable || uses() != 1 {
+		t.Fatalf("canceled during transcription: %d %s, %d uses", rw.Code, rw.Body, uses())
 	}
 }

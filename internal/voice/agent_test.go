@@ -108,7 +108,7 @@ func TestAgentRefusesLinks(t *testing.T) {
 func TestAgentSizeAndFormat(t *testing.T) {
 	tree, a, svc := agentTree(t)
 	put(t, tree, "long.wav", CanonicalWAV(3*16000))
-	if _, err := a.Transcribe(context.Background(), "m", "long.wav"); err == nil || !strings.Contains(err.Error(), "longer than 2 seconds") {
+	if _, err := a.Transcribe(context.Background(), "m", "long.wav"); err == nil || !strings.Contains(err.Error(), "at most 2 seconds of audio") {
 		t.Fatalf("too long: %v", err)
 	}
 	b := CanonicalWAV(16000)
@@ -192,5 +192,19 @@ func TestAgentQueueWait(t *testing.T) {
 	a.Queue.Release()
 	if svc.calls.Load() != 0 {
 		t.Fatal("ran without the GPU")
+	}
+}
+
+// An agent clip holds the GPU at most about as long as the longest agent
+// clip: dictation waits behind it no longer.
+func TestAgentMaxWait(t *testing.T) {
+	if AgentMaxWait(120) != 120*time.Second || AgentMaxWait(5) != 30*time.Second {
+		t.Fatal(AgentMaxWait(120), AgentMaxWait(5))
+	}
+	if AgentMaxSeconds(0, 300) != DefaultAgentMaxSeconds || AgentMaxSeconds(0, 60) != 60 || AgentMaxSeconds(30, 300) != 30 {
+		t.Fatal("AgentMaxSeconds")
+	}
+	if CheckAgentMaxSeconds(0, 300) == nil || CheckAgentMaxSeconds(301, 300) == nil || CheckAgentMaxSeconds(300, 300) != nil {
+		t.Fatal("CheckAgentMaxSeconds")
 	}
 }

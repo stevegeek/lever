@@ -13,11 +13,11 @@ import (
 	"time"
 )
 
-// shortDir is a private temp dir with a short path (a socket path is
-// bounded).
+// shortDir is a private temp dir with a short path under /tmp (a socket
+// path is bounded, and TMPDIR can be long, as on macOS).
 func shortDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("", "vd")
+	d, err := os.MkdirTemp("/tmp", "vd")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,5 +258,147 @@ func TestDictateHandlerRoutes(t *testing.T) {
 		if resp.StatusCode != tc.want {
 			t.Errorf("%s %s: %d", tc.method, tc.path, resp.StatusCode)
 		}
+	}
+}
+
+// blockSvc is a ready Transcriber whose Transcribe reports its start and
+// then works until its context ends.
+type blockSvc struct {
+	started chan struct{}
+	calls   atomic.Int32
+}
+
+func (s *blockSvc) Ready() bool { return true }
+func (s *blockSvc) Transcribe(ctx context.Context, _ []byte) (string, error) {
+	s.calls.Add(1)
+	close(s.started)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// A clip the caller gives up on while it waits in the tool's queue never
+// reached whisper-server: not sent (the proxy gives its use back).
+func TestDictateCanceledWhileQueuedIsNotSent(t *testing.T) {
+	svc := &blockSvc{started: make(chan struct{})}
+	q := &Queue{}
+	var l logs
+	sock := serveDictate(t, &DictateHandler{Svc: svc, Queue: q, MaxSeconds: 2, Log: l.f})
+	// An agent clip holds the GPU.
+	if err := q.Acquire(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	defer q.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, err := (&DictateClient{Socket: sock}).Transcribe(ctx, CanonicalWAV(16000))
+	if !errors.Is(err, ErrNotSent) || svc.calls.Load() != 0 {
+		t.Fatalf("%v, %d calls", err, svc.calls.Load())
+	}
+	eventually(t, "the tool logs the cancel", func() bool { return l.count("canceled while queued") == 1 })
+	// A MaxWait that runs out in the queue is not sent either.
+	_, err = (&DictateClient{Socket: sock, MaxWait: 100 * time.Millisecond}).Transcribe(context.Background(), CanonicalWAV(16000))
+	if !errors.Is(err, ErrNotSent) || svc.calls.Load() != 0 {
+		t.Fatalf("MaxWait in the queue: %v", err)
+	}
+}
+
+// A clip whose transcription started counts, even when the caller gives up
+// before it ends.
+func TestDictateCanceledDuringTranscriptionIsSent(t *testing.T) {
+	svc := &blockSvc{started: make(chan struct{})}
+	var l logs
+	sock := serveDictate(t, &DictateHandler{Svc: svc, Queue: &Queue{}, MaxSeconds: 2, Log: l.f})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-svc.started
+		// Let the tool's 102 reach the client before it gives up.
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	_, err := (&DictateClient{Socket: sock}).Transcribe(ctx, CanonicalWAV(16000))
+	if err == nil || errors.Is(err, ErrNotSent) || svc.calls.Load() != 1 {
+		t.Fatalf("%v, %d calls", err, svc.calls.Load())
+	}
+	eventually(t, "the tool logs the cancel", func() bool { return l.count("canceled during transcription") == 1 })
+}
+
+// The tool's answer words: canceled (queued) is not sent; interrupted
+// (during transcription) is sent.
+func TestDictateClientCancelWords(t *testing.T) {
+	for word, notSent := range map[string]bool{WordCanceled: true, WordInterrupted: false, WordFailed: false} {
+		h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			answerJSON(w, http.StatusServiceUnavailable, map[string]string{"error": word})
+		})
+		sock := serveDictate(t, h)
+		_, err := (&DictateClient{Socket: sock}).Transcribe(context.Background(), CanonicalWAV(16000))
+		if err == nil || errors.Is(err, ErrNotSent) != notSent {
+			t.Errorf("%s: %v", word, err)
+		}
+	}
+}
+
+// Available asks the tool once per HealthTTL however many callers there
+// are: while one slow probe runs, the others keep the previous answer (or,
+// before the first answer, wait for that probe).
+func TestDictateAvailableSingleFlight(t *testing.T) {
+	var probes atomic.Int32
+	release := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probes.Add(1)
+		<-release
+		answerJSON(w, http.StatusOK, Health{Ready: true})
+	})
+	sock := serveDictate(t, h)
+	c := &DictateClient{Socket: sock, HealthTTL: 50 * time.Millisecond}
+	run := func(n int) []bool {
+		out := make([]bool, n)
+		done := make(chan int, n)
+		for i := range n {
+			go func() { out[i] = c.Available(); done <- i }()
+		}
+		for range n {
+			<-done
+		}
+		return out
+	}
+	// First answer: everyone waits for one probe.
+	go func() {
+		for probes.Load() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond) // the others pile in meanwhile
+		release <- struct{}{}
+	}()
+	for i, ok := range run(20) {
+		if !ok {
+			t.Fatalf("caller %d: not available", i)
+		}
+	}
+	if n := probes.Load(); n != 1 {
+		t.Fatalf("%d probes, want 1", n)
+	}
+	// Stale: one caller probes (slowly); the others answer at once with
+	// the previous value.
+	time.Sleep(60 * time.Millisecond)
+	first := make(chan bool)
+	go func() { first <- c.Available() }()
+	for probes.Load() != 2 {
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	for i, ok := range run(20) {
+		if !ok {
+			t.Fatalf("stale caller %d: not the previous answer", i)
+		}
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("callers waited %v for the probe", d)
+	}
+	if n := probes.Load(); n != 2 {
+		t.Fatalf("%d probes, want 2", n)
+	}
+	release <- struct{}{}
+	if !<-first {
+		t.Fatal("the probing caller")
 	}
 }

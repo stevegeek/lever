@@ -20,13 +20,26 @@ func pinModel(t *testing.T) {
 	t.Cleanup(func() { voice.Models = old })
 }
 
+// shortTemp is a temporary directory under /tmp: a socket path in it stays
+// within the Unix socket limit however long TMPDIR is (macOS), so the tree
+// checks are what the tests reach.
+func shortTemp(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("/tmp", "lv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	return d
+}
+
 // goodArgs is a valid command line: the tree, and models, program and
 // socket outside it.
 func goodArgs(t *testing.T) (tree string, args []string) {
 	t.Helper()
 	pinModel(t)
-	tree = t.TempDir()
-	host := t.TempDir()
+	tree = shortTemp(t)
+	host := shortTemp(t)
 	return tree, []string{"-tree", tree, "-models", filepath.Join(host, "models"), "-server", filepath.Join(host, "whisper-server"),
 		"-whisper-port", "8448", "-dictate-socket", filepath.Join(host, "run", "d.sock")}
 }
@@ -41,8 +54,15 @@ func TestParseFlagsGood(t *testing.T) {
 		t.Fatalf("%+v", o)
 	}
 	o, err = parseFlags(args)
-	if err != nil || !o.gpu || o.maxSeconds != 300 || o.language != "" || o.prompt != "" {
+	if err != nil || !o.gpu || o.maxSeconds != 300 || o.agentMaxSeconds != 120 || o.language != "" || o.prompt != "" {
 		t.Fatalf("defaults: %+v %v", o, err)
+	}
+	// -agent-max-seconds: set, or at most -max-seconds by default.
+	if o, err = parseFlags(append(args, "-agent-max-seconds", "30")); err != nil || o.agentMaxSeconds != 30 {
+		t.Fatalf("agent max: %+v %v", o, err)
+	}
+	if o, err = parseFlags(append(args, "-max-seconds", "60")); err != nil || o.agentMaxSeconds != 60 {
+		t.Fatalf("agent max within -max-seconds: %+v %v", o, err)
 	}
 }
 
@@ -95,6 +115,9 @@ func TestParseFlagsRefusals(t *testing.T) {
 		"port is backend":   {append(set("-whisper-port", "3999"), "-backend", "127.0.0.1:3999"), "-backend"},
 		"max zero":          {set("-max-seconds", "0"), "-max-seconds"},
 		"max over":          {set("-max-seconds", "601"), "-max-seconds"},
+		"agent max zero":    {set("-agent-max-seconds", "0"), "-agent-max-seconds"},
+		"agent max over":    {set("-agent-max-seconds", "301"), "-agent-max-seconds"},
+		"agent over max":    {append(set("-max-seconds", "60"), "-agent-max-seconds", "61"), "-agent-max-seconds"},
 		"gpu with a space":  {append(append([]string{}, args...), "-gpu", "false"), "-gpu=false"},
 		"positional":        {append(append([]string{}, args...), "extra"), "unexpected argument"},
 		"unknown flag":      {append(append([]string{}, args...), "-port", "1"), "not defined"},
@@ -124,7 +147,7 @@ func TestParseFlagsSeesThroughLinks(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(tree, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(t.TempDir(), "bin")
+	link := filepath.Join(shortTemp(t), "bin")
 	if err := os.Symlink(filepath.Join(tree, "bin"), link); err != nil {
 		t.Fatal(err)
 	}

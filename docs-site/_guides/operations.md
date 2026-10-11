@@ -507,7 +507,9 @@ one whose write never finished (its overlay link is missing), the load fails, ev
 
 **Check.** `lever doctor`, row *podman storage*: the podman version, the counts of images,
 containers and layers, how many layers nothing uses and their size, layers flagged incomplete, and
-podman's own corruption warnings. The row is read-only, and lever never deletes a layer. A count
+podman's own corruption warnings. lever changes nothing in the store (podman's own startup cleanup
+may run while the row reads it), and lever never deletes a layer. podman's "storage corruption"
+warning fails the row; hints such as "layer not known", which also appear in working stores, warn. A count
 read while a load is running includes the layers that load has written so far.
 
 **On podman 5.x** there is a narrower repair: in the guest as the jail user, `podman system check`
@@ -540,7 +542,7 @@ the store by hand corrupts it further.
    the agent records, to a place outside the podman store:
 
    ```sh
-   tar -C "$HOME" -czf "$HOME/scion-backup-$(date +%Y%m%d-%H%M%S).tar.gz" .scion
+   (umask 077; tar -C "$HOME" -czf "$HOME/scion-backup-$(date +%Y%m%d-%H%M%S).tar.gz" .scion)
    ```
 
    Make sure the agent homes are in a backup too. If a container still exists, this lists its

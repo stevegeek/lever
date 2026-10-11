@@ -23,12 +23,14 @@ const podmanResetFix = "if `lever up` fails at load-image: back up first (the gu
 // or container uses, or layers flagged incomplete, warn. Orphan layers are
 // harmless until a load reuses a damaged one, which is how the reported
 // load-image failure happened. read is jail.ReadStoreHealth over the jail
-// runner: read-only, bounded, as the jail run user. lever never deletes a
-// layer; the fix says how to recover.
+// runner: bounded, as the jail run user; lever changes nothing (podman's own
+// startup cleanup may run). lever never deletes a layer; the fix says how to
+// recover.
 func checkPodmanStorage(ctx context.Context, read func(context.Context) (jail.StoreHealth, error)) checkResult {
 	h, err := read(ctx)
 	if err != nil {
-		return checkResult{podmanStorageCheck, true, "not checked (could not read the jail's podman store): " + firstLine(err.Error()), ""}
+		return warnResult(podmanStorageCheck, "not checked (could not read the jail's podman store): "+firstLine(err.Error()),
+			"a podman that hangs or a store file too big to read can itself be a sign of damage: see \"Recovering the jail's podman store\" in the operations guide")
 	}
 	summary := fmt.Sprintf("podman %s, %s: %d %s, %d %s, %d %s", orUnknown(h.Version), h.Driver,
 		h.Images, plural(h.Images, "image", "images"), h.Containers, plural(h.Containers, "container", "containers"),
@@ -36,6 +38,9 @@ func checkPodmanStorage(ctx context.Context, read func(context.Context) (jail.St
 	var problems []string
 	if h.Orphans > 0 {
 		problems = append(problems, fmt.Sprintf("%d %s no image or container uses (%s)", h.Orphans, plural(h.Orphans, "layer", "layers"), humanBytes(h.OrphanBytes)))
+	}
+	if len(h.Notices) > 0 {
+		problems = append(problems, "podman notes: "+strings.Join(h.Notices, " / "))
 	}
 	if h.Incomplete > 0 {
 		problems = append(problems, fmt.Sprintf("%d %s flagged incomplete", h.Incomplete, plural(h.Incomplete, "layer", "layers")))

@@ -67,9 +67,11 @@ func TestCheckPodmanStorageCorruptionFails(t *testing.T) {
 	}
 }
 
-func TestCheckPodmanStorageReadErrorIsNotChecked(t *testing.T) {
+// A store lever cannot read warns (it can itself be a sign of damage); it
+// never reads as a pass.
+func TestCheckPodmanStorageReadErrorWarns(t *testing.T) {
 	r := checkPodmanStorage(context.Background(), storeReader(jail.StoreHealth{}, errors.New("podman info: exit status 125\nmore")))
-	if !r.ok || r.fix != "" || !strings.HasPrefix(r.detail, "not checked") || strings.Contains(r.detail, "more") {
+	if !r.ok || r.fix == "" || !strings.HasPrefix(r.detail, "not checked") || strings.Contains(r.detail, "more") {
 		t.Fatalf("read error = %+v", r)
 	}
 }

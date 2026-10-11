@@ -37,9 +37,13 @@ type StoreHealth struct {
 	Orphans     int
 	OrphanBytes int64 // their uncompressed size, as the store records it
 	Incomplete  int   // layers flagged incomplete (a write that never finished)
-	// Warnings are podman's own stderr lines that name corruption, sanitized
-	// and clipped, at most storeWarningsMax.
+	// Warnings are podman's own stderr lines that say the store is corrupted
+	// ("storage corruption", "may be corrupted"), sanitized and clipped, at
+	// most storeWarningsMax. They fail the doctor row.
 	Warnings []string
+	// Notices are podman stderr lines that hint at damage but also appear in
+	// stores that work ("layer not known", a bare "corrupt"). They warn.
+	Notices []string
 }
 
 // MajorVersion returns the leading number of Version, or 0 when it has none.
@@ -110,7 +114,8 @@ const storeFileScript = `test -e "$1" || exit 3; exec timeout ` + storeCmdSecond
 
 // ReadStoreHealth reads the health of the jail's rootless podman store. r is
 // the in-jail runner (Backend.JailRunner), so every command runs as the jail
-// run user with its XDG_RUNTIME_DIR. Every command is read-only: `podman
+// run user with its XDG_RUNTIME_DIR. lever changes nothing (podman's own
+// startup cleanup may still run inside podman info): `podman
 // info`, `podman images -a -q` (for podman's own warnings) and a cat of the
 // three metadata files. Nothing is changed and no layer is ever removed.
 func ReadStoreHealth(ctx context.Context, r proc.Runner) (StoreHealth, error) {
@@ -122,7 +127,7 @@ func ReadStoreHealth(ctx context.Context, r proc.Runner) (StoreHealth, error) {
 	if err != nil {
 		return h, fmt.Errorf("podman info: %w: %s", err, podmanErrTail(res.Stderr))
 	}
-	h.Warnings = appendCorruptionWarnings(h.Warnings, res.Stderr)
+	h.Warnings, h.Notices = appendCorruptionWarnings(h.Warnings, h.Notices, res.Stderr)
 	var info podmanInfo
 	if err := json.Unmarshal([]byte(res.Stdout), &info); err != nil {
 		return h, fmt.Errorf("podman info: unreadable output: %w", err)
@@ -141,7 +146,7 @@ func ReadStoreHealth(ctx context.Context, r proc.Runner) (StoreHealth, error) {
 	// layers are damaged; the IDs themselves are not needed, and a failed
 	// listing is judged by its stderr like a good one.
 	res, _ = r.Run(ctx, nil, "timeout", storeCmdSeconds, "podman", "images", "-a", "-q")
-	h.Warnings = appendCorruptionWarnings(h.Warnings, res.Stderr)
+	h.Warnings, h.Notices = appendCorruptionWarnings(h.Warnings, h.Notices, res.Stderr)
 
 	var layers []storeLayer
 	var images []storeImage
@@ -225,24 +230,32 @@ func orphanLayers(layers []storeLayer, images []storeImage, containers []storeCo
 	return orphans, orphanBytes, incomplete
 }
 
-// appendCorruptionWarnings adds podman's stderr lines that name corruption to
-// ws, sanitized, clipped and de-duplicated, up to storeWarningsMax.
-func appendCorruptionWarnings(ws []string, stderr string) []string {
-	for _, l := range strings.FieldsFunc(stderr, func(r rune) bool { return r == '\n' || r == '\r' }) {
-		if len(ws) >= storeWarningsMax {
-			break
-		}
-		if !podmanStorageDamaged(l) && !strings.Contains(strings.ToLower(l), "corrupt") {
-			continue
+// appendCorruptionWarnings sorts podman's stderr lines that name damage
+// into ws (podman says the store is corrupted: they fail the doctor row) and
+// ns (hints such as "layer not known" that also appear in working stores:
+// they warn), sanitized, clipped and de-duplicated, up to storeWarningsMax
+// each.
+func appendCorruptionWarnings(ws, ns []string, stderr string) ([]string, []string) {
+	add := func(list []string, l string) []string {
+		if len(list) >= storeWarningsMax {
+			return list
 		}
 		l = clipMiddle(strings.TrimSpace(termsafe.Sanitize(l)), 300)
-		dup := false
-		for _, w := range ws {
-			dup = dup || w == l
+		for _, w := range list {
+			if w == l {
+				return list
+			}
 		}
-		if !dup {
-			ws = append(ws, l)
+		return append(list, l)
+	}
+	for _, l := range strings.FieldsFunc(stderr, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		low := strings.ToLower(l)
+		switch {
+		case strings.Contains(low, "storage corruption") || strings.Contains(low, "may be corrupted"):
+			ws = add(ws, l)
+		case podmanStorageDamaged(l) || strings.Contains(low, "corrupt"):
+			ns = add(ns, l)
 		}
 	}
-	return ws
+	return ws, ns
 }

@@ -120,17 +120,90 @@ func TestManagerGateContainerGoneIsADeath(t *testing.T) {
 }
 
 // Phase running over a live container, but claude's tmux pane is dead (or
-// was never created): not up, whatever the hub says.
-func TestManagerGatePhaseRunningPaneDeadIsNotUp(t *testing.T) {
+// its window gone) with tmux answering: claude exited before it came up
+// (a bad --continue, an auth failure). scion's shell window keeps tmux and
+// the container up, so only the pane says so — and it is a death within
+// notAliveDeath probes, not a "did not come up" after the whole wait.
+func TestManagerGateClaudeDeadFromTheFirstProbeIsADeath(t *testing.T) {
 	p := &gateProbe{alive: []harnessAnswer{{alive: false}}, running: []runningAnswer{{up: true}}}
 	deps, r := gateDeps(p)
+	deps.HarnessWait = time.Hour
 	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
 	err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil)
-	if !errors.Is(err, scion.ErrAgentNotLive) || !strings.Contains(err.Error(), "tmux pane") {
-		t.Fatalf("want ErrAgentNotLive naming the tmux pane, got %v", err)
+	if !errors.Is(err, scion.ErrAgentDied) || errors.Is(err, scion.ErrAgentNotLive) {
+		t.Fatalf("want ErrAgentDied, got %v", err)
 	}
-	if p.aliveN < 2 {
-		t.Fatalf("HarnessAlive calls = %d: the gate must keep polling for a booting harness", p.aliveN)
+	if !strings.Contains(err.Error(), "claude exited before it came up") {
+		t.Fatalf("error %q does not say claude exited", err)
+	}
+	if p.aliveN != notAliveDeath {
+		t.Fatalf("HarnessAlive calls = %d, want %d", p.aliveN, notAliveDeath)
+	}
+}
+
+// One not-alive answer between booting readings is not a death: the run
+// must be consecutive.
+func TestManagerGateNotAliveRunMustBeConsecutive(t *testing.T) {
+	noServer := harnessAnswer{err: jail.ErrNoTmuxServer}
+	dead := harnessAnswer{alive: false}
+	p := &gateProbe{alive: []harnessAnswer{dead, dead, noServer, dead, dead, noServer, {alive: true}}, running: []runningAnswer{{up: true}}}
+	deps, r := gateDeps(p)
+	deps.HarnessWait = time.Hour
+	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
+	if err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil); err != nil {
+		t.Fatalf("want up, got %v", err)
+	}
+}
+
+// The hub record leaving running while the gate waits for the pane (scion
+// marks it error) is a death at once, not a wait to the end of the budget.
+func TestManagerGateRecordLeavesRunningDuringHarnessWaitIsADeath(t *testing.T) {
+	p := &gateProbe{alive: []harnessAnswer{{err: jail.ErrNoTmuxServer}}, running: []runningAnswer{{up: true}}}
+	deps, r := gateDeps(p)
+	deps.HarnessWait = time.Hour
+	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
+	p.onAlive = func(call int) {
+		if call == 2 {
+			r.phase, r.containerStatus = "error", "Exited (1) 1 second ago"
+		}
+	}
+	err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil)
+	if !errors.Is(err, scion.ErrAgentDied) || !strings.Contains(err.Error(), "left running") || !strings.Contains(err.Error(), `phase "error"`) {
+		t.Fatalf("want ErrAgentDied naming the record leaving running, got %v", err)
+	}
+	if p.aliveN != 2 {
+		t.Fatalf("HarnessAlive calls = %d, want 2 (it fails on the first listing after the flip)", p.aliveN)
+	}
+}
+
+// While the gate waits for the pane it re-reads the hub record, so a
+// progress line shows the current reading, not the one from before the wait.
+func TestHarnessWaitProgressShowsFreshHubReadings(t *testing.T) {
+	ft := newFakeTicks()
+	sink := newLineSink()
+	var line string
+	p := &gateProbe{alive: []harnessAnswer{{err: jail.ErrNoTmuxServer}, {err: jail.ErrNoTmuxServer}, {alive: true}}, running: []runningAnswer{{up: true}}}
+	deps, r := gateDeps(p)
+	deps.HarnessWait = time.Hour
+	deps.Log, deps.clock, deps.progressTicker = sink.logf, ft.now, ft.ticker
+	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
+	p.onAlive = func(call int) {
+		switch call {
+		case 1:
+			r.containerStatus = "Up 42 seconds"
+		case 2:
+			ft.tick()
+			for line = <-sink.ch; !strings.Contains(line, "still starting"); line = <-sink.ch {
+			}
+		}
+	}
+	prog := StartProgress(deps, "up", "hello", "waiting")
+	defer prog.Stop()
+	if err := WaitManagerLive(context.Background(), deps, "hello", "/lever", prog); err != nil {
+		t.Fatalf("want up, got %v", err)
+	}
+	if !strings.Contains(line, `container "Up 42 seconds"`) {
+		t.Fatalf("progress line %q does not show the fresh hub reading", line)
 	}
 }
 

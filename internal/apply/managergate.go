@@ -201,20 +201,31 @@ func (h harnessCheck) read(ctx context.Context) harnessReading {
 // every start for the whole harness wait.
 const unknownHandover = 5
 
+// notAliveDeath is how many not-alive readings in a row, each with a tmux
+// server answering, waitHarness takes as claude's exit. scion creates the
+// agent window together with its session and runs claude in it, and the
+// shell window keeps tmux (and so the container) up after claude exits: a
+// server that answers with no agent window, or a dead pane, is a claude
+// that has already exited (a bad --continue, an auth failure), not one
+// still booting. The extra readings absorb a single odd answer.
+const notAliveDeath = 3
+
 // waitHarness polls the container until claude's tmux pane is alive. A
-// container that stops is a death at once. A pane that never comes alive
-// over a running container, or a tmux server that never answers there (a
-// hung pre-start hook), is not up. A probe that cannot run at all (unknown
-// readings, unknownHandover in a row) over a container podman says is
-// running hands over to the settle window, which then decides on the
-// container alone.
-func waitHarness(ctx context.Context, h harnessCheck, interval, wait time.Duration, log func(string, ...any)) error {
+// container that stops, a claude that exited (notAliveDeath not-alive
+// readings in a row over an answering tmux server), or a hub record that
+// leaves running is a death at once. A tmux server that never answers over
+// a running container (a hung pre-start hook) is not up after wait. A probe
+// that cannot run at all (unknown readings, unknownHandover in a row) over
+// a container podman says is running hands over to the settle window,
+// which then decides on the container alone. list re-reads the hub record
+// every poll (it feeds the progress line); a list error is skipped.
+func waitHarness(ctx context.Context, h harnessCheck, list func(context.Context) ([]scion.Agent, error), name string, interval, wait time.Duration, log func(string, ...any)) error {
 	if interval <= 0 {
 		interval = time.Second
 	}
 	start := time.Now()
 	var last harnessReading
-	unknownRun := 0
+	unknownRun, notAliveRun := 0, 0
 	for {
 		last = h.read(ctx)
 		if err := ctx.Err(); err != nil {
@@ -228,8 +239,31 @@ func waitHarness(ctx context.Context, h harnessCheck, interval, wait time.Durati
 				scion.ErrAgentDied, time.Since(start).Round(100*time.Millisecond))
 		case harnessUnknown:
 			unknownRun++
-		default:
+			notAliveRun = 0
+		case harnessNotAlive:
+			notAliveRun++
 			unknownRun = 0
+		default:
+			unknownRun, notAliveRun = 0, 0
+		}
+		if notAliveRun >= notAliveDeath {
+			return fmt.Errorf("%w: claude exited before it came up — the tmux server in its container answers but claude's pane (scion:agent) was not alive in %d readings in a row, after %s (a failed --continue, an auth failure); `lever attach` shows the session, its container log in the guest the last output",
+				scion.ErrAgentDied, notAliveRun, time.Since(start).Round(100*time.Millisecond))
+		}
+		if list != nil {
+			if agents, err := list(ctx); err == nil {
+				a := scion.FindAgent(agents, name)
+				if a == nil || a.Phase != scion.PhaseRunning {
+					reading := "record gone from the listing"
+					if a != nil {
+						reading = fmt.Sprintf("phase %q, container %q", scion.PhaseLabel(a.Phase), scion.ContainerLabel(a.ContainerStatus))
+					}
+					return fmt.Errorf("%w: the hub record left running (%s) before claude's tmux pane was seen alive, after %s; its container log in the guest holds the last output",
+						scion.ErrAgentDied, reading, time.Since(start).Round(100*time.Millisecond))
+				}
+			} else if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		if time.Since(start) >= wait || (last.state == harnessUnknown && last.containerUp && unknownRun >= unknownHandover) {
 			break
@@ -327,7 +361,7 @@ func gateManagerLiveSteps(ctx context.Context, d Deps, b RetryBudget, name, proj
 		wait = defaultHarnessWait
 	}
 	prog.Stage("waiting for claude's tmux pane (the pre-start hook runs first)")
-	if err := waitHarness(ctx, h, b.Interval, wait, d.Log); err != nil {
+	if err := waitHarness(ctx, h, list, name, b.Interval, wait, d.Log); err != nil {
 		return err
 	}
 	prog.Stage(fmt.Sprintf("holding the %s settle window", b.Settle))

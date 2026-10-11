@@ -184,6 +184,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {
+			return checkPodmanStorage(ctx, func(ctx context.Context) (jail.StoreHealth, error) { return jail.ReadStoreHealth(ctx, jr) })
+		},
+		func() checkResult {
 			return checkNestedVirt(ctx, app.NestedVirt, app.Backend == config.BackendLima, jr, jail.ContainerName(hubProjectKey(b.MountDest()), app.Name), probeDevice)
 		},
 		func() checkResult {

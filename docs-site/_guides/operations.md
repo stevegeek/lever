@@ -397,7 +397,8 @@ manager:
   with matcher `compact` (the session start that follows a compaction), which runs
   `lever-agent after-compact` and gives the agent the note, marked
   `[after compaction: note from this instance's lever.yaml]`. scion's own hooks stay in `~/.claude/settings.json`;
-  Claude Code runs both sets. With nothing configured, boot touches nothing.
+  Claude Code runs both sets. With nothing configured, boot writes only the switch that turns
+  background sessions off (see [background sessions and /login](#background-sessions-and-login)).
 - **Changing them.** Edit the config and run `lever reload` (or `lever apply`): the broker
   restarts and the manager's envelope is staged again. A running agent keeps the values of its
   last start; the new ones apply at its next start (`lever stop && lever up` for the manager, a
@@ -429,6 +430,42 @@ manager:
   is not enough: it resumes the record on its old image. An older image ignores the block, and
   doctor's row shows the difference.
 
+## Background sessions and /login
+
+**Do not use `/login` or background mode in an agent tmux.** lever supplies the agent's login
+(subscription mode) and restarts the harness with `claude --continue`; both features fight that.
+
+- **Background sessions are off in every agent.** At every start, `lever-agent boot` writes
+  `env.CLAUDE_CODE_DISABLE_AGENT_VIEW=1` and `"disableAgentView": true` into the managed-settings
+  file (above), whatever the agent's `claude_settings`; it is not an option. Claude Code documents
+  them as equivalent: they turn off background agents and agent view (`claude agents`, `--bg`,
+  `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.281) the
+  left-arrow shortcut that backgrounds the session and opens agent view is gated on the same
+  switch. This is read from that build, **not yet tested in a running container**; doctor's
+  `claude background sessions` row is the check that matters.
+- **Why.** A session moved into the background (`/background`, `/bg`, or the left-arrow key)
+  leaves session records in the agent home (`~/.claude/sessions/<pid>.json` with `"kind":"bg"`,
+  the interactive record with a `"parkedJobId"`, plus `~/.claude/jobs/` and `~/.claude/daemon*`)
+  that name the container it ran in. After the next container restart, scion starts Claude with
+  `--continue`, and Claude refuses: "Your most recent conversation moved to a background session
+  … registered from another machine or container, so this one can't tell whether it is still
+  running", and exits. `lever apply` or `lever up` then reports the manager `came up, then died`;
+  when the container log holds that refusal, lever adds the cause and the recovery to the error.
+- **Recovery.** In the agent home (`/home/scion` in the agent's container), move aside the
+  `~/.claude/sessions/*.json` records that hold `"kind":"bg"` or a `"parkedJobId"`, and
+  `~/.claude/jobs/` and `~/.claude/daemon*`. The conversation transcript is not touched and
+  stays. Then `lever stop && lever up`. While the container runs, doctor's
+  `claude background sessions` row counts such records left by another container: they will block
+  the next `--continue`.
+- **The left-arrow key.** Claude Code also has a per-user switch for the left-arrow shortcut
+  (`leftArrowOpensAgents: false` in `~/.claude.json`). lever does not write it: that file is
+  Claude Code's own state, which Claude rewrites while it runs, and lever does not manage it.
+  The managed setting above covers the same shortcut.
+- **`/login` does nothing useful, and leaks.** In subscription mode lever gives Claude its login
+  as `CLAUDE_CODE_OAUTH_TOKEN`, which takes precedence over a stored login. `/login` in an agent
+  writes `~/.claude/.credentials.json` into the jail, where agents can read it, and changes
+  nothing. If someone ran it, delete that file.
+
 ## Troubleshooting quick table
 
 | Symptom | Likely cause | Do |
@@ -454,6 +491,7 @@ manager:
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/config-trust/) — `--fresh` resets the conversation, not the tree |
 | Doctor nags `skipped-modified` about a SKILL.md / CLAUDE.md you customized on purpose | your edits aren't recorded as accepted | `lever init --adopt` — records them as your baseline (host-side); doctor then passes, and any change *past* that baseline still fails as "modified since adoption" (tamper signal preserved) |
 | `lever up` printed `is up.` but the manager is dead moments later, or doctor's `manager agent` row fails | the harness died after scion reported the record running — an oversized boot task (see `prompt_file`), or `claude --continue` with no conversation to continue | `lever up` holds the record for a 10 s settle window and reports `came up, then died` with the phase and container it saw; the container log in the guest holds the harness's last output. Fix the cause, then `lever up` again |
+| The manager `came up, then died` after about 2 s, and the error names a stale background session; or doctor's `claude background sessions` row warns | the conversation was moved into a Claude Code background session (`/background`, `/bg`, the left-arrow key) before the last restart; its session records name the old container, and `claude --continue` refuses | move the stale records aside in the agent home, then `lever stop && lever up`; see [background sessions and /login](#background-sessions-and-login) |
 | Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
 
 ## Deploying an image as an archive

@@ -7,6 +7,32 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **Claude Code background sessions are off in every agent (#178).** At every start,
+  `lever-agent boot` writes `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` into the env of the
+  managed-settings file, and `disableAgentView: true` beside it, for every agent, whatever its
+  `claude_settings`; it is not an option. Claude Code documents both as turning off background
+  agents and agent view (`claude agents`, `--bg`, `/background`, the on-demand supervisor). A
+  conversation moved into the background left session records that made the next
+  `claude --continue` refuse after a container restart, so the manager died at start. The
+  managed-settings file is therefore always written now. Read from the baked Claude Code 2.1.281,
+  not yet tested in a running container. Needs a rebuilt agent image and new containers.
+
+### Added
+
+- **A known cause when the manager's harness dies (#178).** When the manager liveness gate
+  (`lever apply`, `lever up` after a resume) sees the harness die or never come up, lever reads
+  the tail of the manager container's log. If it holds Claude Code's refusal for a stale
+  background session, the error names the cause and the recovery. Only fixed phrases are matched;
+  the log is never printed.
+- **Doctor row *claude background sessions* (#178).** Counts, in each running agent's home,
+  Claude session records of a background session (`"kind":"bg"` or a `"parkedJobId"`) that another
+  container registered: they block the next `claude --continue`. Only counts leave the container.
+- **Operations guide: background sessions and /login.** Do not use `/login` or background mode in
+  an agent tmux; the recovery for stale background records; why `/login` in an agent leaks a
+  credentials file into the jail and does nothing.
+
 ## [0.35.0] - 2026-10-11
 
 ### Added

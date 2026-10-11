@@ -63,6 +63,11 @@ type Options struct {
 	// the flag is omitted, which is the default: it does not exist on earlier
 	// pins. See config.ScionConfig.AgentRole.
 	AgentRole string
+	// SettingsWarnLog receives each distinct scion settings-keys warning the
+	// client filters out of its output (IsSettingsKeysWarning, lever#169),
+	// one line at a time, so the warning stays in a log file while the
+	// operator never sees it. nil drops it.
+	SettingsWarnLog func(line string)
 }
 
 type Client struct {
@@ -71,6 +76,7 @@ type Client struct {
 	hubTokenSource func() string
 	agentRole      string
 	r              proc.Runner
+	warnLog        *warnLog
 
 	// Poll budgets (and waitHubReady's progress delay) for waitHubReady /
 	// WaitRuntimeBrokerReady. New sets the
@@ -94,6 +100,7 @@ func New(r proc.Runner, o Options) *Client {
 		hubTokenSource: o.HubTokenSource,
 		agentRole:      o.AgentRole,
 		r:              r,
+		warnLog:        &warnLog{sink: o.SettingsWarnLog},
 
 		hubReadyTimeout:     hubReadyTimeout,
 		hubReadyInterval:    hubReadyInterval,
@@ -148,14 +155,15 @@ func projectFlag(project string) []string {
 func (c *Client) runValue(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(res.Stdout+res.Stderr))
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(c.filterOutput(res.Stdout+res.Stderr)))
 	}
+	c.filterOutput(res.Stderr) // logged, never part of the value
 	return strings.TrimSpace(res.Stdout), nil
 }
 
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
-	out := res.Stdout + res.Stderr
+	out := c.filterOutput(res.Stdout + res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
 	}
@@ -171,7 +179,7 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 // no caller that streams needs one.
 func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
 	res, err := c.r.RunStdin(ctx, stdin, c.env(), c.bin, args...)
-	out := res.Stdout + res.Stderr
+	out := c.filterOutput(res.Stdout + res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
 	}

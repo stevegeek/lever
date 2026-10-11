@@ -67,10 +67,29 @@ const workerLiveSettle = 10 * time.Second
 
 func HostScionClient(jr proc.Runner, st state.State, agentRole string) *scion.Client {
 	return scion.New(jr, scion.Options{
-		HubEndpoint:    scion.DefaultHubEndpoint,
-		HubTokenSource: controllerPAT(st),
-		AgentRole:      agentRole,
+		HubEndpoint:     scion.DefaultHubEndpoint,
+		HubTokenSource:  controllerPAT(st),
+		AgentRole:       agentRole,
+		SettingsWarnLog: StateLogAppender(st),
 	})
+}
+
+// StateLogAppender returns a sink that appends one record per line to the
+// state directory's broker.log, opening and closing the file for each call
+// (O_APPEND keeps a record whole beside the broker's own writes). It is how a
+// scion line lever hides from the operator's console (the settings-keys
+// warning, lever#169) stays in the log. A failure to open the file (no state
+// directory yet) drops the line: it is only a record.
+func StateLogAppender(st state.State) func(line string) {
+	return func(line string) {
+		f, err := os.OpenFile(st.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		slog.New(slog.NewTextHandler(f, nil)).Info("scion output hidden from the console",
+			"reason", "known-benign settings warning (lever#169)", "line", line)
+	}
 }
 
 // controllerPAT is a lazy reader of the controller PAT in st, so a PAT minted

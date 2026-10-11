@@ -7,6 +7,16 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **scion's settings-keys warning is hidden (#169).** scion prints `WARN settings file contains
+  unrecognized keys (these will be ignored) keys=[hub.project_id runtimes[*].type ...]` on every
+  CLI call against a v1 settings file. It is harmless: the legacy-format probe that prints it runs
+  before the v1 loader, which reads those keys. lever now drops this exact line (the `settings`
+  label, the exact message, nothing but attributes after it) from every scion result and error it
+  shows, and records each distinct copy once per command in `broker.log`. Other scion warnings
+  are still shown. The operations guide explains the line.
+
 ## [0.35.0] - 2026-10-11
 
 ### Added

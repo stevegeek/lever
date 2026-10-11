@@ -123,6 +123,15 @@ All host-side state lives in `.lever-state/` at the instance root:
 | `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 
+scion prints `WARN settings file contains unrecognized keys (these will be ignored)
+keys=[hub.project_id runtimes[*].type ...]` on every CLI call in the guest. It is harmless: scion's
+legacy-format probe reads the v1 settings file before the v1 loader, which does read those keys
+(scion writes `hub.project_id` itself). lever hides this one line from what it prints and from
+the scion errors it shows, and records each distinct copy once per command in `broker.log` (a
+`msg="scion output hidden from the console"` line). Any other scion warning is still shown. You
+still see the line when you run `scion` by hand in the guest, and `lever attach` may show it
+briefly before the agent's terminal takes over the screen.
+
 Agent-side, `lever attach [name]` shows the full scrollback including every incoming message and
 tool call. Run `lever doctor` first whenever anything looks wrong; every check prints a fix hint.
 

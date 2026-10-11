@@ -111,7 +111,9 @@ image rebuild. The in-jail code is everything baked into the image: `cmd/lever-a
 `cmd/lever-manager`, `cmd/lever-tool-db`, the scion pre-start hook, `internal/agent`,
 `internal/wire`, every package they import (`go list -deps`; external modules by version), the
 image Dockerfile, and the Go version in `go.mod`. `internal/jailabi/fingerprint.txt` holds a hash
-of those (comments and the release constant left out) and lists what it covers. When `TestJailFingerprint` fails after your change:
+of those and lists what it covers. Go files are hashed as their token stream, so comments, blank
+lines and spacing do not count, nor does the value of the release `Version` constant in
+`internal/cli`; `//go:` directives (build constraints, `go:embed` and the like) do count. When `TestJailFingerprint` fails after your change:
 
 1. add one to `JailABI`;
 2. run `go test ./internal/jailabi -run TestJailFingerprint -update`;
@@ -119,7 +121,9 @@ of those (comments and the release constant left out) and lists what it covers. 
 
 The update refuses to record a new hash under the old number. Bump `JailABI` by hand, then run the
 update, when the code is the same but its meaning on the wire changed. Two branches that each bump
-it conflict in `fingerprint.txt`: after the merge, bump once more and run the update.
+it conflict in `fingerprint.txt`: after the merge, bump once more and run the update. Deleting
+`fingerprint.txt` and running the update re-records it without a bump, so only do that when no
+image has shipped with the current `JailABI`.
 
 ## Docs
 

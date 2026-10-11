@@ -10,9 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"go/ast"
-	"go/format"
-	"go/parser"
+	"go/scanner"
 	"go/token"
 	"io"
 	"os"
@@ -170,56 +168,113 @@ func goModPins(t *testing.T, root string) []string {
 	return pins
 }
 
-// canonicalGo is a Go file reduced to what reaches the binary: comments
-// dropped and gofmt spacing, so a comment edit needs no bump. Line breaks
-// survive (the printer keeps them), so reflowing code does count. Compiler
-// directives (//go:build, //go:embed, //go:linkname, ...) are comments to the
-// parser but change the binary, so they are kept, in order, after the code.
+// goTok is one token of a Go file: its kind and literal.
+type goTok struct {
+	kind token.Token
+	lit  string
+}
+
+// canonicalGo is a Go file reduced to what reaches the binary: its token
+// stream from go/scanner, each token's kind and literal, one per line.
+// Comments, blank lines and spacing are not tokens, so a comment or layout
+// edit needs no bump; any change to the code does count. Compiler directives
+// (//go:build, //go:embed, //go:linkname, ...) are comments to the scanner
+// but change the build, so they stay in the stream where they appear.
+// Semicolons are hashed alike whether written or inserted at a line end.
+// In the internal/cli package, the value of the release constant Version is
+// blanked (see versionValues).
 func canonicalGo(path string, src []byte) ([]byte, error) {
-	var directives []string
-	for _, l := range strings.Split(string(src), "\n") {
-		if l = strings.TrimSpace(l); strings.HasPrefix(l, "//go:") {
-			directives = append(directives, l)
+	fset := token.NewFileSet()
+	file := fset.AddFile(path, -1, len(src))
+	var errs scanner.ErrorList
+	var s scanner.Scanner
+	s.Init(file, src, func(pos token.Position, msg string) { errs.Add(pos, msg) }, scanner.ScanComments)
+	var toks []goTok
+	for {
+		_, kind, lit := s.Scan()
+		if kind == token.EOF {
+			break
+		}
+		switch {
+		case kind == token.COMMENT && !strings.HasPrefix(lit, "//go:"):
+			continue
+		case kind == token.SEMICOLON:
+			lit = ";"
+		case lit == "":
+			lit = kind.String()
+		}
+		toks = append(toks, goTok{kind, lit})
+	}
+	if errs.Len() > 0 {
+		errs.Sort()
+		return nil, errs.Err()
+	}
+	if isVersionPackage(path) {
+		for _, i := range versionValues(toks) {
+			toks[i].lit = `""`
 		}
 	}
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
-	if err != nil {
-		return nil, err
-	}
-	blankVersion(f)
 	var buf bytes.Buffer
-	if err := format.Node(&buf, fset, f); err != nil {
-		return nil, err
-	}
-	for _, d := range directives {
-		buf.WriteString(d + "\n")
+	for _, t := range toks {
+		fmt.Fprintf(&buf, "%s %s\n", t.kind, strconv.Quote(t.lit))
 	}
 	return buf.Bytes(), nil
 }
 
-// blankVersion empties a top-level string constant named Version: the
-// release constant in internal/cli/root.go. lever-manager links that package,
-// but a release bump alone changes no in-jail behaviour (that is the point of
+// isVersionPackage reports whether path is a file of internal/cli, the
+// package that holds the release constant.
+func isVersionPackage(path string) bool {
+	return filepath.ToSlash(filepath.Dir(path)) == "internal/cli"
+}
+
+// versionValues returns the indexes of the STRING tokens that give a
+// top-level constant named Version its value: CONST IDENT(Version) [type]
+// ASSIGN STRING, alone or as a spec of a const ( ... ) group. lever-manager
+// links internal/cli (whose root.go holds the release constant), but a
+// release bump alone changes no in-jail behaviour (that is the point of
 // JailABI).
-func blankVersion(f *ast.File) {
-	for _, d := range f.Decls {
-		gd, ok := d.(*ast.GenDecl)
-		if !ok || gd.Tok != token.CONST {
+func versionValues(toks []goTok) []int {
+	var out []int
+	depth := 0       // ( [ { nesting
+	inConst := false // inside a top-level const ( ... ) group
+	specStart := false
+	for i := 0; i < len(toks); i++ {
+		k := toks[i].kind
+		atSpec := specStart
+		specStart = false
+		switch k {
+		case token.LPAREN, token.LBRACK, token.LBRACE:
+			depth++
+			if !inConst && k == token.LPAREN && depth == 1 && i > 0 && toks[i-1].kind == token.CONST {
+				inConst = true
+				specStart = true
+			}
+			continue
+		case token.RPAREN, token.RBRACK, token.RBRACE:
+			if inConst && depth == 1 {
+				inConst = false
+			}
+			depth--
+			continue
+		case token.SEMICOLON:
+			specStart = inConst && depth == 1
+			continue
+		case token.CONST:
+			specStart = depth == 0
 			continue
 		}
-		for _, spec := range gd.Specs {
-			vs := spec.(*ast.ValueSpec)
-			for i, n := range vs.Names {
-				if n.Name != "Version" || i >= len(vs.Values) {
-					continue
-				}
-				if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					lit.Value = `""`
-				}
-			}
+		if !atSpec || k != token.IDENT || toks[i].lit != "Version" {
+			continue
+		}
+		j := i + 1
+		if j < len(toks) && toks[j].kind == token.IDENT { // a type name
+			j++
+		}
+		if j+1 < len(toks) && toks[j].kind == token.ASSIGN && toks[j+1].kind == token.STRING {
+			out = append(out, j+1)
 		}
 	}
+	return out
 }
 
 // fingerprint hashes the build pins and external modules, then every
@@ -334,40 +389,62 @@ func TestJailFingerprint(t *testing.T) {
 }
 
 // TestJailFingerprintIgnoresCommentsAndVersion: the canonical form drops
-// what never reaches a binary — comments, layout and the release constant —
-// and keeps code.
+// what never reaches a binary (comments, blank lines, spacing and, in
+// internal/cli, the release constant's value) and keeps code and compiler
+// directives.
 func TestJailFingerprintIgnoresCommentsAndVersion(t *testing.T) {
-	base := "package p\n\nconst Version = \"0.34.1\"\n\nfunc F() int { return 1 }\n"
-	same := []string{
-		"package p\n\n// F is one.\nconst Version = \"0.34.2\"\n\nfunc F() int { return 1 } // one\n",
-		"package p\n\nconst   Version = \"0.35.0\"\n\n/* F */ func F() int { return 1 }\n",
+	const path = "internal/cli/root.go"
+	base := "//go:build linux\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tx := 1\n\treturn x\n}\n"
+	same := map[string]string{
+		"doc and trailing comments": "//go:build linux\n\npackage p\n\n// F is one.\nconst Version = \"0.34.2\"\n\nfunc F() int { // one\n\tx := 1 // x\n\treturn x\n} // end\n",
+		"standalone comment":        "//go:build linux\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tx := 1\n\t// now return it\n\treturn x\n}\n",
+		"block comment":             "//go:build linux\n\npackage p\n\nconst Version = \"0.34.1\"\n\n/* F */ func F() int {\n\tx := /* one */ 1\n\treturn x\n}\n",
+		"blank line":                "//go:build linux\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tx := 1\n\n\treturn x\n}\n",
+		"spacing":                   "//go:build linux\n\npackage p\n\nconst   Version   =   \"0.35.0\"\n\nfunc F()int{\n    x:=1\n    return x\n}\n",
 	}
-	diff := []string{
-		"//go:build ignore\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int { return 1 }\n",
-		"package p\n\nconst Version = \"0.34.1\"\n\nfunc F() int { return 2 }\n",
-		"package p\n\nconst Version2 = \"0.34.1\"\n\nfunc F() int { return 1 }\n",
+	diff := map[string]string{
+		"go:build changed":     "//go:build linux && arm64\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tx := 1\n\treturn x\n}\n",
+		"go:build removed":     "package p\n\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tx := 1\n\treturn x\n}\n",
+		"go:embed added":       "//go:build linux\n\npackage p\n\n//go:embed v.txt\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tx := 1\n\treturn x\n}\n",
+		"code changed":         "//go:build linux\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tx := 2\n\treturn x\n}\n",
+		"constant renamed":     "//go:build linux\n\npackage p\n\nconst Version2 = \"0.34.1\"\n\nfunc F() int {\n\tx := 1\n\treturn x\n}\n",
+		"local Version string": "//go:build linux\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int {\n\tconst Version = \"x\"\n\tx := 1\n\treturn x\n}\n",
 	}
-	want, err := canonicalGo("p.go", []byte(base))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, s := range same {
-		got, err := canonicalGo("p.go", []byte(s))
+	canon := func(path, src string) []byte {
+		t.Helper()
+		b, err := canonicalGo(path, []byte(src))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("canonical form differs for %q:\n%s\nvs\n%s", s, got, want)
+		return b
+	}
+	want := canon(path, base)
+	for name, s := range same {
+		if got := canon(path, s); !bytes.Equal(got, want) {
+			t.Errorf("%s: canonical form differs for %q:\n%s\nvs\n%s", name, s, got, want)
 		}
 	}
-	for _, s := range diff {
-		got, err := canonicalGo("p.go", []byte(s))
-		if err != nil {
-			t.Fatal(err)
+	for name, s := range diff {
+		if bytes.Equal(canon(path, s), want) {
+			t.Errorf("%s: canonical form unchanged for %q", name, s)
 		}
-		if bytes.Equal(got, want) {
-			t.Errorf("canonical form unchanged for %q", s)
+	}
+	// A typed Version, or one in a const group, is blanked too.
+	for _, form := range []string{
+		"package p\n\nconst Version string = %q\n",
+		"package p\n\nconst (\n\tA = 1\n\tVersion = %q\n)\n",
+	} {
+		if !bytes.Equal(canon(path, fmt.Sprintf(form, "0.34.1")), canon(path, fmt.Sprintf(form, "0.35.0"))) {
+			t.Errorf("Version not blanked in %q", form)
 		}
+	}
+	// Outside internal/cli a Version constant is ordinary code.
+	other := "internal/agent/p.go"
+	if bytes.Equal(canon(other, base), canon(other, same["spacing"])) {
+		t.Error("a Version change outside internal/cli left the canonical form unchanged")
+	}
+	if _, err := canonicalGo(path, []byte("package p\n\nconst s = \"unterminated\n")); err == nil {
+		t.Error("canonicalGo accepted a file that does not scan")
 	}
 }
 

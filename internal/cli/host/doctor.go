@@ -182,6 +182,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkClaudeSettings(ctx, b.MountDest(), claudeAgents(app.Name, app.ManagerClaude(), workerNames, workerClaude), listAgents, agentSession.ClaudeSettings)
 		},
+		func() checkResult {
+			return checkBackgroundSessions(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), listAgents, agentSession.BackgroundSessions)
+		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {
 			return checkNestedVirt(ctx, app.NestedVirt, app.Backend == config.BackendLima, jr, jail.ContainerName(hubProjectKey(b.MountDest()), app.Name), probeDevice)

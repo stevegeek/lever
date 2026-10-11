@@ -219,6 +219,23 @@ func TestParseFlagsMergeChecksIsExplicit(t *testing.T) {
 	mustParse(t, "-ops", "push,pr_open,pr_status,release")
 }
 
+func TestReleaseOperationHasNoNotes(t *testing.T) {
+	ops := operations(mustParse(t, "-ops", "release"), nil, nil)
+	if len(ops) != 1 || len(ops[0].Params) != 2 || ops[0].Params[0].Name != "repo" || ops[0].Params[1].Name != "tag" {
+		t.Fatalf("release params %+v", ops)
+	}
+	if !strings.Contains(ops[0].Description, "no GitHub release") {
+		t.Fatalf("description %q", ops[0].Description)
+	}
+	// A stale caller that still sends notes gets a named refusal before any
+	// GitHub call (the Ops is nil: a call would panic).
+	v, err := ops[0].Handler(captool.ValidatedContext{Operation: "release"}, map[string]string{"repo": "stevegeek/lever", "tag": "v1.2.3", "notes": ""})
+	m, _ := v.(map[string]any)
+	if err != nil || m["ok"] != false || !strings.Contains(m["error"].(string), "release takes no notes") {
+		t.Fatalf("notes: %v %v", v, err)
+	}
+}
+
 func TestMergeRequireReview(t *testing.T) {
 	o := mustParse(t, "-ops", "pr_merge", "-merge-checks", "any")
 	if !o.mergeRequireReview || len(startupWarnings(o)) != 0 {
@@ -272,9 +289,8 @@ func TestOptInBackstops(t *testing.T) {
 		{"pr_merge", map[string]string{"repo": "stevegeek/lever", "number": "12", "method": "merge"}, true},
 		{"pr_merge", map[string]string{"repo": "stevegeek/lever", "number": "12", "method": "rebase"}, false},
 		{"pr_merge", map[string]string{"repo": "x/y", "number": "12"}, false},
-		{"release", map[string]string{"repo": "stevegeek/lever", "tag": "v1.2.3", "notes": "n"}, true},
+		{"release", map[string]string{"repo": "stevegeek/lever", "tag": "v1.2.3"}, true},
 		{"release", map[string]string{"repo": "stevegeek/lever", "tag": "1.2.3"}, false},
-		{"release", map[string]string{"repo": "stevegeek/lever", "tag": "v1.2.3", "notes": "12345678901"}, false},
 		{"release", map[string]string{"repo": "x/y", "tag": "v1.2.3"}, false},
 	} {
 		err := ops[c.op].Backstop(captool.ValidatedContext{Operation: c.op}, c.args)

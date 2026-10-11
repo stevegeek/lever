@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -45,6 +46,9 @@ type opts struct {
 	textMax                                                          int
 }
 
+// errNotes: release used to take notes; a stale caller learns why it fails.
+var errNotes = errors.New("release takes no notes: it creates only the tag, and the repository's release workflow writes the release")
+
 var appSlugRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,99}$`)
 
 // startupWarnings are the settings an operator turned to the riskier side,
@@ -59,7 +63,7 @@ func startupWarnings(o opts) []string {
 	return w
 }
 
-// maxTextMax is GitHub's limit on a PR body or release notes.
+// maxTextMax is GitHub's limit on a PR body.
 const maxTextMax = 65536
 
 func parseFlags(args []string) (opts, error) {
@@ -85,7 +89,7 @@ func parseFlags(args []string) (opts, error) {
 		"and no outstanding change request; turn off only with -merge-require-review=false")
 	fs.StringVar(&o.appSlug, "app-slug", "", "the GitHub App's slug: its reviews never count for -merge-require-review (bots never count either)")
 	fs.StringVar(&releaseTag, "release-tag", ghpush.DefaultReleaseTag, "pattern a release tag must match (whole tag)")
-	fs.IntVar(&o.textMax, "text-max", 8000, "bytes of PR body or release notes")
+	fs.IntVar(&o.textMax, "text-max", 8000, "bytes of a PR body")
 	err := fs.Parse(args)
 	if err != nil {
 		return o, err
@@ -233,7 +237,7 @@ func releaseBackstop(o opts) func(captool.ValidatedContext, map[string]string) e
 		if !o.releaseTag.MatchString(a["tag"]) {
 			return fmt.Errorf("tag %q does not match the release pattern", a["tag"])
 		}
-		return ghpush.ValidateText("notes", a["notes"], o.textMax)
+		return nil
 	})
 }
 
@@ -306,17 +310,21 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 		},
 		ghpush.OpRelease: {
 			Name: ghpush.OpRelease,
-			Description: "create a GitHub release and its tag on the default branch's current head; the tag must match " +
-				o.releaseTag.String() + " and be greater than every existing matching tag. Starts the repository's release workflow",
+			Description: "create a tag on the default branch's current head (only the tag: no GitHub release); the tag must match " +
+				o.releaseTag.String() + " and be greater than every existing matching tag. The tag starts the repository's release workflow, " +
+				"which makes the release. Returns the tag, target_sha, html_url and commit_url",
 			Params: []captool.ParamSpec{
 				repoParam,
 				{Name: "tag", Type: "string", Description: "new tag, e.g. v1.2.3"},
-				{Name: "notes", Type: "string", Description: fmt.Sprintf("release notes, at most %d bytes; newline and tab are the only control characters allowed", o.textMax)},
 			},
 			CaveatParam: caveat,
 			Backstop:    releaseBackstop(o),
 			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
-				return asResult(g.Release(context.Background(), c.Caller, a["repo"], a["tag"], a["notes"]))
+				// Refused here, not in the backstop, so the agent reads why.
+				if _, ok := a["notes"]; ok {
+					return asResult(nil, errNotes)
+				}
+				return asResult(g.Release(context.Background(), c.Caller, a["repo"], a["tag"]))
 			},
 		},
 	}
@@ -386,7 +394,7 @@ func main() {
 		API:    &ghpush.API{Base: "https://api.github.com", HTTP: ghpush.NewAPIClient(&http.Client{Timeout: 30 * time.Second})},
 		Tokens: minter, Log: logger,
 		TextMax: o.textMax, MergeMethods: o.mergeMethods, MergeChecks: o.mergeChecks, ReleaseTag: o.releaseTag,
-		AllowUnreviewed: !o.mergeRequireReview, AppSlug: o.appSlug,
+		AllowUnreviewed: !o.mergeRequireReview, AppSlug: o.appSlug, WebBase: "https://github.com",
 		Deadline: 2 * time.Minute,
 	}
 	srv, err := captool.New(captool.Config{

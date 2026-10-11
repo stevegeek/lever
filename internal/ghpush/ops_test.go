@@ -59,7 +59,7 @@ type fakeGH struct {
 	runsTotal     int // overrides total_count when set
 	statuses      map[string][]fakeStatus
 	mergeStatus   int              // forces the merge answer's status
-	created       []map[string]any // POST bodies (pulls, releases)
+	created       []map[string]any // POST /pulls bodies
 	refs          []map[string]any // POST /git/refs bodies
 	hideOpenList  int              // list calls that miss the open PRs (a race)
 	tagRace       bool             // the tag appears before the ref is created
@@ -284,16 +284,8 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 		f.tags = append(f.tags, tg)
 		f.json(w, 201, map[string]any{"ref": ref, "object": map[string]any{"sha": body["sha"], "type": "commit"}})
 	case p == "/releases" && r.Method == "POST":
-		tg, _ := body["tag_name"].(string)
-		found := false
-		for _, x := range f.tags {
-			found = found || x == tg
-		}
-		if !found || body["target_commitish"] != nil {
-			f.t.Errorf("release without its tag, or with a target: %v", body)
-		}
-		f.created = append(f.created, body)
-		f.json(w, 201, map[string]any{"tag_name": body["tag_name"], "html_url": "https://github.example/" + f.repo + "/releases/tag/" + body["tag_name"].(string)})
+		f.t.Errorf("release must create only the tag; a GitHub release was requested: %v", body)
+		f.json(w, 201, map[string]any{})
 	default:
 		f.json(w, 404, map[string]string{"message": "Not Found"})
 	}
@@ -338,7 +330,7 @@ func TestOpPermissionsNarrowing(t *testing.T) {
 	if _, err := o.PRMerge(ctx, "manager", repo, "7", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := o.Release(ctx, "manager", repo, "v1.0.0", "notes"); err != nil {
+	if _, err := o.Release(ctx, "manager", repo, "v1.0.0"); err != nil {
 		t.Fatal(err)
 	}
 	want := []Permissions{
@@ -649,25 +641,32 @@ func TestRelease(t *testing.T) {
 	f := newFakeGH(t)
 	f.tags = []string{"v0.9.0", "v0.35.0", "v0.4.1", "nightly", "v1.0.0-rc.1"}
 	o, _, logBuf := newOps(t, f)
-	notes := "private-ish notes\n- one"
-	res, err := o.Release(context.Background(), "manager", repo, "v0.36.0", notes)
+	o.WebBase = "https://github.example"
+	res, err := o.Release(context.Background(), "manager", repo, "v0.36.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.OK || res.Target != shaMain || !strings.HasSuffix(res.URL, "/releases/tag/v0.36.0") {
+	if !res.OK || res.Tag != "v0.36.0" || res.Target != shaMain || res.URL != "https://github.example/"+repo+"/tree/v0.36.0" ||
+		res.CommitURL != "https://github.example/"+repo+"/commit/"+shaMain {
 		t.Fatalf("res %+v", res)
-	}
-	c := f.created[0]
-	if c["tag_name"] != "v0.36.0" || c["body"] != notes || c["draft"] != false || c["prerelease"] != false {
-		t.Fatalf("release body %v", c)
 	}
 	if len(f.refs) != 1 || f.refs[0]["ref"] != "refs/tags/v0.36.0" || f.refs[0]["sha"] != shaMain {
 		t.Fatalf("tag ref %v", f.refs)
 	}
+	for _, r := range f.reqs {
+		if strings.Contains(r, "/releases") {
+			t.Fatalf("release must not call the releases API: %v", f.reqs)
+		}
+	}
 	log := logBuf.String()
-	if strings.Contains(log, "private-ish") || !strings.Contains(log, "github.release") || !strings.Contains(log, "tag=v0.36.0") ||
-		!strings.Contains(log, "notes_len="+strconv.Itoa(len(notes))) {
+	if !strings.Contains(log, "github.release") || !strings.Contains(log, "tag=v0.36.0") || !strings.Contains(log, "target="+shaMain) {
 		t.Fatalf("audit %s", log)
+	}
+	// The default web base.
+	o.WebBase = ""
+	res, err = o.Release(context.Background(), "manager", repo, "v0.37.0")
+	if err != nil || res.URL != "https://github.com/"+repo+"/tree/v0.37.0" {
+		t.Fatalf("res %+v %v", res, err)
 	}
 }
 
@@ -676,7 +675,7 @@ func TestReleaseTargetsTheDefaultBranchHead(t *testing.T) {
 	f.defaultBranch = "trunk"
 	f.heads["trunk"] = shaNew
 	o, _, _ := newOps(t, f)
-	res, err := o.Release(context.Background(), "manager", repo, "v1.0.0", "")
+	res, err := o.Release(context.Background(), "manager", repo, "v1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,9 +686,9 @@ func TestReleaseTargetsTheDefaultBranchHead(t *testing.T) {
 
 func TestReleaseRefusals(t *testing.T) {
 	for _, c := range []struct {
-		name, tag, notes string
-		tags             []string
-		want             string
+		name, tag string
+		tags      []string
+		want      string
 	}{
 		{name: "pattern", tag: "1.2.3", want: "does not match"},
 		{name: "prerelease", tag: "v1.2.3-rc.1", want: "does not match"},
@@ -698,23 +697,21 @@ func TestReleaseRefusals(t *testing.T) {
 		{name: "exists", tag: "v0.35.0", tags: []string{"v0.35.0"}, want: "already exists"},
 		{name: "older", tag: "v0.34.9", tags: []string{"v0.35.0"}, want: `not greater than the existing tag "v0.35.0"`},
 		{name: "numeric not lexical", tag: "v0.9.0", tags: []string{"v0.10.0"}, want: "not greater"},
-		{name: "notes control", tag: "v1.0.0", notes: "a\x00b", want: "control"},
-		{name: "notes size", tag: "v1.0.0", notes: strings.Repeat("n", 8001), want: "max 8000"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeGH(t)
 			f.tags = c.tags
 			o, _, _ := newOps(t, f)
-			_, err := o.Release(context.Background(), "manager", repo, c.tag, c.notes)
+			_, err := o.Release(context.Background(), "manager", repo, c.tag)
 			wantErr(t, err, c.want)
-			if len(f.created) != 0 || len(f.refs) != 0 {
-				t.Fatalf("a refused release reached GitHub: %v %v", f.created, f.refs)
+			if len(f.refs) != 0 {
+				t.Fatalf("a refused release reached GitHub: %v", f.refs)
 			}
 		})
 	}
 	f := newFakeGH(t)
 	o, _, _ := newOps(t, f)
-	_, err := o.Release(context.Background(), "manager", "other/repo", "v1.0.0", "")
+	_, err := o.Release(context.Background(), "manager", "other/repo", "v1.0.0")
 	wantErr(t, err, "not one this tool")
 }
 
@@ -722,11 +719,8 @@ func TestReleaseTagAppearsAfterTheCheck(t *testing.T) {
 	f := newFakeGH(t)
 	f.tagRace = true
 	o, _, _ := newOps(t, f)
-	_, err := o.Release(context.Background(), "manager", repo, "v1.0.0", "")
+	_, err := o.Release(context.Background(), "manager", repo, "v1.0.0")
 	wantErr(t, err, "create tag v1.0.0: refused")
-	if len(f.created) != 0 {
-		t.Fatalf("a release was created on a tag the tool did not make: %v", f.created)
-	}
 }
 
 func TestPROpenRaceReturnsTheExistingPR(t *testing.T) {
@@ -787,17 +781,17 @@ func TestReleaseTagPagination(t *testing.T) {
 		f.tags = append(f.tags, fmt.Sprintf("v0.%d.0", i))
 	}
 	o, _, _ := newOps(t, f)
-	_, err := o.Release(context.Background(), "manager", repo, "v0.149.0", "")
+	_, err := o.Release(context.Background(), "manager", repo, "v0.149.0")
 	wantErr(t, err, "already exists")
-	_, err = o.Release(context.Background(), "manager", repo, "v0.148.1", "")
+	_, err = o.Release(context.Background(), "manager", repo, "v0.148.1")
 	wantErr(t, err, "not greater")
-	if _, err := o.Release(context.Background(), "manager", repo, "v0.150.0", ""); err != nil {
+	if _, err := o.Release(context.Background(), "manager", repo, "v0.150.0"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < maxTagPages*100; i++ {
 		f.tags = append(f.tags, fmt.Sprintf("x%d", i))
 	}
-	_, err = o.Release(context.Background(), "manager", repo, "v9.0.0", "")
+	_, err = o.Release(context.Background(), "manager", repo, "v9.0.0")
 	wantErr(t, err, "cannot compare them all")
 }
 
@@ -806,7 +800,7 @@ func TestReleaseUnorderableExistingTag(t *testing.T) {
 	f.tags = []string{"v1.0.0", "release-x"}
 	o, _, _ := newOps(t, f)
 	o.ReleaseTag = regexp.MustCompile(`^(?:v[0-9.]+|release-.*)$`)
-	_, err := o.Release(context.Background(), "manager", repo, "v2.0.0", "")
+	_, err := o.Release(context.Background(), "manager", repo, "v2.0.0")
 	wantErr(t, err, "not a semantic version")
 }
 

@@ -108,7 +108,7 @@ type Ops struct {
 	API          *API
 	Tokens       ScopedTokenSource
 	Log          *slog.Logger
-	TextMax      int      // bytes of PR body or release notes
+	TextMax      int      // bytes of a PR body
 	MergeMethods []string // allowed merge methods; the first is the default
 	MergeChecks  CheckPolicy
 	// AllowUnreviewed turns off pr_merge's review gate (an approving review
@@ -117,6 +117,7 @@ type Ops struct {
 	AppSlug         string         // the App's slug; its reviews never count (optional: bots never count)
 	ReleaseTag      *regexp.Regexp // matched against the whole tag
 	Deadline        time.Duration  // bounds one whole call (0 = none)
+	WebBase         string         // https://github.com (the default when empty), for result URLs
 
 	relOnce sync.Once
 	relLock chan struct{}
@@ -176,13 +177,16 @@ type MergeResult struct {
 	Warning    string   `json:"warning,omitempty"`
 }
 
-// ReleaseResult is what release returns.
+// ReleaseResult is what release returns: the tag it created, the commit it
+// points at, and the tag's page on GitHub. The repository's release workflow
+// makes the GitHub release from the tag.
 type ReleaseResult struct {
-	OK     bool   `json:"ok"`
-	Repo   string `json:"repo"`
-	Tag    string `json:"tag"`
-	Target string `json:"target_sha"`
-	URL    string `json:"html_url"`
+	OK        bool   `json:"ok"`
+	Repo      string `json:"repo"`
+	Tag       string `json:"tag"`
+	Target    string `json:"target_sha"`
+	URL       string `json:"html_url"`
+	CommitURL string `json:"commit_url"`
 }
 
 type ghRepo struct {
@@ -739,14 +743,13 @@ func (o *Ops) lockRelease(ctx context.Context) (func(), error) {
 	}
 }
 
-// Release creates tag on the default branch's current head, and a GitHub
-// release for it with notes. The tag must match ReleaseTag, not exist, and
-// be greater than every existing tag that matches.
-func (o *Ops) Release(ctx context.Context, caller, repo, tag, notes string) (res ReleaseResult, err error) {
-	nl, nh := textDigest(notes)
+// Release creates tag on the default branch's current head. It creates
+// only the tag: the repository's release workflow builds the GitHub release
+// from it. The tag must match ReleaseTag, not exist, and be greater than
+// every existing tag that matches.
+func (o *Ops) Release(ctx context.Context, caller, repo, tag string) (res ReleaseResult, err error) {
 	defer func() {
-		o.audit(OpRelease, err, "caller", caller, "repo", repo, "tag", tag, "target", res.Target,
-			"notes_len", nl, "notes_sha256", nh)
+		o.audit(OpRelease, err, "caller", caller, "repo", repo, "tag", tag, "target", res.Target)
 	}()
 	if err := ValidateTagName(tag); err != nil {
 		return res, err
@@ -757,9 +760,6 @@ func (o *Ops) Release(ctx context.Context, caller, repo, tag, notes string) (res
 	want, err := parseSemver(tag)
 	if err != nil {
 		return res, fmt.Errorf("tag: %w", err)
-	}
-	if err := ValidateText("notes", notes, o.TextMax); err != nil {
-		return res, err
 	}
 	ctx, cancel, tok, err := o.begin(ctx, OpRelease, repo)
 	defer cancel()
@@ -821,9 +821,9 @@ func (o *Ops) Release(ctx context.Context, caller, repo, tag, notes string) (res
 		return res, fmt.Errorf("default branch %q not found", info.DefaultBranch)
 	}
 	res = ReleaseResult{Repo: repo, Tag: tag, Target: sha}
-	// The tag ref first, at the SHA just read: GitHub refuses (422) a tag
-	// that appeared since the check, where a release would silently adopt
-	// it, and the tag lands on exactly that commit even if the branch moves.
+	// The tag ref at the SHA just read: GitHub refuses (422) a tag that
+	// appeared since the check, and the tag lands on exactly that commit even
+	// if the branch moves.
 	var created ghRef
 	if err := o.API.do(ctx, tok, http.MethodPost, "/repos/"+repo+"/git/refs",
 		map[string]string{"ref": "refs/tags/" + tag, "sha": sha}, &created); err != nil {
@@ -835,17 +835,12 @@ func (o *Ops) Release(ctx context.Context, caller, repo, tag, notes string) (res
 	if created.Ref != "refs/tags/"+tag || created.Object.SHA != sha {
 		return res, fmt.Errorf("create tag %s: unexpected answer", tag)
 	}
-	var out struct {
-		HTMLURL string `json:"html_url"`
-		TagName string `json:"tag_name"`
+	web := o.WebBase
+	if web == "" {
+		web = "https://github.com"
 	}
-	in := map[string]any{"tag_name": tag, "name": tag, "body": notes, "draft": false, "prerelease": false}
-	if err := o.API.do(ctx, tok, http.MethodPost, "/repos/"+repo+"/releases", in, &out); err != nil {
-		return res, fmt.Errorf("tag %s created at %s, but create release: %w", tag, sha, err)
-	}
-	if out.TagName != tag {
-		return res, fmt.Errorf("create release: unexpected answer")
-	}
-	res.OK, res.URL = true, out.HTMLURL
+	res.OK = true
+	res.URL = web + "/" + repo + "/tree/" + url.PathEscape(tag)
+	res.CommitURL = web + "/" + repo + "/commit/" + sha
 	return res, nil
 }

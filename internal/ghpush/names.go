@@ -109,7 +109,7 @@ func ValidateTitle(s string) error {
 	return nil
 }
 
-// ValidateText accepts a PR body or release notes: at most max bytes of
+// ValidateText accepts a PR body: at most max bytes of
 // valid UTF-8, no control character except newline and tab, and no
 // bidirectional or invisible formatting character (it could make the
 // published text read differently from what was reviewed).

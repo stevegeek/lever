@@ -64,7 +64,7 @@ func parseFlags(args []string) (opts, error) {
 	fs.Int64Var(&o.importBudget, "import-budget", 1<<30, "bundle bytes one caller may import per hour, refusals included (0 = no cap)")
 	fs.StringVar(&ops, "ops", ghpush.OpPush, "comma list of operations to offer: "+strings.Join(ghpush.AllOps, ", "))
 	fs.StringVar(&methods, "merge-methods", "squash", "comma list of merge methods pr_merge may use (squash, merge, rebase); the first is the default")
-	fs.StringVar(&checks, "merge-checks", "any", "what pr_merge requires on the head: any (at least one check, all green), none, or a comma list of check names that must succeed")
+	fs.StringVar(&checks, "merge-checks", "", "what pr_merge requires on the head: any (at least one check, all green), none, or a comma list of check names that must succeed; required with pr_merge, no default")
 	fs.StringVar(&releaseTag, "release-tag", ghpush.DefaultReleaseTag, "pattern a release tag must match (whole tag)")
 	fs.IntVar(&o.textMax, "text-max", 8000, "bytes of PR body or release notes")
 	err := fs.Parse(args)
@@ -108,8 +108,14 @@ func parseFlags(args []string) (opts, error) {
 	if o.mergeMethods, err = parseList("-merge-methods", methods, ghpush.MergeMethods); err != nil {
 		return o, err
 	}
-	if o.mergeChecks, err = ghpush.ParseCheckPolicy(checks); err != nil {
-		return o, err
+	switch {
+	case checks != "":
+		if o.mergeChecks, err = ghpush.ParseCheckPolicy(checks); err != nil {
+			return o, err
+		}
+	case slices.Contains(o.ops, ghpush.OpPRMerge):
+		return o, fmt.Errorf("-ops offers pr_merge, so -merge-checks must be set explicitly: a comma list of check names, " +
+			"any (at least one check, all green; can merge before slower checks report) or none")
 	}
 	if o.releaseTag, err = regexp.Compile(`^(?:` + releaseTag + `)$`); err != nil || releaseTag == "" {
 		return o, fmt.Errorf("-release-tag %q: not a usable pattern", releaseTag)

@@ -279,7 +279,7 @@ func newOps(t *testing.T, f *fakeGH) (*Ops, *fakeTokens, *bytes.Buffer) {
 		Repos: map[string]bool{repo: true}, Prefix: "agent/",
 		API:    &API{Base: f.srv.URL, HTTP: NewAPIClient(f.srv.Client())},
 		Tokens: tk, Log: slog.New(slog.NewTextHandler(&logBuf, nil)),
-		TextMax: 8000, MergeMethods: []string{"squash"},
+		TextMax: 8000, MergeMethods: []string{"squash"}, MergeChecks: CheckPolicy{Any: true},
 		ReleaseTag: regexp.MustCompile(`^(?:` + DefaultReleaseTag + `)$`), Deadline: 10 * time.Second,
 	}
 	return o, tk, &logBuf
@@ -562,6 +562,21 @@ func TestPRMergeCheckPolicies(t *testing.T) {
 	}
 }
 
+func TestPRMergeRefusesWithoutACheckPolicy(t *testing.T) {
+	f := newFakeGH(t)
+	f.addPull(7, nil)
+	f.runs[shaHead] = []fakeRun{{"test", "completed", "success"}}
+	o, _, _ := newOps(t, f)
+	for _, pol := range []CheckPolicy{{}, {Any: true, None: true}, {Any: true, Names: []string{"test"}}} {
+		o.MergeChecks = pol
+		_, err := o.PRMerge(context.Background(), "manager", repo, "7", "")
+		wantErr(t, err, "no merge check policy")
+	}
+	if len(f.merges) != 0 {
+		t.Fatalf("merged without a policy: %v", f.merges)
+	}
+}
+
 func TestPRMergeTooManyChecks(t *testing.T) {
 	f := newFakeGH(t)
 	f.addPull(7, nil)
@@ -808,17 +823,17 @@ func TestTokenErrorRefuses(t *testing.T) {
 
 func TestParseCheckPolicy(t *testing.T) {
 	for in, want := range map[string]CheckPolicy{
-		"any":              {},
+		"any":              {Any: true},
 		"none":             {None: true},
 		"test":             {Names: []string{"test"}},
 		" test , e2e ,e2e": {Names: []string{"test", "e2e"}},
 	} {
 		got, err := ParseCheckPolicy(in)
-		if err != nil || got.None != want.None || strings.Join(got.Names, ",") != strings.Join(want.Names, ",") {
+		if err != nil || got.Any != want.Any || got.None != want.None || strings.Join(got.Names, ",") != strings.Join(want.Names, ",") {
 			t.Errorf("%q: %+v %v", in, got, err)
 		}
 	}
-	for _, bad := range []string{"", "test,", "any,test", "a\x01b"} {
+	for _, bad := range []string{"", " ", "test,", "any,test", "a\x01b"} {
 		if _, err := ParseCheckPolicy(bad); err == nil {
 			t.Errorf("%q must be refused", bad)
 		}

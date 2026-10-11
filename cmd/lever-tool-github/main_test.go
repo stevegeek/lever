@@ -123,7 +123,7 @@ func TestParseFlagsOpsDefaultIsPushOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(o.ops, []string{"push"}) || !slices.Equal(o.mergeMethods, []string{"squash"}) ||
-		o.mergeChecks.None || len(o.mergeChecks.Names) != 0 || o.textMax != 8000 || !o.releaseTag.MatchString("v1.2.3") {
+		o.mergeChecks.Any || o.mergeChecks.None || len(o.mergeChecks.Names) != 0 || o.textMax != 8000 || !o.releaseTag.MatchString("v1.2.3") {
 		t.Fatalf("defaults %+v", o)
 	}
 	ops := operations(o, nil, nil)
@@ -139,7 +139,7 @@ func TestParseFlagsOpsDefaultIsPushOnly(t *testing.T) {
 }
 
 func TestParseFlagsOps(t *testing.T) {
-	o, err := parseFlags(append(baseFlags(t), "-ops", "release, push,pr_open,push,pr_merge,pr_status"))
+	o, err := parseFlags(append(baseFlags(t), "-ops", "release, push,pr_open,push,pr_merge,pr_status", "-merge-checks", "any"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestParseFlagsOps(t *testing.T) {
 	if !slices.Equal(opNames(ops), []string{"pr_status"}) {
 		t.Fatalf("an operation -ops leaves out must not be registered: %v", opNames(ops))
 	}
-	for _, op := range operations(mustParse(t, "-ops", strings.Join(want, ",")), nil, nil) {
+	for _, op := range operations(mustParse(t, "-ops", strings.Join(want, ","), "-merge-checks", "test"), nil, nil) {
 		if op.CaveatParam["repo"] != "repo" || op.Backstop == nil || op.Handler == nil {
 			t.Errorf("%s: want a repo caveat, a backstop and a handler", op.Name)
 		}
@@ -178,8 +178,10 @@ func TestParseFlagsOpsRefusals(t *testing.T) {
 		{[]string{"-ops", "pr_create"}},
 		{[]string{"-merge-methods", "squash,fast-forward"}},
 		{[]string{"-merge-methods", ""}},
-		{[]string{"-merge-checks", ""}},
 		{[]string{"-merge-checks", "any,test"}},
+		{[]string{"-merge-checks", " "}},
+		{[]string{"-ops", "pr_merge"}},
+		{[]string{"-ops", "push,pr_merge", "-merge-checks", ""}},
 		{[]string{"-release-tag", "("}},
 		{[]string{"-release-tag", ""}},
 		{[]string{"-text-max", "0"}},
@@ -199,8 +201,26 @@ func TestParseFlagsOpsRefusals(t *testing.T) {
 	}
 }
 
+func TestParseFlagsMergeChecksIsExplicit(t *testing.T) {
+	_, err := parseFlags(append(baseFlags(t), "-ops", "push,pr_merge"))
+	if err == nil || !strings.Contains(err.Error(), "-merge-checks must be set explicitly") {
+		t.Fatalf("want an explicit -merge-checks refusal, got %v", err)
+	}
+	for in, want := range map[string]func(o opts) bool{
+		"any":     func(o opts) bool { return o.mergeChecks.Any },
+		"none":    func(o opts) bool { return o.mergeChecks.None },
+		"ci/test": func(o opts) bool { return slices.Equal(o.mergeChecks.Names, []string{"ci/test"}) },
+	} {
+		if o := mustParse(t, "-ops", "pr_merge", "-merge-checks", in); !want(o) {
+			t.Errorf("-merge-checks %s: %+v", in, o.mergeChecks)
+		}
+	}
+	// Without pr_merge the flag is not needed.
+	mustParse(t, "-ops", "push,pr_open,pr_status,release")
+}
+
 func TestOptInBackstops(t *testing.T) {
-	o := mustParse(t, "-ops", "push,pr_open,pr_status,pr_merge,release", "-merge-methods", "squash,merge", "-text-max", "10")
+	o := mustParse(t, "-ops", "push,pr_open,pr_status,pr_merge,release", "-merge-methods", "squash,merge", "-merge-checks", "none", "-text-max", "10")
 	ops := map[string]captool.Operation{}
 	for _, op := range operations(o, nil, nil) {
 		ops[op.Name] = op

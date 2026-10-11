@@ -54,21 +54,35 @@ const (
 
 // CheckPolicy is what pr_merge requires of the checks on the head SHA
 // beyond "every one of them passed": at least one check (Any), nothing more
-// (None), or the named checks present and successful (Names).
+// (None), or the named checks present and successful (Names). The zero
+// value is no policy, and pr_merge refuses every merge with it.
 type CheckPolicy struct {
+	Any   bool
 	None  bool
 	Names []string
+}
+
+// set reports whether p is one of the three policies.
+func (p CheckPolicy) set() bool {
+	n := 0
+	for _, b := range []bool{p.Any, p.None, len(p.Names) > 0} {
+		if b {
+			n++
+		}
+	}
+	return n == 1
 }
 
 var checkNameRE = regexp.MustCompile(`^[^\x00-\x1f\x7f,]{1,200}$`)
 
 // ParseCheckPolicy reads -merge-checks: "any" (at least one check, all
 // green), "none" (no check needed; any that exist must still be green), or
-// a comma list of check names that must be present and successful.
+// a comma list of check names that must be present and successful. There is
+// no default: an empty value is refused.
 func ParseCheckPolicy(s string) (CheckPolicy, error) {
 	switch strings.TrimSpace(s) {
 	case "any":
-		return CheckPolicy{}, nil
+		return CheckPolicy{Any: true}, nil
 	case "none":
 		return CheckPolicy{None: true}, nil
 	}
@@ -76,7 +90,7 @@ func ParseCheckPolicy(s string) (CheckPolicy, error) {
 	for _, n := range strings.Split(s, ",") {
 		n = strings.TrimSpace(n)
 		if !checkNameRE.MatchString(n) || n == "any" || n == "none" {
-			return p, fmt.Errorf("-merge-checks: want any, none, or a comma list of check names; got %q", s)
+			return CheckPolicy{}, fmt.Errorf("-merge-checks: want any, none, or a comma list of check names; got %q", s)
 		}
 		if !slices.Contains(p.Names, n) {
 			p.Names = append(p.Names, n)
@@ -442,6 +456,9 @@ func (o *Ops) PRStatus(ctx context.Context, caller, repo, number string) (res PR
 // are present and succeeded, and (unless the policy is None) at least one
 // check exists.
 func checkGate(cs []Check, complete bool, pol CheckPolicy) error {
+	if !pol.set() {
+		return fmt.Errorf("no merge check policy configured (-merge-checks); refusing to merge")
+	}
 	if !complete {
 		return fmt.Errorf("more than %d check runs or statuses on the head; cannot verify them all", maxCheckRuns)
 	}

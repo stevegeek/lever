@@ -451,6 +451,7 @@ manager:
 | Doctor's `manager agent` row: "session ended in the hub (phase stopped), but claude still runs in its container"; `lever attach` refuses | another claude process in the manager's container — e.g. `podman exec … claude mcp list` — exited and fired the SessionEnd hook every claude there shares; sciontool reports any SessionEnd as phase stopped. The hub resumes a stopped record in a NEW claude session (only a suspended one gets `--continue`) | `lever apply`: it has the agent report its session running again, and the conversation continues; `lever stop` does the same before it suspends. Do not run `claude` in an agent container through `podman exec` |
 | Doctor's `manager agent` row: "claude has exited (phase stopped)", or `lever up` logs that a stopped record resumes in a new claude session | the session really ended (or the record was stopped while the machine was down); scion's hub resumes a stopped record without `--continue` | `lever up`, then `lever attach` and `/resume` to pick the old conversation (it stays in the agent home) |
 | `lever-manager agent resume <w>` returns 502 after `lever stop && lever up`; the audit detail ends in `statfs …/lever/tickets/<w>: no such file or directory` | the worker's ticket directory is a tmpfs under the run user's `XDG_RUNTIME_DIR` and the jail restart emptied it; before 0.22.4 the resume verb never re-staged a ticket (lever#36) | upgrade lever; on an older version, stage one through the admin route (`curl -X POST 127.0.0.1:8444/worker-ticket -d '{"worker":"<w>"}'`) and resume again |
+| `lever apply`/`up` fails at `load-image`: "payload does not match any of the supported image formats … trying to reuse blob … readlink …/overlay/l/: no such file or directory", maybe after podman's "storage corruption might have occurred" | the jail's podman store holds a damaged layer left by an earlier failed or interrupted load, and podman picked it to reuse; the image archive is fine. Doctor's *podman storage* row counts the layers no image uses | back up the guest's `~/.scion`, then as the jail user `podman system reset --force`, then `lever up` without `--fresh`: see [recovering the jail's podman store](#recovering-the-jails-podman-store) |
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/config-trust/) — `--fresh` resets the conversation, not the tree |
 | Doctor nags `skipped-modified` about a SKILL.md / CLAUDE.md you customized on purpose | your edits aren't recorded as accepted | `lever init --adopt` — records them as your baseline (host-side); doctor then passes, and any change *past* that baseline still fails as "modified since adoption" (tamper signal preserved) |
 | `lever up` printed `is up.` but the manager is dead moments later, or doctor's `manager agent` row fails | the harness died after scion reported the record running — an oversized boot task (see `prompt_file`), or `claude --continue` with no conversation to continue | `lever up` holds the record for a 10 s settle window and reports `came up, then died` with the phase and container it saw; the container log in the guest holds the harness's last output. Fix the cause, then `lever up` again |
@@ -483,6 +484,84 @@ to `.gitignore` when the instance root is a repository. Details:
 To upgrade the image, replace the archive and run `lever apply` (the digest changes, so it
 streams), then `lever up --fresh` to recreate the manager onto it — a plain `up` (or `stop && up`)
 resumes the record on the image it was created with.
+
+## Recovering the jail's podman store
+
+The agent images and containers live in the jail's rootless podman store. That store can be
+damaged in a way that the image archive is not, and then every image load fails.
+
+**Symptoms.** `lever apply` or `lever up` fails at `load-image`, and podman's error (lever prints
+its last lines) says `payload does not match any of the supported image formats`, with a cause like
+`trying to reuse blob … reading layer … creating file-getter: readlink …/overlay/l/: no such file or
+directory`, often after podman's warning that storage corruption might have occurred. Doctor's
+*podman storage* row fails on that warning, or warns about layers no image or container uses. A
+re-run of the same command fails the same way: the archive is fine, the store is not.
+
+**Why it happens.** podman writes an image's layers into the store one by one while it loads it,
+and records the image only at the end. A load that fails or is interrupted (a broken stream, a
+full disk, Ctrl-C, a timeout) leaves the layers it already wrote with no image: orphan layers.
+`lever apply` prunes dangling *images* after each load, but neither that prune nor any other podman
+command before 5.x removes a *layer* that no image owns, so the orphans pile up. When a later load
+looks for an existing layer to reuse, podman searches all layers, orphans included, and if it picks
+one whose write never finished (its overlay link is missing), the load fails, every time.
+
+**Check.** `lever doctor`, row *podman storage*: the podman version, the counts of images,
+containers and layers, how many layers nothing uses and their size, layers flagged incomplete, and
+podman's own corruption warnings. The row is read-only, and lever never deletes a layer. A count
+read while a load is running includes the layers that load has written so far.
+
+**On podman 5.x** there is a narrower repair: in the guest as the jail user, `podman system check`
+lists the damage, and `podman system check --repair` removes damaged images and layers that nothing
+has used for more than a day (`--max` changes the age). Take the backup in step 1 first. On podman
+4.x this command does not exist, and the reset below is the only safe repair: deleting files from
+the store by hand corrupts it further.
+
+### What a reset loses and what it keeps
+
+`podman system reset --force` deletes the whole podman store of the user who runs it.
+
+- **Lost:** every image in the jail (`lever up` loads the configured images again, from `image_tar`
+  or the host Docker store, and warms them, which takes a few minutes for a large image); every
+  container, the manager's and the workers', with anything written inside a container outside
+  its mounts (packages an agent installed at run time, for example); podman volumes and networks
+  in the jail.
+- **Kept:** the hub database and the agent records (`~/.scion` in the guest), the agent homes,
+  where each conversation lives (bind mounts, outside the podman store), the tree, and lever's
+  state on the host. `lever up` re-applies lever's guest configuration either way.
+
+### The runbook
+
+1. **Back up first.** Open a shell in the guest as the jail user (`orb -m lever-<name>` or
+   `limactl shell lever-<name>`). Stop the hub so its database is not written during the copy:
+   `scion server stop`. Then copy the scion directory, which holds the hub database (`hub.db`) and
+   the agent records, to a place outside the podman store:
+
+   ```sh
+   tar -C "$HOME" -czf "$HOME/scion-backup-$(date +%Y%m%d-%H%M%S).tar.gz" .scion
+   ```
+
+   Make sure the agent homes are in a backup too. If a container still exists, this lists its
+   bind mounts (and nothing else, so no environment value is printed):
+
+   {% raw %}
+   ```sh
+   podman inspect --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' <container>
+   ```
+   {% endraw %}
+
+   Copy any home directory outside `~/.scion` the same way. Copy the archives off the guest if
+   the guest itself is in doubt.
+2. **Reset the store, as the jail user** (the same shell; not as root, whose store is a different
+   one): `podman system reset --force`. If podman complains about `XDG_RUNTIME_DIR`, run
+   `export XDG_RUNTIME_DIR=/run/user/$(id -u)` first.
+3. **Bring the instance up again on the same records:** `lever up` on the host, **without
+   `--fresh`**. The `load-image` step loads and warms the images again, and the manager record
+   resumes with its conversation. `--fresh` would discard the conversation and is not needed.
+4. `lever doctor`: the *podman storage* row should read `no orphan layers`.
+
+If `lever up` then exits 3 (the resume failed), see the troubleshooting table; the record and the
+conversation are still kept. To restore the backup, stop the hub, move the damaged `~/.scion`
+aside and unpack the archive in `$HOME`.
 
 ## Upgrading lever
 

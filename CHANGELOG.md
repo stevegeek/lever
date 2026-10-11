@@ -7,6 +7,37 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Doctor row *podman storage* (lever#173).** It reads the jail's rootless podman store as the
+  jail user: the podman version, the counts of images, containers and layers, the layers no image
+  or container uses (orphans) and their size, layers flagged incomplete, and podman's own
+  corruption warnings. podman before 5.x has no command that lists layers, so the row reads
+  containers/storage's metadata files. Every command is read-only and bounded (a guest-side
+  timeout per command, a cap on each output, a 60 s budget). A corruption warning fails the row;
+  orphan or incomplete layers warn. lever never deletes a layer: the fix points at the new
+  runbook.
+- **Operations guide: "Recovering the jail's podman store".** Why orphan layers pile up (a load
+  that fails or is interrupted leaves the layers it wrote with no image; the dangling-image prune
+  after a load never removes a layer, and no podman command before 5.x does) and how one of them
+  breaks every later load. The runbook: back up the guest's `~/.scion` (hub database, agent
+  records) and the agent homes, `podman system reset --force` as the jail user, then `lever up`
+  without `--fresh`, with what the reset loses (images, containers, anything written inside a
+  container outside its mounts, podman volumes) and what it keeps (the hub records, the agent
+  homes and conversations, the tree, the host state). `podman system check` is named for 5.x.
+  A troubleshooting row for the load-image failure points at it.
+
+### Fixed
+
+- **A failed image load now shows podman's own error (lever#173).** `podman load` writes its copy
+  progress to stderr before it fails, and the load error relayed the whole stream on one line, so
+  it led with "Getting image source signatures" and the cause at the end was lost. The load,
+  warm-up, prune and localhost-tag errors now carry podman's last lines: progress dropped, each
+  line sanitized, at most 12 lines and 4 KiB, a long line cut in the middle so its cause
+  survives, and podman's corruption warning kept even when it came earlier. When the output
+  names store damage (the corruption warning, a missing `overlay/l/` link, an unknown layer), the
+  error adds a hint that points at `lever doctor` and the recovery runbook.
+
 ## [0.35.0] - 2026-10-11
 
 ### Added

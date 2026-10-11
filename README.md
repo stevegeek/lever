@@ -136,6 +136,7 @@ command and flag is in the [CLI reference](docs-site/_reference/cli.md).
 - [Security model](docs-site/_guides/security-model.md), threat model, the jail, what containment does and does not buy, validation evidence.
 - [Containment backends](docs-site/_reference/backends.md), the jail contract and what OrbStack and Lima each guarantee.
 - [Capabilities](docs-site/_guides/capabilities.md), how agents get authority.
+- [Tools](docs-site/_guides/tools.md), the first-party broker tools: github, fizzy and whisper.
 - [Agent identity](docs-site/_guides/agent-identity.md), certificates, enrolment, renewal.
 - [Core vs instance](docs-site/_guides/core-vs-instance.md), the boundary between the framework and your setup.
 - [Conventions](docs-site/_guides/conventions.md), recommended (not enforced) tree patterns.

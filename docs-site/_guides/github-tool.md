@@ -1,10 +1,12 @@
 ---
 title: "The github tool"
-nav_order: 5.85
+nav_order: 5.851
+parent: Tools
 permalink: /github-tool/
 ---
 The `github` broker tool (`lever-tool-github`) lets an agent publish a branch to GitHub without
-holding any GitHub credential. Part of [giving agents MCP tools](/getting-started/mcp-tools/).
+holding any GitHub credential. Part of [tools](/tools/); see also
+[giving agents MCP tools](/getting-started/mcp-tools/).
 
 ## What it does
 

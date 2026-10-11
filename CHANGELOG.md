@@ -7,6 +7,11 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Docs
+
+- The docs site groups the github, fizzy and whisper tool guides under a new Tools page, which
+  explains how first-party broker tools work. The guides keep their URLs.
+
 ## [0.35.0] - 2026-10-11
 
 ### Added

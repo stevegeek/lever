@@ -127,7 +127,7 @@ scion prints `WARN settings file contains unrecognized keys (these will be ignor
 keys=[hub.project_id runtimes[*].type ...]` on every CLI call in the guest. It is harmless: scion's
 legacy-format probe reads the v1 settings file before the v1 loader, which does read those keys
 (scion writes `hub.project_id` itself). lever hides this one line from what it prints and from
-the scion errors it shows, and records each distinct copy once per command in `broker.log` (a
+the scion errors it shows, and records each distinct copy once per lever process (the broker: once per run) in `broker.log` (a
 `msg="scion output hidden from the console"` line). Any other scion warning is still shown. You
 still see the line when you run `scion` by hand in the guest, and `lever attach` may show it
 briefly before the agent's terminal takes over the screen.

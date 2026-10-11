@@ -66,6 +66,7 @@ func TestSettingsWarningHiddenAndLogged(t *testing.T) {
 	f.Script("scion stop m", proc.Result{Stderr: settingsWarn + "\n"})
 	f.Script("scion config get default_template", proc.Result{Stdout: "default\n", Stderr: strings.Replace(settingsWarn, "15:25:35", "15:25:36", 1) + "\n"})
 
+	resetWarnSeen()
 	var logged []string
 	c := New(exitRunner{f}, Options{SettingsWarnLog: func(l string) { logged = append(logged, l) }})
 	ctx := context.Background()
@@ -90,6 +91,31 @@ func TestSettingsWarningHiddenAndLogged(t *testing.T) {
 	}
 	if len(logged) != 1 || logged[0] != settingsWarn {
 		t.Fatalf("logged %q, want the warning once", logged)
+	}
+}
+
+func resetWarnSeen() {
+	warnSeen.mu.Lock()
+	defer warnSeen.mu.Unlock()
+	warnSeen.seen = map[string]bool{}
+}
+
+// A second client in the same process does not log the line again, and a
+// warning glued to stdout that lacks a final newline is still found.
+func TestSettingsWarningOncePerProcess(t *testing.T) {
+	resetWarnSeen()
+	var logged []string
+	sink := func(l string) { logged = append(logged, l) }
+	f := proc.NewFakeRunner()
+	f.Script("scion stop m", proc.Result{Stdout: "Stopping m", Stderr: settingsWarn + "\nError: boom\n", Code: 1})
+	for range 2 {
+		err := New(exitRunner{f}, Options{SettingsWarnLog: sink}).Stop(context.Background(), "m", "")
+		if err == nil || strings.Contains(err.Error(), "settings file") || !strings.Contains(err.Error(), "Stopping m") {
+			t.Fatalf("Stop error = %v", err)
+		}
+	}
+	if len(logged) != 1 {
+		t.Fatalf("logged %d times, want once: %q", len(logged), logged)
 	}
 }
 

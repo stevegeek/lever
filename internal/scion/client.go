@@ -155,7 +155,7 @@ func projectFlag(project string) []string {
 func (c *Client) runValue(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(c.filterOutput(res.Stdout+res.Stderr)))
+		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(c.filterOutput(res.Stdout)+c.filterOutput(res.Stderr)))
 	}
 	c.filterOutput(res.Stderr) // logged, never part of the value
 	return strings.TrimSpace(res.Stdout), nil
@@ -163,7 +163,7 @@ func (c *Client) runValue(ctx context.Context, dir string, args ...string) (stri
 
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
-	out := c.filterOutput(res.Stdout + res.Stderr)
+	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
 	}
@@ -179,7 +179,7 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 // no caller that streams needs one.
 func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
 	res, err := c.r.RunStdin(ctx, stdin, c.env(), c.bin, args...)
-	out := c.filterOutput(res.Stdout + res.Stderr)
+	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
 	}

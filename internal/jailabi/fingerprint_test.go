@@ -41,17 +41,23 @@ var jailRoots = []string{
 	"./internal/wire",
 }
 
-// jailExtraFiles are non-Go files the image build copies in.
+// jailExtraFiles are non-Go files that shape the image: the pre-start hook
+// it copies in, and the Dockerfile (its ENV lines are a host-jail contract).
 var jailExtraFiles = []string{
 	"cmd/lever-agent/scionhook/pre-start",
+	"image/lever-claude/Dockerfile",
 }
+
+// jailArches are the jail architectures the image is built for; the package
+// set is the union over them.
+var jailArches = []string{"amd64", "arm64"}
 
 const updateCmd = "go test ./internal/jailabi -run TestJailFingerprint -update"
 
 type listedPkg struct {
 	ImportPath     string
 	Dir            string
-	Module         *struct{ Path string }
+	Module         *struct{ Path, Version string }
 	GoFiles        []string
 	CgoFiles       []string
 	IgnoredGoFiles []string
@@ -77,16 +83,31 @@ func goTool() string {
 	return filepath.Join(runtime.GOROOT(), "bin", "go")
 }
 
-// jailSources lists the in-jail packages (import paths, sorted) and the
+// jailSources lists the in-jail packages of this module (import paths,
+// sorted), the external modules they link (path@version, sorted), and the
 // files to hash (repo-relative, slash-separated, sorted). The package set is
-// taken for linux/amd64, the jail's OS; every Go file of a package counts,
+// the union over linux and each jail arch; every Go file of a package counts,
 // whatever its build constraints, so the result does not depend on the host
 // that runs the test.
-func jailSources(t *testing.T, root string) (pkgs, files []string) {
+func jailSources(t *testing.T, root string) (pkgs, mods, files []string) {
+	t.Helper()
+	for _, arch := range jailArches {
+		p, m, f := listJail(t, root, arch)
+		pkgs, mods, files = append(pkgs, p...), append(mods, m...), append(files, f...)
+	}
+	files = append(files, jailExtraFiles...)
+	for _, s := range []*[]string{&pkgs, &mods, &files} {
+		slices.Sort(*s)
+		*s = slices.Compact(*s)
+	}
+	return pkgs, mods, files
+}
+
+func listJail(t *testing.T, root, arch string) (pkgs, mods, files []string) {
 	t.Helper()
 	cmd := exec.Command(goTool(), append([]string{"list", "-deps", "-json"}, jailRoots...)...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -101,7 +122,11 @@ func jailSources(t *testing.T, root string) (pkgs, files []string) {
 		} else if err != nil {
 			t.Fatalf("go list output: %v", err)
 		}
-		if p.Module == nil || p.Module.Path != modulePath {
+		if p.Module == nil {
+			continue // the standard library: covered by the go line of go.mod
+		}
+		if p.Module.Path != modulePath {
+			mods = append(mods, p.Module.Path+"@"+p.Module.Version)
 			continue
 		}
 		pkgs = append(pkgs, p.ImportPath)
@@ -124,16 +149,39 @@ func jailSources(t *testing.T, root string) (pkgs, files []string) {
 			}
 		}
 	}
-	files = append(files, jailExtraFiles...)
-	slices.Sort(pkgs)
-	slices.Sort(files)
-	return pkgs, slices.Compact(files)
+	return pkgs, mods, files
+}
+
+// goModPins is the go and toolchain lines of go.mod: the Go release the
+// in-jail binaries are built with.
+func goModPins(t *testing.T, root string) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pins []string
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "go ") || strings.HasPrefix(l, "toolchain ") {
+			pins = append(pins, l)
+		}
+	}
+	return pins
 }
 
 // canonicalGo is a Go file reduced to what reaches the binary: comments
 // dropped and gofmt spacing, so a comment edit needs no bump. Line breaks
-// survive (the printer keeps them), so reflowing code does count.
+// survive (the printer keeps them), so reflowing code does count. Compiler
+// directives (//go:build, //go:embed, //go:linkname, ...) are comments to the
+// parser but change the binary, so they are kept, in order, after the code.
 func canonicalGo(path string, src []byte) ([]byte, error) {
+	var directives []string
+	for _, l := range strings.Split(string(src), "\n") {
+		if l = strings.TrimSpace(l); strings.HasPrefix(l, "//go:") {
+			directives = append(directives, l)
+		}
+	}
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
 	if err != nil {
@@ -143,6 +191,9 @@ func canonicalGo(path string, src []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := format.Node(&buf, fset, f); err != nil {
 		return nil, err
+	}
+	for _, d := range directives {
+		buf.WriteString(d + "\n")
 	}
 	return buf.Bytes(), nil
 }
@@ -171,10 +222,16 @@ func blankVersion(f *ast.File) {
 	}
 }
 
-// fingerprint hashes every file's path and canonical content, in order.
-func fingerprint(t *testing.T, root string, files []string) string {
+// fingerprint hashes the build pins and external modules, then every
+// file's path and canonical content, in order.
+func fingerprint(t *testing.T, root string, pins, mods, files []string) string {
 	t.Helper()
 	h := sha256.New()
+	for _, l := range append(slices.Clone(pins), mods...) {
+		io.WriteString(h, l)
+		h.Write([]byte{0})
+	}
+	h.Write([]byte{0})
 	for _, rel := range files {
 		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 		if err != nil {
@@ -225,14 +282,19 @@ func readFingerprint(path string) (recorded, error) {
 	return r, sc.Err()
 }
 
-func writeFingerprint(path string, pkgs []string, sum string) error {
+func writeFingerprint(path string, pins, pkgs, mods []string, sum string) error {
 	var b strings.Builder
 	b.WriteString("# The in-jail sources' fingerprint (internal/jailabi). Do not edit by hand.\n")
 	b.WriteString("# After changing in-jail code: bump JailABI in jailabi.go, then run\n")
 	b.WriteString("#   " + updateCmd + "\n")
 	fmt.Fprintf(&b, "jail_abi %d\n", JailABI)
 	fmt.Fprintf(&b, "sha256 %s\n", sum)
-	b.WriteString("# packages hashed (with the pre-start hook):\n")
+	b.WriteString("# hashed: go.mod's " + strings.Join(pins, ", ") + ", the files " + strings.Join(jailExtraFiles, ", ") + ",\n")
+	b.WriteString("# the external modules\n")
+	for _, m := range mods {
+		b.WriteString("#   " + m + "\n")
+	}
+	b.WriteString("# and the packages\n")
 	for _, p := range pkgs {
 		b.WriteString("#   " + p + "\n")
 	}
@@ -243,8 +305,9 @@ func writeFingerprint(path string, pkgs []string, sum string) error {
 // without a JailABI bump (lever#171). See the package doc.
 func TestJailFingerprint(t *testing.T) {
 	root := repoRoot(t)
-	pkgs, files := jailSources(t, root)
-	sum := fingerprint(t, root, files)
+	pkgs, mods, files := jailSources(t, root)
+	pins := goModPins(t, root)
+	sum := fingerprint(t, root, pins, mods, files)
 	const path = "fingerprint.txt"
 
 	rec, readErr := readFingerprint(path)
@@ -253,7 +316,7 @@ func TestJailFingerprint(t *testing.T) {
 			t.Fatalf("in-jail code changed but JailABI is still %d (fingerprint.txt records %d): "+
 				"bump JailABI in internal/jailabi/jailabi.go first, then run %s", JailABI, rec.abi, updateCmd)
 		}
-		if err := writeFingerprint(path, pkgs, sum); err != nil {
+		if err := writeFingerprint(path, pins, pkgs, mods, sum); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -262,7 +325,7 @@ func TestJailFingerprint(t *testing.T) {
 		t.Fatalf("read %s: %v (run %s)", path, readErr, updateCmd)
 	}
 	if rec.sum != sum {
-		t.Fatalf("the in-jail code (lever-agent, lever-manager, lever-tool-db, the pre-start hook, or a package they import) "+
+		t.Fatalf("the in-jail code (lever-agent, lever-manager, lever-tool-db, a package or module they import, the pre-start hook, the image Dockerfile or the Go version) "+
 			"changed since fingerprint.txt was recorded: bump JailABI and update the fingerprint (%s)", updateCmd)
 	}
 	if rec.abi != JailABI {
@@ -280,6 +343,7 @@ func TestJailFingerprintIgnoresCommentsAndVersion(t *testing.T) {
 		"package p\n\nconst   Version = \"0.35.0\"\n\n/* F */ func F() int { return 1 }\n",
 	}
 	diff := []string{
+		"//go:build ignore\n\npackage p\n\nconst Version = \"0.34.1\"\n\nfunc F() int { return 1 }\n",
 		"package p\n\nconst Version = \"0.34.1\"\n\nfunc F() int { return 2 }\n",
 		"package p\n\nconst Version2 = \"0.34.1\"\n\nfunc F() int { return 1 }\n",
 	}

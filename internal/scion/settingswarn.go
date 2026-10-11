@@ -53,13 +53,17 @@ func splitSettingsWarnings(output string) (kept string, dropped []string) {
 
 // warnLog records the settings warnings the client filtered out of what it
 // shows the operator, so they stay in the log file. scion prints the same
-// warning on every call, so a line already recorded by this client (compared
-// without its timestamp) is not recorded again.
+// warning on every call, so a line already recorded in this process (by any
+// client, compared without its timestamp) is not recorded again.
 type warnLog struct {
 	sink func(line string)
+}
+
+// warnSeen is the process-wide record of warnings already logged.
+var warnSeen = struct {
 	mu   sync.Mutex
 	seen map[string]bool
-}
+}{seen: map[string]bool{}}
 
 var lstdTimestampRE = regexp.MustCompile(`^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} `)
 
@@ -67,17 +71,14 @@ func (w *warnLog) record(lines []string) {
 	if w == nil || w.sink == nil || len(lines) == 0 {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	warnSeen.mu.Lock()
+	defer warnSeen.mu.Unlock()
 	for _, l := range lines {
 		key := lstdTimestampRE.ReplaceAllString(l, "")
-		if w.seen[key] {
+		if warnSeen.seen[key] {
 			continue
 		}
-		if w.seen == nil {
-			w.seen = map[string]bool{}
-		}
-		w.seen[key] = true
+		warnSeen.seen[key] = true
 		w.sink(l)
 	}
 }

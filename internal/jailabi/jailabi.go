@@ -4,7 +4,8 @@
 //
 // The release version is the wrong thing to compare. A release that changes
 // no in-jail code (lever-agent, lever-manager, lever-tool-db, the scion
-// pre-start hook, or anything they import from this module) still bumps it,
+// pre-start hook, the image Dockerfile, anything they import, or the Go
+// version) still bumps it,
 // and the doctor row then told the operator to rebuild the image and discard
 // the manager's conversation for nothing. JailABI changes only when the code
 // baked into the image changes.

@@ -2,8 +2,21 @@
 # After changing in-jail code: bump JailABI in jailabi.go, then run
 #   go test ./internal/jailabi -run TestJailFingerprint -update
 jail_abi 1
-sha256 175840be3028de4fea54eb4b30088d426747ac6329fafe4aae28250b8c391384
-# packages hashed (with the pre-start hook):
+sha256 be5615fc1d77ca2b58a2e4946c56d6ef9577e76f1eed3153fb0ed4b6c8f28821
+# hashed: go.mod's go 1.26.4, the files cmd/lever-agent/scionhook/pre-start, image/lever-claude/Dockerfile,
+# the external modules
+#   github.com/dustin/go-humanize@v1.0.1
+#   github.com/google/uuid@v1.6.0
+#   github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec
+#   github.com/spf13/cobra@v1.10.2
+#   github.com/spf13/pflag@v1.0.9
+#   golang.org/x/sys@v0.44.0
+#   gopkg.in/yaml.v3@v3.0.1
+#   modernc.org/libc@v1.73.4
+#   modernc.org/mathutil@v1.7.1
+#   modernc.org/memory@v1.11.0
+#   modernc.org/sqlite@v1.53.0
+# and the packages
 #   github.com/stevegeek/lever/captool
 #   github.com/stevegeek/lever/cmd/lever-agent
 #   github.com/stevegeek/lever/cmd/lever-manager

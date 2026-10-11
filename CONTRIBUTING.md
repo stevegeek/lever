@@ -109,9 +109,9 @@ stamps it on the agent image as the `lever_jail_abi` label, and `lever doctor`'s
 version` row compares it with the host `lever`, so a release that changed no in-jail code needs no
 image rebuild. The in-jail code is everything baked into the image: `cmd/lever-agent`,
 `cmd/lever-manager`, `cmd/lever-tool-db`, the scion pre-start hook, `internal/agent`,
-`internal/wire`, and every package of this module they import (`go list -deps`).
-`internal/jailabi/fingerprint.txt` holds a hash of those sources (comments and the release
-constant left out) and lists the packages. When `TestJailFingerprint` fails after your change:
+`internal/wire`, every package they import (`go list -deps`; external modules by version), the
+image Dockerfile, and the Go version in `go.mod`. `internal/jailabi/fingerprint.txt` holds a hash
+of those (comments and the release constant left out) and lists what it covers. When `TestJailFingerprint` fails after your change:
 
 1. add one to `JailABI`;
 2. run `go test ./internal/jailabi -run TestJailFingerprint -update`;

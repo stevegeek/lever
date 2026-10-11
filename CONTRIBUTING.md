@@ -102,6 +102,21 @@ CI (`.github/workflows/ci.yml`) runs `gofmt -l .` (must be empty), `go vet ./...
 and `go test -race ./...`. A release is a `v*` tag; the release workflow refuses a tag that does not
 match `const Version` in `internal/cli/root.go` or that is not on `main`.
 
+## Release checklist
+
+Before tagging, besides a green CI:
+
+- `CHANGELOG.md` has the release's section, and `const Version` matches the tag.
+- One live end-to-end run (`make test-lima-e2e`) on the release candidate.
+- **A change to the agent's boot step** (`lever-agent boot`, the scion pre-start hook in
+  `cmd/lever-agent/scionhook`, anything they read or write, or the scion pin) needs a live boot on a
+  throwaway rootless instance, with the uid the hook ran as checked there (the container log's
+  `sciontool init` lines and the owner of the files boot wrote), or the uid confirmed in the pinned
+  scion source (`cmd/sciontool/commands/init.go`: `setupHostUser` runs before the pre-start hooks).
+  Under rootless podman the hook runs as the agent user (uid 1000), not root. Two reviews once
+  accepted "boot runs as root" without either check; a review that relies on the hook's uid must
+  name which check it made.
+
 ## Docs
 
 `docs-site/` builds with `cd docs-site && bundle exec jekyll build`. Docs describe the current

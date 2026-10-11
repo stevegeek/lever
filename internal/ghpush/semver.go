@@ -12,6 +12,10 @@ var semverRE = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9]
 	`(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?` +
 	`(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 
+// numericIDRE is a numeric pre-release identifier. big.Int.SetString alone
+// would also take "-1" or "+1", and "-1" is an alphanumeric identifier.
+var numericIDRE = regexp.MustCompile(`^[0-9]+$`)
+
 type semver struct {
 	core [3]*big.Int
 	pre  []string
@@ -50,8 +54,8 @@ func compareSemver(a, b semver) int {
 	}
 	for i := 0; i < len(a.pre) && i < len(b.pre); i++ {
 		x, y := a.pre[i], b.pre[i]
-		xn, xok := new(big.Int).SetString(x, 10)
-		yn, yok := new(big.Int).SetString(y, 10)
+		xn, xok := numericID(x)
+		yn, yok := numericID(y)
 		switch {
 		case xok && yok:
 			if c := xn.Cmp(yn); c != 0 {
@@ -74,4 +78,13 @@ func compareSemver(a, b semver) int {
 		return 1
 	}
 	return 0
+}
+
+// numericID reads a pre-release identifier as a number when it is made only
+// of digits.
+func numericID(s string) (*big.Int, bool) {
+	if !numericIDRE.MatchString(s) {
+		return nil, false
+	}
+	return new(big.Int).SetString(s, 10)
 }

@@ -851,3 +851,28 @@ func TestSemverOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestSemverHyphenIdentifierIsNotNumeric(t *testing.T) {
+	// "-1" is an alphanumeric identifier: it orders after every numeric one,
+	// and by ASCII among alphanumeric ones.
+	order := []string{"v1.0.0-1", "v1.0.0-2", "v1.0.0--1", "v1.0.0--2", "v1.0.0-a"}
+	for i := 0; i+1 < len(order); i++ {
+		a, err := parseSemver(order[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := parseSemver(order[i+1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compareSemver(a, b) != -1 || compareSemver(b, a) != 1 {
+			t.Errorf("%s < %s", order[i], order[i+1])
+		}
+	}
+	if x, ok := numericID("-1"); ok {
+		t.Errorf("-1 read as numeric %v", x)
+	}
+	if _, ok := numericID("+1"); ok {
+		t.Error("+1 read as numeric")
+	}
+}

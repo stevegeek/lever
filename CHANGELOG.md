@@ -7,121 +7,6 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-### Docs
-
-- The docs site groups the github, fizzy and whisper tool guides under a new Tools page, which
-  explains how first-party broker tools work. The guides keep their URLs.
-
-### Added
-
-- **Doctor row *podman storage* (lever#173).** It reads the jail's rootless podman store as the
-  jail user: the podman version, the counts of images, containers and layers, the layers no image
-  or container uses (orphans) and their size, layers flagged incomplete, and podman's own
-  corruption warnings. podman before 5.x has no command that lists layers, so the row reads
-  containers/storage's metadata files. Every command is read-only and bounded (a guest-side
-  timeout per command, a cap on each output, a 60 s budget). A corruption warning fails the row;
-  orphan or incomplete layers warn. lever never deletes a layer: the fix points at the new
-  runbook.
-- **Operations guide: "Recovering the jail's podman store".** Why orphan layers pile up (a load
-  that fails or is interrupted leaves the layers it wrote with no image; the dangling-image prune
-  after a load never removes a layer, and no podman command before 5.x does) and how one of them
-  breaks every later load. The runbook: back up the guest's `~/.scion` (hub database, agent
-  records) and the agent homes, `podman system reset --force` as the jail user, then `lever up`
-  without `--fresh`, with what the reset loses (images, containers, anything written inside a
-  container outside its mounts, podman volumes) and what it keeps (the hub records, the agent
-  homes and conversations, the tree, the host state). `podman system check` is named for 5.x.
-  A troubleshooting row for the load-image failure points at it.
-
-### Fixed
-
-- **A failed image load now shows podman's own error (lever#173).** `podman load` writes its copy
-  progress to stderr before it fails, and the load error relayed the whole stream on one line, so
-  it led with "Getting image source signatures" and the cause at the end was lost. The load,
-  warm-up, prune and localhost-tag errors now carry podman's last lines: progress dropped, each
-  line sanitized, at most 12 lines and 4 KiB, a long line cut in the middle so its cause
-  survives, and podman's corruption warning kept even when it came earlier. When the output
-  names store damage (the corruption warning, a missing `overlay/l/` link, an unknown layer), the
-  error adds a hint that points at `lever doctor` and the recovery runbook.
-
-### Changed
-
-- **scion's settings-keys warning is hidden (#169).** scion prints `WARN settings file contains
-  unrecognized keys (these will be ignored) keys=[hub.project_id runtimes[*].type ...]` on every
-  CLI call against a v1 settings file. It is harmless: the legacy-format probe that prints it runs
-  before the v1 loader, which reads those keys. lever now drops this exact line (the `settings`
-  label, the exact message, nothing but attributes after it) from every scion result and error it
-  shows, and records each distinct copy once per lever process in `broker.log`. Other scion warnings
-  are still shown. The operations guide explains the line.
-- **Doctor compares the jail ABI, not the release (#171).** lever 0.34.2 changed no in-jail code,
-  yet doctor's `agent lever version` row failed for an image built from 0.34.1 and advised a
-  rebuild and `lever up --fresh`, which discards the conversation. The agent image now carries a
-  `lever_jail_abi` label: `JailABI` in `internal/jailabi`, bumped only when the code baked into
-  the image changes (lever-agent, lever-manager, lever-tool-db, the packages and modules they
-  import, the pre-start hook, the image Dockerfile, and the Go version). The row passes on an equal ABI and shows a release difference as
-  information; a different ABI fails with the rebuild advice; an image without the label is
-  compared by release as before. A test fails when the in-jail sources change without a bump
-  (`internal/jailabi/fingerprint.txt`; Go files count by their tokens and `//go:` directives, so
-  comments, blank lines, spacing and the release version do not); CONTRIBUTING.md says how to bump it. An instance
-  Dockerfile that copies the binaries in itself sets the label from `make -s lever-image-jail-abi`.
-
-### Changed
-
-- **`lever up` reports a manager up only once claude runs (lever#164).** After a start or a resume
-  the gate waits for claude's tmux pane in the manager container to be alive (up to 2 min, since
-  scion's pre-start hook runs first), then holds the record for the 10 s settle window and checks
-  the pane again. Before, it read only the hub record, which scion marks running at container launch
-  and whose container column a heartbeat refreshes, so `lever up --fresh` printed "is up" over a
-  manager whose pre-start hook failed and whose container exited a moment later. A container that
-  podman reports stopped, or a hub record that leaves running during the wait, is a death at once.
-  So is a claude that exits before it comes up (a bad `--continue`, an auth failure): scion's shell
-  window keeps tmux and the container up, so three probes in a row that find tmux answering but no
-  live claude pane report "claude exited before it came up" within a few seconds. A running
-  container with no tmux server yet after the wait (a hung pre-start hook) is not up. When the
-  probe itself cannot run (a few failures in a row), the container still running after the window
-  counts, with a warning. The progress line shows a fresh hub reading during the wait. A manager
-  that was already running still gets one look.
-- **A manager start prints progress (lever#168).** The start-manager step and `lever up`'s resume
-  print a line about every 15 s with what they wait for, the hub's phase and container, and the
-  elapsed time, instead of a silent minute between "No running manager" and the attach.
-- Comments and the pre-start hook's notes no longer say `lever-agent boot` runs as root: under
-  rootless podman sciontool drops to the agent user (uid 1000) before it runs the hook. The symlink
-  confinement stays as defence for a rootful runtime. `CONTRIBUTING.md` gains a release checklist
-  that asks for a live boot (or the uid in the pinned scion source) on a change to the boot step.
-
-### Changed
-
-- **Claude Code background sessions are off in every agent (#178).** At every start,
-  `lever-agent boot` writes `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` into the env of the
-  managed-settings file, and `disableAgentView: true` beside it, for every agent, whatever its
-  `claude_settings`; it is not an option. Claude Code documents both as turning off background
-  agents and agent view (`claude agents`, `--bg`, `/background`, the on-demand supervisor). A
-  conversation moved into the background left session records that made the next
-  `claude --continue` refuse after a container restart, so the manager died at start. The
-  managed-settings file is therefore always written now. Read from the baked Claude Code 2.1.281,
-  not yet tested in a running container. Needs a rebuilt agent image and new containers. The
-  switch guards against accidents: an agent owns `/etc/claude-code` in its container and can
-  change it during a session; lever rewrites it at every start. With no claude config, a failed
-  write now logs `agent-view switch not written (...); background sessions stay possible`.
-
-### Added
-
-- **A known cause when the manager's harness dies (#178).** When the manager liveness gate
-  (`lever apply`, `lever up` after a resume) sees the harness die or never come up, lever counts
-  stale background-session records in the manager container (it usually outlives the harness),
-  and names the cause and the recovery when it finds any. When the container is gone or holds
-  none, it falls back to the last 200 lines of the container log, matching Claude Code's refusal
-  with terminal control codes and line wrapping removed. Only counts and fixed phrases are used;
-  the log is never printed.
-- **Doctor's *claude settings* row shows the agent-view switch (#178).** `agent view: off`, or a
-  warning with `agent view: not set` and the agents whose file lacks it (background sessions are
-  then possible, for example on an image without a writable `/etc/claude-code`).
-- **Doctor row *claude background sessions* (#178).** Counts, in each running agent's home,
-  Claude session records of a background session (`"kind":"bg"` or a `"parkedJobId"`) that another
-  container registered: they block the next `claude --continue`. Only counts leave the container.
-- **Operations guide: background sessions and /login.** Do not use `/login` or background mode in
-  an agent tmux; the recovery for stale background records; why `/login` in an agent leaks a
-  credentials file into the jail and does nothing.
-
 ## [0.35.0] - 2026-10-11
 
 ### Added
@@ -177,6 +62,41 @@ version bump moves the block under the new version heading.
   picks up a fetched model within a minute. `lever doctor` gains a `voice` row for dictation.
   Shipped in releases and built by `make install`.
 
+- **Doctor row *podman storage* (lever#173).** It reads the jail's rootless podman store as the
+  jail user: the podman version, the counts of images, containers and layers, the layers no image
+  or container uses (orphans) and their size, layers flagged incomplete, and podman's own
+  corruption warnings. podman before 5.x has no command that lists layers, so the row reads
+  containers/storage's metadata files. Every command is read-only and bounded (a guest-side
+  timeout per command, a cap on each output, a 60 s budget). A corruption warning fails the row;
+  orphan or incomplete layers warn. lever never deletes a layer: the fix points at the new
+  runbook.
+- **Operations guide: "Recovering the jail's podman store".** Why orphan layers pile up (a load
+  that fails or is interrupted leaves the layers it wrote with no image; the dangling-image prune
+  after a load never removes a layer, and no podman command before 5.x does) and how one of them
+  breaks every later load. The runbook: back up the guest's `~/.scion` (hub database, agent
+  records) and the agent homes, `podman system reset --force` as the jail user, then `lever up`
+  without `--fresh`, with what the reset loses (images, containers, anything written inside a
+  container outside its mounts, podman volumes) and what it keeps (the hub records, the agent
+  homes and conversations, the tree, the host state). `podman system check` is named for 5.x.
+  A troubleshooting row for the load-image failure points at it.
+
+- **A known cause when the manager's harness dies (#178).** When the manager liveness gate
+  (`lever apply`, `lever up` after a resume) sees the harness die or never come up, lever counts
+  stale background-session records in the manager container (it usually outlives the harness),
+  and names the cause and the recovery when it finds any. When the container is gone or holds
+  none, it falls back to the last 200 lines of the container log, matching Claude Code's refusal
+  with terminal control codes and line wrapping removed. Only counts and fixed phrases are used;
+  the log is never printed.
+- **Doctor's *claude settings* row shows the agent-view switch (#178).** `agent view: off`, or a
+  warning with `agent view: not set` and the agents whose file lacks it (background sessions are
+  then possible, for example on an image without a writable `/etc/claude-code`).
+- **Doctor row *claude background sessions* (#178).** Counts, in each running agent's home,
+  Claude session records of a background session (`"kind":"bg"` or a `"parkedJobId"`) that another
+  container registered: they block the next `claude --continue`. Only counts leave the container.
+- **Operations guide: background sessions and /login.** Do not use `/login` or background mode in
+  an agent tmux; the recovery for stale background records; why `/login` in an agent leaks a
+  credentials file into the jail and does nothing.
+
 ### Changed
 
 - **Tool commands are read past `env -S`.** The host-path checks (a program or secret inside the
@@ -192,6 +112,76 @@ version bump moves the block under the new version heading.
   `lever-tool-whisper` entry (its dictation socket's health, and its model's pinned size and
   sha256), also with `remote.voice` off, when only agents use the tool. The `voice` row stays
   about dictation.
+
+- **scion's settings-keys warning is hidden (#169).** scion prints `WARN settings file contains
+  unrecognized keys (these will be ignored) keys=[hub.project_id runtimes[*].type ...]` on every
+  CLI call against a v1 settings file. It is harmless: the legacy-format probe that prints it runs
+  before the v1 loader, which reads those keys. lever now drops this exact line (the `settings`
+  label, the exact message, nothing but attributes after it) from every scion result and error it
+  shows, and records each distinct copy once per lever process in `broker.log`. Other scion warnings
+  are still shown. The operations guide explains the line.
+- **Doctor compares the jail ABI, not the release (#171).** lever 0.34.2 changed no in-jail code,
+  yet doctor's `agent lever version` row failed for an image built from 0.34.1 and advised a
+  rebuild and `lever up --fresh`, which discards the conversation. The agent image now carries a
+  `lever_jail_abi` label: `JailABI` in `internal/jailabi`, bumped only when the code baked into
+  the image changes (lever-agent, lever-manager, lever-tool-db, the packages and modules they
+  import, the pre-start hook, the image Dockerfile, and the Go version). The row passes on an equal ABI and shows a release difference as
+  information; a different ABI fails with the rebuild advice; an image without the label is
+  compared by release as before. A test fails when the in-jail sources change without a bump
+  (`internal/jailabi/fingerprint.txt`; Go files count by their tokens and `//go:` directives, so
+  comments, blank lines, spacing and the release version do not); CONTRIBUTING.md says how to bump it. An instance
+  Dockerfile that copies the binaries in itself sets the label from `make -s lever-image-jail-abi`.
+
+- **`lever up` reports a manager up only once claude runs (lever#164).** After a start or a resume
+  the gate waits for claude's tmux pane in the manager container to be alive (up to 2 min, since
+  scion's pre-start hook runs first), then holds the record for the 10 s settle window and checks
+  the pane again. Before, it read only the hub record, which scion marks running at container launch
+  and whose container column a heartbeat refreshes, so `lever up --fresh` printed "is up" over a
+  manager whose pre-start hook failed and whose container exited a moment later. A container that
+  podman reports stopped, or a hub record that leaves running during the wait, is a death at once.
+  So is a claude that exits before it comes up (a bad `--continue`, an auth failure): scion's shell
+  window keeps tmux and the container up, so three probes in a row that find tmux answering but no
+  live claude pane report "claude exited before it came up" within a few seconds. A running
+  container with no tmux server yet after the wait (a hung pre-start hook) is not up. When the
+  probe itself cannot run (a few failures in a row), the container still running after the window
+  counts, with a warning. The progress line shows a fresh hub reading during the wait. A manager
+  that was already running still gets one look.
+- **A manager start prints progress (lever#168).** The start-manager step and `lever up`'s resume
+  print a line about every 15 s with what they wait for, the hub's phase and container, and the
+  elapsed time, instead of a silent minute between "No running manager" and the attach.
+- Comments and the pre-start hook's notes no longer say `lever-agent boot` runs as root: under
+  rootless podman sciontool drops to the agent user (uid 1000) before it runs the hook. The symlink
+  confinement stays as defence for a rootful runtime. `CONTRIBUTING.md` gains a release checklist
+  that asks for a live boot (or the uid in the pinned scion source) on a change to the boot step.
+
+- **Claude Code background sessions are off in every agent (#178).** At every start,
+  `lever-agent boot` writes `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` into the env of the
+  managed-settings file, and `disableAgentView: true` beside it, for every agent, whatever its
+  `claude_settings`; it is not an option. Claude Code documents both as turning off background
+  agents and agent view (`claude agents`, `--bg`, `/background`, the on-demand supervisor). A
+  conversation moved into the background left session records that made the next
+  `claude --continue` refuse after a container restart, so the manager died at start. The
+  managed-settings file is therefore always written now. Read from the baked Claude Code 2.1.281,
+  not yet tested in a running container. Needs a rebuilt agent image and new containers. The
+  switch guards against accidents: an agent owns `/etc/claude-code` in its container and can
+  change it during a session; lever rewrites it at every start. With no claude config, a failed
+  write now logs `agent-view switch not written (...); background sessions stay possible`.
+
+### Fixed
+
+- **A failed image load now shows podman's own error (lever#173).** `podman load` writes its copy
+  progress to stderr before it fails, and the load error relayed the whole stream on one line, so
+  it led with "Getting image source signatures" and the cause at the end was lost. The load,
+  warm-up, prune and localhost-tag errors now carry podman's last lines: progress dropped, each
+  line sanitized, at most 12 lines and 4 KiB, a long line cut in the middle so its cause
+  survives, and podman's corruption warning kept even when it came earlier. When the output
+  names store damage (the corruption warning, a missing `overlay/l/` link, an unknown layer), the
+  error adds a hint that points at `lever doctor` and the recovery runbook.
+
+### Docs
+
+- The docs site groups the github, fizzy and whisper tool guides under a new Tools page, which
+  explains how first-party broker tools work. The guides keep their URLs.
 
 ## [0.34.3] - 2026-10-09
 

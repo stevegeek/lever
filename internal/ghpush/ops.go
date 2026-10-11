@@ -227,11 +227,17 @@ type ghUser struct {
 }
 
 type ghReview struct {
-	ID       int64   `json:"id"`
-	User     *ghUser `json:"user"`
-	State    string  `json:"state"`
-	CommitID string  `json:"commit_id"`
+	ID          int64   `json:"id"`
+	User        *ghUser `json:"user"`
+	State       string  `json:"state"`
+	CommitID    string  `json:"commit_id"`
+	Association string  `json:"author_association"`
 }
+
+// approverAssociations are the author associations whose approval counts:
+// on a public repository anyone can submit an approving review, and GitHub
+// reports it as APPROVED even though it does not count it.
+var approverAssociations = []string{"OWNER", "MEMBER", "COLLABORATOR"}
 
 type ghCheckRuns struct {
 	Total int `json:"total_count"`
@@ -581,8 +587,9 @@ func (o *Ops) isAppOrBot(u *ghUser) bool {
 // reviewGate is pr_merge's review rule. Per reviewer, the latest review that
 // approves, requests changes or was dismissed decides (a comment changes
 // nothing, as on GitHub). Any reviewer whose latest such review requests
-// changes blocks the merge. At least one reviewer who is a person, not a bot
-// and not the App, must have the latest such review an approval of exactly
+// changes blocks the merge. At least one reviewer who is a person (not a bot
+// and not the App) and the repository's owner, an organization member or a
+// collaborator, must have the latest such review an approval of exactly
 // head. It returns the approvers' logins.
 func (o *Ops) reviewGate(rs []ghReview, head string) ([]string, error) {
 	type decision struct {
@@ -616,7 +623,8 @@ func (o *Ops) reviewGate(rs []ghReview, head string) ([]string, error) {
 		switch {
 		case d.r.State == "CHANGES_REQUESTED":
 			blockers = append(blockers, login)
-		case d.r.State == "APPROVED" && d.r.CommitID == head && !o.isAppOrBot(d.r.User):
+		case d.r.State == "APPROVED" && d.r.CommitID == head && !o.isAppOrBot(d.r.User) &&
+			slices.Contains(approverAssociations, d.r.Association):
 			approvers = append(approvers, login)
 		}
 	}
@@ -625,7 +633,7 @@ func (o *Ops) reviewGate(rs []ghReview, head string) ([]string, error) {
 	}
 	if len(approvers) == 0 {
 		return nil, fmt.Errorf("no approving review by a person on the head %s (an approval of an earlier commit, "+
-			"or by a bot or the App, does not count); ask a reviewer to approve", head)
+			"by a bot or the App, or by someone who is not an owner, member or collaborator, does not count); ask a reviewer to approve", head)
 	}
 	return approvers, nil
 }

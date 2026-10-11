@@ -82,6 +82,8 @@ func TestValidatePRText(t *testing.T) {
 		{"t", "Resolve owner/repo#44", ErrClosingKeyword},
 		{"t", "resolves: #44", ErrClosingKeyword},
 		{"t", "the fix: #3", ErrClosingKeyword},
+		{"t", "Fixes\u00a0#1", ErrClosingKeyword},
+		{"t", "closes\u2003#1", ErrClosingKeyword},
 		{"t", "resolved\n#44", ErrClosingKeyword},
 		{"t", "fixes https://github.com/o/r/issues/9", ErrClosingKeyword},
 		{"t", "@a @b @c @d @e @f", ErrTooManyMentions},

@@ -248,6 +248,11 @@ GitHub beyond the PR, each with a named error:
   issue URL (the merge would close that issue; write `refs #N` instead),
 - more than 5 different users `@`mentioned in the title and body together.
 
+The tool checks only the title and body. GitHub also closes an issue from a closing keyword in a
+commit message once that commit reaches the default branch, and the agent writes the commit
+messages. Read them in review, or merge with `squash` and a repository setting that uses the PR
+title and description as the squash commit message.
+
 The result holds `number` and `html_url`. If an open PR from that branch already exists, the tool opens no other: it returns that
 PR with `existing: true`.
 
@@ -303,10 +308,16 @@ by deleting the tests, and then merge its own change. So by default (`-merge-req
 - The tool reads every review on the PR (100 a page, at most 1000; more is a refusal).
 - For each reviewer, the latest review that approves, requests changes or was dismissed decides. A
   comment changes nothing.
-- If any reviewer's latest such review requests changes, the tool refuses.
+- If any reviewer's latest such review requests changes, the tool refuses. This includes a reviewer
+  from outside the repository; a person with write access can dismiss that review.
 - At least one reviewer's latest such review must be an approval whose commit is the PR's current
-  head SHA, by a person: a GitHub user, not a bot and not the App (`-app-slug`). An approval of an
+  head SHA, by a person: a GitHub user, not a bot and not the App (`-app-slug`), whom GitHub lists
+  as the repository's owner, a member of its organization or a collaborator. On a public repository
+  anyone can submit an approving review; the tool ignores those, as GitHub does. An approval of an
   earlier commit does not count, so a push after the approval needs a new one.
+
+An organization member counts even without write access to this repository. If that is too wide,
+rely on the `main` ruleset's required approval, which counts only reviewers with write access.
 
 The result and the audit line name the approvers. Set the same rule in the `main` ruleset as well
 (section 2): required approval, dismiss stale approvals when new commits are pushed, and require

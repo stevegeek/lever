@@ -85,8 +85,14 @@ func newFakeGH(t *testing.T) *fakeGH {
 
 // review is one review as the reviews API returns it.
 func review(id int64, login, typ, state, commit string) map[string]any {
-	return map[string]any{"id": id * 1000, "state": state, "commit_id": commit,
+	return map[string]any{"id": id * 1000, "state": state, "commit_id": commit, "author_association": "COLLABORATOR",
 		"user": map[string]any{"login": login, "id": id, "type": typ}}
+}
+
+// withAssoc sets a review's author_association.
+func withAssoc(r map[string]any, a string) map[string]any {
+	r["author_association"] = a
+	return r
 }
 
 // addPull adds an open, mergeable PR from agent/x into main, approved on its
@@ -946,6 +952,13 @@ func TestPRMergeReviewGate(t *testing.T) {
 		{name: "comment after approval keeps it", reviews: []map[string]any{appr(1, "alice", "User", shaHead), review(1, "alice", "User", "COMMENTED", shaHead)}, by: "alice"},
 		{name: "comment after change request keeps it", reviews: []map[string]any{review(2, "bob", "User", "CHANGES_REQUESTED", shaOld), review(2, "bob", "User", "COMMENTED", shaHead), appr(1, "alice", "User", shaHead)}, want: "changes requested by bob"},
 		{name: "dismissed change request", reviews: []map[string]any{review(2, "bob", "User", "DISMISSED", shaOld), appr(1, "alice", "User", shaHead)}, by: "alice"},
+		{name: "owner", reviews: []map[string]any{withAssoc(appr(1, "alice", "User", shaHead), "OWNER")}, by: "alice"},
+		{name: "member", reviews: []map[string]any{withAssoc(appr(1, "alice", "User", shaHead), "MEMBER")}, by: "alice"},
+		{name: "outsider approval", reviews: []map[string]any{withAssoc(appr(1, "eve", "User", shaHead), "NONE")}, want: "no approving review"},
+		{name: "contributor approval", reviews: []map[string]any{withAssoc(appr(1, "eve", "User", shaHead), "CONTRIBUTOR")}, want: "no approving review"},
+		{name: "first-timer approval", reviews: []map[string]any{withAssoc(appr(1, "eve", "User", shaHead), "FIRST_TIME_CONTRIBUTOR")}, want: "no approving review"},
+		{name: "no association", reviews: []map[string]any{withAssoc(appr(1, "eve", "User", shaHead), "")}, want: "no approving review"},
+		{name: "outsider change request blocks", reviews: []map[string]any{appr(1, "alice", "User", shaHead), withAssoc(review(2, "eve", "User", "CHANGES_REQUESTED", shaHead), "NONE")}, want: "changes requested by eve"},
 		{name: "two approvers", reviews: []map[string]any{appr(1, "alice", "User", shaHead), appr(2, "carol", "User", shaHead)}, by: "alice,carol"},
 	} {
 		t.Run(c.name, func(t *testing.T) {

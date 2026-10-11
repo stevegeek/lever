@@ -170,7 +170,8 @@ var (
 	userMentionRE = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.+-])@([A-Za-z0-9][A-Za-z0-9-]{0,38})`)
 	// A keyword that closes the issue it references: #N, owner/repo#N or an
 	// issue or PR URL, with an optional colon.
-	closingRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s*` +
+	// Spaces include Unicode ones (Go's \s is ASCII only).
+	closingRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?[\s\p{Z}]*` +
 		`(?:#[0-9]+|[A-Za-z0-9-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://\S+/(?:issues|pull)/[0-9]+)`)
 )
 

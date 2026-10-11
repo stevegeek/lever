@@ -102,6 +102,25 @@ CI (`.github/workflows/ci.yml`) runs `gofmt -l .` (must be empty), `go vet ./...
 and `go test -race ./...`. A release is a `v*` tag; the release workflow refuses a tag that does not
 match `const Version` in `internal/cli/root.go` or that is not on `main`.
 
+### Bumping the jail ABI
+
+`JailABI` in `internal/jailabi/jailabi.go` is the in-jail compatibility version. `make lever-image`
+stamps it on the agent image as the `lever_jail_abi` label, and `lever doctor`'s `agent lever
+version` row compares it with the host `lever`, so a release that changed no in-jail code needs no
+image rebuild. The in-jail code is everything baked into the image: `cmd/lever-agent`,
+`cmd/lever-manager`, `cmd/lever-tool-db`, the scion pre-start hook, `internal/agent`,
+`internal/wire`, and every package of this module they import (`go list -deps`).
+`internal/jailabi/fingerprint.txt` holds a hash of those sources (comments and the release
+constant left out) and lists the packages. When `TestJailFingerprint` fails after your change:
+
+1. add one to `JailABI`;
+2. run `go test ./internal/jailabi -run TestJailFingerprint -update`;
+3. commit `jailabi.go` and `fingerprint.txt` with the change.
+
+The update refuses to record a new hash under the old number. Bump `JailABI` by hand, then run the
+update, when the code is the same but its meaning on the wire changed. Two branches that each bump
+it conflict in `fingerprint.txt`: after the merge, bump once more and run the update.
+
 ## Docs
 
 `docs-site/` builds with `cd docs-site && bundle exec jekyll build`. Docs describe the current

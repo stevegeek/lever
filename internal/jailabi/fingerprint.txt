@@ -1,0 +1,23 @@
+# The in-jail sources' fingerprint (internal/jailabi). Do not edit by hand.
+# After changing in-jail code: bump JailABI in jailabi.go, then run
+#   go test ./internal/jailabi -run TestJailFingerprint -update
+jail_abi 1
+sha256 175840be3028de4fea54eb4b30088d426747ac6329fafe4aae28250b8c391384
+# packages hashed (with the pre-start hook):
+#   github.com/stevegeek/lever/captool
+#   github.com/stevegeek/lever/cmd/lever-agent
+#   github.com/stevegeek/lever/cmd/lever-manager
+#   github.com/stevegeek/lever/cmd/lever-tool-db
+#   github.com/stevegeek/lever/internal/agent
+#   github.com/stevegeek/lever/internal/bridge
+#   github.com/stevegeek/lever/internal/cap/token
+#   github.com/stevegeek/lever/internal/cli
+#   github.com/stevegeek/lever/internal/cli/manager
+#   github.com/stevegeek/lever/internal/httpjson
+#   github.com/stevegeek/lever/internal/mcp
+#   github.com/stevegeek/lever/internal/proc
+#   github.com/stevegeek/lever/internal/retry
+#   github.com/stevegeek/lever/internal/scion
+#   github.com/stevegeek/lever/internal/scion/layout
+#   github.com/stevegeek/lever/internal/termsafe
+#   github.com/stevegeek/lever/internal/wire

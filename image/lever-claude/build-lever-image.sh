@@ -21,6 +21,10 @@
 #                         as the lever_version label (`make lever-image` sets it;
 #                         unset leaves the label empty and `lever doctor` skips
 #                         its host-vs-image version check)
+#   LEVER_JAIL_ABI        in-jail compatibility version of the staged binaries
+#                         (internal/jailabi), baked as the lever_jail_abi label
+#                         (`make lever-image` sets it; unset leaves it empty and
+#                         `lever doctor` compares lever_version instead)
 set -euo pipefail
 
 CTX="$(cd "$(dirname "$0")" && pwd)"
@@ -86,6 +90,6 @@ EOF
   exit 1
 fi
 
-docker build --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" -t "lever-claude:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
+docker build --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" --build-arg "LEVER_JAIL_ABI=${LEVER_JAIL_ABI:-}" -t "lever-claude:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
 
 echo "Built lever-claude:${ARCH} (+ ${TARGET})."

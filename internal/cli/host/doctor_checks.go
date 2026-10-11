@@ -30,6 +30,7 @@ import (
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/jailabi"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
@@ -85,6 +86,10 @@ type doctorProbes struct {
 	// the same two ways.
 	leverVersion    func(imageRef string) (string, error)
 	leverVersionTar func(tarPath, imageRef string) (string, error)
+	// jailABI and jailABITar read the image's lever_jail_abi label (the
+	// in-jail compatibility version, internal/jailabi) the same two ways.
+	jailABI    func(imageRef string) (string, error)
+	jailABITar func(tarPath, imageRef string) (string, error)
 	// remoteHealthz issues GET /healthz through the remote-access proxy.
 	remoteHealthz func(healthzProbe) (int, error)
 	// remoteLogin inspects the local OIDC provider on its loopback port.
@@ -107,6 +112,10 @@ func productionProbes(r proc.Runner) doctorProbes {
 		leverVersion: func(imageRef string) (string, error) { return imageLabelProbe(r, imageRef, leverVersionLabel) },
 		leverVersionTar: func(tarPath, imageRef string) (string, error) {
 			return jail.ImageTarLabel(tarPath, imageRef, leverVersionLabel)
+		},
+		jailABI: func(imageRef string) (string, error) { return imageLabelProbe(r, imageRef, jailabi.Label) },
+		jailABITar: func(tarPath, imageRef string) (string, error) {
+			return jail.ImageTarLabel(tarPath, imageRef, jailabi.Label)
 		},
 		remoteHealthz:   remoteHealthzProbe,
 		remoteLogin:     remoteLoginProbe,
@@ -2236,42 +2245,76 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 	return checkResult{name, true, "baked " + v + " in " + source + " (a manager keeps the image it was created on until recreated: `lever up --fresh`; the manager image row compares the two)", ""}
 }
 
-// checkLeverVersion compares the lever version baked into the manager image
-// (its lever_version label, set by `make lever-image`) with this binary's.
-// The image tag names only the arch, so a build from another lever source
-// replaces it with nothing else to show for it (lever#18). host is the
-// release (cli.Version) and hostFull what `lever version` prints; the label
-// holds the latter form. Releases are compared, not commits: a host built
-// from a later commit of the same release is not a finding, and the detail
-// names both commits.
+// checkLeverVersion compares the in-jail code baked into the manager image
+// with this binary's. The image tag names only the arch, so a build from
+// another lever source replaces it with nothing else to show for it
+// (lever#18).
 //
-// A missing label (an image older than the label, or one not built by `make
-// lever-image`) and an image that cannot be read are informational: the
-// claude-version row already fails on an unreadable image.
-func checkLeverVersion(imageRef, tarPath, host, hostFull string, p doctorProbes) checkResult {
+// The image's lever_jail_abi label (the in-jail compatibility version,
+// internal/jailabi) decides when it is there (lever#171): equal to hostABI
+// passes, with any release difference shown as information, since a release
+// that changed no in-jail code needs no rebuild; different fails. An image
+// without that label (built before it existed, or by an instance Dockerfile
+// that does not set it) falls back to the release comparison: the
+// lever_version label against host, the release (cli.Version); hostFull is
+// what `lever version` prints, the form the label holds. Releases are
+// compared, not commits: a host built from a later commit of the same release
+// is not a finding, and the detail names both commits.
+//
+// A missing lever_version label (an image older than the label, or one not
+// built by `make lever-image`) and an image that cannot be read are
+// informational: the claude-version row already fails on an unreadable image.
+func checkLeverVersion(imageRef, tarPath, host, hostFull string, hostABI int, p doctorProbes) checkResult {
 	const name = "agent lever version"
+	const rebuildFix = "rebuild the agent image from this lever's source (`make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built FROM it), " +
+		"then `lever apply`; a running manager keeps its image until `lever up --fresh` (the conversation is discarded)"
 	source := imageRef
-	var v string
+	var v, abi string
 	var err error
 	if tarPath != "" {
 		source = imageRef + " (from " + tarPath + ")"
 		v, err = p.leverVersionTar(tarPath, imageRef)
+		if err == nil && p.jailABITar != nil {
+			abi, err = p.jailABITar(tarPath, imageRef)
+		}
 	} else {
 		v, err = p.leverVersion(imageRef)
+		if err == nil && p.jailABI != nil {
+			abi, err = p.jailABI(imageRef)
+		}
 	}
 	if err != nil {
 		return checkResult{name, true, "not checked (could not inspect image " + source + "): " + firstLine(err.Error()), ""}
 	}
-	v = strings.TrimSpace(v)
+	v, abi = strings.TrimSpace(v), strings.TrimSpace(abi)
+	if abi != "" {
+		built := ""
+		if v != "" {
+			built = ", built from lever " + v
+		}
+		want := strconv.Itoa(hostABI)
+		if abi != want {
+			return checkResult{name, false,
+				fmt.Sprintf("%s carries jail ABI %s%s but the host lever (%s) has jail ABI %s — its in-jail binaries (lever-agent, lever-manager) do not match this lever", source, abi, built, hostFull, want),
+				rebuildFix}
+		}
+		release := ""
+		switch {
+		case v == hostFull:
+			release = " (the same build as the host)"
+		case v != "":
+			release = "; host lever is " + hostFull + " (info: the in-jail code is the same, so no rebuild is needed)"
+		}
+		return checkResult{name, true, fmt.Sprintf("%s carries jail ABI %s%s, the same as the host lever%s", source, abi, built, release), ""}
+	}
 	if v == "" {
 		return checkResult{name, true, "not checked: no " + leverVersionLabel + " label on " + source +
 			" — the image predates the label (or was not built by `make lever-image`); rebuild it so this row can compare it with the host lever", ""}
 	}
 	if release := strings.Fields(v)[0]; release != host {
 		return checkResult{name, false,
-			fmt.Sprintf("%s carries lever %s but the host lever is %s — its in-jail binaries (lever-agent, lever-manager) were built from another release", source, v, hostFull),
-			"rebuild the agent image from this lever's source (`make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built FROM it), " +
-				"then `lever apply`; a running manager keeps its image until `lever up --fresh` (the conversation is discarded)"}
+			fmt.Sprintf("%s carries lever %s but the host lever is %s — its in-jail binaries (lever-agent, lever-manager) were built from another release (the image has no %s label, so the release is compared)", source, v, hostFull, jailabi.Label),
+			rebuildFix}
 	}
 	if v == hostFull {
 		return checkResult{name, true, fmt.Sprintf("%s carries lever %s, the same as the host", source, v), ""}

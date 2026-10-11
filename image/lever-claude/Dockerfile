@@ -88,5 +88,10 @@ RUN install -d -o scion -g scion -m 0755 /etc/claude-code
 # value re-runs no layer.
 ARG LEVER_VERSION=
 LABEL lever_version="${LEVER_VERSION}"
+# The in-jail compatibility version of those binaries (internal/jailabi).
+# `lever doctor` compares it with the host lever before the release, so a
+# release that changed no in-jail code needs no rebuild.
+ARG LEVER_JAIL_ABI=
+LABEL lever_jail_abi="${LEVER_JAIL_ABI}"
 
 USER scion

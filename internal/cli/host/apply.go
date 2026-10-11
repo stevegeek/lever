@@ -683,7 +683,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		return nil
 	}
 
-	tw := scion.New(jr, scion.Options{HubEndpoint: throwawayHubURL})
+	tw := scion.New(jr, scion.Options{HubEndpoint: throwawayHubURL, SettingsWarnLog: brokerctl.StateLogAppender(st)})
 	started := false
 	defer func() {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), windowCleanupTimeout)

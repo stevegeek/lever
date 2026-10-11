@@ -58,10 +58,14 @@ last rebuilt.
 **lever version:** the image tag names only the arch, so a rebuild from another lever checkout
 replaces `scionlocal/lever-claude:<arch>` for every instance on the host. `make lever-image` records
 the lever version the in-jail binaries were built from in a second label, `lever_version` (the
-release and short commit of that source, e.g. `0.28.1 (21ff051f651f)`; never a binary hash). `lever doctor`'s `agent lever
-version` row compares its release with the host `lever` and fails when they differ; the fix is to
-rebuild the image from the host lever's source, `lever apply`, then `lever up --fresh`. An image with
-no label (built before the label existed, or by running `build-lever-image.sh` without
+release and short commit of that source, e.g. `0.28.1 (21ff051f651f)`; never a binary hash), and
+the in-jail compatibility version in a third, `lever_jail_abi` (a number that changes only when the
+code baked into the image changes). `lever doctor`'s `agent lever version` row compares the jail ABI
+with the host `lever`: equal passes, and a different release is shown for information only; a
+different ABI fails. The fix is to rebuild the image from the host lever's source, `lever apply`,
+then `lever up --fresh`. An image without `lever_jail_abi` (built before that label existed) falls back to
+comparing the release in `lever_version` and fails when it differs. An image with neither label
+(built before the labels existed, or by running `build-lever-image.sh` without
 `LEVER_IMAGE_VERSION`) reads as "not checked".
 
 Cross-build for another arch with `LEVER_IMAGE_ARCH=amd64` (it builds `FROM scion-claude:amd64` and
@@ -94,8 +98,9 @@ worker `image:`) at your tag. If your added layer does root-level work
 under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and `USER scion`.
 The jail runs rootless podman, where a root-owned home is unwritable by the agent and silently
 breaks its boot hook. Keep instance-specific tooling in that layer, not in the framework image.
-An image built `FROM scionlocal/lever-claude:<arch>` inherits both labels (`claude_code_version`,
-`lever_version`), so doctor reads them from your tag with no extra step; rebuild it after each
-`make lever-image`. An instance Dockerfile that copies the binaries in itself (`make
-lever-image-bins`) sets the label itself: `LABEL lever_version="..."` with the value `make -s
-lever-image-version` prints.
+An image built `FROM scionlocal/lever-claude:<arch>` inherits its labels (`claude_code_version`,
+`lever_version`, `lever_jail_abi`), so doctor reads them from your tag with no extra step; rebuild
+it after each `make lever-image`. An instance Dockerfile that copies the binaries in itself (`make
+lever-image-bins`) sets the labels itself: `LABEL lever_version="..."` with the value `make -s
+lever-image-version` prints, and `LABEL lever_jail_abi="..."` with the value `make -s
+lever-image-jail-abi` prints.

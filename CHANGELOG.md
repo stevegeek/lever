@@ -43,6 +43,27 @@ version bump moves the block under the new version heading.
   names store damage (the corruption warning, a missing `overlay/l/` link, an unknown layer), the
   error adds a hint that points at `lever doctor` and the recovery runbook.
 
+### Changed
+
+- **scion's settings-keys warning is hidden (#169).** scion prints `WARN settings file contains
+  unrecognized keys (these will be ignored) keys=[hub.project_id runtimes[*].type ...]` on every
+  CLI call against a v1 settings file. It is harmless: the legacy-format probe that prints it runs
+  before the v1 loader, which reads those keys. lever now drops this exact line (the `settings`
+  label, the exact message, nothing but attributes after it) from every scion result and error it
+  shows, and records each distinct copy once per lever process in `broker.log`. Other scion warnings
+  are still shown. The operations guide explains the line.
+- **Doctor compares the jail ABI, not the release (#171).** lever 0.34.2 changed no in-jail code,
+  yet doctor's `agent lever version` row failed for an image built from 0.34.1 and advised a
+  rebuild and `lever up --fresh`, which discards the conversation. The agent image now carries a
+  `lever_jail_abi` label: `JailABI` in `internal/jailabi`, bumped only when the code baked into
+  the image changes (lever-agent, lever-manager, lever-tool-db, the packages and modules they
+  import, the pre-start hook, the image Dockerfile, and the Go version). The row passes on an equal ABI and shows a release difference as
+  information; a different ABI fails with the rebuild advice; an image without the label is
+  compared by release as before. A test fails when the in-jail sources change without a bump
+  (`internal/jailabi/fingerprint.txt`; Go files count by their tokens and `//go:` directives, so
+  comments, blank lines, spacing and the release version do not); CONTRIBUTING.md says how to bump it. An instance
+  Dockerfile that copies the binaries in itself sets the label from `make -s lever-image-jail-abi`.
+
 ## [0.35.0] - 2026-10-11
 
 ### Added

@@ -123,6 +123,15 @@ All host-side state lives in `.lever-state/` at the instance root:
 | `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 
+scion prints `WARN settings file contains unrecognized keys (these will be ignored)
+keys=[hub.project_id runtimes[*].type ...]` on every CLI call in the guest. It is harmless: scion's
+legacy-format probe reads the v1 settings file before the v1 loader, which does read those keys
+(scion writes `hub.project_id` itself). lever hides this one line from what it prints and from
+the scion errors it shows, and records each distinct copy once per lever process (the broker: once per run) in `broker.log` (a
+`msg="scion output hidden from the console"` line). Any other scion warning is still shown. You
+still see the line when you run `scion` by hand in the guest, and `lever attach` may show it
+briefly before the agent's terminal takes over the screen.
+
 Agent-side, `lever attach [name]` shows the full scrollback including every incoming message and
 tool call. Run `lever doctor` first whenever anything looks wrong; every check prints a fix hint.
 
@@ -444,7 +453,7 @@ manager:
 | `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, back up the conversation if you want it, then `lever up --fresh`. In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
 | `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever stop`, then `lever up` (re-mints the token), or wait and retry. Do **not** answer exit 4 with `--fresh` |
 | Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (the conversation is discarded; before 0.21 the flag was silently dropped after `stop`) |
-| Doctor's `agent lever version` row fails | the agent image was built from another lever release than the host `lever` — the tag names only the arch, so any `make lever-image` on the host (a throwaway instance, another checkout) replaces it | rebuild from the host lever's source: `make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built `FROM` it; `lever apply`; `lever up --fresh` to recreate the manager on it (the conversation is discarded) |
+| Doctor's `agent lever version` row fails | the agent image's in-jail code does not match the host `lever`: its `lever_jail_abi` label differs from the host's jail ABI (or, on an image without that label, its `lever_version` release differs). The tag names only the arch, so any `make lever-image` on the host (a throwaway instance, another checkout) replaces it. A release that changed no in-jail code keeps the jail ABI, so the row passes and shows the release difference as information | rebuild from the host lever's source: `make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built `FROM` it; `lever apply`; `lever up --fresh` to recreate the manager on it (the conversation is discarded) |
 | On `lima` with `egress: open`, every agent turn ends in `Request timed out` (about 4.5 min) while `lever up` looks fine; doctor's `guest DNS` row fails | the guest resolver is a nat DNAT to the host alias on a per-boot port, which the `LEVER_EGRESS` alias DROP swallowed (lever < 0.22.2, lever#34); in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows the `-d <alias> DROP` counter climbing with every lookup | upgrade lever and re-run `lever apply` — the open posture now ACCEPTs the live `LIMADNS` DNAT targets ahead of the alias DROP; `lever doctor`'s `guest DNS` row confirms a lookup completes |
 | Doctor's `manager agent` row says the harness is `stalled` (or `crashed`/`offline`) over an `Up` container | the harness stopped completing turns: it cannot reach the model API (guest DNS, an outage), or its credential expired; the hub marks `stalled` after its `stalled_threshold` (default 5 min without an activity event) | `lever attach` shows the harness (a stuck call ends in `Request timed out`); check the `guest DNS` and credential rows; `lever stop` then `lever up` restarts the harness. If scion's `auto_suspend_stalled` is on, the hub suspends the manager itself and `lever up` resumes it into the same state until the cause is fixed |
 | After the host slept, the manager's replies, status updates and heartbeats fail with `401 … token is expired` (agent.log: `AUTH_LOST`); doctor's `manager agent` or `agent hub tokens` row fails with "hub token expired" | scion's agent hub token lives 10 h and sciontool refreshes it 2 h before expiry with a timer that stands still while the host sleeps; an expired token cannot refresh itself. Doctor warns earlier, when a refresh is overdue | `lever apply` (or `lever up` on a running manager) runs `scion reset-auth` for every running or stopped agent whose token expired — no restart, the conversation is kept. The broker also checks every 5 min and resets a running agent's lapsed token itself (governed by `broker.auto_reenrol`; audit `op=hub-token`); see [agent session heals](#agent-session-heals). By hand, in the guest: `scion reset-auth <agent> -g <mount>` with the controller PAT |
@@ -575,14 +584,17 @@ aside and unpack the archive in `$HOME`.
    (`make lever-image`, or `make lever-image-bins` + your instance's own image build), then
    `lever apply` to load it (or re-save it over the `image_tar` archive on a Docker-less host,
    then `lever apply`). The manager runs a new image only after `lever up --fresh` (back up its
-   conversation first).
+   conversation first). The agent-side binaries changed when the release's jail ABI did:
+   `lever doctor`'s `agent lever version` row fails after step 3 if they did.
 2. `lever init` — refreshes the scaffolded skills (your edited and adopted copies are left
    alone; `--check` to preview). If you've customized scaffolds and doctor nags about them, accept them once with
    `lever init --adopt`.
 3. `lever reload` (or `lever stop && lever up` to also power-cycle the VM) — restart onto the new
    binaries/config.
 4. `lever doctor` — every check green means the upgrade landed. The `agent lever version` row
-   fails while the agent image still carries the previous release's binaries.
+   fails while the agent image's in-jail code is older than the host's (its `lever_jail_abi` label
+   differs). When the new release changed no in-jail code, the row passes and names both
+   releases: no image rebuild and no `lever up --fresh` is needed.
 
 ### Upgrading past 0.30.0: contacts, agent messages, files, push
 

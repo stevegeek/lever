@@ -12,6 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/jailabi"
 	"github.com/stevegeek/lever/internal/proc"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -196,7 +197,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkToolBackends(app.Broker.Tools, app.InstanceDir(), probes) },
 		func() checkResult { return checkClaudeVersion(app.ManagerImage(), app.ManagerImageTarPath(), probes) },
 		func() checkResult {
-			return checkLeverVersion(app.ManagerImage(), app.ManagerImageTarPath(), cli.Version, cli.VersionString(), probes)
+			return checkLeverVersion(app.ManagerImage(), app.ManagerImageTarPath(), cli.Version, cli.VersionString(), jailabi.JailABI, probes)
 		},
 		func() checkResult {
 			return checkManagerImage(ctx, b.MountDest(), app.Name, app.ManagerImage(), listAgents)

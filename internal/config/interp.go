@@ -311,3 +311,39 @@ func codePaths(line string) []string {
 	}
 	return out
 }
+
+// envFormUnread names an env(1) prefix form whose words lever cannot read
+// the way env does, or "": a combined option group with S (-vS), the
+// --split-string=VALUE spelling, or an -S string with quotes, backslashes
+// or $ (env unquotes, unescapes and expands those, strings.Fields does
+// not). A flag hidden in such a form would escape the host-path checks, so
+// config load refuses the command instead of guessing.
+func envFormUnread(argv []string) string {
+	for len(argv) > 0 && baseName(argv[0]) == "env" {
+		rest := argv[1:]
+		for i := 0; i < len(rest); i++ {
+			a := rest[i]
+			switch {
+			case a == "--":
+				return ""
+			case a == "-S" || a == "--split-string":
+				if i+1 < len(rest) && strings.ContainsAny(rest[i+1], "\"'\\$") {
+					return "an env -S string with quotes, backslashes or $"
+				}
+				i++
+			case strings.HasPrefix(a, "--split-string="):
+				return "env --split-string=VALUE"
+			case strings.HasPrefix(a, "-S"):
+				if strings.ContainsAny(a[2:], "\"'\\$") {
+					return "an env -S string with quotes, backslashes or $"
+				}
+			case strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && len(a) > 2 && strings.Contains(a[1:], "S"):
+				return "a combined env option group with S (" + a + ")"
+			case !strings.HasPrefix(a, "-") && !(strings.Contains(a, "=") && !strings.HasPrefix(a, "/")):
+				return ""
+			}
+		}
+		return ""
+	}
+	return ""
+}

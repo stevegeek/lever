@@ -471,3 +471,27 @@ func (a *App) EffectiveDirectiveExpiryMax() time.Duration {
 func (a *App) OperatorPrincipal() string {
 	return "operator@" + a.Name
 }
+
+// VoiceOn reports whether the chat page offers dictation (remote.voice on,
+// with the chat page).
+func (a *App) VoiceOn() bool { return a.RemoteLandingChat() && a.Remote.Voice.Enabled }
+
+// EffectiveVoiceMaxSeconds is remote.voice.max_seconds with its default.
+func (a *App) EffectiveVoiceMaxSeconds() int {
+	return cmp.Or(max(a.Remote.Voice.MaxSeconds, 0), DefaultVoiceMaxSeconds)
+}
+
+// VoiceExcludedLogins is every allowed_users login with voice: false, in
+// config order, while voice is on (nil otherwise).
+func (a *App) VoiceExcludedLogins() []string {
+	if !a.VoiceOn() {
+		return nil
+	}
+	var out []string
+	for _, u := range a.Remote.AllowedUsers {
+		if !u.VoiceAllowed() {
+			out = append(out, u.Login)
+		}
+	}
+	return out
+}

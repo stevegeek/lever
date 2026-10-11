@@ -60,6 +60,12 @@ func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger"
 // fileledger): uploads written by the remote proxy, shares by the broker.
 func (s State) FilesLedger() string { return filepath.Join(s.Dir, "files-ledger") }
 
+// VoiceModels holds the pinned Whisper models `lever voice fetch` downloads
+// when no lever-tool-whisper entry names its own -models (0700, each file
+// 0600); a tool whose -models points here checks the model before each
+// start of its whisper-server child. Never audio or a transcript.
+func (s State) VoiceModels() string { return filepath.Join(s.Dir, "voice-models") }
+
 // Sessions is the record of each agent's last fresh session start and the
 // skill text on disk for it then (package sessionrec): written by apply (the
 // manager) and the broker (workers), read by the remote proxy before it lets

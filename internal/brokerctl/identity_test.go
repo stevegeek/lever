@@ -1,6 +1,7 @@
 package brokerctl
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -241,5 +242,41 @@ func TestFilesSwitchesInTheStamps(t *testing.T) {
 	app.Remote.AllowedUsers[1].Files = nil
 	if RemoteConfigHash(app) != off {
 		t.Fatal("files off: the login switch is ignored")
+	}
+}
+
+// remote.voice is the proxy's alone: on, every setting and the per-login
+// switch restart the proxy; the broker never acts on it; off, nothing of it
+// is in either stamp.
+func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
+	app := remoteTestApp(t)
+	b0, off := ConfigHash(app), RemoteConfigHash(app)
+	app.Remote.Voice = config.Voice{Socket: "/run/lever/whisper.sock", MaxSeconds: 60}
+	no := false
+	app.Remote.AllowedUsers[1].Voice = &no
+	if RemoteConfigHash(app) != off || ConfigHash(app) != b0 {
+		t.Fatal("voice settings while off changed a stamp")
+	}
+	app.Remote.AllowedUsers[1].Voice = nil
+	app.Remote.Voice.Enabled = true
+	on := RemoteConfigHash(app)
+	if on == off {
+		t.Fatal("turning voice on must restart the proxy")
+	}
+	if ConfigHash(app) != b0 {
+		t.Fatal("voice must not bounce the broker")
+	}
+	for name, mut := range map[string]func(a *config.App){
+		"socket":     func(a *config.App) { a.Remote.Voice.Socket = "/run/lever/other.sock" },
+		"max":        func(a *config.App) { a.Remote.Voice.MaxSeconds = 120 },
+		"read aloud": func(a *config.App) { a.Remote.Voice.ReadAloud = &no },
+		"login":      func(a *config.App) { a.Remote.AllowedUsers[1].Voice = &no },
+	} {
+		c := *app
+		c.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
+		mut(&c)
+		if RemoteConfigHash(&c) == on {
+			t.Errorf("%s: no proxy restart", name)
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -243,6 +244,12 @@ func (s *Supervisor) spawnLocked(ctx context.Context, t ToolSpec) error {
 	args := append([]string{}, t.Command[1:]...)
 	args = append(args, "-backend", t.Backend, "-admin", s.adminURL)
 	cmd := exec.CommandContext(ctx, bin, args...)
+	// When the broker stops, a tool gets SIGTERM and toolStopGrace to exit
+	// before SIGKILL: lever-tool-whisper stops its whisper-server child in
+	// that time (off Linux nothing else would, and the orphan would keep
+	// the child's port).
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = toolStopGrace
 	cmd.Dir = t.Dir
 	cmd.Env = []string{"PATH=" + config.ToolSupervisorPATH} // minimal, no inherited secrets
 	if s.toolSecret != "" {
@@ -263,8 +270,13 @@ func (s *Supervisor) spawnLocked(ctx context.Context, t ToolSpec) error {
 	return nil
 }
 
-// Stop force-kills (SIGKILL) every launched tool and reaps it.
-// It is safe to call after a failed Start or multiple times.
+// toolStopGrace is how long a tool has between SIGTERM and SIGKILL. It is
+// short: `lever stop` SIGKILLs a broker that has not exited 2 s after its
+// own SIGTERM, and the tools must be gone by then.
+const toolStopGrace = 1500 * time.Millisecond
+
+// Stop stops every launched tool (SIGTERM, then SIGKILL after toolStopGrace)
+// and reaps it. It is safe to call after a failed Start or multiple times.
 func (s *Supervisor) Stop() {
 	s.mu.Lock()
 	s.stopped = true
@@ -284,9 +296,27 @@ func (s *Supervisor) Stop() {
 func (s *Supervisor) stopLocked() {
 	for _, cmd := range s.cmds {
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
+			_ = cmd.Process.Signal(syscall.SIGTERM)
 		}
+	}
+	deadline := time.Now().Add(toolStopGrace)
+	for _, cmd := range s.cmds {
+		if cmd.Process == nil {
+			continue
+		}
+		exited := make(chan struct{})
+		go func() {
+			_, _ = cmd.Process.Wait()
+			close(exited)
+		}()
+		t := time.NewTimer(time.Until(deadline))
+		select {
+		case <-exited:
+		case <-t.C:
+			_ = cmd.Process.Kill()
+			<-exited
+		}
+		t.Stop()
 	}
 	s.cmds = nil
 	for _, f := range s.files {

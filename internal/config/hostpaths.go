@@ -23,6 +23,15 @@ const (
 	// or a private state dir a host tool keeps. Never safe in the tree: a
 	// read-only mount still lets the manager read it.
 	hostSecret
+	// hostProgramOutside is code the host runs that must lie outside the
+	// tree altogether (lever-tool-whisper's -server): a manager.read_only
+	// mount does not excuse it.
+	hostProgramOutside
+	// hostPrivate is a host path an agent must neither replace nor reach:
+	// lever-tool-whisper's -models (the model whisper-server loads, and its
+	// working directory) and -dictate-socket (remote.voice.socket). Never
+	// safe in the tree, read-only or not.
+	hostPrivate
 	// hostUnchecked is a known flag whose value is not a host program or
 	// secret: the github tool's -tree (it names the tree on purpose) or a
 	// data file the agent may edit by design (-csv, -dsn). Consumed so it
@@ -45,16 +54,75 @@ type hostPath struct {
 
 // toolPathFlags are the path flags of the tools lever ships
 // (cmd/lever-tool-github, cmd/lever-tool-fizzy, cmd/lever-tool-db, and the
-// assistant-demo example's lever-tool-todo) and what each names. Lever
-// cannot know what an unknown flag's value is, so no other flag is checked.
+// assistant-demo example's lever-tool-todo) and what each names, read in
+// every supervised tool's command. Lever cannot know what an unknown flag's
+// value is, so no other flag is checked.
 var toolPathFlags = map[string]hostPathKind{
 	"app-key":    hostSecret,    // github: the GitHub App private key
 	"token-file": hostSecret,    // fizzy: the personal access token
 	"state":      hostSecret,    // github, fizzy: the tool's private state dir
 	"fizzy":      hostProgram,   // fizzy: the fizzy CLI it runs
-	"tree":       hostUnchecked, // github: the tree, to refuse -state and -app-key inside it
+	"tree":       hostUnchecked, // github, whisper: the tree, to refuse paths inside it
 	"dsn":        hostUnchecked, // db: its sqlite data
 	"csv":        hostUnchecked, // todo (example): the agent-editable todo list
+}
+
+// whisperToolFlags are lever-tool-whisper's flags config load reads, read
+// only in the command of a tool that runs lever-tool-whisper
+// (isWhisperCommand): generic names such as -server or -model mean
+// something else to another tool.
+var whisperToolFlags = map[string]hostPathKind{
+	"server":         hostProgramOutside, // the whisper-server program it runs
+	"models":         hostPrivate,        // the model directory
+	"dictate-socket": hostPrivate,        // the dictation socket (remote.voice.socket)
+	// Non-path flags (WhisperTools): consumed with their values, never
+	// checked as paths.
+	"whisper-port":      hostUnchecked,
+	"model":             hostUnchecked,
+	"max-seconds":       hostUnchecked,
+	"agent-max-seconds": hostUnchecked,
+}
+
+// whisperProgram is the base name of lever-tool-whisper's program.
+const whisperProgram = "lever-tool-whisper"
+
+// isWhisperCommand reports whether t runs lever-tool-whisper: its program,
+// after an env(1) prefix, has that base name, or its command takes
+// -dictate-socket (a renamed copy or wrapper keeps the whisper checks).
+func isWhisperCommand(t Tool) bool {
+	if t.External || len(t.Command) == 0 {
+		return false
+	}
+	argv, _ := unwrapEnv(t.Command)
+	if len(argv) == 0 {
+		return false
+	}
+	if baseName(argv[0]) == whisperProgram {
+		return true
+	}
+	// A renamed copy or wrapper still gets the whisper checks when it
+	// takes the dictation socket flag, which no other lever tool has.
+	for _, a := range argv[1:] {
+		name := strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-")
+		if a != name && (name == "dictate-socket" || strings.HasPrefix(name, "dictate-socket=")) {
+			return true
+		}
+	}
+	return false
+}
+
+// knownFlag is the kind of a flag name, and whether lever reads it in a
+// command: toolPathFlags in every tool's, whisperToolFlags in a
+// whisper tool's.
+func knownFlag(whisper bool, name string) (hostPathKind, bool) {
+	if k, ok := toolPathFlags[name]; ok {
+		return k, true
+	}
+	if whisper {
+		k, ok := whisperToolFlags[name]
+		return k, ok
+	}
+	return 0, false
 }
 
 // hostPaths lists every host-run program and host secret the config names.
@@ -85,6 +153,9 @@ func (a *App) hostPaths() []hostPath {
 			add(p)
 		}
 	}
+	if a.RemoteEnabled() && a.Remote.Voice.Enabled {
+		add(hostPath{key: "remote.voice.socket", path: a.Remote.Voice.Socket, kind: hostPrivate})
+	}
 	return out
 }
 
@@ -95,7 +166,8 @@ func (a *App) hostPaths() []hostPath {
 //     up on the supervisor's fixed PATH, which is not in the tree), after
 //     an env(1) prefix too (unwrapEnv);
 //   - the value of each known path flag of the shipped tools
-//     (toolPathFlags), as "-f v", "-f=v" or "--f=v";
+//     (toolPathFlags; whisperToolFlags only in lever-tool-whisper's
+//     command), as "-f v", "-f=v" or "--f=v";
 //   - the code an interpreter runs (interpreterPaths): its script, the
 //     values of its code-path flags (ruby -I, node --require), and the
 //     paths in inline code (sh -c, -e).
@@ -127,24 +199,72 @@ func toolHostPaths(t Tool) []hostPath {
 			add(p.what, joinRaw(chdir, p.path), hostProgram)
 		}
 	}
-	args := t.Command[1:]
+	for _, f := range toolFlags(t) {
+		if f.kind != hostUnchecked {
+			if f.val != "" {
+				add("-"+f.name, f.val, f.kind)
+			}
+			if f.dashNext != "" {
+				add("-"+f.name, f.dashNext, f.kind)
+			}
+		}
+	}
+	return out
+}
+
+// toolFlag is one known flag in a tool's command (knownFlag), its kind,
+// and its value ("" when it has none).
+type toolFlag struct {
+	name, val string
+	kind      hostPathKind
+	// dashNext is the following word when it starts with "-" and so was
+	// not taken as the value: Go's flag package would take it, so a path
+	// flag's check covers it too (toolHostPaths).
+	dashNext string
+}
+
+// toolFlags lists the known flags in t's command (knownFlag), as "-f v",
+// "-f=v", "--f v" or "--f=v", in order. Unknown flags and other arguments
+// are skipped. A following word that starts with "-" is never taken as a
+// flag's value: it is read as a flag itself, so "-model -state x" cannot
+// hide -state from its check (the flag before it then has no value; a path
+// flag's check still covers that word as its value, as Go's flag package
+// would read it).
+func toolFlags(t Tool) []toolFlag {
+	if len(t.Command) == 0 {
+		return nil
+	}
+	whisper := isWhisperCommand(t)
+	var out []toolFlag
+	// The words the tool itself gets: past an env(1) prefix, with a plain
+	// env -S string split into words. The env forms this cannot read as env
+	// does (quotes, escapes or $ in -S, -vS, --split-string=) are refused
+	// at config load (envFormUnread).
+	argv, _ := unwrapEnv(t.Command)
+	if len(argv) == 0 {
+		argv = t.Command
+	}
+	args := argv[1:]
 	for i := 0; i < len(args); i++ {
 		name, ok := strings.CutPrefix(args[i], "-")
 		if !ok || name == "" {
 			continue
 		}
 		name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
-		kind, known := toolPathFlags[name]
+		kind, known := knownFlag(whisper, name)
 		if !known {
 			continue
 		}
+		dashNext := ""
 		if !hasVal && i+1 < len(args) {
-			i++
-			val = args[i]
+			if strings.HasPrefix(args[i+1], "-") {
+				dashNext = args[i+1]
+			} else {
+				i++
+				val = args[i]
+			}
 		}
-		if kind != hostUnchecked {
-			add("-"+name, val, kind)
-		}
+		out = append(out, toolFlag{name: name, val: val, kind: kind, dashNext: dashNext})
 	}
 	return out
 }
@@ -178,6 +298,14 @@ func (a *App) checkHostPathsOutsideTree() error {
 		}
 		if !w.inTree {
 			continue
+		}
+		if p.kind == hostProgramOutside {
+			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent could replace the program the host runs — "+
+				"install it outside the tree (a manager.read_only mount does not excuse it)", p.key, p.path, a.Tree)
+		}
+		if p.kind == hostPrivate {
+			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent could replace or reach it there, "+
+				"and a manager.read_only mount does not excuse it — move it outside the tree", p.key, p.path, a.Tree)
 		}
 		if p.kind == hostSecret {
 			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent can read and replace it there, "+

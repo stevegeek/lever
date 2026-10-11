@@ -145,6 +145,10 @@ func RemoteConfigHash(app *config.App) string {
 			f.NoUploads, f.NoShares, f.Excluded = !app.FilesUploadsOn(), !app.FilesSharesOn(), app.FilesExcludedLogins()
 			id.Files = f
 		}
+		if app.VoiceOn() {
+			id.Voice = &state.VoiceIdentity{Socket: app.Remote.Voice.Socket, MaxSeconds: app.EffectiveVoiceMaxSeconds(),
+				Excluded: app.VoiceExcludedLogins(), NoReadAloud: app.Remote.Voice.ReadAloud != nil && !*app.Remote.Voice.ReadAloud}
+		}
 	}
 	if app.PushOn() {
 		id.Push = app.Remote.Push.Subject

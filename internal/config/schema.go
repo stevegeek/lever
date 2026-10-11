@@ -462,7 +462,37 @@ type Remote struct {
 	// (remoteproxy/files.go, broker share_file). Off by default; needs
 	// landing: chat. See Files.
 	Files Files `yaml:"files"`
+	// Voice turns on dictation on the chat page: a login records a clip,
+	// the broker tool lever-tool-whisper transcribes it, and the text lands
+	// in the message box for review (never sent by itself). Off by default;
+	// needs landing: chat. See Voice.
+	Voice Voice `yaml:"voice"`
 }
+
+// Voice is remote.voice: dictation on the chat page. The transcription
+// itself runs in the broker tool lever-tool-whisper (whisper-server is its
+// child); the proxy posts each checked clip to the tool's dictation socket
+// and returns the text to the login that sent it. Audio and transcripts are
+// never stored.
+type Voice struct {
+	Enabled bool `yaml:"enabled"`
+	// Socket is the tool's dictation socket: an absolute host path outside
+	// the tree, equal to the -dictate-socket of the lever-tool-whisper entry
+	// in broker.tools. Required when enabled.
+	Socket string `yaml:"socket"`
+	// MaxSeconds bounds one clip. Zero = DefaultVoiceMaxSeconds; at most
+	// MaxVoiceMaxSeconds, and at most the tool's -max-seconds.
+	MaxSeconds int `yaml:"max_seconds"`
+	// ReadAloud turns the read-aloud button on agent messages on or off
+	// (the browser's on-device voices; nothing leaves the device). nil =
+	// on while voice is enabled; never shown while it is off.
+	ReadAloud *bool `yaml:"read_aloud"`
+}
+
+const (
+	DefaultVoiceMaxSeconds = 300
+	MaxVoiceMaxSeconds     = 600
+)
 
 // Push is remote.push.
 type Push struct {

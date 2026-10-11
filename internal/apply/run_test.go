@@ -3681,7 +3681,7 @@ func TestWaitManagerLiveGatesUpsResumePath(t *testing.T) {
 		Scion:            scion.New(r, scion.Options{}),
 		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
 	}
-	err := WaitManagerLive(context.Background(), deps, "hello", "/lever")
+	err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil)
 	if !errors.Is(err, scion.ErrAgentDied) || !strings.Contains(err.Error(), "up: manager") {
 		t.Fatalf("want an up-prefixed ErrAgentDied, got %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -132,10 +133,17 @@ func (f logFunc) printf(format string, args ...any) {
 // logLine is the one write site for apply's user-facing lines. The
 // arguments wrap errors from the jail and the hub (scion's stderr, a
 // container status) via %v, so the formatted line goes through
-// termsafe.Sanitize before it reaches the terminal.
+// termsafe.Sanitize before it reaches the terminal. Lines are serialized:
+// the manager start's progress line (apply.Progress) logs from its own
+// goroutine while the step logs from the main one, and w may be a buffer.
 func logLine(w io.Writer, format string, args ...any) {
-	fmt.Fprintln(w, termsafe.Sanitize(fmt.Sprintf(format, args...)))
+	line := termsafe.Sanitize(fmt.Sprintf(format, args...))
+	logLineMu.Lock()
+	defer logLineMu.Unlock()
+	fmt.Fprintln(w, line)
 }
+
+var logLineMu sync.Mutex
 
 // remoteController owns the apply-time remote-proxy lifecycle: spawning the
 // detached `lever remote serve` child, exactly like brokerController.Start
@@ -1395,6 +1403,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// AgentSession lets start-manager heal an expired agent hub token
 		// and a stopped phase over a live harness (apply.HealAgentSession).
 		AgentSession: jail.AgentProbe{R: b.JailRunner()},
+		// ContainerRunning lets the manager gate ask podman itself whether
+		// the container still runs (lever#164), not the hub's heartbeat.
+		ContainerRunning: func(ctx context.Context, ref string) (bool, error) {
+			return jail.ContainerRunning(ctx, b.JailRunner(), ref)
+		},
 		AgentRevoked: agentRevoked(w.app, st),
 
 		EnsureHubLogin: w.ensureHubLogin,

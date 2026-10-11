@@ -132,6 +132,9 @@ type run struct {
 	// process; see ErrBootstrapLatched). start-manager's create path needs
 	// exactly that "did we mint fresh material this run" signal.
 	minted bool
+	// progress is the start-manager progress line while the manager is
+	// started and gated (nil outside that window).
+	progress *Progress
 	// fresh is PlanOpts.Fresh: discard any present manager record at
 	// start-manager (lever#33).
 	fresh bool
@@ -332,6 +335,21 @@ type Deps struct {
 	// (HealAgentSession) before it converges the manager, and the workers'
 	// after. nil ⇒ no heal.
 	AgentSession AgentSessionProbe
+	// ContainerRunning asks podman itself whether an agent container runs
+	// (jail.ContainerRunning in production), not the hub's heartbeat column.
+	// The manager gate reads it when claude's tmux pane is not alive, to tell
+	// a container that stopped (a failed pre-start hook) from one still
+	// booting, and as its fallback when the pane cannot be probed. nil ⇒ the
+	// gate has only the pane probe.
+	ContainerRunning func(ctx context.Context, ref string) (bool, error)
+	// HarnessWait bounds how long the manager gate waits, once the hub record
+	// reads live, for claude's tmux pane to come alive (the pre-start hook
+	// runs first). Zero takes the production default (2 min).
+	HarnessWait time.Duration
+	// clock and progressTicker drive the start progress line (Progress);
+	// nil ⇒ time.Now and a real ticker. Tests inject both.
+	clock          func() time.Time
+	progressTicker func(time.Duration) (<-chan time.Time, func())
 	// AgentRevoked reports an agent (by slug) the broker has revoked, read
 	// from the persisted revocation list, so the session heal does not reset
 	// a revoked agent's hub token. nil ⇒ none known.
@@ -1072,11 +1090,17 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 			return err
 		}
 	}
+	// A container start, the pre-start hook, claude's boot and the settle
+	// window can run over a minute: say what is happening about every 15 s
+	// (lever#168), from the action to the end of the gate.
+	r.progress = StartProgress(r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
-	if err != nil {
-		return err
+	if err == nil {
+		err = r.waitManagerLive(ctx, jp, acted)
 	}
-	if err := r.waitManagerLive(ctx, jp, acted); err != nil {
+	r.progress.Stop()
+	r.progress = nil
+	if err != nil {
 		return err
 	}
 	healNamedSessions(ctx, r.d, jp, workerNames(r.app))
@@ -2179,32 +2203,16 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error 
 		// One look still refuses a running RECORD over a dead container.
 		b.Settle = 0
 	}
-	return gateManagerLive(ctx, r.d.Scion, b, r.app.Name, jp, "start-manager")
+	return gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress)
 }
 
-// gateManagerLive is the manager liveness gate every bring-up path shares: the
-// start-manager step here and `lever up`'s own resume/no-op paths (WaitManagerLive
-// / ObserveManagerLive), which act on the manager WITHOUT going through Run and
-// used to print "is up." with no observation at all (lever#31). subject
-// prefixes the exhaustion/death error; ctx errors pass through unwrapped.
-func gateManagerLive(ctx context.Context, sc *scion.Client, b RetryBudget, name, project, subject string) error {
-	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
-		return sc.List(c, project)
-	}, name, scion.LiveBudget{Attempts: b.Attempts, Interval: b.Interval, Settle: b.Settle})
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return fmt.Errorf("%s: manager %q %w", subject, name, err)
-}
-
-// WaitManagerLive is the full gate — become live, then hold for the settle
-// window — for a path that just acted on the manager (`lever up` after its own
-// `scion resume`). Same List, same budget as the start-manager step.
-func WaitManagerLive(ctx context.Context, d Deps, name, project string) error {
-	return gateManagerLive(ctx, d.Scion, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up")
+// WaitManagerLive is the full gate — become live, see the harness run, then
+// hold for the settle window — for a path that just acted on the manager
+// (`lever up` after its own `scion resume`). Same List, same budget, same
+// in-container check as the start-manager step. prog (may be nil) gets the
+// gate's stages for its progress line.
+func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
+	return gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog)
 }
 
 // observeAttempts bounds ObserveManagerLive's list retries: enough to ride

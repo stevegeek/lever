@@ -48,8 +48,9 @@ const DefaultReleaseTag = `^v[0-9]+\.[0-9]+\.[0-9]+$`
 
 // Bounds on what one call reads from GitHub.
 const (
-	maxCheckRuns = 100 // one page of check runs (and of statuses) per head SHA
-	maxTagPages  = 20  // 100 tags a page
+	maxCheckRuns   = 100 // one page of check runs (and of statuses) per head SHA
+	maxTagPages    = 20  // 100 tags a page
+	maxReviewPages = 10  // 100 reviews a page
 )
 
 // CheckPolicy is what pr_merge requires of the checks on the head SHA
@@ -110,8 +111,12 @@ type Ops struct {
 	TextMax      int      // bytes of PR body or release notes
 	MergeMethods []string // allowed merge methods; the first is the default
 	MergeChecks  CheckPolicy
-	ReleaseTag   *regexp.Regexp // matched against the whole tag
-	Deadline     time.Duration  // bounds one whole call (0 = none)
+	// AllowUnreviewed turns off pr_merge's review gate (an approving review
+	// by a person on the head SHA). The zero value keeps it on.
+	AllowUnreviewed bool
+	AppSlug         string         // the App's slug; its reviews never count (optional: bots never count)
+	ReleaseTag      *regexp.Regexp // matched against the whole tag
+	Deadline        time.Duration  // bounds one whole call (0 = none)
 
 	relOnce sync.Once
 	relLock chan struct{}
@@ -158,13 +163,17 @@ type PRStatusResult struct {
 
 // MergeResult is what pr_merge returns.
 type MergeResult struct {
-	OK       bool    `json:"ok"`
-	Repo     string  `json:"repo"`
-	Number   int     `json:"number"`
-	Method   string  `json:"method"`
-	HeadSHA  string  `json:"head_sha"`
-	MergeSHA string  `json:"merge_sha"`
-	Checks   []Check `json:"checks"`
+	OK         bool     `json:"ok"`
+	Repo       string   `json:"repo"`
+	Number     int      `json:"number"`
+	Method     string   `json:"method"`
+	HeadSHA    string   `json:"head_sha"`
+	MergeSHA   string   `json:"merge_sha"`
+	Checks     []Check  `json:"checks"`
+	ApprovedBy []string `json:"approved_by"`
+	Base       string   `json:"base,omitempty"` // the base read back after the merge
+	Retargeted bool     `json:"retargeted"`     // the base was not the default branch after the merge
+	Warning    string   `json:"warning,omitempty"`
 }
 
 // ReleaseResult is what release returns.
@@ -205,6 +214,19 @@ type ghPull struct {
 	HTMLURL        string     `json:"html_url"`
 	Head           ghPullSide `json:"head"`
 	Base           ghPullSide `json:"base"`
+}
+
+type ghUser struct {
+	Login string `json:"login"`
+	ID    int64  `json:"id"`
+	Type  string `json:"type"`
+}
+
+type ghReview struct {
+	ID       int64   `json:"id"`
+	User     *ghUser `json:"user"`
+	State    string  `json:"state"`
+	CommitID string  `json:"commit_id"`
 }
 
 type ghCheckRuns struct {
@@ -514,12 +536,101 @@ func checkLabel(name string) string {
 	return name
 }
 
+// reviews reads every review on PR number, oldest first, at most
+// maxReviewPages pages.
+func (o *Ops) reviews(ctx context.Context, tok, repo, number string) ([]ghReview, error) {
+	var all []ghReview
+	for page := 1; ; page++ {
+		if page > maxReviewPages {
+			return nil, fmt.Errorf("more than %d reviews on PR #%s; cannot verify them all", maxReviewPages*100, number)
+		}
+		var rs []ghReview
+		q := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/pulls/"+number+"/reviews?"+q.Encode(), nil, &rs); err != nil {
+			return nil, fmt.Errorf("read reviews: %w", err)
+		}
+		if len(rs) > 100 {
+			return nil, fmt.Errorf("read reviews: more entries than requested")
+		}
+		all = append(all, rs...)
+		if len(rs) < 100 {
+			return all, nil
+		}
+	}
+}
+
+// isAppOrBot reports whether a review's author is a bot, or the App itself.
+func (o *Ops) isAppOrBot(u *ghUser) bool {
+	if u == nil || u.Type != "User" {
+		return true
+	}
+	login := strings.ToLower(u.Login)
+	if strings.HasSuffix(login, "[bot]") {
+		return true
+	}
+	return o.AppSlug != "" && strings.TrimSuffix(login, "[bot]") == strings.ToLower(o.AppSlug)
+}
+
+// reviewGate is pr_merge's review rule. Per reviewer, the latest review that
+// approves, requests changes or was dismissed decides (a comment changes
+// nothing, as on GitHub). Any reviewer whose latest such review requests
+// changes blocks the merge. At least one reviewer who is a person, not a bot
+// and not the App, must have the latest such review an approval of exactly
+// head. It returns the approvers' logins.
+func (o *Ops) reviewGate(rs []ghReview, head string) ([]string, error) {
+	type decision struct {
+		r     ghReview
+		order int
+	}
+	latest := map[string]decision{}
+	for i, r := range rs {
+		switch r.State {
+		case "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
+		default:
+			continue // COMMENTED, PENDING
+		}
+		key := "ghost"
+		if r.User != nil {
+			key = strconv.FormatInt(r.User.ID, 10) + "/" + strings.ToLower(r.User.Login)
+		}
+		latest[key] = decision{r, i}
+	}
+	var blockers, approvers []string
+	var order []decision
+	for _, d := range latest {
+		order = append(order, d)
+	}
+	slices.SortFunc(order, func(a, b decision) int { return a.order - b.order })
+	for _, d := range order {
+		login := "ghost"
+		if d.r.User != nil {
+			login = checkLabel(d.r.User.Login)
+		}
+		switch {
+		case d.r.State == "CHANGES_REQUESTED":
+			blockers = append(blockers, login)
+		case d.r.State == "APPROVED" && d.r.CommitID == head && !o.isAppOrBot(d.r.User):
+			approvers = append(approvers, login)
+		}
+	}
+	if len(blockers) > 0 {
+		return nil, fmt.Errorf("changes requested by %s; not merged", strings.Join(blockers, ", "))
+	}
+	if len(approvers) == 0 {
+		return nil, fmt.Errorf("no approving review by a person on the head %s (an approval of an earlier commit, "+
+			"or by a bot or the App, does not count); ask a reviewer to approve", head)
+	}
+	return approvers, nil
+}
+
 // PRMerge merges an open PR from a prefix branch of the same repository into
-// the default branch, once its checks passed, pinned to the checked head SHA.
+// the default branch, once its checks passed and (unless AllowUnreviewed) a
+// person approved its head, pinned to the checked head SHA.
 func (o *Ops) PRMerge(ctx context.Context, caller, repo, number, method string) (res MergeResult, err error) {
 	defer func() {
 		o.audit(OpPRMerge, err, "caller", caller, "repo", repo, "number", number, "method", method,
-			"head", res.HeadSHA, "merge", res.MergeSHA)
+			"head", res.HeadSHA, "merge", res.MergeSHA, "review_gate", !o.AllowUnreviewed,
+			"approved_by", strings.Join(res.ApprovedBy, ","), "base", res.Base, "retargeted", res.Retargeted)
 	}()
 	if err := ValidateNumber(number); err != nil {
 		return res, err
@@ -575,6 +686,15 @@ func (o *Ops) PRMerge(ctx context.Context, caller, repo, number, method string) 
 	if err := checkGate(cs, complete, o.MergeChecks); err != nil {
 		return res, err
 	}
+	if !o.AllowUnreviewed {
+		rs, err := o.reviews(ctx, tok, repo, number)
+		if err != nil {
+			return res, err
+		}
+		if res.ApprovedBy, err = o.reviewGate(rs, p.Head.SHA); err != nil {
+			return res, err
+		}
+	}
 	// sha pins the merge to the checked head: GitHub refuses (409) when the
 	// branch moved since. No retry: a moved head needs a fresh check.
 	var out struct {
@@ -592,6 +712,20 @@ func (o *Ops) PRMerge(ctx context.Context, caller, repo, number, method string) 
 		return res, fmt.Errorf("merge PR #%s: GitHub did not merge it", number)
 	}
 	res.OK, res.MergeSHA = true, out.SHA
+	// The base can change between the read and the merge (someone retargets
+	// the PR): read it back and say so.
+	after, rerr := o.pull(ctx, tok, repo, number)
+	switch {
+	case rerr != nil:
+		res.Warning = fmt.Sprintf("merged, but could not read the PR back to confirm its base: %v", rerr)
+	case after.Base.Ref != info.DefaultBranch:
+		res.Base, res.Retargeted = after.Base.Ref, true
+		res.Warning = fmt.Sprintf("PR #%s was retargeted: it merged into %q, not the default branch %q", number, after.Base.Ref, info.DefaultBranch)
+		o.Log.Warn("github.pr_merge", "caller", caller, "repo", repo, "number", number, "event", "retargeted",
+			"base", after.Base.Ref, "default_branch", info.DefaultBranch, "merge", out.SHA)
+	default:
+		res.Base = after.Base.Ref
+	}
 	return res, nil
 }
 

@@ -39,8 +39,24 @@ type opts struct {
 	ops                                                              []string // offered operations, in ghpush.AllOps order
 	mergeMethods                                                     []string
 	mergeChecks                                                      ghpush.CheckPolicy
+	mergeRequireReview                                               bool
+	appSlug                                                          string
 	releaseTag                                                       *regexp.Regexp
 	textMax                                                          int
+}
+
+var appSlugRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,99}$`)
+
+// startupWarnings are the settings an operator turned to the riskier side,
+// logged when the tool starts.
+func startupWarnings(o opts) []string {
+	var w []string
+	if slices.Contains(o.ops, ghpush.OpPRMerge) && !o.mergeRequireReview {
+		w = append(w, "-merge-require-review=false: pr_merge merges without a person's approving review; "+
+			"CI runs the agent's own code, so an agent that can open and merge PRs can make CI pass (for example by deleting tests) and merge. "+
+			"Require approvals in the default branch's ruleset, or turn the review gate back on")
+	}
+	return w
 }
 
 // maxTextMax is GitHub's limit on a PR body or release notes.
@@ -65,6 +81,9 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&ops, "ops", ghpush.OpPush, "comma list of operations to offer: "+strings.Join(ghpush.AllOps, ", "))
 	fs.StringVar(&methods, "merge-methods", "squash", "comma list of merge methods pr_merge may use (squash, merge, rebase); the first is the default")
 	fs.StringVar(&checks, "merge-checks", "", "what pr_merge requires on the head: any (at least one check, all green), none, or a comma list of check names that must succeed; required with pr_merge, no default")
+	fs.BoolVar(&o.mergeRequireReview, "merge-require-review", true, "pr_merge requires an approving review by a person (not a bot or the App) on the PR's head SHA, "+
+		"and no outstanding change request; turn off only with -merge-require-review=false")
+	fs.StringVar(&o.appSlug, "app-slug", "", "the GitHub App's slug: its reviews never count for -merge-require-review (bots never count either)")
 	fs.StringVar(&releaseTag, "release-tag", ghpush.DefaultReleaseTag, "pattern a release tag must match (whole tag)")
 	fs.IntVar(&o.textMax, "text-max", 8000, "bytes of PR body or release notes")
 	err := fs.Parse(args)
@@ -116,6 +135,9 @@ func parseFlags(args []string) (opts, error) {
 	case slices.Contains(o.ops, ghpush.OpPRMerge):
 		return o, fmt.Errorf("-ops offers pr_merge, so -merge-checks must be set explicitly: a comma list of check names, " +
 			"any (at least one check, all green; can merge before slower checks report) or none")
+	}
+	if o.appSlug != "" && !appSlugRE.MatchString(o.appSlug) {
+		return o, fmt.Errorf("-app-slug %q: want the App's slug, such as my-app", o.appSlug)
 	}
 	if o.releaseTag, err = regexp.Compile(`^(?:` + releaseTag + `)$`); err != nil || releaseTag == "" {
 		return o, fmt.Errorf("-release-tag %q: not a usable pattern", releaseTag)
@@ -221,6 +243,10 @@ func releaseBackstop(o opts) func(captool.ValidatedContext, map[string]string) e
 func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 	repoParam := captool.ParamSpec{Name: "repo", Type: "string", Description: "owner/name, e.g. stevegeek/lever"}
 	caveat := map[string]string{"repo": "repo"}
+	reviewNote := " and a person approved that SHA with no change request outstanding"
+	if !o.mergeRequireReview {
+		reviewNote = " (no review is required)"
+	}
 	all := map[string]captool.Operation{
 		ghpush.OpPush: {
 			Name:        "push",
@@ -265,7 +291,8 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 		ghpush.OpPRMerge: {
 			Name: ghpush.OpPRMerge,
 			Description: "merge an open PR from a " + o.prefix + "* branch of the same repository into the default branch, " +
-				"only when it is mergeable and every check on its head SHA passed; merged pinned to that SHA",
+				"only when it is mergeable, every check on its head SHA passed" + reviewNote + "; merged pinned to that SHA. " +
+				"The result says if the PR was retargeted to another base",
 			Params: []captool.ParamSpec{
 				repoParam,
 				{Name: "number", Type: "string", Description: "PR number, e.g. 12"},
@@ -334,6 +361,9 @@ func main() {
 		}
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	for _, w := range startupWarnings(o) {
+		logger.Warn("lever-tool-github: " + w)
+	}
 	g := ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute}
 	if err := g.CheckVersion(context.Background(), o.state); err != nil {
 		log.Fatal(err)
@@ -356,6 +386,7 @@ func main() {
 		API:    &ghpush.API{Base: "https://api.github.com", HTTP: ghpush.NewAPIClient(&http.Client{Timeout: 30 * time.Second})},
 		Tokens: minter, Log: logger,
 		TextMax: o.textMax, MergeMethods: o.mergeMethods, MergeChecks: o.mergeChecks, ReleaseTag: o.releaseTag,
+		AllowUnreviewed: !o.mergeRequireReview, AppSlug: o.appSlug,
 		Deadline: 2 * time.Minute,
 	}
 	srv, err := captool.New(captool.Config{

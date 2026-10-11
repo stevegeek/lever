@@ -64,6 +64,8 @@ type fakeGH struct {
 	hideOpenList  int              // list calls that miss the open PRs (a race)
 	tagRace       bool             // the tag appears before the ref is created
 	merges        []map[string]any
+	reviews       map[int][]map[string]any
+	retargetTo    string // the PR's base after a merge (it was retargeted)
 	reqs          []string
 	srv           *httptest.Server
 }
@@ -74,14 +76,23 @@ func newFakeGH(t *testing.T) *fakeGH {
 		pulls:    map[int]map[string]any{},
 		runs:     map[string][]fakeRun{},
 		statuses: map[string][]fakeStatus{},
+		reviews:  map[int][]map[string]any{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
 }
 
-// addPull adds an open, mergeable PR from agent/x into main.
+// review is one review as the reviews API returns it.
+func review(id int64, login, typ, state, commit string) map[string]any {
+	return map[string]any{"id": id * 1000, "state": state, "commit_id": commit,
+		"user": map[string]any{"login": login, "id": id, "type": typ}}
+}
+
+// addPull adds an open, mergeable PR from agent/x into main, approved on its
+// head by a person.
 func (f *fakeGH) addPull(n int, mod func(p map[string]any)) {
+	f.reviews[n] = []map[string]any{review(1, "alice", "User", "APPROVED", shaHead)}
 	p := map[string]any{
 		"number": n, "state": "open", "merged": false, "draft": false, "mergeable": true,
 		"mergeable_state": "clean", "html_url": fmt.Sprintf("https://github.example/%s/pull/%d", repo, n),
@@ -101,10 +112,11 @@ func (f *fakeGH) json(w http.ResponseWriter, code int, v any) {
 }
 
 var (
-	rePull   = regexp.MustCompile(`^/pulls/([0-9]+)$`)
-	reMerge  = regexp.MustCompile(`^/pulls/([0-9]+)/merge$`)
-	reRuns   = regexp.MustCompile(`^/commits/([0-9a-f]+)/check-runs$`)
-	reStatus = regexp.MustCompile(`^/commits/([0-9a-f]+)/status$`)
+	reReviews = regexp.MustCompile(`^/pulls/([0-9]+)/reviews$`)
+	rePull    = regexp.MustCompile(`^/pulls/([0-9]+)$`)
+	reMerge   = regexp.MustCompile(`^/pulls/([0-9]+)/merge$`)
+	reRuns    = regexp.MustCompile(`^/commits/([0-9a-f]+)/check-runs$`)
+	reStatus  = regexp.MustCompile(`^/commits/([0-9a-f]+)/status$`)
 )
 
 func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +214,23 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		pl["state"], pl["merged"] = "closed", true
+		if f.retargetTo != "" {
+			pl["base"].(map[string]any)["ref"] = f.retargetTo
+		}
 		f.json(w, 200, map[string]any{"merged": true, "sha": shaNew, "message": "Pull Request successfully merged"})
+	case reReviews.MatchString(p) && r.Method == "GET":
+		n, _ := strconv.Atoi(reReviews.FindStringSubmatch(p)[1])
+		page, _ := strconv.Atoi(q.Get("page"))
+		per, _ := strconv.Atoi(q.Get("per_page"))
+		if page < 1 || per != 100 {
+			f.t.Errorf("reviews query %q", r.URL.RawQuery)
+		}
+		out := []map[string]any{}
+		all := f.reviews[n]
+		for i := (page - 1) * per; i < len(all) && i < page*per; i++ {
+			out = append(out, all[i])
+		}
+		f.json(w, 200, out)
 	case reRuns.MatchString(p) && r.Method == "GET":
 		if q.Get("filter") != "latest" || q.Get("per_page") != "100" {
 			f.t.Errorf("check runs query %q", r.URL.RawQuery)
@@ -889,5 +917,134 @@ func TestSemverHyphenIdentifierIsNotNumeric(t *testing.T) {
 	}
 	if _, ok := numericID("+1"); ok {
 		t.Error("+1 read as numeric")
+	}
+}
+
+func TestPRMergeReviewGate(t *testing.T) {
+	const shaOld = "4444444444444444444444444444444444444444"
+	appr := func(id int64, login, typ, commit string) map[string]any {
+		return review(id, login, typ, "APPROVED", commit)
+	}
+	for _, c := range []struct {
+		name    string
+		slug    string
+		reviews []map[string]any
+		want    string // "" = merges
+		by      string
+	}{
+		{name: "approved on head", reviews: []map[string]any{appr(1, "alice", "User", shaHead)}, by: "alice"},
+		{name: "no reviews", reviews: nil, want: "no approving review"},
+		{name: "approval of an older commit", reviews: []map[string]any{appr(1, "alice", "User", shaOld)}, want: "no approving review"},
+		{name: "bot approval", reviews: []map[string]any{appr(2, "ci-helper[bot]", "Bot", shaHead)}, want: "no approving review"},
+		{name: "app approval by slug", slug: "lever-dev", reviews: []map[string]any{appr(3, "lever-dev[bot]", "User", shaHead)}, want: "no approving review"},
+		{name: "app approval, plain slug", slug: "Lever-Dev", reviews: []map[string]any{appr(3, "lever-dev", "User", shaHead)}, want: "no approving review"},
+		{name: "organization", reviews: []map[string]any{appr(4, "org", "Organization", shaHead)}, want: "no approving review"},
+		{name: "deleted user", reviews: []map[string]any{{"id": 1, "state": "APPROVED", "commit_id": shaHead, "user": nil}}, want: "no approving review"},
+		{name: "commented only", reviews: []map[string]any{review(1, "alice", "User", "COMMENTED", shaHead)}, want: "no approving review"},
+		{name: "dismissed", reviews: []map[string]any{review(1, "alice", "User", "DISMISSED", shaHead)}, want: "no approving review"},
+		{name: "changes requested", reviews: []map[string]any{appr(1, "alice", "User", shaHead), review(2, "bob", "User", "CHANGES_REQUESTED", shaOld)}, want: "changes requested by bob"},
+		{name: "changes requested by a bot block too", reviews: []map[string]any{appr(1, "alice", "User", shaHead), review(2, "x[bot]", "Bot", "CHANGES_REQUESTED", shaHead)}, want: "changes requested by x[bot]"},
+		{name: "approval after own change request", reviews: []map[string]any{review(1, "alice", "User", "CHANGES_REQUESTED", shaOld), appr(1, "alice", "User", shaHead)}, by: "alice"},
+		{name: "change request after own approval", reviews: []map[string]any{appr(1, "alice", "User", shaHead), review(1, "alice", "User", "CHANGES_REQUESTED", shaHead)}, want: "changes requested by alice"},
+		{name: "comment after approval keeps it", reviews: []map[string]any{appr(1, "alice", "User", shaHead), review(1, "alice", "User", "COMMENTED", shaHead)}, by: "alice"},
+		{name: "comment after change request keeps it", reviews: []map[string]any{review(2, "bob", "User", "CHANGES_REQUESTED", shaOld), review(2, "bob", "User", "COMMENTED", shaHead), appr(1, "alice", "User", shaHead)}, want: "changes requested by bob"},
+		{name: "dismissed change request", reviews: []map[string]any{review(2, "bob", "User", "DISMISSED", shaOld), appr(1, "alice", "User", shaHead)}, by: "alice"},
+		{name: "two approvers", reviews: []map[string]any{appr(1, "alice", "User", shaHead), appr(2, "carol", "User", shaHead)}, by: "alice,carol"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeGH(t)
+			f.addPull(7, nil)
+			f.reviews[7] = c.reviews
+			f.runs[shaHead] = []fakeRun{{"test", "completed", "success"}}
+			o, _, logBuf := newOps(t, f)
+			o.AppSlug = c.slug
+			res, err := o.PRMerge(context.Background(), "manager", repo, "7", "")
+			if c.want != "" {
+				wantErr(t, err, c.want)
+				if len(f.merges) != 0 {
+					t.Fatalf("an unreviewed merge reached GitHub: %v", f.merges)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(res.ApprovedBy, ",") != c.by || len(f.merges) != 1 {
+				t.Fatalf("approved_by %v, merges %v", res.ApprovedBy, f.merges)
+			}
+			if !strings.Contains(logBuf.String(), "approved_by="+c.by) || !strings.Contains(logBuf.String(), "review_gate=true") {
+				t.Fatalf("audit %s", logBuf.String())
+			}
+		})
+	}
+}
+
+func TestPRMergeReviewPagination(t *testing.T) {
+	f := newFakeGH(t)
+	f.addPull(7, nil)
+	f.runs[shaHead] = []fakeRun{{"test", "completed", "success"}}
+	var rs []map[string]any
+	for i := 0; i < 150; i++ {
+		rs = append(rs, review(int64(10+i), fmt.Sprintf("u%d", i), "User", "COMMENTED", shaHead))
+	}
+	// The approval is on page 2, and a change request after it on page 2 too.
+	f.reviews[7] = append(rs, review(1, "alice", "User", "APPROVED", shaHead))
+	o, _, _ := newOps(t, f)
+	if _, err := o.PRMerge(context.Background(), "manager", repo, "7", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.addPull(8, nil)
+	f.reviews[8] = append(append([]map[string]any{}, f.reviews[7]...), review(2, "bob", "User", "CHANGES_REQUESTED", shaHead))
+	_, err := o.PRMerge(context.Background(), "manager", repo, "8", "")
+	wantErr(t, err, "changes requested by bob")
+	f.addPull(9, nil)
+	for i := 0; i < maxReviewPages*100; i++ {
+		f.reviews[9] = append(f.reviews[9], review(int64(10+i), "u", "User", "COMMENTED", shaHead))
+	}
+	_, err = o.PRMerge(context.Background(), "manager", repo, "9", "")
+	wantErr(t, err, "cannot verify them all")
+}
+
+func TestPRMergeAllowUnreviewed(t *testing.T) {
+	f := newFakeGH(t)
+	f.addPull(7, nil)
+	f.reviews[7] = nil
+	f.runs[shaHead] = []fakeRun{{"test", "completed", "success"}}
+	o, _, logBuf := newOps(t, f)
+	o.AllowUnreviewed = true
+	if _, err := o.PRMerge(context.Background(), "manager", repo, "7", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range f.reqs {
+		if strings.Contains(r, "/reviews") {
+			t.Fatalf("reviews read with the gate off: %v", f.reqs)
+		}
+	}
+	if !strings.Contains(logBuf.String(), "review_gate=false") {
+		t.Fatalf("audit %s", logBuf.String())
+	}
+}
+
+func TestPRMergeReportsARetarget(t *testing.T) {
+	f := newFakeGH(t)
+	f.addPull(7, nil)
+	f.runs[shaHead] = []fakeRun{{"test", "completed", "success"}}
+	o, _, logBuf := newOps(t, f)
+	res, err := o.PRMerge(context.Background(), "manager", repo, "7", "")
+	if err != nil || res.Retargeted || res.Base != "main" || res.Warning != "" {
+		t.Fatalf("res %+v %v", res, err)
+	}
+	f.addPull(8, nil)
+	f.retargetTo = "release"
+	res, err = o.PRMerge(context.Background(), "manager", repo, "8", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || !res.Retargeted || res.Base != "release" || !strings.Contains(res.Warning, `retargeted: it merged into "release"`) {
+		t.Fatalf("res %+v", res)
+	}
+	log := logBuf.String()
+	if !strings.Contains(log, "event=retargeted") || !strings.Contains(log, "base=release") || !strings.Contains(log, "retargeted=true") {
+		t.Fatalf("audit %s", log)
 	}
 }

@@ -123,7 +123,7 @@ func TestParseFlagsOpsDefaultIsPushOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(o.ops, []string{"push"}) || !slices.Equal(o.mergeMethods, []string{"squash"}) ||
-		o.mergeChecks.Any || o.mergeChecks.None || len(o.mergeChecks.Names) != 0 || o.textMax != 8000 || !o.releaseTag.MatchString("v1.2.3") {
+		!o.mergeRequireReview || o.appSlug != "" || o.mergeChecks.Any || o.mergeChecks.None || len(o.mergeChecks.Names) != 0 || o.textMax != 8000 || !o.releaseTag.MatchString("v1.2.3") {
 		t.Fatalf("defaults %+v", o)
 	}
 	ops := operations(o, nil, nil)
@@ -217,6 +217,36 @@ func TestParseFlagsMergeChecksIsExplicit(t *testing.T) {
 	}
 	// Without pr_merge the flag is not needed.
 	mustParse(t, "-ops", "push,pr_open,pr_status,release")
+}
+
+func TestMergeRequireReview(t *testing.T) {
+	o := mustParse(t, "-ops", "pr_merge", "-merge-checks", "any")
+	if !o.mergeRequireReview || len(startupWarnings(o)) != 0 {
+		t.Fatalf("the review gate must be on by default, without a warning: %+v", o)
+	}
+	if d := operations(o, nil, nil)[0].Description; !strings.Contains(d, "a person approved") {
+		t.Fatalf("description %q", d)
+	}
+	o = mustParse(t, "-ops", "pr_merge", "-merge-checks", "any", "-merge-require-review=false")
+	w := startupWarnings(o)
+	if o.mergeRequireReview || len(w) != 1 || !strings.Contains(w[0], "without a person's approving review") {
+		t.Fatalf("off: %+v %v", o, w)
+	}
+	if d := operations(o, nil, nil)[0].Description; !strings.Contains(d, "no review is required") {
+		t.Fatalf("description %q", d)
+	}
+	// No warning when pr_merge is not offered.
+	if w := startupWarnings(mustParse(t, "-merge-require-review=false")); len(w) != 0 {
+		t.Fatalf("warnings %v", w)
+	}
+	if o := mustParse(t, "-app-slug", "lever-dev"); o.appSlug != "lever-dev" {
+		t.Fatalf("slug %q", o.appSlug)
+	}
+	for _, bad := range []string{"-x", "a/b", "a b", "a[bot]"} {
+		if _, err := parseFlags(append(baseFlags(t), "-app-slug", bad)); err == nil {
+			t.Errorf("-app-slug %q must be refused", bad)
+		}
+	}
 }
 
 func TestOptInBackstops(t *testing.T) {

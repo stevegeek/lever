@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-11
+
 ### Added
 
 - **Shared folders (`shared_folders`, opt-in).** A tree folder that the agents you name mount at

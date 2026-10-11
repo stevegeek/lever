@@ -320,6 +320,12 @@ type Deps struct {
 	// than the config: they apply at start, so a kept manager has the old
 	// ones until its next start. nil skips the warning. Optional.
 	ReadClaudeSettings func(ctx context.Context, ref string) (jail.ClaudeDelivered, error)
+	// HarnessLogTail reads the tail of an agent container's log
+	// (jail.AgentProbe.LogTail in production). When the manager liveness
+	// gate sees the harness die, it is matched for a known cause
+	// (HarnessDeathHint) and the cause and recovery are added to the error.
+	// Never printed. nil skips the hint. Optional.
+	HarnessLogTail func(ctx context.Context, ref string) (string, error)
 	// RecordVolumes reads the extra mounts the hub record of agent in
 	// project was created with (its inline-config volumes, through the
 	// controller's read-only agent listing), as jail mounts. It is
@@ -2179,7 +2185,8 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error 
 		// One look still refuses a running RECORD over a dead container.
 		b.Settle = 0
 	}
-	return gateManagerLive(ctx, r.d.Scion, b, r.app.Name, jp, "start-manager")
+	err := gateManagerLive(ctx, r.d.Scion, b, r.app.Name, jp, "start-manager")
+	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
 // gateManagerLive is the manager liveness gate every bring-up path shares: the
@@ -2204,7 +2211,8 @@ func gateManagerLive(ctx context.Context, sc *scion.Client, b RetryBudget, name,
 // window — for a path that just acted on the manager (`lever up` after its own
 // `scion resume`). Same List, same budget as the start-manager step.
 func WaitManagerLive(ctx context.Context, d Deps, name, project string) error {
-	return gateManagerLive(ctx, d.Scion, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up")
+	err := gateManagerLive(ctx, d.Scion, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up")
+	return withHarnessDeathHint(ctx, d, err, project, name)
 }
 
 // observeAttempts bounds ObserveManagerLive's list retries: enough to ride

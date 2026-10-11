@@ -14,11 +14,14 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// ManagedSettingsPath, AutoCompactWindowEnv: see wire.
+// ManagedSettingsPath, AutoCompactWindowEnv, DisableAgentViewEnv,
+// DisableAgentViewSetting: see wire.
 const (
-	ManagedSettingsPath  = wire.ManagedSettingsPath
-	AutoCompactWindowEnv = wire.AutoCompactWindowEnv
-	afterCompactCommand  = wire.AfterCompactHookPrefix
+	ManagedSettingsPath     = wire.ManagedSettingsPath
+	AutoCompactWindowEnv    = wire.AutoCompactWindowEnv
+	DisableAgentViewEnv     = wire.DisableAgentViewEnv
+	DisableAgentViewSetting = wire.DisableAgentViewSetting
+	afterCompactCommand     = wire.AfterCompactHookPrefix
 )
 
 // AfterCompactMarker starts the context lever's after-compaction hook gives
@@ -33,10 +36,13 @@ const AfterCompactMarker = "[after compaction: note from this instance's lever.y
 // WriteManagedSettings merges c into the managed-settings file at path:
 // AutoCompactWindow as env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, and
 // AfterCompactNote as a SessionStart hook with matcher "compact" (Claude
-// Code's source for the session start that follows a compaction). Keys and
-// hooks lever does not own are kept; lever's are replaced, or removed when c
-// no longer sets them. nil c with no file is a no-op, so an agent with no
-// claude config is never touched. An empty path is a no-op (enrol-only boot).
+// Code's source for the session start that follows a compaction). It also
+// always turns off background agents and agent view
+// (env.CLAUDE_CODE_DISABLE_AGENT_VIEW=1 and disableAgentView: true; see
+// wire.DisableAgentViewEnv), whatever c holds, so the file is written for
+// every agent, nil c included. Keys and hooks lever does not own are kept;
+// lever's are replaced, or removed when c no longer sets them. An empty path
+// is a no-op (enrol-only boot).
 //
 // The file is replaced, not rewritten in place: removed, then created 0644
 // with O_EXCL, so a planted symbolic link is refused. Like WriteSettingsEnv, the work
@@ -56,9 +62,7 @@ func WriteManagedSettings(path string, c *wire.Claude) error {
 		return err
 	}
 	settings := map[string]any{}
-	existed := false
 	if b, err := r.ReadFile(rel); err == nil {
-		existed = true
 		if err := json.Unmarshal(b, &settings); err != nil {
 			return fmt.Errorf("managed settings %s: parse existing: %w", path, err)
 		}
@@ -68,17 +72,7 @@ func WriteManagedSettings(path string, c *wire.Claude) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("managed settings %s: read: %w", path, err)
 	}
-	if !existed && c.IsZero() {
-		return nil
-	}
 	mergeManagedSettings(settings, c)
-	if len(settings) == 0 {
-		// Nothing but lever's keys was there: leave no file behind.
-		if err := r.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("managed settings %s: remove: %w", path, err)
-		}
-		return nil
-	}
 	b, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
@@ -123,7 +117,11 @@ func mergeManagedSettings(settings map[string]any, c *wire.Claude) {
 	if window > 0 {
 		env[AutoCompactWindowEnv] = strconv.Itoa(window)
 	}
-	setOrDelete(settings, "env", env, len(env) > 0)
+	// Always, for every agent: a background session breaks the next
+	// claude --continue after a container restart (wire.DisableAgentViewEnv).
+	env[DisableAgentViewEnv] = "1"
+	settings["env"] = env
+	settings[DisableAgentViewSetting] = true
 
 	hooks, _ := settings["hooks"].(map[string]any)
 	if hooks == nil {

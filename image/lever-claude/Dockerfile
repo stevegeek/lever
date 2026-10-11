@@ -75,7 +75,8 @@ ENV DISABLE_AUTOUPDATER=1
 RUN chown -R scion:scion /home/scion
 
 # Claude Code's managed-settings directory, where lever-agent boot writes the
-# agent's claude_settings and after_compact_note at every start. Under
+# agent's claude_settings and after_compact_note, and turns off background
+# agents and agent view, at every start. Under
 # rootless podman the pre-start hook runs as scion, not root, so the directory
 # must be scion's: the agent can therefore change the file during a session,
 # and boot rewrites it from lever.yaml at the next start.

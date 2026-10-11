@@ -29,7 +29,7 @@
 # Claude config: the bootstrap's optional claude block (the operator's
 # claude_settings and after_compact_note) goes to Claude Code's managed-settings
 # file, which root owns and the agent user cannot write. Boot rewrites it on
-# every start; with no block and no file it touches nothing.
+# every start, and always turns off background agents and agent view there.
 set -eu
 bootstrap="${LEVER_BOOTSTRAP:-}"
 if [ -z "$bootstrap" ]; then

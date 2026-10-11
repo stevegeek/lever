@@ -298,8 +298,9 @@ func TestLoadBootstrapNormalizesBrokerURL(t *testing.T) {
 	}
 }
 
-// boot reads the bootstrap as ROOT (scion pre-start hook) from the
-// agent-writable tree: a symlink at .lever or at bootstrap.json is refused by
+// boot reads the bootstrap in scion's pre-start hook (as root on a rootful
+// runtime; as the agent user under rootless podman) from the agent-writable
+// tree: a symlink at .lever or at bootstrap.json is refused by
 // name (a non-regular file — a FIFO — would otherwise also hang the read).
 func TestLoadBootstrapRefusesSymlink(t *testing.T) {
 	ws := t.TempDir()

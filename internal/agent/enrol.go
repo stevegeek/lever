@@ -83,7 +83,8 @@ func Enrol(ctx context.Context, brokerURL string, caPEM []byte, ticket, cn strin
 // Write persists the identity: agent.crt/ca.crt 0644, agent.key 0600, dir 0700.
 // dir's parent must exist (it is $HOME in production). The work is confined to
 // that parent and refuses a symlink at dir or at any of the three files: boot
-// calls this as root under the agent-writable home (see errRefusedPath).
+// calls this under the agent-writable home, as the agent user under rootless
+// podman and as root otherwise (see errRefusedPath).
 func (id Identity) Write(dir string) error {
 	root, base := splitAbove(dir, 1)
 	r, err := os.OpenRoot(root)

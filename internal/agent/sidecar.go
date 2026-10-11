@@ -56,7 +56,8 @@ type SidecarConfig struct {
 // couldn't already exec), and boot runs inside the pre-start hook, which scion
 // runs BEFORE it reads scion-services.yaml, so this write always wins over any
 // pre-seeded value before the spec is consumed. What the agent must NOT get is
-// this write redirected: boot runs as root, so the write is confined to
+// this write redirected: boot may run as root (see errRefusedPath: under
+// rootless podman it runs as the agent user), so the write is confined to
 // c.HomeDir and a symlink at .scion or at the yaml is refused (errRefusedPath).
 func WriteSidecarSpecs(c SidecarConfig) error {
 	bs, err := LoadBootstrap(c.BootstrapPath)

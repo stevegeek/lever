@@ -63,8 +63,10 @@ const AgentTokenRefreshMargin = 2 * time.Hour
 // image declares.
 const AgentUser = "scion"
 
-// Every exec into an agent container runs a program the agent can replace
-// (it is root in its own container) or feed a file it can replace (a FIFO
+// Every exec into an agent container runs a program the agent may be able to
+// replace (lever treats the agent as root in its own container: its harness
+// runs as uid 1000 under rootless podman, but nothing here relies on that)
+// or feed a file it can replace (a FIFO
 // makes `head` block): each gets its own deadline, so a hostile agent
 // cannot hang doctor, apply or the broker, and its output is capped, so it
 // cannot grow the host process (proc.WithOutputLimit).

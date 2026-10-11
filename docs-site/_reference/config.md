@@ -138,6 +138,10 @@ workers:
     # model: <alias|id>             # optional; defaults to manager.model
     obtain:
       - { tool: db, op: read }       # this worker may obtain db/read capabilities
+shared_folders:                      # optional; off unless listed
+  - path: shared/reference           # a tree folder, outside every worker dir
+    writers: [scratch]               # mounts it read-write at /shared/reference
+    readers: ["*"]                   # every other worker mounts it read-only; the manager always does
 security:                            # optional image policy (both default off)
   allowed_image_registries: [scionlocal]   # only run images from these registries/namespaces
   require_image_digest: false              # true -> every image must be @sha256:-pinned
@@ -158,6 +162,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `scion` | object | no | - | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | - | The manager agent (see below). |
 | `workers` | list | no | `[]` | Project agents the manager orchestrates (see below). |
+| `shared_folders` | list | no | `[]` | Opt-in tree folders that named agents mount at `/shared/<name>`, read-write for writers and read-only for readers (see below). Unset: a worker mounts only its own `dir`. |
 | `egress` | enum | no | `open` | Jail outbound network posture (`open` \| `closed`), applied jail-wide and **independent of `llm_auth`**. `open`: LAN and non-allowlisted host ports dropped, public internet reachable. `closed`: catch-all DROP so the jail reaches **only** the broker port; requires a uniformly `api-key` instance. See [security-model §2.2](/security-model/jail/). |
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
@@ -264,6 +269,79 @@ failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-h
 | `llm_auth` | enum | no | inherits `broker.llm_auth` | Same as `manager.llm_auth`, per worker, but the instance-uniform rule still applies. |
 | `obtain` / `delegate` | list | no | `[]` | Same shape and meaning as `manager.obtain` / `manager.delegate`. |
 | `recyclable` | bool | no | `false` | Lets the manager discard this worker's record and start it fresh with a new task (`lever-manager agent recycle NAME --task "…"`), for a worker slot reused for new work that needs a fresh context. The recycle deletes what `lever worker purge` deletes: the scion record (so the worker's **conversation is lost**) and the staged ticket, never the worker's `dir`. The broker allows it only for a worker that is suspended, stopped or in phase `error` and whose container is not running (read from the hub record and from podman in the jail), never the manager, and at most once a minute per worker. Off, only the operator's `lever worker purge` discards a record. The broker reads it at start: `lever reload` after a change. While at least one worker sets it, the manager's `lever-operator` skill carries the recycle directions (`lever init` renders them); with none, the skill is unchanged. **On an instance with contact logins, setting it (and `lever init`) changes the manager's skill, so contacts cannot post to the manager until it starts fresh**, which loses its conversation unless you back it up: plan the change with the manager's next fresh start (`lever up --fresh`), which it also needs to get a manager image whose `lever-manager` has the `recycle` verb. See [worker slots the manager recycles](/operations/#worker-slots-the-manager-recycles). `lever doctor`'s *worker recycle* row lists the recyclable workers. |
+
+### `shared_folders[]`
+
+A shared folder is a tree directory that the agents you name mount at the same path,
+`/shared/<name>`: read-write for each writer, read-only for each reader. It is the one way to give
+workers a common directory; without it a worker mounts only its own `dir`. Typical uses: reference
+material every worker reads, a hand-off folder one worker fills for the others, build outputs, or
+reviewed tools that one agent publishes and the rest run. **Off unless listed**, and every mount is
+opt-in per agent.
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `path` | path | **yes** | - | The folder, relative to `tree`, spelt like a `manager.read_only` entry: a clean ASCII relative path, no `..`, `./`, trailing slash or `.`, none of `$ ~ : ,`. Must not overlap another shared folder, a `manager.read_only` entry or **any worker `dir`** (compared case-insensitively): a worker mounts its own dir read-write, so a folder in or over one would be writable whatever `writers` says. No component may be `.lever`, `.lever-state` or `.lever-files` (directories lever writes for the host). |
+| `name` | string | no | last component of `path` | The mount name: the folder appears at `/shared/<name>` in every agent that mounts it. Must match `^[a-z0-9][a-z0-9._-]{0,62}$` and be unique. |
+| `writers` | list of agent | no | `[]` | Agents that mount the folder **read-write**: declared worker names, or the instance `name` for the manager. May be empty when only the host writes the folder. |
+| `readers` | list of agent | no | `[]` | Workers that mount it **read-only**: declared worker names, or `"*"` alone for every worker that is not a writer. Quote the star (`readers: ["*"]`): a bare `*` is YAML alias syntax and the file does not load. The manager may be named but need not be (see below). |
+
+At least one of `writers` and `readers` must name an agent, and nobody may be in both.
+
+- **The manager always sees the folder.** It mounts the whole tree. Unless it is a writer, it gets
+  the folder read-only at **both** its tree path and `/shared/<name>`, like a `manager.read_only`
+  entry. A manager that writes the folder mounts it read-write at `/shared/<name>`, and the folder
+  is **pinned** in its tree (bind-mounted over itself). Either way every directory between the tree
+  root and the folder, and every worker `dir`, is pinned too, so the manager can neither move the
+  folder away nor swap it, or a worker dir, for a link that a worker would then mount.
+- **A worker that is not listed sees nothing of it.**
+- **The host checks every mount source.** Every `lever apply`/`lever up` that starts or resumes the
+  manager, and the broker before every worker start and resume, refuse a folder that is missing or
+  reached through a symbolic link. Create the folder before you start the agents. Right before it
+  creates the manager, `lever apply` also refuses a file in a folder that has a hard link
+  **outside** it (another name for it elsewhere could edit it), and a directory in it that it
+  cannot read: copy such a file in instead of linking it, and keep the folder readable. Hard links with every name inside the folder are fine. Nothing re-checks hard links
+  later: no new link across the folder's boundary can be made from a container.
+- **Workers wait for the manager's pins.** While any folder is configured, the broker refuses to
+  start or resume **any** worker unless the manager container holds its whole tree plan (checked
+  as the `manager.read_only` tool guard checks it: the configured mounts, then, for a running
+  manager, its live mounts from the guest side). A manager with no container, or a stopped one
+  whose configured mounts hold the plan and whose planned directories all exist on the host,
+  passes. A manager created before the current plan (a
+  folder or a worker added since) lacks pins: back up its conversation and run `lever up --fresh`.
+  When lever cannot read the mounts or the worker's hub record, the start or resume is refused with
+  "retry".
+- **New contents show at once.** It is a bind mount: files a writer adds appear in every reader
+  without a restart. **Change the folder's contents in place; never replace the folder itself**
+  (`rm -rf` and recreate, a rename-based deploy): a mount stays on the directory that existed when
+  the container started, so agents would go on seeing the old one. `lever doctor` finds a replaced
+  folder in a running reader (writers' mounts are checked by configuration only); recreate the
+  agents it names.
+- **Symbolic links inside the folder are the writers' business.** A link resolves in the container
+  that follows it, so it reaches only what that agent can already see.
+- **No host program may live in a shared folder,** and neither may `remote.labels_file` when a
+  worker writes the folder. Config load refuses a tool `command` whose program or script resolves
+  inside one: a writer could change it, and no shared folder excuses one the way
+  `manager.read_only` does.
+- **Changes need a broker restart and fresh agents.** The broker reads `lever.yaml` only when it
+  starts, so run `lever reload` (not just `lever apply`) after editing the list. scion keeps an
+  agent's mounts for life, so adding a folder, or changing who may read or write it, reaches only an
+  agent created afterwards: a worker after `lever worker purge` (or the manager's `agent recycle`
+  for a recyclable worker) and a new dispatch; the manager after `lever up --fresh`, which
+  **discards its conversation** (back it up first). **The broker refuses to resume a worker whose
+  record holds a shared mount the config no longer grants** (removed, or read-write where it is now
+  read-only), and names the purge; it also refuses a resume when it cannot read the record. A mount
+  the config adds that an older worker lacks is not refused: that worker goes without it until it is
+  created again. The manager's own resume is not refused: a manager that lost access keeps its old
+  mounts until `lever up --fresh`, and `lever doctor` fails meanwhile. `lever doctor`'s *shared
+  folders* row compares every agent's mounts with the plan (a leftover or wider mount fails, a
+  missing one warns) and checks running readers' mounts from the guest side; the *manager read-only
+  paths* row covers the manager's tree-path protection and pins.
+
+**Security:** a shared folder is a deliberate channel from its writers to its readers. Whatever a
+writer puts there, every reader (and the manager) can read and may run, so a compromised writer can
+influence what the other agents do. Grant `writers` only to agents you would trust with that, and
+see [security model §4.5](/security-model/worker-isolation/#45-opt-in-shared-folders).
 
 ### `security`
 
@@ -400,7 +478,7 @@ access guide](/remote-access/) for the accepted security posture, setup steps, a
 | `allow_wildcard_bind` | bool | no | `false` | Acknowledges `bind: 0.0.0.0` or `"::"`: every host address, public ones included. Rejected when `bind` is not a wildcard. |
 | `trust_forwarded_host` | bool | no | `false` | Make the proxy's `Host` check (its DNS-rebinding defence) read `X-Forwarded-Host`, when a request carries exactly one and its `Host` is an IP address, instead of `Host` — for a front that rewrites `Host` to an IP address the default refuses. A rebind sends a name in `Host`, so it is still refused. **Off by default**: anything that reaches the listener directly can set that header. Warned about like a non-loopback `bind`. Not needed when the front sends `Host` as `base_url`'s host, or — with a specific `bind` address — as the address it dials (`127.0.0.1:<port>`, or `<bind>:<port>`). With `bind: 0.0.0.0`/`::` no dialled address is admitted, so a front that rewrites `Host` to one needs this setting (or must pass `base_url`'s host through). |
 | `landing` | string | no | `console` | What the remote origin opens on. `console`: the hub's own web UI. `chat`: lever's chat page — the proxy serves it under `/lever/` and redirects `/` to it. An operator sees the manager and every worker and may message all of them, and the hub's web UI stays reachable from the page (its **Console** link) and by its own paths. A contact sees its `agents:` (to message) and `see:` (view only), gets no Console or Terminal link, and every page navigation of a contact redirects to the chat page (no contact landing page, no hub web UI shell); the contact fence's hub rules are unchanged. A message to an asleep worker wakes it (see the [guide](/remote-access/#waking-a-worker)). `chat` needs at least one operator login in `allowed_users` (rejected at config load without one): with no verified login, no message from the page would verify. See the [guide](/remote-access/#the-chat-page). |
-| `labels_file` | string (tree-relative path) | no | - | A JSON file the manager writes, `{"<agent name>": "<label>"}`, whose labels the chat page shows after each agent's name. Whoever can write this file sets the text contacts see beside each true agent name, the manager's row included: by default that is the manager (and anything else that can write that part of the tree). Rejected at config load when absolute, unclean, containing `..`, or not under `tree`; when equal to or inside any `workers[].dir` (that worker would write it); or when inside `.lever` or the state directory (host-written files). Read on the host through the tree, cached at most 10 s: a regular file of at most 16 KiB with no symbolic link on its path; unknown names are ignored; each label loses control and format characters, has its spaces collapsed, and is cut to 60 characters (dropped when empty). A missing file means no labels; a bad one means no labels and a `chat labels` warning row in `lever doctor`. See the [guide](/remote-access/#labels). |
+| `labels_file` | string (tree-relative path) | no | - | A JSON file the manager writes, `{"<agent name>": "<label>"}`, whose labels the chat page shows after each agent's name. Whoever can write this file sets the text contacts see beside each true agent name, the manager's row included: by default that is the manager (and anything else that can write that part of the tree). Rejected at config load when absolute, unclean, containing `..`, or not under `tree`; when equal to or inside any `workers[].dir` (that worker would write it); or when inside `.lever` or the state directory (host-written files). Read on the host through the tree, cached at most 10 s: a regular file of at most 16 KiB with no symbolic link on its path; unknown names are ignored; each label loses control and format characters, has its spaces collapsed, and is cut to 60 characters (dropped when empty). A missing file means no labels; a bad one means no labels and a `chat labels` warning row in `lever doctor`. Refused inside a `shared_folders` folder that a worker writes. See the [guide](/remote-access/#labels). |
 | `agent_messages.enabled` | bool | no | `false` | Lets an agent start a message to a contact that lists it, under a limit and with a host record, and makes the proxy show a contact only the agent messages that record holds (history, events, DM previews, unread counts). The operator's view is unchanged. Needs at least one `tier: contact` entry in `allowed_users` (rejected at config load without one), and scion `b3562fb1` (2026-08-28) or later, where the hub sets a message's sender itself: a `scion.version` pseudo-version older than that is rejected at config load; for a bare commit hash, a tag or `scion.binary` lever cannot tell, and the `agent messages` row of `lever doctor` warns (it fails on an older `scion.source` checkout). Off, nothing changes. See the [guide](/remote-access/#messages-agents-start). |
 | `agent_messages.follow_up_after` | duration | no | `24h` | How long after a message an agent started (with no answer from the contact) the agent may send its one reminder. `0` or unset is the default; otherwise `1h` to `720h`. A message from the contact resets the count. |
 | `agent_messages.max_chars` | int | no | `4000` | The longest message, in characters, an agent may send a contact. `0` or unset is the default; otherwise `1` to `16000` (the hub's own limit). |

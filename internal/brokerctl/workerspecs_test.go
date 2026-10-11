@@ -2,10 +2,13 @@ package brokerctl
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 func TestWorkerSpecs(t *testing.T) {
@@ -76,5 +79,27 @@ func TestWorkerBrokerURL(t *testing.T) {
 func TestWorkerLiveSettleIsTenSeconds(t *testing.T) {
 	if workerLiveSettle < 10*time.Second {
 		t.Fatalf("workerLiveSettle = %s, want >= 10s", workerLiveSettle)
+	}
+}
+
+func TestWorkerSpecsSharedFolders(t *testing.T) {
+	app := &config.App{Name: "m", Tree: "/host/tree",
+		Workers:       []config.Worker{{Name: "w", Dir: "workers/w"}, {Name: "r", Dir: "workers/r"}, {Name: "x", Dir: "workers/x"}},
+		SharedFolders: []config.SharedFolder{{Path: "tools/releases", Writers: []string{"w"}, Readers: []string{"r"}}}}
+	specs := WorkerSpecs(app, "/lever", "501")
+	got := map[string][]broker.SharedMount{}
+	for _, s := range specs {
+		got[s.Name] = s.Shared
+	}
+	vol := scion.VolumeMount{Source: "/lever/tools/releases", Target: "/shared/releases"}
+	if want := []broker.SharedMount{{Rel: "tools/releases", Volume: vol}}; !reflect.DeepEqual(got["w"], want) {
+		t.Fatalf("writer: %+v, want %+v", got["w"], want)
+	}
+	vol.ReadOnly = true
+	if want := []broker.SharedMount{{Rel: "tools/releases", Volume: vol}}; !reflect.DeepEqual(got["r"], want) {
+		t.Fatalf("reader: %+v, want %+v", got["r"], want)
+	}
+	if got["x"] != nil {
+		t.Fatalf("unlisted worker: %+v, want none", got["x"])
 	}
 }

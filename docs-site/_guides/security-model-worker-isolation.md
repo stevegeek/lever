@@ -43,6 +43,9 @@ itself, not ancestor directories. The relative-`--workspace` guard likewise reso
 project root regardless of a stray ancestor `.git`. A worker's *own* subdirectory may still contain
 its own git repository; that is unaffected.
 
+The one opt-in exception is a **shared folder** (`shared_folders`, [§4.5](#45-opt-in-shared-folders)):
+a tree directory the config names, mounted into the agents it lists and no others.
+
 **The manager still sees everything, by design.** Because the manager's mount is the whole tree,
 and Scion does not shadow child workspace dirs inside a broader mount, the manager's live view
 legitimately includes every worker's in-place edits — the same "mount only your own workspace"
@@ -229,3 +232,66 @@ there, including the knowledge base and every worker's subdirectory, that is an 
 giving the manager whole-tree oversight ([§7](/security-model/compromise/)), not a gap in the
 worker-isolation model above. No automated live gate exercises this guarantee yet; see
 [validation](/security-model/validation/).
+
+### 4.5 Opt-in shared folders
+
+`shared_folders` lets the operator give some agents one common directory. Each entry names a tree
+folder, its **writers** (mount it read-write) and its **readers** (mount it read-only), and every
+agent that has access mounts it at `/shared/<name>`. With no entry the rest of §4.1 holds unchanged:
+a worker mounts only its own subdirectory. What an entry changes, and what still holds:
+
+- **It is a deliberate write path between agents.** Content a writer puts in the folder is read,
+  and may be run, by every reader and by the manager. A compromised writer can therefore steer
+  them, for instance by publishing a changed script that a reader runs next. That is the point of
+  the feature, so lever does not filter the contents; the boundary is who may write. Name as
+  writers only agents you would trust with that reach, and keep the manager's own tools out of a
+  folder a worker writes unless that is the intent.
+- **Nobody else can write it.** A reader's mount is read-only (the runtime enforces it), and an
+  unlisted worker does not mount the folder at all. The manager, which mounts the whole tree, gets
+  the folder read-only at its tree path unless it is a writer, using the `manager.read_only`
+  mechanism ([§5.1.1](/security-model/config-trust/)).
+- **Nobody can move it or swap it for a link.** The guest resolves a bind source through symbolic
+  links, and the tree is agent-writable, so a folder replaced by a link would mount whatever the
+  link names. Only the manager can reach the folder's path in the tree (a worker sees the folder
+  only as its own mount point), so the manager pins the folder itself (read-only, or read-write
+  when it writes it), every directory between the tree root and the folder, and every worker
+  `dir`: a mount point cannot be renamed or removed. lever also walks each folder's path from the
+  tree root on the host and refuses a missing folder or a link on the path: before the manager is
+  started or resumed by `lever apply`/`lever up`, and before every worker start and resume. And
+  while any folder is configured, the broker starts or resumes a worker (any worker: a worker dir
+  the manager swapped for a link to a folder would mount it read-write) only after reading the
+  manager container's mounts (its configuration and, for a running manager, the kernel's mount
+  table from the guest side) and finding its whole tree plan in place; a manager created before the
+  current plan lacks pins and must be recreated first. A manager with no container, or a stopped
+  one whose configured mounts hold the plan, passes: it cannot act while it is down.
+- **Old names are refused.** A hard link made before the folder was shared would let its other
+  name edit a file inside the folder. Right before it creates the manager, `lever apply` refuses a
+  file in a folder with a link count higher than its names inside the folder, and a directory in
+  it that it cannot read (such a directory could hide an old name that readers can still open). New links across the boundary cannot be made from a
+  container: a hard link between two mounts fails (`EXDEV`). Links that stay inside the folder,
+  and symbolic links inside it, are the writers' business: a link resolves in the container that
+  follows it, which reaches only what that agent already sees.
+- **Host-written places stay out.** A folder may not be, or lie in, `.lever` (the manager's
+  enrolment ticket), the state directory or `.lever-files`, nor overlap a worker `dir`, another
+  folder or a `manager.read_only` entry. `remote.labels_file` may not lie in a folder a worker
+  writes.
+- **No host code runs from it.** Config load refuses a broker tool whose program or script lies in
+  a shared folder; unlike `manager.read_only`, no shared folder excuses one, since a worker may
+  write it.
+- **Access changes need fresh agents, and stale access is refused.** scion keeps a record's mounts
+  for life. A worker created under an older plan could get back access the config has withdrawn on
+  its next resume, so the broker reads the worker's hub record before every resume (a dispatch, an
+  operator wake, the re-enrolment healer's bounce) and refuses one that holds a shared mount the
+  plan does not grant, or grants only read-only. A record it cannot read is refused too (with
+  "retry", not a purge): a record outlives the config that made it. The fix is to discard the record (`lever worker purge`, or the
+  manager's `agent recycle` for a recyclable worker).
+- **Replace the contents, not the folder.** A mount stays on the directory that existed when the
+  container started. `lever doctor` reads each running reader's mounts from the guest (the kernel's
+  mount table and the directory's device and inode, never a program in the container) and fails
+  when one covers another directory than the host has now.
+
+**Residual risks.** A running agent keeps its mounts until it is recreated: withdrawing access is
+complete only after the purge (or, for the manager, `lever up --fresh`), and the manager's own
+resume is not refused, only reported by doctor. The checks before a mount and the mount itself are
+not atomic; the pins are what close that window, which is why workers wait for them. Writers'
+mounts are checked by configuration only, since a writer is meant to write.

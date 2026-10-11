@@ -16,7 +16,7 @@ version bump moves the block under the new version heading.
   prefix branch into the default branch (or returns the open one). `pr_status` reports state,
   mergeability and the checks on the head. `pr_merge` merges only an open, mergeable PR from a
   prefix branch of the same repository into the default branch, once every check on the head is
-  green (`-merge-checks`), pinned to the checked head SHA, with a method from `-merge-methods`.
+  green and at least one succeeded (`-merge-checks`), pinned to the checked head SHA, with a method from `-merge-methods`.
   `release` tags the default branch's head with a tag that matches `-release-tag` and is greater
   than every existing one, and creates the release. Titles, bodies and notes are bounded
   (`-text-max`), refuse control characters, and appear in the audit line only as a length and a

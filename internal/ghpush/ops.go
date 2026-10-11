@@ -323,26 +323,42 @@ func (o *Ops) PROpen(ctx context.Context, caller, repo, branch, title, body stri
 	} else if !found {
 		return PRResult{}, fmt.Errorf("branch %q does not exist on GitHub; push it first", branch)
 	}
-	owner := repo[:strings.IndexByte(repo, '/')]
-	q := url.Values{"state": {"open"}, "head": {owner + ":" + branch}, "per_page": {"10"}}
-	var open []ghPull
-	if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/pulls?"+q.Encode(), nil, &open); err != nil {
-		return PRResult{}, fmt.Errorf("list open PRs: %w", err)
-	}
-	for _, p := range open {
-		if p.Head.Ref == branch && p.State == "open" {
-			return PRResult{OK: true, Existing: true, Repo: repo, Number: p.Number, URL: p.HTMLURL, Head: branch, Base: p.Base.Ref}, nil
-		}
+	if existing, found, err := o.openPRFor(ctx, tok, repo, branch); err != nil || found {
+		return existing, err
 	}
 	var created ghPull
 	in := map[string]any{"title": title, "body": body, "head": branch, "base": info.DefaultBranch, "maintainer_can_modify": false}
 	if err := o.API.do(ctx, tok, http.MethodPost, "/repos/"+repo+"/pulls", in, &created); err != nil {
+		// Another call may have opened it meanwhile (GitHub: 422 "A pull
+		// request already exists").
+		if isStatus(err, http.StatusUnprocessableEntity) {
+			if existing, found, lerr := o.openPRFor(ctx, tok, repo, branch); lerr == nil && found {
+				return existing, nil
+			}
+		}
 		return PRResult{}, fmt.Errorf("open PR: %w", err)
 	}
 	if created.Number <= 0 {
 		return PRResult{}, fmt.Errorf("open PR: unexpected answer")
 	}
 	return PRResult{OK: true, Repo: repo, Number: created.Number, URL: created.HTMLURL, Head: branch, Base: info.DefaultBranch}, nil
+}
+
+// openPRFor returns the open PR whose head is branch of repo itself, if any.
+// Its base is whatever that PR has (Base says which).
+func (o *Ops) openPRFor(ctx context.Context, tok, repo, branch string) (PRResult, bool, error) {
+	owner := repo[:strings.IndexByte(repo, '/')]
+	q := url.Values{"state": {"open"}, "head": {owner + ":" + branch}, "per_page": {"10"}}
+	var open []ghPull
+	if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/pulls?"+q.Encode(), nil, &open); err != nil {
+		return PRResult{}, false, fmt.Errorf("list open PRs: %w", err)
+	}
+	for _, p := range open {
+		if p.Head.Ref == branch && p.State == "open" {
+			return PRResult{OK: true, Existing: true, Repo: repo, Number: p.Number, URL: p.HTMLURL, Head: branch, Base: p.Base.Ref}, true, nil
+		}
+	}
+	return PRResult{}, false, nil
 }
 
 func (o *Ops) pull(ctx context.Context, tok, repo, number string) (ghPull, error) {
@@ -445,7 +461,7 @@ func checkGate(cs []Check, complete bool, pol CheckPolicy) error {
 			if c.Status != "completed" {
 				state = c.Status
 			}
-			bad = append(bad, fmt.Sprintf("%s (%s)", c.Name, state))
+			bad = append(bad, fmt.Sprintf("%s (%s)", checkLabel(c.Name), checkLabel(state)))
 			continue
 		}
 		if c.Conclusion == "success" {
@@ -458,8 +474,10 @@ func checkGate(cs []Check, complete bool, pol CheckPolicy) error {
 		}
 		return fmt.Errorf("checks on the head are not all green: %s; wait for them or fix the branch", strings.Join(bad, ", "))
 	}
-	if len(cs) == 0 && !pol.None {
-		return fmt.Errorf("no checks on the head; refusing to merge unchecked code")
+	// Skipped or neutral checks alone are not a check: at least one must
+	// have succeeded.
+	if len(succeeded) == 0 && !pol.None {
+		return fmt.Errorf("no successful check on the head; refusing to merge unchecked code")
 	}
 	for _, n := range pol.Names {
 		if !succeeded[n] {
@@ -467,6 +485,16 @@ func checkGate(cs []Check, complete bool, pol CheckPolicy) error {
 		}
 	}
 	return nil
+}
+
+// checkLabel is a check's name as it may appear in an error: whoever can
+// create a check chooses its name.
+func checkLabel(name string) string {
+	name = strings.Map(dropControl, name)
+	if r := []rune(name); len(r) > 100 {
+		name = string(r[:100]) + "…"
+	}
+	return name
 }
 
 // PRMerge merges an open PR from a prefix branch of the same repository into
@@ -642,15 +670,27 @@ func (o *Ops) Release(ctx context.Context, caller, repo, tag, notes string) (res
 		return res, fmt.Errorf("default branch %q not found", info.DefaultBranch)
 	}
 	res = ReleaseResult{Repo: repo, Tag: tag, Target: sha}
-	// target_commitish is the SHA just read, never a branch name: the tag
-	// lands on exactly that commit even if the branch moves meanwhile.
+	// The tag ref first, at the SHA just read: GitHub refuses (422) a tag
+	// that appeared since the check, where a release would silently adopt
+	// it, and the tag lands on exactly that commit even if the branch moves.
+	var created ghRef
+	if err := o.API.do(ctx, tok, http.MethodPost, "/repos/"+repo+"/git/refs",
+		map[string]string{"ref": "refs/tags/" + tag, "sha": sha}, &created); err != nil {
+		if isStatus(err, http.StatusUnprocessableEntity) {
+			return res, fmt.Errorf("create tag %s: refused (it may exist now, or a tag ruleset blocks the App): %w", tag, err)
+		}
+		return res, fmt.Errorf("create tag %s: %w", tag, err)
+	}
+	if created.Ref != "refs/tags/"+tag || created.Object.SHA != sha {
+		return res, fmt.Errorf("create tag %s: unexpected answer", tag)
+	}
 	var out struct {
 		HTMLURL string `json:"html_url"`
 		TagName string `json:"tag_name"`
 	}
-	in := map[string]any{"tag_name": tag, "target_commitish": sha, "name": tag, "body": notes, "draft": false, "prerelease": false}
+	in := map[string]any{"tag_name": tag, "name": tag, "body": notes, "draft": false, "prerelease": false}
 	if err := o.API.do(ctx, tok, http.MethodPost, "/repos/"+repo+"/releases", in, &out); err != nil {
-		return res, fmt.Errorf("create release: %w", err)
+		return res, fmt.Errorf("tag %s created at %s, but create release: %w", tag, sha, err)
 	}
 	if out.TagName != tag {
 		return res, fmt.Errorf("create release: unexpected answer")

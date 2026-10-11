@@ -60,6 +60,9 @@ type fakeGH struct {
 	statuses      map[string][]fakeStatus
 	mergeStatus   int              // forces the merge answer's status
 	created       []map[string]any // POST bodies (pulls, releases)
+	refs          []map[string]any // POST /git/refs bodies
+	hideOpenList  int              // list calls that miss the open PRs (a race)
+	tagRace       bool             // the tag appears before the ref is created
 	merges        []map[string]any
 	reqs          []string
 	srv           *httptest.Server
@@ -152,16 +155,28 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 	case p == "/pulls" && r.Method == "GET":
 		var out []map[string]any
 		for _, pl := range f.pulls {
+			if f.hideOpenList > 0 {
+				break
+			}
 			h := pl["head"].(map[string]any)
 			if q.Get("state") == "open" && pl["state"] == "open" && q.Get("head") == strings.Split(f.repo, "/")[0]+":"+h["ref"].(string) {
 				out = append(out, pl)
 			}
+		}
+		if f.hideOpenList > 0 {
+			f.hideOpenList--
 		}
 		if out == nil {
 			out = []map[string]any{}
 		}
 		f.json(w, 200, out)
 	case p == "/pulls" && r.Method == "POST":
+		for _, pl := range f.pulls {
+			if pl["state"] == "open" && pl["head"].(map[string]any)["ref"] == body["head"] {
+				f.json(w, 422, map[string]any{"message": "Validation Failed", "errors": []map[string]string{{"message": "A pull request already exists for x:agent/x."}}})
+				return
+			}
+		}
 		f.created = append(f.created, body)
 		n := 100 + len(f.created)
 		f.addPull(n, func(pl map[string]any) { pl["head"].(map[string]any)["ref"] = body["head"] })
@@ -224,9 +239,32 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			out = []map[string]any{}
 		}
 		f.json(w, 200, out)
+	case p == "/git/refs" && r.Method == "POST":
+		ref, _ := body["ref"].(string)
+		tg := strings.TrimPrefix(ref, "refs/tags/")
+		for _, x := range f.tags {
+			if x == tg {
+				f.json(w, 422, map[string]string{"message": "Reference already exists"})
+				return
+			}
+		}
+		if f.tagRace {
+			f.json(w, 422, map[string]string{"message": "Reference already exists"})
+			return
+		}
+		f.refs = append(f.refs, body)
+		f.tags = append(f.tags, tg)
+		f.json(w, 201, map[string]any{"ref": ref, "object": map[string]any{"sha": body["sha"], "type": "commit"}})
 	case p == "/releases" && r.Method == "POST":
+		tg, _ := body["tag_name"].(string)
+		found := false
+		for _, x := range f.tags {
+			found = found || x == tg
+		}
+		if !found || body["target_commitish"] != nil {
+			f.t.Errorf("release without its tag, or with a target: %v", body)
+		}
 		f.created = append(f.created, body)
-		f.tags = append(f.tags, body["tag_name"].(string))
 		f.json(w, 201, map[string]any{"tag_name": body["tag_name"], "html_url": "https://github.example/" + f.repo + "/releases/tag/" + body["tag_name"].(string)})
 	default:
 		f.json(w, 404, map[string]string{"message": "Not Found"})
@@ -362,7 +400,7 @@ func TestPROpenRefusals(t *testing.T) {
 		{repo, "agent/x", "a\tb", "", "control"},
 		{repo, "agent/x", "t", "a\rb", "control"},
 		{repo, "agent/x", "t", "a\x1b[31mb", "control"},
-		{repo, "agent/x", "t", "a‮b", "formatting"},
+		{repo, "agent/x", "t", "a\u202eb", "formatting"},
 		{repo, "agent/x", "t", "\xff", "UTF-8"},
 		{repo, "agent/x", "t", strings.Repeat("x", 8001), "max 8000"},
 	} {
@@ -461,14 +499,14 @@ func TestPRMergeRefusals(t *testing.T) {
 		{name: "base", mod: func(p map[string]any) { p["base"].(map[string]any)["ref"] = "release" }, want: "not the default branch"},
 		{name: "unknown mergeable", mod: func(p map[string]any) { p["mergeable"] = nil }, want: "still computing"},
 		{name: "not mergeable", mod: func(p map[string]any) { p["mergeable"], p["mergeable_state"] = false, "dirty" }, want: "not mergeable (dirty)"},
-		{name: "no checks", runs: []fakeRun{}, want: "no checks"},
+		{name: "no checks", runs: []fakeRun{}, want: "no successful check"},
 		{name: "pending", runs: []fakeRun{{"test", "completed", "success"}, {"lint", "queued", ""}}, want: "lint (queued)"},
 		{name: "failed", runs: []fakeRun{{"test", "completed", "failure"}}, want: "test (failure)"},
 		{name: "cancelled", runs: []fakeRun{{"test", "completed", "cancelled"}}, want: "test (cancelled)"},
 		{name: "status failure", statuses: []fakeStatus{{"ci/legacy", "error"}}, want: "ci/legacy (error)"},
 		{name: "status pending", statuses: []fakeStatus{{"ci/legacy", "pending"}}, want: "ci/legacy (pending)"},
 		{name: "required missing", policy: "test,e2e", want: `"e2e" is missing`},
-		{name: "required neutral", runs: []fakeRun{{"test", "completed", "neutral"}}, policy: "test", want: `"test" is missing or did not succeed`},
+		{name: "required neutral", runs: []fakeRun{{"test", "completed", "neutral"}, {"lint", "completed", "success"}}, policy: "test", want: `"test" is missing or did not succeed`},
 		{name: "method", method: "rebase", want: "not allowed"},
 		{name: "bad number", number: "7/merge", want: "number"},
 		{name: "unknown PR", number: "8", want: "not found"},
@@ -577,8 +615,11 @@ func TestRelease(t *testing.T) {
 		t.Fatalf("res %+v", res)
 	}
 	c := f.created[0]
-	if c["tag_name"] != "v0.36.0" || c["target_commitish"] != shaMain || c["body"] != notes || c["draft"] != false || c["prerelease"] != false {
+	if c["tag_name"] != "v0.36.0" || c["body"] != notes || c["draft"] != false || c["prerelease"] != false {
 		t.Fatalf("release body %v", c)
+	}
+	if len(f.refs) != 1 || f.refs[0]["ref"] != "refs/tags/v0.36.0" || f.refs[0]["sha"] != shaMain {
+		t.Fatalf("tag ref %v", f.refs)
 	}
 	log := logBuf.String()
 	if strings.Contains(log, "private-ish") || !strings.Contains(log, "github.release") || !strings.Contains(log, "tag=v0.36.0") ||
@@ -596,8 +637,8 @@ func TestReleaseTargetsTheDefaultBranchHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Target != shaNew || f.created[0]["target_commitish"] != shaNew {
-		t.Fatalf("target %q / %v", res.Target, f.created[0]["target_commitish"])
+	if res.Target != shaNew || f.refs[0]["sha"] != shaNew {
+		t.Fatalf("target %q / %v", res.Target, f.refs[0])
 	}
 }
 
@@ -623,8 +664,8 @@ func TestReleaseRefusals(t *testing.T) {
 			o, _, _ := newOps(t, f)
 			_, err := o.Release(context.Background(), "manager", repo, c.tag, c.notes)
 			wantErr(t, err, c.want)
-			if len(f.created) != 0 {
-				t.Fatalf("a refused release reached GitHub: %v", f.created)
+			if len(f.created) != 0 || len(f.refs) != 0 {
+				t.Fatalf("a refused release reached GitHub: %v %v", f.created, f.refs)
 			}
 		})
 	}
@@ -632,6 +673,69 @@ func TestReleaseRefusals(t *testing.T) {
 	o, _, _ := newOps(t, f)
 	_, err := o.Release(context.Background(), "manager", "other/repo", "v1.0.0", "")
 	wantErr(t, err, "not one this tool")
+}
+
+func TestReleaseTagAppearsAfterTheCheck(t *testing.T) {
+	f := newFakeGH(t)
+	f.tagRace = true
+	o, _, _ := newOps(t, f)
+	_, err := o.Release(context.Background(), "manager", repo, "v1.0.0", "")
+	wantErr(t, err, "create tag v1.0.0: refused")
+	if len(f.created) != 0 {
+		t.Fatalf("a release was created on a tag the tool did not make: %v", f.created)
+	}
+}
+
+func TestPROpenRaceReturnsTheExistingPR(t *testing.T) {
+	f := newFakeGH(t)
+	f.addPull(7, nil)
+	f.hideOpenList = 1 // the first list misses PR 7; the create then gets a 422
+	o, _, _ := newOps(t, f)
+	res, err := o.PROpen(context.Background(), "manager", repo, "agent/x", "t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Existing || res.Number != 7 || len(f.created) != 0 {
+		t.Fatalf("res %+v, created %v", res, f.created)
+	}
+}
+
+func TestPRMergeSkippedOnlyIsNotChecked(t *testing.T) {
+	f := newFakeGH(t)
+	f.addPull(7, nil)
+	f.runs[shaHead] = []fakeRun{{"docs", "completed", "skipped"}, {"opt", "completed", "neutral"}}
+	o, _, _ := newOps(t, f)
+	_, err := o.PRMerge(context.Background(), "manager", repo, "7", "")
+	wantErr(t, err, "no successful check")
+	o.MergeChecks = CheckPolicy{None: true}
+	if _, err := o.PRMerge(context.Background(), "manager", repo, "7", ""); err != nil {
+		t.Fatalf("-merge-checks none: %v", err)
+	}
+}
+
+func TestPRMergeCheckNamesAreSanitised(t *testing.T) {
+	f := newFakeGH(t)
+	f.addPull(7, nil)
+	f.runs[shaHead] = []fakeRun{{"evil\nline\x1b[2J" + strings.Repeat("x", 300), "completed", "failure"}}
+	o, _, _ := newOps(t, f)
+	_, err := o.PRMerge(context.Background(), "manager", repo, "7", "")
+	wantErr(t, err, "evil line")
+	if strings.ContainsAny(err.Error(), "\n\x1b") || strings.Contains(err.Error(), strings.Repeat("x", 101)) {
+		t.Fatalf("check name not sanitised: %q", err)
+	}
+}
+
+func TestTextRunes(t *testing.T) {
+	for _, s := range []string{"a\u200bb", "a\ufeffb", "a\u2066b", "a\u00adb", "a\u2028b"} {
+		if ValidateTitle(s) == nil || ValidateText("body", s, 100) == nil {
+			t.Errorf("%q must be refused", s)
+		}
+	}
+	for _, s := range []string{"Fix the 👩\u200d💻 page", "naïve café 日本語"} {
+		if err := ValidateTitle(s); err != nil {
+			t.Errorf("%q: %v", s, err)
+		}
+	}
 }
 
 func TestReleaseTagPagination(t *testing.T) {

@@ -111,8 +111,8 @@ func ValidateTitle(s string) error {
 
 // ValidateText accepts a PR body or release notes: at most max bytes of
 // valid UTF-8, no control character except newline and tab, and no
-// bidirectional formatting character (it could make the published text read
-// differently from what was reviewed).
+// bidirectional or invisible formatting character (it could make the
+// published text read differently from what was reviewed).
 func ValidateText(what, s string, max int) error {
 	if len(s) > max {
 		return fmt.Errorf("%s: %d bytes, max %d", what, len(s), max)
@@ -132,15 +132,13 @@ func badTextRune(r rune, multiline bool) bool {
 	if multiline && (r == '\n' || r == '\t') {
 		return false
 	}
-	if unicode.IsControl(r) {
+	if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
 		return true
 	}
-	switch {
-	case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069,
-		r == 0x200e, r == 0x200f, r == 0x061c, r == 0x2028, r == 0x2029:
-		return true
-	}
-	return false
+	// Format characters (bidirectional controls, zero-width and other
+	// invisible characters) except the zero-width joiner that emoji
+	// sequences use.
+	return unicode.Is(unicode.Cf, r) && r != 0x200d
 }
 
 // ValidateTagName is the charset and ref-name check of a release tag, made

@@ -144,7 +144,7 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-name` | no | Tool name. Default `github`. It must equal the `name` in the config. |
 | `-ops` | no | Comma list of the operations to offer: `push`, `pr_open`, `pr_status`, `pr_merge`, `release`. Default `push`. An operation not listed does not exist. |
 | `-merge-methods` | no | Comma list of the merge methods `pr_merge` may use: `squash`, `merge`, `rebase`. The first is the default. Default `squash`. |
-| `-merge-checks` | no | What `pr_merge` requires of the checks on the PR head. `any`: at least one check, and all green. `none`: no check is needed, but any that exist must be green. A comma list of check names: these checks must be present and successful, and all others green. Default `any`. |
+| `-merge-checks` | no | What `pr_merge` requires of the checks on the PR head. `any`: at least one successful check, and all green. `none`: no check is needed, but any that exist must be green. A comma list of check names: these checks must be present and successful, and all others green. Default `any`. |
 | `-release-tag` | no | Pattern that a `release` tag must match, against the whole tag (Go regular expression). Default `^v[0-9]+\.[0-9]+\.[0-9]+$`. A matching tag must also be a semantic version, with an optional leading `v`. |
 | `-text-max` | no | Bytes of a PR body or of release notes. Default 8000, at most 65536. |
 
@@ -217,7 +217,8 @@ Opens a PR from `branch` into the repository's default branch. The tool reads th
 from GitHub; the agent cannot choose the base. The branch must start with the prefix and already
 exist on GitHub (push it first). The title is 1 to 256 characters on one line. The body is at most
 `-text-max` bytes. Both must be valid UTF-8, and the tool refuses control characters (except newline
-and tab in the body) and Unicode bidirectional formatting characters. The result holds `number` and
+and tab in the body) and Unicode format characters such as bidirectional controls and zero-width
+spaces (the zero-width joiner of emoji is allowed). The result holds `number` and
 `html_url`. If an open PR from that branch already exists, the tool opens no other: it returns that
 PR with `existing: true`.
 
@@ -241,14 +242,24 @@ Merges a PR into the default branch. The tool refuses unless:
 - GitHub reports it mergeable (when GitHub is still computing this, retry shortly),
 - every check run on the head SHA completed with `success`, `neutral` or `skipped`, and every commit
   status is `success`,
-- at least one check exists, unless `-merge-checks none`, and every check that `-merge-checks` names
-  is present and succeeded, and
+- at least one check succeeded (skipped and neutral checks alone are not enough), unless
+  `-merge-checks none`, and every check that `-merge-checks` names is present and succeeded, and
 - `method` is in `-merge-methods` (the first is the default).
 
 The tool then merges with the head SHA that it checked. If someone pushes to the branch after the
 check, GitHub refuses the merge, and the agent must check again. The App cannot use an admin bypass.
 The `main` ruleset still applies: if it requires an approving review, `pr_merge` succeeds only after
-a person approves the PR. This keeps a person in the loop for every merge.
+a person approves the PR. This keeps a person in the loop for every merge. Never put the App in the
+bypass list of the `main` ruleset: then its merges would skip the review and the required checks.
+
+GitHub refuses to merge a PR that changes `.github/workflows/` with the App's token, because the
+App has no Workflows permission. Merge such a PR yourself.
+
+The tool knows a check only by its name. It does not check which app or user created it. Anyone who
+can post a check run or commit status on the head can satisfy a check name. CI runs the agent's
+code, so keep the `GITHUB_TOKEN` read-only (section 2): then that code cannot post a status. For a
+stronger guarantee, add the checks to the `main` ruleset as required status checks with their
+source app pinned. GitHub then refuses the merge unless the right app reported them.
 
 **Risk:** a merge changes the default branch. With Contents: write and Pull requests: write, a leaked
 App key can merge any PR that meets your ruleset, so make the ruleset require the status checks you
@@ -256,9 +267,11 @@ trust (and a review, if you want one).
 
 ### `release`
 
-Creates a GitHub release and its tag on the default branch's current head. The tool reads the head
-SHA and creates the release at exactly that commit, so it can release only what is already merged.
-The tag must match `-release-tag`, must not exist, and must be greater, by semantic version order,
+Creates a tag on the default branch's current head, then a GitHub release for it. The tool reads
+the head SHA and creates the tag at exactly that commit, so it can release only what is already
+merged. If the tag appears between the check and the creation, GitHub refuses the tag and the tool
+creates no release. If the release fails after the tag exists, the error says so, and you finish the
+release by hand. The tag must match `-release-tag`, must not exist, and must be greater, by semantic version order,
 than every existing tag that matches the pattern. The notes are at most `-text-max` bytes, with the
 same character rules as a PR body. The release is named after the tag and is not a draft or a
 prerelease. The result holds `html_url`. The tool makes one release at a time.
@@ -277,7 +290,7 @@ includes releases.
 |---|---|
 | Repository not in `-repos`, bad number, tag or method, title or text out of bounds, or a refused character | Named refusal before any GitHub call. |
 | Branch missing on GitHub, PR closed, merged, draft, from a fork, wrong base or head prefix, not mergeable | Named refusal. |
-| A check pending or failed, no check, a named check missing, or more than 100 checks | Named refusal, with the check names. |
+| A check pending or failed, no successful check, a named check missing, or more than 100 checks | Named refusal, with the check names. |
 | Head moved after the check | GitHub refuses the merge. Check again. |
 | Tag exists, is not greater, or an existing matching tag is not a semantic version, or more than 2000 tags | Named refusal. |
 | Token mint or GitHub error, a redirect, or an answer over 4 MiB | Redacted error text. The tool does not retry. |

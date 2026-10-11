@@ -10,8 +10,9 @@ import (
 )
 
 // logTailLines is how many lines of an agent container's log LogTail reads:
-// enough to hold the harness's last words after scion's own start-up lines.
-const logTailLines = 200
+// enough to hold the harness's last words, and small enough to stay under the
+// exec cap (a cut read keeps the older lines and loses the newest).
+const logTailLines = 50
 
 // LogTail returns the last lines of the agent container's log (podman logs
 // --tail, run in the guest), stdout and stderr together. It works on an

@@ -164,7 +164,7 @@ func Boot(ctx context.Context, c BootConfig) error {
 	}
 	if bsErr != nil && c.ManagedSettingsPath != "" && c.Log != nil {
 		// No envelope means no claude block: say why lever's values go.
-		c.Log("lever-agent boot: no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any (agent view stays off)", bsErr, c.ManagedSettingsPath)
+		c.Log("lever-agent boot: no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any (the agent-view switch is still written)", bsErr, c.ManagedSettingsPath)
 	}
 	// The Claude settings are optional: a failed write must not stop the
 	// agent (on rootless podman the pre-start hook runs as the agent user, and

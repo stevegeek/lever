@@ -451,6 +451,8 @@ manager:
   … registered from another machine or container, so this one can't tell whether it is still
   running", and exits. `lever apply` or `lever up` then reports the manager `came up, then died`;
   when the container log holds that refusal, lever adds the cause and the recovery to the error.
+  Whether Claude's refusal reaches the container log at all (scion runs Claude in a tmux window)
+  is not yet tested; without the hint, doctor's row and the recovery below still apply.
 - **Recovery.** In the agent home (`/home/scion` in the agent's container), move aside the
   `~/.claude/sessions/*.json` records that hold `"kind":"bg"` or a `"parkedJobId"`, and
   `~/.claude/jobs/` and `~/.claude/daemon*`. The conversation transcript is not touched and

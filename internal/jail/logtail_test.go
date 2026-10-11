@@ -19,7 +19,7 @@ func TestAgentProbeLogTail(t *testing.T) {
 	if !strings.Contains(got, "out line") || !strings.Contains(got, "err line") {
 		t.Fatalf("tail %q must hold stdout and stderr", got)
 	}
-	if calls[0] != "podman logs --tail 200 lever--assistant" {
+	if calls[0] != "podman logs --tail 50 lever--assistant" {
 		t.Fatalf("argv %q", calls[0])
 	}
 }

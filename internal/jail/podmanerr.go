@@ -75,8 +75,10 @@ func podmanErrTail(out string) string {
 		}
 	}
 	omitted := start
+	// The size counts the warning, the omission note (its longest form) and
+	// every separator, so the result stays within podmanErrTailMax.
 	size := func() int {
-		n := len(warn)
+		n := len(warn) + 3 + len("(99999 earlier lines omitted) | ")
 		for _, l := range kept {
 			n += len(l) + 3
 		}
@@ -92,7 +94,11 @@ func podmanErrTail(out string) string {
 		omitted--
 	}
 	if omitted > 0 {
-		parts = append(parts, fmt.Sprintf("(%d earlier lines omitted)", omitted))
+		noun := "lines"
+		if omitted == 1 {
+			noun = "line"
+		}
+		parts = append(parts, fmt.Sprintf("(%d earlier %s omitted)", omitted, noun))
 	}
 	parts = append(parts, kept...)
 	return strings.Join(parts, " | ")

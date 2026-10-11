@@ -532,8 +532,11 @@ the store by hand corrupts it further.
 ### The runbook
 
 1. **Back up first.** Open a shell in the guest as the jail user (`orb -m lever-<name>` or
-   `limactl shell lever-<name>`). Stop the hub so its database is not written during the copy:
-   `scion server stop`. Then copy the scion directory, which holds the hub database (`hub.db`) and
+   `limactl shell lever-<name>`). Do not use `lever stop` here: it powers the guest off, and the
+   steps below need it running. Stop the hub so its database is not written during the copy
+   (`scion server stop`), then the agent containers so no agent writes its home during the copy
+   or is killed mid-write by the reset (`podman stop --all`; on a damaged store it may fail for
+   some containers, which the reset then removes). Then copy the scion directory, which holds the hub database (`hub.db`) and
    the agent records, to a place outside the podman store:
 
    ```sh

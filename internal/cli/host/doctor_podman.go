@@ -13,7 +13,7 @@ const podmanStorageCheck = "podman storage"
 // podmanResetFix is the recovery every damaged-store verdict points at: back
 // up, reset the store as the jail user, bring the instance up again on the
 // same records. The runbook in the operations guide has the detail.
-const podmanResetFix = "if `lever up` fails at load-image: back up the guest's ~/.scion (hub database, agent homes) first, " +
+const podmanResetFix = "if `lever up` fails at load-image: back up first (the guest's ~/.scion with the hub database, and the agent homes), " +
 	"then in the guest as the jail user run `podman system reset --force` (it removes every image, container and " +
 	"podman volume in the jail; the hub records, agent homes and the tree stay), then `lever up` without --fresh; " +
 	"see \"Recovering the jail's podman store\" in the operations guide"

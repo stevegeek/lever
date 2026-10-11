@@ -60,7 +60,7 @@ func TestPodmanErrTailBoundsLinesAndBytes(t *testing.T) {
 		fmt.Fprintf(&b, "line %d %s\n", i, strings.Repeat("x", 2000))
 	}
 	got := podmanErrTail(b.String())
-	if len(got) > podmanErrTailMax+64 {
+	if len(got) > podmanErrTailMax {
 		t.Fatalf("tail is %d bytes, cap %d", len(got), podmanErrTailMax)
 	}
 	if !strings.Contains(got, "line 499 ") {
@@ -75,6 +75,13 @@ func TestPodmanErrTailBoundsLinesAndBytes(t *testing.T) {
 	// Fewer lines than the limit, short: kept whole, no omission note.
 	if got := podmanErrTail("Error: one\nError: two\n"); got != "Error: one | Error: two" {
 		t.Errorf("short output = %q", got)
+	}
+	var thirteen strings.Builder
+	for i := range 13 {
+		fmt.Fprintf(&thirteen, "Error: %d\n", i)
+	}
+	if got := podmanErrTail(thirteen.String()); !strings.HasPrefix(got, "(1 earlier line omitted) | Error: 1 |") {
+		t.Errorf("one omitted = %q", got)
 	}
 	if got := podmanErrTail(""); got != "" {
 		t.Errorf("empty output = %q", got)

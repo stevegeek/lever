@@ -26,6 +26,13 @@ type ClaudeDelivered struct {
 	// zero when there is no such hook. Only the sum leaves the probe, never
 	// the text: compare it with NoteSum(the configured note).
 	NoteSum [32]byte
+	// AgentViewOff is set when the file turns Claude Code's background
+	// sessions and agent view off: disableAgentView true, or
+	// env.CLAUDE_CODE_DISABLE_AGENT_VIEW truthy (wire.DisableAgentViewEnv;
+	// Claude documents the two as equivalent). Boot writes both for every
+	// agent; unset means the write failed (an image without a writable
+	// /etc/claude-code) or the agent changed the file since.
+	AgentViewOff bool
 }
 
 // NoteSum is the sum ClaudeDelivered.NoteSum holds for note ("" ⇒ zero).
@@ -76,13 +83,14 @@ func (p AgentProbe) ClaudeSettings(ctx context.Context, ref string) (ClaudeDeliv
 	return parseClaudeDelivered(res.Stdout)
 }
 
-// parseClaudeDelivered reads the window and the sum of lever's note out of
-// a managed-settings file. A window outside wire's bounds still parses: the
+// parseClaudeDelivered reads the window, the sum of lever's note and the
+// agent-view switch out of a managed-settings file. A window outside wire's bounds still parses: the
 // caller compares it with the config, which is the finding.
 func parseClaudeDelivered(out string) (ClaudeDelivered, error) {
 	var f struct {
-		Env   map[string]any `json:"env"`
-		Hooks struct {
+		Env              map[string]any `json:"env"`
+		DisableAgentView any            `json:"disableAgentView"`
+		Hooks            struct {
 			SessionStart []struct {
 				Hooks []struct {
 					Command string `json:"command"`
@@ -102,6 +110,14 @@ func parseClaudeDelivered(out string) (ClaudeDelivered, error) {
 		}
 		d.AutoCompactWindow = n
 	}
+	// Anything but a clear "on" counts as not set: the switch is read, not
+	// validated, so an odd value is a finding, not an unreadable file.
+	if b, ok := f.DisableAgentView.(bool); ok && b {
+		d.AgentViewOff = true
+	}
+	if v, ok := f.Env[wire.DisableAgentViewEnv].(string); ok && envTruthy(v) {
+		d.AgentViewOff = true
+	}
 	for _, g := range f.Hooks.SessionStart {
 		for _, h := range g.Hooks {
 			rest, ok := strings.CutPrefix(h.Command, wire.AfterCompactHookPrefix)
@@ -118,7 +134,17 @@ func parseClaudeDelivered(out string) (ClaudeDelivered, error) {
 	return d, nil
 }
 
-// Matches reports whether d is what boot writes for c (nil c: nothing).
+// envTruthy reports whether an env value turns a Claude Code switch on.
+func envTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// Matches reports whether d is what boot writes for c (nil c: nothing). It
+// compares the claude config only; AgentViewOff is reported apart.
 func (d ClaudeDelivered) Matches(c *wire.Claude) bool {
 	var want wire.Claude
 	if c != nil {

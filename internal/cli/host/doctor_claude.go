@@ -29,6 +29,12 @@ type claudeAgent struct {
 // lever wrote until it starts again, so the row probes every running agent
 // even when nothing is configured. A container that still differs after a
 // start runs an image whose lever-agent predates the claude block.
+//
+// The row also reports the agent-view switch boot writes into every agent's
+// file: "agent view: off" when every running agent read has it, else "agent
+// view: not set" with the agents, a warning, since such an agent can move a
+// session into the background (an image without a writable /etc/claude-code
+// cannot take the file).
 func checkClaudeSettings(ctx context.Context, project string, agents []claudeAgent, list agentLister, read claudeSettingsReader) checkResult {
 	const check = "claude settings"
 	configured := false
@@ -47,7 +53,8 @@ func checkClaudeSettings(ctx context.Context, project string, agents []claudeAge
 	if err != nil {
 		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
 	}
-	var good, differ, unread, idle []string
+	var good, differ, unread, idle, viewUnset []string
+	viewRead := 0
 	for _, a := range agents {
 		rec := scionpkg.FindAgent(recs, a.name)
 		if rec == nil || !scionpkg.ContainerLive(rec.ContainerStatus) {
@@ -57,6 +64,12 @@ func checkClaudeSettings(ctx context.Context, project string, agents []claudeAge
 			continue
 		}
 		got, err := read(ctx, jail.ContainerName(hubProjectKey(project), a.name))
+		if err == nil {
+			viewRead++
+			if !got.AgentViewOff {
+				viewUnset = append(viewUnset, a.name)
+			}
+		}
 		switch {
 		case err != nil:
 			unread = append(unread, a.name+" ("+jail.ProbeErrorClass(err)+")")
@@ -79,15 +92,29 @@ func checkClaudeSettings(ctx context.Context, project string, agents []claudeAge
 	if len(unread) > 0 {
 		tail = append(tail, "not checked (unreadable): "+strings.Join(unread, ", "))
 	}
+	var view string
+	switch {
+	case len(viewUnset) > 0:
+		view = "agent view: not set (background sessions possible): " + strings.Join(viewUnset, ", ")
+	case viewRead > 0:
+		view = "agent view: off"
+	}
 	if len(differ) > 0 {
 		detail := "differs from the config, and takes effect at the agent's next start (a running agent keeps the values lever wrote at its last start): " + strings.Join(differ, ", ")
 		if len(good) > 0 {
 			detail += "; as configured: " + strings.Join(good, ", ")
 		}
+		if view != "" {
+			detail += "; " + view
+		}
 		if len(tail) > 0 {
 			detail += "; " + strings.Join(tail, "; ")
 		}
-		return warnResult(check, detail, claudeSettingsFix)
+		fix := claudeSettingsFix
+		if len(viewUnset) > 0 {
+			fix += ". " + agentViewFix
+		}
+		return warnResult(check, detail, fix)
 	}
 	var parts []string
 	if !configured {
@@ -96,12 +123,27 @@ func checkClaudeSettings(ctx context.Context, project string, agents []claudeAge
 	if len(good) > 0 {
 		parts = append(parts, strings.Join(good, ", "))
 	}
+	if view != "" {
+		parts = append(parts, view)
+	}
 	parts = append(parts, tail...)
+	if len(viewUnset) > 0 {
+		return warnResult(check, strings.Join(parts, "; "), agentViewFix)
+	}
 	if len(parts) == 0 {
 		return checkResult{check, true, "no running agent", ""}
 	}
 	return checkResult{check, true, strings.Join(parts, "; "), ""}
 }
+
+// agentViewFix is the claude-settings row's fix when an agent's file does
+// not turn agent view off. Boot rewrites the switch at every start, so a
+// start fixes an agent that changed it; one that stays unset could not
+// write /etc/claude-code.
+const agentViewFix = "agent view not set means boot could not write the switch, or the agent changed it since its last start " +
+	"(it owns /etc/claude-code in its container; lever rewrites it at every start): start the agent again. If it stays " +
+	"not set, the image lacks a writable /etc/claude-code — check that the directory exists and the agent user can write " +
+	"it, or rebuild the image (`make lever-image`) and recreate the agent on it"
 
 // claudeSettingsFix is the claude-settings row's fix. A start applies the
 // config's values; only an image that predates them needs a new container,

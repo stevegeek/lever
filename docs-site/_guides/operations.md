@@ -409,18 +409,20 @@ manager:
   managed-settings file is in the agent's own container and belongs to the `scion` user that runs
   Claude Code, so the agent can change it during a session; boot writes it again from your
   lever.yaml at the next start, unless it cannot (the agent can also make the file or its
-  directory unwritable; boot then logs `claude settings not delivered`). The env value ranks above
+  directory unwritable; boot then logs `claude settings not delivered`, or, with no claude config,
+  `agent-view switch not written`). The env value ranks above
   the agent's own settings files and `/autocompact`. The manager's envelope is in the tree it can
   write, so the manager can rewrite the copy staged for its own next start
   (`.lever/bootstrap.json`) and give itself another window or its own after-compaction note,
   within the same validated bounds; a broker restart (`lever reload`) stages a fresh one. This is
   no new power: the manager can already write a `CLAUDE.md` in its tree, which Claude Code
   reloads. Nothing in this path goes from the agent to the host: the host only reads back an
-  integer and a checksum of the note for doctor and apply.
+  integer, a checksum of the note and whether the agent-view switch is on, for doctor and apply.
 - **A failed delivery never stops the agent** (lever-agent 0.34.1 or later, in the image). If
   boot cannot write the file or the envelope's block is invalid, it logs
   `claude settings not delivered` and the agent starts without them; doctor's `claude settings`
-  row shows what the file holds (the agent's own file, so read it as the agent's word). An image
+  row shows what the file holds (the agent's own file, so read it as the agent's word),
+  including `agent view: off` or `agent view: not set`. An image
   with the 0.34.0 lever-agent and no `/etc/claude-code` still fails to start: rebuild it, or
   remove the two settings and run `lever apply` to unblock the agent at once.
 - **Images.** Delivery needs the new `lever-agent` and the new pre-start hook in the agent image.
@@ -435,9 +437,14 @@ manager:
 **Do not use `/login` or background mode in an agent tmux.** lever supplies the agent's login
 (subscription mode) and restarts the harness with `claude --continue`; both features fight that.
 
-- **Background sessions are off in every agent.** At every start, `lever-agent boot` writes
-  `env.CLAUDE_CODE_DISABLE_AGENT_VIEW=1` and `"disableAgentView": true` into the managed-settings
-  file (above), whatever the agent's `claude_settings`; it is not an option. Claude Code documents
+- **Background sessions are off in every agent, at start.** At every start, `lever-agent boot`
+  writes `env.CLAUDE_CODE_DISABLE_AGENT_VIEW=1` and `"disableAgentView": true` into the
+  managed-settings file (above), whatever the agent's `claude_settings`; it is not an option.
+  The switch guards against accidents, not against the agent: the agent owns `/etc/claude-code`
+  in its container and can change the switch during a session. lever rewrites it at every start.
+  Doctor's `claude settings` row shows `agent view: off`, or warns with `agent view: not set`
+  (background sessions are then possible, for example on an image without a writable
+  `/etc/claude-code`: check that directory's permissions or rebuild the image). Claude Code documents
   them as equivalent: they turn off background agents and agent view (`claude agents`, `--bg`,
   `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.281) the
   left-arrow shortcut that backgrounds the session and opens agent view is gated on the same
@@ -449,10 +456,13 @@ manager:
   that name the container it ran in. After the next container restart, scion starts Claude with
   `--continue`, and Claude refuses: "Your most recent conversation moved to a background session
   … registered from another machine or container, so this one can't tell whether it is still
-  running", and exits. `lever apply` or `lever up` then reports the manager `came up, then died`;
-  when the container log holds that refusal, lever adds the cause and the recovery to the error.
-  Whether Claude's refusal reaches the container log at all (scion runs Claude in a tmux window)
-  is not yet tested; without the hint, doctor's row and the recovery below still apply.
+  running", and exits. `lever apply` or `lever up` then reports the manager `came up, then died`,
+  and adds the cause and the recovery to the error when it finds one. The container usually
+  outlives the harness (tmux's shell window keeps it running), so lever first counts the stale
+  background records in it, as doctor's row does. When the container is gone or holds none, it
+  falls back to the container log, matching the refusal with terminal control codes and line
+  wrapping removed. Whether the refusal reaches the container log at all is not yet tested;
+  without the hint, doctor's row and the recovery below still apply.
 - **Recovery.** In the agent home (`/home/scion` in the agent's container), move aside the
   `~/.claude/sessions/*.json` records that hold `"kind":"bg"` or a `"parkedJobId"`, and
   `~/.claude/jobs/` and `~/.claude/daemon*`. The conversation transcript is not touched and

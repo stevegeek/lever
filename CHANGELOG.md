@@ -17,15 +17,23 @@ version bump moves the block under the new version heading.
   conversation moved into the background left session records that made the next
   `claude --continue` refuse after a container restart, so the manager died at start. The
   managed-settings file is therefore always written now. Read from the baked Claude Code 2.1.281,
-  not yet tested in a running container. Needs a rebuilt agent image and new containers.
+  not yet tested in a running container. Needs a rebuilt agent image and new containers. The
+  switch guards against accidents: an agent owns `/etc/claude-code` in its container and can
+  change it during a session; lever rewrites it at every start. With no claude config, a failed
+  write now logs `agent-view switch not written (...); background sessions stay possible`.
 
 ### Added
 
 - **A known cause when the manager's harness dies (#178).** When the manager liveness gate
-  (`lever apply`, `lever up` after a resume) sees the harness die or never come up, lever reads
-  the tail of the manager container's log. If it holds Claude Code's refusal for a stale
-  background session, the error names the cause and the recovery. Only fixed phrases are matched;
+  (`lever apply`, `lever up` after a resume) sees the harness die or never come up, lever counts
+  stale background-session records in the manager container (it usually outlives the harness),
+  and names the cause and the recovery when it finds any. When the container is gone or holds
+  none, it falls back to the last 200 lines of the container log, matching Claude Code's refusal
+  with terminal control codes and line wrapping removed. Only counts and fixed phrases are used;
   the log is never printed.
+- **Doctor's *claude settings* row shows the agent-view switch (#178).** `agent view: off`, or a
+  warning with `agent view: not set` and the agents whose file lacks it (background sessions are
+  then possible, for example on an image without a writable `/etc/claude-code`).
 - **Doctor row *claude background sessions* (#178).** Counts, in each running agent's home,
   Claude session records of a background session (`"kind":"bg"` or a `"parkedJobId"`) that another
   container registered: they block the next `claude --continue`. Only counts leave the container.

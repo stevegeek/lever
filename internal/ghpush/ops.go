@@ -346,6 +346,9 @@ func (o *Ops) PROpen(ctx context.Context, caller, repo, branch, title, body stri
 	if err := ValidateText("body", body, o.TextMax); err != nil {
 		return PRResult{}, err
 	}
+	if err := ValidatePRText(title, body); err != nil {
+		return PRResult{}, err
+	}
 	ctx, cancel, tok, err := o.begin(ctx, OpPROpen, repo)
 	defer cancel()
 	if err != nil {

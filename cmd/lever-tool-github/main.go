@@ -207,7 +207,10 @@ func prOpenBackstop(o opts) func(captool.ValidatedContext, map[string]string) er
 		if err := ghpush.ValidateTitle(a["title"]); err != nil {
 			return err
 		}
-		return ghpush.ValidateText("body", a["body"], o.textMax)
+		if err := ghpush.ValidateText("body", a["body"], o.textMax); err != nil {
+			return err
+		}
+		return ghpush.ValidatePRText(a["title"], a["body"])
 	})
 }
 
@@ -269,7 +272,8 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 		ghpush.OpPROpen: {
 			Name: ghpush.OpPROpen,
 			Description: "open a PR from a pushed " + o.prefix + "* branch into the repository's default branch; " +
-				"returns number and html_url (or the open PR for that branch, with existing: true). The title and body are published under the GitHub App's name",
+				"returns number and html_url (or the open PR for that branch, with existing: true). The title and body are published under the GitHub App's name; " +
+				fmt.Sprintf("team mentions, issue-closing keywords (fixes #N) and more than %d @mentioned users are refused", ghpush.MaxMentions),
 			Params: []captool.ParamSpec{
 				repoParam,
 				{Name: "branch", Type: "string", Description: "head branch, must start with " + o.prefix + " and exist on GitHub"},

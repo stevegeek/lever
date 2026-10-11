@@ -423,6 +423,9 @@ func TestPROpenRefusals(t *testing.T) {
 		{repo, "agent/x", "t", "a\u202eb", "formatting"},
 		{repo, "agent/x", "t", "\xff", "UTF-8"},
 		{repo, "agent/x", "t", strings.Repeat("x", 8001), "max 8000"},
+		{repo, "agent/x", "t", "cc @org/team", "team mention refused"},
+		{repo, "agent/x", "Fixes #1", "", "issue-closing keyword refused"},
+		{repo, "agent/x", "t", "@a @b @c @d @e @f", "too many @mentions"},
 	} {
 		_, err := o.PROpen(ctx, "manager", c.repo, c.branch, c.title, c.body)
 		wantErr(t, err, c.want)

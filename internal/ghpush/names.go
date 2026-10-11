@@ -6,6 +6,7 @@
 package ghpush
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -147,6 +148,51 @@ func badTextRune(r rune, multiline bool) bool {
 func ValidateTagName(t string) error {
 	if !tagRE.MatchString(t) || strings.Contains(t, "..") || strings.HasSuffix(t, ".lock") || strings.HasSuffix(t, ".") {
 		return fmt.Errorf("tag %q: want letters, digits, '.', '_', '+' and '-' (1-100 characters), such as v1.2.3", t)
+	}
+	return nil
+}
+
+// MaxMentions is the most distinct users one PR's title and body may
+// @mention together.
+const MaxMentions = 5
+
+// The named refusals of outward PR text.
+var (
+	ErrTeamMention     = errors.New("team mention refused")
+	ErrClosingKeyword  = errors.New("issue-closing keyword refused")
+	ErrTooManyMentions = errors.New("too many @mentions")
+)
+
+var (
+	// A team mention is @org/team. A mention starts the text or follows a
+	// character that cannot be part of a login or an e-mail address.
+	teamMentionRE = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.+-])@[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+`)
+	userMentionRE = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.+-])@([A-Za-z0-9][A-Za-z0-9-]{0,38})`)
+	// A keyword that closes the issue it references: #N, owner/repo#N or an
+	// issue or PR URL, with an optional colon.
+	closingRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s*` +
+		`(?:#[0-9]+|[A-Za-z0-9-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://\S+/(?:issues|pull)/[0-9]+)`)
+)
+
+// ValidatePRText refuses PR text that would act on GitHub beyond the PR
+// itself: a team mention (it notifies a whole team), a keyword that closes a
+// referenced issue on merge, and more than MaxMentions distinct users
+// @mentioned in the title and body together.
+func ValidatePRText(title, body string) error {
+	users := map[string]bool{}
+	for _, f := range []struct{ what, s string }{{"title", title}, {"body", body}} {
+		if m := teamMentionRE.FindString(f.s); m != "" {
+			return fmt.Errorf("%s: %w: %q (a team mention notifies the whole team)", f.what, ErrTeamMention, checkLabel(m[strings.IndexByte(m, '@'):]))
+		}
+		if m := closingRE.FindString(f.s); m != "" {
+			return fmt.Errorf("%s: %w: %q (it would close that issue on merge; write \"refs #N\" instead)", f.what, ErrClosingKeyword, checkLabel(m))
+		}
+		for _, m := range userMentionRE.FindAllStringSubmatch(f.s, -1) {
+			users[strings.ToLower(m[1])] = true
+		}
+	}
+	if len(users) > MaxMentions {
+		return fmt.Errorf("%w: %d distinct users mentioned, at most %d", ErrTooManyMentions, len(users), MaxMentions)
 	}
 	return nil
 }

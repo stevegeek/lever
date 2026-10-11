@@ -283,6 +283,8 @@ func TestOptInBackstops(t *testing.T) {
 		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": ""}, false},
 		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": "t", "body": "12345678901"}, false},
 		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": "t", "body": "a\x07"}, false},
+		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": "t", "body": "@o/t"}, false},
+		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": "fixes #1"}, false},
 		{"pr_status", map[string]string{"repo": "stevegeek/lever", "number": "12"}, true},
 		{"pr_status", map[string]string{"repo": "stevegeek/lever", "number": "12/files"}, false},
 		{"pr_merge", map[string]string{"repo": "stevegeek/lever", "number": "12"}, true},

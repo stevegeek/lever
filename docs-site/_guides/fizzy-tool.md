@@ -1,10 +1,12 @@
 ---
 title: "The fizzy tool"
-nav_order: 5.86
+nav_order: 5.852
+parent: Tools
 permalink: /fizzy-tool/
 ---
 The `fizzy` broker tool (`lever-tool-fizzy`) lets an agent work on one Fizzy board without holding
-a Fizzy token. Part of [giving agents MCP tools](/getting-started/mcp-tools/).
+a Fizzy token. Part of [tools](/tools/); see also
+[giving agents MCP tools](/getting-started/mcp-tools/).
 
 ## Why a first-party tool
 

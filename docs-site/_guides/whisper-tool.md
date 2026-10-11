@@ -1,12 +1,13 @@
 ---
 title: "The whisper tool"
-nav_order: 5.87
+nav_order: 5.853
+parent: Tools
 permalink: /whisper-tool/
 ---
 The `whisper` broker tool (`lever-tool-whisper`) runs speech to text on your host with
 whisper.cpp. It serves the chat page's [dictation](/remote-access/#dictation-and-read-aloud), and,
-only if you grant it, an MCP operation that lets an agent transcribe an audio file. Part of
-[giving agents MCP tools](/getting-started/mcp-tools/).
+only if you grant it, an MCP operation that lets an agent transcribe an audio file.
+Part of [tools](/tools/); see also [giving agents MCP tools](/getting-started/mcp-tools/).
 
 ## What it does
 

@@ -129,8 +129,8 @@ Start with **A**; move a server to **B** when you want it scoped per agent, audi
 ambient allowlist. See the [config reference](/reference/config/) for every key and
 [security model §6.2](/security-model/credentials/) for what the gate does and does not protect.
 
-See also: [the github tool](/github-tool/), a first-party broker tool that pushes agent branches
-without a GitHub credential in the jail, [the fizzy tool](/fizzy-tool/), which gives agents a
-fixed set of operations on one Fizzy board without the Fizzy token, and [the whisper
-tool](/whisper-tool/), which runs speech to text on the host for the chat page's dictation and,
+See also [tools](/tools/), the section for the first-party broker tools lever ships:
+[the github tool](/github-tool/), which pushes agent branches without a GitHub credential in the
+jail, [the fizzy tool](/fizzy-tool/), which gives agents a fixed set of operations on one Fizzy
+board without the Fizzy token, and [the whisper tool](/whisper-tool/), which runs speech to text on the host for the chat page's dictation and,
 with a grant, for agents.

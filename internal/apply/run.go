@@ -320,11 +320,18 @@ type Deps struct {
 	// than the config: they apply at start, so a kept manager has the old
 	// ones until its next start. nil skips the warning. Optional.
 	ReadClaudeSettings func(ctx context.Context, ref string) (jail.ClaudeDelivered, error)
+	// BackgroundSessions counts stale Claude background-session records in
+	// an agent container (jail.AgentProbe.BackgroundSessions in production).
+	// When the manager liveness gate sees the harness die and the container
+	// still runs, stale records are the cause it names first, with the
+	// recovery (withHarnessDeathHint). Only counts come back. nil skips it.
+	// Optional.
+	BackgroundSessions func(ctx context.Context, ref string) (jail.BackgroundRecords, error)
 	// HarnessLogTail reads the tail of an agent container's log
-	// (jail.AgentProbe.LogTail in production). When the manager liveness
-	// gate sees the harness die, it is matched for a known cause
-	// (HarnessDeathHint) and the cause and recovery are added to the error.
-	// Never printed. nil skips the hint. Optional.
+	// (jail.AgentProbe.LogTail in production): the fallback when
+	// BackgroundSessions names no cause (the container is gone, say). It is
+	// matched for fixed phrases (HarnessDeathHint) and never printed. nil
+	// skips the fallback. Optional.
 	HarnessLogTail func(ctx context.Context, ref string) (string, error)
 	// RecordVolumes reads the extra mounts the hub record of agent in
 	// project was created with (its inline-config volumes, through the

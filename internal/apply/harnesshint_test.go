@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -39,6 +40,41 @@ func TestHarnessDeathHint(t *testing.T) {
 	}
 }
 
+// The log is a terminal stream: control sequences and pane wrapping must not
+// hide the phrase, and must not invent one.
+func TestHarnessDeathHintTerminalStream(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tail string
+		want bool
+	}{
+		{"colours and cursor moves", "\x1b[2K\x1b[1G\x1b[31mYour most recent conversation \x1b[1mmoved\x1b[22m to a \x1b[38;5;208mbackground\x1b[0m session (abc)\x1b[?25h", true},
+		{"cursor-forward in place of spaces", "Your most recent conversation moved\x1b[1Cto\x1b[1Ca\x1b[1Cbackground\x1b[1Csession", true},
+		{"OSC title and charset switch", "\x1b]0;claude\x07\x1b(BYour most recent conversation moved to a background session\x1b]8;;\x1b\\", true},
+		{"wrapped at the pane edge", "Your most recent conversation moved to a backgr\r\nound session (abc) registered from another\nmachine", true},
+		{"wrapped between words with indent", "Your most recent conversation is running in the\r\n    background (session abc).", true},
+		{"tabs and repeated spaces", "most  recent\tconversation is   running in the background", true},
+		{"upper case", "YOUR MOST RECENT CONVERSATION MOVED TO A BACKGROUND SESSION", true},
+		{"control codes only", "\x1b[2J\x1b[H\x1b[?1049h\x1b]0;x\x07", false},
+		{"unterminated escape", "Error: other failure\x1b[31", false},
+		{"other words", "Error: background job finished; session moved", false},
+	} {
+		if got := HarnessDeathHint(c.tail); (got != "") != c.want {
+			t.Errorf("%s: hint=%v, want %v", c.name, got != "", c.want)
+		}
+	}
+}
+
+func TestStripTerminalControls(t *testing.T) {
+	in := "a\x1b[1;31mb\x1b[0mc\x1b]0;title\x07d\x1bPdcs\x1b\\e\x1b7f\x1b(Bg\x1b["
+	if got := stripTerminalControls(in); got != "abcdefg" {
+		t.Fatalf("stripTerminalControls = %q, want %q", got, "abcdefg")
+	}
+	if got := stripTerminalControls("plain é text"); got != "plain é text" {
+		t.Fatalf("plain text changed: %q", got)
+	}
+}
+
 // The start-manager gate reads the container log when the harness dies, and
 // names a stale background session as the cause, with the recovery.
 func TestStartManagerDeathNamesStaleBackgroundSession(t *testing.T) {
@@ -65,6 +101,76 @@ func TestStartManagerDeathNamesStaleBackgroundSession(t *testing.T) {
 	}
 	if len(refs) != 1 || !strings.HasSuffix(refs[0], "--hello") {
 		t.Fatalf("log read for %q, want one read of the manager container", refs)
+	}
+}
+
+// Stale background records in a container that outlived the harness are the
+// primary signal: the log is not read when they are found.
+func TestWithHarnessDeathHintBackgroundRecordsFirst(t *testing.T) {
+	ctx := context.Background()
+	died := errors.Join(scion.ErrAgentDied)
+	var logReads, bgRefs []string
+	d := Deps{
+		BackgroundSessions: func(_ context.Context, ref string) (jail.BackgroundRecords, error) {
+			bgRefs = append(bgRefs, ref)
+			return jail.BackgroundRecords{Stale: 2}, nil
+		},
+		HarnessLogTail: func(_ context.Context, ref string) (string, error) {
+			logReads = append(logReads, ref)
+			return "", nil
+		},
+	}
+	got := withHarnessDeathHint(ctx, d, died, "/lever", "hello")
+	if !errors.Is(got, scion.ErrAgentDied) || !strings.Contains(got.Error(), StaleBackgroundHint) {
+		t.Fatalf("stale records gave no hint: %v", got)
+	}
+	if len(bgRefs) != 1 || bgRefs[0] != "lever--hello" || len(logReads) != 0 {
+		t.Fatalf("records read for %q, log read for %q; want records only", bgRefs, logReads)
+	}
+
+	// No stale record (or only unreadable ones): the log is the fallback.
+	for _, recs := range []jail.BackgroundRecords{{}, {Unreadable: 3, More: true}} {
+		d.BackgroundSessions = func(context.Context, string) (jail.BackgroundRecords, error) { return recs, nil }
+		d.HarnessLogTail = func(context.Context, string) (string, error) { return "other output", nil }
+		if got := withHarnessDeathHint(ctx, d, died, "/lever", "hello"); got != died {
+			t.Errorf("records %+v and an unknown log changed the error: %v", recs, got)
+		}
+		d.HarnessLogTail = func(context.Context, string) (string, error) { return staleBgLog, nil }
+		if got := withHarnessDeathHint(ctx, d, died, "/lever", "hello"); !strings.Contains(got.Error(), StaleBackgroundHint) {
+			t.Errorf("records %+v: the log fallback gave no hint: %v", recs, got)
+		}
+	}
+
+	// The container is gone (or the probe fails): only the fallback.
+	for _, berr := range []error{jail.ErrNoContainer, jail.ErrSessionsShape} {
+		d.BackgroundSessions = func(context.Context, string) (jail.BackgroundRecords, error) {
+			return jail.BackgroundRecords{Stale: 1}, berr
+		}
+		d.HarnessLogTail = func(context.Context, string) (string, error) { return "", jail.ErrNoContainer }
+		if got := withHarnessDeathHint(ctx, d, died, "/lever", "hello"); got != died {
+			t.Errorf("probe error %v with no log changed the error: %v", berr, got)
+		}
+		d.HarnessLogTail = func(context.Context, string) (string, error) { return staleBgLog, nil }
+		if got := withHarnessDeathHint(ctx, d, died, "/lever", "hello"); !strings.Contains(got.Error(), StaleBackgroundHint) {
+			t.Errorf("probe error %v: the log fallback gave no hint: %v", berr, got)
+		}
+	}
+
+	// A records reader alone (no log reader) still names the cause.
+	d = Deps{BackgroundSessions: func(context.Context, string) (jail.BackgroundRecords, error) {
+		return jail.BackgroundRecords{Stale: 1}, nil
+	}}
+	if got := withHarnessDeathHint(ctx, d, died, "/lever", "hello"); !strings.Contains(got.Error(), StaleBackgroundHint) {
+		t.Errorf("records reader alone gave no hint: %v", got)
+	}
+	// A non-liveness error is never probed.
+	other := errors.New("boom")
+	d.BackgroundSessions = func(context.Context, string) (jail.BackgroundRecords, error) {
+		t.Fatal("probed on a non-liveness error")
+		return jail.BackgroundRecords{}, nil
+	}
+	if got := withHarnessDeathHint(ctx, d, other, "/lever", "hello"); got != other {
+		t.Errorf("a non-liveness error changed: %v", got)
 	}
 }
 

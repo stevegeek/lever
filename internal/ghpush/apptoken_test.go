@@ -10,6 +10,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -124,5 +126,53 @@ func TestMinterErrorHasNoSecrets(t *testing.T) {
 	_, err := m.Token(context.Background(), "stevegeek/lever")
 	if err == nil || !strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "eyJ") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMinterTokenForNarrowsPermissions(t *testing.T) {
+	_, key := writeKey(t, 0o600)
+	var got []map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Repositories []string          `json:"repositories"`
+			Permissions  map[string]string `json:"permissions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Repositories) != 1 || body.Repositories[0] != "lever" {
+			t.Errorf("repositories %v", body.Repositories)
+		}
+		got = append(got, body.Permissions)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": fmt.Sprintf("ghs_%d", len(got)), "expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)})
+	}))
+	defer srv.Close()
+	m := &Minter{AppID: "7", InstallationID: "42", Key: key, APIBase: srv.URL, HTTP: srv.Client(), Now: time.Now}
+	ctx := context.Background()
+	prRead := Permissions{"pull_requests": "read", "checks": "read"}
+	t1, err := m.TokenFor(ctx, "stevegeek/lever", prRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t2, err := m.Token(ctx, "stevegeek/lever")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t3, err := m.TokenFor(ctx, "stevegeek/lever", Permissions{"checks": "read", "pull_requests": "read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if t1 == t2 || t1 != t3 || len(got) != 2 {
+		t.Fatalf("tokens %q %q %q, %d mints: a permission set must have its own cached token", t1, t2, t3, len(got))
+	}
+	if !maps.Equal(got[0], map[string]string(prRead)) || !maps.Equal(got[1], map[string]string{"contents": "write"}) {
+		t.Fatalf("minted permissions %v", got)
+	}
+	for _, bad := range []Permissions{nil, {}, {"contents": "admin"}, {"Contents": "read"}, {"": "read"}} {
+		if _, err := m.TokenFor(ctx, "stevegeek/lever", bad); err == nil {
+			t.Errorf("permission set %v must be refused", bad)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("a refused permission set must not mint: %d mints", len(got))
 	}
 }

@@ -15,6 +15,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +26,45 @@ import (
 // TokenSource yields a push token for one repository.
 type TokenSource interface {
 	Token(ctx context.Context, repo string) (string, error)
+}
+
+// Permissions is a GitHub App permission set, e.g. {"contents": "write"}.
+// A minted token carries exactly these (GitHub adds metadata: read).
+type Permissions map[string]string
+
+// PushPermissions is what push needs.
+var PushPermissions = Permissions{"contents": "write"}
+
+// key is a canonical form of p for the token cache.
+func (p Permissions) key() string {
+	names := make([]string, 0, len(p))
+	for k := range p {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, k := range names {
+		b.WriteString(k + "=" + p[k] + ";")
+	}
+	return b.String()
+}
+
+func (p Permissions) validate() error {
+	if len(p) == 0 {
+		return fmt.Errorf("github app token: empty permission set")
+	}
+	for k, v := range p {
+		if !permNameRE.MatchString(k) || (v != "read" && v != "write") {
+			return fmt.Errorf("github app token: bad permission %q: %q", k, v)
+		}
+	}
+	return nil
+}
+
+// ScopedTokenSource yields a token for one repository and exactly the
+// permission set given.
+type ScopedTokenSource interface {
+	TokenFor(ctx context.Context, repo string, perms Permissions) (string, error)
 }
 
 // LoadAppKey reads the GitHub App private key: a regular file (not a
@@ -65,7 +106,8 @@ func LoadAppKey(path string) (*rsa.PrivateKey, error) {
 }
 
 // Minter mints GitHub App installation tokens narrowed to one repository and
-// contents:write, and caches each until it has less than 10 minutes left.
+// one permission set (Token: contents:write), and caches each until it has
+// less than 10 minutes left.
 type Minter struct {
 	AppID, InstallationID string
 	Key                   *rsa.PrivateKey
@@ -76,6 +118,8 @@ type Minter struct {
 	mu    sync.Mutex
 	cache map[string]cachedToken
 }
+
+var permNameRE = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
 type cachedToken struct {
 	tok string
@@ -96,11 +140,20 @@ func (m *Minter) jwt() (string, error) {
 	return signing + "." + enc.EncodeToString(sig), nil
 }
 
-// Token returns a token for repo ("owner/name").
+// Token returns a contents:write token for repo ("owner/name").
 func (m *Minter) Token(ctx context.Context, repo string) (string, error) {
+	return m.TokenFor(ctx, repo, PushPermissions)
+}
+
+// TokenFor returns a token for repo ("owner/name") with exactly perms.
+func (m *Minter) TokenFor(ctx context.Context, repo string, perms Permissions) (string, error) {
+	if err := perms.validate(); err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if c, ok := m.cache[repo]; ok && c.exp.Sub(m.Now()) > 10*time.Minute {
+	ck := repo + "|" + perms.key()
+	if c, ok := m.cache[ck]; ok && c.exp.Sub(m.Now()) > 10*time.Minute {
 		return c.tok, nil
 	}
 	jwt, err := m.jwt()
@@ -108,7 +161,7 @@ func (m *Minter) Token(ctx context.Context, repo string) (string, error) {
 		return "", fmt.Errorf("github app jwt: %w", err)
 	}
 	name := repo[strings.IndexByte(repo, '/')+1:]
-	body, _ := json.Marshal(map[string]any{"repositories": []string{name}, "permissions": map[string]string{"contents": "write"}})
+	body, _ := json.Marshal(map[string]any{"repositories": []string{name}, "permissions": map[string]string(perms)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.APIBase+"/app/installations/"+m.InstallationID+"/access_tokens", bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -135,6 +188,6 @@ func (m *Minter) Token(ctx context.Context, repo string) (string, error) {
 	if m.cache == nil {
 		m.cache = map[string]cachedToken{}
 	}
-	m.cache[repo] = cachedToken{out.Token, out.ExpiresAt}
+	m.cache[ck] = cachedToken{out.Token, out.ExpiresAt}
 	return out.Token, nil
 }

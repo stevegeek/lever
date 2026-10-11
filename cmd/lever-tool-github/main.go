@@ -4,6 +4,10 @@
 // checks the request, imports the bundle into its own bare mirror and pushes
 // one agent/* branch with a short-lived GitHub App token. The jail never
 // holds a GitHub credential. Spec: docs/superpowers/specs/2026-10-07-lever-dev-on-desktop-design.md §4.
+//
+// With -ops it also offers pr_open, pr_status, pr_merge and release (none by
+// default), each its own capability and each call with a token narrowed to
+// the repository and the permissions that operation needs.
 package main
 
 import (
@@ -16,6 +20,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,11 +36,19 @@ type opts struct {
 	name, backend, admin, tree, state, appID, instID, appKey, prefix string
 	repos                                                            map[string]bool
 	maxBundle, importBudget                                          int64
+	ops                                                              []string // offered operations, in ghpush.AllOps order
+	mergeMethods                                                     []string
+	mergeChecks                                                      ghpush.CheckPolicy
+	releaseTag                                                       *regexp.Regexp
+	textMax                                                          int
 }
+
+// maxTextMax is GitHub's limit on a PR body or release notes.
+const maxTextMax = 65536
 
 func parseFlags(args []string) (opts, error) {
 	var o opts
-	var repos string
+	var repos, ops, methods, checks, releaseTag string
 	fs := flag.NewFlagSet("lever-tool-github", flag.ContinueOnError)
 	fs.StringVar(&o.name, "name", "github", "tool/registry name")
 	fs.StringVar(&o.backend, "backend", "127.0.0.1:3210", "MCP listen address (set by the broker)")
@@ -48,7 +62,13 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&o.prefix, "branch-prefix", "agent/", "required branch prefix")
 	fs.Int64Var(&o.maxBundle, "max-bundle", 256<<20, "bundle size cap in bytes")
 	fs.Int64Var(&o.importBudget, "import-budget", 1<<30, "bundle bytes one caller may import per hour, refusals included (0 = no cap)")
-	if err := fs.Parse(args); err != nil {
+	fs.StringVar(&ops, "ops", ghpush.OpPush, "comma list of operations to offer: "+strings.Join(ghpush.AllOps, ", "))
+	fs.StringVar(&methods, "merge-methods", "squash", "comma list of merge methods pr_merge may use (squash, merge, rebase); the first is the default")
+	fs.StringVar(&checks, "merge-checks", "any", "what pr_merge requires on the head: any (at least one check, all green), none, or a comma list of check names that must succeed")
+	fs.StringVar(&releaseTag, "release-tag", ghpush.DefaultReleaseTag, "pattern a release tag must match (whole tag)")
+	fs.IntVar(&o.textMax, "text-max", 8000, "bytes of PR body or release notes")
+	err := fs.Parse(args)
+	if err != nil {
 		return o, err
 	}
 	for _, r := range []struct{ flag, v string }{{"-tree", o.tree}, {"-state", o.state}, {"-app-id", o.appID}, {"-installation-id", o.instID}, {"-app-key", o.appKey}, {"-repos", repos}} {
@@ -80,7 +100,40 @@ func parseFlags(args []string) (opts, error) {
 	if o.importBudget < 0 {
 		return o, fmt.Errorf("-import-budget must not be negative")
 	}
+	if o.ops, err = parseList("-ops", ops, ghpush.AllOps); err != nil {
+		return o, err
+	}
+	// A stable order whatever the flag's order.
+	o.ops = slices.DeleteFunc(slices.Clone(ghpush.AllOps), func(op string) bool { return !slices.Contains(o.ops, op) })
+	if o.mergeMethods, err = parseList("-merge-methods", methods, ghpush.MergeMethods); err != nil {
+		return o, err
+	}
+	if o.mergeChecks, err = ghpush.ParseCheckPolicy(checks); err != nil {
+		return o, err
+	}
+	if o.releaseTag, err = regexp.Compile(`^(?:` + releaseTag + `)$`); err != nil || releaseTag == "" {
+		return o, fmt.Errorf("-release-tag %q: not a usable pattern", releaseTag)
+	}
+	if o.textMax < 1 || o.textMax > maxTextMax {
+		return o, fmt.Errorf("-text-max must be 1-%d", maxTextMax)
+	}
 	return o, nil
+}
+
+// parseList reads a comma list whose entries must be in allowed. Order is
+// kept and duplicates dropped.
+func parseList(flag, v string, allowed []string) ([]string, error) {
+	var out []string
+	for _, e := range strings.Split(v, ",") {
+		e = strings.TrimSpace(e)
+		if !slices.Contains(allowed, e) {
+			return nil, fmt.Errorf("%s: unknown entry %q; want a comma list of %s", flag, e, strings.Join(allowed, ", "))
+		}
+		if !slices.Contains(out, e) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 
 // pushBackstop re-checks the hard invariants after token verification,
@@ -98,6 +151,147 @@ func pushBackstop(repos map[string]bool, prefix string) func(captool.ValidatedCo
 		}
 		return ghpush.ValidateBundleName(a["bundle"])
 	}
+}
+
+// opBackstop re-checks one opt-in operation's invariants after token
+// verification: the operation name, the repository, then check.
+func opBackstop(op string, repos map[string]bool, check func(map[string]string) error) func(captool.ValidatedContext, map[string]string) error {
+	return func(c captool.ValidatedContext, a map[string]string) error {
+		if c.Operation != op {
+			return fmt.Errorf("github: backstop: only %s is permitted", op)
+		}
+		if err := ghpush.ValidateRepo(a["repo"], repos); err != nil {
+			return err
+		}
+		return check(a)
+	}
+}
+
+func prOpenBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
+	return opBackstop(ghpush.OpPROpen, o.repos, func(a map[string]string) error {
+		if err := ghpush.ValidateBranch(a["branch"], o.prefix); err != nil {
+			return err
+		}
+		if err := ghpush.ValidateTitle(a["title"]); err != nil {
+			return err
+		}
+		return ghpush.ValidateText("body", a["body"], o.textMax)
+	})
+}
+
+func prStatusBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
+	return opBackstop(ghpush.OpPRStatus, o.repos, func(a map[string]string) error {
+		return ghpush.ValidateNumber(a["number"])
+	})
+}
+
+func prMergeBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
+	return opBackstop(ghpush.OpPRMerge, o.repos, func(a map[string]string) error {
+		if err := ghpush.ValidateNumber(a["number"]); err != nil {
+			return err
+		}
+		if m := a["method"]; m != "" && !slices.Contains(o.mergeMethods, m) {
+			return fmt.Errorf("merge method %q not allowed", m)
+		}
+		return nil
+	})
+}
+
+func releaseBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
+	return opBackstop(ghpush.OpRelease, o.repos, func(a map[string]string) error {
+		if err := ghpush.ValidateTagName(a["tag"]); err != nil {
+			return err
+		}
+		if !o.releaseTag.MatchString(a["tag"]) {
+			return fmt.Errorf("tag %q does not match the release pattern", a["tag"])
+		}
+		return ghpush.ValidateText("notes", a["notes"], o.textMax)
+	})
+}
+
+// operations lists the captool operations this instance offers: push
+// unless -ops leaves it out, and each opt-in operation -ops names. An
+// operation not listed is not registered at all.
+func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
+	repoParam := captool.ParamSpec{Name: "repo", Type: "string", Description: "owner/name, e.g. stevegeek/lever"}
+	caveat := map[string]string{"repo": "repo"}
+	all := map[string]captool.Operation{
+		ghpush.OpPush: {
+			Name:        "push",
+			Description: "push one agent/* branch from a git bundle in /workspace/.lever-files/github/ (no force); returns the compare URL",
+			Params: []captool.ParamSpec{
+				{Name: "repo", Type: "string", Description: "owner/name, e.g. stevegeek/lever"},
+				{Name: "branch", Type: "string", Description: "branch name, must start with " + o.prefix},
+				{Name: "bundle", Type: "string", Description: "bundle file name in /workspace/.lever-files/github/"},
+			},
+			CaveatParam: map[string]string{"repo": "repo"},
+			Backstop:    pushBackstop(o.repos, o.prefix),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(p.Push(context.Background(), c.Caller, a["repo"], a["branch"], a["bundle"]))
+			},
+		},
+		ghpush.OpPROpen: {
+			Name: ghpush.OpPROpen,
+			Description: "open a PR from a pushed " + o.prefix + "* branch into the repository's default branch; " +
+				"returns number and html_url (or the open PR for that branch, with existing: true). The title and body are published under the GitHub App's name",
+			Params: []captool.ParamSpec{
+				repoParam,
+				{Name: "branch", Type: "string", Description: "head branch, must start with " + o.prefix + " and exist on GitHub"},
+				{Name: "title", Type: "string", Description: fmt.Sprintf("PR title, 1-%d characters, one line", ghpush.TitleMax)},
+				{Name: "body", Type: "string", Description: fmt.Sprintf("PR description, at most %d bytes; newline and tab are the only control characters allowed", o.textMax)},
+			},
+			CaveatParam: caveat,
+			Backstop:    prOpenBackstop(o),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(g.PROpen(context.Background(), c.Caller, a["repo"], a["branch"], a["title"], a["body"]))
+			},
+		},
+		ghpush.OpPRStatus: {
+			Name:        ghpush.OpPRStatus,
+			Description: "read a PR: state, mergeable, mergeable_state, head and base, and the check runs and commit statuses on the head SHA",
+			Params:      []captool.ParamSpec{repoParam, {Name: "number", Type: "string", Description: "PR number, e.g. 12"}},
+			CaveatParam: caveat,
+			Backstop:    prStatusBackstop(o),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(g.PRStatus(context.Background(), c.Caller, a["repo"], a["number"]))
+			},
+		},
+		ghpush.OpPRMerge: {
+			Name: ghpush.OpPRMerge,
+			Description: "merge an open PR from a " + o.prefix + "* branch of the same repository into the default branch, " +
+				"only when it is mergeable and every check on its head SHA passed; merged pinned to that SHA",
+			Params: []captool.ParamSpec{
+				repoParam,
+				{Name: "number", Type: "string", Description: "PR number, e.g. 12"},
+				{Name: "method", Type: "string", Description: "merge method, one of " + strings.Join(o.mergeMethods, ", ") + "; default " + o.mergeMethods[0]},
+			},
+			CaveatParam: caveat,
+			Backstop:    prMergeBackstop(o),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(g.PRMerge(context.Background(), c.Caller, a["repo"], a["number"], a["method"]))
+			},
+		},
+		ghpush.OpRelease: {
+			Name: ghpush.OpRelease,
+			Description: "create a GitHub release and its tag on the default branch's current head; the tag must match " +
+				o.releaseTag.String() + " and be greater than every existing matching tag. Starts the repository's release workflow",
+			Params: []captool.ParamSpec{
+				repoParam,
+				{Name: "tag", Type: "string", Description: "new tag, e.g. v1.2.3"},
+				{Name: "notes", Type: "string", Description: fmt.Sprintf("release notes, at most %d bytes; newline and tab are the only control characters allowed", o.textMax)},
+			},
+			CaveatParam: caveat,
+			Backstop:    releaseBackstop(o),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(g.Release(context.Background(), c.Caller, a["repo"], a["tag"], a["notes"]))
+			},
+		},
+	}
+	var out []captool.Operation
+	for _, op := range o.ops {
+		out = append(out, all[op])
+	}
+	return out
 }
 
 // asResult turns a refusal into a result the agent can read: captool maps a
@@ -138,34 +332,29 @@ func main() {
 	if err := g.CheckVersion(context.Background(), o.state); err != nil {
 		log.Fatal(err)
 	}
+	minter := &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
+		APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now}
 	p := &ghpush.Pusher{
 		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
 		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
 		Deadline: 10 * time.Minute,
-		Tokens: &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
-			APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now},
+		Tokens:   minter,
 		// GitHub refuses files over 100 MiB, so a bigger object can never be
 		// pushed; the caps bound what index-pack inflates and holds.
 		Limits: ghpush.PackLimits{MaxObjects: 2_000_000, MaxObjectSize: 100 << 20, MaxInflated: 4 << 30},
 		Git:    g,
 		Log:    logger,
 	}
+	gh := &ghpush.Ops{
+		Repos: o.repos, Prefix: o.prefix,
+		API:    &ghpush.API{Base: "https://api.github.com", HTTP: ghpush.NewAPIClient(&http.Client{Timeout: 30 * time.Second})},
+		Tokens: minter, Log: logger,
+		TextMax: o.textMax, MergeMethods: o.mergeMethods, MergeChecks: o.mergeChecks, ReleaseTag: o.releaseTag,
+		Deadline: 2 * time.Minute,
+	}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,
-		Operations: []captool.Operation{{
-			Name:        "push",
-			Description: "push one agent/* branch from a git bundle in /workspace/.lever-files/github/ (no force); returns the compare URL",
-			Params: []captool.ParamSpec{
-				{Name: "repo", Type: "string", Description: "owner/name, e.g. stevegeek/lever"},
-				{Name: "branch", Type: "string", Description: "branch name, must start with " + o.prefix},
-				{Name: "bundle", Type: "string", Description: "bundle file name in /workspace/.lever-files/github/"},
-			},
-			CaveatParam: map[string]string{"repo": "repo"},
-			Backstop:    pushBackstop(o.repos, o.prefix),
-			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
-				return asResult(p.Push(context.Background(), c.Caller, a["repo"], a["branch"], a["bundle"]))
-			},
-		}},
+		Operations: operations(o, p, gh),
 	})
 	if err != nil {
 		log.Fatal(err)

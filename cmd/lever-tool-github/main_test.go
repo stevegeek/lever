@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,5 +100,140 @@ func TestParseFlagsRefusesAppKeyInsideTree(t *testing.T) {
 	}
 	if _, err := parseFlags(append(base, "-app-key", filepath.Join(t.TempDir(), "app.pem"))); err != nil {
 		t.Errorf("a key outside the tree must be accepted: %v", err)
+	}
+}
+
+func baseFlags(t *testing.T) []string {
+	t.Helper()
+	return []string{"-tree", t.TempDir(), "-state", filepath.Join(t.TempDir(), "st"), "-app-id", "1",
+		"-installation-id", "2", "-app-key", filepath.Join(t.TempDir(), "app.pem"), "-repos", "stevegeek/lever"}
+}
+
+func opNames(ops []captool.Operation) []string {
+	var n []string
+	for _, o := range ops {
+		n = append(n, o.Name)
+	}
+	return n
+}
+
+func TestParseFlagsOpsDefaultIsPushOnly(t *testing.T) {
+	o, err := parseFlags(baseFlags(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(o.ops, []string{"push"}) || !slices.Equal(o.mergeMethods, []string{"squash"}) ||
+		o.mergeChecks.None || len(o.mergeChecks.Names) != 0 || o.textMax != 8000 || !o.releaseTag.MatchString("v1.2.3") {
+		t.Fatalf("defaults %+v", o)
+	}
+	ops := operations(o, nil, nil)
+	if !slices.Equal(opNames(ops), []string{"push"}) {
+		t.Fatalf("default operations %v", opNames(ops))
+	}
+	// push is the same operation as before -ops existed.
+	push := ops[0]
+	if len(push.Params) != 3 || push.Params[0].Name != "repo" || push.Params[1].Name != "branch" || push.Params[2].Name != "bundle" ||
+		push.CaveatParam["repo"] != "repo" || len(push.CaveatParam) != 1 || push.Backstop == nil {
+		t.Fatalf("push operation changed: %+v", push)
+	}
+}
+
+func TestParseFlagsOps(t *testing.T) {
+	o, err := parseFlags(append(baseFlags(t), "-ops", "release, push,pr_open,push,pr_merge,pr_status"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"push", "pr_open", "pr_status", "pr_merge", "release"}
+	if !slices.Equal(o.ops, want) || !slices.Equal(opNames(operations(o, nil, nil)), want) {
+		t.Fatalf("ops %v", o.ops)
+	}
+	o, err = parseFlags(append(baseFlags(t), "-ops", "pr_status"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := operations(o, nil, nil)
+	if !slices.Equal(opNames(ops), []string{"pr_status"}) {
+		t.Fatalf("an operation -ops leaves out must not be registered: %v", opNames(ops))
+	}
+	for _, op := range operations(mustParse(t, "-ops", strings.Join(want, ",")), nil, nil) {
+		if op.CaveatParam["repo"] != "repo" || op.Backstop == nil || op.Handler == nil {
+			t.Errorf("%s: want a repo caveat, a backstop and a handler", op.Name)
+		}
+	}
+}
+
+func mustParse(t *testing.T, extra ...string) opts {
+	t.Helper()
+	o, err := parseFlags(append(baseFlags(t), extra...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o
+}
+
+func TestParseFlagsOpsRefusals(t *testing.T) {
+	for _, c := range []struct{ flags []string }{
+		{[]string{"-ops", ""}},
+		{[]string{"-ops", "push,delete"}},
+		{[]string{"-ops", "pr_create"}},
+		{[]string{"-merge-methods", "squash,fast-forward"}},
+		{[]string{"-merge-methods", ""}},
+		{[]string{"-merge-checks", ""}},
+		{[]string{"-merge-checks", "any,test"}},
+		{[]string{"-release-tag", "("}},
+		{[]string{"-release-tag", ""}},
+		{[]string{"-text-max", "0"}},
+		{[]string{"-text-max", "65537"}},
+	} {
+		if _, err := parseFlags(append(baseFlags(t), c.flags...)); err == nil {
+			t.Errorf("%v must be refused", c.flags)
+		}
+	}
+	o := mustParse(t, "-merge-methods", "rebase,merge", "-merge-checks", "test,e2e", "-release-tag", `v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?`, "-text-max", "100")
+	if !slices.Equal(o.mergeMethods, []string{"rebase", "merge"}) || !slices.Equal(o.mergeChecks.Names, []string{"test", "e2e"}) || o.textMax != 100 {
+		t.Fatalf("opts %+v", o)
+	}
+	// The pattern matches the whole tag.
+	if !o.releaseTag.MatchString("v1.2.3-rc.1") || o.releaseTag.MatchString("xv1.2.3") || o.releaseTag.MatchString("v1.2.3-rc.1x") {
+		t.Fatalf("release pattern %s", o.releaseTag)
+	}
+}
+
+func TestOptInBackstops(t *testing.T) {
+	o := mustParse(t, "-ops", "push,pr_open,pr_status,pr_merge,release", "-merge-methods", "squash,merge", "-text-max", "10")
+	ops := map[string]captool.Operation{}
+	for _, op := range operations(o, nil, nil) {
+		ops[op.Name] = op
+	}
+	for _, c := range []struct {
+		op   string
+		args map[string]string
+		ok   bool
+	}{
+		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": "t", "body": "b\n"}, true},
+		{"pr_open", map[string]string{"repo": "x/y", "branch": "agent/x", "title": "t"}, false},
+		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "main", "title": "t"}, false},
+		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": ""}, false},
+		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": "t", "body": "12345678901"}, false},
+		{"pr_open", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "title": "t", "body": "a\x07"}, false},
+		{"pr_status", map[string]string{"repo": "stevegeek/lever", "number": "12"}, true},
+		{"pr_status", map[string]string{"repo": "stevegeek/lever", "number": "12/files"}, false},
+		{"pr_merge", map[string]string{"repo": "stevegeek/lever", "number": "12"}, true},
+		{"pr_merge", map[string]string{"repo": "stevegeek/lever", "number": "12", "method": "merge"}, true},
+		{"pr_merge", map[string]string{"repo": "stevegeek/lever", "number": "12", "method": "rebase"}, false},
+		{"pr_merge", map[string]string{"repo": "x/y", "number": "12"}, false},
+		{"release", map[string]string{"repo": "stevegeek/lever", "tag": "v1.2.3", "notes": "n"}, true},
+		{"release", map[string]string{"repo": "stevegeek/lever", "tag": "1.2.3"}, false},
+		{"release", map[string]string{"repo": "stevegeek/lever", "tag": "v1.2.3", "notes": "12345678901"}, false},
+		{"release", map[string]string{"repo": "x/y", "tag": "v1.2.3"}, false},
+	} {
+		err := ops[c.op].Backstop(captool.ValidatedContext{Operation: c.op}, c.args)
+		if (err == nil) != c.ok {
+			t.Errorf("%s %v: err %v, want ok=%v", c.op, c.args, err, c.ok)
+		}
+	}
+	ok := map[string]string{"repo": "stevegeek/lever", "number": "12"}
+	if err := ops["pr_status"].Backstop(captool.ValidatedContext{Operation: "pr_merge"}, ok); err == nil {
+		t.Error("a backstop must refuse another operation")
 	}
 }

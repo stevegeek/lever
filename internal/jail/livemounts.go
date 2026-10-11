@@ -47,7 +47,8 @@ var ErrContainerNotRunning = errors.New("the container is not running")
 
 // ContainerLiveMounts checks the running container ref against want from
 // the GUEST side, without running a program inside the container (the
-// agent is root there and can replace any of them). Through r, as the
+// agent controls it, and lever treats it as root there: any of them may be
+// replaced). Through r, as the
 // guest user that owns the rootless container:
 //
 //   - podman inspect gives the container's process id;

@@ -18,7 +18,8 @@ import (
 // (enrol-only boot). Written 0600, parent directory 0700.
 //
 // path is <home>/.claude/settings.json: both the directory and the file are
-// agent-writable and boot runs this as root, so the read and the write are
+// agent-writable and boot may run this as root (see errRefusedPath: under
+// rootless podman it runs as the agent user), so the read and the write are
 // confined to <home> (the grandparent) and a symlink at either component is
 // refused (see errRefusedPath). The grandparent must exist.
 func WriteSettingsEnv(path string, env map[string]string) error {

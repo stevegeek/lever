@@ -12,14 +12,25 @@ import (
 // write under the agent-writable home is a symbolic link, or exists as
 // something other than the kind of file expected there.
 //
-// `lever-agent boot` runs as ROOT in scion's pre-start hook, and every file it
+// `lever-agent boot` runs in scion's pre-start hook, and every file it
 // touches (~/.lever-id/*, ~/.claude/settings.json, ~/.scion/scion-services.yaml,
 // the manager's /workspace/.lever/bootstrap.json) sits in a tree the agent
-// (uid 1000) owns. A worker's /run/lever/bootstrap.json is a root-owned
-// read-only mount, but it takes the same path: one reader, one rule.
-// Following a link there would hand the agent a root write (chmod 0700 the
-// target, write attacker-chosen bytes through it) or a root read (a FIFO also
-// hangs the read). So, mirroring wire.Stage on the host side, all work goes
+// (uid 1000) owns. A worker's /run/lever/bootstrap.json is a read-only
+// mount, but it takes the same path: one reader, one rule.
+//
+// Under rootless podman, the runtime lever uses, the hook does NOT run as
+// root: scion starts the container with --userns=keep-id:uid=1000,gid=1000
+// and SCION_KEEPID_UID=1000 (scion pkg/runtime/podman.go), and sciontool
+// init drops to the scion user (uid 1000) in setupHostUser before it runs
+// the pre-start hooks (scion cmd/sciontool/commands/init.go). So boot
+// normally runs with the agent's own rights, and a link the agent plants
+// gains it nothing it could not do itself. The confinement is kept anyway,
+// as defence: on a rootful runtime, or when that drop fails (sciontool logs
+// the failed setuid and carries on as container root), boot runs as root,
+// and following a link would hand the agent a root write (chmod 0700 the
+// target, write attacker-chosen bytes through it) or a root read (a FIFO
+// also hangs the read, at any uid). Nothing here relies on boot being root
+// or on it not being root. So, mirroring wire.Stage on the host side, all work goes
 // through an os.Root anchored at the one component the agent cannot replace
 // (the mount point: $HOME or /workspace), and every agent-controlled component
 // is Lstat-checked and refused if it is a link — even one that stays inside

@@ -155,9 +155,10 @@ func TestIdentityCN(t *testing.T) {
 }
 
 // The identity dir sits under the agent-writable $HOME, and boot (which calls
-// Write) runs as ROOT in scion's pre-start hook. An agent that turns
-// ~/.lever-id, or a file inside it, into a symlink would otherwise get root
-// to chmod the target 0700 and write attacker-chosen bytes through the link.
+// Write) runs in scion's pre-start hook — as the agent user under rootless
+// podman, but as root on a rootful runtime or after a failed privilege drop.
+// An agent that turns ~/.lever-id, or a file inside it, into a symlink would
+// then get root to chmod the target 0700 and write attacker-chosen bytes through the link.
 // Write must refuse by name and leave the target untouched.
 func TestWriteIdentityRefusesSymlinkedDir(t *testing.T) {
 	id := Identity{CertPEM: []byte("c"), KeyPEM: []byte("k"), CAPEM: []byte("a")}

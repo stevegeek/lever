@@ -1,9 +1,11 @@
 #!/bin/sh
 # scion pre-start hook: enrol this agent + configure the harness BEFORE claude
 # launches. Runs in the pre-start phase, as the agent user (uid 1000) under
-# rootless podman, so it writes only paths that user owns (sciontool chowns
-# the key files only when it runs as root); lever-agent writes 0600 key
-# files which sciontool then chowns to the agent user.
+# rootless podman: sciontool init drops to the scion user before it runs the
+# hooks (scion cmd/sciontool/commands/init.go setupHostUser, keep-id mode). So
+# it writes only paths that user owns, and the 0600 key files lever-agent
+# writes are the agent's from the start. Only when sciontool runs the hook as
+# root (a rootful runtime) does it chown the agent home afterwards.
 #
 # Bootstrap path — two layouts, one reader (lever-agent boot):
 #   manager: /workspace/.lever/bootstrap.json. `lever apply` stages the manager's
@@ -28,8 +30,10 @@
 # must be written at runtime because ~/.scion is under the /home/scion bind-mount.
 # Claude config: the bootstrap's optional claude block (the operator's
 # claude_settings and after_compact_note) goes to Claude Code's managed-settings
-# file, which root owns and the agent user cannot write. Boot rewrites it on
-# every start; with no block and no file it touches nothing.
+# file. Lever's image gives /etc/claude-code to the agent user (the hook runs
+# as that user), so it is not a boundary: the agent can change the file in a
+# session. Boot rewrites it on every start; with no block and no file it
+# touches nothing.
 set -eu
 bootstrap="${LEVER_BOOTSTRAP:-}"
 if [ -z "$bootstrap" ]; then

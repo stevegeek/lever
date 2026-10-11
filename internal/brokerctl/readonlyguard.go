@@ -40,7 +40,7 @@ func guardClass(err error) string {
 // entries read-only, pins in place — a missing pin lets the agent move an
 // entry away). Then it checks the RUNNING container from the guest side
 // (jail.ContainerLiveMounts: the kernel's mountinfo and device+inode, no
-// program run inside the container, where the agent is root): every
+// program run inside the container, which the agent controls): every
 // planned directory must be a mount point, the entries read-only, each
 // covering the directory the host has there now. Anything it cannot read
 // — no container yet, a stopped one — is a refusal, so the tool waits.

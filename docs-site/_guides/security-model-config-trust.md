@@ -239,8 +239,8 @@ A program under `manager.read_only` is safe only while the running manager carri
 mount, and that mount is create-time only (§5.1.1). So the broker does not start a tool whose program
 relies on it until it has read the manager container's mounts and found the whole `read_only` plan in
 place (entries read-only, their parents and the worker dirs pinned), and then checked the running
-container from the guest side, without running any program inside it (the agent is root there and
-could replace it): the kernel's `/proc/<pid>/mountinfo` for the container's process must list every
+container from the guest side, without running any program inside it (the agent controls that container
+and could replace it; lever does not rely on the agent lacking root there): the kernel's `/proc/<pid>/mountinfo` for the container's process must list every
 planned directory as a mount point, the entries read-only, and `stat` must find the same device and
 inode at the guest path and at `/proc/<pid>/root/<target>`, so a protected directory replaced on the
 host (the mount stays on the old one) is caught. It fails closed: no container yet, a stopped manager,

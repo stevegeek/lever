@@ -97,6 +97,19 @@ func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 	return holdLive(ctx, list, slug, b.Interval, b.Settle)
 }
 
+// HoldAgentLive is WaitAgentLive's settle phase on its own: the record was
+// just seen live, and must stay live (phase running over a live container)
+// for settle. A caller that puts its own check between becoming live and
+// the hold (apply's manager gate waits for the harness's tmux pane first,
+// so the window starts once the harness runs) composes WaitAgentLive with a
+// zero Settle, its check, then this. settle <= 0 returns nil at once.
+func HoldAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration) error {
+	if settle <= 0 {
+		return nil
+	}
+	return holdLive(ctx, list, slug, interval, settle)
+}
+
 // waitLiveOnce is the first phase: poll until the record is live or the
 // attempts run out.
 func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {

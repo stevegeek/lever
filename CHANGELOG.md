@@ -64,6 +64,30 @@ version bump moves the block under the new version heading.
   comments, blank lines, spacing and the release version do not); CONTRIBUTING.md says how to bump it. An instance
   Dockerfile that copies the binaries in itself sets the label from `make -s lever-image-jail-abi`.
 
+### Changed
+
+- **`lever up` reports a manager up only once claude runs (lever#164).** After a start or a resume
+  the gate waits for claude's tmux pane in the manager container to be alive (up to 2 min, since
+  scion's pre-start hook runs first), then holds the record for the 10 s settle window and checks
+  the pane again. Before, it read only the hub record, which scion marks running at container launch
+  and whose container column a heartbeat refreshes, so `lever up --fresh` printed "is up" over a
+  manager whose pre-start hook failed and whose container exited a moment later. A container that
+  podman reports stopped, or a hub record that leaves running during the wait, is a death at once.
+  So is a claude that exits before it comes up (a bad `--continue`, an auth failure): scion's shell
+  window keeps tmux and the container up, so three probes in a row that find tmux answering but no
+  live claude pane report "claude exited before it came up" within a few seconds. A running
+  container with no tmux server yet after the wait (a hung pre-start hook) is not up. When the
+  probe itself cannot run (a few failures in a row), the container still running after the window
+  counts, with a warning. The progress line shows a fresh hub reading during the wait. A manager
+  that was already running still gets one look.
+- **A manager start prints progress (lever#168).** The start-manager step and `lever up`'s resume
+  print a line about every 15 s with what they wait for, the hub's phase and container, and the
+  elapsed time, instead of a silent minute between "No running manager" and the attach.
+- Comments and the pre-start hook's notes no longer say `lever-agent boot` runs as root: under
+  rootless podman sciontool drops to the agent user (uid 1000) before it runs the hook. The symlink
+  confinement stays as defence for a rootful runtime. `CONTRIBUTING.md` gains a release checklist
+  that asks for a live boot (or the uid in the pinned scion source) on a change to the boot step.
+
 ## [0.35.0] - 2026-10-11
 
 ### Added

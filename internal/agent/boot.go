@@ -170,8 +170,14 @@ func Boot(ctx context.Context, c BootConfig) error {
 	// agent (on rootless podman the pre-start hook runs as the agent user, and
 	// an image without lever's /etc/claude-code cannot take the file). It is
 	// logged, and doctor's claude settings row shows what the agent got.
+	// With no claude config the file carries only the agent-view switch, so
+	// the log names that, not a claude config that was never there.
 	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil && c.Log != nil {
-		c.Log("lever-agent boot: claude settings not delivered: %v", err)
+		if claude.IsZero() {
+			c.Log("lever-agent boot: agent-view switch not written (%v); background sessions stay possible", err)
+		} else {
+			c.Log("lever-agent boot: claude settings not delivered, nor the agent-view switch (background sessions stay possible): %v", err)
+		}
 	}
 	if c.MCPAdd == nil {
 		return nil

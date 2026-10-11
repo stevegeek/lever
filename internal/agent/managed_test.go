@@ -302,6 +302,19 @@ func TestBootSurvivesAnUnwritableManagedSettingsDir(t *testing.T) {
 	if !strings.Contains(strings.Join(logged, "\n"), "claude settings not delivered") {
 		t.Fatalf("no log line for the failed write: %q", logged)
 	}
+
+	// No claude config: only the agent-view switch was to be written, and
+	// the log says that, not that claude settings went missing.
+	writeBootstrapClaude(t, c.BootstrapPath, nil)
+	logged = nil
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatalf("an unwritable managed settings dir stopped the boot: %v", err)
+	}
+	all := strings.Join(logged, "\n")
+	if !strings.Contains(all, "agent-view switch not written (") || !strings.Contains(all, "background sessions stay possible") ||
+		strings.Contains(all, "claude settings not delivered") {
+		t.Fatalf("log for a switch-only write failure: %q", logged)
+	}
 }
 
 // The marker must not start like the skills' trusted operator-note marker.

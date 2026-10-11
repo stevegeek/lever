@@ -323,6 +323,19 @@ type Deps struct {
 	// than the config: they apply at start, so a kept manager has the old
 	// ones until its next start. nil skips the warning. Optional.
 	ReadClaudeSettings func(ctx context.Context, ref string) (jail.ClaudeDelivered, error)
+	// BackgroundSessions counts stale Claude background-session records in
+	// an agent container (jail.AgentProbe.BackgroundSessions in production).
+	// When the manager liveness gate sees the harness die and the container
+	// still runs, stale records are the cause it names first, with the
+	// recovery (withHarnessDeathHint). Only counts come back. nil skips it.
+	// Optional.
+	BackgroundSessions func(ctx context.Context, ref string) (jail.BackgroundRecords, error)
+	// HarnessLogTail reads the tail of an agent container's log
+	// (jail.AgentProbe.LogTail in production): the fallback when
+	// BackgroundSessions names no cause (the container is gone, say). It is
+	// matched for fixed phrases (HarnessDeathHint) and never printed. nil
+	// skips the fallback. Optional.
+	HarnessLogTail func(ctx context.Context, ref string) (string, error)
 	// RecordVolumes reads the extra mounts the hub record of agent in
 	// project was created with (its inline-config volumes, through the
 	// controller's read-only agent listing), as jail mounts. It is
@@ -2203,16 +2216,19 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error 
 		// One look still refuses a running RECORD over a dead container.
 		b.Settle = 0
 	}
-	return gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress)
+	err := gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress)
+	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
 // WaitManagerLive is the full gate — become live, see the harness run, then
 // hold for the settle window — for a path that just acted on the manager
 // (`lever up` after its own `scion resume`). Same List, same budget, same
 // in-container check as the start-manager step. prog (may be nil) gets the
-// gate's stages for its progress line.
+// gate's stages for its progress line. A harness death gets the same hint
+// as the start-manager step (withHarnessDeathHint).
 func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
-	return gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog)
+	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog)
+	return withHarnessDeathHint(ctx, d, err, project, name)
 }
 
 // observeAttempts bounds ObserveManagerLive's list retries: enough to ride

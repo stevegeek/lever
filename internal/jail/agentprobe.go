@@ -146,7 +146,7 @@ func ProbeErrorClass(err error) string {
 		return "timed out"
 	case errors.Is(err, proc.ErrOutputLimit):
 		return "output over its limit"
-	case errors.Is(err, ErrTokenShape), errors.Is(err, ErrClaudeShape):
+	case errors.Is(err, ErrTokenShape), errors.Is(err, ErrClaudeShape), errors.Is(err, ErrSessionsShape):
 		return "unexpected output"
 	case errors.As(err, &exit):
 		return exit.Error()

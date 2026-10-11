@@ -183,6 +183,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkClaudeSettings(ctx, b.MountDest(), claudeAgents(app.Name, app.ManagerClaude(), workerNames, workerClaude), listAgents, agentSession.ClaudeSettings)
 		},
+		func() checkResult {
+			return checkBackgroundSessions(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), listAgents, agentSession.BackgroundSessions)
+		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {
 			return checkPodmanStorage(ctx, func(ctx context.Context) (jail.StoreHealth, error) { return jail.ReadStoreHealth(ctx, jr) })

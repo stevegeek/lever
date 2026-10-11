@@ -32,8 +32,8 @@
 # claude_settings and after_compact_note) goes to Claude Code's managed-settings
 # file. Lever's image gives /etc/claude-code to the agent user (the hook runs
 # as that user), so it is not a boundary: the agent can change the file in a
-# session. Boot rewrites it on every start; with no block and no file it
-# touches nothing.
+# session. Boot rewrites it on every start, and always turns off background
+# agents and agent view there.
 set -eu
 bootstrap="${LEVER_BOOTSTRAP:-}"
 if [ -z "$bootstrap" ]; then

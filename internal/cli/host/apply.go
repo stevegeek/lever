@@ -1399,6 +1399,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// ReadClaudeSettings lets apply warn when the kept manager runs with
 		// other claude_settings / after_compact_note than the config.
 		ReadClaudeSettings: jail.AgentProbe{R: b.JailRunner()}.ClaudeSettings,
+		// BackgroundSessions (first) and HarnessLogTail (fallback) let the
+		// manager liveness gate name a known cause (a stale background
+		// session) when the harness dies.
+		BackgroundSessions: jail.AgentProbe{R: b.JailRunner()}.BackgroundSessions,
+		HarnessLogTail:     jail.AgentProbe{R: b.JailRunner()}.LogTail,
 		RecordVolumes:      w.recordVolumes,
 		// AgentSession lets start-manager heal an expired agent hub token
 		// and a stopped phase over a live harness (apply.HealAgentSession).

@@ -90,6 +90,31 @@ func TestClaudeSettingsScriptRealShell(t *testing.T) {
 	}
 }
 
+func TestParseClaudeDeliveredAgentView(t *testing.T) {
+	for _, c := range []struct {
+		file string
+		want bool
+	}{
+		{`{"env":{"` + wire.DisableAgentViewEnv + `":"1"},"` + wire.DisableAgentViewSetting + `":true}`, true},
+		{`{"` + wire.DisableAgentViewSetting + `":true}`, true},
+		{`{"env":{"` + wire.DisableAgentViewEnv + `":"true"}}`, true},
+		{`{"env":{"` + wire.DisableAgentViewEnv + `":"0"},"` + wire.DisableAgentViewSetting + `":false}`, false},
+		{`{"env":{"` + wire.DisableAgentViewEnv + `":1},"` + wire.DisableAgentViewSetting + `":"yes"}`, false},
+		{managedFile("400000", "x"), false},
+		{`{}`, false},
+	} {
+		d, err := parseClaudeDelivered(c.file)
+		if err != nil || d.AgentViewOff != c.want {
+			t.Errorf("%s: AgentViewOff=%v err=%v, want %v", c.file, d.AgentViewOff, err, c.want)
+		}
+	}
+	// The switch is reported apart from the claude config.
+	d, _ := parseClaudeDelivered(`{"` + wire.DisableAgentViewSetting + `":true}`)
+	if !d.Matches(nil) || d.Describe() != "none" {
+		t.Errorf("the switch alone must still match no config: %+v", d)
+	}
+}
+
 func TestDescribeClaude(t *testing.T) {
 	if got := DescribeClaude(nil); got != "none" {
 		t.Errorf("nil = %q", got)

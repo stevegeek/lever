@@ -11,7 +11,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `cmd/lever-manager` | In-jail orchestration CLI the manager agent runs (`agent`, `msg`, `watch`). |
 | `cmd/lever-agent` | In-jail capability helper. Baked into the agent image; the container pre-start hook runs it to enrol the agent's mTLS identity and serve the capability MCP tool. `cmd/lever-agent/scionhook/` holds that `pre-start` shell hook (copied into the image by `make lever-image`) and a test that pins its contract. |
 | `cmd/lever-tool-db` | Reference first-party capability tool (optional). |
-| `cmd/lever-tool-github` | Host-side broker tool: pushes an agent's git bundle to one `agent/*` branch with a short-lived GitHub App token. |
+| `cmd/lever-tool-github` | Host-side broker tool: pushes an agent's git bundle to one `agent/*` branch with a short-lived GitHub App token; opt-in PR, merge and release operations (`-ops`). |
 | `cmd/lever-tool-fizzy` | Host-side broker tool: a fixed set of operations on one Fizzy board, through the `fizzy` CLI. |
 | `cmd/lever-tool-whisper` | Host-side broker tool: runs whisper.cpp's `whisper-server` for the chat page's dictation (over a Unix socket) and an optional agent `transcribe` operation. |
 | `captool/` | Public SDK for first-party capability tools (independent token verification + backstop). Imported by `examples/`; the only non-`internal` package. |
@@ -36,7 +36,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/fileledger` | Host record of chat-page uploads and agent-shared files, with sha256 and size. |
 | `internal/fizzytool` | Host side of `lever-tool-fizzy`: board-confined operations through the `fizzy` CLI. |
 | `internal/fsutil` | Stdlib-only file helpers (`WriteFileAtomic`). |
-| `internal/ghpush` | Host side of `lever-tool-github`: request checks, bundle import into a host mirror, the push. |
+| `internal/ghpush` | Host side of `lever-tool-github`: request checks, bundle import into a host mirror, the push, and the opt-in PR and release operations over the GitHub REST API. |
 | `internal/hostledger` | Safe JSON-lines file handling shared by the host-side ledgers. |
 | `internal/proc` | The single seam to external commands (`Runner`, `FakeRunner`). |
 | `internal/httpjson` | JSON-over-HTTP client helper (`Post`, typed decode, the one error shape) used by every broker caller. |

@@ -7,6 +7,23 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **github tool: PRs, merges and releases (`-ops`, opt-in).** `lever-tool-github` can now also
+  offer `pr_open`, `pr_status`, `pr_merge` and `release`. With `-ops` unset only `push` exists, as
+  before. Each operation is its own fine-gated capability, acts only on `-repos`, and gets a token
+  narrowed to the one repository and the permissions it needs. `pr_open` opens a PR from a pushed
+  prefix branch into the default branch (or returns the open one). `pr_status` reports state,
+  mergeability and the checks on the head. `pr_merge` merges only an open, mergeable PR from a
+  prefix branch of the same repository into the default branch, once every check on the head is
+  green (`-merge-checks`), pinned to the checked head SHA, with a method from `-merge-methods`.
+  `release` tags the default branch's head with a tag that matches `-release-tag` and is greater
+  than every existing one, and creates the release. Titles, bodies and notes are bounded
+  (`-text-max`), refuse control characters, and appear in the audit line only as a length and a
+  hash. The App needs more permissions for these (Pull requests, Checks, Commit statuses), and
+  `release` needs the App in the release tags ruleset's bypass list; it never needs Workflows. See
+  the github tool guide.
+
 ## [0.35.0] - 2026-10-12
 
 ### Added

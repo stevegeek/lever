@@ -20,7 +20,7 @@ and the program itself stay on the host.
   agent can read. See the [config reference](/reference/config/).
 - **Every call needs a capability.** A registered tool is inert until you grant it. With an
   `obtain` grant an agent mints a token for one `{tool, op}`; with a `delegate` grant the manager
-  mints one for a worker at dispatch. The token is bound to the agent's identity. The broker checks
+  mints one for another agent, such as a worker, and hands it over. The token is bound to the agent's identity. The broker checks
   it and forwards it, and the tool, written with the captool SDK, verifies it again before it acts.
   No grant means no access. The full flow is in [capabilities](/capabilities/).
 - **Refusals are plain results.** A tool that refuses a call returns `{"ok": false, "error": "..."}`

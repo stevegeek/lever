@@ -234,7 +234,7 @@ type lineSink struct {
 	ch    chan string
 }
 
-func newLineSink() *lineSink { return &lineSink{ch: make(chan string, 16)} }
+func newLineSink() *lineSink { return &lineSink{ch: make(chan string, 256)} }
 
 func (s *lineSink) logf(format string, args ...any) {
 	line := strings.TrimSpace(fmt.Sprintf(format, args...))
@@ -296,7 +296,8 @@ func TestStartManagerPrintsProgressWhileWaitingForTheHarness(t *testing.T) {
 	p.onAlive = func(call int) {
 		if call == 1 {
 			ft.tick()
-			line = <-sink.ch
+			for line = <-sink.ch; !strings.Contains(line, "still starting"); line = <-sink.ch {
+			}
 		}
 	}
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", liveWhenContainer: "Up 3 seconds"}
@@ -317,5 +318,60 @@ func TestStartManagerPrintsProgressWhileWaitingForTheHarness(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Fatalf("progress line %q lacks %q", line, want)
 		}
+	}
+}
+
+// Before claude starts, scion has no tmux server in the container yet: the
+// probe answers "no tmux server" (an error, not a false). That is a boot in
+// progress, so the gate keeps waiting and passes once the pane is alive.
+func TestManagerGateNoTmuxServerYetThenAliveIsUp(t *testing.T) {
+	noServer := harnessAnswer{err: jail.ErrNoTmuxServer}
+	p := &gateProbe{alive: []harnessAnswer{noServer, noServer, noServer, noServer, noServer, noServer, {alive: true}}, running: []runningAnswer{{up: true}}}
+	deps, r := gateDeps(p)
+	deps.HarnessWait = time.Second
+	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
+	if err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil); err != nil {
+		t.Fatalf("want up after the boot, got %v", err)
+	}
+	if p.aliveN != 8 {
+		t.Fatalf("HarnessAlive calls = %d, want 8 (seven to come alive, one after the window)", p.aliveN)
+	}
+}
+
+// A pre-start hook that hangs keeps the container up with no tmux server:
+// at the end of the harness wait that is not up, never the container
+// fallback.
+func TestManagerGateHungHookIsNotUp(t *testing.T) {
+	p := &gateProbe{alive: []harnessAnswer{{err: jail.ErrNoTmuxServer}}, running: []runningAnswer{{up: true}}}
+	deps, r := gateDeps(p)
+	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
+	err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil)
+	if !errors.Is(err, scion.ErrAgentNotLive) || !strings.Contains(err.Error(), "no tmux server") {
+		t.Fatalf("want ErrAgentNotLive naming the tmux server, got %v", err)
+	}
+}
+
+// A probe that cannot run at all hands over to the container check after a
+// few readings, not after the whole harness wait.
+func TestManagerGateBrokenProbeHandsOverEarly(t *testing.T) {
+	p := &gateProbe{alive: []harnessAnswer{{err: jail.ErrProbeTimedOut}}, running: []runningAnswer{{up: true}}}
+	deps, r := gateDeps(p)
+	deps.HarnessWait = time.Hour
+	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
+	if err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil); err != nil {
+		t.Fatalf("container running: want up via the fallback, got %v", err)
+	}
+	if p.aliveN != unknownHandover+1 {
+		t.Fatalf("HarnessAlive calls = %d, want %d (handover, then one after the window)", p.aliveN, unknownHandover+1)
+	}
+}
+
+// The tmux server going away after the pane was alive is a death.
+func TestManagerGateTmuxServerGoneDuringSettleIsADeath(t *testing.T) {
+	p := &gateProbe{alive: []harnessAnswer{{alive: true}, {err: jail.ErrNoTmuxServer}}, running: []runningAnswer{{up: true}}}
+	deps, r := gateDeps(p)
+	r.initPhase, r.initContainerStatus = "running", "Up 1 second"
+	if err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil); !errors.Is(err, scion.ErrAgentDied) {
+		t.Fatalf("want ErrAgentDied, got %v", err)
 	}
 }

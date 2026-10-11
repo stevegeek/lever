@@ -15,8 +15,10 @@ version bump moves the block under the new version heading.
   the pane again. Before, it read only the hub record, which scion marks running at container launch
   and whose container column a heartbeat refreshes, so `lever up --fresh` printed "is up" over a
   manager whose pre-start hook failed and whose container exited a moment later. A container that
-  podman reports stopped is a death at once; a running container whose pane never comes alive is
-  not up; when the pane cannot be probed, the container still running after the window counts. A
+  podman reports stopped is a death at once; a running container whose pane, or tmux server, is
+  still not there after the wait (a hung pre-start hook) is not up; when the probe itself cannot
+  run (a few failures in a row), the container still running after the window counts, with a
+  warning. A
   manager that was already running still gets one look.
 - **A manager start prints progress (lever#168).** The start-manager step and `lever up`'s resume
   print a line about every 15 s with what they wait for, the hub's phase and container, and the

@@ -134,6 +134,7 @@ const (
 	harnessUnknown       harnessState = iota // the pane could not be probed
 	harnessAlive                             // claude's tmux pane is alive
 	harnessNotAlive                          // the container runs, the pane is not alive (not yet, or no more)
+	harnessNoServer                          // the container runs, no tmux server answers (not started yet, or gone)
 	harnessContainerDown                     // the container is gone or not running
 )
 
@@ -187,30 +188,50 @@ func (h harnessCheck) read(ctx context.Context) harnessReading {
 	if err == nil {
 		return harnessReading{state: harnessNotAlive}
 	}
+	if errors.Is(err, jail.ErrNoTmuxServer) && rerr == nil {
+		return harnessReading{state: harnessNoServer, containerUp: true, err: err}
+	}
 	return harnessReading{state: harnessUnknown, containerUp: rerr == nil && up, err: err}
 }
 
+// unknownHandover is how many readings in a row the pane probe may fail
+// outright (not "no tmux server": an exec that timed out or exited oddly)
+// over a running container before waitHarness stops waiting on it and
+// hands over to the settle window: a probe that cannot run must not stall
+// every start for the whole harness wait.
+const unknownHandover = 5
+
 // waitHarness polls the container until claude's tmux pane is alive. A
 // container that stops is a death at once. A pane that never comes alive
-// over a running container is not up. A probe that cannot answer at all
-// (every reading unknown) over a container podman says is running hands
-// over to the settle window, which then decides on the container alone.
+// over a running container, or a tmux server that never answers there (a
+// hung pre-start hook), is not up. A probe that cannot run at all (unknown
+// readings, unknownHandover in a row) over a container podman says is
+// running hands over to the settle window, which then decides on the
+// container alone.
 func waitHarness(ctx context.Context, h harnessCheck, interval, wait time.Duration, log func(string, ...any)) error {
 	if interval <= 0 {
 		interval = time.Second
 	}
 	start := time.Now()
 	var last harnessReading
+	unknownRun := 0
 	for {
 		last = h.read(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		switch last.state {
 		case harnessAlive:
 			return nil
 		case harnessContainerDown:
 			return fmt.Errorf("%w: its container stopped before claude's tmux pane was seen alive, after %s — a failed pre-start hook (lever-agent boot) does this; its container log in the guest holds the last output",
 				scion.ErrAgentDied, time.Since(start).Round(100*time.Millisecond))
+		case harnessUnknown:
+			unknownRun++
+		default:
+			unknownRun = 0
 		}
-		if time.Since(start) >= wait {
+		if time.Since(start) >= wait || (last.state == harnessUnknown && last.containerUp && unknownRun >= unknownHandover) {
 			break
 		}
 		select {
@@ -222,6 +243,9 @@ func waitHarness(ctx context.Context, h harnessCheck, interval, wait time.Durati
 	switch {
 	case last.state == harnessNotAlive:
 		return fmt.Errorf("%w: the hub record reads running and the container runs, but claude's tmux pane (scion:agent) was not alive after %s — `lever attach` shows the session, `lever doctor` the manager row",
+			scion.ErrAgentNotLive, wait)
+	case last.state == harnessNoServer:
+		return fmt.Errorf("%w: the hub record reads running and the container runs, but no tmux server answered in it after %s — claude never started (a pre-start hook still running or hung); its container log in the guest holds the last output, `lever doctor` the manager row",
 			scion.ErrAgentNotLive, wait)
 	case last.containerUp:
 		if log != nil {
@@ -242,6 +266,8 @@ func confirmHarness(ctx context.Context, h harnessCheck, settle time.Duration) e
 		return nil
 	case r.state == harnessContainerDown:
 		return fmt.Errorf("%w: its container stopped during the %s settle window; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
+	case r.state == harnessNoServer:
+		return fmt.Errorf("%w: the tmux server in its container went away during the %s settle window, over a running container; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
 	case r.state == harnessNotAlive:
 		return fmt.Errorf("%w: claude's tmux pane (scion:agent) died during the %s settle window, over a running container; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
 	case r.containerUp:

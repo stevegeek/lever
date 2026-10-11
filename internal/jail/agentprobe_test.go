@@ -155,6 +155,9 @@ func TestAgentProbeHarnessAlive(t *testing.T) {
 		if alive != c.alive || (err != nil) != c.wantErr {
 			t.Errorf("%s: alive=%v err=%v, want %v err=%v", c.name, alive, err, c.alive, c.wantErr)
 		}
+		if noServer := strings.Contains(c.res.Stderr, "no server running") || strings.Contains(c.res.Stderr, "error connecting"); noServer != errors.Is(err, ErrNoTmuxServer) {
+			t.Errorf("%s: err=%v, want ErrNoTmuxServer=%v", c.name, err, noServer)
+		}
 		if argv := calls[0]; !strings.Contains(argv, "podman exec --user scion lever--assistant tmux list-panes -t scion:agent") {
 			t.Errorf("%s: argv %q", c.name, argv)
 		}

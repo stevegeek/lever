@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 )
@@ -61,13 +62,28 @@ func tailBlock(src string, tail []string) string {
 
 // ttyRenderer keeps one live line at the bottom of the terminal: the
 // running step, its sub-stage and its elapsed time, redrawn each second.
-// Finished steps, log lines and the summary are written above it.
+// Finished steps, log lines and the summary are written above it. With
+// steps running alongside each other (lever#189) the line shows the
+// foreground step (or, with none, the oldest background one) and names the
+// others after it.
 type ttyRenderer struct {
 	w       io.Writer
 	width   int
 	widthFn func() int
 	cur     *Step
+	bg      []*Step
 	drawn   bool
+}
+
+// focus is the step the live line is about, and the others still running.
+func (t *ttyRenderer) focus() (*Step, []*Step) {
+	if t.cur != nil {
+		return t.cur, t.bg
+	}
+	if len(t.bg) > 0 {
+		return t.bg[0], t.bg[1:]
+	}
+	return nil, nil
 }
 
 func (t *ttyRenderer) tick() time.Duration { return time.Second }
@@ -80,11 +96,18 @@ func (t *ttyRenderer) clear() {
 }
 
 func (t *ttyRenderer) draw(now time.Time) {
-	if t.cur == nil {
+	s, others := t.focus()
+	if s == nil {
 		return
 	}
-	s := t.cur
 	line := "  ..    " + stepName(s)
+	if len(others) > 0 {
+		names := make([]string, 0, len(others))
+		for _, o := range others {
+			names = append(names, o.Label)
+		}
+		line += " (+ " + strings.Join(names, ", ") + ")"
+	}
 	if s.detail != "" {
 		line += ": " + s.detail
 	}
@@ -118,19 +141,23 @@ func (t *ttyRenderer) header(text string, now time.Time) {
 }
 
 func (t *ttyRenderer) start(s *Step, now time.Time) {
-	t.cur = s
+	if s.bg {
+		t.bg = append(t.bg, s)
+	} else {
+		t.cur = s
+	}
 	t.clear()
 	t.draw(now)
 }
 
 func (t *ttyRenderer) detail(s *Step, now time.Time) {
-	if s == t.cur {
+	if f, _ := t.focus(); s == f {
 		t.draw(now)
 	}
 }
 
 func (t *ttyRenderer) tickStep(s *Step, now time.Time) {
-	if s == t.cur {
+	if f, _ := t.focus(); s == f {
 		t.draw(now)
 	}
 }
@@ -139,6 +166,9 @@ func (t *ttyRenderer) done(s *Step, now time.Time, src string, tail []string) {
 	t.clear()
 	if t.cur == s {
 		t.cur = nil
+	}
+	if i := slices.Index(t.bg, s); i >= 0 {
+		t.bg = slices.Delete(t.bg, i, i+1)
 	}
 	line := fmt.Sprintf("  %s  %s", marker(s.state), stepName(s))
 	if s.note != "" {
@@ -159,7 +189,7 @@ func (t *ttyRenderer) log(line string, now time.Time) {
 
 func (t *ttyRenderer) finish(sum Summary, now time.Time) {
 	t.clear()
-	t.cur = nil
+	t.cur, t.bg = nil, nil
 	if sum.Outcome == "ok" {
 		fmt.Fprintln(t.w, sum.Line())
 	}
@@ -180,7 +210,13 @@ func (p *plainRenderer) line(now time.Time, format string, args ...any) {
 
 func (p *plainRenderer) header(text string, now time.Time) { p.line(now, "%s", text) }
 
-func (p *plainRenderer) start(s *Step, now time.Time) { p.line(now, "%s ...", stepName(s)) }
+func (p *plainRenderer) start(s *Step, now time.Time) {
+	if s.bg {
+		p.line(now, "%s ... (alongside the next steps)", stepName(s))
+		return
+	}
+	p.line(now, "%s ...", stepName(s))
+}
 
 func (p *plainRenderer) detail(*Step, time.Time) {}
 

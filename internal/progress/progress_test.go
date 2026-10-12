@@ -388,3 +388,132 @@ func TestRecordIsNeverOpenedThroughALink(t *testing.T) {
 		t.Fatal("link target changed")
 	}
 }
+
+// TestBackgroundStepRunsBesideTheForeground (lever#189): the next Start
+// does not end a background step, its Detail (through WithStep) does not
+// land on the foreground step, and each step ends with its own outcome.
+func TestBackgroundStepRunsBesideTheForeground(t *testing.T) {
+	rep, out, c, m := newRep(t, ModePlain, "")
+	rep.Group("apply", 3)
+	bg := rep.Background("load-image img")
+	bctx := WithStep(With(context.Background(), rep), bg)
+	fg := rep.Start("init-machine")
+	From(bctx).Detail("loading the image into the jail")
+	From(bctx).Note("loaded")
+	if rep.Current() != fg {
+		t.Fatal("Current is not the foreground step")
+	}
+	c.add(time.Second)
+	fg.Done(nil)
+	next := rep.Start("scion-server")
+	c.add(15 * time.Second)
+	m.tick()
+	bg.Done(nil)
+	next.Done(nil)
+	sum := rep.Finish(nil)
+	got := out.String()
+	for _, want := range []string{
+		"[1/3] load-image img ... (alongside the next steps)",
+		"[2/3] init-machine ok (1.0s)\n",
+		"[1/3] load-image img still running (16s): loading the image into the jail",
+		"[3/3] scion-server still running (15s)\n",
+		"[1/3] load-image img ok (16.0s): loaded",
+		"[3/3] scion-server ok (15.0s)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if len(sum.Steps) != 3 {
+		t.Fatalf("summary steps %+v", sum.Steps)
+	}
+	for _, st := range sum.Steps {
+		if st.Outcome != "ok" {
+			t.Fatalf("step %+v", st)
+		}
+	}
+}
+
+// TestBackgroundFailureAndFinish: a failed background step prints its own
+// FAIL line and tail; Finish ends a background step still running with the
+// run's outcome; a view's Start begins another background step and leaves
+// the foreground running.
+func TestBackgroundFailureAndFinish(t *testing.T) {
+	rep, out, _, _ := newRep(t, ModePlain, "")
+	bg := rep.Background("broker-up")
+	bg.TailFrom(func() (string, []string) { return "broker.out.log", []string{"bind: address in use"} })
+	fg := rep.Start("scion-server")
+	bg.Done(errors.New("broker did not answer"))
+	sub := rep.For(bg).Start("tools")
+	if rep.Current() != fg {
+		t.Fatal("a view's Start replaced the foreground step")
+	}
+	fg.Done(nil)
+	rep.Finish(errors.New("broker did not answer"))
+	got := out.String()
+	if !strings.Contains(got, "broker-up FAILED") || !strings.Contains(got, "| bind: address in use") {
+		t.Fatalf("no background failure:\n%s", got)
+	}
+	if !strings.Contains(got, "scion-server ok") {
+		t.Fatalf("foreground not ended on its own:\n%s", got)
+	}
+	if !strings.Contains(got, "tools FAILED") || sub.state != "fail" {
+		t.Fatalf("Finish did not end the background step still running:\n%s", got)
+	}
+}
+
+// TestTTYLiveLineNamesTheOtherRunningSteps: the live line is the
+// foreground step's and names the background ones; with no foreground
+// step it shows the oldest background step.
+func TestTTYLiveLineNamesTheOtherRunningSteps(t *testing.T) {
+	rep, out, c, m := newRep(t, ModeTTY, "")
+	bg := rep.Background("load-image img")
+	fg := rep.Start("scion-server")
+	fg.Detail("hub not answering yet")
+	c.add(2 * time.Second)
+	m.tick()
+	if got := out.String(); !strings.Contains(got, "  ..    scion-server (+ load-image img): hub not answering yet  2.0s") {
+		t.Fatalf("live line: %q", got)
+	}
+	fg.Done(nil)
+	c.add(time.Second)
+	m.tick()
+	if got := out.String(); !strings.HasSuffix(got, "\r\x1b[K  ..    load-image img  3.0s") {
+		t.Fatalf("live line after the foreground ended: %q", got)
+	}
+	bg.Done(nil)
+	rep.Finish(nil)
+}
+
+// TestRecordMarksBackgroundSteps: the record says which steps ran
+// alongside others.
+func TestRecordMarksBackgroundSteps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.jsonl")
+	rep, _, _, _ := newRep(t, ModeQuiet, path)
+	rep.Background("load-image img").Done(nil)
+	rep.Start("init-machine").Done(nil)
+	rep.Finish(nil)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bgStarts, starts int
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var ev event
+		if err := json.Unmarshal([]byte(l), &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Event == "start" {
+			starts++
+			if ev.Background {
+				bgStarts++
+				if ev.Step != "load-image img" {
+					t.Fatalf("background start %+v", ev)
+				}
+			}
+		}
+	}
+	if starts != 2 || bgStarts != 1 {
+		t.Fatalf("starts %d, background %d:\n%s", starts, bgStarts, b)
+	}
+}

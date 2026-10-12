@@ -8,6 +8,12 @@
 // Every method is safe on a nil *Reporter and then does nothing, so code
 // that runs without one (tests, other commands) needs no checks.
 //
+// Steps can run alongside each other (lever#189): Start begins the
+// foreground step, Background a step that runs beside it. A Background step
+// is ended only by its own Done or Skip, never by the next Start. Code that
+// runs inside a background step takes a context from WithStep, so its
+// Detail and Note land on that step, not on the foreground one.
+//
 // The same events go to one renderer (a live line on a terminal, plain
 // timestamped lines, or JSON lines) and, when a record path is set, to a
 // JSON-lines record of the run that doctor and the e2e read back.
@@ -20,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -103,7 +110,8 @@ type Reporter struct {
 	start time.Time
 
 	mu      sync.Mutex
-	cur     *Step
+	cur     *Step   // the foreground step
+	bg      []*Step // background steps still running, in start order
 	done    []*Step
 	count   int // steps started, for [n/N]
 	total   int // planned steps of the current numbered group (0 = unnumbered)
@@ -115,6 +123,11 @@ type Reporter struct {
 
 	stopTick func()
 	tickDone chan struct{}
+
+	// root and pin make a view (For): a Reporter whose Current is pin and
+	// whose every other method is root's.
+	root *Reporter
+	pin  *Step
 }
 
 // New starts a Reporter. The caller must call Finish.
@@ -160,8 +173,12 @@ func New(opts Options) *Reporter {
 					rep.mu.Unlock()
 					return
 				}
+				now := rep.opts.Now()
 				if rep.cur != nil {
-					rep.r.tickStep(rep.cur, rep.opts.Now())
+					rep.r.tickStep(rep.cur, now)
+				}
+				for _, s := range rep.bg {
+					rep.r.tickStep(s, now)
 				}
 				rep.mu.Unlock()
 			}
@@ -209,14 +226,46 @@ func From(ctx context.Context) *Reporter {
 	return rep
 }
 
+// WithStep returns ctx carrying a view of the Reporter on ctx whose running
+// step is s (For): what a background step's code reports through
+// From(ctx).Detail or Note lands on s. ctx is returned unchanged when it
+// carries no Reporter or s is nil.
+func WithStep(ctx context.Context, s *Step) context.Context {
+	rep := From(ctx)
+	if rep == nil || s == nil {
+		return ctx
+	}
+	return With(ctx, rep.For(s))
+}
+
+// For returns a view of rep whose Current is s; every other method acts on
+// rep itself, except Start, which begins a background step (a view never
+// owns the foreground).
+func (rep *Reporter) For(s *Step) *Reporter {
+	if rep == nil {
+		return nil
+	}
+	return &Reporter{root: rep.base(), pin: s}
+}
+
+// base is the Reporter a view stands for, or rep itself.
+func (rep *Reporter) base() *Reporter {
+	if rep != nil && rep.root != nil {
+		return rep.root
+	}
+	return rep
+}
+
 // Active reports whether rep shows step lines itself, so a caller with its
 // own periodic line (the manager start's, lever#168) can stay quiet.
 func (rep *Reporter) Active() bool {
+	rep = rep.base()
 	return rep != nil && rep.opts.Mode != ModeQuiet
 }
 
 // Header prints the run's first line, before any step: what runs, on what.
 func (rep *Reporter) Header(text string) {
+	rep = rep.base()
 	if rep == nil {
 		return
 	}
@@ -231,6 +280,7 @@ func (rep *Reporter) Header(text string) {
 // 0 leaves them unnumbered (the jail phases, whose count depends on what
 // the backend finds).
 func (rep *Reporter) Group(name string, total int) {
+	rep = rep.base()
 	if rep == nil {
 		return
 	}
@@ -252,28 +302,58 @@ type Step struct {
 	state  string // "run", "ok", "skip", "fail"
 	tail   func() (string, []string)
 	beats  int
+	bg     bool // started by Background
 }
 
-// Start begins a step labelled label in the current group. A step still
-// running is ended as done first (steps do not nest).
+// Start begins the foreground step labelled label in the current group. A
+// foreground step still running is ended as done first (steps do not nest);
+// background steps are left running. On a view (For) it begins a
+// background step instead.
 func (rep *Reporter) Start(label string) *Step {
 	if rep == nil {
 		return nil
+	}
+	if rep.root != nil {
+		return rep.root.Background(label)
 	}
 	rep.mu.Lock()
 	defer rep.mu.Unlock()
 	if rep.cur != nil {
 		rep.finishLocked(rep.cur, "ok", "", nil, "", nil)
 	}
+	s := rep.newStepLocked(label, false)
+	rep.cur = s
+	rep.emit(event{Event: "start", Group: s.Group, Step: s.Label, N: s.N, Of: s.Of})
+	rep.r.start(s, s.start)
+	return s
+}
+
+// Background begins a step that runs alongside the foreground one and any
+// other background step (lever#189). It is numbered in start order like
+// any step, and ends only by its own Done or Skip (or Finish): the next
+// Start leaves it running. Code running inside it reports through a
+// context from WithStep.
+func (rep *Reporter) Background(label string) *Step {
+	rep = rep.base()
+	if rep == nil {
+		return nil
+	}
+	rep.mu.Lock()
+	defer rep.mu.Unlock()
+	s := rep.newStepLocked(label, true)
+	rep.bg = append(rep.bg, s)
+	rep.emit(event{Event: "start", Group: s.Group, Step: s.Label, N: s.N, Of: s.Of, Background: true})
+	rep.r.start(s, s.start)
+	return s
+}
+
+func (rep *Reporter) newStepLocked(label string, bg bool) *Step {
 	rep.count++
-	s := &Step{rep: rep, Group: rep.group, Label: termsafe.Sanitize(label), start: rep.opts.Now(), state: "run"}
+	s := &Step{rep: rep, Group: rep.group, Label: termsafe.Sanitize(label), start: rep.opts.Now(), state: "run", bg: bg}
 	if rep.total > 0 {
 		rep.nInGrp++
 		s.N, s.Of = rep.nInGrp, rep.total
 	}
-	rep.cur = s
-	rep.emit(event{Event: "start", Group: s.Group, Step: s.Label, N: s.N, Of: s.Of})
-	rep.r.start(s, s.start)
 	return s
 }
 
@@ -373,6 +453,9 @@ func (rep *Reporter) finishLocked(s *Step, state, reason string, err error, src 
 	if rep.cur == s {
 		rep.cur = nil
 	}
+	if i := slices.Index(rep.bg, s); i >= 0 {
+		rep.bg = slices.Delete(rep.bg, i, i+1)
+	}
 	rep.done = append(rep.done, s)
 	ev := event{Event: "done", Group: s.Group, Step: s.Label, N: s.N, Of: s.Of,
 		MS: s.end.Sub(s.start).Milliseconds(), Outcome: state, Text: s.note}
@@ -392,6 +475,7 @@ func (rep *Reporter) finishLocked(s *Step, state, reason string, err error, src 
 // Log prints a line (a warning, a notice) above the live line. Lines are
 // sanitized for the terminal.
 func (rep *Reporter) Log(line string) {
+	rep = rep.base()
 	if rep == nil {
 		return
 	}
@@ -405,6 +489,7 @@ func (rep *Reporter) Log(line string) {
 // Command records one external command (LEVER_TRACE). argv is reduced to a
 // safe head by the caller (proc.TraceHead).
 func (rep *Reporter) Command(head string, d time.Duration, code int, err error) {
+	rep = rep.base()
 	if rep == nil || !rep.opts.Trace {
 		return
 	}
@@ -418,21 +503,25 @@ func (rep *Reporter) Command(head string, d time.Duration, code int, err error) 
 	rep.r.log(fmt.Sprintf("trace: %s (%s, exit %d)", head, round(d), code), rep.opts.Now())
 }
 
-// Finish ends the run: a step left running ends with err's outcome, the
-// summary line is printed (on success), and the record is closed. It
-// returns the summary for the caller's own use.
+// Finish ends the run: a step left running ends with err's outcome
+// (background steps first, then the foreground one), the summary line is
+// printed (on success), and the record is closed. It returns the summary
+// for the caller's own use.
 func (rep *Reporter) Finish(err error) Summary {
+	rep = rep.base()
 	if rep == nil {
 		return Summary{}
 	}
 	rep.mu.Lock()
-	cur := rep.cur
+	running := append(append([]*Step(nil), rep.bg...), rep.cur)
 	rep.mu.Unlock()
-	if cur != nil {
-		if err != nil {
-			cur.finish("fail", "", err)
-		} else {
-			cur.finish("ok", "", nil)
+	for _, s := range running {
+		switch {
+		case s == nil:
+		case err != nil:
+			s.finish("fail", "", err)
+		default:
+			s.finish("ok", "", nil)
 		}
 	}
 	rep.mu.Lock()
@@ -455,6 +544,7 @@ func (rep *Reporter) Finish(err error) Summary {
 
 // RecordError reports why the run record could not be opened, if it could not.
 func (rep *Reporter) RecordError() error {
+	rep = rep.base()
 	if rep == nil {
 		return nil
 	}
@@ -521,19 +611,21 @@ func (rep *Reporter) summaryLocked(err error) Summary {
 
 // event is one line of the JSON renderer and of the run record.
 type event struct {
-	TS      string   `json:"ts"`
-	Event   string   `json:"event"`
-	Group   string   `json:"group,omitempty"`
-	Step    string   `json:"step,omitempty"`
-	N       int      `json:"n,omitempty"`
-	Of      int      `json:"of,omitempty"`
-	MS      int64    `json:"ms,omitempty"`
-	Outcome string   `json:"outcome,omitempty"`
-	Code    int      `json:"code,omitempty"`
-	Text    string   `json:"text,omitempty"`
-	Error   string   `json:"error,omitempty"`
-	Source  string   `json:"source,omitempty"`
-	Tail    []string `json:"tail,omitempty"`
+	TS      string `json:"ts"`
+	Event   string `json:"event"`
+	Group   string `json:"group,omitempty"`
+	Step    string `json:"step,omitempty"`
+	N       int    `json:"n,omitempty"`
+	Of      int    `json:"of,omitempty"`
+	MS      int64  `json:"ms,omitempty"`
+	Outcome string `json:"outcome,omitempty"`
+	Code    int    `json:"code,omitempty"`
+	Text    string `json:"text,omitempty"`
+	Error   string `json:"error,omitempty"`
+	// Background marks a step started alongside others (lever#189).
+	Background bool     `json:"background,omitempty"`
+	Source     string   `json:"source,omitempty"`
+	Tail       []string `json:"tail,omitempty"`
 }
 
 func (rep *Reporter) emit(ev event) {
@@ -599,10 +691,14 @@ func round(d time.Duration) string {
 // ErrNoRecord is returned by ReadLast when no run was recorded.
 var ErrNoRecord = errors.New("no bring-up recorded yet")
 
-// Current is the running step, or nil.
+// Current is the running foreground step, or nil; on a view (For), the
+// step the view stands for.
 func (rep *Reporter) Current() *Step {
 	if rep == nil {
 		return nil
+	}
+	if rep.root != nil {
+		return rep.pin
 	}
 	rep.mu.Lock()
 	defer rep.mu.Unlock()

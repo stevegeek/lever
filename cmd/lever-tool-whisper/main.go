@@ -90,7 +90,7 @@ func parseFlags(args []string) (opts, error) {
 		{"-server", o.server, "an agent could replace the program the host runs"},
 		{"-dictate-socket", o.socket, "an agent could reach or replace the dictation socket"},
 	} {
-		if err := refuseInTree(o.tree, r.flag, r.v, r.why); err != nil {
+		if err := voice.RefuseInTree(o.tree, r.flag, r.v, r.why); err != nil {
 			return o, err
 		}
 	}
@@ -226,40 +226,4 @@ func main() {
 	<-svcDone
 	_ = dictate.Close()
 	_ = mcp.Close()
-}
-
-// resolveExisting resolves symlinks of the nearest existing ancestor of p and
-// re-appends the part that does not exist yet.
-func resolveExisting(p string) (string, error) {
-	p = filepath.Clean(p)
-	rest := ""
-	for {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return filepath.Join(r, rest), nil
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			return "", fmt.Errorf("cannot resolve %q", p)
-		}
-		rest = filepath.Join(filepath.Base(p), rest)
-		p = parent
-	}
-}
-
-// refuseInTree: the models, the program and the socket must not sit in the
-// tree the agent can read and write (or be the tree itself).
-func refuseInTree(tree, flag, p, why string) error {
-	t, err := filepath.EvalSymlinks(tree)
-	if err != nil {
-		return fmt.Errorf("-tree: %w", err)
-	}
-	s, err := resolveExisting(p)
-	if err != nil {
-		return fmt.Errorf("%s: %w", flag, err)
-	}
-	rel, err := filepath.Rel(t, s)
-	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%s %s is inside -tree %s: %s", flag, p, tree, why)
-	}
-	return nil
 }

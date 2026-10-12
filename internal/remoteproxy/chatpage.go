@@ -336,13 +336,16 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		return true
 	}
 	if p == strings.TrimSuffix(voicePrefix, "/") || strings.HasPrefix(p, voicePrefix) {
-		if g.voice == nil || p != voicePath {
-			// Off, or a path under the prefix that is not the route: the
+		switch {
+		case g.voice != nil && p == voicePath:
+			g.serveVoice(w, r, line, v)
+		case g.speak != nil && p == speakPath:
+			g.serveSpeak(w, r, line, v)
+		default:
+			// Off, or a path under the prefix that is not a route: the
 			// prefix is lever's either way, never the hub's.
 			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
-			return true
 		}
-		g.serveVoice(w, r, line, v)
 		return true
 	}
 	if g.push != nil && (p == pushKeyPath || p == pushSubsPath) {

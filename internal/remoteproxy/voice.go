@@ -43,8 +43,12 @@ type VoiceConfig struct {
 	// then is its use of the limits given back. nil = never.
 	NotSent func(error) bool
 	// ReadAloud: the roster tells the page to offer read-aloud to every
-	// login with voice on (remote.voice.read_aloud).
+	// login with voice on (remote.voice.read_aloud device or server).
 	ReadAloud bool
+	// Speech is read-aloud with a server voice (read_aloud: server,
+	// lever-tool-tts): the speak route, and the roster's voices while the
+	// tool answers ready. nil = the device's voices only.
+	Speech *SpeechConfig
 	// Transcribe turns one checked clip (WAV, PCM s16le, 16 kHz, mono) into
 	// text. Its error goes to the audit line, so it must never carry the
 	// transcript.
@@ -125,7 +129,8 @@ type voiceInfo struct {
 
 // readAloudFor reports whether the page offers read-aloud to login: voice
 // on for it and remote.voice.read_aloud not turned off. Independent of the
-// transcriber: read-aloud runs on the device.
+// transcriber: read-aloud runs on the device, or with lever-tool-tts
+// (speechInfoFor), falling back to the device.
 func (g *gate) readAloudFor(login string) bool {
 	return g.voiceOnFor(login) && g.voice.cfg.ReadAloud
 }

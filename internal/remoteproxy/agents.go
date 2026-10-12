@@ -66,6 +66,9 @@ type agentsAnswer struct {
 	Voice   *voiceInfo   `json:"voice,omitempty"` // remote.voice on for this login, transcriber up
 	// ReadAloud: remote.voice on for this login and read_aloud not off.
 	ReadAloud bool `json:"readAloud,omitempty"`
+	// Speech: read_aloud server and lever-tool-tts ready: the page reads
+	// with these voices (the device's when a request fails).
+	Speech *speechInfo `json:"speech,omitempty"`
 }
 
 // filesInfo is the upload limits the page checks before it sends a file
@@ -481,6 +484,7 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	ans.Voice = g.voiceInfoFor(v.login)
 	ans.ReadAloud = g.readAloudFor(v.login)
+	ans.Speech = g.speechInfoFor(v.login)
 	g.addUnread(ctx, v.login, cookie, &ans)
 	body, err := json.Marshal(ans)
 	if err != nil {

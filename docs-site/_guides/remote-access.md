@@ -1118,8 +1118,12 @@ and `lever remote serve` refuse it on a `scion.source` checkout that does not ho
   `agent_messages.enabled` with a `scion.version` pseudo-version older than that commit; `lever
   apply`, `lever up` and `lever remote serve` refuse it, and the `agent messages` row of `lever
   doctor` fails, when a `scion.source` checkout does not hold it (git `merge-base
-  --is-ancestor`). The `lever doctor` row warns when lever cannot tell (a `scion.binary`, a bare
-  commit hash or a tag, a checkout git cannot answer for). A pseudo-version is judged by its
+  --is-ancestor`): one whose `HEAD` is older, and one git has no such commit in at all (a
+  checkout never fetched since, or a fork without it). A shallow clone that does not show the
+  commit is refused too, since its cut-off history cannot show it either way; `git fetch
+  --unshallow` fixes that. The `lever doctor` row warns when lever cannot tell (a `scion.binary`,
+  a bare commit hash or a tag, a `scion.source` path git cannot answer for: not a repository, git
+  not runnable, or no answer within 5 seconds). A pseudo-version is judged by its
   commit time alone: a commit dated after `b3562fb1` on a branch or fork that lacks it passes.
   `scion.version` is the operator's choice, not the agent's, so this is a guard against a
   mistake, not a boundary; pin an upstream `main` commit.

@@ -1084,7 +1084,7 @@ func TestCheckLeverVersion(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := doctorProbes{leverVersion: func(string) (string, error) { return tc.label, tc.err }}
-			r := checkLeverVersion("img", "", host, hostFull, p)
+			r := checkLeverVersion("img", "", host, hostFull, 3, p)
 			if r.name != "agent lever version" || r.ok != tc.ok || !strings.Contains(r.detail, tc.detail) || !strings.Contains(r.fix, tc.fix) {
 				t.Fatalf("got %+v, want ok=%v detail~%q fix~%q", r, tc.ok, tc.detail, tc.fix)
 			}
@@ -1098,6 +1098,65 @@ func TestCheckLeverVersion(t *testing.T) {
 	}
 }
 
+// checkLeverVersion with a lever_jail_abi label (lever#171): the jail ABI
+// decides, not the release. An image from an earlier release whose in-jail
+// code is unchanged passes and names the release difference; a different
+// ABI fails with the rebuild advice whatever the releases say.
+func TestCheckLeverVersionJailABI(t *testing.T) {
+	const host, hostFull, hostABI = "0.34.2", "0.34.2 (21ff051f651f)", 4
+	for _, tc := range []struct {
+		name    string
+		version string
+		abi     string
+		ok      bool
+		detail  string
+		not     string
+		fix     string
+	}{
+		{"same ABI, earlier release", "0.34.1 (0123456789ab)", "4\n", true,
+			"carries jail ABI 4, built from lever 0.34.1 (0123456789ab), the same as the host lever; host lever is 0.34.2 (21ff051f651f) (info:", "--fresh", ""},
+		{"same ABI, same build", hostFull, "4", true, "the same build as the host", "info:", ""},
+		{"same ABI, no version label", "", "4", true, "carries jail ABI 4, the same as the host lever", "built from", ""},
+		{"other ABI, same release", "0.34.2 (0123456789ab)", "3", false,
+			"carries jail ABI 3, built from lever 0.34.2 (0123456789ab) but the host lever (0.34.2 (21ff051f651f)) has jail ABI 4", "", "lever up --fresh"},
+		{"newer ABI", "0.35.0", "5", false, "carries jail ABI 5", "", "make lever-image"},
+		{"blank ABI falls back to the release", "0.34.1 (0123456789ab)", "  ", false,
+			"carries lever 0.34.1 (0123456789ab) but the host lever is 0.34.2 (21ff051f651f)", "", "make lever-image"},
+		{"no ABI label, same release", "0.34.2", "", true, "same release 0.34.2", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := doctorProbes{
+				leverVersion: func(string) (string, error) { return tc.version, nil },
+				jailABI:      func(string) (string, error) { return tc.abi, nil },
+			}
+			r := checkLeverVersion("img", "", host, hostFull, hostABI, p)
+			if r.ok != tc.ok || !strings.Contains(r.detail, tc.detail) || !strings.Contains(r.fix, tc.fix) ||
+				(tc.not != "" && strings.Contains(r.detail+r.fix, tc.not)) {
+				t.Fatalf("got %+v, want ok=%v detail~%q (without %q) fix~%q", r, tc.ok, tc.detail, tc.not, tc.fix)
+			}
+			if tc.ok && r.fix != "" {
+				t.Fatalf("a passing row carries no fix: %+v", r)
+			}
+		})
+	}
+
+	// From an image_tar both labels come from the archive; an unreadable
+	// ABI label is "not checked", like an unreadable version label.
+	p := doctorProbes{
+		leverVersion:    func(string) (string, error) { return "", fmt.Errorf("docker: command not found") },
+		jailABI:         func(string) (string, error) { return "", fmt.Errorf("docker: command not found") },
+		leverVersionTar: func(tar, ref string) (string, error) { return "0.34.1", nil },
+		jailABITar:      func(tar, ref string) (string, error) { return "4", nil },
+	}
+	if r := checkLeverVersion("img", "/inst/images/img.tar", host, hostFull, hostABI, p); !r.ok || !strings.Contains(r.detail, "img.tar") || !strings.Contains(r.detail, "jail ABI 4") {
+		t.Fatalf("tar, same ABI: %+v", r)
+	}
+	p.jailABITar = func(tar, ref string) (string, error) { return "", fmt.Errorf("unreadable") }
+	if r := checkLeverVersion("img", "/inst/images/img.tar", host, hostFull, hostABI, p); !r.ok || !strings.Contains(r.detail, "not checked") {
+		t.Fatalf("tar, ABI unreadable: %+v", r)
+	}
+}
+
 // With an image_tar the label comes from the archive, as for the Claude
 // version: the host docker probe is never consulted and the detail names the
 // tar.
@@ -1106,12 +1165,12 @@ func TestCheckLeverVersionFromTar(t *testing.T) {
 		leverVersion:    func(string) (string, error) { return "", fmt.Errorf("docker: command not found") },
 		leverVersionTar: func(tar, ref string) (string, error) { return "0.27.0 (aaaaaaaaaaaa)", nil },
 	}
-	got := checkLeverVersion("img", "/inst/images/img.tar", "0.28.1", "0.28.1 (21ff051f651f)", p)
+	got := checkLeverVersion("img", "/inst/images/img.tar", "0.28.1", "0.28.1 (21ff051f651f)", 3, p)
 	if got.ok || !strings.Contains(got.detail, "0.27.0") || !strings.Contains(got.detail, "img.tar") {
 		t.Fatalf("expected a failure naming the version and the tar, got %+v", got)
 	}
 	p.leverVersionTar = func(tar, ref string) (string, error) { return "", fmt.Errorf("image %q is not in the tar", ref) }
-	got = checkLeverVersion("img", "/inst/images/img.tar", "0.28.1", "0.28.1 (21ff051f651f)", p)
+	got = checkLeverVersion("img", "/inst/images/img.tar", "0.28.1", "0.28.1 (21ff051f651f)", 3, p)
 	if !got.ok || !strings.Contains(got.detail, "not checked") || !strings.Contains(got.detail, "img.tar") {
 		t.Fatalf("a tar read failure is not-checked, naming the tar, got %+v", got)
 	}
@@ -1388,6 +1447,7 @@ func TestProductionProbesWiresEveryField(t *testing.T) {
 	p := productionProbes(proc.NewFakeRunner())
 	if p.dial == nil || p.goVersion == nil || p.nodeToolchain == nil || p.claudeVersion == nil ||
 		p.claudeVersionTar == nil || p.leverVersion == nil || p.leverVersionTar == nil ||
+		p.jailABI == nil || p.jailABITar == nil ||
 		p.remoteHealthz == nil || p.remoteLogin == nil || p.remoteJailLogin == nil {
 		t.Fatalf("productionProbes left a probe nil: %+v", p)
 	}

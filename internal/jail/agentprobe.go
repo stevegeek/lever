@@ -63,8 +63,10 @@ const AgentTokenRefreshMargin = 2 * time.Hour
 // image declares.
 const AgentUser = "scion"
 
-// Every exec into an agent container runs a program the agent can replace
-// (it is root in its own container) or feed a file it can replace (a FIFO
+// Every exec into an agent container runs a program the agent may be able to
+// replace (lever treats the agent as root in its own container: its harness
+// runs as uid 1000 under rootless podman, but nothing here relies on that)
+// or feed a file it can replace (a FIFO
 // makes `head` block): each gets its own deadline, so a hostile agent
 // cannot hang doctor, apply or the broker, and its output is capped, so it
 // cannot grow the host process (proc.WithOutputLimit).
@@ -113,6 +115,12 @@ func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, er
 	return parseHubTokenTimes(res.Stdout)
 }
 
+// ErrNoTmuxServer is HarnessAlive's answer when tmux in the container finds
+// no server on the socket it tries: scion has not started its tmux server
+// yet (the pre-start hook is still running), or it is gone, or the exec
+// reached another socket. Not proof either way, so an error.
+var ErrNoTmuxServer = errors.New("no tmux server answered")
+
 // ErrProbeTimedOut is a probe exec that passed its deadline.
 var ErrProbeTimedOut = errors.New("the probe timed out")
 
@@ -132,11 +140,13 @@ func ProbeErrorClass(err error) string {
 		return ""
 	case errors.Is(err, ErrNoContainer):
 		return "no container"
+	case errors.Is(err, ErrNoTmuxServer):
+		return "no tmux server"
 	case errors.Is(err, ErrProbeTimedOut):
 		return "timed out"
 	case errors.Is(err, proc.ErrOutputLimit):
 		return "output over its limit"
-	case errors.Is(err, ErrTokenShape), errors.Is(err, ErrClaudeShape):
+	case errors.Is(err, ErrTokenShape), errors.Is(err, ErrClaudeShape), errors.Is(err, ErrSessionsShape):
 		return "unexpected output"
 	case errors.As(err, &exit):
 		return exit.Error()
@@ -207,7 +217,13 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	}
 	// "no server running" and "error connecting to" are not proof the
 	// harness exited: they also mean this exec reached another socket than
-	// scion's server (another uid or TMUX_TMPDIR). Unknown, so an error.
+	// scion's server (another uid or TMUX_TMPDIR). Unknown, so an error —
+	// but a distinct one (ErrNoTmuxServer): before claude starts, scion has
+	// not started its tmux server yet, and the manager gate tells that
+	// apart from a probe that could not run at all.
+	if strings.Contains(s, "no server running") || strings.Contains(s, "error connecting to") {
+		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrNoTmuxServer)
+	}
 	return false, fmt.Errorf("probing agent harness in %s: exit status %d", ref, res.Code)
 }
 

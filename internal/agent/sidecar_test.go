@@ -124,8 +124,8 @@ func TestWriteSidecarSpecsEmptyBrokerURLIsNoop(t *testing.T) {
 	}
 }
 
-// scion-services.yaml is written by boot as ROOT (scion pre-start hook) under
-// the agent-writable $HOME: a symlink at ~/.scion or at the yaml itself must be
+// scion-services.yaml is written by boot (scion pre-start hook; root on a
+// rootful runtime, the agent user under rootless podman) under the agent-writable $HOME: a symlink at ~/.scion or at the yaml itself must be
 // refused by name, with no write through the link.
 func TestWriteSidecarSpecsRefusesSymlink(t *testing.T) {
 	home := t.TempDir()

@@ -1,0 +1,36 @@
+# The in-jail sources' fingerprint (internal/jailabi). Do not edit by hand.
+# After changing in-jail code: bump JailABI in jailabi.go, then run
+#   go test ./internal/jailabi -run TestJailFingerprint -update
+jail_abi 1
+sha256 052106331181ae189b43985475b44eb4c37fe063f6b8600f6ba51b6a51c9a9dc
+# hashed: go.mod's go 1.26.4, the files cmd/lever-agent/scionhook/pre-start, image/lever-claude/Dockerfile,
+# the external modules
+#   github.com/dustin/go-humanize@v1.0.1
+#   github.com/google/uuid@v1.6.0
+#   github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec
+#   github.com/spf13/cobra@v1.10.2
+#   github.com/spf13/pflag@v1.0.9
+#   golang.org/x/sys@v0.44.0
+#   gopkg.in/yaml.v3@v3.0.1
+#   modernc.org/libc@v1.73.4
+#   modernc.org/mathutil@v1.7.1
+#   modernc.org/memory@v1.11.0
+#   modernc.org/sqlite@v1.53.0
+# and the packages
+#   github.com/stevegeek/lever/captool
+#   github.com/stevegeek/lever/cmd/lever-agent
+#   github.com/stevegeek/lever/cmd/lever-manager
+#   github.com/stevegeek/lever/cmd/lever-tool-db
+#   github.com/stevegeek/lever/internal/agent
+#   github.com/stevegeek/lever/internal/bridge
+#   github.com/stevegeek/lever/internal/cap/token
+#   github.com/stevegeek/lever/internal/cli
+#   github.com/stevegeek/lever/internal/cli/manager
+#   github.com/stevegeek/lever/internal/httpjson
+#   github.com/stevegeek/lever/internal/mcp
+#   github.com/stevegeek/lever/internal/proc
+#   github.com/stevegeek/lever/internal/retry
+#   github.com/stevegeek/lever/internal/scion
+#   github.com/stevegeek/lever/internal/scion/layout
+#   github.com/stevegeek/lever/internal/termsafe
+#   github.com/stevegeek/lever/internal/wire

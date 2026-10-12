@@ -40,23 +40,30 @@ type RemoteUser struct {
 	// no upload, no download, no share to it. nil = true. Contact or
 	// operator; read only while remote.files is on.
 	Files *bool `yaml:"files"`
+	// Voice false gives this login no dictation (remote.voice): no mic on
+	// the page, and the transcribe route refuses it. nil = true. Contact or
+	// operator; read only while remote.voice is on.
+	Voice *bool `yaml:"voice"`
 }
 
 // FilesAllowed is Files with nil read as true.
 func (u RemoteUser) FilesAllowed() bool { return u.Files == nil || *u.Files }
 
-// UnmarshalYAML accepts a plain login or a {login, tier, agents, see, files}
-// map, and refuses any other key in the map.
+// VoiceAllowed is Voice with nil read as true.
+func (u RemoteUser) VoiceAllowed() bool { return u.Voice == nil || *u.Voice }
+
+// UnmarshalYAML accepts a plain login or a {login, tier, agents, see, files,
+// voice} map, and refuses any other key in the map.
 func (u *RemoteUser) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind == yaml.ScalarNode {
 		return n.Decode(&u.Login)
 	}
 	if n.Kind != yaml.MappingNode {
-		return fmt.Errorf("config: remote: allowed_users entries are a login or a {login, tier, agents, see, files} map (line %d)", n.Line)
+		return fmt.Errorf("config: remote: allowed_users entries are a login or a {login, tier, agents, see, files, voice} map (line %d)", n.Line)
 	}
 	for i := 0; i < len(n.Content); i += 2 {
-		if k := n.Content[i].Value; !slices.Contains([]string{"login", "tier", "agents", "see", "files"}, k) {
-			return fmt.Errorf("config: remote: allowed_users entry has unknown key %q (line %d); keys are login, tier, agents, see, files", k, n.Content[i].Line)
+		if k := n.Content[i].Value; !slices.Contains([]string{"login", "tier", "agents", "see", "files", "voice"}, k) {
+			return fmt.Errorf("config: remote: allowed_users entry has unknown key %q (line %d); keys are login, tier, agents, see, files, voice", k, n.Content[i].Line)
 		}
 	}
 	type plain RemoteUser

@@ -13,8 +13,9 @@ Developer notes for working on lever itself. For using lever, start at the
 | `cmd/lever-tool-db` | Reference first-party capability tool (optional). |
 | `cmd/lever-tool-github` | Host-side broker tool: pushes an agent's git bundle to one `agent/*` branch with a short-lived GitHub App token. |
 | `cmd/lever-tool-fizzy` | Host-side broker tool: a fixed set of operations on one Fizzy board, through the `fizzy` CLI. |
+| `cmd/lever-tool-whisper` | Host-side broker tool: runs whisper.cpp's `whisper-server` for the chat page's dictation (over a Unix socket) and an optional agent `transcribe` operation. |
 | `captool/` | Public SDK for first-party capability tools (independent token verification + backstop). Imported by `examples/`; the only non-`internal` package. |
-| `internal/` | Shared packages for all six binaries (listed below). |
+| `internal/` | Shared packages for all seven binaries (listed below). |
 | `internal/agent` | In-jail lever-agent core: keypair, enrolment, capability MCP server, loopback gateway, token renewal. |
 | `internal/agentledger` | Host record of each contact message the broker authorized an agent to send. |
 | `internal/apply` | `lever apply`/`up` bring-up: the pure `Plan` and the `Run` executor. |
@@ -53,6 +54,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/state` | The `.lever-state` directory layout and its file helpers: JSON state, 0600 secrets, pid files, the remote-proxy stamp. |
 | `internal/termsafe` | Makes guest-supplied strings safe to print on the operator's terminal. |
 | `internal/testutil` | Stdlib-only assertion helpers shared by test packages (`WantErrIs`, `WantErrContaining`). |
+| `internal/voice` | Speech to text on the host: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. |
 | `internal/webpush` | Web Push (RFC 8030/8291/8292) sender for the chat page's notifications, stdlib only. |
 | `internal/wire` | Leaf package: agent⇄broker request/response types, route paths and bootstrap material. Imports no other lever package. |
 | `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |
@@ -77,7 +79,7 @@ which needs a Go toolchain.
 ## Build
 
 ```bash
-make install          # host `lever`, `lever-tool-github`, `lever-tool-fizzy` → $PREFIX (default ~/.local/bin)
+make install          # host `lever`, `lever-tool-github`, `lever-tool-fizzy`, `lever-tool-whisper` → $PREFIX (default ~/.local/bin)
 make lever-image      # cross-compile in-jail binaries + docker build the agent image (LEVER_IMAGE_ARCH, default: host Go arch)
 make lever-image-bins # cross-compile in-jail binaries into an instance's image build context only
 ```
@@ -99,6 +101,76 @@ lever acceptance       # six-check live gate against a running instance
 CI (`.github/workflows/ci.yml`) runs `gofmt -l .` (must be empty), `go vet ./...`, `go build ./...`
 and `go test -race ./...`. A release is a `v*` tag; the release workflow refuses a tag that does not
 match `const Version` in `internal/cli/root.go` or that is not on `main`.
+
+### Live test plan for guest hardening and nested virt
+
+The guest crash recovery, `guest_kernel` and the recovery after a hard VM kill (lever#179) are
+unit tested only; these live checks remain. Run each on a disposable instance, one live e2e at a
+time, and never on a VM whose agents you need.
+
+1. **A fresh `nested_virt` VM.** After the first apply: the three files
+   (`/etc/sysctl.d/99-lever-crash-recovery.conf`, `/etc/modprobe.d/lever-no-efi-pstore.conf`,
+   `/etc/default/grub.d/99-lever-crash-recovery.cfg`), the four sysctls live, `efi_pstore` not
+   loaded, apply's `jail: reboot pending:` lines, and `linux-generic-hwe-24.04` installed. Then
+   `lever stop`, `lever up`: doctor's *guest crash recovery* and *guest kernel* rows are green and
+   `/proc/cmdline` has `efi_pstore.pstore_disable=1`.
+2. **Re-apply.** No `update-grub` and no apt run; record the time the hardening adds to apply.
+3. **Re-apply under `egress: closed` without the HWE kernel** (remove the package first): measure
+   the delay and check the warning says the egress is closed. Then make an install fail (open
+   posture, mirrors unreachable) and check the stamp `.lever-state/hwe-install-failed.json`
+   (0600), the next closed-posture apply's warning, and that it runs no apt.
+4. **A production-like VM without `nested_virt`.** No kernel change; `update-grub` succeeds on the
+   Lima cloud image.
+5. **A guest panic.** `echo c > /proc/sysrq-trigger` in the guest, under qemu (and vz on a Mac if
+   possible): the VM comes back or stops (record which, per driver). Then `lever up` logs
+   "suspending and resuming", the conversation is intact, and the record is not refused.
+6. **QEMU killed while the manager runs**, then `lever up`: the same checks as step 5.
+7. **A crash-truncated transcript.** Truncate the last line of the manager's session JSONL, then
+   resume: does `claude --continue` accept it?
+8. **Doctor on OrbStack**: both rows say not applicable.
+9. **Soak.** A nested VM under CPU and IO load for 24 h on the HWE kernel, watching the guest
+   serial log (`~/.lima/<vm>/serial*.log`) for soft lockups.
+
+Record results (no host names) in the operations guide's table of host/guest kernel pairs, and
+update its "verified/unverified" notes.
+
+### Bumping the jail ABI
+
+`JailABI` in `internal/jailabi/jailabi.go` is the in-jail compatibility version. `make lever-image`
+stamps it on the agent image as the `lever_jail_abi` label, and `lever doctor`'s `agent lever
+version` row compares it with the host `lever`, so a release that changed no in-jail code needs no
+image rebuild. The in-jail code is everything baked into the image: `cmd/lever-agent`,
+`cmd/lever-manager`, `cmd/lever-tool-db`, the scion pre-start hook, `internal/agent`,
+`internal/wire`, every package they import (`go list -deps`; external modules by version), the
+image Dockerfile, and the Go version in `go.mod`. `internal/jailabi/fingerprint.txt` holds a hash
+of those and lists what it covers. Go files are hashed as their token stream, so comments, blank
+lines and spacing do not count, nor does the value of the release `Version` constant in
+`internal/cli`; `//go:` directives (build constraints, `go:embed` and the like) do count. When `TestJailFingerprint` fails after your change:
+
+1. add one to `JailABI`;
+2. run `go test ./internal/jailabi -run TestJailFingerprint -update`;
+3. commit `jailabi.go` and `fingerprint.txt` with the change.
+
+The update refuses to record a new hash under the old number. Bump `JailABI` by hand, then run the
+update, when the code is the same but its meaning on the wire changed. Two branches that each bump
+it conflict in `fingerprint.txt`: after the merge, bump once more and run the update. Deleting
+`fingerprint.txt` and running the update re-records it without a bump, so only do that when no
+image has shipped with the current `JailABI`.
+
+## Release checklist
+
+Before tagging, besides a green CI:
+
+- `CHANGELOG.md` has the release's section, and `const Version` matches the tag.
+- One live end-to-end run (`make test-lima-e2e`) on the release candidate.
+- **A change to the agent's boot step** (`lever-agent boot`, the scion pre-start hook in
+  `cmd/lever-agent/scionhook`, anything they read or write, or the scion pin) needs a live boot on a
+  throwaway rootless instance, with the uid the hook ran as checked there (the container log's
+  `sciontool init` lines and the owner of the files boot wrote), or the uid confirmed in the pinned
+  scion source (`cmd/sciontool/commands/init.go`: `setupHostUser` runs before the pre-start hooks).
+  Under rootless podman the hook runs as the agent user (uid 1000), not root. Two reviews once
+  accepted "boot runs as root" without either check; a review that relies on the hook's uid must
+  name which check it made.
 
 ## Docs
 

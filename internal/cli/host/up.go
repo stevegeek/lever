@@ -83,10 +83,13 @@ func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name strin
 // evidence of a death — a harness that died earlier reads as an error phase
 // or an exited container — because holding a healthy long-running manager
 // for ten seconds on every `up` would be a poor trade.
-func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string) error {
+//
+// prog (may be nil) is the resume's progress line (lever#168), handed the
+// gate's stages.
+func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress) error {
 	switch d {
 	case upResume:
-		return apply.WaitManagerLive(ctx, deps, name, project)
+		return apply.WaitManagerLive(ctx, deps, name, project, prog)
 	case upNone:
 		return apply.ObserveManagerLive(ctx, deps, name, project)
 	default:
@@ -115,6 +118,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// operator's keys go to the manager, not to this handler.
 			ctx, stop := applySignalContext(cmd.Context())
 			defer stop()
+			// buildApplyDeps brings the jail up through the backend's EnsureUp
+			// on every path below, before up looks at the manager: on Lima
+			// that converges the guest hardening (crash recovery, guest_kernel;
+			// lever#179) whether up then applies, resumes or only attaches.
 			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
 			if err != nil {
 				return err
@@ -138,6 +145,14 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Println(upProbeNotice(probeErr, fresh))
 			}
 			decision := upDecision(phase, fresh)
+			// A record left "running" by a hard VM kill (a new guest boot,
+			// no live container) is suspended here and resumed below: what
+			// the operator used to do by hand with `lever stop` + `lever up`
+			// (lever#179). Never --fresh: the conversation is kept.
+			if decision == upNone && apply.RecoverAfterGuestRestart(ctx, deps, app.Name, project) {
+				decision = upResume
+			}
+			var prog *apply.Progress
 			switch decision {
 			case upApply:
 				// --fresh: apply's start-manager step deletes any record it
@@ -154,6 +169,17 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
+				// shared_folders: the resume re-resolves every mount source,
+				// as apply's start-manager step checks before its resume.
+				if err := app.PrepareSharedFoldersHost(); err != nil {
+					return err
+				}
+				// The resume and the gate after it can run over a minute
+				// (container start, pre-start hook, claude, settle): print
+				// progress about every 15 s (lever#168). Stopped on every
+				// return; the gate below gets the stages.
+				prog = apply.StartProgress(deps, "up", app.Name, "asking scion to resume the container")
+				defer prog.Stop()
 				if err := sc.Resume(ctx, app.Name, project); err != nil {
 					if scion.IsRefusedByHub(err) {
 						return apply.HubRefusedResume("resume", err)
@@ -178,9 +204,12 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// the "is up." print with no observation at all, and the apply
 			// paths returned on the first live look — over a harness that dies
 			// a moment later (lever#31). Gate every path before claiming up.
-			if err := gateAfterUp(ctx, deps, decision, project, app.Name); err != nil {
+			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog)
+			prog.Stop()
+			if err != nil {
 				return err
 			}
+			apply.RecordGuestBoot(ctx, deps)
 			stop()
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)

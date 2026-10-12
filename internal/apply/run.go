@@ -132,6 +132,9 @@ type run struct {
 	// process; see ErrBootstrapLatched). start-manager's create path needs
 	// exactly that "did we mint fresh material this run" signal.
 	minted bool
+	// progress is the start-manager progress line while the manager is
+	// started and gated (nil outside that window).
+	progress *Progress
 	// fresh is PlanOpts.Fresh: discard any present manager record at
 	// start-manager (lever#33).
 	fresh bool
@@ -320,6 +323,19 @@ type Deps struct {
 	// than the config: they apply at start, so a kept manager has the old
 	// ones until its next start. nil skips the warning. Optional.
 	ReadClaudeSettings func(ctx context.Context, ref string) (jail.ClaudeDelivered, error)
+	// BackgroundSessions counts stale Claude background-session records in
+	// an agent container (jail.AgentProbe.BackgroundSessions in production).
+	// When the manager liveness gate sees the harness die and the container
+	// still runs, stale records are the cause it names first, with the
+	// recovery (withHarnessDeathHint). Only counts come back. nil skips it.
+	// Optional.
+	BackgroundSessions func(ctx context.Context, ref string) (jail.BackgroundRecords, error)
+	// HarnessLogTail reads the tail of an agent container's log
+	// (jail.AgentProbe.LogTail in production): the fallback when
+	// BackgroundSessions names no cause (the container is gone, say). It is
+	// matched for fixed phrases (HarnessDeathHint) and never printed. nil
+	// skips the fallback. Optional.
+	HarnessLogTail func(ctx context.Context, ref string) (string, error)
 	// RecordVolumes reads the extra mounts the hub record of agent in
 	// project was created with (its inline-config volumes, through the
 	// controller's read-only agent listing), as jail mounts. It is
@@ -332,6 +348,26 @@ type Deps struct {
 	// (HealAgentSession) before it converges the manager, and the workers'
 	// after. nil ⇒ no heal.
 	AgentSession AgentSessionProbe
+	// ContainerRunning asks podman itself whether an agent container runs
+	// (jail.ContainerRunning in production), not the hub's heartbeat column.
+	// The manager gate reads it when claude's tmux pane is not alive, to tell
+	// a container that stopped (a failed pre-start hook) from one still
+	// booting, and as its fallback when the pane cannot be probed. nil ⇒ the
+	// gate has only the pane probe.
+	ContainerRunning func(ctx context.Context, ref string) (bool, error)
+	// GuestBoot reads the jail guest's boot id and keeps the one the
+	// manager last ran live in, so a record left "running" by a hard VM
+	// kill is suspended and resumed instead of refused (GuestBoot's doc).
+	// nil ⇒ no recovery and nothing recorded. Optional.
+	GuestBoot GuestBoot
+	// HarnessWait bounds how long the manager gate waits, once the hub record
+	// reads live, for claude's tmux pane to come alive (the pre-start hook
+	// runs first). Zero takes the production default (2 min).
+	HarnessWait time.Duration
+	// clock and progressTicker drive the start progress line (Progress);
+	// nil ⇒ time.Now and a real ticker. Tests inject both.
+	clock          func() time.Time
+	progressTicker func(time.Duration) (<-chan time.Time, func())
 	// AgentRevoked reports an agent (by slug) the broker has revoked, read
 	// from the persisted revocation list, so the session heal does not reset
 	// a revoked agent's hub token. nil ⇒ none known.
@@ -1066,19 +1102,37 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		// The stale-mount check then reads the healed record, so a record
 		// the heal turned running is kept (managerKept) and not refused.
 		rec = HealAgentSession(ctx, r.d.sessionHealer(), jp, rec)
+		// A record left "running" by a guest that was killed and restarted
+		// is suspended here, so converge resumes it (lever#179). Re-read
+		// after: converge acts on what the hub says now, and a suspend that
+		// did not take leaves the record running, refused by the gate as
+		// before.
+		if guestRestartedUnder(ctx, r.d, jp, r.app.Name, rec) {
+			suspendAfterGuestRestart(ctx, r.d, "start-manager", jp, r.app.Name, rec)
+			if rec, err = r.observeManager(ctx, jp); err != nil {
+				return err
+			}
+		}
 	}
 	if rec != nil && !r.fresh {
 		if err := r.checkStaleTreeMounts(ctx, jp, rec); err != nil {
 			return err
 		}
 	}
+	// A container start, the pre-start hook, claude's boot and the settle
+	// window can run over a minute: say what is happening about every 15 s
+	// (lever#168), from the action to the end of the gate.
+	r.progress = StartProgress(r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
+	if err == nil {
+		err = r.waitManagerLive(ctx, jp, acted)
+	}
+	r.progress.Stop()
+	r.progress = nil
 	if err != nil {
 		return err
 	}
-	if err := r.waitManagerLive(ctx, jp, acted); err != nil {
-		return err
-	}
+	RecordGuestBoot(ctx, r.d)
 	healNamedSessions(ctx, r.d, jp, workerNames(r.app))
 	if !r.managerCreated {
 		r.warnManagerTreeMounts(ctx, jp)
@@ -1203,8 +1257,21 @@ const KVMDevice = "/dev/kvm"
 // workers get none.
 func managerVolumes(jp string, app *config.App) []scion.VolumeMount {
 	out := managerTreeVolumes(jp, app.ManagerTreeMounts())
+	out = append(out, SharedVolumes(jp, app.SharedMountsFor(app.Name))...)
 	if app.NestedVirt {
 		out = append(out, scion.VolumeMount{Source: KVMDevice, Target: KVMDevice})
+	}
+	return out
+}
+
+// SharedVolumes turns an agent's shared_folders plan into scion volumes:
+// each folder of the in-jail tree jp mounted at its /shared/<name> target,
+// read-only unless the agent writes it. The broker builds a worker's from
+// the same function, so the two plans cannot drift.
+func SharedVolumes(jp string, mounts []config.SharedMount) []scion.VolumeMount {
+	out := make([]scion.VolumeMount, 0, len(mounts))
+	for _, m := range mounts {
+		out = append(out, scion.VolumeMount{Source: path.Join(jp, m.Rel), Target: m.Target, ReadOnly: m.ReadOnly})
 	}
 	return out
 }
@@ -1584,7 +1651,7 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 		gaps.Replaced = replaced
 	}
 	if !gaps.Empty() {
-		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
+		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only or shared_folders protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
 		if tools := r.toolsOnReadOnly(); len(tools) > 0 {
 			r.d.Log("start-manager: the broker does not start tool(s) %s until then: each runs a program from a protected directory, which this manager could have rewritten", strings.Join(tools, ", "))
 		}
@@ -2040,6 +2107,11 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	if err := r.app.PrepareManagerReadOnlyHost(); err != nil {
 		return fmt.Errorf("start-manager: %w", err)
 	}
+	// shared_folders: hard links out of a folder, checked when the
+	// manager's protection begins (config.App.CheckSharedFolderLinks).
+	if err := r.app.CheckSharedFolderLinks(); err != nil {
+		return fmt.Errorf("start-manager: %w", err)
+	}
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
@@ -2161,32 +2233,19 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error 
 		// One look still refuses a running RECORD over a dead container.
 		b.Settle = 0
 	}
-	return gateManagerLive(ctx, r.d.Scion, b, r.app.Name, jp, "start-manager")
+	err := gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress)
+	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
-// gateManagerLive is the manager liveness gate every bring-up path shares: the
-// start-manager step here and `lever up`'s own resume/no-op paths (WaitManagerLive
-// / ObserveManagerLive), which act on the manager WITHOUT going through Run and
-// used to print "is up." with no observation at all (lever#31). subject
-// prefixes the exhaustion/death error; ctx errors pass through unwrapped.
-func gateManagerLive(ctx context.Context, sc *scion.Client, b RetryBudget, name, project, subject string) error {
-	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
-		return sc.List(c, project)
-	}, name, scion.LiveBudget{Attempts: b.Attempts, Interval: b.Interval, Settle: b.Settle})
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return fmt.Errorf("%s: manager %q %w", subject, name, err)
-}
-
-// WaitManagerLive is the full gate — become live, then hold for the settle
-// window — for a path that just acted on the manager (`lever up` after its own
-// `scion resume`). Same List, same budget as the start-manager step.
-func WaitManagerLive(ctx context.Context, d Deps, name, project string) error {
-	return gateManagerLive(ctx, d.Scion, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up")
+// WaitManagerLive is the full gate — become live, see the harness run, then
+// hold for the settle window — for a path that just acted on the manager
+// (`lever up` after its own `scion resume`). Same List, same budget, same
+// in-container check as the start-manager step. prog (may be nil) gets the
+// gate's stages for its progress line. A harness death gets the same hint
+// as the start-manager step (withHarnessDeathHint).
+func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
+	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog)
+	return withHarnessDeathHint(ctx, d, err, project, name)
 }
 
 // observeAttempts bounds ObserveManagerLive's list retries: enough to ride

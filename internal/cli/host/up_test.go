@@ -195,7 +195,7 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 		{upResume, 2, 1 << 20}, // live, then held: at least one re-observation
 	} {
 		deps, f := newDeps()
-		if err := gateAfterUp(context.Background(), deps, c.action, "/lever", "assistant"); err != nil {
+		if err := gateAfterUp(context.Background(), deps, c.action, "/lever", "assistant", nil); err != nil {
 			t.Fatalf("%s: a running manager must pass: %v", c.action, err)
 		}
 		lists := 0
@@ -212,7 +212,7 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"error","containerStatus":"Exited (1) 2 seconds ago"}]`})
 	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond}}
-	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant"); err == nil {
+	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil); err == nil {
 		t.Fatal("a resume over a dead manager must not pass the gate")
 	}
 }

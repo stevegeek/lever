@@ -1,6 +1,7 @@
 package brokerctl
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -241,5 +242,93 @@ func TestFilesSwitchesInTheStamps(t *testing.T) {
 	app.Remote.AllowedUsers[1].Files = nil
 	if RemoteConfigHash(app) != off {
 		t.Fatal("files off: the login switch is ignored")
+	}
+}
+
+// remote.voice is the proxy's alone: on, every setting and the per-login
+// switch restart the proxy; the broker never acts on it; off, nothing of it
+// is in either stamp.
+func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
+	app := remoteTestApp(t)
+	b0, off := ConfigHash(app), RemoteConfigHash(app)
+	app.Remote.Voice = config.Voice{Socket: "/run/lever/whisper.sock", MaxSeconds: 60}
+	no := false
+	app.Remote.AllowedUsers[1].Voice = &no
+	if RemoteConfigHash(app) != off || ConfigHash(app) != b0 {
+		t.Fatal("voice settings while off changed a stamp")
+	}
+	app.Remote.AllowedUsers[1].Voice = nil
+	app.Remote.Voice.Enabled = true
+	on := RemoteConfigHash(app)
+	if on == off {
+		t.Fatal("turning voice on must restart the proxy")
+	}
+	if ConfigHash(app) != b0 {
+		t.Fatal("voice must not bounce the broker")
+	}
+	for name, mut := range map[string]func(a *config.App){
+		"socket":     func(a *config.App) { a.Remote.Voice.Socket = "/run/lever/other.sock" },
+		"max":        func(a *config.App) { a.Remote.Voice.MaxSeconds = 120 },
+		"read aloud": func(a *config.App) { a.Remote.Voice.ReadAloud = &no },
+		"login":      func(a *config.App) { a.Remote.AllowedUsers[1].Voice = &no },
+	} {
+		c := *app
+		c.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
+		mut(&c)
+		if RemoteConfigHash(&c) == on {
+			t.Errorf("%s: no proxy restart", name)
+		}
+	}
+}
+
+// shared_folders and manager.read_only feed the broker's worker specs,
+// shared mounts and guard plan, so changing either must restart it; an
+// instance that sets neither keeps the hash it had (the golden above).
+func TestConfigHashCoversSharedFoldersAndReadOnly(t *testing.T) {
+	mk := func() *config.App {
+		return &config.App{
+			Name: "hello", Backend: "orbstack", Tree: "/tmp/tree",
+			Workers:       []config.Worker{{Name: "w1", Dir: "workers/w1"}, {Name: "w2", Dir: "workers/w2"}},
+			SharedFolders: []config.SharedFolder{{Path: "shared/x", Writers: []string{"w1"}, Readers: []string{"w2"}}},
+		}
+	}
+	base := ConfigHash(mk())
+	if base != ConfigHash(mk()) {
+		t.Fatal("hash not deterministic")
+	}
+	for name, change := range map[string]func(*config.App){
+		"writers":   func(a *config.App) { a.SharedFolders[0].Writers = nil },
+		"readers":   func(a *config.App) { a.SharedFolders[0].Readers = []string{config.SharedAllWorkers} },
+		"path":      func(a *config.App) { a.SharedFolders[0].Path = "shared/y" },
+		"name":      func(a *config.App) { a.SharedFolders[0].Name = "z" },
+		"removed":   func(a *config.App) { a.SharedFolders = nil },
+		"read_only": func(a *config.App) { a.Manager.ReadOnly = []string{"bin"} },
+	} {
+		a := mk()
+		change(a)
+		if ConfigHash(a) == base {
+			t.Errorf("changing %s must change the hash", name)
+		}
+	}
+	ro := mk()
+	ro.Manager.ReadOnly = []string{"bin"}
+	ro2 := mk()
+	ro2.Manager.ReadOnly = []string{"tools"}
+	if ConfigHash(ro) == ConfigHash(ro2) {
+		t.Fatal("changing a read_only entry must change the hash")
+	}
+
+	// Neither set: the hash is the one from before either was hashed.
+	plain := mk()
+	plain.SharedFolders = nil
+	plain.Manager.ReadOnly = []string{} // empty, not nil: still omitted
+	old := state.HashJSON(struct {
+		Broker       config.Broker
+		Workers      []config.Worker
+		Scion        config.ScionConfig
+		VerifiedChat bool
+	}{plain.Broker, plain.Workers, plain.Scion, ChatConfigured(plain)})
+	if ConfigHash(plain) != old {
+		t.Fatal("an instance without shared_folders or read_only must keep its hash")
 	}
 }

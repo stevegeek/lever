@@ -140,7 +140,10 @@ refuses to start when the key or its `-state` directory is inside `-tree`. `leve
 reads a Fizzy personal access token from a 0600 file owned by the broker user and passes it to the
 fizzy CLI only in its environment. Both are first-party broker tools: the agent holds only a
 capability token, which the broker verifies and forwards and the tool verifies again. See the [github tool](/github-tool/) and
-[fizzy tool](/fizzy-tool/) guides.
+[fizzy tool](/fizzy-tool/) guides. `lever-tool-whisper` holds no credential, but it is a
+first-party host tool on the same terms: its `transcribe` operation reads WAV files from the tree
+root's `.lever-files/whisper/` (which only the manager can write) for any agent holding the
+capability. See the [whisper tool](/whisper-tool/) guide.
 
 **In-jail hub reachability (residual).** The capability broker above is the audited seam for
 agent lifecycle, but the in-jail scion Hub API itself remains reachable from inside an agent

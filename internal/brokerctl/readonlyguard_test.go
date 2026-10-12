@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
@@ -142,5 +143,31 @@ func TestSupervisorLogsGuardRefusalOncePerClass(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "check the program before you trust it again") {
 		t.Fatalf("the fix text lacks the check: %q", b)
+	}
+}
+
+// The shared guard passes a manager that is down (it cannot swap a folder
+// then) and keeps every other refusal.
+func TestSharedGuardDecision(t *testing.T) {
+	for _, class := range []string{"no-container", "not-running"} {
+		if err := sharedGuardDecision(&guardError{class, "down"}); err != nil {
+			t.Errorf("%s: %v, want nil", class, err)
+		}
+	}
+	for _, class := range []string{"gaps:x", "live:x", "missing:x"} {
+		if err := sharedGuardDecision(&guardError{class, "refused"}); err == nil || errors.Is(err, broker.ErrSharedCheckUnavailable) {
+			t.Errorf("%s: %v, want the refusal kept as a gap", class, err)
+		}
+	}
+	for _, class := range []string{"mounts-unreadable", "live-unreadable"} {
+		if err := sharedGuardDecision(&guardError{class, "unreadable"}); !errors.Is(err, broker.ErrSharedCheckUnavailable) {
+			t.Errorf("%s: %v, want ErrSharedCheckUnavailable", class, err)
+		}
+	}
+	if err := sharedGuardDecision(nil); err != nil {
+		t.Errorf("nil: %v", err)
+	}
+	if sharedGuard(&config.App{Name: "m"}, nil, "/lever") != nil {
+		t.Error("no shared folders: the guard must be nil")
 	}
 }

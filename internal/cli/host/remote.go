@@ -30,6 +30,7 @@ import (
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/voice"
 	"github.com/stevegeek/lever/internal/webpush"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -85,6 +86,9 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			printRemoteWarnings(cmd, app)
 			cmd.Printf("remote proxy %q serving on %s, identity header %s (login provider on 127.0.0.1:%d, issuer %s)\n",
 				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader(), provider.Port(), provider.IssuerURL())
+			if app.VoiceOn() {
+				cmd.Printf("dictation on: through lever-tool-whisper's socket %s\n", app.Remote.Voice.Socket)
+			}
 			err = serveRemote(ctx, app, st, provider, handler)
 			stop()
 			<-pushDone
@@ -200,8 +204,24 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// remote.files: uploads into each agent's .lever-files/in/, and
 		// downloads of the files it shares. Nil when off.
 		Files: remoteFiles(app, st),
+		// remote.voice: dictation through lever-tool-whisper's socket.
+		// Nil when off.
+		Voice: remoteVoiceConfig(app),
 	})
 	return provider, handler, push, nil
+}
+
+// remoteVoiceConfig is dictation (remote.voice) as the proxy runs it: each
+// checked clip goes to lever-tool-whisper's dictation socket. Nil when off.
+func remoteVoiceConfig(app *config.App) *remoteproxy.VoiceConfig {
+	if !app.VoiceOn() {
+		return nil
+	}
+	c := &voice.DictateClient{Socket: app.Remote.Voice.Socket}
+	return &remoteproxy.VoiceConfig{MaxSeconds: app.EffectiveVoiceMaxSeconds(), Excluded: app.VoiceExcludedLogins(),
+		ReadAloud: app.Remote.Voice.ReadAloud == nil || *app.Remote.Voice.ReadAloud,
+		NotSent:   func(err error) bool { return errors.Is(err, voice.ErrNotSent) },
+		Available: c.Available, Transcribe: c.Transcribe}
 }
 
 // pushTestHosts is the TEST ONLY exception: both remote.push.test_hosts and

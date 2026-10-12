@@ -32,8 +32,9 @@ func NormalizeBrokerURL(u string) string {
 // staged by the host (wire.Stage, which never stages through a link) in the
 // agent-writable tree; for a worker it is /run/lever/bootstrap.json, the
 // broker's guest ticket directory mounted read-only into that container alone
-// (LEVER_BOOTSTRAP). boot reads it as root, so the read is confined two
-// levels up (<tree>, or /run) and a symlink (or any non-regular file) at the
+// (LEVER_BOOTSTRAP). boot may read it as root (rootful runtime, or a failed
+// privilege drop; see errRefusedPath — under rootless podman it runs as the
+// agent user), so the read is confined two levels up (<tree>, or /run) and a symlink (or any non-regular file) at the
 // directory or at bootstrap.json is refused (errRefusedPath). An absent file
 // still reports fs.ErrNotExist.
 func LoadBootstrap(path string) (Bootstrap, error) {
@@ -164,14 +165,20 @@ func Boot(ctx context.Context, c BootConfig) error {
 	}
 	if bsErr != nil && c.ManagedSettingsPath != "" && c.Log != nil {
 		// No envelope means no claude block: say why lever's values go.
-		c.Log("lever-agent boot: no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any", bsErr, c.ManagedSettingsPath)
+		c.Log("lever-agent boot: no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any (the agent-view switch is still written)", bsErr, c.ManagedSettingsPath)
 	}
 	// The Claude settings are optional: a failed write must not stop the
 	// agent (on rootless podman the pre-start hook runs as the agent user, and
 	// an image without lever's /etc/claude-code cannot take the file). It is
 	// logged, and doctor's claude settings row shows what the agent got.
+	// With no claude config the file carries only the agent-view switch, so
+	// the log names that, not a claude config that was never there.
 	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil && c.Log != nil {
-		c.Log("lever-agent boot: claude settings not delivered: %v", err)
+		if claude.IsZero() {
+			c.Log("lever-agent boot: agent-view switch not written (%v); background sessions stay possible", err)
+		} else {
+			c.Log("lever-agent boot: claude settings not delivered, nor the agent-view switch (background sessions stay possible): %v", err)
+		}
 	}
 	if c.MCPAdd == nil {
 		return nil

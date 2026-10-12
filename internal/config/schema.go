@@ -462,7 +462,37 @@ type Remote struct {
 	// (remoteproxy/files.go, broker share_file). Off by default; needs
 	// landing: chat. See Files.
 	Files Files `yaml:"files"`
+	// Voice turns on dictation on the chat page: a login records a clip,
+	// the broker tool lever-tool-whisper transcribes it, and the text lands
+	// in the message box for review (never sent by itself). Off by default;
+	// needs landing: chat. See Voice.
+	Voice Voice `yaml:"voice"`
 }
+
+// Voice is remote.voice: dictation on the chat page. The transcription
+// itself runs in the broker tool lever-tool-whisper (whisper-server is its
+// child); the proxy posts each checked clip to the tool's dictation socket
+// and returns the text to the login that sent it. Audio and transcripts are
+// never stored.
+type Voice struct {
+	Enabled bool `yaml:"enabled"`
+	// Socket is the tool's dictation socket: an absolute host path outside
+	// the tree, equal to the -dictate-socket of the lever-tool-whisper entry
+	// in broker.tools. Required when enabled.
+	Socket string `yaml:"socket"`
+	// MaxSeconds bounds one clip. Zero = DefaultVoiceMaxSeconds; at most
+	// MaxVoiceMaxSeconds, and at most the tool's -max-seconds.
+	MaxSeconds int `yaml:"max_seconds"`
+	// ReadAloud turns the read-aloud button on agent messages on or off
+	// (the browser's on-device voices; nothing leaves the device). nil =
+	// on while voice is enabled; never shown while it is off.
+	ReadAloud *bool `yaml:"read_aloud"`
+}
+
+const (
+	DefaultVoiceMaxSeconds = 300
+	MaxVoiceMaxSeconds     = 600
+)
 
 // Push is remote.push.
 type Push struct {
@@ -521,21 +551,29 @@ const (
 )
 
 type App struct {
-	Name       string      `yaml:"name"`
-	Backend    string      `yaml:"backend"`
-	Egress     EgressMode  `yaml:"egress"`
-	Tree       string      `yaml:"tree"`
-	Manager    Manager     `yaml:"manager"`
-	Scion      ScionConfig `yaml:"scion"`
-	Workers    []Worker    `yaml:"workers"`
-	Security   Security    `yaml:"security"`
-	Broker     Broker      `yaml:"broker"`
-	Operator   Operator    `yaml:"operator"`
-	Remote     Remote      `yaml:"remote"`
-	Disk       string      `yaml:"disk"`        // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
-	NestedVirt bool        `yaml:"nested_virt"` // Lima-only: the manager container gets /dev/kvm (nested KVM guests). Linux hosts only.
-	CPUs       int         `yaml:"cpus"`        // Lima guest vCPUs; 0 = Lima default. Lima-only.
-	Memory     string      `yaml:"memory"`      // Lima guest memory (e.g. "24GiB"); empty = Lima default. Lima-only.
+	Name     string      `yaml:"name"`
+	Backend  string      `yaml:"backend"`
+	Egress   EgressMode  `yaml:"egress"`
+	Tree     string      `yaml:"tree"`
+	Manager  Manager     `yaml:"manager"`
+	Scion    ScionConfig `yaml:"scion"`
+	Workers  []Worker    `yaml:"workers"`
+	Security Security    `yaml:"security"`
+	Broker   Broker      `yaml:"broker"`
+	Operator Operator    `yaml:"operator"`
+	Remote   Remote      `yaml:"remote"`
+	// SharedFolders are tree directories some agents mount at
+	// /shared/<name>, read-write for writers and read-only for readers.
+	// Off unless listed; see SharedFolder.
+	SharedFolders []SharedFolder `yaml:"shared_folders"`
+	Disk          string         `yaml:"disk"`        // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
+	NestedVirt    bool           `yaml:"nested_virt"` // Lima-only: the manager container gets /dev/kvm (nested KVM guests). Linux hosts only.
+	CPUs          int            `yaml:"cpus"`        // Lima guest vCPUs; 0 = Lima default. Lima-only.
+	Memory        string         `yaml:"memory"`      // Lima guest memory (e.g. "24GiB"); empty = Lima default. Lima-only.
+	// GuestKernel picks the Lima guest's Ubuntu kernel: "hwe" installs the
+	// 24.04 hardware-enablement kernel, "ga" keeps the release kernel. Empty
+	// = "hwe" with nested_virt, else "ga" (EffectiveGuestKernel). Lima-only.
+	GuestKernel string `yaml:"guest_kernel"`
 
 	dir string // instance root (the config file's directory)
 }

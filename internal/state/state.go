@@ -60,6 +60,12 @@ func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger"
 // fileledger): uploads written by the remote proxy, shares by the broker.
 func (s State) FilesLedger() string { return filepath.Join(s.Dir, "files-ledger") }
 
+// VoiceModels holds the pinned Whisper models `lever voice fetch` downloads
+// when no lever-tool-whisper entry names its own -models (0700, each file
+// 0600); a tool whose -models points here checks the model before each
+// start of its whisper-server child. Never audio or a transcript.
+func (s State) VoiceModels() string { return filepath.Join(s.Dir, "voice-models") }
+
 // Sessions is the record of each agent's last fresh session start and the
 // skill text on disk for it then (package sessionrec): written by apply (the
 // manager) and the broker (workers), read by the remote proxy before it lets
@@ -85,6 +91,17 @@ func (s State) SkillsAdopted() string { return filepath.Join(s.Dir, "skills-adop
 // its own would be reachable by whatever reaches the proxy. A file beside
 // remote.pid keeps the answer host-side, where only lever writes it.
 func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
+
+// GuestBoot records the jail guest boot id in which lever last saw the
+// manager live (apply.GuestBoot), so a VM restart under a "running" record
+// can be recognised (lever#179).
+func (s State) GuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json") }
+
+// HWEFailStamp records that the guest_kernel hwe install failed in the
+// jail VM, keyed by the guest's /etc/machine-id (lever#179): while it names
+// the VM and the egress posture is closed, apply and up warn instead of
+// running apt again. Deleting it makes the next bring-up try again.
+func (s State) HWEFailStamp() string { return filepath.Join(s.Dir, "hwe-install-failed.json") }
 
 // PushDir holds the remote proxy's Web Push key, subscriptions and last
 // send result (remote.push), each 0600.

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -39,13 +40,15 @@ func guardClass(err error) string {
 // entries read-only, pins in place — a missing pin lets the agent move an
 // entry away). Then it checks the RUNNING container from the guest side
 // (jail.ContainerLiveMounts: the kernel's mountinfo and device+inode, no
-// program run inside the container, where the agent is root): every
+// program run inside the container, which the agent controls): every
 // planned directory must be a mount point, the entries read-only, each
 // covering the directory the host has there now. Anything it cannot read
 // — no container yet, a stopped one — is a refusal, so the tool waits.
 func readOnlyGuard(app *config.App, jr proc.Runner, jailMount string) ReadOnlyGuard {
 	ref := jail.ContainerName(path.Base(jailMount), app.Name)
-	want := app.ManagerTreeMounts()
+	// read_only's own plan: a shared folder does not change what protects
+	// a tool under a read_only entry, so adding one does not hold it back.
+	want := app.ReadOnlyEntryMounts()
 	return func(ctx context.Context, _ []string) error {
 		return checkManagerReadOnly(ctx, app.Name, app.Tree, jailMount, want,
 			func(ctx context.Context) ([]jail.Mount, error) { return jail.ContainerMounts(ctx, jr, ref) },
@@ -73,7 +76,7 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 	}
 	for _, w := range want {
 		if fi, err := os.Stat(filepath.Join(tree, filepath.FromSlash(w.Rel))); err != nil || !fi.IsDir() {
-			return &guardError{"missing:" + w.Rel, fmt.Sprintf("the protected directory %q is missing on the host (manager.read_only needs it in place; recreate it, or back up and recreate the manager)", w.Rel)}
+			return &guardError{"missing:" + w.Rel, fmt.Sprintf("the protected directory %q is missing on the host (manager.read_only or shared_folders needs it in place; recreate it, or back up and recreate the manager)", w.Rel)}
 		}
 	}
 	plan := make([]jail.LiveMount, 0, len(want))
@@ -95,4 +98,46 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 		return &guardError{"live:" + msg, fmt.Sprintf("manager %q does not hold that protection: %s", name, msg)}
 	}
 	return nil
+}
+
+// sharedGuard is the broker's check before any worker starts or resumes
+// while shared folders are configured (broker.DispatchConfig.SharedGuard):
+// the manager container must hold its whole tree plan (ManagerTreeMounts:
+// the pins over every shared folder and its ancestors, and the worker
+// dirs), read the way the tool guard reads it. With no manager container,
+// or a stopped one whose configured mounts hold the plan, it passes: the
+// live half needs a running process, and a manager that is down cannot
+// swap anything. A mount table it cannot read is ErrSharedCheckUnavailable.
+// nil when no shared folder is configured.
+func sharedGuard(app *config.App, jr proc.Runner, jailMount string) func(context.Context) error {
+	if len(app.SharedFolders) == 0 {
+		return nil
+	}
+	ref := jail.ContainerName(path.Base(jailMount), app.Name)
+	want := app.ManagerTreeMounts()
+	return func(ctx context.Context) error {
+		err := checkManagerReadOnly(ctx, app.Name, app.Tree, jailMount, want,
+			func(ctx context.Context) ([]jail.Mount, error) { return jail.ContainerMounts(ctx, jr, ref) },
+			func(ctx context.Context, live []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+				return jail.ContainerLiveMounts(ctx, jr, ref, live)
+			})
+		return sharedGuardDecision(err)
+	}
+}
+
+// sharedGuardDecision maps a tree-plan check to the shared guard's answer:
+// a manager that is down passes; an unreadable mount table is
+// ErrSharedCheckUnavailable (retry); every other refusal stands.
+func sharedGuardDecision(err error) error {
+	var g *guardError
+	if !errors.As(err, &g) {
+		return err
+	}
+	switch g.class {
+	case "no-container", "not-running":
+		return nil
+	case "mounts-unreadable", "live-unreadable":
+		return fmt.Errorf("%s: %w", g.msg, broker.ErrSharedCheckUnavailable)
+	}
+	return err
 }

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/jailabi"
 	"github.com/stevegeek/lever/internal/proc"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -162,6 +164,8 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	// An agent's hub token expiry and harness liveness, read in its
 	// container (jail.AgentProbe); only a time and a boolean come back.
 	agentSession := jail.AgentProbe{R: jr}
+	// The guest kernel probe backs two rows; read it once, on first use.
+	guestKernel := sync.OnceValues(func() (guestKernelProbe, error) { return readGuestKernelProbe(ctx, jr) })
 	workerNames := make([]string, 0, len(app.Workers))
 	workerDirs := make(map[string]string, len(app.Workers))
 	workerClaude := make(map[string]*wire.Claude, len(app.Workers))
@@ -182,9 +186,23 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkClaudeSettings(ctx, b.MountDest(), claudeAgents(app.Name, app.ManagerClaude(), workerNames, workerClaude), listAgents, agentSession.ClaudeSettings)
 		},
+		func() checkResult {
+			return checkBackgroundSessions(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), listAgents, agentSession.BackgroundSessions)
+		},
 		func() checkResult { return checkGuestDNS(ctx, app.ClosedInternetEgress(), jr) },
 		func() checkResult {
+			return checkPodmanStorage(ctx, func(ctx context.Context) (jail.StoreHealth, error) { return jail.ReadStoreHealth(ctx, jr) })
+		},
+		func() checkResult {
 			return checkNestedVirt(ctx, app.NestedVirt, app.Backend == config.BackendLima, jr, jail.ContainerName(hubProjectKey(b.MountDest()), app.Name), probeDevice)
+		},
+		func() checkResult {
+			p, err := guestKernel()
+			return checkGuestCrashRecovery(app.Backend, p, err)
+		},
+		func() checkResult {
+			p, err := guestKernel()
+			return checkGuestKernel(app, p, err)
 		},
 		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
@@ -193,7 +211,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkToolBackends(app.Broker.Tools, app.InstanceDir(), probes) },
 		func() checkResult { return checkClaudeVersion(app.ManagerImage(), app.ManagerImageTarPath(), probes) },
 		func() checkResult {
-			return checkLeverVersion(app.ManagerImage(), app.ManagerImageTarPath(), cli.Version, cli.VersionString(), probes)
+			return checkLeverVersion(app.ManagerImage(), app.ManagerImageTarPath(), cli.Version, cli.VersionString(), jailabi.JailABI, probes)
 		},
 		func() checkResult {
 			return checkManagerImage(ctx, b.MountDest(), app.Name, app.ManagerImage(), listAgents)
@@ -210,6 +228,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkChatLabels(app) },
 		func() checkResult { return checkPush(app, state) },
 		func() checkResult { return checkFiles(app, state) },
+		func() checkResult { return checkVoice(app) },
+		func() checkResult { return checkVoiceTool(ctx, app) },
+		func() checkResult { return checkVoiceModel(app) },
 		func() checkResult { return checkAgentMessages(app, state, liveAgentMessages(ctx, app, state)) },
 		func() checkResult { return checkSentLedger(app, state) },
 		func() checkResult { return checkGuestClock(ctx, jr, time.Now, app.AgentMessagesOn()) },
@@ -231,6 +252,12 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, probeWritable)
 		},
+		func() checkResult {
+			return checkSharedFolders(ctx, b.MountDest(), app, listAgents, inspectMountsRW, recordVolumes,
+				func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+					return jail.ContainerLiveMounts(ctx, jr, ref, want)
+				})
+		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult { return checkRecyclableWorkers(app.Workers) },
 		func() checkResult {
@@ -240,7 +267,11 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	}
 	out := make([]checkResult, 0, len(checks))
 	for _, run := range checks {
-		out = append(out, run())
+		// A check with nothing to say (the voice rows while voice is off)
+		// answers no row at all.
+		if r := run(); r.name != "" {
+			out = append(out, r)
+		}
 	}
 	return out
 }

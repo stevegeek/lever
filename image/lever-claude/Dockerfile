@@ -75,7 +75,8 @@ ENV DISABLE_AUTOUPDATER=1
 RUN chown -R scion:scion /home/scion
 
 # Claude Code's managed-settings directory, where lever-agent boot writes the
-# agent's claude_settings and after_compact_note at every start. Under
+# agent's claude_settings and after_compact_note, and turns off background
+# agents and agent view, at every start. Under
 # rootless podman the pre-start hook runs as scion, not root, so the directory
 # must be scion's: the agent can therefore change the file during a session,
 # and boot rewrites it from lever.yaml at the next start.
@@ -88,5 +89,10 @@ RUN install -d -o scion -g scion -m 0755 /etc/claude-code
 # value re-runs no layer.
 ARG LEVER_VERSION=
 LABEL lever_version="${LEVER_VERSION}"
+# The in-jail compatibility version of those binaries (internal/jailabi).
+# `lever doctor` compares it with the host lever before the release, so a
+# release that changed no in-jail code needs no rebuild.
+ARG LEVER_JAIL_ABI=
+LABEL lever_jail_abi="${LEVER_JAIL_ABI}"
 
 USER scion

@@ -133,7 +133,7 @@ func PruneImages(ctx context.Context, r proc.Runner, prefix []string, uid string
 	args := pruneImagesArgs(prefix, uid)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
-		return fmt.Errorf("prune images: %w: %s", err, strings.TrimSpace(res.Stderr+res.Stdout))
+		return fmt.Errorf("prune images: %w: %s", err, podmanFailure(res.Stderr, res.Stdout))
 	}
 	return nil
 }
@@ -150,7 +150,7 @@ func WarmImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRe
 	args := warmImageArgs(prefix, uid, imageRef)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
-		return fmt.Errorf("warm image %s: %w: %s", imageRef, err, strings.TrimSpace(res.Stderr+res.Stdout))
+		return fmt.Errorf("warm image %s: %w: %s", imageRef, err, podmanFailure(res.Stderr, res.Stdout))
 	}
 	return nil
 }
@@ -229,7 +229,7 @@ func aliasLocalhost(ctx context.Context, r proc.Runner, prefix []string, uid, re
 	args := localhostAliasArgs(prefix, uid, ref)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
-		return fmt.Errorf("loadimage: tagging %s as %s: %w: %s", args[len(args)-2], args[len(args)-1], err, strings.TrimSpace(res.Stderr+res.Stdout))
+		return fmt.Errorf("loadimage: tagging %s as %s: %w: %s", args[len(args)-2], args[len(args)-1], err, podmanFailure(res.Stderr, res.Stdout))
 	}
 	return nil
 }
@@ -243,6 +243,12 @@ func aliasLocalhost(ctx context.Context, r proc.Runner, prefix []string, uid, re
 // producer's error is primary only when the load itself succeeded, or when
 // the load's own failure is the short read the dead producer caused — in
 // which case both are named.
+//
+// podman's stderr reaches the error through podmanFailure: its last lines,
+// sanitized and bounded, with podman's progress output dropped, plus the
+// recovery hint when it names store damage (lever#173). The whole stream once
+// led the error with "Getting image source signatures" and the copy progress,
+// and the cause at its end was lost.
 func loadImage(ctx context.Context, r proc.Runner, prefix []string, uid string, save func(io.Writer) error) error {
 	pr, pw := io.Pipe()
 	saveErr := make(chan error, 1)
@@ -258,9 +264,9 @@ func loadImage(ctx context.Context, r proc.Runner, prefix []string, uid string, 
 	sErr := <-saveErr
 	switch {
 	case loadErr != nil && sErr != nil:
-		return fmt.Errorf("loadimage: podman load: %w: %s (%v)", loadErr, strings.TrimSpace(res.Stderr), sErr)
+		return fmt.Errorf("loadimage: podman load: %w: %s (%v)", loadErr, podmanFailure(res.Stderr, ""), sErr)
 	case loadErr != nil:
-		return fmt.Errorf("loadimage: podman load: %w: %s", loadErr, strings.TrimSpace(res.Stderr))
+		return fmt.Errorf("loadimage: podman load: %w: %s", loadErr, podmanFailure(res.Stderr, ""))
 	case sErr != nil:
 		return fmt.Errorf("loadimage: %w", sErr)
 	}

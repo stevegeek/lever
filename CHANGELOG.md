@@ -7,6 +7,224 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-12
+
+### Added
+
+- **Shared folders (`shared_folders`, opt-in).** A tree folder that the agents you name mount at
+  `/shared/<name>`: read-write for its `writers`, read-only for its `readers` (`"*"` for every
+  worker), and not at all for anyone else. The manager always sees the folder: read-only, at its
+  tree path too, unless it is a writer. The folder, its parents and every worker dir are pinned in
+  the manager so it cannot be moved or swapped for a link. Config load refuses a folder that
+  overlaps a worker `dir`, another folder or a `manager.read_only` entry, one inside `.lever`, the
+  state directory or `.lever-files`, a host tool program inside one, and a `labels_file` in a
+  folder a worker writes. Before the manager starts or resumes, lever refuses a folder that is
+  missing or reached through a symbolic link, and before it creates the manager, one holding a
+  file with a hard link outside it. While folders are configured, the broker refuses every worker
+  start and resume until the manager holds its pins, refuses a missing or linked folder, and (on a
+  resume) refuses a record that holds a shared mount the config no longer grants, or that it
+  cannot read (with "retry"). With no folder configured, the broker still refuses a resume whose
+  record holds a `/shared` mount, but only when it can read the record: a failed hub read never
+  refuses a resume or a re-enrolment heal on an instance without folders. New doctor row *shared
+  folders*. A change to `shared_folders` or `manager.read_only` restarts the broker on the next
+  `lever apply` (both are in its config hash); new mounts reach only agents created afterwards. A
+  writer can steer what its readers and the manager run: grant `writers` accordingly. See the config reference, the operations guide and security model §4.5.
+- **Dictation and read-aloud on the chat page (`remote.voice`, off by default).** With
+  `landing: chat` and `remote.voice.enabled`, the chat page has a mic beside the message box: the
+  clip is resampled to 16 kHz mono WAV in the browser, posted to the new
+  `POST /lever/api/voice/transcribe` route (`X-Lever-Voice: 1` required), checked by the proxy
+  and handed to the new broker tool `lever-tool-whisper` over its Unix socket
+  (`remote.voice.socket`, the tool's `-dictate-socket`: `0600` in a private directory, outside
+  the tree, never through the broker). The text lands in the message box for review and is never
+  sent by itself. Audio and transcripts are never stored; the audit line has the login, the clip
+  length, the outcome and the latency only. Per login: 30 clips an hour, 60 audio-minutes a day;
+  three slots, of which a contact never takes the last; `voice: false` on an `allowed_users`
+  entry turns it off for that login. A clip the tool never took (it was down, or it refused the
+  clip) does not count against the limits. Hiding or leaving the page ends a recording and
+  discards the clip (nothing is sent). While voice is on, each agent message also gets a speaker button that
+  reads it aloud with the browser's on-device voices only (`remote.voice.read_aloud: false` turns it
+  off); leaving the page stops it. `remote.voice` has only `enabled`, `socket`, `max_seconds` and `read_aloud`.
+- **`lever-tool-whisper`, a first-party broker tool for speech to text.** It runs whisper.cpp's
+  `whisper-server` (which you install yourself, outside the tree; CUDA or Metal) as its child on
+  `127.0.0.1` (`-whisper-port`), with a model from lever's pinned table checked by size and
+  sha256 before every start, every route under a random path prefix that is new at each start
+  and never logged, its output discarded, a reduced environment, its own process group, and, on
+  Linux, Pdeathsig and a check that the port's listener is its own child. The child's pid is kept
+  in `-models` (`whisper-server-<port>.pid`, `0600`): a start after a tool killed outright stops the
+  child it left (verified first to be the configured server on this port), so on macOS an orphan
+  no longer holds the port. Settings are flags in its `command`
+  (`-server`, `-models`, `-model`, `-language`, `-vocabulary`, `-gpu`, `-max-seconds`,
+  `-agent-max-seconds`). Config
+  load recognises it by its program's base name and refuses `-server`, `-models` and
+  `-dictate-socket` inside the tree (no `read_only` excuse), a missing `-tree`, a `-max-seconds`
+  or `-agent-max-seconds` out of range, a `-whisper-port` the jail may reach or that collides with
+  lever's own listeners or a tool backend, and a `remote.voice.socket` that is not a whisper
+  tool's `-dictate-socket`.
+  Optionally, with an `obtain` grant for `{tool: whisper, op: transcribe}`, an agent can
+  transcribe a canonical WAV file from the tree root's `.lever-files/whisper/`, which only the
+  manager can write (config load refuses a worker `dir` that overlaps `.lever-files` while a
+  whisper or github tool is configured, whether `remote.files` is on or not), whoever the caller is (read with no link followed; at most `-agent-max-seconds`, default 120; 30 clips an hour and 60 audio-minutes a
+  day per caller; dictation goes first in the queue, but a running clip is never interrupted). New
+  `lever voice fetch` downloads a model into the tool's `-models` directory from Hugging Face at
+  a pinned commit and keeps it only if its size and sha256 match; the tool never downloads and
+  picks up a fetched model within a minute. `lever doctor` gains a `voice` row for dictation.
+  Shipped in releases and built by `make install`.
+- **Doctor row *podman storage* (lever#173).** It reads the jail's rootless podman store as the
+  jail user: the podman version, the counts of images, containers and layers, the layers no image
+  or container uses (orphans) and their size, layers flagged incomplete, and podman's own
+  corruption warnings. podman before 5.x has no command that lists layers, so the row reads
+  containers/storage's metadata files. Every command is read-only and bounded (a guest-side
+  timeout per command, a cap on each output, a 60 s budget). A corruption warning fails the row;
+  orphan or incomplete layers warn. lever never deletes a layer: the fix points at the new
+  runbook.
+- **Operations guide: "Recovering the jail's podman store".** Why orphan layers pile up (a load
+  that fails or is interrupted leaves the layers it wrote with no image; the dangling-image prune
+  after a load never removes a layer, and no podman command before 5.x does) and how one of them
+  breaks every later load. The runbook: back up the guest's `~/.scion` (hub database, agent
+  records) and the agent homes, `podman system reset --force` as the jail user, then `lever up`
+  without `--fresh`, with what the reset loses (images, containers, anything written inside a
+  container outside its mounts, podman volumes) and what it keeps (the hub records, the agent
+  homes and conversations, the tree, the host state). `podman system check` is named for 5.x.
+  A troubleshooting row for the load-image failure points at it.
+- **A known cause when the manager's harness dies (#178).** When the manager liveness gate
+  (`lever apply`, `lever up` after a resume) sees the harness die or never come up, lever counts
+  stale background-session records in the manager container (it usually outlives the harness),
+  and names the cause and the recovery when it finds any. When the container is gone or holds
+  none, it falls back to the last 200 lines of the container log, matching Claude Code's refusal
+  with terminal control codes and line wrapping removed. Only counts and fixed phrases are used;
+  the log is never printed.
+- **Doctor's *claude settings* row shows the agent-view switch (#178).** `agent view: off`, or a
+  warning with `agent view: not set` and the agents whose file lacks it (background sessions are
+  then possible, for example on an image without a writable `/etc/claude-code`).
+- **Doctor row *claude background sessions* (#178).** Counts, in each running agent's home,
+  Claude session records of a background session (`"kind":"bg"` or a `"parkedJobId"`) that another
+  container registered: they block the next `claude --continue`. Only counts leave the container.
+- **Operations guide: background sessions and /login.** Do not use `/login` or background mode in
+  an agent tmux; the recovery for stale background records; why `/login` in an agent leaks a
+  credentials file into the jail and does nothing.
+- **Lima guests reboot instead of hanging on a kernel crash (lever#179).** Every `lever apply`
+  and `lever up` now sets `kernel.panic_on_oops=1`, `kernel.panic=10` and
+  `kernel.softlockup_panic=1` in every Lima guest (`/etc/sysctl.d/99-lever-crash-recovery.conf`,
+  applied live; `kernel.hung_task_panic` stays `0` so slow disk I/O does not reboot a healthy
+  guest), and turns the EFI pstore backend off: it unloads `efi_pstore` when it can, blacklists
+  it in `/etc/modprobe.d`, and adds `efi_pstore.pstore_disable=1` to the kernel command line
+  through a `/etc/default/grub.d` drop-in and `update-grub`. A nested VM had crashed a 6.8 guest
+  whose oops path then hung in an EFI runtime call for a day. Existing VMs get it on their next
+  apply; the command line, and a backend that could not be unloaded, wait for a reboot, which
+  apply reports and lever never does itself (`lever stop`, then `lever up`). A soft lockup the
+  host causes (a starved vCPU on an overcommitted host, or a host that slept) now reboots the
+  guest too, and lever has no switch for it yet. Whether the VM then reboots (qemu) or stops (vz)
+  is unverified on Lima as of this release; `lever up` brings it back either way. OrbStack is
+  unchanged: its kernel is shared and not lever's. New doctor row *guest crash recovery*.
+- **`guest_kernel` (Lima only): `hwe` or `ga`.** `hwe` installs `linux-generic-hwe-24.04` on the
+  next apply or up and reports a pending reboot; `ga` keeps the 24.04 release kernel. Unset, it
+  is `hwe` with `nested_virt` and `ga` without, so instances without nested VMs keep their
+  kernel. A failed install is a warning. `apt-get update` and the install wait up to 2 minutes
+  for the apt and dpkg locks (cloud-init may hold them on a fresh VM). While the guest's egress
+  is closed lever does not run apt and says why; a failed install is stamped in
+  `.lever-state/hwe-install-failed.json` (0600, keyed by the VM's machine id), and under
+  `egress: closed` later applies and ups warn without running apt until an apply under the open
+  posture succeeds or the stamp is deleted. New doctor row *guest kernel*: the running kernel, a
+  pending reboot, a missing HWE kernel, and `nested_virt` on the 6.8 GA kernel.
+- **Operations guide: "Nested virtualization"**: the hardening, the kernel choice, a table of
+  host/guest kernel pairs tested under nested load, what to do when a nested VM wedges the
+  guest, how to break a reboot loop, soft lockups the host causes, and what moving the base
+  image to Ubuntu 26.04 would need tested. CONTRIBUTING.md has the live test plan for the guest
+  hardening and nested virt.
+
+### Changed
+
+- **Tool commands are read past `env -S`.** The host-path checks (a program or secret inside the
+  tree) now read a tool's flags past an `env` prefix with a plain `-S` string split into words, so
+  a flag such as `-app-key` or `-state` can no longer hide inside one word. One parser walks the
+  `env` options as GNU and BSD `env` do (`-u NAME`/`-uNAME`/`--unset=`, `-C dir`/`-Cdir`/`--chdir=`,
+  `-S str`/`-Sstr`/`--split-string[=]`, `-i`, `-`, `-0`, `-v`, `--`, `NAME=value`), so
+  `env -u X -S '...'` is checked like any other `-S` and `-uSSH_AUTH_SOCK` or `-C/dir` is not
+  mistaken for one. Config load refuses the `env` forms lever cannot read as `env` does: quotes,
+  backslashes, `$` or a `#` comment in an `-S` string, `-S` grouped after other letters (`-vS`),
+  an option it does not know (BSD `-P`, an ambiguous long option), and an `env` with no command;
+  write such a command as separate words.
+- **The broker stops every supervised tool with SIGTERM and 1.5 s of grace before SIGKILL** (it
+  sent SIGKILL at once), so a tool can stop a child of its own.
+- **`lever doctor` gains `voice tool` and `voice model` rows** that check any configured
+  `lever-tool-whisper` entry (its dictation socket's health, and its model's pinned size and
+  sha256), also with `remote.voice` off, when only agents use the tool. The `voice` row stays
+  about dictation.
+- **scion's settings-keys warning is hidden (#169).** scion prints `WARN settings file contains
+  unrecognized keys (these will be ignored) keys=[hub.project_id runtimes[*].type ...]` on every
+  CLI call against a v1 settings file. It is harmless: the legacy-format probe that prints it runs
+  before the v1 loader, which reads those keys. lever now drops this exact line (the `settings`
+  label, the exact message, nothing but attributes after it) from every scion result and error it
+  shows, and records each distinct copy once per lever process in `broker.log`. Other scion warnings
+  are still shown. The operations guide explains the line.
+- **Doctor compares the jail ABI, not the release (#171).** lever 0.34.2 changed no in-jail code,
+  yet doctor's `agent lever version` row failed for an image built from 0.34.1 and advised a
+  rebuild and `lever up --fresh`, which discards the conversation. The agent image now carries a
+  `lever_jail_abi` label: `JailABI` in `internal/jailabi`, bumped only when the code baked into
+  the image changes (lever-agent, lever-manager, lever-tool-db, the packages and modules they
+  import, the pre-start hook, the image Dockerfile, and the Go version). The row passes on an equal ABI and shows a release difference as
+  information; a different ABI fails with the rebuild advice; an image without the label is
+  compared by release as before. A test fails when the in-jail sources change without a bump
+  (`internal/jailabi/fingerprint.txt`; Go files count by their tokens and `//go:` directives, so
+  comments, blank lines, spacing and the release version do not); CONTRIBUTING.md says how to bump it. An instance
+  Dockerfile that copies the binaries in itself sets the label from `make -s lever-image-jail-abi`.
+- **`lever up` reports a manager up only once claude runs (lever#164).** After a start or a resume
+  the gate waits for claude's tmux pane in the manager container to be alive (up to 2 min, since
+  scion's pre-start hook runs first), then holds the record for the 10 s settle window and checks
+  the pane again. Before, it read only the hub record, which scion marks running at container launch
+  and whose container column a heartbeat refreshes, so `lever up --fresh` printed "is up" over a
+  manager whose pre-start hook failed and whose container exited a moment later. A container that
+  podman reports stopped, or a hub record that leaves running during the wait, is a death at once.
+  So is a claude that exits before it comes up (a bad `--continue`, an auth failure): scion's shell
+  window keeps tmux and the container up, so three probes in a row that find tmux answering but no
+  live claude pane report "claude exited before it came up" within a few seconds. A running
+  container with no tmux server yet after the wait (a hung pre-start hook) is not up. When the
+  probe itself cannot run (a few failures in a row), the container still running after the window
+  counts, with a warning. The progress line shows a fresh hub reading during the wait. A manager
+  that was already running still gets one look.
+- **A manager start prints progress (lever#168).** The start-manager step and `lever up`'s resume
+  print a line about every 15 s with what they wait for, the hub's phase and container, and the
+  elapsed time, instead of a silent minute between "No running manager" and the attach.
+- Comments and the pre-start hook's notes no longer say `lever-agent boot` runs as root: under
+  rootless podman sciontool drops to the agent user (uid 1000) before it runs the hook. The symlink
+  confinement stays as defence for a rootful runtime. `CONTRIBUTING.md` gains a release checklist
+  that asks for a live boot (or the uid in the pinned scion source) on a change to the boot step.
+- **Claude Code background sessions are off in every agent (#178).** At every start,
+  `lever-agent boot` writes `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` into the env of the
+  managed-settings file, and `disableAgentView: true` beside it, for every agent, whatever its
+  `claude_settings`; it is not an option. Claude Code documents both as turning off background
+  agents and agent view (`claude agents`, `--bg`, `/background`, the on-demand supervisor). A
+  conversation moved into the background left session records that made the next
+  `claude --continue` refuse after a container restart, so the manager died at start. The
+  managed-settings file is therefore always written now. Read from the baked Claude Code 2.1.281,
+  not yet tested in a running container. Needs a rebuilt agent image and new containers. The
+  switch guards against accidents: an agent owns `/etc/claude-code` in its container and can
+  change it during a session; lever rewrites it at every start. With no claude config, a failed
+  write now logs `agent-view switch not written (...); background sessions stay possible`.
+
+### Fixed
+
+- **A failed image load now shows podman's own error (lever#173).** `podman load` writes its copy
+  progress to stderr before it fails, and the load error relayed the whole stream on one line, so
+  it led with "Getting image source signatures" and the cause at the end was lost. The load,
+  warm-up, prune and localhost-tag errors now carry podman's last lines: progress dropped, each
+  line sanitized, at most 12 lines and 4 KiB, a long line cut in the middle so its cause
+  survives, and podman's corruption warning kept even when it came earlier. When the output
+  names store damage (the corruption warning, a missing `overlay/l/` link, an unknown layer), the
+  error adds a hint that points at `lever doctor` and the recovery runbook.
+- **`lever up` and `lever apply` resume a manager that a hard VM kill left "running".** After a
+  wedged guest was killed and restarted, the record said running over a container that never
+  started, and `lever up` told the operator to run `lever stop` and `lever up`. lever now records
+  the guest boot id (`.lever-state/guest-boot.json`) whenever it sees the manager live; when the
+  boot changed and podman in the guest says the manager's container is not running, it suspends
+  and resumes the record itself, keeping the conversation (never `--fresh`). The hub's container
+  status is never taken as evidence: it briefly reads `created` for a container that is starting.
+
+### Docs
+
+- The docs site groups the github, fizzy and whisper tool guides under a new Tools page, which
+  explains how first-party broker tools work. The guides keep their URLs.
+
 ## [0.34.3] - 2026-10-09
 
 ### Fixed

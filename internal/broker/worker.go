@@ -82,6 +82,10 @@ type WorkerSpec struct {
 	// Claude is the worker's own Claude Code config (config.Worker.Claude),
 	// staged in its envelope before every start and resume. nil = none.
 	Claude *wire.Claude
+	// Shared is this worker's shared_folders plan (config.SharedMountsFor):
+	// mounted at create, and checked on the host before every start and
+	// resume (verifySharedSources, refuseStaleShares).
+	Shared []SharedMount
 }
 
 // workerSpec looks up a declared worker by name (its cert CN, which is also
@@ -324,8 +328,11 @@ func (b *Broker) stageWorkerTicket(ctx context.Context, spec WorkerSpec) error {
 // and LEVER_BOOTSTRAP pointing lever-agent boot at the file. Create-time
 // material (scion keeps a record's volumes and env across resumes).
 func workerTicketVolumes(spec WorkerSpec) ([]scion.VolumeMount, map[string]string) {
-	return []scion.VolumeMount{{Source: spec.TicketDir, Target: workerTicketMount, ReadOnly: true}},
-		map[string]string{workerTicketEnv: workerTicketPath}
+	vols := []scion.VolumeMount{{Source: spec.TicketDir, Target: workerTicketMount, ReadOnly: true}}
+	for _, m := range spec.Shared {
+		vols = append(vols, m.Volume)
+	}
+	return vols, map[string]string{workerTicketEnv: workerTicketPath}
 }
 
 // treePath splits an absolute directory under the instance tree into the
@@ -437,14 +444,17 @@ func (b *Broker) verifyStrictWorkspace(spec WorkerSpec) error {
 	if err != nil || !filepath.IsLocal(realRel) {
 		return fmt.Errorf("%s resolves to %s, outside the tree: %w", spec.HostWorkspace, realWs, fsutil.ErrEscapesTree)
 	}
-	return b.refuseReadOnlyOverlap(spec.Name, realRel)
+	if err := b.refuseReadOnlyOverlap(spec.Name, realRel); err != nil {
+		return err
+	}
+	return b.verifySharedSources(spec)
 }
 
 // ErrReadOnlyOverlap refuses a worker workspace that is, contains or lies
 // inside a manager.read_only directory: the worker would mount it
 // read-write. Config validation refuses such a worker dir; this is the
 // broker's own check, against the path as it stands on disk.
-var ErrReadOnlyOverlap = errors.New("worker workspace overlaps a manager read-only directory")
+var ErrReadOnlyOverlap = errors.New("worker workspace overlaps a protected directory (manager.read_only or a shared folder)")
 
 // refuseReadOnlyOverlap compares a tree-relative worker workspace with
 // every manager.read_only entry, case-folded (the host filesystem usually
@@ -452,7 +462,7 @@ var ErrReadOnlyOverlap = errors.New("worker workspace overlaps a manager read-on
 func (b *Broker) refuseReadOnlyOverlap(worker, rel string) error {
 	for _, ro := range b.readOnlyDirs {
 		if fsutil.RelOverlapFold(rel, ro) {
-			return fmt.Errorf("worker %q workspace %q and manager.read_only %q: %w", worker, rel, ro, ErrReadOnlyOverlap)
+			return fmt.Errorf("worker %q workspace %q and protected directory %q: %w", worker, rel, ro, ErrReadOnlyOverlap)
 		}
 	}
 	return nil
@@ -507,7 +517,7 @@ func refuseEscapingDir(root, rel string, noLinks bool) error {
 			return err
 		}
 		if fi.Mode()&fs.ModeSymlink != 0 && noLinks {
-			return fmt.Errorf("%s: symbolic link refused (manager.read_only is set, so a worker workspace must be reached through real directories only): %w", cur, fsutil.ErrEscapesTree)
+			return fmt.Errorf("%s: symbolic link refused (manager.read_only or a shared folder is configured, so this path must be reached through real directories only): %w", cur, fsutil.ErrEscapesTree)
 		}
 		if fi.Mode()&fs.ModeSymlink != 0 {
 			resolved, err := filepath.EvalSymlinks(cur)
@@ -637,9 +647,14 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	// hand the worker whatever the link names. Checked before the ticket is
 	// spent.
 	if err := b.verifyStrictWorkspace(spec); err != nil {
+		if errors.Is(err, ErrSharedFolder) {
+			b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
+			http.Error(w, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link; the record was kept", http.StatusForbidden)
+			return
+		}
 		if errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, ErrReadOnlyOverlap) {
 			b.audit("worker", actor, "deny", "resume "+spec.Name+": workspace dir: "+err.Error())
-			http.Error(w, "forbidden: worker workspace is reached through a symbolic link or overlaps a manager read-only directory; the record was kept", http.StatusForbidden)
+			http.Error(w, "forbidden: worker workspace is reached through a symbolic link or overlaps a protected directory (manager.read_only or a shared folder); the record was kept", http.StatusForbidden)
 			return
 		}
 		b.audit("worker", actor, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
@@ -652,6 +667,14 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 			return
 		}
 		http.Error(w, "workspace error", http.StatusInternalServerError)
+		return
+	}
+	// shared_folders: a resume recreates the container from the record's
+	// volumes, so a record holding access the config has since withdrawn
+	// would get it back.
+	if err := b.checkSharedAccess(ctx, spec, true); err != nil {
+		b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
+		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err)+"; the record was kept", http.StatusForbidden)
 		return
 	}
 	// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
@@ -740,6 +763,11 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 	// workspace must not spend one. Creating the directory is idempotent and
 	// harmless on its own.
 	if err := b.ensureWorkspaceDir(spec); err != nil {
+		if errors.Is(err, ErrSharedFolder) {
+			b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
+			http.Error(w, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link", http.StatusForbidden)
+			return
+		}
 		if errors.Is(err, fsutil.ErrEscapesTree) {
 			b.audit("worker", b.manager, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
 			http.Error(w, "forbidden: worker workspace escapes the instance tree", http.StatusForbidden)
@@ -747,11 +775,16 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		}
 		if errors.Is(err, ErrReadOnlyOverlap) {
 			b.audit("worker", b.manager, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
-			http.Error(w, "forbidden: worker workspace overlaps a manager read-only directory", http.StatusForbidden)
+			http.Error(w, "forbidden: worker workspace overlaps a protected directory (manager.read_only or a shared folder)", http.StatusForbidden)
 			return
 		}
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": workspace dir: "+err.Error())
 		http.Error(w, "workspace error", http.StatusInternalServerError)
+		return
+	}
+	if err := b.checkSharedAccess(ctx, spec, false); err != nil {
+		b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
+		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err), http.StatusForbidden)
 		return
 	}
 	if err := b.stageWorkerTicket(ctx, spec); err != nil {

@@ -67,10 +67,29 @@ const workerLiveSettle = 10 * time.Second
 
 func HostScionClient(jr proc.Runner, st state.State, agentRole string) *scion.Client {
 	return scion.New(jr, scion.Options{
-		HubEndpoint:    scion.DefaultHubEndpoint,
-		HubTokenSource: controllerPAT(st),
-		AgentRole:      agentRole,
+		HubEndpoint:     scion.DefaultHubEndpoint,
+		HubTokenSource:  controllerPAT(st),
+		AgentRole:       agentRole,
+		SettingsWarnLog: StateLogAppender(st),
 	})
+}
+
+// StateLogAppender returns a sink that appends one record per line to the
+// state directory's broker.log, opening and closing the file for each call
+// (O_APPEND keeps a record whole beside the broker's own writes). It is how a
+// scion line lever hides from the operator's console (the settings-keys
+// warning, lever#169) stays in the log. A failure to open the file (no state
+// directory yet) drops the line: it is only a record.
+func StateLogAppender(st state.State) func(line string) {
+	return func(line string) {
+		f, err := os.OpenFile(st.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		slog.New(slog.NewTextHandler(f, nil)).Info("scion output hidden from the console",
+			"reason", "known-benign settings warning (lever#169)", "line", line)
+	}
 }
 
 // controllerPAT is a lazy reader of the controller PAT in st, so a PAT minted
@@ -283,7 +302,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		Tree: app.Tree,
 		// manager.read_only: worker workspaces may not be created through a
 		// symlink, nor over a protected directory (see the field doc).
-		ReadOnlyDirs: app.Manager.ReadOnly,
+		// shared_folders count too: a worker workspace over one would write
+		// it whatever its writers list says.
+		ReadOnlyDirs: app.ProtectedDirs(),
 		// A dispatched worker must hold live for this long before the manager
 		// hears "running" (lever#31): scion reports the record running before
 		// the harness runs a line, and every observed harness death landed
@@ -353,6 +374,36 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// stamps it (the email, else the user id), rather than assuming the dev
 	// user's default address.
 	d.ResolveControllerSender = controllerSenderFrom(hc)
+	// shared_folders: no worker that mounts one starts or resumes while the
+	// running manager lacks the pins that keep it from swapping a folder.
+	d.SharedGuard = sharedGuard(app, jr, jailMount)
+	// shared_folders: a resume is refused when the worker's record holds a
+	// shared mount the config no longer grants (broker.refuseStaleShares).
+	// With a folder configured a failed read refuses the resume; with none,
+	// only a record that does hold a /shared mount is refused, and a failed
+	// read is ignored (an instance without folders never waits on the hub).
+	readVolumes := func(ctx context.Context, agent string) ([]scion.VolumeMount, error) {
+		agents, err := hc.Agents(ctx, projectKey, scion.DefaultHubEndpoint)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range agents {
+			if a.Slug != agent {
+				continue
+			}
+			out := make([]scion.VolumeMount, 0, len(a.Volumes))
+			for _, v := range a.Volumes {
+				out = append(out, scion.VolumeMount{Source: v.Source, Target: v.Target, ReadOnly: v.ReadOnly})
+			}
+			return out, nil
+		}
+		return nil, fmt.Errorf("no hub record for worker %q", agent)
+	}
+	if len(app.SharedFolders) > 0 {
+		d.RecordVolumes = readVolumes
+	} else {
+		d.LeftoverShareVolumes = readVolumes
+	}
 	return d, nil
 }
 

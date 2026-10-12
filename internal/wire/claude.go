@@ -98,3 +98,19 @@ const AutoCompactWindowEnv = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 // only [A-Za-z0-9+/=]. It is also how a re-run of boot finds lever's own hook
 // among the others to replace it.
 const AfterCompactHookPrefix = "lever-agent after-compact --note-b64 "
+
+// DisableAgentViewEnv and DisableAgentViewSetting turn off Claude Code's
+// background agents and agent view (claude agents, --bg, /background, the
+// left-arrow shortcut that backgrounds the session, and the on-demand
+// supervisor). Claude Code documents the setting as equivalent to the
+// variable. lever-agent boot writes both into the managed-settings file of
+// every agent at every start; it is not an operator option.
+//
+// Why: a session moved into the background registers session records in the
+// agent home that name the container it ran in. After a container restart
+// the next claude --continue cannot tell whether that background session
+// still runs, refuses, and exits, so the agent dies at start.
+const (
+	DisableAgentViewEnv     = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
+	DisableAgentViewSetting = "disableAgentView"
+)

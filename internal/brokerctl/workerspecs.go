@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
@@ -36,6 +37,7 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 			Recyclable:       g.Recyclable,
 			Claude:           g.Claude(),
+			Shared:           sharedMounts(app, jailMount, g.Name),
 		})
 	}
 	return specs
@@ -43,4 +45,19 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 
 func workerBrokerURL(host string, port int) string {
 	return fmt.Sprintf("https://%s:%d", host, port)
+}
+
+// sharedMounts is worker's shared_folders plan as the broker mounts it,
+// built with the same function as the manager's (apply.SharedVolumes).
+func sharedMounts(app *config.App, jailMount, worker string) []broker.SharedMount {
+	plan := app.SharedMountsFor(worker)
+	if len(plan) == 0 {
+		return nil
+	}
+	vols := apply.SharedVolumes(jailMount, plan)
+	out := make([]broker.SharedMount, len(plan))
+	for i, m := range plan {
+		out[i] = broker.SharedMount{Rel: m.Rel, Volume: vols[i]}
+	}
+	return out
 }

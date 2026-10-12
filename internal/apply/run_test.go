@@ -322,6 +322,10 @@ type agentLifecycleRunner struct {
 
 	startCalls, resumeCalls, deleteCalls, listCalls int
 	resumeForceCalls                                int // subset of resumeCalls carrying --force
+	// suspendCalls counts `scion suspend`; a successful one makes the
+	// record suspended/stopped, suspendErr fails it and leaves the record.
+	suspendCalls int
+	suspendErr   error
 }
 
 func (r *agentLifecycleRunner) ensureInit() {
@@ -425,6 +429,14 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 			return proc.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
 		}
 		r.goLive()
+		return proc.Result{Stdout: "ok"}, nil
+	case "suspend":
+		r.suspendCalls++
+		r.record(dir, env, name, args)
+		if r.suspendErr != nil {
+			return proc.Result{Code: 1, Stderr: r.suspendErr.Error()}, r.suspendErr
+		}
+		r.phase, r.containerStatus = "suspended", "stopped"
 		return proc.Result{Stdout: "ok"}, nil
 	case "delete":
 		r.deleteCalls++
@@ -3681,7 +3693,7 @@ func TestWaitManagerLiveGatesUpsResumePath(t *testing.T) {
 		Scion:            scion.New(r, scion.Options{}),
 		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
 	}
-	err := WaitManagerLive(context.Background(), deps, "hello", "/lever")
+	err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil)
 	if !errors.Is(err, scion.ErrAgentDied) || !strings.Contains(err.Error(), "up: manager") {
 		t.Fatalf("want an up-prefixed ErrAgentDied, got %v", err)
 	}
@@ -4325,5 +4337,27 @@ func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
 	}
 	if !slices.Contains(opts.Volumes, scion.VolumeMount{Source: KVMDevice, Target: KVMDevice}) {
 		t.Fatalf("the manager create must carry the /dev/kvm volume, got %v", opts.Volumes)
+	}
+}
+
+// The manager mounts each shared folder at /shared/<name>: read-only, and
+// over its tree path read-only too, unless it writes the folder.
+func TestManagerVolumesSharedFolders(t *testing.T) {
+	app := &config.App{Name: "m", Workers: []config.Worker{{Name: "w", Dir: "workers/w"}},
+		SharedFolders: []config.SharedFolder{
+			{Path: "tools/releases", Writers: []string{"w"}},
+			{Path: "out", Writers: []string{"m"}, Readers: []string{"w"}},
+		}}
+	want := []scion.VolumeMount{
+		{Source: "/lever/out", Target: "/workspace/out"}, // pinned: the manager writes it
+		{Source: "/lever/tools", Target: "/workspace/tools"},
+		{Source: "/lever/workers", Target: "/workspace/workers"},
+		{Source: "/lever/tools/releases", Target: "/workspace/tools/releases", ReadOnly: true},
+		{Source: "/lever/workers/w", Target: "/workspace/workers/w"},
+		{Source: "/lever/tools/releases", Target: "/shared/releases", ReadOnly: true},
+		{Source: "/lever/out", Target: "/shared/out"},
+	}
+	if got := managerVolumes("/lever", app); !reflect.DeepEqual(got, want) {
+		t.Fatalf("volumes = %+v\nwant %+v", got, want)
 	}
 }

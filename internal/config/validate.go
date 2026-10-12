@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/voice"
 	"github.com/stevegeek/lever/internal/webpush"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -158,7 +159,7 @@ func validateLimaKeys(a *App, goos string) error {
 		for _, k := range []struct {
 			key string
 			set bool
-		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}} {
+		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}} {
 			if k.set {
 				return fmt.Errorf("config: %s is Lima-only; OrbStack manages its own machine resources", k.key)
 			}
@@ -167,6 +168,12 @@ func validateLimaKeys(a *App, goos string) error {
 	}
 	if a.NestedVirt && goos == "darwin" {
 		return fmt.Errorf("config: nested_virt needs the qemu driver on a Linux host; Lima's vz nestedVirtualization is not supported yet")
+	}
+	switch a.GuestKernel {
+	case "", GuestKernelHWE, GuestKernelGA:
+	default:
+		return fmt.Errorf("config: guest_kernel %q invalid (want %q or %q, or unset: %q with nested_virt, else %q)",
+			a.GuestKernel, GuestKernelHWE, GuestKernelGA, GuestKernelHWE, GuestKernelGA)
 	}
 	if a.CPUs < 0 || a.CPUs > 256 {
 		return fmt.Errorf("config: cpus %d out of range (1-256, or unset for the Lima default)", a.CPUs)
@@ -318,10 +325,19 @@ func (a *App) Validate() error {
 	if err := a.validateManagerReadOnly(); err != nil {
 		return err
 	}
+	if err := a.validateSharedFolders(); err != nil {
+		return err
+	}
 	if err := a.validateImageTarsDistinct(); err != nil {
 		return err
 	}
 	if err := a.validateBroker(); err != nil {
+		return err
+	}
+	if err := a.validateWhisperTools(); err != nil {
+		return err
+	}
+	if err := a.validateLeverFilesTools(); err != nil {
 		return err
 	}
 	if err := a.validateOperator(); err != nil {
@@ -684,6 +700,49 @@ func (a *App) validateRemote() error {
 				return fmt.Errorf("config: remote: files is on, and manager.read_only %q covers %s: the manager could not write the files it shares", e, chatfiles.Dir)
 			}
 		}
+	}
+	return a.validateVoice()
+}
+
+// validateVoice checks remote.voice (with remote access on: validateRemote
+// returns early otherwise). Its shape is checked even while voice is off;
+// the rest only when it is on. The transcription runs in the broker tool
+// lever-tool-whisper; remote.voice names its dictation socket, which must be
+// the -dictate-socket of a whisper tool in broker.tools when there is one
+// (the tool may also be run by hand, outside the broker).
+func (a *App) validateVoice() error {
+	v := a.Remote.Voice
+	if v.MaxSeconds < 0 || v.MaxSeconds > MaxVoiceMaxSeconds {
+		return fmt.Errorf("config: remote: voice.max_seconds %d; use 1 to %d (or leave it out for %d)", v.MaxSeconds, MaxVoiceMaxSeconds, DefaultVoiceMaxSeconds)
+	}
+	if !v.Enabled {
+		return nil
+	}
+	if a.Remote.Landing != RemoteLandingChat {
+		return fmt.Errorf("config: remote: voice needs landing: chat (the mic is on the chat page)")
+	}
+	if v.Socket == "" {
+		return fmt.Errorf("config: remote: voice.socket is required when voice is on: the -dictate-socket of the lever-tool-whisper entry in broker.tools")
+	}
+	if err := voice.CheckSocketPath(v.Socket); err != nil {
+		return fmt.Errorf("config: remote: voice.socket: %w", err)
+	}
+	tools := a.WhisperTools()
+	if len(tools) == 0 {
+		return nil
+	}
+	w, ok := a.VoiceTool()
+	if !ok {
+		var names []string
+		for _, t := range tools {
+			names = append(names, fmt.Sprintf("%s (-dictate-socket %s)", t.Name, t.Socket))
+		}
+		return fmt.Errorf("config: remote: voice.socket %s is not the -dictate-socket of any whisper tool in broker.tools: %s; set them to the same path",
+			v.Socket, strings.Join(names, ", "))
+	}
+	if a.EffectiveVoiceMaxSeconds() > w.EffectiveMaxSeconds() {
+		return fmt.Errorf("config: remote: voice.max_seconds %d is more than broker tool %q's -max-seconds %d, which would refuse such a clip",
+			a.EffectiveVoiceMaxSeconds(), w.Name, w.EffectiveMaxSeconds())
 	}
 	return nil
 }

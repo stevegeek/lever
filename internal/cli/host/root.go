@@ -34,6 +34,6 @@ func newRootWith(bf BackendFactory) *cobra.Command {
 		Version: cli.VersionString()}
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(cli.VersionCmd())
-	root.AddCommand(newProvisionCmd(bf), newDestroyCmd(bf), newStopCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newReloadCmd(bf), newAttachCmd(bf), newHostMsgCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf), newBackendsCmd(), newInitCmd(), newDirectiveCmd(), newWorkerCmd(bf), newRemoteCmd(bf))
+	root.AddCommand(newProvisionCmd(bf), newDestroyCmd(bf), newStopCmd(bf), newDoctorCmd(bf), newApplyCmd(bf), newUpCmd(bf), newReloadCmd(bf), newAttachCmd(bf), newHostMsgCmd(bf), newBrokerCmd(), newRevokeCmd(), newAcceptanceCmd(bf), newBackendsCmd(), newInitCmd(), newDirectiveCmd(), newWorkerCmd(bf), newRemoteCmd(bf), newVoiceCmd())
 	return root
 }

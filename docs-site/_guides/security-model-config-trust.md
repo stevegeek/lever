@@ -128,6 +128,7 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `manager.instructions_file`, `workers[].instructions_file` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`. The contents become the agent's standing user-level `~/.claude/CLAUDE.md`; scion re-projects its staged copy on every container start, so an agent that rewrites the managed block gets the host's text back. |
 | `manager.image_tar`, `workers[].image_tar` | confined relative path under the root, like `prompt_file`, and — like it — rejected if it resolves inside the mounted `tree`: the archive is the code the agent runs, so an agent must not be able to author the next bring-up's image. Needs a tag-bearing `image` (a digest pin cannot be matched against a tar's tags), the archive must carry that tag (a mismatch is a named error before a byte is streamed), and one image ref may come from only one archive. |
 | `manager.read_only` | each entry a clean ASCII relative path inside `tree` (no `..`, `./`, trailing slash, `.`, `$`, `~`, `:`, `,`); no duplicates or nested entries (case-folded); no worker `dir` equal to, containing or inside an entry; at bring-up, every entry a real directory reached through no symlink, with no symlink inside it pointing out or failing to resolve and no hard-linked file, and every worker dir reached through no symlink (§5.1.1 above). While `read_only` is set, every worker `dir` is held to the same character and ASCII rules, because it becomes a pin. |
+| `shared_folders` | each `path` held to the `manager.read_only` path rules; folders disjoint from each other, from every `manager.read_only` entry and from every worker `dir`, and no component `.lever`, `.lever-state` or `.lever-files` (case-folded); unique mount names (`^[a-z0-9][a-z0-9._-]{0,62}$`); every writer and reader a declared agent, `"*"` only alone in `readers`, nobody in both lists; `remote.labels_file` not in a folder a worker writes; when the manager is started or resumed, each folder a real directory reached through no symlink, and right before it is created, no file in a folder with a hard link outside it; before every worker start or resume, the folder reached through no symlink and the manager holding its pins ([§4.5](/security-model/worker-isolation/#45-opt-in-shared-folders)). |
 | `manager.image`, worker `image` | safe OCI-ref charset; plus **opt-in** `security.allowed_image_registries` (run only images from trusted registries/namespaces) and `security.require_image_digest` (require `@sha256:`-pinned images, no mutable tags). |
 | host-run programs and host secrets | rejected at config load if they resolve inside `tree` (§5.5 below): `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`, each supervised `broker.tools` `command`, and the path arguments in it. |
 | `credential_file` | read with a **permission check** (rejected when any group or world bit is set) and a **size cap** (64 KiB), defence in depth for the secret it becomes ([§6](/security-model/credentials/)). |
@@ -189,12 +190,33 @@ replaceable) by the agent. Config load therefore refuses these paths when they r
 | Kind | Paths | Inside `tree` |
 |---|---|---|
 | Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
-| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`), also after an `env` prefix (its flags and `NAME=value` words are skipped); the value of `-fizzy`; the code an interpreter runs (`python`, `ruby`, `node`, `perl`, `sh`, `bash`, `dash`, `zsh`, `deno`, `bun`, a version suffix such as `python3.12` allowed): the script, which is the first argument after the leading flags (and after `run` for `deno` and `bun`; a relative one after `env -C dir` resolves against `dir`), the value of every value-taking flag before it (`python -W`, `node --env-file`, `deno --config`, `bun --cwd` and the like: a value read as the script must not hide the real one), the value of a flag that loads code (`ruby -I`/`-r`, `perl -I`, `node --require`/`--import`/`--loader`, `bun --preload`), and the paths in inline code (`python -c`; `ruby`/`perl`/`node -e`; for the `sh` family, the command string of `-c` in any option group such as `-ec`, `-ce` or `-euo pipefail -c`, and, as a fallback, the word after any `-c` group anywhere in the command) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write) |
+| Private host path | in a `lever-tool-whisper` `command`, the value of `-models` and `-dictate-socket` (its model directory and dictation socket); `remote.voice.socket` while voice is on | always refused: an agent could replace the model whisper-server loads, or reach or replace the socket, and a `manager.read_only` mount does not excuse it |
+| Program outside the tree | in a `lever-tool-whisper` `command`, the value of `-server` (the `whisper-server` program it runs) | always refused: a `manager.read_only` mount does not excuse it |
+| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`), also after an `env` prefix (its flags and `NAME=value` words are skipped); the value of `-fizzy`; the code an interpreter runs (`python`, `ruby`, `node`, `perl`, `sh`, `bash`, `dash`, `zsh`, `deno`, `bun`, a version suffix such as `python3.12` allowed): the script, which is the first argument after the leading flags (and after `run` for `deno` and `bun`; a relative one after `env -C dir` resolves against `dir`), the value of every value-taking flag before it (`python -W`, `node --env-file`, `deno --config`, `bun --cwd` and the like: a value read as the script must not hide the real one), the value of a flag that loads code (`ruby -I`/`-r`, `perl -I`, `node --require`/`--import`/`--loader`, `bun --preload`), and the paths in inline code (`python -c`; `ruby`/`perl`/`node -e`; for the `sh` family, the command string of `-c` in any option group such as `-ec`, `-ce` or `-euo pipefail -c`, and, as a fallback, the word after any `-c` group anywhere in the command) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write); a `shared_folders` entry never excuses one (its writers can change it) |
 
 **This is a best-effort guard, not a sandbox.** Lever cannot know what an unknown flag's value is: a
 secret, a program, or a data file the agent is meant to edit (the example todo tool's `-csv`). So it
 checks only the command itself, the path flags of the tools it ships (above; `-tree`, `-dsn` and
-`-csv` are read and deliberately not checked) and interpreter scripts. It does not check any other
+`-csv` are read and deliberately not checked as paths) and interpreter scripts. `-app-key`,
+`-token-file`, `-state` and `-fizzy` are read in every supervised tool's command, so your own
+tool's `-state` is checked the same way. `lever-tool-whisper`'s flags (`-server`, `-models`,
+`-dictate-socket`, `-model`, `-whisper-port`, `-max-seconds`, `-agent-max-seconds`) are read only in
+the command of a whisper tool: one whose program, after an `env` prefix, has the base name
+`lever-tool-whisper`, or whose command takes `-dictate-socket` (no other lever tool does), so a
+renamed binary or a wrapper script that passes the tool's flags keeps the whisper checks. Another
+tool's `-server` or `-models` means something else and is not read. Flags are read past an `env`
+prefix, read option by option as GNU and BSD `env` read it, with a plain `env -S` string split
+into words and read again; config load refuses an `env` form lever cannot read the way `env` does
+(quotes, backslashes, `$` or a `#` comment in an `-S` string, `-S` grouped after other letters such
+as `-vS`, an option it does not know such as BSD `-P`, an `env` with no command), since a flag
+hidden in it would escape these checks.
+A word that starts with `-` is never taken as the previous flag's value, so `-model -state x` still
+checks `x`; after a path flag such a word is also checked as that flag's value, as Go's flag package
+would read it. For a whisper tool, config load also requires `-tree` and refuses one that is not the
+instance's tree, checks `-max-seconds` (1 to 600) and `-agent-max-seconds` (1 to `-max-seconds`), and
+refuses a `-whisper-port` the jail may reach (`manager.allow_ports`, the broker's
+jail port, the login port) or that collides with the broker's admin port, the remote proxy's port,
+port 8446 or a tool backend. It does not check any other
 flag or argument. **For your own tool, keep its secrets and the programs it runs outside the tree
 yourself.** Only the leading flags of an interpreter are read: what follows the script is the
 script's own business. Lever knows which of an interpreter's flags take a value from a fixed table; a
@@ -219,8 +241,8 @@ A program under `manager.read_only` is safe only while the running manager carri
 mount, and that mount is create-time only (§5.1.1). So the broker does not start a tool whose program
 relies on it until it has read the manager container's mounts and found the whole `read_only` plan in
 place (entries read-only, their parents and the worker dirs pinned), and then checked the running
-container from the guest side, without running any program inside it (the agent is root there and
-could replace it): the kernel's `/proc/<pid>/mountinfo` for the container's process must list every
+container from the guest side, without running any program inside it (the agent controls that container
+and could replace it; lever does not rely on the agent lacking root there): the kernel's `/proc/<pid>/mountinfo` for the container's process must list every
 planned directory as a mount point, the entries read-only, and `stat` must find the same device and
 inode at the guest path and at `/proc/<pid>/root/<target>`, so a protected directory replaced on the
 host (the mount stays on the old one) is caught. It fails closed: no container yet, a stopped manager,
@@ -231,7 +253,8 @@ into the tool's log once per reason. `lever apply` names the held tools when it 
 manager that lacks the mounts. The fix is the one for the mounts themselves: back up the
 conversation, then `lever up --fresh`. A manager that lacked the mounts before could already have
 rewritten the program; check it before you trust it again. `lever-tool-github` refuses its `-app-key`
-and `-state` inside its `-tree` on its own as well.
+and `-state` inside its `-tree` on its own as well, and `lever-tool-whisper` its `-server`,
+`-models` and `-dictate-socket`.
 
 ### 5.6 Residual
 

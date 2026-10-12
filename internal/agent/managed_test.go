@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,13 +49,30 @@ func sessionStartCommands(t *testing.T, m map[string]any) map[string]string {
 	return out
 }
 
-func TestWriteManagedSettingsNoConfigTouchesNothing(t *testing.T) {
+// assertOnlyAgentViewOff fails unless the file at path holds exactly what
+// lever writes with no claude config: agent view off, nothing else.
+func assertOnlyAgentViewOff(t *testing.T, path string) {
+	t.Helper()
+	m := readManaged(t, path)
+	env, _ := m["env"].(map[string]any)
+	if len(m) != 2 || m[DisableAgentViewSetting] != true || len(env) != 1 || env[DisableAgentViewEnv] != "1" {
+		t.Fatalf("managed settings = %v, want only %s=1 and %s: true", m, DisableAgentViewEnv, DisableAgentViewSetting)
+	}
+}
+
+// Background sessions are off in every agent, with or without claude config.
+func TestWriteManagedSettingsNoConfigStillTurnsOffAgentView(t *testing.T) {
 	p := managedPath(t)
 	if err := WriteManagedSettings(p, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Dir(p)); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("no config must create nothing, stat dir: %v", err)
+	assertOnlyAgentViewOff(t, p)
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %v, want 0644", fi.Mode().Perm())
 	}
 	if err := WriteManagedSettings("", &wire.Claude{AutoCompactWindow: 400000}); err != nil {
 		t.Fatalf("empty path must be a no-op: %v", err)
@@ -77,8 +93,11 @@ func TestWriteManagedSettingsWritesWindowAndHook(t *testing.T) {
 		t.Errorf("mode = %v, want 0644 (claude runs as the scion user and must read it)", fi.Mode().Perm())
 	}
 	m := readManaged(t, p)
-	if env := m["env"].(map[string]any); env[AutoCompactWindowEnv] != "400000" {
-		t.Errorf("env = %v, want %s=400000", env, AutoCompactWindowEnv)
+	if env := m["env"].(map[string]any); env[AutoCompactWindowEnv] != "400000" || env[DisableAgentViewEnv] != "1" {
+		t.Errorf("env = %v, want %s=400000 and %s=1", env, AutoCompactWindowEnv, DisableAgentViewEnv)
+	}
+	if m[DisableAgentViewSetting] != true {
+		t.Errorf("%s = %v, want true", DisableAgentViewSetting, m[DisableAgentViewSetting])
 	}
 	cmds := sessionStartCommands(t, m)
 	want := AfterCompactHookCommand(note)
@@ -96,7 +115,7 @@ func TestWriteManagedSettingsMergesAndReplaces(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	foreign := `{"permissions":{"deny":["WebFetch"]},"env":{"OTHER":"keep"},` +
+	foreign := `{"permissions":{"deny":["WebFetch"]},"env":{"OTHER":"keep","CLAUDE_CODE_DISABLE_AGENT_VIEW":"0"},"disableAgentView":false,` +
 		`"hooks":{"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"sciontool hook --dialect=claude"}]}],` +
 		`"Stop":[{"matcher":"*","hooks":[{"type":"command","command":"sciontool hook --dialect=claude"}]}]}}`
 	if err := os.WriteFile(p, []byte(foreign), 0o644); err != nil {
@@ -133,15 +152,20 @@ func TestWriteManagedSettingsMergesAndReplaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	m = readManaged(t, p)
-	if _, ok := m["env"].(map[string]any)[AutoCompactWindowEnv]; ok {
+	env = m["env"].(map[string]any)
+	if _, ok := env[AutoCompactWindowEnv]; ok {
 		t.Error("unset window still delivered")
+	}
+	// A planted "off" value is overwritten at every start.
+	if env[DisableAgentViewEnv] != "1" || env["OTHER"] != "keep" || m[DisableAgentViewSetting] != true {
+		t.Errorf("after unset env = %v, %s = %v; want agent view off and the foreign key kept", env, DisableAgentViewSetting, m[DisableAgentViewSetting])
 	}
 	if cmds := sessionStartCommands(t, m); len(cmds) != 1 || cmds["sciontool hook --dialect=claude"] == "" {
 		t.Errorf("after unset SessionStart hooks = %v, want the foreign one only", cmds)
 	}
 }
 
-func TestWriteManagedSettingsRemovesFileItEmptied(t *testing.T) {
+func TestWriteManagedSettingsUnsetLeavesOnlyAgentViewOff(t *testing.T) {
 	p := managedPath(t)
 	if err := WriteManagedSettings(p, &wire.Claude{AutoCompactWindow: 400000, AfterCompactNote: "n"}); err != nil {
 		t.Fatal(err)
@@ -149,9 +173,7 @@ func TestWriteManagedSettingsRemovesFileItEmptied(t *testing.T) {
 	if err := WriteManagedSettings(p, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("a file holding only lever's keys must go when they are unset: %v", err)
-	}
+	assertOnlyAgentViewOff(t, p)
 }
 
 func TestWriteManagedSettingsRefusesSymlink(t *testing.T) {
@@ -233,9 +255,9 @@ func TestBootWritesManagedSettingsFromBootstrap(t *testing.T) {
 	if err := Boot(context.Background(), c); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(c.ManagedSettingsPath); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("an envelope with no claude block must remove lever's settings: %v", err)
-	}
+	// An envelope with no claude block removes lever's settings but keeps
+	// agent view off.
+	assertOnlyAgentViewOff(t, c.ManagedSettingsPath)
 }
 
 // The manager's envelope is in the tree it writes: boot drops a block the
@@ -250,9 +272,8 @@ func TestBootDropsInvalidClaudeBlock(t *testing.T) {
 	if err := Boot(context.Background(), c); err != nil {
 		t.Fatalf("an invalid claude block stopped the boot: %v", err)
 	}
-	if _, err := os.Stat(c.ManagedSettingsPath); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatal("wrote managed settings from an invalid block")
-	}
+	// Nothing from the invalid block; agent view is still off.
+	assertOnlyAgentViewOff(t, c.ManagedSettingsPath)
 	if !strings.Contains(strings.Join(logged, "\n"), "claude block refused") {
 		t.Fatalf("no log line for the refused block: %q", logged)
 	}
@@ -280,6 +301,19 @@ func TestBootSurvivesAnUnwritableManagedSettingsDir(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(logged, "\n"), "claude settings not delivered") {
 		t.Fatalf("no log line for the failed write: %q", logged)
+	}
+
+	// No claude config: only the agent-view switch was to be written, and
+	// the log says that, not that claude settings went missing.
+	writeBootstrapClaude(t, c.BootstrapPath, nil)
+	logged = nil
+	if err := Boot(context.Background(), c); err != nil {
+		t.Fatalf("an unwritable managed settings dir stopped the boot: %v", err)
+	}
+	all := strings.Join(logged, "\n")
+	if !strings.Contains(all, "agent-view switch not written (") || !strings.Contains(all, "background sessions stay possible") ||
+		strings.Contains(all, "claude settings not delivered") {
+		t.Fatalf("log for a switch-only write failure: %q", logged)
 	}
 }
 
@@ -310,7 +344,5 @@ func TestBootLogsRemovalWithoutBootstrap(t *testing.T) {
 	if len(logs) != 1 || !strings.Contains(logs[0], "no readable bootstrap envelope") || !strings.Contains(logs[0], c.ManagedSettingsPath) {
 		t.Fatalf("logs = %q", logs)
 	}
-	if _, err := os.Stat(c.ManagedSettingsPath); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("lever's values must be removed: %v", err)
-	}
+	assertOnlyAgentViewOff(t, c.ManagedSettingsPath)
 }

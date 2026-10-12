@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -132,10 +133,17 @@ func (f logFunc) printf(format string, args ...any) {
 // logLine is the one write site for apply's user-facing lines. The
 // arguments wrap errors from the jail and the hub (scion's stderr, a
 // container status) via %v, so the formatted line goes through
-// termsafe.Sanitize before it reaches the terminal.
+// termsafe.Sanitize before it reaches the terminal. Lines are serialized:
+// the manager start's progress line (apply.Progress) logs from its own
+// goroutine while the step logs from the main one, and w may be a buffer.
 func logLine(w io.Writer, format string, args ...any) {
-	fmt.Fprintln(w, termsafe.Sanitize(fmt.Sprintf(format, args...)))
+	line := termsafe.Sanitize(fmt.Sprintf(format, args...))
+	logLineMu.Lock()
+	defer logLineMu.Unlock()
+	fmt.Fprintln(w, line)
 }
+
+var logLineMu sync.Mutex
 
 // remoteController owns the apply-time remote-proxy lifecycle: spawning the
 // detached `lever remote serve` child, exactly like brokerController.Start
@@ -683,7 +691,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		return nil
 	}
 
-	tw := scion.New(jr, scion.Options{HubEndpoint: throwawayHubURL})
+	tw := scion.New(jr, scion.Options{HubEndpoint: throwawayHubURL, SettingsWarnLog: brokerctl.StateLogAppender(st)})
 	started := false
 	defer func() {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), windowCleanupTimeout)
@@ -1196,7 +1204,7 @@ type applyOpts struct {
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, opts applyOpts) (*applyWiring, error) {
-	b, err := bringUpBackend(ctx, app, bf, (&applyWiring{cmd: opts.Cmd}).log)
+	b, err := bringUpBackend(ctx, app, bf, stateFor(configPath), (&applyWiring{cmd: opts.Cmd}).log)
 	if err != nil {
 		return nil, err
 	}
@@ -1254,7 +1262,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 // bringUpBackend constructs the backend for app's machine and brings the jail
 // up, so the run-user/uid and host alias are resolved before anything is
 // built over the jail runner. warn gets the backend's non-fatal advice.
-func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, warn logFunc) (backend.Backend, error) {
+func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, st state.State, warn logFunc) (backend.Backend, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)
 	if err != nil {
@@ -1262,6 +1270,9 @@ func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, war
 	}
 	cfg := backendConfigFor(app, machine)
 	cfg.Warn = warn
+	if st.Dir != "" {
+		cfg.HWEFailStamp = st.HWEFailStamp()
+	}
 	if err := b.EnsureUp(ctx, cfg); err != nil {
 		return nil, err
 	}
@@ -1283,6 +1294,7 @@ func backendConfigFor(app *config.App, machine string) backend.Config {
 		CPUs:           app.CPUs,
 		Memory:         app.Memory,
 		NestedVirt:     app.NestedVirt,
+		GuestKernel:    app.EffectiveGuestKernel(),
 	}
 }
 
@@ -1391,11 +1403,24 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// ReadClaudeSettings lets apply warn when the kept manager runs with
 		// other claude_settings / after_compact_note than the config.
 		ReadClaudeSettings: jail.AgentProbe{R: b.JailRunner()}.ClaudeSettings,
+		// BackgroundSessions (first) and HarnessLogTail (fallback) let the
+		// manager liveness gate name a known cause (a stale background
+		// session) when the harness dies.
+		BackgroundSessions: jail.AgentProbe{R: b.JailRunner()}.BackgroundSessions,
+		HarnessLogTail:     jail.AgentProbe{R: b.JailRunner()}.LogTail,
 		RecordVolumes:      w.recordVolumes,
 		// AgentSession lets start-manager heal an expired agent hub token
 		// and a stopped phase over a live harness (apply.HealAgentSession).
 		AgentSession: jail.AgentProbe{R: b.JailRunner()},
+		// ContainerRunning lets the manager gate ask podman itself whether
+		// the container still runs (lever#164), not the hub's heartbeat.
+		ContainerRunning: func(ctx context.Context, ref string) (bool, error) {
+			return jail.ContainerRunning(ctx, b.JailRunner(), ref)
+		},
 		AgentRevoked: agentRevoked(w.app, st),
+		// GuestBoot lets start-manager and up recover a manager record a
+		// hard VM kill left "running" (lever#179).
+		GuestBoot: jailGuestBoot{jr: b.JailRunner(), st: st},
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is

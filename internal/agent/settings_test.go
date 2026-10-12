@@ -90,8 +90,8 @@ func TestWriteSettingsEnvRejectsCorruptExisting(t *testing.T) {
 	}
 }
 
-// settings.json is read-modify-written by boot as ROOT (scion pre-start hook)
-// under the agent-writable $HOME: a symlink at ~/.claude or at settings.json
+// settings.json is read-modify-written by boot (scion pre-start hook; root on
+// a rootful runtime, the agent user under rootless podman) under the agent-writable $HOME: a symlink at ~/.claude or at settings.json
 // must be refused by name, with no write through the link.
 func TestWriteSettingsEnvRefusesSymlinkedFile(t *testing.T) {
 	home := t.TempDir()

@@ -3,14 +3,17 @@ package ghpush
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // The read-only CI operations: what GitHub Actions ran on a branch, and
@@ -29,9 +32,12 @@ const (
 	ciLogLinesDef   = 150
 	ciLogLinesMax   = 400
 	ciErrorLinesMax = 60
-	ciLogLineMax    = 500      // characters kept of one line
-	ciLogMaxBytes   = 64 << 20 // bytes read from one log at most
+	ciLogLineMax    = 500              // characters kept of one line
+	ciLineReadMax   = ciLogLineMax * 4 // bytes kept of one line before cleaning
 )
+
+// ciLogMaxBytes bounds the bytes read from one log (a variable for tests).
+var ciLogMaxBytes int64 = 64 << 20
 
 // DefaultLogHosts are the hosts GitHub redirects a job log download to.
 // The download carries no credential (the URL is signed), and lever
@@ -54,6 +60,8 @@ type CIRun struct {
 	URL        string  `json:"html_url"`
 	CreatedAt  string  `json:"created_at"`
 	Jobs       []CIJob `json:"jobs,omitempty"`
+	// JobsTruncated: the run has more jobs than the one page listed.
+	JobsTruncated bool `json:"jobs_truncated,omitempty"`
 }
 
 // CIJob is one job of a run: its id is what ci_log takes.
@@ -86,8 +94,7 @@ type CILogResult struct {
 }
 
 type ghRuns struct {
-	Total int `json:"total_count"`
-	Runs  []struct {
+	Runs []struct {
 		ID         int64  `json:"id"`
 		Name       string `json:"name"`
 		Event      string `json:"event"`
@@ -101,7 +108,8 @@ type ghRuns struct {
 }
 
 type ghJobs struct {
-	Jobs []struct {
+	Total int `json:"total_count"`
+	Jobs  []struct {
 		ID         int64  `json:"id"`
 		Name       string `json:"name"`
 		Status     string `json:"status"`
@@ -187,26 +195,28 @@ func (o *Ops) CIRuns(ctx context.Context, caller, repo, branch, limit string) (r
 			Conclusion: label(r.Conclusion), HeadSHA: label(r.HeadSHA), Attempt: r.Attempt, URL: label(r.HTMLURL), CreatedAt: label(r.CreatedAt)}
 		if !green(r.Conclusion) && looked < ciJobsRunsMax {
 			looked++
-			jobs, err := o.runJobs(ctx, tok, repo, r.ID)
+			jobs, more, err := o.runJobs(ctx, tok, repo, r.ID)
 			if err != nil {
 				return CIRunsResult{}, err
 			}
-			run.Jobs = jobs
+			run.Jobs, run.JobsTruncated = jobs, more
 		}
 		res.Runs = append(res.Runs, run)
 	}
 	return res, nil
 }
 
-func (o *Ops) runJobs(ctx context.Context, tok, repo string, id int64) ([]CIJob, error) {
+// runJobs lists one page of a run's jobs, failed ones first; more is true
+// when the run has jobs beyond that page.
+func (o *Ops) runJobs(ctx context.Context, tok, repo string, id int64) (jobs []CIJob, more bool, err error) {
 	var js ghJobs
 	q := url.Values{"per_page": {strconv.Itoa(ciJobsPerRun)}}
 	path := "/repos/" + repo + "/actions/runs/" + strconv.FormatInt(id, 10) + "/jobs?" + q.Encode()
 	if err := o.API.do(ctx, tok, http.MethodGet, path, nil, &js); err != nil {
-		return nil, fmt.Errorf("read jobs of run %d: %w", id, err)
+		return nil, false, fmt.Errorf("read jobs of run %d: %w", id, err)
 	}
 	if len(js.Jobs) > ciJobsPerRun {
-		return nil, fmt.Errorf("read jobs of run %d: more jobs than requested", id)
+		return nil, false, fmt.Errorf("read jobs of run %d: more jobs than requested", id)
 	}
 	out := []CIJob{}
 	for _, j := range js.Jobs {
@@ -218,12 +228,30 @@ func (o *Ops) runJobs(ctx context.Context, tok, repo string, id int64) ([]CIJob,
 		}
 		out = append(out, job)
 	}
-	return out, nil
+	sort.SliceStable(out, func(i, j int) bool { return !green(out[i].Conclusion) && green(out[j].Conclusion) })
+	return out, js.Total > len(js.Jobs), nil
 }
 
-// label bounds and cleans one short text field from GitHub.
+// plainRune drops what can disguise text: control characters (C0, DEL,
+// C1), Unicode format characters (bidirectional controls, zero-width
+// characters, the byte-order mark) and line and paragraph separators. A
+// tab becomes a space.
+func plainRune(r rune) rune {
+	switch {
+	case r == '\t':
+		return ' '
+	case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0),
+		r == 0x2028 || r == 0x2029, unicode.Is(unicode.Cf, r):
+		return -1
+	}
+	return r
+}
+
+// label bounds and cleans one short text field from GitHub (a run, job or
+// step name the workflow chose).
 func label(s string) string {
-	s = strings.TrimSpace(strings.Map(dropControl, ansiRE.ReplaceAllString(s, "")))
+	s = strings.TrimSpace(strings.Map(plainRune, ansiRE.ReplaceAllString(s, "")))
+	s = Scrub(s, "")
 	if r := []rune(s); len(r) > 200 {
 		s = string(r[:200]) + "…"
 	}
@@ -241,20 +269,18 @@ var timestampRE = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ?
 // ansiRE matches terminal escape sequences (colours, cursor moves).
 var ansiRE = regexp.MustCompile(`\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])`)
 
+// stripForMatch removes the timestamp and escape sequences, so the
+// failure patterns see the line as printed.
+func stripForMatch(s string) string {
+	return ansiRE.ReplaceAllString(timestampRE.ReplaceAllString(s, ""), "")
+}
+
 // cleanLogLine makes one log line plain text: no timestamp, no escape
 // sequences or control characters, bounded, and the call's token masked.
 func cleanLogLine(s, tok string) string {
 	s = timestampRE.ReplaceAllString(s, "")
 	s = ansiRE.ReplaceAllString(s, "")
-	s = strings.Map(func(r rune) rune {
-		if r == '\t' {
-			return ' '
-		}
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
-			return -1
-		}
-		return r
-	}, s)
+	s = strings.Map(plainRune, s)
 	s = Scrub(s, tok)
 	if r := []rune(s); len(r) > ciLogLineMax {
 		s = string(r[:ciLogLineMax]) + "…"
@@ -268,7 +294,7 @@ func cleanLogLine(s, tok string) string {
 // followed only to LogHosts over https.
 func (o *Ops) CILog(ctx context.Context, caller, repo, jobID, lines string) (res CILogResult, err error) {
 	defer func() {
-		o.audit(OpCILog, err, "caller", caller, "repo", repo, "job_id", jobID, "lines", res.TotalLines)
+		o.audit(OpCILog, err, "caller", caller, "repo", repo, "job_id", jobID, "lines", lines, "total_lines", res.TotalLines)
 	}()
 	if err := ValidateJobID(jobID); err != nil {
 		return res, err
@@ -292,30 +318,59 @@ func (o *Ops) CILog(ctx context.Context, caller, repo, jobID, lines string) (res
 	}
 	defer body.Close()
 	res = CILogResult{OK: true, Repo: repo, JobID: jobID, ErrorLines: []string{}, Tail: []string{}, Note: ciNote}
-	sc := bufio.NewScanner(io.LimitReader(body, ciLogMaxBytes+1))
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	// Read line by line with a bound on each line: a line longer than
+	// ciLineReadMax keeps its start, and the rest of it is skipped, so one
+	// huge line (minified JSON, base64) neither stops the read nor hides
+	// the lines after it. Lines are cleaned (and scrubbed) only when kept.
+	br := bufio.NewReaderSize(io.LimitReader(body, ciLogMaxBytes+1), 64<<10)
 	var read int64
-	ring := make([]string, 0, n)
-	for sc.Scan() {
-		read += int64(len(sc.Bytes())) + 1
+	raw := make([]string, 0, n) // the tail, not yet cleaned
+	var line []byte
+	partial := false
+	for {
+		chunk, rerr := br.ReadSlice('\n')
+		read += int64(len(chunk))
 		if read > ciLogMaxBytes {
 			res.Truncated = true
 			break
 		}
-		res.TotalLines++
-		line := cleanLogLine(sc.Text(), tok)
-		if errorLineRE.MatchString(line) && len(res.ErrorLines) < ciErrorLinesMax {
-			res.ErrorLines = append(res.ErrorLines, line)
+		if !partial || len(line) < ciLineReadMax {
+			room := ciLineReadMax - len(line)
+			if len(chunk) > room {
+				line = append(line, chunk[:room]...)
+			} else {
+				line = append(line, chunk...)
+			}
 		}
-		if len(ring) == n {
-			ring = ring[1:]
+		if errors.Is(rerr, bufio.ErrBufferFull) {
+			partial = true
+			continue
 		}
-		ring = append(ring, line)
+		if len(chunk) > 0 || len(line) > 0 {
+			text := strings.TrimRight(string(line), "\r\n")
+			res.TotalLines++
+			// The cheap test first; only matching lines are cleaned here.
+			if len(res.ErrorLines) < ciErrorLinesMax && errorLineRE.MatchString(stripForMatch(text)) {
+				res.ErrorLines = append(res.ErrorLines, cleanLogLine(text, tok))
+			}
+			if len(raw) == n {
+				raw = raw[1:]
+			}
+			raw = append(raw, text)
+		}
+		line, partial = line[:0], false
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			// A read that failed part way: return what was read, marked.
+			res.Truncated = true
+			break
+		}
 	}
-	if err := sc.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) {
-		return CILogResult{}, fmt.Errorf("read job log: %s", Scrub(err.Error(), tok))
+	for _, t := range raw {
+		res.Tail = append(res.Tail, cleanLogLine(t, tok))
 	}
-	res.Tail = append(res.Tail, ring...)
 	return res, nil
 }
 
@@ -336,14 +391,22 @@ func (o *Ops) jobLogLocation(ctx context.Context, tok, repo, jobID string) (*url
 		return nil, fmt.Errorf("job log: %s", Scrub(err.Error(), tok))
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, fmt.Errorf("job %s not found in %s (or its log has expired)", jobID, repo)
 	case resp.StatusCode == http.StatusGone:
 		return nil, fmt.Errorf("the log of job %s has expired", jobID)
 	case resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther && resp.StatusCode != http.StatusTemporaryRedirect:
-		return nil, &apiError{Status: resp.StatusCode}
+		var m struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(errBody, &m)
+		msg := Scrub(strings.Map(dropControl, m.Message), tok)
+		if r := []rune(msg); len(r) > 300 {
+			msg = string(r[:300]) + "…"
+		}
+		return nil, &apiError{Status: resp.StatusCode, Message: msg}
 	}
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	if err != nil || !o.logHostAllowed(loc) {
@@ -362,10 +425,15 @@ func (o *Ops) logHostAllowed(u *url.URL) bool {
 		hosts = DefaultLogHosts
 	}
 	for _, h := range hosts {
-		if strings.HasPrefix(h, ".") && strings.HasSuffix(host, h) && len(host) > len(h) {
-			return true
+		// A suffix entry (".example.com") matches a subdomain on the
+		// default port; an exact entry matches the host[:port] as written.
+		if strings.HasPrefix(h, ".") {
+			if strings.HasSuffix(host, h) && len(host) > len(h) && (u.Port() == "" || u.Port() == "443") {
+				return true
+			}
+			continue
 		}
-		if host == h {
+		if strings.EqualFold(u.Host, h) || (u.Port() == "" && host == h) {
 			return true
 		}
 	}
@@ -378,12 +446,14 @@ func (o *Ops) download(ctx context.Context, u *url.URL) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("job log download: bad URL")
 	}
-	c := *o.API.HTTP
-	c.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirect }
+	// Not the API client: its timeout would cover the body, and a large
+	// log is read for longer. The call's deadline (Ops.Deadline) bounds it.
+	c := http.Client{Transport: o.API.HTTP.Transport}
 	if o.LogHTTP != nil {
 		c = *o.LogHTTP
-		c.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirect }
 	}
+	c.Timeout = 0
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirect }
 	resp, err := c.Do(req)
 	if err != nil {
 		// The URL is signed: never repeat it.

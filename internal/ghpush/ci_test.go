@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,9 @@ type fakeCI struct {
 	location string           // overrides the log redirect
 	logBody  string
 	logAuth  []string // Authorization headers the log host saw
+	logReply int      // the log host's status (0 = 200); 302 sends it elsewhere
+	logsCode int      // the logs endpoint's status instead of 302 (0 = 302)
+	jobTotal int      // total_count in the jobs answer (0 = len)
 	jobsAsks []string
 }
 
@@ -33,8 +37,16 @@ func newFakeCI(t *testing.T) *fakeCI {
 	f.logs = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.logAuth = append(f.logAuth, r.Header.Get("Authorization"))
-		body := f.logBody
+		body, reply := f.logBody, f.logReply
 		f.mu.Unlock()
+		if reply == http.StatusFound {
+			http.Redirect(w, r, "https://evil.example/stolen", http.StatusFound)
+			return
+		}
+		if reply != 0 {
+			w.WriteHeader(reply)
+			return
+		}
 		fmt.Fprint(w, body)
 	}))
 	f.api = httptest.NewServer(http.HandlerFunc(f.serve))
@@ -62,12 +74,26 @@ func (f *fakeCI) serve(w http.ResponseWriter, r *http.Request) {
 			runs = append(runs, map[string]any{"id": 100 + i, "name": "CI\x1b[31m", "event": "push", "status": "completed",
 				"conclusion": c, "head_sha": shaHead, "run_attempt": 1, "html_url": "https://github.example/run", "created_at": "2026-10-12T13:44:43Z"})
 		}
-		j(map[string]any{"total_count": len(runs), "workflow_runs": runs})
+		if n, _ := strconv.Atoi(r.URL.Query().Get("per_page")); n > 0 && n < len(runs) {
+			runs = runs[:n]
+		}
+		j(map[string]any{"total_count": 5, "workflow_runs": runs})
 	case strings.HasPrefix(p, "/actions/runs/") && strings.HasSuffix(p, "/jobs"):
 		f.jobsAsks = append(f.jobsAsks, p)
-		j(map[string]any{"jobs": []any{map[string]any{"id": 9000000001, "name": "build-test", "status": "completed", "conclusion": "failure",
-			"steps": []any{map[string]any{"name": "vet", "conclusion": "success"}, map[string]any{"name": "test", "conclusion": "failure"}}}}})
+		total := f.jobTotal
+		if total == 0 {
+			total = 2
+		}
+		j(map[string]any{"total_count": total, "jobs": []any{
+			map[string]any{"id": 9000000002, "name": "lint", "status": "completed", "conclusion": "success"},
+			map[string]any{"id": 9000000001, "name": "build-test", "status": "completed", "conclusion": "failure",
+				"steps": []any{map[string]any{"name": "vet", "conclusion": "success"}, map[string]any{"name": "test", "conclusion": "failure"}}}}})
 	case p == "/actions/jobs/9000000001/logs":
+		if f.logsCode != 0 {
+			w.WriteHeader(f.logsCode)
+			j(map[string]string{"message": "Resource not accessible by integration\x1b[2J"})
+			return
+		}
 		loc := f.location
 		if loc == "" {
 			loc = f.logs.URL + "/signed/log.txt?sig=abc"
@@ -89,7 +115,7 @@ func (f *fakeCI) ops(t *testing.T) (*Ops, *fakeTokens, *bytes.Buffer) {
 		Repos: map[string]bool{repo: true}, Prefix: "agent/",
 		API:    &API{Base: f.api.URL, HTTP: NewAPIClient(f.api.Client())},
 		Tokens: tk, Log: slog.New(slog.NewTextHandler(&logBuf, nil)), Deadline: 10 * time.Second,
-		LogHosts: []string{u.Hostname()}, LogHTTP: f.logs.Client(),
+		LogHosts: []string{u.Host}, LogHTTP: f.logs.Client(),
 	}, tk, &logBuf
 }
 
@@ -107,7 +133,10 @@ func TestCIRunsListsRunsAndTheJobsOfFailedOnes(t *testing.T) {
 	if len(f.jobsAsks) != 3 || res.Runs[1].Jobs != nil || res.Runs[4].Jobs != nil {
 		t.Fatalf("jobs asked %v; runs %+v", f.jobsAsks, res.Runs)
 	}
-	job := res.Runs[0].Jobs[0]
+	if res.Runs[0].JobsTruncated {
+		t.Fatal("jobs_truncated with every job listed")
+	}
+	job := res.Runs[0].Jobs[0] // failed jobs first
 	if job.ID != 9000000001 || job.Conclusion != "failure" || strings.Join(job.FailedSteps, ",") != "test" {
 		t.Fatalf("job: %+v", job)
 	}
@@ -213,10 +242,107 @@ func TestLogHostAllowed(t *testing.T) {
 		"https://evil.example/x":                                        false,
 		"http://pipelines.actions.githubusercontent.com/x":              false,
 		"https://pipelines.actions.githubusercontent.com.evil.example/": false,
+		"https://x.blob.core.windows.net:8443/x":                        false,
+		"https://x.blob.core.windows.net:443/x":                         true,
 	} {
 		u, _ := url.Parse(in)
 		if got := o.logHostAllowed(u); got != want {
 			t.Errorf("logHostAllowed(%s) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestCIRunsSaysWhenJobsAreCut(t *testing.T) {
+	f := newFakeCI(t)
+	f.jobTotal = 120
+	o, _, _ := f.ops(t)
+	res, err := o.CIRuns(context.Background(), "mgr", repo, "agent/x", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Runs[0].JobsTruncated {
+		t.Fatal("a run with more jobs than one page is not marked")
+	}
+}
+
+// TestCILogKeepsReadingPastAHugeLine: one line over the scanner's limit
+// must neither stop the read nor hide what follows it.
+func TestCILogKeepsReadingPastAHugeLine(t *testing.T) {
+	f := newFakeCI(t)
+	f.logBody = "a\n" + strings.Repeat("x", 3<<20) + "\n##[error]real failure\nlast\n"
+	o, _, _ := f.ops(t)
+	res, err := o.CILog(context.Background(), "mgr", repo, "9000000001", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TotalLines != 4 || res.Truncated || len(res.Tail) != 4 || res.Tail[3] != "last" {
+		t.Fatalf("total=%d truncated=%v tail=%d %q", res.TotalLines, res.Truncated, len(res.Tail), res.Tail[len(res.Tail)-1])
+	}
+	if n := len([]rune(res.Tail[1])); n > ciLogLineMax+1 {
+		t.Fatalf("huge line kept at %d runes", n)
+	}
+	if strings.Join(res.ErrorLines, "|") != "##[error]real failure" {
+		t.Fatalf("error lines %q", res.ErrorLines)
+	}
+}
+
+func TestCILogStopsAtTheByteCap(t *testing.T) {
+	old := ciLogMaxBytes
+	ciLogMaxBytes = 100
+	defer func() { ciLogMaxBytes = old }()
+	f := newFakeCI(t)
+	f.logBody = strings.Repeat("0123456789\n", 50)
+	o, _, _ := f.ops(t)
+	res, err := o.CILog(context.Background(), "mgr", repo, "9000000001", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated || res.TotalLines > 10 {
+		t.Fatalf("truncated=%v total=%d", res.Truncated, res.TotalLines)
+	}
+}
+
+func TestCILogDropsDisguisingCharacters(t *testing.T) {
+	f := newFakeCI(t)
+	f.logBody = "safe\u202egnp.exe\u200b\u2028x\ufeff\u0085\u009b2Jy\n"
+	o, _, _ := f.ops(t)
+	res, err := o.CILog(context.Background(), "mgr", repo, "9000000001", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Tail[0] != "safegnp.exex2Jy" {
+		t.Fatalf("tail %q", res.Tail[0])
+	}
+	if got := label("ok\u202e\u0085x"); got != "okx" {
+		t.Fatalf("label %q", got)
+	}
+}
+
+func TestCILogLogHostAnswers(t *testing.T) {
+	f := newFakeCI(t)
+	f.logReply = http.StatusFound
+	o, _, _ := f.ops(t)
+	o.LogHTTP = nil // the production download client
+	o.API.HTTP = NewAPIClient(f.logs.Client())
+	o.API.Base = f.api.URL
+	_, err := o.CILog(context.Background(), "mgr", repo, "9000000001", "")
+	wantErr(t, err, "download failed")
+	if strings.Contains(err.Error(), "sig=") || strings.Contains(err.Error(), "evil") {
+		t.Fatalf("error repeats a URL: %v", err)
+	}
+	f.logReply = http.StatusForbidden
+	o2, _, _ := f.ops(t)
+	_, err = o2.CILog(context.Background(), "mgr", repo, "9000000001", "")
+	wantErr(t, err, "HTTP 403")
+}
+
+func TestCILogKeepsGitHubsRefusal(t *testing.T) {
+	f := newFakeCI(t)
+	f.logsCode = http.StatusForbidden
+	o, _, _ := f.ops(t)
+	_, err := o.CILog(context.Background(), "mgr", repo, "9000000001", "")
+	wantErr(t, err, "HTTP 403: Resource not accessible by integration")
+	if strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("escape in error %q", err)
 	}
 }

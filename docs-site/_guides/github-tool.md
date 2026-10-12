@@ -403,22 +403,27 @@ job id and how much it returned, never the log text.
 
 Returns the newest workflow runs on `branch`, any branch of the repository (`main` too: reading is
 not pushing): each run's `id`, `name`, `event`, `status`, `conclusion`, `head_sha`, `run_attempt`,
-`html_url` and `created_at`. For the three newest runs that did not pass, it also lists their jobs:
-`id`, `name`, `conclusion` and the names of the failed steps. A job's `id` is what `ci_log` takes.
+`html_url` and `created_at`. For the three newest runs that are not green (failed, cancelled, or
+still running), it also lists their jobs, failed ones first: `id`, `name`, `conclusion` and the
+names of the failed steps. It lists one page of 50 jobs a run; `jobs_truncated` says when a run has
+more. A job's `id` is what `ci_log` takes.
 
 ### `ci_log`
 
-Returns the end of one job's log: `tail`, its last `lines` lines, and `error_lines`, at most 60
-lines from the whole log that look like a failure (GitHub's `##[error]` lines, Go's `--- FAIL`,
+Returns the end of one job's log: `tail`, its last `lines` lines, and `error_lines`, the first 60
+lines in the whole log that look like a failure (GitHub's `##[error]` lines, Go's `--- FAIL`,
 `FAIL` and `panic:`, `file.go:N:` compiler and vet messages, `error`/`fatal` at a line's start,
 `exit code N`). Lines are plain text: GitHub's timestamps, terminal escape sequences and control
-characters are removed, each line is cut at 500 characters, and the token and known credential
-shapes are masked. The tool reads at most 64 MiB of a log (`truncated` says when it stopped).
+characters are removed, as are Unicode format characters (bidirectional controls, zero-width
+characters) that could disguise text; each line is cut at 500 characters, and the token and known
+credential shapes are masked. A very long line keeps its start and the read goes on after it. The
+tool reads at most 64 MiB of a log, within the call's two-minute limit (`truncated` says when it
+stopped early).
 
 GitHub answers a log request with a redirect to a signed download URL. The tool follows it only
 over https to GitHub's log hosts (`*.actions.githubusercontent.com`, `*.blob.core.windows.net`) and
 sends no credential there; any other redirect is refused. A log GitHub no longer keeps (90 days by
-default) answers not found.
+default) is reported as not found or expired.
 
 **Risk:** a log is whatever the workflow's commands printed, and the repository's code (which an
 agent may have written) runs in that workflow. The result says so in its `note`: the agent should

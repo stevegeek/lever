@@ -305,3 +305,38 @@ func TestOptInBackstops(t *testing.T) {
 		t.Error("a backstop must refuse another operation")
 	}
 }
+
+func TestCIBackstops(t *testing.T) {
+	o := mustParse(t, "-ops", "push,ci_runs,ci_log")
+	ops := map[string]captool.Operation{}
+	for _, op := range operations(o, nil, nil) {
+		ops[op.Name] = op
+	}
+	if len(ops) != 3 {
+		t.Fatalf("offered %d operations, want push, ci_runs and ci_log", len(ops))
+	}
+	for _, c := range []struct {
+		op   string
+		args map[string]string
+		ok   bool
+	}{
+		{"ci_runs", map[string]string{"repo": "stevegeek/lever", "branch": "main"}, true},
+		{"ci_runs", map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "limit": "20"}, true},
+		{"ci_runs", map[string]string{"repo": "x/y", "branch": "main"}, false},
+		{"ci_runs", map[string]string{"repo": "stevegeek/lever", "branch": "a..b"}, false},
+		{"ci_runs", map[string]string{"repo": "stevegeek/lever", "branch": "main", "limit": "21"}, false},
+		{"ci_log", map[string]string{"repo": "stevegeek/lever", "job_id": "114840402684"}, true},
+		{"ci_log", map[string]string{"repo": "stevegeek/lever", "job_id": "1", "lines": "400"}, true},
+		{"ci_log", map[string]string{"repo": "stevegeek/lever", "job_id": "0"}, false},
+		{"ci_log", map[string]string{"repo": "stevegeek/lever", "job_id": "1", "lines": "401"}, false},
+		{"ci_log", map[string]string{"repo": "x/y", "job_id": "1"}, false},
+	} {
+		err := ops[c.op].Backstop(captool.ValidatedContext{Operation: c.op}, c.args)
+		if (err == nil) != c.ok {
+			t.Errorf("%s %v: err=%v, want ok=%v", c.op, c.args, err, c.ok)
+		}
+	}
+	if err := ops["ci_log"].Backstop(captool.ValidatedContext{Operation: "ci_runs"}, map[string]string{"repo": "stevegeek/lever", "job_id": "1"}); err == nil {
+		t.Error("ci_log's backstop accepted another operation")
+	}
+}

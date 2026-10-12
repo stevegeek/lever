@@ -55,7 +55,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/state` | The `.lever-state` directory layout and its file helpers: JSON state, 0600 secrets, pid files, the remote-proxy stamp. |
 | `internal/termsafe` | Makes guest-supplied strings safe to print on the operator's terminal. |
 | `internal/testutil` | Stdlib-only assertion helpers shared by test packages (`WantErrIs`, `WantErrContaining`). |
-| `internal/voice` | Speech on the host. Speech to text: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. Text to speech: the pinned speech models (`genspeechpins` prints a model's pins from a local clone), the sherpa-onnx adapter, the per-text runner and the speech socket of `lever-tool-tts`. |
+| `internal/voice` | Speech on the host. Speech to text: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. Text to speech: the pinned speech model archives (unpacked with a manifest of every file), the sherpa-onnx adapter, the per-text runner and the speech socket of `lever-tool-tts`. |
 | `internal/webpush` | Web Push (RFC 8030/8291/8292) sender for the chat page's notifications, stdlib only. |
 | `internal/wire` | Leaf package: agent⇄broker request/response types, route paths and bootstrap material. Imports no other lever package. |
 | `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |

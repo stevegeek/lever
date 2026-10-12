@@ -4,10 +4,16 @@ package voice
 //
 // A speech model is not one file, as a Whisper model is: sherpa-onnx loads
 // an ONNX model, its token table, (for Kokoro) its voice embeddings, and
-// espeak-ng's data directory for the phonemes. So each table entry is a set
-// of files from one Hugging Face repository at one commit, each with its
-// size and sha256, laid out on disk under <models>/<model name>/ as in the
-// repository.
+// espeak-ng's data directory for the phonemes, a hundred files and more.
+// sherpa-onnx publishes each model as one archive (.tar.bz2) among the
+// assets of its "tts-models" GitHub release, so lever pins that archive:
+// its URL, size and sha256. `lever voice fetch` keeps the archive only if
+// it matches, unpacks it into <models>/<model name>/ (regular files and
+// directories only), and records the size and sha256 of every file it
+// unpacked in a manifest there (speechfiles.go). Every file the engine
+// loads is thus either checked against the manifest of a verified archive
+// before a run, or refused: a file the manifest does not list fails the
+// check too.
 
 import (
 	"fmt"
@@ -17,12 +23,12 @@ import (
 	"strings"
 )
 
-// SpeechFile is one pinned file of a speech model: its path in the
-// repository (and below the model's directory on disk), size and sha256.
+// SpeechFile is one file of a speech model as lever unpacked it: its path
+// below the model's directory (slash-separated), size and sha256.
 type SpeechFile struct {
-	Path   string
-	Size   int64
-	SHA256 string
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
 // SpeechVoice is one voice of a speech model: the name the page and the
@@ -45,15 +51,18 @@ const (
 type SpeechModel struct {
 	Name string
 	Kind string
-	// Repo is the Hugging Face repository, "owner/name".
-	Repo string
-	// Revision is the repository commit every file is pinned to (40 hex).
-	Revision string
-	// The roles of the files sherpa-onnx is given: paths in Files (DataDir
-	// is a directory, the common prefix of the espeak-ng data files).
-	// VoicesFile is Kokoro's only.
+	// ArchiveURL is the model's archive, a .tar.bz2 asset of sherpa-onnx's
+	// tts-models release; ArchiveSize and ArchiveSHA256 are its pins.
+	ArchiveURL    string
+	ArchiveSize   int64
+	ArchiveSHA256 string
+	// ArchiveRoot is the archive's one top directory: every entry is below
+	// it, and what is below it is unpacked into the model's directory.
+	ArchiveRoot string
+	// The roles of the files sherpa-onnx is given, as paths below the
+	// model's directory (DataDir is espeak-ng's data directory). VoicesFile
+	// is Kokoro's only.
 	ModelFile, TokensFile, VoicesFile, DataDir string
-	Files                                      []SpeechFile
 	Voices                                     []SpeechVoice
 	DefaultVoice                               string
 	// SampleRate is the model's output rate, in Hz (the answer's WAV header
@@ -61,22 +70,30 @@ type SpeechModel struct {
 	SampleRate int
 }
 
-const speechRepoHost = "https://huggingface.co/"
+// speechReleaseURL is where sherpa-onnx publishes its speech models.
+const speechReleaseURL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/"
 
 // ---------------------------------------------------------------------------
-// PINNED VALUES. Every value below that reads Unverified must be replaced by
-// the repository's own, read on a machine with internet access:
+// PINNED VALUES, from GitHub's API for the assets of sherpa-onnx's
+// tts-models release (https://api.github.com/repos/k2-fsa/sherpa-onnx/
+// releases/tags/tts-models, its assets list, and /releases/assets/<id>):
+// each asset's "size" and "digest" (the sha256 GitHub computed when the
+// asset was uploaded). An asset uploaded again gets a new digest: then
+// `lever voice fetch` refuses it until the table is updated.
 //
-//	git clone https://huggingface.co/<Repo> && cd <name> && git checkout <commit>
-//	go run ./internal/voice/genspeechpins -dir <that clone> -revision <commit>
+//	kokoro-en-v0_19.tar.bz2               asset 281054203, uploaded 2025-08-10T02:45:48Z
+//	vits-piper-en_GB-alba-medium.tar.bz2  asset 268506267, uploaded 2025-06-30T02:23:04Z
 //
-// genspeechpins prints the Files list (every file the model needs, the
-// espeak-ng data directory included, with its size and sha256) to paste
-// over the one below. Until then the model is refused by `lever voice
-// fetch`, by lever-tool-tts and by `lever doctor`: nothing runs unpinned.
+// The voices and their speaker ids are those sherpa-onnx documents for
+// each model (k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/
+// kokoro.html: kokoro-en-v0_19 has 11 voices, ids 0 to 10) and writes
+// into it (scripts/kokoro/v0.19/generate_voices_bin.py, id2speaker; and
+// add_meta_data.py: version 1, sample_rate 24000, espeak-ng voice en-us
+// for every speaker, the British ones too). A wrong id is not refused by
+// the engine: sherpa-onnx speaks an id out of range with voice 0.
 //
-// The voices and their speaker ids are those sherpa-onnx documents for each
-// model (kokoro-en-v0_19: 11 English voices, ids 0 to 10).
+// A value set to Unverified (or a size of 0) makes the model refused by
+// `lever voice fetch`, by lever-tool-tts and by `lever doctor`.
 // ---------------------------------------------------------------------------
 
 // DefaultSpeechModel is lever-tool-tts's -model when unset.
@@ -85,14 +102,14 @@ const DefaultSpeechModel = "kokoro-en-v0_19"
 // SpeechModels is lever's table; every lookup reads it. Tests swap it.
 var SpeechModels = []SpeechModel{
 	{
-		Name: "kokoro-en-v0_19", Kind: KindKokoro, Repo: "csukuangfj/kokoro-en-v0_19", Revision: Unverified,
-		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
-		Files: []SpeechFile{
-			{Path: "model.onnx", SHA256: Unverified},
-			{Path: "voices.bin", SHA256: Unverified},
-			{Path: "tokens.txt", SHA256: Unverified},
-			{Path: "espeak-ng-data/phontab", SHA256: Unverified},
-		},
+		// Kokoro-82M v0.19, English only (Apache-2.0): espeak-ng alone
+		// turns the text into phonemes, so it needs no lexicon and no
+		// language flag, and every sherpa-onnx release with Kokoro runs it.
+		Name: "kokoro-en-v0_19", Kind: KindKokoro,
+		ArchiveURL: speechReleaseURL + "kokoro-en-v0_19.tar.bz2", ArchiveSize: 319625534,
+		ArchiveSHA256: "912804855a04745fa77a30be545b3f9a5d15c4d66db00b88cbcd4921df605ac7",
+		ArchiveRoot:   "kokoro-en-v0_19",
+		ModelFile:     "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
 		Voices: []SpeechVoice{
 			{"af", 0, "en-US"}, {"af_bella", 1, "en-US"}, {"af_nicole", 2, "en-US"}, {"af_sarah", 3, "en-US"},
 			{"af_sky", 4, "en-US"}, {"am_adam", 5, "en-US"}, {"am_michael", 6, "en-US"},
@@ -102,14 +119,13 @@ var SpeechModels = []SpeechModel{
 	},
 	{
 		// Piper's en_GB "alba" (medium), the lighter choice: a smaller
-		// model, one voice, less natural than Kokoro.
-		Name: "piper-en_GB-alba-medium", Kind: KindVITS, Repo: "csukuangfj/vits-piper-en_GB-alba-medium", Revision: Unverified,
-		ModelFile: "en_GB-alba-medium.onnx", TokensFile: "tokens.txt", DataDir: "espeak-ng-data",
-		Files: []SpeechFile{
-			{Path: "en_GB-alba-medium.onnx", SHA256: Unverified},
-			{Path: "tokens.txt", SHA256: Unverified},
-			{Path: "espeak-ng-data/phontab", SHA256: Unverified},
-		},
+		// model, one voice, less natural than Kokoro. Piper's own config
+		// for it says 22050 Hz and one speaker.
+		Name: "piper-en_GB-alba-medium", Kind: KindVITS,
+		ArchiveURL: speechReleaseURL + "vits-piper-en_GB-alba-medium.tar.bz2", ArchiveSize: 67212349,
+		ArchiveSHA256: "fcd45962906933eec4431d3688f7d74aaac8713c87c6717f91fd3b23463aa1a1",
+		ArchiveRoot:   "vits-piper-en_GB-alba-medium",
+		ModelFile:     "en_GB-alba-medium.onnx", TokensFile: "tokens.txt", DataDir: "espeak-ng-data",
 		Voices:       []SpeechVoice{{"alba", 0, "en-GB"}},
 		DefaultVoice: "alba", SampleRate: 22050,
 	},
@@ -151,15 +167,6 @@ func (m SpeechModel) VoiceNames() []string {
 	return out
 }
 
-// TotalSize is the sum of the pinned file sizes.
-func (m SpeechModel) TotalSize() int64 {
-	var n int64
-	for _, f := range m.Files {
-		n += f.Size
-	}
-	return n
-}
-
 // cleanSpeechPath accepts a relative slash path of plain components: no
 // empty, "." or ".." component, none starting with a dot, no backslash.
 func cleanSpeechPath(p string) bool {
@@ -179,16 +186,39 @@ func cleanSpeechPath(p string) bool {
 	return true
 }
 
+// espeakDataFiles are the files sherpa-onnx requires in espeak-ng's data
+// directory (offline-tts-*-model-config.cc, Validate).
+var espeakDataFiles = []string{"phontab", "phonindex", "phondata", "intonations"}
+
+// RequiredFiles are the paths below the model's directory that sherpa-onnx
+// is given or requires: an archive without one of them is refused.
+func (m SpeechModel) RequiredFiles() []string {
+	out := []string{m.ModelFile, m.TokensFile}
+	if m.Kind == KindKokoro {
+		out = append(out, m.VoicesFile)
+	}
+	for _, f := range espeakDataFiles {
+		out = append(out, m.DataDir+"/"+f)
+	}
+	return out
+}
+
 // Pinned reports why m cannot be used yet ("" = it can): a value is still
-// Unverified or malformed, or the roles name no listed file.
+// Unverified or malformed.
 func (m SpeechModel) Pinned() string {
 	switch {
-	case m.Revision == Unverified || len(m.Files) == 0:
-		return fmt.Sprintf("lever's speech model table entry for %s is not verified yet (revision, and each file's size and sha256, must be pinned)", m.Name)
-	case !isHex(m.Revision, 40):
-		return fmt.Sprintf("speech model %s: the pinned revision is not a 40-hex commit", m.Name)
-	case !cleanSpeechPath(m.Repo) || strings.Count(m.Repo, "/") != 1:
-		return fmt.Sprintf("speech model %s: the repository %q is not owner/name", m.Name, m.Repo)
+	case !cleanSpeechPath(m.Name) || strings.Contains(m.Name, "/"):
+		return fmt.Sprintf("speech model %q: the name is not a plain name", m.Name)
+	case m.ArchiveSHA256 == Unverified || m.ArchiveSize <= 0:
+		return fmt.Sprintf("lever's speech model table entry for %s is not verified yet (the archive's size and sha256 must be pinned)", m.Name)
+	case !isHex(m.ArchiveSHA256, 64):
+		return fmt.Sprintf("speech model %s: the pinned sha256 is not 64 lowercase hex", m.Name)
+	case !strings.HasSuffix(m.ArchiveURL, ".tar.bz2"):
+		return fmt.Sprintf("speech model %s: the archive %q is not a .tar.bz2", m.Name, m.ArchiveURL)
+	case !speechURLOK(m.ArchiveURL):
+		return fmt.Sprintf("speech model %s: the archive %q is not on sherpa-onnx's GitHub releases", m.Name, m.ArchiveURL)
+	case !cleanSpeechPath(m.ArchiveRoot) || strings.Contains(m.ArchiveRoot, "/"):
+		return fmt.Sprintf("speech model %s: the archive's top directory %q is not a plain name", m.Name, m.ArchiveRoot)
 	case m.Kind != KindKokoro && m.Kind != KindVITS:
 		return fmt.Sprintf("speech model %s: unknown kind %q", m.Name, m.Kind)
 	case m.SampleRate < 8000 || m.SampleRate > 48000:
@@ -199,41 +229,18 @@ func (m SpeechModel) Pinned() string {
 	if _, ok := m.Voice(m.DefaultVoice); !ok {
 		return fmt.Sprintf("speech model %s: the default voice %q is not one of its voices", m.Name, m.DefaultVoice)
 	}
-	seen := map[string]bool{}
-	for _, f := range m.Files {
-		switch {
-		case f.SHA256 == Unverified || f.Size <= 0:
-			return fmt.Sprintf("lever's speech model table entry for %s is not verified yet (%s: size and sha256 must be pinned)", m.Name, f.Path)
-		case !isHex(f.SHA256, 64):
-			return fmt.Sprintf("speech model %s: %s: the pinned sha256 is not 64 lowercase hex", m.Name, f.Path)
-		case !cleanSpeechPath(f.Path):
-			return fmt.Sprintf("speech model %s: the file path %q is not a plain relative path", m.Name, f.Path)
-		case seen[f.Path]:
-			return fmt.Sprintf("speech model %s lists %s twice", m.Name, f.Path)
+	for _, p := range m.RequiredFiles() {
+		if !cleanSpeechPath(p) {
+			return fmt.Sprintf("speech model %s: the file path %q is not a plain relative path", m.Name, p)
 		}
-		seen[f.Path] = true
-	}
-	roles := []struct{ what, p string }{{"model", m.ModelFile}, {"tokens", m.TokensFile}}
-	if m.Kind == KindKokoro {
-		roles = append(roles, struct{ what, p string }{"voices", m.VoicesFile})
-	}
-	for _, r := range roles {
-		if !seen[r.p] {
-			return fmt.Sprintf("speech model %s: its %s file %q is not among its pinned files", m.Name, r.what, r.p)
-		}
-	}
-	if !cleanSpeechPath(m.DataDir) || !slices.ContainsFunc(m.Files, func(f SpeechFile) bool { return strings.HasPrefix(f.Path, m.DataDir+"/") }) {
-		return fmt.Sprintf("speech model %s: no pinned file under its data directory %q", m.Name, m.DataDir)
 	}
 	return ""
 }
 
-// FileURL is where file f of m is downloaded from: the repository at the
-// pinned commit.
-func (m SpeechModel) FileURL(f SpeechFile) string {
-	parts := strings.Split(f.Path, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
-	}
-	return speechRepoHost + m.Repo + "/resolve/" + m.Revision + "/" + strings.Join(parts, "/")
+// speechURLOK accepts an https URL on github.com, with no user, port,
+// query or fragment.
+func speechURLOK(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme == "https" && u.User == nil && u.Host == "github.com" && u.RawQuery == "" && u.Fragment == "" &&
+		strings.HasPrefix(u.Path, "/") && path.Clean(u.Path) == u.Path
 }

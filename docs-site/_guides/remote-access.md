@@ -1658,7 +1658,7 @@ to your own host, never to a cloud speech service.
   and expects it to use no network, but it is not sandboxed: it runs as your user, like
   whisper-server, so install a sherpa-onnx you trust. The jail reaches neither the speech socket nor the engine, which has no port.
 - **Doctor.** The `tts tool` row asks the speech socket for its health; the `tts model` row
-  hashes every file of the model against lever's pins. See the [tts tool](/tts-tool/) guide.
+  hashes every file of the model against the manifest of its verified archive. See the [tts tool](/tts-tool/) guide.
 
 ## What this does NOT do
 

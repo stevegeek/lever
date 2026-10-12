@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,25 +17,44 @@ import (
 	"github.com/stevegeek/lever/internal/voice"
 )
 
-// testSpeechContent is the content of each file of the pinned test speech
-// model.
-var testSpeechContent = map[string]string{"model.onnx": "onnx", "voices.bin": "voices", "tokens.txt": "tokens", "espeak-ng-data/phontab": "phontab"}
+// testSpeechArchive is the voice package's tiny Kokoro archive (top
+// directory tiny-kokoro/, 10 files).
+const testSpeechArchive = "../../voice/testdata/tiny-kokoro.tar.bz2"
 
-// pinTestSpeech swaps lever's speech model table for one pinned model
-// named kokoro-en-v0_19 of testSpeechContent, for the test's length.
+// pinTestSpeech swaps lever's speech model table for one model named
+// kokoro-en-v0_19 pinned to testSpeechArchive, for the test's length.
 func pinTestSpeech(t *testing.T) voice.SpeechModel {
 	t.Helper()
-	m := voice.SpeechModel{Name: voice.DefaultSpeechModel, Kind: voice.KindKokoro, Repo: "someone/kokoro", Revision: strings.Repeat("b", 40),
+	b, err := os.ReadFile(testSpeechArchive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(b)
+	m := voice.SpeechModel{Name: voice.DefaultSpeechModel, Kind: voice.KindKokoro,
+		ArchiveURL:  "https://github.com/someone/tiny/releases/download/models/tiny-kokoro.tar.bz2",
+		ArchiveSize: int64(len(b)), ArchiveSHA256: hex.EncodeToString(sum[:]), ArchiveRoot: "tiny-kokoro",
 		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
 		Voices: []voice.SpeechVoice{{Name: "bf_emma", SID: 7, Lang: "en-GB"}}, DefaultVoice: "bf_emma", SampleRate: 24000}
-	for _, p := range []string{"model.onnx", "voices.bin", "tokens.txt", "espeak-ng-data/phontab"} {
-		sum := sha256.Sum256([]byte(testSpeechContent[p]))
-		m.Files = append(m.Files, voice.SpeechFile{Path: p, Size: int64(len(testSpeechContent[p])), SHA256: hex.EncodeToString(sum[:])})
-	}
 	old := voice.SpeechModels
 	voice.SpeechModels = []voice.SpeechModel{m}
 	t.Cleanup(func() { voice.SpeechModels = old })
 	return m
+}
+
+// archiveFetch is a fetch of a speech model from a loopback server that
+// serves testSpeechArchive.
+func archiveFetch(t *testing.T) func(context.Context, voice.SpeechModel, string) (string, error) {
+	t.Helper()
+	b, err := os.ReadFile(testSpeechArchive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(b) }))
+	t.Cleanup(srv.Close)
+	return func(ctx context.Context, m voice.SpeechModel, dir string) (string, error) {
+		f := voice.Fetcher{AllowHost: func(u *url.URL) bool { return "http://"+u.Host == srv.URL }}
+		return f.FetchSpeechFrom(ctx, m, dir, srv.URL+"/tiny-kokoro.tar.bz2")
+	}
 }
 
 // ttsDoctorApp is voiceDoctorApp with read_aloud: server, served by a
@@ -117,23 +135,15 @@ func TestCheckTTSModel(t *testing.T) {
 	if r := checkTTSModel(app); r.ok || !strings.Contains(r.detail, "not downloaded") || !strings.Contains(r.fix, "lever voice fetch "+m.Name) {
 		t.Fatalf("missing: %+v", r)
 	}
-	write := func(rel, content string) {
-		p := voice.SpeechPath(tool.Models, m, rel)
-		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := archiveFetch(t)(context.Background(), m, tool.Models); err != nil {
+		t.Fatal(err)
 	}
-	for p, c := range testSpeechContent {
-		write(p, c)
-	}
-	_ = os.Chmod(tool.Models, 0o700)
-	if r := checkTTSModel(app); !r.ok || !strings.Contains(r.detail, "4 files") {
+	if r := checkTTSModel(app); !r.ok || !strings.Contains(r.detail, "10 files") || !strings.Contains(r.detail, m.ArchiveSHA256[:12]) {
 		t.Fatalf("good: %+v", r)
 	}
-	write("tokens.txt", "tokenz")
+	if err := os.WriteFile(voice.SpeechPath(tool.Models, m, "tokens.txt"), []byte("a 9\nb 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if r := checkTTSModel(app); r.ok || !strings.Contains(r.detail, "sha256") {
 		t.Fatalf("wrong file: %+v", r)
 	}
@@ -152,19 +162,12 @@ func TestRunSpeechFetch(t *testing.T) {
 	_, st := voiceDoctorApp(t)
 	tool, _ := app.SpeechTool()
 	m := pinTestSpeech(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(testSpeechContent[strings.TrimPrefix(r.URL.Path, "/")]))
-	}))
-	defer srv.Close()
-	fetch := func(ctx context.Context, m voice.SpeechModel, dir string) (string, error) {
-		f := voice.Fetcher{AllowHost: func(u *url.URL) bool { return "http://"+u.Host == srv.URL }}
-		return f.FetchSpeechFrom(ctx, m, dir, func(f voice.SpeechFile) string { return srv.URL + "/" + path.Clean(f.Path) })
-	}
+	fetch := archiveFetch(t)
 	var out bytes.Buffer
 	if err := runSpeechFetch(context.Background(), app, st, "", fetch, &out); err != nil {
 		t.Fatal(err)
 	}
-	if err := voice.VerifySpeech(tool.Models, m); err != nil {
+	if _, err := voice.VerifySpeech(tool.Models, m); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "verified") || !strings.Contains(out.String(), "picks it up") {
@@ -182,11 +185,11 @@ func TestRunSpeechFetch(t *testing.T) {
 	if err := runSpeechFetch(context.Background(), app, st, "", fetch, &out); err != nil {
 		t.Fatal(err)
 	}
-	if err := voice.VerifySpeech(st.VoiceModels(), m); err != nil || !strings.Contains(out.String(), "-models "+st.VoiceModels()) {
+	if _, err := voice.VerifySpeech(st.VoiceModels(), m); err != nil || !strings.Contains(out.String(), "-models "+st.VoiceModels()) {
 		t.Fatalf("%v %s", err, out.String())
 	}
 	// Unpinned: nothing is fetched.
-	voice.SpeechModels[0].Revision = voice.Unverified
+	voice.SpeechModels[0].ArchiveSHA256 = voice.Unverified
 	called := false
 	nofetch := func(context.Context, voice.SpeechModel, string) (string, error) { called = true; return "", nil }
 	if err := runSpeechFetch(context.Background(), app, st, "", nofetch, &out); err == nil || called || !strings.Contains(err.Error(), "not verified") {

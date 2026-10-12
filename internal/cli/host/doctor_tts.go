@@ -66,7 +66,9 @@ func checkTTSTool(ctx context.Context, app *config.App) checkResult {
 
 // checkTTSModel reports the tool's speech model (doctorTTSTool): pinned in
 // lever's table, present in the tool's -models directory, every file of
-// the pinned size and sha256 (hashed whole: a few seconds).
+// the size and sha256 recorded when it was unpacked from the verified
+// archive, and no other file (voice.VerifySpeech; hashed whole: a few
+// seconds).
 func checkTTSModel(app *config.App) checkResult {
 	const name = "tts model"
 	t, ok, lost := doctorTTSTool(app)
@@ -86,12 +88,16 @@ func checkTTSModel(app *config.App) checkResult {
 	if !filepath.IsAbs(t.Models) {
 		return checkResult{name, false, fmt.Sprintf("broker tool %q's -models %q is not an absolute path", t.Name, t.Models), "point -models at the absolute path lever voice fetch downloads into"}
 	}
-	err := voice.VerifySpeech(t.Models, m)
+	files, err := voice.VerifySpeech(t.Models, m)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return checkResult{name, false, m.Name + " is not downloaded into " + t.Models + ": " + lost, "lever voice fetch " + m.Name + " (the tool picks it up at its next request)"}
 	case err != nil:
 		return checkResult{name, false, err.Error() + ": " + lost, "remove " + voice.SpeechDir(t.Models, m) + " and run lever voice fetch " + m.Name}
 	}
-	return checkResult{name, true, fmt.Sprintf("%s: %s, %d files, %d bytes, sha256 of each matches lever's pin", m.Name, voice.SpeechDir(t.Models, m), len(m.Files), m.TotalSize()), ""}
+	var size int64
+	for _, f := range files {
+		size += f.Size
+	}
+	return checkResult{name, true, fmt.Sprintf("%s: %s, %d files, %d bytes, each as unpacked from the pinned archive (sha256 %.12s...)", m.Name, voice.SpeechDir(t.Models, m), len(files), size, m.ArchiveSHA256), ""}
 }

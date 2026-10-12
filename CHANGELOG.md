@@ -59,8 +59,11 @@ version bump moves the block under the new version heading.
   new first-party broker tool `lever-tool-tts`, which runs sherpa-onnx's
   `sherpa-onnx-offline-tts` once per part of a message, as its child, with no port. You install
   sherpa-onnx yourself, outside the tree, as for whisper.cpp; `lever voice fetch kokoro-en-v0_19`
-  downloads the model's files, each pinned by size and sha256 and checked again before every run
-  whenever a file changed. The page sends the cleaned text in parts of whole sentences, the first
+  downloads the model's archive from sherpa-onnx's `tts-models` GitHub release, pinned by size and
+  sha256, unpacks it only once verified (regular files and directories only, nothing outside its
+  top directory) and records every file's size and sha256 in a manifest; before every run whenever
+  something changed, the tool checks every file against that manifest and refuses any file it does
+  not list. The engine gets the text after `--`, so no text is ever read as an option. The page sends the cleaned text in parts of whole sentences, the first
   one short so the voice starts quickly, to `POST /lever/api/voice/speak` (same origin,
   `X-Lever-Voice`, an agent the login's list shows, at most the tool's `-max-chars`, 40,000
   characters an hour and 200,000 a day per login), plays each part with Web Audio (also on iPhone

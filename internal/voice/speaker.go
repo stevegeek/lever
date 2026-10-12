@@ -86,7 +86,7 @@ func (s *Speaker) Check() (string, error) {
 	case before != "" && before == s.bad:
 		return "", s.badErr
 	}
-	err = VerifySpeech(s.ModelDir, s.Model)
+	_, err = VerifySpeech(s.ModelDir, s.Model)
 	after := speechStamp(s.ModelDir, s.Model)
 	if err == nil && before != after {
 		err = fmt.Errorf("%w: the files of %s changed while they were checked", ErrModel, s.Model.Name)

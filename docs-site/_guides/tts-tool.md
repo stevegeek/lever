@@ -24,8 +24,8 @@ processes of your user can connect. There is no long-running engine and no TCP p
 listens but the socket and the tool's MCP backend.
 
 **The guarantees:** text and audio are never stored or logged. The jail cannot reach the socket,
-and the engine has no port. The tool runs the engine only with model files whose sizes and sha256
-match lever's table, and only from a program file that no one but you or root can change. The
+and the engine has no port. The tool runs the engine only with model files unpacked from an archive whose size and
+sha256 match lever's table, each unchanged since, and only from a program file that no one but you or root can change. The
 engine gets a reduced environment and no stdin, and its output is discarded (it prints the text it
 speaks).
 
@@ -38,7 +38,10 @@ nothing to speak with, and no agent can call it without an `obtain` grant.
 - sherpa-onnx's `sherpa-onnx-offline-tts`, which you install yourself (below). Install it outside
   the tree, owned by you or root and writable by no one else. Lever never builds or installs it.
 - Disk space for the model: about 350 MB for `kokoro-en-v0_19` and 80 MB for
-  `piper-en_GB-alba-medium`, espeak-ng's data included. The engine runs on the CPU.
+  `piper-en_GB-alba-medium`, espeak-ng's data included, and as much again while `lever voice
+  fetch` unpacks it (the archives are 320 MB and 67 MB). The engine runs on the CPU.
+- A sherpa-onnx release that runs Kokoro models (`--kokoro-model` in
+  `sherpa-onnx-offline-tts --help`).
 - Install the tool with `make install`. Releases ship it for darwin and linux.
 - [Remote access](/remote-access/) with the chat page and `remote.voice` on (read-aloud is part of
   it).
@@ -109,7 +112,15 @@ command that takes `-speak-socket`, and reads these flags only in its command:
 Config load checks each of these (the model and voice against lever's table, the numbers against
 their ranges) and refuses the program, the models and the socket inside the tree. The Kokoro voices
 of `kokoro-en-v0_19` are `af`, `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `am_adam`,
-`am_michael` (American) and `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis` (British).
+`am_michael` (American) and `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis` (British), speaker
+ids 0 to 10 in that order, as sherpa-onnx documents them.
+
+**Why `kokoro-en-v0_19`.** It is the English-only Kokoro model: espeak-ng alone turns its text
+into phonemes, so sherpa-onnx needs only the model, its voices, its tokens and espeak-ng's data,
+and every sherpa-onnx release that runs Kokoro runs it. sherpa-onnx's newer multi-lingual Kokoro
+models (`kokoro-multi-lang-v1_0` has eight British voices to this one's four) also need a lexicon
+or language flag that depends on the voice, and carry Chinese dictionaries and rules; lever does
+not offer them yet.
 
 ## 2. Fetch the model
 
@@ -118,18 +129,32 @@ lever voice fetch kokoro-en-v0_19
 lever voice fetch                  # the whisper tool's model, and the tts tool's
 ```
 
-The files come from Hugging Face at the commit lever pins: the ONNX model, its tokens, Kokoro's
-voice file and espeak-ng's data. Lever keeps each file only if its size and sha256 match its
-table. Neither the tool nor the proxy ever downloads a model. Before every run the tool checks the
-program and the model: it hashes every file again whenever a file's metadata (inode, size, times,
-owner, mode) changed since its last full check, so a model fetched later, or replaced, is checked
-at the next request. With no tts tool configured, `lever voice fetch` downloads into
+sherpa-onnx publishes each model as one archive among the assets of its
+[`tts-models` release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models): the ONNX
+model, its tokens, Kokoro's voice file and espeak-ng's data. Lever pins the archive's URL, size and
+sha256 (as GitHub records them for the asset) and downloads it only from `github.com` and GitHub's
+release-asset hosts. It keeps the archive only if its size and sha256 match, and then unpacks it
+into `<models>/<model>/`: directories (`0700`) and regular files (`0600`) only, from below the
+archive's top directory. A link, a device or a path outside that directory refuses the whole
+archive, and so does one without the files sherpa-onnx needs. Lever writes a manifest there with
+the size and sha256 of every file it unpacked, and deletes the archive.
+
+If sherpa-onnx uploads a model's archive again, its sha256 changes and `lever voice fetch` refuses
+it until a lever release pins the new one; a model already fetched keeps working.
+
+Neither the tool nor the proxy ever downloads a model. Before every run the tool checks the
+program and the model: every file in the model's directory must be one the manifest lists, of
+its size and sha256, so a file changed or added there is refused. The manifest itself is trusted
+as lever wrote it: it guards against a damaged, partial or changed model, not against a program
+running as you, which could rewrite the manifest too (as it could replace the engine itself). It hashes the files again whenever the metadata (inode, size, times, owner, mode) of
+anything in that directory changed since its last full check, so a model fetched later, or
+replaced, is checked at the next request. With no tts tool configured, `lever voice fetch` downloads into
 `.lever-state/voice-models/`; point `-models` at that absolute path.
 
 Then run `lever reload` and check `lever doctor`: the tool's own row, and the `tts tool` and
 `tts model` rows. `tts tool` asks the speech socket for its health (not running, not ready, or
 ready with the model, voice and limits); `tts model` checks every file of the `-model` in
-`-models` against lever's pinned sizes and sha256. With `read_aloud: server` they check the tool
+`-models` against the manifest of its verified archive, and that no other file is there. With `read_aloud: server` they check the tool
 that serves `remote.voice.speak_socket`; otherwise the first tts tool in `broker.tools`. The `voice`
 row says which read-aloud the chat page uses.
 
@@ -141,7 +166,8 @@ row says which read-aloud the chat page uses.
 2. The proxy checks the login, the request and the limits ([below](#limits)), then posts the text to
    the socket.
 3. The tool cleans the text again: control and format characters and angle brackets become spaces,
-   and no part starts with `-` (sherpa-onnx would read it as an option). It refuses an empty text,
+   and no part starts with `-`. The text also goes to the engine after `--`, which ends its
+   options, so it is never read as one. It refuses an empty text,
    one over `-max-chars` and a voice the model lacks.
 4. It runs `sherpa-onnx-offline-tts` once, with a private output directory under `-models`, reads
    the WAV it wrote (16-bit PCM, mono, at the model's rate), deletes the directory, and answers a

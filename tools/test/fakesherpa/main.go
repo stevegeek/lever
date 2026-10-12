@@ -1,5 +1,6 @@
 // Command fakesherpa is a TEST-ONLY stand-in for sherpa-onnx's
-// sherpa-onnx-offline-tts: it takes the flags lever passes
+// sherpa-onnx-offline-tts: it reads its arguments as the real one does and
+// takes the flags lever passes
 // (internal/voice/sherpa.go) and writes a WAV to --output-filename, so a
 // test can run lever-tool-tts without a model. Never part of a release
 // (.goreleaser.yaml builds only binaries under ./cmd).
@@ -19,15 +20,21 @@ import (
 )
 
 func main() {
+	// As sherpa-onnx's ParseOptions reads them: options up to the first
+	// argument that does not start with "--", or up to a lone "--", which
+	// is dropped; every later argument is positional.
 	opts := map[string]string{}
-	var pos []string
-	for _, a := range os.Args[1:] {
-		if k, v, ok := strings.Cut(strings.TrimPrefix(a, "--"), "="); ok && strings.HasPrefix(a, "--") {
-			opts[k] = v
-			continue
+	args := os.Args[1:]
+	i := 0
+	for ; i < len(args) && strings.HasPrefix(args[i], "--"); i++ {
+		if args[i] == "--" {
+			i++
+			break
 		}
-		pos = append(pos, a)
+		k, v, _ := strings.Cut(strings.TrimPrefix(args[i], "--"), "=")
+		opts[k] = v
 	}
+	pos := args[i:]
 	if len(pos) != 1 {
 		fmt.Fprintln(os.Stderr, "Error: Please provide the text to generate audio.")
 		os.Exit(1)

@@ -16,14 +16,10 @@ func pinModel(t *testing.T) {
 	t.Helper()
 	old := voice.SpeechModels
 	voice.SpeechModels = []voice.SpeechModel{{
-		Name: voice.DefaultSpeechModel, Kind: voice.KindKokoro, Repo: "someone/kokoro", Revision: strings.Repeat("b", 40),
+		Name: voice.DefaultSpeechModel, Kind: voice.KindKokoro,
+		ArchiveURL:  "https://github.com/someone/kokoro/releases/download/models/kokoro.tar.bz2",
+		ArchiveSize: 1, ArchiveSHA256: strings.Repeat("c", 64), ArchiveRoot: "kokoro",
 		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
-		Files: []voice.SpeechFile{
-			{Path: "model.onnx", Size: 1, SHA256: strings.Repeat("c", 64)},
-			{Path: "voices.bin", Size: 1, SHA256: strings.Repeat("c", 64)},
-			{Path: "tokens.txt", Size: 1, SHA256: strings.Repeat("c", 64)},
-			{Path: "espeak-ng-data/phontab", Size: 1, SHA256: strings.Repeat("c", 64)},
-		},
 		Voices:       []voice.SpeechVoice{{Name: "bf_emma", SID: 7, Lang: "en-GB"}, {Name: "bm_george", SID: 9, Lang: "en-GB"}},
 		DefaultVoice: "bf_emma", SampleRate: 24000,
 	}}
@@ -130,20 +126,18 @@ func TestParseFlagsRefusals(t *testing.T) {
 
 func TestParseFlagsRefusesUnverifiedModel(t *testing.T) {
 	_, args := goodArgs(t)
-	voice.SpeechModels[0].Files[1].SHA256 = voice.Unverified
+	voice.SpeechModels[0].ArchiveSHA256 = voice.Unverified
 	if _, err := parseFlags(args); err == nil || !strings.Contains(err.Error(), "not verified") {
 		t.Fatal(err)
 	}
 }
 
-// The shipped table is refused until its values are pinned.
-func TestShippedModelIsRefusedUntilPinned(t *testing.T) {
+// The shipped table's default model is pinned: the flags parse.
+func TestShippedModelIsPinned(t *testing.T) {
 	tree, host := shortTemp(t), shortTemp(t)
 	args := []string{"-tree", tree, "-models", filepath.Join(host, "m"), "-server", filepath.Join(host, "tts"), "-speak-socket", filepath.Join(host, "s.sock")}
-	m, _ := voice.LookupSpeech(voice.DefaultSpeechModel)
-	_, err := parseFlags(args)
-	if m.Pinned() != "" && (err == nil || !strings.Contains(err.Error(), "not verified")) {
-		t.Fatalf("unpinned default model: %v", err)
+	if _, err := parseFlags(args); err != nil {
+		t.Fatal(err)
 	}
 }
 

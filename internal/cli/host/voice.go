@@ -27,9 +27,10 @@ func newVoiceFetchCmd() *cobra.Command {
 		Use:   "fetch [MODEL] [CONFIG]",
 		Args:  cobra.MaximumNArgs(2),
 		Short: "Download a pinned Whisper or speech model for lever-tool-whisper or lever-tool-tts, checking its size and sha256",
-		Long: "Downloads MODEL from Hugging Face at the commit lever pins, and keeps each file only if its size and sha256\n" +
-			"match lever's table. Whisper models (lever-tool-whisper): " + strings.Join(voice.Names(), ", ") + ".\n" +
-			"Speech models (lever-tool-tts): " + strings.Join(voice.SpeechNames(), ", ") + ".\n" +
+		Long: "Downloads MODEL and keeps it only if its size and sha256 match lever's table.\n" +
+			"Whisper models (lever-tool-whisper), one file each from Hugging Face at the commit lever pins: " + strings.Join(voice.Names(), ", ") + ".\n" +
+			"Speech models (lever-tool-tts), one archive each from sherpa-onnx's GitHub releases, unpacked once verified,\n" +
+			"with a manifest of every file's size and sha256: " + strings.Join(voice.SpeechNames(), ", ") + ".\n" +
 			"Without MODEL: the -model of the whisper tool (or " + voice.DefaultModel + "), and the -model of the tts tool when one is configured.\n" +
 			"A model goes into the -models directory of its tool's entry in broker.tools, or, with none configured,\n" +
 			"into voice-models/ in the state directory (point the tool's -models at that absolute path).\n" +
@@ -184,12 +185,12 @@ func runSpeechFetch(ctx context.Context, app *config.App, st state.State, name s
 	if why := m.Pinned(); why != "" {
 		return fmt.Errorf("voice: %s; this lever release cannot download it", why)
 	}
-	fmt.Fprintf(out, "fetching %s (%d files, %d bytes) from https://huggingface.co/%s at %s\n", m.Name, len(m.Files), m.TotalSize(), m.Repo, m.Revision)
+	fmt.Fprintf(out, "fetching %s (an archive of %d bytes) from %s\n", m.Name, m.ArchiveSize, m.ArchiveURL)
 	p, err := fetch(ctx, m, dir)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "%s verified: %s (every file's size and sha256)\n", m.Name, p)
+	fmt.Fprintf(out, "%s verified: %s (unpacked from the archive of sha256 %s)\n", m.Name, p, m.ArchiveSHA256)
 	switch {
 	case !ok:
 		fmt.Fprintf(out, "add lever-tool-tts to broker.tools with -models %s and -model %s to use it\n", dir, m.Name)

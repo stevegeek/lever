@@ -1,38 +1,55 @@
 package voice
 
 // The sherpa-onnx adapter: every assumption lever makes about sherpa-onnx's
-// text-to-speech program, sherpa-onnx-offline-tts, is in this file. Check
-// them against the sherpa-onnx version in use:
+// text-to-speech program, sherpa-onnx-offline-tts, is in this file.
+// Checked against sherpa-onnx's source on its master branch (2026-10):
+// sherpa-onnx/csrc/sherpa-onnx-offline-tts.cc, parse-options.cc,
+// offline-tts-model-config.cc, offline-tts-kokoro-model-config.cc,
+// offline-tts-vits-model-config.cc, offline-tts-kokoro-model.cc,
+// offline-tts-vits-model.cc, offline-tts-kokoro-impl.h and wave-writer.cc,
+// and its documentation of the Kokoro models. Not yet run against a built
+// release; the fake in tools/test/fakesherpa stands in for it in tests.
 //
 //  1. One run speaks one text: the text is the program's one positional
-//     argument, the WAV goes to --output-filename, and the program exits
-//     (status 0 on success). It reads no stdin and opens no network
-//     connection; it loads the model files it is given on every run.
-//  2. Flags, in Kaldi's --name=value form: for Kokoro --kokoro-model,
-//     --kokoro-voices, --kokoro-tokens, --kokoro-data-dir (espeak-ng's
-//     data) and --kokoro-length-scale (speed: larger is slower); for a
-//     VITS (Piper) model --vits-model, --vits-tokens, --vits-data-dir and
-//     --vits-length-scale; and --num-threads, --sid (the speaker id) and
-//     --output-filename. Nothing else is passed.
-//  3. An argument that starts with "--" is read as an option, wherever it
-//     is. lever never passes a text that starts with "-" (SpeechInput).
-//  4. The output is a WAV file of 16-bit PCM, mono, at the model's sample
-//     rate. lever reads only the fmt and data chunks of it and sends on a
-//     WAV it writes itself (SpeechWAV): nothing else of the file leaves the
-//     tool.
-//  5. The program prints the text it speaks, and timings, to its console.
-//     lever discards the child's stdout and stderr: text must never reach
-//     the tool's log.
+//     argument (more than one, or none, is an error), the WAV goes to
+//     --output-filename, and the program exits, status 0 on success. It
+//     reads no stdin, and it loads the model files it is given on every
+//     run.
+//  2. Options are Kaldi's --name=value. lever passes, for Kokoro,
+//     --kokoro-model, --kokoro-voices, --kokoro-tokens, --kokoro-data-dir
+//     (espeak-ng's data) and --kokoro-length-scale; for a VITS (Piper)
+//     model --vits-model, --vits-tokens, --vits-data-dir and
+//     --vits-length-scale; and --num-threads, --sid and --output-filename.
+//     Nothing else. The length scale is the speed: larger is slower, and
+//     the engine uses 1/scale as its speed while --speed is left at 1
+//     (--speed itself is newer than some releases that run Kokoro, so
+//     lever does not pass it). The data directory must hold phontab,
+//     phonindex, phondata and intonations. kokoro-en-v0_19 is a version 1
+//     Kokoro model: espeak-ng alone makes its phonemes, so it takes no
+//     --kokoro-lexicon or --kokoro-lang (a multi-lingual Kokoro model,
+//     version 2, would require one of them).
+//  3. A first pass reads --config=FILE (a file of more options) and
+//     --help from every argument that starts with "--", up to a lone "--",
+//     positional ones included; the second pass reads options up to the
+//     first argument that does not start with "--" or a lone "--", which
+//     is dropped. lever passes the text last, after "--", so no text is
+//     ever read as an option (not even as --config), and never passes a
+//     text that starts with "-" either (SpeechInput).
+//  4. The output is a WAV file with a 44-byte header (fmt and data
+//     chunks), 16-bit PCM, mono, at the model's sample rate (read from the
+//     model's metadata). lever reads only the fmt and data chunks of it and
+//     sends on a WAV it writes itself (SpeechWAV): nothing else of the file
+//     leaves the tool.
+//  5. The program prints progress to stdout, and the text it speaks, its
+//     own arguments and timings to stderr. lever discards the child's
+//     stdout and stderr: text must never reach the tool's log.
 //  6. The text is not SSML or any other markup: sherpa-onnx speaks it as
-//     plain text (through espeak-ng's phonemizer for Kokoro and Piper
-//     models). SpeechInput still removes control and format characters and
-//     angle brackets.
-//
-// Checked against sherpa-onnx's documentation of its Kokoro and Piper
-// models and the offline TTS program (sherpa-onnx/csrc/
-// sherpa-onnx-offline-tts.cc and offline-tts-*-model-config.cc), as lever's
-// authors knew them; NOT re-checked against a release when this was
-// written. The fake in tools/test/fakesherpa stands in for it in tests.
+//     plain text (through espeak-ng's phonemizer for these models).
+//     SpeechInput still removes control and format characters and angle
+//     brackets.
+//  7. A speaker id (--sid) out of the model's range is not an error: the
+//     engine logs it and speaks voice 0. lever's table must therefore
+//     carry the documented ids (speechmodels.go).
 
 import (
 	"encoding/binary"
@@ -66,7 +83,8 @@ const (
 
 // SherpaArgs is the sherpa-onnx-offline-tts argument list that speaks text
 // with voice v of model m from the models directory dir into out
-// (assumptions 1 to 3). text must have passed SpeechInput.
+// (assumptions 1 to 3): the options, "--", and the text. text must have
+// passed SpeechInput.
 func SherpaArgs(m SpeechModel, dir string, v SpeechVoice, speed float64, threads int, out, text string) []string {
 	p := func(rel string) string { return SpeechPath(dir, m, rel) }
 	scale := strconv.FormatFloat(1/speed, 'f', 3, 64)
@@ -80,7 +98,7 @@ func SherpaArgs(m SpeechModel, dir string, v SpeechVoice, speed float64, threads
 			"--vits-data-dir=" + p(m.DataDir), "--vits-length-scale=" + scale}
 	}
 	return append(args, "--num-threads="+strconv.Itoa(threads), "--sid="+strconv.Itoa(v.SID),
-		"--output-filename="+filepath.Clean(out), text)
+		"--output-filename="+filepath.Clean(out), "--", text)
 }
 
 // ErrBadText: nothing speakable is left of the text, or it is too long.

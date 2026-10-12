@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -11,8 +12,10 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -21,73 +24,94 @@ import (
 	"time"
 )
 
-// testSpeechFiles is the content of a tiny Kokoro model's files.
+// testSpeechFiles is the content of a tiny Kokoro model's files, as
+// testdata/tiny-kokoro.tar.bz2 holds them below its top directory
+// tiny-kokoro/ (with a ._model.onnx that is skipped, an empty directory
+// and a pax global header). The archive was made with Python's tarfile
+// and bz2 modules, as no bzip2 writer is in Go's library.
 var testSpeechFiles = map[string]string{
-	"model.onnx":                  "onnx bytes",
-	"voices.bin":                  "voice bytes",
-	"tokens.txt":                  "a 1\nb 2\n",
-	"espeak-ng-data/phontab":      "phontab",
-	"espeak-ng-data/lang/gmw/en":  "name english",
-	"espeak-ng-data/en_dict":      "dict",
-	"espeak-ng-data/intonations":  "into",
-	"espeak-ng-data/phondata":     "phondata",
-	"espeak-ng-data/phonindex":    "phonindex",
-	"espeak-ng-data/voices/!v/xx": "variant",
+	"model.onnx":                          "onnx bytes",
+	"voices.bin":                          "voice bytes",
+	"tokens.txt":                          "a 1\nb 2\n",
+	"espeak-ng-data/phontab":              "phontab",
+	"espeak-ng-data/lang/gmw/en":          "name english",
+	"espeak-ng-data/en_dict":              "dict",
+	"espeak-ng-data/intonations":          "into",
+	"espeak-ng-data/phondata":             "phondata",
+	"espeak-ng-data/phonindex":            "phonindex",
+	"espeak-ng-data/voices/!v/Mr serious": "variant",
 }
 
-// testSpeechModel is a pinned Kokoro model of testSpeechFiles.
+const testSpeechArchive = "testdata/tiny-kokoro.tar.bz2"
+
+// testSpeechModel is a Kokoro model pinned to testSpeechArchive.
 func testSpeechModel() SpeechModel {
-	m := SpeechModel{
-		Name: "tiny-kokoro", Kind: KindKokoro, Repo: "someone/tiny-kokoro", Revision: strings.Repeat("b", 40),
+	b, err := os.ReadFile(testSpeechArchive)
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(b)
+	return SpeechModel{
+		Name: "tiny-kokoro", Kind: KindKokoro,
+		ArchiveURL:  "https://github.com/someone/tiny/releases/download/models/tiny-kokoro.tar.bz2",
+		ArchiveSize: int64(len(b)), ArchiveSHA256: hex.EncodeToString(sum[:]), ArchiveRoot: "tiny-kokoro",
 		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
 		Voices:       []SpeechVoice{{"af", 0, "en-US"}, {"bf_emma", 7, "en-GB"}},
 		DefaultVoice: "bf_emma", SampleRate: 24000,
 	}
-	var paths []string
-	for p := range testSpeechFiles {
-		paths = append(paths, p)
-	}
-	slices.Sort(paths)
-	for _, p := range paths {
-		sum := sha256.Sum256([]byte(testSpeechFiles[p]))
-		m.Files = append(m.Files, SpeechFile{Path: p, Size: int64(len(testSpeechFiles[p])), SHA256: hex.EncodeToString(sum[:])})
-	}
-	return m
 }
 
-// placeSpeech writes m's files into dir as a fetch would.
+// testSpeechManifest is the manifest of testSpeechFiles.
+func testSpeechManifest() []SpeechFile {
+	var out []SpeechFile
+	for p, c := range testSpeechFiles {
+		sum := sha256.Sum256([]byte(c))
+		out = append(out, SpeechFile{Path: p, Size: int64(len(c)), SHA256: hex.EncodeToString(sum[:])})
+	}
+	slices.SortFunc(out, func(a, b SpeechFile) int { return strings.Compare(a.Path, b.Path) })
+	return out
+}
+
+// placeSpeech writes m's files and manifest into dir as a fetch would.
 func placeSpeech(t *testing.T, dir string, m SpeechModel) {
 	t.Helper()
-	for _, f := range m.Files {
-		sub, err := privateDirs(SpeechDir(dir, m), filepath.ToSlash(filepath.Dir(f.Path)), true)
+	root := SpeechDir(dir, m)
+	for p, c := range testSpeechFiles {
+		sub, err := privateDirs(root, path.Dir(p), true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(sub, filepath.Base(f.Path)), []byte(testSpeechFiles[f.Path]), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(sub, path.Base(p)), []byte(c), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if err := writeSpeechManifest(root, m, testSpeechManifest()); err != nil {
+		t.Fatal(err)
+	}
 }
 
-func TestShippedSpeechModelsAreRefusedUntilPinned(t *testing.T) {
+func TestShippedSpeechModels(t *testing.T) {
 	for _, name := range []string{"kokoro-en-v0_19", "piper-en_GB-alba-medium"} {
 		m, ok := LookupSpeech(name)
 		if !ok {
 			t.Fatalf("%s is not in the table", name)
 		}
-		if _, ok := m.Voice(m.DefaultVoice); !ok {
-			t.Errorf("%s: default voice %q is not one of its voices", name, m.DefaultVoice)
+		if why := m.Pinned(); why != "" {
+			t.Errorf("%s: %s", name, why)
 		}
-		// Placeholder values: the model runs only once pinned for real.
-		if m.Pinned() == "" && slices.ContainsFunc(m.Files, func(f SpeechFile) bool { return f.SHA256 == Unverified }) {
-			t.Errorf("%s: Pinned accepts an unverified file", name)
+		if !strings.HasPrefix(m.ArchiveURL, speechReleaseURL) || path.Base(m.ArchiveURL) != m.ArchiveRoot+".tar.bz2" {
+			t.Errorf("%s: archive %s, top directory %s", name, m.ArchiveURL, m.ArchiveRoot)
 		}
 	}
+	// sherpa-onnx's table for kokoro-en-v0_19: speaker id -> voice.
 	k, _ := LookupSpeech(DefaultSpeechModel)
-	for _, v := range []string{"bf_emma", "bm_george"} {
-		if _, ok := k.Voice(v); !ok {
-			t.Errorf("the default model has no voice %s", v)
+	for i, v := range []string{"af", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam", "am_michael", "bf_emma", "bf_isabella", "bm_george", "bm_lewis"} {
+		if got, ok := k.Voice(v); !ok || got.SID != i {
+			t.Errorf("%s: %+v %v, want id %d", v, got, ok, i)
 		}
+	}
+	if len(k.Voices) != 11 || k.DefaultVoice != "bf_emma" || k.SampleRate != 24000 {
+		t.Errorf("%+v", k)
 	}
 }
 
@@ -96,39 +120,39 @@ func TestSpeechModelPinned(t *testing.T) {
 		t.Fatal(why)
 	}
 	for name, mut := range map[string]func(m *SpeechModel){
-		"unverified revision": func(m *SpeechModel) { m.Revision = Unverified },
-		"short revision":      func(m *SpeechModel) { m.Revision = "abc" },
-		"unverified file":     func(m *SpeechModel) { m.Files[0].SHA256 = Unverified },
-		"zero size":           func(m *SpeechModel) { m.Files[1].Size = 0 },
-		"dotdot path":         func(m *SpeechModel) { m.Files[0].Path = "../x" },
-		"absolute path":       func(m *SpeechModel) { m.Files[0].Path = "/x" },
-		"dot component":       func(m *SpeechModel) { m.Files[0].Path = "espeak-ng-data/.x" },
-		"duplicate":           func(m *SpeechModel) { m.Files[1].Path = m.Files[0].Path },
-		"no files":            func(m *SpeechModel) { m.Files = nil },
-		"no voices file":      func(m *SpeechModel) { m.VoicesFile = "nope.bin" },
-		"no data dir":         func(m *SpeechModel) { m.DataDir = "nodata" },
-		"bad default":         func(m *SpeechModel) { m.DefaultVoice = "zz" },
-		"bad kind":            func(m *SpeechModel) { m.Kind = "tacotron" },
-		"bad repo":            func(m *SpeechModel) { m.Repo = "a/b/c" },
-		"bad rate":            func(m *SpeechModel) { m.SampleRate = 0 },
+		"unverified sha256": func(m *SpeechModel) { m.ArchiveSHA256 = Unverified },
+		"short sha256":      func(m *SpeechModel) { m.ArchiveSHA256 = "abc" },
+		"upper sha256":      func(m *SpeechModel) { m.ArchiveSHA256 = strings.ToUpper(m.ArchiveSHA256) },
+		"zero size":         func(m *SpeechModel) { m.ArchiveSize = 0 },
+		"http":              func(m *SpeechModel) { m.ArchiveURL = "http" + strings.TrimPrefix(m.ArchiveURL, "https") },
+		"other host":        func(m *SpeechModel) { m.ArchiveURL = "https://example.com/x.tar.bz2" },
+		"query":             func(m *SpeechModel) { m.ArchiveURL += "?x=1.tar.bz2" },
+		"not bz2":           func(m *SpeechModel) { m.ArchiveURL = strings.TrimSuffix(m.ArchiveURL, ".bz2") + ".gz" },
+		"root with slash":   func(m *SpeechModel) { m.ArchiveRoot = "a/b" },
+		"root dotdot":       func(m *SpeechModel) { m.ArchiveRoot = ".." },
+		"dotdot model":      func(m *SpeechModel) { m.ModelFile = "../x" },
+		"absolute tokens":   func(m *SpeechModel) { m.TokensFile = "/x" },
+		"no voices file":    func(m *SpeechModel) { m.VoicesFile = "" },
+		"no data dir":       func(m *SpeechModel) { m.DataDir = "" },
+		"bad default":       func(m *SpeechModel) { m.DefaultVoice = "zz" },
+		"bad kind":          func(m *SpeechModel) { m.Kind = "tacotron" },
+		"bad rate":          func(m *SpeechModel) { m.SampleRate = 0 },
+		"no voices":         func(m *SpeechModel) { m.Voices = nil },
+		"name with slash":   func(m *SpeechModel) { m.Name = "../x" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := testSpeechModel()
-			m.Files = slices.Clone(m.Files)
 			mut(&m)
 			if m.Pinned() == "" {
 				t.Fatal("accepted")
 			}
 		})
 	}
-}
-
-func TestSpeechFileURL(t *testing.T) {
+	// A VITS model needs no voices file.
 	m := testSpeechModel()
-	got := m.FileURL(SpeechFile{Path: "espeak-ng-data/voices/!v/a b"})
-	want := "https://huggingface.co/someone/tiny-kokoro/resolve/" + strings.Repeat("b", 40) + "/espeak-ng-data/voices/%21v/a%20b"
-	if got != want {
-		t.Fatalf("%s", got)
+	m.Kind, m.VoicesFile = KindVITS, ""
+	if why := m.Pinned(); why != "" {
+		t.Fatal(why)
 	}
 }
 
@@ -163,7 +187,7 @@ func TestSherpaArgs(t *testing.T) {
 	want := []string{
 		"--kokoro-model=/m/tiny-kokoro/model.onnx", "--kokoro-voices=/m/tiny-kokoro/voices.bin",
 		"--kokoro-tokens=/m/tiny-kokoro/tokens.txt", "--kokoro-data-dir=/m/tiny-kokoro/espeak-ng-data",
-		"--kokoro-length-scale=0.800", "--num-threads=2", "--sid=7", "--output-filename=/m/.speak-1/speech.wav", "Hello.",
+		"--kokoro-length-scale=0.800", "--num-threads=2", "--sid=7", "--output-filename=/m/.speak-1/speech.wav", "--", "Hello.",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("%q", got)
@@ -171,7 +195,7 @@ func TestSherpaArgs(t *testing.T) {
 	m.Kind, m.ModelFile, m.VoicesFile = KindVITS, "alba.onnx", ""
 	got = SherpaArgs(m, "/m", SpeechVoice{"alba", 0, "en-GB"}, 1, 1, "/o.wav", "Hi.")
 	want = []string{"--vits-model=/m/tiny-kokoro/alba.onnx", "--vits-tokens=/m/tiny-kokoro/tokens.txt",
-		"--vits-data-dir=/m/tiny-kokoro/espeak-ng-data", "--vits-length-scale=1.000", "--num-threads=1", "--sid=0", "--output-filename=/o.wav", "Hi."}
+		"--vits-data-dir=/m/tiny-kokoro/espeak-ng-data", "--vits-length-scale=1.000", "--num-threads=1", "--sid=0", "--output-filename=/o.wav", "--", "Hi."}
 	if !slices.Equal(got, want) {
 		t.Fatalf("%q", got)
 	}
@@ -236,115 +260,349 @@ func TestSpeechWAV(t *testing.T) {
 	}
 }
 
+// serveArchive serves the file at p, counting requests.
+func serveArchive(t *testing.T, p string) (*httptest.Server, *int) {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	n := new(int)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		*n++
+		mu.Unlock()
+		_, _ = w.Write(b)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, n
+}
+
 func TestFetchAndVerifySpeech(t *testing.T) {
 	m := testSpeechModel()
-	var mu sync.Mutex
-	asked := map[string]int{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := strings.TrimPrefix(r.URL.Path, "/")
-		mu.Lock()
-		asked[p]++
-		mu.Unlock()
-		body, ok := testSpeechFiles[p]
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = w.Write([]byte(body))
-	}))
-	defer srv.Close()
+	srv, asked := serveArchive(t, testSpeechArchive)
 	dir := filepath.Join(t.TempDir(), "models")
-	src := func(f SpeechFile) string { return srv.URL + "/" + f.Path }
 	f := Fetcher{AllowHost: loopbackOnly(srv)}
-	root, err := f.FetchSpeechFrom(context.Background(), m, dir, src)
+	root, err := f.FetchSpeechFrom(context.Background(), m, dir, srv.URL+"/a.tar.bz2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if root != SpeechDir(dir, m) {
 		t.Fatalf("root %s", root)
 	}
-	if err := VerifySpeech(dir, m); err != nil {
+	files, err := VerifySpeech(dir, m)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(filepath.Join(root, "espeak-ng-data", "lang")); fi.Mode().Perm() != 0o700 {
-		t.Fatalf("subdirectory mode %v", fi.Mode())
+	if !slices.Equal(files, testSpeechManifest()) {
+		t.Fatalf("%+v", files)
 	}
-	// Verified files are not downloaded again.
-	if _, err := f.FetchSpeechFrom(context.Background(), m, dir, src); err != nil {
-		t.Fatal(err)
+	if _, err := os.Lstat(filepath.Join(root, "._model.onnx")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("._model.onnx: %v", err)
 	}
-	for p, n := range asked {
-		if n != 1 {
-			t.Errorf("%s fetched %d times", p, n)
+	for _, d := range []string{"espeak-ng-data/lang", "espeak-ng-data/empty", "espeak-ng-data/voices/!v"} {
+		if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(d))); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Fatalf("%s: %v", d, err)
 		}
 	}
-	// A changed file fails the check, and the next fetch replaces it.
+	if fi, _ := os.Stat(SpeechPath(dir, m, "model.onnx")); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("file mode %v", fi.Mode())
+	}
+	// Nothing is left beside the model: no archive, no temp directory.
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("%v", entries)
+	}
+	// A verified model is not downloaded again.
+	if _, err := f.FetchSpeechFrom(context.Background(), m, dir, srv.URL+"/a.tar.bz2"); err != nil || *asked != 1 {
+		t.Fatalf("%v, %d downloads", err, *asked)
+	}
+	// A changed file fails the check, and the next fetch replaces the model.
 	if err := os.WriteFile(filepath.Join(root, "tokens.txt"), []byte("a 9\nb 2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifySpeech(dir, m); !errors.Is(err, ErrModel) {
+	if _, err := VerifySpeech(dir, m); !errors.Is(err, ErrModel) {
 		t.Fatalf("changed file: %v", err)
 	}
-	if _, err := f.FetchSpeechFrom(context.Background(), m, dir, src); err != nil {
+	if _, err := f.FetchSpeechFrom(context.Background(), m, dir, srv.URL+"/a.tar.bz2"); err != nil || *asked != 2 {
+		t.Fatalf("%v, %d downloads", err, *asked)
+	}
+	if _, err := VerifySpeech(dir, m); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifySpeech(dir, m); err != nil {
-		t.Fatal(err)
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("the old model is left: %v", entries)
+	}
+	// An archive of other bytes is refused, and the model there kept.
+	other := m
+	other.ArchiveSHA256 = strings.Repeat("0", 64)
+	if _, err := f.FetchSpeechFrom(context.Background(), other, filepath.Join(t.TempDir(), "m3"), srv.URL+"/a.tar.bz2"); err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("wrong sha256: %v", err)
 	}
 	// An unpinned model is never fetched.
 	u := m
-	u.Revision = Unverified
-	if _, err := f.FetchSpeechFrom(context.Background(), u, dir, src); !errors.Is(err, ErrUnpinned) {
+	u.ArchiveSHA256 = Unverified
+	if _, err := f.FetchSpeechFrom(context.Background(), u, dir, srv.URL); !errors.Is(err, ErrUnpinned) {
 		t.Fatalf("unpinned: %v", err)
 	}
-	// The real source is Hugging Face only.
-	if _, err := (Fetcher{}).FetchSpeechFrom(context.Background(), m, filepath.Join(t.TempDir(), "m2"), src); err == nil || !strings.Contains(err.Error(), "not a Hugging Face host") {
+	// The real source is GitHub's release hosts only.
+	if _, err := (Fetcher{}).FetchSpeechFrom(context.Background(), m, filepath.Join(t.TempDir(), "m2"), srv.URL); err == nil || !strings.Contains(err.Error(), "not a GitHub release host") {
 		t.Fatalf("loopback source: %v", err)
+	}
+}
+
+func TestGitHubReleaseHost(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/x.tar.bz2":   true,
+		"https://release-assets.githubusercontent.com/github-production-release-asset/1": true,
+		"https://objects.githubusercontent.com/github-production-release-asset-2e65be/1": true,
+		"https://github.com:443/x":                   true,
+		"http://github.com/x":                        false,
+		"https://github.com:8443/x":                  false,
+		"https://user@github.com/x":                  false,
+		"https://raw.githubusercontent.com/x/y/z":    false,
+		"https://github.com.evil.test/x":             false,
+		"https://evil.test/github.com":               false,
+		"https://huggingface.co/x/resolve/abc/model": false,
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := GitHubReleaseHost(u); got != want {
+			t.Errorf("%s: %v", raw, got)
+		}
+	}
+}
+
+// tarEntry is one entry of a test archive.
+type tarEntry struct {
+	name, body string
+	typ        byte
+	link       string
+}
+
+func testTar(t *testing.T, entries []tarEntry) *tar.Reader {
+	t.Helper()
+	var b bytes.Buffer
+	w := tar.NewWriter(&b)
+	for _, e := range entries {
+		h := &tar.Header{Name: e.name, Typeflag: e.typ, Mode: 0o644, Linkname: e.link, ModTime: time.Unix(1700000000, 0)}
+		if e.typ == tar.TypeReg {
+			h.Size = int64(len(e.body))
+		}
+		if err := w.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if e.typ == tar.TypeReg {
+			if _, err := w.Write([]byte(e.body)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return tar.NewReader(&b)
+}
+
+// goodTar is a complete tiny-kokoro archive's entries.
+func goodTar() []tarEntry {
+	var out []tarEntry
+	for _, f := range testSpeechManifest() {
+		out = append(out, tarEntry{name: "tiny-kokoro/" + f.Path, body: testSpeechFiles[f.Path], typ: tar.TypeReg})
+	}
+	return out
+}
+
+// privateTemp is a private (0700) temporary directory, as the one a fetch
+// unpacks into.
+func privateTemp(t *testing.T) string {
+	t.Helper()
+	d := filepath.Join(t.TempDir(), "into")
+	if err := PrivateDir(d); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestUnpackSpeechTar(t *testing.T) {
+	m := testSpeechModel()
+	files, err := unpackSpeechTar(testTar(t, append([]tarEntry{{name: "./tiny-kokoro/", typ: tar.TypeDir}, {name: "tiny-kokoro/x/.hidden/y", body: "z", typ: tar.TypeReg}}, goodTar()...)), privateTemp(t), m)
+	if err != nil || !slices.Equal(files, testSpeechManifest()) {
+		t.Fatalf("%v %+v", err, files)
+	}
+	for name, tc := range map[string]struct {
+		extra []tarEntry
+		drop  string
+		want  string
+	}{
+		"outside the top":   {extra: []tarEntry{{name: "other/x", body: "x", typ: tar.TypeReg}}, want: "not below"},
+		"a file at the top": {extra: []tarEntry{{name: "tiny-kokoro", body: "x", typ: tar.TypeReg}}, want: "not a plain relative path"},
+		"dotdot":            {extra: []tarEntry{{name: "tiny-kokoro/../x", body: "x", typ: tar.TypeReg}}, want: "not a plain relative path"},
+		"absolute":          {extra: []tarEntry{{name: "/tiny-kokoro/x", body: "x", typ: tar.TypeReg}}, want: "not below"},
+		"double slash":      {extra: []tarEntry{{name: "tiny-kokoro/a//x", body: "x", typ: tar.TypeReg}}, want: "not a plain relative path"},
+		"control character": {extra: []tarEntry{{name: "tiny-kokoro/a\tx", body: "x", typ: tar.TypeReg}}, want: "not a plain relative path"},
+		"symlink":           {extra: []tarEntry{{name: "tiny-kokoro/l", typ: tar.TypeSymlink, link: "/etc/passwd"}}, want: "not a regular file or a directory"},
+		"hard link":         {extra: []tarEntry{{name: "tiny-kokoro/l", typ: tar.TypeLink, link: "tiny-kokoro/model.onnx"}}, want: "not a regular file or a directory"},
+		"fifo":              {extra: []tarEntry{{name: "tiny-kokoro/f", typ: tar.TypeFifo}}, want: "not a regular file or a directory"},
+		"twice":             {extra: []tarEntry{{name: "tiny-kokoro/tokens.txt", body: "again", typ: tar.TypeReg}}, want: "exists"},
+		"file then dir":     {extra: []tarEntry{{name: "tiny-kokoro/tokens.txt/x", body: "x", typ: tar.TypeReg}}, want: "tokens.txt"},
+		"no voices":         {drop: "voices.bin", want: "no voices.bin"},
+		"no phondata":       {drop: "espeak-ng-data/phondata", want: "no espeak-ng-data/phondata"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var es []tarEntry
+			for _, e := range goodTar() {
+				if e.name != "tiny-kokoro/"+tc.drop {
+					es = append(es, e)
+				}
+			}
+			es = append(es, tc.extra...)
+			into := privateTemp(t)
+			_, err := unpackSpeechTar(testTar(t, es), into, m)
+			if !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if _, err := os.Lstat(filepath.Join(into, "l")); err == nil {
+				t.Fatal("a link was made")
+			}
+		})
+	}
+}
+
+func TestFetchSpeechRefusesABadArchive(t *testing.T) {
+	// The pinned archive whose top directory is not the one the table
+	// names: nothing lands.
+	m := testSpeechModel()
+	m.ArchiveRoot = "other"
+	srv, _ := serveArchive(t, testSpeechArchive)
+	dir := filepath.Join(t.TempDir(), "models")
+	if _, err := (Fetcher{AllowHost: loopbackOnly(srv)}).FetchSpeechFrom(context.Background(), m, dir, srv.URL); !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), "not below other/") {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("left behind: %v", entries)
 	}
 }
 
 func TestVerifySpeechRefusesUnsafeLayouts(t *testing.T) {
 	m := testSpeechModel()
 	t.Run("missing", func(t *testing.T) {
-		if err := VerifySpeech(t.TempDir(), m); !errors.Is(err, fs.ErrNotExist) {
+		if _, err := VerifySpeech(t.TempDir(), m); !errors.Is(err, fs.ErrNotExist) {
 			t.Fatal(err)
 		}
 	})
-	t.Run("symlinked directory", func(t *testing.T) {
+	t.Run("missing file", func(t *testing.T) {
 		dir := t.TempDir()
 		placeSpeech(t, dir, m)
-		data := filepath.Join(SpeechDir(dir, m), "espeak-ng-data")
-		moved := filepath.Join(dir, "elsewhere")
-		if err := os.Rename(data, moved); err != nil {
+		if err := os.Remove(SpeechPath(dir, m, "espeak-ng-data/en_dict")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(moved, data); err != nil {
-			t.Fatal(err)
-		}
-		if err := VerifySpeech(dir, m); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		if _, err := VerifySpeech(dir, m); !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), "missing") {
 			t.Fatal(err)
 		}
 	})
-	t.Run("open directory", func(t *testing.T) {
-		dir := t.TempDir()
-		placeSpeech(t, dir, m)
-		if err := os.Chmod(SpeechDir(dir, m), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := VerifySpeech(dir, m); err == nil || !strings.Contains(err.Error(), "other users") {
-			t.Fatal(err)
-		}
-	})
-	t.Run("writable file", func(t *testing.T) {
-		dir := t.TempDir()
-		placeSpeech(t, dir, m)
-		if err := os.Chmod(SpeechPath(dir, m, "model.onnx"), 0o666); err != nil {
-			t.Fatal(err)
-		}
-		if err := VerifySpeech(dir, m); !errors.Is(err, ErrModel) {
-			t.Fatal(err)
-		}
-	})
+	for name, tc := range map[string]struct {
+		mut  func(t *testing.T, dir string)
+		want string
+	}{
+		"symlinked directory": {func(t *testing.T, dir string) {
+			data := filepath.Join(SpeechDir(dir, m), "espeak-ng-data")
+			moved := filepath.Join(dir, "elsewhere")
+			if err := os.Rename(data, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, data); err != nil {
+				t.Fatal(err)
+			}
+		}, "symbolic link"},
+		"open directory": {func(t *testing.T, dir string) {
+			if err := os.Chmod(SpeechDir(dir, m), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "other users"},
+		"open subdirectory": {func(t *testing.T, dir string) {
+			if err := os.Chmod(SpeechPath(dir, m, "espeak-ng-data/lang"), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}, "other users"},
+		"writable file": {func(t *testing.T, dir string) {
+			if err := os.Chmod(SpeechPath(dir, m, "model.onnx"), 0o666); err != nil {
+				t.Fatal(err)
+			}
+		}, "another user"},
+		"an extra file": {func(t *testing.T, dir string) {
+			if err := os.WriteFile(SpeechPath(dir, m, "espeak-ng-data/lang/gmw/en-GB"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "not among the files"},
+		"an extra link": {func(t *testing.T, dir string) {
+			if err := os.Symlink("/etc/passwd", SpeechPath(dir, m, "espeak-ng-data/fr_dict")); err != nil {
+				t.Fatal(err)
+			}
+		}, "symbolic link"},
+		"a file made a link": {func(t *testing.T, dir string) {
+			p, moved := SpeechPath(dir, m, "tokens.txt"), filepath.Join(dir, "tokens.txt")
+			if err := os.Rename(p, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, p); err != nil {
+				t.Fatal(err)
+			}
+		}, "symbolic link"},
+		"no manifest": {func(t *testing.T, dir string) {
+			if err := os.Remove(filepath.Join(SpeechDir(dir, m), speechManifest)); err != nil {
+				t.Fatal(err)
+			}
+		}, "did not unpack it"},
+		"writable manifest": {func(t *testing.T, dir string) {
+			if err := os.Chmod(filepath.Join(SpeechDir(dir, m), speechManifest), 0o622); err != nil {
+				t.Fatal(err)
+			}
+		}, "another user"},
+		"another archive's manifest": {func(t *testing.T, dir string) {
+			o := m
+			o.ArchiveSHA256 = strings.Repeat("e", 64)
+			p := filepath.Join(SpeechDir(dir, m), speechManifest)
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeSpeechManifest(SpeechDir(dir, m), o, testSpeechManifest()); err != nil {
+				t.Fatal(err)
+			}
+		}, "another archive"},
+		"a manifest without a role": {func(t *testing.T, dir string) {
+			files := slices.DeleteFunc(testSpeechManifest(), func(f SpeechFile) bool { return f.Path == "voices.bin" })
+			if err := os.Remove(filepath.Join(SpeechDir(dir, m), speechManifest)); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeSpeechManifest(SpeechDir(dir, m), m, files); err != nil {
+				t.Fatal(err)
+			}
+		}, "no voices.bin"},
+		"a manifest with a dotdot path": {func(t *testing.T, dir string) {
+			files := append(testSpeechManifest(), SpeechFile{Path: "../x", Size: 1, SHA256: strings.Repeat("a", 64)})
+			if err := os.Remove(filepath.Join(SpeechDir(dir, m), speechManifest)); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeSpeechManifest(SpeechDir(dir, m), m, files); err != nil {
+				t.Fatal(err)
+			}
+		}, "not a plain path"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			placeSpeech(t, dir, m)
+			if _, err := VerifySpeech(dir, m); err != nil {
+				t.Fatal(err)
+			}
+			tc.mut(t, dir)
+			if _, err := VerifySpeech(dir, m); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
 }
 
 var (
@@ -482,7 +740,7 @@ func TestSpeakerChecksTheModelBeforeEveryRun(t *testing.T) {
 	if err := os.Remove(p); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Check(); err == nil || !strings.Contains(err.Error(), "not downloaded") {
+	if _, err := s.Check(); err == nil || !strings.Contains(err.Error(), "voices.bin is missing") {
 		t.Fatalf("missing file: %v", err)
 	}
 	// The failure is remembered for the same layout, and a file that

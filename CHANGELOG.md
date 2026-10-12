@@ -71,6 +71,9 @@ version bump moves the block under the new version heading.
 
 ### Changed
 
+- **`lever stop` no longer warns when the manager is already suspended (lever#198).** scion
+  refuses to suspend a suspended record, and `stop` printed that as a failed suspend; it now
+  checks the record and prints a note instead.
 - **`lever up` says what it is doing from its first line (lever#195):** a header naming the
   application and the backend's containment posture (as `apply` printed already) comes before
   the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's

@@ -308,8 +308,11 @@ version bump moves the block under the new version heading.
   which would then have been sent SIGTERM and SIGKILL. lever now reads the process's arguments
   (`/proc` on Linux, the `kern.procargs2` sysctl on macOS) and treats the pid as the daemon only
   when they are `lever broker serve` (or `remote serve`) and, where they name the config by an
-  absolute path (as `apply` starts them), this instance's config; checked again before the SIGKILL. Anything else is a stale pid file: it is removed and nothing is signalled.
-  `lever doctor` and `lever remote status` still report liveness by the pid alone.
+  absolute path (as `apply` starts them), this instance's config. It is checked again before the
+  SIGKILL, and on Linux the signals go through a pidfd taken before the check. Anything else is a
+  stale pid file: it is removed and nothing is signalled. A live process whose arguments cannot be
+  read is not signalled either; the stop fails and keeps the pid file rather than guess. `lever
+  doctor` and `lever remote status` still report liveness by the pid alone.
 - **The read-only guard checks the manager's namespaces (lever#162).** The guest-side live check
   (the broker's tool guard, doctor's *manager read-only paths* and *shared folders* rows, apply's
   keep and resume warning) read the mounts of the manager's first process. A root agent that could

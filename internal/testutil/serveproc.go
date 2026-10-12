@@ -20,11 +20,18 @@ import (
 // as it exits; done is closed then.
 func StartServeProcess(t testing.TB, sub, configPath string) (cmd *exec.Cmd, done <-chan struct{}) {
 	t.Helper()
+	return StartServeProcessScript(t, sub, configPath, "")
+}
+
+// StartServeProcessScript is StartServeProcess with prelude (sh commands,
+// e.g. a trap) run before the sleep.
+func StartServeProcessScript(t testing.TB, sub, configPath, prelude string) (cmd *exec.Cmd, done <-chan struct{}) {
+	t.Helper()
 	dir := t.TempDir()
 	// The ready file says the script runs, so the kernel shows its argv
 	// (right after exec there is a moment where it does not yet). The
 	// trailing ":" keeps the shell from exec'ing sleep in its place.
-	if err := os.WriteFile(filepath.Join(dir, sub), []byte(": > ready\nsleep 60\n:\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, sub), []byte(prelude+"\n: > ready\nsleep 60\n:\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	args := []string{"lever", sub, "serve"}

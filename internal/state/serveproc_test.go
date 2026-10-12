@@ -26,16 +26,18 @@ func TestServesHere(t *testing.T) {
 		argv []string
 		want bool
 	}{
-		"apply's broker":               {[]string{"/usr/local/bin/lever", "broker", "serve", cfg}, true},
-		"by hand, relative config":     {[]string{"lever", "broker", "serve", "lever.yaml"}, true},
-		"by hand, no config":           {[]string{"lever", "broker", "serve"}, true},
-		"another instance's broker":    {[]string{"lever", "broker", "serve", filepath.Join(other, "lever.yaml")}, false},
-		"the remote proxy":             {[]string{"lever", "remote", "serve", cfg}, false},
-		"another lever command":        {[]string{"lever", "broker", "status", cfg}, false},
-		"an unrelated process":         {[]string{"/usr/bin/sleep", "60"}, false},
-		"broker as argv[0] only":       {[]string{"broker", "serve"}, false},
-		"empty":                        {nil, false},
-		"a config that does not exist": {[]string{"lever", "broker", "serve", "/nonexistent/lever.yaml"}, false},
+		"apply's broker":                  {[]string{"/usr/local/bin/lever", "broker", "serve", cfg}, true},
+		"by hand, relative config":        {[]string{"lever", "broker", "serve", "lever.yaml"}, true},
+		"by hand, no config":              {[]string{"lever", "broker", "serve"}, true},
+		"another instance's, a flag last": {[]string{"lever", "broker", "serve", filepath.Join(other, "lever.yaml"), "--x"}, false},
+		"apply's, a flag first":           {[]string{"lever", "broker", "serve", "--x", cfg}, true},
+		"another instance's broker":       {[]string{"lever", "broker", "serve", filepath.Join(other, "lever.yaml")}, false},
+		"the remote proxy":                {[]string{"lever", "remote", "serve", cfg}, false},
+		"another lever command":           {[]string{"lever", "broker", "status", cfg}, false},
+		"an unrelated process":            {[]string{"/usr/bin/sleep", "60"}, false},
+		"broker as argv[0] only":          {[]string{"broker", "serve"}, false},
+		"empty":                           {nil, false},
+		"a config that does not exist":    {[]string{"lever", "broker", "serve", "/nonexistent/lever.yaml"}, false},
 	} {
 		if got := st.servesHere(c.argv, BrokerDaemon); got != c.want {
 			t.Errorf("%s: servesHere(%q) = %v, want %v", name, c.argv, got, c.want)
@@ -92,7 +94,7 @@ func TestServeProcessReadsARealProcess(t *testing.T) {
 	if st.ServeProcess(pid, RemoteDaemon) {
 		t.Fatal("the broker was taken for the remote proxy")
 	}
-	if st.ServeProcess(os.Getpid(), BrokerDaemon) {
+	if st.Identify(os.Getpid(), BrokerDaemon) != NotServe {
 		t.Fatal("this test process was taken for a broker")
 	}
 	if err := os.WriteFile(st.PID(), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {

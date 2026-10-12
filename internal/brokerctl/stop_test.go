@@ -250,3 +250,31 @@ func TestStopNeverSignalsThisProcess(t *testing.T) {
 		assertPidFileGone(t, tgt.pidFile(s), "stale")
 	}
 }
+
+// A daemon that ignores SIGTERM is SIGKILLed once the wait runs out (it is
+// still the daemon then, checked again before the SIGKILL).
+func TestStopKillsADaemonThatIgnoresSIGTERM(t *testing.T) {
+	s := newStopState(t)
+	cmd, done := testutil.StartServeProcessScript(t, state.BrokerDaemon, filepath.Join(filepath.Dir(s.Dir), "lever.yaml"), "trap '' TERM")
+	writePID(t, s.PID(), cmd.Process.Pid)
+	if err := StopBroker(s); err != nil {
+		t.Fatal(err)
+	}
+	assertKilled(t, sleeper{cmd, done}, "a daemon ignoring SIGTERM")
+	assertPidFileGone(t, s.PID(), "the pid file should be removed")
+}
+
+// A live pid whose identity cannot be read is neither signalled nor
+// forgotten: the stop fails and keeps the file.
+func TestStopKeepsAPidItCannotIdentify(t *testing.T) {
+	s := newStopState(t)
+	p := startSleeper(t, s, brokerTarget)
+	err := stopProcessByPIDFile(s.PID(), func(int) state.Identity { return state.Unknown })
+	if err == nil {
+		t.Fatal("an unidentifiable pid was not reported")
+	}
+	if _, serr := os.Stat(s.PID()); serr != nil {
+		t.Fatalf("the pid file was removed: %v", serr)
+	}
+	assertAlive(t, p, "an unidentifiable process")
+}

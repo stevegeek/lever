@@ -35,16 +35,19 @@ version bump moves the block under the new version heading.
   application and the backend's containment posture (as `apply` printed already) comes before
   the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's
   hub is not running (after `lever stop` or a VM restart); starting it") instead of scion's raw
-  "connection refused". `apply` prints the posture in the same header.
+  "connection refused". `apply` prints the posture in the same header, on stderr with the rest of
+  the list (also with `--progress quiet`); `lever acceptance`'s `check …` lines moved to stderr
+  with it.
 - **One log line shape for lever's daemons (lever#197).** The broker, the remote proxy and the
   first-party tools write slog text lines with a UTC millisecond time and `component=`; lines the
   Go runtime writes for them (TLS handshake errors) and their startup prints take the same shape,
   so `broker.out.log`, `remote.log`, `broker.log` and `tool-logs/<tool>.log` read alike. Every
-  line passes one redaction rule (env values in an argv, Anthropic and GitHub tokens, bearer
-  tokens, `--…secret=` flags), which `scion` errors already used. `lever doctor`'s
+  line passes one redaction rule (env values in an argv, Anthropic, GitHub and scion hub tokens,
+  JWTs, Authorization headers, bearer tokens, `--…secret`/`--…token` flag values), which the
+  `scion` errors shown to the operator now use too. `lever doctor`'s
   expired-certificate check reads both the new and the old `broker.out.log` lines. The audit
-  JSON-lines files and the ledgers keep their form. captool's default logger is now the process's
-  default slog logger instead of a discarded one.
+  JSON-lines files and the ledgers keep their form. A daemon that fails to start still ends its
+  file with the plain `Error: …` line the `lever` binary prints.
 - **Operator warnings read the same everywhere:** `<who>: warning: <text>` (`lever`, `jail`, or the
   bring-up step), replacing the mix of `WARNING:`, bare `warning:` and `lever: warning:`.
 - **Jail ABI 2.** The in-jail code changed (shared packages); rebuild the agent image

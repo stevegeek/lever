@@ -54,3 +54,29 @@ func TestUpProbeReasonNeverEmpty(t *testing.T) {
 		t.Fatal("empty reason")
 	}
 }
+
+// TestFinishOnReturnRecordsAPanicAsAFailure: a crashed run must not be
+// saved as a success, and the panic goes on.
+func TestFinishOnReturnRecordsAPanicAsAFailure(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	os.MkdirAll(st.BringupLogDir(), 0o700)
+	b := &bringup{rep: progress.New(progress.Options{Mode: progress.ModeQuiet, Command: "up"}), state: st}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("panic swallowed")
+			}
+		}()
+		var err error
+		defer b.finishOnReturn(&err)
+		panic("boom")
+	}()
+	sum, err := progress.ReadLast(st.LastBringup())
+	if err != nil || sum.Outcome != "fail" {
+		t.Fatalf("summary %+v, %v", sum, err)
+	}
+	b.finish(nil) // a second finish changes nothing
+	if sum2, _ := progress.ReadLast(st.LastBringup()); sum2.Outcome != "fail" {
+		t.Fatal("second finish rewrote the summary")
+	}
+}

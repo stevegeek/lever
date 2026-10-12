@@ -146,9 +146,11 @@ time=2026-10-12T13:00:01.250Z level=WARN msg="could not remove /path/broker.pid:
 The components are `broker`, `remote-proxy` and `lever-tool-<name>`; the few lines `lever` itself
 adds to `broker.log` carry `component=lever`. Lines the Go runtime writes for a daemon (an HTTP
 server's TLS handshake error, say) take the same shape, so `broker.out.log`, `remote.log` and
-`tool-logs/<tool>.log` read alike. Every line passes one redaction rule before it is written: an
-env value in a `podman run` argv, Anthropic and GitHub tokens, a bearer token and a
-`--…secret=`/`--…token=` flag value are masked (`***`). That is a backstop; lever does not log a
+`tool-logs/<tool>.log` read alike; a daemon that fails to start ends its file with the plain
+`Error: …` line `lever` prints. Every line passes one redaction rule before it is written: an
+env value in a `podman run` argv, Anthropic, GitHub and scion hub tokens, a JWT, an
+Authorization header, a bearer token and a `--…secret`/`--…token`/`--…password` flag value are
+masked (`***`). That is a backstop; lever does not log a
 credential on purpose. Files written before 0.36.0 keep their old lines; `lever doctor` reads both.
 
 Two kinds of record keep their own form, because tools and people parse them: the
@@ -169,11 +171,12 @@ steps scroll above it with their time and a note (*reused*, *already loaded*, *a
 The run ends with its total and its slowest steps. `--progress` (or `LEVER_PROGRESS`) chooses the
 output: `auto` (the default: the live line on a terminal, else `plain`), `plain` (a timestamped
 line per step, and a *still running* line every 15 s for a long one), `json` (one JSON object per
-event), `quiet` (warnings and failures only).
+event), `quiet` (the header, warnings and failures only).
 
 When a step fails, the list shows the step, its time, and the last lines of the log that explains
 it: `broker.out.log` for broker-up, `remote.log` for the remote proxy, the hub's log in the jail
-(`~/.scion/server.log`) for the steps that talk to the hub, Lima's `ha.stderr.log` for the VM start.
+(`~/.scion/server.log`) for the steps that talk to the hub, Lima's `ha.stderr.log` for the VM start; credentials in those
+lines are masked. An interrupted run (Ctrl-C) shows no tail.
 The manager container's own log is never shown: it is the agent's word.
 
 `LEVER_TRACE=1` adds a line for every external command lever runs (`limactl`, `scion`, `podman`,

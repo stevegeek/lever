@@ -30,6 +30,7 @@ const progressFlagUsage = "progress output: auto (a live line on a terminal, els
 type bringup struct {
 	rep   *progress.Reporter
 	state state.State
+	done  bool
 }
 
 // startBringup builds the run's progress list (lever#185): the renderer
@@ -79,19 +80,31 @@ func bringupHeader(command string, app *config.App) string {
 // finish ends the run and saves its summary for doctor. Call it before an
 // attach: the terminal must be the manager's from then on.
 func (b *bringup) finish(err error) {
-	if b == nil {
+	if b == nil || b.done {
 		return
 	}
+	b.done = true
 	sum := b.rep.Finish(err)
 	if b.state.Dir != "" && sum.Outcome != "" {
 		_ = progress.WriteLast(b.state.LastBringup(), sum)
 	}
 }
 
+// finishOnReturn is finish for a defer: it ends the run with the command's
+// returned error, and a panic as a failure (then panics on), so a crashed
+// run is never recorded as a success.
+func (b *bringup) finishOnReturn(errp *error) {
+	if r := recover(); r != nil {
+		b.finish(fmt.Errorf("panic: %v", r))
+		panic(r)
+	}
+	b.finish(*errp)
+}
+
 // traceOn reads LEVER_TRACE: any value but "", "0" and "false".
 func traceOn() bool {
 	switch strings.ToLower(os.Getenv("LEVER_TRACE")) {
-	case "", "0", "false", "no":
+	case "", "0", "false":
 		return false
 	}
 	return true
@@ -219,6 +232,10 @@ func checkLastBringup(st state.State, now time.Time) checkResult {
 // slog and standard-log output, and its cobra prints, which take the
 // operator prose form and are logged at that form's level.
 func daemonLogging(cmd *cobra.Command, component string) {
+	// Once per process: a second call would wrap the line writer in itself.
+	if logging.Installed() {
+		return
+	}
 	l := logging.Install(cmd.ErrOrStderr(), component)
 	w := logging.Writer(l)
 	cmd.SetOut(w)

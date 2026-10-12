@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // keepRecords is how many run records RecordPath keeps in its directory.
@@ -21,7 +23,7 @@ func RecordPath(dir, command string, now time.Time) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("progress records: %w", err)
 	}
-	name := fmt.Sprintf("bringup-%s-%s.jsonl", command, now.UTC().Format("20060102T150405Z"))
+	name := fmt.Sprintf("bringup-%s-%s-%d.jsonl", command, now.UTC().Format("20060102T150405Z"), os.Getpid())
 	prune(dir, keepRecords-1)
 	return filepath.Join(dir, name), nil
 }
@@ -110,5 +112,6 @@ func (s Summary) Describe(now time.Time) string {
 			when = fmt.Sprintf("%dh%dm ago", h, m)
 		}
 	}
-	return fmt.Sprintf("%s (%s)", s.Line(), when)
+	// The labels come back from a file: show them as text only.
+	return termsafe.Sanitize(fmt.Sprintf("%s (%s)", s.Line(), when))
 }

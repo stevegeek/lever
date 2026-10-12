@@ -8,6 +8,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/daemon"
 	"github.com/stevegeek/lever/internal/egress"
+	"github.com/stevegeek/lever/internal/progress"
 )
 
 // ApplyEgress applies the LEVER_EGRESS ruleset inside the guest via RootPrefix,
@@ -94,8 +95,14 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 		if !closed4 || (lv4 == "" && lv6 == "") {
 			return "", "", false, fmt.Errorf("%w (the live %s chains are left as they are; the alias is read back from them only when the IPv4 chain is closed and names one)", err, egress.Chain)
 		}
-		daemon.Warnf("egress: could not resolve the host alias (%v) — the live closed IPv4 %s chain blocks DNS; "+
+		msg := fmt.Sprintf("egress: could not resolve the host alias (%v) — the live closed IPv4 %s chain blocks DNS; "+
 			"using the alias it names instead: v4 %q, v6 %q", err, egress.Chain, lv4, lv6)
+		// Above the progress list's live line when a bring-up shows one.
+		if rep := progress.From(ctx); rep != nil {
+			rep.Log("jail: warning: " + msg)
+		} else {
+			daemon.Warnf("%s", msg)
+		}
 		v4, v6 = lv4, lv6
 	}
 	var forwards []egress.DNSForward

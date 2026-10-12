@@ -116,7 +116,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer func() { run.finish(err) }()
+			defer run.finishOnReturn(&err)
 			rep := run.rep
 			printRemoteWarnings(cmd, app)
 			if err := checkContactGate(app, stateFor(path)); err != nil {
@@ -240,7 +240,6 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// The list ends before the attach: from here the terminal is the
 			// manager's.
 			run.finish(nil)
-			run = nil
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
@@ -267,6 +266,9 @@ func upDecisionNote(phase string, d upAction) string {
 	}
 	if phase == "" {
 		return "no manager yet; starting it"
+	}
+	if phase == scion.PhaseRunning || phase == scion.PhaseSuspended {
+		return fmt.Sprintf("phase %s; recreating it (--fresh)", scion.PhaseLabel(phase))
 	}
 	return fmt.Sprintf("phase %s; bringing it up", scion.PhaseLabel(phase))
 }

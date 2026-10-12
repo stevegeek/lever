@@ -37,7 +37,7 @@ func readBackstop(ctx captool.ValidatedContext, args map[string]string) error {
 func buildServer(store *Store, name, backend, adminURL string) (*captool.Server, error) {
 	return captool.New(captool.Config{
 		Name: name, Version: Version, Backend: backend, AdminURL: adminURL,
-		Log: slog.Default(),
+		Log: slog.Default(), // lever's log shape: main installs it
 		Operations: []captool.Operation{{
 			Name: "read", Description: "read rows from an allowed table filtered by owner",
 			Params: []captool.ParamSpec{

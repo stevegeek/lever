@@ -504,7 +504,7 @@ func (o patMintOpts) warn(format string, args ...any) {
 		o.Warn(format, args...)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "lever: warning: "+format+"\n", args...)
+	fmt.Fprintln(os.Stderr, termsafe.Sanitize(fmt.Sprintf("lever: warning: "+format, args...)))
 }
 
 // patReasonAbsent is patMintReason's answer for a first mint.
@@ -963,7 +963,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer func() { run.finish(err) }()
+			defer run.finishOnReturn(&err)
 			printRemoteWarnings(cmd, app)
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
@@ -980,7 +980,6 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			run.finish(nil)
-			run = nil
 			cmd.Printf("application %q is up.\n", app.Name)
 			return nil
 		},
@@ -1477,6 +1476,9 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 			return w.sc.ServerStart(ctx, opts)
 		},
 		ScopeKnown: w.sc.KnowsUATScope,
+		// Through the wiring's log: sanitized, and above the progress
+		// list's live line rather than written over it.
+		Warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
 	})
 }
 

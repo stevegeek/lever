@@ -71,7 +71,8 @@ func replace(groups []string, a slog.Attr) slog.Attr {
 }
 
 // The credential shapes Redact masks. Each keeps a recognisable prefix so
-// a reader knows what was there.
+// a reader knows what was there. The rules match a credential's shape, not
+// a word like "token" in prose: "reading token /path failed" stays as it is.
 var (
 	// envValueRE: a container-runtime env argument (-e KEY=VALUE,
 	// --env=KEY=VALUE, ...): the key stays, the value goes.
@@ -80,10 +81,19 @@ var (
 	anthropicRE = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{8,}`)
 	// githubRE: GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_, github_pat_).
 	githubRE = regexp.MustCompile(`\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{16,}`)
-	// bearerRE: an Authorization header value.
-	bearerRE = regexp.MustCompile(`(?i)\b(bearer|token)\s+[A-Za-z0-9._~+/=-]{16,}`)
-	// secretFlagRE: a --*secret*=VALUE / --*token*=VALUE / --*password*=VALUE flag.
-	secretFlagRE = regexp.MustCompile(`(?i)(--?[a-z0-9-]*(secret|token|password)[a-z0-9-]*=)\S+`)
+	// scionPATRE: the scion hub's personal access tokens.
+	scionPATRE = regexp.MustCompile(`\b(scion_pat_)[A-Za-z0-9_-]{8,}`)
+	// jwtRE: a JSON web token (three base64url parts, the first a JSON
+	// object's "{\"" prefix).
+	jwtRE = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.?[A-Za-z0-9_-]*`)
+	// authHeaderRE: an Authorization or *-Token header's value, with its
+	// scheme (Bearer, Basic) when it has one.
+	authHeaderRE = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|x-[a-z0-9-]*token)(\s*[:=]\s*)(bearer\s+|basic\s+)?\S+`)
+	// bearerRE: a bearer credential outside a header.
+	bearerRE = regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}`)
+	// secretFlagRE: a --*secret*, --*token* or --*password* flag's value,
+	// joined by = or by a space.
+	secretFlagRE = regexp.MustCompile(`(?i)(--?[a-z0-9-]*(secret|token|password)[a-z0-9-]*)(=|\s+)([^\s-]\S*)`)
 )
 
 // Redact masks the credentials lever handles wherever they appear in s.
@@ -92,8 +102,21 @@ func Redact(s string) string {
 	s = envValueRE.ReplaceAllString(s, "${1}${2}${3}${4}***")
 	s = anthropicRE.ReplaceAllString(s, "sk-ant-***")
 	s = githubRE.ReplaceAllString(s, "${1}***")
+	s = scionPATRE.ReplaceAllString(s, "${1}***")
+	s = jwtRE.ReplaceAllString(s, "eyJ***")
+	s = authHeaderRE.ReplaceAllString(s, "${1}${2}${3}***")
 	s = bearerRE.ReplaceAllString(s, "${1} ***")
-	return secretFlagRE.ReplaceAllString(s, "${1}***")
+	return secretFlagRE.ReplaceAllStringFunc(s, func(m string) string {
+		sub := secretFlagRE.FindStringSubmatch(m)
+		// A flag naming where the secret lives (--token-file, --secret-dir)
+		// carries a path, not the secret.
+		for _, suffix := range []string{"-file", "-path", "-dir", "-env", "-name"} {
+			if strings.HasSuffix(strings.ToLower(sub[1]), suffix) {
+				return m
+			}
+		}
+		return sub[1] + sub[3] + "***"
+	})
 }
 
 // Writer returns an io.Writer that logs each line written to it through l:

@@ -247,7 +247,7 @@ func TestQuietPrintsOnlyLogsAndFailures(t *testing.T) {
 	rep.Log("lever: note")
 	rep.Start("b").Done(errors.New("x"))
 	rep.Finish(errors.New("x"))
-	if got := out.String(); got != "lever: note\nFAIL  b  0.0s\n" {
+	if got := out.String(); got != "h\nlever: note\nFAIL  b  0.0s\n" {
 		t.Fatalf("quiet output %q", got)
 	}
 	if rep.Active() {
@@ -334,4 +334,57 @@ func readFile(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestTailIsRedactedAndSkippedOnCancel(t *testing.T) {
+	rep, out, _, _ := newRep(t, ModePlain, "")
+	s := rep.Start("broker-up")
+	s.TailFrom(func() (string, []string) {
+		return "broker.out.log", []string{"podman run -e TOKEN=sk-ant-oat01-abcdefghijkl x"}
+	})
+	s.Done(errors.New("Authorization: Bearer abcdefghijklmnopqrstuv"))
+	called := false
+	c := rep.Start("scion-server")
+	c.TailFrom(func() (string, []string) { called = true; return "x", []string{"y"} })
+	c.Done(context.Canceled)
+	rep.Finish(context.Canceled)
+	if strings.Contains(out.String(), "abcdefghijkl") {
+		t.Fatalf("tail not redacted:\n%s", out.String())
+	}
+	if called {
+		t.Fatal("tail read for an interrupted run")
+	}
+}
+
+func TestTTYFollowsTheWidthAndAlwaysTruncates(t *testing.T) {
+	out := &syncBuf{}
+	width := 60
+	rep := New(Options{Mode: ModeTTY, Out: out, WidthFunc: func() int { return width }, Ticker: newManual().ticker})
+	s := rep.Start("start-manager")
+	width = 12
+	s.Detail(strings.Repeat("x", 50))
+	line := out.String()
+	line = line[strings.LastIndex(line, "\r\x1b[K")+4:]
+	if n := len([]rune(line)); n > 12 {
+		t.Fatalf("live line %d runes > 12: %q", n, line)
+	}
+	rep.Finish(nil)
+}
+
+func TestRecordIsNeverOpenedThroughALink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	os.WriteFile(target, []byte("keep"), 0o600)
+	link := filepath.Join(dir, "rec.jsonl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip(err)
+	}
+	rep := New(Options{Mode: ModeQuiet, Record: link, Ticker: newManual().ticker})
+	rep.Finish(nil)
+	if rep.RecordError() == nil {
+		t.Fatal("record opened through a link")
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatal("link target changed")
+	}
 }

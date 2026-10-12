@@ -112,6 +112,12 @@ func (p *Progress) report() {
 	if p.rep == nil {
 		return
 	}
+	// After Stop the running step may be another one: say nothing.
+	select {
+	case <-p.stop:
+		return
+	default:
+	}
 	p.rep.Detail(p.detail())
 }
 

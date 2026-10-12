@@ -23,8 +23,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
@@ -85,6 +87,9 @@ type Options struct {
 	Trace bool
 	// Width is the terminal's width for the live line (0 = 100).
 	Width int
+	// WidthFunc, when set, is asked for the width at each redraw, so a
+	// resized terminal is followed.
+	WidthFunc func() int
 
 	Now    func() time.Time
 	Ticker func(time.Duration) (<-chan time.Time, func())
@@ -126,7 +131,7 @@ func New(opts Options) *Reporter {
 	rep := &Reporter{opts: opts, start: opts.Now()}
 	switch opts.Mode {
 	case ModeTTY:
-		rep.r = &ttyRenderer{w: opts.Out, width: opts.Width}
+		rep.r = &ttyRenderer{w: opts.Out, width: opts.Width, widthFn: opts.WidthFunc}
 	case ModeJSON:
 		rep.r = &jsonRenderer{w: opts.Out}
 	case ModeQuiet:
@@ -215,6 +220,7 @@ func (rep *Reporter) Header(text string) {
 	if rep == nil {
 		return
 	}
+	text = oneLine(text)
 	rep.mu.Lock()
 	defer rep.mu.Unlock()
 	rep.emit(event{Event: "header", Text: text})
@@ -230,7 +236,7 @@ func (rep *Reporter) Group(name string, total int) {
 	}
 	rep.mu.Lock()
 	defer rep.mu.Unlock()
-	rep.group, rep.total, rep.nInGrp = name, total, 0
+	rep.group, rep.total, rep.nInGrp = oneLine(name), total, 0
 }
 
 // Step is one running step. Its methods are safe on nil.
@@ -340,7 +346,9 @@ func (s *Step) finish(state, reason string, err error) {
 	// round trip, and the live line keeps ticking meanwhile.
 	var src string
 	var tail []string
-	if state == "fail" {
+	// An interrupted run (Ctrl-C) does not wait on a guest round trip for
+	// a tail nobody asked for.
+	if state == "fail" && !errors.Is(err, context.Canceled) {
 		s.rep.mu.Lock()
 		fn := s.tail
 		s.rep.mu.Unlock()
@@ -369,9 +377,11 @@ func (rep *Reporter) finishLocked(s *Step, state, reason string, err error, src 
 	ev := event{Event: "done", Group: s.Group, Step: s.Label, N: s.N, Of: s.Of,
 		MS: s.end.Sub(s.start).Milliseconds(), Outcome: state, Text: s.note}
 	if err != nil {
-		ev.Error = oneLine(err.Error())
+		ev.Error = logging.Redact(oneLine(err.Error()))
 	}
-	src, tail = termsafe.Sanitize(src), sanitizeTail(tail)
+	// One choke point for what a tail shows: masked, then made safe for
+	// the terminal, whatever its source did already.
+	src, tail = termsafe.Sanitize(logging.Redact(src)), sanitizeTail(tail)
 	if state == "fail" {
 		ev.Source, ev.Tail = src, tail
 	}
@@ -402,7 +412,7 @@ func (rep *Reporter) Command(head string, d time.Duration, code int, err error) 
 	defer rep.mu.Unlock()
 	ev := event{Event: "cmd", Text: head, MS: d.Milliseconds(), Code: code}
 	if err != nil && code == 0 {
-		ev.Error = oneLine(err.Error())
+		ev.Error = logging.Redact(oneLine(err.Error()))
 	}
 	rep.emit(ev)
 	rep.r.log(fmt.Sprintf("trace: %s (%s, exit %d)", head, round(d), code), rep.opts.Now())
@@ -546,7 +556,8 @@ func (rep *Reporter) emit(ev event) {
 }
 
 func openRecord(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// A new file only, never through a link: the name is the run's own.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("progress record: %w", err)
 	}
@@ -564,7 +575,7 @@ func oneLine(s string) string {
 func sanitizeTail(lines []string) []string {
 	var out []string
 	for _, l := range lines {
-		l = strings.TrimRight(termsafe.Sanitize(l), " \t\r")
+		l = strings.TrimRight(termsafe.Sanitize(logging.Redact(l)), " \t\r")
 		if l == "" {
 			continue
 		}

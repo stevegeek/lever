@@ -63,10 +63,11 @@ func tailBlock(src string, tail []string) string {
 // running step, its sub-stage and its elapsed time, redrawn each second.
 // Finished steps, log lines and the summary are written above it.
 type ttyRenderer struct {
-	w     io.Writer
-	width int
-	cur   *Step
-	drawn bool
+	w       io.Writer
+	width   int
+	widthFn func() int
+	cur     *Step
+	drawn   bool
 }
 
 func (t *ttyRenderer) tick() time.Duration { return time.Second }
@@ -89,12 +90,21 @@ func (t *ttyRenderer) draw(now time.Time) {
 	}
 	el := round(now.Sub(s.start))
 	w := t.width
+	if t.widthFn != nil {
+		if n := t.widthFn(); n > 0 {
+			w = n
+		}
+	}
 	if w <= 0 {
 		w = 100
 	}
 	// The line must not wrap: a wrapped line cannot be cleared with \r.
+	// Runes stand in for columns; lever's text is ASCII but for a dash.
 	max := w - len(el) - 3
-	if r := []rune(line); max > 8 && len(r) > max {
+	if max < 1 {
+		max = 1
+	}
+	if r := []rune(line); len(r) > max {
 		line = string(r[:max-1]) + "…"
 	}
 	io.WriteString(t.w, "\r\x1b[K"+line+"  "+el)
@@ -236,13 +246,15 @@ type quietRenderer struct {
 	w io.Writer
 }
 
-func (q *quietRenderer) tick() time.Duration          { return 0 }
-func (q *quietRenderer) header(string, time.Time)     {}
-func (q *quietRenderer) start(*Step, time.Time)       {}
-func (q *quietRenderer) detail(*Step, time.Time)      {}
-func (q *quietRenderer) tickStep(*Step, time.Time)    {}
-func (q *quietRenderer) finish(Summary, time.Time)    {}
-func (q *quietRenderer) log(line string, _ time.Time) { fmt.Fprintln(q.w, line) }
+func (q *quietRenderer) tick() time.Duration { return 0 }
+
+// The header is kept: it states the backend's containment posture.
+func (q *quietRenderer) header(text string, _ time.Time) { fmt.Fprintln(q.w, text) }
+func (q *quietRenderer) start(*Step, time.Time)          {}
+func (q *quietRenderer) detail(*Step, time.Time)         {}
+func (q *quietRenderer) tickStep(*Step, time.Time)       {}
+func (q *quietRenderer) finish(Summary, time.Time)       {}
+func (q *quietRenderer) log(line string, _ time.Time)    { fmt.Fprintln(q.w, line) }
 func (q *quietRenderer) done(s *Step, now time.Time, src string, tail []string) {
 	if s.state != "fail" {
 		return

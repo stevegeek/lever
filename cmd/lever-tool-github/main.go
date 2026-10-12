@@ -113,6 +113,8 @@ func asResult(v any, err error) (any, error) {
 }
 
 func main() {
+	logger := logging.Install(os.Stderr, "lever-tool-github")
+	// Installed first, so a fatal startup error takes the same line shape.
 	o, err := parseFlags(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
@@ -133,7 +135,6 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	logger := logging.Install(os.Stderr, "lever-tool-github")
 	g := ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute}
 	if err := g.CheckVersion(context.Background(), o.state); err != nil {
 		log.Fatal(err)

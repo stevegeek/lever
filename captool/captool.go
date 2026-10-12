@@ -108,10 +108,10 @@ func New(c Config) (*Server, error) {
 		c.EpochTTL = defaultEpochTTL
 	}
 	if c.Log == nil {
-		// The process's default logger: a lever tool installs lever's log
-		// line shape as the default first thing (internal/logging), so its
-		// SDK lines and its own share one form in tool-logs/<name>.log.
-		c.Log = slog.Default()
+		// Silent unless the tool asks: lever's own tools pass their
+		// logger (internal/logging's shape), which is what
+		// tool-logs/<name>.log holds.
+		c.Log = slog.New(slog.DiscardHandler)
 	}
 	ops := make(map[string]Operation, len(c.Operations))
 	for _, o := range c.Operations {

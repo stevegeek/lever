@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -84,7 +85,7 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer func() { run.finish(err) }()
+			defer run.finishOnReturn(&err)
 			return runAcceptance(ctx, cmd, app, path, bf)
 		},
 	}
@@ -165,7 +166,11 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 		}
 		acceptanceLine(cmd, rep, fmt.Sprintf("check %-14s %s", name, status))
 	}
-	checks.Done(nil)
+	if overallPass(results) {
+		checks.Done(nil)
+	} else {
+		checks.Done(errors.New("a capability check failed"))
+	}
 
 	// 3. Write the dated note.
 	date := time.Now().Format("2006-01-02")

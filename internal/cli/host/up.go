@@ -118,6 +118,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// operator's keys go to the manager, not to this handler.
 			ctx, stop := applySignalContext(cmd.Context())
 			defer stop()
+			// buildApplyDeps brings the jail up through the backend's EnsureUp
+			// on every path below, before up looks at the manager: on Lima
+			// that converges the guest hardening (crash recovery, guest_kernel;
+			// lever#179) whether up then applies, resumes or only attaches.
 			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
 			if err != nil {
 				return err

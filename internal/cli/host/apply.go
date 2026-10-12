@@ -1204,7 +1204,7 @@ type applyOpts struct {
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, opts applyOpts) (*applyWiring, error) {
-	b, err := bringUpBackend(ctx, app, bf, (&applyWiring{cmd: opts.Cmd}).log)
+	b, err := bringUpBackend(ctx, app, bf, stateFor(configPath), (&applyWiring{cmd: opts.Cmd}).log)
 	if err != nil {
 		return nil, err
 	}
@@ -1262,7 +1262,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 // bringUpBackend constructs the backend for app's machine and brings the jail
 // up, so the run-user/uid and host alias are resolved before anything is
 // built over the jail runner. warn gets the backend's non-fatal advice.
-func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, warn logFunc) (backend.Backend, error) {
+func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, st state.State, warn logFunc) (backend.Backend, error) {
 	machine := machineName(app.Name)
 	b, err := bf(app.Backend, machine)
 	if err != nil {
@@ -1270,6 +1270,9 @@ func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, war
 	}
 	cfg := backendConfigFor(app, machine)
 	cfg.Warn = warn
+	if st.Dir != "" {
+		cfg.HWEFailStamp = st.HWEFailStamp()
+	}
 	if err := b.EnsureUp(ctx, cfg); err != nil {
 		return nil, err
 	}

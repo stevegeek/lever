@@ -2,6 +2,7 @@ package guest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,9 +275,29 @@ func TestEnsureCrashRecoveryFailure(t *testing.T) {
 	}
 }
 
-// kernelSandbox runs guestKernelScript with stub dpkg, apt-get, timeout and
-// uname.
+// kernelEnv is one sandboxed run of guestKernelScript.
+type kernelEnv struct {
+	kernel, osVersion, running, def string
+	dpkgHas, aptFails               bool
+	// aptLockedTimes makes the first n apt-get update calls fail on a held
+	// lock; egressClosed makes iptables -S show the closed catch-all DROP.
+	aptLockedTimes int
+	egressClosed   bool
+	machineID      string
+	opts           KernelOpts
+}
+
+const testMachineID = "0123456789abcdef0123456789abcdef"
+
+// runKernelScript runs guestKernelScript with stub dpkg-query, apt-get,
+// iptables, timeout, sleep and uname.
 func runKernelScript(t *testing.T, kernel, osVersion, running, def string, dpkgHas bool, aptFails bool) (GuestReport, string) {
+	t.Helper()
+	r, calls := runKernelEnv(t, kernelEnv{kernel: kernel, osVersion: osVersion, running: running, def: def, dpkgHas: dpkgHas, aptFails: aptFails})
+	return r.GuestReport, calls
+}
+
+func runKernelEnv(t *testing.T, e kernelEnv) (KernelReport, string) {
 	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
@@ -295,48 +316,71 @@ func runKernelScript(t *testing.T, kernel, osVersion, running, def string, dpkgH
 	// Not installed is modelled as state rc (removed, config left), which
 	// dpkg -s would have reported with exit 0.
 	status := "deinstall ok config-files"
-	if dpkgHas {
+	if e.dpkgHas {
 		status = "install ok installed"
 	}
 	aptExit := "0"
-	if aptFails {
+	if e.aptFails {
 		aptExit = "100"
 	}
+	lockCount := filepath.Join(root, "lock.count")
 	stub("dpkg-query", `echo "dpkg-query $*" >> `+shellSingleQuote(log)+"; printf '%s' "+shellSingleQuote(status))
-	stub("apt-get", `echo "apt-get $*" >> `+shellSingleQuote(log)+"; exit "+aptExit)
+	stub("apt-get", `echo "apt-get $*" >> `+shellSingleQuote(log)+`
+case "$*" in *update*)
+  n=$(cat `+shellSingleQuote(lockCount)+` 2>/dev/null || echo 0)
+  if [ "$n" -lt `+fmt.Sprint(e.aptLockedTimes)+` ]; then
+    echo $((n+1)) > `+shellSingleQuote(lockCount)+`
+    echo "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1234 (apt-get)" >&2
+    exit 100
+  fi ;;
+esac
+exit `+aptExit)
+	chain := "-N LEVER_EGRESS\n-A LEVER_EGRESS -d 10.0.0.0/8 -j DROP"
+	if e.egressClosed {
+		chain += "\n-A LEVER_EGRESS -j DROP"
+	}
+	stub("iptables", `echo "iptables $*" >> `+shellSingleQuote(log)+"; printf '%s\\n' "+shellSingleQuote(chain))
 	stub("timeout", `shift; exec "$@"`)
-	stub("uname", "echo "+running)
-	p := kernelPaths{OSRelease: filepath.Join(root, "os-release"), Vmlinuz: filepath.Join(root, "boot/vmlinuz")}
-	if err := os.WriteFile(p.OSRelease, []byte(`NAME="Ubuntu"`+"\nVERSION_ID=\""+osVersion+"\"\n"), 0o644); err != nil {
+	stub("sleep", `:`)
+	stub("uname", "echo "+e.running)
+	p := kernelPaths{OSRelease: filepath.Join(root, "os-release"), Vmlinuz: filepath.Join(root, "boot/vmlinuz"), MachineID: filepath.Join(root, "machine-id")}
+	if err := os.WriteFile(p.OSRelease, []byte(`NAME="Ubuntu"`+"\nVERSION_ID=\""+e.osVersion+"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if def != "" {
+	mid := e.machineID
+	if mid == "" {
+		mid = testMachineID
+	}
+	if err := os.WriteFile(p.MachineID, []byte(mid+"\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if e.def != "" {
 		if err := os.MkdirAll(filepath.Dir(p.Vmlinuz), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		target := filepath.Join(root, "boot/vmlinuz-"+def)
+		target := filepath.Join(root, "boot/vmlinuz-"+e.def)
 		if err := os.WriteFile(target, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink("vmlinuz-"+def, p.Vmlinuz); err != nil {
+		if err := os.Symlink("vmlinuz-"+e.def, p.Vmlinuz); err != nil {
 			t.Fatal(err)
 		}
 	}
-	cmd := exec.Command("bash", "-c", guestKernelScript(kernel, p))
+	cmd := exec.Command("bash", "-c", guestKernelScript(e.kernel, e.opts, p))
 	cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH")}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("script failed: %v\n%s", err, out)
 	}
 	calls, _ := os.ReadFile(log)
-	return parseGuestReport(string(out)), string(calls)
+	return parseKernelReport(string(out)), string(calls)
 }
 
 func TestGuestKernelHWEInstallsAndReportsReboot(t *testing.T) {
 	// Before the install /boot/vmlinuz already names the new kernel in the
 	// stub; the real package moves it.
 	rep, calls := runKernelScript(t, GuestKernelHWE, "24.04", "6.8.0-146-generic", "6.17.0-5-generic", false, false)
-	if !strings.Contains(calls, "apt-get install -y -qq -o DPkg::Lock::Timeout=120 "+HWEPackage) {
+	if !strings.Contains(calls, "apt-get install -y -qq -o DPkg::Lock::Timeout=120 "+HWEPackage) || !strings.Contains(calls, "apt-get -o DPkg::Lock::Timeout=120 update -qq") {
 		t.Errorf("want the HWE install; calls:\n%s", calls)
 	}
 	if len(rep.Reboot) != 1 || !strings.Contains(rep.Reboot[0], "runs kernel 6.8.0-146-generic; the default kernel is now 6.17.0-5-generic") {
@@ -396,7 +440,75 @@ func TestGuestKernelNoVmlinuzNoReboot(t *testing.T) {
 
 func TestEnsureGuestKernelRejectsUnknown(t *testing.T) {
 	g := Guest{Host: proc.NewFakeRunner(), UserPrefix: []string{"x"}, RootPrefix: []string{"x"}}
-	if _, err := g.EnsureGuestKernel(context.Background(), "mainline"); err == nil {
+	if _, err := g.EnsureGuestKernel(context.Background(), "mainline", KernelOpts{}); err == nil {
 		t.Fatal("want a refusal")
+	}
+}
+
+func TestGuestKernelHWEReportsOutcomeAndMachineID(t *testing.T) {
+	r, _ := runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.8.0-146-generic", def: "6.17.0-5-generic"})
+	if r.HWE != HWEInstalled || r.MachineID != testMachineID {
+		t.Errorf("hwe=%q machine-id=%q", r.HWE, r.MachineID)
+	}
+	r, _ = runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.8.0-146-generic", def: "6.8.0-146-generic", aptFails: true})
+	if r.HWE != HWEFailed {
+		t.Errorf("hwe=%q, want failed", r.HWE)
+	}
+	r, _ = runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.17.0-5-generic", def: "6.17.0-5-generic", dpkgHas: true})
+	if r.HWE != HWEInstalled {
+		t.Errorf("hwe=%q, want installed", r.HWE)
+	}
+}
+
+// apt-get update must wait out a held lock (cloud-init, apt-daily on a
+// fresh VM) rather than fail at once.
+func TestGuestKernelHWEUpdateWaitsForLock(t *testing.T) {
+	r, calls := runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.8.0-146-generic", def: "6.17.0-5-generic", aptLockedTimes: 2})
+	if n := strings.Count(calls, "update -qq"); n != 3 {
+		t.Errorf("want 3 update attempts, got %d; calls:\n%s", n, calls)
+	}
+	if r.HWE != HWEInstalled || len(r.Warn) != 0 {
+		t.Errorf("report = %+v", r)
+	}
+}
+
+// A non-lock update failure is not retried.
+func TestGuestKernelHWEUpdateFailureNotRetried(t *testing.T) {
+	r, calls := runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.8.0-146-generic", def: "6.8.0-146-generic", aptFails: true})
+	if n := strings.Count(calls, "update -qq"); n != 1 {
+		t.Errorf("want 1 update attempt, got %d", n)
+	}
+	if strings.Contains(calls, "apt-get install") {
+		t.Errorf("a failed update must not run the install; calls:\n%s", calls)
+	}
+	if r.HWE != HWEFailed {
+		t.Errorf("hwe = %q", r.HWE)
+	}
+}
+
+func TestGuestKernelHWEClosedEgressSkipsApt(t *testing.T) {
+	r, calls := runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.8.0-146-generic", def: "6.8.0-146-generic", egressClosed: true})
+	if strings.Contains(calls, "apt-get") {
+		t.Errorf("closed egress must not run apt; calls:\n%s", calls)
+	}
+	if r.HWE != HWESkippedClose || len(r.Warn) != 1 || !strings.Contains(r.Warn[0], "egress is closed") {
+		t.Errorf("report = %+v", r)
+	}
+}
+
+func TestGuestKernelHWEStampSkipsApt(t *testing.T) {
+	r, calls := runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.8.0-146-generic", def: "6.8.0-146-generic",
+		opts: KernelOpts{SkipIfMachineID: testMachineID}})
+	if strings.Contains(calls, "apt-get") || strings.Contains(calls, "iptables") {
+		t.Errorf("a stamped VM must not run apt; calls:\n%s", calls)
+	}
+	if r.HWE != HWESkippedStamp {
+		t.Errorf("hwe = %q", r.HWE)
+	}
+	// A stamp for another VM (a recreated one) is not this VM's.
+	r, calls = runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: "24.04", running: "6.8.0-146-generic", def: "6.17.0-5-generic",
+		opts: KernelOpts{SkipIfMachineID: "ffffffffffffffffffffffffffffffff"}})
+	if !strings.Contains(calls, "apt-get install") || r.HWE != HWEInstalled {
+		t.Errorf("another VM's stamp must not skip; hwe=%q calls:\n%s", r.HWE, calls)
 	}
 }

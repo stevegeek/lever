@@ -3,8 +3,14 @@ package guest
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/egress"
 )
+
+// egressChain is lever's egress chain in the guest (egress.Chain).
+const egressChain = egress.Chain
 
 // Guest crash recovery (lever#179). A jail guest whose kernel takes an oops
 // must reboot, not hang. The incident behind it: a Lima guest running a
@@ -207,37 +213,119 @@ const HWEPackage = "linux-generic-hwe-24.04"
 
 // kernelPaths are the guest paths the kernel script reads; see crashPaths.
 type kernelPaths struct {
-	OSRelease, Vmlinuz string
+	OSRelease, Vmlinuz, MachineID string
 }
 
-var realKernelPaths = kernelPaths{OSRelease: "/etc/os-release", Vmlinuz: "/boot/vmlinuz"}
+var realKernelPaths = kernelPaths{OSRelease: "/etc/os-release", Vmlinuz: "/boot/vmlinuz", MachineID: "/etc/machine-id"}
+
+// HWE install outcomes the kernel script reports ("hwe: <state>"), read
+// into KernelReport.HWE.
+const (
+	HWEInstalled    = "installed"      // the package is installed (now or before)
+	HWEFailed       = "failed"         // apt-get update or install failed
+	HWESkippedClose = "skipped-egress" // the guest's egress is closed; apt not tried
+	HWESkippedStamp = "skipped-stamp"  // an earlier install failed on this VM; apt not tried
+)
+
+// KernelOpts tunes EnsureGuestKernel.
+type KernelOpts struct {
+	// SkipIfMachineID makes the script skip the HWE install, without
+	// running apt, when the guest's /etc/machine-id equals it: the host
+	// keeps a stamp of an install that failed on that VM (lima's
+	// hweFailStamp) and passes its id while the egress posture is closed.
+	// "" never skips.
+	SkipIfMachineID string
+}
+
+// KernelReport is EnsureGuestKernel's GuestReport plus what the host needs
+// to keep its failed-install stamp: the HWE outcome ("" when guest_kernel
+// is not hwe or the release is not 24.04) and the guest's machine id ("" if
+// unreadable).
+type KernelReport struct {
+	GuestReport
+	HWE       string
+	MachineID string
+}
+
+// machineIDRE is the shape of /etc/machine-id (32 lowercase hex digits).
+var machineIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+func parseKernelReport(out string) KernelReport {
+	r := KernelReport{GuestReport: parseGuestReport(out)}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "hwe: "):
+			switch v := strings.TrimPrefix(line, "hwe: "); v {
+			case HWEInstalled, HWEFailed, HWESkippedClose, HWESkippedStamp:
+				r.HWE = v
+			}
+		case strings.HasPrefix(line, "machine-id: "):
+			if v := strings.TrimPrefix(line, "machine-id: "); machineIDRE.MatchString(v) {
+				r.MachineID = v
+			}
+		}
+	}
+	return r
+}
+
+// AptLockWait is how long (seconds) the kernel script lets apt wait for
+// the apt and dpkg locks: on a fresh VM cloud-init or apt-daily may hold
+// them, and that first apply is the one with open egress.
+const AptLockWait = 120
 
 // guestKernelScript is the root script EnsureGuestKernel runs. Under hwe it
 // installs HWEPackage unless dpkg-query says "install ok installed" (a
-// package in state rc, or a cut-off install, is installed again). apt-get
-// update is bounded by a timeout (on a re-apply under the closed egress
-// posture the mirrors may not resolve) and the install waits at most 120 s
-// for the dpkg lock; the install itself is never killed midway. Under any
-// flavour it reports a reboot when the kernel /boot/vmlinuz names
-// (the one grub boots by default) is not the running one. It never removes
-// a kernel.
-func guestKernelScript(kernel string, p kernelPaths) string {
+// package in state rc, or a cut-off install, is installed again). It does
+// not try apt when the host's stamp names this VM (opts.SkipIfMachineID)
+// or when lever's egress chain in the guest ends in the closed posture's
+// catch-all DROP: the mirrors are unreachable there, and apt would only
+// wait out its timeout. apt-get update and the install both wait up to
+// AptLockWait for the apt and dpkg locks (DPkg::Lock::Timeout; update is
+// also retried while it reports a held lock, for an apt that does not
+// apply the option to the lists lock); update is bounded by a timeout, the
+// install itself is never killed midway. Under any flavour it reports a
+// reboot when the kernel /boot/vmlinuz names (the one grub boots by
+// default) is not the running one. It never removes a kernel.
+func guestKernelScript(kernel string, opts KernelOpts, p kernelPaths) string {
 	q := shellSingleQuote
 	var b strings.Builder
 	b.WriteString("set -u\n")
 	if kernel == GuestKernelHWE {
 		fmt.Fprintf(&b, `VERSION_ID=
-. %s 2>/dev/null || true
+. %[1]s 2>/dev/null || true
+mid=$(cat %[2]s 2>/dev/null || true)
+echo "machine-id: $mid"
 if [ "$VERSION_ID" != 24.04 ]; then
   echo "warn: guest_kernel hwe: the guest is Ubuntu ${VERSION_ID:-unknown}, not 24.04; lever installed no kernel"
-elif [ "$(dpkg-query -W -f='${Status}' %s 2>/dev/null)" != "install ok installed" ]; then
+elif [ "$(dpkg-query -W -f='${Status}' %[3]s 2>/dev/null)" = "install ok installed" ]; then
+  echo "hwe: installed"
+elif [ -n %[4]s ] && [ "$mid" = %[4]s ]; then
+  echo "hwe: skipped-stamp"
+elif iptables -S %[5]s 2>/dev/null | grep -qx -- %[6]s; then
+  echo "hwe: skipped-egress"
+  echo %[7]s
+else
   export DEBIAN_FRONTEND=noninteractive
-  if ! { timeout 120 apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq -o DPkg::Lock::Timeout=120 %s >/dev/null 2>&1; }; then
-    echo %s
+  ok=0
+  end=$(( $(date +%%s) + %[8]d ))
+  while :; do
+    err=$(timeout %[8]d apt-get -o DPkg::Lock::Timeout=%[8]d update -qq 2>&1 >/dev/null) && { ok=1; break; }
+    case "$err" in *"Could not get lock"*|*"Unable to lock"*) ;; *) break ;; esac
+    [ "$(date +%%s)" -lt "$end" ] || break
+    sleep 5
+  done
+  if [ "$ok" = 1 ] && apt-get install -y -qq -o DPkg::Lock::Timeout=%[8]d %[3]s >/dev/null 2>&1; then
+    echo "hwe: installed"
+  else
+    echo "hwe: failed"
+    echo %[9]s
   fi
 fi
-`, q(p.OSRelease), HWEPackage, HWEPackage,
-			q("warn: guest_kernel hwe: installing "+HWEPackage+" failed (the guest may not reach the Ubuntu mirrors under the closed egress posture); run lever apply again with the open posture, or install it by hand in the guest"))
+`, q(p.OSRelease), q(p.MachineID), HWEPackage, q(opts.SkipIfMachineID), q(egressChain), q("-A "+egressChain+" -j DROP"),
+			q("warn: guest_kernel hwe: "+HWEPackage+" is not installed, and lever did not run apt: the jail's egress is closed (the closed posture's catch-all DROP is in place), so the Ubuntu mirrors are unreachable; run lever apply once with the open posture, or install it by hand in the guest"),
+			AptLockWait,
+			q("warn: guest_kernel hwe: installing "+HWEPackage+" failed (the guest may not reach the Ubuntu mirrors); run lever apply again with the open posture, or install it by hand in the guest"))
 	}
 	fmt.Fprintf(&b, `running=$(uname -r)
 default=$(readlink -f %s 2>/dev/null || true)
@@ -254,18 +342,21 @@ fi
 // remove an installed HWE kernel). Under either it reports a reboot when
 // the default kernel is not the running one. "" (lever provision, which
 // has no config) only reports.
-func (g Guest) EnsureGuestKernel(ctx context.Context, kernel string) (GuestReport, error) {
+func (g Guest) EnsureGuestKernel(ctx context.Context, kernel string, opts KernelOpts) (KernelReport, error) {
 	switch kernel {
 	case "", GuestKernelGA, GuestKernelHWE:
 	default:
-		return GuestReport{}, fmt.Errorf("guest_kernel %q: want %q or %q", kernel, GuestKernelHWE, GuestKernelGA)
+		return KernelReport{}, fmt.Errorf("guest_kernel %q: want %q or %q", kernel, GuestKernelHWE, GuestKernelGA)
 	}
-	res, err := g.RootRun(ctx, "bash", "-c", guestKernelScript(kernel, realKernelPaths))
+	if opts.SkipIfMachineID != "" && !machineIDRE.MatchString(opts.SkipIfMachineID) {
+		opts.SkipIfMachineID = ""
+	}
+	res, err := g.RootRun(ctx, "bash", "-c", guestKernelScript(kernel, opts, realKernelPaths))
 	if err != nil || res.Code != 0 {
 		if err == nil {
 			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
 		}
-		return GuestReport{}, fmt.Errorf("guest kernel (%s): %w", kernel, err)
+		return KernelReport{}, fmt.Errorf("guest kernel (%s): %w", kernel, err)
 	}
-	return parseGuestReport(res.Stdout), nil
+	return parseKernelReport(res.Stdout), nil
 }

@@ -97,6 +97,12 @@ func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp"
 // can be recognised (lever#179).
 func (s State) GuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json") }
 
+// HWEFailStamp records that the guest_kernel hwe install failed in the
+// jail VM, keyed by the guest's /etc/machine-id (lever#179): while it names
+// the VM and the egress posture is closed, apply and up warn instead of
+// running apt again. Deleting it makes the next bring-up try again.
+func (s State) HWEFailStamp() string { return filepath.Join(s.Dir, "hwe-install-failed.json") }
+
 // PushDir holds the remote proxy's Web Push key, subscriptions and last
 // send result (remote.push), each 0600.
 func (s State) PushDir() string { return filepath.Join(s.Dir, "push") }

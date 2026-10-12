@@ -118,12 +118,12 @@ const crashGrubFile = `# Written by lever (guest crash recovery, lever#179). Do 
 # Keeps the EFI pstore backend from registering at boot, built in or a module.
 GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} ` + EFIPstoreCmdline + `"`
 
-// efiPstoreActiveFn is the shell function both the provisioning script and
+// EFIPstoreActiveShell is the shell function both the provisioning script and
 // doctor's probe use to tell whether the EFI pstore backend may still be
 // registered: the module (or built-in) is present, and either pstore names
 // it as its backend or it was not loaded with pstore_disable. Unknown reads
 // as active.
-const efiPstoreActiveFn = `efi_pstore_active() {
+const EFIPstoreActiveShell = `efi_pstore_active() {
   [ -d "$1/efi_pstore" ] || return 1
   b=$(cat "$1/pstore/parameters/backend" 2>/dev/null || true)
   [ "$b" = efi ] && return 0
@@ -152,7 +152,7 @@ func crashRecoveryScript(p crashPaths) string {
   return 0
 }
 `)
-	b.WriteString(efiPstoreActiveFn)
+	b.WriteString(EFIPstoreActiveShell)
 	fmt.Fprintf(&b, "converge %s %s || true\n", q(p.Sysctl), q(crashSysctlFile()))
 	for _, s := range CrashSysctls {
 		kv := s.Key + "=" + s.Value

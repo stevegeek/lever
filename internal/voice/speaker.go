@@ -178,18 +178,26 @@ func (s *Speaker) Speak(ctx context.Context, text, voice string) ([]byte, error)
 const speakTempPrefix = ".speak-"
 
 // RemoveStaleSpeech deletes the per-run output directories a killed tool
-// left in dir (best effort; the tool runs it at start, before any run).
-func RemoveStaleSpeech(dir string) {
+// left in dir: those untouched for longer than any run may take (another
+// tool sharing the directory may be running one now). Best effort; the
+// tool runs it at start.
+func RemoveStaleSpeech(dir string, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), speakTempPrefix) && e.IsDir() {
+		if !strings.HasPrefix(e.Name(), speakTempPrefix) || !e.IsDir() {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > staleSpeechAfter {
 			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
 		}
 	}
 }
+
+// staleSpeechAfter is well past the longest run (Speaker.MaxWait's default).
+const staleSpeechAfter = 10 * time.Minute
 
 // runEngine runs the program once: no stdin, stdout and stderr discarded
 // (the program prints the text, assumption 5), a reduced environment

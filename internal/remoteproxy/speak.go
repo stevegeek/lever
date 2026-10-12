@@ -13,10 +13,11 @@ package remoteproxy
 // server-side lookup would have to repeat, exactly, every rule of what a
 // login is shown (a contact's filtered history above all), and a mistake
 // there would read out a message the login may not see. Text the page
-// sends is text the login already has. So it cannot become a general
-// speech service, the text is bounded per request (the tool's -max-chars)
-// and per login (characters an hour and a day), the reference must name an
-// agent the login's roster lists, and voice: false on a login turns it off.
+// sends is text the login already has. Any text a login sends is spoken,
+// so the route is a speech service for the logins, but a bounded one: the
+// text is bounded per request (the tool's -max-chars) and per login
+// (characters an hour and a day), the reference must name an agent the
+// login's roster lists, and voice: false on a login turns it off.
 
 import (
 	"context"
@@ -278,11 +279,14 @@ func (g *gate) serveSpeak(w http.ResponseWriter, r *http.Request, line *AuditLin
 		g.refuseSpeak(w, r, line, http.StatusBadRequest, "bad-request")
 		return
 	}
-	line.Agent, line.MessageID = truncateAudit(req.Agent), req.ID
+	line.MessageID = req.ID
 	if !slices.Contains(v.message, req.Agent) && !slices.Contains(v.see, req.Agent) {
+		// The name is not one of the login's agents: not written to the
+		// audit line, which would otherwise carry any text a login chose.
 		g.refuseSpeak(w, r, line, http.StatusForbidden, "agent")
 		return
 	}
+	line.Agent = req.Agent
 	if req.Voice != "" && !slices.ContainsFunc(health.Voices, func(x voice.SpeakVoice) bool { return x.Name == req.Voice }) {
 		g.refuseSpeak(w, r, line, http.StatusBadRequest, "bad-voice")
 		return

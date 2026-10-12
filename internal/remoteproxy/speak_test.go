@@ -171,6 +171,8 @@ func TestSpeakRefusals(t *testing.T) {
 			if tc.mut != nil {
 				tc.mut(&cfg, rec)
 			}
+			var lines lockedLines
+			cfg.Audit = lines.add
 			var rw *httptest.ResponseRecorder
 			if tc.body == nil {
 				rw = chatDo(NewHandler(cfg), tc.login, "GET", speakPath)
@@ -179,6 +181,12 @@ func TestSpeakRefusals(t *testing.T) {
 			}
 			if rw.Code != tc.status || errorWord(rw) != tc.word {
 				t.Fatalf("%d %s, want %d %s", rw.Code, rw.Body, tc.status, tc.word)
+			}
+			if tc.word == "agent" {
+				all := lines.all()
+				if a := all[len(all)-1].Agent; a != "" {
+					t.Fatalf("a refused agent name reached the audit line: %q", a)
+				}
 			}
 			if tc.word != "unavailable" && len(rec.texts) != 0 {
 				t.Fatalf("the tool was asked: %q", rec.texts)

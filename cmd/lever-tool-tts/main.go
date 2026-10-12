@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/stevegeek/lever/captool"
 	"github.com/stevegeek/lever/internal/logging"
@@ -137,7 +138,7 @@ func main() {
 	if err := voice.PrivateDir(o.models); err != nil {
 		log.Fatalf("-models: %v", err)
 	}
-	voice.RemoveStaleSpeech(o.models)
+	voice.RemoveStaleSpeech(o.models, time.Now())
 	vlog := func(format string, a ...any) { log.Printf(format, a...) }
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

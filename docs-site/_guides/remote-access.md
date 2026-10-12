@@ -1648,13 +1648,15 @@ to your own host, never to a cloud speech service.
   with the engine at a time (separate from dictation's: the engine runs on the CPU). A text the
   engine never got does not count.
 - **Privacy.** The text and the audio are held in memory only, by the proxy and the tool; the
-  engine writes the audio to a private directory of the tool's, which the tool reads and removes
-  at once. The proxy's audit line (`voice-speak` or `deny-speak`) has the login, the agent, the
+  engine gets the text as its argument (a local user who can list processes with their arguments
+  can read it while a part is spoken) and writes the audio to a private directory of the tool's,
+  which the tool reads and removes at once. The proxy's audit line (`voice-speak` or `deny-speak`) has the login, the agent, the
   message id, the length, the outcome and the latency; the tool's log line the length, the voice,
   the outcome and the latency. Never the text, never the audio.
 - **Agent text is untrusted input to the engine.** It is bounded, control characters and markup
-  are removed, it is never passed as an option, and the engine has no network and no access to
-  the tree. The jail reaches neither the speech socket nor the engine, which has no port.
+  are removed, and it is never passed as an option. lever gives the engine no path in the tree
+  and expects it to use no network, but it is not sandboxed: it runs as your user, like
+  whisper-server, so install a sherpa-onnx you trust. The jail reaches neither the speech socket nor the engine, which has no port.
 - **Doctor.** The `tts tool` row asks the speech socket for its health; the `tts model` row
   hashes every file of the model against lever's pins. See the [tts tool](/tts-tool/) guide.
 

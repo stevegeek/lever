@@ -38,6 +38,9 @@ func TestReadAloudYAML(t *testing.T) {
 		"read_aloud: server": ReadAloudServer,
 		"read_aloud: device": ReadAloudDevice,
 		"read_aloud: off":    ReadAloudOff,
+		"read_aloud: yes":    ReadAloudDevice,
+		"read_aloud: no":     ReadAloudOff,
+		"read_aloud: on":     ReadAloudDevice,
 		"enabled: true":      "",
 	} {
 		var v Voice

@@ -1052,6 +1052,9 @@ function placeTranscript(agent, text) {
 const READ_VOICE_KEY = 'lever-read-voice';
 const SERVER_VOICE_KEY = 'lever-read-server-voice';
 const SPEAK_PATH = '/lever/api/voice/speak';
+// SPEAK_MS bounds one part: the tool gives a run 2 minutes, and the proxy
+// may queue it behind two others.
+const SPEAK_MS = 7 * 60000;
 let speaking = null; // {id, button, stop}: the message being read
 let audioCtx = null; // one per page, made and resumed on a tap
 
@@ -1171,7 +1174,7 @@ function audioContext() {
 async function speakPart(s, agent, id, text, voice) {
   const limit = new AbortController();
   s.aborts.add(limit);
-  const timer = setTimeout(() => limit.abort(), REQUEST_MS);
+  const timer = setTimeout(() => limit.abort(), SPEAK_MS);
   try {
     const res = await fetch(SPEAK_PATH, {
       method: 'POST',
@@ -1241,6 +1244,7 @@ function speakServer(m, button, text, sv, agent) {
   // arrives.
   if (typeof ctx.resume === 'function') void ctx.resume().catch(() => {});
   const parts = speechParts(text, sv.maxChars);
+  if (!parts.length) return;
   const voice = pickServerVoice(sv, kept(SERVER_VOICE_KEY));
   const s = { id: m.id, button, aborts: new Set(), source: null };
   s.stop = () => {

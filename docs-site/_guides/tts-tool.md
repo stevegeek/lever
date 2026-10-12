@@ -60,7 +60,8 @@ sudo install -m 0755 bin/sherpa-onnx-offline-tts /usr/local/bin/
 A static build (`BUILD_SHARED_LIBS=OFF`) is one file. With a shared build or a prebuilt archive,
 keep the program with its `lib/` directory, for example under `/opt/sherpa-onnx/`, owned by root,
 and point `-server` at `/opt/sherpa-onnx/bin/sherpa-onnx-offline-tts`. Check it with
-`sherpa-onnx-offline-tts --help`. The tool resolves the program's real path once at start and
+`sherpa-onnx-offline-tts --help`. The tool checks the program file and its directory, not the
+libraries next to it: keep `lib/` as safe from other users as the program. The tool resolves the program's real path once at start and
 refuses it if it later resolves to another file; restart the tool (`lever reload`) after an
 upgrade.
 
@@ -148,7 +149,8 @@ row says which read-aloud the chat page uses.
 
 One run at a time. A run gets 2 minutes; a request whose page went away kills its run. On Linux
 the run also dies with the tool when the tool is killed; on macOS a run left behind by a tool killed
-hard ends by itself when its one text is spoken, and the next start removes its output directory.
+hard ends by itself when its one text is spoken, and a later start removes its output directory
+once it is ten minutes old.
 
 The tool writes one line per request to `tool-logs/tts.log`: the length, the voice, the outcome and
 the latency. Never the text.
@@ -169,5 +171,5 @@ read-aloud at all.
 | The remote proxy | the speech socket | It runs as your user. It checks, before each request, that the socket's directory is private and yours. |
 | Agents | the tool's MCP backend, through the broker only | The broker forwards `/mcp/tts/` with the tool secret. The tool offers only `voices`, read-only, and only with a capability. |
 | Agents | not the socket, not the engine | The jail reaches no host Unix socket, config load refuses the socket path inside the tree, and the engine has no port. |
-| Agent text | the engine, as plain text | Bounded, cleaned, never markup, never an option; the engine has no network and no access to the tree (its files are outside it). |
+| Agent text | the engine, as plain text | Bounded, cleaned, never markup, never an option. The engine gets no path in the tree (its files are outside it) and is not expected to use the network, but it is not sandboxed: it runs as your user. Install a sherpa-onnx you trust. |
 | Other local users | the engine's command line | The text of a part is the engine's argument, so a local user who can list processes with their arguments can read it while it runs (on Linux every user can, unless `/proc` is mounted with `hidepid`). Run the tool only on a host where you trust every local user, as for the whisper tool. |

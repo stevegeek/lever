@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -36,6 +37,14 @@ func (r *ReadAloud) UnmarshalYAML(n *yaml.Node) error {
 	var s string
 	if err := n.Decode(&s); err != nil {
 		return err
+	}
+	// YAML 1.1's other bool words, which the bool this key was decoded
+	// into before took as well.
+	switch strings.ToLower(s) {
+	case "yes", "y", "on":
+		s = string(ReadAloudDevice)
+	case "no", "n":
+		s = string(ReadAloudOff)
 	}
 	*r = ReadAloud(s)
 	return nil

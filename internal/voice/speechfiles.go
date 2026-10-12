@@ -108,6 +108,13 @@ func VerifySpeech(dir string, m SpeechModel) error {
 		return fmt.Errorf("%w: %s", ErrUnpinned, why)
 	}
 	root := SpeechDir(dir, m)
+	// Every file is looked for first, so a missing one is found before any
+	// file is hashed.
+	for _, file := range m.Files {
+		if _, err := os.Lstat(SpeechPath(dir, m, file.Path)); err != nil {
+			return err
+		}
+	}
 	for _, file := range m.Files {
 		sub, err := privateDirs(root, path.Dir(file.Path), false)
 		if err != nil {
@@ -123,8 +130,8 @@ func VerifySpeech(dir string, m SpeechModel) error {
 // speechStamp is a fingerprint of the files and directories of m in dir as
 // the file system describes them (device, inode, size, times, owner, mode,
 // links), without reading them: a file replaced or written changes it (its
-// ctime at least). "" when the platform has no such description, or a
-// file is missing: then only a full VerifySpeech will do.
+// ctime at least), and so does a missing one appearing. "" when the
+// platform has no such description: then only a full VerifySpeech will do.
 func speechStamp(dir string, m SpeechModel) string {
 	root := SpeechDir(dir, m)
 	var b strings.Builder
@@ -135,6 +142,13 @@ func speechStamp(dir string, m SpeechModel) string {
 		}
 		seen[p] = true
 		fi, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			// Recorded as missing, so a failed check of an incomplete
+			// model is remembered rather than run again in full.
+			b.WriteString(p)
+			b.WriteString("\x00missing\n")
+			return true
+		}
 		if err != nil {
 			return false
 		}

@@ -616,8 +616,14 @@ test('speechParts: sentences, a short first part, none over the limit', () => {
   assert.equal(long.join(' '), `${'word '.repeat(300)}end.`.replace(/\s+/g, ' '));
   const solid = speechParts('x'.repeat(250), 100);
   assert.deepEqual(solid.map((p) => p.length), [100, 100, 50]);
+  // A long first sentence: the first part is still short.
+  const firstLong = speechParts(`${'word '.repeat(100)}end. Next.`, 600);
+  assert.ok([...firstLong[0]].length <= SPEECH_FIRST, JSON.stringify(firstLong));
+  // A part with nothing to say is dropped.
+  assert.deepEqual(speechParts('Hello. --- 😀😀. World.', 600), ['Hello. --- 😀😀. World.']);
+  assert.deepEqual(speechParts(`${'a'.repeat(199)}. ${'-'.repeat(150)}`, 200), [`${'a'.repeat(199)}.`]);
   // Code points, not UTF-16 units.
-  const emoji = speechParts('😀'.repeat(150), 100);
+  const emoji = speechParts('𝒜'.repeat(150), 100);
   assert.deepEqual(emoji.map((p) => [...p].length), [100, 50]);
 });
 

@@ -485,6 +485,20 @@ func TestSpeakerChecksTheModelBeforeEveryRun(t *testing.T) {
 	if _, err := s.Check(); err == nil || !strings.Contains(err.Error(), "not downloaded") {
 		t.Fatalf("missing file: %v", err)
 	}
+	// The failure is remembered for the same layout, and a file that
+	// appears is checked.
+	if s.bad == "" {
+		t.Fatal("a missing file left no stamp")
+	}
+	if _, err := s.Check(); err == nil {
+		t.Fatal("missing file, second check")
+	}
+	if err := os.WriteFile(p, []byte(testSpeechFiles["voices.bin"]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Check(); err != nil {
+		t.Fatalf("file back: %v", err)
+	}
 }
 
 func TestSpeakerRefusesAReplacedProgram(t *testing.T) {
@@ -523,7 +537,12 @@ func TestRemoveStaleSpeech(t *testing.T) {
 	if err := os.WriteFile(keep, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	RemoveStaleSpeech(dir)
+	// A fresh one may be another tool's run: kept.
+	RemoveStaleSpeech(dir, time.Now())
+	if _, err := os.Stat(filepath.Join(dir, ".speak-1")); err != nil {
+		t.Fatal("a fresh output directory was removed")
+	}
+	RemoveStaleSpeech(dir, time.Now().Add(time.Hour))
 	noSpeakTemp(t, dir)
 	if _, err := os.Stat(keep); err != nil {
 		t.Fatal(err)

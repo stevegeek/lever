@@ -690,12 +690,14 @@ export function speechParts(text, maxChars) {
   // No lookbehind: older Safari cannot parse it, and this module would
   // not load at all.
   const sentences = str(text).replace(/([.!?…:;])\s+/g, '$1\n').split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  const first = Math.min(SPEECH_FIRST, max);
   const pieces = [];
   for (const sentence of sentences) {
     let rest = [...sentence];
-    while (rest.length > max) {
-      let cut = rest.lastIndexOf(' ', max);
-      if (cut <= 0) cut = max;
+    // The very first piece is cut at the first part's limit.
+    for (let lim = pieces.length ? max : first; rest.length > lim; lim = max) {
+      let cut = rest.lastIndexOf(' ', lim);
+      if (cut <= 0) cut = lim;
       pieces.push(rest.slice(0, cut).join('').trim());
       rest = rest.slice(cut);
       while (rest[0] === ' ') rest.shift();
@@ -715,7 +717,8 @@ export function speechParts(text, maxChars) {
     }
   }
   if (cur) parts.push(cur);
-  return parts;
+  // A part with nothing to say (only symbols) would be refused.
+  return parts.filter((p) => /[\p{L}\p{N}]/u.test(p));
 }
 
 const SPEAK_WORDS = {

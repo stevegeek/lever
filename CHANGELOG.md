@@ -46,10 +46,17 @@ version bump moves the block under the new version heading.
   job log's failure-looking lines and its last lines as plain text (no timestamps or escape
   sequences, credentials masked, at most 64 MiB read). The log download follows GitHub's redirect
   only over https to its log hosts, with no credential. Both need only Actions: read on the App.
+- **github tool: triage issues (`issue_list`, `issue_read`, `issue_comment`, `issue_close`,
+  opt-in).** List and read the repository's issues (cleaned text, credentials masked, marked as
+  data), comment on one, and close one as `completed` or `not_planned` with an optional comment.
+  Pull requests are never listed, read, commented on or closed through these. Comments follow the
+  PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
+  audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
+  need Issues: read and write.
 - **`lever apply`, `lever up` and `lever acceptance` list their steps as they run (lever#185).**
-  The jail's steps (start VM, guest hardening, guest state, packages and runtimes, scion, egress
-  firewall, nested virt), apply's numbered steps (`[5/11] scion-server`) and the manager's, each with its
-  time and a note when nothing needed doing (*reused*, *already loaded*, *already running*). On a
+  The jail's steps (start VM, guest hardening and guest profile on Lima, guest state, packages and
+  runtimes, scion, egress firewall, nested virt), apply's numbered steps (`[5/11] scion-server`)
+  and the manager's, each with its time and a note when nothing needed doing (*reused*, *already loaded*, *already running*). On a
   terminal one live line shows the running step and what it waits for (Lima's boot stage, the hub
   not answering yet, the manager start's stage); the run ends with its total and slowest steps.
   `--progress auto|tty|plain|json|quiet` or `LEVER_PROGRESS` chooses the output; `plain` prints a
@@ -110,7 +117,6 @@ version bump moves the block under the new version heading.
   supervised tool's backend, the remote proxy's) is held by a process that is not this
   instance's, naming it when `lsof` can. The operations guide has a section on running two
   instances on one host.
-
 - **Natural read-aloud: server voices with Kokoro on your own host (lever#200).** With
   `remote.voice.read_aloud: server` the chat page's speaker button reads agent messages with a
   neural voice (Kokoro's American and British English voices, or a lighter Piper voice) run by the
@@ -148,8 +154,8 @@ version bump moves the block under the new version heading.
   is the chain's only REJECT, and every other link-local address is still dropped. `lever
   acceptance`'s egress-refused check now also dials the metadata address (it must answer "no
   route to host") and a neighbouring link-local address (it must still be dropped). A running
-  closed-posture jail keeps its old chain until `lever down` and `up`, or a VM restart, and
-  `lever acceptance` fails on it until then.
+  jail gets the new chain at its next `lever apply` or `lever up`: the old chain is not the exact
+  ruleset lever would write, so it is rebuilt (atomically), in the closed posture too (lever#187).
 - **The guest no longer runs a rootless Docker daemon (lever#183).** Provisioning installed rootless
   Docker and started `dockerd` on every apply, then waited up to 30 s for it, but scion runs the
   agents in podman and nothing used it. Lever no longer installs or starts it, and stops and
@@ -180,15 +186,17 @@ version bump moves the block under the new version heading.
   hide behind the hub's start. The progress list shows these steps as running alongside the one in
   front. A failed step alongside prints its failure at once and stops the run after the step in
   front; a failed step in front stops the others, which are listed as stopped, not failed.
-- **A bring-up of a provisioned jail checks it in two guest calls instead of about twenty
+- **A bring-up of a provisioned jail reads its state in two guest calls instead of about twenty
   (lever#187).** `lever apply` and `lever up` used to make one guest round trip per check on every
   run (on Lima each is a `limactl shell`, a quarter to half a second), even to attach to a running
   manager. A new *guest state* step reads the run user, the guest arch, the installed scion's
-  digest, both families' egress chains, the resolver state and the nested-virt state at once. A
+  digest, both families' egress chains, the resolver state and the nested-virt state at once. On
+  Lima the steps that converge the guest on every bring-up still make their own calls: guest
+  hardening two (crash recovery, kernel flavour) and the guest profile one, so a warm Lima
+  bring-up makes five. A
   root-owned stamp (`/var/lib/lever/provision.stamp`) that names the exact provisioning scripts and
   the current boot, with the run user's pasta drop-in still as written, lets the packages and
-  runtimes step skip (a rootless dockerd that died is then not restarted until the next VM restart);
-  the egress chains are always compared rule for rule with the ruleset lever would commit and are
+  runtimes step skip; the egress chains are always compared rule for rule with the ruleset lever would commit and are
   rebuilt on any difference, so a missing or tampered chain never passes. The first bring-up after a
   VM restart, or after a lever whose provisioning changed, provisions in full and writes the stamp.
   With a `scion.version` that is a commit or a semantic or pseudo-version (not a branch), the host
@@ -229,13 +237,6 @@ version bump moves the block under the new version heading.
 - **Jail ABI 2.** The in-jail code changed (shared packages); rebuild the agent image
   (`make lever-image`) and recreate the manager on it when convenient. Doctor's *agent lever
   version* row says so.
-- **github tool: triage issues (`issue_list`, `issue_read`, `issue_comment`, `issue_close`,
-  opt-in).** List and read the repository's issues (cleaned text, credentials masked, marked as
-  data), comment on one, and close one as `completed` or `not_planned` with an optional comment.
-  Pull requests are never listed, read, commented on or closed through these. Comments follow the
-  PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
-  audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
-  need Issues: read and write.
 - **`lever attach` and `lever up` detach stale terminals before they attach (lever#170).** An
   earlier attach whose terminal went away (a closed window, a dropped ssh, a host that slept)
   stayed attached to the agent's tmux session and could freeze the next view while the agent

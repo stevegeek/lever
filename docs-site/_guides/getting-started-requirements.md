@@ -135,10 +135,11 @@ What each part does:
   its memory limit is killed alone and does not take the manager with it. With zram swap a
   container may also use up to its limit again in swap first (scion sets no separate swap
   limit). The limits are set when
-  an agent is created: a change reaches the manager at its next `lever up --fresh` (back up the
-  conversation first) and a worker at its next fresh start.
-- **`broker.max_running_workers`** makes the broker refuse a worker start, resume or wake past the
-  cap with a message the manager can act on (suspend or stop a worker first), instead of letting
+  an agent is created: a change reaches the manager at its next
+  `lever up --fresh --keep-conversation` (it backs the conversation up and resumes the new manager
+  on it) and a worker at its next fresh start.
+- **`broker.max_running_workers`** makes the broker refuse a worker start, resume, recycle or wake
+  past the cap with a message the manager can act on (suspend or stop a worker first), instead of letting
   the VM run out of memory.
 - **`scion.binary`** skips building scion on the host.
 
@@ -147,8 +148,8 @@ and one worker 0.4-0.5 GB each, their work and the page cache the rest. That lea
 for a second light worker or a memory spike.
 
 `lever apply` and `lever up` warn when an existing VM was created with other `cpus` or `memory`:
-those apply only when Lima creates the VM (back up the conversation, then
-`lever destroy` and `lever up`). `guest_profile` applies to an existing VM at the next `apply` or
+those apply only when Lima creates the VM. To recreate it and keep the manager's conversation:
+`lever conversation backup`, `lever destroy`, `lever up`, then `lever conversation restore`. `guest_profile` applies to an existing VM at the next `apply` or
 `up`.
 
 On OrbStack, the VM is OrbStack's own: set its memory and CPU limits in OrbStack's settings.

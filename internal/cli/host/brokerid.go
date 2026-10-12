@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/httpjson"
@@ -57,6 +58,24 @@ func judgeRunningBroker(got broker.EpochAnswer, ours, wantVersion, wantHash stri
 	}
 }
 
+// heldBrokerErr is nil only when got is the broker this apply runs: this
+// instance's id, this binary's version and this broker config's hash.
+// Healthy holds every answer to it, so the reuse decision and the health
+// check share judgeRunningBroker. ownPIDAlive is false here on purpose: a
+// broker without an id is never the one this binary started.
+func heldBrokerErr(got broker.EpochAnswer, ours, wantVersion, wantHash string, adminPort int) error {
+	switch judgeRunningBroker(got, ours, wantVersion, wantHash, false) {
+	case brokerReuse:
+		return nil
+	case brokerRestart: // this instance's id, another binary or config
+		return fmt.Errorf("this instance's broker answers on 127.0.0.1:%d as version %q, or with another broker config, not as the broker this apply runs (version %q): "+
+			"another lever apply or reload of this instance may have replaced it; lever does not use it. Run lever stop, then run this again",
+			adminPort, got.Version, wantVersion)
+	default:
+		return foreignBrokerError(adminPort, got, ours)
+	}
+}
+
 // shortID shortens an instance id for messages. Not a secret; just long.
 func shortID(id string) string {
 	if id == "" {
@@ -73,9 +92,9 @@ func shortID(id string) string {
 func foreignBrokerError(adminPort int, got broker.EpochAnswer, ours string) error {
 	if got.InstanceID == "" {
 		return fmt.Errorf("a lever broker that reports no instance id (version %q, an older lever) is serving on 127.0.0.1:%d, "+
-			"and this instance's %s names no live process, so nothing shows it is this instance's broker; lever leaves it running. "+
+			"and nothing shows it is this instance's broker; lever leaves it running. "+
 			"If it is another instance's, give this instance its own broker.jail_port and broker.admin_port; if it is this instance's, stop that process, then run this again",
-			got.Version, adminPort, "broker.pid")
+			got.Version, adminPort)
 	}
 	return fmt.Errorf("the broker on 127.0.0.1:%d belongs to another lever instance (its instance id %s, this instance's %s); lever leaves it running. "+
 		"Give this instance its own broker.jail_port and broker.admin_port (and remote.port, remote.login_port and tool backend ports, see the operations guide). "+
@@ -120,4 +139,30 @@ func requireOwnBroker(ctx context.Context, client *http.Client, adminPort int, s
 		return foreignBrokerError(adminPort, got, ours)
 	}
 	return nil
+}
+
+// brokerQuietWait bounds how long Start waits for the admin port to fall
+// silent after stopping this instance's broker. A var so tests can shorten it.
+var brokerQuietWait = 3 * time.Second
+
+// stillAnswering polls the admin /epoch until it stops answering or wait
+// elapses; it returns the last answer and whether a broker still answers.
+func (bc *brokerController) stillAnswering(ctx context.Context, wait time.Duration) (broker.EpochAnswer, bool) {
+	deadline := time.Now().Add(wait)
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		got, err := readBrokerIdentity(probeCtx, bc.admin, bc.adminURL)
+		cancel()
+		if err != nil {
+			return broker.EpochAnswer{}, false
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return got, true
+		}
+		select {
+		case <-ctx.Done():
+			return got, true
+		case <-time.After(brokerHealthInterval):
+		}
+	}
 }

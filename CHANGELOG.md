@@ -98,10 +98,14 @@ version bump moves the block under the new version heading.
   the same ports, even with the same version and config hash, is left running and apply stops with
   an error naming the ports to change. A broker from an older lever (no id) is restarted only when
   this instance's `broker.pid` names a live process, and only once the port fell silent after the
-  stop. The health wait accepts only this instance's broker, and `lever revoke` and
-  `lever broker bump-epoch` refuse any other. A copied instance directory makes its own id, and
-  its stop paths drop the copied pid files instead of signalling the original's processes. The
-  id lives outside the in-jail wire types, so the jail ABI is unchanged.
+  stop (apply waits up to 3 s for that, then refuses rather than adopt what still answers). The
+  health wait accepts only the broker this apply runs, one that reports this instance's id, this
+  binary's version and this config's hash, and fails at once on any other: before, when another
+  broker held the ports, the new broker could not bind and died, and the health check accepted
+  the other one. `lever revoke` and `lever broker bump-epoch` refuse a broker of another instance.
+  A copied instance directory makes its own id, and its stop paths drop the copied pid files
+  instead of signalling the original's processes. The id lives outside the in-jail wire types, so
+  the jail ABI is unchanged.
 - **Doctor's `instance ports` row (lever#181)** warns when a configured port (the broker's, a
   supervised tool's backend, the remote proxy's) is held by a process that is not this
   instance's, naming it when `lsof` can. The operations guide has a section on running two
@@ -236,9 +240,19 @@ version bump moves the block under the new version heading.
   queries both an in-memory and an on-disk database, and its tests pass. No shipped `lever` binary
   links SQLite; only the reference tool does. It is baked into the agent image, which this release
   rebuilds anyway (jail ABI 2).
+- **The Makefile builds with the Go release in `go.mod`.** It sets `GOTOOLCHAIN=go<go.mod>+auto`,
+  the Go CI uses (the `go` command downloads it once if the local one differs, and still switches
+  up when a dependency needs a newer Go). Under Go 1.27 the old SQLite pair in `lever-tool-db`
+  hung on first use and the e2e's tool calls failed with a 502; the upgrade above fixes that, and
+  the pin keeps the next such break out of local builds. `make GOTOOLCHAIN=local` builds with the
+  local Go, to try a newer one on purpose.
 
 ### Fixed
 
+- **`lever acceptance` waits for its tools to listen** (up to 30 s) before it runs the checks, and
+  fails naming the tool, its address and its log when one never does. A first check could reach
+  the gateway before the tool bound its port and fail with a 502 unrelated to the capability under
+  test. A tool held back by `manager.read_only` is not waited for.
 - **Agent messages refuse an old `scion.source` checkout at bring-up (lever#159).** Config load
   refused `remote.agent_messages` only on an old `scion.version` pseudo-version; an old
   `scion.source` checkout failed only `lever doctor`'s row. `lever apply`, `lever up` and `lever

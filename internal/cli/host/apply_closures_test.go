@@ -12,7 +12,10 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
@@ -238,25 +241,90 @@ func TestMintManagerBootstrapNon200(t *testing.T) {
 }
 
 // TestBrokerHealthyReturnsOnOK proves the health poll succeeds as soon as
-// /epoch answers 200 with this instance's id (lever#181).
+// /epoch answers 200 as the broker this apply runs: this instance's id
+// (lever#181), this binary's version and this config's hash.
 func TestBrokerHealthyReturnsOnOK(t *testing.T) {
 	var st state.State
+	var app *config.App
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
 		id, _ := st.ReadInstanceID()
-		_ = json.NewEncoder(w).Encode(broker.EpochAnswer{InstanceID: id})
+		writeJSONEpoch(w, answer(id, cli.VersionString(), brokerctl.ConfigHash(app)))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	deps, _, st, _ := buildDepsAgainstFakeBroker(t, srv)
+	deps, a, s, _ := buildDepsAgainstFakeBroker(t, srv)
+	app, st = a, s
 	if _, err := st.EnsureInstanceID(); err != nil { // Start makes it in a real apply
 		t.Fatal(err)
 	}
 
 	if err := deps.BrokerHealthy(context.Background()); err != nil {
-		t.Fatalf("BrokerHealthy against a 200 /epoch: %v", err)
+		t.Fatalf("BrokerHealthy against this instance's broker: %v", err)
 	}
+}
+
+// A broker that is not the one this apply runs is never adopted: another
+// instance's (even with this binary and config), this instance's with
+// another binary or config, or one predating instance ids. Health fails at
+// once, naming the port, instead of polling to the timeout or carrying on.
+func TestBrokerHealthyRefusesAForeignBroker(t *testing.T) {
+	var st state.State
+	var app *config.App
+	var mu sync.Mutex
+	var mk func(ours string) broker.EpochAnswer
+	mux := http.NewServeMux()
+	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
+		id, _ := st.ReadInstanceID()
+		mu.Lock()
+		a := mk(id)
+		mu.Unlock()
+		writeJSONEpoch(w, a)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	deps, a, s, _ := buildDepsAgainstFakeBroker(t, srv)
+	app, st = a, s
+	if _, err := st.EnsureInstanceID(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		mk   func(ours string) broker.EpochAnswer
+		want string
+	}{
+		{"another instance, this binary and config", func(string) broker.EpochAnswer {
+			return answer(idOther, cli.VersionString(), brokerctl.ConfigHash(app))
+		}, "another lever instance"},
+		{"this instance, another binary", func(ours string) broker.EpochAnswer {
+			return answer(ours, "0.34.2", brokerctl.ConfigHash(app))
+		}, "not as the broker this apply runs"},
+		{"this instance, another config", func(ours string) broker.EpochAnswer {
+			return answer(ours, cli.VersionString(), "another-config")
+		}, "not as the broker this apply runs"},
+		{"predates instance ids", func(string) broker.EpochAnswer {
+			return answer("", "0.34.2", "another-instance")
+		}, "no instance id"},
+	} {
+		mu.Lock()
+		mk = c.mk
+		mu.Unlock()
+		start := time.Now()
+		err := deps.BrokerHealthy(context.Background())
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("127.0.0.1:%d", app.EffectiveAdminPort())) || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: err = %v, want the port and %q", c.name, err, c.want)
+		}
+		if time.Since(start) > 3*time.Second {
+			t.Fatalf("%s: took %s: a broker that is not this apply's must fail at once", c.name, time.Since(start))
+		}
+	}
+}
+
+func writeJSONEpoch(w http.ResponseWriter, a broker.EpochAnswer) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(a)
 }
 
 // TestEgressAllowlistCarriesTheLoginPort is the regression test for a live

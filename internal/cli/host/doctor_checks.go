@@ -1825,10 +1825,14 @@ func braceList(names []string) string {
 	return "{" + strings.Join(names, ",") + "}"
 }
 
-// backendHostPort strips an optional path from a "host:port[/path]" backend,
-// leaving the "host:port" a TCP dial needs. External backends are validated
-// scheme-less, so no scheme handling is required.
+// backendHostPort strips an optional scheme and path from a
+// "[scheme://]host:port[/path]" backend, leaving the "host:port" a TCP dial
+// needs. External backends are validated scheme-less; a supervised tool's
+// may carry a scheme (as config's backendPort accepts).
 func backendHostPort(backend string) string {
+	if i := strings.Index(backend, "://"); i >= 0 {
+		backend = backend[i+3:]
+	}
 	if i := strings.IndexByte(backend, '/'); i >= 0 {
 		return backend[:i]
 	}

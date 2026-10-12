@@ -10,7 +10,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
@@ -114,7 +116,7 @@ func TestBrokerStartRefusesAnUnownedOldBroker(t *testing.T) {
 	app := &config.App{Name: "a"}
 	app.Broker.AdminPort = port
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
-	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") {
+	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") || !strings.Contains(err.Error(), "names no live process") {
 		t.Fatalf("Start = %v, want the no-instance-id refusal", err)
 	}
 }
@@ -157,12 +159,13 @@ func epochServerFor(t *testing.T, app *config.App, id string) (string, int) {
 func TestBrokerHealthyChecksTheInstance(t *testing.T) {
 	st, id := stateWithID(t)
 	app := &config.App{Name: "a"}
-	url, _ := epochServer(t, answer(id, "v", "h"))
+	url, port := epochServerFor(t, app, id)
+	app.Broker.AdminPort = port
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
 	if err := bc.Healthy(context.Background()); err != nil {
 		t.Fatalf("own broker: %v", err)
 	}
-	url, _ = epochServer(t, answer(idOther, "v", "h"))
+	url, _ = epochServerFor(t, app, idOther)
 	bc.adminURL = url
 	if err := bc.Healthy(context.Background()); err == nil || !strings.Contains(err.Error(), "another lever instance") {
 		t.Fatalf("other broker: %v", err)
@@ -198,6 +201,8 @@ func TestRequireOwnBroker(t *testing.T) {
 // process: the stop stops nothing, the broker still answers, and apply
 // refuses rather than adopting whatever holds the port.
 func TestBrokerStartRefusesWhenTheStopLeavesABroker(t *testing.T) {
+	defer func(w time.Duration) { brokerQuietWait = w }(brokerQuietWait)
+	brokerQuietWait = 300 * time.Millisecond
 	st, id := stateWithID(t)
 	url, port := epochServer(t, answer(id, "some-older-binary", "h"))
 	app := &config.App{Name: "a"}
@@ -205,5 +210,79 @@ func TestBrokerStartRefusesWhenTheStopLeavesABroker(t *testing.T) {
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
 	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "still answers") || !strings.Contains(err.Error(), "stop the broker by hand") {
 		t.Fatalf("Start = %v, want the still-answers refusal", err)
+	}
+}
+
+// heldBrokerErr: Healthy accepts only the broker this apply runs (this
+// instance's id, this binary, this config); every other answer is an error
+// naming the port, and another instance's names the ports to change.
+func TestHeldBrokerErr(t *testing.T) {
+	if err := heldBrokerErr(answer(idOurs, "v", "h"), idOurs, "v", "h", 8444); err != nil {
+		t.Fatalf("own broker: %v", err)
+	}
+	for _, c := range []struct {
+		name string
+		got  broker.EpochAnswer
+		ours string
+		want string
+	}{
+		{"another instance, same binary and config", answer(idOther, "v", "h"), idOurs, "broker.admin_port"},
+		{"ours, other binary", answer(idOurs, "0.34.2", "h"), idOurs, "not as the broker this apply runs"},
+		{"ours, other config", answer(idOurs, "v", "other"), idOurs, "not as the broker this apply runs"},
+		{"predates ids, same binary and config", answer("", "v", "h"), idOurs, "no instance id"},
+		{"no id of our own", answer(idOurs, "v", "h"), "", "another lever instance"},
+	} {
+		err := heldBrokerErr(c.got, c.ours, "v", "h", 8444)
+		if err == nil || !strings.Contains(err.Error(), "127.0.0.1:8444") || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want the port and %q", c.name, err, c.want)
+		}
+	}
+}
+
+// stillAnswering: a broker that keeps answering is reported with its
+// identity; a closed port is not.
+func TestBrokerStillAnswering(t *testing.T) {
+	url, _ := epochServer(t, answer(idOther, "0.34.2", "x"))
+	bc := &brokerController{adminURL: url, admin: http.DefaultClient}
+	if got, ok := bc.stillAnswering(context.Background(), 300*time.Millisecond); !ok || got.Version != "0.34.2" || got.InstanceID != idOther {
+		t.Fatalf("answering broker: %+v %v", got, ok)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "http://" + ln.Addr().String()
+	ln.Close()
+	bc.adminURL = closed
+	if _, ok := bc.stillAnswering(context.Background(), 300*time.Millisecond); ok {
+		t.Fatal("a closed port must not read as answering")
+	}
+}
+
+// stillAnswering waits out a broker that is still shutting down: one that
+// answers a few more probes and then falls silent reads as quiet, before
+// the wait ends.
+func TestBrokerStillAnsweringWaitsOutASlowStop(t *testing.T) {
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		n++
+		left := n <= 3
+		mu.Unlock()
+		if !left {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(answer(idOurs, "v", "h"))
+	}))
+	t.Cleanup(srv.Close)
+	bc := &brokerController{adminURL: srv.URL, admin: http.DefaultClient}
+	start := time.Now()
+	if got, ok := bc.stillAnswering(context.Background(), 5*time.Second); ok {
+		t.Fatalf("a broker that fell silent read as answering: %+v", got)
+	}
+	if time.Since(start) >= 5*time.Second {
+		t.Fatalf("took %s: quiet must end the wait", time.Since(start))
 	}
 }

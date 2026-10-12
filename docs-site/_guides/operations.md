@@ -720,17 +720,19 @@ API.
 
 **A broker is never shared.** Each instance has a random instance id, made on first use in
 `.lever-state/instance-id.json`, and its broker reports it on `/epoch`. `lever apply`, `up` and
-`reload` reuse or restart a running broker only when it reports this instance's id. When another
-instance's broker answers on the configured admin port, they stop with an error that names the
-ports to change, and leave that broker running. `lever revoke` and `lever broker bump-epoch` refuse it
-the same way, so a revoke never reaches the other instance's agents. A broker started by a lever
-that predates the id reports none: apply restarts it when this instance's `broker.pid` names a live
-process, then checks the port fell silent, and otherwise refuses. A copied instance directory makes
-its own id on its first apply (the file records the directory it belongs to), so a copy and its
-original never pass for one another; the copy's `broker.pid` and `remote.pid` name the original's
-processes, so its `lever stop`, `reload` and `apply` remove them and never signal them. Moving an
-instance looks the same to lever (a new id, the pid files dropped): stop it (`lever stop`) before
-you move it.
+`reload` reuse or restart a running broker only when it reports this instance's id (or, for a broker
+from an older lever, as below). When another instance's broker answers on the configured admin port,
+they stop with an error that names the ports to change, and leave that broker running. `lever
+revoke` and `lever broker bump-epoch` refuse it the same way, so a revoke never reaches the other
+instance's agents. A broker started by a lever that predates the id reports none: apply restarts it
+when this instance's `broker.pid` names a live process, then checks the port fell silent, and
+otherwise refuses. Once it has started its broker, apply waits only for a broker that reports this
+instance's id, this binary's version and this config's hash: any other broker that answers makes
+apply fail at once, and it is never used. A copied instance directory makes its own id on its first
+apply (the file records the directory it belongs to), so a copy and its original never pass for one
+another; the copy's `broker.pid` and `remote.pid` name the original's processes, so its `lever
+stop`, `reload` and `apply` remove them and never signal them. Moving an instance looks the same to
+lever (a new id, the pid files dropped): stop it (`lever stop`) before you move it.
 
 `lever doctor`'s `instance ports` row warns when a configured port is held by a process that is not
 this instance's: another instance's broker on the broker ports, or any listener on a port whose

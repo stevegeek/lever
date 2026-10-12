@@ -1059,20 +1059,28 @@ func (bc *brokerController) Start(ctx context.Context) error {
 			progress.From(ctx).Note("reused")
 			return nil // same instance, binary and broker config; keep the process + PID
 		case brokerRefuse:
+			if er.InstanceID == "" {
+				return fmt.Errorf("%w (this instance's %s names no live process)", foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours), stateRel(bc.state, bc.state.PID()))
+			}
 			return foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours)
 		}
 		bc.log.printf("lever: broker predates this binary or its tool config changed — restarting it (was %q)", er.Version)
 		if err := brokerctl.StopBroker(bc.state); err != nil {
 			return fmt.Errorf("stopping the stale broker before restart: %w", err)
 		}
-		// The broker stopped was the one the pid file names. If a broker
-		// still answers, it was not that one: never adopt it.
-		checkCtx, cancel := context.WithTimeout(ctx, time.Second)
-		defer cancel()
-		if still, err := readBrokerIdentity(checkCtx, bc.admin, bc.adminURL); err == nil {
+		// StopBroker stops only the process this instance's broker.pid
+		// names, and waits for it to exit. A broker that still answers on
+		// the admin port once the port had time to fall silent was not that
+		// process: a spawn could not bind the port and would die, and the
+		// health check must not adopt what answers. Refuse instead.
+		still, ok := bc.stillAnswering(ctx, brokerQuietWait)
+		if err := ctx.Err(); err != nil {
+			return err // a cancelled probe proves nothing: spawn nothing
+		}
+		if ok {
 			if still.InstanceID == ours {
-				return fmt.Errorf("this instance's broker still answers on 127.0.0.1:%d after the stop: %s names another process or none; stop the broker by hand, then run this again",
-					bc.app.EffectiveAdminPort(), stateRel(bc.state, bc.state.PID()))
+				return fmt.Errorf("this instance's broker still answers on 127.0.0.1:%d after the stop: %s names another process or none; stop the broker by hand (find it with lsof -nP -iTCP:%d -sTCP:LISTEN), then run this again",
+					bc.app.EffectiveAdminPort(), stateRel(bc.state, bc.state.PID()), bc.app.EffectiveAdminPort())
 			}
 			return fmt.Errorf("a broker still answers on 127.0.0.1:%d after this instance's broker was stopped: %w",
 				bc.app.EffectiveAdminPort(), foreignBrokerError(bc.app.EffectiveAdminPort(), still, ours))
@@ -1098,11 +1106,14 @@ const (
 	brokerHealthInterval = 200 * time.Millisecond
 )
 
-// Healthy polls GET /epoch until this instance's broker answers (its
-// instance id, lever#181) or brokerHealthTimeout elapses. A broker of
-// another instance answering fails at once: the spawned child lost the
-// ports to it, and minting from it would hand this instance's manager
-// another instance's broker.
+// Healthy polls GET /epoch until the broker this apply runs answers or
+// brokerHealthTimeout elapses: this instance's id (lever#181), this
+// binary's version and this broker config's hash (heldBrokerErr). Any
+// other broker answering fails at once rather than being adopted: another
+// instance's broker means the spawned child lost the ports to it, and
+// minting from it would hand this instance's manager another instance's
+// broker; this instance's broker with another version or config is not the
+// one this apply started.
 func (bc *brokerController) Healthy(ctx context.Context) error {
 	ours, err := bc.state.ReadInstanceID()
 	if err != nil {
@@ -1110,15 +1121,16 @@ func (bc *brokerController) Healthy(ctx context.Context) error {
 	}
 	pollCtx, cancel := context.WithTimeout(ctx, brokerHealthTimeout)
 	defer cancel()
+	wantV, wantH := cli.VersionString(), brokerctl.ConfigHash(bc.app)
 	var last error
 	err = retry.Until(pollCtx, 0, brokerHealthInterval, func() (bool, error) {
 		got, gerr := readBrokerIdentity(pollCtx, bc.admin, bc.adminURL)
-		switch {
-		case gerr != nil:
+		if gerr != nil {
 			last = gerr
 			return false, nil
-		case got.InstanceID != ours:
-			return false, foreignBrokerError(bc.app.EffectiveAdminPort(), got, ours)
+		}
+		if err := heldBrokerErr(got, ours, wantV, wantH, bc.app.EffectiveAdminPort()); err != nil {
+			return false, err
 		}
 		return true, nil
 	})

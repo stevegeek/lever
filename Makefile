@@ -11,6 +11,16 @@ PREFIX ?= $(HOME)/.local/bin
 # own instance directory (this default is a neutral placeholder).
 LEVER_INSTANCE ?= $(HOME)/lever-instance
 
+# Build with the Go release go.mod names: the one CI uses. A
+# newer local Go can break dependencies that lean on runtime internals: under
+# Go 1.27, modernc.org/libc v1.73.4 (behind lever-tool-db's SQLite until lever#180)
+# hung on first use.
+# The go command downloads that toolchain once when the local one differs.
+# Offline, or to try a newer Go on purpose: make GOTOOLCHAIN=local <target>.
+GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
+GOTOOLCHAIN ?= go$(GO_VERSION)+auto
+export GOTOOLCHAIN
+
 # Install the host `lever` binary (darwin/native) onto PATH — your everyday entry
 # (`lever up` from anywhere inside an instance, or `lever up path/to/lever.yaml`).
 # Cross-compile the guest's remote-access login forwarder for linux/amd64 and

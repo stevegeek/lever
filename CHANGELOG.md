@@ -85,6 +85,18 @@ version bump moves the block under the new version heading.
   audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
   need Issues: read and write.
 
+### Fixed
+
+- **Agent messages refuse an old `scion.source` checkout at bring-up (lever#159).** Config load
+  refused `remote.agent_messages` only on an old `scion.version` pseudo-version; an old
+  `scion.source` checkout failed only `lever doctor`'s row. `lever apply`, `lever up` and `lever
+  remote serve` now refuse it too when git says the checkout does not hold `b3562fb1` (one git
+  cannot answer for stays doctor's warning). A pseudo-version is still judged by its commit time,
+  so a later-dated fork commit that lacks the fix passes; the docs say so.
+- **A verify miss gives its call back only to the window that counted it (lever#22).** A miss
+  (and a recycle that deletes nothing) returns its call to the per-minute budget; a call that
+  ran past its window could lower the count of the window a later call had opened.
+
 ## [0.35.0] - 2026-10-12
 
 ### Added

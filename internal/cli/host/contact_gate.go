@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -13,6 +14,8 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
@@ -37,6 +40,11 @@ import (
 // An adopted (owner-customized) skill counts as current only when it was
 // adopted at this version.
 //
+// With remote.agent_messages on, it also refuses a scion.source checkout
+// that predates config.AgentMessagesScionFloor: the contact filter trusts
+// the sender the hub sets, and an older hub lets an agent post as its
+// contact (doctor's agent messages row says the same).
+//
 // The disk is not the whole story: a resumed session keeps the skill text it
 // loaded before. That part is checked per agent, per post, by the remote
 // proxy (contactSession), because only then is it known which agents exist
@@ -58,7 +66,25 @@ func checkContactGate(app *config.App, st state.State) error {
 			"these are not: %s. Run `lever init` (or `lever init --force` over an edited skill), then apply again",
 			cli.Version, strings.Join(stale, ", "))
 	}
+	// Config load refuses agent messages on a scion.version pseudo-version
+	// older than the floor; a scion.source checkout needs git, so it is
+	// checked here. Only a checkout known to predate the floor is refused:
+	// one git cannot answer for is doctor's warning, as a scion.binary is.
+	if app.AgentMessagesOn() && app.Scion.Version == "" && app.Scion.Source != "" {
+		if bad, note := agentMessagesScion(app, scionSourceHasCommit); bad {
+			return fmt.Errorf("remote: agent_messages needs scion %s (2026-08-28) or later, where the hub sets a message's sender itself; %s. "+
+				"Update the checkout, or turn remote.agent_messages off", config.AgentMessagesScionFloor[:8], note)
+		}
+	}
 	return nil
+}
+
+// scionSourceHasCommit is how checkContactGate asks whether the scion.source
+// checkout holds a commit (a test replaces it).
+var scionSourceHasCommit = func(source, commit string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return scionbin.SourceHasCommit(ctx, proc.RealRunner{}, source, commit)
 }
 
 // staleSkillList names each agent skill on disk that is not this version's

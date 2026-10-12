@@ -88,13 +88,15 @@ when it is created again:
 - **The verb is in the manager image.** `lever-manager agent recycle` exists only in a
   `lever-manager` binary of this release or later. Rebuild the image (`make lever-image`, and
   rebuild an instance image built from it), then give the manager the new image with
-  `lever up --fresh`. A fresh start **discards the manager's conversation**: back it up first.
+  `lever up --fresh --keep-conversation`, which keeps the manager's conversation (plain `--fresh`
+  starts a new one).
   Until then the manager's old binary has no `recycle` command.
 - **The skill changes on an instance with contact logins.** Setting `recyclable: true` on the
   first worker and running `lever init` changes the manager's `lever-operator` skill. While the
   manager's session was started on the old skill, contacts cannot post to the manager; that ends
-  only when the manager starts fresh, which loses its conversation unless you back it up. Make
-  the config change, the image rebuild and the backup together, then run one `lever up --fresh`.
+  only when the manager starts fresh (plain `lever up --fresh`, which backs the old conversation
+  up first; `--keep-conversation` would keep the old skill too). Make the config change and the
+  image rebuild together, then run one `lever up --fresh`.
 
 - **What is lost:** the worker's conversation. Nothing can resume it afterwards.
 - **What is kept:** the worker's `dir` (its work product). The next piece of work sees the files
@@ -369,9 +371,10 @@ and `worker purge` looked for the worker ticket in the wrong runtime directory.
 ## Create-time manager settings
 
 scion keeps a record's mounts and devices for life. Two manager settings therefore reach only a
-freshly created manager: change them, back up the manager's conversation, then run
-`lever up --fresh`. `lever stop` + `lever up` and `lever reload` keep the old mounts; `lever apply`
-warns.
+freshly created manager: change them, then run `lever up --fresh --keep-conversation`, which
+recreates the manager and carries its conversation over
+([below](#the-managers-conversation-across---fresh)). `lever stop` + `lever up` and `lever reload`
+keep the old mounts; `lever apply` warns.
 
 - **`manager.read_only`** — the listed tree directories are read-only in the manager, and while
   the list is set every worker dir and the parents of each entry are pinned (bind-mounted over
@@ -386,11 +389,55 @@ warns.
 - **`nested_virt`** (Lima on an x86_64 Linux host) — gives the **manager** container `/dev/kvm`;
   workers and the hub do not get it. `lever apply` checks the host's KVM `nested` module and
   installs the guest udev rule (`/dev/kvm` mode 0666); a jail VM created without `/dev/kvm` needs a
-  recreate (back up the conversation, `lever destroy`, `lever up`). Doctor's `nested virt` row
+  recreate (`lever conversation backup`, `lever destroy`, `lever up`, `lever conversation restore`). Doctor's `nested virt` row
   checks the guest device, the manager's device, and that the old podman drop-in that gave every
   container the device is gone (`lever apply` removes it; workers created while it was there keep
   the device until they are recreated). Turned off, the row fails while the manager still holds
   the device. See [`nested_virt`](/reference/config/#top-level).
+
+## The manager's conversation across `--fresh`
+
+A manager keeps the image, model, mounts and devices it was created with, so changing one of them
+needs a fresh create: `lever up --fresh`. That deletes the manager's scion record and, with it, the
+record's home in the jail, where Claude Code keeps the conversation (`~/.claude/projects`).
+
+- **`lever up --fresh`** backs the conversation up before it deletes anything: it suspends a
+  running manager, copies its `~/.claude/projects` to `.lever-state/conversations/<id>/` and prints
+  the path. If the backup fails, nothing is deleted and `up` stops: fix the cause, or run
+  `lever up --fresh --no-backup` to discard the conversation without a copy. The new manager
+  starts a new conversation.
+- **`lever up --fresh --keep-conversation`** does the same, then, once the new manager is live,
+  suspends it, puts the backed-up transcripts in its home and resumes it, so `claude --continue`
+  picks up the old conversation. Use it for an image, model, mount or device change. The new
+  manager's boot turn is cut short, and its transcript is moved aside in the manager's home
+  (`~/.claude/projects.lever-replaced-<stamp>`). If the restore fails, the backup stays:
+  `lever conversation restore <id>` tries again.
+- **`lever conversation list`** shows the backups, newest first. **`lever conversation backup`**
+  takes one by hand (the jail must be up; a running manager is copied as it runs).
+  **`lever conversation restore [<id>]`** puts one back, the newest by default, into a running or
+  suspended manager: it backs up the conversation it replaces (`--no-backup` skips that), suspends
+  the manager, swaps the transcripts and resumes it. lever keeps the last 10 backups.
+- **Recreating the VM** (`lever destroy`, `lever up`) loses the agent homes too: run
+  `lever conversation backup` first and `lever conversation restore` after. `lever destroy` does
+  not touch the state directory.
+
+Only the transcripts are carried over. `~/.claude.json` (the account identity, onboarding state,
+the MCP configuration lever writes when the agent boots, and in api-key mode the key) stays the
+new record's own.
+
+**Security.** A backup holds the whole conversation, with whatever secrets the agent saw. It lives
+in the state directory, never in the tree: lever keeps no backup when the state directory is inside
+the tree. Directories are 0700 and files 0600, and lever never prints a backup's content. Every byte
+of it was written by the agent, so lever never follows a link the agent made in its home, keeps only
+directories and regular files with clean relative names, refuses an archive past its limits (1 GiB
+a file, 4 GiB in all), and restores only that checked copy into a directory it has just created.
+A restored conversation keeps the lever skill it was started with: the restore records that skill
+(from the backup) as the manager's session, so contacts can post to the manager only while that
+skill is the one on disk; a backup that does not know it refuses contacts until the next plain
+fresh start.
+
+**When not to keep it.** To get rid of a session you no longer trust (a compromise, a prompt
+injection), use plain `lever up --fresh`: `--keep-conversation` brings the session back.
 
 ## Shared folders
 
@@ -407,7 +454,7 @@ between workers, build outputs, or reviewed tools that one agent publishes for t
    config only when it starts, and a change to `shared_folders` restarts it.
 3. Recreate the agents that should mount it: mounts are create-time only. The manager comes
    first, because it mounts every folder (read-only unless it writes it) and holds the pins that
-   protect the folder: back up its conversation and run `lever up --fresh`. Until it has them, the
+   protect the folder: run `lever up --fresh --keep-conversation`. Until it has them, the
    broker refuses to start or resume any worker. Then, for each worker,
    `lever worker purge <worker>` (or `lever-manager agent recycle` from the manager for a
    recyclable worker), and dispatch it again.
@@ -488,8 +535,7 @@ manager:
   remove the two settings and run `lever apply` to unblock the agent at once.
 - **Images.** Delivery needs the new `lever-agent` and the new pre-start hook in the agent image.
   Run `make lever-image` (and rebuild any instance image built `FROM` it), then put each agent on
-  a new container: the manager with `lever up --fresh` (back up its conversation first: it is
-  discarded), a worker with `lever worker purge <name>` or a recycle. `lever stop && lever up`
+  a new container: the manager with `lever up --fresh --keep-conversation`, a worker with `lever worker purge <name>` or a recycle. `lever stop && lever up`
   is not enough: it resumes the record on its old image. An older image ignores the block, and
   doctor's row shows the difference.
 
@@ -550,10 +596,10 @@ manager:
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
 | `lever apply`/`up` fails at `scion-server`: "hub not ready after …" | a hub start spends about 15 s before it serves (most of it a GCP metadata lookup that times out off GCP), and a cold start after a reboot or a scion pin change takes longer. lever waits up to 2 minutes and prints a line after 15 s; before 0.30.0 it gave up after 30 probes (about 30 s), and a retry seconds later found the hub up | run the command again; if it fails again, read `~/.scion/server.log` in the guest (`orb -m lever-<name>` or `limactl shell lever-<name>`). "no scion server is running in the jail any more" means the server exited during start-up: its log says why |
 | `lever apply`/`up` fails at `start-manager`: "manager … stayed in phase \"created\" … and did not settle"; the guest's `~/.scion/server.log` shows `context canceled` on a start about every 30 s | the first rootless start of a large image (several GB) builds podman's user-namespace layer copy, which can take longer than scion's ~30 s start timeout; scion then deletes the partial work and starts again from zero, every time. lever 0.34.2 and later warms the copy of every image in the `load-image` step on every apply (fast once warm; a warning there means the warm-up failed) | in the guest, as the jail user: `podman run --rm --userns=keep-id:uid=1000,gid=1000 --entrypoint true <image>` (it can take a few minutes), then `lever up --fresh` — a manager that never left phase created has no conversation to lose |
-| `lever up` fails: "manager … cannot be resumed: <dir> mounted by the manager record but no longer on the host" (before 0.30.0: podman `statfs /lever/<dir>: no such file or directory`) | the manager was created with `manager.read_only` naming `<dir>` (or a worker dir while the list was set); the record keeps that mount for life, and the directory was deleted after the entry was removed from `lever.yaml`. lever reads the mounts off the stopped manager container, or, with no container, off the hub record, and refuses every resume (the forced resume of an `error` phase too); it only warns when it keeps a running manager as it is | recreate the directory (`mkdir`, empty is enough) and run `lever up` again; to drop the mount, back up the conversation and run `lever up --fresh`. Keep a removed entry's directory until that fresh create |
-| `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, back up the conversation if you want it, then `lever up --fresh`. In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
+| `lever up` fails: "manager … cannot be resumed: <dir> mounted by the manager record but no longer on the host" (before 0.30.0: podman `statfs /lever/<dir>: no such file or directory`) | the manager was created with `manager.read_only` naming `<dir>` (or a worker dir while the list was set); the record keeps that mount for life, and the directory was deleted after the entry was removed from `lever.yaml`. lever reads the mounts off the stopped manager container, or, with no container, off the hub record, and refuses every resume (the forced resume of an `error` phase too); it only warns when it keeps a running manager as it is | recreate the directory (`mkdir`, empty is enough) and run `lever up` again; to drop the mount, run `lever up --fresh --keep-conversation`. Keep a removed entry's directory until that fresh create |
+| `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` resumes the new manager on it). In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
 | `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever stop`, then `lever up` (re-mints the token), or wait and retry. Do **not** answer exit 4 with `--fresh` |
-| Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (the conversation is discarded; before 0.21 the flag was silently dropped after `stop`) |
+| Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (add `--keep-conversation` to keep the conversation; plain `--fresh` starts a new one after backing the old one up; before 0.21 the flag was silently dropped after `stop`) |
 | Doctor's `agent lever version` row fails | the agent image's in-jail code does not match the host `lever`: its `lever_jail_abi` label differs from the host's jail ABI (or, on an image without that label, its `lever_version` release differs). The tag names only the arch, so any `make lever-image` on the host (a throwaway instance, another checkout) replaces it. A release that changed no in-jail code keeps the jail ABI, so the row passes and shows the release difference as information | rebuild from the host lever's source: `make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built `FROM` it; `lever apply`; `lever up --fresh` to recreate the manager on it (the conversation is discarded) |
 | On `lima` with `egress: open`, every agent turn ends in `Request timed out` (about 4.5 min) while `lever up` looks fine; doctor's `guest DNS` row fails | the guest resolver is a nat DNAT to the host alias on a per-boot port, which the `LEVER_EGRESS` alias DROP swallowed (lever < 0.22.2, lever#34); in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows the `-d <alias> DROP` counter climbing with every lookup | upgrade lever and re-run `lever apply` — the open posture now ACCEPTs the live `LIMADNS` DNAT targets ahead of the alias DROP; `lever doctor`'s `guest DNS` row confirms a lookup completes |
 | Doctor's `manager agent` row says the harness is `stalled` (or `crashed`/`offline`) over an `Up` container | the harness stopped completing turns: it cannot reach the model API (guest DNS, an outage), or its credential expired; the hub marks `stalled` after its `stalled_threshold` (default 5 min without an activity event) | `lever attach` shows the harness (a stuck call ends in `Request timed out`); check the `guest DNS` and credential rows; `lever stop` then `lever up` restarts the harness. If scion's `auto_suspend_stalled` is on, the hub suspends the manager itself and `lever up` resumes it into the same state until the cause is fixed |
@@ -869,8 +915,8 @@ driver).
    `lever-tool-fizzy` and `lever-tool-whisper`), and if the agent-side binaries changed, rebuild the agent image
    (`make lever-image`, or `make lever-image-bins` + your instance's own image build), then
    `lever apply` to load it (or re-save it over the `image_tar` archive on a Docker-less host,
-   then `lever apply`). The manager runs a new image only after `lever up --fresh` (back up its
-   conversation first). The agent-side binaries changed when the release's jail ABI did:
+   then `lever apply`). The manager runs a new image only after
+   `lever up --fresh --keep-conversation`, which keeps its conversation. The agent-side binaries changed when the release's jail ABI did:
    `lever doctor`'s `agent lever version` row fails after step 3 if they did.
 2. `lever init` — refreshes the scaffolded skills (your edited and adopted copies are left
    alone; `--check` to preview). If you've customized scaffolds and doctor nags about them, accept them once with
@@ -892,8 +938,9 @@ driver).
 - **Agent messages and files need the new agent image.** `remote.agent_messages`,
   `remote.files` and `remote.push` are off by default. To turn on agent messages or files:
   `make lever-image` (and rebuild an instance image built from it), `lever init`, `lever apply`,
-  then start the agents fresh: `lever up --fresh` for the manager after you back up its
-  conversation, purge and start for a worker. Push touches no agent: `lever apply` restarts the
+  then start the agents fresh: `lever up --fresh` for the manager (it backs the conversation up
+  first; keeping it with `--keep-conversation` also keeps the skill it started with), purge and
+  start for a worker. Push touches no agent: `lever apply` restarts the
   proxy with it.
 - **Four more tools in every instance.** After an image rebuild, every instance's
   `lever-capability` server lists `contacts`, `contact_message`, `contact_files` and

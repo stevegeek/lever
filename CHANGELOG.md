@@ -52,6 +52,22 @@ version bump moves the block under the new version heading.
   command with its time and exit code, showing only the command's leading plain words. The Lima
   e2e prints a time on every line, each phase's duration and a table of them, and on a failed
   acceptance the end of the broker and tool logs.
+- **`lever up --fresh` keeps a copy of the manager's conversation, and can carry it over
+  (lever#198).** A fresh create deletes the manager's record and its home in the jail, where
+  Claude Code keeps the transcripts. `up --fresh` now backs up the manager's `~/.claude/projects`
+  to `.lever-state/conversations/<id>/` (0700, files 0600, the last 10 kept) before it deletes
+  anything, suspending a running manager for the copy; a failed backup stops the fresh start with
+  the record kept, and `--no-backup` skips it. `--keep-conversation` then suspends the new manager,
+  puts the old transcripts in its home and resumes it, so `claude --continue` picks the old
+  conversation up on the new image, model, mounts or devices; the boot turn is cut short. `lever
+  conversation list|backup|restore [ID]` lists, takes and restores backups by hand (a restore
+  backs up what it replaces). Only the transcripts travel: `~/.claude.json` (account, onboarding,
+  the MCP setup lever writes, an API key) stays the new record's. The agent wrote every byte, so
+  lever follows no link in its home, keeps only directories and regular files with clean names
+  within size limits, and restores only that checked copy. A restored conversation is recorded as
+  started on the skill its backup names, so contacts are refused when that is not the skill on
+  disk. No backup is kept while the state directory is inside the tree. Doctor and apply hints
+  that said "back up the conversation, then `lever up --fresh`" now name `--keep-conversation`.
 
 ### Changed
 

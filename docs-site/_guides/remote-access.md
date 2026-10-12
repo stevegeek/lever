@@ -1004,7 +1004,7 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   `.lever-state/sessions.jsonl` (0600, a host record like the ledgers). The proxy lets a contact
   post to an agent only while that agent's last fresh start saw the skill that is on disk now;
   otherwise it answers 403 "this agent cannot take your messages yet". Every bring-up prints one
-  warning line that names such agents (at most eight, grouped by reason). For the manager, run `lever up --fresh` after you back up its conversation; a
+  warning line that names such agents (at most eight, grouped by reason). For the manager, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` does not help, the kept conversation keeps its old skill); a
   worker takes contact messages once the broker next creates it fresh.
 - **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
   contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
@@ -1091,8 +1091,8 @@ below). It works with either `landing`.
   proxy (the key is part of their config stamps); until it runs, they keep the old setting, and
   the `agent messages` row of `lever doctor` says so. The agent image must contain this
   release's `lever-agent`, which has the two tools: run `make lever-image` (and rebuild an
-  instance image built from it), then `lever up --fresh` for the manager after you back up its
-  conversation. Each contact agent must start fresh on the new skill: `lever up --fresh` for the
+  instance image built from it), then `lever up --fresh` for the manager (it backs the conversation up
+  first). Each contact agent must start fresh on the new skill: `lever up --fresh` for the
   manager, purge and start for a worker. Until then a contact's post to it is refused as not
   fresh. Turning it off again restores the earlier behaviour, with the same steps.
 - **Clocks.** The hub stamps a message with the VM's clock, and lever binds it to its
@@ -1363,7 +1363,7 @@ covers it.
   so run `lever init` first (it rewrites them), then `lever apply` (it restarts the broker and
   the proxy). From then on a contact sees every agent as not fresh, and cannot post or upload to
   it, until that agent starts a fresh session on the new skill: `lever up --fresh` for the
-  manager (back up its conversation first), purge and start for a worker. The operator is not
+  manager (it backs the conversation up first), purge and start for a worker. The operator is not
   held back. The agent image must contain this release's lever-agent: run `make lever-image` (and
   rebuild an instance image built from it) before the fresh starts. It has the two tools; they are
   direct lever-capability tools, called with no `request` mint. While files are off,

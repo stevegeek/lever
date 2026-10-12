@@ -100,7 +100,7 @@ create time only: an existing VM needs a recreate. Inside the guest, lever write
 (`/etc/udev/rules.d/65-lever-kvm.rules`, mode 0666). The manager gets the device as a bind-mount
 volume on its scion record (scion has no per-agent device field; rootless podman passes a
 `--device` as the same bind mount). The volume is create-time only: to give an existing manager
-the device, or to take it away, back up the conversation, then run `lever up --fresh`. When the
+the device, or to take it away, run `lever up --fresh --keep-conversation`. When the
 key is off, apply removes the rule and sets the device back to mode 0660. Each apply also removes
 the podman drop-in (`20-lever-kvm.conf`) that earlier builds wrote, which gave every container the
 device. `lever doctor` has a *nested virt* row. The key is rejected on OrbStack and on darwin.

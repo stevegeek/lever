@@ -1319,6 +1319,7 @@ func backendConfigFor(app *config.App, machine string) backend.Config {
 		Memory:         app.Memory,
 		NestedVirt:     app.NestedVirt,
 		GuestKernel:    app.EffectiveGuestKernel(),
+		GuestProfile:   app.EffectiveGuestProfile(),
 	}
 }
 

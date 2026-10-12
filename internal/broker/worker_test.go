@@ -806,7 +806,12 @@ func TestWorkerStartFailsWhenHarnessDiesDuringSettle(t *testing.T) {
 		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, dieAfterLists: 2}
 	b := newTestBroker(t, rt, spec)
-	b.liveAttempts, b.liveInterval, b.liveSettle = 3, time.Millisecond, 30*time.Millisecond
+	// The window is long on purpose: two dead readings end it at once, a few
+	// milliseconds in, so its length never costs a passing run anything. A
+	// short one made the test a race with the scheduler — a settle poll that
+	// a loaded machine fired after the deadline read the record still live
+	// and closed the window before the death was due.
+	b.liveAttempts, b.liveInterval, b.liveSettle = 3, time.Millisecond, 10*time.Second
 
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
 

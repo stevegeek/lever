@@ -3658,8 +3658,12 @@ func TestStartManagerFailsWhenHarnessDiesDuringSettle(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", dieAfterLiveLists: 2}
 	deps := Deps{
-		Scion:            scion.New(r, scion.Options{}),
-		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
+		Scion: scion.New(r, scion.Options{}),
+		// A long window on purpose: two dead readings end it a few
+		// milliseconds in. A short one raced the scheduler — a settle poll
+		// fired late on a loaded machine read the record still live after
+		// the deadline and passed the gate before the death was due.
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 10 * time.Second},
 	}
 	err := runApply(app, deps)
 	if !errors.Is(err, scion.ErrAgentDied) {

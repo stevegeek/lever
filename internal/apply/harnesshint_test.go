@@ -82,8 +82,10 @@ func TestStartManagerDeathNamesStaleBackgroundSession(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", dieAfterLiveLists: 2}
 	var refs []string
 	deps := Deps{
-		Scion:            scion.New(r, scion.Options{}),
-		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
+		Scion: scion.New(r, scion.Options{}),
+		// Long on purpose, as in TestStartManagerFailsWhenHarnessDiesDuringSettle:
+		// the death ends the window early, and a short one races the scheduler.
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 10 * time.Second},
 		HarnessLogTail: func(_ context.Context, ref string) (string, error) {
 			refs = append(refs, ref)
 			return "SECRET-LINE\n" + staleBgLog, nil

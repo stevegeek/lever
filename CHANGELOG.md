@@ -293,14 +293,14 @@ version bump moves the block under the new version heading.
   required only that `OUTPUT` jump to `LEVER_EGRESS` somewhere, both on the warm path ("verified,
   unchanged") and in the full apply. An ACCEPT, RETURN or goto placed in `OUTPUT` ahead of the jump
   decided every packet before the lever chain saw it, and neither path noticed or fixed it. The jump
-  must now be `OUTPUT`'s first rule, and its only copy, in both families. Every apply makes it so:
-  any other copy is deleted and the jump inserted at position 1 in one `iptables-restore` commit per
-  family, so `OUTPUT` is never without it. Other `OUTPUT` rules stay where they are; behind the
-  jump they cannot weaken it. When a scion step ran between the warm path's probe and the egress
-  decision (a build can take minutes), the chains are read again just before that decision. The
-  jail security model now says what the check cannot see: rules written with `nft` that `iptables`
-  cannot print, and, on Lima, a run user (which has passwordless sudo) that controls what root
-  commands report.
+  must now be `OUTPUT`'s first rule, and its only copy, in both families. A bring-up that does not
+  verify it so makes it so: any other copy is deleted and the jump inserted at position 1 in one
+  `iptables-restore` commit per family, so `OUTPUT` is never without it, and `OUTPUT` is read back
+  to confirm it. Other `OUTPUT` rules stay where they are; behind the jump they cannot weaken it.
+  When a scion step ran between the warm path's probe and the egress decision (a build can take
+  minutes), the chains are read again just before that decision. The jail security model now says
+  what the check cannot see: rules written with `nft` that `iptables` cannot print, and, on Lima, a
+  run user (which has passwordless sudo) that controls what root commands report.
 - **A reused pid is never signalled as the broker or the remote proxy.** `lever stop`, `down`,
   `destroy`, and `apply`'s restarts stopped whatever process `broker.pid` or `remote.pid` named,
   and `apply` restarted a broker that reports no instance id whenever `broker.pid` named any live

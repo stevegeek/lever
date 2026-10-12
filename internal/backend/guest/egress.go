@@ -257,6 +257,16 @@ func (g Guest) ensureEgressChain(ctx context.Context) error {
 		if err := g.pipeInto(ctx, g.RootPrefix, strings.NewReader(in), "exec "+fam.RestoreBinary()+" --noflush"); err != nil {
 			return fmt.Errorf("egress: make the %s jump OUTPUT's first rule (%s): %w", egress.Chain, fam.RestoreBinary(), err)
 		}
+		// Read it back: a commit that succeeded without leaving the jump
+		// first (a listing this parse misread) fails here, naming what
+		// OUTPUT holds, rather than at every later warm check.
+		after, err := g.RootRun(ctx, bin, "-S", "OUTPUT")
+		if err != nil {
+			return fmt.Errorf("egress: list OUTPUT (%s): %w", bin, err)
+		}
+		if !egress.JumpFirst(after.Stdout) {
+			return fmt.Errorf("egress: after the repair, the %s jump is still not OUTPUT's first and only rule (%s); OUTPUT lists:\n%s", egress.Chain, bin, strings.TrimSpace(after.Stdout))
+		}
 	}
 	return nil
 }

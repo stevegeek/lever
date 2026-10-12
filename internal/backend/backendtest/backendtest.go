@@ -232,6 +232,10 @@ func (g Guest) ScriptEgress(f *proc.FakeRunner, ahosts string) {
 func (g Guest) scriptFirewall(f *proc.FakeRunner) {
 	f.Script(g.Root+" iptables", proc.Result{})
 	f.Script(g.Root+" ip6tables", proc.Result{})
+	// A converged OUTPUT: the jump is first, so no jump repair is made
+	// (the longer key wins over the two above).
+	f.Script(g.Root+" iptables -S OUTPUT", proc.Result{Stdout: JumpListing})
+	f.Script(g.Root+" ip6tables -S OUTPUT", proc.Result{Stdout: JumpListing})
 	// The atomic commit: `<root> bash -c 'exec ip[6]tables-restore --noflush'`
 	// with the ruleset on stdin (guest.commitEgressChain).
 	f.Script(g.Root+" bash -c exec ip", proc.Result{})

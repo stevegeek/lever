@@ -355,7 +355,11 @@ func (g Guest) probeCall(ctx context.Context, prefix []string, script string, ke
 // now rather than as Probe found them: a bring-up may spend minutes between
 // the two (a scion build). When the read fails, the listings are dropped
 // from s, and VerifyEgress then reports false: the full path runs. A nil s
-// is left alone.
+// is left alone. The alias lookup and the resolver state (ahosts, dnschain,
+// resolv) are deliberately left as Probe read them: they only shape the
+// ruleset the live chains are compared with, and a chain that changed is
+// caught by these four listings; re-reading the alias would take a call
+// as the run user too.
 func (g Guest) RefreshEgress(ctx context.Context, s *Snapshot) {
 	if s == nil {
 		return

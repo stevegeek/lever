@@ -61,9 +61,9 @@ host's. Validated behaviour and its limits:
 ip6tables chain that `OUTPUT` jumps to (never direct `OUTPUT` rules), so re-apply replaces only that
 chain (idempotent, and it never touches non-lever rules). The jump must be **`OUTPUT`'s first rule**
 in both families: a rule ahead of it (an ACCEPT, a RETURN, a goto) would decide packets before the
-lever chain saw them. Every apply that rebuilds the chains also makes the jump first and unique,
-deleting any other copy of it and inserting it at position 1 in one `iptables-restore` commit, so
-`OUTPUT` is never without it. Other `OUTPUT` rules are left where they are: behind the jump they
+lever chain saw them. Whenever a bring-up does not verify the egress state unchanged (below), it
+makes the jump first and unique before anything else, deleting any other copy of it and inserting it
+at position 1 in one `iptables-restore` commit per family, so `OUTPUT` is never without it. Other `OUTPUT` rules are left where they are: behind the jump they
 cannot weaken it. The replacement is **atomic per address
 family**: one `iptables-restore --noflush` commit per family empties the chain and loads the whole
 new ruleset in a single transaction, so within a family the old rules stay in force until the new

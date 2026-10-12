@@ -98,7 +98,9 @@ func TestLoadImageRunsAlongsideTheHubSteps(t *testing.T) {
 }
 
 // TestStartManagerWaitsForTheImagesAndTheBroker: start-manager begins only
-// once every image is loaded and warm and the broker is healthy.
+// once every image is loaded and warm and the broker is healthy. The fake
+// runtime broker never reports online, so start-manager makes its own
+// runtime-broker wait (lever#190) and that call shows when it began.
 func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
 	var warmed, healthy atomic.Bool
 	var mu sync.Mutex
@@ -114,18 +116,45 @@ func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
 			healthy.Store(true)
 			return nil
 		},
-		WaitBrokerReady: func(context.Context, string) error {
+		WaitBrokerReady: func(context.Context, string) (bool, error) {
 			mu.Lock()
 			ready = append(ready, warmed.Load() && healthy.Load())
 			mu.Unlock()
-			return nil
+			return false, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(ready) == 0 || !ready[len(ready)-1] {
-		t.Fatal("start-manager started before the image warm-up or the broker health check finished")
+	if len(ready) != 2 || !ready[1] {
+		t.Fatalf("runtime-broker waits (lanes done at each) = %v; want two, start-manager's after the image warm-up and the broker health check", ready)
+	}
+}
+
+// TestRuntimeBrokerSeenOnlineSkipsStartManagersWait: with the lanes running
+// in the background, the scion-server step's online answer still carries to
+// start-manager (both are foreground steps of the same run, and no lane step
+// restarts the hub), so the runtime broker is asked about only once.
+func TestRuntimeBrokerSeenOnlineSkipsStartManagersWait(t *testing.T) {
+	var mu sync.Mutex
+	var projects []string
+	_, err := runWithProgress(t, Deps{
+		WarmImage: func(context.Context, string) error {
+			time.Sleep(20 * time.Millisecond)
+			return nil
+		},
+		WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
+			mu.Lock()
+			projects = append(projects, project)
+			mu.Unlock()
+			return true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(projects) != 1 || projects[0] != scionGlobalProject {
+		t.Fatalf("WaitBrokerReady calls = %q; want only the scion-server step's", projects)
 	}
 }
 

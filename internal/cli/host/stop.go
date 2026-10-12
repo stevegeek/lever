@@ -79,7 +79,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					hcancel()
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
-						cmd.PrintErrf("lever: warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
+						reportManagerSuspendError(cmd, sc, appName, b.MountDest(), serr)
 					}
 					cancel()
 					// After the manager, under its own budget, so a slow worker
@@ -97,6 +97,23 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	return cmd
+}
+
+// reportManagerSuspendError reports a failed suspend of the manager, unless
+// the record already reads suspended: scion refuses to suspend a suspended
+// record (a second `lever stop`, or a restore that left it so), and that
+// refusal changes nothing about the next resume (lever#198).
+func reportManagerSuspendError(cmd *cobra.Command, sc workerSuspender, name, project string, serr error) {
+	lctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+	agents, err := sc.List(lctx, project)
+	cancel()
+	if err == nil {
+		if a := scion.FindAgent(agents, name); a != nil && a.Phase == scion.PhaseSuspended {
+			cmd.Printf("manager %q is already suspended.\n", name)
+			return
+		}
+	}
+	cmd.PrintErrf("lever: warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
 }
 
 // healStoppedManager runs before the manager's suspend. A manager whose hub

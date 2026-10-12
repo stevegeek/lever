@@ -69,6 +69,14 @@ func (p *postLive) start() {
 	})
 }
 
+// wait waits for probes the gate started, without logging their lines;
+// probes it never started stay unstarted. finish or abandon follows.
+func (p *postLive) wait() {
+	if p.started {
+		<-p.done
+	}
+}
+
 // finish runs the probes if the gate did not start them, waits for them,
 // and logs every line they held back.
 func (p *postLive) finish() {

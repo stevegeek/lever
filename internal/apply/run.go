@@ -1207,6 +1207,11 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		err = r.waitManagerLive(ctx, jp, acted, probes.start)
 	}
 	if err == nil && resumed && !verified {
+		// The post-live probes (started by the gate) read the same mounts:
+		// let them end first, so the two never race, and the manager is
+		// still not reported up until this check has passed — a mismatch
+		// suspends it and the probes' warnings are dropped (abandon).
+		probes.wait()
 		if verified, err = r.verifyResumedTreeMounts(ctx, jp); err == nil && !verified {
 			r.d.Log("start-manager: warning: lever could not check from the guest where manager %q's tree mounts come from after the resume; run `lever doctor` (row \"manager read-only paths\")", r.app.Name)
 		}

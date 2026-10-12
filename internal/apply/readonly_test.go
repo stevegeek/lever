@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -245,13 +246,16 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 			f := scionOKRunner()
 			r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "suspended", initContainerStatus: "stopped"}
 			var refs []string
+			var mu sync.Mutex // start-manager and its post-live probes both inspect
 			deps := Deps{
 				Scion: scion.New(r, scion.Options{}),
 				Log:   func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
 			}
 			if tc.inspect != nil {
 				deps.InspectContainerMounts = func(ctx context.Context, ref string) ([]jail.Mount, error) {
+					mu.Lock()
 					refs = append(refs, ref)
+					mu.Unlock()
 					return tc.inspect(ctx, ref)
 				}
 				deps.CheckLiveMounts = tc.probe

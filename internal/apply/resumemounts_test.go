@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
@@ -78,7 +81,20 @@ func TestStartManagerVerifiesResumedTreeMounts(t *testing.T) {
 			var logs, refs []string
 			var plans [][]jail.LiveMount
 			i := 0
+			// Called from start-manager and from its post-live probes,
+			// which must not overlap: the check after the resume waits for
+			// the probes (it alone may suspend the manager).
+			var mu sync.Mutex
+			var inFlight atomic.Int32
+			var overlapped atomic.Bool
 			live := func(_ context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+				if inFlight.Add(1) > 1 {
+					overlapped.Store(true)
+				}
+				defer inFlight.Add(-1)
+				time.Sleep(5 * time.Millisecond) // widen the window an overlap needs
+				mu.Lock()
+				defer mu.Unlock()
 				refs = append(refs, ref)
 				plans = append(plans, want)
 				a := tc.answers[min(i, len(tc.answers)-1)]
@@ -95,6 +111,9 @@ func TestStartManagerVerifiesResumedTreeMounts(t *testing.T) {
 			})
 			if r.resumeCalls == 0 {
 				t.Fatal("the case must resume the manager")
+			}
+			if overlapped.Load() {
+				t.Fatal("the check after the resume ran alongside the post-live probes")
 			}
 			switch {
 			case tc.wantErr == "" && err != nil:

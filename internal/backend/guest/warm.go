@@ -301,32 +301,63 @@ func (g Guest) Probe(ctx context.Context, spec ProbeSpec) (*Snapshot, error) {
 		{g.UserPrefix, userProbeScript(spec), userProbeKeys(spec)},
 		{g.RootPrefix, rootProbeScript(spec), rootProbeKeys(spec)},
 	} {
-		// A nonce per call: the run user sees the first call's.
-		nonce, err := probeNonce()
+		items, err := g.probeCall(ctx, part.prefix, part.script, part.keys)
 		if err != nil {
 			return nil, err
 		}
-		argv := append(append([]string{}, part.prefix[1:]...), "/bin/bash", "-c", part.script, "lever-probe", nonce)
-		res, err := g.Host.Run(ctx, nil, part.prefix[0], argv...)
-		if err != nil {
-			return nil, fmt.Errorf("guest probe: %w", err)
-		}
-		items, err := parseProbe(res.Stdout, nonce)
-		if err != nil {
-			return nil, err
-		}
-		if len(items) != len(part.keys) {
-			return nil, fmt.Errorf("guest probe: %d sections, want %d", len(items), len(part.keys))
-		}
-		for _, k := range part.keys {
-			it, ok := items[k]
-			if !ok {
-				return nil, fmt.Errorf("guest probe: no %q section", k)
-			}
+		for k, it := range items {
 			snap.items[k] = it
 		}
 	}
 	return snap, nil
+}
+
+// probeCall runs one probe script through prefix and returns exactly the
+// sections keys names, or an error.
+func (g Guest) probeCall(ctx context.Context, prefix []string, script string, keys []string) (map[string]probeItem, error) {
+	// A nonce per call: the run user sees the user call's.
+	nonce, err := probeNonce()
+	if err != nil {
+		return nil, err
+	}
+	argv := append(append([]string{}, prefix[1:]...), "/bin/bash", "-c", script, "lever-probe", nonce)
+	res, err := g.Host.Run(ctx, nil, prefix[0], argv...)
+	if err != nil {
+		return nil, fmt.Errorf("guest probe: %w", err)
+	}
+	items, err := parseProbe(res.Stdout, nonce)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) != len(keys) {
+		return nil, fmt.Errorf("guest probe: %d sections, want %d", len(items), len(keys))
+	}
+	for _, k := range keys {
+		if _, ok := items[k]; !ok {
+			return nil, fmt.Errorf("guest probe: no %q section", k)
+		}
+	}
+	return items, nil
+}
+
+// RefreshEgress reads both families' OUTPUT and lever chain listings again,
+// in one root call, into s, so VerifyEgress judges the chains as they are
+// now rather than as Probe found them: a bring-up may spend minutes between
+// the two (a scion build). When the read fails, the listings are dropped
+// from s, and VerifyEgress then reports false: the full path runs. A nil s
+// is left alone.
+func (g Guest) RefreshEgress(ctx context.Context, s *Snapshot) {
+	if s == nil {
+		return
+	}
+	items, err := g.probeCall(ctx, g.RootPrefix, probeHead+probeIptables+egressProbeScript, egressProbeKeys)
+	for _, k := range egressProbeKeys {
+		if err != nil {
+			delete(s.items, k)
+		} else {
+			s.items[k] = items[k]
+		}
+	}
 }
 
 func probeNonce() (string, error) {

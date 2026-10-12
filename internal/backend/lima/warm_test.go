@@ -2,6 +2,9 @@ package lima
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
 	"strings"
 	"testing"
 
@@ -244,4 +247,56 @@ func TestEnsureUpWarmPathNestedVirt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// warmScionUp brings up a converged guest that already holds the scion
+// binary the config names (its digest in the probe), so the scion step
+// installs nothing; onProbe runs before each probe is answered.
+func warmScionUp(t *testing.T, onProbe func(n int, items map[string]backendtest.ProbeItem)) *backendtest.ProbeRunner {
+	t.Helper()
+	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
+	data, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	items := convergedItems()
+	items["hash0"] = backendtest.ProbeItem{Out: hex.EncodeToString(sum[:]) + "  " + guest.ScionProbePath + "\n"}
+	r := warmVM(items)
+	r.OnProbe = onProbe
+	warmUp(t, r, backend.Config{ScionBinary: bin})
+	return r
+}
+
+// With a scion step between the probe and the egress decision (a build can
+// take minutes), the chains are read again just before the decision, in
+// one more root call, and judged as they are then.
+func TestEnsureUpWarmPathRereadsTheChainsAfterTheScionStep(t *testing.T) {
+	r := warmScionUp(t, nil)
+	if r.Probes != 3 {
+		t.Fatalf("probes = %d, want 3 (user, root, egress re-read)", r.Probes)
+	}
+	if bins, _ := backendtest.RestoreCommits(r.FakeRunner); len(bins) != 0 {
+		t.Fatalf("a verified chain was committed again: %v", bins)
+	}
+	if bins, _ := backendtest.JumpCommits(r.FakeRunner); len(bins) != 0 {
+		t.Fatalf("a verified OUTPUT was rewritten: %v", bins)
+	}
+
+	// The chain changed after the first probe: the re-read sees it, and
+	// the full path rebuilds.
+	r = warmScionUp(t, func(n int, items map[string]backendtest.ProbeItem) {
+		if n == 3 {
+			items["out4"] = backendtest.ProbeItem{Out: "-P OUTPUT ACCEPT\n-A OUTPUT -j ACCEPT\n" + egress.JumpRule + "\n"}
+		}
+	})
+	backendtest.AssertAtomicCommitOrder(t, r.FakeRunner)
+
+	// A listing the re-read cannot read sends egress down the full path too.
+	r = warmScionUp(t, func(n int, items map[string]backendtest.ProbeItem) {
+		if n == 3 {
+			delete(items, "chain6")
+		}
+	})
+	backendtest.AssertAtomicCommitOrder(t, r.FakeRunner)
 }

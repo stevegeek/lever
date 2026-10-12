@@ -172,7 +172,8 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 // of their own. When the provisioning stamp matches, the runtimes are left
 // alone, scion's arch and installed digest come from the probe, and the
 // egress chains are VERIFIED against the exact ruleset and left alone only
-// when they match. When the stamp does not match (a new guest, a reboot, a
+// when they match (read once more just before that decision when a scion
+// step ran in between, guest.RefreshEgress). When the stamp does not match (a new guest, a reboot, a
 // lever whose provisioning scripts differ), or the probe fails, every step
 // takes its full path as before, and a successful provisioning writes the
 // stamp for the next bring-up.
@@ -231,6 +232,11 @@ func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
 		}
 	}
 	s = rep.Start("egress firewall")
+	if cfg.HasScion() {
+		// The scion step can take minutes (a build): judge the chains as
+		// they are now, not as the probe found them before it.
+		g.RefreshEgress(ctx, snap)
+	}
 	if v4, ok := snap.VerifyEgress(cfg.AllowedPorts, cfg.ClosedInternet, b.hooks.DNSForward != nil, b.hooks.DNSProbe); ok {
 		b.aliasV4 = v4
 		s.Note("verified, unchanged")

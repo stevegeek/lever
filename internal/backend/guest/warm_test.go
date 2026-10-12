@@ -165,6 +165,21 @@ iptables -A OUTPUT -j LEVER_EGRESS && ip6tables -A OUTPUT -j LEVER_EGRESS && exe
 	if _, ok := snap.VerifyEgress([]int{3305, 9000}, false, false, nil); ok {
 		t.Fatal("VerifyEgress accepted a chain missing a port")
 	}
+	// The same chains with an ACCEPT ahead of the IPv4 jump: the chain is
+	// bypassed, so the state does not verify.
+	g.RootPrefix = []string{"unshare", "-rn", "/bin/sh", "-c", strings.Replace(setup, "iptables -A OUTPUT -j LEVER_EGRESS", "iptables -A OUTPUT -j ACCEPT && iptables -A OUTPUT -j LEVER_EGRESS", 1), "setup"}
+	if snap, err = g.Probe(context.Background(), ProbeSpec{HostAlias: "localhost"}); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if _, ok := snap.VerifyEgress(ports, false, false, nil); ok {
+		t.Fatalf("VerifyEgress accepted an OUTPUT whose first rule is an ACCEPT:\n%s", snap.items["out4"].out)
+	}
+	// And RefreshEgress reads the listings again, through the same prefix.
+	g.RootPrefix[4] = setup
+	g.RefreshEgress(context.Background(), snap)
+	if _, ok := snap.VerifyEgress(ports, false, false, nil); !ok {
+		t.Fatalf("VerifyEgress refused the re-read converged state:\n%s", snap.items["out4"].out)
+	}
 }
 
 func TestWarmFixturePastaDropIn(t *testing.T) {

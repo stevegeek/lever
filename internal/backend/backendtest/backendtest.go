@@ -533,6 +533,9 @@ type ProbeRunner struct {
 	Items  map[string]ProbeItem
 	Probes int
 	Stamps []string // the key of each stamp write
+	// OnProbe, when set, runs before probe n (1-based) is answered, so a
+	// test can change Items between the probe and a later re-read.
+	OnProbe func(n int, items map[string]ProbeItem)
 }
 
 var emitRe = regexp.MustCompile(`(?m)^emit ([a-z0-9]+) `)
@@ -541,6 +544,9 @@ func (r *ProbeRunner) RunIn(ctx context.Context, dir string, env map[string]stri
 	n := len(args)
 	if name == r.Host && n >= 4 && args[n-2] == "lever-probe" && args[n-4] == "-c" {
 		r.Probes++
+		if r.OnProbe != nil {
+			r.OnProbe(r.Probes, r.Items)
+		}
 		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
 		var b strings.Builder
 		for _, m := range emitRe.FindAllStringSubmatch(args[n-3], -1) {

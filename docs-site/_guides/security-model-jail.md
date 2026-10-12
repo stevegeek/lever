@@ -44,7 +44,14 @@ host's. Validated behaviour and its limits:
   not depend on OrbStack routing alone: the allowlist drops the private/special-use ranges
   unconditionally, `10/8`, `172.16/12`, `192.168/16`, **`169.254/16` (link-local/metadata)**,
   **`100.64/10` (CGNAT/Tailscale)**, and IPv6 `fe80::/10` + `fc00::/7`
-  (`internal/egress/allowlist.go`). LAN-unreachability must still be re-checked on OrbStack upgrades.
+  (`internal/egress/allowlist.go`). One address in them is refused out loud instead of dropped: the
+  cloud metadata address `169.254.169.254/32` is REJECTed (`icmp-host-prohibited`) just before the
+  `169.254/16` DROP, so the scion hub's GCP project lookup at each start fails at once instead of
+  timing out for about 13 s. Its ICMP answer goes from and to the guest's own address over `lo`, so
+  one narrow ACCEPT (`-o lo`, ICMP host-prohibited, conntrack `RELATED`) lets it through the private
+  range DROPs. It is the only REJECT in the chain, and `lever acceptance` checks that the address
+  answers "no route to host" while a neighbouring link-local address is still dropped.
+  LAN-unreachability must still be re-checked on OrbStack upgrades.
 - **Host loopback services are reachable via the alias** (`host.orb.internal`), which forwards to
   the host's `127.0.0.1` over **both IPv4 and IPv6**. This is how the manager reaches local tool
   servers (e.g. the broker, an MCP server) without exposing them on the LAN. The alias exposes *all*
@@ -94,8 +101,8 @@ require a container/namespace escape (which reduces to the kernel/runtime caveat
 
 ### 2.3 Rootless podman (required)
 
-Scion runs the agents in **rootless podman** (it auto-prefers podman over Docker; a rootless Docker
-daemon is provisioned in the guest too, but the agent containers are podman). Inside an isolated
+Scion runs the agents in **rootless podman** (it auto-prefers podman over Docker, and lever installs
+no Docker daemon in the guest). Inside an isolated
 machine, **rootful containers do not work** and a **rootless runtime is required.** An isolated
 machine applies a seccomp filter that blocks the `bpf()` syscall, which a rootful OCI runtime
 (`runc`/`crun`) needs to program the cgroup-v2 device controller; containers fail with
@@ -132,7 +139,7 @@ so a containment posture is never silently substituted.
 - **Lima's in-guest kernel attack surface is intentionally widened for rootless runtimes.**
   Provisioning re-enables the unprivileged user-namespace knob
   (`kernel.apparmor_restrict_unprivileged_userns=0`) that Ubuntu ≥ 23.10 disables by default, a
-  prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
+  prerequisite for rootless podman and pasta. This widens attack surface *inside the
   guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
   the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
   this surface reaches VM root, not the host, consistent with the [§8](/security-model/compromise/) "containing runtime authority

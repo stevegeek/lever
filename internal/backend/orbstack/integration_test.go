@@ -73,11 +73,11 @@ func TestRealOrbStack(t *testing.T) {
 	}
 	t.Logf("LAN from jail: %q (expected BLOCKED)", strings.TrimSpace(res.Stdout))
 
-	// 5. Rootless docker must run a container.
-	res, err = r.Run(ctx, map[string]string{"DOCKER_HOST": b.DockerHost()}, "orb", "-m", machine, "bash", "-lc",
-		`export XDG_RUNTIME_DIR=/run/user/$(id -u); docker run --rm alpine echo OK`)
+	// 5. Rootless podman (scion's runtime) must run a container.
+	res, err = r.Run(ctx, nil, "orb", "-m", machine, "bash", "-lc",
+		`export XDG_RUNTIME_DIR=/run/user/$(id -u); podman run --rm docker.io/library/alpine echo OK`)
 	if err != nil || !strings.Contains(res.Stdout, "OK") {
-		t.Fatalf("rootless docker run failed: %v %q %q", err, res.Stdout, res.Stderr)
+		t.Fatalf("rootless podman run failed: %v %q %q", err, res.Stdout, res.Stderr)
 	}
-	t.Logf("rootless docker: %q", strings.TrimSpace(res.Stdout))
+	t.Logf("rootless podman: %q", strings.TrimSpace(res.Stdout))
 }

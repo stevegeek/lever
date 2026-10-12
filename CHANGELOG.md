@@ -77,6 +77,28 @@ version bump moves the block under the new version heading.
 
 ### Changed
 
+- **The hub starts about 13 s sooner: the jail rejects the cloud metadata address (lever#182).**
+  The scion hub looks up a GCP project ID at `169.254.169.254` at every start; the egress chain
+  dropped it, so the lookup spent six 2 s timeouts before the hub served. The `LEVER_EGRESS` chain
+  now REJECTs `169.254.169.254/32` (`icmp-host-prohibited`) just before the `169.254/16` DROP, in
+  both postures and on both backends, so the lookup fails within about a second. The kernel sends
+  that answer to the guest's own address over `lo`, so one narrow ACCEPT (ICMP host-prohibited,
+  `RELATED`, on `lo` only) lets it through the private-range DROPs. Nothing more is reachable: it
+  is the chain's only REJECT, and every other link-local address is still dropped. `lever
+  acceptance`'s egress-refused check now also dials the metadata address (it must answer "no
+  route to host") and a neighbouring link-local address (it must still be dropped). A running
+  closed-posture jail keeps its old chain until `lever down` and `up`, or a VM restart, and
+  `lever acceptance` fails on it until then.
+- **The guest no longer runs a rootless Docker daemon (lever#183).** Provisioning installed rootless
+  Docker and started `dockerd` on every apply, then waited up to 30 s for it, but scion runs the
+  agents in podman and nothing used it. Lever no longer installs or starts it, and stops and
+  disables the one an older lever started on an existing VM (its files stay in the run user's
+  `~/bin`). That saves about 100-150 MB of guest memory and some seconds of each apply. `lever
+  provision` no longer prints a `DOCKER_HOST`.
+- **A smaller scion binary (lever#191).** Lever builds scion with `-trimpath -ldflags="-s -w"`
+  (about 173 MB to 121 MB), so less is streamed into the guest and paged in at each hub start. The
+  first apply after the upgrade rebuilds and reinstalls scion once. A `scion.binary` is installed
+  as it is.
 - **`lever up` says what it is doing from its first line (lever#195):** a header naming the
   application and the backend's containment posture (as `apply` printed already) comes before
   the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's

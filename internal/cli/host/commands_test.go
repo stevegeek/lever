@@ -41,7 +41,6 @@ func (s *stubBackend) EnsureUp(_ context.Context, cfg backend.Config) error {
 	s.up, s.upCfg = true, cfg
 	return nil
 }
-func (s *stubBackend) DockerHost() string                             { return "unix:///x" }
 func (s *stubBackend) HostToolAlias() string                          { return "host.orb.internal" }
 func (s *stubBackend) MountDest() string                              { return "/lever" }
 func (s *stubBackend) ApplyEgress(context.Context, []int, bool) error { return nil }

@@ -26,8 +26,8 @@ const (
 	// mounted (via `orb create --mount <host>:/lever` or the lima template).
 	// Agents work exclusively within this directory; no host home is visible.
 	MountDest = "/lever"
-	// DefaultRunUID is the fallback UID used for the rootless Docker socket path
-	// (/run/user/<uid>/docker.sock) before EnsureUp has resolved the real UID.
+	// DefaultRunUID is the fallback run-user UID (the /run/user/<uid> runtime
+	// dir) before EnsureUp has resolved the real UID.
 	// It matches an OrbStack guest user (the macOS uid, 501 by default) but NOT
 	// a Lima guest user (1000): every command that reaches into the jail calls
 	// EnsureUp or ResolveRunUser first, or its XDG_RUNTIME_DIR is wrong on Lima.
@@ -109,11 +109,6 @@ func (b *Base) Guest() guest.Guest { return b.hooks.Guest(b.r, b.machine) }
 // jailPrefix is the in-jail transport argv prefix for the current run user.
 func (b *Base) jailPrefix() []string { return b.hooks.JailPrefix(b.machine, b.user) }
 
-// DockerHost is the rootless Docker socket endpoint the broker drives.
-func (b *Base) DockerHost() string {
-	return fmt.Sprintf("unix:///run/user/%s/docker.sock", b.RunUID())
-}
-
 // HostToolAlias is how an agent reaches allowlisted host tools.
 func (b *Base) HostToolAlias() string { return b.hostAlias }
 
@@ -137,7 +132,7 @@ func (b *Base) RunUID() string {
 }
 
 // ReadRunUser caches the in-jail run user and UID (via the guest UserPrefix +
-// whoami / id -u) so the subid/linger script and the rootless Docker socket path
+// whoami / id -u) so the subid/linger script and the runtime dir path
 // work for any guest user, not a hardcoded one. Called after the machine exists
 // and before guest provisioning.
 func (b *Base) ReadRunUser(ctx context.Context) error {

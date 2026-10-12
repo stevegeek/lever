@@ -62,7 +62,7 @@ on macOS and `qemu` on Linux, booting an Ubuntu 24.04 cloud image. The containme
   lever template's `portForwards` block carries an ignore-all rule for both `0.0.0.0` and
   `127.0.0.1` guest binds, closing it.
 - **Lima's bundled containerd disabled** (`containerd: {system: false, user: false}`). Lever
-  provisions rootless podman/Docker itself, exactly as it does for `orbstack`.
+  provisions rootless podman itself, exactly as it does for `orbstack`.
 
 Requires **Lima ≥ 2.0.0**, checked at bring-up: the ignore rules depend on Lima 2.0's
 `portForwards` semantics, and an older `limactl` forwards guest ports despite the rendered ignore

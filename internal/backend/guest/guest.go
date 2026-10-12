@@ -66,9 +66,8 @@ func (g Guest) pipeInto(ctx context.Context, prefix []string, stdin io.Reader, s
 	return err
 }
 
-// EnsureRuntimes installs prereqs + rootless Docker and rootless Podman.
-// Idempotent: the rootless install script and systemctl --start are safe to re-run.
-// Podman is daemonless so no service startup is needed; scion auto-prefers it over Docker.
+// EnsureRuntimes installs the prereqs and rootless Podman, which scion runs
+// the agents in. Idempotent. Podman is daemonless, so nothing is started.
 func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	root := func(script string) error {
 		_, err := g.RootRun(ctx, "bash", "-lc", script)
@@ -104,7 +103,7 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships
 	// kernel.apparmor_restrict_unprivileged_userns=1, which blocks the rootless
 	// runtimes' rootlesskit/pasta from creating the unprivileged user namespace
-	// they require — without this the rootless Docker/Podman install fails with
+	// they require — without this rootless podman fails with
 	// "fork/exec /proc/self/exe: permission denied". The jail is a dedicated VM
 	// whose OWN kernel is the containment boundary (backend Guarantee 0:
 	// separate-kernel), and its sole purpose is to run the agent's untrusted
@@ -116,8 +115,8 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	if err := root(`printf 'kernel.apparmor_restrict_unprivileged_userns=0\n' > /etc/sysctl.d/99-lever-userns.conf; sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true`); err != nil {
 		return fmt.Errorf("relax unprivileged userns for rootless runtimes: %w", err)
 	}
-	// Enable lingering so the run user's systemd instance (and thus rootless
-	// dockerd) survives after the provisioning SSH session closes. `loginctl
+	// Enable lingering so the run user's systemd instance (and its runtime
+	// dir, which rootless podman uses) survives after the provisioning SSH session closes. `loginctl
 	// enable-linger` is the canonical path (used on OrbStack), but on the Lima
 	// Ubuntu guest systemd-logind's D-Bus interface intermittently hangs — every
 	// loginctl call then blocks until timeout and the step fails ("Could not
@@ -129,11 +128,14 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 		runUser, runUser, runUser, runUser, runUser, runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)
 	}
-	if err := user(`command -v dockerd-rootless.sh >/dev/null 2>&1 || curl -fsSL https://get.docker.com/rootless | sh`); err != nil {
-		return fmt.Errorf("rootless install: %w", err)
-	}
-	if err := user(`export XDG_RUNTIME_DIR=/run/user/$(id -u); export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock; systemctl --user enable --now docker 2>/dev/null || (nohup dockerd-rootless.sh >/tmp/lever-dockerd.log 2>&1 &); timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'`); err != nil {
-		return fmt.Errorf("start rootless dockerd: %w", err)
+	// Lever used to install and start a rootless dockerd here. Nothing uses it
+	// (scion runs the agents in podman; lever#183), so a VM provisioned
+	// before that has it running and enabled: stop and disable it. A no-op
+	// once it is off or was never installed. The pid file covers the
+	// non-systemd start lever also used; it lives in the run user's runtime
+	// dir, which no agent container sees. The installed files stay.
+	if err := user(dockerOffScript); err != nil {
+		return fmt.Errorf("disable the unused rootless dockerd: %w", err)
 	}
 	// Per-agent network isolation: agents run in their own pasta netns, and
 	// reach the VM-loopback hub at PastaHostAddr. The drop-in depends on the
@@ -143,6 +145,20 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	}
 	return nil
 }
+
+// dockerOffScript stops and disables the rootless dockerd an older lever
+// started in the guest (lever#183), if it is there; it exits 0 either way.
+// A pid file left by a dockerd that died is only acted on while that pid is
+// still a dockerd, so a reused pid is never killed.
+const dockerOffScript = `export XDG_RUNTIME_DIR=/run/user/$(id -u)
+if timeout 10 systemctl --user -q is-enabled docker 2>/dev/null || timeout 10 systemctl --user -q is-active docker 2>/dev/null; then
+  timeout 30 systemctl --user disable --now docker >/dev/null 2>&1 || true
+fi
+pid=$(cat "$XDG_RUNTIME_DIR/docker.pid" 2>/dev/null) || pid=
+case "$pid" in ''|*[!0-9]*) ;; *)
+  [ "$(cat /proc/$pid/comm 2>/dev/null)" = dockerd ] && kill "$pid" 2>/dev/null ;;
+esac
+true`
 
 // GOARCH returns the guest's Go cross-compile arch, detected via `uname -m`
 // run inside the guest (as the run user).

@@ -852,8 +852,8 @@ Doctor's *guest kernel* row shows `uname -r` and warns when `/boot/vmlinuz` name
 `nested_virt` runs on a 6.8 kernel.
 
 **Ubuntu 26.04** is a later option, not part of this change: its podman generation differs from
-the one lever is tested with. Before the base image moves, it needs the rootless podman and Docker
-installs, the pasta drop-in (`passt` version), scion's container lifecycle (create, suspend,
+the one lever is tested with. Before the base image moves, it needs the rootless podman
+install, the pasta drop-in (`passt` version), scion's container lifecycle (create, suspend,
 resume, `--continue`), the agent image's layer copy and warm-up, the egress chains and the guest
 DNS path, and `lever-test` e2e on both Lima drivers, with nested load on the qemu driver.
 

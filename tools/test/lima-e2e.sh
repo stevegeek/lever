@@ -182,6 +182,15 @@ egress_closed_in_guest() {
   limactl shell "$MACHINE" sudo iptables -S LEVER_EGRESS 2>/dev/null | grep -qE '^-A LEVER_EGRESS -j DROP'
 }
 
+# egress_one_reject_in_guest — true iff the chain's only REJECT, in either
+# family, is the metadata /32 (lever#182); everything else it refuses is a DROP.
+egress_one_reject_in_guest() {
+  local v4 v6
+  v4=$(limactl shell "$MACHINE" sudo iptables -S LEVER_EGRESS 2>/dev/null | grep -e '-j REJECT')
+  v6=$(limactl shell "$MACHINE" sudo ip6tables -S LEVER_EGRESS 2>/dev/null | grep -e '-j REJECT')
+  [ "$v4" = "-A LEVER_EGRESS -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited" ] && [ -z "$v6" ]
+}
+
 # stop_broker — stop the host-side broker via its PID file (fallback: pattern),
 # leaving the VM and its egress chain intact. Used before the idempotent re-apply
 # so the re-run gets a fresh broker: `lever acceptance`'s broker is a one-shot
@@ -210,12 +219,15 @@ run_acceptance() {
 }
 
 # ================================================================================
-# 1. OPEN posture — full VM bring-up (slow: apt + rootless docker + scion) then the
+# 1. OPEN posture — full VM bring-up (slow: apt + podman + scion) then the
 #    six §19 checks.
 # ================================================================================
 say "OPEN posture: lever acceptance (first bring-up — several minutes)"
 write_config open
 if run_acceptance; then ok "acceptance PASSED (open egress)"; else bad "acceptance FAILED (open egress)"; fi
+if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (open egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (open egress)"; fi
+# lever#183: provisioning installs and starts no dockerd (scion runs podman).
+if limactl shell "$MACHINE" pgrep -x dockerd >/dev/null 2>&1; then bad "a dockerd runs in the guest"; else ok "no dockerd in the guest"; fi
 
 # ================================================================================
 # 2. Guest port-forward suppression — the template hazard. A guest 0.0.0.0
@@ -280,6 +292,7 @@ say "switch posture: lever down (open) then bring up CLOSED"
 write_config closed
 if run_acceptance; then ok "acceptance PASSED (closed egress)"; else bad "acceptance FAILED (closed egress)"; fi
 if egress_closed_in_guest; then ok "LEVER_EGRESS chain is closed (catch-all DROP present)"; else bad "closed posture did not install the catch-all DROP"; fi
+if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (closed egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (closed egress)"; fi
 
 # ================================================================================
 # 4. Idempotent closed re-apply (I2: never briefly reopen egress). Re-run the gate

@@ -180,7 +180,9 @@ func IsAgentAbsent(err error) bool {
 // (server.log, every start since 2026-08-22; 13 s of it is the hub's GCP
 // project-ID lookup timing out against 169.254.169.254 —
 // cmd/server_foreground.go, the Policy Troubleshooter's
-// hub.ResolveGCPProjectID — on a machine that is not on GCP). Add the
+// hub.ResolveGCPProjectID — on a machine that is not on GCP; since
+// lever#182 the egress chain rejects that address, so the lookup fails at
+// once and the budget no longer needs to cover it). Add the
 // daemon's re-exec, a cold page cache for the binary and a 100+ MB hub.db
 // after a reboot, and the probe CLI's own start each attempt, and a cold
 // start overran the old 30 attempts (card #82: "hub not ready after 30

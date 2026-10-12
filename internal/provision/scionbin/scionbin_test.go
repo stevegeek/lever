@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestResolveSourceCrossCompiles(t *testing.T) {
 	if c.Name != "go" || c.Dir != src || c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
 		t.Fatalf("build call = %+v", c)
 	}
-	if strings.Join(c.Args, " ") != "build -o "+out+" ./cmd/scion" {
+	if strings.Join(c.Args, " ") != "build -trimpath -ldflags=-s -w -o "+out+" ./cmd/scion" {
 		t.Fatalf("build args = %v", c.Args)
 	}
 }
@@ -78,7 +79,7 @@ func TestResolveVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	f.Script("/opt/go/bin/go mod download -json "+scionbin.ModulePath+"@"+pin,
 		proc.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
-	f.Script("/opt/go/bin/go build -o", proc.Result{})
+	f.Script("/opt/go/bin/go build -trimpath -ldflags=-s -w -o", proc.Result{})
 
 	if _, err := scionbin.Resolve(context.Background(), f, scionbin.Spec{Version: pin}, "arm64", "m"); err != nil {
 		t.Fatalf("Resolve(version): %v", err)
@@ -90,6 +91,9 @@ func TestResolveVersionBuildsFromPinnedModule(t *testing.T) {
 	build := f.Calls[bi]
 	if build.Dir != moduleDir {
 		t.Fatalf("build ran in %q, want the pinned module dir %q", build.Dir, moduleDir)
+	}
+	if !slices.Contains(build.Args, "-trimpath") || !slices.Contains(build.Args, "-ldflags=-s -w") {
+		t.Fatalf("the pinned build must be stripped and trimmed (lever#191): %v", build.Args)
 	}
 }
 

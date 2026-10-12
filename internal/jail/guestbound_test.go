@@ -13,18 +13,24 @@ import (
 // The guest deadline is shorter than the host's by the SIGKILL grace and
 // a second for the transport, so the guest ends a hung command first.
 func TestGuestBounded(t *testing.T) {
-	name, args := guestBounded("podman", "exec", "c", "tmux")
+	name, args := guestBounded(context.Background(), "podman", "exec", "c", "tmux")
 	if name != "timeout" || !reflect.DeepEqual(args, []string{"--kill-after=1s", "8s", "podman", "exec", "c", "tmux"}) {
 		t.Fatalf("argv = %s %q", name, args)
 	}
-	if kill := guestTimeoutSecs() + int(guestKillAfter/time.Second); time.Duration(kill)*time.Second >= agentExecTimeout {
-		t.Fatalf("guest deadline %ds + kill grace must end before the host's %s", guestTimeoutSecs(), agentExecTimeout)
+	if kill := guestTimeoutSecs(context.Background()) + int(guestKillAfter/time.Second); time.Duration(kill)*time.Second >= agentExecTimeout {
+		t.Fatalf("guest deadline %ds + kill grace must end before the host's %s", guestTimeoutSecs(context.Background()), agentExecTimeout)
+	}
+	// Several commands under one host deadline: each gets what is left.
+	ctx, cancel := context.WithTimeout(context.Background(), 5500*time.Millisecond)
+	defer cancel()
+	if got := guestTimeoutSecs(ctx); got != 4 {
+		t.Fatalf("5.5 s left: guest deadline %ds, want 4", got)
 	}
 	old := agentExecTimeout
 	agentExecTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { agentExecTimeout = old })
-	if guestTimeoutSecs() != 1 {
-		t.Fatalf("a short host deadline still gives the guest 1 s, got %d", guestTimeoutSecs())
+	if guestTimeoutSecs(context.Background()) != 1 {
+		t.Fatalf("a short host deadline still gives the guest 1 s, got %d", guestTimeoutSecs(context.Background()))
 	}
 }
 

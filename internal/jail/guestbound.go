@@ -30,18 +30,27 @@ const guestKillAfter = time.Second
 // SIGKILL grace plus a second for the transport to carry the exit back.
 const guestMargin = guestKillAfter + time.Second
 
-// guestTimeoutSecs is the guest-side deadline in whole seconds (at least 1)
-// for a host deadline of agentExecTimeout.
-func guestTimeoutSecs() int {
-	s := int((agentExecTimeout - guestMargin) / time.Second)
-	return max(s, 1)
+// guestTimeoutSecs is the guest-side deadline in whole seconds (at least
+// 1): the time ctx has left (agentExecTimeout when it has no deadline)
+// less guestMargin, rounded up. A caller runs several guest commands under one
+// BoundAgentExec deadline, so each gets what is left of it, never a fresh
+// full span that would outlive the host's.
+func guestTimeoutSecs(ctx context.Context) int {
+	left := agentExecTimeout
+	if d, ok := ctx.Deadline(); ok {
+		left = time.Until(d)
+	}
+	// Rounded up: a deadline set a moment ago (9.99 s left of 10) keeps its
+	// whole seconds; the rounding eats less than the second of transport
+	// slack in guestMargin, so the guest still ends first.
+	return max(int((left-guestMargin+time.Second-1)/time.Second), 1)
 }
 
 // guestBounded is the argv that runs name args under the guest's timeout(1).
-func guestBounded(name string, args ...string) (string, []string) {
+func guestBounded(ctx context.Context, name string, args ...string) (string, []string) {
 	return "timeout", append([]string{
 		"--kill-after=" + strconv.Itoa(int(guestKillAfter/time.Second)) + "s",
-		strconv.Itoa(guestTimeoutSecs()) + "s",
+		strconv.Itoa(guestTimeoutSecs(ctx)) + "s",
 		name,
 	}, args...)
 }
@@ -58,14 +67,14 @@ const (
 // program inside a container can exit 124 by itself too: then it is still a
 // failed probe, only named as a timeout). res is returned as r gave it.
 func runGuestBounded(ctx context.Context, r proc.Runner, name string, args ...string) (proc.Result, error) {
-	n, a := guestBounded(name, args...)
+	n, a := guestBounded(ctx, name, args...)
 	res, err := r.Run(ctx, nil, n, a...)
 	return res, guestTimeoutErr(res, err)
 }
 
 // runGuestBoundedStdin is runGuestBounded with stdin.
 func runGuestBoundedStdin(ctx context.Context, r proc.Runner, stdin io.Reader, name string, args ...string) (proc.Result, error) {
-	n, a := guestBounded(name, args...)
+	n, a := guestBounded(ctx, name, args...)
 	res, err := r.RunStdin(ctx, stdin, nil, n, a...)
 	return res, guestTimeoutErr(res, err)
 }

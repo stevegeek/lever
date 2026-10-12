@@ -101,6 +101,8 @@ func TestHostPathWrappersRefused(t *testing.T) {
 		"[uv, run, --project, ws/tools, tool]",
 		"[uv, run, --with, ROOT/ws/tools, tool]",
 		"[uv, --directory, ws, run, tools/bin.py]",
+		"[uv, run, --cache-dir, ws/tools, x.py]",
+		"[uv, run, --find-links=ws/tools, x.py]",
 	} {
 		p, root := hostPathsInstance(t, "")
 		mustWrite(t, root+"/ws/tools/bin.py")

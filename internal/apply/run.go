@@ -1705,9 +1705,11 @@ func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, rec *scion.Ag
 // the current plan and the mounts the record kept from older ones) is read
 // back from the guest (CheckLiveMounts, jail.LiveMount.SelfMount: the
 // kernel's record of where each mount comes from, no program run inside
-// the container). A mount that comes from elsewhere, or a first process in
-// a namespace made inside the container, suspends the manager and fails
-// the bring-up: fail closed, since the agent may hold a path it must never
+// the container). A mount that comes from elsewhere, is missing at its
+// place (the runtime resolves the destination too, in the same tree, so a
+// link moves the mount point as well) or is writable where it should be
+// read-only, or a first process in a namespace made inside the container,
+// suspends the manager and fails the bring-up: fail closed, since the agent may hold a path it must never
 // see. verified is false, with no error, when the check could not run (no
 // container yet, not running, unreadable): the caller tries again once the
 // manager is live, and warns if it still cannot. With no inspect or live
@@ -1743,12 +1745,20 @@ func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified 
 	}
 	var bad []string
 	for _, p := range problems {
-		if p.Reason == jail.LiveMountElsewhere {
+		// Elsewhere: the source was resolved through a link. Missing: the
+		// runtime also resolves the destination inside the container, and
+		// /workspace is the same tree, so a swapped link moves the mount
+		// point too (podman lists it, the kernel has it elsewhere).
+		// Writable: a read-only mount is not. Replaced alone (another
+		// inode behind a mount the kernel records at the right place) is
+		// left to warnManagerTreeMounts: it rests on stable inode numbers.
+		switch p.Reason {
+		case jail.LiveMountElsewhere, jail.LiveMountMissing, jail.LiveMountWritable:
 			bad = append(bad, strconv.Quote(strings.TrimPrefix(p.Target, scion.ContainerWorkspace+"/"))+" "+p.Reason)
 		}
 	}
 	if len(bad) > 0 {
-		why = "a tree mount does not come from the tree: " + strings.Join(bad, "; ") + ". A directory in its path was swapped (for a symbolic link, most likely) between lever's check and the container start, so the runtime may have mounted something else into the manager"
+		why = "a tree mount is not what lever planned: " + strings.Join(bad, "; ") + ". A directory in its path was swapped (for a symbolic link, most likely) between lever's check and the container start, so the runtime may have mounted something else into the manager, at another place too"
 	}
 	if why == "" {
 		return true, nil

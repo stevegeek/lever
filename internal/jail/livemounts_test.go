@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -27,6 +28,8 @@ type liveRunner struct {
 
 // nsHeld is lsns for a first process in its runtime's namespaces: the
 // pid and mnt namespaces owned by its user namespace.
+var statRE = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
+
 const nsHeld = "4026531834 time 0\n4026532463 user 4026531837\n4026532464 mnt 4026532463\n4026532536 pid 4026532463\n4026532537 net 4026532400\n"
 
 // nsNested is lsns after the first process moved into a user and mount
@@ -64,9 +67,27 @@ func (l *liveRunner) Run(_ context.Context, _ map[string]string, name string, ar
 		return proc.Result{Stdout: ns}, nil
 	case "xargs":
 		if l.statErr {
-			return proc.Result{Code: 123, Stderr: "stat: cannot statx: Permission denied"}, errors.New("exit status 123")
+			return proc.Result{Code: 1, Stderr: "xargs: stat: Permission denied"}, errors.New("exit status 1")
 		}
-		return proc.Result{Stdout: l.stat}, nil
+		// l.stat lists one answer per path in order: "dev:ino", "-" for a
+		// path stat could not answer (xargs then exits 123), or raw text.
+		paths := strings.Split(strings.TrimSuffix(l.stdin[len(l.stdin)-1], "\x00"), "\x00")
+		var out strings.Builder
+		missing := false
+		for k, line := range strings.Split(strings.TrimSuffix(l.stat, "\n"), "\n") {
+			switch {
+			case line == "-" || k >= len(paths):
+				missing = true
+			case statRE.MatchString(line):
+				out.WriteString(line + ":" + paths[k] + "\n")
+			default:
+				out.WriteString(line + "\n")
+			}
+		}
+		if missing || strings.Count(l.stat, "\n") < len(paths) {
+			return proc.Result{Code: 123, Stdout: out.String(), Stderr: "stat: cannot statx: No such file or directory"}, errors.New("exit status 123")
+		}
+		return proc.Result{Stdout: out.String()}, nil
 	}
 	return proc.Result{Code: 1}, errors.New("unexpected")
 }
@@ -128,7 +149,13 @@ func TestContainerLiveMounts(t *testing.T) {
 		{"pid changed", liveRunner{pids: []string{"4242", "4343"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same}, nil, errLiveMounts},
 		{"mountinfo too long", liveRunner{pids: []string{"4242"}, mountinfo: strings.Repeat(miRoot, liveMountsMaxOutput/len(miRoot)+1), stat: same}, nil, errLiveMounts},
 		{"mountinfo empty", liveRunner{pids: []string{"4242"}, mountinfo: "", stat: same}, nil, errLiveMounts},
-		{"stat short", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: "60:10\n"}, nil, errLiveMounts},
+		// stat could not answer for some paths: those mounts are not held,
+		// and the check still runs (deleting a source must not turn it
+		// into "could not read").
+		{"stat short", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: "60:10\n"},
+			[]LiveMountProblem{{"/workspace/a", LiveMountReplaced}, {"/workspace/a/tools", LiveMountReplaced}}, nil},
+		{"source gone", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: "60:10\n60:10\n-\n60:11\n"},
+			[]LiveMountProblem{{"/workspace/a/tools", LiveMountReplaced}}, nil},
 		{"stat garbage", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: "60:10\n60:10\nx\n60:11\n"}, nil, errLiveMounts},
 		{"stat fails", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, statErr: true}, nil, errLiveMounts},
 		// The first process moved into namespaces made inside the
@@ -150,6 +177,8 @@ func TestContainerLiveMounts(t *testing.T) {
 			ns: []string{"4026532463 user 0\n4026532536 pid 4026532463\n"}}, nil, errLiveMounts},
 		{"lsns garbage", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
 			ns: []string{nsHeld + "x mnt 1\n"}}, nil, errLiveMounts},
+		{"lsns other type without owner", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
+			ns: []string{"4026531834 time\n" + nsHeld}}, nil, nil},
 		{"lsns duplicate type", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
 			ns: []string{nsHeld + "4026532999 mnt 4026532463\n"}}, nil, errLiveMounts},
 	}
@@ -181,7 +210,7 @@ func TestContainerLiveMountsReadsFromTheGuest(t *testing.T) {
 		"podman inspect --type container --format {{.State.Pid}} lever--m",
 		"lsns --raw --noheadings --output NS,TYPE,ONS --task 4242",
 		"head -c 65536 /proc/4242/mountinfo",
-		"xargs -0 stat -c %d:%i --",
+		"xargs -0 stat -c %d:%i:%n --",
 		"lsns --raw --noheadings --output NS,TYPE,ONS --task 4242",
 		"podman inspect --type container --format {{.State.Pid}} lever--m",
 	}

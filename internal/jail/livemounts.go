@@ -42,7 +42,7 @@ const (
 	// come from the tree directory at its place (another device, or another
 	// path in the tree's file system): the runtime followed a symbolic link
 	// that stood in the path when it mounted, or the directory was moved
-	// away (renamed) since. It needs no stable inode numbers, unlike
+	// away (renamed) since through the guest's own view of the tree. It needs no stable inode numbers, unlike
 	// LiveMountReplaced.
 	LiveMountElsewhere = "is mounted from another place than the tree's directory there (a symbolic link was followed when the container started, or the directory was moved since)"
 )
@@ -133,7 +133,7 @@ func ContainerLiveMounts(ctx context.Context, r proc.Runner, ref string, want []
 		return nil, errLiveMounts
 	}
 	var problems []LiveMountProblem
-	for i, w := range want {
+	for _, w := range want {
 		o, ok := opts[w.Target]
 		switch {
 		case !ok:
@@ -142,7 +142,7 @@ func ContainerLiveMounts(ctx context.Context, r proc.Runner, ref string, want []
 			problems = append(problems, LiveMountProblem{w.Target, LiveMountWritable})
 		case w.SelfMount && !fromParentTree(opts, w.Target, o):
 			problems = append(problems, LiveMountProblem{w.Target, LiveMountElsewhere})
-		case ids[2*i] != ids[2*i+1]:
+		case !sameID(ids, w.Source, procDir+"/root"+w.Target):
 			problems = append(problems, LiveMountProblem{w.Target, LiveMountReplaced})
 		}
 	}
@@ -256,30 +256,37 @@ func checkRuntimeNamespaces(ctx context.Context, r proc.Runner, pid int) error {
 // shown).
 type nsEntry struct{ id, owner uint64 }
 
-var nsLineRE = regexp.MustCompile(`^([0-9]{1,20}) ([a-z_]{1,16}) ([0-9]{1,20})$`)
-
-// parseNamespaces reads lsns --raw --noheadings --output NS,TYPE,ONS: every
-// line must have that shape, each type may appear once, and the pid, mnt
-// and user types must be there with a non-zero id.
+// parseNamespaces reads lsns --raw --noheadings --output NS,TYPE,ONS. Only
+// the pid, mnt and user lines are read (another type may show no owner on
+// some systems), and those strictly: each once, a numeric id and owner, a
+// non-zero id. A missing one is an error.
 func parseNamespaces(out string) (map[string]nsEntry, error) {
 	if len(out) > liveMountsMaxOutput {
 		return nil, errLiveMounts
 	}
 	got := map[string]nsEntry{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		m := nsLineRE.FindStringSubmatch(line)
-		if m == nil {
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			continue
+		}
+		switch f[1] {
+		case "pid", "mnt", "user":
+		default:
+			continue
+		}
+		if len(f) != 3 || !nsNumRE.MatchString(f[0]) || !nsNumRE.MatchString(f[2]) {
 			return nil, errLiveMounts
 		}
-		id, err1 := strconv.ParseUint(m[1], 10, 64)
-		owner, err2 := strconv.ParseUint(m[3], 10, 64)
+		id, err1 := strconv.ParseUint(f[0], 10, 64)
+		owner, err2 := strconv.ParseUint(f[2], 10, 64)
 		if err1 != nil || err2 != nil || id == 0 {
 			return nil, errLiveMounts
 		}
-		if _, dup := got[m[2]]; dup {
+		if _, dup := got[f[1]]; dup {
 			return nil, errLiveMounts
 		}
-		got[m[2]] = nsEntry{id, owner}
+		got[f[1]] = nsEntry{id, owner}
 	}
 	for _, t := range []string{"pid", "mnt", "user"} {
 		if _, ok := got[t]; !ok {
@@ -289,33 +296,53 @@ func parseNamespaces(out string) (map[string]nsEntry, error) {
 	return got, nil
 }
 
-var statRE = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
+var nsNumRE = regexp.MustCompile(`^[0-9]{1,20}$`)
 
-// statIDs is "device:inode" for each want's Source and container-side
-// Target, in that order: one xargs-run stat, every line checked. The paths
-// are stdin to xargs -0, so none of them is a word of the command line.
-func statIDs(ctx context.Context, r proc.Runner, procDir string, want []LiveMount) ([]string, error) {
+var statLineRE = regexp.MustCompile(`^([0-9]+:[0-9]+):(/.*)$`)
+
+// statIDs is "device:inode" by path for each want's Source and
+// container-side Target: one xargs-run stat, the paths on stdin (so none
+// of them is a word of the command line), every line checked. stat names
+// each path it answers for, and a path it cannot stat (gone, or a link
+// that no longer resolves) is simply absent: xargs then exits 123, which
+// is not an error here, so an agent that deletes a source cannot turn the
+// whole check into "could not read". Any other failure, a line of another
+// shape, or a path that was not asked for is an error.
+func statIDs(ctx context.Context, r proc.Runner, procDir string, want []LiveMount) (map[string]string, error) {
 	var in strings.Builder
+	asked := map[string]bool{}
 	for _, w := range want {
-		in.WriteString(w.Source)
-		in.WriteByte(0)
-		in.WriteString(procDir + "/root" + w.Target)
-		in.WriteByte(0)
-	}
-	res, err := runGuestBoundedStdin(ctx, r, strings.NewReader(in.String()), "xargs", "-0", "stat", "-c", "%d:%i", "--")
-	if err != nil {
-		return nil, errLiveMounts
-	}
-	lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
-	if len(lines) != 2*len(want) {
-		return nil, errLiveMounts
-	}
-	for _, l := range lines {
-		if !statRE.MatchString(l) {
-			return nil, errLiveMounts
+		for _, p := range []string{w.Source, procDir + "/root" + w.Target} {
+			in.WriteString(p)
+			in.WriteByte(0)
+			asked[p] = true
 		}
 	}
-	return lines, nil
+	res, err := runGuestBoundedStdin(ctx, r, strings.NewReader(in.String()), "xargs", "-0", "stat", "-c", "%d:%i:%n", "--")
+	if err != nil && res.Code != 123 {
+		return nil, errLiveMounts
+	}
+	ids := map[string]string{}
+	out := strings.TrimSuffix(res.Stdout, "\n")
+	if out == "" {
+		return ids, nil
+	}
+	for _, l := range strings.Split(out, "\n") {
+		m := statLineRE.FindStringSubmatch(l)
+		if m == nil || !asked[m[2]] {
+			return nil, errLiveMounts
+		}
+		ids[m[2]] = m[1]
+	}
+	return ids, nil
+}
+
+// sameID reports whether stat answered for both paths with the same
+// device and inode.
+func sameID(ids map[string]string, a, b string) bool {
+	x, okA := ids[a]
+	y, okB := ids[b]
+	return okA && okB && x == y
 }
 
 // mountOpts is what parseMountinfo keeps of one mount: read-only, the

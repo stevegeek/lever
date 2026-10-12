@@ -57,6 +57,12 @@ func TestStartManagerVerifiesResumedTreeMounts(t *testing.T) {
 			`"kb" is mounted from another place`, true, ""},
 		{"entry through a link, forced resume", "error", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/assistant/tools", Reason: jail.LiveMountElsewhere}}}},
 			`"assistant/tools" is mounted from another place`, true, ""},
+		// The runtime resolved the destination through the same link: the
+		// mount point moved, so the planned place has no mount.
+		{"mount point moved by the link", "suspended", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountMissing}}}},
+			`"kb" not a mount point`, true, ""},
+		{"read-only mount writable", "suspended", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/assistant/tools", Reason: jail.LiveMountWritable}}}},
+			`"assistant/tools" mounted read-write`, true, ""},
 		{"foreign namespace", "suspended", []answer{{err: jail.ErrForeignNamespace}}, "mount namespace made inside the container", true, ""},
 		// Not running yet right after the resume: checked again once live.
 		{"not running yet", "suspended", []answer{{err: jail.ErrContainerNotRunning}, {problems: []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}}},

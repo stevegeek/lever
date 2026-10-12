@@ -142,6 +142,9 @@ var (
 	uvRunCodeFlags = map[string]bool{
 		"--with": true, "--with-editable": true, "--with-requirements": true, "--find-links": true, "-f": true,
 		"--directory": true, "--project": true, "--config-file": true, "--env-file": true, "--python": true, "-p": true,
+		// Package sources and the cache uv installs from: a local path there is code.
+		"--index": true, "--default-index": true, "--index-url": true, "-i": true, "--extra-index-url": true,
+		"--cache-dir": true,
 	}
 	uvRunBoolFlags = map[string]bool{
 		"--all-extras": true, "--no-default-groups": true, "--all-groups": true, "--no-dev": true,
@@ -164,7 +167,10 @@ var (
 // x.py`, `uv run ./tool`). It returns the values that name code (paths
 // uv installs from or runs: --with, --project, --directory and the like)
 // and the directory --directory makes the command run in. Anything else
-// (uvx, `uv tool run`, an option missing from the tables) is unread.
+// (uvx, `uv tool run`, an option missing from the tables) is unread. Not
+// read: UV_* variables an env prefix sets (UV_PROJECT, UV_CACHE_DIR and
+// the like), and where a bare command after `uv run` resolves (the
+// project's virtual environment, not the supervisor's PATH).
 func parseUvRun(args []string) (cmd []string, chdir string, paths []interpPath, unread string) {
 	seenRun, script, module := false, false, false
 	i := 0

@@ -356,6 +356,12 @@ type Deps struct {
 	// booting, and as its fallback when the pane cannot be probed. nil ⇒ the
 	// gate has only the pane probe.
 	ContainerRunning func(ctx context.Context, ref string) (bool, error)
+	// ContainerStartedBeforeBoot asks podman whether an agent container
+	// last started before the guest's current boot
+	// (jail.ContainerStartedBeforeBoot in production). The guest-restart
+	// recovery reads it only when GuestBoot kept no boot id (the first
+	// bring-up after an upgrade). nil ⇒ no such fallback.
+	ContainerStartedBeforeBoot func(ctx context.Context, ref string) (bool, error)
 	// GuestBoot reads the jail guest's boot id and keeps the one the
 	// manager last ran live in, so a record left "running" by a hard VM
 	// kill is suspended and resumed instead of refused (GuestBoot's doc).

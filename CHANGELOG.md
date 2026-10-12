@@ -84,6 +84,12 @@ version bump moves the block under the new version heading.
   PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
   audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
   need Issues: read and write.
+- **The recovery after a hard VM kill also works without a recorded boot id (lever#179).** When
+  `.lever-state/guest-boot.json` holds no boot id (an instance last brought up before 0.35.0, or a
+  lost file), `lever up` and `lever apply` now take podman's word instead: a manager record that
+  says running, over a container podman says is not running and last started before the guest's
+  current boot, is suspended and resumed with its conversation, as with a recorded boot id. A
+  container podman never started is not evidence, and a read that fails leaves the old message.
 
 ## [0.35.0] - 2026-10-12
 

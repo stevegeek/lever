@@ -36,23 +36,49 @@ type GuestBoot interface {
 // that is starting, so the hub's status is never evidence of a dead one,
 // and a podman read that fails (or no podman probe at all) answers no. Any
 // read that fails answers no, which leaves today's behaviour in place.
+// With no boot id kept, podman's start time stands in for it
+// (startedInEndedBoot).
 func guestRestartedUnder(ctx context.Context, d Deps, project, name string, rec *scion.Agent) bool {
 	if rec == nil || rec.Phase != scion.PhaseRunning || d.GuestBoot == nil {
 		return false
 	}
 	was, err := d.GuestBoot.Recorded()
-	if err != nil || was == "" {
+	if err != nil {
 		return false
+	}
+	ref := jail.ContainerName(path.Base(project), name)
+	if was == "" {
+		return startedInEndedBoot(ctx, d, ref)
 	}
 	now, err := d.GuestBoot.Current(ctx)
 	if err != nil || now == "" || now == was {
 		return false
 	}
+	return podmanSaysStopped(ctx, d, ref)
+}
+
+// podmanSaysStopped reports podman's own answer that the container ref is
+// not running; no probe, or a probe that fails, answers no.
+func podmanSaysStopped(ctx context.Context, d Deps, ref string) bool {
 	if d.ContainerRunning == nil {
 		return false
 	}
-	running, err := d.ContainerRunning(ctx, jail.ContainerName(path.Base(project), name))
+	running, err := d.ContainerRunning(ctx, ref)
 	return err == nil && !running
+}
+
+// startedInEndedBoot is guestRestartedUnder's evidence when lever kept no
+// boot id: the instance's last bring-up predates the record (an upgrade),
+// or the record file was lost. Then podman must say both that the
+// container is not running and that it last started before the current
+// boot (jail.ContainerStartedBeforeBoot). A container that never started,
+// or any read that fails, answers no.
+func startedInEndedBoot(ctx context.Context, d Deps, ref string) bool {
+	if d.ContainerStartedBeforeBoot == nil || !podmanSaysStopped(ctx, d, ref) {
+		return false
+	}
+	before, err := d.ContainerStartedBeforeBoot(ctx, ref)
+	return err == nil && before
 }
 
 // suspendAfterGuestRestart suspends a manager record guestRestartedUnder

@@ -48,8 +48,12 @@ func StartPrebuild(ctx context.Context, r proc.Runner, spec Spec, goarch, machin
 		p.mu.Lock()
 		stopped := p.stopped
 		p.mu.Unlock()
-		if p.err != nil && stopped {
-			p.step.Skip("stopped: the bring-up ended before the scion step")
+		switch {
+		case p.err != nil && stopped:
+			p.step.Skip("stopped: not needed (the bring-up ended, or the guest's architecture differs)")
+			return
+		case p.err != nil && pctx.Err() != nil:
+			p.step.Skip("stopped: the run was interrupted")
 			return
 		}
 		p.step.Done(p.err)
@@ -59,11 +63,15 @@ func StartPrebuild(ctx context.Context, r proc.Runner, spec Spec, goarch, machin
 
 // Result waits for the build and returns its binary and error when it was
 // built from spec for goarch and machine. ok is false when p is nil or
-// built something else; the caller then builds itself. Result waits even
-// then, since a second build would write the same output path. A ctx that
-// ends first returns its error with ok true.
+// builds something else; that build is then cancelled and waited out
+// (a second build would write the same output path), and the caller
+// builds itself. A ctx that ends first returns its error with ok true.
 func (p *Prebuild) Result(ctx context.Context, spec Spec, goarch, machine string) (path string, err error, ok bool) {
 	if p == nil {
+		return "", nil, false
+	}
+	if p.spec.Source != spec.Source || p.spec.Version != spec.Version || p.goarch != goarch || p.machine != machine {
+		p.Stop()
 		return "", nil, false
 	}
 	select {
@@ -75,9 +83,6 @@ func (p *Prebuild) Result(ctx context.Context, spec Spec, goarch, machine string
 		case <-ctx.Done():
 			return "", ctx.Err(), true
 		}
-	}
-	if p.spec.Source != spec.Source || p.spec.Version != spec.Version || p.goarch != goarch || p.machine != machine {
-		return "", nil, false
 	}
 	return p.path, p.err, true
 }

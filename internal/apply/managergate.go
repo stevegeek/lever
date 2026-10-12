@@ -25,8 +25,11 @@ const defaultHarnessWait = 2 * time.Minute
 // its tmux pane alive. The pane exists only once the pre-start hook has
 // passed and claude has started, and every harness death behind lever#31
 // (a task past the tmux cap, `claude --continue` with no conversation, an
-// auth failure) landed within three seconds of claude's start; counted from
-// the pane, three seconds holds that margin. The long Settle of the budget
+// auth failure) landed within three seconds of the record reading running,
+// which is before the pane exists; counted from the pane, a later and
+// stronger signal, three seconds covers them. It is still probabilistic for
+// a later death, as the 10 s window was; `lever doctor`'s manager row and
+// `lever up`'s look after a detach catch one. The long Settle of the budget
 // stays for a gate that never saw the pane (no probe, or a probe that could
 // not run), which counts from the hub record instead.
 //

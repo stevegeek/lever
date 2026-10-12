@@ -111,3 +111,17 @@ func TestPrebuildStopCancelsAnUntakenBuild(t *testing.T) {
 	<-r.started
 	p.Stop() // returns only once the build has ended
 }
+
+// TestPrebuildForAnotherArchIsCancelled: a guest of another architecture
+// does not wait out the early build; it is cancelled and ended before
+// Result returns.
+func TestPrebuildForAnotherArchIsCancelled(t *testing.T) {
+	backendtest.IsolateCache(t)
+	r := blockingRunner{started: make(chan struct{})}
+	spec := scionbin.Spec{Source: t.TempDir()}
+	p := scionbin.StartPrebuild(context.Background(), r, spec, "amd64", "m")
+	<-r.started
+	if _, _, ok := p.Result(context.Background(), spec, "arm64", "m"); ok {
+		t.Fatal("an amd64 build was taken for an arm64 guest")
+	}
+}

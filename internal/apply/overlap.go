@@ -74,6 +74,9 @@ type lanes struct {
 	r     *run
 	order []*bgLane
 	by    map[string]*bgLane
+	// notify gets one value as each lane ends (buffered for all of them),
+	// so join wakes on any lane.
+	notify chan struct{}
 }
 
 // startLanes takes the background steps out of steps, starts their lanes,
@@ -95,9 +98,10 @@ func startLanes(ctx context.Context, r *run, steps []Step) (*lanes, []Step) {
 		}
 		l.steps = append(l.steps, s)
 	}
-	// Each lane's first step is listed here, in plan order, so the step
-	// numbers follow the plan; a lane lists its later steps as it starts
-	// them.
+	// Each lane's first step is listed here, in plan order, so those
+	// numbers follow the plan; a lane lists its later steps (a second
+	// image) as it starts them, numbered then.
+	ls.notify = make(chan struct{}, len(ls.order))
 	for _, l := range ls.order {
 		lctx, cancel := context.WithCancel(ctx)
 		l.cancel = cancel
@@ -120,7 +124,11 @@ func (ls *lanes) startStep(ctx context.Context, s Step) *progress.Step {
 
 // run is one lane's goroutine; first is its first step's listing.
 func (ls *lanes) run(ctx context.Context, l *bgLane, first *progress.Step) {
-	defer close(l.done)
+	defer func() {
+		close(l.done)
+		ls.notify <- struct{}{}
+		l.cancel()
+	}()
 	for i, s := range l.steps {
 		ps := first
 		if i > 0 {
@@ -130,15 +138,25 @@ func (ls *lanes) run(ctx context.Context, l *bgLane, first *progress.Step) {
 			ps = ls.startStep(ctx, s)
 		}
 		err := ls.r.step(progress.WithStep(ctx, ps), s)
-		if reason := l.stopped(); err != nil && reason != "" {
+		if err != nil && (l.stopped() != "" || ctx.Err() != nil) {
+			// Stopped by the run, or by an interrupt (Ctrl-C): not a
+			// failure of this step.
+			reason := l.stopped()
+			if reason == "" {
+				reason = failedReason(ctx.Err())
+			}
 			ps.Skip("stopped: " + reason)
 			return
 		}
-		ps.Done(err)
 		if err != nil {
+			// Recorded before the step is listed as failed, so a
+			// foreground step that sees the FAIL line sees the failure.
 			l.mu.Lock()
 			l.err = fmt.Errorf("step %s: %w", s.Kind, err)
 			l.mu.Unlock()
+		}
+		ps.Done(err)
+		if err != nil {
 			return
 		}
 	}
@@ -160,35 +178,42 @@ func (l *bgLane) failure() error {
 // waiting for the others.
 func (ls *lanes) failed() error {
 	for _, l := range ls.order {
-		select {
-		case <-l.done:
-			if err := l.failure(); err != nil {
-				return err
-			}
-		default:
-		}
-	}
-	return nil
-}
-
-// join waits for the named lanes (every lane when all is set) and returns
-// the first failure among them, in plan order. ctx ends the wait (the
-// lanes see the same cancellation).
-func (ls *lanes) join(ctx context.Context, names []string, all bool) error {
-	for _, l := range ls.order {
-		if !all && !slices.Contains(names, l.name) {
-			continue
-		}
-		select {
-		case <-l.done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 		if err := l.failure(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// join waits for the named lanes (every lane when all is set). A failure
+// of ANY lane, named or not, ends the wait at once and is returned: the
+// run stops before the step that waited. ctx ends the wait (the lanes see
+// the same cancellation).
+func (ls *lanes) join(ctx context.Context, names []string, all bool) error {
+	for {
+		if err := ls.failed(); err != nil {
+			return err
+		}
+		pending := false
+		for _, l := range ls.order {
+			if !all && !slices.Contains(names, l.name) {
+				continue
+			}
+			select {
+			case <-l.done:
+			default:
+				pending = true
+			}
+		}
+		if !pending {
+			return nil
+		}
+		select {
+		case <-ls.notify:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // stop ends every lane still running, for reason, and waits for them all.

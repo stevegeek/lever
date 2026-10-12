@@ -33,13 +33,38 @@ func idleTicker(time.Duration) (<-chan time.Time, func()) {
 // the list's text.
 func runWithProgress(t *testing.T, deps Deps) (string, error) {
 	t.Helper()
+	return runWithProgressCtx(context.Background(), t, deps, &syncOut{})
+}
+
+// syncOut is a progress output a test may read while the run writes it.
+type syncOut struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (o *syncOut) Write(p []byte) (int, error) { o.mu.Lock(); defer o.mu.Unlock(); return o.b.Write(p) }
+func (o *syncOut) String() string              { o.mu.Lock(); defer o.mu.Unlock(); return o.b.String() }
+
+// waitFor waits until out shows want.
+func (o *syncOut) waitFor(want string) bool {
+	deadline := time.Now().Add(overlapTimeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(o.String(), want) {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
+}
+
+func runWithProgressCtx(ctx context.Context, t *testing.T, deps Deps, out *syncOut) (string, error) {
+	t.Helper()
 	app, f := newObserveFirstApp(t)
 	if deps.Scion == nil {
 		deps.Scion = scion.New(&agentLifecycleRunner{FakeRunner: f, slug: "hello"}, scion.Options{})
 	}
-	var out bytes.Buffer
-	rep := progress.New(progress.Options{Mode: progress.ModePlain, Out: &out, Ticker: idleTicker})
-	err := Run(progress.With(context.Background(), rep), app, fillDeps(deps), PlanOpts{})
+	rep := progress.New(progress.Options{Mode: progress.ModePlain, Out: out, Ticker: idleTicker})
+	err := Run(progress.With(ctx, rep), app, fillDeps(deps), PlanOpts{})
 	rep.Finish(err)
 	return out.String(), err
 }
@@ -75,7 +100,9 @@ func TestLoadImageRunsAlongsideTheHubSteps(t *testing.T) {
 // TestStartManagerWaitsForTheImagesAndTheBroker: start-manager begins only
 // once every image is loaded and warm and the broker is healthy.
 func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
-	var warmed, healthy, ok atomic.Bool
+	var warmed, healthy atomic.Bool
+	var mu sync.Mutex
+	var ready []bool // per WaitBrokerReady call; start-manager's is the last
 	_, err := runWithProgress(t, Deps{
 		WarmImage: func(context.Context, string) error {
 			time.Sleep(20 * time.Millisecond)
@@ -88,14 +115,16 @@ func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
 			return nil
 		},
 		WaitBrokerReady: func(context.Context, string) error {
-			ok.Store(warmed.Load() && healthy.Load())
+			mu.Lock()
+			ready = append(ready, warmed.Load() && healthy.Load())
+			mu.Unlock()
 			return nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !ok.Load() {
+	if len(ready) == 0 || !ready[len(ready)-1] {
 		t.Fatal("start-manager started before the image warm-up or the broker health check finished")
 	}
 }
@@ -127,11 +156,11 @@ func TestMintWaitsForTheBroker(t *testing.T) {
 // lets the foreground step that is running finish, starts no further step,
 // and is the error Run returns.
 func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
-	patStarted, loadFailed := make(chan struct{}), make(chan struct{})
+	patStarted := make(chan struct{})
 	var patDone, serverRan atomic.Bool
-	out, err := runWithProgress(t, Deps{
+	out := &syncOut{}
+	_, err := runWithProgressCtx(context.Background(), t, Deps{
 		LoadImage: func(context.Context, string) error {
-			defer close(loadFailed)
 			select {
 			case <-patStarted:
 			case <-time.After(overlapTimeout):
@@ -140,10 +169,9 @@ func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
 		},
 		EnsureControllerPAT: func(context.Context) error {
 			close(patStarted)
-			select {
-			case <-loadFailed:
-			case <-time.After(overlapTimeout):
-			}
+			// The step in front ends only once the lane step is listed
+			// as failed.
+			out.waitFor(testImage + " FAILED")
 			patDone.Store(true)
 			return nil
 		},
@@ -151,7 +179,7 @@ func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
 			serverRan.Store(true)
 			return false, nil
 		},
-	})
+	}, out)
 	testutil.WantErrIs(t, err, errBoom)
 	if !strings.Contains(err.Error(), "step load-image") {
 		t.Fatalf("error does not name the failed step: %v", err)
@@ -162,8 +190,72 @@ func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
 	if serverRan.Load() {
 		t.Fatal("a step after the background failure ran")
 	}
-	if !strings.Contains(out, "load-image "+testImage+" FAILED") || !strings.Contains(out, "bootstrap-token ok") {
-		t.Fatalf("progress list:\n%s", out)
+	if got := out.String(); !strings.Contains(got, "load-image "+testImage+" FAILED") || !strings.Contains(got, "bootstrap-token ok") {
+		t.Fatalf("progress list:\n%s", got)
+	}
+}
+
+// TestLaneFailureStopsAStepWaitingForAnotherLane: mint waits for the broker
+// lane; the image lane failing during that wait stops the run before mint.
+func TestLaneFailureStopsAStepWaitingForAnotherLane(t *testing.T) {
+	brokerRelease, templateDone := make(chan struct{}), make(chan struct{})
+	var minted atomic.Bool
+	out := &syncOut{}
+	_, err := runWithProgressCtx(context.Background(), t, Deps{
+		BrokerHealthy: func(context.Context) error {
+			<-brokerRelease
+			return nil
+		},
+		// The step before mint: once it ran, mint is about to wait for
+		// the broker lane.
+		EnsureAgentTemplate: func(context.Context, string) (bool, error) {
+			close(templateDone)
+			return false, nil
+		},
+		LoadImage: func(context.Context, string) error {
+			<-templateDone
+			time.Sleep(20 * time.Millisecond) // mint is waiting by now
+			go func() {
+				out.waitFor(testImage + " FAILED")
+				close(brokerRelease)
+			}()
+			return errBoom
+		},
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+			minted.Store(true)
+			return BootstrapMaterial{Ticket: "t"}, nil
+		},
+	}, out)
+	testutil.WantErrIs(t, err, errBoom)
+	if minted.Load() {
+		t.Fatal("mint ran after the image lane failed")
+	}
+}
+
+// TestInterruptListsLaneStepsAsStopped: Ctrl-C (the run's context ends)
+// stops a lane step; it is listed as stopped, and the error is the
+// interruption, not a failure of the step.
+func TestInterruptListsLaneStepsAsStopped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &syncOut{}
+	_, err := runWithProgressCtx(ctx, t, Deps{
+		LoadImage: func(lctx context.Context, _ string) error {
+			<-lctx.Done()
+			return lctx.Err()
+		},
+		EnsureControllerPAT: func(c context.Context) error {
+			cancel()
+			<-c.Done()
+			return c.Err()
+		},
+	}, out)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "load-image") {
+		t.Fatalf("error: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, testImage+" FAILED") || !strings.Contains(got, "stopped: the run was interrupted") {
+		t.Fatalf("progress list:\n%s", got)
 	}
 }
 

@@ -73,7 +73,9 @@ func execAttach(ctx context.Context, b backend.Backend, sc *scion.Client, slug, 
 // detached, or the session ended. `lever up` on a terminal uses it instead
 // of execAttach so it can check the manager after the detach (lever#188).
 // While the child runs, the terminal's interrupt and quit signals are the
-// attach's: lever waits them out rather than dying under it. (The child
+// attach's (the terminal sends them to it too): lever waits them out
+// rather than dying under it. A terminate or hangup sent to lever is
+// passed on to the attach, which then ends, as exec'ing it did. (The child
 // gets the default handling back on exec; only an ignored signal would be
 // inherited, so they are caught, not ignored.)
 func runAttach(ctx context.Context, b backend.Backend, sc *scion.Client, slug, project string) error {
@@ -87,22 +89,27 @@ func runAttach(ctx context.Context, b backend.Backend, sc *scion.Client, slug, p
 	}
 	c := exec.Command(bin, argv[1:]...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT)
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		for range sigs {
-		}
-	}()
-	err = c.Run()
-	signal.Stop(sigs)
-	close(sigs)
-	<-drained
-	if err != nil {
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	if err := c.Start(); err != nil {
 		return fmt.Errorf("attach: %w", err)
 	}
-	return nil
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	for {
+		select {
+		case sig := <-sigs:
+			if sig == syscall.SIGTERM || sig == syscall.SIGHUP {
+				_ = c.Process.Signal(sig)
+			}
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("attach: %w", err)
+			}
+			return nil
+		}
+	}
 }
 
 // newAttachCmd is a debugging/eyes-on verb: it attaches to a RUNNING agent and

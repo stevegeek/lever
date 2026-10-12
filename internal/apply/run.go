@@ -895,7 +895,9 @@ func runLoadImage(ctx context.Context, s Step, d Deps) error {
 	// Warm an image that was already loaded too: an earlier apply may have
 	// loaded it and then failed or timed out before its warm-up finished.
 	warmImage(ctx, s.Target, d)
-	return nil
+	// A warm-up cut short by the run stopping (lever#189) or an interrupt
+	// is not a finished step.
+	return ctx.Err()
 }
 
 // imageWarmTimeout bounds one image's warm-up. The measured first run of a
@@ -927,7 +929,7 @@ func warmImage(ctx context.Context, ref string, d Deps) {
 		}
 		err = <-done
 	}
-	if err != nil {
+	if err != nil && ctx.Err() == nil {
 		d.Log("load-image: warning: warming %s failed: %v. The first agent start on it may stay in phase created; see the start-manager error if it does", ref, err)
 	}
 }

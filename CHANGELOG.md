@@ -204,6 +204,14 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **The Makefile builds with the Go release in `go.mod`.** It sets `GOTOOLCHAIN` (the `go` command
+  downloads that toolchain once if the local one differs), the same Go CI and the releases use.
+  Under a newer local Go 1.27, `lever-tool-db`'s SQLite driver hung on first use, so the e2e's tool
+  calls failed with a 502. `make GOTOOLCHAIN=local` keeps the local Go.
+- **`lever acceptance` waits for its tools to listen** (up to 30 s) before it runs the checks, and
+  fails naming the tool, its address and its log when one never does. A first check could reach
+  the gateway before the tool bound its port and fail with a 502 unrelated to the capability under
+  test.
 - **A failed image load now shows podman's own error (lever#173).** `podman load` writes its copy
   progress to stderr before it fails, and the load error relayed the whole stream on one line, so
   it led with "Getting image source signatures" and the cause at the end was lost. The load,

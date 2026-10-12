@@ -98,7 +98,7 @@ func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name
 }
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
-	var fresh, noAttach bool
+	var fresh, noAttach, shared bool
 	var progressMode string
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
@@ -244,11 +244,12 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
 			}
-			return execAttach(cmd.Context(), b, sc, app.Name, project)
+			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
 		},
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
+	c.Flags().BoolVar(&shared, "shared", false, sharedFlagUsage)
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
 }
@@ -279,12 +280,19 @@ func upDecisionNote(phase string, d upAction) string {
 func upProbeReason(probeErr error) string {
 	msg := strings.ToLower(probeErr.Error())
 	switch {
-	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "is not responding"):
+	case hubNotRunning(probeErr):
 		return "the jail's hub is not running (after `lever stop` or a VM restart); starting it"
 	case strings.Contains(msg, "project not found"), strings.Contains(msg, "no git origin remote found"):
 		return "the project is not registered with the hub yet; registering it"
 	}
 	return "no running manager (" + firstLine(probeErr.Error()) + "); bringing the application up"
+}
+
+// hubNotRunning reports scion's answer when the jail's hub does not serve:
+// after `lever stop --keep-vm`, a VM restart, or a hub that exited.
+func hubNotRunning(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "is not responding")
 }
 
 // upProbeNotice is the line `up` prints when the phase probe could not see

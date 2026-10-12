@@ -122,6 +122,85 @@ func TestGuestRestartedUnder(t *testing.T) {
 	}
 }
 
+func startedBefore(before bool, err error) func(context.Context, string) (bool, error) {
+	return func(context.Context, string) (bool, error) { return before, err }
+}
+
+// With no boot id kept (an instance whose last bring-up predates the
+// record), podman's start time is the evidence of a VM restart: the
+// container is not running and last started before the current boot.
+func TestGuestRestartedUnderWithoutRecord(t *testing.T) {
+	running := &scion.Agent{Slug: "hello", Phase: scion.PhaseRunning, ContainerStatus: "created"}
+	noRecord := &fakeGuestBoot{current: bootB}
+	cases := []struct {
+		name   string
+		rec    *scion.Agent
+		cr     func(context.Context, string) (bool, error)
+		before func(context.Context, string) (bool, error)
+		want   bool
+	}{
+		{"stopped, started in an earlier boot", running, podmanSays(false), startedBefore(true, nil), true},
+		{"stopped, started in this boot", running, podmanSays(false), startedBefore(false, nil), false},
+		{"running, started in an earlier boot", running, podmanSays(true), startedBefore(true, nil), false},
+		{"start time unreadable", running, podmanSays(false), startedBefore(true, errors.New("podman")), false},
+		{"no start probe", running, podmanSays(false), nil, false},
+		{"no podman", running, nil, startedBefore(true, nil), false},
+		{"podman fails", running, func(context.Context, string) (bool, error) { return false, errors.New("x") }, startedBefore(true, nil), false},
+		{"suspended record", &scion.Agent{Slug: "hello", Phase: scion.PhaseSuspended}, podmanSays(false), startedBefore(true, nil), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var asked []string
+			before := c.before
+			if before != nil {
+				inner := before
+				before = func(ctx context.Context, ref string) (bool, error) {
+					asked = append(asked, ref)
+					return inner(ctx, ref)
+				}
+			}
+			d := Deps{GuestBoot: noRecord, ContainerRunning: c.cr, ContainerStartedBeforeBoot: before}
+			if got := guestRestartedUnder(context.Background(), d, "/lever", "hello", c.rec); got != c.want {
+				t.Errorf("got %t, want %t", got, c.want)
+			}
+			for _, ref := range asked {
+				if ref != "lever--hello" {
+					t.Errorf("asked about %q, want the manager's container", ref)
+				}
+			}
+		})
+	}
+	// A kept boot id decides alone: the same boot is never a restart,
+	// whatever podman's start time says.
+	d := Deps{GuestBoot: &fakeGuestBoot{current: bootA, recorded: bootA}, ContainerRunning: podmanSays(false), ContainerStartedBeforeBoot: startedBefore(true, nil)}
+	if guestRestartedUnder(context.Background(), d, "/lever", "hello", running) {
+		t.Error("a kept boot id that did not change must not be overridden by the start time")
+	}
+}
+
+// The upgrade case end to end: no boot id kept, the VM restarted under the
+// manager; apply suspends and resumes it and records the boot.
+func TestStartManagerRecoversWithoutRecord(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "created"}
+	gb := &fakeGuestBoot{current: bootB}
+	deps := Deps{
+		Scion:                      scion.New(r, scion.Options{}),
+		GuestBoot:                  gb,
+		ContainerRunning:           podmanSays(false),
+		ContainerStartedBeforeBoot: startedBefore(true, nil),
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.suspendCalls != 1 || r.resumeCalls != 1 || r.startCalls != 0 || r.deleteCalls != 0 {
+		t.Errorf("suspend=%d resume=%d start=%d delete=%d, want 1/1/0/0", r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+	}
+	if len(gb.records) != 1 || gb.records[0] != bootB {
+		t.Errorf("records = %v, want the current boot", gb.records)
+	}
+}
+
 // RecoverAfterGuestRestart is up's half: it suspends and says so only once
 // the record reads suspended.
 func TestRecoverAfterGuestRestartForUp(t *testing.T) {

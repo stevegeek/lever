@@ -1441,6 +1441,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ContainerRunning: func(ctx context.Context, ref string) (bool, error) {
 			return jail.ContainerRunning(ctx, b.JailRunner(), ref)
 		},
+		// ContainerStartedBeforeBoot is the guest-restart recovery's
+		// evidence when no boot id was kept (lever#179).
+		ContainerStartedBeforeBoot: func(ctx context.Context, ref string) (bool, error) {
+			return jail.ContainerStartedBeforeBoot(ctx, b.JailRunner(), ref)
+		},
 		AgentRevoked: agentRevoked(w.app, st),
 		// GuestBoot lets start-manager and up recover a manager record a
 		// hard VM kill left "running" (lever#179).

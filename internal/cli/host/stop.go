@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -21,18 +22,34 @@ import (
 // following `lever up` can resume fast (no re-apply, no reinstall). This is
 // distinct from `destroy`, which deletes the machine and clears staged
 // runtime state.
+//
+// With --keep-vm the agents are suspended and the hub and the host daemons
+// stopped exactly as before, but the VM is left running (lever#196): the next
+// `lever up` skips the VM boot and starts only the hub and the manager. The
+// VM keeps its memory on the host meanwhile.
 func newStopCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag *string
+	var keepVM bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Power off the jail, keeping its disk (fast `lever up` resume)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// --keep-vm stops this instance's hub and agents and leaves its
+			// VM up: it needs the instance (its broker, its agents), so it
+			// refuses a --machine target rather than leave a foreign jail
+			// half stopped.
+			if keepVM && *machine != "" {
+				return fmt.Errorf("stop: --keep-vm acts on the current instance; run it from the instance root without --machine")
+			}
 			// Resolve the app (for the manager's scion slug) and, when targeting
 			// the current instance (no explicit --machine), stop the host-side
 			// broker too — mirroring `destroy`'s broker-stop block. UNLIKE
 			// destroy, staged runtime state (bootstrap ticket, manifest) is left
 			// alone: stop preserves everything for a fast resume.
 			ia := loadInstanceApp()
+			if keepVM && ia.app == nil {
+				return fmt.Errorf("stop: --keep-vm needs an instance: run it from the instance root (no lever.yaml found)")
+			}
 			var appName string
 			var st state.State // set alongside appName; valid whenever appName != ""
 			if ia.app != nil {
@@ -63,6 +80,12 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// apply's observe-first start-manager copes with whatever state
 			// results) — but surfaced so a recurrence of #3 is diagnosable. The
 			// timeout stops a hung scion from blocking power-off.
+			// Set once the jail answers: --keep-vm then has a hub to stop.
+			var hub hubStopper
+			// suspended stays true while every suspend lever tried took;
+			// --keep-vm must not claim the agents are suspended otherwise,
+			// because their containers go on running in the VM.
+			suspended := true
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
 					// st was set alongside appName above; HostScionClient's
@@ -72,6 +95,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// Empty agent role: this client only calls List and Suspend,
 					// and only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
+					hub = sc
 					// The heal has its own budget, ahead of the suspend's, so a
 					// slow one cannot cost the manager its suspend.
 					hctx, hcancel := context.WithTimeout(cmd.Context(), stopHealBudget)
@@ -79,15 +103,30 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					hcancel()
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
-						cmd.PrintErrf("lever: warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
+						suspended = false
+						if hubNotRunning(serr) {
+							// Still a warning (the match is on wording, and a hub
+							// that relays another dial failure matches too), but
+							// one that names the common case: after `lever stop
+							// --keep-vm` the hub is down and the agents were
+							// suspended then.
+							cmd.PrintErrf("lever: warning: scion suspend failed: the jail's hub did not answer (after `lever stop --keep-vm` the agents are already suspended): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
+						} else {
+							cmd.PrintErrf("lever: warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
+						}
 					}
 					cancel()
 					// After the manager, under its own budget, so a slow worker
 					// pass cannot cost the manager its suspend.
-					suspendRunningWorkers(cmd, sc, ia.app, b.MountDest())
+					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest()) {
+						suspended = false
+					}
 				}
 			}
 
+			if keepVM {
+				return stopKeepVM(cmd, hub, m, suspended)
+			}
 			if err := b.Stop(cmd.Context()); err != nil {
 				return err
 			}
@@ -96,7 +135,42 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 		},
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
+	cmd.Flags().BoolVar(&keepVM, "keep-vm", false, "suspend the agents and stop the hub and the broker, but leave the VM running (it keeps its memory on the host); the next `lever up` skips the VM boot")
 	return cmd
+}
+
+// hubStopTimeout bounds --keep-vm's hub stop (scion's stop, then the wait
+// for the old daemon to exit). A var so a test can shrink it.
+var hubStopTimeout = 30 * time.Second
+
+// hubStopper is the part of *scion.Client stopKeepVM uses (a test seam).
+type hubStopper interface {
+	ServerStop(ctx context.Context) error
+}
+
+// stopKeepVM ends `lever stop --keep-vm` once the suspends were tried and
+// the host daemons stopped: it stops the jail's hub and leaves the VM
+// running. hub is nil when the jail did not answer: no agent was suspended,
+// and if the VM is up after all (a transient failure) its agents still run,
+// so that is an error naming plain `lever stop`. A failed hub stop is a
+// warning: the hub runs inside the jail, and the next `lever up` starts or
+// reuses it. A suspend that did not take is an error after the hub stop:
+// that agent's container goes on running in the VM that stays up.
+func stopKeepVM(cmd *cobra.Command, hub hubStopper, machine string, suspended bool) error {
+	if hub == nil {
+		return fmt.Errorf("stop --keep-vm: machine %q did not answer, so no agent was suspended; if it is running, `lever stop` powers it off (and `lever up` starts it again)", machine)
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), hubStopTimeout)
+	err := hub.ServerStop(ctx)
+	cancel()
+	if err != nil {
+		cmd.PrintErrf("lever: warning: stopping the jail's hub failed (the next `lever up` reuses it): %s\n", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	if !suspended {
+		return fmt.Errorf("stop --keep-vm: machine %q left running with the hub and broker stopped, but not every agent was suspended (warnings above); its container goes on running in the VM. `lever stop` powers the VM off", machine)
+	}
+	cmd.Printf("machine %q left running — agents suspended, hub and broker stopped; the VM keeps its memory on the host. Run `lever up` to resume, or `lever stop` to power it off.\n", machine)
+	return nil
 }
 
 // healStoppedManager runs before the manager's suspend. A manager whose hub
@@ -167,17 +241,18 @@ type workerSuspender interface {
 // so it needed `lever worker purge`. A suspended record resumes cleanly.
 //
 // Best-effort, like the manager's suspend: every failure is a warning and the
-// caller powers off regardless. No worker is stopped or deleted here.
-func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string) {
+// caller powers off regardless. No worker is stopped or deleted here. It
+// reports whether every suspend it needed took (false on a failed list).
+func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string) bool {
 	if len(app.Workers) == 0 {
-		return
+		return true
 	}
 	lctx, cancel := context.WithTimeout(cmd.Context(), workerListTimeout)
 	agents, err := sc.List(lctx, project)
 	cancel()
 	if err != nil {
 		cmd.PrintErrf("lever: warning: listing agents failed, no worker was suspended (a running worker may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(err)))
-		return
+		return false
 	}
 	var names []string
 	for _, wk := range app.Workers {
@@ -188,13 +263,16 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 	errs := suspendWorkers(cmd.Context(), sc, names, project, workerSuspendParallel, workerSuspendTimeout)
 	// Reported in config order once every suspend has returned, whatever
 	// order they finished in.
+	ok := true
 	for i, name := range names {
 		if errs[i] != nil {
+			ok = false
 			cmd.PrintErrf("lever: warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", name, termsafe.Sanitize(scion.ErrSummary(errs[i])))
 			continue
 		}
 		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", name, name)
 	}
+	return ok
 }
 
 // suspendWorkers suspends names with at most parallel calls in flight, each

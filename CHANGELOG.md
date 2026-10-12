@@ -52,6 +52,15 @@ version bump moves the block under the new version heading.
   command with its time and exit code, showing only the command's leading plain words. The Lima
   e2e prints a time on every line, each phase's duration and a table of them, and on a failed
   acceptance the end of the broker and tool logs.
+- **`lever stop --keep-vm` (lever#196).** Suspends the manager and the running workers and stops
+  the jail's hub, the broker and the remote proxy, as `lever stop` does, but leaves the VM
+  running, so the next `lever up` skips the VM boot. The VM keeps its memory on the host until it
+  is powered off (with Lima nothing hands the guest's memory back), so a plain `lever stop` is
+  still the choice when the RAM matters. It acts on the current instance only and refuses
+  `--machine`, and it exits non-zero when the jail does not answer or a suspend did not take
+  (that agent's container would go on running in the VM). A plain `lever stop` that finds the
+  hub already down says so in its suspend warning. Operations guide: "Stopping without powering
+  off".
 
 ### Changed
 
@@ -84,6 +93,21 @@ version bump moves the block under the new version heading.
   PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
   audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
   need Issues: read and write.
+- **`lever attach` and `lever up` detach stale terminals before they attach (lever#170).** An
+  earlier attach whose terminal went away (a closed window, a dropped ssh, a host that slept)
+  stayed attached to the agent's tmux session and could freeze the next view while the agent
+  worked. Both now detach the terminals earlier attaches left on the agent first, as
+  `tmux attach -d` does, and print how many; `--shared` keeps them. The container's own tmux
+  client (scion's start command attaches one; detaching it would stop the agent) is never
+  detached: only clients a `podman exec` started are. Operations guide: "A frozen attach view", with
+  the recovery (`Ctrl-L`, else `Ctrl-b d` and `lever attach` again; `Esc` leaves Claude Code's
+  background-agent view).
+- **The recovery after a hard VM kill also works without a recorded boot id (lever#179).** When
+  `.lever-state/guest-boot.json` holds no boot id (an instance last brought up before 0.35.0, or a
+  lost file), `lever up` and `lever apply` now take podman's word instead: a manager record that
+  says running, over a container podman says is not running and last started before the guest's
+  current boot, is suspended and resumed with its conversation, as with a recorded boot id. A
+  container podman never started is not evidence, and a read that fails leaves the old message.
 
 ## [0.35.0] - 2026-10-12
 

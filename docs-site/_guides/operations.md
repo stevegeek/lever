@@ -493,6 +493,30 @@ manager:
   is not enough: it resumes the record on its old image. An older image ignores the block, and
   doctor's row shows the difference.
 
+## A frozen attach view
+
+The view `lever attach` (or `lever up`) gives you can freeze, or keep an old terminal's size,
+while the agent and Claude Code run normally. The usual cause is a stale tmux client: an earlier
+attach whose terminal went away (a closed window, a dropped ssh session, a host that slept) is
+still attached to the agent's tmux session. `lever attach` and `lever up` therefore detach the
+terminals earlier attaches left on the agent before they attach, as `tmux attach -d` does, and
+print how many they detached. `--shared` keeps them, for two terminals that should both watch, or
+when a terminal in scion's web UI is open on the same agent (a default attach detaches it too).
+They never detach the container's own tmux client: scion starts the agent's tmux session with a
+client attached in the container's main process, and detaching it would stop the agent. Only
+clients a `podman exec` started (an attach) are detached; one lever cannot place is left alone.
+
+When a view freezes anyway:
+
+1. Press `Ctrl-L`: Claude Code clears and redraws its screen and keeps the conversation.
+2. If it stays frozen, detach with `Ctrl-b d` (or close the terminal) and run `lever attach`
+   again: the new attach detaches the old client.
+3. If a stray key opened Claude Code's background-agent view, `Esc` leaves it. Do not move the
+   session into the background (see [background sessions and /login](#background-sessions-and-login)).
+
+To check whether the agent itself is working without attaching: `lever doctor` (the *manager
+agent* row), or `lever msg send` and watch for the reply.
+
 ## Background sessions and /login
 
 **Do not use `/login` or background mode in an agent tmux.** lever supplies the agent's login
@@ -539,6 +563,36 @@ manager:
   writes `~/.claude/.credentials.json` into the jail, where agents can read it, and changes
   nothing. If someone ran it, delete that file.
 
+## Stopping without powering off
+
+`lever stop --keep-vm` is `lever stop` without the power-off. It stops the broker and the remote
+proxy, suspends the manager and every running worker (the conversation is kept, as with a plain
+stop), stops the jail's hub, and leaves the VM running. The next `lever up` finds the VM already
+up (the *start VM* step reads *already running*), so it skips the VM boot, then starts the hub
+and the broker and resumes the manager. Use it for a short break, or overnight when a fast
+morning `lever up` matters more than the memory.
+
+The trade-off is memory. A running VM keeps its memory on the host while nothing runs in it:
+with Lima, the memory the guest has used stays allocated to the VM process, up to the
+instance's configured `memory`, and lever does nothing to hand it back (with the `vz` driver
+there is no balloon to return it). With OrbStack the machine stays running in OrbStack's shared
+VM, which manages its own memory. On a laptop, prefer a plain `lever stop` when you need the RAM
+or before a long time away; `lever stop` also powers off a VM that `--keep-vm` left running.
+
+What stays the same: containment does not change (the VM keeps its egress firewall, and with the
+broker stopped the jail reaches nothing of the host's), and a guest the host kills or restarts
+meanwhile is recovered by the next `lever up` like any other
+([recovery after a hard VM kill](#recovery-after-a-hard-vm-kill)).
+
+`--keep-vm` fails (non-zero exit) when it cannot vouch that the agents are suspended: when the
+jail does not answer (nothing was suspended; if the VM is up after all, `lever stop` powers it
+off), or when a suspend did not take (the hub is still stopped and the VM left up, but that
+agent's container goes on running in it until `lever stop`). Only the manager and the workers in
+`lever.yaml` are suspended, as with a plain stop; any other agent container keeps running in the
+VM. A plain `lever stop` after a `--keep-vm` finds the hub down: its suspend warning says the hub
+did not answer and that the earlier `--keep-vm` already suspended the agents, and the VM powers
+off as usual.
+
 ## Troubleshooting quick table
 
 | Symptom | Likely cause | Do |
@@ -562,10 +616,11 @@ manager:
 | Doctor's `manager agent` row: "claude has exited (phase stopped)", or `lever up` logs that a stopped record resumes in a new claude session | the session really ended (or the record was stopped while the machine was down); scion's hub resumes a stopped record without `--continue` | `lever up`, then `lever attach` and `/resume` to pick the old conversation (it stays in the agent home) |
 | `lever-manager agent resume <w>` returns 502 after `lever stop && lever up`; the audit detail ends in `statfs …/lever/tickets/<w>: no such file or directory` | the worker's ticket directory is a tmpfs under the run user's `XDG_RUNTIME_DIR` and the jail restart emptied it; before 0.22.4 the resume verb never re-staged a ticket (lever#36) | upgrade lever; on an older version, stage one through the admin route (`curl -X POST 127.0.0.1:8444/worker-ticket -d '{"worker":"<w>"}'`) and resume again |
 | `lever apply`/`up` fails at `load-image`: "payload does not match any of the supported image formats … trying to reuse blob … readlink …/overlay/l/: no such file or directory", maybe after podman's "storage corruption might have occurred" | the jail's podman store holds a damaged layer left by an earlier failed or interrupted load, and podman picked it to reuse; the image archive is fine. Doctor's *podman storage* row counts the layers no image uses | back up the guest's `~/.scion`, then as the jail user `podman system reset --force`, then `lever up` without `--fresh`: see [recovering the jail's podman store](#recovering-the-jails-podman-store) |
+| The attach view is frozen (or keeps an old terminal's size) while the agent works | a stale tmux client: an earlier attach whose terminal went away is still attached | `Ctrl-L`; else `Ctrl-b d` and `lever attach` again, which detaches the stale client (see [a frozen attach view](#a-frozen-attach-view)); `Esc` leaves Claude Code's background-agent view if a stray key opened it |
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/config-trust/) — `--fresh` resets the conversation, not the tree |
 | Doctor nags `skipped-modified` about a SKILL.md / CLAUDE.md you customized on purpose | your edits aren't recorded as accepted | `lever init --adopt` — records them as your baseline (host-side); doctor then passes, and any change *past* that baseline still fails as "modified since adoption" (tamper signal preserved) |
 | `lever up` printed `is up.` but the manager is dead moments later, or doctor's `manager agent` row fails | the harness died after scion reported the record running — a failed pre-start hook (`lever-agent boot`), an oversized boot task (see `prompt_file`), or `claude --continue` with no conversation to continue | after a start or resume, `lever up` waits until claude's tmux pane in the manager container is alive (up to 2 min: the pre-start hook runs first), then holds the record for a 10 s settle window and looks at the pane again. It reports `came up, then died` when the container stops, the hub record leaves running, or the pane dies; a claude that exits before it comes up (tmux answers in three probes in a row but claude's pane is not alive: scion's shell window keeps tmux and the container up) is `came up, then died: claude exited before it came up`, within a few seconds. It reports `did not come up` when the container runs but no tmux server answers in it after the wait (a hung pre-start hook). When the probe itself cannot run (it times out or fails a few times in a row), the container still running (podman's own state, not the hub's) after the window counts, with a warning. The container log in the guest holds the harness's last output. Fix the cause, then `lever up` again |
-| `lever up` fails: "record says running, but its container is \"created\" — the harness died" after the jail VM was killed or crashed | nothing suspended the manager before the VM went down. lever now recognises the new guest boot and suspends and resumes the record itself; this still shows on the first bring-up after an upgrade (no boot recorded yet), when podman in the guest cannot say whether the container runs, or when the suspend fails | `lever stop`, then `lever up` (the conversation is kept). See [nested virtualization](#nested-virtualization) |
+| `lever up` fails: "record says running, but its container is \"created\" — the harness died" after the jail VM was killed or crashed | nothing suspended the manager before the VM went down. lever now recognises the new guest boot (or, with no boot recorded, a container podman last started before the current boot) and suspends and resumes the record itself; this still shows when podman in the guest cannot say whether the container runs or when it started, or when the suspend fails | `lever stop`, then `lever up` (the conversation is kept). See [nested virtualization](#nested-virtualization) |
 | `lever up` (or `apply`) prints `start-manager: manager "<name>" still starting — …; 45s elapsed` | a manager start takes a while: the container start, the pre-start hook, claude's boot and the settle window can run over a minute | nothing: it prints a line about every 15 s with what it waits for, the hub's phase and container, and the time since the start. A line that repeats the same stage for minutes names where it is stuck |
 | The manager start fails (`claude exited before it came up`, or `came up, then died`) and the error names a stale background session; or doctor's `claude background sessions` row warns | the conversation was moved into a Claude Code background session (`/background`, `/bg`, the left-arrow key) before the last restart; its session records name the old container, and `claude --continue` refuses | move the stale records aside in the agent home, then `lever stop && lever up`; see [background sessions and /login](#background-sessions-and-login) |
 | Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
@@ -822,9 +877,15 @@ lever now records the guest's boot id (`/proc/sys/kernel/random/boot_id`, new on
 not running (podman's own answer in the guest; when podman cannot be asked, lever does nothing,
 because the hub briefly reports `created` for a container that is starting), it logs
 that the VM restarted, suspends the record and resumes it: what `lever stop` + `lever up` did by
-hand. The conversation is kept; lever never uses `--fresh` for this. When the boot id cannot be
-read, nothing was recorded yet (the first bring-up after upgrading), or the suspend does not take,
-`lever up` behaves as before and names `lever stop`, then `lever up`.
+hand. The conversation is kept; lever never uses `--fresh` for this.
+
+When no boot id was recorded yet (the first bring-up after upgrading from a release before
+0.35.0, or a lost `.lever-state/guest-boot.json`), podman's own start time stands in for it: lever
+recovers the same way when podman says the manager's container is not running **and** that it last
+started before the guest's current boot (`State.StartedAt` against `btime` in `/proc/stat`). A
+container podman never started is not evidence. When the boot id or the start time cannot be read,
+or the suspend does not take, `lever up` behaves as before and names `lever stop`, then
+`lever up`.
 
 ### If a nested VM wedges the guest
 

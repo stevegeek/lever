@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -132,6 +133,14 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//     gate with a clear message (never a vacuous check pass).
 	if err := h.setup(ctx, b); err != nil {
 		return fmt.Errorf("acceptance: setup: %w", err)
+	}
+	// 2c. Wait until every supervised tool listens: the broker starts them
+	//     with itself, and a first check that reaches the gateway before the
+	//     tool binds its backend gets a 502 that says nothing about the
+	//     capability under test. A tool that never listens fails the gate
+	//     here, naming its log.
+	if err := waitToolsListening(ctx, app, defaultToolDial, toolListenWait); err != nil {
+		return fmt.Errorf("acceptance: %w", err)
 	}
 
 	results := map[string]bool{}
@@ -517,4 +526,53 @@ func (h *acceptanceHarness) checkRevocation(ctx context.Context) (bool, error) {
 		return true, nil // denied post-revocation — correct
 	}
 	return false, fmt.Errorf("token still accepted after bump-epoch (must be 403): %s", out)
+}
+
+// toolListenWait bounds how long acceptance waits for the supervised tools
+// to listen before it runs the checks.
+const toolListenWait = 30 * time.Second
+
+// defaultToolDial reports whether addr accepts a TCP connection now.
+func defaultToolDial(ctx context.Context, addr string) error {
+	d := net.Dialer{Timeout: 2 * time.Second}
+	c, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	return c.Close()
+}
+
+// waitToolsListening polls each supervised (not external) tool's backend
+// until it accepts a TCP connection, for at most wait in all. A tool that
+// does not listen in time is an error that names the tool, its address and
+// its log, so the gate fails on the real cause instead of a 502 in a check.
+func waitToolsListening(ctx context.Context, app *config.App, dial func(context.Context, string) error, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for _, t := range app.Broker.Tools {
+		if t.External || t.Backend == "" {
+			continue
+		}
+		addr := t.Backend
+		if i := strings.IndexByte(addr, '/'); i >= 0 {
+			addr = addr[:i]
+		}
+		for {
+			err := dial(ctx, addr)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("tool %q is not listening on %s after %s (%v); see its log, tool-logs/%s.log in the state directory", t.Name, addr, wait, err, t.Name)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}
+	return nil
 }

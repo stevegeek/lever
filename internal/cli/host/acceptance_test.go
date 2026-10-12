@@ -1,9 +1,12 @@
 package host
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
@@ -252,5 +255,36 @@ func TestFormatNoteDeterministicAndVerdict(t *testing.T) {
 	}
 	if !strings.Contains(failNote, "egress-refused") || !strings.Contains(failNote, "FAIL") {
 		t.Fatalf("note should mark egress-refused FAIL:\n%s", failNote)
+	}
+}
+
+func TestWaitToolsListening(t *testing.T) {
+	app := &config.App{Broker: config.Broker{Tools: []config.Tool{
+		{Name: "db", Backend: "127.0.0.1:3201"},
+		{Name: "ext", Backend: "127.0.0.1:3901/mcp", External: true},
+	}}}
+	// Listens on the third try: waits, then passes; the external tool is never dialled.
+	var dialled []string
+	n := 0
+	dial := func(_ context.Context, addr string) error {
+		dialled = append(dialled, addr)
+		if n++; n < 3 {
+			return errors.New("connection refused")
+		}
+		return nil
+	}
+	if err := waitToolsListening(context.Background(), app, dial, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range dialled {
+		if a != "127.0.0.1:3201" {
+			t.Fatalf("dialled %q", a)
+		}
+	}
+	// Never listens: a named error after the wait.
+	never := func(context.Context, string) error { return errors.New("connection refused") }
+	err := waitToolsListening(context.Background(), app, never, 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), `tool "db" is not listening on 127.0.0.1:3201`) || !strings.Contains(err.Error(), "tool-logs/db.log") {
+		t.Fatalf("err = %v", err)
 	}
 }

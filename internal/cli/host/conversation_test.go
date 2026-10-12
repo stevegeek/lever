@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -318,5 +319,63 @@ func TestCheckFreshFlags(t *testing.T) {
 		if err := checkFreshFlags(c.fresh, c.noBackup, c.keep); (err == nil) != c.ok {
 			t.Errorf("fresh=%v noBackup=%v keep=%v: %v", c.fresh, c.noBackup, c.keep, err)
 		}
+	}
+}
+
+// lostInstallRunner runs captures for real and fails every install the way
+// a lost transport does: no exit status the script chose.
+type lostInstallRunner struct{ proc.RealRunner }
+
+func (lostInstallRunner) RunStdin(context.Context, io.Reader, map[string]string, string, ...string) (proc.Result, error) {
+	return proc.Result{Code: 255}, errors.New("transport lost")
+}
+
+// TestRestoreUnsureInstallRefusesContacts: an install failure that may have
+// come after the swap records the unknown skill, never the previous one, and
+// says the manager holds either conversation.
+func TestRestoreUnsureInstallRefusesContacts(t *testing.T) {
+	f := newConvFixture(t)
+	writeConvFile(t, f.transcript("old.jsonl"), "old\n")
+	m, _, err := f.ops.backup(context.Background(), "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessionrec.Append(f.ops.st.Sessions(), sessionrec.Record{Agent: "mgr", SkillHash: "current", Started: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	f.ops.guest.R = lostInstallRunner{}
+	err = f.ops.restore(context.Background(), m.ID, false)
+	if err == nil || !strings.Contains(err.Error(), "whichever conversation") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := f.latestSkill(t); got != restoredUnknownSkill {
+		t.Fatalf("session record = %q, want the unknown skill", got)
+	}
+	if strings.Join(f.sc.calls, ",") != "suspend,resume" {
+		t.Fatalf("calls = %v", f.sc.calls)
+	}
+}
+
+// TestFreshBackupNoHomeFailsClosed: a record whose home lever cannot find
+// stops the fresh start, and the manager the hook suspended is resumed
+// through the role guard; a guard refusal leaves it suspended.
+func TestFreshBackupNoHomeFailsClosed(t *testing.T) {
+	f := newConvFixture(t)
+	f.ops.guest.Agent = "elsewhere"
+	var saved *convbackup.Meta
+	err := f.ops.backupBeforeDelete(&saved)(context.Background(), &scion.Agent{Slug: "mgr", Phase: scion.PhaseRunning})
+	if !errors.Is(err, convbackup.ErrNoHome) || saved != nil {
+		t.Fatalf("err = %v saved %v", err, saved)
+	}
+	if strings.Join(f.sc.calls, ",") != "suspend,resume" {
+		t.Fatalf("calls = %v", f.sc.calls)
+	}
+
+	f.sc.phase, f.sc.calls = scion.PhaseRunning, nil
+	guard := errors.New("pre-role record")
+	f.ops.verifyRole = func(context.Context) error { return guard }
+	err = f.ops.backupBeforeDelete(&saved)(context.Background(), &scion.Agent{Slug: "mgr", Phase: scion.PhaseRunning})
+	if !errors.Is(err, guard) || strings.Join(f.sc.calls, ",") != "suspend" {
+		t.Fatalf("guard: err %v calls %v", err, f.sc.calls)
 	}
 }

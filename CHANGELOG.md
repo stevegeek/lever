@@ -66,7 +66,8 @@ version bump moves the block under the new version heading.
   lever follows no link in its home, keeps only directories and regular files with clean names
   within size limits, and restores only that checked copy. A restored conversation is recorded as
   started on the skill its backup names, so contacts are refused when that is not the skill on
-  disk. No backup is kept while the state directory is inside the tree. Doctor and apply hints
+  disk. No backup is kept while the state directory is inside the tree, so there `up --fresh`
+  needs `--no-backup`. Doctor and apply hints
   that said "back up the conversation, then `lever up --fresh`" now name `--keep-conversation`.
 
 ### Changed

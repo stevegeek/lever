@@ -103,8 +103,10 @@ func Copy(dst io.Writer, src io.Reader, prefix string, lim Limits) (Stats, error
 	tr := tar.NewReader(zr)
 	zw := gzip.NewWriter(dst)
 	tw := tar.NewWriter(zw)
-	seen := map[string]bool{}  // every name written
-	files := map[string]bool{} // the regular files among them
+	seen := map[string]bool{}    // every name written
+	files := map[string]bool{}   // the regular files among them
+	parents := map[string]bool{} // every directory an earlier name lies beneath
+	var skippedBytes int64
 	entries := 0
 	for {
 		h, err := tr.Next()
@@ -129,6 +131,14 @@ func Copy(dst io.Writer, src io.Reader, prefix string, lim Limits) (Stats, error
 		case tar.TypeDir:
 		case tar.TypeReg, tar.TypeRegA: //nolint:staticcheck // TypeRegA is what old tars write
 		default:
+			// Skipped, but whatever data it carries still passes through
+			// the decompressor: it counts against the total.
+			if h.Size > 0 {
+				if h.Size > lim.MaxTotal || skippedBytes+h.Size > lim.MaxTotal {
+					return st, refused("more than %d bytes in all", lim.MaxTotal)
+				}
+				skippedBytes += h.Size
+			}
 			st.Skipped++
 			continue
 		}
@@ -138,10 +148,14 @@ func Copy(dst io.Writer, src io.Reader, prefix string, lim Limits) (Stats, error
 		if seen[name] {
 			return st, refused("%q appears twice", name)
 		}
+		if h.Typeflag != tar.TypeDir && parents[name] {
+			return st, refused("%q is a file, and an earlier entry lies beneath it", name)
+		}
 		for p := path.Dir(name); p != "."; p = path.Dir(p) {
 			if files[p] {
 				return st, refused("%q lies beneath the file %q", name, p)
 			}
+			parents[p] = true
 		}
 		seen[name] = true
 		mtime := h.ModTime.UTC()

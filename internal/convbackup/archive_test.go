@@ -150,6 +150,8 @@ func TestCopyRefuses(t *testing.T) {
 		{"backslash", []entry{reg("projects/a\\b", "x")}, DefaultLimits},
 		{"duplicate", []entry{reg("projects/a", "x"), reg("projects/a", "y")}, DefaultLimits},
 		{"beneath a file", []entry{reg("projects/a", "x"), reg("projects/a/b", "y")}, DefaultLimits},
+		{"file over an implied dir", []entry{reg("projects/a/b", "x"), reg("projects/a", "y")}, DefaultLimits},
+		{"skipped data counts", []entry{reg("projects/a", "12345678"), {name: "projects/s", typ: tar.TypeGNUSparse, size: 1 << 40}}, small},
 		{"file too large", []entry{reg("projects/a", strings.Repeat("x", 11))}, small},
 		{"total too large", []entry{reg("projects/a", strings.Repeat("x", 8)), reg("projects/b", strings.Repeat("x", 8))}, small},
 		{"too many entries", []entry{reg("projects/a", ""), reg("projects/b", ""), reg("projects/c", ""), reg("projects/d", ""), reg("projects/e", "")}, small},

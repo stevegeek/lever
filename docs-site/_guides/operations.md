@@ -403,7 +403,8 @@ record's home in the jail, where Claude Code keeps the conversation (`~/.claude/
 
 - **`lever up --fresh`** backs the conversation up before it deletes anything: it suspends a
   running manager, copies its `~/.claude/projects` to `.lever-state/conversations/<id>/` and prints
-  the path. If the backup fails, nothing is deleted and `up` stops: fix the cause, or run
+  the path. If the backup fails, or lever cannot find the manager's home in the jail, nothing is
+  deleted, the manager is resumed and `up` stops: fix the cause, or run
   `lever up --fresh --no-backup` to discard the conversation without a copy. The new manager
   starts a new conversation.
 - **`lever up --fresh --keep-conversation`** does the same, then, once the new manager is live,

@@ -33,6 +33,7 @@ const (
 	exitAmbiguous   = 12 // more than one registration claims the workspace
 	exitNotPlainDir = 13 // .claude or .claude/projects is a link or not a directory
 	exitTooLarge    = 14 // a file or the whole is past the limits
+	exitNotSwapped  = 15 // a restore failed before the swap: projects is as it was
 )
 
 // maxCompressed bounds what a capture may print: the compressed archive. A
@@ -90,7 +91,7 @@ total=$(du -sk --apparent-size projects 2>/dev/null | cut -f1)
 [ "${total:-0}" -le ` + fmt.Sprint(DefaultLimits.MaxTotal/1024) + ` ] || { echo ".claude/projects is larger than the limit" >&2; exit 14; }
 tar -czf - projects
 rc=$?
-if [ "$rc" -eq 1 ]; then echo "LEVER-CHANGED" >&2; exit 0; fi
+if [ "$rc" -eq 1 ]; then printf '\nLEVER-CHANGED\n' >&2; exit 0; fi
 exit "$rc"
 `
 
@@ -102,21 +103,34 @@ exit "$rc"
 // leaves the current projects as they were. $3 is the stamp naming the
 // directory moved aside.
 var installScript = homeScript + `stamp=$3
-if [ ! -e .claude ] && [ ! -L .claude ]; then mkdir -m 700 .claude || exit 2; fi
+if [ ! -e .claude ] && [ ! -L .claude ]; then mkdir -m 700 .claude || exit 15; fi
 ` + enterClaude + `new=projects.lever-restoring-$stamp
 old=projects.lever-replaced-$stamp
-mkdir -m 700 -- "$new" || exit 2
+mkdir -m 700 -- "$new" || exit 15
 if ! ( cd -- "$new" && [ "$(pwd -P)" = "$real/.claude/$new" ] && tar -xzf - --no-same-owner --no-same-permissions ); then
   rm -rf -- "$new"
   echo "unpacking the conversation failed" >&2
-  exit 2
+  exit 15
 fi
 if [ -e projects ] || [ -L projects ]; then
-  mv -T -- projects "$old" || { rm -rf -- "$new"; exit 2; }
+  mv -T -- projects "$old" || { rm -rf -- "$new"; exit 15; }
   echo "PARKED $old"
 fi
-mv -T -- "$new" projects || { if [ -e "$old" ] || [ -L "$old" ]; then mv -T -- "$old" projects; fi; rm -rf -- "$new"; exit 2; }
+if ! mv -T -- "$new" projects; then
+  if [ -e "$old" ] || [ -L "$old" ]; then mv -T -- "$old" projects || exit 2; fi
+  rm -rf -- "$new"
+  exit 15
+fi
 `
+
+// ErrNoHome means lever found no home for the manager in the jail: no
+// registration claims the workspace, or the record has no home directory.
+var ErrNoHome = errors.New("lever found no home for the manager in the jail")
+
+// ErrNotSwapped wraps an Install error that is known to have left the
+// manager's .claude/projects as it was. Any other Install error may have
+// come after the swap.
+var ErrNotSwapped = errors.New("the conversation in the manager's home was not changed")
 
 // stampRE is the shape Install accepts for its stamp.
 var stampRE = regexp.MustCompile(`^[0-9A-Za-z-]{1,40}$`)
@@ -127,29 +141,46 @@ var stampRE = regexp.MustCompile(`^[0-9A-Za-z-]{1,40}$`)
 var ErrNotPlainDir = errors.New("the manager's .claude/projects is not a plain directory in its home; lever does not follow links the agent made")
 
 // Capture reads the manager's .claude/projects from the guest as a gzip tar
-// archive (names beginning "projects"). found is false when there is no
-// home or no projects directory: nothing to back up. changed reports that a
-// file changed while it was read (the manager was running).
-func (g Guest) Capture(ctx context.Context) (archive []byte, found, changed bool, err error) {
+// archive (names beginning "projects"), returned as a string to spare a
+// copy of what can be hundreds of megabytes. found is false when the home
+// has no projects directory: nothing to back up. A missing home is
+// ErrNoHome. changed reports that a file changed while it was read (the
+// manager was running).
+func (g Guest) Capture(ctx context.Context) (archive string, found, changed bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, captureTimeout)
 	defer cancel()
 	ctx = proc.WithOutputLimit(ctx, maxCompressed)
 	res, err := g.R.Run(ctx, nil, "bash", "--noprofile", "--norc", "-c", captureScript, "lever-conversation", g.Workspace, g.Agent)
+	if err == nil && res.Code != 0 {
+		err = fmt.Errorf("exit status %d", res.Code)
+	}
 	switch {
 	case err == nil:
-		return []byte(res.Stdout), true, strings.Contains(res.Stderr, "LEVER-CHANGED"), nil
+		return res.Stdout, true, hasLine(res.Stderr, "LEVER-CHANGED"), nil
 	case errors.Is(err, proc.ErrOutputLimit):
-		return nil, false, false, fmt.Errorf("the manager's conversation is larger than %d MiB compressed", maxCompressed>>20)
+		return "", false, false, fmt.Errorf("reading the manager's conversation printed more than %d MiB (the compressed archive, or warnings); nothing was saved", maxCompressed>>20)
 	}
 	switch res.Code {
-	case exitNoHome, exitNoProjects:
-		return nil, false, false, nil
+	case exitNoHome:
+		return "", false, false, ErrNoHome
+	case exitNoProjects:
+		return "", false, false, nil
 	case exitNotPlainDir:
-		return nil, false, false, ErrNotPlainDir
+		return "", false, false, ErrNotPlainDir
 	case exitTooLarge:
-		return nil, false, false, fmt.Errorf("the manager's conversation is past lever's limits (%d MiB a file, %d MiB in all)", DefaultLimits.MaxFile>>20, DefaultLimits.MaxTotal>>20)
+		return "", false, false, fmt.Errorf("the manager's conversation is past lever's limits (%d MiB a file, %d MiB in all)", DefaultLimits.MaxFile>>20, DefaultLimits.MaxTotal>>20)
 	}
-	return nil, false, false, fmt.Errorf("reading the manager's conversation in the jail: %v%s", err, stderrTail(res.Stderr))
+	return "", false, false, fmt.Errorf("reading the manager's conversation in the jail: %v%s", err, stderrTail(res.Stderr))
+}
+
+// hasLine reports whether s holds line as a whole line.
+func hasLine(s, line string) bool {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) == line {
+			return true
+		}
+	}
+	return false
 }
 
 // Install puts archive (a stored backup: names relative to projects) into
@@ -164,13 +195,20 @@ func (g Guest) Install(ctx context.Context, archive io.Reader, stamp string) (pa
 	defer cancel()
 	ctx = proc.WithOutputLimit(ctx, 64<<10)
 	res, err := g.R.RunStdin(ctx, archive, nil, "bash", "--noprofile", "--norc", "-c", installScript, "lever-conversation", g.Workspace, g.Agent, stamp)
+	if err == nil && res.Code != 0 {
+		err = fmt.Errorf("exit status %d", res.Code)
+	}
 	if err != nil {
 		switch res.Code {
 		case exitNoHome:
-			return "", errors.New("the manager has no home in the jail (is its record there? `lever up` first)")
+			return "", fmt.Errorf("%w: %w (is its record there? `lever up` first)", ErrNotSwapped, ErrNoHome)
 		case exitNotPlainDir:
-			return "", ErrNotPlainDir
+			return "", fmt.Errorf("%w: %w", ErrNotSwapped, ErrNotPlainDir)
+		case exitNotSwapped:
+			return "", fmt.Errorf("%w: writing the conversation into the jail failed%s", ErrNotSwapped, stderrTail(res.Stderr))
 		}
+		// A timeout, a lost transport or anything else: the guest may have
+		// swapped the files anyway.
 		return "", fmt.Errorf("writing the conversation into the jail: %v%s", err, stderrTail(res.Stderr))
 	}
 	for _, line := range strings.Split(res.Stdout, "\n") {

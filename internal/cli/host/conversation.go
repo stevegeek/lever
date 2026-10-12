@@ -1,12 +1,12 @@
 package host
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -95,7 +95,8 @@ func (o convOps) clock() time.Time {
 }
 
 // backup copies the manager's transcripts to the store and prunes it to
-// convbackup.Keep. found is false when the manager's home holds none.
+// convbackup.Keep. found is false when the manager's home holds no
+// projects; a home lever cannot find is convbackup.ErrNoHome.
 func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, found bool, err error) {
 	store, err := o.store()
 	if err != nil {
@@ -114,7 +115,7 @@ func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, 
 		m.SkillHash, m.SessionStarted = r.SkillHash, r.Started
 	}
 	m, err = store.Save(m, func(w io.Writer) (convbackup.Stats, error) {
-		return convbackup.Copy(w, bytes.NewReader(raw), "projects", convbackup.DefaultLimits)
+		return convbackup.Copy(w, strings.NewReader(raw), "projects", convbackup.DefaultLimits)
 	})
 	if err != nil {
 		return m, false, fmt.Errorf("saving the manager's conversation: %w", err)
@@ -140,15 +141,27 @@ func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, 
 // set to the backup when there was a conversation to save.
 func (o convOps) backupBeforeDelete(saved **convbackup.Meta) func(ctx context.Context, rec *scion.Agent) error {
 	return func(ctx context.Context, rec *scion.Agent) error {
+		suspended := false
 		if rec != nil && rec.Phase == scion.PhaseRunning && o.sc != nil {
 			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			if err := o.sc.Suspend(sctx, o.app.Name, o.guest.Workspace); err != nil {
 				o.log("conversation: could not suspend manager %q before the backup (%s); copying it while it runs", o.app.Name, termsafe.Sanitize(scion.ErrSummary(err)))
+			} else {
+				suspended = true
 			}
 			cancel()
 		}
 		m, found, err := o.backup(ctx, "up --fresh")
+		if errors.Is(err, convbackup.ErrNoHome) {
+			// The record exists, so scion will delete a home lever could
+			// not find (a registration or a layout lever does not know):
+			// that is no proof there is nothing to lose.
+			err = fmt.Errorf("%w for the record it is about to delete, so it cannot tell whether a conversation would be lost", err)
+		}
 		if err != nil {
+			if suspended {
+				err = o.resumeAfterFailure(ctx, err, "")
+			}
 			return err
 		}
 		if !found {
@@ -217,13 +230,16 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	default:
 		return fmt.Errorf("manager %q is in phase %s; a restore needs it running or suspended (`lever up --no-attach` first)", o.app.Name, scion.BoundedQuote(rec.Phase))
 	}
+	// unsure says an install failed in a way that may have come after the
+	// swap: the manager then holds one conversation or the other.
+	unsure := false
 	defer func() {
 		if err != nil && suspended && !done {
-			if rerr := o.sc.Resume(ctx, o.app.Name, project); rerr != nil {
-				err = fmt.Errorf("%w; resuming the manager afterwards failed too (%s): run `lever up`", err, termsafe.Sanitize(scion.ErrSummary(rerr)))
-			} else {
-				err = fmt.Errorf("%w; the manager was resumed on its own conversation", err)
+			how := "on its own conversation"
+			if unsure {
+				how = "on whichever conversation its home now holds"
 			}
+			err = o.resumeAfterFailure(ctx, err, how)
 		}
 	}()
 	if err := o.waitSuspended(ctx); err != nil {
@@ -247,11 +263,16 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	}
 	parked, err := o.guest.Install(ctx, archive, o.clock().Format("20060102T150405Z"))
 	if err != nil {
-		// The conversation did not change: put its record back (or, with
-		// none, one that refuses contacts).
+		// Only an install known to have changed nothing gets its record
+		// back. Any other failure (a timeout, a lost transport) may have
+		// come after the swap, so the record refuses contacts until the
+		// manager next starts fresh: never the old conversation under the
+		// current skill.
 		back := restoredUnknownSkill
-		if hadPrev {
+		if errors.Is(err, convbackup.ErrNotSwapped) && hadPrev {
 			back = prev.SkillHash
+		} else if !errors.Is(err, convbackup.ErrNotSwapped) {
+			unsure = true
 		}
 		if rerr := o.recordSession(back); rerr != nil {
 			o.log("conversation: warning: restoring the session record failed: %v", rerr)
@@ -280,6 +301,27 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 		return apply.ResumeFailed("resume", err)
 	}
 	return o.gate(ctx)
+}
+
+// resumeAfterFailure resumes a manager this code suspended, after cause,
+// through the pre-role record guard, on a context of its own (ctx may be
+// what was cancelled), and says so in the error it returns. how says on
+// which conversation ("" leaves it out).
+func (o convOps) resumeAfterFailure(ctx context.Context, cause error, how string) error {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancel()
+	if o.verifyRole != nil {
+		if gerr := o.verifyRole(rctx); gerr != nil {
+			return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
+		}
+	}
+	if rerr := o.sc.Resume(rctx, o.app.Name, o.guest.Workspace); rerr != nil {
+		return fmt.Errorf("%w; the manager is suspended and resuming it failed (%s): run `lever up`", cause, termsafe.Sanitize(scion.ErrSummary(rerr)))
+	}
+	if how != "" {
+		how = " " + how
+	}
+	return fmt.Errorf("%w; the manager was resumed%s", cause, how)
 }
 
 // verifyStored reads backup id whole through the archive checks.

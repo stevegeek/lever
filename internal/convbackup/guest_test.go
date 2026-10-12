@@ -85,7 +85,7 @@ func TestCaptureAndInstallRoundTrip(t *testing.T) {
 		t.Fatalf("capture: found=%v err=%v", found, err)
 	}
 	var stored bytes.Buffer
-	st, err := Copy(&stored, bytes.NewReader(raw), "projects", DefaultLimits)
+	st, err := Copy(&stored, strings.NewReader(raw), "projects", DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +129,8 @@ func TestCaptureAndInstallRoundTrip(t *testing.T) {
 	}
 }
 
-// TestCaptureNothingToBackUp: no registration, no home, or no projects is
-// "not found", never an error.
+// TestCaptureNothingToBackUp: no .claude or no projects is "not found";
+// no registration or no home is ErrNoHome (lever cannot tell).
 func TestCaptureNothingToBackUp(t *testing.T) {
 	_, ah := fakeJail(t)
 	if _, found, _, err := guest().Capture(context.Background()); err != nil || found {
@@ -144,13 +144,13 @@ func TestCaptureNothingToBackUp(t *testing.T) {
 	}
 	g := guest()
 	g.Agent = "other"
-	if _, found, _, err := g.Capture(context.Background()); err != nil || found {
-		t.Fatalf("no home: found=%v err=%v", found, err)
+	if _, _, _, err := g.Capture(context.Background()); !errors.Is(err, ErrNoHome) {
+		t.Fatalf("no home: %v", err)
 	}
 	g = guest()
 	g.Workspace = "/elsewhere"
-	if _, found, _, err := g.Capture(context.Background()); err != nil || found {
-		t.Fatalf("no registration: found=%v err=%v", found, err)
+	if _, _, _, err := g.Capture(context.Background()); !errors.Is(err, ErrNoHome) {
+		t.Fatalf("no registration: %v", err)
 	}
 }
 
@@ -238,8 +238,8 @@ func TestInstallNeverWritesThroughALink(t *testing.T) {
 func TestInstallBadArchiveKeepsCurrent(t *testing.T) {
 	_, ah := fakeJail(t)
 	writeFile(t, filepath.Join(ah, ".claude", "projects", "-workspace", "cur.jsonl"), "cur\n")
-	if _, err := guest().Install(context.Background(), strings.NewReader("garbage"), "s3"); err == nil {
-		t.Fatal("want an error")
+	if _, err := guest().Install(context.Background(), strings.NewReader("garbage"), "s3"); !errors.Is(err, ErrNotSwapped) {
+		t.Fatalf("want ErrNotSwapped, got %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(ah, ".claude", "projects", "-workspace", "cur.jsonl")); err != nil || string(b) != "cur\n" {
 		t.Fatalf("current: %q %v", b, err)
@@ -250,5 +250,18 @@ func TestInstallBadArchiveKeepsCurrent(t *testing.T) {
 	}
 	if _, err := guest().Install(context.Background(), strings.NewReader(""), "../x"); err == nil {
 		t.Fatal("a bad stamp was accepted")
+	}
+}
+
+// TestInstallUnknownFailureIsNotNotSwapped: a failure the script did not
+// report as "nothing changed" (a timeout, a lost transport) is never
+// ErrNotSwapped: the swap may have happened.
+func TestInstallUnknownFailureIsNotNotSwapped(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("bash", proc.Result{Code: 255})
+	g := Guest{R: f, Workspace: "/lever", Agent: "mgr"}
+	_, err := g.Install(context.Background(), strings.NewReader("x"), "s4")
+	if err == nil || errors.Is(err, ErrNotSwapped) {
+		t.Fatalf("err = %v", err)
 	}
 }

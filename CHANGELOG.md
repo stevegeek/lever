@@ -62,7 +62,8 @@ version bump moves the block under the new version heading.
   tool's `-dictate-socket`.
   Optionally, with an `obtain` grant for `{tool: whisper, op: transcribe}`, an agent can
   transcribe a canonical WAV file from the tree root's `.lever-files/whisper/`, which only the
-  manager can write, whoever the caller is (read with no link followed; at most `-agent-max-seconds`, default 120; 30 clips an hour and 60 audio-minutes a
+  manager can write (config load refuses a worker `dir` that overlaps `.lever-files` while a
+  whisper or github tool is configured, whether `remote.files` is on or not), whoever the caller is (read with no link followed; at most `-agent-max-seconds`, default 120; 30 clips an hour and 60 audio-minutes a
   day per caller; dictation goes first in the queue, but a running clip is never interrupted). New
   `lever voice fetch` downloads a model into the tool's `-models` directory from Hugging Face at
   a pinned commit and keeps it only if its size and sha256 match; the tool never downloads and

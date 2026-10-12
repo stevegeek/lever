@@ -139,7 +139,8 @@ byte. Convert other audio first, for example
 
 **Whose files.** The tool always reads from that one folder, the tree root's
 `.lever-files/whisper/`, whoever the caller is. Only the manager can write there (a worker mounts
-only its own directory), but any agent with a whisper `transcribe` capability, a worker holding a
+only its own directory, and config load refuses a worker `dir` that overlaps `.lever-files` while
+a whisper or github tool is configured), but any agent with a whisper `transcribe` capability, a worker holding a
 delegated or obtained one included, reads the files the manager put there. Grant the capability,
 and delegate it, only to agents that may read what the manager puts in that folder. The
 [github tool](/github-tool/)'s bundle folder works the same way.

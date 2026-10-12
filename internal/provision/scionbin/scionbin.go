@@ -11,10 +11,13 @@ package scionbin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision"
@@ -114,28 +117,119 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 		return spec.Binary, nil
 	}
 
+	out, err := OutputPath(machine)
+	if err != nil {
+		return "", err
+	}
 	goBin := "go"
 	buildDir := spec.Source
+	stampKey := ""
 	if spec.Version != "" {
-		gb, dir, err := FetchModule(ctx, r, spec.Version)
+		gb, err := provision.GoBinary(ctx, r)
+		if err != nil {
+			return "", err
+		}
+		// A pinned module's source never changes, so the last output is
+		// this build's when the stamp beside it says so (lever#187).
+		if stampKey = buildKey(spec.Version, goarch, gb); stampKey != "" && stampMatches(out, stampKey) {
+			return out, nil
+		}
+		dir, err := fetchModule(ctx, r, gb, spec.Version)
 		if err != nil {
 			return "", err
 		}
 		goBin, buildDir = gb, dir
 	}
 
-	out, err := OutputPath(machine)
-	if err != nil {
-		return "", err
-	}
 	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
 		return "", fmt.Errorf("scion build dir: %w", err)
 	}
+	// The stamp goes before the build: a build that fails, or that is
+	// interrupted, must not leave an old stamp naming a new output.
+	if err := os.Remove(stampPath(out)); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("scion build stamp: %w", err)
+	}
 	if _, err := r.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": goarch},
-		goBin, "build", "-o", out, "./cmd/scion"); err != nil {
+		goBin, buildArgs(out)...); err != nil {
 		return "", fmt.Errorf("cross-compile scion: %w", err)
 	}
+	if stampKey != "" {
+		writeStamp(out, stampKey) // best-effort: a missing stamp costs one build
+	}
 	return out, nil
+}
+
+// buildArgs is the go command line that builds scion into out.
+func buildArgs(out string) []string { return []string{"build", "-o", out, "./cmd/scion"} }
+
+// buildEnvKeys are the environment variables that change what `go build`
+// produces from the same module and toolchain. They are part of the stamp's
+// key, so a change to any of them rebuilds.
+var buildEnvKeys = []string{"GOFLAGS", "GOTOOLCHAIN", "GOEXPERIMENT", "GOAMD64", "GOARM64", "CGO_ENABLED", "GODEBUG"}
+
+// buildKey names a Version-mode build: the pin, the arch, the toolchain
+// (its GOROOT and the version in GOROOT/VERSION), the build command line and
+// buildEnvKeys. "" when the toolchain version cannot be read: the build then
+// runs every time, as it did before the stamp.
+func buildKey(version, goarch, goBin string) string {
+	root := filepath.Dir(filepath.Dir(goBin))
+	v, err := os.ReadFile(filepath.Join(root, "VERSION"))
+	if err != nil {
+		return ""
+	}
+	goVersion, _, _ := strings.Cut(string(v), "\n")
+	if goVersion = strings.TrimSpace(goVersion); goVersion == "" {
+		return ""
+	}
+	h := sha256.New()
+	fields := []string{"lever scion build v1", version, "linux", goarch, root, goVersion, strings.Join(buildArgs("OUT"), " ")}
+	for _, k := range buildEnvKeys {
+		fields = append(fields, k+"="+os.Getenv(k))
+	}
+	for _, f := range fields {
+		fmt.Fprintf(h, "%d:%s\n", len(f), f)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// buildStamp records the build that produced an output: its key, and the
+// size and modification time the output had when the build finished, so an
+// output changed since (rebuilt by hand, truncated, replaced) is rebuilt.
+type buildStamp struct {
+	Key     string `json:"key"`
+	Size    int64  `json:"size"`
+	ModTime int64  `json:"mtime_ns"`
+}
+
+func stampPath(out string) string { return out + ".stamp" }
+
+// stampMatches reports whether out exists as the build named key left it.
+func stampMatches(out, key string) bool {
+	b, err := os.ReadFile(stampPath(out))
+	if err != nil {
+		return false
+	}
+	var st buildStamp
+	if json.Unmarshal(b, &st) != nil || st.Key != key {
+		return false
+	}
+	fi, err := os.Stat(out)
+	return err == nil && fi.Mode().IsRegular() && fi.Size() == st.Size && fi.ModTime().UnixNano() == st.ModTime
+}
+
+func writeStamp(out, key string) {
+	fi, err := os.Stat(out)
+	if err != nil {
+		return
+	}
+	b, err := json.Marshal(buildStamp{Key: key, Size: fi.Size(), ModTime: fi.ModTime().UnixNano()})
+	if err != nil {
+		return
+	}
+	tmp := stampPath(out) + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, stampPath(out))
+	}
 }
 
 // OutputDir is the host directory Resolve writes cross-compiled scion
@@ -177,21 +271,30 @@ func FetchModule(ctx context.Context, r proc.Runner, version string) (goBin, dir
 	if err != nil {
 		return "", "", err
 	}
+	dir, err = fetchModule(ctx, r, goBin, version)
+	if err != nil {
+		return "", "", err
+	}
+	return goBin, dir, nil
+}
+
+// fetchModule is FetchModule with the go binary already resolved.
+func fetchModule(ctx context.Context, r proc.Runner, goBin, version string) (string, error) {
 	out, err := r.Run(ctx, nil, goBin, "mod", "download", "-json", ModulePath+"@"+version)
 	if err != nil {
-		return "", "", fmt.Errorf("download scion %s: %w", version, err)
+		return "", fmt.Errorf("download scion %s: %w", version, err)
 	}
 	var dl struct{ Dir, Error string }
 	if jerr := json.Unmarshal([]byte(out.Stdout), &dl); jerr != nil {
-		return "", "", fmt.Errorf("parse `go mod download` output for scion %s: %w", version, jerr)
+		return "", fmt.Errorf("parse `go mod download` output for scion %s: %w", version, jerr)
 	}
 	if dl.Error != "" {
-		return "", "", fmt.Errorf("download scion %s: %s", version, dl.Error)
+		return "", fmt.Errorf("download scion %s: %s", version, dl.Error)
 	}
 	if dl.Dir == "" {
-		return "", "", fmt.Errorf("`go mod download` returned no source dir for scion %s", version)
+		return "", fmt.Errorf("`go mod download` returned no source dir for scion %s", version)
 	}
-	return goBin, dl.Dir, nil
+	return dl.Dir, nil
 }
 
 // SourceHasCommit reports whether the source checkout's HEAD holds commit

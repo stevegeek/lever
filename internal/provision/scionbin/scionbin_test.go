@@ -246,3 +246,122 @@ func TestSourceHasCommit(t *testing.T) {
 		t.Fatal("not a checkout must be an error")
 	}
 }
+
+// buildStampFixture is a Version-mode Resolve against a fake toolchain at
+// a temp GOROOT whose VERSION file the stamp reads, with a fake build that
+// writes the output.
+type buildStampFixture struct {
+	t    *testing.T
+	root string
+	out  string
+}
+
+func newBuildStampFixture(t *testing.T) *buildStampFixture {
+	t.Helper()
+	backendtest.IsolateCache(t)
+	for _, k := range []string{"GOFLAGS", "GOTOOLCHAIN", "GOEXPERIMENT", "GOAMD64", "GOARM64", "CGO_ENABLED", "GODEBUG"} {
+		t.Setenv(k, "")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("go1.26.4\ntime 2026-06-01\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := scionbin.OutputPath("m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &buildStampFixture{t: t, root: root, out: out}
+}
+
+// resolve runs Resolve and reports whether it built (ran `go mod download`
+// and `go build`).
+func (x *buildStampFixture) resolve(pin string) bool {
+	x.t.Helper()
+	f := proc.NewFakeRunner()
+	goBin := filepath.Join(x.root, "bin", "go")
+	f.Script("go env GOROOT", proc.Result{Stdout: x.root + "\n"})
+	f.Script(goBin+" mod download -json", proc.Result{Stdout: `{"Dir":"/mod/scion"}`})
+	f.Script(goBin+" build -o", proc.Result{})
+	// The output a build would leave (the fake build writes nothing).
+	if _, err := os.Stat(x.out); err != nil {
+		if err := os.MkdirAll(filepath.Dir(x.out), 0o700); err != nil {
+			x.t.Fatal(err)
+		}
+		if err := os.WriteFile(x.out, []byte("fake-scion"), 0o755); err != nil {
+			x.t.Fatal(err)
+		}
+	}
+	got, err := scionbin.Resolve(context.Background(), f, scionbin.Spec{Version: pin}, "arm64", "m")
+	if err != nil || got != x.out {
+		x.t.Fatalf("Resolve = %q, %v", got, err)
+	}
+	built := f.Called(proc.Subcommand(goBin, "build"))
+	if downloaded := f.Called(proc.Subcommand(goBin, "mod")); downloaded != built {
+		x.t.Fatalf("download=%v build=%v: both or neither", downloaded, built)
+	}
+	return built
+}
+
+// A Version-mode build leaves a stamp; the next Resolve of the same pin,
+// arch and toolchain returns the output without `go mod download` or `go
+// build` (lever#187). Anything in the key, or the output itself, changing
+// builds again.
+func TestResolveVersionSkipsTheBuildOnAMatchingStamp(t *testing.T) {
+	x := newBuildStampFixture(t)
+	if !x.resolve("aaaa") {
+		t.Fatal("the first resolve must build")
+	}
+	if x.resolve("aaaa") {
+		t.Fatal("a matching stamp must skip the build")
+	}
+	if !x.resolve("bbbb") {
+		t.Fatal("another pin must build")
+	}
+	if x.resolve("bbbb") {
+		t.Fatal("the new pin's stamp must hold")
+	}
+	t.Setenv("GOFLAGS", "-tags=x")
+	if !x.resolve("bbbb") {
+		t.Fatal("a GOFLAGS change must build")
+	}
+	if err := os.WriteFile(filepath.Join(x.root, "VERSION"), []byte("go1.26.5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !x.resolve("bbbb") {
+		t.Fatal("a toolchain change must build")
+	}
+	// The output replaced since the build (another size).
+	if err := os.WriteFile(x.out, []byte("something else entirely"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !x.resolve("bbbb") {
+		t.Fatal("a changed output must build")
+	}
+	// Without a readable toolchain version, no stamp: build every time.
+	if err := os.Remove(filepath.Join(x.root, "VERSION")); err != nil {
+		t.Fatal(err)
+	}
+	if !x.resolve("bbbb") || !x.resolve("bbbb") {
+		t.Fatal("no toolchain version must always build")
+	}
+}
+
+// A failed build leaves no stamp that could vouch for the old output.
+func TestResolveFailedBuildRemovesTheStamp(t *testing.T) {
+	x := newBuildStampFixture(t)
+	x.resolve("aaaa")
+	if _, err := os.Stat(x.out + ".stamp"); err != nil {
+		t.Fatalf("no stamp after a build: %v", err)
+	}
+	f := proc.NewFakeRunner()
+	goBin := filepath.Join(x.root, "bin", "go")
+	f.Script("go env GOROOT", proc.Result{Stdout: x.root + "\n"})
+	f.Script(goBin+" mod download -json", proc.Result{Stdout: `{"Dir":"/mod/scion"}`})
+	// No build script: the build fails.
+	if _, err := scionbin.Resolve(context.Background(), f, scionbin.Spec{Version: "cccc"}, "arm64", "m"); err == nil {
+		t.Fatal("want the build failure")
+	}
+	if _, err := os.Stat(x.out + ".stamp"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("stamp after a failed build: %v", err)
+	}
+}

@@ -177,7 +177,7 @@ func TestResolveRunUserErrorsWhenMachineNotRunning(t *testing.T) {
 	}
 }
 
-func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
+func TestRunUIDReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	f := proc.NewFakeRunner()
 	orbVersionScript(f)
 	scriptList(f, listRunning)
@@ -187,8 +187,8 @@ func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/Users/x/tree"}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	if got := b.DockerHost(); !strings.Contains(got, "/run/user/1000/") {
-		t.Fatalf("DockerHost should reflect resolved uid 1000; got %q", got)
+	if got := b.RunUID(); got != "1000" {
+		t.Fatalf("RunUID should be the resolved uid 1000; got %q", got)
 	}
 }
 

@@ -99,8 +99,8 @@ require a container/namespace escape (which reduces to the kernel/runtime caveat
 
 ### 2.3 Rootless podman (required)
 
-Scion runs the agents in **rootless podman** (it auto-prefers podman over Docker; a rootless Docker
-daemon is provisioned in the guest too, but the agent containers are podman). Inside an isolated
+Scion runs the agents in **rootless podman** (it auto-prefers podman over Docker, and lever installs
+no Docker daemon in the guest). Inside an isolated
 machine, **rootful containers do not work** and a **rootless runtime is required.** An isolated
 machine applies a seccomp filter that blocks the `bpf()` syscall, which a rootful OCI runtime
 (`runc`/`crun`) needs to program the cgroup-v2 device controller; containers fail with
@@ -137,7 +137,7 @@ so a containment posture is never silently substituted.
 - **Lima's in-guest kernel attack surface is intentionally widened for rootless runtimes.**
   Provisioning re-enables the unprivileged user-namespace knob
   (`kernel.apparmor_restrict_unprivileged_userns=0`) that Ubuntu ≥ 23.10 disables by default, a
-  prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
+  prerequisite for rootless podman and pasta. This widens attack surface *inside the
   guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
   the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
   this surface reaches VM root, not the host, consistent with the [§8](/security-model/compromise/) "containing runtime authority

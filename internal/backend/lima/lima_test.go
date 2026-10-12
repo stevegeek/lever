@@ -307,16 +307,16 @@ func TestStopOnAlreadyStoppedVMIsHarmless(t *testing.T) {
 	}
 }
 
-// --- Test 6: DockerHost — default before EnsureUp, resolved uid after. ---
+// --- Test 6: RunUID — default before EnsureUp, resolved uid after. ---
 
-func TestDockerHostDefaultBeforeEnsureUp(t *testing.T) {
+func TestRunUIDDefaultBeforeEnsureUp(t *testing.T) {
 	l := New(proc.NewFakeRunner(), "lever-x", common.Options{})
-	if got := l.DockerHost(); got != "unix:///run/user/501/docker.sock" {
-		t.Fatalf("DockerHost() before EnsureUp = %q", got)
+	if got := l.RunUID(); got != common.DefaultRunUID {
+		t.Fatalf("RunUID() before EnsureUp = %q", got)
 	}
 }
 
-func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
+func TestRunUIDReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	f := proc.NewFakeRunner()
 	limaVersionScript(f)
 	scriptList(f, listRunning)
@@ -327,8 +327,8 @@ func TestDockerHostReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	if got := l.DockerHost(); !strings.Contains(got, "/run/user/1000/") {
-		t.Fatalf("DockerHost should reflect resolved uid 1000; got %q", got)
+	if got := l.RunUID(); got != "1000" {
+		t.Fatalf("RunUID should be the resolved uid 1000; got %q", got)
 	}
 }
 

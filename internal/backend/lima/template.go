@@ -4,7 +4,7 @@
 // guest→host port-forwarding suppressed (lima's default forwards every guest
 // listener to host 127.0.0.1 — a jailed agent could squat host-loopback ports
 // and impersonate local services), and lima's bundled containerd disabled
-// (lever provisions rootless podman/docker itself, mirroring orbstack).
+// (lever provisions rootless podman itself, mirroring orbstack).
 // Do not add mounts or forwards without a security review (zone Z1).
 package lima
 

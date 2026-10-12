@@ -1,7 +1,7 @@
 // Package lima implements the Backend contract via a Lima VM (own kernel) +
-// rootless Docker + iptables egress.
+// rootless podman + iptables egress.
 //
-// The prefix/guest-delegating half of the contract (DockerHost, the jail
+// The prefix/guest-delegating half of the contract (the jail
 // transport + image ops, the guest scion/egress delegations, run-user caching)
 // lives once in internal/backend/common.Base, which this embeds; only the
 // Lima-specific verbs (version preflight, VM create/start/stop, realized-config

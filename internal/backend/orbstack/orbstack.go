@@ -1,8 +1,8 @@
 // Package orbstack implements the Backend contract on macOS via an OrbStack
-// isolated machine + rootless Docker + iptables egress. See docs-site/_guides/security-model-compromise.md §8 for the validated commands. Rootful Docker FAILS inside an isolated machine (seccomp blocks
+// isolated machine + rootless podman + iptables egress. See docs-site/_guides/security-model-compromise.md §8 for the validated commands. Rootful Docker FAILS inside an isolated machine (seccomp blocks
 // bpf()); rootless is required.
 //
-// The prefix/guest-delegating half of the contract (DockerHost, the jail
+// The prefix/guest-delegating half of the contract (the jail
 // transport + image ops, the guest scion/egress delegations, run-user caching)
 // lives once in internal/backend/common.Base, which this embeds; only the
 // OrbStack-specific verbs (version preflight, machine create/start/stop) and the

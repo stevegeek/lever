@@ -219,13 +219,15 @@ run_acceptance() {
 }
 
 # ================================================================================
-# 1. OPEN posture — full VM bring-up (slow: apt + rootless docker + scion) then the
+# 1. OPEN posture — full VM bring-up (slow: apt + podman + scion) then the
 #    six §19 checks.
 # ================================================================================
 say "OPEN posture: lever acceptance (first bring-up — several minutes)"
 write_config open
 if run_acceptance; then ok "acceptance PASSED (open egress)"; else bad "acceptance FAILED (open egress)"; fi
 if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (open egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (open egress)"; fi
+# lever#183: provisioning installs and starts no dockerd (scion runs podman).
+if limactl shell "$MACHINE" pgrep -x dockerd >/dev/null 2>&1; then bad "a dockerd runs in the guest"; else ok "no dockerd in the guest"; fi
 
 # ================================================================================
 # 2. Guest port-forward suppression — the template hazard. A guest 0.0.0.0

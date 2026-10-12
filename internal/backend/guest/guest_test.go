@@ -44,8 +44,8 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			if err := g.EnsureRuntimes(context.Background(), "devuser"); err != nil {
 				t.Fatalf("EnsureRuntimes: %v", err)
 			}
-			if len(f.Calls) != 6 {
-				t.Fatalf("expected 6 calls, got %d: %+v", len(f.Calls), f.Calls)
+			if len(f.Calls) != 5 {
+				t.Fatalf("expected 5 calls, got %d: %+v", len(f.Calls), f.Calls)
 			}
 
 			// call 0: root apt install — RootPrefix then bash -lc <script>.
@@ -79,34 +79,31 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 				t.Errorf("call 2 script missing subid/linger for runUser: %q", secondScript)
 			}
 
-			// call 3: user rootless install.
+			// call 3: user disables a leftover rootless dockerd (lever#183);
+			// nothing installs or starts one any more.
 			third := f.Calls[3]
 			if third.Name != shape.userPrefix[0] {
 				t.Fatalf("call 3 should be user-prefixed, got %+v", third)
 			}
 			thirdScript := third.Args[len(third.Args)-1]
-			if !strings.Contains(thirdScript, "get.docker.com/rootless") {
-				t.Errorf("call 3 script missing rootless install: %q", thirdScript)
+			if !strings.Contains(thirdScript, "disable --now docker") {
+				t.Errorf("call 3 script does not disable the old dockerd: %q", thirdScript)
+			}
+			for i, c := range f.Calls {
+				script := c.Args[len(c.Args)-1]
+				if strings.Contains(script, "get.docker.com") || strings.Contains(script, "dockerd-rootless.sh") || strings.Contains(script, "enable --now docker") {
+					t.Errorf("call %d still installs or starts dockerd: %q", i, script)
+				}
 			}
 
-			// call 4: user dockerd start.
-			fourth := f.Calls[4]
-			if fourth.Name != shape.userPrefix[0] {
-				t.Fatalf("call 4 should be user-prefixed, got %+v", fourth)
-			}
-			fourthScript := fourth.Args[len(fourth.Args)-1]
-			if !strings.Contains(fourthScript, "docker info") {
-				t.Errorf("call 4 script missing dockerd start: %q", fourthScript)
-			}
-
-			// call 5: user stages the pasta host-loopback mapping (per-agent netns).
-			fifth := f.Calls[5]
+			// call 4: user stages the pasta host-loopback mapping (per-agent netns).
+			fifth := f.Calls[4]
 			if fifth.Name != shape.userPrefix[0] {
-				t.Fatalf("call 5 should be user-prefixed, got %+v", fifth)
+				t.Fatalf("call 4 should be user-prefixed, got %+v", fifth)
 			}
 			fifthScript := fifth.Args[len(fifth.Args)-1]
 			if !strings.Contains(fifthScript, "containers.conf.d") || !strings.Contains(fifthScript, "map-host-loopback") {
-				t.Errorf("call 5 script missing pasta host-loopback mapping: %q", fifthScript)
+				t.Errorf("call 4 script missing pasta host-loopback mapping: %q", fifthScript)
 			}
 		})
 	}

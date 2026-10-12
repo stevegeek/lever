@@ -81,6 +81,11 @@ type Config struct {
 	// know nested_virt (`lever provision`): EnsureUp leaves the guest's
 	// /dev/kvm setup as it is instead of converging it to NestedVirt.
 	NestedVirtUnknown bool
+	// GuestKernel is the Lima guest kernel flavour to converge on ("hwe"
+	// or "ga"; config.App.EffectiveGuestKernel). "" (`lever provision`, no
+	// config) installs nothing and only reports a pending reboot. Ignored
+	// by OrbStack, whose kernel is OrbStack's.
+	GuestKernel string
 	// Warn prints a loud, user-facing line (apply's log). EnsureUp uses it
 	// for advice that must not fail the bring-up, e.g. a cpus or memory
 	// value an existing Lima VM does not have. Nil discards.

@@ -495,3 +495,27 @@ func (a *App) VoiceExcludedLogins() []string {
 	}
 	return out
 }
+
+// Lima guest kernel flavours (guest_kernel).
+const (
+	GuestKernelHWE = "hwe" // Ubuntu 24.04's hardware-enablement kernel (linux-generic-hwe-24.04)
+	GuestKernelGA  = "ga"  // the 24.04 release kernel the cloud image ships (6.8)
+)
+
+// EffectiveGuestKernel is the Lima guest kernel flavour apply converges on:
+// guest_kernel when set, else hwe with nested_virt and ga without. The
+// default follows nested_virt because the 6.8 GA kernel is the one a nested
+// VM crashed (lever#179), while an instance that runs no nested VM has no
+// reason to change kernels under it. "" off Lima.
+func (a *App) EffectiveGuestKernel() string {
+	if a.Backend != BackendLima {
+		return ""
+	}
+	if a.GuestKernel != "" {
+		return a.GuestKernel
+	}
+	if a.NestedVirt {
+		return GuestKernelHWE
+	}
+	return GuestKernelGA
+}

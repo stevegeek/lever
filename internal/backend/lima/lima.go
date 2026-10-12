@@ -99,6 +99,12 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err := l.ensureVM(ctx, cfg); err != nil {
 		return err
 	}
+	// Before Provision: on a fresh VM no egress chain exists yet, so the
+	// HWE kernel install reaches the mirrors (a re-apply under the closed
+	// posture may not, which the kernel step reports as a warning).
+	if err := l.hardenGuest(ctx, cfg); err != nil {
+		return err
+	}
 	if err := l.Provision(ctx, cfg); err != nil {
 		return err
 	}
@@ -422,3 +428,36 @@ func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DN
 }
 
 var _ backend.Backend = (*Lima)(nil)
+
+// RebootAdvice is how an operator reboots the jail VM without losing the
+// manager's conversation.
+const RebootAdvice = "`lever stop`, then `lever up`, reboots the VM and keeps the manager conversation"
+
+// hardenGuest converges the guest's crash recovery (always) and its kernel
+// flavour (cfg.GuestKernel) on every bring-up, so an existing VM gets them
+// on its next apply or up (lever#179). A failed crash-recovery write fails
+// the bring-up; what only a reboot applies, and a kernel install that
+// could not run, are warnings: lever never reboots the guest itself.
+func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
+	warn := cfg.Warn
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
+	crash, err := l.Guest().EnsureCrashRecovery(ctx)
+	if err != nil {
+		return err
+	}
+	kernel, err := l.Guest().EnsureGuestKernel(ctx, cfg.GuestKernel)
+	if err != nil {
+		// The kernel step only installs a package and reads two paths; a
+		// failure to run it must not keep the jail down.
+		warn("jail: WARNING: %v", err)
+	}
+	for _, w := range append(crash.Warn, kernel.Warn...) {
+		warn("jail: WARNING: %s", w)
+	}
+	for _, r := range append(crash.Reboot, kernel.Reboot...) {
+		warn("jail: reboot pending: %s; %s", r, RebootAdvice)
+	}
+	return nil
+}

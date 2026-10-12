@@ -1291,6 +1291,7 @@ func backendConfigFor(app *config.App, machine string) backend.Config {
 		CPUs:           app.CPUs,
 		Memory:         app.Memory,
 		NestedVirt:     app.NestedVirt,
+		GuestKernel:    app.EffectiveGuestKernel(),
 	}
 }
 

@@ -57,9 +57,10 @@ version bump moves the block under the new version heading.
   running, so the next `lever up` skips the VM boot. The VM keeps its memory on the host until it
   is powered off (with Lima nothing hands the guest's memory back), so a plain `lever stop` is
   still the choice when the RAM matters. It acts on the current instance only and refuses
-  `--machine`. A plain `lever stop` that finds the hub already down now says nothing was
-  suspended instead of warning that the suspend failed. Operations guide: "Stopping without
-  powering off".
+  `--machine`, and it exits non-zero when the jail does not answer or a suspend did not take
+  (that agent's container would go on running in the VM). A plain `lever stop` that finds the
+  hub already down says so in its suspend warning. Operations guide: "Stopping without powering
+  off".
 
 ### Changed
 

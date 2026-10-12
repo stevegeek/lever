@@ -20,12 +20,16 @@ import (
 // never started (a zero StartedAt) answers false, as does any answer that
 // does not parse: the caller then leaves the record alone.
 //
-// btime is the realtime clock minus the time since boot, so a large step
-// of the guest clock after boot moves it. A container started before such
-// a step in the same boot can then read as older than the boot; callers
-// act only on a container podman says is not running, where the remedy
-// (suspend and resume, keeping the conversation) is the one the operator
-// would run by hand.
+// btime is the realtime clock minus the time since boot, so a step of the
+// guest clock after boot moves it. That is common, not rare: a host that
+// slept pauses the guest, and the guest clock is stepped forward on wake,
+// moving btime later by the length of the sleep. A container started
+// before such a step in the same boot then reads as older than the boot.
+// Callers act only on a container podman says is not running, where the
+// remedy (suspend and resume, keeping the conversation) is the one the
+// operator would run by hand, so the error is benign. On OrbStack btime is
+// the shared VM's, so a restart of the machine alone is not seen (a false
+// no, which is safe).
 func ContainerStartedBeforeBoot(ctx context.Context, r proc.Runner, ref string) (bool, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return false, fmt.Errorf("inspecting container start: invalid container reference %q", ref)

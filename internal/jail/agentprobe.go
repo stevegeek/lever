@@ -279,11 +279,16 @@ const AttachSession = "scion"
 // process has no parent inside the container's pid namespace (its parent
 // is podman's, outside), so /proc/<pid>/status reads "PPid: 0"; the main
 // client descends from the container's init and reads a non-zero PPid.
-// Only clients with PPid 0 are detached. A pid tmux reports that is not a
-// number, or whose status cannot be read, is left attached.
+// Only clients with PPid 0 are detached. PID 1 also reads PPid 0, so it
+// is never detached: an image whose main process is the tmux client
+// itself would otherwise lose it. A pid tmux reports that is not a
+// number, or whose status cannot be read, is left attached. A stale
+// client whose exec session died is reparented inside the container and
+// stays (incomplete cleanup, never harm). The count is the agent's own
+// word, as every AgentProbe answer is.
 const detachClientsScript = `clients=$(tmux list-clients -t ` + AttachSession + ` -F '#{client_pid} #{client_tty}' 2>/dev/null) || exit 0
 printf '%s\n' "$clients" | while read -r pid tty; do
-  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  case "$pid" in ''|*[!0-9]*|1) continue ;; esac
   [ -n "$tty" ] || continue
   ppid=
   while read -r k v; do

@@ -108,11 +108,11 @@ func TestDetachClientsScriptSparesTheContainersClient(t *testing.T) {
 	}
 }
 
-// A client whose status cannot be read, an odd pid, or no tty is left
-// attached; no server lists nothing and detaches nothing.
+// A client whose status cannot be read, an odd pid, no tty, or PID 1
+// (PPid 0 too, but the container's main process) is left attached; no server lists nothing and detaches nothing.
 func TestDetachClientsScriptFailsSafe(t *testing.T) {
-	clients := "999 /dev/pts/3\nabc /dev/pts/4\n412\n-1 /dev/pts/5\n"
-	out, logged := runDetachScript(t, clients, map[string]string{"412": "0"}, false)
+	clients := "999 /dev/pts/3\nabc /dev/pts/4\n412\n-1 /dev/pts/5\n1 /dev/console\n"
+	out, logged := runDetachScript(t, clients, map[string]string{"412": "0", "1": "0"}, false)
 	if strings.TrimSpace(out) != "" || logged != "" {
 		t.Errorf("out %q log %q, want nothing detached", out, logged)
 	}

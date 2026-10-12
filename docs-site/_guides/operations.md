@@ -500,7 +500,8 @@ while the agent and Claude Code run normally. The usual cause is a stale tmux cl
 attach whose terminal went away (a closed window, a dropped ssh session, a host that slept) is
 still attached to the agent's tmux session. `lever attach` and `lever up` therefore detach the
 terminals earlier attaches left on the agent before they attach, as `tmux attach -d` does, and
-print how many they detached. `--shared` keeps them, for two terminals that should both watch.
+print how many they detached. `--shared` keeps them, for two terminals that should both watch, or
+when a terminal in scion's web UI is open on the same agent (a default attach detaches it too).
 They never detach the container's own tmux client: scion starts the agent's tmux session with a
 client attached in the container's main process, and detaching it would stop the agent. Only
 clients a `podman exec` started (an attach) are detached; one lever cannot place is left alone.
@@ -581,10 +582,16 @@ or before a long time away; `lever stop` also powers off a VM that `--keep-vm` l
 What stays the same: containment does not change (the VM keeps its egress firewall, and with the
 broker stopped the jail reaches nothing of the host's), and a guest the host kills or restarts
 meanwhile is recovered by the next `lever up` like any other
-([recovery after a hard VM kill](#recovery-after-a-hard-vm-kill)). With the jail not answering,
-`--keep-vm` has nothing in it to stop and says so. A plain `lever stop` after a `--keep-vm` finds
-the hub down, says that nothing was suspended now (the first stop suspended the agents), and
-powers the VM off as usual.
+([recovery after a hard VM kill](#recovery-after-a-hard-vm-kill)).
+
+`--keep-vm` fails (non-zero exit) when it cannot vouch that the agents are suspended: when the
+jail does not answer (nothing was suspended; if the VM is up after all, `lever stop` powers it
+off), or when a suspend did not take (the hub is still stopped and the VM left up, but that
+agent's container goes on running in it until `lever stop`). Only the manager and the workers in
+`lever.yaml` are suspended, as with a plain stop; any other agent container keeps running in the
+VM. A plain `lever stop` after a `--keep-vm` finds the hub down: its suspend warning says the hub
+did not answer and that the earlier `--keep-vm` already suspended the agents, and the VM powers
+off as usual.
 
 ## Troubleshooting quick table
 

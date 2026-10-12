@@ -1506,8 +1506,10 @@ synthesis API and at least one on-device voice.
 - **Stopping.** The broker stops the tool with SIGTERM, and the tool stops its child before it
   exits. On Linux the child also dies with the tool, even when the tool is killed. On macOS a
   tool killed hard (the broker sends SIGKILL after 1.5 s, and `lever stop` kills a broker that is
-  slow to exit) can leave the child running and holding the port, and dictation then stays off:
-  find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN` and stop it, then `lever reload`.
+  slow to exit) can leave the child running and holding the port; the next start finds it through
+  the pid file the tool keeps in `-models`, checks that it is the configured whisper-server on
+  this port, and stops it. If another process holds the port, dictation stays off: find it with
+  `lsof -nP -iTCP:<port> -sTCP:LISTEN` and stop it, then `lever reload`.
 - **The route.** Only for a verified login, like the rest of the chat page. The page sends
   `X-Lever-Voice: 1` with each clip and the proxy refuses a clip without it (a browser sends such
   a header to another origin only after a CORS preflight, which the proxy never grants). The

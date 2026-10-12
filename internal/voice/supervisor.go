@@ -40,6 +40,11 @@ type Supervisor struct {
 	// and is retried after the backoff (Service checks the program again,
 	// so a restart never runs a file someone replaced).
 	Check func() error
+	// PidFile, when set, names the running child (written 0600 at each
+	// start, removed when it exits), so a start after a tool killed
+	// outright can stop the child it left behind (reapOrphan, unix only).
+	// Service puts it in the -models directory.
+	PidFile string
 	// Zero values take the defaults below (tests shorten them).
 	MinBackoff, MaxBackoff, StableAfter, StopGrace, ProbeEvery time.Duration
 
@@ -152,6 +157,9 @@ func (s *Supervisor) Run(ctx context.Context) {
 				continue
 			}
 		}
+		// A child an earlier tool left running (killed before it could
+		// stop it) holds the port: stop it, once verified to be ours.
+		s.reapOrphan()
 		if s.portTaken() {
 			s.blocked.Store(true)
 			s.logf("voice: 127.0.0.1:%d is already in use by another process; whisper-server not started, dictation unavailable (retrying in %s)", s.Port, backoff)
@@ -177,7 +185,7 @@ func (s *Supervisor) Run(ctx context.Context) {
 
 // command is the child's command: Stdin, Stdout and Stderr nil (the null
 // device, never a log: whisper.cpp prints transcripts), a reduced
-// environment, and Pdeathsig on Linux.
+// environment, its own process group, and Pdeathsig on Linux.
 func (s *Supervisor) command() *exec.Cmd {
 	cmd := exec.Command(s.Program, s.Args...)
 	cmd.Dir = s.Dir
@@ -202,9 +210,21 @@ func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
-	s.logf("voice: whisper-server started on %s (pid %d)", s.Addr(), cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	s.logf("voice: whisper-server started on %s (pid %d)", s.Addr(), pid)
+	if s.PidFile != "" {
+		if err := writePidFile(s.PidFile, pid); err != nil {
+			s.logf("voice: cannot write the pid file: %v (a whisper-server left by a killed tool will not be stopped)", err)
+		}
+	}
 	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		if s.PidFile != "" {
+			removePidFile(s.PidFile, pid)
+		}
+		exited <- err
+	}()
 	probeCtx, stopProbe := context.WithCancel(ctx)
 	probed := make(chan struct{})
 	go func() {
@@ -221,12 +241,15 @@ func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 		return time.Since(start), exitText(err)
 	case <-ctx.Done():
 		s.ready.Store(false)
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		// The child leads its own process group: signal the group, so
+		// nothing it started outlives it.
+		signalTree(pid, syscall.SIGTERM)
 		t := time.NewTimer(dur(s.StopGrace, defaultStopGrace))
 		defer t.Stop()
 		select {
 		case <-exited:
 		case <-t.C:
+			signalTree(pid, syscall.SIGKILL)
 			_ = cmd.Process.Kill()
 			<-exited
 		}

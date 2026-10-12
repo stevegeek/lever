@@ -48,8 +48,11 @@ version bump moves the block under the new version heading.
   `whisper-server` (which you install yourself, outside the tree; CUDA or Metal) as its child on
   `127.0.0.1` (`-whisper-port`), with a model from lever's pinned table checked by size and
   sha256 before every start, every route under a random path prefix that is new at each start
-  and never logged, its output discarded, a reduced environment, and, on Linux, Pdeathsig and a
-  check that the port's listener is its own child. Settings are flags in its `command`
+  and never logged, its output discarded, a reduced environment, its own process group, and, on
+  Linux, Pdeathsig and a check that the port's listener is its own child. The child's pid is kept
+  in `-models` (`whisper-server.pid`, `0600`): a start after a tool killed outright stops the
+  child it left (verified first to be the configured server on this port), so on macOS an orphan
+  no longer holds the port. Settings are flags in its `command`
   (`-server`, `-models`, `-model`, `-language`, `-vocabulary`, `-gpu`, `-max-seconds`,
   `-agent-max-seconds`). Config
   load recognises it by its program's base name and refuses `-server`, `-models` and

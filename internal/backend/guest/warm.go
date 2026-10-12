@@ -356,7 +356,7 @@ func userProbeScript(spec ProbeSpec) string {
 	b.WriteString("pastahelp() { pasta --help 2>&1; true; }\n")
 	b.WriteString("emit user /usr/bin/id -un\nemit uid /usr/bin/id -u\nemit arch /usr/bin/uname -m\n")
 	b.WriteString(`emit kvmlegacy test -e "` + legacyKVMDropInPath + `"` + "\n")
-	b.WriteString(`emit pasta cat "` + pastaDropInPath + `"` + "\n")
+	b.WriteString(`emit pasta /usr/bin/cat "` + pastaDropInPath + `"` + "\n")
 	b.WriteString("emit pastahelp pastahelp\n")
 	if spec.HostAlias != "" {
 		b.WriteString("emit ahosts /usr/bin/getent ahosts " + shellSingleQuote(spec.HostAlias) + "\n")
@@ -374,27 +374,50 @@ func userProbeKeys(spec ProbeSpec) []string {
 
 // bootKeyScript prints the boot id and pid 1's start time (field 22 of
 // /proc/1/stat; pid 1's command name has no space).
-const bootKeyScript = `bootkey() { cat /proc/sys/kernel/random/boot_id && cut -d' ' -f22 /proc/1/stat; }
+const bootKeyScript = `bootkey() { /usr/bin/cat /proc/sys/kernel/random/boot_id && /usr/bin/cut -d' ' -f22 /proc/1/stat; }
 `
+
+// probeIptables picks the iptables binaries by absolute path, as the rest
+// of the probe names its commands, so no PATH entry chooses them: Ubuntu
+// (24.04, and OrbStack's Ubuntu machines) installs them in /usr/sbin; /sbin
+// is the fallback for a guest without the merged /usr. With neither, the
+// listings fail (exit 127), and an unread listing sends the egress step
+// down the full path.
+const probeIptables = `IPT=/usr/sbin/iptables; [ -x "$IPT" ] || IPT=/sbin/iptables
+IP6T=/usr/sbin/ip6tables; [ -x "$IP6T" ] || IP6T=/sbin/ip6tables
+`
+
+// egressProbeScript lists both families' OUTPUT and lever chain, the
+// sections out4, chain4, out6 and chain6.
+const egressProbeScript = `emit out4 "$IPT" -S OUTPUT
+emit chain4 "$IPT" -S ` + egress.Chain + `
+emit out6 "$IP6T" -S OUTPUT
+emit chain6 "$IP6T" -S ` + egress.Chain + `
+`
+
+// egressProbeKeys are the sections egressProbeScript prints.
+var egressProbeKeys = []string{"out4", "chain4", "out6", "chain6"}
 
 // rootProbeScript reads, as root, the stamp, both families' OUTPUT jump and
 // lever chain, the resolver state, the kvm state and the file digests.
+// Every command is named by absolute path except test, which is the bash
+// builtin (emit runs it as a command word, and no PATH lookup is made).
 func rootProbeScript(spec ProbeSpec) string {
 	var b strings.Builder
 	b.WriteString(probeHead)
 	b.WriteString(bootKeyScript)
+	b.WriteString(probeIptables)
 	b.WriteString("emit boot bootkey\n")
-	b.WriteString("emit stamp cat " + ProvisionStampPath + "\n")
-	b.WriteString("emit out4 iptables -S OUTPUT\nemit chain4 iptables -S " + egress.Chain + "\n")
-	b.WriteString("emit out6 ip6tables -S OUTPUT\nemit chain6 ip6tables -S " + egress.Chain + "\n")
+	b.WriteString("emit stamp /usr/bin/cat " + ProvisionStampPath + "\n")
+	b.WriteString(egressProbeScript)
 	if spec.DNSChain != "" {
-		b.WriteString("emit dnschain iptables -t nat -S " + shellSingleQuote(spec.DNSChain) + "\n")
+		b.WriteString(`emit dnschain "$IPT" -t nat -S ` + shellSingleQuote(spec.DNSChain) + "\n")
 	}
 	if spec.ResolvConf != "" {
-		b.WriteString("emit resolv cat " + shellSingleQuote(spec.ResolvConf) + "\n")
+		b.WriteString("emit resolv /usr/bin/cat " + shellSingleQuote(spec.ResolvConf) + "\n")
 	}
-	b.WriteString("emit kvmchar test -c /dev/kvm\nemit kvmmode stat -c %a /dev/kvm\n")
-	b.WriteString("emit udev cat " + KVMUdevRulePath + "\nemit udevexists test -e " + KVMUdevRulePath + "\n")
+	b.WriteString("emit kvmchar test -c /dev/kvm\nemit kvmmode /usr/bin/stat -c %a /dev/kvm\n")
+	b.WriteString("emit udev /usr/bin/cat " + KVMUdevRulePath + "\nemit udevexists test -e " + KVMUdevRulePath + "\n")
 	for i, p := range spec.HashPaths {
 		b.WriteString("emit hash" + strconv.Itoa(i) + " /usr/bin/sha256sum " + shellSingleQuote(p) + "\n")
 	}

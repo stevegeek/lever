@@ -202,3 +202,27 @@ func TestProvisionedRequiresThePastaDropIn(t *testing.T) {
 		}
 	}
 }
+
+// Every command the root probe runs is named by absolute path (the
+// iptables pair through $IPT/$IP6T, which hold one), or is a bash builtin or
+// the script's own function: no PATH entry chooses what root runs.
+func TestRootProbeNamesCommandsByAbsolutePath(t *testing.T) {
+	script := rootProbeScript(ProbeSpec{DNSChain: "LIMADNS", ResolvConf: "/etc/resolv.conf", HashPaths: []string{ScionProbePath}}) +
+		probeIptables + egressProbeScript
+	for _, line := range strings.Split(script, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] != "emit" {
+			continue
+		}
+		switch cmd := f[2]; {
+		case strings.HasPrefix(cmd, "/"), cmd == `"$IPT"`, cmd == `"$IP6T"`, cmd == "test", cmd == "bootkey":
+		default:
+			t.Errorf("root probe runs %q by bare name: %s", cmd, line)
+		}
+	}
+	for _, want := range []string{"IPT=/usr/sbin/iptables", "IP6T=/usr/sbin/ip6tables", "/usr/bin/cat /proc/sys/kernel/random/boot_id", "/usr/bin/cut "} {
+		if !strings.Contains(script, want) {
+			t.Errorf("root probe lacks %q", want)
+		}
+	}
+}

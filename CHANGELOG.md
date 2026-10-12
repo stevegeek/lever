@@ -9,6 +9,19 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **A small-machine profile: guest trimming, zram swap, per-agent limits and a worker cap
+  (lever#193).** `guest_profile: small` (Lima only, opt-in) disables the guest services a jail does
+  not use (snapd, unattended upgrades and the apt timers, multipathd, ModemManager) and adds zram
+  swap through lever's own unit, with no apt package; `standard`, the default, restores exactly the
+  units lever disabled. It is opt-in because the guest then stops installing its own security
+  updates. `manager.resources` and `workers[].resources` (`memory`, `cpu`) become the container's
+  scion resource limits (podman `--memory` and `--cpus`); create-time only, like `model`.
+  `broker.max_running_workers` makes the broker refuse a worker start, resume, recycle or wake that
+  would pass the cap, with a 409 naming the workers that hold it and nothing staged or deleted.
+  Together they make a 2-core, 8 GB host workable for a manager and one or two workers.
+- **System requirements and a sizing guide (lever#194).** A new getting-started page states the
+  minimum and recommended host CPU, RAM and disk, VM memory per agent, what the first boot
+  downloads, typical cold and warm bring-up times per backend, and the small-machine profile.
 - **github tool: PRs, merges and releases (`-ops`, opt-in).** `lever-tool-github` can now also
   offer `pr_open`, `pr_status`, `pr_merge` and `release`. With `-ops` unset only `push` exists, as
   before. Each operation is its own fine-gated capability, acts only on `-repos`, and gets a token

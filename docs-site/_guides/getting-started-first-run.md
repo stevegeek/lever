@@ -118,7 +118,9 @@ lever up
 
 `lever up` runs the plan from step 3 (creating the jail if needed), starts the manager, and hands
 you its terminal. **First boot takes ~10-15 minutes** (runtimes + a multi-GB image load); after
-that it is fast.
+that a `lever up` after `lever stop` typically takes 1-2 minutes, and one with the manager already
+running only seconds. [System requirements & sizing](/getting-started/requirements/) has the
+numbers per backend and what the first boot downloads.
 
 `up` is idempotent: re-running it resumes a suspended manager and re-attaches. Detach with
 `Ctrl-b d`; the manager keeps running in the jail, and `lever attach` or the next `lever up`

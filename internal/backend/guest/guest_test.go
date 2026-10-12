@@ -215,7 +215,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	f.Script("/opt/go/bin/go mod download -json github.com/GoogleCloudPlatform/scion@"+pin,
 		proc.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
-	f.Script("/opt/go/bin/go build -o", proc.Result{})
+	f.Script("/opt/go/bin/go build -trimpath -ldflags=-s -w -o", proc.Result{})
 	f.Script("orb -m lever-vtest uname -m", proc.Result{Stdout: "arm64\n"})
 	f.Script("orb -m lever-vtest cat", proc.Result{Code: 1})
 	f.Script("orb -u root -m lever-vtest", proc.Result{})

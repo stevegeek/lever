@@ -95,6 +95,13 @@ func (e *SourceError) Error() string {
 
 func (e *SourceError) Unwrap() error { return e.Err }
 
+// buildFlags strip the symbol table and DWARF (-s -w) and the host's file
+// paths (-trimpath) from the cross-compiled scion: about 173 MB to 121 MB
+// (lever#191), less to stream into the guest and to page in at each hub
+// start. Go's panic stack traces keep their function names and lines
+// (pclntab stays); only debugger and symbolizer data goes.
+var buildFlags = []string{"-trimpath", "-ldflags=-s -w"}
+
 // Resolve produces a host-local scion binary for goarch ("arm64"/"amd64").
 // machine names the output file under OutputDir so two jails on one host never
 // share a build output.
@@ -131,8 +138,9 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
 		return "", fmt.Errorf("scion build dir: %w", err)
 	}
+	args := append(append([]string{"build"}, buildFlags...), "-o", out, "./cmd/scion")
 	if _, err := r.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": goarch},
-		goBin, "build", "-o", out, "./cmd/scion"); err != nil {
+		goBin, args...); err != nil {
 		return "", fmt.Errorf("cross-compile scion: %w", err)
 	}
 	return out, nil

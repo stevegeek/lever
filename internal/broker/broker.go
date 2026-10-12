@@ -327,7 +327,7 @@ type Broker struct {
 	// leftoverShareVolumes: the best-effort reader while no folder is
 	// configured (refuseStaleShares).
 	leftoverShareVolumes RecordVolumesFunc
-	sharedGuard   func(ctx context.Context) error
+	sharedGuard          func(ctx context.Context) error
 	// afterWorkspaceMkdir is a test seam: called between a strict worker
 	// workspace mkdir and the walk that follows it. nil outside tests.
 	afterWorkspaceMkdir func()

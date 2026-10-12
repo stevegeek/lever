@@ -337,6 +337,9 @@ func (a *App) Validate() error {
 	if err := a.validateWhisperTools(); err != nil {
 		return err
 	}
+	if err := a.validateTTSTools(); err != nil {
+		return err
+	}
 	if err := a.validateLeverFilesTools(); err != nil {
 		return err
 	}
@@ -715,8 +718,14 @@ func (a *App) validateVoice() error {
 	if v.MaxSeconds < 0 || v.MaxSeconds > MaxVoiceMaxSeconds {
 		return fmt.Errorf("config: remote: voice.max_seconds %d; use 1 to %d (or leave it out for %d)", v.MaxSeconds, MaxVoiceMaxSeconds, DefaultVoiceMaxSeconds)
 	}
+	if !v.ReadAloud.valid() {
+		return fmt.Errorf("config: remote: voice.read_aloud %q; use device, server or off", v.ReadAloud)
+	}
 	if !v.Enabled {
 		return nil
+	}
+	if err := a.validateSpeech(); err != nil {
+		return err
 	}
 	if a.Remote.Landing != RemoteLandingChat {
 		return fmt.Errorf("config: remote: voice needs landing: chat (the mic is on the chat page)")
@@ -743,6 +752,38 @@ func (a *App) validateVoice() error {
 	if a.EffectiveVoiceMaxSeconds() > w.EffectiveMaxSeconds() {
 		return fmt.Errorf("config: remote: voice.max_seconds %d is more than broker tool %q's -max-seconds %d, which would refuse such a clip",
 			a.EffectiveVoiceMaxSeconds(), w.Name, w.EffectiveMaxSeconds())
+	}
+	return nil
+}
+
+// validateSpeech checks read_aloud: server (voice on): the speech socket of
+// lever-tool-tts, which must be the -speak-socket of a tts tool in
+// broker.tools when there is one (the tool may also be run by hand).
+func (a *App) validateSpeech() error {
+	v := a.Remote.Voice
+	if a.EffectiveReadAloud() != ReadAloudServer {
+		return nil
+	}
+	if v.SpeakSocket == "" {
+		return fmt.Errorf("config: remote: voice.speak_socket is required with read_aloud: server: the -speak-socket of the lever-tool-tts entry in broker.tools")
+	}
+	if err := voice.CheckSocketPath(v.SpeakSocket); err != nil {
+		return fmt.Errorf("config: remote: voice.speak_socket: %w", err)
+	}
+	if v.SpeakSocket == v.Socket {
+		return fmt.Errorf("config: remote: voice.speak_socket is voice.socket, the dictation socket; give lever-tool-tts its own")
+	}
+	tools := a.TTSTools()
+	if len(tools) == 0 {
+		return nil
+	}
+	if _, ok := a.SpeechTool(); !ok {
+		var names []string
+		for _, t := range tools {
+			names = append(names, fmt.Sprintf("%s (-speak-socket %s)", t.Name, t.Socket))
+		}
+		return fmt.Errorf("config: remote: voice.speak_socket %s is not the -speak-socket of any tts tool in broker.tools: %s; set them to the same path",
+			v.SpeakSocket, strings.Join(names, ", "))
 	}
 	return nil
 }

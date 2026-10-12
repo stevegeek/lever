@@ -63,7 +63,11 @@ type VoiceIdentity struct {
 	Socket      string
 	MaxSeconds  int
 	Excluded    []string `json:",omitempty"` // allowed_users voice: false
-	NoReadAloud bool     `json:",omitempty"` // remote.voice.read_aloud: false
+	NoReadAloud bool     `json:",omitempty"` // remote.voice.read_aloud: off (or false)
+	// SpeakSocket is lever-tool-tts's socket while read_aloud is server
+	// (omitted otherwise, so a stamp without it is unchanged). The speech
+	// settings are the tool's flags.
+	SpeakSocket string `json:",omitempty"`
 }
 
 // FilesIdentity is the part of remote.files a running proxy captured.

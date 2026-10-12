@@ -156,7 +156,10 @@ func RemoteConfigHash(app *config.App) string {
 		}
 		if app.VoiceOn() {
 			id.Voice = &state.VoiceIdentity{Socket: app.Remote.Voice.Socket, MaxSeconds: app.EffectiveVoiceMaxSeconds(),
-				Excluded: app.VoiceExcludedLogins(), NoReadAloud: app.Remote.Voice.ReadAloud != nil && !*app.Remote.Voice.ReadAloud}
+				Excluded: app.VoiceExcludedLogins(), NoReadAloud: app.EffectiveReadAloud() == config.ReadAloudOff}
+			if app.EffectiveReadAloud() == config.ReadAloudServer {
+				id.Voice.SpeakSocket = app.Remote.Voice.SpeakSocket
+			}
 		}
 	}
 	if app.PushOn() {

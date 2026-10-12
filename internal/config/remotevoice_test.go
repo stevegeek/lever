@@ -246,7 +246,7 @@ func TestAllowedUserVoiceKey(t *testing.T) {
 	if err := yaml.Unmarshal([]byte("enabled: true\nsocket: /run/w.sock\nmax_seconds: 120\nread_aloud: false\n"), &v); err != nil {
 		t.Fatal(err)
 	}
-	if !v.Enabled || v.Socket != "/run/w.sock" || v.MaxSeconds != 120 || v.ReadAloud == nil || *v.ReadAloud {
+	if !v.Enabled || v.Socket != "/run/w.sock" || v.MaxSeconds != 120 || v.ReadAloud != ReadAloudOff {
 		t.Fatalf("%+v", v)
 	}
 }

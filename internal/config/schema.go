@@ -483,10 +483,17 @@ type Voice struct {
 	// MaxSeconds bounds one clip. Zero = DefaultVoiceMaxSeconds; at most
 	// MaxVoiceMaxSeconds, and at most the tool's -max-seconds.
 	MaxSeconds int `yaml:"max_seconds"`
-	// ReadAloud turns the read-aloud button on agent messages on or off
-	// (the browser's on-device voices; nothing leaves the device). nil =
-	// on while voice is enabled; never shown while it is off.
-	ReadAloud *bool `yaml:"read_aloud"`
+	// ReadAloud is how the read-aloud button on agent messages speaks:
+	// ReadAloudDevice (the browser's on-device voices; nothing leaves the
+	// device), ReadAloudServer (lever-tool-tts on the operator's host, the
+	// device's voices when it is down) or ReadAloudOff. YAML true and false
+	// read as device and off. "" = device while voice is enabled; never
+	// shown while it is off.
+	ReadAloud ReadAloud `yaml:"read_aloud"`
+	// SpeakSocket is lever-tool-tts's speech socket: an absolute host path
+	// outside the tree, equal to the -speak-socket of the lever-tool-tts
+	// entry in broker.tools. Required with read_aloud: server.
+	SpeakSocket string `yaml:"speak_socket"`
 }
 
 const (

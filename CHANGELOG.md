@@ -33,6 +33,13 @@ version bump moves the block under the new version heading.
   job log's failure-looking lines and its last lines as plain text (no timestamps or escape
   sequences, credentials masked, at most 64 MiB read). The log download follows GitHub's redirect
   only over https to its log hosts, with no credential. Both need only Actions: read on the App.
+- **github tool: triage issues (`issue_list`, `issue_read`, `issue_comment`, `issue_close`,
+  opt-in).** List and read the repository's issues (cleaned text, credentials masked, marked as
+  data), comment on one, and close one as `completed` or `not_planned` with an optional comment.
+  Pull requests are never listed, read, commented on or closed through these. Comments follow the
+  PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
+  audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
+  need Issues: read and write.
 
 ## [0.35.0] - 2026-10-12
 

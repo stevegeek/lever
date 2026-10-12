@@ -28,7 +28,8 @@ const (
 )
 
 // AllOps lists every operation in a stable order.
-var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRuns, OpCILog}
+var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRuns, OpCILog,
+	OpIssueList, OpIssueRead, OpIssueComment, OpIssueClose}
 
 // OpPermissions is the App permission set each operation's token is
 // narrowed to. GitHub adds metadata: read to every token.
@@ -40,6 +41,11 @@ var OpPermissions = map[string]Permissions{
 	OpRelease:  {"contents": "write"},
 	OpCIRuns:   {"actions": "read"},
 	OpCILog:    {"actions": "read"},
+
+	OpIssueList:    {"issues": "read"},
+	OpIssueRead:    {"issues": "read"},
+	OpIssueComment: {"issues": "write"},
+	OpIssueClose:   {"issues": "write"},
 }
 
 // MergeMethods are the merge methods GitHub accepts.

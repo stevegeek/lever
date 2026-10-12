@@ -340,3 +340,36 @@ func TestCIBackstops(t *testing.T) {
 		t.Error("ci_log's backstop accepted another operation")
 	}
 }
+
+func TestIssueBackstops(t *testing.T) {
+	o := mustParse(t, "-ops", "issue_list,issue_read,issue_comment,issue_close")
+	ops := map[string]captool.Operation{}
+	for _, op := range operations(o, nil, nil) {
+		ops[op.Name] = op
+	}
+	r := "stevegeek/lever"
+	for _, c := range []struct {
+		op   string
+		args map[string]string
+		ok   bool
+	}{
+		{"issue_list", map[string]string{"repo": r}, true},
+		{"issue_list", map[string]string{"repo": r, "state": "all", "limit": "50"}, true},
+		{"issue_list", map[string]string{"repo": r, "state": "draft"}, false},
+		{"issue_list", map[string]string{"repo": "x/y"}, false},
+		{"issue_read", map[string]string{"repo": r, "number": "29"}, true},
+		{"issue_read", map[string]string{"repo": r, "number": "0"}, false},
+		{"issue_comment", map[string]string{"repo": r, "number": "29", "body": "ok"}, true},
+		{"issue_comment", map[string]string{"repo": r, "number": "29", "body": ""}, false},
+		{"issue_comment", map[string]string{"repo": r, "number": "29", "body": "@org/team"}, false},
+		{"issue_close", map[string]string{"repo": r, "number": "29"}, true},
+		{"issue_close", map[string]string{"repo": r, "number": "29", "reason": "not_planned", "body": "bye"}, true},
+		{"issue_close", map[string]string{"repo": r, "number": "29", "reason": "spam"}, false},
+		{"issue_close", map[string]string{"repo": r, "number": "29", "body": "closes #3"}, false},
+	} {
+		err := ops[c.op].Backstop(captool.ValidatedContext{Operation: c.op}, c.args)
+		if (err == nil) != c.ok {
+			t.Errorf("%s %v: err=%v, want ok=%v", c.op, c.args, err, c.ok)
+		}
+	}
+}

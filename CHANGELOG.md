@@ -91,6 +91,21 @@ version bump moves the block under the new version heading.
   disk. No backup is kept while the state directory is inside the tree, so there `up --fresh`
   needs `--no-backup`. Doctor and apply hints
   that said "back up the conversation, then `lever up --fresh`" now name `--keep-conversation`.
+- **A broker is never shared between two instances (lever#181).** Each instance has a random
+  instance id, made on first use in `.lever-state/instance-id.json` with the state directory it
+  belongs to, and its broker reports it on `/epoch`. `lever apply`, `up` and `reload` reuse or
+  restart a running broker only when it reports this instance's id; another instance's broker on
+  the same ports, even with the same version and config hash, is left running and apply stops with
+  an error naming the ports to change. A broker from an older lever (no id) is restarted only when
+  this instance's `broker.pid` names a live process, and only once the port fell silent after the
+  stop. The health wait accepts only this instance's broker, and `lever revoke` and
+  `lever broker bump-epoch` refuse any other. A copied instance directory makes its own id, and
+  its stop paths drop the copied pid files instead of signalling the original's processes. The
+  id lives outside the in-jail wire types, so the jail ABI is unchanged.
+- **Doctor's `instance ports` row (lever#181)** warns when a configured port (the broker's, a
+  supervised tool's backend, the remote proxy's) is held by a process that is not this
+  instance's, naming it when `lsof` can. The operations guide has a section on running two
+  instances on one host.
 
 ### Changed
 
@@ -163,6 +178,11 @@ version bump moves the block under the new version heading.
   says running, over a container podman says is not running and last started before the guest's
   current boot, is suspended and resumed with its conversation, as with a recorded boot id. A
   container podman never started is not evidence, and a read that fails leaves the old message.
+- **The Lima e2e picks free host ports (lever#181).** The broker's ports, the db tool's backend
+  and the port-forward check's port are chosen free on the host unless set (`JAIL_PORT`,
+  `ADMIN_PORT`, the new `TOOL_PORT`, `SUPPRESS_PORT`); a port set explicitly that is in use stops
+  the run before it starts, naming the process. Any failed run now prints the end of the broker
+  and tool logs, masked, with or without `KEEP=1`.
 
 ### Fixed
 

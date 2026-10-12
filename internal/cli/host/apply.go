@@ -1033,25 +1033,47 @@ const brokerAdminTimeout = 5 * time.Second
 // duplicate — it would fail to bind the ports, die, and clobber broker.pid with
 // a dead PID. A fast single-shot probe (no listener => instant
 // connection-refused, so no penalty on a fresh apply). But only reuse a broker
-// that matches THIS binary and THIS broker config (#19): a broker started by an
-// older binary (no healer, stale routes) or with an older tool set would
-// otherwise keep serving while apply reports success — so on identity mismatch,
-// stop it and fall through to spawn.
+// that is THIS instance's (lever#181) and matches THIS binary and THIS broker
+// config (#19): a broker started by an older binary (no healer, stale routes)
+// or with an older tool set would otherwise keep serving while apply reports
+// success — so on identity mismatch, stop it and fall through to spawn.
+// Another instance's broker on the same ports is never stopped and never
+// used: apply fails and says which ports to change (judgeRunningBroker).
 func (bc *brokerController) Start(ctx context.Context) error {
+	ours, err := bc.state.EnsureInstanceID()
+	if err != nil {
+		return err
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	var er wire.EpochResponse
 	// Anything but a decodable 200 — connection refused, a non-200, a body that
-	// is not the epoch JSON — means no broker of ours is serving: fall through
-	// to the spawn.
-	if err := httpjson.Get(probeCtx, bc.admin, bc.adminURL+wire.PathEpoch, &er); err == nil {
-		if brokerReusable(er, cli.VersionString(), brokerctl.ConfigHash(bc.app)) {
+	// is not the epoch JSON — means no lever broker is serving: fall through
+	// to the spawn. Something else holding a port makes the child's bind
+	// fail, which Healthy reports.
+	if er, err := readBrokerIdentity(probeCtx, bc.admin, bc.adminURL); err == nil {
+		_, _, alive := state.PIDStatus(bc.state.PID())
+		switch judgeRunningBroker(er, ours, cli.VersionString(), brokerctl.ConfigHash(bc.app), alive) {
+		case brokerReuse:
 			progress.From(ctx).Note("reused")
-			return nil // same binary + same broker config; keep the process + PID
+			return nil // same instance, binary and broker config; keep the process + PID
+		case brokerRefuse:
+			return foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours)
 		}
 		bc.log.printf("lever: broker predates this binary or its tool config changed — restarting it (was %q)", er.Version)
 		if err := brokerctl.StopBroker(bc.state); err != nil {
 			return fmt.Errorf("stopping the stale broker before restart: %w", err)
+		}
+		// The broker stopped was the one the pid file names. If a broker
+		// still answers, it was not that one: never adopt it.
+		checkCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if still, err := readBrokerIdentity(checkCtx, bc.admin, bc.adminURL); err == nil {
+			if still.InstanceID == ours {
+				return fmt.Errorf("this instance's broker still answers on 127.0.0.1:%d after the stop: %s names another process or none; stop the broker by hand, then run this again",
+					bc.app.EffectiveAdminPort(), stateRel(bc.state, bc.state.PID()))
+			}
+			return fmt.Errorf("a broker still answers on 127.0.0.1:%d after this instance's broker was stopped: %w",
+				bc.app.EffectiveAdminPort(), foreignBrokerError(bc.app.EffectiveAdminPort(), still, ours))
 		}
 	}
 	cmd, logf, err := brokerServeCmd(bc.selfExe, bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
@@ -1074,17 +1096,33 @@ const (
 	brokerHealthInterval = 200 * time.Millisecond
 )
 
-// Healthy polls GET /epoch until 200 or brokerHealthTimeout elapses.
+// Healthy polls GET /epoch until this instance's broker answers (its
+// instance id, lever#181) or brokerHealthTimeout elapses. A broker of
+// another instance answering fails at once: the spawned child lost the
+// ports to it, and minting from it would hand this instance's manager
+// another instance's broker.
 func (bc *brokerController) Healthy(ctx context.Context) error {
+	ours, err := bc.state.ReadInstanceID()
+	if err != nil {
+		return fmt.Errorf("broker health: %w", err)
+	}
 	pollCtx, cancel := context.WithTimeout(ctx, brokerHealthTimeout)
 	defer cancel()
 	var last error
-	err := retry.Until(pollCtx, 0, brokerHealthInterval, func() (bool, error) {
-		last = httpjson.Get(pollCtx, bc.admin, bc.adminURL+wire.PathEpoch, nil)
-		return last == nil, nil
+	err = retry.Until(pollCtx, 0, brokerHealthInterval, func() (bool, error) {
+		got, gerr := readBrokerIdentity(pollCtx, bc.admin, bc.adminURL)
+		switch {
+		case gerr != nil:
+			last = gerr
+			return false, nil
+		case got.InstanceID != ours:
+			return false, foreignBrokerError(bc.app.EffectiveAdminPort(), got, ours)
+		}
+		return true, nil
 	})
-	if err != nil && ctx.Err() == nil {
-		return fmt.Errorf("broker did not become healthy within %s (last err: %v)", brokerHealthTimeout, last)
+	if err != nil && ctx.Err() == nil && pollCtx.Err() != nil {
+		return fmt.Errorf("broker did not become healthy within %s (last err: %v); if another process holds 127.0.0.1:%d or 127.0.0.1:%d, the broker could not bind it: see %s",
+			brokerHealthTimeout, last, bc.app.EffectiveJailPort(), bc.app.EffectiveAdminPort(), stateRel(bc.state, bc.state.OutLog()))
 	}
 	return err
 }

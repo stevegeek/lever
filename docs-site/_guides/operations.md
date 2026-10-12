@@ -230,6 +230,7 @@ Everything is in `.lever-state/`, mode 0600. Two kinds of file differ in who bou
 | File | What it is | Bounded by |
 |---|---|---|
 | `broker.log` | the capability and messaging audit trail | **you** — unbounded |
+| `instance-id.json` | this instance's id and the state directory it was made for (see [two instances on one host](#two-instances-on-one-host)); delete it only with the broker stopped | lever — written once |
 | `remote-audit.jsonl` | one line per request the remote-access proxy allowed or denied (only with `remote:` configured) | **you** — unbounded |
 | `broker.out.log`, `remote.log`, `tool-logs/<tool>.log` | process output of the broker, the remote proxy and each supervised tool | **you** — unbounded |
 | `directives.log` | the operator-directive audit log (issued, delivered, consumed, revoked, and each denial) | lever — past 1 MiB it is renamed to `directives.log.1`, replacing the previous `.1` |
@@ -648,6 +649,7 @@ off as usual.
 | Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then `lever reload` |
 | "unknown recipient" / new worker invisible | broker still running on the old config | `lever reload` |
 | 502 on an external tool call | the host-side server isn't listening | `lever doctor` (`tool backends` row), start your server |
+| `lever apply` fails: "the broker on 127.0.0.1:8444 belongs to another lever instance" | another instance on this host uses the same broker ports | give this instance its own `broker.jail_port` and `broker.admin_port`; see [two instances on one host](#two-instances-on-one-host) |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
 | `lever apply`/`up` fails at `scion-server`: "hub not ready after …" | a hub start spends about 15 s before it serves (most of it a GCP metadata lookup that times out off GCP), and a cold start after a reboot or a scion pin change takes longer. lever waits up to 2 minutes and prints a line after 15 s; before 0.30.0 it gave up after 30 probes (about 30 s), and a retry seconds later found the hub up | run the command again; if it fails again, read `~/.scion/server.log` in the guest (`orb -m lever-<name>` or `limactl shell lever-<name>`). "no scion server is running in the jail any more" means the server exited during start-up: its log says why |
 | `lever apply`/`up` fails at `start-manager`: "manager … stayed in phase \"created\" … and did not settle"; the guest's `~/.scion/server.log` shows `context canceled` on a start about every 30 s | the first rootless start of a large image (several GB) builds podman's user-namespace layer copy, which can take longer than scion's ~30 s start timeout; scion then deletes the partial work and starts again from zero, every time. lever 0.34.2 and later warms the copy of every image in the `load-image` step on every apply (fast once warm; a warning there means the warm-up failed) | in the guest, as the jail user: `podman run --rm --userns=keep-id:uid=1000,gid=1000 --entrypoint true <image>` (it can take a few minutes), then `lever up --fresh` — a manager that never left phase created has no conversation to lose |
@@ -671,6 +673,53 @@ off as usual.
 | `lever up` (or `apply`) prints `start-manager: manager "<name>" still starting — …; 45s elapsed` | a manager start takes a while: the container start, the pre-start hook, claude's boot and the settle window can run over a minute | nothing: it prints a line about every 15 s with what it waits for, the hub's phase and container, and the time since the start. A line that repeats the same stage for minutes names where it is stuck |
 | The manager start fails (`claude exited before it came up`, or `came up, then died`) and the error names a stale background session; or doctor's `claude background sessions` row warns | the conversation was moved into a Claude Code background session (`/background`, `/bg`, the left-arrow key) before the last restart; its session records name the old container, and `claude --continue` refuses | move the stale records aside in the agent home, then `lever stop && lever up`; see [background sessions and /login](#background-sessions-and-login) |
 | Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
+
+## Two instances on one host
+
+Each instance is its own directory: its `lever.yaml`, its tree and its `.lever-state/`. Two
+instances can run on one host at once, but they share the host's loopback ports, and `lever.yaml`
+validation sees only its own file, so it cannot catch a clash between them. Give the second
+instance:
+
+- **its own `name`.** The jail VM is `lever-<name>`; two instances with one name share a VM.
+- **its own broker ports**, `broker.jail_port` and `broker.admin_port` (defaults 8443 and 8444).
+- **its own remote ports** when remote access is on, `remote.port` and `remote.login_port`
+  (defaults 8445 and 8447); see [several remote-enabled instances](/remote-access/).
+- **its own tool ports**: each supervised tool's `backend` port, and a whisper tool's
+  `-whisper-port`.
+
+```yaml
+# instance B's lever.yaml
+name: assistant-b
+broker:
+  jail_port: 8453
+  admin_port: 8454
+  # and each supervised tool's backend on a port instance A does not use
+```
+
+**Keep each instance's `manager.allow_ports` off the other's ports.** Validation refuses an
+instance's own admin port and tool ports in its `allow_ports`, but not another instance's: listing
+instance A's admin port in instance B's `allow_ports` hands B's agents A's unauthenticated admin
+API.
+
+**A broker is never shared.** Each instance has a random instance id, made on first use in
+`.lever-state/instance-id.json`, and its broker reports it on `/epoch`. `lever apply`, `up` and
+`reload` reuse or restart a running broker only when it reports this instance's id. When another
+instance's broker answers on the configured admin port, they stop with an error that names the
+ports to change, and leave that broker running. `lever revoke` and `lever broker bump-epoch` refuse it
+the same way, so a revoke never reaches the other instance's agents. A broker started by a lever
+that predates the id reports none: apply restarts it when this instance's `broker.pid` names a live
+process, then checks the port fell silent, and otherwise refuses. A copied instance directory makes
+its own id on its first apply (the file records the directory it belongs to), so a copy and its
+original never pass for one another; the copy's `broker.pid` and `remote.pid` name the original's
+processes, so its `lever stop`, `reload` and `apply` remove them and never signal them. Moving an
+instance looks the same to lever (a new id, the pid files dropped): stop it (`lever stop`) before
+you move it.
+
+`lever doctor`'s `instance ports` row warns when a configured port is held by a process that is not
+this instance's: another instance's broker on the broker ports, or any listener on a port whose
+process of this instance (the broker, its tools, the remote proxy) is not running. It names the
+holder when `lsof` can see it.
 
 ## Deploying an image as an archive
 

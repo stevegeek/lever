@@ -16,17 +16,70 @@
 # through `limactl shell` (the scion + lever-agent install pipes), and
 # header-free `limactl list --format`.
 #
-# Env overrides: NAME, JAIL_PORT, ADMIN_PORT, SUPPRESS_PORT, SCION_VERSION,
-# KEEP=1 (skip teardown for inspection).
+# Host ports: the broker's jail and admin ports, the db tool's backend and the
+# port the suppression check listens on in the guest (which must be free on
+# the host too, or the check would reach the host's listener). Each is picked
+# free on 127.0.0.1 unless set, so a run never lands on another lever
+# instance's ports (lever#181). A port set explicitly that is in use stops the
+# run before anything starts, naming the process holding it.
+#
+# Env overrides: NAME, JAIL_PORT, ADMIN_PORT, TOOL_PORT, SUPPRESS_PORT,
+# SCION_VERSION, KEEP=1 (skip teardown for inspection). On failure the end of
+# the broker and tool logs is printed (masked), with or without KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 NAME="${NAME:-limae2e}"
-JAIL_PORT="${JAIL_PORT:-8443}"
-ADMIN_PORT="${ADMIN_PORT:-8444}"
-SUPPRESS_PORT="${SUPPRESS_PORT:-8898}"
 MACHINE="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
+
+# --- host ports ------------------------------------------------------------------
+# Chosen before anything is created, so a refusal leaves nothing to clean up.
+# port_busy <port>: something accepts connections on 127.0.0.1:<port>.
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# port_holder <port>: the process listening on <port>, as best the host can tell.
+port_holder() {
+  local out=""
+  if command -v lsof >/dev/null 2>&1; then
+    out="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fpc 2>/dev/null | awk '
+      /^p/ && !p { p = substr($0, 2) } /^c/ && !c { c = substr($0, 2) }
+      END { if (p) printf "pid %s (%s)", p, c }')"
+  fi
+  if [ -z "$out" ] && command -v ss >/dev/null 2>&1; then
+    out="$(ss -ltnpH "sport = :$1" 2>/dev/null | sed -n 's/.*users:(\(.*\))$/\1/p' | head -1)"
+  fi
+  echo "${out:-an unknown process (lsof/ss could not tell)}"
+}
+
+# pick_port <var>: keep <var> when set (refusing to start if it is in use),
+# else set it to a free port at or above $next_port, not one already taken by
+# this run.
+picked=" "
+next_port=$((20000 + RANDOM % 9000))
+pick_port() {
+  local var="$1" val="${!1:-}"
+  if [ -n "$val" ]; then
+    if port_busy "$val"; then
+      echo "$var=$val is in use on 127.0.0.1 by $(port_holder "$val"); stop it or pick another port"
+      exit 1
+    fi
+  else
+    val=$next_port
+    while port_busy "$val" || [[ "$picked" == *" $val "* ]]; do
+      val=$((val + 1))
+      [ "$val" -lt 65000 ] || { echo "no free port found for $var"; exit 1; }
+    done
+    next_port=$((val + 1))
+  fi
+  picked="$picked$val "
+  printf -v "$var" '%s' "$val"
+}
+for v in JAIL_PORT ADMIN_PORT TOOL_PORT SUPPRESS_PORT; do pick_port "$v"; done
+if [ "$(printf '%s\n' "$JAIL_PORT" "$ADMIN_PORT" "$TOOL_PORT" "$SUPPRESS_PORT" | sort -u | wc -l)" -ne 4 ]; then
+  echo "JAIL_PORT, ADMIN_PORT, TOOL_PORT and SUPPRESS_PORT must differ:$picked"; exit 1
+fi
+
 
 # Ensure the REAL Go toolchain is on PATH regardless of CWD. lever shells out to
 # `go` (the host-side scion cross-compile) from the instance dir; under an
@@ -60,19 +113,49 @@ say()  { end_phase; phase_name="$*"; phase_start=$SECONDS; printf '\n%s === %s =
 ok()   { printf '%s   PASS: %s\n' "$(ts)" "$*"; }
 bad()  { printf '%s   FAIL: %s\n' "$(ts)" "$*"; fail=1; }
 
-# show_logs prints the end of the instance's broker and tool logs, so a
+# mask_secrets hides anything shaped like a credential, on top of lever's own
+# masking in these logs: API keys, GitHub tokens, bearer tokens, PEM private
+# keys, and the value of any secret/token/password/key field. perl, because
+# BSD sed has no case-insensitive substitution; without perl nothing is
+# printed rather than something unmasked.
+mask_secrets() {
+  if ! command -v perl >/dev/null 2>&1; then
+    echo "      | (perl not found: log not shown unmasked)"
+    return 0
+  fi
+  perl -pe '
+    s/sk-ant-[A-Za-z0-9_-]+/sk-ant-***/g;
+    s/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/$1***/g;
+    s/(authorization["\x27]?\s*[:=]\s*).*/$1***/gi;
+    s/(bearer\s+)[A-Za-z0-9._~+\/=-]+/$1***/gi;
+    s/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/***jwt***/g;
+    s#(://)[^/\s:@]+:[^/\s@]+@#$1***@#g;
+    $k = 1 if /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+    if ($k) { $k = 0 if /-----END [A-Z ]*PRIVATE KEY-----/; $_ = "[private key masked]\n"; }
+    s/((?:secret|token|password|passwd|credential|private[_-]?key|api[_-]?key)[A-Za-z_-]*["\x27]?\s*[:=]\s*["\x27]?)[^"\x27\s,}]+/$1***/gi;
+  '
+}
+
+# show_logs prints the end of the instance's broker and tool logs, masked, so a
 # failed run explains itself without KEEP=1. lever masks credentials in
-# these files; they hold no keys.
+# these files; they hold no keys. The exit trap prints them on a failed run
+# unless a failed acceptance already did.
+logs_shown=""
 show_logs() {
+  logs_shown=1
   st="$INST/.lever-state"
   for f in "$st/broker.out.log" "$st/broker.log" "$st"/tool-logs/*.log; do
     [ -f "$f" ] || continue
     printf '%s   --- last lines of %s:\n' "$(ts)" "${f#$WORK/}"
-    tail -n 20 "$f" | sed 's/^/      | /'
+    tail -n 30 "$f" | mask_secrets | sed 's/^/      | /'
   done
 }
 
 cleanup() {
+  rc=$?
+  if { [ "$rc" != "0" ] || [ "$fail" != "0" ]; } && [ -z "$logs_shown" ]; then
+    show_logs
+  fi
   if [ "${KEEP:-0}" = "1" ]; then
     echo "KEEP=1: leaving VM $MACHINE + broker up; work dir $WORK"
     return
@@ -86,6 +169,7 @@ trap cleanup EXIT
 # --- preflight -------------------------------------------------------------------
 command -v limactl >/dev/null 2>&1 || { echo "limactl not found (brew install lima)"; exit 1; }
 say "lima $(limactl --version 2>&1 | head -1)"
+echo "host ports: jail $JAIL_PORT, admin $ADMIN_PORT, db tool $TOOL_PORT, suppression check $SUPPRESS_PORT"
 
 # Lima's vz VMs run the host's native arch; build the in-guest lever-agent to match.
 case "$(uname -m)" in
@@ -161,7 +245,7 @@ $authblock
   tools:
     - name: db
       command: [$BIN/lever-tool-db, -dsn, "file:$INST/ref.db"]
-      backend: 127.0.0.1:3201
+      backend: 127.0.0.1:$TOOL_PORT
       operations:
         - name: read
           caveat_param:

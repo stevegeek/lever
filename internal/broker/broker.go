@@ -78,6 +78,12 @@ type Config struct {
 	// instead of silently reusing it (#19). Both optional (empty = unreported).
 	Version    string
 	ConfigHash string
+	// InstanceID is this instance's id (state.EnsureInstanceID), reported
+	// by /epoch so a host-side caller can tell this instance's broker from
+	// another instance's on the same ports (lever#181). Optional (empty =
+	// unreported, which every caller treats as "not ours"). Not
+	// DirectiveConfig.InstanceID, the instance name signed directives carry.
+	InstanceID string
 	// ToolSecret is the per-boot broker-to-tool shared secret (minted by
 	// brokerctl.Serve, delivered to each supervised first-party tool through
 	// its environment). The gateway presents it in X-Lever-Tool-Secret on
@@ -426,10 +432,11 @@ type Broker struct {
 	fileLedger *fileRecord // FilesConfig.LedgerDir
 	filesRate  *rateWindow // list + share calls
 
-	version    string // reported by /epoch (see Config.Version)
-	configHash string // reported by /epoch (see Config.ConfigHash)
-	toolSecret string // presented to first-party tools (see Config.ToolSecret)
-	timeouts   TimeoutConfig
+	version         string // reported by /epoch (see Config.Version)
+	configHash      string // reported by /epoch (see Config.ConfigHash)
+	epochInstanceID string // reported by /epoch (see Config.InstanceID)
+	toolSecret      string // presented to first-party tools (see Config.ToolSecret)
+	timeouts        TimeoutConfig
 }
 
 // New builds a Broker from c.
@@ -464,7 +471,7 @@ func New(c Config) *Broker {
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
-		log: c.Log, version: c.Version, configHash: c.ConfigHash, toolSecret: c.ToolSecret,
+		log: c.Log, version: c.Version, configHash: c.ConfigHash, epochInstanceID: c.InstanceID, toolSecret: c.ToolSecret,
 		timeouts: c.Timeouts.withDefaults(),
 		// persisted state
 		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,

@@ -27,7 +27,6 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
-	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/jailabi"
@@ -40,7 +39,6 @@ import (
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/webpush"
-	"github.com/stevegeek/lever/internal/wire"
 )
 
 // checkResult is one diagnostic outcome. detail is shown in both the pass and
@@ -97,6 +95,9 @@ type doctorProbes struct {
 	remoteLogin func(port int) (loginProbeResult, error)
 	// remoteJailLogin asks the hub, from inside the jail, to start a login.
 	remoteJailLogin func(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error)
+	// portHolder names the process listening on a host loopback port
+	// ("pid 123, python3"), or "" when it cannot tell.
+	portHolder func(ctx context.Context, port int) string
 }
 
 // productionProbes wires the real probes. Host subprocesses (go, node,
@@ -121,6 +122,7 @@ func productionProbes(r proc.Runner) doctorProbes {
 		remoteHealthz:   remoteHealthzProbe,
 		remoteLogin:     remoteLoginProbe,
 		remoteJailLogin: remoteJailLoginProbe,
+		portHolder:      func(ctx context.Context, port int) string { return lsofHolder(ctx, r, port) },
 	}
 }
 
@@ -540,12 +542,16 @@ func liveAgentMessages(ctx context.Context, app *config.App, st state.State) age
 		brokerHash: func() (string, bool) {
 			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
-			var er wire.EpochResponse
-			u := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), wire.PathEpoch)
 			// A redirect is not the broker's answer: never followed.
 			client := &http.Client{Timeout: 2 * time.Second,
 				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-			if err := httpjson.Get(ctx, client, u, &er); err != nil {
+			er, err := readBrokerIdentity(ctx, client, fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort()))
+			if err != nil {
+				return "", false
+			}
+			// Another instance's broker on these ports says nothing about
+			// this instance's (the instance ports row reports it).
+			if ours, err := st.ReadInstanceID(); err != nil || er.InstanceID != ours {
 				return "", false
 			}
 			return er.ConfigHash, true

@@ -16,6 +16,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -74,14 +75,16 @@ func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps,
 func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	var epochHits int
 	var app *config.App
+	var st state.State
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
 		epochHits++
-		_ = json.NewEncoder(w).Encode(wire.EpochResponse{
+		id, _ := st.ReadInstanceID()
+		_ = json.NewEncoder(w).Encode(broker.EpochAnswer{EpochResponse: wire.EpochResponse{
 			Epoch:      1,
 			Version:    cli.VersionString(),
 			ConfigHash: brokerctl.ConfigHash(app),
-		})
+		}, InstanceID: id})
 	})
 	mux.HandleFunc("/bootstrap", func(http.ResponseWriter, *http.Request) {
 		t.Error("StartBroker must not hit /bootstrap")
@@ -90,7 +93,6 @@ func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	defer srv.Close()
 
 	var deps apply.Deps
-	var st state.State
 	deps, app, st, _ = buildDepsAgainstFakeBroker(t, srv)
 
 	// Seed broker.pid as a directory: the restart branch reads it via StopBroker
@@ -116,19 +118,21 @@ func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 // otherwise follow (and without which this branch is untestable in-process).
 func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 	var app *config.App
+	var st state.State
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(wire.EpochResponse{
+		// This instance's broker (its id), started by an older binary.
+		id, _ := st.ReadInstanceID()
+		_ = json.NewEncoder(w).Encode(broker.EpochAnswer{EpochResponse: wire.EpochResponse{
 			Epoch:      1,
 			Version:    "some-older-binary",
 			ConfigHash: brokerctl.ConfigHash(app),
-		})
+		}, InstanceID: id})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	var deps apply.Deps
-	var st state.State
 	deps, app, st, _ = buildDepsAgainstFakeBroker(t, srv)
 
 	if err := os.MkdirAll(st.PID(), 0o755); err != nil {
@@ -234,16 +238,21 @@ func TestMintManagerBootstrapNon200(t *testing.T) {
 }
 
 // TestBrokerHealthyReturnsOnOK proves the health poll succeeds as soon as
-// /epoch answers 200.
+// /epoch answers 200 with this instance's id (lever#181).
 func TestBrokerHealthyReturnsOnOK(t *testing.T) {
+	var st state.State
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		id, _ := st.ReadInstanceID()
+		_ = json.NewEncoder(w).Encode(broker.EpochAnswer{InstanceID: id})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	deps, _, _, _ := buildDepsAgainstFakeBroker(t, srv)
+	deps, _, st, _ := buildDepsAgainstFakeBroker(t, srv)
+	if _, err := st.EnsureInstanceID(); err != nil { // Start makes it in a real apply
+		t.Fatal(err)
+	}
 
 	if err := deps.BrokerHealthy(context.Background()); err != nil {
 		t.Fatalf("BrokerHealthy against a 200 /epoch: %v", err)

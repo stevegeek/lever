@@ -178,6 +178,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	checks := []func() checkResult{
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
 		func() checkResult {
+			return checkInstancePorts(app, state, instancePortsProbesFor(ctx, state, probes))
+		},
+		func() checkResult {
 			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, time.Now())
 		},
 		func() checkResult {

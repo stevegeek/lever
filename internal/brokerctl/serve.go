@@ -220,7 +220,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 // leaves unset — Persistence (state-dir revocation/directive state and their
 // write-through closures), Directives (the operator-directive channel, when
 // enabled), Dispatch (the worker-dispatch runtime, worker specs, instance
-// project and URLs) — plus the /epoch Version/ConfigHash pair. It is the exact
+// project and URLs) — plus the /epoch Version, ConfigHash and InstanceID. It is the exact
 // wiring Serve applies between BuildBroker and broker.New;
 // single_project_dispatch_test drives this same function so the two can never
 // drift.
@@ -260,6 +260,14 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
+	// The instance id (lever#181), made here when apply did not make it
+	// first (a `lever broker serve` run by hand). Made before any port is
+	// bound, so no broker of this instance ever answers without it.
+	id, err := st.EnsureInstanceID()
+	if err != nil {
+		return err
+	}
+	cfg.InstanceID = id
 	return nil
 }
 

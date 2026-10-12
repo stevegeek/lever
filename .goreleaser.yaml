@@ -57,6 +57,18 @@ builds:
     goos: [darwin, linux]
     goarch: [amd64, arm64]
 
+  - id: lever-tool-tts
+    main: ./cmd/lever-tool-tts
+    binary: lever-tool-tts
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+
 archives:
   - id: lever
     formats: [tar.gz]

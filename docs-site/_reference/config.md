@@ -505,7 +505,8 @@ access guide](/remote-access/) for the accepted security posture, setup steps, a
 | `voice.enabled` | bool | no | `false` | Dictation on the chat page: a login records a clip, the broker tool [`lever-tool-whisper`](/whisper-tool/) transcribes it, and the text lands in the message box for review (never sent by itself). Needs `landing: chat` and `voice.socket` (rejected at config load without them). Off, the proxy has no voice route, and the page shows no mic and no read-aloud button. On, it also turns on read-aloud (`voice.read_aloud`). The transcription settings (program, model, language, vocabulary, GPU, port) are the tool's flags, not keys here. See the [guide](/remote-access/#dictation-and-read-aloud). |
 | `voice.socket` | absolute path | when `voice.enabled` | - | The tool's dictation socket, which the proxy posts each clip to. A clean absolute path **outside the tree** (a `manager.read_only` entry does not excuse it), at most 103 bytes, in a directory private to you. When `broker.tools` has a whisper tool (an entry whose program has the base name `lever-tool-whisper`), config load refuses a `socket` that is not one of their `-dictate-socket` values. |
 | `voice.max_seconds` | int | no | `300` | The longest clip, in seconds; the page stops recording there. `0` or unset is the default; otherwise `1` to `600`, and at most the whisper tool's `-max-seconds` (config load refuses more). |
-| `voice.read_aloud` | bool | no | `true` | The speaker button on agent messages, which reads a message aloud with the browser's on-device voices (nothing leaves the device). Shown only while `voice.enabled`; `false` hides it. A login with `voice: false` gets neither dictation nor read-aloud. |
+| `voice.read_aloud` | `device`, `server` or `off` | no | `device` | The speaker button on agent messages. `device`: it reads with the browser's on-device voices (nothing leaves the device). `server`: it reads with a neural voice of the broker tool [`lever-tool-tts`](/tts-tool/) on your host, and with the device's voices while the tool is down; needs `voice.speak_socket`. `off` hides it. `true` and `false` are read as `device` and `off`. Shown only while `voice.enabled`. A login with `voice: false` gets neither dictation nor read-aloud. See [server voices](/remote-access/#server-voices). |
+| `voice.speak_socket` | absolute path | when `voice.read_aloud: server` | - | The tts tool's speech socket, which the proxy posts each part of a message to. A clean absolute path **outside the tree** (a `manager.read_only` entry does not excuse it), at most 103 bytes, in a directory private to you, not `voice.socket`. When `broker.tools` has a tts tool (an entry whose program has the base name `lever-tool-tts`, or that takes `-speak-socket`), config load refuses a `speak_socket` that is not one of their `-speak-socket` values. The voice settings (program, model, voice, speed, threads, longest text) are the tool's flags, not keys here. |
 
 ```yaml
 remote:
@@ -527,6 +528,8 @@ remote:
   # voice:                                    # optional; dictation on the chat page (needs landing: chat)
   #   enabled: true
   #   socket: /home/you/my-instance/.lever-state/whisper/dictate.sock   # lever-tool-whisper's -dictate-socket
+  #   read_aloud: server                    # optional; device (default), server or off
+  #   speak_socket: /home/you/my-instance/.lever-state/tts/speak.sock    # with server: lever-tool-tts's -speak-socket
 ```
 
 ## Conventions & derived values

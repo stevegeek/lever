@@ -485,10 +485,11 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 	// download link) or option (a read-aloud voice, its text set as text),
 	// the attributes it sets are the href of the two fixed links and of a
 	// file row (lever's own download route, built from a checked agent name
-	// and id) and that row's download name, the one fetch is the api
+	// and id) and that row's download name, the fetches are the api
 	// helper's (the dictation clip goes through it too, to lever's own
-	// route with its custom header), and the one XMLHttpRequest is the
-	// upload. A new element kind, attribute or request shows up here, to be
+	// route with its custom header) and read-aloud's (a part of a message,
+	// to lever's own speak route with the same header, answered as audio),
+	// and the one XMLHttpRequest is the upload. A new element kind, attribute or request shows up here, to be
 	// looked at.
 	js, err := chatUI.ReadFile("chatui/chat.js")
 	if err != nil {
@@ -508,7 +509,7 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`setAttribute\('download', `: 1,
 		`new XMLHttpRequest\(`:       1,
 		`\.\s*open\s*\(`:             1,
-		`\bfetch\(`:                  1,
+		`\bfetch\(`:                  2,
 		`serviceWorker\.register\(swScriptURL\(\), \{ scope: '/lever/' \}\)`: 1,
 		// The one Trusted Types policy, whose only output is the worker URL.
 		`createPolicy\(`: 1,
@@ -519,10 +520,14 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`serviceWorker\.register\(`:                    1,
 		`pushManager\.subscribe\(`:                     1,
 		`new EventSource\(`:                            1,
-		// Dictation posts only to lever's route, with its header; speech
-		// is the browser's own synthesis, never a network voice.
+		// Dictation and read-aloud post only to lever's routes, with
+		// their header; speech is the browser's own synthesis or lever's
+		// server voice (played with Web Audio), never a network voice.
 		`'/lever/api/voice/transcribe'`: 1,
-		`'X-Lever-Voice': '1'`:          1,
+		`'/lever/api/voice/speak'`:      1,
+		`'X-Lever-Voice': '1'`:          2,
+		`createBufferSource\(`:          2, // dictation's resampling and read-aloud's playback
+		`decodeAudioData\(`:             2, // the same two
 		`getUserMedia\(`:                1,
 		`speechSynthesis\.speak\(`:      1,
 		`pickVoice\(`:                   2,

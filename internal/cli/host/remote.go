@@ -91,6 +91,9 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader(), provider.Port(), provider.IssuerURL())
 			if app.VoiceOn() {
 				cmd.Printf("dictation on: through lever-tool-whisper's socket %s\n", app.Remote.Voice.Socket)
+				if app.EffectiveReadAloud() == config.ReadAloudServer {
+					cmd.Printf("read-aloud with server voices: through lever-tool-tts's socket %s (the device's voices when it is down)\n", app.Remote.Voice.SpeakSocket)
+				}
 			}
 			err = serveRemote(ctx, app, st, provider, handler)
 			stop()
@@ -215,16 +218,24 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 }
 
 // remoteVoiceConfig is dictation (remote.voice) as the proxy runs it: each
-// checked clip goes to lever-tool-whisper's dictation socket. Nil when off.
+// checked clip goes to lever-tool-whisper's dictation socket; with
+// read_aloud: server, each part of a message read aloud goes to
+// lever-tool-tts's speech socket. Nil when off.
 func remoteVoiceConfig(app *config.App) *remoteproxy.VoiceConfig {
 	if !app.VoiceOn() {
 		return nil
 	}
 	c := &voice.DictateClient{Socket: app.Remote.Voice.Socket}
-	return &remoteproxy.VoiceConfig{MaxSeconds: app.EffectiveVoiceMaxSeconds(), Excluded: app.VoiceExcludedLogins(),
-		ReadAloud: app.Remote.Voice.ReadAloud == nil || *app.Remote.Voice.ReadAloud,
+	vc := &remoteproxy.VoiceConfig{MaxSeconds: app.EffectiveVoiceMaxSeconds(), Excluded: app.VoiceExcludedLogins(),
+		ReadAloud: app.EffectiveReadAloud() != config.ReadAloudOff,
 		NotSent:   func(err error) bool { return errors.Is(err, voice.ErrNotSent) },
 		Available: c.Available, Transcribe: c.Transcribe}
+	if app.EffectiveReadAloud() == config.ReadAloudServer {
+		s := &voice.SpeakClient{Socket: app.Remote.Voice.SpeakSocket}
+		vc.Speech = &remoteproxy.SpeechConfig{Available: s.Available, Speak: s.Speak,
+			NotSent: func(err error) bool { return errors.Is(err, voice.ErrSpeakNotSent) }}
+	}
+	return vc
 }
 
 // pushTestHosts is the TEST ONLY exception: both remote.push.test_hosts and

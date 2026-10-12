@@ -78,11 +78,17 @@ func CheckSocketPath(p string) error {
 // caller's that nothing answers on; anything else at path is refused. The
 // socket is 0600.
 func ListenDictate(path string) (net.Listener, error) {
+	return listenPrivate(path, "dictation socket", "lever-tool-whisper")
+}
+
+// listenPrivate is ListenDictate for a socket described as what, served by
+// the tool named tool (for the messages).
+func listenPrivate(path, what, tool string) (net.Listener, error) {
 	if err := CheckSocketPath(path); err != nil {
 		return nil, err
 	}
 	if err := PrivateDir(filepath.Dir(path)); err != nil {
-		return nil, fmt.Errorf("dictation socket directory: %w", err)
+		return nil, fmt.Errorf("%s directory: %w", what, err)
 	}
 	fi, err := os.Lstat(path)
 	switch {
@@ -90,17 +96,17 @@ func ListenDictate(path string) (net.Listener, error) {
 	case err != nil:
 		return nil, err
 	case fi.Mode()&fs.ModeSocket == 0:
-		return nil, fmt.Errorf("dictation socket %s: something that is not a socket is there (%s); lever leaves it alone", path, fi.Mode().Type())
+		return nil, fmt.Errorf("%s %s: something that is not a socket is there (%s); lever leaves it alone", what, path, fi.Mode().Type())
 	default:
 		if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
-			return nil, fmt.Errorf("dictation socket %s belongs to uid %d, not to you", path, owner)
+			return nil, fmt.Errorf("%s %s belongs to uid %d, not to you", what, path, owner)
 		}
 		if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
 			c.Close()
-			return nil, fmt.Errorf("dictation socket %s is in use: another lever-tool-whisper serves it", path)
+			return nil, fmt.Errorf("%s %s is in use: another %s serves it", what, path, tool)
 		}
 		if err := os.Remove(path); err != nil {
-			return nil, fmt.Errorf("dictation socket %s: removing the stale socket: %w", path, err)
+			return nil, fmt.Errorf("%s %s: removing the stale socket: %w", what, path, err)
 		}
 	}
 	ln, err := net.Listen("unix", path)
@@ -405,26 +411,35 @@ func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, err
 // could have made it and listen there), or that is not the caller's own
 // socket. The clip is then not sent (ErrNotSent).
 func checkSocketOwner(p string) error {
+	if err := socketOwnerErr(p, "dictation socket"); err != nil {
+		return fmt.Errorf("%w: %w", ErrNotSent, err)
+	}
+	return nil
+}
+
+// socketOwnerErr is checkSocketOwner's test for the socket p, described as
+// what, with no error of its own wrapped.
+func socketOwnerErr(p, what string) error {
 	dir := filepath.Dir(p)
 	di, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("%w: the dictation socket's directory: %v", ErrNotSent, err)
+		return fmt.Errorf("the %s's directory: %v", what, err)
 	}
 	if !di.IsDir() || di.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%w: the dictation socket's directory %s is not a private directory (mode %v)", ErrNotSent, dir, di.Mode())
+		return fmt.Errorf("the %s's directory %s is not a private directory (mode %v)", what, dir, di.Mode())
 	}
 	if owner, ok := fileOwner(di); ok && owner != os.Getuid() {
-		return fmt.Errorf("%w: the dictation socket's directory %s belongs to uid %d, not to you", ErrNotSent, dir, owner)
+		return fmt.Errorf("the %s's directory %s belongs to uid %d, not to you", what, dir, owner)
 	}
 	si, err := os.Lstat(p)
 	if err != nil {
-		return fmt.Errorf("%w: the dictation socket: %v", ErrNotSent, err)
+		return fmt.Errorf("the %s: %v", what, err)
 	}
 	if si.Mode()&fs.ModeSocket == 0 {
-		return fmt.Errorf("%w: %s is not a socket", ErrNotSent, p)
+		return fmt.Errorf("%s is not a socket", p)
 	}
 	if owner, ok := fileOwner(si); ok && owner != os.Getuid() {
-		return fmt.Errorf("%w: the dictation socket %s belongs to uid %d, not to you", ErrNotSent, p, owner)
+		return fmt.Errorf("the %s %s belongs to uid %d, not to you", what, p, owner)
 	}
 	return nil
 }

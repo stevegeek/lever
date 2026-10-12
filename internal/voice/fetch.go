@@ -37,6 +37,24 @@ func HuggingFaceHost(u *url.URL) bool {
 	return h == "huggingface.co" || strings.HasSuffix(h, ".huggingface.co") || strings.HasSuffix(h, ".hf.co")
 }
 
+// GitHubReleaseHost reports whether u is a host GitHub serves release
+// assets from, over https on the default port: github.com, which answers a
+// download with a redirect, and the content hosts it redirects to
+// (release-assets.githubusercontent.com, and objects.githubusercontent.com
+// before it). Not any other *.githubusercontent.com host: those serve
+// repository content. Every other host is refused, the first request and
+// every redirect alike. Speech model archives come from there.
+func GitHubReleaseHost(u *url.URL) bool {
+	if u.Scheme != "https" || u.User != nil || u.Port() != "" && u.Port() != "443" {
+		return false
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com":
+		return true
+	}
+	return false
+}
+
 // Fetcher downloads a pinned model. The zero value is the real one.
 type Fetcher struct {
 	// Client is the HTTP client; nil = one with connection timeouts and no
@@ -44,7 +62,8 @@ type Fetcher struct {
 	// replaced.
 	Client *http.Client
 	// AllowHost decides every host the download may reach; nil =
-	// HuggingFaceHost. Tests allow their own loopback server.
+	// HuggingFaceHost for a Whisper model, GitHubReleaseHost for a speech
+	// model's archive. Tests allow their own loopback server.
 	AllowHost func(*url.URL) bool
 	// Progress, when set, gets a line every 10 per cent.
 	Progress io.Writer
@@ -74,13 +93,40 @@ func (f Fetcher) FetchFrom(ctx context.Context, m Model, src, dir string) (strin
 		// A file that is there but wrong is replaced below, never used.
 		f.say("%s: the file there does not verify (%v); downloading again\n", m.Name, err)
 	}
-	allow := f.AllowHost
-	if allow == nil {
-		allow = HuggingFaceHost
+	tmp, err := f.download(ctx, download{name: m.Name, src: src, size: m.Size, sha256: m.SHA256,
+		allow: HuggingFaceHost, hosts: "a Hugging Face host"}, dir)
+	if err != nil {
+		return "", err
 	}
-	u, err := url.Parse(src)
+	if err := os.Rename(tmp, final); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	return final, nil
+}
+
+// download is one pinned file to download: its name for messages, its
+// URL, size and sha256, and the hosts it may come from (allow, unless the
+// Fetcher's AllowHost is set; hosts names them in a refusal).
+type download struct {
+	name, src string
+	size      int64
+	sha256    string
+	allow     func(*url.URL) bool
+	hosts     string
+}
+
+// download fetches d into a private temp file (.fetch-*, mode 0600) in
+// dir and returns its path once its size and sha256 match the pins; the
+// caller renames or removes it. Nothing is left behind on an error.
+func (f Fetcher) download(ctx context.Context, d download, dir string) (string, error) {
+	allow := d.allow
+	if f.AllowHost != nil {
+		allow = f.AllowHost
+	}
+	u, err := url.Parse(d.src)
 	if err != nil || !allow(u) {
-		return "", fmt.Errorf("voice: refusing to download %s from %s: not a Hugging Face host", m.Name, src)
+		return "", fmt.Errorf("voice: refusing to download %s from %s: not %s", d.name, d.src, d.hosts)
 	}
 	client := http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -96,24 +142,24 @@ func (f Fetcher) FetchFrom(ctx context.Context, m Model, src, dir string) (strin
 			return errors.New("too many redirects")
 		}
 		if !allow(req.URL) {
-			return fmt.Errorf("refusing a redirect to %s: not a Hugging Face host", req.URL.Host)
+			return fmt.Errorf("refusing a redirect to %s: not %s", req.URL.Host, d.hosts)
 		}
 		return nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.src, nil)
 	if err != nil {
 		return "", err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("voice: download %s: %w", m.Name, err)
+		return "", fmt.Errorf("voice: download %s: %w", d.name, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("voice: download %s: HTTP %d", m.Name, resp.StatusCode)
+		return "", fmt.Errorf("voice: download %s: HTTP %d", d.name, resp.StatusCode)
 	}
-	if resp.ContentLength >= 0 && resp.ContentLength != m.Size {
-		return "", fmt.Errorf("voice: download %s: the server announces %d bytes, the pinned size is %d", m.Name, resp.ContentLength, m.Size)
+	if resp.ContentLength >= 0 && resp.ContentLength != d.size {
+		return "", fmt.Errorf("voice: download %s: the server announces %d bytes, the pinned size is %d", d.name, resp.ContentLength, d.size)
 	}
 	removeStaleFetches(dir, time.Now())
 	tmp, err := os.CreateTemp(dir, ".fetch-*")
@@ -131,15 +177,15 @@ func (f Fetcher) FetchFrom(ctx context.Context, m Model, src, dir string) (strin
 		return "", err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), &progressReader{r: io.LimitReader(resp.Body, m.Size+1), total: m.Size, f: f, name: m.Name})
+	n, err := io.Copy(io.MultiWriter(tmp, h), &progressReader{r: io.LimitReader(resp.Body, d.size+1), total: d.size, f: f, name: d.name})
 	if err != nil {
-		return "", fmt.Errorf("voice: download %s: %w", m.Name, err)
+		return "", fmt.Errorf("voice: download %s: %w", d.name, err)
 	}
-	if n != m.Size {
-		return "", fmt.Errorf("voice: download %s: got %d bytes, the pinned size is %d", m.Name, n, m.Size)
+	if n != d.size {
+		return "", fmt.Errorf("voice: download %s: got %d bytes, the pinned size is %d", d.name, n, d.size)
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != m.SHA256 {
-		return "", fmt.Errorf("voice: download %s: sha256 %s, the pinned sha256 is %s", m.Name, got, m.SHA256)
+	if got := hex.EncodeToString(h.Sum(nil)); got != d.sha256 {
+		return "", fmt.Errorf("voice: download %s: sha256 %s, the pinned sha256 is %s", d.name, got, d.sha256)
 	}
 	if err := tmp.Sync(); err != nil {
 		return "", err
@@ -147,13 +193,8 @@ func (f Fetcher) FetchFrom(ctx context.Context, m Model, src, dir string) (strin
 	if err := tmp.Close(); err != nil {
 		return "", err
 	}
-	if err := os.Rename(tmp.Name(), final); err != nil {
-		os.Remove(tmp.Name())
-		done = true
-		return "", err
-	}
 	done = true
-	return final, nil
+	return tmp.Name(), nil
 }
 
 func (f Fetcher) say(format string, a ...any) {
@@ -212,6 +253,13 @@ func Verify(p string, m Model) error {
 	if why := m.Pinned(); why != "" {
 		return fmt.Errorf("%w: %s", ErrUnpinned, why)
 	}
+	return verifyFile(p, m.Size, m.SHA256)
+}
+
+// verifyFile checks the file at p: a regular file of the caller's (no
+// symbolic link), not writable by others, of size bytes and sha256 sum.
+// A missing file is fs.ErrNotExist.
+func verifyFile(p string, size int64, sum string) error {
 	fi, err := os.Lstat(p)
 	if err != nil {
 		return err
@@ -221,8 +269,8 @@ func Verify(p string, m Model) error {
 		return fmt.Errorf("%w: %s is not a regular file (a symbolic link?)", ErrModel, p)
 	case fi.Mode().Perm()&0o022 != 0:
 		return fmt.Errorf("%w: %s is %v: another user can change it", ErrModel, p, fi.Mode().Perm())
-	case fi.Size() != m.Size:
-		return fmt.Errorf("%w: %s has %d bytes, the pinned size is %d", ErrModel, p, fi.Size(), m.Size)
+	case fi.Size() != size:
+		return fmt.Errorf("%w: %s has %d bytes, the pinned size is %d", ErrModel, p, fi.Size(), size)
 	}
 	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
 		return fmt.Errorf("%w: %s belongs to uid %d, not to you", ErrModel, p, owner)
@@ -236,8 +284,8 @@ func Verify(p string, m Model) error {
 	if _, err := io.Copy(h, file); err != nil {
 		return err
 	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != m.SHA256 {
-		return fmt.Errorf("%w: %s has sha256 %s, the pinned sha256 is %s", ErrModel, p, got, m.SHA256)
+	if got := hex.EncodeToString(h.Sum(nil)); got != sum {
+		return fmt.Errorf("%w: %s has sha256 %s, the pinned sha256 is %s", ErrModel, p, got, sum)
 	}
 	return nil
 }
@@ -290,20 +338,21 @@ func safeOwned(p string, fi fs.FileInfo) error {
 	return nil
 }
 
-// removeStaleFetches deletes partial downloads a killed fetch left in dir:
-// regular files named .fetch-*, untouched for a day (a fetch running now
-// writes its own file continuously). Best effort.
+// removeStaleFetches deletes what a killed fetch left in dir: partial
+// downloads (regular files named .fetch-*) and partly unpacked speech
+// models (private directories named .fetch-*), untouched for a day (a
+// fetch running now writes continuously). Best effort.
 func removeStaleFetches(dir string, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), ".fetch-") || !e.Type().IsRegular() {
+		if !strings.HasPrefix(e.Name(), ".fetch-") || !e.Type().IsRegular() && !e.IsDir() {
 			continue
 		}
 		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > 24*time.Hour {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
+			_ = os.RemoveAll(filepath.Join(dir, e.Name()))
 		}
 	}
 }

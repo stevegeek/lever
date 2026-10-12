@@ -52,6 +52,9 @@ func TestMain(m *testing.M) {
 	if fakeBin != "" {
 		os.RemoveAll(filepath.Dir(fakeBin))
 	}
+	if fakeSherpaBin != "" {
+		os.RemoveAll(filepath.Dir(fakeSherpaBin))
+	}
 	os.Exit(code)
 }
 

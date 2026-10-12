@@ -198,8 +198,9 @@ type Config struct {
 	Files *FilesConfig
 	// Voice (remote.voice) turns on dictation: the page records a clip and
 	// /lever/api/voice/transcribe turns it into text for the message box
-	// (voice.go). Nil = off: the route is a 404 and the roster carries no
-	// voice. Needs ChatAgent.
+	// (voice.go); with Voice.Speech, /lever/api/voice/speak reads a part of
+	// an agent message aloud with lever-tool-tts (speak.go). Nil = off: the
+	// routes are a 404 and the roster carries no voice. Needs ChatAgent.
 	Voice *VoiceConfig
 	// Push, when non-nil, is the Web Push service (remote.push, push.go):
 	// the page's subscription routes and worker, and the hub streams that
@@ -447,6 +448,11 @@ type AuditLine struct {
 	// the text.
 	AudioSeconds float64 `json:"audio_seconds,omitempty"`
 	LatencyMS    int64   `json:"latency_ms,omitempty"`
+	// MessageID and Chars describe a read-aloud request (speak.go): the
+	// message the page says the text is from (with Agent), and the text's
+	// length in characters. Never the text, never the audio.
+	MessageID string `json:"message_id,omitempty"`
+	Chars     int    `json:"chars,omitempty"`
 	// Error records why an allowed request never got an answer from the hub
 	// (set only on the 502 path). The transport's own diagnosis lands here
 	// rather than in the client's response body: the operator needs to know
@@ -646,6 +652,9 @@ func NewHandler(cfg Config) http.Handler {
 		}
 		if cfg.Voice != nil {
 			g.voice = newVoiceState(*cfg.Voice)
+			if cfg.Voice.Speech != nil {
+				g.speak = newSpeakState(*cfg.Voice.Speech)
+			}
 		}
 		if cfg.Push != nil {
 			g.push = cfg.Push
@@ -893,6 +902,7 @@ type gate struct {
 	push     *Push         // nil unless Config.Push and ChatAgent are set
 	files    *filesState   // nil unless Config.Files and ChatAgent are set
 	voice    *voiceState   // nil unless Config.Voice and ChatAgent are set
+	speak    *speakState   // nil unless Config.Voice.Speech is set too
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration

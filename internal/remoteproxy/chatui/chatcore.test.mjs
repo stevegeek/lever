@@ -2,6 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_MESSAGE,
+  SPEECH_FIRST,
+  pickServerVoice,
+  speakErrorText,
+  speechConfig,
+  speechParts,
   filesConfig,
   fileList,
   sizeText,
@@ -573,4 +578,58 @@ test('pickVoice uses on-device voices only', () => {
   assert.equal(pickVoice([net, de, en], '', 'en-US'), en, 'then the page language');
   assert.equal(pickVoice([net, de, en], '', ''), de, 'then the first');
   assert.deepEqual(localVoices([net, en, null, { localService: true }]), [en]);
+});
+
+test('speechConfig: the roster server voices, checked', () => {
+  const good = { speech: { voice: 'bf_emma', voices: [{ name: 'bf_emma', lang: 'en-GB' }, { name: 'am_adam', lang: 'en-US' }], maxChars: 600 } };
+  assert.deepEqual(speechConfig(good), { voice: 'bf_emma', voices: [{ name: 'bf_emma', lang: 'en-GB' }, { name: 'am_adam', lang: 'en-US' }], maxChars: 600 });
+  for (const bad of [null, {}, { speech: null }, { speech: { voices: [], maxChars: 600 } }, { speech: { voices: [{ name: 'a' }], maxChars: 50 } },
+    { speech: { voices: [{ name: 'a' }], maxChars: 5000 } }, { speech: { voices: [{ name: 'a' }], maxChars: '600' } }, { speech: { voices: 'a', maxChars: 600 } },
+    { speech: { voices: [{ name: '<b>' }, { name: 'a b' }, { name: 7 }], maxChars: 600 } }]) {
+    assert.equal(speechConfig(bad), null, JSON.stringify(bad));
+  }
+  // A default the list lacks falls to the first voice; bad entries are dropped.
+  const odd = speechConfig({ speech: { voice: 'gone', voices: [{ name: '../x' }, { name: 'ok_1', lang: 'en\nGB' }], maxChars: 100 } });
+  assert.deepEqual(odd, { voice: 'ok_1', voices: [{ name: 'ok_1', lang: 'en GB' }], maxChars: 100 });
+});
+
+test('pickServerVoice: the saved voice while the tool has it, else the default', () => {
+  const cfg = { voice: 'bf_emma', voices: [{ name: 'bf_emma' }, { name: 'am_adam' }], maxChars: 600 };
+  assert.equal(pickServerVoice(cfg, 'am_adam'), 'am_adam');
+  assert.equal(pickServerVoice(cfg, 'gone'), 'bf_emma');
+  assert.equal(pickServerVoice(cfg, ''), 'bf_emma');
+  assert.equal(pickServerVoice(null, 'am_adam'), '');
+});
+
+test('speechParts: sentences, a short first part, none over the limit', () => {
+  assert.deepEqual(speechParts('One. Two! Three?', 600), ['One. Two! Three?']);
+  assert.deepEqual(speechParts('', 600), []);
+  assert.deepEqual(speechParts('Line one\nline two', 600), ['Line one line two']);
+  const s = (n, c) => `${c.repeat(n - 1)}.`;
+  const text = [s(150, 'a'), s(100, 'b'), s(300, 'c'), s(250, 'd')].join(' ');
+  const parts = speechParts(text, 600);
+  assert.deepEqual(parts, [s(150, 'a'), `${s(100, 'b')} ${s(300, 'c')}`, s(250, 'd')]);
+  assert.ok([...parts[0]].length <= SPEECH_FIRST);
+  // A sentence longer than the limit is cut at a space, or anywhere.
+  const long = speechParts(`${'word '.repeat(300)}end.`, 100);
+  assert.ok(long.every((p) => [...p].length <= 100 && p === p.trim()), JSON.stringify(long));
+  assert.equal(long.join(' '), `${'word '.repeat(300)}end.`.replace(/\s+/g, ' '));
+  const solid = speechParts('x'.repeat(250), 100);
+  assert.deepEqual(solid.map((p) => p.length), [100, 100, 50]);
+  // A long first sentence: the first part is still short.
+  const firstLong = speechParts(`${'word '.repeat(100)}end. Next.`, 600);
+  assert.ok([...firstLong[0]].length <= SPEECH_FIRST, JSON.stringify(firstLong));
+  // A part with nothing to say is dropped.
+  assert.deepEqual(speechParts('Hello. --- 😀😀. World.', 600), ['Hello. --- 😀😀. World.']);
+  assert.deepEqual(speechParts(`${'a'.repeat(199)}. ${'-'.repeat(150)}`, 200), [`${'a'.repeat(199)}.`]);
+  // Code points, not UTF-16 units.
+  const emoji = speechParts('𝒜'.repeat(150), 100);
+  assert.deepEqual(emoji.map((p) => [...p].length), [100, 50]);
+});
+
+test('speakErrorText: the proxy words in the page words', () => {
+  assert.match(speakErrorText(429, { error: 'quota' }), /today/);
+  assert.match(speakErrorText(503, { error: 'unavailable' }), /server voice is unavailable/);
+  assert.match(speakErrorText(403, { error: 'agent' }), /not on your list/);
+  assert.equal(speakErrorText(500, { error: 'weird' }), 'weird (HTTP 500)');
 });

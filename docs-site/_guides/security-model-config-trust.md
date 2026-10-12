@@ -200,8 +200,8 @@ replaceable) by the agent. Config load therefore refuses these paths when they r
 | Kind | Paths | Inside `tree` |
 |---|---|---|
 | Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
-| Private host path | in a `lever-tool-whisper` `command`, the value of `-models` and `-dictate-socket` (its model directory and dictation socket); `remote.voice.socket` while voice is on | always refused: an agent could replace the model whisper-server loads, or reach or replace the socket, and a `manager.read_only` mount does not excuse it |
-| Program outside the tree | in a `lever-tool-whisper` `command`, the value of `-server` (the `whisper-server` program it runs) | always refused: a `manager.read_only` mount does not excuse it |
+| Private host path | in a `lever-tool-whisper` `command`, the value of `-models` and `-dictate-socket` (its model directory and dictation socket); in a `lever-tool-tts` `command`, the value of `-models` and `-speak-socket`; `remote.voice.socket` and `remote.voice.speak_socket` while voice is on | always refused: an agent could replace the model whisper-server loads, or reach or replace the socket, and a `manager.read_only` mount does not excuse it |
+| Program outside the tree | in a `lever-tool-whisper` `command`, the value of `-server` (the `whisper-server` program it runs); in a `lever-tool-tts` `command`, the value of `-server` (`sherpa-onnx-offline-tts`) | always refused: a `manager.read_only` mount does not excuse it |
 | Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`), also after an `env` prefix (its flags and `NAME=value` words are skipped) and after the command wrappers lever reads (`nice`, `nohup`, `setsid`, `timeout`, `stdbuf`, `ionice`, `taskset`, `uv run`, nested in any order with `env`); for `uv run`, its script (a `.py` file, or any after `--script`) and the values of its options that name code (`--with`, `--with-editable`, `--with-requirements`, `--project`, `--directory`, `--find-links`, `--index` and the other index options, `--cache-dir`, `--config-file`, `--env-file`, `--python`), relative ones against `--directory`; the value of `-fizzy`; the code an interpreter runs (`python`, `pypy`, `ruby`, `node`, `nodejs`, `perl`, `sh`, `bash`, `dash`, `zsh`, `deno`, `bun`, a version suffix such as `python3.12` allowed): the script, which is the first argument after the leading flags (and after `run` for `deno` and `bun`; a relative one after `env -C dir` resolves against `dir`), the value of every value-taking flag before it (`python -W`, `node --env-file`, `deno --config`, `bun --cwd` and the like: a value read as the script must not hide the real one), the value of a flag that loads code (`ruby -I`/`-r`, `perl -I`, `node --require`/`--import`/`--loader`, `bun --preload`), and the paths in inline code (`python -c`; `ruby`/`perl`/`node -e`; for the `sh` family, the command string of `-c` in any option group such as `-ec`, `-ce` or `-euo pipefail -c`, and, as a fallback, the word after any `-c` group anywhere in the command) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write); a `shared_folders` entry never excuses one (its writers can change it) |
 
 **This is a best-effort guard, not a sandbox.** Lever cannot know what an unknown flag's value is: a
@@ -213,7 +213,10 @@ tool's `-state` is checked the same way. `lever-tool-whisper`'s flags (`-server`
 `-dictate-socket`, `-model`, `-whisper-port`, `-max-seconds`, `-agent-max-seconds`) are read only in
 the command of a whisper tool: one whose program, after an `env` prefix, has the base name
 `lever-tool-whisper`, or whose command takes `-dictate-socket` (no other lever tool does), so a
-renamed binary or a wrapper script that passes the tool's flags keeps the whisper checks. Another
+renamed binary or a wrapper script that passes the tool's flags keeps the whisper checks.
+`lever-tool-tts`'s flags (`-server`, `-models`, `-speak-socket`, `-model`, `-voice`, `-speed`,
+`-threads`, `-max-chars`) are read the same way, only in the command of a tts tool: base name
+`lever-tool-tts`, or a command that takes `-speak-socket`. Another
 tool's `-server` or `-models` means something else and is not read. Flags are read past an `env`
 prefix, read option by option as GNU and BSD `env` read it, with a plain `env -S` string split
 into words and read again; config load refuses an `env` form lever cannot read the way `env` does
@@ -235,7 +238,10 @@ would read it. For a whisper tool, config load also requires `-tree` and refuses
 instance's tree, checks `-max-seconds` (1 to 600) and `-agent-max-seconds` (1 to `-max-seconds`), and
 refuses a `-whisper-port` the jail may reach (`manager.allow_ports`, the broker's
 jail port, the login port) or that collides with the broker's admin port, the remote proxy's port,
-port 8446 or a tool backend. It does not check any other
+port 8446 or a tool backend. For a tts tool it requires `-tree` (the instance's), `-models`,
+`-server` and `-speak-socket` (not a dictation socket, not another tts tool's), and checks
+`-model` and `-voice` against lever's table and `-speed`, `-threads` and `-max-chars` against
+their ranges; the tool has no port. It does not check any other
 flag or argument. **For your own tool, keep its secrets and the programs it runs outside the tree
 yourself.** Only the leading flags of an interpreter are read: what follows the script is the
 script's own business. Lever knows which of an interpreter's flags take a value from a fixed table; a
@@ -281,8 +287,9 @@ manager that lacks the mounts. The fix is the one for the mounts themselves:
 `lever up --fresh` (with `--keep-conversation` to keep the conversation, which you then trust as
 much as the manager). A manager that lacked the mounts before could already have
 rewritten the program; check it before you trust it again. `lever-tool-github` refuses its `-app-key`
-and `-state` inside its `-tree` on its own as well, and `lever-tool-whisper` its `-server`,
-`-models` and `-dictate-socket`.
+and `-state` inside its `-tree` on its own as well, `lever-tool-whisper` its `-server`,
+`-models` and `-dictate-socket`, and `lever-tool-tts` its `-server`, `-models` and
+`-speak-socket`.
 
 ### 5.6 Residual
 

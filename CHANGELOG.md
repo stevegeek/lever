@@ -111,6 +111,28 @@ version bump moves the block under the new version heading.
   instance's, naming it when `lsof` can. The operations guide has a section on running two
   instances on one host.
 
+- **Natural read-aloud: server voices with Kokoro on your own host (lever#200).** With
+  `remote.voice.read_aloud: server` the chat page's speaker button reads agent messages with a
+  neural voice (Kokoro's American and British English voices, or a lighter Piper voice) run by the
+  new first-party broker tool `lever-tool-tts`, which runs sherpa-onnx's
+  `sherpa-onnx-offline-tts` once per part of a message, as its child, with no port. You install
+  sherpa-onnx yourself, outside the tree, as for whisper.cpp; `lever voice fetch kokoro-en-v0_19`
+  downloads the model's archive from sherpa-onnx's `tts-models` GitHub release, pinned by size and
+  sha256, unpacks it only once verified (regular files and directories only, nothing outside its
+  top directory) and records every file's size and sha256 in a manifest; before every run whenever
+  something changed, the tool checks every file against that manifest and refuses any file it does
+  not list. The engine gets the text after `--`, so no text is ever read as an option. The page sends the cleaned text in parts of whole sentences, the first
+  one short so the voice starts quickly, to `POST /lever/api/voice/speak` (same origin,
+  `X-Lever-Voice`, an agent the login's list shows, at most the tool's `-max-chars`, 40,000
+  characters an hour and 200,000 a day per login), plays each part with Web Audio (also on iPhone
+  Safari) while it asks for the next, and falls back to the device's on-device voice when the
+  first part cannot be had. Agent text goes only to your host, never to a cloud speech service;
+  text and audio are never stored or logged (the audit line has the agent, message id, length,
+  outcome and latency). `read_aloud` now takes `device` (the default), `server` or `off`; `true`
+  and `false` still mean device and off. New `remote.voice.speak_socket`, `lever doctor` rows
+  *tts tool* and *tts model*, and the tts tool guide. Nothing in the jail changed for it: no image
+  rebuild.
+
 ### Changed
 
 - **`lever stop` no longer warns when the manager is already suspended (lever#198).** scion

@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -270,8 +271,8 @@ func reenrolBroker(t *testing.T, rt WorkerRuntime, mode string) (*Broker, Worker
 			c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = mode, managerDir
 			// The manager's resume checks pass (TestHealManagerResumeGuard
 			// covers their refusals).
-			c.Dispatch.ManagerResumeGuard = func(context.Context) (func(context.Context) error, error) {
-				return func(context.Context) error { return nil }, nil
+			c.Dispatch.ManagerResumeGuard = func(context.Context) (ManagerResumeCheck, error) {
+				return &fakeResumeCheck{verified: true}, nil
 			}
 		}))
 	return b, spec, managerDir
@@ -386,3 +387,21 @@ func mintWorkerTicket(t *testing.T, b *Broker, worker string) string {
 	}
 	return bs.Ticket
 }
+
+// fakeResumeCheck is a ManagerResumeCheck: After fails with afterErr,
+// AfterFailure records that it ran and joins failErr.
+type fakeResumeCheck struct {
+	afterErr, failErr error
+	verified          bool
+	failedWith        error
+}
+
+func (c *fakeResumeCheck) After(context.Context) error { return c.afterErr }
+func (c *fakeResumeCheck) AfterFailure(_ context.Context, cause error) error {
+	c.failedWith = cause
+	if c.failErr != nil {
+		return errors.Join(cause, c.failErr)
+	}
+	return cause
+}
+func (c *fakeResumeCheck) Verified() bool { return c.verified }

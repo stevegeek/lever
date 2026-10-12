@@ -2,6 +2,8 @@ package apply
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -26,10 +28,13 @@ import (
 //   - Live, once the manager is live (after the caller's gate), or Settle
 //     on a path with no gate: the same check again when it could not run
 //     the first time (the container was not running yet), and a warning if
-//     it still cannot.
+//     it still cannot;
+//   - AfterFailure, when the resume call or the gate failed: a container
+//     the resume started anyway is checked before the failure is reported.
 //
 // The caller must not report the manager up while Resumed, Live or Settle
-// returned an error.
+// returned an error. The checks run detached from the caller's
+// cancellation (bounded), so an interrupt does not skip them.
 type ManagerResume struct {
 	r        *run
 	project  string
@@ -41,8 +46,14 @@ type ManagerResume struct {
 // "conversation", "broker"). An error means: do not resume.
 func BeginManagerResume(ctx context.Context, d Deps, app *config.App, project, subject string) (*ManagerResume, error) {
 	m := &ManagerResume{r: &run{app: app, d: d, subject: subject}, project: project}
+	// Fail closed: without the two readers the read-back would pass
+	// without looking (verifyResumedTreeMounts treats them as optional
+	// for apply's tests).
+	if d.InspectContainerMounts == nil || d.CheckLiveMounts == nil {
+		return nil, fmt.Errorf("%s: internal error: the manager's mount checks are not wired, so lever does not resume it", subject)
+	}
 	if err := app.PrepareManagerReadOnlyHost(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", subject, err)
 	}
 	// Every caller resumes the record (none keeps it running as it is), so
 	// a gone directory refuses, as for apply's resume.
@@ -75,6 +86,23 @@ func (m *ManagerResume) Live(ctx context.Context) error {
 	return err
 }
 
+// AfterFailure is for a resume call or a gate that failed with cause: the
+// resume may still have started the container, so its mounts are read
+// back (a mismatch suspends it) and joined to cause. A container that is
+// not running says nothing.
+func (m *ManagerResume) AfterFailure(ctx context.Context, cause error) error {
+	if m.verified {
+		return cause
+	}
+	if _, err := m.r.verifyResumedTreeMounts(ctx, m.project); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+// Verified reports whether the resumed manager's mounts were read back.
+func (m *ManagerResume) Verified() bool { return m.verified }
+
 // settleBudget bounds Settle's wait for a container to run.
 var settleBudget = RetryBudget{Attempts: 30, Interval: time.Second}
 
@@ -86,7 +114,8 @@ func (m *ManagerResume) Settle(ctx context.Context) error {
 		return nil
 	}
 	var verr error
-	_ = retry.Until(ctx, settleBudget.Attempts, settleBudget.Interval, func() (bool, error) {
+	// Detached, like each check: an interrupt must not end the wait.
+	_ = retry.Until(context.WithoutCancel(ctx), settleBudget.Attempts, settleBudget.Interval, func() (bool, error) {
 		v, err := m.r.verifyResumedTreeMounts(ctx, m.project)
 		m.verified, verr = v, err
 		return v, nil

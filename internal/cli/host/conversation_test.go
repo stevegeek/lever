@@ -104,6 +104,12 @@ func (g *fakeResumeGuard) begin(context.Context) (managerResume, error) {
 func (g *fakeResumeGuard) Resumed(context.Context) error { return g.step("resumed") }
 func (g *fakeResumeGuard) Live(context.Context) error    { return g.step("live") }
 func (g *fakeResumeGuard) Settle(context.Context) error  { return g.step("settle") }
+func (g *fakeResumeGuard) AfterFailure(_ context.Context, cause error) error {
+	if err := g.step("after-failure"); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
 
 func newConvFixture(t *testing.T) *convFixture {
 	t.Helper()
@@ -447,6 +453,17 @@ func TestRestoreResumeChecks(t *testing.T) {
 				t.Fatalf("checks = %q gated %d, want %q gated %d", got, f.gated, tc.wantSteps, tc.wantGated)
 			}
 		})
+	}
+	// A failed resume is checked too: the container may run all the same.
+	f0 := newConvFixture(t)
+	writeConvFile(t, f0.transcript("old.jsonl"), "old\n")
+	m0, _, err0 := f0.ops.backup(context.Background(), "manual")
+	if err0 != nil {
+		t.Fatal(err0)
+	}
+	f0.sc.resumeErr = errors.New("hook failed")
+	if err := f0.ops.restore(context.Background(), m0.ID, false); err == nil || strings.Join(f0.guard.steps, ",") != "begin,after-failure" || f0.gated != 0 {
+		t.Fatalf("err = %v checks %q gated %d, want begin,after-failure", err, f0.guard.steps, f0.gated)
 	}
 	// The resume after a failed restore: a refused pre-check keeps the
 	// manager suspended and says so.

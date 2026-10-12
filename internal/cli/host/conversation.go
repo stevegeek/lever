@@ -62,6 +62,7 @@ type managerResume interface {
 	Resumed(ctx context.Context) error
 	Live(ctx context.Context) error
 	Settle(ctx context.Context) error
+	AfterFailure(ctx context.Context, cause error) error
 }
 
 // newConvOps wires convOps from a bring-up's live dependencies.
@@ -321,19 +322,21 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	}
 	guard, err := o.startResume(ctx)
 	if err != nil {
-		return fmt.Errorf("%w; the manager stays suspended", err)
+		return fmt.Errorf("%w; the conversation is restored, but the manager stays suspended: fix that, then run `lever up`", err)
 	}
 	if err := o.sc.Resume(ctx, o.app.Name, project); err != nil {
 		if scion.IsRefusedByHub(err) {
-			return apply.HubRefusedResume("resume", err)
+			err = apply.HubRefusedResume("resume", err)
+		} else {
+			err = apply.ResumeFailed("resume", err)
 		}
-		return apply.ResumeFailed("resume", err)
+		return guard.AfterFailure(ctx, err)
 	}
 	if err := guard.Resumed(ctx); err != nil {
 		return err
 	}
 	if err := o.gate(ctx); err != nil {
-		return err
+		return guard.AfterFailure(ctx, err)
 	}
 	return guard.Live(ctx)
 }
@@ -355,14 +358,16 @@ func (o convOps) resumeAfterFailure(ctx context.Context, cause error, how string
 		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
 	}
 	if rerr := o.sc.Resume(rctx, o.app.Name, o.guest.Workspace); rerr != nil {
-		return fmt.Errorf("%w; the manager is suspended and resuming it failed (%s): run `lever up`", cause, termsafe.Sanitize(scion.ErrSummary(rerr)))
+		err := fmt.Errorf("%w; the manager is suspended and resuming it failed (%s): run `lever up`", cause, termsafe.Sanitize(scion.ErrSummary(rerr)))
+		return guard.AfterFailure(rctx, err)
 	}
 	// No liveness gate here: Settle checks until the container runs.
-	if verr := guard.Resumed(rctx); verr != nil {
-		return fmt.Errorf("%w; the manager was resumed, then: %w", cause, verr)
+	verr := guard.Resumed(rctx)
+	if verr == nil {
+		verr = guard.Settle(rctx)
 	}
-	if verr := guard.Settle(rctx); verr != nil {
-		return fmt.Errorf("%w; the manager was resumed, then: %w", cause, verr)
+	if verr != nil {
+		return fmt.Errorf("%w; resuming the manager after that failed its mount check: %w", cause, verr)
 	}
 	if how != "" {
 		how = " " + how

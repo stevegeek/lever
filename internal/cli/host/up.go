@@ -108,6 +108,9 @@ func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name
 			err = apply.WaitManagerLive(ctx, deps, name, project, prog)
 		}
 		if err != nil {
+			if guard != nil {
+				err = guard.AfterFailure(ctx, err)
+			}
 			return err
 		}
 		if guard == nil {
@@ -133,9 +136,12 @@ func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project 
 	}
 	if err := resume(ctx); err != nil {
 		if scion.IsRefusedByHub(err) {
-			return nil, apply.HubRefusedResume("resume", err)
+			err = apply.HubRefusedResume("resume", err)
+		} else {
+			err = apply.ResumeFailed("resume", err)
 		}
-		return nil, apply.ResumeFailed("resume", err)
+		// The container may have started all the same.
+		return nil, guard.AfterFailure(ctx, err)
 	}
 	if err := guard.Resumed(ctx); err != nil {
 		return nil, err

@@ -388,18 +388,6 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// shared_folders: no worker that mounts one starts or resumes while the
 	// running manager lacks the pins that keep it from swapping a folder.
 	d.SharedGuard = sharedGuard(app, jr, jailMount)
-	// The re-enrol bounce of the manager is a resume: the checks apply
-	// runs around its own (lever#158), with the same client and runner.
-	d.ManagerResumeGuard = managerResumeGuard(app, apply.Deps{
-		Scion: sc,
-		Log:   daemon.Warnf,
-		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
-			return jail.ContainerMounts(ctx, jr, ref)
-		},
-		CheckLiveMounts: func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
-			return jail.ContainerLiveMounts(ctx, jr, ref, want)
-		},
-	}, jailMount)
 	// shared_folders: a resume is refused when the worker's record holds a
 	// shared mount the config no longer grants (broker.refuseStaleShares).
 	// With a folder configured a failed read refuses the resume; with none,
@@ -422,6 +410,31 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		}
 		return nil, fmt.Errorf("no hub record for worker %q", agent)
 	}
+	// The re-enrol bounce of the manager is a resume: the checks apply
+	// runs around its own (lever#158), with the same client and runner.
+	d.ManagerResumeGuard = managerResumeGuard(app, apply.Deps{
+		Scion: sc,
+		Log:   daemon.Warnf,
+		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
+			return jail.ContainerMounts(ctx, jr, ref)
+		},
+		CheckLiveMounts: func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return jail.ContainerLiveMounts(ctx, jr, ref, want)
+		},
+		// The record's mounts when the manager has no container, for the
+		// gone-directory check (as apply reads them).
+		RecordVolumes: func(ctx context.Context, _, agent string) ([]jail.Mount, error) {
+			vols, err := readVolumes(ctx, agent)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]jail.Mount, 0, len(vols))
+			for _, v := range vols {
+				out = append(out, jail.Mount{Source: v.Source, Destination: v.Target, RW: !v.ReadOnly})
+			}
+			return out, nil
+		},
+	}, jailMount)
 	if len(app.SharedFolders) > 0 {
 		d.RecordVolumes = readVolumes
 	} else {
@@ -549,17 +562,28 @@ func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
 // checks before the resume (apply.BeginManagerResume), and after it the
 // read-back of the tree mounts, again until the container runs (there is
 // no liveness gate on the bounce), suspending the manager on a mismatch.
-func managerResumeGuard(app *config.App, d apply.Deps, jailMount string) func(context.Context) (func(context.Context) error, error) {
-	return func(ctx context.Context) (func(context.Context) error, error) {
+func managerResumeGuard(app *config.App, d apply.Deps, jailMount string) func(context.Context) (broker.ManagerResumeCheck, error) {
+	return func(ctx context.Context) (broker.ManagerResumeCheck, error) {
 		g, err := apply.BeginManagerResume(ctx, d, app, jailMount, "broker")
 		if err != nil {
 			return nil, err
 		}
-		return func(ctx context.Context) error {
-			if err := g.Resumed(ctx); err != nil {
-				return err
-			}
-			return g.Settle(ctx)
-		}, nil
+		return resumeCheck{g}, nil
 	}
 }
+
+// resumeCheck is broker.ManagerResumeCheck over an apply.ManagerResume.
+type resumeCheck struct{ g *apply.ManagerResume }
+
+func (c resumeCheck) After(ctx context.Context) error {
+	if err := c.g.Resumed(ctx); err != nil {
+		return err
+	}
+	return c.g.Settle(ctx)
+}
+
+func (c resumeCheck) AfterFailure(ctx context.Context, cause error) error {
+	return c.g.AfterFailure(ctx, cause)
+}
+
+func (c resumeCheck) Verified() bool { return c.g.Verified() }

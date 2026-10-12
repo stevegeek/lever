@@ -228,3 +228,62 @@ func TestManagerResumeSettle(t *testing.T) {
 		})
 	}
 }
+
+// A resume that fails may still have started the container: its mounts are
+// read back before the failure is reported, and a mismatch suspends it.
+func TestStartManagerChecksMountsAfterFailedResume(t *testing.T) {
+	_, app := readOnlyConfig(t, true)
+	jp := JailPath(app.Tree, app.Tree, "")
+	mounts := []jail.Mount{
+		{Source: jp, Destination: "/workspace", RW: true},
+		{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
+		{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
+	}
+	f := scionOKRunner()
+	r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "suspended", initContainerStatus: "stopped",
+		resumeErr: errors.New("pre-start hook failed")}
+	err := runApply(app, Deps{
+		Scion:                  scion.New(r, scion.Options{}),
+		InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
+		CheckLiveMounts: func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return []jail.LiveMountProblem{{Target: "/workspace/assistant/tools", Reason: jail.LiveMountElsewhere}}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is mounted from another place") || !sawScionCall(f, "suspend hello") {
+		t.Fatalf("err = %v calls %q, want the mount mismatch reported and the manager suspended", err, joinedCalls(f))
+	}
+}
+
+// An interrupt (a cancelled context) right after the resume does not skip
+// the read-back or the suspend.
+func TestManagerResumeCheckSurvivesCancel(t *testing.T) {
+	app := &config.App{Name: "hello", Tree: t.TempDir()}
+	if err := os.Mkdir(filepath.Join(app.Tree, "kb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := scionOKRunner()
+	d := Deps{
+		Scion: scion.New(f, scion.Options{}),
+		InspectContainerMounts: func(ctx context.Context, _ string) ([]jail.Mount, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return []jail.Mount{{Source: "/lever/kb", Destination: "/workspace/kb"}}, nil
+		},
+		CheckLiveMounts: func(ctx context.Context, _ string, _ []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}, nil
+		},
+	}
+	g, err := BeginManagerResume(context.Background(), d, app, "/lever", "up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := g.Resumed(ctx); err == nil || !strings.Contains(err.Error(), "is mounted from another place") || !sawScionCall(f, "suspend hello") {
+		t.Fatalf("err = %v calls %q, want the mismatch found and the manager suspended despite the cancel", err, joinedCalls(f))
+	}
+}

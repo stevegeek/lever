@@ -1218,6 +1218,17 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err == nil {
 		err = r.waitManagerLive(ctx, jp, acted, probes.start)
 	}
+	// A failed resume or gate can still leave a recreated container
+	// running (a scion error after the start, an interrupt): read its
+	// mounts back before the failure is reported, so a swapped mount is
+	// suspended rather than left running unchecked. A container that is not
+	// running reads as unverified, which says nothing here.
+	if err != nil && !verified && rec != nil && !r.fresh && !managerKept(rec) && !r.managerCreated {
+		probes.wait()
+		if _, verr := r.verifyResumedTreeMounts(ctx, jp); verr != nil {
+			err = errors.Join(err, verr)
+		}
+	}
 	if err == nil && resumed && !verified {
 		// The post-live probes (started by the gate) read the same mounts:
 		// let them end first, so the two never race, and the manager is
@@ -1771,12 +1782,19 @@ func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, kept bool) er
 // container yet, not running, unreadable): the caller tries again once the
 // manager is live, and warns if it still cannot. With no inspect or live
 // check wired there is nothing to run, and verified is true.
+// resumeCheckTimeout bounds one verifyResumedTreeMounts, suspend included.
+const resumeCheckTimeout = 90 * time.Second
+
 func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified bool, err error) {
 	if r.d.InspectContainerMounts == nil || r.d.CheckLiveMounts == nil {
 		// Not wired (tests; the CLI wires both): nothing to check with,
 		// and warnManagerTreeMounts names the gap when a plan exists.
 		return true, nil
 	}
+	// Detached from the caller's cancellation, bounded: an interrupt (^C)
+	// right after the resume must not skip the check or the suspend.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resumeCheckTimeout)
+	defer cancel()
 	ref := jail.ContainerName(path.Base(jp), r.app.Name)
 	got, err := r.d.InspectContainerMounts(ctx, ref)
 	if err != nil {

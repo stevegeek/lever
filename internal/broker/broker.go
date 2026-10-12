@@ -144,6 +144,20 @@ type LLMConfig struct {
 	Upstream string
 }
 
+// ManagerResumeCheck is the half of DispatchConfig.ManagerResumeGuard that
+// runs after the bounce's resume (apply.ManagerResume in production).
+type ManagerResumeCheck interface {
+	// After reads back, from the guest, where each of the resumed
+	// manager's tree mounts comes from, until its container runs; a
+	// mismatch suspends the manager and is the error.
+	After(ctx context.Context) error
+	// AfterFailure is After for a resume that failed with cause: a
+	// container it started anyway is checked, its error joined to cause.
+	AfterFailure(ctx context.Context, cause error) error
+	// Verified reports whether After could read the mounts back.
+	Verified() bool
+}
+
 // DispatchConfig is the host-side worker dispatch and messaging wiring.
 type DispatchConfig struct {
 	// Runtime is the scion client the broker drives; Workers are the
@@ -244,11 +258,10 @@ type DispatchConfig struct {
 	// ManagerResumeGuard runs the checks apply runs around a resume of the
 	// manager (lever#158) for the broker's own: the re-enrol bounce.
 	// Called before anything is staged, it refuses when the host tree or
-	// the manager record's mounts are not what lever planned; the function
-	// it returns runs right after the resume and reads back, from the
-	// guest, where each tree mount comes from, suspending the manager on a
-	// mismatch. nil: the broker never resumes the manager (fail closed).
-	ManagerResumeGuard func(ctx context.Context) (after func(ctx context.Context) error, err error)
+	// the manager record's mounts are not what lever planned; the check it
+	// returns runs after the resume (see ManagerResumeCheck). nil: the
+	// broker never resumes the manager (fail closed).
+	ManagerResumeGuard func(ctx context.Context) (ManagerResumeCheck, error)
 	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
 	// instance tree (jail.StageWorkerTicket in production). The manager
 	// mounts the whole tree, so nothing a worker must redeem may be written
@@ -346,7 +359,7 @@ type Broker struct {
 	// configured (refuseStaleShares).
 	leftoverShareVolumes RecordVolumesFunc
 	sharedGuard          func(ctx context.Context) error
-	managerResumeGuard   func(ctx context.Context) (func(ctx context.Context) error, error)
+	managerResumeGuard   func(ctx context.Context) (ManagerResumeCheck, error)
 	// afterWorkspaceMkdir is a test seam: called between a strict worker
 	// workspace mkdir and the walk that follows it. nil outside tests.
 	afterWorkspaceMkdir func()

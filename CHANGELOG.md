@@ -341,7 +341,10 @@ version bump moves the block under the new version heading.
   manager: `lever up`'s own (also the one after a VM restart, lever#179), which now checks the
   `read_only` paths on the host before it as apply does, `lever conversation restore` and its
   resume after a failed restore or backup, and the broker's re-enrol bounce, which does not resume
-  the manager when it cannot run them. A source that is gone no longer makes the whole live check
+  the manager when it cannot run them and says in its audit line when the read-back could not
+  run. A resume that reports a failure is checked as well (the container may have started all the
+  same), and an interrupt (^C) right after a resume no longer skips the check or the suspend. A
+  source that is gone no longer makes the whole live check
   unreadable: that mount alone is reported. The swap itself cannot be prevented: until that check, the
   manager may already hold the wrong mount.
 - **A hung probe's `podman exec` ends in the guest too (lever#158).** A host-side deadline killed

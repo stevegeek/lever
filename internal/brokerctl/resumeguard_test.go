@@ -2,6 +2,7 @@ package brokerctl
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,8 +59,8 @@ func TestManagerResumeGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := after(context.Background()); err != nil || suspended(f) {
-		t.Fatalf("after = %v, suspended %v", err, suspended(f))
+	if err := after.After(context.Background()); err != nil || suspended(f) || !after.Verified() {
+		t.Fatalf("after = %v, suspended %v, verified %v", err, suspended(f), after.Verified())
 	}
 	// From elsewhere after the resume: refused, the manager suspended.
 	deps, f = newDeps([]jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}})
@@ -67,7 +68,20 @@ func TestManagerResumeGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := after(context.Background()); err == nil || !strings.Contains(err.Error(), "is mounted from another place") || !suspended(f) {
+	if err := after.After(context.Background()); err == nil || !strings.Contains(err.Error(), "is mounted from another place") || !suspended(f) {
 		t.Fatalf("after = %v, suspended %v", err, suspended(f))
+	}
+	// A failed resume whose container runs all the same is checked too.
+	deps, f = newDeps([]jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}})
+	after, err = managerResumeGuard(app, deps, "/lever")(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := after.AfterFailure(context.Background(), errors.New("hook failed")); err == nil || !strings.Contains(err.Error(), "hook failed") || !strings.Contains(err.Error(), "another place") || !suspended(f) {
+		t.Fatalf("after failure = %v, suspended %v", err, suspended(f))
+	}
+	// Unwired readers: refused before anything is resumed.
+	if _, err := managerResumeGuard(app, apply.Deps{}, "/lever")(context.Background()); err == nil {
+		t.Fatal("a guard without the mount readers must refuse")
 	}
 }

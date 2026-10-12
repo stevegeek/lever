@@ -14,8 +14,9 @@ Developer notes for working on lever itself. For using lever, start at the
 | `cmd/lever-tool-github` | Host-side broker tool: pushes an agent's git bundle to one `agent/*` branch with a short-lived GitHub App token; opt-in PR, merge and release operations (`-ops`). |
 | `cmd/lever-tool-fizzy` | Host-side broker tool: a fixed set of operations on one Fizzy board, through the `fizzy` CLI. |
 | `cmd/lever-tool-whisper` | Host-side broker tool: runs whisper.cpp's `whisper-server` for the chat page's dictation (over a Unix socket) and an optional agent `transcribe` operation. |
+| `cmd/lever-tool-tts` | Host-side broker tool: runs sherpa-onnx's `sherpa-onnx-offline-tts` once per text for the chat page's read-aloud with server voices (over a Unix socket). |
 | `captool/` | Public SDK for first-party capability tools (independent token verification + backstop). Imported by `examples/`; the only non-`internal` package. |
-| `internal/` | Shared packages for all seven binaries (listed below). |
+| `internal/` | Shared packages for all eight binaries (listed below). |
 | `internal/agent` | In-jail lever-agent core: keypair, enrolment, capability MCP server, loopback gateway, token renewal. |
 | `internal/agentledger` | Host record of each contact message the broker authorized an agent to send. |
 | `internal/apply` | `lever apply`/`up` bring-up: the pure `Plan` and the `Run` executor. |
@@ -54,7 +55,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/state` | The `.lever-state` directory layout and its file helpers: JSON state, 0600 secrets, pid files, the remote-proxy stamp. |
 | `internal/termsafe` | Makes guest-supplied strings safe to print on the operator's terminal. |
 | `internal/testutil` | Stdlib-only assertion helpers shared by test packages (`WantErrIs`, `WantErrContaining`). |
-| `internal/voice` | Speech to text on the host: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. |
+| `internal/voice` | Speech on the host. Speech to text: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. Text to speech: the pinned speech models (`genspeechpins` prints a model's pins from a local clone), the sherpa-onnx adapter, the per-text runner and the speech socket of `lever-tool-tts`. |
 | `internal/webpush` | Web Push (RFC 8030/8291/8292) sender for the chat page's notifications, stdlib only. |
 | `internal/wire` | Leaf package: agent⇄broker request/response types, route paths and bootstrap material. Imports no other lever package. |
 | `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |
@@ -79,7 +80,7 @@ which needs a Go toolchain.
 ## Build
 
 ```bash
-make install          # host `lever`, `lever-tool-github`, `lever-tool-fizzy`, `lever-tool-whisper` → $PREFIX (default ~/.local/bin)
+make install          # host `lever`, `lever-tool-github`, `lever-tool-fizzy`, `lever-tool-whisper`, `lever-tool-tts` → $PREFIX (default ~/.local/bin)
 make lever-image      # cross-compile in-jail binaries + docker build the agent image (LEVER_IMAGE_ARCH, default: host Go arch)
 make lever-image-bins # cross-compile in-jail binaries into an instance's image build context only
 ```

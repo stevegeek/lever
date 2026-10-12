@@ -37,8 +37,9 @@ hand-written `.mcp.json`. After you change `broker.tools` or grants on a running
 | [github](/github-tool/) | `lever-tool-github` | Push a branch from a git bundle, with no GitHub credential in the jail. |
 | [fizzy](/fizzy-tool/) | `lever-tool-fizzy` | Work on one Fizzy board, with no Fizzy token in the jail. |
 | [whisper](/whisper-tool/) | `lever-tool-whisper` | Speech to text on the host, for the chat page's dictation and, if granted, an agent's audio file. |
+| [tts](/tts-tool/) | `lever-tool-tts` | Text to speech on the host, a natural voice for the chat page's read-aloud; agents get only a read-only list of the voices. |
 
-`make install` builds all three into `~/.local/bin`. lever also ships `lever-tool-db`, a reference
+`make install` builds all four into `~/.local/bin`. lever also ships `lever-tool-db`, a reference
 tool for writing your own.
 
 To register any MCP server as a broker tool, including third-party servers that are already

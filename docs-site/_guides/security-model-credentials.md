@@ -144,7 +144,8 @@ capability token, which the broker verifies and forwards and the tool verifies a
 [fizzy tool](/fizzy-tool/) guides. `lever-tool-whisper` holds no credential, but it is a
 first-party host tool on the same terms: its `transcribe` operation reads WAV files from the tree
 root's `.lever-files/whisper/` (which only the manager can write) for any agent holding the
-capability. See the [whisper tool](/whisper-tool/) guide.
+capability. See the [whisper tool](/whisper-tool/) guide. `lever-tool-tts` holds no credential
+either; its only operation, `voices`, is read-only. See the [tts tool](/tts-tool/) guide.
 
 **In-jail hub reachability (residual).** The capability broker above is the audited seam for
 agent lifecycle, but the in-jail scion Hub API itself remains reachable from inside an agent

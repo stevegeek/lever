@@ -53,6 +53,25 @@ version bump moves the block under the new version heading.
   e2e prints a time on every line, each phase's duration and a table of them, and on a failed
   acceptance the end of the broker and tool logs.
 
+- **Natural read-aloud: server voices with Kokoro on your own host (lever#200).** With
+  `remote.voice.read_aloud: server` the chat page's speaker button reads agent messages with a
+  neural voice (Kokoro's American and British English voices, or a lighter Piper voice) run by the
+  new first-party broker tool `lever-tool-tts`, which runs sherpa-onnx's
+  `sherpa-onnx-offline-tts` once per part of a message, as its child, with no port. You install
+  sherpa-onnx yourself, outside the tree, as for whisper.cpp; `lever voice fetch kokoro-en-v0_19`
+  downloads the model's files, each pinned by size and sha256 and checked again before every run
+  whenever a file changed. The page sends the cleaned text in parts of whole sentences, the first
+  one short so the voice starts quickly, to `POST /lever/api/voice/speak` (same origin,
+  `X-Lever-Voice`, an agent the login's list shows, at most the tool's `-max-chars`, 40,000
+  characters an hour and 200,000 a day per login), plays each part with Web Audio (also on iPhone
+  Safari) while it asks for the next, and falls back to the device's on-device voice when the
+  first part cannot be had. Agent text goes only to your host, never to a cloud speech service;
+  text and audio are never stored or logged (the audit line has the agent, message id, length,
+  outcome and latency). `read_aloud` now takes `device` (the default), `server` or `off`; `true`
+  and `false` still mean device and off. New `remote.voice.speak_socket`, `lever doctor` rows
+  *tts tool* and *tts model*, and the tts tool guide. Nothing in the jail changed for it: no image
+  rebuild.
+
 ### Changed
 
 - **`lever up` says what it is doing from its first line (lever#195):** a header naming the

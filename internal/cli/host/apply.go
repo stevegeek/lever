@@ -1415,6 +1415,9 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 			return jail.ContainerRunning(ctx, b.JailRunner(), ref)
 		},
 		AgentRevoked: agentRevoked(w.app, st),
+		// GuestBoot lets start-manager and up recover a manager record a
+		// hard VM kill left "running" (lever#179).
+		GuestBoot: jailGuestBoot{jr: b.JailRunner(), st: st},
 
 		EnsureHubLogin: w.ensureHubLogin,
 		// DisableHubLogin removes the guest-side bridge when remote access is

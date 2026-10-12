@@ -141,6 +141,13 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Println(upProbeNotice(probeErr, fresh))
 			}
 			decision := upDecision(phase, fresh)
+			// A record left "running" by a hard VM kill (a new guest boot,
+			// no live container) is suspended here and resumed below: what
+			// the operator used to do by hand with `lever stop` + `lever up`
+			// (lever#179). Never --fresh: the conversation is kept.
+			if decision == upNone && apply.RecoverAfterGuestRestart(ctx, deps, app.Name, project) {
+				decision = upResume
+			}
 			var prog *apply.Progress
 			switch decision {
 			case upApply:
@@ -198,6 +205,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			apply.RecordGuestBoot(ctx, deps)
 			stop()
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)

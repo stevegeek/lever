@@ -92,6 +92,11 @@ func (s State) SkillsAdopted() string { return filepath.Join(s.Dir, "skills-adop
 // remote.pid keeps the answer host-side, where only lever writes it.
 func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
 
+// GuestBoot records the jail guest boot id in which lever last saw the
+// manager live (apply.GuestBoot), so a VM restart under a "running" record
+// can be recognised (lever#179).
+func (s State) GuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json") }
+
 // PushDir holds the remote proxy's Web Push key, subscriptions and last
 // send result (remote.push), each 0600.
 func (s State) PushDir() string { return filepath.Join(s.Dir, "push") }

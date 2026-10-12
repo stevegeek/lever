@@ -322,6 +322,10 @@ type agentLifecycleRunner struct {
 
 	startCalls, resumeCalls, deleteCalls, listCalls int
 	resumeForceCalls                                int // subset of resumeCalls carrying --force
+	// suspendCalls counts `scion suspend`; a successful one makes the
+	// record suspended/stopped, suspendErr fails it and leaves the record.
+	suspendCalls int
+	suspendErr   error
 }
 
 func (r *agentLifecycleRunner) ensureInit() {
@@ -425,6 +429,14 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 			return proc.Result{Code: 1, Stderr: r.resumeErr.Error()}, r.resumeErr
 		}
 		r.goLive()
+		return proc.Result{Stdout: "ok"}, nil
+	case "suspend":
+		r.suspendCalls++
+		r.record(dir, env, name, args)
+		if r.suspendErr != nil {
+			return proc.Result{Code: 1, Stderr: r.suspendErr.Error()}, r.suspendErr
+		}
+		r.phase, r.containerStatus = "suspended", "stopped"
 		return proc.Result{Stdout: "ok"}, nil
 	case "delete":
 		r.deleteCalls++

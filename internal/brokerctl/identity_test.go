@@ -280,3 +280,55 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 		}
 	}
 }
+
+// shared_folders and manager.read_only feed the broker's worker specs,
+// shared mounts and guard plan, so changing either must restart it; an
+// instance that sets neither keeps the hash it had (the golden above).
+func TestConfigHashCoversSharedFoldersAndReadOnly(t *testing.T) {
+	mk := func() *config.App {
+		return &config.App{
+			Name: "hello", Backend: "orbstack", Tree: "/tmp/tree",
+			Workers:       []config.Worker{{Name: "w1", Dir: "workers/w1"}, {Name: "w2", Dir: "workers/w2"}},
+			SharedFolders: []config.SharedFolder{{Path: "shared/x", Writers: []string{"w1"}, Readers: []string{"w2"}}},
+		}
+	}
+	base := ConfigHash(mk())
+	if base != ConfigHash(mk()) {
+		t.Fatal("hash not deterministic")
+	}
+	for name, change := range map[string]func(*config.App){
+		"writers":   func(a *config.App) { a.SharedFolders[0].Writers = nil },
+		"readers":   func(a *config.App) { a.SharedFolders[0].Readers = []string{config.SharedAllWorkers} },
+		"path":      func(a *config.App) { a.SharedFolders[0].Path = "shared/y" },
+		"name":      func(a *config.App) { a.SharedFolders[0].Name = "z" },
+		"removed":   func(a *config.App) { a.SharedFolders = nil },
+		"read_only": func(a *config.App) { a.Manager.ReadOnly = []string{"bin"} },
+	} {
+		a := mk()
+		change(a)
+		if ConfigHash(a) == base {
+			t.Errorf("changing %s must change the hash", name)
+		}
+	}
+	ro := mk()
+	ro.Manager.ReadOnly = []string{"bin"}
+	ro2 := mk()
+	ro2.Manager.ReadOnly = []string{"tools"}
+	if ConfigHash(ro) == ConfigHash(ro2) {
+		t.Fatal("changing a read_only entry must change the hash")
+	}
+
+	// Neither set: the hash is the one from before either was hashed.
+	plain := mk()
+	plain.SharedFolders = nil
+	plain.Manager.ReadOnly = []string{} // empty, not nil: still omitted
+	old := state.HashJSON(struct {
+		Broker       config.Broker
+		Workers      []config.Worker
+		Scion        config.ScionConfig
+		VerifiedChat bool
+	}{plain.Broker, plain.Workers, plain.Scion, ChatConfigured(plain)})
+	if ConfigHash(plain) != old {
+		t.Fatal("an instance without shared_folders or read_only must keep its hash")
+	}
+}

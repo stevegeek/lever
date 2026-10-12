@@ -323,8 +323,9 @@ At least one of `writers` and `readers` must name an agent, and nobody may be in
   worker writes the folder. Config load refuses a tool `command` whose program or script resolves
   inside one: a writer could change it, and no shared folder excuses one the way
   `manager.read_only` does.
-- **Changes need a broker restart and fresh agents.** The broker reads `lever.yaml` only when it
-  starts, so run `lever reload` (not just `lever apply`) after editing the list. scion keeps an
+- **Changes restart the broker and need fresh agents.** The broker reads `lever.yaml` only when it
+  starts, and a change to `shared_folders` or `manager.read_only` changes its config hash, so the
+  next `lever apply` (or `lever reload`) restarts it with the new plan. scion keeps an
   agent's mounts for life, so adding a folder, or changing who may read or write it, reaches only an
   agent created afterwards: a worker after `lever worker purge` (or the manager's `agent recycle`
   for a recyclable worker) and a new dispatch; the manager after `lever up --fresh`, which

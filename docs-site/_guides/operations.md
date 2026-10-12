@@ -351,8 +351,8 @@ between workers, build outputs, or reviewed tools that one agent publishes for t
 
 1. Create the folder in the tree as a real directory (not a symbolic link), outside every worker
    `dir`.
-2. Add the entry to `lever.yaml` and run `lever reload`: the broker reads the config only when it
-   starts.
+2. Add the entry to `lever.yaml` and run `lever apply` (or `lever reload`): the broker reads the
+   config only when it starts, and a change to `shared_folders` restarts it.
 3. Recreate the agents that should mount it: mounts are create-time only. The manager comes
    first, because it mounts every folder (read-only unless it writes it) and holds the pins that
    protect the folder: back up its conversation and run `lever up --fresh`. Until it has them, the
@@ -364,7 +364,7 @@ between workers, build outputs, or reviewed tools that one agent publishes for t
 5. Tell the agents about it: lever's skills do not mention shared folders, so say in each agent's
    `instructions_file` (or task) what `/shared/<name>` holds and whether that agent may write it.
 
-**Changing or removing a folder** works the same way: edit `lever.yaml`, run `lever reload`, then
+**Changing or removing a folder** works the same way: edit `lever.yaml`, run `lever apply` (it restarts the broker), then
 recreate the agents whose access changed. Until then the broker refuses to resume a worker whose
 record holds access the config withdrew, and doctor fails for any agent that still holds it. Keep a
 removed folder on the host until every agent that mounted it is recreated: a resume needs the mount

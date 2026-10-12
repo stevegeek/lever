@@ -44,16 +44,25 @@ func ConfigHash(app *config.App) string {
 	// after_compact_note are omitted while unset (their json tags on
 	// config.Worker) for the same reason; a new Worker field needs the same
 	// tag, or every instance with workers restarts its broker on upgrade.
+	//
+	// SharedFolders and ManagerReadOnly (both omitted while empty, the same
+	// old hash) feed the broker's worker specs, the shared mounts it grants
+	// and the read-only guard plan it checks the running manager against
+	// (sharedGuard, refuseStaleShares). A broker that outlived a change
+	// would keep granting the old mounts, so `lever apply` must restart it.
 	return state.HashJSON(struct {
-		Broker        config.Broker
-		Workers       []config.Worker
-		Scion         config.ScionConfig
-		VerifiedChat  bool
-		WebSenders    []string            `json:",omitempty"`
-		AgentMessages *agentMessagesStamp `json:",omitempty"`
-		Files         *filesStamp         `json:",omitempty"`
-		ManagerClaude *wire.Claude        `json:",omitempty"`
-	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude()})
+		Broker          config.Broker
+		Workers         []config.Worker
+		Scion           config.ScionConfig
+		VerifiedChat    bool
+		WebSenders      []string              `json:",omitempty"`
+		AgentMessages   *agentMessagesStamp   `json:",omitempty"`
+		Files           *filesStamp           `json:",omitempty"`
+		ManagerClaude   *wire.Claude          `json:",omitempty"`
+		SharedFolders   []config.SharedFolder `json:",omitempty"`
+		ManagerReadOnly []string              `json:",omitempty"`
+	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude(),
+		app.SharedFolders, app.Manager.ReadOnly})
 }
 
 // agentMessagesStamp is the part of remote.agent_messages the broker acts on.

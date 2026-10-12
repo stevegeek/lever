@@ -23,8 +23,9 @@ version bump moves the block under the new version heading.
   file with a hard link outside it. While folders are configured, the broker refuses every worker
   start and resume until the manager holds its pins, refuses a missing or linked folder, and (on a
   resume) refuses a record that holds a shared mount the config no longer grants, or that it
-  cannot read (with "retry"). New doctor row *shared folders*. Changes need
-  `lever reload` and fresh agents. A writer can steer what its readers and the manager run: grant
+  cannot read (with "retry"). New doctor row *shared folders*. A change to `shared_folders` or
+  `manager.read_only` restarts the broker on the next `lever apply` (both are in its config
+  hash); new mounts reach only agents created afterwards. A writer can steer what its readers and the manager run: grant
   `writers` accordingly. See the config reference, the operations guide and security model §4.5.
 - **Dictation and read-aloud on the chat page (`remote.voice`, off by default).** With
   `landing: chat` and `remote.voice.enabled`, the chat page has a mic beside the message box: the

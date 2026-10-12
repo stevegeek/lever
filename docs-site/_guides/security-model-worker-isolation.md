@@ -278,8 +278,10 @@ a worker mounts only its own subdirectory. What an entry changes, and what still
 - **No host code runs from it.** Config load refuses a broker tool whose program or script lies in
   a shared folder; unlike `manager.read_only`, no shared folder excuses one, since a worker may
   write it.
-- **Access changes need fresh agents, and stale access is refused.** scion keeps a record's mounts
-  for life. A worker created under an older plan could get back access the config has withdrawn on
+- **Access changes need fresh agents, and stale access is refused.** The broker holds the plan it
+  read at start; `shared_folders` and `manager.read_only` are in its config hash, so `lever apply`
+  restarts it after a change and the checks below compare against the new plan, never a stale one.
+  scion keeps a record's mounts for life. A worker created under an older plan could get back access the config has withdrawn on
   its next resume, so the broker reads the worker's hub record before every resume (a dispatch, an
   operator wake, the re-enrolment healer's bounce) and refuses one that holds a shared mount the
   plan does not grant, or grants only read-only. A record it cannot read is refused too (with

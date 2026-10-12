@@ -1054,6 +1054,31 @@ func TestRateWindowForgetsOldCallers(t *testing.T) {
 	}
 }
 
+// TestRateWindowRefundStaysInItsWindow: a refund gives the call back to the
+// window that counted it, and to no later one: a call that took longer than
+// the window cannot lower the count of the window a later call opened.
+func TestRateWindowRefundStaysInItsWindow(t *testing.T) {
+	rw := newRateWindow(1)
+	t0 := time.Now()
+	if ok, _ := rw.take("c", t0); !ok {
+		t.Fatal("first call refused")
+	}
+	rw.refund("c", t0)
+	if ok, _ := rw.take("c", t0.Add(time.Second)); !ok {
+		t.Fatal("a refunded call still counts in its own window")
+	}
+	// The window rolls over while that call is in flight: its refund must
+	// not free the slot of the new window.
+	t1 := t0.Add(61 * time.Second)
+	if ok, _ := rw.take("c", t1); !ok {
+		t.Fatal("the new window's first call refused")
+	}
+	rw.refund("c", t0.Add(time.Second))
+	if ok, _ := rw.take("c", t1.Add(time.Second)); ok {
+		t.Fatal("a refund from an ended window freed a slot in the new one")
+	}
+}
+
 // TestVerifyEndToEndOverMTLS: over the real jail listener (mTLS, the caller
 // from its certificate), a contact's post that forges a lever marker verifies
 // as the contact's own words, a worker relay as the worker's, and an

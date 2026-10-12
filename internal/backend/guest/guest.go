@@ -103,7 +103,7 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships
 	// kernel.apparmor_restrict_unprivileged_userns=1, which blocks the rootless
 	// runtimes' rootlesskit/pasta from creating the unprivileged user namespace
-	// they require — without this the rootless Docker/Podman install fails with
+	// they require — without this rootless podman fails with
 	// "fork/exec /proc/self/exe: permission denied". The jail is a dedicated VM
 	// whose OWN kernel is the containment boundary (backend Guarantee 0:
 	// separate-kernel), and its sole purpose is to run the agent's untrusted
@@ -148,13 +148,16 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 
 // dockerOffScript stops and disables the rootless dockerd an older lever
 // started in the guest (lever#183), if it is there; it exits 0 either way.
+// A pid file left by a dockerd that died is only acted on while that pid is
+// still a dockerd, so a reused pid is never killed.
 const dockerOffScript = `export XDG_RUNTIME_DIR=/run/user/$(id -u)
-if systemctl --user -q is-enabled docker 2>/dev/null || systemctl --user -q is-active docker 2>/dev/null; then
-  systemctl --user disable --now docker >/dev/null 2>&1 || true
+if timeout 10 systemctl --user -q is-enabled docker 2>/dev/null || timeout 10 systemctl --user -q is-active docker 2>/dev/null; then
+  timeout 30 systemctl --user disable --now docker >/dev/null 2>&1 || true
 fi
-if [ -f "$XDG_RUNTIME_DIR/docker.pid" ]; then
-  kill "$(cat "$XDG_RUNTIME_DIR/docker.pid")" 2>/dev/null || true
-fi
+pid=$(cat "$XDG_RUNTIME_DIR/docker.pid" 2>/dev/null) || pid=
+case "$pid" in ''|*[!0-9]*) ;; *)
+  [ "$(cat /proc/$pid/comm 2>/dev/null)" = dockerd ] && kill "$pid" 2>/dev/null ;;
+esac
 true`
 
 // GOARCH returns the guest's Go cross-compile arch, detected via `uname -m`

@@ -545,18 +545,10 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 	steps := Plan(app, opts)
 	rep := progress.From(ctx)
 	rep.Group("apply", len(steps))
-	for _, step := range steps {
-		ps := rep.Start(stepLabel(step))
-		if d.StepTail != nil {
-			if fn := d.StepTail(step.Kind); fn != nil {
-				ps.TailFrom(fn)
-			}
-		}
-		err := r.step(ctx, step)
-		ps.Done(err)
-		if err != nil {
-			return fmt.Errorf("step %s: %w", step.Kind, err)
-		}
+	// broker-up and load-image run alongside the steps after them (lever#189;
+	// see runSteps).
+	if err := r.runSteps(ctx, steps); err != nil {
+		return err
 	}
 	rep.Group("", 0)
 	// Converge the remote proxy OFF when the config disables it. Plan omits

@@ -214,8 +214,17 @@ type DispatchConfig struct {
 	ReadOnlyDirs []string
 	// RecordVolumes reads a worker's hub record volumes, for the check that
 	// refuses to resume a worker whose record holds a shared folder mount
-	// the config no longer grants (refuseStaleShares). nil skips it.
+	// the config no longer grants (refuseStaleShares). Wired only while
+	// shared_folders lists a folder: a failed read then refuses the resume
+	// (fail closed, "retry"). nil skips it.
 	RecordVolumes RecordVolumesFunc
+	// LeftoverShareVolumes is the same reader for an instance with NO
+	// shared folder (wired instead of RecordVolumes): a record made while
+	// folders were configured still refuses its resume when it holds a
+	// /shared mount, but only when the read succeeds. A failed read lets
+	// the resume go on, so an instance that never used shared folders is
+	// not held back by a hub hiccup. nil skips it.
+	LeftoverShareVolumes RecordVolumesFunc
 	// SharedGuard checks that the running manager holds its tree plan
 	// (config.App.ManagerTreeMounts: the pins over every shared folder and
 	// worker dir) before any worker starts or resumes. Wired only while
@@ -315,6 +324,9 @@ type Broker struct {
 	readOnlyDirs   []string
 	// shared_folders (refuseStaleShares).
 	recordVolumes RecordVolumesFunc
+	// leftoverShareVolumes: the best-effort reader while no folder is
+	// configured (refuseStaleShares).
+	leftoverShareVolumes RecordVolumesFunc
 	sharedGuard   func(ctx context.Context) error
 	// afterWorkspaceMkdir is a test seam: called between a strict worker
 	// workspace mkdir and the walk that follows it. nil outside tests.
@@ -453,7 +465,7 @@ func New(c Config) *Broker {
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
-		recordVolumes: d.RecordVolumes, sharedGuard: d.SharedGuard,
+		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,

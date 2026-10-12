@@ -379,7 +379,10 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	d.SharedGuard = sharedGuard(app, jr, jailMount)
 	// shared_folders: a resume is refused when the worker's record holds a
 	// shared mount the config no longer grants (broker.refuseStaleShares).
-	d.RecordVolumes = func(ctx context.Context, agent string) ([]scion.VolumeMount, error) {
+	// With a folder configured a failed read refuses the resume; with none,
+	// only a record that does hold a /shared mount is refused, and a failed
+	// read is ignored (an instance without folders never waits on the hub).
+	readVolumes := func(ctx context.Context, agent string) ([]scion.VolumeMount, error) {
 		agents, err := hc.Agents(ctx, projectKey, scion.DefaultHubEndpoint)
 		if err != nil {
 			return nil, err
@@ -395,6 +398,11 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 			return out, nil
 		}
 		return nil, fmt.Errorf("no hub record for worker %q", agent)
+	}
+	if len(app.SharedFolders) > 0 {
+		d.RecordVolumes = readVolumes
+	} else {
+		d.LeftoverShareVolumes = readVolumes
 	}
 	return d, nil
 }

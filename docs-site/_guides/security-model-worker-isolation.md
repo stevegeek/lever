@@ -284,8 +284,12 @@ a worker mounts only its own subdirectory. What an entry changes, and what still
   scion keeps a record's mounts for life. A worker created under an older plan could get back access the config has withdrawn on
   its next resume, so the broker reads the worker's hub record before every resume (a dispatch, an
   operator wake, the re-enrolment healer's bounce) and refuses one that holds a shared mount the
-  plan does not grant, or grants only read-only. A record it cannot read is refused too (with
-  "retry", not a purge): a record outlives the config that made it. The fix is to discard the record (`lever worker purge`, or the
+  plan does not grant, or grants only read-only. While any folder is configured, a record it
+  cannot read is refused too (with "retry", not a purge): a record outlives the config that made
+  it. Once the list is empty the broker still refuses a record that holds any `/shared` mount, but
+  only when the read succeeds: an instance with no folder lets a resume or a re-enrolment heal go
+  on when the hub read fails, so a removed folder's leftover record can be resumed during a hub
+  outage. Purge such workers when you remove the last folder. The fix is to discard the record (`lever worker purge`, or the
   manager's `agent recycle` for a recyclable worker).
 - **Replace the contents, not the folder.** A mount stays on the directory that existed when the
   container started. `lever doctor` reads each running reader's mounts from the guest (the kernel's

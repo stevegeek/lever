@@ -340,3 +340,35 @@ func TestDecorateConfigWiresVerification(t *testing.T) {
 		t.Fatalf("remote off: chat config = %+v", c)
 	}
 }
+
+// The stale-shares record read fails closed only while a folder is
+// configured; without one it is wired as the best-effort reader, so a hub
+// read failure never refuses a resume or a heal there (broker.refuseStaleShares).
+func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
+	be, err := registry.Select("orbstack", proc.RealRunner{}, "lever-demo")
+	if err != nil {
+		t.Fatalf("registry.Select: %v", err)
+	}
+	st := state.ForConfig(t.TempDir())
+	env := ServeEnv{JailUser: "jail", JailUID: "501"}
+
+	app := wiringApp(t.TempDir(), "")
+	d, err := dispatchConfig(app, st, be, env)
+	if err != nil {
+		t.Fatalf("dispatchConfig: %v", err)
+	}
+	if d.RecordVolumes != nil || d.LeftoverShareVolumes == nil {
+		t.Fatalf("no folders: RecordVolumes wired=%v LeftoverShareVolumes wired=%v, want only the best-effort reader",
+			d.RecordVolumes != nil, d.LeftoverShareVolumes != nil)
+	}
+
+	app.SharedFolders = []config.SharedFolder{{Path: "shared/x", Readers: []string{"a"}}}
+	d, err = dispatchConfig(app, st, be, env)
+	if err != nil {
+		t.Fatalf("dispatchConfig: %v", err)
+	}
+	if d.RecordVolumes == nil || d.LeftoverShareVolumes != nil {
+		t.Fatalf("with folders: RecordVolumes wired=%v LeftoverShareVolumes wired=%v, want only the fail-closed reader",
+			d.RecordVolumes != nil, d.LeftoverShareVolumes != nil)
+	}
+}

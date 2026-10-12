@@ -254,3 +254,67 @@ func TestWorkerRecycle_sharedGuardRefusesBeforePurge(t *testing.T) {
 		t.Fatalf("purged=%v started=%d, want neither", rt.purged, len(rt.started))
 	}
 }
+
+// With no folder configured the best-effort reader still refuses a record
+// that holds a /shared mount (folders removed, old record kept), but a
+// failed read lets the resume and the healer's bounce go on.
+func TestWorkerResume_leftoverSharesWithoutFolders(t *testing.T) {
+	leftover := []scion.VolumeMount{{Source: "/lever/tools/releases", Target: "/shared/releases", ReadOnly: true}}
+	ticket := []scion.VolumeMount{{Source: "/run/user/501/lever/tickets/worker", Target: "/run/lever", ReadOnly: true}}
+	for _, tc := range []struct {
+		name    string
+		vols    []scion.VolumeMount
+		readErr error
+		ok      bool
+	}{
+		{"leftover mount refused", leftover, nil, false},
+		{"clean record resumes", ticket, nil, true},
+		{"read failure ignored", nil, errors.New("hub down"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "stopped"}}}}
+			var buf bytes.Buffer
+			tree := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(tree, "workers", "worker"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
+				HostWorkspace: filepath.Join(tree, "workers", "worker"),
+				TicketDir:     "/run/user/501/lever/tickets/worker", Image: "img:1"}
+			b := New(testConfig(t, withAudit(&buf), withManager("test-manager", ""), withRuntime(rt, spec), func(c *Config) {
+				c.Dispatch.Tree = tree
+				c.Dispatch.LeftoverShareVolumes = func(context.Context, string) ([]scion.VolumeMount, error) { return tc.vols, tc.readErr }
+			}))
+			rec := callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+			if tc.ok {
+				if rec.Code != http.StatusOK || len(rt.resumed) != 1 {
+					t.Fatalf("status=%d resumed=%d, want a resume (%s)", rec.Code, len(rt.resumed), rec.Body.String())
+				}
+				return
+			}
+			if rec.Code != http.StatusForbidden || len(rt.resumed)+len(rt.staged) != 0 || !strings.Contains(rec.Body.String(), "lever worker purge worker") {
+				t.Fatalf("status=%d resumed=%d, want 403 naming the purge (%s)", rec.Code, len(rt.resumed), rec.Body.String())
+			}
+			if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker"); ok {
+				t.Fatal("the healer must not bounce a worker with a leftover shared mount")
+			}
+		})
+	}
+}
+
+// The best-effort reader's failed read does not stop the healer's bounce
+// either (the silent heal refusal the fail-closed read caused).
+func TestRefuseStaleShares_bestEffortIgnoresReadErrors(t *testing.T) {
+	b := &Broker{leftoverShareVolumes: func(context.Context, string) ([]scion.VolumeMount, error) {
+		return nil, errors.New("hub down")
+	}}
+	if err := b.refuseStaleShares(context.Background(), WorkerSpec{Name: "w"}); err != nil {
+		t.Fatalf("best-effort read failure = %v, want nil", err)
+	}
+	b = &Broker{recordVolumes: func(context.Context, string) ([]scion.VolumeMount, error) {
+		return nil, errors.New("hub down")
+	}}
+	if err := b.refuseStaleShares(context.Background(), WorkerSpec{Name: "w"}); !errors.Is(err, ErrSharedCheckUnavailable) {
+		t.Fatalf("fail-closed read failure = %v, want ErrSharedCheckUnavailable", err)
+	}
+}

@@ -115,18 +115,30 @@ func sharedAccessHint(worker string, err error) string {
 // one the plan holds, with the same source and no more access. A mount the
 // plan adds that the record lacks is not refused (it is less access); the
 // worker gets it when it is next created. With no reader wired (tests) it
-// does nothing. A failed read refuses the resume whatever the config says
-// now: a record outlives the config that made it, so an instance that
-// removed every folder may still hold a worker that mounts one.
+// does nothing.
+//
+// While folders are configured (recordVolumes) a failed read refuses the
+// resume with "retry": a record outlives the config that made it. With no
+// folder configured (leftoverShareVolumes) the plan grants nothing, so a
+// record that still holds a /shared mount is refused, but a failed read is
+// ignored: an instance that never configured a folder must not have its
+// resumes and heals refused whenever the hub read fails.
 func (b *Broker) refuseStaleShares(ctx context.Context, spec WorkerSpec) error {
-	if b.recordVolumes == nil {
-		return nil
+	switch {
+	case b.recordVolumes != nil:
+		vols, err := b.recordVolumes(ctx, spec.Name)
+		if err != nil {
+			return fmt.Errorf("reading worker %q's record to check its shared folder mounts: %v: %w", spec.Name, err, ErrSharedCheckUnavailable)
+		}
+		return staleShares(spec, vols)
+	case b.leftoverShareVolumes != nil:
+		vols, err := b.leftoverShareVolumes(ctx, spec.Name)
+		if err != nil {
+			return nil
+		}
+		return staleShares(spec, vols)
 	}
-	vols, err := b.recordVolumes(ctx, spec.Name)
-	if err != nil {
-		return fmt.Errorf("reading worker %q's record to check its shared folder mounts: %v: %w", spec.Name, err, ErrSharedCheckUnavailable)
-	}
-	return staleShares(spec, vols)
+	return nil
 }
 
 // staleShares is refuseStaleShares' decision.

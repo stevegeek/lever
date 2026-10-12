@@ -331,7 +331,10 @@ At least one of `writers` and `readers` must name an agent, and nobody may be in
   for a recyclable worker) and a new dispatch; the manager after `lever up --fresh`, which
   **discards its conversation** (back it up first). **The broker refuses to resume a worker whose
   record holds a shared mount the config no longer grants** (removed, or read-write where it is now
-  read-only), and names the purge; it also refuses a resume when it cannot read the record. A mount
+  read-only), and names the purge. While any folder is configured it also refuses a resume when it
+  cannot read the record ("retry"). With none configured it still reads the record and refuses one
+  that holds a `/shared` mount (left from before the folders were removed), but a failed read does
+  not hold the resume back, so an instance without folders never waits on that read. A mount
   the config adds that an older worker lacks is not refused: that worker goes without it until it is
   created again. The manager's own resume is not refused: a manager that lost access keeps its old
   mounts until `lever up --fresh`, and `lever doctor` fails meanwhile. `lever doctor`'s *shared

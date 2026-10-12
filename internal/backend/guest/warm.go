@@ -291,6 +291,16 @@ func (s *Snapshot) VerifyEgress(allowedPorts []int, closedInternet bool, hasDNS 
 // trusted on its own: an alias it gave must still match the root-read chains
 // exactly, and its pasta drop-in is its own file. An error means the snapshot
 // cannot be trusted as a whole; the caller then takes the full path.
+//
+// The root call is only as trustworthy as the RootPrefix it runs through.
+// On OrbStack that is `orb -u root`, which the run user has no part in. On
+// Lima it is `limactl shell <vm> sudo ...`: it runs in the run user's own
+// session, and that user has passwordless sudo, so a compromised run user
+// is root in the guest and controls what the root call reports (and what
+// any root command the full path runs does; that was so before the probe
+// and is not made worse by it). Nothing on Lima is defended against a
+// compromised run user by the root probe; the boundary there is the
+// rootless container the agents run in, and the VM around it.
 func (g Guest) Probe(ctx context.Context, spec ProbeSpec) (*Snapshot, error) {
 	snap := &Snapshot{items: map[string]probeItem{}, spec: spec}
 	for _, part := range []struct {

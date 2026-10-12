@@ -87,7 +87,22 @@ the closed posture it is read from the live chains, as below. The host alias is 
 the live IPv4 chain is closed (the guest resolves over IPv4, and that DROP blocks DNS by design),
 the aliases are read back from the live rules, each from its own family, with a warning naming them. Under an open or absent chain a failed lookup fails the apply. The rules are not persisted
 in the guest: after a guest reboot there is no chain until the next `lever apply`/`up`, which applies
-egress before it starts any agent. The posture is chosen by the
+egress before it starts any agent.
+
+What that verification can and cannot vouch for:
+
+- It reads the chains as `iptables -S` prints them. On an nf_tables guest, a rule written into the
+  lever chain with `nft` itself, in a form `iptables` cannot print back, may not show in that
+  listing, and is then not noticed. Before the verification, every apply re-declared the chain in
+  its `iptables-restore` commit, which emptied it and so removed such a rule as a side effect; a
+  verified bring-up no longer rewrites a matching chain. Writing such a rule takes root in the guest.
+- It is only as trustworthy as root in the guest. On **Lima**, lever's root commands (the
+  verification's read included) run as `limactl shell <vm> sudo ...` in the run user's session, and
+  the run user has passwordless sudo: a process running as the run user in the VM is root there,
+  and can make any root command lever runs, the verification and the full rebuild alike, report or
+  do what it likes. This was so before the verification existed. On Lima the boundary against a
+  compromised agent is the rootless container it runs in (and the VM around it), not the guest's
+  run user. On **OrbStack** root commands run as `orb -u root`, without the run user. The posture is chosen by the
 explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 
 - **`egress: open` (default):** `OUTPUT` default-ACCEPT; `LEVER_EGRESS` ACCEPTs the allowlisted host

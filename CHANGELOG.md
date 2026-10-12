@@ -289,6 +289,18 @@ version bump moves the block under the new version heading.
 
 ### Security
 
+- **The egress jump must be `OUTPUT`'s first rule (lever#187).** The check that egress is in force
+  required only that `OUTPUT` jump to `LEVER_EGRESS` somewhere, both on the warm path ("verified,
+  unchanged") and in the full apply. An ACCEPT, RETURN or goto placed in `OUTPUT` ahead of the jump
+  decided every packet before the lever chain saw it, and neither path noticed or fixed it. The jump
+  must now be `OUTPUT`'s first rule, and its only copy, in both families. Every apply makes it so:
+  any other copy is deleted and the jump inserted at position 1 in one `iptables-restore` commit per
+  family, so `OUTPUT` is never without it. Other `OUTPUT` rules stay where they are; behind the
+  jump they cannot weaken it. When a scion step ran between the warm path's probe and the egress
+  decision (a build can take minutes), the chains are read again just before that decision. The
+  jail security model now says what the check cannot see: rules written with `nft` that `iptables`
+  cannot print, and, on Lima, a run user (which has passwordless sudo) that controls what root
+  commands report.
 - **The read-only guard checks the manager's namespaces (lever#162).** The guest-side live check
   (the broker's tool guard, doctor's *manager read-only paths* and *shared folders* rows, apply's
   keep and resume warning) read the mounts of the manager's first process. A root agent that could

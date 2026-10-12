@@ -301,6 +301,15 @@ version bump moves the block under the new version heading.
   jail security model now says what the check cannot see: rules written with `nft` that `iptables`
   cannot print, and, on Lima, a run user (which has passwordless sudo) that controls what root
   commands report.
+- **A reused pid is never signalled as the broker or the remote proxy.** `lever stop`, `down`,
+  `destroy`, and `apply`'s restarts stopped whatever process `broker.pid` or `remote.pid` named,
+  and `apply` restarted a broker that reports no instance id whenever `broker.pid` named any live
+  process. A pid file can outlive its daemon, and the OS can give the pid to an unrelated process,
+  which would then have been sent SIGTERM and SIGKILL. lever now reads the process's arguments
+  (`/proc` on Linux, the `kern.procargs2` sysctl on macOS) and treats the pid as the daemon only
+  when they are `lever broker serve` (or `remote serve`) and, where they name the config by an
+  absolute path (as `apply` starts them), this instance's config; checked again before the SIGKILL. Anything else is a stale pid file: it is removed and nothing is signalled.
+  `lever doctor` and `lever remote status` still report liveness by the pid alone.
 - **The read-only guard checks the manager's namespaces (lever#162).** The guest-side live check
   (the broker's tool guard, doctor's *manager read-only paths* and *shared folders* rows, apply's
   keep and resume warning) read the mounts of the manager's first process. A root agent that could

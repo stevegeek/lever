@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // stopTarget is one pid-file-backed daemon: which pid file it reads and
@@ -18,42 +20,65 @@ type stopTarget struct {
 	name    string
 	pidFile func(state.State) string
 	stop    func(state.State) error
+	sub     string // the daemon's `lever <sub> serve`
 }
 
 var (
-	brokerTarget = stopTarget{"StopBroker", state.State.PID, StopBroker}
-	remoteTarget = stopTarget{"StopRemoteProxy", state.State.RemotePID, StopRemoteProxy}
+	brokerTarget = stopTarget{"StopBroker", state.State.PID, StopBroker, state.BrokerDaemon}
+	remoteTarget = stopTarget{"StopRemoteProxy", state.State.RemotePID, StopRemoteProxy, state.RemoteDaemon}
 )
 
-// startSleeper starts a real long-lived child to stand in for a daemon
-// process, writes its pid to path, and returns the command. The caller reaps it.
-func startSleeper(t *testing.T, path string) *exec.Cmd {
-	t.Helper()
-	cmd := exec.Command("sleep", "60")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return cmd
+// sleeper is a real long-lived child standing in for a daemon process.
+type sleeper struct {
+	cmd  *exec.Cmd
+	done <-chan struct{} // closed once it has exited and been reaped
 }
 
+// startSleeper starts a stand-in for tgt's daemon of s (its argv is
+// `lever <broker|remote> serve <config beside s>`, what
+// state.ServeProcess recognises) and writes its pid to tgt's pid file.
+func startSleeper(t *testing.T, s state.State, tgt stopTarget) sleeper {
+	t.Helper()
+	cmd, done := testutil.StartServeProcess(t, tgt.sub, filepath.Join(filepath.Dir(s.Dir), "lever.yaml"))
+	writePID(t, tgt.pidFile(s), cmd.Process.Pid)
+	return sleeper{cmd, done}
+}
+
+func writePID(t *testing.T, path string, pid int) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newStopState is the state dir of an instance whose config is in a temp
+// dir, as state.ForConfig makes it.
 func newStopState(t *testing.T) state.State {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	s := state.ForConfig(t.TempDir())
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return state.State{Dir: dir}
+	return s
 }
 
-// assertKilled reaps cmd and confirms it no longer accepts a signal.
-func assertKilled(t *testing.T, cmd *exec.Cmd, what string) {
+// assertKilled waits for p to exit (it is reaped as it does).
+func assertKilled(t *testing.T, p sleeper, what string) {
 	t.Helper()
-	_ = cmd.Wait()
-	if err := cmd.Process.Signal(syscall.Signal(0)); err == nil {
+	select {
+	case <-p.done:
+	case <-time.After(10 * time.Second):
 		t.Fatalf("%s should have been killed", what)
+	}
+}
+
+// assertAlive fails unless p is still running.
+func assertAlive(t *testing.T, p sleeper, what string) {
+	t.Helper()
+	select {
+	case <-p.done:
+		t.Fatalf("%s must not have been signalled", what)
+	default:
 	}
 }
 
@@ -76,7 +101,7 @@ func testStopNoPidFileIsNoop(t *testing.T, tgt stopTarget) {
 
 func testStopKillsProcessAndRemovesPidFile(t *testing.T, tgt stopTarget) {
 	s := newStopState(t)
-	cmd := startSleeper(t, tgt.pidFile(s))
+	cmd := startSleeper(t, s, tgt)
 
 	if err := tgt.stop(s); err != nil {
 		t.Fatalf("%s: %v", tgt.name, err)
@@ -126,9 +151,8 @@ func TestStopRemoteProxyGarbagePidFileCleared(t *testing.T) {
 func TestStopBrokerAndStopRemoteProxyAreIndependent(t *testing.T) {
 	s := newStopState(t)
 
-	brokerCmd := startSleeper(t, s.PID())
-	defer func() { _ = brokerCmd.Process.Kill(); _ = brokerCmd.Wait() }()
-	remoteCmd := startSleeper(t, s.RemotePID())
+	brokerCmd := startSleeper(t, s, brokerTarget)
+	remoteCmd := startSleeper(t, s, remoteTarget)
 
 	if err := StopRemoteProxy(s); err != nil {
 		t.Fatalf("StopRemoteProxy: %v", err)
@@ -139,9 +163,7 @@ func TestStopBrokerAndStopRemoteProxyAreIndependent(t *testing.T) {
 	if _, err := os.Stat(s.PID()); err != nil {
 		t.Fatalf("broker.pid must survive a StopRemoteProxy call, stat err = %v", err)
 	}
-	if err := brokerCmd.Process.Signal(syscall.Signal(0)); err != nil {
-		t.Fatalf("broker process must survive a StopRemoteProxy call: %v", err)
-	}
+	assertAlive(t, brokerCmd, "the broker process (by StopRemoteProxy)")
 }
 
 // copyIDFrom gives s the instance id file of another state dir, as a copy
@@ -168,15 +190,63 @@ func TestStopLeavesACopiedPidFilesProcessAlone(t *testing.T) {
 		t.Run(tgt.name, func(t *testing.T) {
 			s := newStopState(t)
 			copyIDFrom(t, s)
-			cmd := startSleeper(t, tgt.pidFile(s))
-			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			cmd := startSleeper(t, s, tgt)
 			if err := tgt.stop(s); err != nil {
 				t.Fatalf("%s: %v", tgt.name, err)
 			}
 			assertPidFileGone(t, tgt.pidFile(s), "the copied pid file should be removed")
-			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
-				t.Fatalf("%s signalled the original's process: %v", tgt.name, err)
+			assertAlive(t, cmd, tgt.name+": the original's process")
+		})
+	}
+}
+
+// A pid file whose pid the OS gave to another process (here, one that is
+// not a lever daemon, and one that is the other daemon, and one that is
+// another instance's daemon) is stale: the stop removes the file and
+// signals nothing.
+func TestStopLeavesAReusedPidAlone(t *testing.T) {
+	for _, tgt := range []stopTarget{brokerTarget, remoteTarget} {
+		t.Run(tgt.name, func(t *testing.T) {
+			s := newStopState(t)
+			other := newStopState(t)
+			unrelated, unrelatedDone := testutil.StartServeProcess(t, "notlever", "")
+			wrongDaemon := brokerTarget
+			if tgt.sub == brokerTarget.sub {
+				wrongDaemon = remoteTarget
+			}
+			for name, p := range map[string]sleeper{
+				"an unrelated process":      {unrelated, unrelatedDone},
+				"the other daemon":          startSleeperFor(t, s, wrongDaemon.sub),
+				"another instance's daemon": startSleeperFor(t, other, tgt.sub),
+			} {
+				writePID(t, tgt.pidFile(s), p.cmd.Process.Pid)
+				if err := tgt.stop(s); err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				assertPidFileGone(t, tgt.pidFile(s), name+": the stale pid file should be removed")
+				assertAlive(t, p, name)
 			}
 		})
+	}
+}
+
+// startSleeperFor starts a stand-in `lever <sub> serve` for s without
+// writing any pid file.
+func startSleeperFor(t *testing.T, s state.State, sub string) sleeper {
+	t.Helper()
+	cmd, done := testutil.StartServeProcess(t, sub, filepath.Join(filepath.Dir(s.Dir), "lever.yaml"))
+	return sleeper{cmd, done}
+}
+
+// The guard is real: this test process is alive but is no daemon, so a
+// pid file naming it is removed and the test survives.
+func TestStopNeverSignalsThisProcess(t *testing.T) {
+	for _, tgt := range []stopTarget{brokerTarget, remoteTarget} {
+		s := newStopState(t)
+		writePID(t, tgt.pidFile(s), os.Getpid())
+		if err := tgt.stop(s); err != nil {
+			t.Fatal(err)
+		}
+		assertPidFileGone(t, tgt.pidFile(s), "stale")
 	}
 }

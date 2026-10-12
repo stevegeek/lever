@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // TestStopSuspendsManager verifies the happy path: with a reachable jail,
@@ -242,11 +242,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("sleep", "60")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	cmd, done := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +260,18 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	if _, err := os.Stat(st.RemotePID()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("remote.pid should be removed after stop, stat err = %v", err)
 	}
-	_ = cmd.Wait()
+	waitStopped(t, done, "the remote proxy")
+}
+
+// waitStopped fails unless the stand-in daemon whose done channel this is
+// exits soon.
+func waitStopped(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s was not stopped", what)
+	}
 }
 
 // TestStopWithExplicitMachineDoesNotStopBroker mirrors destroy's --machine
@@ -587,11 +594,7 @@ func TestStopKeepVM(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	proxy := exec.Command("sleep", "60")
-	if err := proxy.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = proxy.Process.Kill(); _ = proxy.Wait() })
+	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(fmt.Sprintf("%d\n", proxy.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +621,7 @@ func TestStopKeepVM(t *testing.T) {
 	if _, err := os.Stat(st.RemotePID()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the host daemons must be stopped too: remote.pid stat err = %v", err)
 	}
-	_ = proxy.Wait()
+	waitStopped(t, proxyDone, "the remote proxy")
 	got := out.String()
 	for _, want := range []string{"left running", "keeps its memory on the host", "`lever up`"} {
 		if !strings.Contains(got, want) {

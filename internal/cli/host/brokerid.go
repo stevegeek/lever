@@ -32,7 +32,9 @@ const (
 
 // judgeRunningBroker decides what to do with a broker that answered /epoch.
 // ours is this instance's id. ownPIDAlive is whether this instance's
-// broker.pid names a live process.
+// broker.pid names a live process that is this instance's `lever broker
+// serve` (state.State.BrokerStatus; a pid the OS gave to another process
+// does not count).
 //
 //   - Same id: reuse it when version and config hash match, else restart it.
 //   - Another id: it is another instance's broker. Refuse, and stop nothing.

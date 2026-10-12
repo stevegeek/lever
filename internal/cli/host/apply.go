@@ -208,8 +208,10 @@ func (rc *remoteController) addr() string {
 // remote.pid with a dead pid, the same failure mode brokerController.Start's
 // #19 reuse shortcut guards against for the broker. Liveness is the same
 // pidfile+TCP-dial check `lever remote status` uses (state.PIDStatus +
-// tcpDial): a live-but-not-yet-listening pid (a startup race) or a
-// stale/absent pid both fall through to a fresh spawn.
+// tcpDial), where the live pid must also be this instance's `lever remote
+// serve` (state.State.RemoteStatus): a live-but-not-yet-listening pid (a
+// startup race) or a stale/absent pid, a reused one included, both fall
+// through to a fresh spawn.
 //
 // The stamp check is the third condition, and it is NOT optional. The proxy
 // reads its config once and caches all of it in the handler it builds at
@@ -224,7 +226,7 @@ func (rc *remoteController) addr() string {
 // not grow one — it fronts the hub, so any listener of its own would be
 // reachable by whatever reaches the proxy. Hence a host-side stamp file.
 func (rc *remoteController) Start(ctx context.Context) error {
-	if _, found, alive := state.PIDStatus(rc.state.RemotePID()); found && alive {
+	if _, found, alive := rc.state.RemoteStatus(); found && alive {
 		if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) && tcpDial(rc.addr()) == nil {
 			progress.From(ctx).Note("reused")
 			return nil // already serving: this binary, this config, this port
@@ -1053,7 +1055,9 @@ func (bc *brokerController) Start(ctx context.Context) error {
 	// to the spawn. Something else holding a port makes the child's bind
 	// fail, which Healthy reports.
 	if er, err := readBrokerIdentity(probeCtx, bc.admin, bc.adminURL); err == nil {
-		_, _, alive := state.PIDStatus(bc.state.PID())
+		// alive: broker.pid names a live `lever broker serve` of this
+		// instance; a pid the OS gave to another process is a stale file.
+		_, _, alive := bc.state.BrokerStatus()
 		switch judgeRunningBroker(er, ours, cli.VersionString(), brokerctl.ConfigHash(bc.app), alive) {
 		case brokerReuse:
 			progress.From(ctx).Note("reused")

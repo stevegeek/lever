@@ -428,7 +428,10 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+	// A stand-in `lever remote serve` for this instance: remote.pid must name
+	// one, not merely a live process (state.State.RemoteStatus).
+	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -440,8 +443,7 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	// The stamp must MATCH, or Start correctly treats the running proxy as
-	// serving a different config and restarts it — which here would kill the
-	// test process, since remote.pid names it.
+	// serving a different config and restarts it.
 	if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
 		t.Fatal(err)
 	}
@@ -449,6 +451,41 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 		version: "v-test", cfgHash: "hash-test", selfExe: selfExe}
 	if err := rc.Start(context.Background()); err != nil {
 		t.Fatalf("Start on an already-serving proxy must reuse (nil), got: %v", err)
+	}
+	select {
+	case <-proxyDone:
+		t.Fatal("the reused proxy was stopped")
+	default:
+	}
+}
+
+// remote.pid names a live process that is not this instance's `lever remote
+// serve` (the pid was reused; here, this very test process): it is a stale
+// file. Start neither reuses it nor signals it; it spawns a fresh proxy (the
+// spawn fails here, selfExe does not exist, proving Start reached it).
+func TestRemoteControllerStartTreatsAReusedPIDAsStale(t *testing.T) {
+	dir := t.TempDir()
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// A stamp for another config, so a pid taken for the proxy would be
+	// stopped: that would kill this test.
+	if err := st.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
+		t.Fatal(err)
+	}
+	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: ln.Addr().(*net.TCPAddr).Port,
+		version: "v-test", cfgHash: "hash-NEW", selfExe: "/no/such/lever-binary"}
+	if err := rc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "/no/such/lever-binary") {
+		t.Fatalf("Start = %v, want the spawn's failure", err)
 	}
 }
 
@@ -471,11 +508,7 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	victim := exec.Command("/bin/sh", "-c", "sleep 30")
-	if err := victim.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = victim.Process.Kill(); _, _ = victim.Process.Wait() })
+	victim, victimDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(victim.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -498,13 +531,12 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	// The stale proxy must be gone: leaving it alive would keep the old config
 	// serving AND hold the port, so the respawn could never bind.
 	//
-	// Reaped via Wait, not signal(0): a killed-but-unreaped child is a ZOMBIE,
-	// and signal 0 succeeds on a zombie because the process entry still exists
-	// — so the obvious check passes whether or not the kill worked.
-	done := make(chan struct{})
-	go func() { _, _ = victim.Process.Wait(); close(done) }()
+	// Reaped via Wait (the stand-in's done), not signal(0): a
+	// killed-but-unreaped child is a ZOMBIE, and signal 0 succeeds on a
+	// zombie because the process entry still exists — so the obvious check
+	// passes whether or not the kill worked.
 	select {
-	case <-done:
+	case <-victimDone:
 	case <-time.After(5 * time.Second):
 		t.Error("the stale proxy was left running — the respawn could never bind the port")
 	}
@@ -1165,11 +1197,7 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	oldProxy := exec.Command("/bin/sh", "-c", "sleep 30")
-	if err := oldProxy.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = oldProxy.Process.Kill(); _, _ = oldProxy.Process.Wait() })
+	oldProxy, oldProxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(oldProxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1194,10 +1222,8 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 		t.Fatal("Start must not silently succeed here")
 	}
 
-	done := make(chan struct{})
-	go func() { _, _ = oldProxy.Process.Wait(); close(done) }()
 	select {
-	case <-done:
+	case <-oldProxyDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the old proxy was LEAKED: still serving the previous port with the previous config, and remote.pid no longer names it")
 	}

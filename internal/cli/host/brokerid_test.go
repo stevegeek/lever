@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -210,6 +212,65 @@ func TestBrokerStartRefusesWhenTheStopLeavesABroker(t *testing.T) {
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
 	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "still answers") || !strings.Contains(err.Error(), "stop the broker by hand") {
 		t.Fatalf("Start = %v, want the still-answers refusal", err)
+	}
+}
+
+// instanceState is a state dir beside a config in a temp dir (as apply
+// makes it) with an instance id, and that config's path.
+func instanceState(t *testing.T) (state.State, string) {
+	t.Helper()
+	root := t.TempDir()
+	st := state.ForConfig(root)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureInstanceID(); err != nil {
+		t.Fatal(err)
+	}
+	return st, filepath.Join(root, "lever.yaml")
+}
+
+// A broker predating instance ids answers, and broker.pid names a live
+// process that is NOT this instance's `lever broker serve` (the pid was
+// reused; here, this very test process). That is a stale pid file: nothing
+// ties the broker to this instance, so apply refuses, and signals nothing.
+func TestBrokerStartTreatsAReusedPIDAsStale(t *testing.T) {
+	st, _ := instanceState(t)
+	url, port := epochServer(t, answer("", "v0.35.0", "h"))
+	app := &config.App{Name: "a"}
+	app.Broker.AdminPort = port
+	if err := os.WriteFile(st.PID(), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
+	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") || !strings.Contains(err.Error(), "names no live process") {
+		t.Fatalf("Start = %v, want the no-instance-id refusal", err)
+	}
+}
+
+// The same old broker, with broker.pid naming this instance's `lever broker
+// serve` (a stand-in): apply restarts it, so the process is stopped. (The
+// test's /epoch server keeps answering, so Start then refuses what still
+// holds the port; the stop is what this test is about.)
+func TestBrokerStartStopsItsOwnOldBroker(t *testing.T) {
+	defer func(w time.Duration) { brokerQuietWait = w }(brokerQuietWait)
+	brokerQuietWait = 300 * time.Millisecond
+	st, cfg := instanceState(t)
+	url, port := epochServer(t, answer("", "v0.35.0", "h"))
+	app := &config.App{Name: "a"}
+	app.Broker.AdminPort = port
+	old, oldDone := testutil.StartServeProcess(t, state.BrokerDaemon, cfg)
+	if err := os.WriteFile(st.PID(), []byte(strconv.Itoa(old.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
+	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "still answers") {
+		t.Fatalf("Start = %v, want the still-answers refusal", err)
+	}
+	select {
+	case <-oldDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("this instance's old broker was not stopped")
 	}
 }
 

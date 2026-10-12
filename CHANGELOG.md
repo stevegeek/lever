@@ -55,6 +55,27 @@ version bump moves the block under the new version heading.
 
 ### Changed
 
+- **A manager start is confirmed from claude itself, not after a fixed 10 s (lever#188).** After a
+  start or resume the settle window is now 3 s counted from claude's tmux pane seen alive (the
+  lever#164 probe), instead of 10 s; every harness death seen so far came within three seconds of
+  claude's start. A start whose pane cannot be probed keeps the 10 s window. The hub record's
+  activity is not used: scion's own start report sets the same activity and time as claude's
+  SessionStart, before claude runs. `start-manager`'s post-start checks (the workers' session heal
+  and the read-only, nested-virt and claude-settings warnings) run during the window; their lines
+  print once the start is confirmed, and the warnings are dropped when it is not. `lever up` on a
+  terminal attaches as soon as claude runs, with no window, and checks the manager again after you
+  detach: a manager that died is reported then, with the start's hints and a non-zero exit.
+  `--no-attach`, `lever apply` and a stdin that is not a terminal keep the window.
+- **Independent bring-up steps run alongside each other (lever#189).** The host's scion build starts
+  before the VM and runs while it boots and is provisioned; the scion step uses it once the guest
+  reports the same architecture, and builds again otherwise. `broker-up` and the image loads with
+  their keep-id warm-up (one image at a time) run while `init-machine`, `scion-server` and the
+  registration steps run; the enrol-ticket mint and the remote proxy wait for the broker, and
+  `start-manager` for the broker and every image. A changed image's load and a first warm-up now
+  hide behind the hub's start. The progress list shows these steps as running alongside the one in
+  front. A failed step alongside prints its failure at once and stops the run after the step in
+  front; a failed step in front stops the others, which are listed as stopped, not failed.
+
 - **`lever up` says what it is doing from its first line (lever#195):** a header naming the
   application and the backend's containment posture (as `apply` printed already) comes before
   the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's

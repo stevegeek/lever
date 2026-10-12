@@ -58,6 +58,11 @@ func New(r proc.Runner, vm string, opts common.Options) *Lima {
 			},
 			ResolveHostAlias: l.resolveHostAlias,
 			DNSForward:       l.resolverForward,
+			DNSProbe: &guest.DNSProbe{
+				NATChain:   limaDNSChain,
+				ResolvConf: limaResolvConf,
+				Forwards:   limaDNSForwards,
+			},
 		},
 	})
 	return l
@@ -120,6 +125,11 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 		return nil
 	}
 	s = rep.Start("nested virt")
+	if l.WarmSnapshot().NestedVirtConverged(cfg.NestedVirt) {
+		s.Note("unchanged")
+		s.Done(nil)
+		return nil
+	}
 	err = l.Guest().EnsureNestedVirt(ctx, cfg.NestedVirt)
 	s.Done(err)
 	return err
@@ -444,16 +454,33 @@ const limaDNSChain = "LIMADNS"
 // targets, the resolver's upstream file is read, and an alias nameserver
 // gives the port-53 targets (egress.ParseResolverUpstreams).
 func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error) {
-	if res, err := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain); err == nil {
-		if targets := egress.ParseDNATTargets(res.Stdout, aliasV4); len(targets) > 0 {
+	nat, natErr := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain)
+	if natErr == nil {
+		if targets := egress.ParseDNATTargets(nat.Stdout, aliasV4); len(targets) > 0 {
 			return targets, nil
 		}
 	}
-	res, err := l.Guest().RootRun(ctx, "cat", "/run/systemd/resolve/resolv.conf")
-	if err != nil {
-		return nil, nil
+	res, err := l.Guest().RootRun(ctx, "cat", limaResolvConf)
+	return limaDNSForwards(nat.Stdout, natErr == nil, res.Stdout, err == nil, aliasV4), nil
+}
+
+// limaResolvConf is systemd-resolved's upstream file, read when LIMADNS
+// yields no targets.
+const limaResolvConf = "/run/systemd/resolve/resolv.conf"
+
+// limaDNSForwards is resolverForward's decision on what it read, shared with
+// the warm-path probe (guest.DNSProbe): the LIMADNS targets when the chain
+// was read and has any, else the resolver upstream's, else none.
+func limaDNSForwards(nat string, natOK bool, resolv string, resolvOK bool, aliasV4 string) []egress.DNSForward {
+	if natOK {
+		if targets := egress.ParseDNATTargets(nat, aliasV4); len(targets) > 0 {
+			return targets
+		}
 	}
-	return egress.ParseResolverUpstreams(res.Stdout, aliasV4), nil
+	if !resolvOK {
+		return nil
+	}
+	return egress.ParseResolverUpstreams(resolv, aliasV4)
 }
 
 var _ backend.Backend = (*Lima)(nil)

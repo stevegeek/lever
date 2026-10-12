@@ -60,7 +60,18 @@ committed one after the other, IPv6 first and IPv4 last: if the IPv6 commit fail
 if the IPv4 commit fails (or the apply is interrupted between them), IPv6 has the new rules and IPv4
 the old, and the error says so. The re-apply skip for a live closed instance (below) requires
 **both** families to carry the closed catch-all DROP, so a half-applied closed posture is always
-rebuilt, never skipped. The host alias is resolved under the old chain; when that lookup fails and
+rebuilt, never skipped.
+
+**Every bring-up verifies the chains; none assumes them.** On an `apply` or `up` of a jail that is
+already provisioned (a root-owned provisioning stamp in the guest names the exact provisioning
+scripts and the current boot), lever reads both families' `LEVER_EGRESS` and `OUTPUT` listings in
+one guest call and compares them, rule for rule and in order, with the ruleset it would commit
+(`internal/egress/listing.go`, `guest.Snapshot.VerifyEgress`). It leaves them alone only when they
+match exactly and `OUTPUT` jumps to the chain in both families; a chain that is missing, has a rule
+added, removed or changed, names another alias or other ports, or is half-applied is rebuilt by the
+atomic commit above. The stamp only lets lever skip re-installing packages and runtimes; it never
+stands in for the firewall. In the open posture the alias is resolved again for the comparison; in
+the closed posture it is read from the live chains, as below. The host alias is resolved under the old chain; when that lookup fails and
 the live IPv4 chain is closed (the guest resolves over IPv4, and that DROP blocks DNS by design),
 the aliases are read back from the live rules, each from its own family, with a warning naming them. Under an open or absent chain a failed lookup fails the apply. The rules are not persisted
 in the guest: after a guest reboot there is no chain until the next `lever apply`/`up`, which applies
@@ -86,7 +97,10 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
   validates (`internal/cap/ca/rotate.go NewServerCertSource`, which mints via `IssueServerCertSANs`;
   `internal/brokerctl/serve.go` passes the IP from `$LEVER_HOST_ALIAS_IP`, which
   `internal/cli/host/apply.go` sets on the broker child). Re-applying a *live* closed instance detects the active catch-all DROP
-  in both the IPv4 and the IPv6 chain and leaves them untouched.
+  in both the IPv4 and the IPv6 chain and leaves them untouched when they are exactly the closed
+  ruleset for the aliases they name and the configured ports; otherwise (a port added to
+  `manager.allow_ports`, a rule changed by hand) it rebuilds them atomically, taking the alias from
+  the live chains when the closed chain blocks the lookup.
 
 **Enforcement** lives in the jail's network namespace, for both postures. A **non-privileged** agent
 container is in a separate namespace from the rules and cannot flush them; reaching the rules would

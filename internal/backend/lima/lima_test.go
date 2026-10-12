@@ -736,7 +736,9 @@ func TestEnsureUpNestedVirtUnknownLeavesGuest(t *testing.T) {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	for _, c := range f.Calls {
-		if strings.Contains(strings.Join(c.Args, " "), "kvm") {
+		argv := strings.Join(c.Args, " ")
+		// The warm-path probe reads the kvm state; it changes nothing.
+		if strings.Contains(argv, "kvm") && !strings.Contains(argv, "lever-probe") {
 			t.Fatalf("EnsureUp touched the nested-virt setup: %v", c.Args)
 		}
 	}

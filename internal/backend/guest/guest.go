@@ -151,7 +151,12 @@ func (g Guest) GOARCH(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("uname -m: %w", err)
 	}
-	switch u := strings.TrimSpace(res.Stdout); u {
+	return goarchOf(res.Stdout)
+}
+
+// goarchOf maps `uname -m` output to a Go arch.
+func goarchOf(uname string) (string, error) {
+	switch u := strings.TrimSpace(uname); u {
 	case "aarch64", "arm64":
 		return "arm64", nil
 	case "x86_64", "amd64":
@@ -175,24 +180,43 @@ type ScionSpec = scionbin.Spec
 // is what lets the jail host carry no Go — issue #27) and streamed in by
 // InstallRootBinaryIfChanged.
 func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
+	return g.EnsureScionFrom(ctx, spec, nil)
+}
+
+// EnsureScionFrom is EnsureScion with the guest's arch and the installed
+// binary's digest taken from a warm-path probe (ScionProbePath in
+// ProbeSpec.HashPaths) instead of their own guest calls. A nil snapshot, or
+// one that could not read either, reads it from the guest as EnsureScion
+// does.
+func (g Guest) EnsureScionFrom(ctx context.Context, spec ScionSpec, snap *Snapshot) error {
 	// Validate the spec BEFORE touching the guest, so a plainly wrong config
 	// fails without a round-trip and without depending on the guest being up.
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	arch, err := g.GOARCH(ctx)
-	if err != nil {
-		return fmt.Errorf("detect guest architecture: %w", err)
+	arch, ok := snap.GOARCH()
+	if !ok {
+		var err error
+		if arch, err = g.GOARCH(ctx); err != nil {
+			return fmt.Errorf("detect guest architecture: %w", err)
+		}
 	}
 	bin, err := scionbin.Resolve(ctx, g.Host, spec, arch, g.Machine)
 	if err != nil {
 		return err
 	}
-	if _, err := g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath); err != nil {
+	guestDigest := func() string { return g.guestFileDigest(ctx, scionDestPath) }
+	if d, ok := snap.Digest(scionDestPath); ok {
+		guestDigest = func() string { return d }
+	}
+	if _, err := g.installRootBinaryIfChanged(ctx, bin, scionDestPath, guestDigest); err != nil {
 		return err
 	}
 	return g.EnsureScionWebAssets(ctx, spec)
 }
+
+// ScionProbePath is the installed scion binary, for ProbeSpec.HashPaths.
+const ScionProbePath = scionDestPath
 
 // InstallRootBinary streams a host-local executable into the guest at destPath
 // (mode +x), owned by root, via the RootPrefix transport. It is the backend-
@@ -326,6 +350,13 @@ func (g Guest) guestFileDigest(ctx context.Context, path string) string {
 // decided the install (hashedHandle). Reopening by path between the two
 // would let anyone who can write the path swap the file in the gap.
 func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) (bool, error) {
+	return g.installRootBinaryIfChanged(ctx, localPath, destPath, func() string { return g.guestFileDigest(ctx, destPath) })
+}
+
+// installRootBinaryIfChanged is InstallRootBinaryIfChanged with the guest
+// digest supplied: read in place, or by the warm-path probe moments earlier
+// (the same sha256sum of the same file, batched with the probe's other reads).
+func (g Guest) installRootBinaryIfChanged(ctx context.Context, localPath, destPath string, guestDigest func() string) (bool, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return false, fmt.Errorf("hashing %s: %w", localPath, err)
@@ -335,7 +366,7 @@ func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPa
 	if err != nil {
 		return false, fmt.Errorf("hashing %s: %w", localPath, err)
 	}
-	if g.guestFileDigest(ctx, destPath) == h.digest {
+	if guestDigest() == h.digest {
 		return false, nil
 	}
 	if err := g.installFromHandle(ctx, h, destPath); err != nil {

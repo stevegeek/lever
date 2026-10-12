@@ -6,11 +6,14 @@ package backendtest
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
@@ -39,13 +42,23 @@ type ClosedChainRunner struct {
 }
 
 // ClosedChain6 is the `ip6tables -S LEVER_EGRESS` output of the same closed
-// posture (every closed ruleset ends each family with the catch-all DROP).
-const ClosedChain6 = "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d fd07::fe/128 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d fd07::fe/128 -j DROP\n-A LEVER_EGRESS -j DROP\n"
+// posture (every closed ruleset ends each family with the catch-all DROP):
+// exactly what the closed ruleset for HostAliasV6 and port 8443 lists, as
+// the re-apply skip requires (guest.existingClosedAlias).
+var ClosedChain6 = closedListing(egress.IPv6)
 
 // ClosedChain is the `iptables -S LEVER_EGRESS` output of a live closed
-// posture: loopback accepted, one allowlisted port to the alias, the alias
-// dropped, everything else dropped.
-const ClosedChain = "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"
+// posture for HostAliasV4 and port 8443: loopback accepted, the port to the
+// alias, the alias and the private ranges dropped, everything else dropped.
+var ClosedChain = closedListing(egress.IPv4)
+
+// HostAliasV6 is the IPv6 alias the closed fixtures name.
+const HostAliasV6 = "fd07::fe"
+
+func closedListing(f egress.Family) string {
+	rules := egress.BuildRulesDNS(HostAliasV4, HostAliasV6, []int{8443}, true, nil)
+	return strings.Join(egress.Listing(rules, f), "\n") + "\n"
+}
 
 func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	argv := strings.Join(args, " ")
@@ -469,4 +482,84 @@ func RunVersionCases(t *testing.T, cases []VersionCase, check func(f *proc.FakeR
 			}
 		})
 	}
+}
+
+// ProbeItem is one answer of the warm-path probe (guest.Probe): a command's
+// stdout and exit code.
+type ProbeItem struct {
+	Out  string
+	Code int
+}
+
+// ProbeRunner answers the warm-path probe (the `/bin/bash -c <script>
+// lever-probe <nonce>` calls through Host) from Items, keyed by the section
+// names the script emits; a section with no item answers exit 1 and no
+// output. It records each probe and each provisioning-stamp write, and falls
+// through to the embedded FakeRunner for everything else.
+type ProbeRunner struct {
+	*proc.FakeRunner
+	Host   string
+	Items  map[string]ProbeItem
+	Probes int
+	Stamps []string // the key of each stamp write
+}
+
+var emitRe = regexp.MustCompile(`(?m)^emit ([a-z0-9]+) `)
+
+func (r *ProbeRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	n := len(args)
+	if name == r.Host && n >= 4 && args[n-2] == "lever-probe" && args[n-4] == "-c" {
+		r.Probes++
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		var b strings.Builder
+		for _, m := range emitRe.FindAllStringSubmatch(args[n-3], -1) {
+			it, ok := r.Items[m[1]]
+			if !ok {
+				it = ProbeItem{Code: 1}
+			}
+			fmt.Fprintf(&b, "@@%s %s %d\n%s\n", args[n-1], m[1], it.Code, strings.TrimRight(it.Out, "\n"))
+		}
+		return proc.Result{Stdout: b.String()}, nil
+	}
+	if name == r.Host && n >= 2 && args[n-2] == "lever-stamp" {
+		r.Stamps = append(r.Stamps, args[n-1])
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{}, nil
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// Run is re-declared for the same reason as ClosedChainRunner.Run.
+func (r *ProbeRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// ProbeBoot is the boot key a WarmItems guest reports.
+const ProbeBoot = "4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5\n42\n"
+
+// WarmItems is the probe of a converged guest for an open-posture, nested
+// virt off EnsureUp with allowedPorts, resolving to AhostsDual, provisioned
+// in this boot with stampKey (guest.ProvisionStampKey("leveruser"); this
+// package cannot import guest, whose tests import it). forwards are the DNS targets the chain already
+// accepts (Lima's LIMADNS ones); nat, when not empty, is the LIMADNS listing
+// they come from.
+func WarmItems(stampKey string, allowedPorts []int, forwards []egress.DNSForward, nat string) map[string]ProbeItem {
+	rules := egress.BuildRulesDNS(HostAliasV4, HostAliasV6, allowedPorts, false, forwards)
+	jump := "-P OUTPUT ACCEPT\n-A OUTPUT -j " + egress.Chain + "\n"
+	items := map[string]ProbeItem{
+		"user":   {Out: "leveruser\n"},
+		"uid":    {Out: "501\n"},
+		"arch":   {Out: "aarch64\n"},
+		"ahosts": {Out: AhostsDual},
+		"boot":   {Out: ProbeBoot},
+		"stamp":  {Out: stampKey + " 4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5:42\n"},
+		"out4":   {Out: jump},
+		"out6":   {Out: jump},
+		"chain4": {Out: strings.Join(egress.Listing(rules, egress.IPv4), "\n") + "\n"},
+		"chain6": {Out: strings.Join(egress.Listing(rules, egress.IPv6), "\n") + "\n"},
+	}
+	if nat != "" {
+		items["dnschain"] = ProbeItem{Out: nat}
+	}
+	return items
 }

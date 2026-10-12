@@ -164,8 +164,12 @@ VM) or the bring-up step (`start-manager`, `load-image`). `lever-agent` inside a
 ### Watching a bring-up
 
 `lever apply`, `lever up` and `lever acceptance` list their steps as they run: the jail's
-(start VM, guest hardening, packages and runtimes, scion, egress firewall), then apply's numbered
-steps, then the manager's. On a terminal one live line shows the running step, what it waits for
+(start VM, guest hardening, guest state, packages and runtimes, scion, egress firewall, nested
+virt), then apply's numbered steps, then the manager's. *Guest state* reads, in two guest calls,
+what the jail steps after it check; on a jail that is already provisioned those steps then say
+*already provisioned*, *verified, unchanged* or *unchanged* instead of running (the firewall is
+always compared rule for rule, never assumed). The first bring-up after a VM restart provisions in
+full once. On a terminal one live line shows the running step, what it waits for
 (Lima's boot stage, "hub not answering yet", the manager start's stage) and its time; finished
 steps scroll above it with their time and a note (*reused*, *already loaded*, *already running*).
 The run ends with its total and its slowest steps. `--progress` (or `LEVER_PROGRESS`) chooses the

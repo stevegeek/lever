@@ -102,6 +102,20 @@ func TestEnsureUpWarmPathRebuildsAnyEgressDifference(t *testing.T) {
 		"no v6 chain": func(m map[string]backendtest.ProbeItem) { delete(m, "chain6") },
 		"no v4 jump":  func(m map[string]backendtest.ProbeItem) { m["out4"] = backendtest.ProbeItem{Out: "-P OUTPUT ACCEPT\n"} },
 		"no v6 jump":  func(m map[string]backendtest.ProbeItem) { m["out6"] = backendtest.ProbeItem{Out: "-P OUTPUT ACCEPT\n"} },
+		// The jump present but not first: the ACCEPT ahead of it decides
+		// every packet before the lever chain sees it.
+		"v4 accept before the jump": func(m map[string]backendtest.ProbeItem) {
+			m["out4"] = backendtest.ProbeItem{Out: "-P OUTPUT ACCEPT\n-A OUTPUT -j ACCEPT\n" + egress.JumpRule + "\n"}
+		},
+		"v6 return before the jump": func(m map[string]backendtest.ProbeItem) {
+			m["out6"] = backendtest.ProbeItem{Out: "-P OUTPUT ACCEPT\n-A OUTPUT -d ::/0 -j RETURN\n" + egress.JumpRule + "\n"}
+		},
+		"v4 goto before the jump": func(m map[string]backendtest.ProbeItem) {
+			m["out4"] = backendtest.ProbeItem{Out: "-P OUTPUT ACCEPT\n-A OUTPUT -g OTHER\n" + egress.JumpRule + "\n"}
+		},
+		"v6 jump twice": func(m map[string]backendtest.ProbeItem) {
+			m["out6"] = backendtest.ProbeItem{Out: backendtest.JumpListing + egress.JumpRule + "\n"}
+		},
 		"rule added": func(m map[string]backendtest.ProbeItem) {
 			m["chain4"] = backendtest.ProbeItem{Out: m["chain4"].Out + "-A LEVER_EGRESS -j ACCEPT\n"}
 		},

@@ -204,9 +204,23 @@ type DNSProbe struct {
 
 // VerifyEgress reports whether the live egress state is exactly what
 // ApplyEgress would leave for (allowedPorts, closedInternet), and if so the
-// IPv4 alias the chains use. Exactly means: OUTPUT jumps to LEVER_EGRESS in
-// both families, and each family's chain lists the very rules ApplyEgress
-// would commit, in order, with nothing added (egress.ListingMatches).
+// IPv4 alias the chains use. Exactly means: in both families OUTPUT's FIRST
+// rule is the jump to LEVER_EGRESS and it jumps there nowhere else
+// (egress.JumpFirst, the state ensureEgressChain leaves; a rule ahead of the
+// jump would decide packets before the lever chain saw them), and each
+// family's chain lists the very rules ApplyEgress would commit, in order,
+// with nothing added (egress.ListingMatches).
+//
+// What it cannot see: it reads the chains as `iptables -S` prints them. On
+// an nf_tables guest a rule added with nft itself, in a form iptables-nft
+// cannot translate back, may print as something else or not at all, and
+// would then not be noticed here. The full path repairs such a rule as a
+// side effect (its `iptables-restore --noflush` re-declares the chain, which
+// empties it, on every apply); the warm path skips that rewrite when the
+// listing matches. Comparing `nft list chain` too would need a second
+// rendering of the ruleset in nft's syntax, and nft is not always installed,
+// so it is not done; writing nft rules into the guest takes root, which the
+// trust note on Probe covers (security-model-jail.md says so too).
 //
 // The aliases come from where ApplyEgress takes them: in the open posture
 // from the getent lookup the probe ran (and the resolver's forward targets
@@ -221,7 +235,7 @@ type DNSProbe struct {
 func (s *Snapshot) VerifyEgress(allowedPorts []int, closedInternet bool, hasDNS bool, dns *DNSProbe) (string, bool) {
 	out4, ok4 := s.item("out4")
 	out6, ok6 := s.item("out6")
-	if !ok4 || !ok6 || !hasJump(out4) || !hasJump(out6) {
+	if !ok4 || !ok6 || !egress.JumpFirst(out4) || !egress.JumpFirst(out6) {
 		return "", false
 	}
 	chain4, ok4 := s.item("chain4")
@@ -265,17 +279,6 @@ func (s *Snapshot) VerifyEgress(allowedPorts []int, closedInternet bool, hasDNS 
 		return "", false
 	}
 	return v4, true
-}
-
-// hasJump reports whether an `iptables -S OUTPUT` listing jumps to the
-// lever chain (the check ensureEgressChain makes with -C).
-func hasJump(listing string) bool {
-	for _, line := range strings.Split(listing, "\n") {
-		if strings.TrimSpace(line) == "-A OUTPUT -j "+egress.Chain {
-			return true
-		}
-	}
-	return false
 }
 
 // Probe reads the guest state the warm path decides on, in two guest calls:

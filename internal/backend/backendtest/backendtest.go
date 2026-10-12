@@ -52,6 +52,10 @@ var ClosedChain6 = closedListing(egress.IPv6)
 // alias, the alias and the private ranges dropped, everything else dropped.
 var ClosedChain = closedListing(egress.IPv4)
 
+// JumpListing is `iptables -S OUTPUT` (or ip6tables) of a converged guest:
+// the jump to the lever chain is OUTPUT's first and only rule.
+const JumpListing = "-P OUTPUT ACCEPT\n" + egress.JumpRule + "\n"
+
 // HostAliasV6 is the IPv6 alias the closed fixtures name.
 const HostAliasV6 = "fd07::fe"
 
@@ -71,6 +75,11 @@ func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[strin
 		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
 			if !r.Open {
 				return proc.Result{Stdout: ClosedChain}, nil
+			}
+		case strings.Contains(argv, "tables -S OUTPUT"):
+			// A live closed posture: the jump is OUTPUT's first rule.
+			if !r.Open {
+				return proc.Result{Stdout: JumpListing}, nil
 			}
 		case strings.Contains(argv, "-F LEVER_EGRESS"):
 			r.Flushed = true
@@ -228,19 +237,41 @@ func (g Guest) scriptFirewall(f *proc.FakeRunner) {
 	f.Script(g.Root+" bash -c exec ip", proc.Result{})
 }
 
-// RestoreCommits returns the stdin of every iptables-restore / ip6tables-restore
-// commit ApplyEgress made, in order, keyed by the restore binary.
+// RestoreCommits returns the stdin of every chain commit ApplyEgress made
+// (an iptables-restore / ip6tables-restore that declares LEVER_EGRESS), in
+// order, keyed by the restore binary. The commits that only place the
+// OUTPUT jump are JumpCommits.
 func RestoreCommits(f *proc.FakeRunner) (bins []string, inputs []string) {
+	return restoreCalls(f, true)
+}
+
+// JumpCommits returns the restore commits that only (re)place the OUTPUT
+// jump (egress.JumpRestoreInput), in order, keyed by the restore binary.
+func JumpCommits(f *proc.FakeRunner) (bins []string, inputs []string) {
+	return restoreCalls(f, false)
+}
+
+// chainDecl is how a chain commit declares the lever chain.
+const chainDecl = "\n:" + egress.Chain + " "
+
+func restoreCalls(f *proc.FakeRunner, chain bool) (bins []string, inputs []string) {
 	for _, c := range f.Calls {
 		argv := c.Argv()
 		for _, bin := range []string{"ip6tables-restore", "iptables-restore"} {
-			if strings.Contains(argv, "exec "+bin+" --noflush") {
+			if strings.Contains(argv, "exec "+bin+" --noflush") && strings.Contains(c.Stdin, chainDecl) == chain {
 				bins, inputs = append(bins, bin), append(inputs, c.Stdin)
 				break
 			}
 		}
 	}
 	return bins, inputs
+}
+
+// firstChainCommit is the index of the first IPv6 chain commit, or -1.
+func firstChainCommit(f *proc.FakeRunner) int {
+	return f.CallIndex(func(c proc.Call) bool {
+		return strings.Contains(c.Argv(), "exec ip6tables-restore --noflush") && strings.Contains(c.Stdin, chainDecl)
+	})
 }
 
 // ScriptProvision scripts everything EnsureUp does AFTER the machine is up:
@@ -326,7 +357,7 @@ func AssertAtomicCommit(t *testing.T, f *proc.FakeRunner, alias string) {
 		t.Fatalf("ApplyEgress must never flush LEVER_EGRESS (that opens egress until the rules are back): %+v", f.Calls[i])
 	}
 	getentIdx := f.CallIndex(proc.ArgvContains("getent ahosts " + alias))
-	commitIdx := f.CallIndex(proc.ArgvContains("exec ip6tables-restore --noflush"))
+	commitIdx := firstChainCommit(f)
 	if getentIdx < 0 || commitIdx < 0 || getentIdx > commitIdx {
 		t.Fatalf("resolve (idx %d) must precede the commit (idx %d)", getentIdx, commitIdx)
 	}
@@ -556,7 +587,7 @@ const ProbeBoot = "4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5\n42\n"
 // they come from.
 func WarmItems(stampKey string, allowedPorts []int, forwards []egress.DNSForward, nat string) map[string]ProbeItem {
 	rules := egress.BuildRulesDNS(HostAliasV4, HostAliasV6, allowedPorts, false, forwards)
-	jump := "-P OUTPUT ACCEPT\n-A OUTPUT -j " + egress.Chain + "\n"
+	jump := JumpListing
 	items := map[string]ProbeItem{
 		"user":      {Out: "leveruser\n"},
 		"uid":       {Out: "501\n"},

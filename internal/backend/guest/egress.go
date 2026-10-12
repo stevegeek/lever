@@ -227,24 +227,35 @@ func (g Guest) existingClosedAlias(ctx context.Context, allowedPorts []int) (str
 	return v4, true
 }
 
-// ensureEgressChain makes sure the LEVER_EGRESS chain exists and OUTPUT jumps
-// to it exactly once, for both address families, WITHOUT flushing it: the
-// live rules stay in force until commitEgressChain replaces them atomically.
-// A freshly created chain is empty, which enforces nothing more than the
-// absence of the chain did.
+// ensureEgressChain makes sure the LEVER_EGRESS chain exists and that the
+// jump to it is OUTPUT's FIRST rule, exactly once, for both address
+// families, WITHOUT flushing the chain: the live rules stay in force until
+// commitEgressChain replaces them atomically. A freshly created chain is
+// empty, which enforces nothing more than the absence of the chain did.
+//
+// First, not merely present: a rule ahead of the jump (an ACCEPT, a RETURN,
+// a goto) would decide packets before the lever chain sees them. When the
+// jump is not already first and unique (egress.JumpFirst), every copy of it
+// is deleted and one inserted at position 1 in ONE iptables-restore commit
+// (egress.JumpRestoreInput), so OUTPUT is never without it. Other OUTPUT
+// rules are left where they are: behind the jump they cannot weaken it.
+// This is the state Snapshot.VerifyEgress requires, so the warm path's
+// check and this repair agree, and a repaired OUTPUT verifies next time.
 func (g Guest) ensureEgressChain(ctx context.Context) error {
-	for _, bin := range []string{"iptables", "ip6tables"} {
-		run := func(args ...string) error {
-			_, err := g.RootRun(ctx, append([]string{bin}, args...)...)
-			return err
-		}
+	for _, fam := range []egress.Family{egress.IPv4, egress.IPv6} {
+		bin := fam.Binary()
 		// Create the chain if absent (-N errors if it already exists — tolerate).
-		_ = run("-N", egress.Chain)
-		// Ensure the OUTPUT jump exists exactly once: -C checks, -A adds if missing.
-		if err := run("-C", "OUTPUT", "-j", egress.Chain); err != nil {
-			if err := run("-A", "OUTPUT", "-j", egress.Chain); err != nil {
-				return fmt.Errorf("egress: add OUTPUT jump (%s): %w", bin, err)
-			}
+		_, _ = g.RootRun(ctx, bin, "-N", egress.Chain)
+		res, err := g.RootRun(ctx, bin, "-S", "OUTPUT")
+		if err != nil {
+			return fmt.Errorf("egress: list OUTPUT (%s): %w", bin, err)
+		}
+		if egress.JumpFirst(res.Stdout) {
+			continue
+		}
+		in := egress.JumpRestoreInput(res.Stdout)
+		if err := g.pipeInto(ctx, g.RootPrefix, strings.NewReader(in), "exec "+fam.RestoreBinary()+" --noflush"); err != nil {
+			return fmt.Errorf("egress: make the %s jump OUTPUT's first rule (%s): %w", egress.Chain, fam.RestoreBinary(), err)
 		}
 	}
 	return nil

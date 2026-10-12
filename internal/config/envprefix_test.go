@@ -26,6 +26,9 @@ func TestParseEnvPrefix(t *testing.T) {
 		{"-0 -v", []string{"env", "-0", "-v", "tool", "-state", "/tree/s"}, tool, "", false},
 		{"-iv0 group", []string{"env", "-iv0", "tool", "-state", "/tree/s"}, tool, "", false},
 		{"--", []string{"env", "-i", "--", "A=1", "tool", "-state", "/tree/s"}, tool, "", false},
+		{"-- then -", []string{"env", "--", "-", "/tree/evil", "x"}, []string{"/tree/evil", "x"}, "", false},
+		{"-- then - then an option", []string{"env", "--", "-", "-u", "X", "tool"}, nil, "", true},
+		{"- then -", []string{"env", "-", "-"}, nil, "", true},
 		{"options stop at an assignment", []string{"env", "A=1", "-i", "tool"}, []string{"-i", "tool"}, "", false},
 
 		{"-u NAME", []string{"env", "-u", "X", "tool", "-state", "/tree/s"}, tool, "", false},

@@ -187,8 +187,10 @@ func toolHostPaths(t Tool) []hostPath {
 	}
 	// After an env prefix, a relative path resolves against env's -C
 	// directory (joinRaw keeps a ".." in it for the refusal).
+	// Decided by argv[0], not by length: an -S string can make the command
+	// env runs as long as the prefix, or longer.
 	argv, chdir := t.Command, ""
-	if real, dir := unwrapEnv(argv); len(real) > 0 && len(real) < len(argv) {
+	if real, dir := unwrapEnv(argv); baseName(argv[0]) == "env" && len(real) > 0 {
 		argv, chdir = real, dir
 		if strings.ContainsRune(argv[0], '/') {
 			add("command (after env)", joinRaw(chdir, argv[0]), hostProgram)

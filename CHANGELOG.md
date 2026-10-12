@@ -34,8 +34,8 @@ version bump moves the block under the new version heading.
   sequences, credentials masked, at most 64 MiB read). The log download follows GitHub's redirect
   only over https to its log hosts, with no credential. Both need only Actions: read on the App.
 - **`lever apply`, `lever up` and `lever acceptance` list their steps as they run (lever#185).**
-  The jail's steps (start VM, guest hardening, packages and runtimes, scion, egress firewall,
-  nested virt), apply's numbered steps (`[5/11] scion-server`) and the manager's, each with its
+  The jail's steps (start VM, guest hardening, guest state, packages and runtimes, scion, egress
+  firewall, nested virt), apply's numbered steps (`[5/11] scion-server`) and the manager's, each with its
   time and a note when nothing needed doing (*reused*, *already loaded*, *already running*). On a
   terminal one live line shows the running step and what it waits for (Lima's boot stage, the hub
   not answering yet, the manager start's stage); the run ends with its total and slowest steps.
@@ -55,6 +55,31 @@ version bump moves the block under the new version heading.
 
 ### Changed
 
+- **A bring-up of a provisioned jail checks it in two guest calls instead of about twenty
+  (lever#187).** `lever apply` and `lever up` used to make one guest round trip per check on every
+  run (on Lima each is a `limactl shell`, a quarter to half a second), even to attach to a running
+  manager. A new *guest state* step reads the run user, the guest arch, the installed scion's
+  digest, both families' egress chains, the resolver state and the nested-virt state at once. A
+  root-owned stamp (`/var/lib/lever/provision.stamp`) that names the exact provisioning scripts and
+  the current boot lets the packages and runtimes step skip; the egress chains are always compared
+  rule for rule with the ruleset lever would commit and are rebuilt on any difference, so a missing
+  or tampered chain never passes. The first bring-up after a VM restart, or after a lever whose
+  provisioning changed, provisions in full and writes the stamp. With `scion.version`, the host
+  skips `go mod download` and `go build` when a stamp beside the last build names the same pin,
+  arch, Go toolchain and Go environment and the output is unchanged.
+- **A closed-egress re-apply now applies a changed ruleset (lever#187).** The re-apply skip for a
+  live closed posture held for any closed chain; it now holds only when both chains are exactly the
+  closed ruleset for their aliases and the configured ports. A port added to `manager.allow_ports`,
+  or a rule changed by hand, is applied by the next `apply` or `up` (atomically, as before) instead
+  of needing `lever destroy` and `up`. The `OUTPUT` jump is ensured before that skip too.
+- **Readiness waits run in the guest (lever#190).** The hub wait polls the hub's `/healthz` from
+  inside the jail every 150 ms (one guest call per 5 s) instead of starting the scion CLI through
+  the jail every second, and the runtime-broker wait polls `scion hub brokers` in the guest every
+  200 ms in one call. Each still ends on the same check as before (the CLI probe, lever's parse of
+  the broker list), and falls back to the old polling when the jail has no `curl`. `start-manager`
+  no longer waits for the broker again when the `scion-server` step of the same run saw it online.
+  A hub link that finds no runtime broker yet is retried after 1, 2, 4, 8 and 16 s (was 5, 10 and
+  20 s).
 - **`lever up` says what it is doing from its first line (lever#195):** a header naming the
   application and the backend's containment posture (as `apply` printed already) comes before
   the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's

@@ -131,14 +131,36 @@ func (s *Snapshot) bootKey() (string, bool) {
 }
 
 // Provisioned reports whether the provisioning stamp records key in this
-// boot.
+// boot, and the run user's pasta drop-in is still the one the provisioning
+// writes for this guest's pasta: that file belongs to the run user, so the
+// stamp cannot vouch for it, and the full path rewrites it on every run.
 func (s *Snapshot) Provisioned(key string) bool {
 	boot, ok := s.bootKey()
 	if !ok {
 		return false
 	}
 	stamp, ok := s.item("stamp")
-	return ok && strings.TrimSpace(stamp) == key+" "+boot
+	return ok && strings.TrimSpace(stamp) == key+" "+boot && s.pastaConverged()
+}
+
+// pastaConverged reports whether the drop-in holds what pastaDropInScript
+// would write for the pasta --help text the probe read.
+func (s *Snapshot) pastaConverged() bool {
+	got, ok := s.item("pasta")
+	help, read := s.items["pastahelp"]
+	if !ok || !read {
+		return false
+	}
+	var want string
+	switch {
+	case strings.Contains(help.out, "--map-host-loopback"):
+		want = pastaDropInModern
+	case strings.Contains(help.out, "--no-map-gw"):
+		want = pastaDropInGateway
+	default:
+		return false
+	}
+	return strings.TrimSpace(got) == strings.TrimSpace(want)
 }
 
 // NestedVirtConverged reports whether the guest already holds what
@@ -258,14 +280,15 @@ func hasJump(listing string) bool {
 
 // Probe reads the guest state the warm path decides on, in two guest calls:
 // one as the run user, one as root. Every section of the output is framed by
-// a line carrying a fresh random nonce, so nothing a section prints (a DNS
-// answer, a file) can pose as another section. An error means the snapshot
+// a line carrying a fresh random nonce per call, so nothing a root section
+// prints (a file, a listing) can pose as another section, and a section the
+// script did not ask for fails the probe. The user call runs in the run
+// user's login shell, so the run user can shape everything it reports (as it
+// could the separate whoami/getent calls before); nothing it reports is
+// trusted on its own: an alias it gave must still match the root-read chains
+// exactly, and its pasta drop-in is its own file. An error means the snapshot
 // cannot be trusted as a whole; the caller then takes the full path.
 func (g Guest) Probe(ctx context.Context, spec ProbeSpec) (*Snapshot, error) {
-	nonce, err := probeNonce()
-	if err != nil {
-		return nil, err
-	}
 	snap := &Snapshot{items: map[string]probeItem{}, spec: spec}
 	for _, part := range []struct {
 		prefix []string
@@ -275,6 +298,11 @@ func (g Guest) Probe(ctx context.Context, spec ProbeSpec) (*Snapshot, error) {
 		{g.UserPrefix, userProbeScript(spec), userProbeKeys(spec)},
 		{g.RootPrefix, rootProbeScript(spec), rootProbeKeys(spec)},
 	} {
+		// A nonce per call: the run user sees the first call's.
+		nonce, err := probeNonce()
+		if err != nil {
+			return nil, err
+		}
 		argv := append(append([]string{}, part.prefix[1:]...), "/bin/bash", "-c", part.script, "lever-probe", nonce)
 		res, err := g.Host.Run(ctx, nil, part.prefix[0], argv...)
 		if err != nil {
@@ -283,6 +311,9 @@ func (g Guest) Probe(ctx context.Context, spec ProbeSpec) (*Snapshot, error) {
 		items, err := parseProbe(res.Stdout, nonce)
 		if err != nil {
 			return nil, err
+		}
+		if len(items) != len(part.keys) {
+			return nil, fmt.Errorf("guest probe: %d sections, want %d", len(items), len(part.keys))
 		}
 		for _, k := range part.keys {
 			it, ok := items[k]
@@ -312,14 +343,18 @@ emit() { k=$1; shift; o=$("$@" 2>/dev/null); c=$?; printf '@@%s %s %d\n%s\n' "$N
 `
 
 // userProbeScript reads, as the run user, what ReadRunUser, GOARCH, the
-// alias lookup and the legacy kvm drop-in check read. Absolute paths and
-// the test builtin: the run user's PATH starts with directories the run user
-// can write.
+// alias lookup, the pasta drop-in check and the legacy kvm drop-in check
+// read. Absolute paths keep a stray PATH entry out of the answers; they do
+// not keep out the run user, who controls its own login shell (see Probe).
 func userProbeScript(spec ProbeSpec) string {
 	var b strings.Builder
 	b.WriteString(probeHead)
+	// pasta --help may exit non-zero; its text is what decides the drop-in.
+	b.WriteString("pastahelp() { pasta --help 2>&1; true; }\n")
 	b.WriteString("emit user /usr/bin/id -un\nemit uid /usr/bin/id -u\nemit arch /usr/bin/uname -m\n")
 	b.WriteString(`emit kvmlegacy test -e "` + legacyKVMDropInPath + `"` + "\n")
+	b.WriteString(`emit pasta cat "` + pastaDropInPath + `"` + "\n")
+	b.WriteString("emit pastahelp pastahelp\n")
 	if spec.HostAlias != "" {
 		b.WriteString("emit ahosts /usr/bin/getent ahosts " + shellSingleQuote(spec.HostAlias) + "\n")
 	}
@@ -327,7 +362,7 @@ func userProbeScript(spec ProbeSpec) string {
 }
 
 func userProbeKeys(spec ProbeSpec) []string {
-	keys := []string{"user", "uid", "arch", "kvmlegacy"}
+	keys := []string{"user", "uid", "arch", "kvmlegacy", "pasta", "pastahelp"}
 	if spec.HostAlias != "" {
 		keys = append(keys, "ahosts")
 	}

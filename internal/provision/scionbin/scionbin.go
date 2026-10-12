@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/proc"
@@ -130,8 +131,13 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 			return "", err
 		}
 		// A pinned module's source never changes, so the last output is
-		// this build's when the stamp beside it says so (lever#187).
-		if stampKey = buildKey(spec.Version, goarch, gb); stampKey != "" && stampMatches(out, stampKey) {
+		// this build's when the stamp beside it says so (lever#187). Only
+		// for a version that names one source for good: a branch name or
+		// "latest" moves, and must be fetched every time.
+		if immutableVersion(spec.Version) {
+			stampKey = buildKey(spec.Version, goarch, gb)
+		}
+		if stampKey != "" && stampMatches(out, stampKey) {
 			return out, nil
 		}
 		dir, err := fetchModule(ctx, r, gb, spec.Version)
@@ -158,6 +164,16 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 	}
 	return out, nil
 }
+
+// immutableRe matches the versions that name one module source for good: a
+// commit hash (or a prefix of at least 7 hex digits) and a semantic or
+// pseudo-version (v1.2.3, v0.0.0-20260101000000-abcdef123456, v1.2.3-rc.1).
+var immutableRe = regexp.MustCompile(`^(?:[0-9a-f]{7,40}|v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$`)
+
+// immutableVersion reports whether a scion.version may be stamped. A
+// short hex prefix resolves to the same commit for as long as it is
+// unambiguous; the module proxy and go.sum keep a version's content fixed.
+func immutableVersion(v string) bool { return immutableRe.MatchString(v) }
 
 // buildArgs is the go command line that builds scion into out.
 func buildArgs(out string) []string { return []string{"build", "-o", out, "./cmd/scion"} }

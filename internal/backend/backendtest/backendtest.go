@@ -534,6 +534,17 @@ func (r *ProbeRunner) Run(ctx context.Context, env map[string]string, name strin
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
+// PastaDropIn is the drop-in the provisioning writes for a pasta with
+// --map-host-loopback (guest.pastaDropInModern; this package cannot import
+// guest). TestWarmFixturePastaDropIn in guest pins the two together.
+const PastaDropIn = `[containers]
+host_containers_internal_ip = "169.254.1.2"
+
+[network]
+default_rootless_network_cmd = "pasta"
+pasta_options = ["--map-host-loopback", "169.254.1.2"]
+`
+
 // ProbeBoot is the boot key a WarmItems guest reports.
 const ProbeBoot = "4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5\n42\n"
 
@@ -547,16 +558,18 @@ func WarmItems(stampKey string, allowedPorts []int, forwards []egress.DNSForward
 	rules := egress.BuildRulesDNS(HostAliasV4, HostAliasV6, allowedPorts, false, forwards)
 	jump := "-P OUTPUT ACCEPT\n-A OUTPUT -j " + egress.Chain + "\n"
 	items := map[string]ProbeItem{
-		"user":   {Out: "leveruser\n"},
-		"uid":    {Out: "501\n"},
-		"arch":   {Out: "aarch64\n"},
-		"ahosts": {Out: AhostsDual},
-		"boot":   {Out: ProbeBoot},
-		"stamp":  {Out: stampKey + " 4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5:42\n"},
-		"out4":   {Out: jump},
-		"out6":   {Out: jump},
-		"chain4": {Out: strings.Join(egress.Listing(rules, egress.IPv4), "\n") + "\n"},
-		"chain6": {Out: strings.Join(egress.Listing(rules, egress.IPv6), "\n") + "\n"},
+		"user":      {Out: "leveruser\n"},
+		"uid":       {Out: "501\n"},
+		"arch":      {Out: "aarch64\n"},
+		"ahosts":    {Out: AhostsDual},
+		"boot":      {Out: ProbeBoot},
+		"pasta":     {Out: PastaDropIn},
+		"pastahelp": {Out: "Usage: pasta [OPTION]... [COMMAND] [ARGS]...\n  --map-host-loopback ADDR\n"},
+		"stamp":     {Out: stampKey + " 4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5:42\n"},
+		"out4":      {Out: jump},
+		"out6":      {Out: jump},
+		"chain4":    {Out: strings.Join(egress.Listing(rules, egress.IPv4), "\n") + "\n"},
+		"chain6":    {Out: strings.Join(egress.Listing(rules, egress.IPv6), "\n") + "\n"},
 	}
 	if nat != "" {
 		items["dnschain"] = ProbeItem{Out: nat}

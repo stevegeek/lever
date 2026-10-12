@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -441,5 +443,12 @@ func TestInGuestWaitScriptsRunForReal(t *testing.T) {
 	err = exec.Command(sh, "-c", healthzScript, "_", "http://127.0.0.1:9", "1").Run()
 	if !errors.As(err, &ee) || ee.ExitCode() != waitedExit {
 		t.Fatalf("healthz: %v, want exit %d", err, waitedExit)
+	}
+	// Something that answers, but not 200: unusable at once (exit 4).
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	err = exec.Command(sh, "-c", healthzScript, "_", srv.URL, "20").Run()
+	if !errors.As(err, &ee) || ee.ExitCode() != 4 {
+		t.Fatalf("healthz 404: %v, want exit 4", err)
 	}
 }

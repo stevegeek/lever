@@ -61,10 +61,12 @@ version bump moves the block under the new version heading.
   manager. A new *guest state* step reads the run user, the guest arch, the installed scion's
   digest, both families' egress chains, the resolver state and the nested-virt state at once. A
   root-owned stamp (`/var/lib/lever/provision.stamp`) that names the exact provisioning scripts and
-  the current boot lets the packages and runtimes step skip; the egress chains are always compared
-  rule for rule with the ruleset lever would commit and are rebuilt on any difference, so a missing
-  or tampered chain never passes. The first bring-up after a VM restart, or after a lever whose
-  provisioning changed, provisions in full and writes the stamp. With `scion.version`, the host
+  the current boot, with the run user's pasta drop-in still as written, lets the packages and
+  runtimes step skip (a rootless dockerd that died is then not restarted until the next VM restart);
+  the egress chains are always compared rule for rule with the ruleset lever would commit and are
+  rebuilt on any difference, so a missing or tampered chain never passes. The first bring-up after a
+  VM restart, or after a lever whose provisioning changed, provisions in full and writes the stamp.
+  With a `scion.version` that is a commit or a semantic or pseudo-version (not a branch), the host
   skips `go mod download` and `go build` when a stamp beside the last build names the same pin,
   arch, Go toolchain and Go environment and the output is unchanged.
 - **A closed-egress re-apply now applies a changed ruleset (lever#187).** The re-apply skip for a
@@ -76,10 +78,10 @@ version bump moves the block under the new version heading.
   inside the jail every 150 ms (one guest call per 5 s) instead of starting the scion CLI through
   the jail every second, and the runtime-broker wait polls `scion hub brokers` in the guest every
   200 ms in one call. Each still ends on the same check as before (the CLI probe, lever's parse of
-  the broker list), and falls back to the old polling when the jail has no `curl`. `start-manager`
-  no longer waits for the broker again when the `scion-server` step of the same run saw it online.
-  A hub link that finds no runtime broker yet is retried after 1, 2, 4, 8 and 16 s (was 5, 10 and
-  20 s).
+  the broker list), and falls back to the old polling when the jail has no `curl` or the hub does
+  not answer `/healthz` with a 200. `start-manager` no longer waits for the broker again when the
+  `scion-server` step of the same run saw it online. A hub link that finds no runtime broker yet is
+  retried after 1, 2, 4, 8 and 16 s (was 5, 10 and 20 s).
 - **`lever up` says what it is doing from its first line (lever#195):** a header naming the
   application and the backend's containment posture (as `apply` printed already) comes before
   the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's

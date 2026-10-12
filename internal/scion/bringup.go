@@ -292,12 +292,16 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 
 // healthzScript polls $1/healthz from inside the jail every 150 ms, at most
 // $2 more times: exit 0 once it answers 200, 3 when it never did
-// (waitedExit), 127 without curl. Each request is bounded, so a hub that accepts and hangs
-// cannot stretch the loop.
+// (waitedExit), 127 without curl, and 4 at once when something answers but
+// not with a 200 or not as plain HTTP (curl 22, 35, 60): a hub that does not
+// serve /healthz there must not cost every attempt the whole window. Each
+// request is bounded, so a hub that accepts and hangs cannot stretch the
+// loop.
 const healthzScript = `command -v curl >/dev/null 2>&1 || exit 127
 i=0
 while :; do
-  curl -fs -o /dev/null --connect-timeout 1 --max-time 2 "$1/healthz" && exit 0
+  curl -fs -o /dev/null --connect-timeout 1 --max-time 2 "$1/healthz"
+  case $? in 0) exit 0 ;; 22|35|60) exit 4 ;; esac
   [ "$i" -ge "$2" ] && exit 3
   sleep 0.15
   i=$((i+1))
@@ -455,8 +459,13 @@ func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, 
 		case <-time.After(brokerPollEvery):
 		}
 	}
+	// The rest of the budget, not a fresh one.
+	attempts := c.brokerReadyAttempts
+	if c.brokerReadyInterval > 0 {
+		attempts = max(1, int(time.Until(deadline)/c.brokerReadyInterval))
+	}
 	online := false
-	err := retry.Until(ctx, c.brokerReadyAttempts, c.brokerReadyInterval, func() (bool, error) {
+	err := retry.Until(ctx, attempts, c.brokerReadyInterval, func() (bool, error) {
 		out, err := c.runValue(ctx, "", args...)
 		if err != nil {
 			return false, nil

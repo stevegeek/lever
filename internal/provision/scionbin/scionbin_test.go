@@ -308,40 +308,40 @@ func (x *buildStampFixture) resolve(pin string) bool {
 // builds again.
 func TestResolveVersionSkipsTheBuildOnAMatchingStamp(t *testing.T) {
 	x := newBuildStampFixture(t)
-	if !x.resolve("aaaa") {
+	if !x.resolve("aaaaaaaa") {
 		t.Fatal("the first resolve must build")
 	}
-	if x.resolve("aaaa") {
+	if x.resolve("aaaaaaaa") {
 		t.Fatal("a matching stamp must skip the build")
 	}
-	if !x.resolve("bbbb") {
+	if !x.resolve("bbbbbbbb") {
 		t.Fatal("another pin must build")
 	}
-	if x.resolve("bbbb") {
+	if x.resolve("bbbbbbbb") {
 		t.Fatal("the new pin's stamp must hold")
 	}
 	t.Setenv("GOFLAGS", "-tags=x")
-	if !x.resolve("bbbb") {
+	if !x.resolve("bbbbbbbb") {
 		t.Fatal("a GOFLAGS change must build")
 	}
 	if err := os.WriteFile(filepath.Join(x.root, "VERSION"), []byte("go1.26.5\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !x.resolve("bbbb") {
+	if !x.resolve("bbbbbbbb") {
 		t.Fatal("a toolchain change must build")
 	}
 	// The output replaced since the build (another size).
 	if err := os.WriteFile(x.out, []byte("something else entirely"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if !x.resolve("bbbb") {
+	if !x.resolve("bbbbbbbb") {
 		t.Fatal("a changed output must build")
 	}
 	// Without a readable toolchain version, no stamp: build every time.
 	if err := os.Remove(filepath.Join(x.root, "VERSION")); err != nil {
 		t.Fatal(err)
 	}
-	if !x.resolve("bbbb") || !x.resolve("bbbb") {
+	if !x.resolve("bbbbbbbb") || !x.resolve("bbbbbbbb") {
 		t.Fatal("no toolchain version must always build")
 	}
 }
@@ -349,7 +349,7 @@ func TestResolveVersionSkipsTheBuildOnAMatchingStamp(t *testing.T) {
 // A failed build leaves no stamp that could vouch for the old output.
 func TestResolveFailedBuildRemovesTheStamp(t *testing.T) {
 	x := newBuildStampFixture(t)
-	x.resolve("aaaa")
+	x.resolve("aaaaaaaa")
 	if _, err := os.Stat(x.out + ".stamp"); err != nil {
 		t.Fatalf("no stamp after a build: %v", err)
 	}
@@ -358,10 +358,27 @@ func TestResolveFailedBuildRemovesTheStamp(t *testing.T) {
 	f.Script("go env GOROOT", proc.Result{Stdout: x.root + "\n"})
 	f.Script(goBin+" mod download -json", proc.Result{Stdout: `{"Dir":"/mod/scion"}`})
 	// No build script: the build fails.
-	if _, err := scionbin.Resolve(context.Background(), f, scionbin.Spec{Version: "cccc"}, "arm64", "m"); err == nil {
+	if _, err := scionbin.Resolve(context.Background(), f, scionbin.Spec{Version: "cccccccc"}, "arm64", "m"); err == nil {
 		t.Fatal("want the build failure")
 	}
 	if _, err := os.Stat(x.out + ".stamp"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("stamp after a failed build: %v", err)
+	}
+}
+
+// A version that can move (a branch, "latest") is fetched and built every
+// time; only commits and semantic or pseudo-versions are stamped.
+func TestResolveNeverStampsAMovingVersion(t *testing.T) {
+	x := newBuildStampFixture(t)
+	for _, v := range []string{"main", "latest", "feature/x", "v1.2"} {
+		if !x.resolve(v) || !x.resolve(v) {
+			t.Errorf("%q: a moving version must build every time", v)
+		}
+	}
+	for _, v := range []string{"666333f9", "v1.2.3", "v0.0.0-20260101000000-abcdef123456"} {
+		x.resolve(v)
+		if x.resolve(v) {
+			t.Errorf("%q: an immutable version must be stamped", v)
+		}
 	}
 }

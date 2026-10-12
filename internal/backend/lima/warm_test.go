@@ -124,6 +124,7 @@ func TestEnsureUpWarmPathRebuildsAnyEgressDifference(t *testing.T) {
 		},
 		"stamp missing":     func(m map[string]backendtest.ProbeItem) { delete(m, "stamp") },
 		"probe has no user": func(m map[string]backendtest.ProbeItem) { delete(m, "user") },
+		"pasta drop-in off": func(m map[string]backendtest.ProbeItem) { m["pasta"] = backendtest.ProbeItem{Out: "[network]\n"} },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

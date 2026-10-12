@@ -29,6 +29,38 @@ const listingFixture6 = `-N LEVER_EGRESS
 -A LEVER_EGRESS -d fc00::/7 -j DROP
 `
 
+// The closed ruleset BuildRulesDNS("192.168.5.2", "fd07::fe", {8443},
+// true, nil), as iptables -S prints it, written out by hand.
+const closedFixture4 = `-N LEVER_EGRESS
+-A LEVER_EGRESS -o lo -j ACCEPT
+-A LEVER_EGRESS -d 192.168.5.2/32 -p tcp -m tcp --dport 8443 -j ACCEPT
+-A LEVER_EGRESS -d 192.168.5.2/32 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A LEVER_EGRESS -d 192.168.5.2/32 -j DROP
+-A LEVER_EGRESS -d 10.0.0.0/8 -j DROP
+-A LEVER_EGRESS -d 172.16.0.0/12 -j DROP
+-A LEVER_EGRESS -d 192.168.0.0/16 -j DROP
+-A LEVER_EGRESS -d 169.254.0.0/16 -j DROP
+-A LEVER_EGRESS -d 100.64.0.0/10 -j DROP
+-A LEVER_EGRESS -j DROP
+`
+
+const closedFixture6 = `-N LEVER_EGRESS
+-A LEVER_EGRESS -o lo -j ACCEPT
+-A LEVER_EGRESS -d fd07::fe/128 -p tcp -m tcp --dport 8443 -j ACCEPT
+-A LEVER_EGRESS -d fd07::fe/128 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+-A LEVER_EGRESS -d fd07::fe/128 -j DROP
+-A LEVER_EGRESS -d fe80::/10 -j DROP
+-A LEVER_EGRESS -d fc00::/7 -j DROP
+-A LEVER_EGRESS -j DROP
+`
+
+func TestListingMatchesClosedPrintedForm(t *testing.T) {
+	rules := BuildRulesDNS("192.168.5.2", "fd07::fe", []int{8443}, true, nil)
+	if !ListingMatches(rules, IPv4, closedFixture4) || !ListingMatches(rules, IPv6, closedFixture6) {
+		t.Fatalf("closed listing does not match:\n%s\n%s", strings.Join(Listing(rules, IPv4), "\n"), strings.Join(Listing(rules, IPv6), "\n"))
+	}
+}
+
 func fixtureRules() []Rule {
 	return BuildRulesDNS("192.168.5.2", "fd07:0:0::00fe", []int{3305}, false, []DNSForward{{"udp", 53}})
 }

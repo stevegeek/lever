@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -87,6 +88,9 @@ func TestProvisionStampRoundTrip(t *testing.T) {
 	snap := &Snapshot{items: map[string]probeItem{
 		"boot":  {out: strings.TrimRight(string(boot), "\n")},
 		"stamp": {out: strings.TrimRight(string(stamp), "\n")},
+		// A converged drop-in, so the stamp alone decides here.
+		"pasta":     {out: pastaDropInModern},
+		"pastahelp": {out: "--map-host-loopback"},
 	}}
 	if !snap.Provisioned(key) {
 		t.Fatalf("stamp %q not accepted for boot %q", stamp, boot)
@@ -160,5 +164,41 @@ iptables -A OUTPUT -j LEVER_EGRESS && ip6tables -A OUTPUT -j LEVER_EGRESS && exe
 	}
 	if _, ok := snap.VerifyEgress([]int{3305, 9000}, false, false, nil); ok {
 		t.Fatal("VerifyEgress accepted a chain missing a port")
+	}
+}
+
+func TestWarmFixturePastaDropIn(t *testing.T) {
+	if backendtest.PastaDropIn != pastaDropInModern {
+		t.Fatalf("backendtest.PastaDropIn drifted from pastaDropInModern")
+	}
+}
+
+// The stamp cannot vouch for the run user's own pasta drop-in: it must hold
+// what the provisioning writes for the guest's pasta, or the runtimes step
+// runs (and rewrites it).
+func TestProvisionedRequiresThePastaDropIn(t *testing.T) {
+	key := ProvisionStampKey("alice")
+	base := func() *Snapshot {
+		return &Snapshot{items: map[string]probeItem{
+			"boot":      {out: "b\n1"},
+			"stamp":     {out: key + " b:1"},
+			"pasta":     {out: pastaDropInGateway},
+			"pastahelp": {out: "  --no-map-gw  ...", code: 1},
+		}}
+	}
+	if !base().Provisioned(key) {
+		t.Fatal("a converged gateway drop-in was refused")
+	}
+	for name, mutate := range map[string]func(*Snapshot){
+		"tampered":           func(s *Snapshot) { s.items["pasta"] = probeItem{out: pastaDropInGateway + "\n[x]\n"} },
+		"missing":            func(s *Snapshot) { s.items["pasta"] = probeItem{code: 1} },
+		"other pasta":        func(s *Snapshot) { s.items["pastahelp"] = probeItem{out: "--map-host-loopback"} },
+		"pasta without maps": func(s *Snapshot) { s.items["pastahelp"] = probeItem{out: "usage"} },
+	} {
+		s := base()
+		mutate(s)
+		if s.Provisioned(key) {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

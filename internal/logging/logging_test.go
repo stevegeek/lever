@@ -53,7 +53,7 @@ func TestInstallRoutesTheStdlibLog(t *testing.T) {
 
 func TestRedactLeavesOrdinaryTextAlone(t *testing.T) {
 	for _, s := range []string{"worker w1 started", "token bucket refilled", "-e FOO", "the key is set",
-		"reading token /Users/stephen/.lever-state/controller.pat failed",
+		"reading token /Users/alice/.lever-state/controller.pat failed",
 		"refreshing the token periodically-renewed-thing",
 		"the hub token expires in 9h59m0s", "--token-file /path is unset"} {
 		if got := Redact(s); got != s {

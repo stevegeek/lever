@@ -52,6 +52,20 @@ version bump moves the block under the new version heading.
   command with its time and exit code, showing only the command's leading plain words. The Lima
   e2e prints a time on every line, each phase's duration and a table of them, and on a failed
   acceptance the end of the broker and tool logs.
+- **A broker is never shared between two instances (lever#181).** Each instance has a random
+  instance id, made on first use in `.lever-state/instance-id.json` with the state directory it
+  belongs to, and its broker reports it on `/epoch`. `lever apply`, `up` and `reload` reuse or
+  restart a running broker only when it reports this instance's id; another instance's broker on
+  the same ports, even with the same version and config hash, is left running and apply stops with
+  an error naming the ports to change. A broker from an older lever (no id) is restarted only when
+  this instance's `broker.pid` names a live process, and only once the port fell silent after the
+  stop. The health wait accepts only this instance's broker, and `lever revoke` and
+  `lever broker bump-epoch` refuse any other. A copied instance directory makes its own id. The
+  id lives outside the in-jail wire types, so the jail ABI is unchanged.
+- **Doctor's `instance ports` row (lever#181)** warns when a configured port (the broker's, a
+  supervised tool's backend, the remote proxy's) is held by a process that is not this
+  instance's, naming it when `lsof` can. The operations guide has a section on running two
+  instances on one host.
 
 ### Changed
 
@@ -84,6 +98,11 @@ version bump moves the block under the new version heading.
   PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
   audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
   need Issues: read and write.
+- **The Lima e2e picks free host ports (lever#181).** The broker's ports, the db tool's backend
+  and the port-forward check's port are chosen free on the host unless set (`JAIL_PORT`,
+  `ADMIN_PORT`, the new `TOOL_PORT`, `SUPPRESS_PORT`); a port set explicitly that is in use stops
+  the run before it starts, naming the process. Any failed run now prints the end of the broker
+  and tool logs, masked, with or without `KEEP=1`.
 
 ## [0.35.0] - 2026-10-12
 

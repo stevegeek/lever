@@ -62,6 +62,12 @@ type PlanOpts struct {
 	// up, so `up` can neither see the record nor delete it beforehand
 	// (lever#33). The plan itself is unchanged.
 	Fresh bool
+	// Attach says the caller (`lever up` on a terminal) attaches the
+	// operator to the manager once Run returns: start-manager's gate then
+	// ends as soon as claude's tmux pane is alive, with no settle window,
+	// and the caller checks the manager after the detach
+	// (CheckManagerAfterDetach) (lever#188). The plan itself is unchanged.
+	Attach bool
 }
 
 // brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.

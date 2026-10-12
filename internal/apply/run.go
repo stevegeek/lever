@@ -73,7 +73,9 @@ var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
 // harness has run a line, and every harness death observed so far (a task past
 // the tmux cap, `claude --continue` with no conversation) landed within three
 // seconds of that. Ten seconds catches those with margin and is still
-// probabilistic for a later death.
+// probabilistic for a later death. It is the window of a gate that never saw
+// claude's pane; once the pane is seen the window is harnessSettle, counted
+// from it (lever#188).
 var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second, Settle: 10 * time.Second}
 
 // defaultPhaseSettleRetry bounds settleManagerPhase's wait for a record caught
@@ -139,6 +141,9 @@ type run struct {
 	// fresh is PlanOpts.Fresh: discard any present manager record at
 	// start-manager (lever#33).
 	fresh bool
+	// attach is PlanOpts.Attach: start-manager's gate ends once claude's
+	// pane is alive (lever#188).
+	attach bool
 	// managerCreated records that THIS run created the manager record (a
 	// create that answered "already exists" does not count). Only a created
 	// record is known to carry the manager.read_only mounts; any other is
@@ -538,6 +543,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		managerLive: d.ManagerLiveRetry.or(defaultManagerLiveRetry),
 		phaseSettle: d.PhaseSettleRetry.or(defaultPhaseSettleRetry),
 		fresh:       opts.Fresh,
+		attach:      opts.Attach,
 	}
 	// The plan is kept, not just ranged over: the converge-to-off reconciliation
 	// below needs to know whether this run manages the hub at all (see
@@ -1150,22 +1156,21 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// window can run over a minute: say what is happening about every 15 s
 	// (lever#168), from the action to the end of the gate.
 	r.progress = StartProgress(ctx, r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
+	// The post-live probes run alongside the settle window, from the moment
+	// the gate has seen claude (lever#188), rather than after it.
+	probes := r.startPostLive(ctx, jp)
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
 	if err == nil {
-		err = r.waitManagerLive(ctx, jp, acted)
+		err = r.waitManagerLive(ctx, jp, acted, probes.start)
 	}
 	r.progress.Stop()
 	r.progress = nil
 	if err != nil {
+		probes.abandon()
 		return err
 	}
 	RecordGuestBoot(ctx, r.d)
-	healNamedSessions(ctx, r.d, jp, workerNames(r.app))
-	if !r.managerCreated {
-		r.warnManagerTreeMounts(ctx, jp)
-	}
-	r.warnManagerNestedVirt(ctx, jp)
-	r.warnManagerClaude(ctx, jp)
+	probes.finish()
 	return nil
 }
 
@@ -2251,7 +2256,7 @@ func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 // record — not CLI exit codes or error wording — is what makes start-manager's
 // success meaningful. The live-container predicate is scion.ContainerLive,
 // shared with the broker's worker liveness gate.
-func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error {
+func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool, onHarness func()) error {
 	b := r.managerLive
 	if !acted {
 		// Nothing was started or resumed: the manager was running before
@@ -2260,7 +2265,7 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error 
 		// One look still refuses a running RECORD over a dead container.
 		b.Settle = 0
 	}
-	err := gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress)
+	err := gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress, gateOpts{attach: r.attach, onHarness: onHarness})
 	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
@@ -2271,7 +2276,19 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool) error 
 // gate's stages for its progress line. A harness death gets the same hint
 // as the start-manager step (withHarnessDeathHint).
 func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
-	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog)
+	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{})
+	return withHarnessDeathHint(ctx, d, err, project, name)
+}
+
+// WaitManagerStarted is WaitManagerLive for a `lever up` that attaches the
+// operator's terminal next (lever#188): it ends as soon as claude's tmux
+// pane is alive, with no settle window, so the operator is attached the
+// moment claude runs. The caller must check the manager after the detach
+// (CheckManagerAfterDetach): a claude that dies in the first seconds is
+// reported then. A gate that cannot see the pane holds the window as
+// WaitManagerLive does.
+func WaitManagerStarted(ctx context.Context, d Deps, name, project string, prog *Progress) error {
+	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{attach: true})
 	return withHarnessDeathHint(ctx, d, err, project, name)
 }
 

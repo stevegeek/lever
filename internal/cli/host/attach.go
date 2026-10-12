@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"syscall"
 
@@ -65,6 +66,43 @@ func execAttach(ctx context.Context, b backend.Backend, sc *scion.Client, slug, 
 		return fmt.Errorf("attach: %w", err)
 	}
 	return syscall.Exec(bin, argv, os.Environ()) // hand over the TTY
+}
+
+// runAttach runs the backend-wrapped scion attach for slug in project as a
+// child on the operator's terminal and returns when it ends: the operator
+// detached, or the session ended. `lever up` on a terminal uses it instead
+// of execAttach so it can check the manager after the detach (lever#188).
+// While the child runs, the terminal's interrupt and quit signals are the
+// attach's: lever waits them out rather than dying under it. (The child
+// gets the default handling back on exec; only an ignored signal would be
+// inherited, so they are caught, not ignored.)
+func runAttach(ctx context.Context, b backend.Backend, sc *scion.Client, slug, project string) error {
+	argv, err := attachArgv(ctx, b, sc, slug, project)
+	if err != nil {
+		return err
+	}
+	bin, err := exec.LookPath(argv[0])
+	if err != nil {
+		return fmt.Errorf("attach: %w", err)
+	}
+	c := exec.Command(bin, argv[1:]...)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for range sigs {
+		}
+	}()
+	err = c.Run()
+	signal.Stop(sigs)
+	close(sigs)
+	<-drained
+	if err != nil {
+		return fmt.Errorf("attach: %w", err)
+	}
+	return nil
 }
 
 // newAttachCmd is a debugging/eyes-on verb: it attaches to a RUNNING agent and

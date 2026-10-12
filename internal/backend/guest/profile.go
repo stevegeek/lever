@@ -42,9 +42,11 @@ const (
 
 // TrimmedUnits are the systemd units the small profile disables, in order.
 var TrimmedUnits = []string{
-	"snapd.service", "snapd.socket", "snapd.seeded.service",
+	// Sockets before their services, so socket activation cannot start a
+	// service again between the two.
+	"snapd.socket", "snapd.service", "snapd.seeded.service",
 	"unattended-upgrades.service", "apt-daily.timer", "apt-daily-upgrade.timer",
-	"multipathd.service", "multipathd.socket",
+	"multipathd.socket", "multipathd.service",
 	"ModemManager.service",
 }
 
@@ -85,10 +87,16 @@ start)
   fi
   kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
   size="$((kb / 2))KiB"
-  dev=$(zramctl --find --size "$size" --algorithm zstd 2>/dev/null || zramctl --find --size "$size")
+  if ! dev=$(zramctl --find --size "$size" --algorithm zstd 2>/dev/null); then
+    # A device zramctl added before the algorithm failed is left unused
+    # (it holds no memory); the fallback takes the next one.
+    dev=$(zramctl --find --size "$size")
+  fi
+  echo "$dev" > %[1]s
+  trap 'swapoff "$dev" 2>/dev/null || true; zramctl --reset "$dev" 2>/dev/null || true; rm -f %[1]s' EXIT
   mkswap -L lever-zram "$dev" >/dev/null
   swapon -p 100 "$dev"
-  echo "$dev" > %[1]s
+  trap - EXIT
   ;;
 stop)
   dev=$(cat %[1]s 2>/dev/null || true)
@@ -109,7 +117,8 @@ func zramUnit(p profilePaths) string {
 [Unit]
 Description=lever zram swap (guest_profile: small)
 DefaultDependencies=no
-Before=swap.target
+Before=swap.target shutdown.target
+Conflicts=shutdown.target
 
 [Service]
 Type=oneshot
@@ -177,12 +186,21 @@ fi
 	}
 	// standard: undo what small did, and only that.
 	fmt.Fprintf(&b, `if [ -f "$state" ]; then
+  left=
   while IFS= read -r u; do
     [ -n "$u" ] || continue
     unit_exists "$u" || continue
-    systemctl enable --now "$u" >/dev/null 2>&1 || echo "warn: guest_profile standard: could not enable $u again"
+    if ! systemctl enable --now "$u" >/dev/null 2>&1; then
+      echo "warn: guest_profile standard: could not enable $u again; the next apply tries again"
+      left="$left$u
+"
+    fi
   done < "$state"
-  rm -f "$state" || exit 1
+  if [ -n "$left" ]; then
+    printf '%%s' "$left" > "$state" || exit 1
+  else
+    rm -f "$state" || exit 1
+  fi
 fi
 if [ -f %[1]s ]; then
   systemctl disable --now %[2]s >/dev/null 2>&1 || echo %[3]s

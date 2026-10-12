@@ -55,7 +55,7 @@ func (e *workerCapError) Error() string {
 		who += fmt.Sprintf("%d other agent(s)", e.others)
 	}
 	return fmt.Sprintf("worker %s was not started: broker.max_running_workers is %d and %d worker(s) are running or starting (%s). "+
-		"Suspend or stop one first (`lever-manager agent suspend NAME`), or ask the operator to raise broker.max_running_workers. Nothing was changed.",
+		"Suspend or stop one first (`lever-manager agent suspend NAME`); for a record that never came up or an agent that is not a declared worker, ask the operator to purge it (`lever worker purge NAME`) or to raise broker.max_running_workers. Nothing was changed.",
 		e.worker, e.max, len(e.active)+e.others, who)
 }
 
@@ -83,6 +83,12 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 	if b.maxRunningWorkers <= 0 {
 		return func() {}, nil
 	}
+	// Admissions run one at a time, the records read under the lock: a
+	// read taken before another admission's start finished would miss that
+	// worker once its release drops it from admitting. admitMu is a leaf
+	// lock (List takes no broker lock).
+	b.admitMu.Lock()
+	defer b.admitMu.Unlock()
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
 		return nil, fmt.Errorf("reading the running workers for broker.max_running_workers: %w", err)
@@ -96,8 +102,6 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 			counted[a.Slug] = true
 		}
 	}
-	b.admitMu.Lock()
-	defer b.admitMu.Unlock()
 	for other := range b.admitting {
 		if other != name {
 			counted[other] = true
@@ -128,8 +132,11 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 	}, nil
 }
 
-// admitOrRefuse is admitWorker for a handler: a refusal answers 409 with the
-// cap's message, a failed read 502; both are audited under actor.
+// admitOrRefuse is admitWorker for a handler: a refusal answers 409, a
+// failed read 502; both are audited under actor. The full message (the cap
+// and the running workers' names) goes to the manager only; any other actor
+// (a chat-page login's wake) gets a short body, the detail staying in the
+// audit line.
 func (b *Broker) admitOrRefuse(ctx context.Context, w http.ResponseWriter, actor, verb, name string) (func(), bool) {
 	release, err := b.admitWorker(ctx, name)
 	if err == nil {
@@ -137,7 +144,11 @@ func (b *Broker) admitOrRefuse(ctx context.Context, w http.ResponseWriter, actor
 	}
 	if errors.Is(err, ErrWorkerCap) {
 		b.audit("worker", actor, "deny", verb+" "+name+": "+err.Error())
-		http.Error(w, err.Error(), http.StatusConflict)
+		msg := err.Error()
+		if actor != b.manager {
+			msg = "busy: too many workers are running"
+		}
+		http.Error(w, msg, http.StatusConflict)
 		return nil, false
 	}
 	b.audit("worker", actor, "error", verb+" "+name+": "+err.Error())

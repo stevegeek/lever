@@ -42,7 +42,7 @@ A starting point for the jail VM's `memory`:
 
 | Agents running at once | VM memory |
 |---|---|
-| Manager + 1 worker | 3 GiB (the floor), 4 GiB to be comfortable |
+| Manager + 1 worker | 3 GiB at the least, 4 GiB to be comfortable |
 | Manager + 2 workers | 4 GiB with `guest_profile: small` and per-agent limits, else 5 GiB |
 | Each further worker | + 1 GiB, more for heavy workloads |
 
@@ -133,7 +133,9 @@ What each part does:
   VM. Switching back to `standard` restores what lever disabled. See the
   [`guest_profile` row](/reference/config/).
 - **`resources`** caps each agent container (podman `--memory` and `--cpus`). A worker that hits
-  its memory limit is killed alone and does not take the manager with it. The limits are set when
+  its memory limit is killed alone and does not take the manager with it. With zram swap a
+  container may also use up to its limit again in swap first (scion sets no separate swap
+  limit). The limits are set when
   an agent is created: a change reaches the manager at its next `lever up --fresh` (back up the
   conversation first) and a worker at its next fresh start.
 - **`broker.max_running_workers`** makes the broker refuse a worker start, resume or wake past the

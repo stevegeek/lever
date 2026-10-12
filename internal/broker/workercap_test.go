@@ -130,6 +130,10 @@ func TestWorkerCapRefusesResumeAndWake(t *testing.T) {
 		if rec.Code != http.StatusConflict || len(rt.resumed) != 0 {
 			t.Fatalf("status = %d resumed=%v (%s)", rec.Code, rt.resumed, rec.Body.String())
 		}
+		// A chat-page login is not told which workers run or what the cap is.
+		if body := rec.Body.String(); strings.Contains(body, "max_running_workers") || strings.Contains(body, "(a)") {
+			t.Fatalf("wake refusal leaks the cap detail: %q", body)
+		}
 	})
 	t.Run("resume below the cap", func(t *testing.T) {
 		b, rt, _ := capBroker(t, 2, agents...)

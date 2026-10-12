@@ -138,7 +138,7 @@ func TestGuestProfileSmallTrimsAndAddsZram(t *testing.T) {
 			t.Errorf("%s: state %q active %t, want disabled and stopped", u, st, active)
 		}
 	}
-	if got := readLines(t, s.paths.State); strings.Join(got, " ") != "snapd.service snapd.socket unattended-upgrades.service apt-daily.timer" {
+	if got := readLines(t, s.paths.State); strings.Join(got, " ") != "snapd.socket snapd.service unattended-upgrades.service apt-daily.timer" {
 		t.Errorf("recorded units = %v", got)
 	}
 	for _, untouched := range []string{"multipathd.service", "snapd.seeded.service", "ModemManager.service"} {
@@ -242,6 +242,32 @@ func TestGuestProfileStandardUndoesSmall(t *testing.T) {
 	_, calls = s.run(GuestProfileStandard)
 	if calls != "" {
 		t.Fatalf("an untouched guest got systemctl calls:\n%s", calls)
+	}
+}
+
+// A unit that will not come back stays recorded, so the next apply retries it.
+func TestGuestProfileStandardKeepsUnitsItCouldNotRestore(t *testing.T) {
+	s := newProfileSandbox(t)
+	s.unit("snapd.service", "enabled", true)
+	s.unit("apt-daily.timer", "enabled", true)
+	s.run(GuestProfileSmall)
+	s.failing("snapd.service")
+	rep, _ := s.run(GuestProfileStandard)
+	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "snapd.service") {
+		t.Fatalf("warnings = %q", rep.Warn)
+	}
+	if got := readLines(t, s.paths.State); strings.Join(got, " ") != "snapd.service" {
+		t.Fatalf("record after a failed restore = %v, want only snapd.service", got)
+	}
+	if st, _ := s.state("apt-daily.timer"); st != "enabled" {
+		t.Errorf("apt-daily.timer: %q, want enabled", st)
+	}
+	_ = os.Remove(filepath.Join(s.root, "fail", "snapd.service"))
+	if rep, _ = s.run(GuestProfileStandard); len(rep.Warn) != 0 {
+		t.Fatalf("retry warnings = %q", rep.Warn)
+	}
+	if _, err := os.Stat(s.paths.State); !os.IsNotExist(err) {
+		t.Fatalf("record not removed after the retry (%v)", err)
 	}
 }
 

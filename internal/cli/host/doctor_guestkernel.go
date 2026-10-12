@@ -39,7 +39,7 @@ func guestKernelProbeScript() string {
 	// readlink -f prints a missing path as it is: only a vmlinuz-<version>
 	// target names a default kernel.
 	b.WriteString("d=$(readlink -f /boot/vmlinuz 2>/dev/null); case \"$d\" in */vmlinuz-*) d=${d##*/vmlinuz-} ;; *) d= ;; esac; echo \"default=$d\"\n")
-	fmt.Fprintf(&b, "if dpkg -s %s >/dev/null 2>&1; then echo hwe=1; else echo hwe=0; fi\n", guest.HWEPackage)
+	fmt.Fprintf(&b, "if [ \"$(dpkg-query -W -f='${Status}' %s 2>/dev/null)\" = \"install ok installed\" ]; then echo hwe=1; else echo hwe=0; fi\n", guest.HWEPackage)
 	return b.String()
 }
 
@@ -145,8 +145,12 @@ func checkGuestKernel(app *config.App, p guestKernelProbe, perr error) checkResu
 		return warnResult(name, detail+"; "+guest.HWEPackage+" is not installed",
 			"run `lever apply` (it installs the package; under the closed egress posture the guest may not reach the Ubuntu mirrors), then reboot the VM ("+lima.RebootAdvice+")")
 	case app.NestedVirt && strings.HasPrefix(p.running, "6.8."):
-		return warnResult(name, detail+"; nested_virt runs on the 24.04 GA kernel (6.8), which crashed under nested VM load",
-			"set guest_kernel: hwe (the default with nested_virt), run `lever apply`, then reboot the VM ("+lima.RebootAdvice+")")
+		fix := "run `lever apply`, then reboot the VM (" + lima.RebootAdvice + ")"
+		if app.GuestKernel == config.GuestKernelGA {
+			// An explicit choice: say what it costs, do not override it.
+			fix = "guest_kernel: ga is set explicitly; to move off 6.8, remove it (hwe is the default with nested_virt) or set hwe, then " + fix
+		}
+		return warnResult(name, detail+"; nested_virt runs on the 24.04 GA kernel (6.8), which crashed under nested VM load", fix)
 	}
 	return checkResult{name, true, detail, ""}
 }

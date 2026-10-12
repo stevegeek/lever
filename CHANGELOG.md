@@ -18,7 +18,8 @@ version bump moves the block under the new version heading.
   through a `/etc/default/grub.d` drop-in and `update-grub`. A nested VM had crashed a 6.8 guest
   whose oops path then hung in an EFI runtime call for a day. Existing VMs get it on their next
   apply; the command line, and a backend that could not be unloaded, wait for a reboot, which
-  apply reports and lever never does itself (`lever stop`, then `lever up`). OrbStack is
+  apply reports and lever never does itself (`lever stop`, then `lever up`). A soft lockup the
+  host causes (a starved vCPU on an overcommitted host) now reboots the guest too. OrbStack is
   unchanged: its kernel is shared and not lever's. New doctor row *guest crash recovery*.
 - **`guest_kernel` (Lima only): `hwe` or `ga`.** `hwe` installs `linux-generic-hwe-24.04` on the
   next apply or up and reports a pending reboot; `ga` keeps the 24.04 release kernel. Unset, it

@@ -152,6 +152,32 @@ func TestCrashRecoveryScriptIdempotent(t *testing.T) {
 	}
 }
 
+// A write that fails must fail the script, though converge runs inside a
+// || list where set -e does not reach.
+func TestCrashRecoveryScriptFailedWriteFails(t *testing.T) {
+	for _, which := range []string{"sysctl", "grub"} {
+		t.Run(which, func(t *testing.T) {
+			s := newCrashSandbox(t)
+			blocker := filepath.Join(filepath.Dir(s.paths.Cmdline), "not-a-dir")
+			s.write(blocker, "")
+			if which == "sysctl" {
+				s.paths.Sysctl = filepath.Join(blocker, "x.conf")
+			} else {
+				s.paths.GrubDropIn = filepath.Join(blocker, "x.cfg")
+			}
+			cmd := exec.Command("bash", "-c", crashRecoveryScript(s.paths))
+			cmd.Env = []string{"PATH=" + s.bin + ":" + os.Getenv("PATH")}
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("a failed write must fail the script:\n%s", out)
+			}
+			if which == "grub" && strings.Contains(string(out), "update-grub") {
+				t.Errorf("must stop before update-grub:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestCrashRecoveryScriptRewritesEditedFile(t *testing.T) {
 	s := newCrashSandbox(t)
 	s.write(s.paths.Sysctl, "kernel.panic = 0\n")
@@ -266,15 +292,17 @@ func runKernelScript(t *testing.T, kernel, osVersion, running, def string, dpkgH
 			t.Fatal(err)
 		}
 	}
-	dpkgExit := "1"
+	// Not installed is modelled as state rc (removed, config left), which
+	// dpkg -s would have reported with exit 0.
+	status := "deinstall ok config-files"
 	if dpkgHas {
-		dpkgExit = "0"
+		status = "install ok installed"
 	}
 	aptExit := "0"
 	if aptFails {
 		aptExit = "100"
 	}
-	stub("dpkg", `echo "dpkg $*" >> `+shellSingleQuote(log)+"; exit "+dpkgExit)
+	stub("dpkg-query", `echo "dpkg-query $*" >> `+shellSingleQuote(log)+"; printf '%s' "+shellSingleQuote(status))
 	stub("apt-get", `echo "apt-get $*" >> `+shellSingleQuote(log)+"; exit "+aptExit)
 	stub("timeout", `shift; exec "$@"`)
 	stub("uname", "echo "+running)
@@ -308,7 +336,7 @@ func TestGuestKernelHWEInstallsAndReportsReboot(t *testing.T) {
 	// Before the install /boot/vmlinuz already names the new kernel in the
 	// stub; the real package moves it.
 	rep, calls := runKernelScript(t, GuestKernelHWE, "24.04", "6.8.0-146-generic", "6.17.0-5-generic", false, false)
-	if !strings.Contains(calls, "apt-get install -y -qq "+HWEPackage) {
+	if !strings.Contains(calls, "apt-get install -y -qq -o DPkg::Lock::Timeout=120 "+HWEPackage) {
 		t.Errorf("want the HWE install; calls:\n%s", calls)
 	}
 	if len(rep.Reboot) != 1 || !strings.Contains(rep.Reboot[0], "runs kernel 6.8.0-146-generic; the default kernel is now 6.17.0-5-generic") {

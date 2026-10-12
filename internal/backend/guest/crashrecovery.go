@@ -139,18 +139,19 @@ const EFIPstoreActiveShell = `efi_pstore_active() {
 // writes each file only when its content differs, applies the sysctls live
 // on every run, unloads a loaded efi_pstore module, runs update-grub only
 // when the drop-in changed or grub.cfg lacks the parameter, and reports
-// what waits for a reboot. A failed write fails the script (set -e); a
-// failed sysctl, unload or update-grub is a warning.
+// what waits for a reboot. A failed write exits the script with 1
+// (converge exits itself: set -e does not reach a function called from a
+// || list); a failed sysctl, unload or update-grub is a warning.
 func crashRecoveryScript(p crashPaths) string {
 	q := shellSingleQuote
 	var b strings.Builder
 	b.WriteString("set -eu\n")
 	b.WriteString(`converge() {
   if [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; then return 1; fi
-  mkdir -p "$(dirname "$1")"
-  printf '%s\n' "$2" > "$1.lever-tmp"
-  chmod 0644 "$1.lever-tmp"
-  mv -f "$1.lever-tmp" "$1"
+  mkdir -p "$(dirname "$1")" || exit 1
+  printf '%s\n' "$2" > "$1.lever-tmp" || exit 1
+  chmod 0644 "$1.lever-tmp" || exit 1
+  mv -f "$1.lever-tmp" "$1" || exit 1
   return 0
 }
 `)
@@ -212,9 +213,12 @@ type kernelPaths struct {
 var realKernelPaths = kernelPaths{OSRelease: "/etc/os-release", Vmlinuz: "/boot/vmlinuz"}
 
 // guestKernelScript is the root script EnsureGuestKernel runs. Under hwe it
-// installs HWEPackage when dpkg does not have it (bounded by timeouts: on a
-// re-apply under the closed egress posture the mirrors may not resolve);
-// under any flavour it reports a reboot when the kernel /boot/vmlinuz names
+// installs HWEPackage unless dpkg-query says "install ok installed" (a
+// package in state rc, or a cut-off install, is installed again). apt-get
+// update is bounded by a timeout (on a re-apply under the closed egress
+// posture the mirrors may not resolve) and the install waits at most 120 s
+// for the dpkg lock; the install itself is never killed midway. Under any
+// flavour it reports a reboot when the kernel /boot/vmlinuz names
 // (the one grub boots by default) is not the running one. It never removes
 // a kernel.
 func guestKernelScript(kernel string, p kernelPaths) string {
@@ -226,9 +230,9 @@ func guestKernelScript(kernel string, p kernelPaths) string {
 . %s 2>/dev/null || true
 if [ "$VERSION_ID" != 24.04 ]; then
   echo "warn: guest_kernel hwe: the guest is Ubuntu ${VERSION_ID:-unknown}, not 24.04; lever installed no kernel"
-elif ! dpkg -s %s >/dev/null 2>&1; then
+elif [ "$(dpkg-query -W -f='${Status}' %s 2>/dev/null)" != "install ok installed" ]; then
   export DEBIAN_FRONTEND=noninteractive
-  if ! { timeout 300 apt-get update -qq >/dev/null 2>&1 && timeout 1200 apt-get install -y -qq %s >/dev/null 2>&1; }; then
+  if ! { timeout 120 apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq -o DPkg::Lock::Timeout=120 %s >/dev/null 2>&1; }; then
     echo %s
   fi
 fi

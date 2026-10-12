@@ -689,7 +689,9 @@ instance that runs no nested VM has no reason to change kernels under it. lever 
 package on the next apply or up and then warns that a reboot is pending until the guest runs the
 new kernel (`lever stop`, then `lever up`). The GA kernel stays installed; grub's *Advanced
 options* menu still offers it. Under `egress: closed` a re-apply may not reach the Ubuntu
-mirrors; the install then fails with a warning and the next apply retries it.
+mirrors; `apt-get update` then gives up after 2 minutes, the install fails with a warning, and
+each later apply spends that time again until it succeeds. lever counts the package installed only
+when dpkg says `install ok installed`.
 
 Doctor's *guest kernel* row shows `uname -r` and warns when `/boot/vmlinuz` names another kernel
 (a reboot is pending), when `guest_kernel` is `hwe` and the package is missing, and when
@@ -733,8 +735,9 @@ read, nothing was recorded yet (the first bring-up after upgrading), or the susp
    it on the host: `limactl stop --force <vm>`, or kill its QEMU process. Then `lever up`.
 3. Keep the evidence before it rotates. The guest console goes to the Lima instance directory on
    the host (`~/.lima/<vm>/serial*.log`), which holds the oops even when the guest could not
-   write its disk. After the reboot, `journalctl -k -b -1` in the guest has the previous boot's
-   kernel log when it reached the disk.
+   write its disk. After the reboot, `journalctl -k -b -1` in the guest may have the previous
+   boot's kernel log, but journald rarely flushes the oops itself before a panic: trust the
+   serial log.
 4. Check `lever doctor`: the *guest crash recovery* and *guest kernel* rows should be green. Add
    the host and guest kernels and the outcome to the table above.
 

@@ -48,7 +48,7 @@ func TestEnsureUpGAKernelInstallsNothing(t *testing.T) {
 	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree, GuestKernel: guest.GuestKernelGA}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	if rootBashScript(f, "apt-get install -y -qq "+guest.HWEPackage) >= 0 {
+	if rootBashScript(f, "apt-get install") >= 0 {
 		t.Error("ga must not install the HWE kernel")
 	}
 	if rootBashScript(f, "/boot/vmlinuz") < 0 {

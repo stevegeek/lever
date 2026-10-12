@@ -380,8 +380,9 @@ warns.
   `git checkout` that removes it) leaves the read-only mount on the old directory until the next
   fresh create. Removing an entry, or a worker while the list is set, also needs `--fresh`, and the
   directory must stay on the host until then (see the troubleshooting row for `cannot be
-  resumed`). Doctor's `manager read-only paths` row probes each entry with a write test in the
-  running manager. Details and limits:
+  resumed`). Doctor's `manager read-only paths` row checks every entry and pin of the running
+  manager from the guest side (the kernel's mount table and the directory behind each mount),
+  without running anything inside it. Details and limits:
   [`read_only`](/reference/config/#manager).
 - **`nested_virt`** (Lima on an x86_64 Linux host) — gives the **manager** container `/dev/kvm`;
   workers and the hub do not get it. `lever apply` checks the host's KVM `nested` module and

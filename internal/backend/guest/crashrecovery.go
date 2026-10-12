@@ -122,11 +122,13 @@ GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} ` + EFIPstoreCmdline + `"`
 // doctor's probe use to tell whether the EFI pstore backend may still be
 // registered: the module (or built-in) is present, and either pstore names
 // it as its backend or it was not loaded with pstore_disable. Unknown reads
-// as active.
+// as active. The backend's name is "efi_pstore" on Ubuntu's 6.8 kernel
+// (read from a 24.04 Lima guest, where efi_pstore is a loadable module with
+// no holders) and "efi" on older kernels.
 const EFIPstoreActiveShell = `efi_pstore_active() {
   [ -d "$1/efi_pstore" ] || return 1
   b=$(cat "$1/pstore/parameters/backend" 2>/dev/null || true)
-  [ "$b" = efi ] && return 0
+  case "$b" in efi|efi_pstore) return 0 ;; esac
   d=$(cat "$1/efi_pstore/parameters/pstore_disable" 2>/dev/null || true)
   [ "$d" = Y ] && return 1
   return 0
@@ -235,7 +237,7 @@ fi
 	}
 	fmt.Fprintf(&b, `running=$(uname -r)
 default=$(readlink -f %s 2>/dev/null || true)
-default=${default##*/vmlinuz-}
+case "$default" in */vmlinuz-*) default=${default##*/vmlinuz-} ;; *) default= ;; esac
 if [ -n "$default" ] && [ "$default" != "$running" ]; then
   echo "reboot: the guest runs kernel $running; the default kernel is now $default"
 fi

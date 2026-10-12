@@ -147,6 +147,9 @@ func TestGuestKernelProbeScriptRuns(t *testing.T) {
 	if p.running == "" {
 		t.Fatalf("no running kernel in:\n%s", out)
 	}
+	if p.deflt != "" && strings.Contains(p.deflt, "/") {
+		t.Errorf("default kernel %q is a path, not a version", p.deflt)
+	}
 	for _, s := range guest.CrashSysctls {
 		if _, ok := p.sysctl[s.Key]; !ok {
 			t.Errorf("no %s in:\n%s", s.Key, out)

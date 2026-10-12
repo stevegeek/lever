@@ -36,7 +36,9 @@ func guestKernelProbeScript() string {
 	b.WriteString(guest.EFIPstoreActiveShell)
 	b.WriteString("if efi_pstore_active /sys/module; then echo efi_pstore=active; else echo efi_pstore=off; fi\n")
 	b.WriteString("echo \"running=$(uname -r)\"\n")
-	b.WriteString("d=$(readlink -f /boot/vmlinuz 2>/dev/null); echo \"default=${d##*/vmlinuz-}\"\n")
+	// readlink -f prints a missing path as it is: only a vmlinuz-<version>
+	// target names a default kernel.
+	b.WriteString("d=$(readlink -f /boot/vmlinuz 2>/dev/null); case \"$d\" in */vmlinuz-*) d=${d##*/vmlinuz-} ;; *) d= ;; esac; echo \"default=$d\"\n")
 	fmt.Fprintf(&b, "if dpkg -s %s >/dev/null 2>&1; then echo hwe=1; else echo hwe=0; fi\n", guest.HWEPackage)
 	return b.String()
 }

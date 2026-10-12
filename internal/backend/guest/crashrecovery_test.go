@@ -82,7 +82,7 @@ func TestCrashRecoveryScriptFirstRunWritesEverything(t *testing.T) {
 	s := newCrashSandbox(t)
 	// A loaded efi_pstore module registered as pstore's backend.
 	s.write(filepath.Join(s.paths.SysModule, "efi_pstore/initstate"), "live\n")
-	s.write(filepath.Join(s.paths.SysModule, "pstore/parameters/backend"), "efi\n")
+	s.write(filepath.Join(s.paths.SysModule, "pstore/parameters/backend"), "efi_pstore\n")
 	rep, calls := s.run()
 
 	sysctl, _ := os.ReadFile(s.paths.Sysctl)
@@ -165,13 +165,30 @@ func TestCrashRecoveryScriptRewritesEditedFile(t *testing.T) {
 func TestCrashRecoveryScriptBuiltinBackendNeedsReboot(t *testing.T) {
 	s := newCrashSandbox(t)
 	// Built in: /sys/module/efi_pstore without initstate; no unload is tried.
-	s.write(filepath.Join(s.paths.SysModule, "efi_pstore/parameters/pstore_disable"), "N\n")
+	// pstore still names it as the backend, so setting pstore_disable after
+	// registration did not turn it off.
+	s.write(filepath.Join(s.paths.SysModule, "efi_pstore/parameters/pstore_disable"), "Y\n")
 	s.write(filepath.Join(s.paths.SysModule, "pstore/parameters/backend"), "efi\n")
 	rep, calls := s.run()
 	if strings.Contains(calls, "modprobe") {
 		t.Errorf("a built-in backend cannot be unloaded; calls:\n%s", calls)
 	}
 	if len(rep.Reboot) != 2 || !strings.Contains(rep.Reboot[1], "EFI pstore backend is still registered") {
+		t.Errorf("reboot = %q", rep.Reboot)
+	}
+}
+
+func TestCrashRecoveryScriptModuleInUseNeedsReboot(t *testing.T) {
+	s := newCrashSandbox(t)
+	s.stub("modprobe", `echo "modprobe $*" >> `+shellSingleQuote(s.log)+"; exit 1")
+	s.write(filepath.Join(s.paths.SysModule, "efi_pstore/initstate"), "live\n")
+	s.write(filepath.Join(s.paths.SysModule, "efi_pstore/parameters/pstore_disable"), "N\n")
+	s.write(filepath.Join(s.paths.SysModule, "pstore/parameters/backend"), "efi_pstore\n")
+	rep, calls := s.run()
+	if !strings.Contains(calls, "modprobe -r efi_pstore") {
+		t.Errorf("want an unload attempt; calls:\n%s", calls)
+	}
+	if len(rep.Reboot) != 2 || !strings.Contains(rep.Reboot[1], "could not be unloaded") {
 		t.Errorf("reboot = %q", rep.Reboot)
 	}
 }
@@ -336,6 +353,15 @@ func TestGuestKernelGAInstallsNothing(t *testing.T) {
 	}
 	// A GA kernel update (unattended-upgrades) still waits for a reboot.
 	if len(rep.Reboot) != 1 {
+		t.Errorf("reboot = %q", rep.Reboot)
+	}
+}
+
+func TestGuestKernelNoVmlinuzNoReboot(t *testing.T) {
+	// readlink -f prints a missing /boot/vmlinuz as it is; that is no
+	// default kernel, not a different one.
+	rep, _ := runKernelScript(t, GuestKernelGA, "24.04", "6.8.0-146-generic", "", false, false)
+	if len(rep.Reboot) != 0 {
 		t.Errorf("reboot = %q", rep.Reboot)
 	}
 }

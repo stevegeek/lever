@@ -884,7 +884,8 @@ async function toggleMic() {
   } finally {
     micStarting = false;
   }
-  if (chat !== c || recording) {
+  // The page went away while the prompt was up: nothing to record for.
+  if (chat !== c || recording || document.visibilityState === 'hidden') {
     stopTracks(stream);
     return;
   }
@@ -947,6 +948,16 @@ function stopDictation() {
 function cancelDictation() {
   if (recording) recording.discard = true;
   stopDictation();
+}
+
+// dropHiddenDictation discards a recording when the page is hidden or put
+// away: the microphone must not go on listening behind the login's back, and
+// the 500 ms tick that would stop it at the limit is throttled in the
+// background. The clip is not sent.
+function dropHiddenDictation() {
+  if (!recording) return;
+  cancelDictation();
+  showError('Dictation stopped because the page was hidden; nothing was sent.');
 }
 
 async function finishDictation(r) {
@@ -1856,5 +1867,14 @@ el.files.addEventListener('click', () => {
   void loadFiles();
 });
 window.addEventListener('resize', grow);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') dropHiddenDictation();
+});
+// pagehide (the tab closed, navigated away or put in the back/forward
+// cache) also stops reading aloud, which would otherwise go on speaking.
+window.addEventListener('pagehide', () => {
+  dropHiddenDictation();
+  stopSpeaking();
+});
 
 void start();

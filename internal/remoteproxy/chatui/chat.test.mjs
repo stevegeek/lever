@@ -2222,3 +2222,52 @@ test('mic: a second tap while the permission prompt is up opens no second stream
   assert.equal(env.media.recorders.length, 1);
   assert.equal(env.media.recorders[0].slice, undefined, 'no timeslice (Safari writes fragmented MP4 for chunks)');
 });
+
+test('mic: hiding the page while recording discards the clip and releases the microphone', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: {} });
+  env.els.mic.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.mic.className, 'recording');
+  await env.hide();
+  await tick(20);
+  assert.equal(env.media.recorders[0].state, 'inactive');
+  assert.equal(env.media.stopped, 1, 'the microphone is released');
+  assert.equal(transcribes(env).length, 0, 'the clip is not sent');
+  assert.equal(env.els.mic.className, '');
+  assert.equal(env.els.voice.hidden, true);
+  assert.match(env.els.error.textContent, /page was hidden; nothing was sent/);
+  assert.equal(env.intervals.filter((i) => i.ms === 500).length, 0, 'the tick is cleared');
+});
+
+test('mic: pagehide while recording discards the clip; with no recording it says nothing', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: {} });
+  await env.pagehide();
+  assert.equal(env.els.error.textContent, '');
+  env.els.mic.dispatch('click');
+  await tick(5);
+  await env.pagehide();
+  await tick(20);
+  assert.equal(env.media.stopped, 1);
+  assert.equal(transcribes(env).length, 0);
+});
+
+test('mic: a page hidden while the permission prompt was up does not start recording', async () => {
+  const env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: {} });
+  env.document.visibilityState = 'hidden';
+  env.els.mic.dispatch('click');
+  await tick(5);
+  assert.equal(env.media.recorders.length, 0);
+  assert.equal(env.media.stopped, 1, 'the stream is released');
+});
+
+test('read-aloud: pagehide stops reading; hiding the page alone does not', async () => {
+  const env = await loadChat(hubWith({ agents: readAloudAgents, history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL] } });
+  const b = env.els.list.children[0].children.find((c) => c.className === 'speak');
+  b.dispatch('click');
+  assert.equal(b.textContent, '⏹');
+  await env.hide();
+  assert.equal(env.speech.cancels, 0, 'a backgrounded page may go on reading');
+  await env.pagehide();
+  assert.equal(env.speech.cancels, 1);
+  assert.equal(b.textContent, '🔊');
+});

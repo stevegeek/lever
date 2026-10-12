@@ -63,7 +63,20 @@ export async function load(hub, opts = {}) {
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
   env.document = doc;
-  globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener() {} };
+  const winListeners = {};
+  globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener: (t, f) => (winListeners[t] ||= []).push(f) };
+  // hide puts the page in the background (visibilitychange); pagehide is
+  // the page being closed, navigated away from or frozen.
+  env.hide = async () => {
+    doc.visibilityState = 'hidden';
+    doc.hidden = true;
+    doc.dispatch('visibilitychange');
+    await tick(5);
+  };
+  env.pagehide = async () => {
+    for (const f of winListeners.pagehide || []) f({ persisted: false });
+    await tick(5);
+  };
   // Trusted Types as the push-on CSP sets it (opts.trustedTypes): only the
   // policy name lever-sw, once; a script-URL sink refuses a plain string.
   if (opts.trustedTypes) {

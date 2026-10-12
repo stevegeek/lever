@@ -1482,7 +1482,9 @@ synthesis API and at least one on-device voice.
   seconds) and the browser can record. The page records with the browser's MediaRecorder, then
   decodes the clip, resamples it to 16 kHz mono and encodes it as WAV, all in the browser, and
   posts it to `POST /lever/api/voice/transcribe`. A timer shows the time recorded; recording
-  stops by itself at `max_seconds`. While lever transcribes, the page shows "Transcribing…". The
+  stops by itself at `max_seconds`. Hiding the page (switching tab or app, locking the phone) or
+  leaving it ends a recording in progress and discards the clip: nothing is sent, and the page
+  says so. While lever transcribes, the page shows "Transcribing…". The
   browser asks for the microphone the first time; the page needs the HTTPS front (a secure
   context).
 - **The proxy.** It checks the login, the request and the clip (below), then posts the clip to
@@ -1535,7 +1537,7 @@ synthesis API and at least one on-device voice.
   (those the browser marks as local): a voice that would send the text to a speech service is
   never used, even if it is the browser's default. Before reading, the page removes markdown
   formatting, reads a code block as "code block skipped" and a link as its text or host name.
-  Tapping the button again, or another message's, stops it. With more than one on-device voice,
+  Tapping the button again, or another message's, stops it, and so does leaving the page. With more than one on-device voice,
   the chat header offers a choice, which the browser keeps for that device. A device with no
   on-device voice cannot read aloud.
 

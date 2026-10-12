@@ -40,9 +40,10 @@ version bump moves the block under the new version heading.
   length, the outcome and the latency only. Per login: 30 clips an hour, 60 audio-minutes a day;
   three slots, of which a contact never takes the last; `voice: false` on an `allowed_users`
   entry turns it off for that login. A clip the tool never took (it was down, or it refused the
-  clip) does not count against the limits. While voice is on, each agent message also gets a speaker button that
+  clip) does not count against the limits. Hiding or leaving the page ends a recording and
+  discards the clip (nothing is sent). While voice is on, each agent message also gets a speaker button that
   reads it aloud with the browser's on-device voices only (`remote.voice.read_aloud: false` turns it
-  off). `remote.voice` has only `enabled`, `socket`, `max_seconds` and `read_aloud`.
+  off); leaving the page stops it. `remote.voice` has only `enabled`, `socket`, `max_seconds` and `read_aloud`.
 - **`lever-tool-whisper`, a first-party broker tool for speech to text.** It runs whisper.cpp's
   `whisper-server` (which you install yourself, outside the tree; CUDA or Metal) as its child on
   `127.0.0.1` (`-whisper-port`), with a model from lever's pinned table checked by size and

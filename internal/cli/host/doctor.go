@@ -145,9 +145,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	recordVolumes := func(ctx context.Context, project, agent string) ([]jail.Mount, error) {
 		return hubRecordVolumes(ctx, hc, project, agent)
 	}
-	// The live half: can the manager's user write a read_only entry?
-	probeWritable := func(ctx context.Context, ref, target string) (bool, error) {
-		return jail.ContainerPathWritable(ctx, jr, ref, target)
+	// The live half, from the guest side (no program in the container).
+	liveMounts := func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+		return jail.ContainerLiveMounts(ctx, jr, ref, want)
 	}
 	probeDevice := func(ctx context.Context, ref, path string) (bool, error) {
 		return jail.ContainerHasCharDevice(ctx, jr, ref, path)
@@ -254,13 +254,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},
 		func() checkResult {
-			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, probeWritable)
+			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, liveMounts)
 		},
 		func() checkResult {
-			return checkSharedFolders(ctx, b.MountDest(), app, listAgents, inspectMountsRW, recordVolumes,
-				func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
-					return jail.ContainerLiveMounts(ctx, jr, ref, want)
-				})
+			return checkSharedFolders(ctx, b.MountDest(), app, listAgents, inspectMountsRW, recordVolumes, liveMounts)
 		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult { return checkRecyclableWorkers(app.Workers) },

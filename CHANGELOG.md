@@ -218,6 +218,54 @@ version bump moves the block under the new version heading.
   (and a recycle that deletes nothing) returns its call to the per-minute budget; a call that
   ran past its window could lower the count of the window a later call had opened.
 
+### Security
+
+- **The read-only guard checks the manager's namespaces (lever#162).** The guest-side live check
+  (the broker's tool guard, doctor's *manager read-only paths* and *shared folders* rows, apply's
+  keep and resume warning) read the mounts of the manager's first process. A root agent that could
+  ptrace that process could move it into a user and mount namespace made inside the container,
+  showing a staged read-only mount while the agent writes from the real one. The check now requires
+  that process to be in the mount and user namespaces the container runtime created: their owner
+  must be the owner of its PID namespace, which a process can never leave. It needs `lsns` from
+  util-linux 2.38 or later in the guest (Ubuntu 24.04 has 2.39); without it the check cannot run
+  and fails closed. A foreign namespace holds the tools back and fails the doctor rows.
+- **Doctor and apply no longer ask the manager whether it can write (lever#162).** The *manager
+  read-only paths* row and apply's keep/resume warning ran `test -w` inside the manager, whose
+  programs the agent controls. Both now use the guest-side check the tool guard uses, for every
+  entry and pin. The check also reads where each mount comes from in the kernel's mount table: a
+  protected directory mounted through a symbolic link, or renamed away since, is reported without
+  relying on stable inode numbers.
+- **A resumed manager's tree mounts are checked after the resume (lever#158).** The stale-mount
+  check reads the host tree before a resume, but the runtime resolves each mount source again,
+  following symbolic links, when it recreates the container. A directory swapped for a link in
+  between got whatever the link named mounted into the manager. Right after the resume (again once
+  the manager is live, if it was not running yet) apply reads back where every tree mount comes
+  from, the dropped ones included. A mount from elsewhere, missing at its place (the runtime
+  resolves the destination in the same tree, so a link moves the mount point too) or read-write
+  where it should be read-only, or a foreign namespace, suspends the manager and fails the
+  bring-up. A source that is gone no longer makes the whole live check unreadable: that mount
+  alone is reported. The swap itself cannot be prevented: until that check, the
+  manager may already hold the wrong mount.
+- **A hung probe's `podman exec` ends in the guest too (lever#158).** A host-side deadline killed
+  only the `orb` or `limactl` client, and a `podman exec` the agent made hang could stay behind in
+  the guest on every token-watch pass. Every exec into an agent container, `podman logs`, and the
+  live check's guest reads now run under the guest's `timeout`, with what is left of the 10 s host
+  deadline less 2 s (SIGKILL 1 s after SIGTERM). This ends the `podman exec` client. Whether the
+  process it started inside the container (and its exec `conmon`) ends with it is not verified
+  live; `podman exec` is not known to pass the signal on.
+- **A `read_only` path with a space cannot be split on its way to the guest (lever#162).** The live
+  check passes the paths to `stat` on stdin (`xargs -0`), never as words of the guest command
+  line, so a transport that joins and re-splits the command line cannot cut such a path in two.
+- **Tool commands are read past common wrappers (lever#162).** The check that a tool's program, or
+  the script its interpreter runs, is not agent-writable now reads past `nice`, `nohup`, `setsid`,
+  `timeout`, `stdbuf`, `ionice`, `taskset` and `uv run`, nested in any order with `env`. For
+  `uv run` it reads the script, `-m` module or command, checks the options that name code
+  (`--with`, `--with-editable`, `--with-requirements`, `--project`, `--directory`, `--find-links`,
+  the index options, `--cache-dir`, `--config-file`, `--env-file`, `--python`) as programs, and resolves relative paths against
+  `--directory`. `pypy` and `nodejs` count as interpreters. Config load refuses a wrapper form it
+  cannot read (an unknown option, `--help`, `ionice -p`, `uv tool run`, a missing command). Other
+  wrappers (`chrt`, `time`, `flock`, `sudo` and the like) and `UV_*` variables are still not read.
+
 ## [0.35.0] - 2026-10-12
 
 ### Added

@@ -89,11 +89,21 @@ closes that for the directories it names:
   recreate, a rename-based deploy, a `git checkout` that removes and re-adds it), podman still lists
   the read-only mount but it covers the old directory, and a write from the manager lands in the new
   one (verified on OrbStack). The protection is gone until the next fresh create. `lever doctor` and
-  `lever apply` probe each entry live (a write test inside the running manager) and fail or warn when
-  it is writable; a probe that cannot run is reported as unconfirmed, never as protected. The same
-  holds for a worker dir (or an entry's parent) recreated on the host: the manager's pin stays on
-  the old directory, and this is **not** detected — doctor checks pins by inspect only, because no
-  non-mutating live test of a pin is known to be reliable. Never recreate those on the host.
+  `lever apply` check every entry and pin live from the guest side, as the tool guard below does,
+  and fail or warn when a mount covers another directory than the host has there now; a check that
+  cannot run is reported as unconfirmed, never as protected. The same holds for a worker dir (or an
+  entry's parent) recreated on the host: the manager's pin stays on the old directory. It is
+  reported, but only a fresh create fixes it. Never recreate those on the host.
+- **A resume mounts what the path names at that moment.** The runtime resolves each mount source
+  again, following symbolic links, when a resume recreates the manager's container. `lever apply`
+  checks the host tree before the resume and refuses a path that is gone or goes through a link,
+  but an agent that can write a mounted directory's parent could swap it for a link in between.
+  So right after the resume `lever apply` reads back from the guest where every tree mount comes
+  from (the kernel's mount table: the parent mount's file system, at the same path) and suspends
+  the manager, failing the bring-up, when one comes from elsewhere, is missing at its place (the
+  runtime resolves the destination in the same tree, so a link moves the mount point too) or is
+  read-write where it should be read-only. That check comes after the
+  container start: until it runs, the manager may hold the wrong mount.
 - The hard-link refusal also catches a pnpm `node_modules` (hard-linked from its store) and the
   objects of a `git clone --local`; keep such things out of protected directories.
 
@@ -192,7 +202,7 @@ replaceable) by the agent. Config load therefore refuses these paths when they r
 | Secret or trust anchor | `manager.credential_file`, `broker.api_key_file`, `operator.signing_key`, `operator.allowed_signers`; in a tool `command`, the value of `-app-key`, `-token-file` and `-state` | always refused: a `manager.read_only` mount still lets the manager **read** the file |
 | Private host path | in a `lever-tool-whisper` `command`, the value of `-models` and `-dictate-socket` (its model directory and dictation socket); `remote.voice.socket` while voice is on | always refused: an agent could replace the model whisper-server loads, or reach or replace the socket, and a `manager.read_only` mount does not excuse it |
 | Program outside the tree | in a `lever-tool-whisper` `command`, the value of `-server` (the `whisper-server` program it runs) | always refused: a `manager.read_only` mount does not excuse it |
-| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`), also after an `env` prefix (its flags and `NAME=value` words are skipped); the value of `-fizzy`; the code an interpreter runs (`python`, `ruby`, `node`, `perl`, `sh`, `bash`, `dash`, `zsh`, `deno`, `bun`, a version suffix such as `python3.12` allowed): the script, which is the first argument after the leading flags (and after `run` for `deno` and `bun`; a relative one after `env -C dir` resolves against `dir`), the value of every value-taking flag before it (`python -W`, `node --env-file`, `deno --config`, `bun --cwd` and the like: a value read as the script must not hide the real one), the value of a flag that loads code (`ruby -I`/`-r`, `perl -I`, `node --require`/`--import`/`--loader`, `bun --preload`), and the paths in inline code (`python -c`; `ruby`/`perl`/`node -e`; for the `sh` family, the command string of `-c` in any option group such as `-ec`, `-ce` or `-euo pipefail -c`, and, as a fallback, the word after any `-c` group anywhere in the command) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write); a `shared_folders` entry never excuses one (its writers can change it) |
+| Program | a tool `command`'s program when given as a path (a bare name is looked up on the supervisor's fixed `PATH`), also after an `env` prefix (its flags and `NAME=value` words are skipped) and after the command wrappers lever reads (`nice`, `nohup`, `setsid`, `timeout`, `stdbuf`, `ionice`, `taskset`, `uv run`, nested in any order with `env`); for `uv run`, its script (a `.py` file, or any after `--script`) and the values of its options that name code (`--with`, `--with-editable`, `--with-requirements`, `--project`, `--directory`, `--find-links`, `--index` and the other index options, `--cache-dir`, `--config-file`, `--env-file`, `--python`), relative ones against `--directory`; the value of `-fizzy`; the code an interpreter runs (`python`, `pypy`, `ruby`, `node`, `nodejs`, `perl`, `sh`, `bash`, `dash`, `zsh`, `deno`, `bun`, a version suffix such as `python3.12` allowed): the script, which is the first argument after the leading flags (and after `run` for `deno` and `bun`; a relative one after `env -C dir` resolves against `dir`), the value of every value-taking flag before it (`python -W`, `node --env-file`, `deno --config`, `bun --cwd` and the like: a value read as the script must not hide the real one), the value of a flag that loads code (`ruby -I`/`-r`, `perl -I`, `node --require`/`--import`/`--loader`, `bun --preload`), and the paths in inline code (`python -c`; `ruby`/`perl`/`node -e`; for the `sh` family, the command string of `-c` in any option group such as `-ec`, `-ce` or `-euo pipefail -c`, and, as a fallback, the word after any `-c` group anywhere in the command) | refused unless it lies under a `manager.read_only` entry, reached through no symbolic link inside the tree, and in no worker `dir` (a worker mounts its dir read-write); a `shared_folders` entry never excuses one (its writers can change it) |
 
 **This is a best-effort guard, not a sandbox.** Lever cannot know what an unknown flag's value is: a
 secret, a program, or a data file the agent is meant to edit (the example todo tool's `-csv`). So it
@@ -209,7 +219,16 @@ prefix, read option by option as GNU and BSD `env` read it, with a plain `env -S
 into words and read again; config load refuses an `env` form lever cannot read the way `env` does
 (quotes, backslashes, `$` or a `#` comment in an `-S` string, `-S` grouped after other letters such
 as `-vS`, an option it does not know such as BSD `-P`, an `env` with no command), since a flag
-hidden in it would escape these checks.
+hidden in it would escape these checks. The command wrappers above are read the same way, as their
+own option parsing reads them (options up to the first operand, then `timeout`'s duration or
+`taskset`'s mask, then the command), and a form lever cannot read is refused too: an option it does
+not know, `--help`, `ionice -p` or `taskset -p` (which run no command), a `uv` command other than
+`run`, a `uv run` option missing from lever's table, a wrapper with no command. Wrappers lever does
+not know (`chrt`, `time`, `flock`, `sudo`, `systemd-run` and the like) are not read: their first
+argument is taken as the program, and what they run is not checked. Nor are `UV_*` variables an
+`env` prefix sets (`UV_PROJECT`, `UV_CACHE_DIR` and the like), or where a bare command after
+`uv run` resolves (the project's virtual environment). Run the program directly, or behind a
+wrapper above, when it matters.
 A word that starts with `-` is never taken as the previous flag's value, so `-model -state x` still
 checks `x`; after a path flag such a word is also checked as that flag's value, as Go's flag package
 would read it. For a whisper tool, config load also requires `-tree` and refuses one that is not the
@@ -243,10 +262,18 @@ relies on it until it has read the manager container's mounts and found the whol
 place (entries read-only, their parents and the worker dirs pinned), and then checked the running
 container from the guest side, without running any program inside it (the agent controls that container
 and could replace it; lever does not rely on the agent lacking root there): the kernel's `/proc/<pid>/mountinfo` for the container's process must list every
-planned directory as a mount point, the entries read-only, and `stat` must find the same device and
-inode at the guest path and at `/proc/<pid>/root/<target>`, so a protected directory replaced on the
-host (the mount stays on the old one) is caught. It fails closed: no container yet, a stopped manager,
-or anything it cannot read or parse holds the tool back. The reasons it logs are fixed text, never
+planned directory as a mount point, the entries read-only, each coming from the tree directory at its
+place (the parent mount's device, at the parent's root joined with the path below it: a symbolic
+link the runtime followed, or a directory renamed away, shows as another place), and `stat` must find
+the same device and inode at the guest path and at `/proc/<pid>/root/<target>`, so a protected
+directory replaced on the host (the mount stays on the old one) is caught. That process must also be
+in the mount and user namespaces the container runtime created: a root agent that could ptrace it
+could otherwise move it into namespaces made inside the container and show a staged view. The
+reference is the owner of its PID namespace, which a process can never leave; `lsns` (util-linux
+2.38 or later in the guest) reads the owners. The paths reach `stat` on stdin, never as words of
+the guest command line, and every read runs under the guest's own deadline. It fails closed: no
+container yet, a stopped manager, a foreign namespace, or anything it cannot read or parse holds the
+tool back. The reasons it logs are fixed text, never
 container output. It asks again every 30 seconds (apply starts the broker
 before the manager, so a fresh create gains the mounts after the first ask), and writes the reason
 into the tool's log once per reason. `lever apply` names the held tools when it keeps or resumes a

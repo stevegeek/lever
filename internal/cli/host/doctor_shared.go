@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -106,6 +107,10 @@ func checkSharedFolders(ctx context.Context, project string, app *config.App, li
 		slices.SortFunc(want, func(x, y jail.LiveMount) int { return strings.Compare(x.Target, y.Target) })
 		if len(want) > 0 {
 			problems, err := live(ctx, ref, want)
+			if errors.Is(err, jail.ErrForeignNamespace) {
+				fails = append(fails, fmt.Sprintf("%s: %v (treat it as compromised)", name, err))
+				continue
+			}
 			if err != nil {
 				warns = append(warns, fmt.Sprintf("%s: live check could not run (%s)", name, firstLine(err.Error())))
 				continue

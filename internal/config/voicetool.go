@@ -129,7 +129,7 @@ func (a *App) VoiceTool() (WhisperTool, bool) {
 func (a *App) validateWhisperTools() error {
 	for _, t := range a.Broker.Tools {
 		if form := envFormUnread(t.Command); form != "" {
-			return fmt.Errorf("config: broker.tools[%s] command uses %s, which lever cannot read the way env does, so its flags would escape the host-path checks; write the command as separate words (env NAME=value program -flag value)", t.Name, form)
+			return fmt.Errorf("config: broker.tools[%s] command uses %s, which lever cannot read the way env or the wrapper does, so its program and flags would escape the host-path checks; write the command as separate words with options lever reads (env NAME=value program -flag value), or run the program directly", t.Name, form)
 		}
 	}
 	tools := a.WhisperTools()

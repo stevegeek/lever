@@ -1,0 +1,151 @@
+package apply
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/scion"
+)
+
+// lever#158: the stale-mount check reads the host tree before the resume,
+// and the runtime resolves each mount source again (following links) when
+// it recreates the container. Right after a resume apply reads back, from
+// the guest, where every tree self-mount comes from, and a mount from
+// elsewhere suspends the manager and fails the bring-up.
+func TestStartManagerVerifiesResumedTreeMounts(t *testing.T) {
+	_, app := readOnlyConfig(t, true)
+	if err := os.MkdirAll(filepath.Join(app.Tree, "kb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jp := JailPath(app.Tree, app.Tree, "")
+	mounts := []jail.Mount{
+		{Source: jp, Destination: "/workspace", RW: true},
+		{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
+		{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
+		// A dropped entry the record still mounts: checked too.
+		{Source: path.Join(jp, "kb"), Destination: "/workspace/kb"},
+		// Not a tree self-mount: not lever's, not checked.
+		{Source: "/run/lever/x", Destination: "/run/lever"},
+	}
+	wantPlan := []jail.LiveMount{
+		{Target: "/workspace/assistant", Source: path.Join(jp, "assistant"), SelfMount: true},
+		{Target: "/workspace/assistant/tools", Source: path.Join(jp, "assistant/tools"), ReadOnly: true, SelfMount: true},
+		{Target: "/workspace/kb", Source: path.Join(jp, "kb"), ReadOnly: true, SelfMount: true},
+	}
+	type answer struct {
+		problems []jail.LiveMountProblem
+		err      error
+	}
+	cases := []struct {
+		name        string
+		phase       string
+		answers     []answer // successive live-check answers (the last repeats)
+		wantErr     string
+		wantSuspend bool
+		wantLog     string
+	}{
+		{"held", "suspended", []answer{{}}, "", false, ""},
+		{"stale mount through a link", "suspended", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}}},
+			`"kb" is mounted from another place`, true, ""},
+		{"entry through a link, forced resume", "error", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/assistant/tools", Reason: jail.LiveMountElsewhere}}}},
+			`"assistant/tools" is mounted from another place`, true, ""},
+		// The runtime resolved the destination through the same link: the
+		// mount point moved, so the planned place has no mount.
+		{"mount point moved by the link", "suspended", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountMissing}}}},
+			`"kb" not a mount point`, true, ""},
+		{"read-only mount writable", "suspended", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/assistant/tools", Reason: jail.LiveMountWritable}}}},
+			`"assistant/tools" mounted read-write`, true, ""},
+		{"foreign namespace", "suspended", []answer{{err: jail.ErrForeignNamespace}}, "mount namespace made inside the container", true, ""},
+		// Not running yet right after the resume: checked again once live.
+		{"not running yet", "suspended", []answer{{err: jail.ErrContainerNotRunning}, {problems: []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}}},
+			`"kb" is mounted from another place`, true, ""},
+		{"never readable", "suspended", []answer{{err: errors.New("cannot read")}}, "", false, "could not check from the guest where manager"},
+		// A replaced directory (inode only) is the existing warning, not a
+		// suspension: the kernel's record still names the tree.
+		{"replaced, not elsewhere", "suspended", []answer{{problems: []jail.LiveMountProblem{{Target: "/workspace/assistant/tools", Reason: jail.LiveMountReplaced}}}},
+			"", false, "covers another directory"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs, refs []string
+			var plans [][]jail.LiveMount
+			i := 0
+			live := func(_ context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+				refs = append(refs, ref)
+				plans = append(plans, want)
+				a := tc.answers[min(i, len(tc.answers)-1)]
+				i++
+				return a.problems, a.err
+			}
+			f := scionOKRunner()
+			r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: tc.phase, initContainerStatus: "stopped"}
+			err := runApply(app, Deps{
+				Scion:                  scion.New(r, scion.Options{}),
+				Log:                    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+				InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
+				CheckLiveMounts:        live,
+			})
+			if r.resumeCalls == 0 {
+				t.Fatal("the case must resume the manager")
+			}
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if suspended := sawScionCall(f, "suspend hello"); suspended != tc.wantSuspend {
+				t.Fatalf("suspend called = %v, want %v (calls %q)", suspended, tc.wantSuspend, joinedCalls(f))
+			}
+			if tc.wantLog != "" && !strings.Contains(strings.Join(logs, "\n"), tc.wantLog) {
+				t.Fatalf("logs %q, want %q", logs, tc.wantLog)
+			}
+			if !reflect.DeepEqual(plans[0], wantPlan) {
+				t.Fatalf("plan = %+v, want %+v", plans[0], wantPlan)
+			}
+			for _, ref := range refs {
+				if ref != jail.ContainerName(path.Base(jp), app.Name) {
+					t.Fatalf("checked %q", ref)
+				}
+			}
+		})
+	}
+}
+
+// A manager apply keeps running is not recreated, so it is not suspended:
+// a foreign namespace there is the loud warning of warnManagerTreeMounts.
+func TestStartManagerKeptForeignNamespaceWarns(t *testing.T) {
+	_, app := readOnlyConfig(t, true)
+	jp := JailPath(app.Tree, app.Tree, "")
+	mounts := []jail.Mount{
+		{Source: jp, Destination: "/workspace", RW: true},
+		{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
+		{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
+	}
+	var logs []string
+	f := scionOKRunner()
+	r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: "running", initContainerStatus: "Up 2 hours"}
+	err := runApply(app, Deps{
+		Scion:                  scion.New(r, scion.Options{}),
+		AgentSession:           &fakeSessionProbe{tok: validToken(), alive: true},
+		Log:                    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
+		CheckLiveMounts: func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return nil, jail.ErrForeignNamespace
+		},
+	})
+	if err != nil || r.resumeCalls != 0 || sawScionCall(f, "suspend hello") {
+		t.Fatalf("err=%v resume=%d calls=%q", err, r.resumeCalls, joinedCalls(f))
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "treat the manager as compromised") {
+		t.Fatalf("logs %q", logs)
+	}
+}

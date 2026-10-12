@@ -250,8 +250,8 @@ func (h *hangRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]s
 	return h.Run(ctx, env, name, args...)
 }
 
-// TestAgentProbeExecsAreBounded: every probe exec, and the read-only write
-// probe, runs under its own deadline whatever the caller's context, so a
+// TestAgentProbeExecsAreBounded: every probe exec, and the device probe,
+// runs under its own deadline whatever the caller's context, so a
 // hanging exec (a FIFO token file, a fake tmux server, a sciontool that never
 // returns) ends in an error instead of hanging doctor, apply or the broker.
 func TestAgentProbeExecsAreBounded(t *testing.T) {
@@ -265,7 +265,7 @@ func TestAgentProbeExecsAreBounded(t *testing.T) {
 	_, err1 := p.HubToken(ctx, "lever--x")
 	_, err2 := p.HarnessAlive(ctx, "lever--x")
 	err3 := p.ReportSessionRunning(ctx, "lever--x")
-	_, err4 := ContainerPathWritable(ctx, h, "lever--x", "/workspace/a")
+	_, err4 := ContainerHasCharDevice(ctx, h, "lever--x", "/dev/kvm")
 	_, err5 := p.ClaudeSettings(ctx, "lever--x")
 	for i, err := range []error{err1, err2, err3, err4, err5} {
 		if err == nil {

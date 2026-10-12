@@ -178,57 +178,6 @@ func TestContainerEnvScriptFiltersInTheGuest(t *testing.T) {
 	}
 }
 
-func TestContainerPathWritable(t *testing.T) {
-	probe := func(res proc.Result) (bool, error, *proc.FakeRunner) {
-		host := proc.NewFakeRunner()
-		host.Script("orb", res)
-		jr := New(Config{Host: host, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
-		ok, err := ContainerPathWritable(context.Background(), jr, "lever--mgr", "/workspace/kb/tools")
-		return ok, err, host
-	}
-	ok, err, host := probe(proc.Result{})
-	if err != nil || !ok {
-		t.Fatalf("exit 0 = writable; got %v, %v", ok, err)
-	}
-	if argv := host.Calls[0].Argv(); !contains(argv, "podman exec --user 0 lever--mgr test -w /workspace/kb/tools") {
-		t.Fatalf("argv %q", argv)
-	}
-	if ok, err, _ := probe(proc.Result{Code: 1}); err != nil || ok {
-		t.Fatalf("a quiet exit 1 = not writable; got %v, %v", ok, err)
-	}
-	// podman's own warning lines are noise, not a failure.
-	warn := "WARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session available\n" +
-		`time="2026-10-04T10:00:00Z" level=warning msg="some notice"` + "\n"
-	if ok, err, _ := probe(proc.Result{Code: 1, Stderr: warn}); err != nil || ok {
-		t.Fatalf("exit 1 with only podman warnings = not writable; got %v, %v", ok, err)
-	}
-	// A start failure the runner reports with no exit code is an error.
-	jr0 := New(Config{Host: errRunner{}, Prefix: orbPrefix("lever-x", "u"), UID: "501"})
-	if ok, err := ContainerPathWritable(context.Background(), jr0, "lever--mgr", "/workspace/x"); err == nil || ok {
-		t.Fatalf("a runner error with code 0 must be an error, got %v, %v", ok, err)
-	}
-	// Anything else never reads as "not writable".
-	for _, res := range []proc.Result{
-		{Code: 1, Stderr: warn + "Error: something else\n"},
-		{Code: 125, Stderr: "Error: can only create exec sessions on running containers"},
-		{Code: 127, Stderr: "test: not found"},
-		{Code: 1, Stderr: "orb: machine not running"},
-	} {
-		if _, err, _ := probe(res); err == nil {
-			t.Fatalf("result %+v must be an error, not a verdict", res)
-		}
-	}
-	if _, err, _ := probe(proc.Result{Code: 125, Stderr: `Error: no such container "lever--mgr"`}); !errors.Is(err, ErrNoContainer) {
-		t.Fatalf("err = %v, want ErrNoContainer", err)
-	}
-	jr := New(Config{Host: proc.NewFakeRunner(), Prefix: orbPrefix("lever-x", "u"), UID: "501"})
-	for _, bad := range [][2]string{{"--all", "/x"}, {"c", "relative"}} {
-		if _, err := ContainerPathWritable(context.Background(), jr, bad[0], bad[1]); err == nil {
-			t.Fatalf("ref %q target %q must be refused", bad[0], bad[1])
-		}
-	}
-}
-
 // errRunner fails every call before the command runs: an error with exit
 // code 0 (the binary could not be started).
 type errRunner struct{}
@@ -246,12 +195,12 @@ func (e errRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]str
 func TestContainerHasCharDevice(t *testing.T) {
 	ctx := context.Background()
 	yes := proc.NewFakeRunner()
-	yes.Script("podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 0})
+	yes.Script("timeout --kill-after=1s 8s podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 0})
 	if ok, err := ContainerHasCharDevice(ctx, yes, "proj--mgr", "/dev/kvm"); err != nil || !ok {
 		t.Fatalf("present: %v %v", ok, err)
 	}
 	no := proc.NewFakeRunner()
-	no.Script("podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 1})
+	no.Script("timeout --kill-after=1s 8s podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 1})
 	if ok, err := ContainerHasCharDevice(ctx, no, "proj--mgr", "/dev/kvm"); err != nil || ok {
 		t.Fatalf("absent: %v %v", ok, err)
 	}

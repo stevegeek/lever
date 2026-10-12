@@ -215,11 +215,14 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 		{Source: path.Join(jp, "assistant"), Destination: "/workspace/assistant", RW: true},
 		{Source: path.Join(jp, "assistant/tools"), Destination: "/workspace/assistant/tools"},
 	}
-	refused := func(context.Context, string, string) (bool, error) { return false, nil }
+	refused := func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil }
+	failing := func(err error) LiveMountChecker {
+		return func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, err }
+	}
 	for _, tc := range []struct {
 		name     string
 		inspect  func(context.Context, string) ([]jail.Mount, error)
-		probe    func(context.Context, string, string) (bool, error)
+		probe    LiveMountChecker
 		wantWarn string
 	}{
 		{"lacks the mounts", func(context.Context, string) ([]jail.Mount, error) {
@@ -227,12 +230,13 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 		}, refused, "not mounted read-only"},
 		{"holds them", func(context.Context, string) ([]jail.Mount, error) { return held, nil }, refused, ""},
 		{"replaced on the host", func(context.Context, string) ([]jail.Mount, error) { return held, nil },
-			func(_ context.Context, _ string, target string) (bool, error) {
-				return target == "/workspace/assistant/tools", nil
+			func(_ context.Context, _ string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+				return []jail.LiveMountProblem{{Target: "/workspace/assistant/tools", Reason: jail.LiveMountReplaced}}, nil
 			},
 			"edit protected directories in place"},
 		{"probe cannot run", func(context.Context, string) ([]jail.Mount, error) { return held, nil },
-			func(context.Context, string, string) (bool, error) { return false, errors.New("exec failed") }, "could not probe"},
+			failing(errors.New("cannot read the running container's mounts from the guest")), "could not check manager"},
+
 		{"cannot inspect", func(context.Context, string) ([]jail.Mount, error) { return nil, errors.New("podman exploded") }, refused, "lever doctor"},
 		{"no probe wired", nil, nil, "lever doctor"},
 	} {
@@ -250,7 +254,7 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 					refs = append(refs, ref)
 					return tc.inspect(ctx, ref)
 				}
-				deps.ProbeContainerWritable = tc.probe
+				deps.CheckLiveMounts = tc.probe
 			}
 			if err := runApply(app, deps); err != nil {
 				t.Fatalf("a missing mount must not fail apply: %v", err)
@@ -263,10 +267,16 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 			} else if !strings.Contains(joined, "warning:") || !strings.Contains(joined, tc.wantWarn) {
 				t.Fatalf("want a warning mentioning %q, got %q", tc.wantWarn, joined)
 			}
-			// Twice on a resume: the stale-mount check before it, and the
-			// protection check after.
-			if tc.inspect != nil && (len(refs) != 2 || refs[0] != jail.ContainerName(path.Base(jp), "hello") || refs[1] != refs[0]) {
-				t.Fatalf("inspected %q, want the manager container by name, before and after the resume", refs)
+			// On a resume: the stale-mount check before it, the check of
+			// where the resumed mounts come from (once more when it could
+			// not run the first time), and the protection check after.
+			if tc.inspect != nil && len(refs) < 3 {
+				t.Fatalf("inspected %q, want the manager container before and after the resume", refs)
+			}
+			for _, ref := range refs {
+				if ref != jail.ContainerName(path.Base(jp), "hello") {
+					t.Fatalf("inspected %q, want the manager container by name", refs)
+				}
 			}
 		})
 	}
@@ -313,20 +323,70 @@ func TestManagerTreeMountGaps(t *testing.T) {
 	if !reflect.DeepEqual(g.Writable, []string{"a/tools"}) || !strings.Contains(g.String(), "a/tools mounted read-write") {
 		t.Fatalf("gaps = %+v (%s)", g, g)
 	}
-	// The live probe: only entries are probed, at their container path; a
-	// probe error is an error, never "protected".
-	var probed []string
-	replaced, err := ProbeReplacedEntries(context.Background(), func(_ context.Context, _ string, target string) (bool, error) {
-		probed = append(probed, target)
-		return true, nil
-	}, "c", want)
-	if err != nil || !reflect.DeepEqual(replaced, []string{"a/tools"}) || !reflect.DeepEqual(probed, []string{"/workspace/a/tools"}) {
-		t.Fatalf("replaced=%v probed=%v err=%v", replaced, probed, err)
+}
+
+// The live half: the whole plan goes to the guest-side check, at its
+// container paths from the in-jail tree, and each problem comes back as
+// the gap of its kind; a check that cannot run is an error, never "held".
+func TestLiveTreeMountGaps(t *testing.T) {
+	want := []config.TreeMount{{Rel: "a"}, {Rel: "w", WorkerPin: true}, {Rel: "a/tools", ReadOnly: true}, {Rel: "b"}, {Rel: "c", ReadOnly: true}}
+	var asked []jail.LiveMount
+	answer := []jail.LiveMountProblem{
+		{Target: "/workspace/a/tools", Reason: jail.LiveMountReplaced},
+		{Target: "/workspace/w", Reason: jail.LiveMountMissing},
+		{Target: "/workspace/a", Reason: jail.LiveMountMissing},
+		{Target: "/workspace/c", Reason: jail.LiveMountWritable},
+		{Target: "/workspace/b", Reason: jail.LiveMountElsewhere},
 	}
-	if _, err := ProbeReplacedEntries(context.Background(), func(context.Context, string, string) (bool, error) {
-		return false, errors.New("exec failed")
-	}, "c", want); err == nil {
-		t.Fatal("a probe that cannot run must be an error")
+	live := func(_ context.Context, ref string, w []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+		if ref != "ctr" {
+			t.Errorf("ref = %q", ref)
+		}
+		asked = w
+		return answer, nil
+	}
+	g, err := LiveTreeMountGaps(context.Background(), live, "/lever", "ctr", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAsked := []jail.LiveMount{
+		{Target: "/workspace/a", Source: "/lever/a", SelfMount: true},
+		{Target: "/workspace/w", Source: "/lever/w", SelfMount: true},
+		{Target: "/workspace/a/tools", Source: "/lever/a/tools", ReadOnly: true, SelfMount: true},
+		{Target: "/workspace/b", Source: "/lever/b", SelfMount: true},
+		{Target: "/workspace/c", Source: "/lever/c", ReadOnly: true, SelfMount: true},
+	}
+	if !reflect.DeepEqual(asked, wantAsked) {
+		t.Fatalf("asked %+v", asked)
+	}
+	if !reflect.DeepEqual(g, TreeMountGaps{Replaced: []string{"a/tools"}, MissingWorkerPins: []string{"w"}, MissingPins: []string{"a"}, Writable: []string{"c"}, Elsewhere: []string{"b"}}) {
+		t.Fatalf("gaps = %+v", g)
+	}
+	if !strings.Contains(g.String(), "a/tools covers another directory than the host has there now") || !strings.Contains(g.String(), "b mounted from another place") || !g.Stale() {
+		t.Fatalf("replaced wording: %s", g)
+	}
+	answer = []jail.LiveMountProblem{{Target: "/workspace/a/tools", Reason: jail.LiveMountMissing}}
+	if g, err := LiveTreeMountGaps(context.Background(), live, "/lever", "ctr", want); err != nil || !reflect.DeepEqual(g.Missing, []string{"a/tools"}) {
+		t.Fatalf("missing entry: %+v %v", g, err)
+	}
+	for _, bad := range [][]jail.LiveMountProblem{
+		{{Target: "/workspace/elsewhere", Reason: jail.LiveMountMissing}},
+		{{Target: "/workspace/a", Reason: "something new"}},
+	} {
+		answer = bad
+		if _, err := LiveTreeMountGaps(context.Background(), live, "/lever", "ctr", want); err == nil {
+			t.Fatalf("an answer outside the plan or with an unknown reason must be an error: %+v", bad)
+		}
+	}
+	for _, e := range []error{errors.New("cannot read"), jail.ErrForeignNamespace, jail.ErrContainerNotRunning} {
+		if _, err := LiveTreeMountGaps(context.Background(), func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return nil, e
+		}, "/lever", "ctr", want); !errors.Is(err, e) {
+			t.Fatalf("err = %v, want %v", err, e)
+		}
+	}
+	if g, err := LiveTreeMountGaps(context.Background(), nil, "/lever", "ctr", nil); err != nil || !g.Empty() {
+		t.Fatal("an empty plan has nothing to check")
 	}
 }
 
@@ -349,7 +409,7 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 	goneRO := []jail.Mount{{Source: path.Join(jp, "gone"), Destination: "/workspace/gone"}}
 	noContainer := func(context.Context, string) ([]jail.Mount, error) { return nil, jail.ErrNoContainer }
 	const goneMsg = `"gone" mounted by the manager record but no longer on the host`
-	refused := func(context.Context, string, string) (bool, error) { return false, nil }
+	refused := func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil }
 	for _, tc := range []struct {
 		name             string
 		extra            []jail.Mount
@@ -388,7 +448,7 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 				Scion:                  scion.New(r, scion.Options{}),
 				Log:                    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
 				InspectContainerMounts: inspect,
-				ProbeContainerWritable: refused,
+				CheckLiveMounts:        refused,
 			}
 			if tc.record != nil {
 				deps.RecordVolumes = func(_ context.Context, project, agent string) ([]jail.Mount, error) {
@@ -549,7 +609,7 @@ func TestStartManagerWarnsAboutToolsOnReadOnly(t *testing.T) {
 		InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) {
 			return []jail.Mount{{Source: jp, Destination: "/workspace", RW: true}}, nil
 		},
-		ProbeContainerWritable: func(context.Context, string, string) (bool, error) { return false, nil },
+		CheckLiveMounts: func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil },
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)

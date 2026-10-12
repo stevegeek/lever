@@ -45,7 +45,7 @@ var shLongValueFlags = map[string]bool{"--rcfile": true, "--init-file": true}
 
 // interpreterRE matches an interpreter command name, a version suffix
 // allowed (python3.12, ruby3.3, perl5.36): group 1 is the family.
-var interpreterRE = regexp.MustCompile(`^(python|ruby|node|perl|sh|bash|dash|zsh|deno|bun)[0-9][0-9.]*$|^(python|ruby|node|perl|sh|bash|dash|zsh|deno|bun)$`)
+var interpreterRE = regexp.MustCompile(`^(python|pypy|ruby|node|nodejs|perl|sh|bash|dash|zsh|deno|bun)[0-9][0-9.]*$|^(python|pypy|ruby|node|nodejs|perl|sh|bash|dash|zsh|deno|bun)$`)
 
 // interpreterFamily is the interpreterFlags key for a command name, or ""
 // when it is no interpreter lever knows.
@@ -58,13 +58,17 @@ func interpreterFamily(name string) string {
 	switch fam {
 	case "bash", "dash", "zsh":
 		return "sh"
+	case "pypy":
+		return "python"
+	case "nodejs":
+		return "node"
 	}
 	return fam
 }
 
-// unwrapEnv skips an env(1) prefix (parseEnvPrefix) and returns the argv
-// env runs and the directory env -C/--chdir makes it run in ("" =
-// unchanged). Anything that does not start with env is returned unchanged;
+// unwrapEnv skips an env(1) prefix, and the command wrappers lever reads
+// (parseEnvPrefix), and returns the argv they run and the directory env
+// -C/--chdir (or uv run --directory) makes it run in ("" = unchanged). Anything that does not start with env is returned unchanged;
 // a prefix lever cannot read as env does gives nil (config load refuses it,
 // envFormUnread).
 func unwrapEnv(argv []string) ([]string, string) {
@@ -81,11 +85,18 @@ func unwrapEnv(argv []string) ([]string, string) {
 // instead of guessing.
 func envFormUnread(argv []string) string { return parseEnvPrefix(argv).unread }
 
-// envPrefix is what env(1) makes of a command line that starts with it.
+// envPrefix is what env(1) and the command wrappers lever reads
+// (wrapperSpecs, `uv run`) make of a command line that starts with them.
 type envPrefix struct {
-	argv   []string // the command env runs
-	chdir  string   // -C/--chdir, joined across nested envs ("" = unchanged)
-	unread string   // a form lever cannot read as env does ("" = none)
+	argv   []string // the command env (or the wrapper) runs
+	chdir  string   // -C/--chdir (uv run --directory), joined across nested prefixes ("" = unchanged)
+	unread string   // a form lever cannot read as env or the wrapper does ("" = none)
+	// wrapped is set when at least one prefix was read off.
+	wrapped bool
+	// paths are values of a wrapper's options that name code (uv run
+	// --with, --project and the like), each relative to the chdir in force
+	// where it stood.
+	paths []interpPath
 }
 
 // envLongOpts are GNU env's long options (getopt_long also takes any
@@ -124,16 +135,41 @@ const envSplitSpace = " \t\n\v\f\r"
 // looked up, -L, -U; --help and --version, which run nothing; an unknown or
 // ambiguous long option), a missing option value and an env with no
 // command are unread.
+//
+// The command wrappers in wrapperSpecs (nice, nohup, setsid, timeout,
+// stdbuf, ionice, taskset) and `uv run` (parseUvRun) are read off the same
+// way, nested in any order with env.
 func parseEnvPrefix(argv []string) envPrefix {
 	var p envPrefix
-	for len(argv) > 0 && baseName(argv[0]) == "env" {
-		rest, chdir, unread := parseOneEnv(argv[1:])
+	for len(argv) > 0 {
+		base := baseName(argv[0])
+		var rest []string
+		var chdir, unread string
+		var paths []interpPath
+		if spec, ok := wrapperSpecs[base]; ok {
+			rest, unread = parseWrapper(base, spec, argv[1:])
+		} else {
+			switch base {
+			case "env":
+				rest, chdir, unread = parseOneEnv(argv[1:])
+			case "uv":
+				rest, chdir, paths, unread = parseUvRun(argv[1:])
+			default:
+				p.argv = argv
+				return p
+			}
+		}
 		if unread != "" {
 			return envPrefix{unread: unread}
+		}
+		for _, x := range paths {
+			x.path = joinRaw(p.chdir, x.path)
+			p.paths = append(p.paths, x)
 		}
 		if chdir != "" {
 			p.chdir = joinRaw(p.chdir, chdir)
 		}
+		p.wrapped = true
 		argv = rest
 	}
 	p.argv = argv

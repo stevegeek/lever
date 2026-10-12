@@ -65,50 +65,6 @@ func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]st
 	return targets, nil
 }
 
-// ContainerPathWritable asks the running jail container named by ref
-// whether target is writable (`podman exec --user 0 <ref> test -w
-// <target>`, argv only, no shell): as root, so only a read-only mount says
-// no. It is the live half of the
-// manager.read_only check: an inspect still lists a read-only mount after
-// the host replaced the directory it covered (a rename-based deploy, rm -rf
-// and recreate), while a write from the container lands in the new,
-// unprotected directory — verified on OrbStack 2026-10-04. `test` answers
-// exit 1 with no output for "not writable" (EROFS on a read-only mount);
-// anything else — podman's own failure, a stopped container, a missing
-// `test` — is an error, never "not writable", so a probe that could not run
-// cannot read as protected.
-func ContainerPathWritable(ctx context.Context, r proc.Runner, ref, target string) (bool, error) {
-	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
-		return false, fmt.Errorf("probing container path: invalid container reference %q", ref)
-	}
-	if !strings.HasPrefix(target, "/") {
-		return false, fmt.Errorf("probing container path: target %q is not absolute", target)
-	}
-	// --user 0: the question is "is this a read-only mount", not "may the
-	// agent user write here". root bypasses permission bits but still gets
-	// EROFS on a read-only mount, so the answer does not depend on the
-	// image's USER or the directory's mode.
-	// The agent controls what `test` is in its container: bounded like
-	// every other exec into it (BoundAgentExec).
-	ctx, cancel := BoundAgentExec(ctx)
-	defer cancel()
-	res, err := r.Run(ctx, nil, "podman", "exec", "--user", "0", ref, "test", "-w", target)
-	quiet := strings.TrimSpace(res.Stdout) == "" && benignStderr(res.Stderr)
-	switch {
-	case err == nil && res.Code == 0:
-		return true, nil
-	case res.Code == 1 && quiet:
-		return false, nil
-	}
-	if s := strings.ToLower(res.Stderr); strings.Contains(s, "no such container") || strings.Contains(s, "no such object") {
-		return false, fmt.Errorf("probing container %s: %w", ref, ErrNoContainer)
-	}
-	if err == nil {
-		err = fmt.Errorf("exit status %d", res.Code)
-	}
-	return false, fmt.Errorf("probing %s in container %s: %w: %s", target, ref, err, strings.TrimSpace(res.Stderr))
-}
-
 // ContainerHasCharDevice reports whether path is a character device inside
 // the running jail container ref (podman exec --user 0 <ref> test -c <path>).
 // Used to tell a manager created before nested_virt (no /dev/kvm) from one
@@ -124,7 +80,7 @@ func ContainerHasCharDevice(ctx context.Context, r proc.Runner, ref, path string
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := r.Run(ctx, nil, "podman", "exec", "--user", "0", ref, "test", "-c", path)
+	res, err := runGuestBounded(ctx, r, "podman", "exec", "--user", "0", ref, "test", "-c", path)
 	switch {
 	case err == nil && res.Code == 0:
 		return true, nil
@@ -138,24 +94,6 @@ func ContainerHasCharDevice(ctx context.Context, r proc.Runner, ref, path string
 		err = fmt.Errorf("exit %d", res.Code)
 	}
 	return false, fmt.Errorf("probing container %s device %s: %w", ref, path, err)
-}
-
-// benignStderr reports whether stderr holds nothing but podman's own
-// warning lines — `WARN[0000] ...` (the default text format) or a logrus
-// `level=warning` line — which podman prints on some guests for every
-// command (a cgroups or config notice). Any other line keeps the probe an
-// error: a stderr lever cannot read never lets a result count as "not
-// writable", so it never reads as protected.
-func benignStderr(stderr string) bool {
-	for _, line := range strings.Split(stderr, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "WARN[") ||
-			(strings.HasPrefix(line, "time=") && strings.Contains(line, " level=warning ")) {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 // ContainerName is the name scion gives an agent's container: the hub

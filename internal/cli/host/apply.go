@@ -1699,6 +1699,7 @@ func foreignBrokerError(adminPort int, got wire.EpochResponse) error {
 		v = "unknown"
 	}
 	return fmt.Errorf("a broker that is not this instance's answers on 127.0.0.1:%d (version %s, another config): "+
-		"another lever instance, or a leftover broker, uses this instance's broker ports. Give this instance its own "+
-		"broker.jail_port and broker.admin_port, or stop the other broker (lever down in its instance)", adminPort, v)
+		"another lever instance, a leftover broker, or this instance's own broker with a stale broker.pid, uses this "+
+		"instance's broker ports. Give this instance its own broker.jail_port and broker.admin_port, or stop whatever "+
+		"listens on that port (lever down in the other instance, or find it with ss -ltnp)", adminPort, v)
 }

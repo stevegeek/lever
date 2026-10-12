@@ -213,7 +213,7 @@ version bump moves the block under the new version heading.
   config's hash, failing at once with the port and the fix (give the instance its own
   `broker.jail_port` and `broker.admin_port`, or stop the other broker).
 - **The Makefile builds with the Go release in `go.mod`.** It sets `GOTOOLCHAIN` (the `go` command
-  downloads that toolchain once if the local one differs), the same Go CI and the releases use.
+  downloads that toolchain once if the local one differs), the same Go CI uses.
   Under a newer local Go 1.27, `lever-tool-db`'s SQLite driver hung on first use, so the e2e's tool
   calls failed with a 502. `make GOTOOLCHAIN=local` keeps the local Go.
 - **`lever acceptance` waits for its tools to listen** (up to 30 s) before it runs the checks, and

@@ -89,7 +89,7 @@ Machine-specific paths (`LEVER_INSTANCE`, `LEVER_IMAGE_CTX`, `PREFIX`) go in an 
 unless `LEVER_IMAGE_FORCE=1`.
 
 The Makefile builds with the Go release named in `go.mod` (it sets `GOTOOLCHAIN`; the `go` command
-downloads that toolchain once if yours differs), the same Go CI and the releases use. A newer local
+downloads that toolchain once if yours differs), the same Go CI uses. A newer local
 Go can break dependencies that rely on runtime internals: under Go 1.27, `lever-tool-db`'s SQLite
 driver (`modernc.org/libc`) hangs on first use, and `make test-lima-e2e` then fails its tool calls
 with a 502. Offline, or to try a newer Go on purpose, run `make GOTOOLCHAIN=local <target>`.

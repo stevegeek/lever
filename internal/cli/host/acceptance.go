@@ -548,8 +548,12 @@ func defaultToolDial(ctx context.Context, addr string) error {
 // its log, so the gate fails on the real cause instead of a 502 in a check.
 func waitToolsListening(ctx context.Context, app *config.App, dial func(context.Context, string) error, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
+	// A tool whose program lies under manager.read_only is held back until
+	// the manager holds those mounts, which a broker-only run never starts:
+	// it is not expected to listen.
+	held, _ := app.ToolsOnReadOnly()
 	for _, t := range app.Broker.Tools {
-		if t.External || t.Backend == "" {
+		if t.External || t.Backend == "" || len(held[t.Name]) > 0 {
 			continue
 		}
 		addr := t.Backend

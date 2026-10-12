@@ -1578,9 +1578,13 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // The inspect is not enough on its own: when the host replaces a protected
 // directory after the create, podman still lists the read-only mount while
 // a write from the container lands in the new directory (verified on
-// OrbStack 2026-10-04). So for a RUNNING container every entry is also
-// probed live (apply.ProbeReplacedEntries); a probe that cannot run, or a
-// container that is not running, is a warning that says so — never a pass.
+// OrbStack 2026-10-04). So for a RUNNING container the whole plan is also
+// checked live from the guest side (apply.LiveTreeMountGaps through
+// jail.ContainerLiveMounts: the kernel's mountinfo and the device and inode
+// behind each mount, never a program inside the container, which the agent
+// controls); a check that cannot run, or a container that is not running,
+// is a warning that says so — never a pass. A first process found in a
+// namespace made inside the container fails the row.
 // The container is found by the id scion reports or else by scion's
 // container name, as for the worker ticket mounts. No manager record or
 // container, a listing or an inspect failure, is "not checked".
@@ -1596,7 +1600,7 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // With no container to inspect (or an inspect that fails), that half reads
 // the hub record's volumes instead (record; nil skips it), which a resume
 // recreates the container from; the plan half then stays "not checked".
-func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, record recordVolumeReader, probe apply.WritableProbe) checkResult {
+func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, record recordVolumeReader, live liveMountChecker) checkResult {
 	const check = "manager read-only paths"
 	notChecked := func(detail string) checkResult {
 		if len(want) == 0 {
@@ -1642,7 +1646,7 @@ func checkManagerReadOnly(ctx context.Context, project, tree, name string, want 
 		}
 		return checkResult{check, true, "none configured", ""}
 	}
-	r := managerReadOnlyGaps(ctx, check, project, name, ref, a.ContainerStatus, want, mounts, probe)
+	r := managerReadOnlyGaps(ctx, check, project, name, ref, a.ContainerStatus, want, mounts, live)
 	if stale.Empty() {
 		return r
 	}
@@ -1655,26 +1659,30 @@ func checkManagerReadOnly(ctx context.Context, project, tree, name string, want 
 }
 
 // managerReadOnlyGaps is checkManagerReadOnly's half for the current plan:
-// every planned mount present, and (on a running container) every entry
-// refusing a write.
-func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, containerStatus string, want []config.TreeMount, mounts []jail.Mount, probe apply.WritableProbe) checkResult {
+// every planned mount present, and (on a running container) the whole plan
+// held live, as the guest sees it.
+func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, containerStatus string, want []config.TreeMount, mounts []jail.Mount, live liveMountChecker) checkResult {
 	gaps := apply.ManagerTreeMountGaps(project, want, mounts)
 	if gaps.Empty() {
 		if !scionpkg.ContainerLive(containerStatus) {
-			return warnResult(check, "the mounts are listed, but the write probe did not run (the manager container is not running), so a protected directory replaced on the host would go unnoticed",
+			return warnResult(check, "the mounts are listed, but the live check did not run (the manager container is not running), so a protected directory replaced on the host would go unnoticed",
 				"bring the manager up (`lever up`) and re-run doctor")
 		}
-		if probe == nil {
+		if live == nil {
 			// A warning row needs a fix to print as one ("!"), never as "✓".
-			return warnResult(check, "the mounts are listed, but the write probe is not wired, so a protected directory replaced on the host would go unnoticed",
-				"this is a lever wiring gap; check the manager by hand (`podman exec <container> test -w <entry>` in the guest must fail) and report it")
+			return warnResult(check, "the mounts are listed, but the live check is not wired, so a protected directory replaced on the host would go unnoticed",
+				"this is a lever wiring gap; report it")
 		}
-		replaced, err := apply.ProbeReplacedEntries(ctx, probe, ref, want)
-		if err != nil {
-			return warnResult(check, "the mounts are listed, but the write probe could not run ("+firstLine(err.Error())+"), so protection is not confirmed",
+		lg, err := apply.LiveTreeMountGaps(ctx, apply.LiveMountChecker(live), project, ref, want)
+		switch {
+		case errors.Is(err, jail.ErrForeignNamespace):
+			return checkResult{check, false, fmt.Sprintf("manager %q: %v", name, err),
+				"something in the container moved its first process there to show lever a staged view of its mounts: treat the manager as compromised; back up what you need, then recreate it (`lever up --fresh`)"}
+		case err != nil:
+			return warnResult(check, "the mounts are listed, but the live check could not run ("+firstLine(err.Error())+"), so protection is not confirmed",
 				"re-run doctor once the manager container is up")
 		}
-		gaps.Replaced = replaced
+		gaps = lg
 	}
 	if !gaps.Empty() {
 		return checkResult{check, false, fmt.Sprintf("manager %q: %s", name, gaps), apply.ManagerTreeMountsFix(gaps)}
@@ -1687,7 +1695,7 @@ func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, contain
 			pins++
 		}
 	}
-	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q (mounted, and a write probe refused), %d pin(s) mounted (pins are checked by inspect only)", entries, name, pins), ""}
+	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q, %d pin(s) mounted (checked live from the guest: each a mount point over the host's directory)", entries, name, pins), ""}
 }
 
 // staleTreeMountsResult is checkManagerReadOnly's row for mounts the

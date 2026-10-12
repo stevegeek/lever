@@ -163,7 +163,7 @@ func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
 // Deps are the executor's collaborators, injected so Run is testable offline.
 // LoadImage and friends are host-side (docker-save|podman-load); Scion runs IN
 // the jail (built on a JailRunner). Every func field except ReadCred,
-// ImageTagPolicy, InspectContainerMounts and ProbeContainerWritable is REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
+// ImageTagPolicy, InspectContainerMounts and CheckLiveMounts is REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
 // so a wiring gap fails loudly instead of silently skipping a step. The CLI
 // wires all of them (buildApplyDeps); tests fill the ones they do not assert
 // on with inert implementations.
@@ -307,11 +307,14 @@ type Deps struct {
 	// record holds that the config dropped or whose directory is gone
 	// (checkStaleTreeMounts). nil ⇒ the warning says it could not check.
 	InspectContainerMounts func(ctx context.Context, ref string) ([]jail.Mount, error)
-	// ProbeContainerWritable asks a running container whether its user can
-	// write a path (jail.ContainerPathWritable in production): the live
-	// check that a read_only entry was not replaced on the host after the
-	// manager was created. nil ⇒ the warning says it could not check.
-	ProbeContainerWritable func(ctx context.Context, ref, target string) (bool, error)
+	// CheckLiveMounts checks a running container's mounts from the guest
+	// side (jail.ContainerLiveMounts in production: the kernel's mountinfo
+	// and the device and inode behind each mount, no program run inside
+	// the container, which the agent controls): the live check that a
+	// read_only entry is mounted read-only and was not replaced on the host
+	// after the manager was created. nil ⇒ the warning says it could not
+	// check.
+	CheckLiveMounts LiveMountChecker
 	// ProbeContainerDevice asks a running container whether path is a
 	// character device in it (jail.ContainerHasCharDevice in production).
 	// Used to warn when nested_virt is on and the manager's container lacks
@@ -1340,21 +1343,26 @@ func managerTreeVolumes(jp string, mounts []config.TreeMount) []scion.VolumeMoun
 //   - Writable: an entry mounted read-write — the agent writes it;
 //   - WrongSource: a mount whose source is not that directory of the
 //     in-jail tree — it covers something else;
-//   - Replaced: an entry the container can write although its read-only
-//     mount is listed — the host replaced the directory after the manager
-//     was created, and the mount still covers the old one (live probe);
+//   - Replaced: a planned mount that covers another directory than the
+//     host has there now — the host replaced the directory after the
+//     manager was created, and the mount still covers the old one, while
+//     a write may land in the new one (live check, LiveTreeMountGaps);
+//   - Elsewhere: a planned mount the kernel records as coming from another
+//     place than the tree directory at its path — a symbolic link stood in
+//     the path when the container started (the runtime followed it), or
+//     the directory was renamed since (live check);
 //   - MissingPins: an entry's ancestor with no mount — the agent can
 //     rename it away and recreate the protected path writable;
 //   - MissingWorkerPins: a worker dir (or its ancestor) with no mount —
 //     the manager can replace it with a link and have that worker mount a
 //     protected directory read-write.
 type TreeMountGaps struct {
-	Missing, Writable, WrongSource, Replaced, MissingPins, MissingWorkerPins []string
+	Missing, Writable, WrongSource, Replaced, Elsewhere, MissingPins, MissingWorkerPins []string
 }
 
 // Empty reports whether the container matches the plan.
 func (g TreeMountGaps) Empty() bool {
-	return len(g.Missing)+len(g.Writable)+len(g.WrongSource)+len(g.Replaced)+len(g.MissingPins)+len(g.MissingWorkerPins) == 0
+	return len(g.Missing)+len(g.Writable)+len(g.WrongSource)+len(g.Replaced)+len(g.Elsewhere)+len(g.MissingPins)+len(g.MissingWorkerPins) == 0
 }
 
 // String words the gaps for a doctor row or an apply warning.
@@ -1368,7 +1376,8 @@ func (g TreeMountGaps) String() string {
 	add(g.Missing, "not mounted read-only: the agent can write it")
 	add(g.Writable, "mounted read-write: the agent can write it")
 	add(g.WrongSource, "mounted from another source: the mount covers something else")
-	add(g.Replaced, "writable from the container although its read-only mount is listed: the directory was replaced on the host after the manager was created, and the mount still covers the old one")
+	add(g.Replaced, "covers another directory than the host has there now: it was replaced on the host after the manager was created, and the mount still covers the old one")
+	add(g.Elsewhere, "mounted from another place than the tree's directory there: a symbolic link stood in its path when the container started (the runtime followed it), or it was moved since")
 	add(g.MissingPins, "not pinned: the agent can rename it away and recreate a protected path writable")
 	add(g.MissingWorkerPins, "(a worker dir) not pinned: the manager can replace it with a symbolic link and have that worker mount a protected directory read-write")
 	return strings.Join(parts, "; ")
@@ -1378,15 +1387,15 @@ func (g TreeMountGaps) String() string {
 // beside it). A fresh create fixes it like the rest, but the operator
 // caused it by replacing a protected directory instead of editing it in
 // place, so the fix text adds that rule.
-func (g TreeMountGaps) Stale() bool { return len(g.Replaced) > 0 }
+func (g TreeMountGaps) Stale() bool { return len(g.Replaced)+len(g.Elsewhere) > 0 }
 
 // ManagerTreeMountGaps compares a manager container's mounts with the
 // read_only plan: every planned directory must be mounted at its place in
 // the workspace from the same place in the in-jail tree jp, and an entry
 // must be read-only. A pin's writability is not checked — what makes it a
 // pin is being a mount point, which cannot be renamed or removed. Shared by
-// `lever doctor` and apply's keep/resume warning. The live write probe
-// (ProbeReplacedEntries) is separate: it needs a running container.
+// `lever doctor` and apply's keep/resume warning. The live check
+// (LiveTreeMountGaps) is separate: it needs a running container.
 func ManagerTreeMountGaps(jp string, want []config.TreeMount, got []jail.Mount) TreeMountGaps {
 	byTarget := make(map[string]jail.Mount, len(got))
 	for _, m := range got {
@@ -1411,32 +1420,68 @@ func ManagerTreeMountGaps(jp string, want []config.TreeMount, got []jail.Mount) 
 	return g
 }
 
-// WritableProbe asks a running container whether its user can write an
-// in-container path (jail.ContainerPathWritable in production).
-type WritableProbe func(ctx context.Context, ref, target string) (bool, error)
+// LiveMountChecker checks a running container's mounts from the guest
+// (jail.ContainerLiveMounts in production).
+type LiveMountChecker func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error)
 
-// ProbeReplacedEntries runs the live half of the read_only check on a
-// RUNNING manager container: every entry must refuse a write. A listed
-// read-only mount does not prove it — after the host replaced the
-// directory (rename-based deploy, rm -rf and recreate) the mount stays on
-// the old directory and a write lands in the new one. Returns the entries
-// the container can write; any probe that cannot run is an error, so a
-// failed probe never reads as protected.
-func ProbeReplacedEntries(ctx context.Context, probe WritableProbe, ref string, want []config.TreeMount) ([]string, error) {
-	var replaced []string
+// ManagerLivePlan is the tree plan want as the live check reads it: each
+// directory at its place in the workspace, from the same place in the
+// in-jail tree jp, read-only for an entry; each a tree directory over its
+// own place (jail.LiveMount.SelfMount).
+func ManagerLivePlan(jp string, want []config.TreeMount) []jail.LiveMount {
+	plan := make([]jail.LiveMount, 0, len(want))
 	for _, w := range want {
-		if !w.ReadOnly {
-			continue
+		plan = append(plan, jail.LiveMount{Target: path.Join(scion.ContainerWorkspace, w.Rel), Source: path.Join(jp, w.Rel), ReadOnly: w.ReadOnly, SelfMount: true})
+	}
+	return plan
+}
+
+// LiveTreeMountGaps runs the live half of the tree-plan check on a RUNNING
+// container ref, from the guest side (live): every planned directory a
+// mount point, an entry read-only, each covering the directory the host
+// has there now. A mount podman lists does not prove it — after the host
+// replaced the directory (rename-based deploy, rm -rf and recreate) the
+// mount stays on the old directory and a write lands in the new one — and
+// an answer from inside the container would be the agent's word. Every
+// failure to check is an error (jail.ErrContainerNotRunning,
+// jail.ErrForeignNamespace among them), so a check that did not run never
+// reads as held.
+func LiveTreeMountGaps(ctx context.Context, live LiveMountChecker, jp, ref string, want []config.TreeMount) (TreeMountGaps, error) {
+	var g TreeMountGaps
+	if len(want) == 0 {
+		return g, nil
+	}
+	problems, err := live(ctx, ref, ManagerLivePlan(jp, want))
+	if err != nil {
+		return g, err
+	}
+	byTarget := make(map[string]config.TreeMount, len(want))
+	for _, w := range want {
+		byTarget[path.Join(scion.ContainerWorkspace, w.Rel)] = w
+	}
+	for _, p := range problems {
+		w, ok := byTarget[p.Target]
+		if !ok {
+			return TreeMountGaps{}, fmt.Errorf("live mount check named %q, which is not in the plan", p.Target)
 		}
-		writable, err := probe(ctx, ref, path.Join(scion.ContainerWorkspace, w.Rel))
-		if err != nil {
-			return nil, err
-		}
-		if writable {
-			replaced = append(replaced, w.Rel)
+		switch {
+		case p.Reason == jail.LiveMountMissing && w.ReadOnly:
+			g.Missing = append(g.Missing, w.Rel)
+		case p.Reason == jail.LiveMountMissing && w.WorkerPin:
+			g.MissingWorkerPins = append(g.MissingWorkerPins, w.Rel)
+		case p.Reason == jail.LiveMountMissing:
+			g.MissingPins = append(g.MissingPins, w.Rel)
+		case p.Reason == jail.LiveMountWritable:
+			g.Writable = append(g.Writable, w.Rel)
+		case p.Reason == jail.LiveMountReplaced:
+			g.Replaced = append(g.Replaced, w.Rel)
+		case p.Reason == jail.LiveMountElsewhere:
+			g.Elsewhere = append(g.Elsewhere, w.Rel)
+		default:
+			return TreeMountGaps{}, fmt.Errorf("live mount check gave an unknown reason for %q", w.Rel)
 		}
 	}
-	return replaced, nil
+	return g, nil
 }
 
 // ManagerTreeMountsFix is the operator's way out of every gap: a fresh
@@ -1659,14 +1704,14 @@ func (r *run) managerMounts(ctx context.Context, jp string) ([]jail.Mount, bool)
 // the manager works, it is only unprotected — but loud, naming what is
 // wrong and the way to fix it. The container is found by scion's container
 // name, which a resume keeps (its id changes when scion recreates the
-// container); it is live here (waitManagerLive passed), so the write probe
-// runs too.
+// container); it is live here (waitManagerLive passed), so the live check
+// (LiveTreeMountGaps, from the guest side) runs too.
 func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 	want := r.app.ManagerTreeMounts()
 	if len(want) == 0 {
 		return
 	}
-	if r.d.InspectContainerMounts == nil || r.d.ProbeContainerWritable == nil {
+	if r.d.InspectContainerMounts == nil || r.d.CheckLiveMounts == nil {
 		r.d.Log("start-manager: warning: manager.read_only is create-time only and lever could not inspect manager %q's mounts; run `lever doctor` (row \"manager read-only paths\") to see whether it holds them", r.app.Name)
 		return
 	}
@@ -1678,12 +1723,16 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 	}
 	gaps := ManagerTreeMountGaps(jp, want, got)
 	if gaps.Empty() {
-		replaced, err := ProbeReplacedEntries(ctx, WritableProbe(r.d.ProbeContainerWritable), ref, want)
-		if err != nil {
-			r.d.Log("start-manager: warning: lever could not probe whether manager %q can write its read-only paths (%v); run `lever doctor` to check", r.app.Name, err)
+		live, err := LiveTreeMountGaps(ctx, r.d.CheckLiveMounts, jp, ref, want)
+		switch {
+		case errors.Is(err, jail.ErrForeignNamespace):
+			r.d.Log("start-manager: warning: manager %q: %v. Something in the container moved it there to show lever a staged view of its mounts: treat the manager as compromised, back up what you need and recreate it (`lever up --fresh`)", r.app.Name, err)
+			return
+		case err != nil:
+			r.d.Log("start-manager: warning: lever could not check manager %q's live mounts from the guest (%v); run `lever doctor` to check", r.app.Name, err)
 			return
 		}
-		gaps.Replaced = replaced
+		gaps = live
 	}
 	if !gaps.Empty() {
 		r.d.Log("start-manager: warning: manager %q does not hold its manager.read_only or shared_folders protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))

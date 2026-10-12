@@ -1810,14 +1810,20 @@ func TestCheckManagerReadOnly(t *testing.T) {
 			return mounts, nil
 		}
 	}
-	// probeOf answers the live write probe: targets listed in writable are
-	// writable; err, when set, is every probe's answer.
-	probeOf := func(err error, writable ...string) apply.WritableProbe {
-		return func(_ context.Context, _ string, target string) (bool, error) {
+	// probeOf answers the live check: targets listed in replaced cover
+	// another directory than the host's; err, when set, is the answer.
+	probeOf := func(err error, replaced ...string) liveMountChecker {
+		return func(_ context.Context, _ string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
 			if err != nil {
-				return false, err
+				return nil, err
 			}
-			return slices.Contains(writable, target), nil
+			var out []jail.LiveMountProblem
+			for _, w := range want {
+				if slices.Contains(replaced, w.Target) {
+					out = append(out, jail.LiveMountProblem{Target: w.Target, Reason: jail.LiveMountReplaced})
+				}
+			}
+			return out, nil
 		}
 	}
 	refused := probeOf(nil)
@@ -1848,13 +1854,13 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		want       []config.TreeMount
 		list       agentLister
 		inspect    mountInspector
-		probe      apply.WritableProbe
+		probe      liveMountChecker
 		ok         bool
 		warn       bool
 		wantDetail string
 		wantFix    string
 	}{
-		{"all mounted, probe refused", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, false, "1 path(s) read-only in \"assistant\" (mounted, and a write probe refused), 3 pin(s)", ""},
+		{"all mounted, probe refused", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, false, "1 path(s) read-only in \"assistant\", 3 pin(s) mounted (checked live from the guest", ""},
 		{"created before the setting", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, false, false,
 			"assistant/tools not mounted read-only: the agent can write it", "lever up --fresh"},
 		{"entry pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, ro)}), refused, false, false, "assistant not pinned: the agent can rename it away", "back up the manager's conversation"},
@@ -1867,14 +1873,20 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		// The false OK the inspect alone gave: the mount is listed, but the
 		// host replaced the directory and a write lands in the new one.
 		{"entry replaced on the host", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(nil, "/workspace/assistant/tools"), false, false,
-			"assistant/tools writable from the container although its read-only mount is listed", "edit protected directories in place"},
-		{"probe cannot run", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(errors.New("podman exec failed")), true, true, "write probe could not run", "re-run doctor"},
-		{"probe not wired", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), nil, true, true, "write probe is not wired", "lever wiring gap"},
+			"assistant/tools covers another directory than the host has there now", "edit protected directories in place"},
+		// A replaced pin is reported too: the whole plan is checked live.
+		{"pin replaced on the host", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(nil, "/workspace/assistant"), false, false,
+			"assistant covers another directory than the host has there now", "edit protected directories in place"},
+		{"probe cannot run", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(errors.New("cannot read the running container's mounts from the guest")), true, true, "live check could not run", "re-run doctor"},
+		// The first process moved into a namespace made inside the
+		// container: a staged view, so the row fails.
+		{"foreign namespace", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(jail.ErrForeignNamespace), false, false, "mount namespace made inside the container", "compromised"},
+		{"probe not wired", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), nil, true, true, "live check is not wired", "lever wiring gap"},
 		{"container not running", want, listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "Exited (0) 2 minutes ago", ContainerID: "cm"}),
-			inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, true, "write probe did not run (the manager container is not running)", "lever up"},
+			inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, true, "live check did not run (the manager container is not running)", "lever up"},
 		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
 		{"no container id, found by name", want, listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "running"}),
-			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), refused, true, false, "a write probe refused", ""},
+			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), refused, true, false, "checked live from the guest", ""},
 		{"none configured", nil, mgr, inspectOf(nil), refused, true, false, "none configured", ""},
 		{"none configured, nothing mounted", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, true, false, "none configured", ""},
 		{"none configured, list fails", nil, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, inspectOf(nil), refused, true, false, "none configured", ""},
@@ -1925,7 +1937,7 @@ func TestCheckManagerReadOnlyFallsBackToTheHubRecord(t *testing.T) {
 		return []scion.Agent{{Slug: "assistant", Phase: "suspended"}}, nil
 	}
 	noContainer := func(context.Context, string) ([]jail.Mount, error) { return nil, jail.ErrNoContainer }
-	refused := func(context.Context, string, string) (bool, error) { return false, nil }
+	refused := func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil }
 	recordOf := func(ms ...jail.Mount) recordVolumeReader {
 		return func(_ context.Context, project, agent string) ([]jail.Mount, error) {
 			if project != "lever" || agent != "assistant" {

@@ -79,14 +79,12 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 			return &guardError{"missing:" + w.Rel, fmt.Sprintf("the protected directory %q is missing on the host (manager.read_only or shared_folders needs it in place; recreate it, or back up and recreate the manager)", w.Rel)}
 		}
 	}
-	plan := make([]jail.LiveMount, 0, len(want))
-	for _, w := range want {
-		plan = append(plan, jail.LiveMount{Target: path.Join(scion.ContainerWorkspace, w.Rel), Source: path.Join(jailMount, w.Rel), ReadOnly: w.ReadOnly})
-	}
-	problems, err := live(ctx, plan)
+	problems, err := live(ctx, apply.ManagerLivePlan(jailMount, want))
 	switch {
 	case errors.Is(err, jail.ErrContainerNotRunning), errors.Is(err, jail.ErrNoContainer):
 		return &guardError{"not-running", fmt.Sprintf("manager %q is not running, so lever cannot see its live mounts", name)}
+	case errors.Is(err, jail.ErrForeignNamespace):
+		return &guardError{"foreign-namespace", fmt.Sprintf("manager %q does not hold that protection: %v", name, jail.ErrForeignNamespace)}
 	case err != nil:
 		return &guardError{"live-unreadable", fmt.Sprintf("lever cannot read manager %q's live mounts from the guest", name)}
 	case len(problems) > 0:

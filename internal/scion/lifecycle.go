@@ -88,14 +88,31 @@ type LiveBudget struct {
 // exhausted budget with nothing observed, not "poll forever" (retry.Until's
 // reading of a non-positive count).
 func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, b LiveBudget) error {
+	return waitAgentLive(ctx, list, slug, b, wallClock)
+}
+
+// waitAgentLive is WaitAgentLive with the settle window's clock injected.
+func waitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, b LiveBudget, clk settleClock) error {
 	if err := waitLiveOnce(ctx, list, slug, b.Attempts, b.Interval); err != nil {
 		return err
 	}
 	if b.Settle <= 0 {
 		return nil
 	}
-	return holdLive(ctx, list, slug, b.Interval, b.Settle)
+	return holdLive(ctx, list, slug, b.Interval, b.Settle, clk)
 }
+
+// settleClock is the settle window's view of time: now reads it, after waits
+// for one poll interval. Production uses the wall clock. Tests substitute a
+// clock on which every wait returns at once and moves time on by exactly the
+// interval, so a window's outcome follows from the order of observations
+// alone and never from how late a loaded scheduler fires a timer.
+type settleClock struct {
+	now   func() time.Time
+	after func(time.Duration) <-chan time.Time
+}
+
+var wallClock = settleClock{now: time.Now, after: time.After}
 
 // HoldAgentLive is WaitAgentLive's settle phase on its own: the record was
 // just seen live, and must stay live (phase running over a live container)
@@ -107,7 +124,7 @@ func HoldAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 	if settle <= 0 {
 		return nil
 	}
-	return holdLive(ctx, list, slug, interval, settle)
+	return holdLive(ctx, list, slug, interval, settle, wallClock)
 }
 
 // waitLiveOnce is the first phase: poll until the record is live or the
@@ -165,7 +182,7 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 // jail forever (lever#31 review R1). A list error between two non-live
 // readings does not break the chain: it is neither confirmation nor
 // contradiction.
-func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration) error {
+func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration, clk settleClock) error {
 	if interval <= 0 {
 		// Never spin: a zero interval would call list as fast as the CPU
 		// allows for the whole window. One second is the manager gate's own
@@ -175,7 +192,7 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 	// strikeGrace bounds how many polls past the deadline a pending strike may
 	// wait for a deciding observation.
 	const strikeGrace = 3
-	start := time.Now()
+	start := clk.now()
 	var lastErr error
 	var lastPhase, lastContainer string
 	observed := false
@@ -184,7 +201,7 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-clk.after(interval):
 		}
 		agents, err := list(ctx)
 		if err != nil {
@@ -205,11 +222,11 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 			default:
 				if strikes++; strikes >= 2 {
 					return fmt.Errorf("%w after %s (%s) — scion reported success and the record was live, then the harness died; its container log in the guest holds the last output",
-						ErrAgentDied, time.Since(start).Round(100*time.Millisecond), describeReading(lastPhase, lastContainer))
+						ErrAgentDied, clk.now().Sub(start).Round(100*time.Millisecond), describeReading(lastPhase, lastContainer))
 				}
 			}
 		}
-		if time.Since(start) >= settle {
+		if clk.now().Sub(start) >= settle {
 			if strikes == 0 {
 				break
 			}

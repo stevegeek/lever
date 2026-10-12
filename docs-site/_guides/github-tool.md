@@ -20,9 +20,11 @@ By default the only operation is `push`, with the arguments `repo`, `branch` and
 open the PR yourself: the `push` result includes a compare URL for this.
 
 You can also offer more operations with the `-ops` flag: `pr_open`, `pr_status`, `pr_merge`
-and `release` (see [6. PRs, merges and releases](#6-prs-merges-and-releases-opt-in)), and the
+and `release` (see [6. PRs, merges and releases](#6-prs-merges-and-releases-opt-in)), the
 read-only `ci_runs` and `ci_log`, which let an agent see why CI failed (see
-[7. CI runs and logs](#7-ci-runs-and-logs-opt-in)). They are off
+[7. CI runs and logs](#7-ci-runs-and-logs-opt-in)), and `issue_list`, `issue_read`,
+`issue_comment` and `issue_close` for triaging the repository's issues (see
+[8. Issues](#8-issues-opt-in)). They are off
 by default. `pr_open` publishes text under the App's name, `pr_merge` changes the default branch,
 and `release` creates a tag that starts your release workflow. Offer them only on repositories
 where you want this, and grant each one only to the agents that need it. The riskier settings are
@@ -122,7 +124,7 @@ broker:
       command: [/home/you/.local/bin/lever-tool-github,
                 # -tree, -state, -app-id, -installation-id, -app-key as above
                 -repos, owner/name,
-                -ops, "push,pr_open,pr_status,pr_merge,release,ci_runs,ci_log",
+                -ops, "push,pr_open,pr_status,pr_merge,release,ci_runs,ci_log,issue_list,issue_read,issue_comment,issue_close",
                 -merge-methods, squash,
                 -merge-checks, "test,lint"]  # required with pr_merge: names, any or none
                 # pr_merge requires a person's approval by default
@@ -137,6 +139,10 @@ broker:
         - {name: release, params: [repo, tag]}
         - {name: ci_runs, params: [repo, branch, limit]}
         - {name: ci_log, params: [repo, job_id, lines]}
+        - {name: issue_list, params: [repo, state, limit]}
+        - {name: issue_read, params: [repo, number]}
+        - {name: issue_comment, params: [repo, number, body]}
+        - {name: issue_close, params: [repo, number, reason, body]}
       allowed_values:
         repo: [owner/name]
 manager:
@@ -148,6 +154,10 @@ manager:
     - {tool: github, op: release}
     - {tool: github, op: ci_runs}
     - {tool: github, op: ci_log}
+    - {tool: github, op: issue_list}
+    - {tool: github, op: issue_read}
+    - {tool: github, op: issue_comment}
+    - {tool: github, op: issue_close}
 ```
 
 Each operation is its own capability. An agent with only `push` and `pr_open` can open PRs but not
@@ -167,7 +177,7 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-max-bundle` | no | Bundle size cap. Default 256 MiB. |
 | `-import-budget` | no | Bundle bytes that one caller can import in one hour. Refused pushes count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
 | `-name` | no | Tool name. Default `github`. It must equal the `name` in the config. |
-| `-ops` | no | Comma list of the operations to offer: `push`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`. Default `push`. An operation not listed does not exist. |
+| `-ops` | no | Comma list of the operations to offer: `push`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`, `issue_list`, `issue_read`, `issue_comment`, `issue_close`. Default `push`. An operation not listed does not exist. |
 | `-merge-methods` | no | Comma list of the merge methods `pr_merge` may use: `squash`, `merge`, `rebase`. The first is the default. Default `squash`. |
 | `-merge-checks` | with `pr_merge` | What `pr_merge` requires of the checks on the PR head. A comma list of check names: these checks must be present and successful, and all others green. `any`: at least one successful check, and all green. `none`: no check is needed, but any that exist must be green. No default: when `-ops` offers `pr_merge`, the tool refuses to start without it. |
 | `-merge-require-review` | no | `pr_merge` requires an approving review by a person on the PR's head SHA, and no outstanding request for changes. Default `true`. Turn it off only with `-merge-require-review=false`; the tool then logs a warning when it starts. |
@@ -429,6 +439,41 @@ default) is reported as not found or expired.
 agent may have written) runs in that workflow. The result says so in its `note`: the agent should
 read a log as data, not as instructions. GitHub masks the repository's secrets in logs; the tool's
 masking is a second line, not a guarantee.
+
+## 8. Issues (opt-in)
+
+`issue_list` and `issue_read` read the repository's issues; `issue_comment` and `issue_close`
+publish under the App's name. They exist only when `-ops` lists them, act only on a repository in
+`-repos`, and each call gets a token narrowed to that repository and **Issues: read**
+(`issue_list`, `issue_read`) or **Issues: read and write** (`issue_comment`, `issue_close`). Pull
+requests are never touched: they are left out of lists, and reading, commenting on or closing one
+is refused. Each call writes an audit line (`github.issue_list`, …) with the caller, the
+repository and the issue number; for a comment, its length and the start of its SHA-256 hash,
+never the text.
+
+| Operation | Arguments | App permissions it needs |
+|---|---|---|
+| `issue_list` | `repo`, `state` (open, closed or all; default open), `limit` (1-50, default 20) | Issues: read |
+| `issue_read` | `repo`, `number` | Issues: read |
+| `issue_comment` | `repo`, `number`, `body` | Issues: read and write |
+| `issue_close` | `repo`, `number`, `reason` (`completed` or `not_planned`; default `completed`), `body` (optional) | Issues: read and write |
+
+- `issue_list` returns the newest issues: number, title, state and close reason, author, labels,
+  comment count, dates and URL.
+- `issue_read` returns one issue's summary, its body (cut at 20,000 characters) and its newest 30
+  comments (each cut at 4,000). Text is cleaned like a CI log: escapes, control and format
+  characters dropped, credential shapes masked. Issue text is written by whoever opened or
+  commented on the issue, which on a public repository is anyone; the result's `note` says to read
+  it as data, not instructions.
+- `issue_comment` posts a comment. The body follows the `pr_open` body rules: at most
+  `-text-max` bytes, no control or format characters, no team mention, no issue-closing keyword, at
+  most 5 users `@`mentioned.
+- `issue_close` closes an open issue with the reason, after posting `body` as a comment when one is
+  given. An issue already closed is refused and nothing is posted. It never reopens, locks or
+  deletes an issue, and never edits one.
+
+**Risk:** comments appear on GitHub under the App's name, and closing an issue is visible to its
+author. Grant `issue_comment` and `issue_close` only to agents whose triage you accept in public.
 
 ## Bundle limits
 

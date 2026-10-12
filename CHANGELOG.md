@@ -77,6 +77,13 @@ version bump moves the block under the new version heading.
 - **Jail ABI 2.** The in-jail code changed (shared packages); rebuild the agent image
   (`make lever-image`) and recreate the manager on it when convenient. Doctor's *agent lever
   version* row says so.
+- **github tool: triage issues (`issue_list`, `issue_read`, `issue_comment`, `issue_close`,
+  opt-in).** List and read the repository's issues (cleaned text, credentials masked, marked as
+  data), comment on one, and close one as `completed` or `not_planned` with an optional comment.
+  Pull requests are never listed, read, commented on or closed through these. Comments follow the
+  PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
+  audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
+  need Issues: read and write.
 
 ## [0.35.0] - 2026-10-12
 

@@ -310,6 +310,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		// the harness runs a line, and every observed harness death landed
 		// within three seconds of that. Same value as apply's manager gate.
 		LiveSettle: workerLiveSettle,
+		// broker.max_running_workers (0 = no cap).
+		MaxRunningWorkers: app.Broker.MaxRunningWorkers,
 		// Agents under closed-internet egress dial the host-alias IP; otherwise
 		// the backend's host alias hostname (the server cert's DNS SAN).
 		BrokerURL: workerBrokerURL(cmp.Or(env.HostAliasIP, be.HostToolAlias()), app.EffectiveJailPort()),

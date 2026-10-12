@@ -1278,7 +1278,18 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		// api-key: start with --harness-auth api-key (satisfied by the placeholder
 		// secret set above); the real credential arrives in-container.
 		APIKey: apiKey,
+		// manager.resources: the container's memory and CPU limits, as inline
+		// config. Create-time only, like Volumes.
+		Resources: ScionResources(r.app.Manager.Resources),
 	}, nil
+}
+
+// ScionResources is an agent's configured limits in the shape scion.Start
+// sends (resources.limits); the zero value for none. Shared by the manager's
+// start here and the broker's worker specs (brokerctl.WorkerSpecs).
+func ScionResources(r config.Resources) scion.Resources {
+	mem, cpu := r.ScionLimits()
+	return scion.Resources{Memory: mem, CPU: cpu}
 }
 
 // KVMDevice is the device nested_virt gives the manager container.

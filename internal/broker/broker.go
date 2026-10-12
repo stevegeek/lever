@@ -189,6 +189,10 @@ type DispatchConfig struct {
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
+	// MaxRunningWorkers is broker.max_running_workers: the broker refuses to
+	// bring up a worker while this many other workers are running or
+	// starting (workercap.go). 0 = no cap.
+	MaxRunningWorkers int
 	// Tree is the host path to the instance tree: the confinement anchor for
 	// staging enrolment material. Everything below it is agent-writable and the
 	// broker writes there as the operator, so wire.Stage confines every write to
@@ -355,6 +359,12 @@ type Broker struct {
 	// onWorkerLockWait, when set, runs when lockWorker finds the lock held
 	// and starts to wait (a test seam).
 	onWorkerLockWait func(name string)
+	// maxRunningWorkers is broker.max_running_workers (0 = no cap);
+	// admitting holds the starts admitted and not yet returned, guarded by
+	// admitMu (workercap.go).
+	maxRunningWorkers int
+	admitMu           sync.Mutex
+	admitting         map[string]int
 
 	mu           sync.Mutex
 	minEpoch     int
@@ -467,6 +477,7 @@ func New(c Config) *Broker {
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
 		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
+		maxRunningWorkers:   d.MaxRunningWorkers,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
 		ticketStager:        d.Tickets,

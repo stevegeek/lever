@@ -150,6 +150,14 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "instructions error; nothing was deleted", http.StatusInternalServerError)
 		return
 	}
+	// broker.max_running_workers: refuse before the purge, so nothing is
+	// deleted. The start below admits again under the same name, which the
+	// count allows (a worker never counts against itself).
+	release, ok := b.admitOrRefuse(ctx, w, b.manager, "recycle", spec.Name)
+	if !ok {
+		return
+	}
+	defer release()
 	// Counted last, so a refusal above does not use up the worker's slot.
 	if ok, wait := b.recycleRate.take(spec.Name, time.Now()); !ok {
 		secs := int(wait.Round(time.Second) / time.Second)

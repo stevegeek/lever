@@ -100,14 +100,14 @@ func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, er
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
 	if err != nil {
 		switch {
 		case noSuchContainer(res.Stderr):
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrNoContainer)
 		case errors.Is(err, proc.ErrOutputLimit):
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, proc.ErrOutputLimit)
-		case ctx.Err() != nil:
+		case ctx.Err() != nil, errors.Is(err, ErrProbeTimedOut):
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrProbeTimedOut)
 		}
 		return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, &ProbeExitError{Code: res.Code})
@@ -199,7 +199,7 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "tmux", "list-panes", "-t", "scion:agent", "-F", "#{pane_dead}")
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "tmux", "list-panes", "-t", "scion:agent", "-F", "#{pane_dead}")
 	if err == nil {
 		for _, ln := range strings.Fields(res.Stdout) {
 			if ln == "0" {
@@ -210,6 +210,8 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	}
 	s := strings.ToLower(res.Stderr)
 	switch {
+	case errors.Is(err, ErrProbeTimedOut):
+		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrProbeTimedOut)
 	case noSuchContainer(res.Stderr):
 		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrNoContainer)
 	case strings.Contains(s, "can't find window"), strings.Contains(s, "can't find session"):
@@ -240,7 +242,7 @@ func (p AgentProbe) ReportSessionRunning(ctx context.Context, ref string) error 
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sciontool", "hook", "--dialect=claude", "SessionStart")
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sciontool", "hook", "--dialect=claude", "SessionStart")
 	if err != nil {
 		if noSuchContainer(res.Stderr) {
 			return fmt.Errorf("reporting agent session in %s: %w", ref, ErrNoContainer)

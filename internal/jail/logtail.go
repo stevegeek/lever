@@ -37,7 +37,7 @@ func (p AgentProbe) LogTail(ctx context.Context, ref string) (string, error) {
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
 	ctx = proc.WithOutputLimit(ctx, logTailOutputLimit)
-	res, err := p.R.Run(ctx, nil, "podman", "logs", "--tail", strconv.Itoa(logTailLines), ref)
+	res, err := runGuestBounded(ctx, p.R, "podman", "logs", "--tail", strconv.Itoa(logTailLines), ref)
 	out := res.Stdout + "\n" + res.Stderr
 	if err != nil {
 		switch {
@@ -45,7 +45,7 @@ func (p AgentProbe) LogTail(ctx context.Context, ref string) (string, error) {
 			return "", fmt.Errorf("reading agent container log in %s: %w", ref, ErrNoContainer)
 		case errors.Is(err, proc.ErrOutputLimit):
 			return out, fmt.Errorf("reading agent container log in %s: %w", ref, proc.ErrOutputLimit)
-		case ctx.Err() != nil:
+		case ctx.Err() != nil, errors.Is(err, ErrProbeTimedOut):
 			return "", fmt.Errorf("reading agent container log in %s: %w", ref, ErrProbeTimedOut)
 		}
 		return "", fmt.Errorf("reading agent container log in %s: %w", ref, &ProbeExitError{Code: res.Code})

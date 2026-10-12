@@ -69,14 +69,14 @@ func (p AgentProbe) BackgroundSessions(ctx context.Context, ref string) (Backgro
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", bgSessionsScript, "sh", AgentSessionsDir)
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", bgSessionsScript, "sh", AgentSessionsDir)
 	if err != nil {
 		switch {
 		case noSuchContainer(res.Stderr):
 			return BackgroundRecords{}, fmt.Errorf("reading agent session records in %s: %w", ref, ErrNoContainer)
 		case errors.Is(err, proc.ErrOutputLimit):
 			return BackgroundRecords{}, fmt.Errorf("reading agent session records in %s: %w", ref, proc.ErrOutputLimit)
-		case ctx.Err() != nil:
+		case ctx.Err() != nil, errors.Is(err, ErrProbeTimedOut):
 			return BackgroundRecords{}, fmt.Errorf("reading agent session records in %s: %w", ref, ErrProbeTimedOut)
 		}
 		return BackgroundRecords{}, fmt.Errorf("reading agent session records in %s: %w", ref, &ProbeExitError{Code: res.Code})

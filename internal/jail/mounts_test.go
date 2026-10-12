@@ -246,12 +246,12 @@ func (e errRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]str
 func TestContainerHasCharDevice(t *testing.T) {
 	ctx := context.Background()
 	yes := proc.NewFakeRunner()
-	yes.Script("podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 0})
+	yes.Script("timeout --kill-after=1s 8s podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 0})
 	if ok, err := ContainerHasCharDevice(ctx, yes, "proj--mgr", "/dev/kvm"); err != nil || !ok {
 		t.Fatalf("present: %v %v", ok, err)
 	}
 	no := proc.NewFakeRunner()
-	no.Script("podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 1})
+	no.Script("timeout --kill-after=1s 8s podman exec --user 0 proj--mgr test -c /dev/kvm", proc.Result{Code: 1})
 	if ok, err := ContainerHasCharDevice(ctx, no, "proj--mgr", "/dev/kvm"); err != nil || ok {
 		t.Fatalf("absent: %v %v", ok, err)
 	}

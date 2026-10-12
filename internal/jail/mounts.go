@@ -92,7 +92,7 @@ func ContainerPathWritable(ctx context.Context, r proc.Runner, ref, target strin
 	// every other exec into it (BoundAgentExec).
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := r.Run(ctx, nil, "podman", "exec", "--user", "0", ref, "test", "-w", target)
+	res, err := runGuestBounded(ctx, r, "podman", "exec", "--user", "0", ref, "test", "-w", target)
 	quiet := strings.TrimSpace(res.Stdout) == "" && benignStderr(res.Stderr)
 	switch {
 	case err == nil && res.Code == 0:
@@ -124,7 +124,7 @@ func ContainerHasCharDevice(ctx context.Context, r proc.Runner, ref, path string
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := r.Run(ctx, nil, "podman", "exec", "--user", "0", ref, "test", "-c", path)
+	res, err := runGuestBounded(ctx, r, "podman", "exec", "--user", "0", ref, "test", "-c", path)
 	switch {
 	case err == nil && res.Code == 0:
 		return true, nil

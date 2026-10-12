@@ -66,14 +66,14 @@ func (p AgentProbe) ClaudeSettings(ctx context.Context, ref string) (ClaudeDeliv
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", claudeSettingsScript, "sh", wire.ManagedSettingsPath)
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", claudeSettingsScript, "sh", wire.ManagedSettingsPath)
 	if err != nil {
 		switch {
 		case noSuchContainer(res.Stderr):
 			return ClaudeDelivered{}, fmt.Errorf("reading agent claude settings in %s: %w", ref, ErrNoContainer)
 		case errors.Is(err, proc.ErrOutputLimit):
 			return ClaudeDelivered{}, fmt.Errorf("reading agent claude settings in %s: %w", ref, proc.ErrOutputLimit)
-		case ctx.Err() != nil:
+		case ctx.Err() != nil, errors.Is(err, ErrProbeTimedOut):
 			return ClaudeDelivered{}, fmt.Errorf("reading agent claude settings in %s: %w", ref, ErrProbeTimedOut)
 		case res.Code == claudeAbsentExit:
 			return ClaudeDelivered{}, nil

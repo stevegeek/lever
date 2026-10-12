@@ -10,7 +10,9 @@ import (
 // line, then one `-A` line per rule, in order. iptables prints a bare
 // destination address with its full prefix length (`-d 192.168.5.2/32`,
 // `-d fd07::fe/128`) and adds the implicit protocol match before a port
-// (`-p tcp -m tcp --dport 8443`); everything else prints as written.
+// (`-p tcp -m tcp --dport 8443`), and likewise before an ICMP type, which it
+// prints as type/code (`-p icmp -m icmp --icmp-type 3/10` for
+// host-prohibited); everything else prints as written.
 //
 // It exists so a re-apply can VERIFY the live chain against the ruleset it
 // would commit (ListingMatches) instead of assuming it. The comparison is
@@ -39,6 +41,12 @@ func listingLine(args []string, f Family) string {
 		case a == "-p" && i+2 < len(args) && (args[i+2] == "--dport" || args[i+2] == "--sport"):
 			b = append(b, a, args[i+1], "-m", args[i+1])
 			i++
+		case a == "-p" && i+2 < len(args) && args[i+1] == "icmp" && args[i+2] == "--icmp-type":
+			b = append(b, a, "icmp", "-m", "icmp")
+			i++
+		case a == "--icmp-type" && i+1 < len(args):
+			b = append(b, a, listingICMPType(args[i+1]))
+			i++
 		default:
 			b = append(b, a)
 		}
@@ -61,6 +69,21 @@ func listingAddr(s string, f Family) string {
 		return ip.To4().String() + "/32"
 	}
 	return ip.String() + "/128"
+}
+
+// icmpTypeCodes are the ICMP type names the ruleset uses, as iptables -S
+// prints them (type/code). A name missing here is left as written, which
+// cannot match a live listing: it costs a rebuild, never a false match.
+var icmpTypeCodes = map[string]string{
+	"host-prohibited": "3/10",
+}
+
+// listingICMPType is an ICMP type as iptables prints it.
+func listingICMPType(s string) string {
+	if tc, ok := icmpTypeCodes[s]; ok {
+		return tc
+	}
+	return s
 }
 
 // ListingMatches reports whether live, the output of `iptables -S Chain` (or

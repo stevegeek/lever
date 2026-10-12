@@ -7,13 +7,16 @@ import (
 )
 
 // listingFixture is what `iptables -S LEVER_EGRESS` printed (iptables 1.8.11,
-// nf_tables) for the open ruleset of BuildRulesDNS("192.168.5.2",
+// nf_tables) for the open ruleset (the lever#182 ICMP ACCEPT and metadata
+// REJECT lines as TestListingAgainstRealIptables sees them printed) of BuildRulesDNS("192.168.5.2",
 // "fd07::fe", {3305}, false, udp/53).
 const listingFixture4 = `-N LEVER_EGRESS
 -A LEVER_EGRESS -d 192.168.5.2/32 -p tcp -m tcp --dport 3305 -j ACCEPT
 -A LEVER_EGRESS -d 192.168.5.2/32 -p udp -m udp --dport 53 -j ACCEPT
 -A LEVER_EGRESS -d 192.168.5.2/32 -m conntrack --ctstate ESTABLISHED -j ACCEPT
 -A LEVER_EGRESS -d 192.168.5.2/32 -j DROP
+-A LEVER_EGRESS -o lo -p icmp -m icmp --icmp-type 3/10 -m conntrack --ctstate RELATED -j ACCEPT
+-A LEVER_EGRESS -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited
 -A LEVER_EGRESS -d 10.0.0.0/8 -j DROP
 -A LEVER_EGRESS -d 172.16.0.0/12 -j DROP
 -A LEVER_EGRESS -d 192.168.0.0/16 -j DROP
@@ -36,6 +39,8 @@ const closedFixture4 = `-N LEVER_EGRESS
 -A LEVER_EGRESS -d 192.168.5.2/32 -p tcp -m tcp --dport 8443 -j ACCEPT
 -A LEVER_EGRESS -d 192.168.5.2/32 -m conntrack --ctstate ESTABLISHED -j ACCEPT
 -A LEVER_EGRESS -d 192.168.5.2/32 -j DROP
+-A LEVER_EGRESS -o lo -p icmp -m icmp --icmp-type 3/10 -m conntrack --ctstate RELATED -j ACCEPT
+-A LEVER_EGRESS -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited
 -A LEVER_EGRESS -d 10.0.0.0/8 -j DROP
 -A LEVER_EGRESS -d 172.16.0.0/12 -j DROP
 -A LEVER_EGRESS -d 192.168.0.0/16 -j DROP
@@ -91,6 +96,14 @@ func TestListingMatchesRejectsAnyDifference(t *testing.T) {
 		"other alias":        strings.ReplaceAll(listingFixture4, "192.168.5.2/32", "192.168.5.9/32"),
 		"drop became accept": strings.Replace(listingFixture4, "-d 10.0.0.0/8 -j DROP", "-d 10.0.0.0/8 -j ACCEPT", 1),
 		"error text":         "iptables: No chain/target/match by that name.\n",
+		// The lever#182 pair: the ICMP ACCEPT widened, the REJECT opened.
+		"icmp any type":        strings.Replace(listingFixture4, " -m icmp --icmp-type 3/10", "", 1),
+		"icmp other type":      strings.Replace(listingFixture4, "--icmp-type 3/10", "--icmp-type 3/3", 1),
+		"icmp named type":      strings.Replace(listingFixture4, "--icmp-type 3/10", "--icmp-type host-prohibited", 1),
+		"icmp not lo":          strings.Replace(listingFixture4, "-o lo -p icmp", "-p icmp", 1),
+		"icmp not related":     strings.Replace(listingFixture4, "--ctstate RELATED -j ACCEPT", "--ctstate RELATED,NEW -j ACCEPT", 1),
+		"reject became accept": strings.Replace(listingFixture4, "-d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited", "-d 169.254.169.254/32 -j ACCEPT", 1),
+		"reject wider":         strings.Replace(listingFixture4, "169.254.169.254/32 -j REJECT", "169.254.0.0/16 -j REJECT", 1),
 	}
 	for name, live := range cases {
 		if ListingMatches(rules, IPv4, live) {

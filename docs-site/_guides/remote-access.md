@@ -1022,6 +1022,15 @@ grants no hub route: the fence below admits nothing for a see-only agent.
 - **Manager messages are recorded.** A worker verifies every message too, so a manager message
   answers `lever` with the kind `manager` and a contact's post answers `web` with the tier
   `contact`, whatever either says.
+- **A record names the sender, not the words' origin.** When the manager forwards a contact's
+  words to a worker, the message verifies as `lever`, kind `manager`: the record shows who sent
+  it, and nothing can follow text through an agent. The skills tell the manager to say whose
+  words it forwards, and every agent to keep the contact's tier for quoted or forwarded text; that
+  is an instruction, not a fence.
+- **The session check covers the agents a contact lists.** A contact can post only to those, so
+  the proxy checks only their sessions. Other agents get a contact's words only inside a lever
+  message (a relay or a manager message), whose first line lever writes and whose record the
+  agent verifies, so a marker the contact typed is never that message's marker.
 
 ## Messages agents start
 
@@ -1041,8 +1050,9 @@ remote:
 ```
 
 Config load refuses `enabled: true` when `allowed_users` has no `tier: contact` entry (agents
-message only contacts), and on a `scion.version` older than `b3562fb1` (see **Scion version**
-below). It works with either `landing`.
+message only contacts), and on a `scion.version` older than `b3562fb1`; `lever apply`, `lever up`
+and `lever remote serve` refuse it on a `scion.source` checkout that does not hold that commit (see
+**Scion version** below). It works with either `landing`.
 
 - **The agent's two steps.** The agent calls `contact_message` (a tool of its `lever-capability`
   MCP server) with the contact's login, the whole text and, for a reply, the `message_id` that
@@ -1105,9 +1115,18 @@ below). It works with either `landing`.
 - **Scion version.** The filter trusts the sender the hub stamps on a row, which scion sets from
   the caller's own auth only from commit `b3562fb1` (2026-08-28). On an older scion an agent could
   post a row as its contact and the contact would see it. Config load refuses
-  `agent_messages.enabled` with a `scion.version` pseudo-version older than that commit; the
-  `agent messages` row of `lever doctor` fails when a `scion.source` checkout does not hold it,
-  and warns when lever cannot tell (a `scion.binary`, a bare commit hash or a tag).
+  `agent_messages.enabled` with a `scion.version` pseudo-version older than that commit; `lever
+  apply`, `lever up` and `lever remote serve` refuse it, and the `agent messages` row of `lever
+  doctor` fails, when a `scion.source` checkout does not hold it (git `merge-base
+  --is-ancestor`): one whose `HEAD` is older, and one git has no such commit in at all (a
+  checkout never fetched since, or a fork without it). A shallow clone that does not show the
+  commit is refused too, since its cut-off history cannot show it either way; `git fetch
+  --unshallow` fixes that. The `lever doctor` row warns when lever cannot tell (a `scion.binary`,
+  a bare commit hash or a tag, a `scion.source` path git cannot answer for: not a repository, git
+  not runnable, or no answer within 5 seconds). A pseudo-version is judged by its
+  commit time alone: a commit dated after `b3562fb1` on a branch or fork that lacks it passes.
+  `scion.version` is the operator's choice, not the agent's, so this is a guard against a
+  mistake, not a boundary; pin an upstream `main` commit.
 - **Known limits.** The hub's own web UI (the console landing) shows a new agent message to a
   contact only after a reload, since the events carry no text, and shows no unread marks (lever's
   chat page counts them itself). A message older than the two 4 MiB record files of that

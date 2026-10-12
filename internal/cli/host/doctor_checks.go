@@ -626,9 +626,10 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 
 // agentMessagesScion checks the configured scion against
 // config.AgentMessagesScionFloor, the first hub that sets a message's sender
-// itself (the filter trusts it). bad: known to be older (note says why);
-// otherwise note is set when lever cannot tell (a prebuilt binary, a bare
-// commit hash or tag, a checkout git cannot answer for).
+// itself (the filter trusts it). bad: known to be older, a checkout without
+// the floor commit, or a shallow clone that does not show it (note says
+// why); otherwise note is set when lever cannot tell (a prebuilt binary, a
+// bare commit hash or tag, a path git cannot answer for).
 func agentMessagesScion(app *config.App, hasCommit func(source, commit string) (bool, error)) (bad bool, note string) {
 	floor := config.AgentMessagesScionFloor[:8]
 	sc := app.Scion
@@ -645,11 +646,14 @@ func agentMessagesScion(app *config.App, hasCommit func(source, commit string) (
 			return false, ""
 		}
 		has, err := hasCommit(sc.Source, config.AgentMessagesScionFloor)
+		if errors.Is(err, scionbin.ErrShallowSource) {
+			return true, "the scion.source checkout is a shallow clone that does not show " + floor + ", so it cannot be shown to set a message's sender itself (run git fetch --unshallow)"
+		}
 		if err != nil {
 			return false, "cannot tell whether the scion.source checkout holds " + floor + ": " + err.Error()
 		}
 		if !has {
-			return true, "the scion.source checkout predates " + floor + ": its hub takes a message's sender from the caller, so an agent can post as its contact"
+			return true, "the scion.source checkout does not hold " + floor + " (it predates it, or is a fork without it): its hub takes a message's sender from the caller, so an agent can post as its contact"
 		}
 	case sc.Binary != "":
 		return false, "cannot tell whether the scion.binary holds " + floor + " (the hub sets a message's sender from " + floor + " on)"

@@ -16,6 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
@@ -319,5 +320,58 @@ func TestContactSessionSurvivesAStampOnlyRelease(t *testing.T) {
 	}
 	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "started before its current skill") {
 		t.Fatalf("changed skill text: %v", err)
+	}
+}
+
+// TestContactGateRefusesAnOldScionSourceForAgentMessages: with agent
+// messages on, a scion.source checkout that predates the sender fix is
+// refused at bring-up (config load can only check a pseudo-version), as is
+// a shallow clone that does not show it; one that holds it passes, and one
+// git cannot answer for is doctor's warning, not a refusal. Agent messages off: the checkout is not asked.
+func TestContactGateRefusesAnOldScionSourceForAgentMessages(t *testing.T) {
+	app, _, st := scaffoldFixture(t)
+	withContact(app)
+	app.Remote.AgentMessages.Enabled = true
+	app.Scion = config.ScionConfig{Source: t.TempDir()}
+	if _, err := syncSkills(app, st, false, false); err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	answer := func(has bool, err error) {
+		scionSourceHasCommit = func(source, commit string) (bool, error) {
+			asked = append(asked, source+" "+commit)
+			return has, err
+		}
+	}
+	real := scionSourceHasCommit
+	t.Cleanup(func() { scionSourceHasCommit = real })
+	answer(false, nil)
+	if err := checkContactGate(app, st); err == nil || !strings.Contains(err.Error(), "agent_messages") ||
+		!strings.Contains(err.Error(), config.AgentMessagesScionFloor[:8]) {
+		t.Fatalf("old checkout: err = %v, want the floor refusal", err)
+	}
+	if len(asked) != 1 || asked[0] != app.Scion.Source+" "+config.AgentMessagesScionFloor {
+		t.Fatalf("asked %q", asked)
+	}
+	answer(true, nil)
+	if err := checkContactGate(app, st); err != nil {
+		t.Fatalf("checkout with the fix: %v", err)
+	}
+	answer(false, fmt.Errorf("/s: %w", scionbin.ErrShallowSource))
+	if err := checkContactGate(app, st); err == nil || !strings.Contains(err.Error(), "shallow clone") {
+		t.Fatalf("shallow checkout: err = %v, want the floor refusal", err)
+	}
+	answer(false, fmt.Errorf("not a git repository"))
+	if err := checkContactGate(app, st); err != nil {
+		t.Fatalf("checkout git cannot answer for: %v", err)
+	}
+	asked = nil
+	app.Remote.AgentMessages.Enabled = false
+	if _, err := syncSkills(app, st, true, false); err != nil {
+		t.Fatal(err)
+	}
+	answer(false, nil)
+	if err := checkContactGate(app, st); err != nil || len(asked) != 0 {
+		t.Fatalf("agent messages off: err = %v, asked %q", err, asked)
 	}
 }

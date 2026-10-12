@@ -29,7 +29,8 @@ not.
   `contact_message` (within its limit), and only of type `instruction`, `input-needed` or
   `assistant-reply`; everything else is removed from the contact's view. This needs scion
   `b3562fb1` or later, where the hub sets a message's sender itself; config load refuses
-  `remote.agent_messages` on an older `scion.version`. A file reaches a contact only through
+  `remote.agent_messages` on an older `scion.version`, and bring-up on a `scion.source`
+  checkout that does not hold that commit. A file reaches a contact only through
   `share_file`, to a login that may message that agent, and is downloaded only from a host-side
   copy that still matches its recorded sha256. See [remote access](/remote-access/#messages-agents-start)
   and [files in the chat](/remote-access/#files-in-the-chat).

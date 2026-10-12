@@ -12,9 +12,11 @@ package scionbin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision"
@@ -202,16 +204,57 @@ func FetchModule(ctx context.Context, r proc.Runner, version string) (goBin, dir
 	return goBin, dl.Dir, nil
 }
 
+// ErrShallowSource is SourceHasCommit's error for a shallow clone that does
+// not show the commit: its history is cut off, so a missing commit says
+// nothing either way. Unlike SourceHasCommit's other errors it is not "cannot
+// tell, carry on": a caller gating on the commit refuses it, since the commit
+// cannot be shown and a clone can be deepened (git fetch --unshallow).
+var ErrShallowSource = errors.New("the checkout is a shallow clone that does not show the commit (run git fetch --unshallow)")
+
 // SourceHasCommit reports whether the source checkout's HEAD holds commit
-// (git merge-base --is-ancestor). An error means git cannot tell: not a
-// checkout, or a commit it does not know (a shallow clone, a fork).
+// (git merge-base --is-ancestor).
+//
+//   - true: commit is an ancestor of HEAD (also trustworthy in a shallow
+//     clone: git found the path).
+//   - false, nil: the checkout is a full repository and either commit is not
+//     an ancestor of HEAD or git has no such object at all (a checkout that
+//     predates it and was never fetched, or a fork that never had it).
+//   - false, ErrShallowSource: a shallow clone that does not show it.
+//   - any other error: git cannot tell (not a repository, git not runnable,
+//     the deadline). Callers treat that as a warning, not a refusal.
+//
+// source is passed as git's -C value and commit as a revision argument;
+// nothing goes through a shell.
 func SourceHasCommit(ctx context.Context, r proc.Runner, source, commit string) (bool, error) {
 	res, err := r.Run(ctx, nil, "git", "-C", source, "merge-base", "--is-ancestor", commit, "HEAD")
 	if err == nil {
 		return true, nil
 	}
-	if res.Code == 1 {
-		return false, nil
+	cannotTell := fmt.Errorf("git merge-base in %s: %w", source, err)
+	if ctx.Err() != nil {
+		return false, cannotTell
 	}
-	return false, fmt.Errorf("git merge-base in %s: %w", source, err)
+	// Exit 1 is "not an ancestor"; anything else (128: an object git does
+	// not have, or not a repository) needs a closer look before it counts.
+	notAncestor := res.Code == 1
+	if _, gerr := r.Run(ctx, nil, "git", "-C", source, "rev-parse", "--git-dir"); gerr != nil {
+		return false, cannotTell
+	}
+	if !notAncestor {
+		if _, cerr := r.Run(ctx, nil, "git", "-C", source, "cat-file", "-e", commit+"^{commit}"); cerr == nil || ctx.Err() != nil {
+			// git has the commit yet merge-base failed, or the deadline hit.
+			return false, cannotTell
+		}
+	}
+	sh, serr := r.Run(ctx, nil, "git", "-C", source, "rev-parse", "--is-shallow-repository")
+	if serr != nil {
+		return false, cannotTell
+	}
+	switch strings.TrimSpace(sh.Stdout) {
+	case "false":
+		return false, nil
+	case "true":
+		return false, fmt.Errorf("%s: %w", source, ErrShallowSource)
+	}
+	return false, cannotTell
 }

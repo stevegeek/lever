@@ -67,11 +67,14 @@ func (rw *rateWindow) take(cn string, now time.Time) (bool, time.Duration) {
 	return false, w.start.Add(time.Minute).Sub(now)
 }
 
-// refund gives back one call counted by take in cn's current window.
-func (rw *rateWindow) refund(cn string) {
+// refund gives back one call that take counted for cn at at (the now take
+// was given). Only the window that counted it gives the call back: when that
+// window has ended and a later call has opened a new one, the refund is
+// dropped, so a slow call cannot lower the count of a window it was never in.
+func (rw *rateWindow) refund(cn string, at time.Time) {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
-	if w := rw.win[cn]; w != nil && w.n > 0 {
+	if w := rw.win[cn]; w != nil && w.n > 0 && !w.start.After(at) && at.Sub(w.start) < time.Minute {
 		w.n--
 	}
 }

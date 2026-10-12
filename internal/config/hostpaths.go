@@ -164,7 +164,10 @@ func (a *App) hostPaths() []hostPath {
 //
 //   - the program itself when it is given as a path (a bare name is looked
 //     up on the supervisor's fixed PATH, which is not in the tree), after
-//     an env(1) prefix too (unwrapEnv);
+//     an env(1) prefix and the command wrappers lever reads too
+//     (parseEnvPrefix: nice, nohup, setsid, timeout, stdbuf, ionice,
+//     taskset, uv run, nested in any order), and the values of the
+//     wrapper options that name code (uv run --with, --project);
 //   - the value of each known path flag of the shipped tools
 //     (toolPathFlags; whisperToolFlags only in lever-tool-whisper's
 //     command), as "-f v", "-f=v" or "--f=v";
@@ -190,8 +193,11 @@ func toolHostPaths(t Tool) []hostPath {
 	// Decided by argv[0], not by length: an -S string can make the command
 	// env runs as long as the prefix, or longer.
 	argv, chdir := t.Command, ""
-	if real, dir := unwrapEnv(argv); baseName(argv[0]) == "env" && len(real) > 0 {
-		argv, chdir = real, dir
+	if p := parseEnvPrefix(argv); p.unread == "" && p.wrapped && len(p.argv) > 0 {
+		argv, chdir = p.argv, p.chdir
+		for _, x := range p.paths {
+			add(x.what, x.path, hostProgram)
+		}
 		if strings.ContainsRune(argv[0], '/') {
 			add("command (after env)", joinRaw(chdir, argv[0]), hostProgram)
 		}

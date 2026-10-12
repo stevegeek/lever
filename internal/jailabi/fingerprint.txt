@@ -1,8 +1,8 @@
 # The in-jail sources' fingerprint (internal/jailabi). Do not edit by hand.
 # After changing in-jail code: bump JailABI in jailabi.go, then run
 #   go test ./internal/jailabi -run TestJailFingerprint -update
-jail_abi 2
-sha256 c85f44c3f787839ca93bf8df0b0200bafc4e7e42c8876c4fe56ad9a85162c4bd
+jail_abi 3
+sha256 33f94a3c7dad8cfd3d808649f48ef2d459dcd939e6e45c4818c37e050e889b28
 # hashed: go.mod's go 1.26.4, the files cmd/lever-agent/scionhook/pre-start, image/lever-claude/Dockerfile,
 # the external modules
 #   github.com/dustin/go-humanize@v1.0.1
@@ -10,12 +10,12 @@ sha256 c85f44c3f787839ca93bf8df0b0200bafc4e7e42c8876c4fe56ad9a85162c4bd
 #   github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec
 #   github.com/spf13/cobra@v1.10.2
 #   github.com/spf13/pflag@v1.0.9
-#   golang.org/x/sys@v0.44.0
+#   golang.org/x/sys@v0.48.0
 #   gopkg.in/yaml.v3@v3.0.1
-#   modernc.org/libc@v1.73.4
+#   modernc.org/libc@v1.77.1
 #   modernc.org/mathutil@v1.7.1
-#   modernc.org/memory@v1.11.0
-#   modernc.org/sqlite@v1.53.0
+#   modernc.org/memory@v1.12.1
+#   modernc.org/sqlite@v1.60.1
 # and the packages
 #   github.com/stevegeek/lever/captool
 #   github.com/stevegeek/lever/cmd/lever-agent

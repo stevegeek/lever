@@ -84,6 +84,12 @@ version bump moves the block under the new version heading.
   PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
   audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
   need Issues: read and write.
+- **`lever-tool-db` moves to modernc.org/sqlite v1.60.1 on modernc.org/libc v1.77.1 (lever#180)**,
+  from v1.53.0 on v1.73.4; SQLite itself goes from 3.53.2 to 3.53.4. A host with Go 1.27 saw the
+  old pair hang on first use. Built with Go 1.27.1 and 1.27.2, the new pair opens, seeds and
+  queries both an in-memory and an on-disk database, and its tests pass. No shipped `lever` binary
+  links SQLite; only the reference tool does. It is baked into the agent image, so the jail ABI
+  goes to 3: rebuild the image (`make lever-image`) when convenient.
 
 ## [0.35.0] - 2026-10-12
 

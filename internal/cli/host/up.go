@@ -279,12 +279,19 @@ func upDecisionNote(phase string, d upAction) string {
 func upProbeReason(probeErr error) string {
 	msg := strings.ToLower(probeErr.Error())
 	switch {
-	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "is not responding"):
+	case hubNotRunning(probeErr):
 		return "the jail's hub is not running (after `lever stop` or a VM restart); starting it"
 	case strings.Contains(msg, "project not found"), strings.Contains(msg, "no git origin remote found"):
 		return "the project is not registered with the hub yet; registering it"
 	}
 	return "no running manager (" + firstLine(probeErr.Error()) + "); bringing the application up"
+}
+
+// hubNotRunning reports scion's answer when the jail's hub does not serve:
+// after `lever stop --keep-vm`, a VM restart, or a hub that exited.
+func hubNotRunning(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "is not responding")
 }
 
 // upProbeNotice is the line `up` prints when the phase probe could not see

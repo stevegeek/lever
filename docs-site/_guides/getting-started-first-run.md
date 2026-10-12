@@ -192,3 +192,8 @@ Three levels, from lightest to heaviest:
 next `lever up` resumes the same manager conversation. `destroy` removes the jail machine
 `lever-<name>`; your tree on disk is untouched, and the next `lever up` re-provisions from scratch.
 See the [CLI reference](/reference/cli/#everyday-lifecycle).
+
+`lever stop --keep-vm` does everything `stop` does except power the VM off: the agents are
+suspended and the hub and the broker stopped, so the next `lever up` skips the VM boot. The VM
+keeps its memory on the host until you power it off; see
+[stopping without powering off](/operations/#stopping-without-powering-off).

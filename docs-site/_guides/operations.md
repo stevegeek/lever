@@ -539,6 +539,30 @@ manager:
   writes `~/.claude/.credentials.json` into the jail, where agents can read it, and changes
   nothing. If someone ran it, delete that file.
 
+## Stopping without powering off
+
+`lever stop --keep-vm` is `lever stop` without the power-off. It stops the broker and the remote
+proxy, suspends the manager and every running worker (the conversation is kept, as with a plain
+stop), stops the jail's hub, and leaves the VM running. The next `lever up` finds the VM already
+up (the *start VM* step reads *already running*), so it skips the VM boot, then starts the hub
+and the broker and resumes the manager. Use it for a short break, or overnight when a fast
+morning `lever up` matters more than the memory.
+
+The trade-off is memory. A running VM keeps its memory on the host while nothing runs in it:
+with Lima, the memory the guest has used stays allocated to the VM process, up to the
+instance's configured `memory`, and lever does nothing to hand it back (with the `vz` driver
+there is no balloon to return it). With OrbStack the machine stays running in OrbStack's shared
+VM, which manages its own memory. On a laptop, prefer a plain `lever stop` when you need the RAM
+or before a long time away; `lever stop` also powers off a VM that `--keep-vm` left running.
+
+What stays the same: containment does not change (the VM keeps its egress firewall, and with the
+broker stopped the jail reaches nothing of the host's), and a guest the host kills or restarts
+meanwhile is recovered by the next `lever up` like any other
+([recovery after a hard VM kill](#recovery-after-a-hard-vm-kill)). With the jail not answering,
+`--keep-vm` has nothing in it to stop and says so. A plain `lever stop` after a `--keep-vm` finds
+the hub down, says that nothing was suspended now (the first stop suspended the agents), and
+powers the VM off as usual.
+
 ## Troubleshooting quick table
 
 | Symptom | Likely cause | Do |

@@ -52,6 +52,14 @@ version bump moves the block under the new version heading.
   command with its time and exit code, showing only the command's leading plain words. The Lima
   e2e prints a time on every line, each phase's duration and a table of them, and on a failed
   acceptance the end of the broker and tool logs.
+- **`lever stop --keep-vm` (lever#196).** Suspends the manager and the running workers and stops
+  the jail's hub, the broker and the remote proxy, as `lever stop` does, but leaves the VM
+  running, so the next `lever up` skips the VM boot. The VM keeps its memory on the host until it
+  is powered off (with Lima nothing hands the guest's memory back), so a plain `lever stop` is
+  still the choice when the RAM matters. It acts on the current instance only and refuses
+  `--machine`. A plain `lever stop` that finds the hub already down now says nothing was
+  suspended instead of warning that the suspend failed. Operations guide: "Stopping without
+  powering off".
 
 ### Changed
 

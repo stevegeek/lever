@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/stevegeek/lever/internal/logging"
 	"log"
 	"log/slog"
 	"net/http"
@@ -36,7 +37,7 @@ func readBackstop(ctx captool.ValidatedContext, args map[string]string) error {
 func buildServer(store *Store, name, backend, adminURL string) (*captool.Server, error) {
 	return captool.New(captool.Config{
 		Name: name, Version: Version, Backend: backend, AdminURL: adminURL,
-		Log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Log: slog.Default(),
 		Operations: []captool.Operation{{
 			Name: "read", Description: "read rows from an allowed table filtered by owner",
 			Params: []captool.ParamSpec{
@@ -53,6 +54,7 @@ func buildServer(store *Store, name, backend, adminURL string) (*captool.Server,
 }
 
 func main() {
+	logging.Install(os.Stderr, "lever-tool-db")
 	name := flag.String("name", "db", "tool/registry name")
 	backend := flag.String("backend", "127.0.0.1:3201", "MCP listen address")
 	admin := flag.String("admin", "http://127.0.0.1:3401", "broker admin base URL")

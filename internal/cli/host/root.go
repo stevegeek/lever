@@ -19,7 +19,7 @@ type BackendFactory func(name, machine string) (backend.Backend, error)
 // guarantees a config's name is valid; flag-driven commands (provision, down,
 // doctor with explicit --backend) surface registry errors directly.
 func defaultFactory(name, machine string) (backend.Backend, error) {
-	return registry.Select(name, proc.RealRunner{}, machine)
+	return registry.Select(name, proc.Traced(proc.RealRunner{}), machine)
 }
 
 // NewRoot builds the host control-plane CLI (`lever`): provisioning only.

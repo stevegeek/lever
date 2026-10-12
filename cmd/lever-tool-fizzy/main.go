@@ -8,8 +8,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/stevegeek/lever/internal/logging"
 	"log"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -132,7 +132,7 @@ func main() {
 	if err := fizzytool.CheckNoLocalConfig(dirs["work"]); err != nil {
 		log.Fatal(err)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := logging.Install(os.Stderr, "lever-tool-fizzy")
 	t := &fizzytool.Tool{
 		CLI:   fizzytool.CLI{Bin: o.fizzy, Account: o.account, Token: tok, Home: dirs["home"], Work: dirs["work"], APIURL: "https://app.fizzy.do", Timeout: 30 * time.Second, MaxOut: 1 << 20},
 		Board: o.board, Prefix: o.prefix, TmpDir: dirs["tmp"], Log: logger,

@@ -31,6 +31,7 @@ import (
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/jailabi"
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
@@ -2160,9 +2161,10 @@ func brokerStartTime(pidPath string) (time.Time, bool) {
 
 // scanBrokerLogCertExpiry returns the timestamp of the most recent expired- /
 // bad-certificate TLS handshake error in the tail of the broker log at path.
-// Lines are Go-stdlog-prefixed ("2006/01/02 15:04:05 …"); the prefix is parsed
-// in local time (the broker logs local time). Lines without the fingerprint or
-// without a parseable timestamp are ignored.
+// Two line shapes are read: lever's daemon log line ("time=<RFC3339, UTC>
+// level=… msg=…", since lever#197) and the Go-stdlog prefix a broker before
+// it wrote ("2006/01/02 15:04:05 …", local time), which an older file still
+// holds. Lines without the fingerprint or a parseable timestamp are ignored.
 func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 	data, err := readFileTail(path, brokerLogTailBytes)
 	if err != nil {
@@ -2174,11 +2176,8 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 		if !strings.Contains(line, "certificate has expired") && !strings.Contains(line, "tls: bad certificate") {
 			continue
 		}
-		if len(line) < 19 {
-			continue
-		}
-		ts, perr := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local)
-		if perr != nil {
+		ts, ok := brokerLogLineTime(line)
+		if !ok {
 			continue
 		}
 		if !found || ts.After(latest) {
@@ -2186,6 +2185,23 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 		}
 	}
 	return latest, found, nil
+}
+
+// brokerLogLineTime is a broker log line's time, in either shape
+// scanBrokerLogCertExpiry reads.
+func brokerLogLineTime(line string) (time.Time, bool) {
+	if rest, ok := strings.CutPrefix(line, "time="); ok {
+		if i := strings.IndexByte(rest, ' '); i > 0 {
+			rest = rest[:i]
+		}
+		ts, err := time.Parse(logging.TimeFormat, rest)
+		return ts, err == nil
+	}
+	if len(line) < 19 {
+		return time.Time{}, false
+	}
+	ts, err := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local)
+	return ts, err == nil
 }
 
 // The labels image/lever-claude/Dockerfile bakes from build args: the pinned

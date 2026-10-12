@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/daemon"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -87,7 +87,7 @@ func StateLogAppender(st state.State) func(line string) {
 			return
 		}
 		defer f.Close()
-		slog.New(slog.NewTextHandler(f, nil)).Info("scion output hidden from the console",
+		logging.New(f, "lever").Info("scion output hidden from the console",
 			"reason", "known-benign settings warning (lever#169)", "line", line)
 	}
 }
@@ -136,7 +136,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 	defer logf.Close()
-	cfg.Log = slog.New(slog.NewTextHandler(logf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg.Log = logging.New(logf, "broker")
 
 	// Per-boot broker-to-tool shared secret: the gateway presents it to every
 	// first-party tool, the supervisor hands it to each tool it spawns, and a

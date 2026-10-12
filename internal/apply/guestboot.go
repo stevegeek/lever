@@ -63,7 +63,7 @@ func suspendAfterGuestRestart(ctx context.Context, d Deps, subject, project, nam
 	d.logf("%s: manager %q: the jail VM restarted since the manager last ran (a new guest boot) and its container is %s; suspending and resuming it (the conversation is kept)",
 		subject, name, scion.BoundedQuote(rec.ContainerStatus))
 	if err := d.Scion.Suspend(ctx, name, project); err != nil {
-		d.logf("%s: WARNING: suspend of manager %q failed: %s", subject, name, scion.ErrSummary(err))
+		d.logf("%s: warning: suspend of manager %q failed: %s", subject, name, scion.ErrSummary(err))
 	}
 }
 
@@ -113,6 +113,6 @@ func RecordGuestBoot(ctx context.Context, d Deps) {
 		return
 	}
 	if err := d.GuestBoot.Record(id); err != nil {
-		d.logf("start-manager: WARNING: could not record the guest boot id (a VM restart will not be recognised): %v", err)
+		d.logf("start-manager: warning: could not record the guest boot id (a VM restart will not be recognised): %v", err)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
@@ -465,6 +466,11 @@ type Deps struct {
 	// other user-facing warnings already surface (see internal/cli/host/stop.go,
 	// internal/cli/host/down.go).
 	Log func(format string, args ...any)
+	// StepTail, when set, names where a failure of a step of this kind is
+	// explained (lever#186): it returns a function the progress list runs
+	// only on failure, giving the source's name and its last lines. nil, or
+	// a nil function, shows no tail.
+	StepTail func(kind StepKind) func() (string, []string)
 	// BrokerStartRetry bounds the retry that absorbs scion's runtime-broker
 	// registration race on manager start/resume/list; ManagerLiveRetry
 	// bounds the post-start liveness poll. Zero values take the production
@@ -537,11 +543,22 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 	// below needs to know whether this run manages the hub at all (see
 	// disableHubLogin).
 	steps := Plan(app, opts)
+	rep := progress.From(ctx)
+	rep.Group("apply", len(steps))
 	for _, step := range steps {
-		if err := r.step(ctx, step); err != nil {
+		ps := rep.Start(stepLabel(step))
+		if d.StepTail != nil {
+			if fn := d.StepTail(step.Kind); fn != nil {
+				ps.TailFrom(fn)
+			}
+		}
+		err := r.step(ctx, step)
+		ps.Done(err)
+		if err != nil {
 			return fmt.Errorf("step %s: %w", step.Kind, err)
 		}
 	}
+	rep.Group("", 0)
 	// Converge the remote proxy OFF when the config disables it. Plan omits
 	// the remote-proxy step entirely in that case (see its RemoteEnabled
 	// guard) so dry-run output never shows a start step it won't take — but
@@ -674,6 +691,15 @@ func planHas(steps []Step, kind StepKind) bool {
 		}
 	}
 	return false
+}
+
+// stepLabel is a step's name on the progress list: its kind, and for an
+// image its reference (the plan can load several).
+func stepLabel(s Step) string {
+	if s.Kind == KindLoadImage && s.Target != "" {
+		return string(s.Kind) + " " + s.Target
+	}
+	return string(s.Kind)
 }
 
 // step is the thin dispatch over StepKind: it routes each step to its
@@ -850,10 +876,15 @@ func runLoadImage(ctx context.Context, s Step, d Deps) error {
 			return d.LoadImageTar(ctx, ref, s.TarPath, d.ImageTagPolicy)
 		}
 	}
-	if !loaded(ctx, s.Target) {
+	rep := progress.From(ctx)
+	if loaded(ctx, s.Target) {
+		rep.Note("already loaded")
+	} else {
+		rep.Detail("loading the image into the jail")
 		if err := load(ctx, s.Target); err != nil {
 			return err
 		}
+		rep.Note("loaded")
 		// After a load, prune dangling images: when this load superseded a tag
 		// (a rebuilt image), the old copy is now untagged and would otherwise
 		// ratchet the grow-only jail disk. A no-op when the load just added a
@@ -891,7 +922,11 @@ func warmImage(ctx context.Context, ref string, d Deps) {
 	select {
 	case err = <-done:
 	case <-time.After(imageWarmNoticeAfter):
-		d.Log("load-image: warming the user-namespace layer copy of %s (the first run of a large image can take a minute)", ref)
+		if rep := progress.From(ctx); rep.Active() {
+			rep.Detail("warming the user-namespace layer copy (the first run of a large image can take a minute)")
+		} else {
+			d.Log("load-image: warming the user-namespace layer copy of %s (the first run of a large image can take a minute)", ref)
+		}
 		err = <-done
 	}
 	if err != nil {
@@ -1122,7 +1157,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// A container start, the pre-start hook, claude's boot and the settle
 	// window can run over a minute: say what is happening about every 15 s
 	// (lever#168), from the action to the end of the gate.
-	r.progress = StartProgress(r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
+	r.progress = StartProgress(ctx, r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
 	if err == nil {
 		err = r.waitManagerLive(ctx, jp, acted)
@@ -1156,7 +1191,7 @@ func (r *run) warnManagerClaude(ctx context.Context, jp string) {
 	if err != nil || got.Matches(want) {
 		return
 	}
-	r.d.Log("start-manager: WARNING: manager %q runs with claude settings %s, but the config sets %s; the config's values take effect at its next start (`lever stop && lever up`). If a start does not change them, the image's lever-agent predates them: rebuild it (`make lever-image`), then recreate the manager with `lever up --fresh` (back up its conversation first: it is discarded) — `lever stop && lever up` resumes it on its old image",
+	r.d.Log("start-manager: warning: manager %q runs with claude settings %s, but the config sets %s; the config's values take effect at its next start (`lever stop && lever up`). If a start does not change them, the image's lever-agent predates them: rebuild it (`make lever-image`), then recreate the manager with `lever up --fresh` (back up its conversation first: it is discarded) — `lever stop && lever up` resumes it on its old image",
 		r.app.Name, got.Describe(), jail.DescribeClaude(want))
 }
 
@@ -1595,7 +1630,7 @@ func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, rec *scion.Ag
 	if len(stale.Gone) > 0 && !managerKept(rec) {
 		return fmt.Errorf("start-manager: manager %q cannot be resumed: %s. To fix it, %s", r.app.Name, stale, stale.Fix())
 	}
-	r.d.Log("start-manager: WARNING: manager %q: %s. %s", r.app.Name, stale, stale.Fix())
+	r.d.Log("start-manager: warning: manager %q: %s. %s", r.app.Name, stale, stale.Fix())
 	return nil
 }
 
@@ -1632,26 +1667,26 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 		return
 	}
 	if r.d.InspectContainerMounts == nil || r.d.ProbeContainerWritable == nil {
-		r.d.Log("start-manager: WARNING: manager.read_only is create-time only and lever could not inspect manager %q's mounts; run `lever doctor` (row \"manager read-only paths\") to see whether it holds them", r.app.Name)
+		r.d.Log("start-manager: warning: manager.read_only is create-time only and lever could not inspect manager %q's mounts; run `lever doctor` (row \"manager read-only paths\") to see whether it holds them", r.app.Name)
 		return
 	}
 	ref := jail.ContainerName(path.Base(jp), r.app.Name)
 	got, err := r.d.InspectContainerMounts(ctx, ref)
 	if err != nil {
-		r.d.Log("start-manager: WARNING: manager.read_only is create-time only and lever could not inspect manager %q's mounts (%v); run `lever doctor` to check", r.app.Name, err)
+		r.d.Log("start-manager: warning: manager.read_only is create-time only and lever could not inspect manager %q's mounts (%v); run `lever doctor` to check", r.app.Name, err)
 		return
 	}
 	gaps := ManagerTreeMountGaps(jp, want, got)
 	if gaps.Empty() {
 		replaced, err := ProbeReplacedEntries(ctx, WritableProbe(r.d.ProbeContainerWritable), ref, want)
 		if err != nil {
-			r.d.Log("start-manager: WARNING: lever could not probe whether manager %q can write its read-only paths (%v); run `lever doctor` to check", r.app.Name, err)
+			r.d.Log("start-manager: warning: lever could not probe whether manager %q can write its read-only paths (%v); run `lever doctor` to check", r.app.Name, err)
 			return
 		}
 		gaps.Replaced = replaced
 	}
 	if !gaps.Empty() {
-		r.d.Log("start-manager: WARNING: manager %q does not hold its manager.read_only or shared_folders protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
+		r.d.Log("start-manager: warning: manager %q does not hold its manager.read_only or shared_folders protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
 		if tools := r.toolsOnReadOnly(); len(tools) > 0 {
 			r.d.Log("start-manager: the broker does not start tool(s) %s until then: each runs a program from a protected directory, which this manager could have rewritten", strings.Join(tools, ", "))
 		}
@@ -1688,22 +1723,22 @@ func (r *run) warnManagerNestedVirt(ctx context.Context, jp string) {
 	}
 	if r.d.ProbeContainerDevice == nil {
 		if on {
-			r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm; run `lever doctor` (row \"nested virt\")", r.app.Name)
+			r.d.Log("start-manager: warning: nested_virt is on and lever could not probe manager %q for /dev/kvm; run `lever doctor` (row \"nested virt\")", r.app.Name)
 		}
 		return
 	}
 	has, err := r.d.ProbeContainerDevice(ctx, jail.ContainerName(path.Base(jp), r.app.Name), KVMDevice)
 	if err != nil {
 		if on {
-			r.d.Log("start-manager: WARNING: nested_virt is on and lever could not probe manager %q for /dev/kvm (%v); run `lever doctor`", r.app.Name, err)
+			r.d.Log("start-manager: warning: nested_virt is on and lever could not probe manager %q for /dev/kvm (%v); run `lever doctor`", r.app.Name, err)
 		}
 		return
 	}
 	switch {
 	case on && !has:
-		r.d.Log("start-manager: WARNING: nested_virt is on but manager %q has no /dev/kvm; %s", r.app.Name, NestedVirtRecreateFix)
+		r.d.Log("start-manager: warning: nested_virt is on but manager %q has no /dev/kvm; %s", r.app.Name, NestedVirtRecreateFix)
 	case !on && has:
-		r.d.Log("start-manager: WARNING: nested_virt is off but the manager %q still has /dev/kvm; %s", r.app.Name, NestedVirtRecreateFix)
+		r.d.Log("start-manager: warning: nested_virt is off but the manager %q still has /dev/kvm; %s", r.app.Name, NestedVirtRecreateFix)
 	}
 }
 

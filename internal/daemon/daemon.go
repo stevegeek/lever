@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/logging"
 )
 
 // WritePIDFile records the running process's pid at path (0600), creating
@@ -44,9 +46,14 @@ func RemovePIDFile(path string) {
 	}
 }
 
-// Warnf prints a non-fatal problem to stderr in the "lever: warning:" form
-// every host-side daemon uses.
+// Warnf reports a non-fatal problem: in a daemon that installed lever's
+// logger (internal/logging), as a WARN line in its log; elsewhere on stderr
+// in the operator prose form, "lever: warning: ...".
 func Warnf(format string, args ...any) {
+	if logging.Installed() {
+		slog.Warn(fmt.Sprintf(format, args...))
+		return
+	}
 	fmt.Fprintf(os.Stderr, "lever: warning: "+format+"\n", args...)
 }
 

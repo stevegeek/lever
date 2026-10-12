@@ -260,7 +260,7 @@ func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
 	f.Script(orbGuest.User+" true", proc.Result{})
 	b := New(f, machine, common.Options{})
 
-	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
+	if _, err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
 		t.Fatalf("ensureMachine: %v", err)
 	}
 	if !f.Called(proc.Subcommand("orb", "start")) {
@@ -275,7 +275,7 @@ func TestEnsureMachineRunningIsNoop(t *testing.T) {
 	scriptList(f, listRunning)
 	b := New(f, machine, common.Options{})
 
-	if err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
+	if _, err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
 		t.Fatalf("ensureMachine: %v", err)
 	}
 	// Neither start nor create for an already-running machine.
@@ -291,7 +291,7 @@ func TestEnsureMachineStartTimesOutWhenUnreachable(t *testing.T) {
 	b := New(f, machine, common.Options{})
 	b.probeAttempts, b.probeInterval = 2, time.Millisecond
 
-	err := b.ensureMachine(context.Background(), "/Users/x/tree")
+	_, err := b.ensureMachine(context.Background(), "/Users/x/tree")
 	if err == nil {
 		t.Fatal("expected an error when the machine never becomes reachable after start")
 	}

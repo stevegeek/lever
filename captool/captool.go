@@ -7,7 +7,6 @@ import (
 	"crypto/ed25519"
 	"crypto/subtle"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -109,7 +108,10 @@ func New(c Config) (*Server, error) {
 		c.EpochTTL = defaultEpochTTL
 	}
 	if c.Log == nil {
-		c.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+		// The process's default logger: a lever tool installs lever's log
+		// line shape as the default first thing (internal/logging), so its
+		// SDK lines and its own share one form in tool-logs/<name>.log.
+		c.Log = slog.Default()
 	}
 	ops := make(map[string]Operation, len(c.Operations))
 	for _, o := range c.Operations {

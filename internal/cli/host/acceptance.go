@@ -15,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -67,18 +68,28 @@ func formatNote(results map[string]bool, date string) string {
 }
 
 func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
-	return &cobra.Command{
+	var progressMode string
+	c := &cobra.Command{
 		Use:   "acceptance [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring up a real jail and drive the six acceptance capability checks (live gate)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
-			return runAcceptance(cmd.Context(), cmd, app, path, bf)
+			// The bring-up is listed and timed like apply's (lever#184,
+			// #185): the e2e reads the phase times from its record.
+			run, ctx, err := startBringup(cmd, app, stateFor(path), "acceptance", progressMode)
+			if err != nil {
+				return err
+			}
+			defer func() { run.finish(err) }()
+			return runAcceptance(ctx, cmd, app, path, bf)
 		},
 	}
+	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	return c
 }
 
 // runAcceptance is the live acceptance gate. It brings a REAL jail up (manager +
@@ -100,7 +111,9 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    scion/container/registration steps (incl. init-machine, which needs a
 	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
 	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
-	w, err := buildApplyDeps(ctx, app, configPath, bf, applyOpts{Cmd: cmd})
+	rep := progress.From(ctx)
+	rep.Group("jail", 0)
+	w, err := buildApplyDeps(ctx, app, configPath, bf, applyOpts{Cmd: cmd, Rep: rep})
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}
@@ -130,23 +143,29 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	// 2b. Setup phase: install lever-agent in the VM, then enrol the manager and
 	//     mint+enrol the worker. FAIL-CLOSED — any setup error aborts the
 	//     gate with a clear message (never a vacuous check pass).
-	if err := h.setup(ctx, b); err != nil {
+	rep.Group("acceptance", 0)
+	setup := rep.Start("enrol test agents")
+	err = h.setup(ctx, b)
+	setup.Done(err)
+	if err != nil {
 		return fmt.Errorf("acceptance: setup: %w", err)
 	}
+	checks := rep.Start("capability checks")
 
 	results := map[string]bool{}
 	for _, name := range acceptanceCheckNames() {
 		ok, derr := h.run(ctx, name)
 		results[name] = ok
 		if derr != nil {
-			cmd.PrintErrf("check %-14s error: %v\n", name, derr)
+			acceptanceLine(cmd, rep, fmt.Sprintf("check %-14s error: %v", name, derr))
 		}
 		status := "FAIL"
 		if ok {
 			status = "PASS"
 		}
-		cmd.Printf("check %-14s %s\n", name, status)
+		acceptanceLine(cmd, rep, fmt.Sprintf("check %-14s %s", name, status))
 	}
+	checks.Done(nil)
 
 	// 3. Write the dated note.
 	date := time.Now().Format("2006-01-02")
@@ -169,6 +188,16 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	}
 	cmd.Println("acceptance PASSED")
 	return nil
+}
+
+// acceptanceLine prints a check result above the progress list's live line,
+// or on the command's output when there is no list.
+func acceptanceLine(cmd *cobra.Command, rep *progress.Reporter, line string) {
+	if rep != nil {
+		rep.Log(line)
+		return
+	}
+	cmd.Println(line)
 }
 
 // bootstrapDirInJail returns the in-jail directory holding the manager's

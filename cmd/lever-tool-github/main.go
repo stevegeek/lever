@@ -10,8 +10,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/stevegeek/lever/internal/logging"
 	"log"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -133,7 +133,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := logging.Install(os.Stderr, "lever-tool-github")
 	g := ghpush.Git{Bin: gitBin, Ceiling: o.state, Home: filepath.Join(o.state, "home"), Timeout: 5 * time.Minute}
 	if err := g.CheckVersion(context.Background(), o.state); err != nil {
 		log.Fatal(err)

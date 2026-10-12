@@ -76,7 +76,7 @@ func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
 				return err
 			}
 			if ticketErr != nil {
-				cmd.PrintErrf("warning: removing staged ticket for %q: %v\n", spec.Name, ticketErr)
+				cmd.PrintErrf("lever: warning: removing staged ticket for %q: %v\n", spec.Name, ticketErr)
 			}
 
 			cmd.Printf("worker %q purged — scion record deleted; work product in %s kept.\n", spec.Name, spec.HostWorkspace)

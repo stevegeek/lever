@@ -142,7 +142,7 @@ func TestRecoverAfterGuestRestartForUp(t *testing.T) {
 	if RecoverAfterGuestRestart(context.Background(), d2, "hello", "/lever") {
 		t.Fatal("a suspend that did not take must leave up on its observe path")
 	}
-	if !strings.Contains(strings.Join(logged.lines, "\n"), "WARNING: suspend of manager") {
+	if !strings.Contains(strings.Join(logged.lines, "\n"), "warning: suspend of manager") {
 		t.Errorf("the failed suspend must be logged: %q", logged.lines)
 	}
 

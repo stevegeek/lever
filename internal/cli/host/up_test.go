@@ -224,11 +224,44 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 func TestUpProbeNotice(t *testing.T) {
 	err := errors.New("hub is not responding\nUsage: scion list ...")
 	plain := upProbeNotice(err, false)
-	if !strings.Contains(plain, "hub is not responding") || strings.Contains(plain, "Usage") || strings.Contains(plain, "--fresh") {
+	if !strings.Contains(plain, "hub is not running") || strings.Contains(plain, "Usage") || strings.Contains(plain, "--fresh") {
 		t.Errorf("plain notice = %q", plain)
 	}
 	fresh := upProbeNotice(err, true)
-	if !strings.Contains(fresh, "--fresh") || !strings.Contains(fresh, "discard") || !strings.Contains(fresh, "hub is not responding") {
+	if !strings.Contains(fresh, "--fresh") || !strings.Contains(fresh, "discard") || !strings.Contains(fresh, "hub is not running") {
 		t.Errorf("fresh notice = %q, want the flag, the discard, and the reason", fresh)
+	}
+}
+
+// TestUpProbeReason: the probe failure in the operator's words, never the
+// raw client error (lever#195); an unknown error keeps its first line only.
+func TestUpProbeReason(t *testing.T) {
+	cases := map[string]string{
+		"dial tcp 127.0.0.1:8080: connect: connection refused": "hub is not running",
+		"Error: project not found":                             "not registered with the hub yet",
+		"weird\nUsage: scion list":                             "no running manager (weird)",
+	}
+	for in, want := range cases {
+		if got := upProbeReason(errors.New(in)); !strings.Contains(got, want) || strings.Contains(got, "Usage") {
+			t.Errorf("upProbeReason(%q) = %q, want it to contain %q", in, got, want)
+		}
+	}
+}
+
+func TestUpDecisionNote(t *testing.T) {
+	cases := []struct {
+		phase string
+		d     upAction
+		want  string
+	}{
+		{scion.PhaseRunning, upNone, "running"},
+		{scion.PhaseSuspended, upResume, "suspended; resuming it"},
+		{scion.PhaseRunning, upResume, "the VM restarted under it; resuming it"},
+		{"", upApply, "no manager yet; starting it"},
+	}
+	for _, c := range cases {
+		if got := upDecisionNote(c.phase, c.d); got != c.want {
+			t.Errorf("upDecisionNote(%q, %q) = %q, want %q", c.phase, c.d, got, c.want)
+		}
 	}
 }

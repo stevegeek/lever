@@ -86,7 +86,7 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 	}
 	alive, err := probe.HarnessAlive(ctx, ref)
 	if err != nil {
-		log("WARNING: agent %q has hub phase stopped over a live container, and lever could not tell whether its harness still runs (%v)", rec.Slug, err)
+		log("lever: warning: agent %q has hub phase stopped over a live container, and lever could not tell whether its harness still runs (%v)", rec.Slug, err)
 		return rec
 	}
 	if !alive {
@@ -94,7 +94,7 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 	}
 	log("agent %q: the hub says its session ended (phase stopped), but claude still runs in its container — a SessionEnd from another claude process there (e.g. `claude mcp list` through podman exec) does this; reporting the session running again", rec.Slug)
 	if err := probe.ReportSessionRunning(ctx, ref); err != nil {
-		log("WARNING: agent %q: could not report its session running (%v); a resume now restarts claude in a new session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", rec.Slug, err)
+		log("lever: warning: agent %q: could not report its session running (%v); a resume now restarts claude in a new session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", rec.Slug, err)
 		return rec
 	}
 	healed := rec
@@ -114,7 +114,7 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 		log("agent %q: session reported running again; its conversation continues", rec.Slug)
 		return healed
 	}
-	log("WARNING: agent %q: the hub still reads phase %s after the session report (is its hub token valid? see `lever doctor`); a resume now restarts claude in a new session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)",
+	log("lever: warning: agent %q: the hub still reads phase %s after the session report (is its hub token valid? see `lever doctor`); a resume now restarts claude in a new session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)",
 		rec.Slug, scion.BoundedQuote(healed.Phase))
 	return healed
 }
@@ -144,7 +144,7 @@ func healHubToken(ctx context.Context, h SessionHealer, project, slug, ref strin
 	sc, probe, log := h.Scion, h.Probe, h.Log
 	tok, err := probe.HubToken(ctx, ref)
 	if err != nil {
-		log("WARNING: could not read agent %q's hub token expiry (%v); `lever doctor` shows the token row", slug, err)
+		log("lever: warning: could not read agent %q's hub token expiry (%v); `lever doctor` shows the token row", slug, err)
 		return
 	}
 	if !tok.Expired() {
@@ -153,23 +153,23 @@ func healHubToken(ctx context.Context, h SessionHealer, project, slug, ref strin
 	expired := fmt.Sprintf("its hub token expired at %s (guest clock %s) — every reply, status and heartbeat it sends fails with 401",
 		tok.Expiry.Format(time.RFC3339), tok.Now.Format(time.RFC3339))
 	if h.VerifyRole == nil {
-		log("WARNING: agent %q: %s; it is not reset here — run `lever apply`", slug, expired)
+		log("lever: warning: agent %q: %s; it is not reset here — run `lever apply`", slug, expired)
 		return
 	}
 	if err := h.VerifyRole(ctx, path.Base(project), slug); err != nil {
-		log("WARNING: agent %q: %s; it is NOT reset: %s", slug, expired, termsafe.Sanitize(err.Error()))
+		log("lever: warning: agent %q: %s; it is NOT reset: %s", slug, expired, termsafe.Sanitize(err.Error()))
 		return
 	}
 	log("agent %q: %s; resetting it (scion reset-auth)", slug, expired)
 	if err := sc.ResetAuth(ctx, slug, project); err != nil {
-		log("WARNING: agent %q: scion reset-auth failed: %s — in the guest, run `scion reset-auth %s -g %s` with the controller PAT", slug, termsafe.Sanitize(scion.ErrSummary(err)), slug, project)
+		log("lever: warning: agent %q: scion reset-auth failed: %s — in the guest, run `scion reset-auth %s -g %s` with the controller PAT", slug, termsafe.Sanitize(scion.ErrSummary(err)), slug, project)
 		return
 	}
 	if now, err := probe.HubToken(ctx, ref); err == nil && !now.Expired() {
 		log("agent %q: new hub token, valid until %s", slug, now.Expiry.Format(time.RFC3339))
 		return
 	}
-	log("WARNING: agent %q: scion reset-auth answered, but its token file does not show a valid token yet; re-run `lever doctor` in a minute", slug)
+	log("lever: warning: agent %q: scion reset-auth answered, but its token file does not show a valid token yet; re-run `lever doctor` in a minute", slug)
 }
 
 // HealSessions runs HealAgentSession over the manager and every configured
@@ -197,7 +197,7 @@ func healNamedSessions(ctx context.Context, d Deps, project string, names []stri
 	}
 	agents, err := d.Scion.List(ctx, project)
 	if err != nil {
-		d.Log("WARNING: could not list agents to check their hub sessions: %s", termsafe.Sanitize(scion.ErrSummary(err)))
+		d.Log("lever: warning: could not list agents to check their hub sessions: %s", termsafe.Sanitize(scion.ErrSummary(err)))
 		return
 	}
 	for _, name := range names {

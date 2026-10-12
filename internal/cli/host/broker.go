@@ -43,6 +43,9 @@ func newBrokerServeCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Run the capability broker + first-party tools (foreground)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A daemon: every line it writes (broker.out.log when apply
+			// spawned it) takes lever's log shape (lever#197).
+			daemonLogging(cmd, "broker")
 			path, err := resolveConfigPath(argOrEmpty(args))
 			if err != nil {
 				return err

@@ -5,8 +5,14 @@ import (
 	"strings"
 )
 
-// ParseAhosts parses `getent ahosts <alias>` output into the first IPv4 and
-// first IPv6 address found. Every backend that resolves a host-alias domain
+// ParseAhosts parses `getent ahosts <alias>` output into one IPv4 and one
+// IPv6 address: the LAST of each family listed (each address appears once
+// per socket type, so for an alias with one address per family, the usual
+// case, first and last are the same). Both callers that build chains from it
+// (the backends' ResolveHostAlias and Snapshot.VerifyEgress) use this same
+// parse, so a live chain and its verification always name the same address;
+// changing the pick would make every existing chain mismatch once and be
+// rebuilt. Every backend that resolves a host-alias domain
 // (host.orb.internal, host.lima.internal, ...) runs getent through its own
 // argv prefix but hits the identical output format, so the parse itself lives
 // here once rather than being copied per backend.

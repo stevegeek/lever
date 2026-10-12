@@ -47,8 +47,10 @@ host's. Validated behaviour and its limits:
   (`internal/egress/allowlist.go`). One address in them is refused out loud instead of dropped: the
   cloud metadata address `169.254.169.254/32` is REJECTed (`icmp-host-prohibited`) just before the
   `169.254/16` DROP, so the scion hub's GCP project lookup at each start fails at once instead of
-  timing out for about 13 s. It is the only REJECT in the chain, and `lever acceptance` checks that
-  it answers "no route to host" while a neighbouring link-local address is still dropped.
+  timing out for about 13 s. Its ICMP answer goes from and to the guest's own address over `lo`, so
+  one narrow ACCEPT (`-o lo`, ICMP host-prohibited, conntrack `RELATED`) lets it through the private
+  range DROPs. It is the only REJECT in the chain, and `lever acceptance` checks that the address
+  answers "no route to host" while a neighbouring link-local address is still dropped.
   LAN-unreachability must still be re-checked on OrbStack upgrades.
 - **Host loopback services are reachable via the alias** (`host.orb.internal`), which forwards to
   the host's `127.0.0.1` over **both IPv4 and IPv6**. This is how the manager reaches local tool

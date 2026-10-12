@@ -59,11 +59,14 @@ version bump moves the block under the new version heading.
   The scion hub looks up a GCP project ID at `169.254.169.254` at every start; the egress chain
   dropped it, so the lookup spent six 2 s timeouts before the hub served. The `LEVER_EGRESS` chain
   now REJECTs `169.254.169.254/32` (`icmp-host-prohibited`) just before the `169.254/16` DROP, in
-  both postures and on both backends, so the lookup fails at once. Nothing more is reachable: it
+  both postures and on both backends, so the lookup fails within about a second. The kernel sends
+  that answer to the guest's own address over `lo`, so one narrow ACCEPT (ICMP host-prohibited,
+  `RELATED`, on `lo` only) lets it through the private-range DROPs. Nothing more is reachable: it
   is the chain's only REJECT, and every other link-local address is still dropped. `lever
   acceptance`'s egress-refused check now also dials the metadata address (it must answer "no
   route to host") and a neighbouring link-local address (it must still be dropped). A running
-  closed-posture jail keeps its chain until `lever down` and `up`, or a VM restart.
+  closed-posture jail keeps its old chain until `lever down` and `up`, or a VM restart, and
+  `lever acceptance` fails on it until then.
 - **The guest no longer runs a rootless Docker daemon (lever#183).** Provisioning installed rootless
   Docker and started `dockerd` on every apply, then waited up to 30 s for it, but scion runs the
   agents in podman and nothing used it. Lever no longer installs or starts it, and stops and

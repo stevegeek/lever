@@ -599,12 +599,13 @@ func classifyLinkLocalProbe(ip string, res proc.Result, err error) (linkState, e
 
 // metadataVerdict is the PURE decision for the metadata REJECT: PASS iff the
 // metadata address is rejected and the control address is dropped. A dropped
-// metadata address is contained but means the REJECT is not in force (a chain
-// from before lever#182 that a closed-posture re-apply left alone); a rejected
+// metadata address is contained but means the REJECT is not in force, or its
+// ICMP answer is dropped on the way back (a closed chain from before lever#182
+// that a re-apply left alone, or a chain without the lo ACCEPT); a rejected
 // control means the REJECT is wider than its /32; an open address is a hole.
 func metadataVerdict(meta, control linkState) (bool, error) {
 	if meta != linkRejected {
-		return false, fmt.Errorf("egress-refused: metadata address %s was %q, want %q (the chain's icmp-host-prohibited REJECT; a chain from before it needs lever down and up)", egress.MetadataV4, meta, linkRejected)
+		return false, fmt.Errorf("egress-refused: metadata address %s was %q, want %q (the chain's icmp-host-prohibited REJECT and the lo ACCEPT for its answer; a closed chain from before them needs lever down and up)", egress.MetadataV4, meta, linkRejected)
 	}
 	if control != linkDropped {
 		return false, fmt.Errorf("egress-refused: link-local control %s was %q, want %q (only the metadata /32 may be rejected)", linkLocalControl, control, linkDropped)

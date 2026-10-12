@@ -132,17 +132,20 @@ func TestBuildRulesClosedInternetExemptsLoopback(t *testing.T) {
 			t.Fatalf("loopback ACCEPT (idx %d) must precede the catch-all DROP (idx %d) for family %v", lo, drop, fam)
 		}
 	}
-	// Open posture stays byte-identical to pre-existing: no loopback rule added.
+	// The open posture gets no blanket loopback ACCEPT.
 	if loIdx(open, IPv4) >= 0 || loIdx(open, IPv6) >= 0 {
-		t.Fatal("open posture must NOT add a loopback rule (byte-identical to pre-existing)")
+		t.Fatal("open posture must NOT add a blanket loopback ACCEPT")
 	}
 }
 
-// loIdx returns the index of the `-o lo -j ACCEPT` rule for a family, or -1.
+// loIdx returns the index of the blanket `-o lo -j ACCEPT` rule for a family,
+// or -1. (The narrow lo ACCEPT for the metadata REJECT's ICMP answer, in both
+// postures, is not it; TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop
+// pins that one.)
 func loIdx(rules []Rule, fam Family) int {
+	blanket := []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}
 	for i, r := range rules {
-		args := strings.Join(r.Args, " ")
-		if r.Family == fam && strings.Contains(args, "-o lo") && strings.Contains(args, "-j ACCEPT") {
+		if r.Family == fam && slices.Equal(r.Args, blanket) {
 			return i
 		}
 	}
@@ -387,6 +390,17 @@ func TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop(t *testing.T) {
 		}
 		if closed && rej > dropIdxFamily(rules, IPv4) {
 			t.Fatal("metadata REJECT must precede the catch-all DROP")
+		}
+		// The REJECT's ICMP answer goes from and to the guest's own address
+		// (192.168.5.15 on Lima) over lo: it must be ACCEPTed before the
+		// private-range DROPs, narrowly, or the dial hangs as if dropped.
+		const reply = "-A " + Chain + " -o lo -p icmp --icmp-type host-prohibited -m conntrack --ctstate RELATED -j ACCEPT"
+		acc := indexOfRule(v4, "--icmp-type")
+		if acc < 0 || v4[acc] != reply || acc > indexOfRule(v4, "-d 192.168.0.0/16 -j DROP") {
+			t.Fatalf("closed=%v: the REJECT's reply ACCEPT is missing, wider than it should be, or after the 192.168/16 DROP: %v", closed, v4)
+		}
+		if indexOfRule(familyArgs(rules, IPv6), "icmp") >= 0 {
+			t.Fatalf("closed=%v: no IPv6 ICMP rule is needed", closed)
 		}
 		var rejects int
 		for _, r := range rules {

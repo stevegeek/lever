@@ -267,9 +267,10 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 			} else if !strings.Contains(joined, "warning:") || !strings.Contains(joined, tc.wantWarn) {
 				t.Fatalf("want a warning mentioning %q, got %q", tc.wantWarn, joined)
 			}
-			// Twice on a resume: the stale-mount check before it, and the
-			// protection check after.
-			if tc.inspect != nil && len(refs) != 2 {
+			// On a resume: the stale-mount check before it, the check of
+			// where the resumed mounts come from (once more when it could
+			// not run the first time), and the protection check after.
+			if tc.inspect != nil && len(refs) < 3 {
 				t.Fatalf("inspected %q, want the manager container before and after the resume", refs)
 			}
 			for _, ref := range refs {

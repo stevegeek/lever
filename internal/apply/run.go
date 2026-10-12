@@ -1162,8 +1162,21 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// (lever#168), from the action to the end of the gate.
 	r.progress = StartProgress(ctx, r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
+	// A resume recreated the container from the record's mounts: check
+	// them as soon as it runs (verifyResumedTreeMounts), and again once it
+	// is live if it was not running yet.
+	resumed := err == nil && acted && rec != nil && !r.managerCreated
+	verified := false
+	if resumed {
+		verified, err = r.verifyResumedTreeMounts(ctx, jp)
+	}
 	if err == nil {
 		err = r.waitManagerLive(ctx, jp, acted)
+	}
+	if err == nil && resumed && !verified {
+		if verified, err = r.verifyResumedTreeMounts(ctx, jp); err == nil && !verified {
+			r.d.Log("start-manager: warning: lever could not check from the guest where manager %q's tree mounts come from after the resume; run `lever doctor` (row \"manager read-only paths\")", r.app.Name)
+		}
 	}
 	r.progress.Stop()
 	r.progress = nil
@@ -1677,6 +1690,75 @@ func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, rec *scion.Ag
 	}
 	r.d.Log("start-manager: warning: manager %q: %s. %s", r.app.Name, stale, stale.Fix())
 	return nil
+}
+
+// verifyResumedTreeMounts closes what checkStaleTreeMounts cannot: that
+// check reads the host tree BEFORE the resume, and the runtime resolves
+// each mount source again, following symbolic links, when it recreates the
+// container. An agent that can write a mounted directory's parent (the
+// manager itself during a forced resume, or a writer of a shared folder
+// above a stale mount) can swap the directory for a link in between, and
+// the runtime then mounts whatever the link names — a guest path, read-write
+// for a pin — into the manager. Nothing lever runs can make the runtime's
+// own mount refuse a link, so this checks the result: right after the
+// resume, every directory lever mounted over its own place (treeSelfMount:
+// the current plan and the mounts the record kept from older ones) is read
+// back from the guest (CheckLiveMounts, jail.LiveMount.SelfMount: the
+// kernel's record of where each mount comes from, no program run inside
+// the container). A mount that comes from elsewhere, or a first process in
+// a namespace made inside the container, suspends the manager and fails
+// the bring-up: fail closed, since the agent may hold a path it must never
+// see. verified is false, with no error, when the check could not run (no
+// container yet, not running, unreadable): the caller tries again once the
+// manager is live, and warns if it still cannot. With no inspect or live
+// check wired there is nothing to run, and verified is true.
+func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified bool, err error) {
+	if r.d.InspectContainerMounts == nil || r.d.CheckLiveMounts == nil {
+		// Not wired (tests; the CLI wires both): nothing to check with,
+		// and warnManagerTreeMounts names the gap when a plan exists.
+		return true, nil
+	}
+	ref := jail.ContainerName(path.Base(jp), r.app.Name)
+	got, err := r.d.InspectContainerMounts(ctx, ref)
+	if err != nil {
+		return false, nil
+	}
+	var plan []jail.LiveMount
+	for _, m := range got {
+		if rel, ok := treeSelfMount(jp, m); ok {
+			plan = append(plan, jail.LiveMount{Target: path.Join(scion.ContainerWorkspace, rel), Source: path.Join(jp, rel), ReadOnly: !m.RW, SelfMount: true})
+		}
+	}
+	if len(plan) == 0 {
+		return true, nil
+	}
+	slices.SortFunc(plan, func(a, b jail.LiveMount) int { return strings.Compare(a.Target, b.Target) })
+	problems, err := r.d.CheckLiveMounts(ctx, ref, plan)
+	var why string
+	switch {
+	case errors.Is(err, jail.ErrForeignNamespace):
+		why = fmt.Sprintf("%v, so lever cannot see the mounts the agent works under. Something in the container moved it there to show lever a staged view", err)
+	case err != nil:
+		return false, nil
+	}
+	var bad []string
+	for _, p := range problems {
+		if p.Reason == jail.LiveMountElsewhere {
+			bad = append(bad, strconv.Quote(strings.TrimPrefix(p.Target, scion.ContainerWorkspace+"/"))+" "+p.Reason)
+		}
+	}
+	if len(bad) > 0 {
+		why = "a tree mount does not come from the tree: " + strings.Join(bad, "; ") + ". A directory in its path was swapped (for a symbolic link, most likely) between lever's check and the container start, so the runtime may have mounted something else into the manager"
+	}
+	if why == "" {
+		return true, nil
+	}
+	suspended := "lever suspended it"
+	if serr := r.d.Scion.Suspend(ctx, r.app.Name, jp); serr != nil {
+		suspended = "lever could NOT suspend it (" + scion.ErrSummary(serr) + "): stop it yourself (`lever stop`)"
+	}
+	return true, fmt.Errorf("start-manager: manager %q after its resume: %s; %s. Find and undo what changed on the host (put the real directory back), then run `lever up` again, or back up what you need and recreate the manager (`lever up --fresh`); treat what the manager could reach since as exposed",
+		r.app.Name, why, suspended)
 }
 
 // managerMounts is the manager's mounts for checkStaleTreeMounts: its

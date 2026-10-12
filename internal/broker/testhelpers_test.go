@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -265,7 +266,14 @@ func reenrolBroker(t *testing.T, rt WorkerRuntime, mode string) (*Broker, Worker
 		TicketDir:     "/run/user/501/lever/tickets/scratch"}
 	managerDir := filepath.Join(t.TempDir(), ".lever")
 	b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt, spec),
-		func(c *Config) { c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = mode, managerDir }))
+		func(c *Config) {
+			c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = mode, managerDir
+			// The manager's resume checks pass (TestHealManagerResumeGuard
+			// covers their refusals).
+			c.Dispatch.ManagerResumeGuard = func(context.Context) (func(context.Context) error, error) {
+				return func(context.Context) error { return nil }, nil
+			}
+		}))
 	return b, spec, managerDir
 }
 

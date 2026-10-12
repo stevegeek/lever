@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
@@ -93,18 +94,53 @@ func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name strin
 // attach (an up that attaches a terminal next) ends the resume's gate once
 // claude's pane is alive, with no settle window; the attach then follows
 // at once and the manager is checked after the detach (lever#188).
-func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, attach bool) error {
+//
+// guard (the resume path's lever#158 checks, nil elsewhere) reads the tree
+// mounts back once the manager is live, if that could not be done right
+// after the resume: the manager is not reported up before.
+func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, attach bool, guard *apply.ManagerResume) error {
 	switch d {
 	case upResume:
+		var err error
 		if attach {
-			return apply.WaitManagerStarted(ctx, deps, name, project, prog)
+			err = apply.WaitManagerStarted(ctx, deps, name, project, prog)
+		} else {
+			err = apply.WaitManagerLive(ctx, deps, name, project, prog)
 		}
-		return apply.WaitManagerLive(ctx, deps, name, project, prog)
+		if err != nil {
+			return err
+		}
+		if guard == nil {
+			return errors.New("up: internal error: the resume's mount checks are missing")
+		}
+		return guard.Live(ctx)
 	case upNone:
 		return apply.ObserveManagerLive(ctx, deps, name, project)
 	default:
 		return nil
 	}
+}
+
+// resumeForUp is up's own resume of the manager, between the checks
+// apply's start-manager step runs around its resume (lever#158): before it
+// the host tree and a mount whose directory is gone, right after it where
+// each tree mount comes from (a mismatch suspends the manager). The
+// returned guard's Live runs after the gate (gateAfterUp).
+func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project string, resume func(context.Context) error) (*apply.ManagerResume, error) {
+	guard, err := apply.BeginManagerResume(ctx, deps, app, project, "up")
+	if err != nil {
+		return nil, err
+	}
+	if err := resume(ctx); err != nil {
+		if scion.IsRefusedByHub(err) {
+			return nil, apply.HubRefusedResume("resume", err)
+		}
+		return nil, apply.ResumeFailed("resume", err)
+	}
+	if err := guard.Resumed(ctx); err != nil {
+		return nil, err
+	}
+	return guard, nil
 }
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
@@ -191,6 +227,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			check.Done(nil)
 			var prog *apply.Progress
+			// guard is set on the resume path: it checked the tree before the
+			// resume and reads the mounts back after it (lever#158).
+			var guard *apply.ManagerResume
 			switch decision {
 			case upApply:
 				// --fresh: apply's start-manager step deletes any record it
@@ -230,25 +269,20 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
-				// shared_folders: the resume re-resolves every mount source,
-				// as apply's start-manager step checks before its resume.
-				if err := app.PrepareSharedFoldersHost(); err != nil {
-					return err
-				}
-				resume := rep.Start("resume manager")
-				resume.TailFrom(w.stepTail(apply.KindStartManager))
-				// The resume and the gate after it can run over a minute
-				// (container start, pre-start hook, claude, settle): print
-				// progress about every 15 s (lever#168), or hand the stages
-				// to the progress list. Stopped on every return; the gate
-				// below gets the stages.
-				prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
+				guard, err = resumeForUp(ctx, deps, app, project, func(ctx context.Context) error {
+					resume := rep.Start("resume manager")
+					resume.TailFrom(w.stepTail(apply.KindStartManager))
+					// The resume and the gate after it can run over a minute
+					// (container start, pre-start hook, claude, settle): print
+					// progress about every 15 s (lever#168), or hand the stages
+					// to the progress list. Stopped on every return; the gate
+					// below gets the stages.
+					prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
+					return sc.Resume(ctx, app.Name, project)
+				})
 				defer prog.Stop()
-				if err := sc.Resume(ctx, app.Name, project); err != nil {
-					if scion.IsRefusedByHub(err) {
-						return apply.HubRefusedResume("resume", err)
-					}
-					return apply.ResumeFailed("resume", err)
+				if err != nil {
+					return err
 				}
 			case upNone:
 				// A running manager is not exempt: it refreshes its own token
@@ -271,7 +305,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// the "is up." print with no observation at all, and the apply
 			// paths returned on the first live look — over a harness that dies
 			// a moment later (lever#31). Gate every path before claiming up.
-			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, attachTTY)
+			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, attachTTY, guard)
 			prog.Stop()
 			if err != nil {
 				return err

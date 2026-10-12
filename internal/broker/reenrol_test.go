@@ -529,3 +529,48 @@ func TestFreshStartResetsTheAttemptCount(t *testing.T) {
 		t.Fatalf("heal attempts after a fresh start = %d, want 0", n)
 	}
 }
+
+// The manager's bounce is a resume: the lever#158 checks run around it
+// (DispatchConfig.ManagerResumeGuard). Unwired, or refusing before, the
+// manager is neither staged a ticket nor bounced; refusing after the
+// resume, the heal fails (the guard suspended the manager).
+func TestHealManagerResumeGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		guard      func(context.Context) (func(context.Context) error, error)
+		wantStaged bool
+		wantResume bool
+		wantAudit  string
+	}{
+		{"unwired", nil, false, false, "no check of the manager's tree mounts is wired"},
+		{"refused before", func(context.Context) (func(context.Context) error, error) {
+			return nil, errors.New("kb mounted by the manager record but no longer on the host")
+		}, false, false, "refusing to bounce appname: kb mounted"},
+		{"refused after", func(context.Context) (func(context.Context) error, error) {
+			return func(context.Context) error { return errors.New("kb is mounted from another place") }, nil
+		}, true, true, "tree mounts failed their check: kb is mounted from another place"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "appname", Phase: "suspended", ContainerStatus: "stopped"}},
+			}}
+			var buf bytes.Buffer
+			managerDir := filepath.Join(t.TempDir(), ".lever")
+			b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt), withAudit(&buf),
+				func(c *Config) {
+					c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = "all", managerDir
+					c.Dispatch.ManagerResumeGuard = tc.guard
+				}))
+			b.healLapse(context.Background(), "test-manager")
+			if staged := stagedCN(t, managerDir) != ""; staged != tc.wantStaged {
+				t.Fatalf("staged = %v, want %v", staged, tc.wantStaged)
+			}
+			if resumed := len(rt.resumed) > 0; resumed != tc.wantResume {
+				t.Fatalf("resumed = %v, want %v", resumed, tc.wantResume)
+			}
+			if !strings.Contains(buf.String(), tc.wantAudit) || strings.Contains(buf.String(), "healed via") {
+				t.Fatalf("audit %q, want %q and no heal", buf.String(), tc.wantAudit)
+			}
+		})
+	}
+}

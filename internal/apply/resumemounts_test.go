@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
 )
@@ -166,5 +167,64 @@ func TestStartManagerKeptForeignNamespaceWarns(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "treat the manager as compromised") {
 		t.Fatalf("logs %q", logs)
+	}
+}
+
+// ManagerResume (the resume paths outside start-manager): Settle checks
+// again until the container runs, and fails on what it then finds; a check
+// that never runs is a warning.
+func TestManagerResumeSettle(t *testing.T) {
+	old := settleBudget
+	settleBudget = RetryBudget{Attempts: 4, Interval: time.Millisecond}
+	t.Cleanup(func() { settleBudget = old })
+	app := &config.App{Name: "hello", Tree: t.TempDir()}
+	if err := os.Mkdir(filepath.Join(app.Tree, "kb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mounts := []jail.Mount{{Source: "/lever/kb", Destination: "/workspace/kb"}}
+	for _, tc := range []struct {
+		name    string
+		answers []error
+		wantErr string
+		wantLog string
+	}{
+		{"running after two looks", []error{jail.ErrContainerNotRunning, jail.ErrContainerNotRunning, nil}, "is mounted from another place", ""},
+		{"never running", []error{jail.ErrContainerNotRunning}, "", "could not check from the guest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i := 0
+			var logs []string
+			f := scionOKRunner()
+			d := Deps{
+				Scion:                  scion.New(f, scion.Options{}),
+				Log:                    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+				InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
+				CheckLiveMounts: func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+					err := tc.answers[min(i, len(tc.answers)-1)]
+					i++
+					if err != nil {
+						return nil, err
+					}
+					return []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}, nil
+				},
+			}
+			g, err := BeginManagerResume(context.Background(), d, app, "/lever", "conversation")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := g.Resumed(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			err = g.Settle(context.Background())
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.HasPrefix(err.Error(), "conversation: ") || !sawScionCall(f, "suspend hello") {
+					t.Fatalf("err = %v (calls %q), want %q and the manager suspended", err, joinedCalls(f), tc.wantErr)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(strings.Join(logs, "\n"), tc.wantLog) {
+				t.Fatalf("err = %v logs %q, want the warning %q", err, logs, tc.wantLog)
+			}
+		})
 	}
 }

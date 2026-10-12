@@ -77,7 +77,33 @@ type convFixture struct {
 	home      string
 	logs      []string
 	gated     int
+	guard     *fakeResumeGuard
 }
+
+// fakeResumeGuard records the lever#158 checks around a resume, in order,
+// and fails the step named in failAt.
+type fakeResumeGuard struct {
+	steps  []string
+	failAt string
+}
+
+func (g *fakeResumeGuard) step(name string) error {
+	g.steps = append(g.steps, name)
+	if g.failAt == name {
+		return errors.New(name + " refused")
+	}
+	return nil
+}
+
+func (g *fakeResumeGuard) begin(context.Context) (managerResume, error) {
+	if err := g.step("begin"); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+func (g *fakeResumeGuard) Resumed(context.Context) error { return g.step("resumed") }
+func (g *fakeResumeGuard) Live(context.Context) error    { return g.step("live") }
+func (g *fakeResumeGuard) Settle(context.Context) error  { return g.step("settle") }
 
 func newConvFixture(t *testing.T) *convFixture {
 	t.Helper()
@@ -103,7 +129,7 @@ func newConvFixture(t *testing.T) *convFixture {
 	if err := os.MkdirAll(ah, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	f := &convFixture{sc: &fakeConvScion{phase: scion.PhaseRunning}, agentHome: ah, home: home}
+	f := &convFixture{sc: &fakeConvScion{phase: scion.PhaseRunning}, agentHome: ah, home: home, guard: &fakeResumeGuard{}}
 	f.ops = convOps{
 		app:         &config.App{Name: "mgr", Tree: tree},
 		st:          state.State{Dir: stDir},
@@ -112,6 +138,7 @@ func newConvFixture(t *testing.T) *convFixture {
 		log:         func(format string, a ...any) { f.logs = append(f.logs, fmt.Sprintf(format, a...)) },
 		verifyRole:  func(context.Context) error { return nil },
 		gate:        func(context.Context) error { f.gated++; return nil },
+		beginResume: f.guard.begin,
 		suspendWait: apply.RetryBudget{Attempts: 3, Interval: time.Millisecond},
 	}
 	return f
@@ -185,6 +212,9 @@ func TestFreshBackupThenRestore(t *testing.T) {
 	if strings.Join(f.sc.calls, ",") != "suspend,resume" || f.gated != 1 {
 		t.Fatalf("calls = %v, gated %d", f.sc.calls, f.gated)
 	}
+	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live" {
+		t.Fatalf("resume checks = %q, want begin,resumed,live (lever#158)", got)
+	}
 	if b, err := os.ReadFile(f.transcript("old.jsonl")); err != nil || string(b) != "{\"old\":1}\n" {
 		t.Fatalf("restored: %q %v", b, err)
 	}
@@ -225,6 +255,9 @@ func TestRestoreFailureResumesAndKeepsRecord(t *testing.T) {
 	}
 	if strings.Join(f.sc.calls, ",") != "suspend,resume" || f.gated != 0 {
 		t.Fatalf("calls = %v gated %d, want the manager resumed after the failure", f.sc.calls, f.gated)
+	}
+	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,settle" {
+		t.Fatalf("resume checks = %q, want begin,resumed,settle: no gate follows that resume (lever#158)", got)
 	}
 	if got := f.latestSkill(t); got != "current" {
 		t.Fatalf("session record = %q, want it put back to current", got)
@@ -377,5 +410,66 @@ func TestFreshBackupNoHomeFailsClosed(t *testing.T) {
 	err = f.ops.backupBeforeDelete(&saved)(context.Background(), &scion.Agent{Slug: "mgr", Phase: scion.PhaseRunning})
 	if !errors.Is(err, guard) || strings.Join(f.sc.calls, ",") != "suspend" {
 		t.Fatalf("guard: err %v calls %v", err, f.sc.calls)
+	}
+}
+
+// TestRestoreResumeChecks: every resume a restore makes passes the
+// lever#158 checks. A refused pre-check leaves the manager suspended (no
+// resume), and a failed check after the resume fails the restore before
+// the gate reports the manager up.
+func TestRestoreResumeChecks(t *testing.T) {
+	for _, tc := range []struct {
+		failAt    string
+		wantCalls string
+		wantSteps string
+		wantGated int
+	}{
+		{"begin", "suspend", "begin", 0},
+		{"resumed", "suspend,resume", "begin,resumed", 0},
+		{"live", "suspend,resume", "begin,resumed,live", 1},
+	} {
+		t.Run(tc.failAt, func(t *testing.T) {
+			f := newConvFixture(t)
+			writeConvFile(t, f.transcript("old.jsonl"), "old\n")
+			m, found, err := f.ops.backup(context.Background(), "manual")
+			if err != nil || !found {
+				t.Fatalf("backup: %v %v", found, err)
+			}
+			f.guard.failAt = tc.failAt
+			err = f.ops.restore(context.Background(), m.ID, false)
+			if err == nil || !strings.Contains(err.Error(), tc.failAt+" refused") {
+				t.Fatalf("err = %v, want the %s refusal", err, tc.failAt)
+			}
+			if got := strings.Join(f.sc.calls, ","); got != tc.wantCalls {
+				t.Fatalf("calls = %q, want %q", got, tc.wantCalls)
+			}
+			if got := strings.Join(f.guard.steps, ","); got != tc.wantSteps || f.gated != tc.wantGated {
+				t.Fatalf("checks = %q gated %d, want %q gated %d", got, f.gated, tc.wantSteps, tc.wantGated)
+			}
+		})
+	}
+	// The resume after a failed restore: a refused pre-check keeps the
+	// manager suspended and says so.
+	f := newConvFixture(t)
+	f.sc.phase = scion.PhaseSuspended
+	f.guard.failAt = "begin"
+	err := f.ops.resumeAfterFailure(context.Background(), errors.New("cause"), "")
+	if err == nil || !strings.Contains(err.Error(), "the manager stays suspended: begin refused") || len(f.sc.calls) != 0 {
+		t.Fatalf("err = %v calls %v", err, f.sc.calls)
+	}
+	// A check after it fails: the error says the manager was resumed and
+	// what the check found (the guard suspended it).
+	f = newConvFixture(t)
+	f.guard.failAt = "settle"
+	err = f.ops.resumeAfterFailure(context.Background(), errors.New("cause"), "")
+	if err == nil || !strings.Contains(err.Error(), "settle refused") || strings.Join(f.sc.calls, ",") != "resume" {
+		t.Fatalf("err = %v calls %v", err, f.sc.calls)
+	}
+	// A convOps without the checks wired never resumes.
+	f = newConvFixture(t)
+	f.ops.beginResume = nil
+	err = f.ops.resumeAfterFailure(context.Background(), errors.New("cause"), "")
+	if err == nil || len(f.sc.calls) != 0 {
+		t.Fatalf("err = %v calls %v, want no resume without the checks", err, f.sc.calls)
 	}
 }

@@ -47,9 +47,21 @@ type convOps struct {
 	// own resume does), and gate the liveness gate after it.
 	verifyRole func(ctx context.Context) error
 	gate       func(ctx context.Context) error
-	now        func() time.Time
+	// beginResume starts the checks around every resume of the manager
+	// (apply.BeginManagerResume, lever#158): the host tree before it, the
+	// mounts read back after it. newConvOps always sets it.
+	beginResume func(ctx context.Context) (managerResume, error)
+	now         func() time.Time
 	// suspendWait bounds the wait for a suspended record (a test seam).
 	suspendWait apply.RetryBudget
+}
+
+// managerResume is the part of *apply.ManagerResume a restore drives (a
+// test seam).
+type managerResume interface {
+	Resumed(ctx context.Context) error
+	Live(ctx context.Context) error
+	Settle(ctx context.Context) error
 }
 
 // newConvOps wires convOps from a bring-up's live dependencies.
@@ -67,7 +79,20 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 		gate: func(ctx context.Context) error {
 			return apply.WaitManagerLive(ctx, w.deps, app.Name, project, nil)
 		},
+		beginResume: func(ctx context.Context) (managerResume, error) {
+			return apply.BeginManagerResume(ctx, w.deps, app, project, "conversation")
+		},
 	}
+}
+
+// startResume runs the checks before a resume of the manager. Without
+// beginResume (a convOps not built by newConvOps) it refuses: a resume
+// whose mounts nobody reads back is never made.
+func (o convOps) startResume(ctx context.Context) (managerResume, error) {
+	if o.beginResume == nil {
+		return nil, errors.New("internal error: no resume checks wired")
+	}
+	return o.beginResume(ctx)
 }
 
 // errConvStateInTree: a backup holds the whole conversation, and with it
@@ -294,13 +319,23 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	if err := o.verifyRole(ctx); err != nil {
 		return err
 	}
+	guard, err := o.startResume(ctx)
+	if err != nil {
+		return fmt.Errorf("%w; the manager stays suspended", err)
+	}
 	if err := o.sc.Resume(ctx, o.app.Name, project); err != nil {
 		if scion.IsRefusedByHub(err) {
 			return apply.HubRefusedResume("resume", err)
 		}
 		return apply.ResumeFailed("resume", err)
 	}
-	return o.gate(ctx)
+	if err := guard.Resumed(ctx); err != nil {
+		return err
+	}
+	if err := o.gate(ctx); err != nil {
+		return err
+	}
+	return guard.Live(ctx)
 }
 
 // resumeAfterFailure resumes a manager this code suspended, after cause,
@@ -315,8 +350,19 @@ func (o convOps) resumeAfterFailure(ctx context.Context, cause error, how string
 			return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
 		}
 	}
+	guard, gerr := o.startResume(rctx)
+	if gerr != nil {
+		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
+	}
 	if rerr := o.sc.Resume(rctx, o.app.Name, o.guest.Workspace); rerr != nil {
 		return fmt.Errorf("%w; the manager is suspended and resuming it failed (%s): run `lever up`", cause, termsafe.Sanitize(scion.ErrSummary(rerr)))
+	}
+	// No liveness gate here: Settle checks until the container runs.
+	if verr := guard.Resumed(rctx); verr != nil {
+		return fmt.Errorf("%w; the manager was resumed, then: %w", cause, verr)
+	}
+	if verr := guard.Settle(rctx); verr != nil {
+		return fmt.Errorf("%w; the manager was resumed, then: %w", cause, verr)
 	}
 	if how != "" {
 		how = " " + how

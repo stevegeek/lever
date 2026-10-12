@@ -103,7 +103,10 @@ closes that for the directories it names:
   the manager, failing the bring-up, when one comes from elsewhere, is missing at its place (the
   runtime resolves the destination in the same tree, so a link moves the mount point too) or is
   read-write where it should be read-only. That check comes after the
-  container start: until it runs, the manager may hold the wrong mount.
+  container start: until it runs, the manager may hold the wrong mount. Every resume of the
+  manager runs both checks: `lever apply`'s, `lever up`'s own (also after a VM restart),
+  `lever conversation restore`'s (and the resume after a failed restore or backup), and the
+  broker's re-enrol bounce, which refuses to resume the manager when it cannot run them.
 - The hard-link refusal also catches a pnpm `node_modules` (hard-linked from its store) and the
   objects of a `git clone --local`; keep such things out of protected directories.
 

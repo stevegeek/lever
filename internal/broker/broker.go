@@ -241,6 +241,14 @@ type DispatchConfig struct {
 	// shared folders are configured; nil skips the check. A refusal that
 	// wraps ErrSharedCheckUnavailable means the mounts could not be read.
 	SharedGuard func(ctx context.Context) error
+	// ManagerResumeGuard runs the checks apply runs around a resume of the
+	// manager (lever#158) for the broker's own: the re-enrol bounce.
+	// Called before anything is staged, it refuses when the host tree or
+	// the manager record's mounts are not what lever planned; the function
+	// it returns runs right after the resume and reads back, from the
+	// guest, where each tree mount comes from, suspending the manager on a
+	// mismatch. nil: the broker never resumes the manager (fail closed).
+	ManagerResumeGuard func(ctx context.Context) (after func(ctx context.Context) error, err error)
 	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
 	// instance tree (jail.StageWorkerTicket in production). The manager
 	// mounts the whole tree, so nothing a worker must redeem may be written
@@ -338,6 +346,7 @@ type Broker struct {
 	// configured (refuseStaleShares).
 	leftoverShareVolumes RecordVolumesFunc
 	sharedGuard          func(ctx context.Context) error
+	managerResumeGuard   func(ctx context.Context) (func(ctx context.Context) error, error)
 	// afterWorkspaceMkdir is a test seam: called between a strict worker
 	// workspace mkdir and the walk that follows it. nil outside tests.
 	afterWorkspaceMkdir func()
@@ -483,7 +492,8 @@ func New(c Config) *Broker {
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
-		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
+		managerResumeGuard: d.ManagerResumeGuard,
+		liveAttempts:       defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		maxRunningWorkers:   d.MaxRunningWorkers,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,

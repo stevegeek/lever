@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/broker"
@@ -387,6 +388,18 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// shared_folders: no worker that mounts one starts or resumes while the
 	// running manager lacks the pins that keep it from swapping a folder.
 	d.SharedGuard = sharedGuard(app, jr, jailMount)
+	// The re-enrol bounce of the manager is a resume: the checks apply
+	// runs around its own (lever#158), with the same client and runner.
+	d.ManagerResumeGuard = managerResumeGuard(app, apply.Deps{
+		Scion: sc,
+		Log:   daemon.Warnf,
+		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
+			return jail.ContainerMounts(ctx, jr, ref)
+		},
+		CheckLiveMounts: func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return jail.ContainerLiveMounts(ctx, jr, ref, want)
+		},
+	}, jailMount)
 	// shared_folders: a resume is refused when the worker's record holds a
 	// shared mount the config no longer grants (broker.refuseStaleShares).
 	// With a folder configured a failed read refuses the resume; with none,
@@ -530,4 +543,23 @@ func (h hubTokenHealer) TokenExpired(ctx context.Context, agent string) (bool, e
 
 func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
 	return h.sc.ResetAuth(ctx, agent, h.project)
+}
+
+// managerResumeGuard is broker.DispatchConfig.ManagerResumeGuard: the
+// checks before the resume (apply.BeginManagerResume), and after it the
+// read-back of the tree mounts, again until the container runs (there is
+// no liveness gate on the bounce), suspending the manager on a mismatch.
+func managerResumeGuard(app *config.App, d apply.Deps, jailMount string) func(context.Context) (func(context.Context) error, error) {
+	return func(ctx context.Context) (func(context.Context) error, error) {
+		g, err := apply.BeginManagerResume(ctx, d, app, jailMount, "broker")
+		if err != nil {
+			return nil, err
+		}
+		return func(ctx context.Context) error {
+			if err := g.Resumed(ctx); err != nil {
+				return err
+			}
+			return g.Settle(ctx)
+		}, nil
+	}
 }

@@ -336,8 +336,12 @@ version bump moves the block under the new version heading.
   from, the dropped ones included. A mount from elsewhere, missing at its place (the runtime
   resolves the destination in the same tree, so a link moves the mount point too) or read-write
   where it should be read-only, or a foreign namespace, suspends the manager and fails the
-  bring-up. A source that is gone no longer makes the whole live check unreadable: that mount
-  alone is reported. The swap itself cannot be prevented: until that check, the
+  bring-up. The same checks run, before and after the resume, on every other resume of the
+  manager: `lever up`'s own (also the one after a VM restart, lever#179), which now checks the
+  `read_only` paths on the host before it as apply does, `lever conversation restore` and its
+  resume after a failed restore or backup, and the broker's re-enrol bounce, which does not resume
+  the manager when it cannot run them. A source that is gone no longer makes the whole live check
+  unreadable: that mount alone is reported. The swap itself cannot be prevented: until that check, the
   manager may already hold the wrong mount.
 - **A hung probe's `podman exec` ends in the guest too (lever#158).** A host-side deadline killed
   only the `orb` or `limactl` client, and a `podman exec` the agent made hang could stay behind in

@@ -218,13 +218,13 @@ func TestWorkerCapHealerResume(t *testing.T) {
 		scion.Agent{Slug: "a", Phase: "running", ContainerStatus: "Up 1 minute"},
 		scion.Agent{Slug: "b", Phase: "suspended"})
 	rt.staticPhases = true
-	if _, ok := b.bounceForReenrol(context.Background(), "b", "b"); ok {
+	if _, ok := b.bounceForReenrol(context.Background(), "b", "b", nil); ok {
 		t.Fatal("the healer resumed a worker past the cap")
 	}
 	if len(rt.resumed) != 0 || !strings.Contains(audit.String(), "max_running_workers") {
 		t.Fatalf("resumed=%v audit:\n%s", rt.resumed, audit.String())
 	}
-	if verb, ok := b.bounceForReenrol(context.Background(), "a", "a"); !ok || verb != "suspend+resume" {
+	if verb, ok := b.bounceForReenrol(context.Background(), "a", "a", nil); !ok || verb != "suspend+resume" {
 		t.Fatalf("bounce of a running worker: verb=%q ok=%t", verb, ok)
 	}
 }

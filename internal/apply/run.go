@@ -153,6 +153,18 @@ type run struct {
 	// broker online after its hub start, so start-manager need not wait
 	// for it again.
 	brokerOnline bool
+	// subject prefixes the resume checks' messages: "start-manager" in
+	// Run, the command's own name on the other resume paths
+	// (ManagerResume).
+	subject string
+}
+
+// subjectName is the prefix of the resume checks' messages.
+func (r *run) subjectName() string {
+	if r.subject != "" {
+		return r.subject
+	}
+	return "start-manager"
 }
 
 // StageBootstrapMaterial writes m as the manager's one-time enrolment ticket
@@ -1183,7 +1195,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		}
 	}
 	if rec != nil && !r.fresh {
-		if err := r.checkStaleTreeMounts(ctx, jp, rec); err != nil {
+		if err := r.checkStaleTreeMounts(ctx, jp, managerKept(rec)); err != nil {
 			return err
 		}
 	}
@@ -1213,7 +1225,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		// suspends it and the probes' warnings are dropped (abandon).
 		probes.wait()
 		if verified, err = r.verifyResumedTreeMounts(ctx, jp); err == nil && !verified {
-			r.d.Log("start-manager: warning: lever could not check from the guest where manager %q's tree mounts come from after the resume; run `lever doctor` (row \"manager read-only paths\")", r.app.Name)
+			r.warnUnverifiedResume()
 		}
 	}
 	r.progress.Stop()
@@ -1718,10 +1730,10 @@ func managerKept(rec *scion.Agent) bool { return rec.Phase == scion.PhaseRunning
 //
 // A gone directory refuses the bring-up before anything is acted on,
 // naming the fix, unless apply will keep the record as it is
-// (managerKept): every other path resumes it — the forced resume of an
+// (kept, from managerKept): every other path resumes it — the forced resume of an
 // error phase too, even while its container is still up — and the resume
 // recreates the container. Everything else is a warning.
-func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, rec *scion.Agent) error {
+func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, kept bool) error {
 	got, ok := r.managerMounts(ctx, jp)
 	if !ok {
 		return nil
@@ -1730,10 +1742,10 @@ func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, rec *scion.Ag
 	if stale.Empty() {
 		return nil
 	}
-	if len(stale.Gone) > 0 && !managerKept(rec) {
-		return fmt.Errorf("start-manager: manager %q cannot be resumed: %s. To fix it, %s", r.app.Name, stale, stale.Fix())
+	if len(stale.Gone) > 0 && !kept {
+		return fmt.Errorf("%s: manager %q cannot be resumed: %s. To fix it, %s", r.subjectName(), r.app.Name, stale, stale.Fix())
 	}
-	r.d.Log("start-manager: warning: manager %q: %s. %s", r.app.Name, stale, stale.Fix())
+	r.d.logf("%s: warning: manager %q: %s. %s", r.subjectName(), r.app.Name, stale, stale.Fix())
 	return nil
 }
 
@@ -1812,8 +1824,14 @@ func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified 
 	if serr := r.d.Scion.Suspend(ctx, r.app.Name, jp); serr != nil {
 		suspended = "lever could NOT suspend it (" + scion.ErrSummary(serr) + "): stop it yourself (`lever stop`)"
 	}
-	return true, fmt.Errorf("start-manager: manager %q after its resume: %s; %s. Find and undo what changed on the host (put the real directory back), then run `lever up` again, or back up what you need and recreate the manager (`lever up --fresh`); treat what the manager could reach since as exposed",
-		r.app.Name, why, suspended)
+	return true, fmt.Errorf("%s: manager %q after its resume: %s; %s. Find and undo what changed on the host (put the real directory back), then run `lever up` again, or recreate the manager with `lever up --fresh` (it backs the conversation up first); treat what the manager could reach since as exposed, and if that includes the manager itself, do not add --keep-conversation, which carries the session you no longer trust into the new manager",
+		r.subjectName(), r.app.Name, why, suspended)
+}
+
+// warnUnverifiedResume is the warning for a resume whose tree mounts
+// lever could not read back even once the manager was live.
+func (r *run) warnUnverifiedResume() {
+	r.d.logf("%s: warning: lever could not check from the guest where manager %q's tree mounts come from after the resume; run `lever doctor` (row \"manager read-only paths\")", r.subjectName(), r.app.Name)
 }
 
 // managerMounts is the manager's mounts for checkStaleTreeMounts: its
@@ -1863,7 +1881,7 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 		live, err := LiveTreeMountGaps(ctx, r.d.CheckLiveMounts, jp, ref, want)
 		switch {
 		case errors.Is(err, jail.ErrForeignNamespace):
-			r.d.Log("start-manager: warning: manager %q: %v. Something in the container moved it there to show lever a staged view of its mounts: treat the manager as compromised, back up what you need and recreate it (`lever up --fresh`)", r.app.Name, err)
+			r.d.Log("start-manager: warning: manager %q: %v. Something in the container moved it there to show lever a staged view of its mounts: treat the manager as compromised and recreate it with `lever up --fresh`, without --keep-conversation", r.app.Name, err)
 			return
 		case err != nil:
 			r.d.Log("start-manager: warning: lever could not check manager %q's live mounts from the guest (%v); run `lever doctor` to check", r.app.Name, err)

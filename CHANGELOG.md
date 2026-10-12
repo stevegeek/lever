@@ -69,7 +69,6 @@ version bump moves the block under the new version heading.
   a pinned commit and keeps it only if its size and sha256 match; the tool never downloads and
   picks up a fetched model within a minute. `lever doctor` gains a `voice` row for dictation.
   Shipped in releases and built by `make install`.
-
 - **Doctor row *podman storage* (lever#173).** It reads the jail's rootless podman store as the
   jail user: the podman version, the counts of images, containers and layers, the layers no image
   or container uses (orphans) and their size, layers flagged incomplete, and podman's own
@@ -87,7 +86,6 @@ version bump moves the block under the new version heading.
   container outside its mounts, podman volumes) and what it keeps (the hub records, the agent
   homes and conversations, the tree, the host state). `podman system check` is named for 5.x.
   A troubleshooting row for the load-image failure points at it.
-
 - **A known cause when the manager's harness dies (#178).** When the manager liveness gate
   (`lever apply`, `lever up` after a resume) sees the harness die or never come up, lever counts
   stale background-session records in the manager container (it usually outlives the harness),
@@ -117,14 +115,12 @@ version bump moves the block under the new version heading.
   backslashes, `$` or a `#` comment in an `-S` string, `-S` grouped after other letters (`-vS`),
   an option it does not know (BSD `-P`, an ambiguous long option), and an `env` with no command;
   write such a command as separate words.
-
 - **The broker stops every supervised tool with SIGTERM and 1.5 s of grace before SIGKILL** (it
   sent SIGKILL at once), so a tool can stop a child of its own.
 - **`lever doctor` gains `voice tool` and `voice model` rows** that check any configured
   `lever-tool-whisper` entry (its dictation socket's health, and its model's pinned size and
   sha256), also with `remote.voice` off, when only agents use the tool. The `voice` row stays
   about dictation.
-
 - **scion's settings-keys warning is hidden (#169).** scion prints `WARN settings file contains
   unrecognized keys (these will be ignored) keys=[hub.project_id runtimes[*].type ...]` on every
   CLI call against a v1 settings file. It is harmless: the legacy-format probe that prints it runs
@@ -143,7 +139,6 @@ version bump moves the block under the new version heading.
   (`internal/jailabi/fingerprint.txt`; Go files count by their tokens and `//go:` directives, so
   comments, blank lines, spacing and the release version do not); CONTRIBUTING.md says how to bump it. An instance
   Dockerfile that copies the binaries in itself sets the label from `make -s lever-image-jail-abi`.
-
 - **`lever up` reports a manager up only once claude runs (lever#164).** After a start or a resume
   the gate waits for claude's tmux pane in the manager container to be alive (up to 2 min, since
   scion's pre-start hook runs first), then holds the record for the 10 s settle window and checks
@@ -165,7 +160,6 @@ version bump moves the block under the new version heading.
   rootless podman sciontool drops to the agent user (uid 1000) before it runs the hook. The symlink
   confinement stays as defence for a rootful runtime. `CONTRIBUTING.md` gains a release checklist
   that asks for a live boot (or the uid in the pinned scion source) on a change to the boot step.
-
 - **Claude Code background sessions are off in every agent (#178).** At every start,
   `lever-agent boot` writes `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` into the env of the
   managed-settings file, and `disableAgentView: true` beside it, for every agent, whatever its

@@ -72,7 +72,7 @@ func fillDeps(d Deps) Deps {
 		d.EnsureControllerPAT = func(context.Context) error { return nil }
 	}
 	if d.WaitBrokerReady == nil {
-		d.WaitBrokerReady = func(context.Context, string) error { return nil }
+		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
 	}
 	if d.MintManagerBootstrap == nil {
 		d.MintManagerBootstrap = func(context.Context) (BootstrapMaterial, error) {
@@ -805,13 +805,13 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	var waitCalls, startCallsAtGate int
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
-		WaitBrokerReady: func(ctx context.Context, project string) error {
+		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return nil // scion-server's wait after the hub start
+				return false, nil // scion-server's wait after the hub start: timed out
 			}
 			waitCalls++
 			startCallsAtGate = r.startCalls
-			return nil
+			return true, nil
 		},
 	}
 	if err := runApply(app, deps); err != nil {
@@ -828,6 +828,30 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	}
 }
 
+// lever#190: when the scion-server step saw the broker online, start-manager
+// does not wait for it a second time in the same run.
+func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	var waits []string
+	deps := Deps{
+		Scion: scion.New(r, scion.Options{}),
+		WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
+			waits = append(waits, project)
+			return true, nil
+		},
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(waits) != 1 || waits[0] != "global" {
+		t.Fatalf("waits = %q, want only scion-server's", waits)
+	}
+	if r.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1", r.startCalls)
+	}
+}
+
 // TestStartManagerBrokerReadyErrorAbortsBeforeActing: a gate error (e.g. ctx
 // cancellation — the gate's only non-nil return, since it is otherwise
 // fail-soft) aborts start-manager before it touches any record.
@@ -836,11 +860,11 @@ func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
-		WaitBrokerReady: func(ctx context.Context, project string) error {
+		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return nil // scion-server's wait after the hub start
+				return false, nil // scion-server's wait after the hub start: timed out
 			}
-			return context.Canceled
+			return false, context.Canceled
 		},
 	}
 	err := runApply(app, deps)
@@ -3092,9 +3116,9 @@ func TestScionServerWaitsForTheBroker(t *testing.T) {
 		deps := Deps{
 			Scion:          hubScion(f, app),
 			EnsureHubLogin: func(context.Context) (bool, error) { return changed, nil },
-			WaitBrokerReady: func(_ context.Context, project string) error {
+			WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
 				waits = append(waits, project)
-				return nil
+				return false, nil
 			},
 		}
 		if err := runApply(app, deps); err != nil {

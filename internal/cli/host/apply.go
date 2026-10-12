@@ -1392,7 +1392,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// registered + online (see the Deps field doc): the broker registers
 		// asynchronously after the Hub API, so the first create/resume would
 		// otherwise race it. Fail-soft in the client, so it never fails bring-up.
-		WaitBrokerReady: sc.WaitRuntimeBrokerReady,
+		WaitBrokerReady: sc.RuntimeBrokerReady,
 
 		// RearmBootstrap backs Deps.RearmBootstrap — see brokerController.Rearm
 		// for the full rationale (re-arm the single-use latch on the create path,

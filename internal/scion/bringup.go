@@ -230,8 +230,34 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 	attempts := 0
 	var lastErr error
 	errGone := errors.New("server gone")
-	err := retry.Until(ctx, 0, c.hubReadyInterval, func() (bool, error) {
+	// The wait itself runs in the guest (lever#190): one jail call polls the
+	// hub's public /healthz every 150 ms for up to hubAliveEvery, instead of
+	// one jail call and one scion CLI start per second. The scion CLI probe
+	// below still decides: it runs once after each in-guest wait, so the
+	// readiness rule (an answer, or a refused credential) is unchanged, and
+	// a hub that never answers /healthz is still found within hubAliveEvery.
+	// Without an endpoint, or when the in-guest wait cannot run (no curl),
+	// it polls with the CLI every hubReadyInterval as before.
+	inGuest := c.hubEndpoint != ""
+	pace := false
+	err := retry.Until(ctx, 0, 0, func() (bool, error) {
 		attempts++
+		if pace {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(c.hubReadyInterval):
+			}
+		}
+		pace = true
+		if inGuest {
+			switch c.awaitHealthz(ctx, min(c.hubAliveEvery, time.Until(deadline))) {
+			case healthzDown:
+				pace = false // the guest loop has already waited
+			case healthzUnavailable:
+				inGuest = false
+			}
+		}
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json")
 		if lastErr == nil || isHubAuthRefusal(lastErr) {
 			return true, nil
@@ -264,6 +290,48 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 	return err
 }
 
+// healthzScript polls $1/healthz from inside the jail every 150 ms, at most
+// $2 more times: exit 0 once it answers 200, 3 when it never did
+// (waitedExit), 127 without curl. Each request is bounded, so a hub that accepts and hangs
+// cannot stretch the loop.
+const healthzScript = `command -v curl >/dev/null 2>&1 || exit 127
+i=0
+while :; do
+  curl -fs -o /dev/null --connect-timeout 1 --max-time 2 "$1/healthz" && exit 0
+  [ "$i" -ge "$2" ] && exit 3
+  sleep 0.15
+  i=$((i+1))
+done`
+
+// waitedExit is how both in-guest waits (healthzScript, brokerWaitScript)
+// say they polled for their whole window without seeing what they wait for.
+// A code of its own, so that a jail transport failure or a shell that could
+// not start (exit 1, 126, 255) is never read as "not ready yet".
+const waitedExit = 3
+
+type healthzResult int
+
+const (
+	healthzUp          healthzResult = iota
+	healthzDown                      // polled for the whole window, no answer
+	healthzUnavailable               // the in-guest poll could not run
+)
+
+// awaitHealthz waits in the jail, for up to d, until the hub's /healthz
+// answers (healthzScript). Only waitedExit means "not up yet"; any other
+// failure (no curl, a jail transport error) means this path is unusable here.
+func (c *Client) awaitHealthz(ctx context.Context, d time.Duration) healthzResult {
+	n := int(d / (150 * time.Millisecond))
+	res, err := c.r.Run(ctx, nil, "sh", "-c", healthzScript, "_", strings.TrimRight(c.hubEndpoint, "/"), strconv.Itoa(n))
+	switch {
+	case err == nil:
+		return healthzUp
+	case res.Code == waitedExit:
+		return healthzDown
+	}
+	return healthzUnavailable
+}
+
 // isHubAuthRefusal reports whether a scion CLI error is the hub refusing the
 // credential (HTTP 401; scion cmd/common.go maps it to this message), which
 // proves the hub is up and answering.
@@ -277,11 +345,14 @@ func isHubAuthRefusal(err error) bool {
 var ErrHubNotReady = errors.New("hub not ready")
 
 // brokerReadyAttempts/brokerReadyInterval are the default WaitRuntimeBrokerReady
-// budget.
+// budget: their product is how long it waits.
 const (
 	brokerReadyAttempts = 30
 	brokerReadyInterval = 1 * time.Second
 )
+
+// brokerPollEvery is how often the in-guest broker wait asks the hub.
+const brokerPollEvery = 200 * time.Millisecond
 
 // runtimeBroker is the subset of a `scion hub brokers --format json` row we read
 // to judge readiness. A broker registers with the hub before it finishes
@@ -296,8 +367,45 @@ func (b runtimeBroker) ready() bool {
 	return b.Status == "online" || b.ConnectionState == "connected"
 }
 
+// brokersOnline reports whether a `hub brokers --format json` output lists
+// a ready broker. parseJSON (not raw Unmarshal): scion prints the dev-auth
+// WARNING banner into the same stream, and parseJSON strips it + ANSI before
+// decoding — matching List/messaging. A parse miss is "not ready".
+func brokersOnline(out string) bool {
+	var brokers []runtimeBroker
+	if parseJSON(out, &brokers) != nil {
+		return false
+	}
+	return slices.ContainsFunc(brokers, runtimeBroker.ready)
+}
+
+// brokerWaitScript runs `scion hub brokers` ($3…) in the jail every 200 ms,
+// at most $1 more times, until its output names an online or connected
+// broker, and prints that output; exit 3 (waitedExit) when none did. The text match only decides when to stop
+// polling: lever parses the printed output itself (brokersOnline) and keeps
+// waiting when it does not hold.
+const brokerWaitScript = `n=$1; shift
+i=0
+while :; do
+  if out=$("$@" 2>/dev/null); then
+    case $out in *'"online"'*|*'"connected"'*) printf '%s' "$out"; exit 0 ;; esac
+  fi
+  [ "$i" -ge "$n" ] && exit 3
+  sleep 0.2
+  i=$((i+1))
+done`
+
 // WaitRuntimeBrokerReady blocks until the hub reports at least one ONLINE
-// runtime broker, or the attempt budget is exhausted. The scion workstation
+// runtime broker, or the budget is exhausted; see RuntimeBrokerReady, whose
+// answer it drops.
+func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {
+	_, err := c.RuntimeBrokerReady(ctx, project)
+	return err
+}
+
+// RuntimeBrokerReady blocks until the hub reports at least one ONLINE
+// runtime broker, or the budget is exhausted, and reports whether it saw
+// one. The scion workstation
 // daemon brings up its Hub API and its runtime broker separately: waitHubReady
 // (called from ServerStart) confirms the Hub API serves, but the runtime broker
 // registers AND connects asynchronously afterward — and `scion start`/`resume`
@@ -306,34 +414,60 @@ func (b runtimeBroker) ready() bool {
 // otherwise fails the first `up` and needs a second, or leans on the start
 // path's broker-unavailable retry).
 //
-// FAIL-SOFT: on budget exhaustion it returns nil (not an error), so the caller
-// proceeds to start regardless — the start path's own bounded broker-unavailable
-// retry (internal/apply's retryOnBrokerUnavailable, gated on
+// The wait runs in the guest (lever#190): one jail call polls `hub brokers`
+// every brokerPollEvery (brokerWaitScript) instead of one jail call per
+// second, so an online broker is seen within a fraction of a second. When
+// that call cannot run, it polls from the host as before.
+//
+// FAIL-SOFT: on budget exhaustion it returns (false, nil), not an error, so the
+// caller proceeds to start regardless — the start path's own bounded
+// broker-unavailable retry (internal/apply's retryOnBrokerUnavailable, gated on
 // IsBrokerUnavailable) is the backstop, and hard-failing the whole bring-up on
-// a readiness probe that can't confirm would be worse than letting start try. Only ctx cancellation returns an error. `hub brokers` lists
+// a readiness probe that can't confirm would be worse than letting start try.
+// Only ctx cancellation returns an error. `hub brokers` lists
 // brokers hub-wide; project scopes only the hub-client/settings resolution, so
 // it is passed to dodge the "no project" resolution failure a bare call hits.
-func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {
+func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, error) {
 	args := append([]string{"hub", "brokers", "--format", "json"}, projectFlag(project)...)
+	budget := time.Duration(c.brokerReadyAttempts) * c.brokerReadyInterval
+	deadline := time.Now().Add(budget)
+	for {
+		n := int(time.Until(deadline) / brokerPollEvery)
+		argv := append([]string{"-c", brokerWaitScript, "_", strconv.Itoa(max(n, 0)), c.bin}, args...)
+		res, err := c.r.RunIn(ctx, "", c.env(), "sh", argv...)
+		if cerr := ctx.Err(); cerr != nil {
+			return false, cerr
+		}
+		if err == nil && brokersOnline(res.Stdout) {
+			return true, nil
+		}
+		if err != nil && res.Code != waitedExit {
+			break // the in-guest wait cannot run here: poll from the host
+		}
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		// The guest matched text that lever's parse did not accept: keep
+		// waiting, without spinning.
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(brokerPollEvery):
+		}
+	}
+	online := false
 	err := retry.Until(ctx, c.brokerReadyAttempts, c.brokerReadyInterval, func() (bool, error) {
 		out, err := c.runValue(ctx, "", args...)
 		if err != nil {
 			return false, nil
 		}
-		// parseJSON (not raw Unmarshal): scion prints the dev-auth WARNING
-		// banner into the same stream, and parseJSON strips it + ANSI before
-		// decoding — matching List/messaging. A parse miss leaves brokers empty
-		// (not ready), so it stays fail-soft.
-		var brokers []runtimeBroker
-		if parseJSON(out, &brokers) != nil {
-			return false, nil
-		}
-		return slices.ContainsFunc(brokers, runtimeBroker.ready), nil
+		online = brokersOnline(out)
+		return online, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
-		return nil
+		return false, nil
 	}
-	return err
+	return online, err
 }
 
 // InitMachine seeds the machine-level scion dir + default harness configs

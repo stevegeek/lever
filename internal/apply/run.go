@@ -144,6 +144,10 @@ type run struct {
 	// record is known to carry the manager.read_only mounts; any other is
 	// probed and warned about (warnManagerTreeMounts).
 	managerCreated bool
+	// brokerOnline records that the scion-server step saw the runtime
+	// broker online after its hub start, so start-manager need not wait
+	// for it again.
+	brokerOnline bool
 }
 
 // StageBootstrapMaterial writes m as the manager's one-time enrolment ticket
@@ -234,8 +238,10 @@ type Deps struct {
 	// broker's async registration — the flakiness that made first-boot need a
 	// second `up`. The implementation is fail-soft (returns nil on timeout), so
 	// it never fails the bring-up on its own; the start path's broker-unavailable
-	// retry still backstops it.
-	WaitBrokerReady      func(ctx context.Context, project string) error
+	// retry still backstops it. It reports whether it saw the broker online,
+	// so start-manager can skip its own wait when the scion-server step's saw
+	// it in the same run (lever#190).
+	WaitBrokerReady      func(ctx context.Context, project string) (online bool, err error)
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 	// RearmBootstrap restarts the broker (re-arming its single-use /bootstrap
 	// latch; broker CA + signing keys persist on disk so existing agent certs
@@ -796,9 +802,11 @@ func (r *run) scionServer(ctx context.Context) error {
 	// apply: with the broker online it is one `hub brokers` call. The wait
 	// is fail-soft, like the one before start-manager. It asks scion's
 	// global settings, because the tree may not be a scion project yet.
-	if err := r.d.WaitBrokerReady(ctx, scionGlobalProject); err != nil {
+	online, err := r.d.WaitBrokerReady(ctx, scionGlobalProject)
+	if err != nil {
 		return fmt.Errorf("scion-server: waiting for runtime broker: %w", err)
 	}
+	r.brokerOnline = online
 	return nil
 }
 
@@ -1016,8 +1024,11 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 }
 
 // hubLinkRetryDelays are the waits before each retry of a hub link that
-// failed with no_runtime_broker. A variable so tests can shorten it.
-var hubLinkRetryDelays = []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second}
+// failed with no_runtime_broker. A variable so tests can shorten it. Short
+// first (lever#190): a broker that registers moments late costs a second,
+// not five; doubling up to 16 s keeps the backstop's reach (31 s, the old
+// 5, 10, 20 s reached 35 s) for a slow cold start.
+var hubLinkRetryDelays = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
 
 // hubLink runs `scion hub link`, retrying a 422 no_runtime_broker a few
 // times (lever#166): the link's agent sync creates agents on the hub, which
@@ -1120,8 +1131,14 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// is the proactive complement to the broker-unavailable retry below — wait
 	// for a ready broker rather than only reacting when a call fails against a
 	// not-yet-ready one. Fail-soft (never errors on timeout); the retry backstops.
-	if err := r.d.WaitBrokerReady(ctx, jp); err != nil {
-		return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
+	//
+	// Skipped when the scion-server step of this same run saw the broker
+	// online (lever#190): nothing between the two restarts the hub, and a
+	// broker lost since is what the retry below is for.
+	if !r.brokerOnline {
+		if _, err := r.d.WaitBrokerReady(ctx, jp); err != nil {
+			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
+		}
 	}
 	opts, err := r.managerStartOpts(ctx, jp, task, instructions)
 	if err != nil {

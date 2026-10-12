@@ -421,3 +421,47 @@ func TestAliasFallbackHalfClosedStates(t *testing.T) {
 		t.Fatalf("v6 closed + v4 open: nothing may be committed, got %v", bins)
 	}
 }
+
+// The re-apply skip for a live closed posture holds only for a chain that is
+// exactly the closed ruleset (lever#187): a rule added or removed by hand,
+// or a port the config now allows, is rebuilt, with the alias read back from
+// the live chain when the closed chain blocks the lookup.
+func TestApplyEgressRebuildsAClosedChainThatDiffers(t *testing.T) {
+	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
+	cases := map[string]struct {
+		v4    string
+		ports []int
+	}{
+		"accept added":   {strings.Replace(backendtest.ClosedChain, "-A LEVER_EGRESS -o lo -j ACCEPT\n", "-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 1.2.3.4/32 -j ACCEPT\n", 1), []int{8443}},
+		"drop removed":   {strings.Replace(backendtest.ClosedChain, "-A LEVER_EGRESS -d 10.0.0.0/8 -j DROP\n", "", 1), []int{8443}},
+		"port added":     {backendtest.ClosedChain, []int{8443, 9000}},
+		"port withdrawn": {backendtest.ClosedChain, nil},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newListingRunner(c.v4, backendtest.ClosedChain6)
+			v4, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, c.ports, true)
+			if err != nil || !rebuilt || v4 != backendtest.HostAliasV4 {
+				t.Fatalf("v4=%q rebuilt=%v err=%v; want a rebuild from the live alias", v4, rebuilt, err)
+			}
+			backendtest.AssertAtomicCommitOrder(t, r.FakeRunner)
+			if got, want := committedV4(t, r.FakeRunner), egress.RestoreInput(egress.BuildRules(backendtest.HostAliasV4, backendtest.HostAliasV6, c.ports, true), egress.IPv4); got != want {
+				t.Fatalf("committed:\n%s\nwant:\n%s", got, want)
+			}
+		})
+	}
+}
+
+// The chain and the OUTPUT jump are ensured before the skip, so a closed
+// chain that OUTPUT no longer jumps to is never left that way.
+func TestApplyEgressEnsuresTheJumpBeforeTheClosedSkip(t *testing.T) {
+	r := newListingRunner(backendtest.ClosedChain, backendtest.ClosedChain6)
+	if _, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), noopResolve(t), nil, []int{8443}, true); err != nil || rebuilt {
+		t.Fatalf("rebuilt=%v err=%v; want the skip", rebuilt, err)
+	}
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		if !r.Called(proc.ArgvContains(bin + " -C OUTPUT -j LEVER_EGRESS")) {
+			t.Errorf("%s: the OUTPUT jump was not checked on the skip path", bin)
+		}
+	}
+}

@@ -300,6 +300,13 @@ type Deps struct {
 	// error is logged, not fatal: the manager is up, and without the record
 	// contacts are refused (fail closed). Nil records nothing.
 	BeginSession func(agent string) (commit func() error)
+	// BackupManagerConversation, when set, runs under PlanOpts.Fresh just
+	// before the manager record rec is deleted (scion deletes the record's
+	// home, and the conversation with it). An error stops the fresh start
+	// with nothing deleted: a backup the operator asked for never fails
+	// silently into a discard (lever#198). Nil backs nothing up
+	// (`up --fresh --no-backup`, and `apply`, which never deletes a record).
+	BackupManagerConversation func(ctx context.Context, rec *scion.Agent) error
 	// InspectContainerMounts reads a jail container's mounts (id or name),
 	// jail.ContainerMounts in production. Used to warn when a manager that
 	// apply kept or resumed lacks the manager.read_only mounts, which only a
@@ -1191,7 +1198,7 @@ func (r *run) warnManagerClaude(ctx context.Context, jp string) {
 	if err != nil || got.Matches(want) {
 		return
 	}
-	r.d.Log("start-manager: warning: manager %q runs with claude settings %s, but the config sets %s; the config's values take effect at its next start (`lever stop && lever up`). If a start does not change them, the image's lever-agent predates them: rebuild it (`make lever-image`), then recreate the manager with `lever up --fresh` (back up its conversation first: it is discarded) — `lever stop && lever up` resumes it on its old image",
+	r.d.Log("start-manager: warning: manager %q runs with claude settings %s, but the config sets %s; the config's values take effect at its next start (`lever stop && lever up`). If a start does not change them, the image's lever-agent predates them: rebuild it (`make lever-image`), then recreate the manager with `lever up --fresh --keep-conversation` (it backs up the conversation and resumes the new manager on it) — `lever stop && lever up` resumes it on its old image",
 		r.app.Name, got.Describe(), jail.DescribeClaude(want))
 }
 
@@ -1440,10 +1447,10 @@ func ProbeReplacedEntries(ctx context.Context, probe WritableProbe, ref string, 
 }
 
 // ManagerTreeMountsFix is the operator's way out of every gap: a fresh
-// create (which discards the conversation, so back it up first), and for a
+// create (`up --fresh --keep-conversation` carries the conversation over), and for a
 // replaced directory, editing protected directories in place from now on.
 func ManagerTreeMountsFix(g TreeMountGaps) string {
-	fix := "back up the manager's conversation first, then run `lever up --fresh` to recreate the manager with the mounts (the fresh start deletes the manager record and its conversation)"
+	fix := "run `lever up --fresh --keep-conversation` to recreate the manager with the mounts and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"
 	if g.Stale() {
 		fix += "; from then on edit protected directories in place — replacing one on the host (rm -rf and recreate, a rename-based deploy, a git checkout that removes and re-adds it) drops the protection until the next fresh create"
 	}
@@ -1518,7 +1525,7 @@ func (s StaleTreeMounts) String() string {
 // is enough) or start fresh; for a dropped mount, keep the directory until
 // a fresh create, which is the only way to drop the mount.
 func (s StaleTreeMounts) Fix() string {
-	const fresh = "back up the manager's conversation first, then run `lever up --fresh` (the fresh start deletes the manager record and its conversation, and creates the manager with the mounts the config names now)"
+	const fresh = "run `lever up --fresh --keep-conversation` (it recreates the manager with the mounts the config names now and keeps its conversation; plain `--fresh` starts a new one; both back the old one up first)"
 	if len(s.Gone) > 0 {
 		return "recreate each missing directory on the host as a real directory (an empty one is enough; replace a symbolic link with one) and run the command again; or, to drop the mounts, " + fresh
 	}
@@ -1745,7 +1752,7 @@ func (r *run) warnManagerNestedVirt(ctx context.Context, jp string) {
 // NestedVirtRecreateFix is how a manager gains or drops /dev/kvm: a fresh
 // create, which discards the conversation (a stop and up keeps the record's
 // volumes).
-const NestedVirtRecreateFix = "recreate it to apply the change: back up the conversation first, then `lever up --fresh` (discards the conversation; `lever stop` + `lever up` keeps the old devices)"
+const NestedVirtRecreateFix = "recreate it to apply the change: `lever up --fresh --keep-conversation` (`lever stop` + `lever up` keeps the old devices)"
 
 // convergeManager acts on the observed manager record (nil when absent, already
 // settled out of any transitional phase by observeManager): create, keep,
@@ -1767,6 +1774,11 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// (lever#33). Loud, like every other discard; the create that follows
 		// is what puts a changed manager.image into effect (a resume keeps
 		// the image the record was created with).
+		if r.d.BackupManagerConversation != nil {
+			if err := r.d.BackupManagerConversation(ctx, rec); err != nil {
+				return false, fmt.Errorf("start-manager: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.app.Name, err)
+			}
+		}
 		return true, r.recoverDeleteAndCreate(ctx, jp, opts,
 			fmt.Sprintf("start-manager: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.app.Name, scion.BoundedQuote(rec.Phase)),
 			"--fresh delete")

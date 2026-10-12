@@ -1857,7 +1857,7 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		{"all mounted, probe refused", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, false, "1 path(s) read-only in \"assistant\" (mounted, and a write probe refused), 3 pin(s)", ""},
 		{"created before the setting", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, false, false,
 			"assistant/tools not mounted read-only: the agent can write it", "lever up --fresh"},
-		{"entry pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, ro)}), refused, false, false, "assistant not pinned: the agent can rename it away", "back up the manager's conversation"},
+		{"entry pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, ro)}), refused, false, false, "assistant not pinned: the agent can rename it away", "--keep-conversation"},
 		{"worker pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, ro, wpins[0]}}), refused, false, false,
 			"workers/w (a worker dir) not pinned: the manager can replace it with a symbolic link and have that worker mount a protected directory", "lever up --fresh"},
 		{"entry mounted rw", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, pin, jail.Mount{Source: "/lever/assistant/tools", Destination: "/workspace/assistant/tools", RW: true})}), refused, false, false,
@@ -2349,7 +2349,7 @@ func TestCheckNestedVirt(t *testing.T) {
 	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", has); !r.ok {
 		t.Fatalf("all good: %+v", r)
 	}
-	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", lacks); r.ok || !strings.Contains(r.fix, "lever up --fresh") || !strings.Contains(r.fix, "back up") {
+	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", lacks); r.ok || !strings.Contains(r.fix, "lever up --fresh --keep-conversation") {
 		t.Fatalf("container lacks kvm: %+v", r)
 	}
 	bad := proc.NewFakeRunner()

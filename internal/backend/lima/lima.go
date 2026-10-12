@@ -159,7 +159,7 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	}
 	if !created && cfg.Warn != nil {
 		for _, d := range inst.sizingDrift(cfg.CPUs, cfg.Memory) {
-			cfg.Warn("jail: warning: %s; Lima applies it only when it creates the VM (back up the conversation, then `lever destroy` and `lever up` to recreate)", d)
+			cfg.Warn("jail: warning: %s; Lima applies it only when it creates the VM (to recreate: `lever conversation backup`, `lever destroy`, `lever up`, then `lever conversation restore`)", d)
 		}
 	}
 	s := rep.Start("start VM")

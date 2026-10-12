@@ -54,7 +54,7 @@ func TestCheckClaudeSettings(t *testing.T) {
 		t.Fatalf("differs: %+v", r)
 	}
 	// An old image is fixed by a new container, never by stop+up alone.
-	for _, want := range []string{"make lever-image", "lever up --fresh", "back up its conversation", "lever worker purge <name>", "recycle"} {
+	for _, want := range []string{"make lever-image", "lever up --fresh --keep-conversation", "lever worker purge <name>", "recycle"} {
 		if !strings.Contains(r.fix, want) {
 			t.Fatalf("fix %q lacks %q", r.fix, want)
 		}

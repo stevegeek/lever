@@ -40,7 +40,7 @@ func TestWarnManagerClaude(t *testing.T) {
 	r.warnManagerClaude(context.Background(), "/lever/proj")
 	if len(logs) != 1 || !strings.Contains(logs[0], "runs with claude settings window 200000, but the config sets window 400000, after-compact note") ||
 		!strings.Contains(logs[0], "lever stop && lever up") || !strings.Contains(logs[0], "make lever-image") ||
-		!strings.Contains(logs[0], "lever up --fresh") || !strings.Contains(logs[0], "back up its conversation") {
+		!strings.Contains(logs[0], "lever up --fresh") || !strings.Contains(logs[0], "--keep-conversation") {
 		t.Fatalf("differs: %q", logs)
 	}
 

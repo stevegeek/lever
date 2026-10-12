@@ -1337,7 +1337,7 @@ func checkNestedVirt(ctx context.Context, on, lima bool, jr proc.Runner, manager
 				got = "missing"
 			}
 			return checkResult{check, false, "guest /dev/kvm: " + got,
-				"`lever apply` installs the rule; if /dev/kvm is missing the VM was created before nested_virt or the host nested module is off: back up the conversation, `lever destroy`, `lever up`"}
+				"`lever apply` installs the rule; if /dev/kvm is missing the VM was created before nested_virt or the host nested module is off: `lever conversation backup`, `lever destroy`, `lever up`, `lever conversation restore`"}
 		}
 	}
 	if res, err := jr.Run(ctx, nil, "sh", "-c", legacyKVMDropInTest); err == nil && res.Code == 0 {
@@ -1413,7 +1413,7 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 	}
 	return checkResult{check, false,
 		fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want),
-		"run `lever up --fresh` to recreate the manager on the configured image (the conversation is discarded)"}
+		"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
 }
 
 // networkCheckedAgents is every agent the agent-network row inspects: the
@@ -2283,7 +2283,7 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 func checkLeverVersion(imageRef, tarPath, host, hostFull string, hostABI int, p doctorProbes) checkResult {
 	const name = "agent lever version"
 	const rebuildFix = "rebuild the agent image from this lever's source (`make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built FROM it), " +
-		"then `lever apply`; a running manager keeps its image until `lever up --fresh` (the conversation is discarded)"
+		"then `lever apply`; a running manager keeps its image until `lever up --fresh --keep-conversation`"
 	source := imageRef
 	var v, abi string
 	var err error

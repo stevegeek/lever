@@ -150,7 +150,7 @@ const agentViewFix = "agent view not set means boot could not write the switch, 
 // and `lever stop && lever up` resumes the record on its old image.
 const claudeSettingsFix = "start the agent again: `lever stop && lever up` for the manager, a stop and a resume for a worker. " +
 	"If a start does not change the values, the agent image's lever-agent predates them: rebuild it (`make lever-image`), then " +
-	"recreate the agent on it — the manager with `lever up --fresh` (back up its conversation first: it is discarded), a worker " +
+	"recreate the agent on it — the manager with `lever up --fresh --keep-conversation`, a worker " +
 	"with `lever worker purge <name>` or a recycle. The manager can also have rewritten its own .lever/bootstrap.json; " +
 	"`lever reload` stages a fresh one"
 

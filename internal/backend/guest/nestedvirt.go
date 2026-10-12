@@ -50,7 +50,7 @@ func (g Guest) EnsureNestedVirt(ctx context.Context, on bool) error {
 			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
 		}
 		if on {
-			return fmt.Errorf("nested_virt: the jail VM has no usable /dev/kvm: it was created before nested_virt, or the host nested module is off; recreate the VM: back up the manager conversation, then `lever destroy` (alias `down`; deletes the VM and the conversation) and `lever up`: %w", err)
+			return fmt.Errorf("nested_virt: the jail VM has no usable /dev/kvm: it was created before nested_virt, or the host nested module is off; recreate the VM: `lever conversation backup`, then `lever destroy` (alias `down`; deletes the VM and the conversation) and `lever up`, then `lever conversation restore`: %w", err)
 		}
 		return fmt.Errorf("nested_virt off: remove udev rule: %w", err)
 	}

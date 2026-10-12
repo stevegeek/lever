@@ -103,8 +103,8 @@ that reaches out of the entry, a `Gemfile`, `.bundle/config`, `package.json` or 
 (not inside) it, the tree's `.git` (hooks, `core.fsmonitor` and other config run code when **you** run
 `git` there), `mise`/`asdf`/`direnv` files a shell picks up on `cd`. Move such files inside an entry,
 or do not trust them. **Create-time only:** scion keeps a record's mounts for life, so the mounts reach
-a manager created after the setting; `lever up --fresh` recreates an existing one (it discards the
-manager's conversation, back it up first). `lever apply` warns, and `lever doctor`'s *manager
+a manager created after the setting; `lever up --fresh` recreates an existing one (it backs the
+manager's conversation up and starts a new one; `--keep-conversation` carries it over). `lever apply` warns, and `lever doctor`'s *manager
 read-only paths* row fails, when the running manager lacks a mount. The same holds the other way:
 removing an entry leaves it mounted read-only until a fresh create, and its directory must stay until
 then (a resume of a record whose mounted directory is gone fails; apply refuses it up front and names
@@ -250,8 +250,9 @@ or anything it cannot read or parse holds the tool back. The reasons it logs are
 container output. It asks again every 30 seconds (apply starts the broker
 before the manager, so a fresh create gains the mounts after the first ask), and writes the reason
 into the tool's log once per reason. `lever apply` names the held tools when it keeps or resumes a
-manager that lacks the mounts. The fix is the one for the mounts themselves: back up the
-conversation, then `lever up --fresh`. A manager that lacked the mounts before could already have
+manager that lacks the mounts. The fix is the one for the mounts themselves:
+`lever up --fresh` (with `--keep-conversation` to keep the conversation, which you then trust as
+much as the manager). A manager that lacked the mounts before could already have
 rewritten the program; check it before you trust it again. `lever-tool-github` refuses its `-app-key`
 and `-state` inside its `-tree` on its own as well, and `lever-tool-whisper` its `-server`,
 `-models` and `-dictate-socket`.

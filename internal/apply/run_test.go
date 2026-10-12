@@ -3941,6 +3941,55 @@ func TestStartManagerFreshWithNoRecordJustCreates(t *testing.T) {
 	}
 }
 
+// TestStartManagerFreshBacksUpBeforeTheDelete (lever#198): the backup runs
+// on the record about to be deleted, before the delete; a failed backup stops
+// the fresh start with the record kept and nothing created.
+func TestStartManagerFreshBacksUpBeforeTheDelete(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 2 days"}
+	var seen *scion.Agent
+	var deletesAtBackup int
+	deps := Deps{
+		Scion: scion.New(r, scion.Options{}),
+		BackupManagerConversation: func(_ context.Context, rec *scion.Agent) error {
+			seen, deletesAtBackup = rec, r.deleteCalls
+			return nil
+		},
+	}
+	if err := runApplyFresh(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if seen == nil || seen.Phase != "running" || deletesAtBackup != 0 || r.deleteCalls != 1 {
+		t.Fatalf("backup saw %+v with %d deletes before it; deletes %d", seen, deletesAtBackup, r.deleteCalls)
+	}
+
+	app, f = newObserveFirstApp(t)
+	r = &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	deps = Deps{
+		Scion:                     scion.New(r, scion.Options{}),
+		BackupManagerConversation: func(context.Context, *scion.Agent) error { return errors.New("disk full") },
+	}
+	err := runApplyFresh(app, deps)
+	testutil.WantErrContaining(t, err, "disk full")
+	testutil.WantErrContaining(t, err, "NOT deleted")
+	testutil.WantErrContaining(t, err, "--no-backup")
+	if r.deleteCalls != 0 || r.startCalls != 0 || r.resumeCalls != 0 {
+		t.Fatalf("delete/start/resume = %d/%d/%d after a failed backup, want 0/0/0", r.deleteCalls, r.startCalls, r.resumeCalls)
+	}
+
+	// No record: nothing to back up, and the hook is not called.
+	app, f = newObserveFirstApp(t)
+	r = &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	called := false
+	deps = Deps{
+		Scion:                     scion.New(r, scion.Options{}),
+		BackupManagerConversation: func(context.Context, *scion.Agent) error { called = true; return nil },
+	}
+	if err := runApplyFresh(app, deps); err != nil || called {
+		t.Fatalf("absent record: err %v, backup called %v", err, called)
+	}
+}
+
 // A delete that fails under --fresh is fatal: with the record still present,
 // resuming it would silently defeat the flag.
 func TestStartManagerFreshDeleteFailureIsFatal(t *testing.T) {
@@ -4281,7 +4330,7 @@ func TestWarnManagerNestedVirt(t *testing.T) {
 	r := &run{app: &config.App{Name: "assistant", Backend: config.BackendLima, NestedVirt: true}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
 	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return false, nil }
 	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
-	if len(logs) != 1 || !strings.Contains(logs[0], "has no /dev/kvm") || !strings.Contains(logs[0], "lever up --fresh") || !strings.Contains(logs[0], "back up") {
+	if len(logs) != 1 || !strings.Contains(logs[0], "has no /dev/kvm") || !strings.Contains(logs[0], "lever up --fresh --keep-conversation") {
 		t.Fatalf("on, lacks: logs = %q", logs)
 	}
 	logs = nil

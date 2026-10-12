@@ -286,7 +286,7 @@ func contactSessionWarning(manager string, blocked []blockedContactAgent) string
 		how = append(how, "a worker takes contact messages once the broker next creates it fresh")
 	}
 	if hasManager {
-		how = append(how, fmt.Sprintf("for the manager %s, run `lever up --fresh` (back up the manager's conversation first), or let this bring-up create it",
+		how = append(how, fmt.Sprintf("for the manager %s, run `lever up --fresh` (it backs the conversation up first; --keep-conversation does not help here, the kept conversation keeps the skill it started with), or let this bring-up create it",
 			termsafe.Sanitize(manager)))
 	}
 	if len(blocked) == 1 {

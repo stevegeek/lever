@@ -2,11 +2,13 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/convbackup"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
@@ -98,13 +100,16 @@ func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name
 }
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
-	var fresh, noAttach, shared bool
+	var fresh, noAttach, shared, noBackup, keepConv bool
 	var progressMode string
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an application up (if needed) and attach the manager",
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if err := checkFreshFlags(fresh, noBackup, keepConv); err != nil {
+				return err
+			}
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
@@ -178,8 +183,31 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// --fresh: apply's start-manager step deletes any record it
 				// finds once the hub is up and creates anew; a failed delete
 				// is fatal there, so the old session is never resumed silently.
+				// Unless --no-backup, the conversation is backed up first, and
+				// a failed backup keeps the record (lever#198).
+				var saved *convbackup.Meta
+				conv := newConvOps(w, app, stateFor(path))
+				if fresh && !noBackup {
+					deps.BackupManagerConversation = conv.backupBeforeDelete(&saved)
+				}
 				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh}); err != nil {
+					if saved != nil {
+						rep.Log(fmt.Sprintf("lever: the previous conversation is backed up as %s; once the manager is up, `lever conversation restore %s` brings it back", saved.ID, saved.ID))
+					}
 					return err
+				}
+				if keepConv {
+					rep.Group("conversation", 0)
+					step := rep.Start("restore conversation")
+					if saved == nil {
+						step.Skip("there was no conversation to keep")
+					} else {
+						err := conv.restore(ctx, saved.ID, false)
+						step.Done(err)
+						if err != nil {
+							return fmt.Errorf("%w. The previous conversation is backed up as %s: `lever conversation restore %s` tries again", err, saved.ID, saved.ID)
+						}
+					}
 				}
 			case upResume:
 				// `up` resumes a suspended manager ITSELF, without going through
@@ -247,11 +275,26 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
 		},
 	}
-	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
+	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread (the old conversation is backed up first)")
+	c.Flags().BoolVar(&noBackup, "no-backup", false, "with --fresh: discard the old conversation without backing it up")
+	c.Flags().BoolVar(&keepConv, "keep-conversation", false, "with --fresh: recreate the manager and resume it on the old conversation")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
 	c.Flags().BoolVar(&shared, "shared", false, sharedFlagUsage)
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
+}
+
+// checkFreshFlags refuses flag combinations that mean nothing: --no-backup
+// and --keep-conversation act on the record --fresh deletes, and keeping a
+// conversation needs its backup.
+func checkFreshFlags(fresh, noBackup, keepConv bool) error {
+	switch {
+	case (noBackup || keepConv) && !fresh:
+		return errors.New("--no-backup and --keep-conversation go with --fresh")
+	case noBackup && keepConv:
+		return errors.New("--keep-conversation needs the backup that --no-backup skips")
+	}
+	return nil
 }
 
 // upDecisionNote says, on the check step, what up found and will do.

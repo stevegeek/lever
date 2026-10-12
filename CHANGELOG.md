@@ -74,9 +74,29 @@ version bump moves the block under the new version heading.
   (that agent's container would go on running in the VM). A plain `lever stop` that finds the
   hub already down says so in its suspend warning. Operations guide: "Stopping without powering
   off".
+- **`lever up --fresh` keeps a copy of the manager's conversation, and can carry it over
+  (lever#198).** A fresh create deletes the manager's record and its home in the jail, where
+  Claude Code keeps the transcripts. `up --fresh` now backs up the manager's `~/.claude/projects`
+  to `.lever-state/conversations/<id>/` (0700, files 0600, the last 10 kept) before it deletes
+  anything, suspending a running manager for the copy; a failed backup stops the fresh start with
+  the record kept, and `--no-backup` skips it. `--keep-conversation` then suspends the new manager,
+  puts the old transcripts in its home and resumes it, so `claude --continue` picks the old
+  conversation up on the new image, model, mounts or devices; the boot turn is cut short. `lever
+  conversation list|backup|restore [ID]` lists, takes and restores backups by hand (a restore
+  backs up what it replaces). Only the transcripts travel: `~/.claude.json` (account, onboarding,
+  the MCP setup lever writes, an API key) stays the new record's. The agent wrote every byte, so
+  lever follows no link in its home, keeps only directories and regular files with clean names
+  within size limits, and restores only that checked copy. A restored conversation is recorded as
+  started on the skill its backup names, so contacts are refused when that is not the skill on
+  disk. No backup is kept while the state directory is inside the tree, so there `up --fresh`
+  needs `--no-backup`. Doctor and apply hints
+  that said "back up the conversation, then `lever up --fresh`" now name `--keep-conversation`.
 
 ### Changed
 
+- **`lever stop` no longer warns when the manager is already suspended (lever#198).** scion
+  refuses to suspend a suspended record, and `stop` printed that as a failed suspend; it now
+  checks the record and prints a note instead.
 - **The hub starts about 13 s sooner: the jail rejects the cloud metadata address (lever#182).**
   The scion hub looks up a GCP project ID at `169.254.169.254` at every start; the egress chain
   dropped it, so the lookup spent six 2 s timeouts before the hub served. The `LEVER_EGRESS` chain

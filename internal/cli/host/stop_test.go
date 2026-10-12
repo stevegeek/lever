@@ -107,9 +107,11 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 		{
 			// The manager's suspend failing is a warning too: the worker pass
 			// still runs under its own budget, then the power-off.
-			name:     "manager suspend fails",
+			name: "manager suspend fails",
+			// The extra list checks whether the record was already suspended
+			// (a refusal that is no failure); it reads running here.
 			scripts:  map[string]string{"scion suspend scratch": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "list", "suspend scratch"},
 			wantOut:  "warning: scion suspend failed",
 			alsoOut:  `worker "scratch" suspended`,
 		},
@@ -785,4 +787,31 @@ func (r suspendFailsRunner) RunIn(ctx context.Context, dir string, env map[strin
 		return proc.Result{Code: 1, Stderr: "Error: the hub said no"}, errors.New("exit status 1")
 	}
 	return proc.Result{Stdout: "ok"}, nil
+}
+
+// TestReportManagerSuspendErrorQuietWhenSuspended: a suspend refused because
+// the record is already suspended is a note, not a warning; any other
+// failure still warns.
+func TestReportManagerSuspendErrorQuietWhenSuspended(t *testing.T) {
+	for _, c := range []struct {
+		phase string
+		warn  bool
+	}{{scion.PhaseSuspended, false}, {scion.PhaseRunning, true}, {"", true}} {
+		var out, errOut strings.Builder
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetContext(context.Background())
+		f := &fakeSuspender{}
+		if c.phase != "" {
+			f.agents = []scion.Agent{{Slug: "demo", Phase: c.phase}}
+		}
+		suspended := reportManagerSuspendError(cmd, f, "demo", "/lever", errors.New("cannot suspend: phase suspended"))
+		if suspended == c.warn {
+			t.Errorf("phase %q: reported suspended=%v", c.phase, suspended)
+		}
+		if got := strings.Contains(errOut.String(), "warning"); got != c.warn {
+			t.Errorf("phase %q: warned=%v (stderr %q, stdout %q)", c.phase, got, errOut.String(), out.String())
+		}
+	}
 }

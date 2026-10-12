@@ -254,3 +254,46 @@ func TestFormatNoteDeterministicAndVerdict(t *testing.T) {
 		t.Fatalf("note should mark egress-refused FAIL:\n%s", failNote)
 	}
 }
+
+// TestClassifyLinkLocalProbe pins how a /dev/tcp dial is read: only the
+// REJECT's EHOSTUNREACH is "rejected", only timeout's 124 is "dropped", a
+// connect or a reset is "open", and anything else fails closed.
+func TestClassifyLinkLocalProbe(t *testing.T) {
+	e := fmt.Errorf("exit")
+	for _, tc := range []struct {
+		name string
+		res  proc.Result
+		err  error
+		want linkState
+	}{
+		{"connected", proc.Result{}, nil, linkOpen},
+		{"reset", proc.Result{Code: 1, Stderr: "bash: connect: Connection refused\nbash: line 1: /dev/tcp/169.254.169.254/80: Connection refused\n"}, e, linkOpen},
+		{"rejected", proc.Result{Code: 1, Stderr: "bash: connect: No route to host\nbash: line 1: /dev/tcp/169.254.169.254/80: No route to host\n"}, e, linkRejected},
+		{"dropped", proc.Result{Code: 124}, e, linkDropped},
+		{"bash missing", proc.Result{Code: 127, Stderr: "timeout: failed to run command 'bash': No such file or directory"}, e, linkUncertain},
+		{"net unreachable", proc.Result{Code: 1, Stderr: "bash: connect: Network is unreachable"}, e, linkUncertain},
+	} {
+		got, err := classifyLinkLocalProbe("169.254.169.254", tc.res, tc.err)
+		if got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+		if (got == linkUncertain) != (err != nil) {
+			t.Errorf("%s: an error iff uncertain, got %v", tc.name, err)
+		}
+	}
+}
+
+// TestMetadataVerdict: PASS only for a rejected metadata address with a
+// dropped control; everything else fails.
+func TestMetadataVerdict(t *testing.T) {
+	all := []linkState{linkOpen, linkRejected, linkDropped, linkUncertain}
+	for _, m := range all {
+		for _, c := range all {
+			pass, err := metadataVerdict(m, c)
+			want := m == linkRejected && c == linkDropped
+			if pass != want || (err == nil) != want {
+				t.Errorf("meta=%s control=%s: pass=%v err=%v, want pass=%v", m, c, pass, err, want)
+			}
+		}
+	}
+}

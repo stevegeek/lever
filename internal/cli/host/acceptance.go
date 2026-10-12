@@ -14,6 +14,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/progress"
@@ -29,7 +30,7 @@ func acceptanceCheckNames() []string {
 		"no-table-c",     // worker CANNOT read a scope outside the envelope
 		"no-drop-filter", // worker CANNOT widen by dropping the delegated filter caveat
 		"no-self-path",   // worker CANNOT self-mint an un-granted capability
-		"egress-refused", // jail reaches the allowlisted broker port but NOT the non-allowlisted admin port
+		"egress-refused", // jail reaches the allowlisted broker port but NOT the non-allowlisted admin port, and the metadata REJECT is exactly its /32
 		"revocation",     // after revoke/bump-epoch the next call is denied
 	}
 }
@@ -516,7 +517,10 @@ func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (probe
 // behind host.orb.internal, so the contrast is non-vacuous and directly proves
 // the egress allowlist. FAIL-CLOSED on any ambiguous result. (The public internet
 // is intentionally left OPEN by the allowlist, so curling example.com would NOT
-// test containment — the broker port contrast does.)
+// test containment — the broker port contrast does.) It then checks the
+// chain's one REJECT (metadataVerdict): the metadata address answers
+// "No route to host" at once, and a neighbouring link-local address is
+// still dropped, so the REJECT neither opens nor widens anything.
 func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
 	jailState, jerr := h.probeReachable(ctx, h.app.EffectiveJailPort())
 	if jailState == stateUncertain {
@@ -526,7 +530,86 @@ func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error
 	if adminState == stateUncertain {
 		return false, aerr // FAIL-CLOSED: cannot classify the admin-port probe
 	}
-	return egressVerdict(jailState, adminState)
+	if ok, err := egressVerdict(jailState, adminState); !ok {
+		return false, err
+	}
+	// The chain's one REJECT (lever#182): the metadata address is refused at
+	// once, and a neighbouring link-local address is still silently dropped,
+	// so the REJECT is exactly that /32 and opens nothing.
+	meta, merr := h.probeLinkLocal(ctx, egress.MetadataV4)
+	if meta == linkUncertain {
+		return false, merr
+	}
+	other, oerr := h.probeLinkLocal(ctx, linkLocalControl)
+	if other == linkUncertain {
+		return false, oerr
+	}
+	return metadataVerdict(meta, other)
+}
+
+// linkLocalControl is a link-local address next to egress.MetadataV4 that the
+// chain must DROP (169.254/16) and not REJECT: the control for the one REJECT.
+const linkLocalControl = "169.254.169.253"
+
+// linkState is the outcome of a raw TCP dial from the jail to a link-local
+// address (probeLinkLocal), consumed by metadataVerdict.
+type linkState string
+
+const (
+	linkOpen      linkState = "open"      // the dial reached something (connected, or a host answered with a reset)
+	linkRejected  linkState = "rejected"  // EHOSTUNREACH: the chain's icmp-host-prohibited REJECT
+	linkDropped   linkState = "dropped"   // no answer before the timeout: a DROP
+	linkUncertain linkState = "uncertain" // cannot classify — FAIL-CLOSED
+)
+
+// linkLocalTimeout bounds one link-local dial, in seconds: a DROP costs this
+// long, a REJECT returns at once.
+const linkLocalTimeout = "3"
+
+// probeLinkLocal dials ip:80 from the jail with bash's /dev/tcp, which, unlike
+// curl, reports the connect errno ("No route to host" for the REJECT,
+// "Connection refused" for a reset) so the two can be told apart. ip is one of
+// two constants, never input.
+func (h *acceptanceHarness) probeLinkLocal(ctx context.Context, ip string) (linkState, error) {
+	res, err := h.jr.Run(ctx, nil, "timeout", linkLocalTimeout, "bash", "-c", "exec 3<>/dev/tcp/"+ip+"/80")
+	return classifyLinkLocalProbe(ip, res, err)
+}
+
+// classifyLinkLocalProbe maps a probeLinkLocal result to a linkState: exit 0
+// is open; "Connection refused" is open too (a reset came back, so packets
+// reached a host); "No route to host" is rejected; timeout's exit 124 is
+// dropped; anything else (bash or timeout missing, another errno) is
+// uncertain.
+func classifyLinkLocalProbe(ip string, res proc.Result, err error) (linkState, error) {
+	if err == nil {
+		return linkOpen, nil
+	}
+	out := res.Stdout + res.Stderr
+	switch {
+	case res.Code == 124:
+		return linkDropped, nil
+	case strings.Contains(out, "No route to host"):
+		return linkRejected, nil
+	case strings.Contains(out, "Connection refused"):
+		return linkOpen, nil
+	default:
+		return linkUncertain, fmt.Errorf("egress-refused: link-local probe of %s exited %d with unexpected output (FAIL-CLOSED): %s", ip, res.Code, out)
+	}
+}
+
+// metadataVerdict is the PURE decision for the metadata REJECT: PASS iff the
+// metadata address is rejected and the control address is dropped. A dropped
+// metadata address is contained but means the REJECT is not in force (a chain
+// from before lever#182 that a closed-posture re-apply left alone); a rejected
+// control means the REJECT is wider than its /32; an open address is a hole.
+func metadataVerdict(meta, control linkState) (bool, error) {
+	if meta != linkRejected {
+		return false, fmt.Errorf("egress-refused: metadata address %s was %q, want %q (the chain's icmp-host-prohibited REJECT; a chain from before it needs lever down and up)", egress.MetadataV4, meta, linkRejected)
+	}
+	if control != linkDropped {
+		return false, fmt.Errorf("egress-refused: link-local control %s was %q, want %q (only the metadata /32 may be rejected)", linkLocalControl, control, linkDropped)
+	}
+	return true, nil
 }
 
 // checkRevocation — PASS = after /bump-epoch the worker's previously-working

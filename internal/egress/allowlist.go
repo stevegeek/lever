@@ -36,6 +36,21 @@ var (
 	ipv6Local = []string{"fe80::/10", "fc00::/7"} // link-local + ULA (the host alias ULA is a /128 inside fc00::/7, so allow-before-drop ordering is essential)
 )
 
+// MetadataV4 is the cloud instance-metadata address (GCP, AWS, Azure). It
+// lies inside 169.254/16, which the chain drops, but it is the one address
+// in the chain that is REJECTed rather than dropped (lever#182): the scion
+// hub looks up a GCP project ID there at every start, and a dropped dial
+// costs it six 2 s timeouts (~13 s) before it serves, where an ICMP
+// host-prohibited reply (EHOSTUNREACH, which its client does not retry) ends
+// the lookup at once. A REJECT is still a refusal: nothing is delivered to
+// the address, and every other link-local address stays dropped.
+const MetadataV4 = "169.254.169.254"
+
+// metadataReject is the argv tail of the one REJECT rule, after "-A Chain".
+func metadataReject() []string {
+	return []string{"-d", MetadataV4 + "/32", "-j", "REJECT", "--reject-with", "icmp-host-prohibited"}
+}
+
 // BuildRules returns ordered OUTPUT rules. aliasV4/aliasV6 are the resolved
 // host.orb.internal addresses; allowedPorts are host-loopback tool ports.
 // Assumes the OUTPUT chain default policy is ACCEPT: the public internet stays
@@ -207,6 +222,11 @@ func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet b
 	if aliasV6 != "" {
 		rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-j", "DROP")})
 	}
+	// 2b) REJECT the instance-metadata address, just before the 169.254/16
+	// DROP below that would otherwise swallow it (see MetadataV4). Both
+	// postures: in the closed one it also precedes the catch-all DROP. This
+	// is the only REJECT in the chain; it is a /32 and admits nothing.
+	rules = append(rules, Rule{IPv4, out(metadataReject()...)})
 	// 3) DROP private/LAN ranges explicitly (don't rely on OrbStack routing alone).
 	for _, c := range privateV4 {
 		rules = append(rules, Rule{IPv4, out("-d", c, "-j", "DROP")})
@@ -263,7 +283,8 @@ func (r Rule) Render() string { return r.Family.Binary() + " " + strings.Join(r.
 
 // DroppedForJail reports whether ip lies in a range the jail's egress rules
 // DROP in EVERY posture (the private/special-use ranges of rule 3 in
-// BuildRulesDNS), so no jailed process can open a connection to it, whatever
+// BuildRulesDNS; MetadataV4 inside 169.254/16 is REJECTed by rule 2b
+// instead, which refuses it just as surely), so no jailed process can open a connection to it, whatever
 // port it listens on. It is what makes a non-loopback host listener safe from
 // the jail: config.validateRemote accepts a non-loopback remote.bind only on
 // such an address. Loopback is NOT in the set — the jail reaches host

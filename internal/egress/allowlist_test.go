@@ -367,3 +367,41 @@ func TestParseResolverUpstreams(t *testing.T) {
 		}
 	}
 }
+
+// lever#182: the metadata address is REJECTed (so the hub's GCP lookup fails
+// at once) just before the 169.254/16 DROP, in both postures, and that /32
+// REJECT is the ONLY non-DROP refusal in the chain: every other rule is an
+// ACCEPT already asserted elsewhere or a DROP.
+func TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop(t *testing.T) {
+	const want = "-A " + Chain + " -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited"
+	for _, closed := range []bool{false, true} {
+		rules := BuildRulesDNS("192.168.5.2", "fd07::fe", []int{8443}, closed, []DNSForward{{"udp", 41234}})
+		v4 := familyArgs(rules, IPv4)
+		rej := indexOfRule(v4, "-j REJECT")
+		if rej < 0 || v4[rej] != want {
+			t.Fatalf("closed=%v: metadata REJECT missing or not exact: %v", closed, v4)
+		}
+		drop := indexOfRule(v4, "-d 169.254.0.0/16 -j DROP")
+		if drop < 0 || rej > drop {
+			t.Fatalf("closed=%v: metadata REJECT (idx %d) must precede the 169.254/16 DROP (idx %d)", closed, rej, drop)
+		}
+		if closed && rej > dropIdxFamily(rules, IPv4) {
+			t.Fatal("metadata REJECT must precede the catch-all DROP")
+		}
+		var rejects int
+		for _, r := range rules {
+			if slices.Contains(r.Args, "REJECT") {
+				rejects++
+				if r.Family != IPv4 {
+					t.Fatalf("closed=%v: a REJECT in the IPv6 chain: %v", closed, r.Args)
+				}
+			}
+		}
+		if rejects != 1 {
+			t.Fatalf("closed=%v: want exactly one REJECT, got %d", closed, rejects)
+		}
+	}
+	if !DroppedForJail(net.ParseIP(MetadataV4)) {
+		t.Fatal("the metadata address must stay inside the refused set")
+	}
+}

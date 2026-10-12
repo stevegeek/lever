@@ -9,6 +9,30 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **github tool: PRs, merges and releases (`-ops`, opt-in).** `lever-tool-github` can now also
+  offer `pr_open`, `pr_status`, `pr_merge` and `release`. With `-ops` unset only `push` exists, as
+  before. Each operation is its own fine-gated capability, acts only on `-repos`, and gets a token
+  narrowed to the one repository and the permissions it needs. `pr_open` opens a PR from a pushed
+  prefix branch into the default branch (or returns the open one); it refuses team mentions,
+  issue-closing keywords (`fixes #N`) and more than 5 mentioned users. `pr_status` reports state,
+  mergeability and the checks on the head. `pr_merge` merges only an open, mergeable PR from a
+  prefix branch of the same repository into the default branch, pinned to the checked head SHA,
+  with a method from `-merge-methods`, once the checks pass (`-merge-checks`: check names, `any` or
+  `none`, with no default when `pr_merge` is offered) and, by default, once a person approved that
+  head SHA with no change request outstanding (`-merge-require-review`; turning it off logs a
+  warning). It reports a PR that was retargeted during the merge. `release` creates only a tag on
+  the default branch's head, matching `-release-tag` and greater than every existing one; the
+  repository's release workflow makes the release. Titles and bodies are bounded (`-text-max`),
+  refuse control characters, and appear in the audit line only as a length and a hash. The App
+  needs more permissions for these (Pull requests, Checks, Commit statuses), and `release` needs
+  the App in the release tag creation ruleset's bypass list; it never needs Workflows. See the
+  github tool guide.
+- **github tool: read CI (`ci_runs`, `ci_log`, opt-in).** Two read-only operations so an agent can
+  see why CI failed without a credential in the jail. `ci_runs` lists the newest workflow runs on a
+  branch, with the jobs and failed steps of the newest runs that did not pass. `ci_log` returns a
+  job log's failure-looking lines and its last lines as plain text (no timestamps or escape
+  sequences, credentials masked, at most 64 MiB read). The log download follows GitHub's redirect
+  only over https to its log hosts, with no credential. Both need only Actions: read on the App.
 - **`lever apply`, `lever up` and `lever acceptance` list their steps as they run (lever#185).**
   The jail's steps (start VM, guest hardening, packages and runtimes, scion, egress firewall,
   nested virt), apply's numbered steps (`[5/11] scion-server`) and the manager's, each with its

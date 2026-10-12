@@ -6,9 +6,12 @@
 package ghpush
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // BundleDir is the tree-relative directory the agent writes bundles into
@@ -69,6 +72,128 @@ func ValidateBranch(b, prefix string) error {
 func ValidateBundleName(n string) error {
 	if !bundleRE.MatchString(n) {
 		return fmt.Errorf("bundle %q: want a single file name like my-branch.bundle in %s", n, BundleDir)
+	}
+	return nil
+}
+
+var (
+	numberRE = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
+	tagRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,99}$`)
+	shaRE    = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+)
+
+// TitleMax is the longest PR title, in characters.
+const TitleMax = 256
+
+// ValidateNumber accepts a PR number: a positive decimal integer.
+func ValidateNumber(n string) error {
+	if !numberRE.MatchString(n) {
+		return fmt.Errorf("number %q: want a positive PR number such as 12", n)
+	}
+	return nil
+}
+
+// ValidateTitle accepts a PR title: 1 to TitleMax characters of valid
+// UTF-8, not blank, and no control or bidirectional formatting character.
+func ValidateTitle(s string) error {
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("title: not valid UTF-8")
+	}
+	if n := utf8.RuneCountInString(s); n == 0 || n > TitleMax || strings.TrimSpace(s) == "" {
+		return fmt.Errorf("title must be 1-%d characters and not blank, got %d", TitleMax, n)
+	}
+	for _, r := range s {
+		if badTextRune(r, false) {
+			return fmt.Errorf("title: control or formatting character %U refused", r)
+		}
+	}
+	return nil
+}
+
+// ValidateText accepts a PR body: at most max bytes of
+// valid UTF-8, no control character except newline and tab, and no
+// bidirectional or invisible formatting character (it could make the
+// published text read differently from what was reviewed).
+func ValidateText(what, s string, max int) error {
+	if len(s) > max {
+		return fmt.Errorf("%s: %d bytes, max %d", what, len(s), max)
+	}
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("%s: not valid UTF-8", what)
+	}
+	for _, r := range s {
+		if badTextRune(r, true) {
+			return fmt.Errorf("%s: control or formatting character %U refused (only newline and tab are allowed)", what, r)
+		}
+	}
+	return nil
+}
+
+func badTextRune(r rune, multiline bool) bool {
+	if multiline && (r == '\n' || r == '\t') {
+		return false
+	}
+	if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
+		return true
+	}
+	// Format characters (bidirectional controls, zero-width and other
+	// invisible characters) except the zero-width joiner that emoji
+	// sequences use.
+	return unicode.Is(unicode.Cf, r) && r != 0x200d
+}
+
+// ValidateTagName is the charset and ref-name check of a release tag, made
+// before the configured pattern: no '/', no "..", no ".lock" suffix, no
+// leading '-' or '.'.
+func ValidateTagName(t string) error {
+	if !tagRE.MatchString(t) || strings.Contains(t, "..") || strings.HasSuffix(t, ".lock") || strings.HasSuffix(t, ".") {
+		return fmt.Errorf("tag %q: want letters, digits, '.', '_', '+' and '-' (1-100 characters), such as v1.2.3", t)
+	}
+	return nil
+}
+
+// MaxMentions is the most distinct users one PR's title and body may
+// @mention together.
+const MaxMentions = 5
+
+// The named refusals of outward PR text.
+var (
+	ErrTeamMention     = errors.New("team mention refused")
+	ErrClosingKeyword  = errors.New("issue-closing keyword refused")
+	ErrTooManyMentions = errors.New("too many @mentions")
+)
+
+var (
+	// A team mention is @org/team. A mention starts the text or follows a
+	// character that cannot be part of a login or an e-mail address.
+	teamMentionRE = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.+-])@[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+`)
+	userMentionRE = regexp.MustCompile(`(?:^|[^A-Za-z0-9_.+-])@([A-Za-z0-9][A-Za-z0-9-]{0,38})`)
+	// A keyword that closes the issue it references: #N, owner/repo#N or an
+	// issue or PR URL, with an optional colon.
+	// Spaces include Unicode ones (Go's \s is ASCII only).
+	closingRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?[\s\p{Z}]*` +
+		`(?:#[0-9]+|[A-Za-z0-9-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://\S+/(?:issues|pull)/[0-9]+)`)
+)
+
+// ValidatePRText refuses PR text that would act on GitHub beyond the PR
+// itself: a team mention (it notifies a whole team), a keyword that closes a
+// referenced issue on merge, and more than MaxMentions distinct users
+// @mentioned in the title and body together.
+func ValidatePRText(title, body string) error {
+	users := map[string]bool{}
+	for _, f := range []struct{ what, s string }{{"title", title}, {"body", body}} {
+		if m := teamMentionRE.FindString(f.s); m != "" {
+			return fmt.Errorf("%s: %w: %q (a team mention notifies the whole team)", f.what, ErrTeamMention, checkLabel(m[strings.IndexByte(m, '@'):]))
+		}
+		if m := closingRE.FindString(f.s); m != "" {
+			return fmt.Errorf("%s: %w: %q (it would close that issue on merge; write \"refs #N\" instead)", f.what, ErrClosingKeyword, checkLabel(m))
+		}
+		for _, m := range userMentionRE.FindAllStringSubmatch(f.s, -1) {
+			users[strings.ToLower(m[1])] = true
+		}
+	}
+	if len(users) > MaxMentions {
+		return fmt.Errorf("%w: %d distinct users mentioned, at most %d", ErrTooManyMentions, len(users), MaxMentions)
 	}
 	return nil
 }

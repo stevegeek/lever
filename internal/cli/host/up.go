@@ -98,7 +98,7 @@ func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name
 }
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
-	var fresh, noAttach bool
+	var fresh, noAttach, shared bool
 	var progressMode string
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
@@ -244,11 +244,12 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
 			}
-			return execAttach(cmd.Context(), b, sc, app.Name, project)
+			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
 		},
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
+	c.Flags().BoolVar(&shared, "shared", false, sharedFlagUsage)
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
 }

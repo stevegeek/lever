@@ -1,7 +1,9 @@
 package host
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -135,5 +137,56 @@ func TestAttachArgvWithoutTokenStagesNothing(t *testing.T) {
 	}
 	if len(host.Calls) != 0 {
 		t.Fatalf("nothing may run without a token; got %d call(s)", len(host.Calls))
+	}
+}
+
+// lever#170: before attaching, the other terminals attached to the agent
+// are detached (a stale one froze the view), and how many is said; with
+// --shared nothing is detached. The container is the agent's in the
+// instance project.
+func TestDetachBeforeAttach(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		shared bool
+		n      int
+		err    error
+		want   string
+		asked  bool
+	}{
+		{"one stale", false, 1, nil, `lever: detached 1 earlier terminal attached to "assistant"`, true},
+		{"two", false, 2, nil, "detached 2 earlier terminals", true},
+		{"none", false, 0, nil, "", true},
+		{"probe fails", false, 0, errors.New("podman: no"), "", true},
+		{"shared", true, 3, nil, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var refs []string
+			old := detachOtherClients
+			detachOtherClients = func(_ context.Context, _ proc.Runner, ref string) (int, error) {
+				refs = append(refs, ref)
+				return tc.n, tc.err
+			}
+			t.Cleanup(func() { detachOtherClients = old })
+			var out bytes.Buffer
+			detachBeforeAttach(context.Background(), &out, proc.NewFakeRunner(), "assistant", "/lever", tc.shared)
+			if tc.asked != (len(refs) == 1) || (tc.asked && refs[0] != "lever--assistant") {
+				t.Fatalf("refs = %q, want asked %t", refs, tc.asked)
+			}
+			got := out.String()
+			if tc.want == "" && got != "" || !strings.Contains(got, tc.want) {
+				t.Errorf("output %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Both verbs that attach take --shared.
+func TestAttachAndUpHaveSharedFlag(t *testing.T) {
+	root := stubRoot(&stubBackend{})
+	for _, verb := range []string{"attach", "up"} {
+		c, _, err := root.Find([]string{verb})
+		if err != nil || c.Flags().Lookup("shared") == nil {
+			t.Errorf("%s: no --shared flag (%v)", verb, err)
+		}
 	}
 }

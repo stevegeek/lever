@@ -3,8 +3,10 @@ package host
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"syscall"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -52,10 +55,45 @@ func attachArgv(ctx context.Context, b backend.Backend, sc *scion.Client, slug, 
 	return b.AttachArgv(inner), nil
 }
 
+// detachOtherClients detaches the tmux clients attached to an agent's
+// session (jail.AgentProbe.DetachClients); a test seam.
+var detachOtherClients = func(ctx context.Context, r proc.Runner, ref string) (int, error) {
+	return jail.AgentProbe{R: r}.DetachClients(ctx, ref)
+}
+
+// sharedFlagUsage is the --shared flag's help, on attach and up.
+const sharedFlagUsage = "keep the terminals earlier attaches left on the agent attached (by default they are detached first: a stale one can freeze the view)"
+
+// detachBeforeAttach detaches the tmux clients earlier attaches left on
+// slug's session before the attach, unless shared (lever#170): an earlier
+// attach whose terminal went away stays attached as a stale client, and the
+// new view can then freeze or keep the old terminal's size. What
+// `tmux attach -d` does (scion's attach has no such flag), except that the
+// container's own client is spared (jail.AgentProbe.DetachClients). Best-effort: a failure is not reported
+// (scion's attach that follows reports a container that is not there),
+// and a count of detached clients is printed to w.
+func detachBeforeAttach(ctx context.Context, w io.Writer, r proc.Runner, slug, project string, shared bool) {
+	if shared {
+		return
+	}
+	n, err := detachOtherClients(ctx, r, jail.ContainerName(path.Base(project), slug))
+	if err != nil || n == 0 {
+		return
+	}
+	noun := "terminal"
+	if n > 1 {
+		noun = "terminals"
+	}
+	fmt.Fprintf(w, "lever: detached %d earlier %s attached to %q (a stale attach can freeze the view; --shared keeps them)\n", n, noun, slug)
+}
+
 // execAttach replaces the current process with the backend-wrapped scion attach
 // for slug in project — the same TTY-handover chain `lever up` uses. It only
-// returns on error (syscall.Exec does not return on success).
-func execAttach(ctx context.Context, b backend.Backend, sc *scion.Client, slug, project string) error {
+// returns on error (syscall.Exec does not return on success). Unless shared,
+// other terminals attached to the agent are detached first
+// (detachBeforeAttach).
+func execAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, shared bool) error {
+	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, shared)
 	argv, err := attachArgv(ctx, b, sc, slug, project)
 	if err != nil {
 		return err
@@ -73,7 +111,8 @@ func execAttach(ctx context.Context, b backend.Backend, sc *scion.Client, slug, 
 // rather than provisioning it. If the jail is up but the target agent/worker is
 // not running, scion's own attach error surfaces.
 func newAttachCmd(bf BackendFactory) *cobra.Command {
-	return &cobra.Command{
+	var shared bool
+	c := &cobra.Command{
 		Use:   "attach [NAME]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Attach your TTY to the manager (default) or a named worker agent",
@@ -102,7 +141,9 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return execAttach(cmd.Context(), b, sc, slug, project)
+			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, slug, project, shared)
 		},
 	}
+	c.Flags().BoolVar(&shared, "shared", false, sharedFlagUsage)
+	return c
 }

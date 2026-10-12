@@ -60,7 +60,8 @@ version bump moves the block under the new version heading.
   an error naming the ports to change. A broker from an older lever (no id) is restarted only when
   this instance's `broker.pid` names a live process, and only once the port fell silent after the
   stop. The health wait accepts only this instance's broker, and `lever revoke` and
-  `lever broker bump-epoch` refuse any other. A copied instance directory makes its own id. The
+  `lever broker bump-epoch` refuse any other. A copied instance directory makes its own id, and
+  its stop paths drop the copied pid files instead of signalling the original's processes. The
   id lives outside the in-jail wire types, so the jail ABI is unchanged.
 - **Doctor's `instance ports` row (lever#181)** warns when a configured port (the broker's, a
   supervised tool's backend, the remote proxy's) is held by a process that is not this

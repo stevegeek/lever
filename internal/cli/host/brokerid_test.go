@@ -203,7 +203,7 @@ func TestBrokerStartRefusesWhenTheStopLeavesABroker(t *testing.T) {
 	app := &config.App{Name: "a"}
 	app.Broker.AdminPort = port
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
-	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "still answers") {
+	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "still answers") || !strings.Contains(err.Error(), "stop the broker by hand") {
 		t.Fatalf("Start = %v, want the still-answers refusal", err)
 	}
 }

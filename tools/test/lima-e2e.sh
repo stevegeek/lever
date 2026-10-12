@@ -126,19 +126,22 @@ mask_secrets() {
   perl -pe '
     s/sk-ant-[A-Za-z0-9_-]+/sk-ant-***/g;
     s/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/$1***/g;
+    s/(authorization["\x27]?\s*[:=]\s*).*/$1***/gi;
     s/(bearer\s+)[A-Za-z0-9._~+\/=-]+/$1***/gi;
+    s/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/***jwt***/g;
+    s#(://)[^/\s:@]+:[^/\s@]+@#$1***@#g;
     $k = 1 if /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
     if ($k) { $k = 0 if /-----END [A-Z ]*PRIVATE KEY-----/; $_ = "[private key masked]\n"; }
-    s/((?:secret|token|password|passwd|api[_-]?key|authorization)[A-Za-z_-]*["\x27]?\s*[:=]\s*["\x27]?)[^"\x27\s,}]+/$1***/gi;
+    s/((?:secret|token|password|passwd|credential|private[_-]?key|api[_-]?key)[A-Za-z_-]*["\x27]?\s*[:=]\s*["\x27]?)[^"\x27\s,}]+/$1***/gi;
   '
 }
 
 # show_logs prints the end of the instance's broker and tool logs, masked, so a
 # failed run explains itself without KEEP=1. lever masks credentials in
-# these files; they hold no keys. Printed at most once per run.
+# these files; they hold no keys. The exit trap prints them on a failed run
+# unless a failed acceptance already did.
 logs_shown=""
 show_logs() {
-  [ -z "$logs_shown" ] || return 0
   logs_shown=1
   st="$INST/.lever-state"
   for f in "$st/broker.out.log" "$st/broker.log" "$st"/tool-logs/*.log; do
@@ -150,7 +153,7 @@ show_logs() {
 
 cleanup() {
   rc=$?
-  if [ "$rc" != "0" ] || [ "$fail" != "0" ]; then
+  if { [ "$rc" != "0" ] || [ "$fail" != "0" ]; } && [ -z "$logs_shown" ]; then
     show_logs
   fi
   if [ "${KEEP:-0}" = "1" ]; then

@@ -133,8 +133,10 @@ func instancePorts(app *config.App, brokerAlive, remoteAlive bool) []instancePor
 //     (or none, while this instance's broker is not running): another
 //     instance's broker holds the broker ports.
 //   - While the process of this instance that binds a port is not running,
-//     something listens there anyway: it would make the next bring-up fail
-//     to bind (or, for the broker, be refused).
+//     something listens there anyway: the next bring-up then clashes with
+//     it. Usually the bind fails (or, for the broker, apply refuses); on
+//     macOS a 127.0.0.1 bind can succeed beside a wildcard listener, and
+//     the two then split the port's clients.
 //
 // A warning, not a failure: the holder may be about to exit, and with this
 // instance down nothing is broken yet.

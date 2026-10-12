@@ -149,3 +149,33 @@ func TestValidInstanceID(t *testing.T) {
 		}
 	}
 }
+
+// The copy's first Ensure drops the pid files that came with it: they name
+// the original's processes.
+func TestInstanceIDOfACopyDropsItsPidFiles(t *testing.T) {
+	orig := State{Dir: t.TempDir()}
+	if _, err := orig.EnsureInstanceID(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(orig.InstanceIDFile())
+	cp := State{Dir: t.TempDir()}
+	for _, p := range []string{cp.InstanceIDFile(), cp.PID(), cp.RemotePID()} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !cp.FromAnotherDir() || orig.FromAnotherDir() {
+		t.Fatal("FromAnotherDir wrong")
+	}
+	if _, err := cp.EnsureInstanceID(); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{cp.PID(), cp.RemotePID()} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived: %v", filepath.Base(p), err)
+		}
+	}
+	if cp.FromAnotherDir() {
+		t.Error("still from another dir after Ensure")
+	}
+}

@@ -123,11 +123,19 @@ func (s State) EnsureInstanceID() (string, error) {
 		return "", fmt.Errorf("state: write instance id: %w", werr)
 	}
 	path := s.InstanceIDFile()
-	if _, err := os.Lstat(path); err == nil {
-		// Made for another directory (ReadInstanceID above): remove it,
-		// then publish ours like a first use. Removing only a file that
-		// still names another directory keeps a concurrent first use's id.
-		if old, err := readInstanceID(path); err == nil && !sameDir(old.Dir, dir) {
+	if s.FromAnotherDir() {
+		// Made for another directory (ReadInstanceID above). The pid
+		// files came with it and name that directory's processes: drop
+		// them first, so nothing here ever signals them. Then remove the
+		// id file and publish ours like a first use. Removing only a file
+		// that still names another directory keeps a concurrent first
+		// use's id.
+		for _, p := range []string{s.PID(), s.RemotePID()} {
+			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return "", fmt.Errorf("state: drop a copied pid file: %w", err)
+			}
+		}
+		if s.FromAnotherDir() {
 			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return "", fmt.Errorf("state: replace instance id: %w", err)
 			}
@@ -140,6 +148,19 @@ func (s State) EnsureInstanceID() (string, error) {
 		return "", fmt.Errorf("state: write instance id: %w", err)
 	}
 	return rec.ID, nil
+}
+
+// FromAnotherDir reports whether the state directory holds an instance id
+// file made for another directory: the instance directory was copied or
+// moved. Its pid files then name the other directory's processes (a copy's
+// original still runs them), so the stop paths leave them alone.
+func (s State) FromAnotherDir() bool {
+	dir, err := filepath.Abs(s.Dir)
+	if err != nil {
+		return false
+	}
+	rec, err := readInstanceID(s.InstanceIDFile())
+	return err == nil && !sameDir(rec.Dir, dir)
 }
 
 // readInstanceID reads and checks the file: a 32-hex-digit id and an

@@ -1068,6 +1068,10 @@ func (bc *brokerController) Start(ctx context.Context) error {
 		checkCtx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
 		if still, err := readBrokerIdentity(checkCtx, bc.admin, bc.adminURL); err == nil {
+			if still.InstanceID == ours {
+				return fmt.Errorf("this instance's broker still answers on 127.0.0.1:%d after the stop: %s names another process or none; stop the broker by hand, then run this again",
+					bc.app.EffectiveAdminPort(), stateRel(bc.state, bc.state.PID()))
+			}
 			return fmt.Errorf("a broker still answers on 127.0.0.1:%d after this instance's broker was stopped: %w",
 				bc.app.EffectiveAdminPort(), foreignBrokerError(bc.app.EffectiveAdminPort(), still, ours))
 		}

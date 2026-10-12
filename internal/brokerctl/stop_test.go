@@ -143,3 +143,40 @@ func TestStopBrokerAndStopRemoteProxyAreIndependent(t *testing.T) {
 		t.Fatalf("broker process must survive a StopRemoteProxy call: %v", err)
 	}
 }
+
+// copyIDFrom gives s the instance id file of another state dir, as a copy
+// of the instance directory would (lever#181).
+func copyIDFrom(t *testing.T, s state.State) {
+	t.Helper()
+	orig := state.State{Dir: t.TempDir()}
+	if _, err := orig.EnsureInstanceID(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(orig.InstanceIDFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.InstanceIDFile(), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// In a copied instance directory the pid file names the original's
+// process: the stop removes the file and never signals the process.
+func TestStopLeavesACopiedPidFilesProcessAlone(t *testing.T) {
+	for _, tgt := range []stopTarget{brokerTarget, remoteTarget} {
+		t.Run(tgt.name, func(t *testing.T) {
+			s := newStopState(t)
+			copyIDFrom(t, s)
+			cmd := startSleeper(t, tgt.pidFile(s))
+			defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+			if err := tgt.stop(s); err != nil {
+				t.Fatalf("%s: %v", tgt.name, err)
+			}
+			assertPidFileGone(t, tgt.pidFile(s), "the copied pid file should be removed")
+			if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+				t.Fatalf("%s signalled the original's process: %v", tgt.name, err)
+			}
+		})
+	}
+}

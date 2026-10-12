@@ -72,8 +72,25 @@ func stopProcessByPIDFile(pidPath string) error {
 // its already-consumed single-use bootstrap latch — from poisoning the next
 // `lever apply` (which would otherwise reuse it and stage no bootstrap
 // ticket).
+//
+// In an instance directory copied or moved from another (lever#181), the
+// pid file came with it and names the other directory's broker: it is
+// removed, never signalled.
 func StopBroker(st state.State) error {
-	return stopProcessByPIDFile(st.PID())
+	return stopOwnPIDFile(st, st.PID())
+}
+
+// stopOwnPIDFile is stopProcessByPIDFile, except that a pid file this
+// state directory inherited from another (state.FromAnotherDir) is only
+// removed.
+func stopOwnPIDFile(st state.State, pidPath string) error {
+	if st.FromAnotherDir() {
+		if err := os.Remove(pidPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("brokerctl: %w", err)
+		}
+		return nil
+	}
+	return stopProcessByPIDFile(pidPath)
 }
 
 // StopRemoteProxy stops the remote-access proxy process recorded in the state
@@ -84,5 +101,5 @@ func StopBroker(st state.State) error {
 // both call sites may run against an already-stopped proxy, so idempotence
 // matters here as much as it does for StopBroker.
 func StopRemoteProxy(st state.State) error {
-	return stopProcessByPIDFile(st.RemotePID())
+	return stopOwnPIDFile(st, st.RemotePID())
 }

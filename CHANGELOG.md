@@ -19,16 +19,25 @@ version bump moves the block under the new version heading.
   whose oops path then hung in an EFI runtime call for a day. Existing VMs get it on their next
   apply; the command line, and a backend that could not be unloaded, wait for a reboot, which
   apply reports and lever never does itself (`lever stop`, then `lever up`). A soft lockup the
-  host causes (a starved vCPU on an overcommitted host) now reboots the guest too. OrbStack is
+  host causes (a starved vCPU on an overcommitted host, or a host that slept) now reboots the
+  guest too, and lever has no switch for it yet. Whether the VM then reboots (qemu) or stops (vz)
+  is unverified on Lima as of this release; `lever up` brings it back either way. OrbStack is
   unchanged: its kernel is shared and not lever's. New doctor row *guest crash recovery*.
 - **`guest_kernel` (Lima only): `hwe` or `ga`.** `hwe` installs `linux-generic-hwe-24.04` on the
   next apply or up and reports a pending reboot; `ga` keeps the 24.04 release kernel. Unset, it
   is `hwe` with `nested_virt` and `ga` without, so instances without nested VMs keep their
-  kernel. A failed install is a warning. New doctor row *guest kernel*: the running kernel, a
+  kernel. A failed install is a warning. `apt-get update` and the install wait up to 2 minutes
+  for the apt and dpkg locks (cloud-init may hold them on a fresh VM). While the guest's egress
+  is closed lever does not run apt and says why; a failed install is stamped in
+  `.lever-state/hwe-install-failed.json` (0600, keyed by the VM's machine id), and under
+  `egress: closed` later applies and ups warn without running apt until an apply under the open
+  posture succeeds or the stamp is deleted. New doctor row *guest kernel*: the running kernel, a
   pending reboot, a missing HWE kernel, and `nested_virt` on the 6.8 GA kernel.
 - **Operations guide: "Nested virtualization"**: the hardening, the kernel choice, a table of
   host/guest kernel pairs tested under nested load, what to do when a nested VM wedges the
-  guest, and what moving the base image to Ubuntu 26.04 would need tested.
+  guest, how to break a reboot loop, soft lockups the host causes, and what moving the base
+  image to Ubuntu 26.04 would need tested. CONTRIBUTING.md has the live test plan for the guest
+  hardening and nested virt.
 
 ### Fixed
 
@@ -36,8 +45,9 @@ version bump moves the block under the new version heading.
   wedged guest was killed and restarted, the record said running over a container that never
   started, and `lever up` told the operator to run `lever stop` and `lever up`. lever now records
   the guest boot id (`.lever-state/guest-boot.json`) whenever it sees the manager live; when the
-  boot changed and the manager's container is not running, it suspends and resumes the record
-  itself, keeping the conversation (never `--fresh`).
+  boot changed and podman in the guest says the manager's container is not running, it suspends
+  and resumes the record itself, keeping the conversation (never `--fresh`). The hub's container
+  status is never taken as evidence: it briefly reads `created` for a container that is starting.
 
 ## [0.35.0] - 2026-10-11
 

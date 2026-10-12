@@ -513,7 +513,7 @@ manager:
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/config-trust/) — `--fresh` resets the conversation, not the tree |
 | Doctor nags `skipped-modified` about a SKILL.md / CLAUDE.md you customized on purpose | your edits aren't recorded as accepted | `lever init --adopt` — records them as your baseline (host-side); doctor then passes, and any change *past* that baseline still fails as "modified since adoption" (tamper signal preserved) |
 | `lever up` printed `is up.` but the manager is dead moments later, or doctor's `manager agent` row fails | the harness died after scion reported the record running — a failed pre-start hook (`lever-agent boot`), an oversized boot task (see `prompt_file`), or `claude --continue` with no conversation to continue | after a start or resume, `lever up` waits until claude's tmux pane in the manager container is alive (up to 2 min: the pre-start hook runs first), then holds the record for a 10 s settle window and looks at the pane again. It reports `came up, then died` when the container stops, the hub record leaves running, or the pane dies; a claude that exits before it comes up (tmux answers in three probes in a row but claude's pane is not alive: scion's shell window keeps tmux and the container up) is `came up, then died: claude exited before it came up`, within a few seconds. It reports `did not come up` when the container runs but no tmux server answers in it after the wait (a hung pre-start hook). When the probe itself cannot run (it times out or fails a few times in a row), the container still running (podman's own state, not the hub's) after the window counts, with a warning. The container log in the guest holds the harness's last output. Fix the cause, then `lever up` again |
-| `lever up` fails: "record says running, but its container is \"created\" — the harness died" after the jail VM was killed or crashed | nothing suspended the manager before the VM went down. lever now recognises the new guest boot and suspends and resumes the record itself; this still shows on the first bring-up after an upgrade (no boot recorded yet) or when the suspend fails | `lever stop`, then `lever up` (the conversation is kept). See [nested virtualization](#nested-virtualization) |
+| `lever up` fails: "record says running, but its container is \"created\" — the harness died" after the jail VM was killed or crashed | nothing suspended the manager before the VM went down. lever now recognises the new guest boot and suspends and resumes the record itself; this still shows on the first bring-up after an upgrade (no boot recorded yet), when podman in the guest cannot say whether the container runs, or when the suspend fails | `lever stop`, then `lever up` (the conversation is kept). See [nested virtualization](#nested-virtualization) |
 | `lever up` (or `apply`) prints `start-manager: manager "<name>" still starting — …; 45s elapsed` | a manager start takes a while: the container start, the pre-start hook, claude's boot and the settle window can run over a minute | nothing: it prints a line about every 15 s with what it waits for, the hub's phase and container, and the time since the start. A line that repeats the same stage for minutes names where it is stuck |
 | The manager start fails (`claude exited before it came up`, or `came up, then died`) and the error names a stale background session; or doctor's `claude background sessions` row warns | the conversation was moved into a Claude Code background session (`/background`, `/bg`, the left-arrow key) before the last restart; its session records name the old container, and `claude --continue` refuses | move the stale records aside in the agent home, then `lever stop && lever up`; see [background sessions and /login](#background-sessions-and-login) |
 | Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
@@ -644,7 +644,9 @@ guest kernel, and a `lever up` that resumes the manager after such a kill.
 ### Crash recovery in every Lima guest
 
 Every `lever apply` and `lever up` converges these in every Lima guest, `nested_virt` or not
-(an existing VM gets them on its next apply). They are on by default and have no switch:
+(an existing VM gets them on its next apply or up). `lever up` does it before it looks at the
+manager, so it runs whether up then applies, resumes a suspended manager or only attaches to a
+running one. They are on by default and have no switch:
 
 - **Sysctls**, in `/etc/sysctl.d/99-lever-crash-recovery.conf` and applied to the running kernel:
   `kernel.panic_on_oops=1` (an oops panics instead of leaving a half-dead kernel),
@@ -653,8 +655,8 @@ Every `lever apply` and `lever up` converges these in every Lima guest, `nested_
   is written so: a task blocked in D state for two minutes is what slow guest disk I/O looks like
   (the first podman layer copy of a large image, a stalled host mount), and panicking on it would
   reboot a healthy guest. A hung task does not wedge the kernel; the oops and soft-lockup paths
-  cover the failure that does. A side effect: a soft lockup the host causes (a starved vCPU on an
-  overcommitted host) now reboots the guest instead of passing.
+  cover the failure that does. A side effect: a soft lockup the host causes now reboots the
+  guest instead of passing (see [soft lockups the host causes](#soft-lockups-the-host-causes)).
 - **No EFI pstore.** The panic path runs `kmsg_dump` too, so with the EFI backend registered a
   panic could hang in the same EFI call. On Ubuntu 24.04's 6.8 kernel `efi_pstore` is a loadable
   module, loaded at boot and registered as pstore's backend. lever unloads it now when it can, writes
@@ -667,6 +669,38 @@ Every `lever apply` and `lever up` converges these in every Lima guest, `nested_
 
 Each file is written only when its content differs, and `update-grub` runs only when the drop-in
 changed or `grub.cfg` lacks the parameter. lever never reboots the guest.
+
+**What a panic does to the VM.** The guest kernel asks for a reboot 10 s after a panic. What the
+VM then does depends on Lima's driver: under **qemu** the guest reboots, unless Lima starts QEMU
+with `-no-reboot` (then QEMU exits and the VM stops); under **vz** (Apple Virtualization.framework,
+lever's default on macOS) a guest reboot usually stops the VM. Either way, `lever up` brings it
+back (it starts a stopped VM) and resumes the manager (see
+[recovery after a hard VM kill](#recovery-after-a-hard-vm-kill)). **Unverified as of this
+release:** no panic has been forced on a lever-managed Lima VM under either driver, and lever does
+not depend on Lima's source, so whether Lima passes `-no-reboot` to QEMU was not checked. Step 5 of
+the [live test plan](https://github.com/stevegeek/lever/blob/main/CONTRIBUTING.md#live-test-plan-for-guest-hardening-and-nested-virt)
+checks it.
+
+**A guest booted without grub.** The command-line parameter reaches the kernel through grub, and
+the pending-reboot check reads `/boot/vmlinuz`. A guest that boots a kernel directly (a Lima
+template whose `images` entry sets `kernel:`, rather than the cloud image's grub) never gets the
+parameter, so apply and doctor report "reboot pending" for it forever. lever's own template boots
+the cloud image through grub; with a custom one, add `efi_pstore.pstore_disable=1` to that
+kernel's command line yourself, or ignore the line.
+
+#### Soft lockups the host causes
+
+`kernel.softlockup_panic=1` panics on any soft lockup, including one the guest did not cause: a
+vCPU that the host did not run for 20 s or more looks the same from inside. That happens under
+heavy CPU steal on an overcommitted host, and can happen after the host sleeps or is suspended
+with the VM running. The guest then panics and reboots (or stops), and every agent in it goes
+down with it; `lever up` brings the manager back, workers are restarted as usual.
+
+lever has no setting to turn it off, and an override file does not hold: every `lever apply` and
+`lever up` rewrites `/etc/sysctl.d/99-lever-crash-recovery.conf` and sets the value in the running
+kernel again. `sudo sysctl -w kernel.softlockup_panic=0` in the guest turns it off until the next
+apply or up. If it bites repeatedly, give the VM fewer vCPUs than the host has free, keep the host
+awake while agents run, and open an issue: a switch would be the fix.
 
 **What needs a reboot:** the kernel command line (always, the first time), and the EFI pstore
 backend when it could not be unloaded (built in, or in use). The sysctls and the unload take
@@ -688,10 +722,23 @@ release and is well past 6.8), `ga` keeps the 24.04 release kernel (6.8). Unset,
 instance that runs no nested VM has no reason to change kernels under it. lever installs the
 package on the next apply or up and then warns that a reboot is pending until the guest runs the
 new kernel (`lever stop`, then `lever up`). The GA kernel stays installed; grub's *Advanced
-options* menu still offers it. Under `egress: closed` a re-apply may not reach the Ubuntu
-mirrors; `apt-get update` then gives up after 2 minutes, the install fails with a warning, and
-each later apply spends that time again until it succeeds. lever counts the package installed only
-when dpkg says `install ok installed`.
+options* menu still offers it. lever counts the package installed only when dpkg says
+`install ok installed`.
+
+The install normally happens on the VM's first apply, before lever's egress chain exists, so it
+reaches the Ubuntu mirrors under either posture. `apt-get update` and the install each wait up to
+2 minutes for the apt and dpkg locks, which cloud-init or `apt-daily` may hold on a fresh VM.
+Later, when the package is still missing:
+
+- **Egress closed in the guest.** When lever's egress chain ends in the closed posture's
+  catch-all `DROP`, lever does not run apt at all and says so in a warning.
+- **A failed install is stamped.** When the install fails, lever writes
+  `.lever-state/hwe-install-failed.json` (mode 0600) with the VM's `/etc/machine-id` and the
+  time. While the stamp names the VM and the instance's posture is `egress: closed`, apply and up
+  warn and do not run apt, so they do not wait out apt's timeouts each time. An apply under the
+  open posture tries again and removes the stamp when the package is installed; deleting the
+  stamp makes the next apply or up try again. A recreated VM has a new machine id, so an old
+  stamp does not apply to it.
 
 Doctor's *guest kernel* row shows `uname -r` and warns when `/boot/vmlinuz` names another kernel
 (a reboot is pending), when `guest_kernel` is `hwe` and the package is missing, and when
@@ -720,7 +767,8 @@ the manager. Earlier releases' `lever up` refused ("record says running, but its
 lever now records the guest's boot id (`/proc/sys/kernel/random/boot_id`, new on every boot) in
 `.lever-state/guest-boot.json` each time it sees the manager live. When `lever apply` or
 `lever up` finds the record "running", the boot id changed since, and the manager's container is
-not running (podman's answer; the hub's container status when podman cannot be asked), it logs
+not running (podman's own answer in the guest; when podman cannot be asked, lever does nothing,
+because the hub briefly reports `created` for a container that is starting), it logs
 that the VM restarted, suspends the record and resumes it: what `lever stop` + `lever up` did by
 hand. The conversation is kept; lever never uses `--fresh` for this. When the boot id cannot be
 read, nothing was recorded yet (the first bring-up after upgrading), or the suspend does not take,
@@ -740,6 +788,28 @@ read, nothing was recorded yet (the first bring-up after upgrading), or the susp
    serial log.
 4. Check `lever doctor`: the *guest crash recovery* and *guest kernel* rows should be green. Add
    the host and guest kernels and the outcome to the table above.
+
+### Breaking a reboot loop
+
+If the guest oopses on every boot after `systemd-sysctl` has applied lever's file (a broken
+kernel or module that faults early), `panic_on_oops` turns that into a reboot about every 10 s.
+To stop it:
+
+1. Stop the VM: `limactl stop --force <vm>`.
+2. Start it with its console attached and interrupt grub (hold `Esc` or `Shift` as it boots; the
+   cloud image hides the menu). Under qemu, Lima's instance directory has the serial console
+   socket (`~/.lima/<vm>/serial*.sock`; the name depends on the Lima version), for example
+   `socat -,raw,echo=0 unix-connect:<socket>`. Under vz, use the VM's console as your Lima version
+   offers it.
+3. Either pick the previous kernel under *Advanced options* (the GA kernel stays installed), or
+   edit the `linux` line and add `sysctl.kernel.panic_on_oops=0`. `systemd-sysctl` applies
+   `/etc/sysctl.d` after the kernel reads that parameter, so lever's file sets it back to 1; add
+   `systemd.mask=systemd-sysctl.service` on the same line so the boot keeps 0.
+4. Once the guest is up, fix the cause (remove the faulting module, pin the working kernel as
+   grub's default) before the next `lever apply` or `lever up`: both set `panic_on_oops=1` again.
+
+This path is unverified on Lima as of this release (the console steps vary by Lima version and
+driver).
 
 ## Upgrading lever
 

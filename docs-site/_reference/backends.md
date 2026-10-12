@@ -111,6 +111,9 @@ See the [`nested_virt` config row](/reference/config/) for the full contract.
 
 **Sizing.** `disk` (default `24GiB`; Lima's own default is 100GiB), `cpus` (1-256) and `memory`
 (at least `2GiB`) size the VM. They are Lima only (config load rejects `cpus`, `memory`,
-`nested_virt` and `guest_kernel` on OrbStack, and OrbStack ignores `disk`) and create-time only: apply warns when
+`nested_virt`, `guest_kernel` and `guest_profile` on OrbStack, and OrbStack ignores `disk`) and create-time only: apply warns when
 `cpus` or `memory` differ from the existing VM's, and a bigger disk needs `limactl disk resize` or
-a recreate. Unset `cpus` and `memory` keep Lima's defaults.
+a recreate. Unset `cpus` and `memory` keep Lima's defaults (4 vCPUs and 4 GiB, or fewer on a smaller host). `guest_profile: small`
+trims the guest's services and adds zram swap, on an existing VM too. See
+[system requirements & sizing](/getting-started/requirements/) for the numbers and a small-machine
+profile.

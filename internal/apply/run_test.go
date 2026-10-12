@@ -4340,6 +4340,27 @@ func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
 	}
 }
 
+// manager.resources reaches the manager's create as scion limits, the
+// memory in scion's notation; unset sends none.
+func TestManagerStartOptsResources(t *testing.T) {
+	app := &config.App{Name: "m", Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}
+	r := &run{app: app}
+	opts, err := r.managerStartOpts(context.Background(), "/lever/proj", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Resources != (scion.Resources{}) {
+		t.Fatalf("unset: resources = %+v, want none", opts.Resources)
+	}
+	app.Manager.Resources = config.Resources{Memory: "3GiB", CPU: "1.5"}
+	if opts, err = r.managerStartOpts(context.Background(), "/lever/proj", "task", ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := (scion.Resources{Memory: "3Gi", CPU: "1.5"}); opts.Resources != want {
+		t.Fatalf("resources = %+v, want %+v", opts.Resources, want)
+	}
+}
+
 // The manager mounts each shared folder at /shared/<name>: read-only, and
 // over its tree path read-only too, unless it writes the folder.
 func TestManagerVolumesSharedFolders(t *testing.T) {

@@ -86,6 +86,10 @@ type WorkerSpec struct {
 	// mounted at create, and checked on the host before every start and
 	// resume (verifySharedSources, refuseStaleShares).
 	Shared []SharedMount
+	// Resources is workers[].resources: the container's memory and CPU
+	// limits, sent at a fresh start (scion stores them in the record, so a
+	// resume reuses them). Zero = scion's defaults.
+	Resources scion.Resources
 }
 
 // workerSpec looks up a declared worker by name (its cert CN, which is also
@@ -642,6 +646,13 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
+	// broker.max_running_workers: checked before anything is staged, so a
+	// refusal changes nothing.
+	release, ok := b.admitOrRefuse(ctx, w, actor, "resume", spec.Name)
+	if !ok {
+		return
+	}
+	defer release()
 	// manager.read_only: a resume re-resolves the workspace bind source, so
 	// a worker dir the manager swapped for a link since the dispatch would
 	// hand the worker whatever the link names. Checked before the ticket is
@@ -750,6 +761,12 @@ func workerPurgeHint(worker string) string {
 // directory mounted into the new container.
 func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
 	ctx := r.Context()
+	// broker.max_running_workers, before any side effect.
+	release, ok := b.admitOrRefuse(ctx, w, b.manager, "start", spec.Name)
+	if !ok {
+		return
+	}
+	defer release()
 	// Read the standing instructions BEFORE any side effect (ticket, env,
 	// workspace dir): a config that names a file the host cannot read is an
 	// operator error, and it must fail with nothing staged.
@@ -809,6 +826,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		Project: b.instanceProject, WorkspaceSubdir: spec.WorkspaceSubdir,
 		Image: spec.Image, Model: spec.Model, APIKey: spec.APIKey,
 		Instructions: instructions, Volumes: volumes, Env: env,
+		Resources: spec.Resources,
 	}); err != nil {
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "runtime error", http.StatusBadGateway)

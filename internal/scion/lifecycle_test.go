@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -945,6 +946,57 @@ func TestStartInlineConfigCarriesInstructionsVolumesAndEnvTogether(t *testing.T)
 	}
 	if body.AgentInstructions != "manual" || len(body.Volumes) != 1 || body.Env["K"] != "v" {
 		t.Fatalf("inline config = %+v", body)
+	}
+}
+
+// Container limits travel as inline config resources.limits in scion's
+// ResourceSpec shape, and on their own still switch the start to `--config -`.
+func TestStartResourcesGoOverStdin(t *testing.T) {
+	f := fakeScion(true)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a",
+		Resources: Resources{Memory: "1536Mi", CPU: "1.5"}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	if !slices.Contains(last.Args, "--config") {
+		t.Fatalf("argv %q: resources alone must send the inline config", last.Args)
+	}
+	var body struct {
+		Resources struct {
+			Limits struct {
+				CPU    string `json:"cpu"`
+				Memory string `json:"memory"`
+			} `json:"limits"`
+			Requests *json.RawMessage `json:"requests"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal([]byte(last.Stdin), &body); err != nil {
+		t.Fatalf("stdin is not valid JSON: %v (%q)", err, last.Stdin)
+	}
+	if body.Resources.Limits.CPU != "1.5" || body.Resources.Limits.Memory != "1536Mi" {
+		t.Fatalf("resources = %+v (stdin %q)", body.Resources, last.Stdin)
+	}
+	if body.Resources.Requests != nil {
+		t.Fatalf("lever sends limits only, got requests in %q", last.Stdin)
+	}
+	// One limit alone: the other is absent, so scion's default for it applies.
+	f2 := fakeScion(true)
+	if err := New(f2, Options{}).Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a",
+		Resources: Resources{Memory: "2Gi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f2.Calls[len(f2.Calls)-1].Stdin; !strings.Contains(got, `"resources":{"limits":{"memory":"2Gi"}}`) {
+		t.Fatalf("memory-only stdin = %q", got)
+	}
+	// No limits: no resources key at all, and no stdin when nothing else is set.
+	f3 := fakeScion(true)
+	if err := New(f3, Options{}).Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+		t.Fatal(err)
+	}
+	if last := f3.Calls[len(f3.Calls)-1]; slices.Contains(last.Args, "--config") || last.Stdin != "" {
+		t.Fatalf("a start with no inline material sent config: argv %q stdin %q", last.Args, last.Stdin)
 	}
 }
 

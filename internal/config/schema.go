@@ -156,6 +156,12 @@ type Broker struct {
 	// valid in every way but time — never a revoked or epoch-stale identity).
 	// all (default) | manager | off. See #22.
 	AutoReenrol AutoReenrolMode `yaml:"auto_reenrol"`
+	// MaxRunningWorkers caps how many workers may run at once: the broker
+	// refuses a start, resume or wake that would take the count of running
+	// or starting workers past it (see broker.admitWorker). 0, the default,
+	// is no cap. The manager does not count. The json tag keeps it out of
+	// brokerctl.ConfigHash while unset (no broker restart on upgrade).
+	MaxRunningWorkers int `yaml:"max_running_workers" json:",omitempty"`
 }
 
 // AutoReenrolMode selects which agents the broker's natural-lapse healer
@@ -220,13 +226,16 @@ type Manager struct {
 	ReadOnly []string `yaml:"read_only"`
 	// ClaudeSettings and AfterCompactNote configure the agent's Claude Code
 	// (see ClaudeSettings). Applied at every start, a resume included.
-	ClaudeSettings   ClaudeSettings  `yaml:"claude_settings"`
-	AfterCompactNote string          `yaml:"after_compact_note"`
-	AllowPorts       []int           `yaml:"allow_ports"`
-	CredentialFile   string          `yaml:"credential_file"`
-	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
-	Obtain           []Grant         `yaml:"obtain"`
-	Delegate         []DelegateGrant `yaml:"delegate"`
+	ClaudeSettings   ClaudeSettings `yaml:"claude_settings"`
+	AfterCompactNote string         `yaml:"after_compact_note"`
+	// Resources caps the manager container's memory and CPU (see
+	// Resources). Create-time only, like Model.
+	Resources      Resources       `yaml:"resources"`
+	AllowPorts     []int           `yaml:"allow_ports"`
+	CredentialFile string          `yaml:"credential_file"`
+	LLMAuth        LLMAuthMode     `yaml:"llm_auth"`
+	Obtain         []Grant         `yaml:"obtain"`
+	Delegate       []DelegateGrant `yaml:"delegate"`
 }
 
 type Worker struct {
@@ -260,6 +269,10 @@ type Worker struct {
 	// json tag keeps it out of brokerctl.ConfigHash while false (see
 	// ClaudeSettings).
 	Recyclable bool `yaml:"recyclable" json:",omitempty"`
+	// Resources caps this worker's container memory and CPU (see
+	// Resources). Not inherited from the manager. Create-time only, like
+	// Model. The json tag keeps it out of brokerctl.ConfigHash while unset.
+	Resources Resources `yaml:"resources" json:",omitzero"`
 }
 
 type ScionConfig struct {
@@ -574,6 +587,12 @@ type App struct {
 	// 24.04 hardware-enablement kernel, "ga" keeps the release kernel. Empty
 	// = "hwe" with nested_virt, else "ga" (EffectiveGuestKernel). Lima-only.
 	GuestKernel string `yaml:"guest_kernel"`
+	// GuestProfile trims the Lima guest for a small host: "small" disables
+	// the guest services a jail does not use (snapd, unattended upgrades and
+	// the apt timers, multipathd, ModemManager) and adds zram swap.
+	// "standard" or empty leaves the stock Ubuntu guest (and undoes what
+	// "small" did). Lima-only. See EffectiveGuestProfile.
+	GuestProfile string `yaml:"guest_profile"`
 
 	dir string // instance root (the config file's directory)
 }

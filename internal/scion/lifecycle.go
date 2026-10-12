@@ -538,6 +538,12 @@ type StartOpts struct {
 	// broker sets LEVER_BOOTSTRAP so lever-agent boot reads the mounted
 	// ticket. CREATE-time only, as Volumes.
 	Env map[string]string
+	// Resources caps the agent container's memory and CPU, sent as inline
+	// config `resources.limits` (scion ResourceSpec), which scion's podman
+	// runtime turns into --memory and --cpus. The zero value sends nothing,
+	// so scion's own defaults apply. CREATE-time only, as Volumes: scion
+	// stores the resolved spec in the record and a resume reuses it.
+	Resources Resources
 	// Workspace is the path mounted as /workspace in the agent container,
 	// passed as `--workspace`. For directory projects this MUST be set to the
 	// (in-jail) project tree to get a live in-place bind mount: scion's default
@@ -649,7 +655,7 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	// so no quoting rule of a config language can alter the text. Inline
 	// content, not a file:// URI, so nothing depends on where the scion
 	// binary runs or what its working directory is. See StartOpts.Instructions.
-	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions, Volumes: o.Volumes, Env: o.Env})
+	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions, Volumes: o.Volumes, Env: o.Env, Resources: o.Resources.spec()})
 	if err != nil {
 		return fmt.Errorf("encoding inline agent config: %w", err)
 	}
@@ -713,10 +719,39 @@ func startArgs(o StartOpts, role string) []string {
 }
 
 // hasInlineConfig reports whether Start must send an inline config on stdin:
-// any of instructions, volumes or env is set. Absent all three, the argv is
-// byte-identical to a plain start and nothing is written to scion's stdin.
+// any of instructions, volumes, env or resources is set. Absent all four, the
+// argv is byte-identical to a plain start and nothing is written to scion's
+// stdin.
 func (o StartOpts) hasInlineConfig() bool {
-	return o.Instructions != "" || len(o.Volumes) > 0 || len(o.Env) > 0
+	return o.Instructions != "" || len(o.Volumes) > 0 || len(o.Env) > 0 || o.Resources != (Resources{})
+}
+
+// Resources is an agent's container limits in scion's own notation: Memory a
+// Kubernetes quantity ("1536Mi", "2Gi"), CPU in cores ("1.5") or millicores
+// ("500m"). Config validation (config.Resources) is what bounds them; scion
+// parses them again when it builds the container.
+type Resources struct {
+	Memory string
+	CPU    string
+}
+
+// resourceSpec is the subset of scion's ResourceSpec (pkg/api) lever sends:
+// limits only.
+type resourceSpec struct {
+	Limits resourceList `json:"limits"`
+}
+
+type resourceList struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
+}
+
+// spec is r as inline config, nil when neither limit is set.
+func (r Resources) spec() *resourceSpec {
+	if r == (Resources{}) {
+		return nil
+	}
+	return &resourceSpec{Limits: resourceList{CPU: r.CPU, Memory: r.Memory}}
 }
 
 // ContainerWorkspace is where scion mounts an agent's workspace (the
@@ -733,15 +768,17 @@ type VolumeMount struct {
 }
 
 // inlineAgentConfig is the subset of scion's inline agent config (`scion
-// config-schema`) lever sends: the standing instructions, extra volumes and
-// extra env. Everything else an agent needs is already a flag, and an inline
-// value would silently override the template chain for that field. Every
+// config-schema`) lever sends: the standing instructions, extra volumes,
+// extra env and the container limits. Everything else an agent needs is
+// already a flag, and an inline value would silently override the template
+// chain for that field. Every
 // field is omitempty: scion reads a PRESENT empty agent_instructions as
 // "inline-provided" and would then skip the template's instructions.
 type inlineAgentConfig struct {
 	AgentInstructions string            `json:"agent_instructions,omitempty"`
 	Volumes           []VolumeMount     `json:"volumes,omitempty"`
 	Env               map[string]string `json:"env,omitempty"`
+	Resources         *resourceSpec     `json:"resources,omitempty"`
 }
 
 func (c *Client) Resume(ctx context.Context, worker, project string) error {

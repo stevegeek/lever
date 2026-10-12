@@ -159,7 +159,7 @@ func validateLimaKeys(a *App, goos string) error {
 		for _, k := range []struct {
 			key string
 			set bool
-		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}} {
+		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}, {"guest_profile", a.GuestProfile != ""}} {
 			if k.set {
 				return fmt.Errorf("config: %s is Lima-only; OrbStack manages its own machine resources", k.key)
 			}
@@ -174,6 +174,12 @@ func validateLimaKeys(a *App, goos string) error {
 	default:
 		return fmt.Errorf("config: guest_kernel %q invalid (want %q or %q, or unset: %q with nested_virt, else %q)",
 			a.GuestKernel, GuestKernelHWE, GuestKernelGA, GuestKernelHWE, GuestKernelGA)
+	}
+	switch a.GuestProfile {
+	case "", GuestProfileStandard, GuestProfileSmall:
+	default:
+		return fmt.Errorf("config: guest_profile %q invalid (want %q or %q, or unset: %q)",
+			a.GuestProfile, GuestProfileStandard, GuestProfileSmall, GuestProfileStandard)
 	}
 	if a.CPUs < 0 || a.CPUs > 256 {
 		return fmt.Errorf("config: cpus %d out of range (1-256, or unset for the Lima default)", a.CPUs)
@@ -312,6 +318,12 @@ func (a *App) Validate() error {
 		return err
 	}
 	if err := validateClaude("manager", a.Manager.ClaudeSettings, a.Manager.AfterCompactNote); err != nil {
+		return err
+	}
+	if err := a.validateResources("manager", a.Manager.Resources); err != nil {
+		return err
+	}
+	if err := a.validateWorkerCap(); err != nil {
 		return err
 	}
 	for _, g := range a.Workers {
@@ -475,7 +487,7 @@ func (a *App) validateWorker(g Worker) error {
 	if err := validateClaude(fmt.Sprintf("worker %q", g.Name), g.ClaudeSettings, g.AfterCompactNote); err != nil {
 		return err
 	}
-	return nil
+	return a.validateResources(fmt.Sprintf("worker %q", g.Name), g.Resources)
 }
 
 // validateOperator fails closed on operator-directive-channel config

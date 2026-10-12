@@ -262,6 +262,22 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 			return "", false
 		}
 	}
+	// broker.max_running_workers: bringing back a worker that is not
+	// running takes a slot like any resume. A bounce of a running one does
+	// not (it holds its slot throughout).
+	resumes := phase == scion.PhaseSuspended || phase == scion.PhaseStopped || phase == scion.PhaseError
+	if _, isWorker := b.workers[slug]; isWorker && resumes {
+		release, err := b.admitWorker(ctx, slug)
+		if err != nil {
+			outcome := "error"
+			if errors.Is(err, ErrWorkerCap) {
+				outcome = "deny"
+			}
+			b.audit("reenrol", cn, outcome, "natural lapse: not resuming "+slug+": "+err.Error())
+			return "", false
+		}
+		defer release()
+	}
 	switch phase {
 	case scion.PhaseRunning:
 		verb = "suspend+resume"

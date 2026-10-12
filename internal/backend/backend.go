@@ -86,6 +86,11 @@ type Config struct {
 	// config) installs nothing and only reports a pending reboot. Ignored
 	// by OrbStack, whose kernel is OrbStack's.
 	GuestKernel string
+	// GuestProfile is the Lima guest profile to converge on ("small" or
+	// "standard"; config.App.EffectiveGuestProfile, guest.GuestProfile*).
+	// "" (`lever provision`, no config) leaves the guest as it is. Ignored
+	// by OrbStack.
+	GuestProfile string
 	// HWEFailStamp is the host path of the stamp lever keeps when the HWE
 	// kernel install failed in this VM (state.State.HWEFailStamp, 0600,
 	// keyed by the guest's machine id). While it names the VM and the

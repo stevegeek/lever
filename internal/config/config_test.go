@@ -1218,6 +1218,10 @@ func TestValidateLimaKeys(t *testing.T) {
 		{"guest_kernel ga darwin", func(a *App) { a.GuestKernel = "ga" }, "darwin", ""},
 		{"guest_kernel bad", func(a *App) { a.GuestKernel = "mainline" }, "linux", `guest_kernel "mainline" invalid`},
 		{"guest_kernel on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.GuestKernel = "hwe" }, "darwin", "guest_kernel is Lima-only"},
+		{"guest_profile small", func(a *App) { a.GuestProfile = "small" }, "linux", ""},
+		{"guest_profile standard darwin", func(a *App) { a.GuestProfile = "standard" }, "darwin", ""},
+		{"guest_profile bad", func(a *App) { a.GuestProfile = "tiny" }, "linux", `guest_profile "tiny" invalid`},
+		{"guest_profile on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.GuestProfile = "small" }, "darwin", "guest_profile is Lima-only"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

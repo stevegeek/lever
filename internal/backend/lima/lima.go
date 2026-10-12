@@ -113,6 +113,11 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if err != nil {
 		return err
 	}
+	// Before Provision too: the small profile stops the apt timers that
+	// would otherwise compete with provisioning for the dpkg lock.
+	if err := l.ensureGuestProfile(ctx, cfg); err != nil {
+		return err
+	}
 	if err := l.Provision(ctx, cfg); err != nil {
 		return err
 	}
@@ -461,6 +466,33 @@ var _ backend.Backend = (*Lima)(nil)
 // RebootAdvice is how an operator reboots the jail VM without losing the
 // manager's conversation.
 const RebootAdvice = "`lever stop`, then `lever up`, reboots the VM and keeps the manager conversation"
+
+// ensureGuestProfile converges the guest on cfg.GuestProfile (lever#193):
+// the small profile's trimmed services and zram swap, or standard, which
+// undoes them. "" (no config) skips the step. What systemd refuses is a
+// warning; a failed write of lever's own files fails the bring-up.
+func (l *Lima) ensureGuestProfile(ctx context.Context, cfg backend.Config) error {
+	if cfg.GuestProfile == "" {
+		return nil
+	}
+	warn := cfg.Warn
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
+	s := progress.From(ctx).Start("guest profile " + cfg.GuestProfile)
+	rep, err := l.Guest().EnsureGuestProfile(ctx, cfg.GuestProfile)
+	s.Done(err)
+	if err != nil {
+		return err
+	}
+	for _, w := range rep.Warn {
+		warn("jail: warning: %s", w)
+	}
+	for _, r := range rep.Reboot {
+		warn("jail: reboot pending: %s; %s", r, RebootAdvice)
+	}
+	return nil
+}
 
 // hardenGuest converges the guest's crash recovery (always) and its kernel
 // flavour (cfg.GuestKernel) on every bring-up, so an existing VM gets them

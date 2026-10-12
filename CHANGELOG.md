@@ -203,6 +203,12 @@ version bump moves the block under the new version heading.
   `ADMIN_PORT`, the new `TOOL_PORT`, `SUPPRESS_PORT`); a port set explicitly that is in use stops
   the run before it starts, naming the process. Any failed run now prints the end of the broker
   and tool logs, masked, with or without `KEEP=1`.
+- **`lever-tool-db` moves to modernc.org/sqlite v1.60.1 on modernc.org/libc v1.77.1 (lever#180)**,
+  from v1.53.0 on v1.73.4; SQLite itself goes from 3.53.2 to 3.53.4. A host with Go 1.27 saw the
+  old pair hang on first use. Built with Go 1.27.1 and 1.27.2, the new pair opens, seeds and
+  queries both an in-memory and an on-disk database, and its tests pass. No shipped `lever` binary
+  links SQLite; only the reference tool does. It is baked into the agent image, which this release
+  rebuilds anyway (jail ABI 2).
 
 ### Fixed
 

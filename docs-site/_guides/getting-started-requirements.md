@@ -71,7 +71,6 @@ its start as it grows. An SSD is the single biggest help on an older machine.
 - **In the guest, with apt:** `podman`, `uidmap`, `passt`, `fuse-overlayfs`, `slirp4netns`,
   `dbus-user-session`, `iptables`, `curl` and `netcat-openbsd` when any is missing, and the
   `linux-generic-hwe-24.04` kernel with `guest_kernel: hwe`.
-- **In the guest:** rootless Docker, from the get.docker.com install script.
 - **On the host:** the Go modules of the pinned scion (skipped with `scion.binary`); with
   `remote.enabled` and a `version:` or `source:` scion, the npm packages of scion's web UI.
 - **The agent image** is never pulled from inside the jail: `make lever-image` builds it on the host

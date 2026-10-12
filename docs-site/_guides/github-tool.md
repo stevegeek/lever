@@ -19,8 +19,10 @@ start with the configured prefix (default `agent/`), and it never forces a push.
 By default the only operation is `push`, with the arguments `repo`, `branch` and `bundle`. You then
 open the PR yourself: the `push` result includes a compare URL for this.
 
-You can also offer four more operations with the `-ops` flag: `pr_open`, `pr_status`, `pr_merge`
-and `release` (see [6. PRs, merges and releases](#6-prs-merges-and-releases-opt-in)). They are off
+You can also offer more operations with the `-ops` flag: `pr_open`, `pr_status`, `pr_merge`
+and `release` (see [6. PRs, merges and releases](#6-prs-merges-and-releases-opt-in)), and the
+read-only `ci_runs` and `ci_log`, which let an agent see why CI failed (see
+[7. CI runs and logs](#7-ci-runs-and-logs-opt-in)). They are off
 by default. `pr_open` publishes text under the App's name, `pr_merge` changes the default branch,
 and `release` creates a tag that starts your release workflow. Offer them only on repositories
 where you want this, and grant each one only to the agents that need it. The riskier settings are
@@ -120,7 +122,7 @@ broker:
       command: [/home/you/.local/bin/lever-tool-github,
                 # -tree, -state, -app-id, -installation-id, -app-key as above
                 -repos, owner/name,
-                -ops, "push,pr_open,pr_status,pr_merge,release",
+                -ops, "push,pr_open,pr_status,pr_merge,release,ci_runs,ci_log",
                 -merge-methods, squash,
                 -merge-checks, "test,lint"]  # required with pr_merge: names, any or none
                 # pr_merge requires a person's approval by default
@@ -133,6 +135,8 @@ broker:
         - {name: pr_status, params: [repo, number]}
         - {name: pr_merge, params: [repo, number, method]}
         - {name: release, params: [repo, tag]}
+        - {name: ci_runs, params: [repo, branch, limit]}
+        - {name: ci_log, params: [repo, job_id, lines]}
       allowed_values:
         repo: [owner/name]
 manager:
@@ -142,6 +146,8 @@ manager:
     - {tool: github, op: pr_status}
     - {tool: github, op: pr_merge}
     - {tool: github, op: release}
+    - {tool: github, op: ci_runs}
+    - {tool: github, op: ci_log}
 ```
 
 Each operation is its own capability. An agent with only `push` and `pr_open` can open PRs but not
@@ -161,7 +167,7 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-max-bundle` | no | Bundle size cap. Default 256 MiB. |
 | `-import-budget` | no | Bundle bytes that one caller can import in one hour. Refused pushes count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
 | `-name` | no | Tool name. Default `github`. It must equal the `name` in the config. |
-| `-ops` | no | Comma list of the operations to offer: `push`, `pr_open`, `pr_status`, `pr_merge`, `release`. Default `push`. An operation not listed does not exist. |
+| `-ops` | no | Comma list of the operations to offer: `push`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`. Default `push`. An operation not listed does not exist. |
 | `-merge-methods` | no | Comma list of the merge methods `pr_merge` may use: `squash`, `merge`, `rebase`. The first is the default. Default `squash`. |
 | `-merge-checks` | with `pr_merge` | What `pr_merge` requires of the checks on the PR head. A comma list of check names: these checks must be present and successful, and all others green. `any`: at least one successful check, and all green. `none`: no check is needed, but any that exist must be green. No default: when `-ops` offers `pr_merge`, the tool refuses to start without it. |
 | `-merge-require-review` | no | `pr_merge` requires an approving review by a person on the PR's head SHA, and no outstanding request for changes. Default `true`. Turn it off only with `-merge-require-review=false`; the tool then logs a warning when it starts. |
@@ -378,6 +384,46 @@ to an agent whose job includes releases.
 | PR retargeted between the check and the merge | Merged. The result has `retargeted: true` and a `warning`, and a warning audit line is written. |
 | Tag exists, is not greater, or an existing matching tag is not a semantic version, or more than 2000 tags | Named refusal. |
 | Token mint or GitHub error, a redirect, or an answer over 4 MiB | Redacted error text. The tool does not retry. |
+
+## 7. CI runs and logs (opt-in)
+
+`ci_runs` and `ci_log` read GitHub Actions and change nothing. They exist only when `-ops` lists
+them, act only on a repository in `-repos`, and each call gets a token narrowed to that repository
+and **Actions: read**. Add that permission to the App (and accept it on the installation); the
+tool still has no Workflows permission, so agents can read CI but not change it. Each call writes
+an audit line (`github.ci_runs`, `github.ci_log`) with the caller, the repository, the branch or
+job id and how much it returned, never the log text.
+
+| Operation | Arguments | App permissions it needs | GitHub settings it needs |
+|---|---|---|---|
+| `ci_runs` | `repo`, `branch`, `limit` (optional, 1-20, default 5) | Actions: read | None. |
+| `ci_log` | `repo`, `job_id`, `lines` (optional, 1-400, default 150) | Actions: read | None. |
+
+### `ci_runs`
+
+Returns the newest workflow runs on `branch`, any branch of the repository (`main` too: reading is
+not pushing): each run's `id`, `name`, `event`, `status`, `conclusion`, `head_sha`, `run_attempt`,
+`html_url` and `created_at`. For the three newest runs that did not pass, it also lists their jobs:
+`id`, `name`, `conclusion` and the names of the failed steps. A job's `id` is what `ci_log` takes.
+
+### `ci_log`
+
+Returns the end of one job's log: `tail`, its last `lines` lines, and `error_lines`, at most 60
+lines from the whole log that look like a failure (GitHub's `##[error]` lines, Go's `--- FAIL`,
+`FAIL` and `panic:`, `file.go:N:` compiler and vet messages, `error`/`fatal` at a line's start,
+`exit code N`). Lines are plain text: GitHub's timestamps, terminal escape sequences and control
+characters are removed, each line is cut at 500 characters, and the token and known credential
+shapes are masked. The tool reads at most 64 MiB of a log (`truncated` says when it stopped).
+
+GitHub answers a log request with a redirect to a signed download URL. The tool follows it only
+over https to GitHub's log hosts (`*.actions.githubusercontent.com`, `*.blob.core.windows.net`) and
+sends no credential there; any other redirect is refused. A log GitHub no longer keeps (90 days by
+default) answers not found.
+
+**Risk:** a log is whatever the workflow's commands printed, and the repository's code (which an
+agent may have written) runs in that workflow. The result says so in its `note`: the agent should
+read a log as data, not as instructions. GitHub masks the repository's secrets in logs; the tool's
+masking is a second line, not a guarantee.
 
 ## Bundle limits
 

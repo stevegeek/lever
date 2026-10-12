@@ -28,7 +28,7 @@ const (
 )
 
 // AllOps lists every operation in a stable order.
-var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease}
+var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRuns, OpCILog}
 
 // OpPermissions is the App permission set each operation's token is
 // narrowed to. GitHub adds metadata: read to every token.
@@ -38,6 +38,8 @@ var OpPermissions = map[string]Permissions{
 	OpPRStatus: {"pull_requests": "read", "checks": "read", "statuses": "read"},
 	OpPRMerge:  {"contents": "write", "pull_requests": "write", "checks": "read", "statuses": "read"},
 	OpRelease:  {"contents": "write"},
+	OpCIRuns:   {"actions": "read"},
+	OpCILog:    {"actions": "read"},
 }
 
 // MergeMethods are the merge methods GitHub accepts.
@@ -118,6 +120,11 @@ type Ops struct {
 	ReleaseTag      *regexp.Regexp // matched against the whole tag
 	Deadline        time.Duration  // bounds one whole call (0 = none)
 	WebBase         string         // https://github.com (the default when empty), for result URLs
+	// LogHosts are the hosts a job log download may be redirected to
+	// (nil = DefaultLogHosts); LogHTTP, when set, is the client for that
+	// download (tests).
+	LogHosts []string
+	LogHTTP  *http.Client
 
 	relOnce sync.Once
 	relLock chan struct{}

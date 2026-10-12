@@ -27,6 +27,12 @@ version bump moves the block under the new version heading.
   needs more permissions for these (Pull requests, Checks, Commit statuses), and `release` needs
   the App in the release tag creation ruleset's bypass list; it never needs Workflows. See the
   github tool guide.
+- **github tool: read CI (`ci_runs`, `ci_log`, opt-in).** Two read-only operations so an agent can
+  see why CI failed without a credential in the jail. `ci_runs` lists the newest workflow runs on a
+  branch, with the jobs and failed steps of the newest runs that did not pass. `ci_log` returns a
+  job log's failure-looking lines and its last lines as plain text (no timestamps or escape
+  sequences, credentials masked, at most 64 MiB read). The log download follows GitHub's redirect
+  only over https to its log hosts, with no credential. Both need only Actions: read on the App.
 
 ## [0.35.0] - 2026-10-12
 

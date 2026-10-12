@@ -12,7 +12,9 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
@@ -236,18 +238,49 @@ func TestMintManagerBootstrapNon200(t *testing.T) {
 // TestBrokerHealthyReturnsOnOK proves the health poll succeeds as soon as
 // /epoch answers 200.
 func TestBrokerHealthyReturnsOnOK(t *testing.T) {
+	// The fake answers with this binary's version and this config's hash:
+	// the identity of the broker this apply runs.
+	var app *config.App
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		writeJSONEpoch(w, wire.EpochResponse{Version: cli.VersionString(), ConfigHash: brokerctl.ConfigHash(app)})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	deps, _, _, _ := buildDepsAgainstFakeBroker(t, srv)
+	deps, a, _, _ := buildDepsAgainstFakeBroker(t, srv)
+	app = a
 
 	if err := deps.BrokerHealthy(context.Background()); err != nil {
-		t.Fatalf("BrokerHealthy against a 200 /epoch: %v", err)
+		t.Fatalf("BrokerHealthy against this instance's broker: %v", err)
 	}
+}
+
+// A broker that answers with another identity (another instance on the same
+// ports, or a leftover broker) is never adopted: health fails at once,
+// naming the port, instead of polling to the timeout or carrying on.
+func TestBrokerHealthyRefusesAForeignBroker(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
+		writeJSONEpoch(w, wire.EpochResponse{Version: "0.34.2", ConfigHash: "another-instance"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	deps, app, _, _ := buildDepsAgainstFakeBroker(t, srv)
+	start := time.Now()
+	err := deps.BrokerHealthy(context.Background())
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("127.0.0.1:%d", app.EffectiveAdminPort())) {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("took %s: a foreign broker must fail at once", time.Since(start))
+	}
+}
+
+func writeJSONEpoch(w http.ResponseWriter, er wire.EpochResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(er)
 }
 
 // TestEgressAllowlistCarriesTheLoginPort is the regression test for a live

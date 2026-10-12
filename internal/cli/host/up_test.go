@@ -3,6 +3,8 @@ package host
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -230,5 +232,36 @@ func TestUpProbeNotice(t *testing.T) {
 	fresh := upProbeNotice(err, true)
 	if !strings.Contains(fresh, "--fresh") || !strings.Contains(fresh, "discard") || !strings.Contains(fresh, "hub is not responding") {
 		t.Errorf("fresh notice = %q, want the flag, the discard, and the reason", fresh)
+	}
+}
+
+// A broker that answers on this instance's admin port with another
+// identity is never adopted: the error names the port and the fix.
+func TestBrokerIdentityErr(t *testing.T) {
+	if err := brokerIdentityErr(wire.EpochResponse{Version: "v", ConfigHash: "h"}, "v", "h", 8444); err != nil {
+		t.Fatalf("own broker: %v", err)
+	}
+	for _, got := range []wire.EpochResponse{{Version: "0.34.2", ConfigHash: "other"}, {Version: "v", ConfigHash: "other"}, {}} {
+		err := brokerIdentityErr(got, "v", "h", 8444)
+		if err == nil || !strings.Contains(err.Error(), "127.0.0.1:8444") || !strings.Contains(err.Error(), "broker.admin_port") {
+			t.Fatalf("%+v: err = %v", got, err)
+		}
+	}
+}
+
+// stillAnswering: a broker that keeps answering is reported; a closed port
+// is not.
+func TestBrokerStillAnswering(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"epoch":0,"version":"0.34.2","config_hash":"x"}`))
+	}))
+	bc := &brokerController{adminURL: srv.URL, admin: srv.Client()}
+	if er, ok := bc.stillAnswering(context.Background(), 300*time.Millisecond); !ok || er.Version != "0.34.2" {
+		t.Fatalf("answering broker: %+v %v", er, ok)
+	}
+	srv.Close()
+	if _, ok := bc.stillAnswering(context.Background(), 300*time.Millisecond); ok {
+		t.Fatal("a closed port must not read as answering")
 	}
 }

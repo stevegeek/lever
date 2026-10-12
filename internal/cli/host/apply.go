@@ -1034,6 +1034,14 @@ func (bc *brokerController) Start(ctx context.Context) error {
 		if err := brokerctl.StopBroker(bc.state); err != nil {
 			return fmt.Errorf("stopping the stale broker before restart: %w", err)
 		}
+		// StopBroker stops only this instance's broker (its pid file). A
+		// broker that still answers on the admin port is another one: a
+		// second lever instance on the same ports, or a leaked process. A
+		// spawn could not bind the port and would die, and the health
+		// check would then adopt the other broker. Refuse instead.
+		if still, ok := bc.stillAnswering(ctx, foreignBrokerWait); ok {
+			return foreignBrokerError(bc.app.EffectiveAdminPort(), still)
+		}
 	}
 	cmd, logf, err := brokerServeCmd(bc.selfExe, bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
 	if err != nil {
@@ -1055,15 +1063,29 @@ const (
 	brokerHealthInterval = 200 * time.Millisecond
 )
 
-// Healthy polls GET /epoch until 200 or brokerHealthTimeout elapses.
+// Healthy polls GET /epoch until this instance's broker answers or
+// brokerHealthTimeout elapses. A broker that answers with another identity
+// (version or config hash) is not the one this apply runs, so it fails at
+// once rather than being adopted (see foreignBrokerError).
 func (bc *brokerController) Healthy(ctx context.Context) error {
 	pollCtx, cancel := context.WithTimeout(ctx, brokerHealthTimeout)
 	defer cancel()
-	var last error
+	var last, foreign error
+	wantV, wantH := cli.VersionString(), brokerctl.ConfigHash(bc.app)
 	err := retry.Until(pollCtx, 0, brokerHealthInterval, func() (bool, error) {
-		last = httpjson.Get(pollCtx, bc.admin, bc.adminURL+wire.PathEpoch, nil)
-		return last == nil, nil
+		var er wire.EpochResponse
+		last = httpjson.Get(pollCtx, bc.admin, bc.adminURL+wire.PathEpoch, &er)
+		if last != nil {
+			return false, nil
+		}
+		if foreign = brokerIdentityErr(er, wantV, wantH, bc.app.EffectiveAdminPort()); foreign != nil {
+			return false, foreign
+		}
+		return true, nil
 	})
+	if foreign != nil {
+		return foreign
+	}
 	if err != nil && ctx.Err() == nil {
 		return fmt.Errorf("broker did not become healthy within %s (last err: %v)", brokerHealthTimeout, last)
 	}
@@ -1631,4 +1653,52 @@ func agentRevoked(app *config.App, st state.State) func(agent string) bool {
 		}
 		return slices.Contains(rs.Revoked, cn)
 	}
+}
+
+// foreignBrokerWait bounds how long Start waits for the admin port to go
+// quiet after stopping this instance's broker.
+const foreignBrokerWait = 3 * time.Second
+
+// stillAnswering polls the admin /epoch until it stops answering or wait
+// elapses; it returns the last answer and whether a broker still answers.
+func (bc *brokerController) stillAnswering(ctx context.Context, wait time.Duration) (wire.EpochResponse, bool) {
+	deadline := time.Now().Add(wait)
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		var er wire.EpochResponse
+		err := httpjson.Get(probeCtx, bc.admin, bc.adminURL+wire.PathEpoch, &er)
+		cancel()
+		if err != nil {
+			return wire.EpochResponse{}, false
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return er, true
+		}
+		select {
+		case <-ctx.Done():
+			return er, true
+		case <-time.After(brokerHealthInterval):
+		}
+	}
+}
+
+// brokerIdentityErr is nil when the broker that answered is this binary
+// with this broker config; otherwise the foreign-broker error.
+func brokerIdentityErr(got wire.EpochResponse, wantVersion, wantHash string, adminPort int) error {
+	if brokerReusable(got, wantVersion, wantHash) {
+		return nil
+	}
+	return foreignBrokerError(adminPort, got)
+}
+
+// foreignBrokerError names a broker on this instance's admin port that is
+// not this instance's.
+func foreignBrokerError(adminPort int, got wire.EpochResponse) error {
+	v := got.Version
+	if v == "" {
+		v = "unknown"
+	}
+	return fmt.Errorf("a broker that is not this instance's answers on 127.0.0.1:%d (version %s, another config): "+
+		"another lever instance, or a leftover broker, uses this instance's broker ports. Give this instance its own "+
+		"broker.jail_port and broker.admin_port, or stop the other broker (lever down in its instance)", adminPort, v)
 }

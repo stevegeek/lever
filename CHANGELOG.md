@@ -204,6 +204,14 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **`lever apply` never adopts another instance's broker.** When a broker on this instance's admin
+  port had another version or config, apply stopped this instance's broker (by its pid file) and
+  started a new one; when the broker on the port was another instance's (two lever instances on
+  the same ports) or a leftover, nothing stopped it, the new broker could not bind and died, and the
+  health check then accepted the other broker. Apply now refuses when a broker still answers after
+  the stop, and the health check accepts only a broker that reports this binary's version and this
+  config's hash, failing at once with the port and the fix (give the instance its own
+  `broker.jail_port` and `broker.admin_port`, or stop the other broker).
 - **The Makefile builds with the Go release in `go.mod`.** It sets `GOTOOLCHAIN` (the `go` command
   downloads that toolchain once if the local one differs), the same Go CI and the releases use.
   Under a newer local Go 1.27, `lever-tool-db`'s SQLite driver hung on first use, so the e2e's tool

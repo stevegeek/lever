@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"strings"
 	"syscall"
@@ -103,6 +104,51 @@ func execAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.C
 		return fmt.Errorf("attach: %w", err)
 	}
 	return syscall.Exec(bin, argv, os.Environ()) // hand over the TTY
+}
+
+// runAttach runs the backend-wrapped scion attach for slug in project as a
+// child on the operator's terminal and returns when it ends: the operator
+// detached, or the session ended. `lever up` on a terminal uses it instead
+// of execAttach so it can check the manager after the detach (lever#188).
+// While the child runs, the terminal's interrupt and quit signals are the
+// attach's (the terminal sends them to it too): lever waits them out
+// rather than dying under it. A terminate or hangup sent to lever is
+// passed on to the attach, which then ends, as exec'ing it did. (The child
+// gets the default handling back on exec; only an ignored signal would be
+// inherited, so they are caught, not ignored.)
+func runAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, shared bool) error {
+	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, shared)
+	argv, err := attachArgv(ctx, b, sc, slug, project)
+	if err != nil {
+		return err
+	}
+	bin, err := exec.LookPath(argv[0])
+	if err != nil {
+		return fmt.Errorf("attach: %w", err)
+	}
+	c := exec.Command(bin, argv[1:]...)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	if err := c.Start(); err != nil {
+		return fmt.Errorf("attach: %w", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	for {
+		select {
+		case sig := <-sigs:
+			if sig == syscall.SIGTERM || sig == syscall.SIGHUP {
+				_ = c.Process.Signal(sig)
+			}
+		case err := <-done:
+			if err != nil {
+				return fmt.Errorf("attach: %w", err)
+			}
+			return nil
+		}
+	}
 }
 
 // newAttachCmd is a debugging/eyes-on verb: it attaches to a RUNNING agent and

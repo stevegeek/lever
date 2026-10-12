@@ -678,3 +678,42 @@ func TestInstallIfChangedRefusesBytesThatChangedUnderTheHandle(t *testing.T) {
 		t.Fatalf("error should say the file changed under the install: %v", err)
 	}
 }
+
+// TestEnsureScionTakesTheEarlyBuild (lever#189): a build started while the
+// VM booted is installed when the guest has the architecture it was built
+// for, and the guest step builds nothing itself; a guest of another
+// architecture gets its own build.
+func TestEnsureScionTakesTheEarlyBuild(t *testing.T) {
+	for _, tc := range []struct {
+		uname     string
+		ownBuilds int
+	}{{"aarch64", 0}, {"x86_64", 1}} {
+		t.Run(tc.uname, func(t *testing.T) {
+			user, root := []string{"orb", "-m", "lever-jail"}, []string{"orb", "-u", "root", "-m", "lever-jail"}
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(user, " ")+" uname -m", proc.Result{Stdout: tc.uname + "\n"})
+			f.Script("go build", proc.Result{})
+			f.Script(strings.Join(user, " ")+" /usr/bin/sha256sum", proc.Result{Code: 1})
+			f.Script(strings.Join(root, " "), proc.Result{})
+			src := t.TempDir()
+			backendtest.StageFakeBuildOutput(t, "lever-jail")
+			early := proc.NewFakeRunner()
+			early.Script("go build", proc.Result{})
+			pre := scionbin.StartPrebuild(context.Background(), early, scionbin.Spec{Source: src}, "arm64", "lever-jail")
+			defer pre.Stop()
+			g := Guest{Host: f, UserPrefix: user, RootPrefix: root, Machine: "lever-jail"}
+			if err := g.EnsureScion(context.Background(), ScionSpec{Source: src, Prebuilt: pre}); err != nil {
+				t.Fatalf("EnsureScion: %v", err)
+			}
+			own := 0
+			for _, c := range f.Calls {
+				if c.Name == "go" {
+					own++
+				}
+			}
+			if own != tc.ownBuilds || len(early.Calls) != 1 {
+				t.Fatalf("guest-step builds %d (want %d), early builds %d", own, tc.ownBuilds, len(early.Calls))
+			}
+		})
+	}
+}

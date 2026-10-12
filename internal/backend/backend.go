@@ -19,6 +19,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
 // Profile DECLARES what a backend actually guarantees, so the security posture
@@ -60,6 +61,11 @@ type Config struct {
 	// backend obeys it rather than re-deriving it, so the flag lever passes to
 	// the hub and the assets lever staged cannot disagree.
 	ScionWebUI bool
+	// ScionPrebuild, when set, is the host build of the configured scion,
+	// started before EnsureUp so it runs while the VM boots (lever#189). The
+	// scion step uses it when the guest's architecture matches the one it
+	// was built for. nil: the scion step builds.
+	ScionPrebuild *scionbin.Prebuild
 	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
 	// so the jail can reach ONLY the broker port on the host alias. Required for
 	// api-key mode: LLM traffic must flow broker→Anthropic, not

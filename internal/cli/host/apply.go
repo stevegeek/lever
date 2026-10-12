@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/progress"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
@@ -1335,10 +1337,30 @@ func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, st 
 	if st.Dir != "" {
 		cfg.HWEFailStamp = st.HWEFailStamp()
 	}
+	// The host's scion build runs while the VM boots and is provisioned
+	// (lever#189); the scion step takes it once the guest confirms the
+	// architecture. Stopped (cancelled, if nothing took it) on the way out.
+	cfg.ScionPrebuild = startScionPrebuild(ctx, b, cfg)
+	defer cfg.ScionPrebuild.Stop()
 	if err := b.EnsureUp(ctx, cfg); err != nil {
 		return nil, err
 	}
 	return b, nil
+}
+
+// startScionPrebuild starts the host build of cfg's scion for the host's
+// architecture through the backend's host runner, or returns nil when the
+// backend has none or there is nothing to build.
+func startScionPrebuild(ctx context.Context, b backend.Backend, cfg backend.Config) *scionbin.Prebuild {
+	hr, ok := b.(interface{ Runner() proc.Runner })
+	if !ok || !cfg.HasScion() {
+		return nil
+	}
+	return scionbin.StartPrebuild(ctx, hr.Runner(), scionbin.Spec{
+		Binary:  cfg.ScionBinary,
+		Source:  cfg.ScionSource,
+		Version: cfg.ScionVersion,
+	}, runtime.GOARCH, cfg.MachineName)
 }
 
 // backendConfigFor is the backend.Config apply brings the jail up with.

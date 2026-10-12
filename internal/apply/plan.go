@@ -62,6 +62,12 @@ type PlanOpts struct {
 	// up, so `up` can neither see the record nor delete it beforehand
 	// (lever#33). The plan itself is unchanged.
 	Fresh bool
+	// Attach says the caller (`lever up` on a terminal) attaches the
+	// operator to the manager once Run returns: start-manager's gate then
+	// ends as soon as claude's tmux pane is alive, with no settle window,
+	// and the caller checks the manager after the detach
+	// (CheckManagerAfterDetach) (lever#188). The plan itself is unchanged.
+	Attach bool
 }
 
 // brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.
@@ -71,9 +77,12 @@ var brokerOnlyKinds = map[StepKind]bool{
 }
 
 // Plan returns the ordered bring-up for an app. Order is load-bearing: the
-// image must be loaded before scion runs in the jail; projects must be
-// registered before the manager (which orchestrates them) starts. The jail
-// itself is not a step: it is up before Run can be called at all (see Run).
+// images must be loaded before the manager starts; projects must be
+// registered before the manager (which orchestrates them) starts. Run starts
+// broker-up and load-image alongside the steps after them and waits for them
+// where a step needs them (lever#189; see waitsFor), so the order here is
+// also the order the list numbers them in. The jail itself is not a step: it
+// is up before Run can be called at all (see Run).
 func Plan(a *config.App, opts PlanOpts) []Step {
 	// Bring the host broker (+ first-party tools) up first; the jail reaches it
 	// at host.orb.internal. Health-checked before the manager starts.

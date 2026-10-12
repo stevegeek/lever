@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -88,9 +89,16 @@ func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name strin
 //
 // prog (may be nil) is the resume's progress line (lever#168), handed the
 // gate's stages.
-func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress) error {
+//
+// attach (an up that attaches a terminal next) ends the resume's gate once
+// claude's pane is alive, with no settle window; the attach then follows
+// at once and the manager is checked after the detach (lever#188).
+func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, attach bool) error {
 	switch d {
 	case upResume:
+		if attach {
+			return apply.WaitManagerStarted(ctx, deps, name, project, prog)
+		}
 		return apply.WaitManagerLive(ctx, deps, name, project, prog)
 	case upNone:
 		return apply.ObserveManagerLive(ctx, deps, name, project)
@@ -166,6 +174,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				}
 			}
 			decision := upDecision(phase, fresh)
+			// On a terminal the operator is attached as soon as claude runs,
+			// and the manager is checked after the detach, instead of after
+			// a settle window nobody watches (lever#188). --no-attach and a
+			// stdin that is not a terminal keep the window.
+			attachTTY := !noAttach && isTerminal(os.Stdin)
 			// A record left "running" by a hard VM kill (a new guest boot,
 			// no live container) is suspended here and resumed below: what
 			// the operator used to do by hand with `lever stop` + `lever up`
@@ -190,7 +203,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if fresh && !noBackup {
 					deps.BackupManagerConversation = conv.backupBeforeDelete(&saved)
 				}
-				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh}); err != nil {
+				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh, Attach: attachTTY}); err != nil {
 					if saved != nil {
 						rep.Log(fmt.Sprintf("lever: the previous conversation is backed up as %s; once the manager is up, `lever conversation restore %s` brings it back", saved.ID, saved.ID))
 					}
@@ -258,7 +271,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// the "is up." print with no observation at all, and the apply
 			// paths returned on the first live look — over a harness that dies
 			// a moment later (lever#31). Gate every path before claiming up.
-			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog)
+			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, attachTTY)
 			prog.Stop()
 			if err != nil {
 				return err
@@ -272,7 +285,14 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
 			}
-			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
+			if !attachTTY {
+				return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
+			}
+			attachErr := runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
+			if err := apply.CheckManagerAfterDetach(cmd.Context(), deps, app.Name, project); err != nil {
+				return err
+			}
+			return attachErr
 		},
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread (the old conversation is backed up first)")

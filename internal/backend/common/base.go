@@ -170,10 +170,11 @@ func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
 	if cfg.HasScion() {
 		s = rep.Start(scionStepLabel(cfg))
 		err := b.Guest().EnsureScion(ctx, guest.ScionSpec{
-			Binary:  cfg.ScionBinary,
-			Source:  cfg.ScionSource,
-			Version: cfg.ScionVersion,
-			WebUI:   cfg.ScionWebUI,
+			Binary:   cfg.ScionBinary,
+			Source:   cfg.ScionSource,
+			Version:  cfg.ScionVersion,
+			WebUI:    cfg.ScionWebUI,
+			Prebuilt: cfg.ScionPrebuild,
 		})
 		s.Done(err)
 		if err != nil {

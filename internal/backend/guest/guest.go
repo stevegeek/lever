@@ -200,7 +200,12 @@ func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 	if err != nil {
 		return fmt.Errorf("detect guest architecture: %w", err)
 	}
-	bin, err := scionbin.Resolve(ctx, g.Host, spec, arch, g.Machine)
+	// A build started while the VM booted (lever#189) is used when it was
+	// for this guest's architecture; otherwise build now.
+	bin, err, ok := spec.Prebuilt.Result(ctx, spec, arch, g.Machine)
+	if !ok {
+		bin, err = scionbin.Resolve(ctx, g.Host, spec, arch, g.Machine)
+	}
 	if err != nil {
 		return err
 	}

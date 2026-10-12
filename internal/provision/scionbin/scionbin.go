@@ -45,6 +45,11 @@ type Spec struct {
 	// block has drifted before — Binary was added to both literals while the
 	// guard around them was updated in neither (see backend.Config.HasScion).
 	WebUI bool
+	// Prebuilt, when set, is this spec's build already started on the host
+	// while the guest came up (StartPrebuild). It is not configuration: the
+	// guest's scion step takes its result (Prebuild.Result) instead of
+	// building again, when the guest's architecture matches.
+	Prebuilt *Prebuild
 }
 
 // BuildsWebAssets reports whether lever both WANTS and CAN build scion's SPA

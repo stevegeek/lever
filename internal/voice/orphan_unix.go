@@ -13,14 +13,6 @@ import (
 	"time"
 )
 
-// PidFileName is the file, in the tool's -models directory (a private host
-// directory the tool owns, outside the tree), that names the running
-// whisper-server child. A tool killed outright (SIGKILL inside its stop
-// grace) leaves it behind; off Linux nothing else kills the child, which
-// keeps the port and the GPU memory, so the next start reads the file and
-// stops that orphan (Supervisor.reapOrphan).
-const PidFileName = "whisper-server.pid"
-
 // orphanPortWait bounds the wait for a stopped orphan's port to free.
 const orphanPortWait = 5 * time.Second
 

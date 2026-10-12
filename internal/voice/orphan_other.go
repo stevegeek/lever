@@ -7,9 +7,7 @@ import (
 	"syscall"
 )
 
-// PidFileName: see orphan_unix.go. Off unix no pid file is kept.
-const PidFileName = "whisper-server.pid"
-
+// Off unix no pid file is kept.
 func writePidFile(string, int) error { return nil }
 func removePidFile(string, int)      {}
 func (s *Supervisor) reapOrphan()    {}

@@ -185,7 +185,7 @@ clip's length, the outcome and the latency. Never the text.
 The broker stops the tool with SIGTERM, and the tool stops its child (it runs in its own process
 group, which is signalled as a whole) within a second. On Linux the child also dies with the tool
 when the tool is killed. On macOS a tool killed hard can leave whisper-server running and holding
-`-whisper-port`. The tool keeps the child's pid in `whisper-server.pid` (mode `0600`) in the
+`-whisper-port`. The tool keeps the child's pid in `whisper-server-<port>.pid` (mode `0600`) in the
 `-models` directory, so the next start stops that process, but only after checking that its
 command line is the configured `-server` on this port (a pid file that names anything else is
 removed and nothing is signalled), waits for the port to free and starts its own child. If

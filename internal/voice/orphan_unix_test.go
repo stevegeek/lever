@@ -41,7 +41,7 @@ func gone(cmd *exec.Cmd) bool {
 }
 
 func TestPidFileWriteReadRemove(t *testing.T) {
-	p := filepath.Join(t.TempDir(), PidFileName)
+	p := filepath.Join(t.TempDir(), PidFileName(8448))
 	if err := writePidFile(p, 4242); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestSupervisorReapsItsOrphan(t *testing.T) {
 	args := ServerArgs(model, port, false, "/old")
 	orphan := startOrphan(t, bin, args...)
 	eventually(t, "the orphan listening", func() bool { return listening(port) })
-	pidFile := filepath.Join(t.TempDir(), PidFileName)
+	pidFile := filepath.Join(t.TempDir(), PidFileName(8448))
 	if err := writePidFile(pidFile, orphan.Process.Pid); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestSupervisorNeverKillsAnUnrelatedPid(t *testing.T) {
 		"our program, other port": startOrphan(t, bin, ServerArgs(model, other, false, "/x")...),
 	} {
 		t.Run(name, func(t *testing.T) {
-			pidFile := filepath.Join(t.TempDir(), PidFileName)
+			pidFile := filepath.Join(t.TempDir(), PidFileName(8448))
 			if err := writePidFile(pidFile, cmd.Process.Pid); err != nil {
 				t.Fatal(err)
 			}
@@ -160,7 +160,7 @@ func TestSupervisorNeverKillsAnUnrelatedPid(t *testing.T) {
 	if err := dead.Run(); err != nil {
 		t.Fatal(err)
 	}
-	pidFile := filepath.Join(t.TempDir(), PidFileName)
+	pidFile := filepath.Join(t.TempDir(), PidFileName(8448))
 	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(dead.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}

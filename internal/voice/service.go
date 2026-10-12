@@ -69,7 +69,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	sup.Check = s.check
 	if sup.PidFile == "" {
-		sup.PidFile = filepath.Join(s.ModelDir, PidFileName)
+		sup.PidFile = filepath.Join(s.ModelDir, PidFileName(s.Port))
 	}
 	// Never through a proxy from the environment: loopback only. A fresh
 	// connection per clip: a pooled one could be dead after the child

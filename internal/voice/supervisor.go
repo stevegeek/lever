@@ -64,6 +64,16 @@ const (
 	defaultProbeEvery = 250 * time.Millisecond
 )
 
+// PidFileName is the file, in the tool's -models directory (a private host
+// directory the tool owns, outside the tree), that names the running
+// whisper-server child on port. A tool killed outright (SIGKILL inside its
+// stop grace) leaves it behind; off Linux nothing else kills the child,
+// which keeps the port and the GPU memory, so the next start reads the
+// file and stops that orphan (Supervisor.reapOrphan, unix only). The port
+// is in the name: two whisper tools may share a -models directory, and
+// each must find its own child's file.
+func PidFileName(port int) string { return "whisper-server-" + strconv.Itoa(port) + ".pid" }
+
 // Addr is the child's address.
 func (s *Supervisor) Addr() string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(s.Port)) }
 

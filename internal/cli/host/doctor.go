@@ -232,6 +232,8 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkVoice(app) },
 		func() checkResult { return checkVoiceTool(ctx, app) },
 		func() checkResult { return checkVoiceModel(app) },
+		func() checkResult { return checkTTSTool(ctx, app) },
+		func() checkResult { return checkTTSModel(app) },
 		func() checkResult { return checkAgentMessages(app, state, liveAgentMessages(ctx, app, state)) },
 		func() checkResult { return checkSentLedger(app, state) },
 		func() checkResult { return checkGuestClock(ctx, jr, time.Now, app.AgentMessagesOn()) },

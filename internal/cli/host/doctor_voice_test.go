@@ -104,7 +104,7 @@ func TestCheckVoiceConfigAndPort(t *testing.T) {
 	app.Remote.AllowedUsers[1].Voice = &no
 	r := checkVoice(app)
 	if !r.ok || !strings.Contains(r.detail, "127.0.0.1:8448") || !strings.Contains(r.detail, `broker tool "whisper"`) ||
-		!strings.Contains(r.detail, "no dictation for c@x") || !strings.Contains(r.detail, "never stored") {
+		!strings.Contains(r.detail, "no dictation or read-aloud for c@x") || !strings.Contains(r.detail, "never stored") {
 		t.Fatalf("%+v", r)
 	}
 	// A config that bypassed validation: the row still fails.
@@ -250,6 +250,22 @@ func TestRemoteVoiceConfig(t *testing.T) {
 	}
 	if !vc.NotSent(voice.ErrNotSent) {
 		t.Fatal("NotSent")
+	}
+	if vc.Speech != nil {
+		t.Fatal("server voices with read_aloud unset")
+	}
+	app.Remote.Voice.ReadAloud = config.ReadAloudServer
+	app.Remote.Voice.SpeakSocket = "/nonexistent/lever/tts.sock"
+	vc = remoteVoiceConfig(app)
+	if vc.Speech == nil || !vc.ReadAloud || !vc.Speech.NotSent(voice.ErrSpeakNotSent) || vc.Speech.NotSent(voice.ErrNotSent) {
+		t.Fatalf("%+v", vc.Speech)
+	}
+	if _, ok := vc.Speech.Available(); ok {
+		t.Fatal("available without the tool")
+	}
+	app.Remote.Voice.ReadAloud = config.ReadAloudOff
+	if vc = remoteVoiceConfig(app); vc.ReadAloud || vc.Speech != nil {
+		t.Fatalf("read_aloud off: %+v", vc)
 	}
 	app.Remote.Voice.Enabled = false
 	if remoteVoiceConfig(app) != nil {

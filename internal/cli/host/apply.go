@@ -32,6 +32,7 @@ import (
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
@@ -223,6 +224,7 @@ func (rc *remoteController) addr() string {
 func (rc *remoteController) Start(ctx context.Context) error {
 	if _, found, alive := state.PIDStatus(rc.state.RemotePID()); found && alive {
 		if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) && tcpDial(rc.addr()) == nil {
+			progress.From(ctx).Note("reused")
 			return nil // already serving: this binary, this config, this port
 		}
 		// A live proxy that is NOT the one this config asks for. Stop it before
@@ -502,7 +504,7 @@ func (o patMintOpts) warn(format string, args ...any) {
 		o.Warn(format, args...)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+	fmt.Fprintln(os.Stderr, termsafe.Sanitize(fmt.Sprintf("lever: warning: "+format, args...)))
 }
 
 // patReasonAbsent is patMintReason's answer for a first mint.
@@ -925,26 +927,27 @@ func applySignalContext(parent context.Context) (ctx context.Context, stop func(
 
 func newApplyCmd(bf BackendFactory) *cobra.Command {
 	var dryRun bool
+	var progressMode string
 	c := &cobra.Command{
 		Use:   "apply [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an agent-manager application up from a config",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
-			// State the containment posture every bring-up runs under, so the
-			// selected backend's guarantees are visible, not assumed.
-			if p, ok := registry.ProfileFor(app.Backend); ok {
-				cmd.Printf("backend: %s\n", p.Summary())
-			}
-			printRemoteWarnings(cmd, app)
-			if err := checkContactGate(app, stateFor(path)); err != nil {
-				return err
-			}
-			printContactSessionWarnings(cmd, app, stateFor(path))
 			if dryRun {
+				// State the containment posture every bring-up runs under, so
+				// the selected backend's guarantees are visible, not assumed.
+				if p, ok := registry.ProfileFor(app.Backend); ok {
+					cmd.Printf("backend: %s\n", p.Summary())
+				}
+				printRemoteWarnings(cmd, app)
+				if err := checkContactGate(app, stateFor(path)); err != nil {
+					return err
+				}
+				printContactSessionWarnings(cmd, app, stateFor(path))
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					if s.TarPath != "" {
 						cmd.Printf("  %-16s %s (from %s)\n", s.Kind, s.Target, s.TarPath)
@@ -954,20 +957,35 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			ctx, stop := applySignalContext(cmd.Context())
+			// The header states the containment posture every bring-up runs
+			// under, so the backend's guarantees are visible, not assumed.
+			run, pctx, err := startBringup(cmd, app, stateFor(path), "apply", progressMode)
+			if err != nil {
+				return err
+			}
+			defer run.finishOnReturn(&err)
+			printRemoteWarnings(cmd, app)
+			if err := checkContactGate(app, stateFor(path)); err != nil {
+				return err
+			}
+			printContactSessionWarnings(cmd, app, stateFor(path))
+			ctx, stop := applySignalContext(pctx)
 			defer stop()
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
+			run.rep.Group("jail", 0)
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep})
 			if err != nil {
 				return err
 			}
 			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
+			run.finish(nil)
 			cmd.Printf("application %q is up.\n", app.Name)
 			return nil
 		},
 	}
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "print the bring-up plan and exit")
+	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
 }
 
@@ -1028,6 +1046,7 @@ func (bc *brokerController) Start(ctx context.Context) error {
 	// to the spawn.
 	if err := httpjson.Get(probeCtx, bc.admin, bc.adminURL+wire.PathEpoch, &er); err == nil {
 		if brokerReusable(er, cli.VersionString(), brokerctl.ConfigHash(bc.app)) {
+			progress.From(ctx).Note("reused")
 			return nil // same binary + same broker config; keep the process + PID
 		}
 		bc.log.printf("lever: broker predates this binary or its tool config changed — restarting it (was %q)", er.Version)
@@ -1172,6 +1191,9 @@ type applyWiring struct {
 	// broker cert carries it as a SAN.
 	brokerHost string
 	cmd        *cobra.Command // for Log; nil ⇒ stderr
+	// rep, when set, takes the Log lines, so they print above its live
+	// line (lever#185).
+	rep *progress.Reporter
 }
 
 // applyOpts carries the per-invocation knobs of buildApplyDeps that are not
@@ -1182,6 +1204,8 @@ type applyOpts struct {
 	// that never exercise a Log-emitting path), in which case Log falls back
 	// to stderr.
 	Cmd *cobra.Command
+	// Rep is the bring-up's progress list; nil prints Log lines directly.
+	Rep *progress.Reporter
 	// SelfExe is the executable the broker and remote controllers re-exec as
 	// `broker serve` / `remote serve`. Empty means os.Args[0].
 	//
@@ -1204,7 +1228,7 @@ type applyOpts struct {
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, opts applyOpts) (*applyWiring, error) {
-	b, err := bringUpBackend(ctx, app, bf, stateFor(configPath), (&applyWiring{cmd: opts.Cmd}).log)
+	b, err := bringUpBackend(ctx, app, bf, stateFor(configPath), (&applyWiring{cmd: opts.Cmd, rep: opts.Rep}).log)
 	if err != nil {
 		return nil, err
 	}
@@ -1226,7 +1250,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return nil, err
 	}
 
-	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd}
+	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd, rep: opts.Rep}
 	aliasV4 := b.HostAliasV4()
 	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
 	selfExe := cmp.Or(opts.SelfExe, os.Args[0])
@@ -1430,6 +1454,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		EnsureScionTelemetry: w.ensureScionTelemetry,
 		EnsureAgentTemplate:  w.ensureAgentTemplate,
 		Log:                  w.log,
+		StepTail:             w.stepTail,
 	}
 }
 
@@ -1451,6 +1476,9 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 			return w.sc.ServerStart(ctx, opts)
 		},
 		ScopeKnown: w.sc.KnowsUATScope,
+		// Through the wiring's log: sanitized, and above the progress
+		// list's live line rather than written over it.
+		Warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
 	})
 }
 
@@ -1608,6 +1636,10 @@ func (w *applyWiring) ensureAgentTemplate(ctx context.Context, projectDir string
 // one, e.g. a direct test) falls back to os.Stderr so the line is never
 // silently lost.
 func (w *applyWiring) log(format string, args ...any) {
+	if w.rep != nil {
+		w.rep.Log(fmt.Sprintf(format, args...))
+		return
+	}
 	if w.cmd != nil {
 		logLine(w.cmd.ErrOrStderr(), format, args...)
 		return

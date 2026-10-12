@@ -24,8 +24,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/stevegeek/lever/internal/logging"
 	"log"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -150,6 +150,8 @@ func asResult(v any, err error) (any, error) {
 }
 
 func main() {
+	logger := logging.Install(os.Stderr, "lever-tool-whisper")
+	// Installed first, so a fatal startup error takes the same line shape.
 	o, err := parseFlags(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
@@ -159,7 +161,6 @@ func main() {
 	if _, err := voice.CheckServer(o.server); err != nil {
 		log.Fatal(err)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	vlog := func(format string, a ...any) { log.Printf(format, a...) }
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

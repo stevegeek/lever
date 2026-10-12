@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 )
 
 const (
@@ -161,23 +162,46 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 // was added to both literals while the guard around them was updated in
 // neither — see backend.Config.HasScion).
 func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
-	if err := b.ReadRunUser(ctx); err != nil {
-		return err
+	rep := progress.From(ctx)
+	s := rep.Start("packages and runtimes")
+	err := b.ReadRunUser(ctx)
+	if err == nil {
+		err = b.Guest().EnsureRuntimes(ctx, b.RunUser())
 	}
-	if err := b.Guest().EnsureRuntimes(ctx, b.RunUser()); err != nil {
+	s.Done(err)
+	if err != nil {
 		return err
 	}
 	if cfg.HasScion() {
-		if err := b.Guest().EnsureScion(ctx, guest.ScionSpec{
+		s = rep.Start(scionStepLabel(cfg))
+		err := b.Guest().EnsureScion(ctx, guest.ScionSpec{
 			Binary:  cfg.ScionBinary,
 			Source:  cfg.ScionSource,
 			Version: cfg.ScionVersion,
 			WebUI:   cfg.ScionWebUI,
-		}); err != nil {
+		})
+		s.Done(err)
+		if err != nil {
 			return err
 		}
 	}
-	return b.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+	s = rep.Start("egress firewall")
+	err = b.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+	s.Done(err)
+	return err
+}
+
+// scionStepLabel names the scion step by the pin it installs.
+func scionStepLabel(cfg backend.Config) string {
+	switch {
+	case cfg.ScionBinary != "":
+		return "scion (prebuilt binary)"
+	case len(cfg.ScionVersion) > 12:
+		return "scion " + cfg.ScionVersion[:12]
+	case cfg.ScionVersion != "":
+		return "scion " + cfg.ScionVersion
+	}
+	return "scion"
 }
 
 // ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records the

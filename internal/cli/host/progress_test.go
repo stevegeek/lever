@@ -1,0 +1,82 @@
+package host
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stevegeek/lever/internal/progress"
+	"github.com/stevegeek/lever/internal/state"
+)
+
+func TestCheckLastBringup(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	now := time.Date(2026, 10, 12, 14, 0, 0, 0, time.UTC)
+	if r := checkLastBringup(st, now); !r.ok || !strings.Contains(r.detail, "none recorded yet") {
+		t.Fatalf("no record: %+v", r)
+	}
+	if err := os.MkdirAll(st.BringupLogDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sum := progress.Summary{Command: "up", Outcome: "ok", TotalMS: 61400, At: now.Add(-2 * time.Hour),
+		Slowest: []progress.StepTime{{Step: "[11/11] start-manager", MS: 24000}}}
+	if err := progress.WriteLast(st.LastBringup(), sum); err != nil {
+		t.Fatal(err)
+	}
+	r := checkLastBringup(st, now)
+	if !r.ok || !strings.Contains(r.detail, "up done in 1m1s (slowest: [11/11] start-manager 24.0s) (2h ago)") ||
+		!strings.Contains(r.detail, filepath.Join(st.Dir, "logs")) {
+		t.Fatalf("row: %+v", r)
+	}
+}
+
+func TestFileTailRedactsAndBounds(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "broker.out.log")
+	var b strings.Builder
+	for i := 0; i < 30; i++ {
+		b.WriteString("line\n")
+	}
+	b.WriteString("podman run -e TOKEN=sk-ant-oat01-abcdefghijkl x\n")
+	os.WriteFile(p, []byte(b.String()), 0o600)
+	got := fileTail(p, 15)
+	if len(got) != 15 || strings.Contains(strings.Join(got, "\n"), "abcdefghijkl") {
+		t.Fatalf("tail: %q", got)
+	}
+	if fileTail(filepath.Join(t.TempDir(), "missing"), 15) != nil {
+		t.Fatal("missing file has a tail")
+	}
+}
+
+func TestUpProbeReasonNeverEmpty(t *testing.T) {
+	if upProbeReason(os.ErrNotExist) == "" {
+		t.Fatal("empty reason")
+	}
+}
+
+// TestFinishOnReturnRecordsAPanicAsAFailure: a crashed run must not be
+// saved as a success, and the panic goes on.
+func TestFinishOnReturnRecordsAPanicAsAFailure(t *testing.T) {
+	st := state.State{Dir: t.TempDir()}
+	os.MkdirAll(st.BringupLogDir(), 0o700)
+	b := &bringup{rep: progress.New(progress.Options{Mode: progress.ModeQuiet, Command: "up"}), state: st}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("panic swallowed")
+			}
+		}()
+		var err error
+		defer b.finishOnReturn(&err)
+		panic("boom")
+	}()
+	sum, err := progress.ReadLast(st.LastBringup())
+	if err != nil || sum.Outcome != "fail" {
+		t.Fatalf("summary %+v, %v", sum, err)
+	}
+	b.finish(nil) // a second finish changes nothing
+	if sum2, _ := progress.ReadLast(st.LastBringup()); sum2.Outcome != "fail" {
+		t.Fatal("second finish rewrote the summary")
+	}
+}

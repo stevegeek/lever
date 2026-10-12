@@ -122,6 +122,7 @@ All host-side state lives in `.lever-state/` at the instance root:
 | `broker.out.log` | the broker process's own stdout and stderr (startup, proxy errors) | broker won't start, or brokered tool calls 502 (backend refused) |
 | `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
+| `logs/bringup-<command>-<time>.jsonl` | one record per `lever apply`, `lever up` and `lever acceptance`: each step with its time and outcome, and for a failed step the log lines shown with it; the last 10 runs are kept | a bring-up was slow or failed and the terminal output is gone; `lever doctor`'s *last bring-up* row summarises the newest |
 
 scion prints `WARN settings file contains unrecognized keys (these will be ignored)
 keys=[hub.project_id runtimes[*].type ...]` on every CLI call in the guest. It is harmless: scion's
@@ -131,6 +132,57 @@ the scion errors it shows, and records each distinct copy once per lever process
 `msg="scion output hidden from the console"` line). Any other scion warning is still shown. You
 still see the line when you run `scion` by hand in the guest, and `lever attach` may show it
 briefly before the agent's terminal takes over the screen.
+
+### The shape of a log line
+
+The broker, the remote proxy and every first-party tool write one line shape, slog's text form
+with the time in UTC to the millisecond and the process named in `component`:
+
+```text
+time=2026-10-12T13:00:00.000Z level=INFO msg="broker.decision" component=broker op=request caller=hello decision=allow ...
+time=2026-10-12T13:00:01.250Z level=WARN msg="could not remove /path/broker.pid: ..." component=broker
+```
+
+The components are `broker`, `remote-proxy` and `lever-tool-<name>`; the few lines `lever` itself
+adds to `broker.log` carry `component=lever`. Lines the Go runtime writes for a daemon (an HTTP
+server's TLS handshake error, say) take the same shape, so `broker.out.log`, `remote.log` and
+`tool-logs/<tool>.log` read alike; a daemon that fails to start ends its file with the plain
+`Error: …` line `lever` prints. Every line passes one redaction rule before it is written: an
+env value in a `podman run` argv, Anthropic, GitHub and scion hub tokens, a JWT, an
+Authorization header, a bearer token and a `--…secret`/`--…token`/`--…password` flag value are
+masked (`***`). That is a backstop; lever does not log a
+credential on purpose. Files written before 0.36.0 keep their old lines; `lever doctor` reads both.
+
+Two kinds of record keep their own form, because tools and people parse them: the
+JSON-lines audits (`remote-audit.jsonl`, `directives.log`) and the ledgers.
+
+What `lever` prints on your terminal is not a log line but a message to you, in one form:
+`<who>: <text>`, and for a warning `<who>: warning: <text>`, where *who* is `lever`, `jail` (the
+VM) or the bring-up step (`start-manager`, `load-image`). `lever-agent` inside a container prints
+`lever-agent: <text>` the same way.
+
+### Watching a bring-up
+
+`lever apply`, `lever up` and `lever acceptance` list their steps as they run: the jail's
+(start VM, guest hardening, packages and runtimes, scion, egress firewall), then apply's numbered
+steps, then the manager's. On a terminal one live line shows the running step, what it waits for
+(Lima's boot stage, "hub not answering yet", the manager start's stage) and its time; finished
+steps scroll above it with their time and a note (*reused*, *already loaded*, *already running*).
+The run ends with its total and its slowest steps. `--progress` (or `LEVER_PROGRESS`) chooses the
+output: `auto` (the default: the live line on a terminal, else `plain`), `plain` (a timestamped
+line per step, and a *still running* line every 15 s for a long one), `json` (one JSON object per
+event), `quiet` (the header, warnings and failures only).
+
+When a step fails, the list shows the step, its time, and the last lines of the log that explains
+it: `broker.out.log` for broker-up, `remote.log` for the remote proxy, the hub's log in the jail
+(`~/.scion/server.log`) for the steps that talk to the hub, Lima's `ha.stderr.log` for the VM start; credentials in those
+lines are masked. An interrupted run (Ctrl-C) shows no tail.
+The manager container's own log is never shown: it is the agent's word.
+
+`LEVER_TRACE=1` adds a line for every external command lever runs (`limactl`, `scion`, `podman`,
+`go`) with its time and exit code. Only the command's leading words are shown, up to the first flag,
+assignment or anything that is not a plain word, so a flag value, an env value or a script never
+appears.
 
 Agent-side, `lever attach [name]` shows the full scrollback including every incoming message and
 tool call. Run `lever doctor` first whenever anything looks wrong; every check prints a fix hint.

@@ -79,7 +79,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					hcancel()
 					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
-						cmd.PrintErrf("warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
+						cmd.PrintErrf("lever: warning: scion suspend failed (conversation may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(serr)))
 					}
 					cancel()
 					// After the manager, under its own budget, so a slow worker
@@ -176,7 +176,7 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 	agents, err := sc.List(lctx, project)
 	cancel()
 	if err != nil {
-		cmd.PrintErrf("warning: listing agents failed, no worker was suspended (a running worker may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(err)))
+		cmd.PrintErrf("lever: warning: listing agents failed, no worker was suspended (a running worker may not resume cleanly on next up): %s\n", termsafe.Sanitize(scion.ErrSummary(err)))
 		return
 	}
 	var names []string
@@ -190,7 +190,7 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 	// order they finished in.
 	for i, name := range names {
 		if errs[i] != nil {
-			cmd.PrintErrf("warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", name, termsafe.Sanitize(scion.ErrSummary(errs[i])))
+			cmd.PrintErrf("lever: warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", name, termsafe.Sanitize(scion.ErrSummary(errs[i])))
 			continue
 		}
 		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", name, name)
@@ -236,9 +236,9 @@ func suspendBeforeStop(phase string) bool {
 // are warnings: the VM-side teardown that follows must still run.
 func stopHostDaemons(cmd *cobra.Command, st state.State) {
 	if err := brokerctl.StopBroker(st); err != nil {
-		cmd.PrintErrf("warning: stopping broker: %v\n", err)
+		cmd.PrintErrf("lever: warning: stopping broker: %v\n", err)
 	}
 	if err := brokerctl.StopRemoteProxy(st); err != nil {
-		cmd.PrintErrf("warning: stopping remote proxy: %v\n", err)
+		cmd.PrintErrf("lever: warning: stopping remote proxy: %v\n", err)
 	}
 }

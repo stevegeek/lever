@@ -39,7 +39,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 					// look legitimate.
 					stopHostDaemons(cmd, st)
 					if serr := removeIfPresent(st.RemoteStamp()); serr != nil {
-						cmd.PrintErrf("warning: removing the remote proxy stamp: %v\n", serr)
+						cmd.PrintErrf("lever: warning: removing the remote proxy stamp: %v\n", serr)
 					}
 					clearStagedRuntimeState(ia.app)
 					// The controller PAT was minted against the hub DB that lives
@@ -49,7 +49,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 					// no-op reuses the stale PAT and the new hub's fresh DB rejects
 					// it ("authentication failed" at readiness).
 					if rerr := removePATs(st); rerr != nil {
-						cmd.PrintErrf("warning: removing stale PATs: %v\n", rerr)
+						cmd.PrintErrf("lever: warning: removing stale PATs: %v\n", rerr)
 					}
 				}
 			} else {

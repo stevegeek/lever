@@ -208,6 +208,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
 		},
 		func() checkResult { return checkAgentCert(state, time.Now()) },
+		func() checkResult { return checkLastBringup(state, time.Now()) },
 		func() checkResult { return checkToolBackends(app.Broker.Tools, app.InstanceDir(), probes) },
 		func() checkResult { return checkClaudeVersion(app.ManagerImage(), app.ManagerImageTarPath(), probes) },
 		func() checkResult {

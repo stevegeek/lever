@@ -7,7 +7,6 @@ import (
 	"crypto/ed25519"
 	"crypto/subtle"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -109,7 +108,10 @@ func New(c Config) (*Server, error) {
 		c.EpochTTL = defaultEpochTTL
 	}
 	if c.Log == nil {
-		c.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+		// Silent unless the tool asks: lever's own tools pass their
+		// logger (internal/logging's shape), which is what
+		// tool-logs/<name>.log holds.
+		c.Log = slog.New(slog.DiscardHandler)
 	}
 	ops := make(map[string]Operation, len(c.Operations))
 	for _, o := range c.Operations {

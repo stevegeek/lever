@@ -47,6 +47,9 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Run the remote-access proxy (foreground)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A daemon: every line it writes (remote.log when apply spawned
+			// it) takes lever's log shape (lever#197).
+			daemonLogging(cmd, "remote-proxy")
 			path, app, err := loadRemoteApp(args)
 			if err != nil {
 				return err
@@ -818,7 +821,7 @@ func newRemoteStatusCmd() *cobra.Command {
 				}
 			}
 			for _, w := range app.RemoteWarnings() {
-				cmd.Printf("warning: %s\n", w)
+				cmd.Printf("lever: warning: %s\n", w)
 			}
 			// The provider's port is worth printing because it is the second
 			// host listener this instance owns: a second remote-enabled

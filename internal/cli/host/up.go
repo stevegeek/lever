@@ -99,15 +99,25 @@ func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
 	var fresh, noAttach bool
+	var progressMode string
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an application up (if needed) and attach the manager",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
+			// The first line of every up, before the jail is touched: what
+			// runs, on which backend (lever#195). A VM boot can take a
+			// minute; it is never silent.
+			run, pctx, err := startBringup(cmd, app, stateFor(path), "up", progressMode)
+			if err != nil {
+				return err
+			}
+			defer run.finishOnReturn(&err)
+			rep := run.rep
 			printRemoteWarnings(cmd, app)
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
@@ -116,19 +126,22 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// The bring-up runs under a signal-aware context (see
 			// applySignalContext); the attach below does not, so the
 			// operator's keys go to the manager, not to this handler.
-			ctx, stop := applySignalContext(cmd.Context())
+			ctx, stop := applySignalContext(pctx)
 			defer stop()
 			// buildApplyDeps brings the jail up through the backend's EnsureUp
 			// on every path below, before up looks at the manager: on Lima
 			// that converges the guest hardening (crash recovery, guest_kernel;
 			// lever#179) whether up then applies, resumes or only attaches.
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
+			rep.Group("jail", 0)
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
 			if err != nil {
 				return err
 			}
 			deps, b, sc := w.deps, w.b, w.sc
 			project := b.MountDest() // in-jail project path == mount root
 
+			rep.Group("manager", 0)
+			check := rep.Start("check manager")
 			phase, probeErr := managerPhase(ctx, sc, project, app.Name)
 			phase, err = phaseOrAbsent(phase, probeErr)
 			if err != nil {
@@ -142,7 +155,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// NOT prove the record is absent: after `stop` a suspended
 				// record is waiting behind the down hub, which is why --fresh
 				// rides into apply rather than being decided here (lever#33).
-				cmd.Println(upProbeNotice(probeErr, fresh))
+				check.Note(upProbeReason(probeErr))
+				if fresh {
+					rep.Log(upProbeNotice(probeErr, fresh))
+				}
 			}
 			decision := upDecision(phase, fresh)
 			// A record left "running" by a hard VM kill (a new guest boot,
@@ -152,6 +168,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if decision == upNone && apply.RecoverAfterGuestRestart(ctx, deps, app.Name, project) {
 				decision = upResume
 			}
+			if probeErr == nil {
+				check.Note(upDecisionNote(phase, decision))
+			}
+			check.Done(nil)
 			var prog *apply.Progress
 			switch decision {
 			case upApply:
@@ -174,11 +194,14 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := app.PrepareSharedFoldersHost(); err != nil {
 					return err
 				}
+				resume := rep.Start("resume manager")
+				resume.TailFrom(w.stepTail(apply.KindStartManager))
 				// The resume and the gate after it can run over a minute
 				// (container start, pre-start hook, claude, settle): print
-				// progress about every 15 s (lever#168). Stopped on every
-				// return; the gate below gets the stages.
-				prog = apply.StartProgress(deps, "up", app.Name, "asking scion to resume the container")
+				// progress about every 15 s (lever#168), or hand the stages
+				// to the progress list. Stopped on every return; the gate
+				// below gets the stages.
+				prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
 				defer prog.Stop()
 				if err := sc.Resume(ctx, app.Name, project); err != nil {
 					if scion.IsRefusedByHub(err) {
@@ -198,7 +221,10 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// A running manager can still hold an expired hub token (the
 				// refresh timer stalls while the host sleeps), and its workers
 				// too; apply.Run would heal them, but this path bypasses it.
+				heal := rep.Start("refresh agent sessions")
 				apply.HealSessions(ctx, deps, app, project)
+				heal.Done(nil)
+				rep.Start("check manager is live")
 			}
 			// The paths that act on the manager without apply.Run used to reach
 			// the "is up." print with no observation at all, and the apply
@@ -211,6 +237,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			apply.RecordGuestBoot(ctx, deps)
 			stop()
+			// The list ends before the attach: from here the terminal is the
+			// manager's.
+			run.finish(nil)
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
@@ -220,7 +249,42 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
+	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
+}
+
+// upDecisionNote says, on the check step, what up found and will do.
+func upDecisionNote(phase string, d upAction) string {
+	switch d {
+	case upNone:
+		return "running"
+	case upResume:
+		if phase == scion.PhaseRunning {
+			return "the VM restarted under it; resuming it"
+		}
+		return "suspended; resuming it"
+	}
+	if phase == "" {
+		return "no manager yet; starting it"
+	}
+	if phase == scion.PhaseRunning || phase == scion.PhaseSuspended {
+		return fmt.Sprintf("phase %s; recreating it (--fresh)", scion.PhaseLabel(phase))
+	}
+	return fmt.Sprintf("phase %s; bringing it up", scion.PhaseLabel(phase))
+}
+
+// upProbeReason is the probe failure in the operator's words (lever#195):
+// the hub after `lever stop` or a VM restart answers "connection refused",
+// which says nothing to someone who did not write the hub client.
+func upProbeReason(probeErr error) string {
+	msg := strings.ToLower(probeErr.Error())
+	switch {
+	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "is not responding"):
+		return "the jail's hub is not running (after `lever stop` or a VM restart); starting it"
+	case strings.Contains(msg, "project not found"), strings.Contains(msg, "no git origin remote found"):
+		return "the project is not registered with the hub yet; registering it"
+	}
+	return "no running manager (" + firstLine(probeErr.Error()) + "); bringing the application up"
 }
 
 // upProbeNotice is the line `up` prints when the phase probe could not see
@@ -230,11 +294,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 // --fresh it must say what the flag will do, because the probe failing is
 // exactly the case where a silent resume used to happen (lever#33).
 func upProbeNotice(probeErr error, fresh bool) string {
-	reason := firstLine(probeErr.Error())
+	reason := upProbeReason(probeErr)
 	if fresh {
-		return fmt.Sprintf("No running manager observed (%s) — bringing the application up; --fresh will discard any manager record found once the hub is up.", reason)
+		return fmt.Sprintf("lever: no running manager observed (%s) — --fresh will discard any manager record found once the hub is up", reason)
 	}
-	return fmt.Sprintf("No running manager (%s) — bringing the application up.", reason)
+	return "lever: " + reason
 }
 
 // firstLine returns the first line of s, trimmed of surrounding whitespace

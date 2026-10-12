@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
@@ -31,6 +32,10 @@ const progressEvery = 15 * time.Second
 // record, and the time since the start. A nil *Progress is valid and prints
 // nothing, so the gate can run without one.
 type Progress struct {
+	// rep, when it shows steps itself (lever#185), gets the stage and the
+	// hub reading as the running step's detail, and no line is logged:
+	// its live line and heartbeat say the same.
+	rep           *progress.Reporter
 	log           func(string, ...any)
 	subject, name string
 	now           func() time.Time
@@ -49,7 +54,14 @@ type Progress struct {
 // StartProgress starts the progress line for the manager name; subject
 // prefixes it ("start-manager", "up"). The caller must call Stop. A Deps
 // without Log yields a nil *Progress.
-func StartProgress(d Deps, subject, name, stage string) *Progress {
+func StartProgress(ctx context.Context, d Deps, subject, name, stage string) *Progress {
+	if rep := progress.From(ctx); rep.Active() {
+		p := &Progress{rep: rep, subject: subject, name: name, stage: stage,
+			stop: make(chan struct{}), done: make(chan struct{})}
+		close(p.done)
+		p.report()
+		return p
+	}
 	if d.Log == nil {
 		return nil
 	}
@@ -92,6 +104,32 @@ func (p *Progress) Stage(stage string) {
 	p.mu.Lock()
 	p.stage = stage
 	p.mu.Unlock()
+	p.report()
+}
+
+// report hands the stage and the reading to the step reporter, if any.
+func (p *Progress) report() {
+	if p.rep == nil {
+		return
+	}
+	// After Stop the running step may be another one: say nothing.
+	select {
+	case <-p.stop:
+		return
+	default:
+	}
+	p.rep.Detail(p.detail())
+}
+
+// detail is the stage and the last hub reading.
+func (p *Progress) detail() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	reading := "no hub reading of the record yet"
+	if p.seen {
+		reading = fmt.Sprintf("hub phase %q, container %q", scion.PhaseLabel(p.phase), scion.ContainerLabel(p.container))
+	}
+	return fmt.Sprintf("%s (%s)", p.stage, reading)
 }
 
 // observe records the last hub reading of the record.
@@ -102,6 +140,7 @@ func (p *Progress) observe(phase, container string) {
 	p.mu.Lock()
 	p.phase, p.container, p.seen = phase, container, true
 	p.mu.Unlock()
+	p.report()
 }
 
 // Stop ends the progress line and waits for its goroutine: no line is
@@ -117,14 +156,8 @@ func (p *Progress) Stop() {
 // line is one progress line. Phase and container are hub text an agent can
 // set about itself, so they pass through the display labels.
 func (p *Progress) line() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	reading := "no hub reading of the record yet"
-	if p.seen {
-		reading = fmt.Sprintf("hub phase %q, container %q", scion.PhaseLabel(p.phase), scion.ContainerLabel(p.container))
-	}
-	return fmt.Sprintf("%s: manager %q still starting — %s (%s); %s elapsed",
-		p.subject, p.name, p.stage, reading, p.now().Sub(p.start).Round(time.Second))
+	elapsed := p.now().Sub(p.start).Round(time.Second)
+	return fmt.Sprintf("%s: manager %q still starting — %s; %s elapsed", p.subject, p.name, p.detail(), elapsed)
 }
 
 // harnessState is one in-container reading of the manager's harness.
@@ -283,7 +316,7 @@ func waitHarness(ctx context.Context, h harnessCheck, list func(context.Context)
 			scion.ErrAgentNotLive, wait)
 	case last.containerUp:
 		if log != nil {
-			log("WARNING: could not probe the manager's harness (%s); its container runs, so the settle window decides on the container", jail.ProbeErrorClass(last.err))
+			log("lever: warning: could not probe the manager's harness (%s); its container runs, so the settle window decides on the container", jail.ProbeErrorClass(last.err))
 		}
 		return nil
 	}

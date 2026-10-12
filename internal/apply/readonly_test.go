@@ -257,10 +257,10 @@ func TestStartManagerWarnsWhenKeptManagerLacksReadOnlyMounts(t *testing.T) {
 			}
 			joined := strings.Join(logs, "\n")
 			if tc.wantWarn == "" {
-				if strings.Contains(joined, "WARNING") {
+				if strings.Contains(joined, "warning:") {
 					t.Fatalf("no warning expected, got %q", joined)
 				}
-			} else if !strings.Contains(joined, "WARNING") || !strings.Contains(joined, tc.wantWarn) {
+			} else if !strings.Contains(joined, "warning:") || !strings.Contains(joined, tc.wantWarn) {
 				t.Fatalf("want a warning mentioning %q, got %q", tc.wantWarn, joined)
 			}
 			// Twice on a resume: the stale-mount check before it, and the
@@ -420,7 +420,7 @@ func TestStartManagerStaleTreeMounts(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(joined, "WARNING") || !strings.Contains(joined, tc.wantLog) || !strings.Contains(joined, "lever up --fresh") {
+			if !strings.Contains(joined, "warning:") || !strings.Contains(joined, tc.wantLog) || !strings.Contains(joined, "lever up --fresh") {
 				t.Fatalf("want a warning mentioning %q and the fix, got %q", tc.wantLog, joined)
 			}
 		})

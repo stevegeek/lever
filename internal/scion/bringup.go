@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
@@ -213,10 +214,15 @@ const (
 // (serverPIDProbe), and once that answers that no scion server is alive —
 // the daemon exited, or its pid file named another process — it stops with
 // ErrHubNotReady and a pointer at the server log. A probe that cannot run
-// says nothing and the wait goes on. progress, when non-nil, gets a line
+// says nothing and the wait goes on. notify, when non-nil, gets a line
 // after hubReadyNotice and every hubReadyEvery after it, so a slow start
 // reads as a wait and not as a hang.
-func (c *Client) waitHubReady(ctx context.Context, progress func(format string, args ...any)) error {
+func (c *Client) waitHubReady(ctx context.Context, notify func(format string, args ...any)) error {
+	// A progress list (lever#185) shows the wait on its live line instead.
+	rep := progress.From(ctx)
+	if rep.Active() {
+		notify = nil
+	}
 	start := time.Now()
 	deadline := start.Add(c.hubReadyTimeout)
 	nextNotice := start.Add(c.hubReadyNotice)
@@ -240,8 +246,9 @@ func (c *Client) waitHubReady(ctx context.Context, progress func(format string, 
 				return false, errGone
 			}
 		}
-		if progress != nil && !now.Before(nextNotice) {
-			progress("scion-server: the hub is not answering yet after %s; a cold start (the first after a reboot or a scion pin change) can take a minute — waiting up to %s",
+		rep.Detail(fmt.Sprintf("hub not answering yet; a cold start can take a minute (waiting up to %s)", c.hubReadyTimeout))
+		if notify != nil && !now.Before(nextNotice) {
+			notify("scion-server: the hub is not answering yet after %s; a cold start (the first after a reboot or a scion pin change) can take a minute — waiting up to %s",
 				now.Sub(start).Round(time.Second), c.hubReadyTimeout)
 			nextNotice = now.Add(hubReadyEvery)
 		}

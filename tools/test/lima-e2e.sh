@@ -42,9 +42,35 @@ INST="$WORK/instance"
 BIN="$WORK/bin"
 fail=0
 
-say()  { printf '\n=== %s ===\n' "$*"; }
-ok()   { printf '  PASS: %s\n' "$*"; }
-bad()  { printf '  FAIL: %s\n' "$*"; fail=1; }
+# Every line carries the time, and each phase its duration, so a slow run
+# shows where the time went (lever#184). lever itself prints its bring-up
+# steps as plain timestamped lines (LEVER_PROGRESS=plain) and records them in
+# the instance's .lever-state/logs/.
+export LEVER_PROGRESS="${LEVER_PROGRESS:-plain}"
+ts()   { date +%H:%M:%S; }
+phase_name=""; phase_start=$SECONDS; phase_times=""
+end_phase() {
+  [ -n "$phase_name" ] || return 0
+  d=$((SECONDS - phase_start))
+  printf '%s --- %s took %ds\n' "$(ts)" "$phase_name" "$d"
+  phase_times="$phase_times$(printf '  %5ds  %s' "$d" "$phase_name")
+"
+}
+say()  { end_phase; phase_name="$*"; phase_start=$SECONDS; printf '\n%s === %s ===\n' "$(ts)" "$*"; }
+ok()   { printf '%s   PASS: %s\n' "$(ts)" "$*"; }
+bad()  { printf '%s   FAIL: %s\n' "$(ts)" "$*"; fail=1; }
+
+# show_logs prints the end of the instance's broker and tool logs, so a
+# failed run explains itself without KEEP=1. lever masks credentials in
+# these files; they hold no keys.
+show_logs() {
+  st="$INST/.lever-state"
+  for f in "$st/broker.out.log" "$st/broker.log" "$st"/tool-logs/*.log; do
+    [ -f "$f" ] || continue
+    printf '%s   --- last lines of %s:\n' "$(ts)" "${f#$WORK/}"
+    tail -n 20 "$f" | sed 's/^/      | /'
+  done
+}
 
 cleanup() {
   if [ "${KEEP:-0}" = "1" ]; then
@@ -176,7 +202,11 @@ stop_broker() {
 # idempotent bootstrap-latch path (§4), and a posture switch is done with an
 # explicit `lever down` first (§3), which stops the broker via its PID file.
 run_acceptance() {
-  ( cd "$INST" && "$LEVER" acceptance )
+  if ( cd "$INST" && "$LEVER" acceptance ); then
+    return 0
+  fi
+  show_logs
+  return 1
 }
 
 # ================================================================================
@@ -281,6 +311,8 @@ else
 fi
 
 # --- verdict ---------------------------------------------------------------------
+end_phase; phase_name=""
 say "result"
+printf 'phase times:\n%s' "$phase_times"
 if [ "$fail" = "0" ]; then echo "lima e2e: PASS"; else echo "lima e2e: FAIL"; fi
 exit "$fail"

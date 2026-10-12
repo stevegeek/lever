@@ -7,6 +7,53 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`lever apply`, `lever up` and `lever acceptance` list their steps as they run (lever#185).**
+  The jail's steps (start VM, guest hardening, packages and runtimes, scion, egress firewall,
+  nested virt), apply's numbered steps (`[5/11] scion-server`) and the manager's, each with its
+  time and a note when nothing needed doing (*reused*, *already loaded*, *already running*). On a
+  terminal one live line shows the running step and what it waits for (Lima's boot stage, the hub
+  not answering yet, the manager start's stage); the run ends with its total and slowest steps.
+  `--progress auto|tty|plain|json|quiet` or `LEVER_PROGRESS` chooses the output; `plain` prints a
+  timestamped line per step and a *still running* line every 15 s. The manager start's 15 s line
+  (lever#168) feeds the list instead of printing its own when the list is shown.
+- **A failed step shows the log that explains it (lever#186):** the step, its time and the last 15
+  lines of its own log (`broker.out.log`, `remote.log`, the hub's `~/.scion/server.log` in the
+  jail, Lima's `ha.stderr.log`), masked and made safe for the terminal. The manager container's
+  log is never shown.
+- **Bring-up records and timings (lever#184).** Every run is recorded in
+  `.lever-state/logs/bringup-<command>-<time>.jsonl` (the last 10 kept), and `lever doctor` has a
+  *last bring-up* row with its total and slowest steps. `LEVER_TRACE=1` adds a line per external
+  command with its time and exit code, showing only the command's leading plain words. The Lima
+  e2e prints a time on every line, each phase's duration and a table of them, and on a failed
+  acceptance the end of the broker and tool logs.
+
+### Changed
+
+- **`lever up` says what it is doing from its first line (lever#195):** a header naming the
+  application and the backend's containment posture (as `apply` printed already) comes before
+  the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's
+  hub is not running (after `lever stop` or a VM restart); starting it") instead of scion's raw
+  "connection refused". `apply` prints the posture in the same header, on stderr with the rest of
+  the list (also with `--progress quiet`); `lever acceptance`'s `check …` lines moved to stderr
+  with it.
+- **One log line shape for lever's daemons (lever#197).** The broker, the remote proxy and the
+  first-party tools write slog text lines with a UTC millisecond time and `component=`; lines the
+  Go runtime writes for them (TLS handshake errors) and their startup prints take the same shape,
+  so `broker.out.log`, `remote.log`, `broker.log` and `tool-logs/<tool>.log` read alike. Every
+  line passes one redaction rule (env values in an argv, Anthropic, GitHub and scion hub tokens,
+  JWTs, Authorization headers, bearer tokens, `--…secret`/`--…token` flag values), which the
+  `scion` errors shown to the operator now use too. `lever doctor`'s
+  expired-certificate check reads both the new and the old `broker.out.log` lines. The audit
+  JSON-lines files and the ledgers keep their form. A daemon that fails to start still ends its
+  file with the plain `Error: …` line the `lever` binary prints.
+- **Operator warnings read the same everywhere:** `<who>: warning: <text>` (`lever`, `jail`, or the
+  bring-up step), replacing the mix of `WARNING:`, bare `warning:` and `lever: warning:`.
+- **Jail ABI 2.** The in-jail code changed (shared packages); rebuild the agent image
+  (`make lever-image`) and recreate the manager on it when convenient. Doctor's *agent lever
+  version* row says so.
+
 ## [0.35.0] - 2026-10-12
 
 ### Added

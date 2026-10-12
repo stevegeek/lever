@@ -109,3 +109,10 @@ func (s State) PushDir() string { return filepath.Join(s.Dir, "push") }
 
 // ToolLogDir is the directory holding per-supervised-tool logs.
 func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }
+
+// BringupLogDir holds the records of the last bring-ups (`lever apply`,
+// `lever up`): one JSON-lines file per run, and LastBringup (lever#185).
+func (s State) BringupLogDir() string { return filepath.Join(s.Dir, "logs") }
+
+// LastBringup is the summary of the last bring-up, which doctor shows.
+func (s State) LastBringup() string { return filepath.Join(s.BringupLogDir(), "last-bringup.json") }

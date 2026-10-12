@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -119,6 +120,25 @@ func TestScanBrokerLogCertExpiry_PicksLatest(t *testing.T) {
 		t.Fatalf("found=%v err=%v, want found and no error", found, err)
 	}
 	if got.Format("2006/01/02 15:04:05") != newer.Format("2006/01/02 15:04:05") {
+		t.Errorf("latest = %s, want %s", got, newer)
+	}
+}
+
+// TestScanBrokerLogCertExpiry_ReadsBothShapes: a broker of this release logs
+// net/http's TLS errors as lever daemon lines (lever#197); a file written by
+// an older broker holds the stdlog shape. The newest of either counts.
+func TestScanBrokerLogCertExpiry_ReadsBothShapes(t *testing.T) {
+	now := time.Now()
+	st := state.State{Dir: t.TempDir()}
+	old := now.Add(-30 * time.Minute)
+	newer := now.Add(-time.Minute).UTC()
+	line := "time=" + newer.Format(logging.TimeFormat) + ` level=INFO msg="http: TLS handshake error from 10.0.2.15:40000: remote error: tls: bad certificate" component=broker`
+	writeBrokerLog(t, st, certExpiredLine(old)+"\n"+line+"\n")
+	got, found, err := scanBrokerLogCertExpiry(st.OutLog())
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if !got.Equal(newer.Truncate(time.Millisecond)) {
 		t.Errorf("latest = %s, want %s", got, newer)
 	}
 }

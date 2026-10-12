@@ -357,7 +357,7 @@ func (x *buildStampFixture) resolve(pin string) bool {
 	goBin := filepath.Join(x.root, "bin", "go")
 	f.Script("go env GOROOT", proc.Result{Stdout: x.root + "\n"})
 	f.Script(goBin+" mod download -json", proc.Result{Stdout: `{"Dir":"/mod/scion"}`})
-	f.Script(goBin+" build -o", proc.Result{})
+	f.Script(goBin+" build -trimpath -ldflags=-s -w -o", proc.Result{})
 	// The output a build would leave (the fake build writes nothing).
 	if _, err := os.Stat(x.out); err != nil {
 		if err := os.MkdirAll(filepath.Dir(x.out), 0o700); err != nil {

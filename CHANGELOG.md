@@ -105,10 +105,14 @@ version bump moves the block under the new version heading.
 
 - **Tool commands are read past `env -S`.** The host-path checks (a program or secret inside the
   tree) now read a tool's flags past an `env` prefix with a plain `-S` string split into words, so
-  a flag such as `-app-key` or `-state` can no longer hide inside one word. Config load refuses the
-  `env` forms lever cannot read as `env` does: quotes, backslashes or `$` in an `-S` string, a
-  combined option group such as `-vS`, and `--split-string=`; write such a command as separate
-  words.
+  a flag such as `-app-key` or `-state` can no longer hide inside one word. One parser walks the
+  `env` options as GNU and BSD `env` do (`-u NAME`/`-uNAME`/`--unset=`, `-C dir`/`-Cdir`/`--chdir=`,
+  `-S str`/`-Sstr`/`--split-string[=]`, `-i`, `-`, `-0`, `-v`, `--`, `NAME=value`), so
+  `env -u X -S '...'` is checked like any other `-S` and `-uSSH_AUTH_SOCK` or `-C/dir` is not
+  mistaken for one. Config load refuses the `env` forms lever cannot read as `env` does: quotes,
+  backslashes, `$` or a `#` comment in an `-S` string, `-S` grouped after other letters (`-vS`),
+  an option it does not know (BSD `-P`, an ambiguous long option), and an `env` with no command;
+  write such a command as separate words.
 
 - **The broker stops every supervised tool with SIGTERM and 1.5 s of grace before SIGKILL** (it
   sent SIGKILL at once), so a tool can stop a child of its own.

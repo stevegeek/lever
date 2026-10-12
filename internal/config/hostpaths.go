@@ -238,8 +238,8 @@ func toolFlags(t Tool) []toolFlag {
 	var out []toolFlag
 	// The words the tool itself gets: past an env(1) prefix, with a plain
 	// env -S string split into words. The env forms this cannot read as env
-	// does (quotes, escapes or $ in -S, -vS, --split-string=) are refused
-	// at config load (envFormUnread).
+	// does (parseEnvPrefix: quotes, escapes or $ in -S, -vS, an unknown
+	// option) are refused at config load (envFormUnread).
 	argv, _ := unwrapEnv(t.Command)
 	if len(argv) == 0 {
 		argv = t.Command

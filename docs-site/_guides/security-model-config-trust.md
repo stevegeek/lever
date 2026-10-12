@@ -205,9 +205,11 @@ the command of a whisper tool: one whose program, after an `env` prefix, has the
 `lever-tool-whisper`, or whose command takes `-dictate-socket` (no other lever tool does), so a
 renamed binary or a wrapper script that passes the tool's flags keeps the whisper checks. Another
 tool's `-server` or `-models` means something else and is not read. Flags are read past an `env`
-prefix, with a plain `env -S` string split into words; config load refuses an `env` form lever
-cannot read the way `env` does (quotes, backslashes or `$` in an `-S` string, a combined option
-group such as `-vS`, `--split-string=`), since a flag hidden in it would escape these checks.
+prefix, read option by option as GNU and BSD `env` read it, with a plain `env -S` string split
+into words and read again; config load refuses an `env` form lever cannot read the way `env` does
+(quotes, backslashes, `$` or a `#` comment in an `-S` string, `-S` grouped after other letters such
+as `-vS`, an option it does not know such as BSD `-P`, an `env` with no command), since a flag
+hidden in it would escape these checks.
 A word that starts with `-` is never taken as the previous flag's value, so `-model -state x` still
 checks `x`; after a path flag such a word is also checked as that flag's value, as Go's flag package
 would read it. For a whisper tool, config load also requires `-tree` and refuses one that is not the

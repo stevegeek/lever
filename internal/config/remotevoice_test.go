@@ -300,9 +300,10 @@ func TestWhisperPathsRefusedInsideTree(t *testing.T) {
 // ones load.
 func TestEnvFormsLeverCannotRead(t *testing.T) {
 	for cmd, bad := range map[string]bool{
-		"env -S 'tool -state /s'":            false,
-		"env -vS tool":                       true,
-		"env --split-string=tool":            true,
+		"env -S 'tool -state /s'": false,
+		"env -vS tool":            true,
+		// Read precisely now (parseEnvPrefix), like --split-string tool.
+		"env --split-string=tool":            false,
 		"env -u X tool -state /s":            false,
 		"env CUDA_VISIBLE_DEVICES=0 tool -x": false,
 	} {

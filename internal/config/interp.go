@@ -62,54 +62,220 @@ func interpreterFamily(name string) string {
 	return fam
 }
 
-// unwrapEnv skips an env(1) prefix — its flags and NAME=value assignments —
-// and returns the argv env runs, and the directory env -C/--chdir makes it
-// run in ("" = unchanged). -S's value is split into words, as env does.
-// Anything else is returned unchanged.
+// unwrapEnv skips an env(1) prefix (parseEnvPrefix) and returns the argv
+// env runs and the directory env -C/--chdir makes it run in ("" =
+// unchanged). Anything that does not start with env is returned unchanged;
+// a prefix lever cannot read as env does gives nil (config load refuses it,
+// envFormUnread).
 func unwrapEnv(argv []string) ([]string, string) {
-	chdir := ""
+	p := parseEnvPrefix(argv)
+	if p.unread != "" {
+		return nil, ""
+	}
+	return p.argv, p.chdir
+}
+
+// envFormUnread names an env(1) prefix form whose words lever cannot read
+// the way env does, or "" (parseEnvPrefix). A flag hidden in such a form
+// would escape the host-path checks, so config load refuses the command
+// instead of guessing.
+func envFormUnread(argv []string) string { return parseEnvPrefix(argv).unread }
+
+// envPrefix is what env(1) makes of a command line that starts with it.
+type envPrefix struct {
+	argv   []string // the command env runs
+	chdir  string   // -C/--chdir, joined across nested envs ("" = unchanged)
+	unread string   // a form lever cannot read as env does ("" = none)
+}
+
+// envLongOpts are GNU env's long options (getopt_long also takes any
+// unambiguous prefix of one). BSD env has none.
+var envLongOpts = []string{
+	"block-signal", "chdir", "debug", "default-signal", "help", "ignore-environment",
+	"ignore-signal", "list-signal-handling", "null", "split-string", "unset", "version",
+}
+
+// envSplitSpace is what GNU env -S splits on.
+const envSplitSpace = " \t\n\v\f\r"
+
+// parseEnvPrefix walks an env(1) prefix exactly as GNU and BSD env do (their
+// getopt: options first, stopping at the first operand; then NAME=value
+// words; then the command), nested envs included, and is the one reader
+// behind unwrapEnv and envFormUnread:
+//
+//   - -i, -0, -v, alone or grouped (-iv), and "-" (= -i, which ends the
+//     options; an option word right after it is unread);
+//   - -u NAME, -uNAME, --unset NAME, --unset=NAME (the value is never an
+//     option, so -uSSH_AUTH_SOCK unsets SSH_AUTH_SOCK);
+//   - -C dir, -Cdir, --chdir dir, --chdir=dir;
+//   - -S str, -Sstr, --split-string str, --split-string=str: str is split on
+//     blanks as GNU does and its words parsed again as options, assignments
+//     and the command. A string with quotes, a backslash, $ or a word
+//     starting with # is unread (env unquotes, unescapes, expands and
+//     comments those; lever does not);
+//   - -S after other letters in one group (-iS, -vS) is unread: precise
+//     getopt would take it, but such a group is refused rather than read;
+//   - --block-signal, --default-signal, --ignore-signal (optional =SIG),
+//     --debug, --ignore-environment, --null, --list-signal-handling;
+//   - "--" ends the options; NAME=value words follow (any word with "=",
+//     as env reads it), then the command.
+//
+// Any other option (BSD -P altpath, which changes where the program is
+// looked up, -L, -U; --help and --version, which run nothing; an unknown or
+// ambiguous long option), a missing option value and an env with no
+// command are unread.
+func parseEnvPrefix(argv []string) envPrefix {
+	var p envPrefix
 	for len(argv) > 0 && baseName(argv[0]) == "env" {
-		rest := argv[1:]
-		for len(rest) > 0 {
-			a := rest[0]
-			switch {
-			case a == "--":
-				rest = rest[1:]
-			case a == "-u" || a == "--unset":
-				rest = rest[min(2, len(rest)):]
-				continue
-			case a == "-C" || a == "--chdir":
-				if len(rest) < 2 {
-					return nil, ""
-				}
-				chdir = joinRaw(chdir, rest[1])
-				rest = rest[2:]
-				continue
-			case strings.HasPrefix(a, "--chdir="):
-				chdir = joinRaw(chdir, strings.TrimPrefix(a, "--chdir="))
-				rest = rest[1:]
-				continue
-			case a == "-S" || a == "--split-string":
-				if len(rest) < 2 {
-					return nil, ""
-				}
-				rest = append(strings.Fields(rest[1]), rest[2:]...)
-				continue
-			case strings.HasPrefix(a, "-S"):
-				rest = append(strings.Fields(a[2:]), rest[1:]...)
-				continue
-			case strings.HasPrefix(a, "-"):
-				rest = rest[1:]
-				continue
-			case strings.Contains(a, "=") && !strings.HasPrefix(a, "/"):
-				rest = rest[1:]
-				continue
-			}
-			break
+		rest, chdir, unread := parseOneEnv(argv[1:])
+		if unread != "" {
+			return envPrefix{unread: unread}
+		}
+		if chdir != "" {
+			p.chdir = joinRaw(p.chdir, chdir)
 		}
 		argv = rest
 	}
-	return argv, chdir
+	p.argv = argv
+	return p
+}
+
+// parseOneEnv is one env's words (after its argv[0]): the command it runs,
+// its -C directory (several join), and an unread form or "".
+func parseOneEnv(args []string) (cmd []string, chdir string, unread string) {
+	setDir := func(d string) { chdir = joinRaw(chdir, d) }
+	// value takes an option's value: glued, else the next word.
+	value := func(glued string, has bool, i *int, opt string) (string, bool) {
+		if has {
+			return glued, true
+		}
+		if *i+1 >= len(args) {
+			unread = "env " + opt + " without its value"
+			return "", false
+		}
+		*i++
+		return args[*i], true
+	}
+	// split inserts -S's words where it stood, to be read again.
+	split := func(i int, str string) bool {
+		if strings.ContainsAny(str, "\"'\\$") {
+			unread = "an env -S string with quotes, backslashes or $"
+			return false
+		}
+		words := strings.FieldsFunc(str, func(r rune) bool { return strings.ContainsRune(envSplitSpace, r) })
+		for _, w := range words {
+			if strings.HasPrefix(w, "#") {
+				unread = "an env -S string with a # comment"
+				return false
+			}
+		}
+		args = append(words, args[i+1:]...)
+		return true
+	}
+	i := 0
+options:
+	for i < len(args) {
+		a := args[i]
+		switch {
+		case a == "--":
+			i++
+			break options
+		case a == "-":
+			// GNU reads "-" as -i once the options are over, so a word after
+			// it is never an option there; BSD may differ, so refuse the case
+			// where it matters.
+			if i+1 < len(args) && strings.HasPrefix(args[i+1], "-") {
+				return nil, "", "an env option after \"-\""
+			}
+			i++
+			break options
+		case strings.HasPrefix(a, "--"):
+			name, val, hasVal := strings.Cut(a[2:], "=")
+			full := ""
+			for _, o := range envLongOpts {
+				if strings.HasPrefix(o, name) {
+					if o == name {
+						full = o
+						break
+					}
+					if full != "" {
+						return nil, "", "an ambiguous env option (" + a + ")"
+					}
+					full = o
+				}
+			}
+			if name == "" || full == "" {
+				return nil, "", "an unknown env option (" + a + ")"
+			}
+			switch full {
+			case "unset":
+				if _, ok := value(val, hasVal, &i, "--unset"); !ok {
+					return nil, "", unread
+				}
+				i++
+			case "chdir":
+				d, ok := value(val, hasVal, &i, "--chdir")
+				if !ok {
+					return nil, "", unread
+				}
+				setDir(d)
+				i++
+			case "split-string":
+				str, ok := value(val, hasVal, &i, "--split-string")
+				if !ok || !split(i, str) {
+					return nil, "", unread
+				}
+				i = 0
+			case "block-signal", "default-signal", "ignore-signal":
+				i++
+			case "debug", "ignore-environment", "null", "list-signal-handling":
+				if hasVal {
+					return nil, "", "an env option with a value it does not take (" + a + ")"
+				}
+				i++
+			default: // help, version: env runs nothing
+				return nil, "", "env --" + full
+			}
+		case strings.HasPrefix(a, "-"):
+			for j := 1; j < len(a); j++ {
+				switch c := a[j]; c {
+				case 'i', '0', 'v':
+					continue
+				case 'u', 'C', 'S':
+					if c == 'S' && j > 1 {
+						return nil, "", "a combined env option group with S (" + a + ")"
+					}
+					v, ok := value(a[j+1:], j+1 < len(a), &i, "-"+string(c))
+					if !ok {
+						return nil, "", unread
+					}
+					switch c {
+					case 'C':
+						setDir(v)
+					case 'S':
+						if !split(i, v) {
+							return nil, "", unread
+						}
+						i = 0
+						continue options
+					}
+				default:
+					return nil, "", "an env option lever does not read (-" + string(c) + " in " + a + ")"
+				}
+				break
+			}
+			i++
+		default:
+			break options
+		}
+	}
+	for i < len(args) && strings.Contains(args[i], "=") {
+		i++
+	}
+	if i >= len(args) {
+		return nil, "", "an env with no command"
+	}
+	return args[i:], chdir, ""
 }
 
 // joinRaw is base/p without cleaning (so a ".." stays for the caller's
@@ -310,40 +476,4 @@ func codePaths(line string) []string {
 		}
 	}
 	return out
-}
-
-// envFormUnread names an env(1) prefix form whose words lever cannot read
-// the way env does, or "": a combined option group with S (-vS), the
-// --split-string=VALUE spelling, or an -S string with quotes, backslashes
-// or $ (env unquotes, unescapes and expands those, strings.Fields does
-// not). A flag hidden in such a form would escape the host-path checks, so
-// config load refuses the command instead of guessing.
-func envFormUnread(argv []string) string {
-	for len(argv) > 0 && baseName(argv[0]) == "env" {
-		rest := argv[1:]
-		for i := 0; i < len(rest); i++ {
-			a := rest[i]
-			switch {
-			case a == "--":
-				return ""
-			case a == "-S" || a == "--split-string":
-				if i+1 < len(rest) && strings.ContainsAny(rest[i+1], "\"'\\$") {
-					return "an env -S string with quotes, backslashes or $"
-				}
-				i++
-			case strings.HasPrefix(a, "--split-string="):
-				return "env --split-string=VALUE"
-			case strings.HasPrefix(a, "-S"):
-				if strings.ContainsAny(a[2:], "\"'\\$") {
-					return "an env -S string with quotes, backslashes or $"
-				}
-			case strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && len(a) > 2 && strings.Contains(a[1:], "S"):
-				return "a combined env option group with S (" + a + ")"
-			case !strings.HasPrefix(a, "-") && !(strings.Contains(a, "=") && !strings.HasPrefix(a, "/")):
-				return ""
-			}
-		}
-		return ""
-	}
-	return ""
 }

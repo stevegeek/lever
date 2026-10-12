@@ -68,8 +68,10 @@ func checkContactGate(app *config.App, st state.State) error {
 	}
 	// Config load refuses agent messages on a scion.version pseudo-version
 	// older than the floor; a scion.source checkout needs git, so it is
-	// checked here. Only a checkout known to predate the floor is refused:
-	// one git cannot answer for is doctor's warning, as a scion.binary is.
+	// checked here. A checkout without the floor commit (older and never
+	// fetched, or a fork) is refused, and so is a shallow clone that does
+	// not show it; a path git cannot answer for (not a repository, git not
+	// runnable, the timeout) is doctor's warning, as a scion.binary is.
 	if app.AgentMessagesOn() && app.Scion.Version == "" && app.Scion.Source != "" {
 		if bad, note := agentMessagesScion(app, scionSourceHasCommit); bad {
 			return fmt.Errorf("remote: agent_messages needs scion %s (2026-08-28) or later, where the hub sets a message's sender itself; %s. "+

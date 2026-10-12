@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend/backendtest"
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
@@ -212,20 +213,28 @@ func TestResolveFailsWithoutAUserCacheDir(t *testing.T) {
 	}
 }
 
-func TestSourceHasCommit(t *testing.T) {
+// gitRepo runs git in dir with a fixed identity and returns its trimmed output.
+func gitRepo(t *testing.T, dir string) func(args ...string) string {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git")
 	}
-	dir := t.TempDir()
-	git := func(args ...string) string {
+	return func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false"}, args...)...)
-		out, err := cmd.Output()
+		out, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("git %v: %v", args, err)
+			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 		return strings.TrimSpace(string(out))
 	}
+}
+
+// SourceHasCommit against real git: the exit-code mapping is the gate, so
+// it is not stubbed here.
+func TestSourceHasCommit(t *testing.T) {
+	dir := t.TempDir()
+	git := gitRepo(t, dir)
 	git("init", "-q")
 	git("commit", "-q", "--allow-empty", "-m", "one")
 	first := git("rev-parse", "HEAD")
@@ -233,16 +242,79 @@ func TestSourceHasCommit(t *testing.T) {
 	second := git("rev-parse", "HEAD")
 	git("checkout", "-q", first)
 	ctx := context.Background()
-	if ok, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, dir, first); !ok || err != nil {
+	has := func(source, commit string) (bool, error) {
+		return scionbin.SourceHasCommit(ctx, proc.RealRunner{}, source, commit)
+	}
+	if ok, err := has(dir, first); !ok || err != nil {
 		t.Fatalf("HEAD itself: %v %v", ok, err)
 	}
-	if ok, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, dir, second); ok || err != nil {
+	git("checkout", "-q", second)
+	if ok, err := has(dir, first); !ok || err != nil {
+		t.Fatalf("an ancestor: %v %v", ok, err)
+	}
+	git("checkout", "-q", first)
+	// git has the object, but HEAD does not hold it (merge-base exits 1).
+	if ok, err := has(dir, second); ok || err != nil {
 		t.Fatalf("a later commit: %v %v", ok, err)
 	}
-	if _, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, dir, "b3562fb19a970a7788bb7aa110c024799506f225"); err == nil {
-		t.Fatal("an unknown commit must be an error (cannot tell)")
+	// git has no such object (merge-base exits 128): a checkout that
+	// predates the floor and was never fetched, or a fork that never had it.
+	// Held to be "not held", never "cannot tell".
+	if ok, err := has(dir, config.AgentMessagesScionFloor); ok || err != nil {
+		t.Fatalf("a commit git does not have: %v %v, want false, nil", ok, err)
 	}
-	if _, err := scionbin.SourceHasCommit(ctx, proc.RealRunner{}, t.TempDir(), first); err == nil {
-		t.Fatal("not a checkout must be an error")
+	// Not a repository: cannot tell.
+	if ok, err := has(t.TempDir(), first); ok || err == nil || errors.Is(err, scionbin.ErrShallowSource) {
+		t.Fatalf("not a checkout: %v %v, want a cannot-tell error", ok, err)
+	}
+	if ok, err := has(filepath.Join(t.TempDir(), "missing"), first); ok || err == nil || errors.Is(err, scionbin.ErrShallowSource) {
+		t.Fatalf("no such directory: %v %v, want a cannot-tell error", ok, err)
+	}
+	// The deadline: cannot tell.
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	if ok, err := scionbin.SourceHasCommit(done, proc.RealRunner{}, dir, config.AgentMessagesScionFloor); ok || err == nil || errors.Is(err, scionbin.ErrShallowSource) {
+		t.Fatalf("expired context: %v %v, want a cannot-tell error", ok, err)
+	}
+}
+
+// A shallow clone cuts history off, so a commit it does not show might be
+// below the cut: SourceHasCommit says so (ErrShallowSource, which the gate
+// refuses) rather than "not held" or "cannot tell". A commit it does show
+// as an ancestor is still held.
+func TestSourceHasCommitShallow(t *testing.T) {
+	up := t.TempDir()
+	git := gitRepo(t, up)
+	git("init", "-q")
+	git("commit", "-q", "--allow-empty", "-m", "one")
+	first := git("rev-parse", "HEAD")
+	git("commit", "-q", "--allow-empty", "-m", "two")
+	git("commit", "-q", "--allow-empty", "-m", "three")
+	head := git("rev-parse", "HEAD")
+	clone := filepath.Join(t.TempDir(), "c")
+	git("clone", "-q", "--depth", "1", "file://"+up, clone)
+	ctx := context.Background()
+	has := func(commit string) (bool, error) {
+		return scionbin.SourceHasCommit(ctx, proc.RealRunner{}, clone, commit)
+	}
+	if ok, err := has(head); !ok || err != nil {
+		t.Fatalf("HEAD of a shallow clone: %v %v", ok, err)
+	}
+	if ok, err := has(first); ok || !errors.Is(err, scionbin.ErrShallowSource) {
+		t.Fatalf("an ancestor below the cut: %v %v, want ErrShallowSource", ok, err)
+	}
+	if ok, err := has(config.AgentMessagesScionFloor); ok || !errors.Is(err, scionbin.ErrShallowSource) {
+		t.Fatalf("an unknown commit: %v %v, want ErrShallowSource", ok, err)
+	}
+}
+
+// git not runnable at all: cannot tell.
+func TestSourceHasCommitWithoutGit(t *testing.T) {
+	dir := t.TempDir()
+	gitRepo(t, dir)("init", "-q")
+	t.Setenv("PATH", t.TempDir())
+	ok, err := scionbin.SourceHasCommit(context.Background(), proc.RealRunner{}, dir, config.AgentMessagesScionFloor)
+	if ok || err == nil || errors.Is(err, scionbin.ErrShallowSource) {
+		t.Fatalf("no git: %v %v, want a cannot-tell error", ok, err)
 	}
 }

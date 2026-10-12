@@ -139,7 +139,8 @@ byte. Convert other audio first, for example
 
 **Whose files.** The tool always reads from that one folder, the tree root's
 `.lever-files/whisper/`, whoever the caller is. Only the manager can write there (a worker mounts
-only its own directory), but any agent with a whisper `transcribe` capability, a worker holding a
+only its own directory, and config load refuses a worker `dir` that overlaps `.lever-files` while
+a whisper or github tool is configured), but any agent with a whisper `transcribe` capability, a worker holding a
 delegated or obtained one included, reads the files the manager put there. Grant the capability,
 and delegate it, only to agents that may read what the manager puts in that folder. The
 [github tool](/github-tool/)'s bundle folder works the same way.
@@ -181,8 +182,12 @@ clip's length, the outcome and the latency. Never the text.
 
 ## Stopping and restarts
 
-The broker stops the tool with SIGTERM, and the tool stops its child within a second. On Linux the
-child also dies with the tool when the tool is killed. On macOS a tool killed hard can leave
-whisper-server running and holding `-whisper-port`; the next start then finds the port taken and
-starts no child (`lever doctor` shows the tool not ready). Find the process with
-`lsof -nP -iTCP:<port> -sTCP:LISTEN`, stop it, and run `lever reload`.
+The broker stops the tool with SIGTERM, and the tool stops its child (it runs in its own process
+group, which is signalled as a whole) within a second. On Linux the child also dies with the tool
+when the tool is killed. On macOS a tool killed hard can leave whisper-server running and holding
+`-whisper-port`. The tool keeps the child's pid in `whisper-server-<port>.pid` (mode `0600`) in the
+`-models` directory, so the next start stops that process, but only after checking that its
+command line is the configured `-server` on this port (a pid file that names anything else is
+removed and nothing is signalled), waits for the port to free and starts its own child. If
+something else holds the port, the tool starts no child (`lever doctor` shows the tool not ready):
+find it with `lsof -nP -iTCP:<port> -sTCP:LISTEN`, stop it, and run `lever reload`.

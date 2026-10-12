@@ -313,6 +313,11 @@ func TestToolHostPaths(t *testing.T) {
 	})
 	// env -C: a relative path resolves against env's directory.
 	check("env -C", paths("env", "-C", "/w", "python3", "x.py"), []got{{"broker.tools[t] script", "/w/x.py", hostProgram}})
+	// An -S string that makes the command as long as the prefix, or longer,
+	// still gets the program and its script checked.
+	check("env -S program", paths("env", "-S/tree/evil a b c d"), []got{{"broker.tools[t] command (after env)", "/tree/evil", hostProgram}})
+	check("env -S script", paths("env", "-S", "python3 /tree/x.py a b"), []got{{"broker.tools[t] script", "/tree/x.py", hostProgram}})
+	check("env -- - program", paths("env", "--", "-", "/tree/evil", "x"), []got{{"broker.tools[t] command (after env)", "/tree/evil", hostProgram}})
 	check("env --chdir= relative", paths("env", "--chdir=ws", "ruby", "x.rb"), []got{{"broker.tools[t] script", "ws/x.rb", hostProgram}})
 	check("versioned", paths("python3.12", "/t/x.py"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
 	check("versioned ruby", paths("/usr/bin/ruby3.3", "-Ilib/x", "-r", "/t/r.rb", "/t/x.rb"), []got{

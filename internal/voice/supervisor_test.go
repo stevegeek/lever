@@ -269,6 +269,10 @@ func TestServiceRunsAVerifiedModel(t *testing.T) {
 		_ = s.Run(ctx)
 	}()
 	eventually(t, "ready", s.Ready)
+	// The child's pid file is in the tool's -models directory.
+	if _, err := os.Stat(filepath.Join(dir, PidFileName(s.Port))); err != nil {
+		t.Fatalf("no pid file in the models directory: %v", err)
+	}
 	text, err := s.Transcribe(ctx, []byte("RIFFxxxx"))
 	if err != nil || !strings.Contains(text, "language auto; prompt Scion; format json; gpu true") {
 		t.Fatalf("%q %v", text, err)

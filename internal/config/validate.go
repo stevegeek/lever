@@ -337,6 +337,9 @@ func (a *App) Validate() error {
 	if err := a.validateWhisperTools(); err != nil {
 		return err
 	}
+	if err := a.validateLeverFilesTools(); err != nil {
+		return err
+	}
 	if err := a.validateOperator(); err != nil {
 		return err
 	}

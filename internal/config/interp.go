@@ -117,8 +117,8 @@ const envSplitSpace = " \t\n\v\f\r"
 //     getopt would take it, but such a group is refused rather than read;
 //   - --block-signal, --default-signal, --ignore-signal (optional =SIG),
 //     --debug, --ignore-environment, --null, --list-signal-handling;
-//   - "--" ends the options; NAME=value words follow (any word with "=",
-//     as env reads it), then the command.
+//   - "--" ends the options; one "-" may follow (-i), then NAME=value
+//     words (any word with "=", as env reads it), then the command.
 //
 // Any other option (BSD -P altpath, which changes where the program is
 // looked up, -L, -U; --help and --version, which run nothing; an unknown or
@@ -181,13 +181,7 @@ options:
 			i++
 			break options
 		case a == "-":
-			// GNU reads "-" as -i once the options are over, so a word after
-			// it is never an option there; BSD may differ, so refuse the case
-			// where it matters.
-			if i+1 < len(args) && strings.HasPrefix(args[i+1], "-") {
-				return nil, "", "an env option after \"-\""
-			}
-			i++
+			// An operand: the options are over (handled below).
 			break options
 		case strings.HasPrefix(a, "--"):
 			name, val, hasVal := strings.Cut(a[2:], "=")
@@ -268,6 +262,15 @@ options:
 		default:
 			break options
 		}
+	}
+	// GNU reads one "-" right after the options (after "--" too) as -i,
+	// so a word after it is never an option there; BSD may go on reading
+	// options, so refuse the case where that matters.
+	if i < len(args) && args[i] == "-" {
+		if i+1 < len(args) && strings.HasPrefix(args[i+1], "-") {
+			return nil, "", "an env option after \"-\""
+		}
+		i++
 	}
 	for i < len(args) && strings.Contains(args[i], "=") {
 		i++

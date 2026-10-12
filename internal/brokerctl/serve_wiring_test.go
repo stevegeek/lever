@@ -73,8 +73,13 @@ func decorateForTest(t *testing.T, app *config.App, version string) (broker.Conf
 func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
 	tree := t.TempDir()
 	app := wiringApp(tree, "") // directives OFF
-	cfg, _ := decorateForTest(t, app, "v1.2.3")
+	cfg, st := decorateForTest(t, app, "v1.2.3")
 
+	// The instance id (lever#181) is made before the broker binds, and is
+	// the one the state dir records.
+	if id, err := st.ReadInstanceID(); err != nil || cfg.InstanceID != id || !state.ValidInstanceID(id) {
+		t.Errorf("InstanceID = %q, state dir's = %q (%v)", cfg.InstanceID, id, err)
+	}
 	if cfg.Identity.ManagerSlug != "demo" {
 		t.Errorf("ManagerSlug = %q, want app name %q", cfg.Identity.ManagerSlug, "demo")
 	}

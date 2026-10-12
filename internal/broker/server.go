@@ -109,9 +109,24 @@ func withBodyDeadline(d time.Duration, h http.Handler) http.Handler {
 	})
 }
 
-// handleEpoch serves the current epoch for captool freshness checks (admin/loopback).
+// EpochAnswer is the body of GET /epoch: wire.EpochResponse, which
+// first-party tools read for the epoch, plus the instance id, which only
+// host-side lever reads (lever#181). The id lives here, not in package
+// wire, because wire is in-jail code: the field would change the jail ABI
+// for a value no in-jail program reads. A broker predating the id reports
+// it empty.
+type EpochAnswer struct {
+	wire.EpochResponse
+	InstanceID string `json:"instance_id,omitempty"`
+}
+
+// handleEpoch serves the current epoch for captool freshness checks, and
+// the process identity for lever on the host (admin/loopback).
 func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, wire.EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash})
+	writeJSON(w, EpochAnswer{
+		EpochResponse: wire.EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash},
+		InstanceID:    b.epochInstanceID,
+	})
 }
 
 // AdminHandler builds an http.Handler for the admin (loopback) listener.

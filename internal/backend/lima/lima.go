@@ -13,15 +13,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/state"
 )
 
 // hostAlias is the DNS name Lima resolves to the host from inside the VM.
@@ -97,6 +100,12 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 		}
 	}
 	if err := l.ensureVM(ctx, cfg); err != nil {
+		return err
+	}
+	// Before Provision: on a fresh VM no egress chain exists yet, so the
+	// HWE kernel install reaches the mirrors (a re-apply under the closed
+	// posture may not, which the kernel step reports as a warning).
+	if err := l.hardenGuest(ctx, cfg); err != nil {
 		return err
 	}
 	if err := l.Provision(ctx, cfg); err != nil {
@@ -422,3 +431,102 @@ func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DN
 }
 
 var _ backend.Backend = (*Lima)(nil)
+
+// RebootAdvice is how an operator reboots the jail VM without losing the
+// manager's conversation.
+const RebootAdvice = "`lever stop`, then `lever up`, reboots the VM and keeps the manager conversation"
+
+// hardenGuest converges the guest's crash recovery (always) and its kernel
+// flavour (cfg.GuestKernel) on every bring-up, so an existing VM gets them
+// on its next apply or up (lever#179). `lever up` runs it too, whatever
+// the manager's state, because up builds its dependencies through EnsureUp
+// before it decides to resume or attach. A failed crash-recovery write
+// fails the bring-up; what only a reboot applies, and a kernel install
+// that could not run, are warnings: lever never reboots the guest itself.
+func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
+	warn := cfg.Warn
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
+	crash, err := l.Guest().EnsureCrashRecovery(ctx)
+	if err != nil {
+		return err
+	}
+	var opts guest.KernelOpts
+	stamp, stampErr := loadHWEStamp(cfg.HWEFailStamp)
+	if stampErr != nil {
+		warn("jail: WARNING: %v", stampErr)
+	}
+	if cfg.GuestKernel == guest.GuestKernelHWE && cfg.ClosedInternet {
+		opts.SkipIfMachineID = stamp.MachineID
+	}
+	kernel, err := l.Guest().EnsureGuestKernel(ctx, cfg.GuestKernel, opts)
+	if err != nil {
+		// The kernel step only installs a package and reads two paths; a
+		// failure to run it must not keep the jail down.
+		warn("jail: WARNING: %v", err)
+	}
+	if cfg.GuestKernel == guest.GuestKernelHWE {
+		l.keepHWEStamp(cfg.HWEFailStamp, stamp, kernel, warn)
+	}
+	for _, w := range append(crash.Warn, kernel.Warn...) {
+		warn("jail: WARNING: %s", w)
+	}
+	for _, r := range append(crash.Reboot, kernel.Reboot...) {
+		warn("jail: reboot pending: %s; %s", r, RebootAdvice)
+	}
+	return nil
+}
+
+// hweStamp is the host-side record of a guest_kernel hwe install that
+// failed (backend.Config.HWEFailStamp): the VM it failed in, by
+// /etc/machine-id (stable for the VM's life, new when it is recreated),
+// and when.
+type hweStamp struct {
+	MachineID string    `json:"machine_id"`
+	FailedAt  time.Time `json:"failed_at"`
+}
+
+// loadHWEStamp reads the stamp; a missing path or file is the zero stamp.
+func loadHWEStamp(path string) (hweStamp, error) {
+	if path == "" {
+		return hweStamp{}, nil
+	}
+	s, err := state.LoadJSON[hweStamp](path, "HWE install stamp")
+	if err != nil {
+		return hweStamp{}, fmt.Errorf("%v (delete %s to retry the HWE kernel install)", err, path)
+	}
+	return s, nil
+}
+
+// keepHWEStamp converges the stamp on what the kernel step reported: a
+// failed install stamps the VM, an installed package removes the stamp,
+// and a skip on the stamp says what to do. Writes are best-effort
+// (warned): the stamp only saves time.
+func (l *Lima) keepHWEStamp(path string, was hweStamp, k guest.KernelReport, warn func(string, ...any)) {
+	if path == "" {
+		return
+	}
+	switch k.HWE {
+	case guest.HWEFailed:
+		if k.MachineID == "" {
+			return
+		}
+		err := os.MkdirAll(filepath.Dir(path), 0o700)
+		if err == nil {
+			err = state.SaveJSON(path, "HWE install stamp", hweStamp{MachineID: k.MachineID, FailedAt: time.Now().UTC()})
+		}
+		if err != nil {
+			warn("jail: WARNING: %v", err)
+		}
+	case guest.HWEInstalled:
+		if was.MachineID != "" {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				warn("jail: WARNING: remove %s: %v", path, err)
+			}
+		}
+	case guest.HWESkippedStamp:
+		warn("jail: WARNING: guest_kernel hwe: %s is not installed; the install failed in this VM on %s, and lever does not run apt again while the egress posture is closed (apt would wait up to %d s each time). Run lever apply once with the open posture, install it by hand in the guest, or delete %s to retry",
+			guest.HWEPackage, was.FailedAt.Format(time.RFC3339), guest.AptLockWait, path)
+	}
+}

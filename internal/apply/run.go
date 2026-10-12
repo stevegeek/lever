@@ -355,6 +355,11 @@ type Deps struct {
 	// booting, and as its fallback when the pane cannot be probed. nil ⇒ the
 	// gate has only the pane probe.
 	ContainerRunning func(ctx context.Context, ref string) (bool, error)
+	// GuestBoot reads the jail guest's boot id and keeps the one the
+	// manager last ran live in, so a record left "running" by a hard VM
+	// kill is suspended and resumed instead of refused (GuestBoot's doc).
+	// nil ⇒ no recovery and nothing recorded. Optional.
+	GuestBoot GuestBoot
 	// HarnessWait bounds how long the manager gate waits, once the hub record
 	// reads live, for claude's tmux pane to come alive (the pre-start hook
 	// runs first). Zero takes the production default (2 min).
@@ -1097,6 +1102,17 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		// The stale-mount check then reads the healed record, so a record
 		// the heal turned running is kept (managerKept) and not refused.
 		rec = HealAgentSession(ctx, r.d.sessionHealer(), jp, rec)
+		// A record left "running" by a guest that was killed and restarted
+		// is suspended here, so converge resumes it (lever#179). Re-read
+		// after: converge acts on what the hub says now, and a suspend that
+		// did not take leaves the record running, refused by the gate as
+		// before.
+		if guestRestartedUnder(ctx, r.d, jp, r.app.Name, rec) {
+			suspendAfterGuestRestart(ctx, r.d, "start-manager", jp, r.app.Name, rec)
+			if rec, err = r.observeManager(ctx, jp); err != nil {
+				return err
+			}
+		}
 	}
 	if rec != nil && !r.fresh {
 		if err := r.checkStaleTreeMounts(ctx, jp, rec); err != nil {
@@ -1116,6 +1132,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
+	RecordGuestBoot(ctx, r.d)
 	healNamedSessions(ctx, r.d, jp, workerNames(r.app))
 	if !r.managerCreated {
 		r.warnManagerTreeMounts(ctx, jp)

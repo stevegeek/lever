@@ -164,8 +164,11 @@ func TestBringUpBackendPassesWarn(t *testing.T) {
 	app := &config.App{Name: "x", Backend: config.BackendLima, CPUs: 8, Memory: "24GiB", NestedVirt: true}
 	var got []string
 	warn := func(format string, a ...any) { got = append(got, fmt.Sprintf(format, a...)) }
-	if _, err := bringUpBackend(context.Background(), app, func(string, string) (backend.Backend, error) { return sb, nil }, warn); err != nil {
+	if _, err := bringUpBackend(context.Background(), app, func(string, string) (backend.Backend, error) { return sb, nil }, state.State{Dir: "/state"}, warn); err != nil {
 		t.Fatal(err)
+	}
+	if sb.upCfg.HWEFailStamp != "/state/hwe-install-failed.json" {
+		t.Errorf("stamp = %q", sb.upCfg.HWEFailStamp)
 	}
 	if sb.upCfg.Warn == nil || sb.upCfg.CPUs != 8 || sb.upCfg.Memory != "24GiB" || !sb.upCfg.NestedVirt || sb.upCfg.NestedVirtUnknown {
 		t.Fatalf("cfg = %+v", sb.upCfg)

@@ -102,6 +102,38 @@ CI (`.github/workflows/ci.yml`) runs `gofmt -l .` (must be empty), `go vet ./...
 and `go test -race ./...`. A release is a `v*` tag; the release workflow refuses a tag that does not
 match `const Version` in `internal/cli/root.go` or that is not on `main`.
 
+### Live test plan for guest hardening and nested virt
+
+The guest crash recovery, `guest_kernel` and the recovery after a hard VM kill (lever#179) are
+unit tested only; these live checks remain. Run each on a disposable instance, one live e2e at a
+time, and never on a VM whose agents you need.
+
+1. **A fresh `nested_virt` VM.** After the first apply: the three files
+   (`/etc/sysctl.d/99-lever-crash-recovery.conf`, `/etc/modprobe.d/lever-no-efi-pstore.conf`,
+   `/etc/default/grub.d/99-lever-crash-recovery.cfg`), the four sysctls live, `efi_pstore` not
+   loaded, apply's `jail: reboot pending:` lines, and `linux-generic-hwe-24.04` installed. Then
+   `lever stop`, `lever up`: doctor's *guest crash recovery* and *guest kernel* rows are green and
+   `/proc/cmdline` has `efi_pstore.pstore_disable=1`.
+2. **Re-apply.** No `update-grub` and no apt run; record the time the hardening adds to apply.
+3. **Re-apply under `egress: closed` without the HWE kernel** (remove the package first): measure
+   the delay and check the warning says the egress is closed. Then make an install fail (open
+   posture, mirrors unreachable) and check the stamp `.lever-state/hwe-install-failed.json`
+   (0600), the next closed-posture apply's warning, and that it runs no apt.
+4. **A production-like VM without `nested_virt`.** No kernel change; `update-grub` succeeds on the
+   Lima cloud image.
+5. **A guest panic.** `echo c > /proc/sysrq-trigger` in the guest, under qemu (and vz on a Mac if
+   possible): the VM comes back or stops (record which, per driver). Then `lever up` logs
+   "suspending and resuming", the conversation is intact, and the record is not refused.
+6. **QEMU killed while the manager runs**, then `lever up`: the same checks as step 5.
+7. **A crash-truncated transcript.** Truncate the last line of the manager's session JSONL, then
+   resume: does `claude --continue` accept it?
+8. **Doctor on OrbStack**: both rows say not applicable.
+9. **Soak.** A nested VM under CPU and IO load for 24 h on the HWE kernel, watching the guest
+   serial log (`~/.lima/<vm>/serial*.log`) for soft lockups.
+
+Record results (no host names) in the operations guide's table of host/guest kernel pairs, and
+update its "verified/unverified" notes.
+
 ### Bumping the jail ABI
 
 `JailABI` in `internal/jailabi/jailabi.go` is the in-jail compatibility version. `make lever-image`

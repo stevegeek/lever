@@ -104,10 +104,13 @@ the device, or to take it away, back up the conversation, then run `lever up --f
 key is off, apply removes the rule and sets the device back to mode 0660. Each apply also removes
 the podman drop-in (`20-lever-kvm.conf`) that earlier builds wrote, which gave every container the
 device. `lever doctor` has a *nested virt* row. The key is rejected on OrbStack and on darwin.
+With `nested_virt` the guest kernel defaults to Ubuntu's HWE kernel (`guest_kernel`), and every
+Lima guest is set to reboot rather than hang on a kernel crash; see
+[nested virtualization](/operations/#nested-virtualization).
 See the [`nested_virt` config row](/reference/config/) for the full contract.
 
 **Sizing.** `disk` (default `24GiB`; Lima's own default is 100GiB), `cpus` (1-256) and `memory`
-(at least `2GiB`) size the VM. They are Lima only (config load rejects `cpus`, `memory` and
-`nested_virt` on OrbStack, and OrbStack ignores `disk`) and create-time only: apply warns when
+(at least `2GiB`) size the VM. They are Lima only (config load rejects `cpus`, `memory`,
+`nested_virt` and `guest_kernel` on OrbStack, and OrbStack ignores `disk`) and create-time only: apply warns when
 `cpus` or `memory` differ from the existing VM's, and a bigger disk needs `limactl disk resize` or
 a recreate. Unset `cpus` and `memory` keep Lima's defaults.

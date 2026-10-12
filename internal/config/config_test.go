@@ -1214,6 +1214,10 @@ func TestValidateLimaKeys(t *testing.T) {
 		{"memory bad format", func(a *App) { a.Memory = "lots" }, "linux", `memory "lots" invalid`},
 		{"memory too small", func(a *App) { a.Memory = "1GiB" }, "linux", "at least 2GiB"},
 		{"memory MiB ok", func(a *App) { a.Memory = "4096MiB" }, "linux", ""},
+		{"guest_kernel hwe", func(a *App) { a.GuestKernel = "hwe" }, "linux", ""},
+		{"guest_kernel ga darwin", func(a *App) { a.GuestKernel = "ga" }, "darwin", ""},
+		{"guest_kernel bad", func(a *App) { a.GuestKernel = "mainline" }, "linux", `guest_kernel "mainline" invalid`},
+		{"guest_kernel on orbstack", func(a *App) { a.Backend = BackendOrbstack; a.GuestKernel = "hwe" }, "darwin", "guest_kernel is Lima-only"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

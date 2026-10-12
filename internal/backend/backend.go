@@ -81,6 +81,18 @@ type Config struct {
 	// know nested_virt (`lever provision`): EnsureUp leaves the guest's
 	// /dev/kvm setup as it is instead of converging it to NestedVirt.
 	NestedVirtUnknown bool
+	// GuestKernel is the Lima guest kernel flavour to converge on ("hwe"
+	// or "ga"; config.App.EffectiveGuestKernel). "" (`lever provision`, no
+	// config) installs nothing and only reports a pending reboot. Ignored
+	// by OrbStack, whose kernel is OrbStack's.
+	GuestKernel string
+	// HWEFailStamp is the host path of the stamp lever keeps when the HWE
+	// kernel install failed in this VM (state.State.HWEFailStamp, 0600,
+	// keyed by the guest's machine id). While it names the VM and the
+	// egress posture is closed, a bring-up warns instead of trying apt
+	// again; an apply under the open posture tries again and removes it on
+	// success. "" keeps no stamp. Lima only.
+	HWEFailStamp string
 	// Warn prints a loud, user-facing line (apply's log). EnsureUp uses it
 	// for advice that must not fail the bring-up, e.g. a cpus or memory
 	// value an existing Lima VM does not have. Nil discards.

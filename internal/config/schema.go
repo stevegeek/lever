@@ -570,6 +570,10 @@ type App struct {
 	NestedVirt    bool           `yaml:"nested_virt"` // Lima-only: the manager container gets /dev/kvm (nested KVM guests). Linux hosts only.
 	CPUs          int            `yaml:"cpus"`        // Lima guest vCPUs; 0 = Lima default. Lima-only.
 	Memory        string         `yaml:"memory"`      // Lima guest memory (e.g. "24GiB"); empty = Lima default. Lima-only.
+	// GuestKernel picks the Lima guest's Ubuntu kernel: "hwe" installs the
+	// 24.04 hardware-enablement kernel, "ga" keeps the release kernel. Empty
+	// = "hwe" with nested_virt, else "ga" (EffectiveGuestKernel). Lima-only.
+	GuestKernel string `yaml:"guest_kernel"`
 
 	dir string // instance root (the config file's directory)
 }

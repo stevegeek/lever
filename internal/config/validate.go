@@ -159,7 +159,7 @@ func validateLimaKeys(a *App, goos string) error {
 		for _, k := range []struct {
 			key string
 			set bool
-		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}} {
+		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}} {
 			if k.set {
 				return fmt.Errorf("config: %s is Lima-only; OrbStack manages its own machine resources", k.key)
 			}
@@ -168,6 +168,12 @@ func validateLimaKeys(a *App, goos string) error {
 	}
 	if a.NestedVirt && goos == "darwin" {
 		return fmt.Errorf("config: nested_virt needs the qemu driver on a Linux host; Lima's vz nestedVirtualization is not supported yet")
+	}
+	switch a.GuestKernel {
+	case "", GuestKernelHWE, GuestKernelGA:
+	default:
+		return fmt.Errorf("config: guest_kernel %q invalid (want %q or %q, or unset: %q with nested_virt, else %q)",
+			a.GuestKernel, GuestKernelHWE, GuestKernelGA, GuestKernelHWE, GuestKernelGA)
 	}
 	if a.CPUs < 0 || a.CPUs > 256 {
 		return fmt.Errorf("config: cpus %d out of range (1-256, or unset for the Lima default)", a.CPUs)

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -163,6 +164,8 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	// An agent's hub token expiry and harness liveness, read in its
 	// container (jail.AgentProbe); only a time and a boolean come back.
 	agentSession := jail.AgentProbe{R: jr}
+	// The guest kernel probe backs two rows; read it once, on first use.
+	guestKernel := sync.OnceValues(func() (guestKernelProbe, error) { return readGuestKernelProbe(ctx, jr) })
 	workerNames := make([]string, 0, len(app.Workers))
 	workerDirs := make(map[string]string, len(app.Workers))
 	workerClaude := make(map[string]*wire.Claude, len(app.Workers))
@@ -192,6 +195,14 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		},
 		func() checkResult {
 			return checkNestedVirt(ctx, app.NestedVirt, app.Backend == config.BackendLima, jr, jail.ContainerName(hubProjectKey(b.MountDest()), app.Name), probeDevice)
+		},
+		func() checkResult {
+			p, err := guestKernel()
+			return checkGuestCrashRecovery(app.Backend, p, err)
+		},
+		func() checkResult {
+			p, err := guestKernel()
+			return checkGuestKernel(app, p, err)
 		},
 		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)

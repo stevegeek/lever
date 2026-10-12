@@ -95,7 +95,13 @@ func TestGuestRestartedUnder(t *testing.T) {
 	}{
 		{"new boot, podman says stopped", running, &fakeGuestBoot{current: bootB, recorded: bootA}, podmanSays(false), true},
 		{"new boot, podman says running", running, &fakeGuestBoot{current: bootB, recorded: bootA}, podmanSays(true), false},
-		{"new boot, no podman, hub created", running, &fakeGuestBoot{current: bootB, recorded: bootA}, nil, true},
+		// The hub reports "created" for a starting container too, so
+		// without podman's answer nothing is suspended (lever#179 review).
+		{"new boot, no podman, hub created", running, &fakeGuestBoot{current: bootB, recorded: bootA}, nil, false},
+		{"new boot, podman fails, hub created", running, &fakeGuestBoot{current: bootB, recorded: bootA},
+			func(context.Context, string) (bool, error) { return false, errors.New("podman: no answer") }, false},
+		{"new boot, podman fails, hub exited", &scion.Agent{Slug: "hello", Phase: scion.PhaseRunning, ContainerStatus: "Exited (137)"}, &fakeGuestBoot{current: bootB, recorded: bootA},
+			func(context.Context, string) (bool, error) { return false, errors.New("podman: no answer") }, false},
 		{"new boot, podman fails, hub blank", &scion.Agent{Slug: "hello", Phase: scion.PhaseRunning}, &fakeGuestBoot{current: bootB, recorded: bootA},
 			func(context.Context, string) (bool, error) { return false, errors.New("no podman") }, false},
 		{"new boot, no podman, hub live", &scion.Agent{Slug: "hello", Phase: scion.PhaseRunning, ContainerStatus: "Up 3 hours"}, &fakeGuestBoot{current: bootB, recorded: bootA}, nil, false},

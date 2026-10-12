@@ -30,9 +30,11 @@ type GuestBoot interface {
 
 // guestRestartedUnder reports whether rec is a manager record left over
 // from a guest boot that has ended: the record says running, lever saw the
-// manager live in an earlier boot than the current one, and the manager's
-// container is not running now (podman's answer when it can be read, else
-// the hub's container status, where an empty status is no evidence). Any
+// manager live in an earlier boot than the current one, and podman in the
+// guest says the manager's container is not running now. Only podman's
+// own answer counts: the hub briefly reports "created" for a container
+// that is starting, so the hub's status is never evidence of a dead one,
+// and a podman read that fails (or no podman probe at all) answers no. Any
 // read that fails answers no, which leaves today's behaviour in place.
 func guestRestartedUnder(ctx context.Context, d Deps, project, name string, rec *scion.Agent) bool {
 	if rec == nil || rec.Phase != scion.PhaseRunning || d.GuestBoot == nil {
@@ -46,12 +48,11 @@ func guestRestartedUnder(ctx context.Context, d Deps, project, name string, rec 
 	if err != nil || now == "" || now == was {
 		return false
 	}
-	if d.ContainerRunning != nil {
-		if running, err := d.ContainerRunning(ctx, jail.ContainerName(path.Base(project), name)); err == nil {
-			return !running
-		}
+	if d.ContainerRunning == nil {
+		return false
 	}
-	return rec.ContainerStatus != "" && !scion.ContainerLive(rec.ContainerStatus)
+	running, err := d.ContainerRunning(ctx, jail.ContainerName(path.Base(project), name))
+	return err == nil && !running
 }
 
 // suspendAfterGuestRestart suspends a manager record guestRestartedUnder

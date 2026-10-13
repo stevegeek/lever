@@ -20,6 +20,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/treebackup"
@@ -953,13 +954,18 @@ func hasTreeSnapshot(e *treeEnv) bool {
 // when the backend says so before and after the walk.
 func quiescentAfterStop(b backend.Backend) func(ctx context.Context) string { return vmOffProbe(b) }
 
+// guestSyncOutputLimit caps what the guest's sync may print: the guest is
+// not trusted, and an uncapped exec buffers all of it in this process.
+const guestSyncOutputLimit = 4 << 10
+
 // guestSync flushes the guest's write-back cache into the share before a
 // keep-vm snapshot: without it the suspended agents' last writes may not
-// have reached the host yet.
+// have reached the host yet. Output past the cap is a failed sync, so the
+// snapshot is labelled none.
 func guestSync(ctx context.Context, b backend.Backend) error {
 	sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	_, err := b.JailRunner().Run(sctx, nil, "sync")
+	_, err := b.JailRunner().Run(proc.WithOutputLimit(sctx, guestSyncOutputLimit), nil, "sync")
 	return err
 }
 

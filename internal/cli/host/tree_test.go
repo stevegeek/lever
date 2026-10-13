@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/treebackup"
 )
 
@@ -287,5 +289,33 @@ func TestDoctorTreeBackupRow(t *testing.T) {
 	app.TreeBackup.Enabled = false
 	if r := checkTreeBackup(app, st, now); !r.ok || !strings.Contains(r.detail, "off") {
 		t.Fatalf("off: %+v", r)
+	}
+}
+
+// floodRunner stands in for a hostile guest: whatever it is asked to run,
+// it runs `yes`, which writes until it is killed.
+type floodRunner struct{ proc.RealRunner }
+
+func (f floodRunner) Run(ctx context.Context, env map[string]string, _ string, _ ...string) (proc.Result, error) {
+	return f.RealRunner.Run(ctx, env, "yes")
+}
+
+// The keep-vm sync is a guest exec: its output is capped like every other
+// one, and a guest that floods it fails the sync at once.
+func TestGuestSyncOutputIsCapped(t *testing.T) {
+	if _, err := exec.LookPath("yes"); err != nil {
+		t.Skip("no yes(1)")
+	}
+	b := &stubBackend{runner: floodRunner{}}
+	start := time.Now()
+	err := guestSync(context.Background(), b)
+	if !errors.Is(err, proc.ErrOutputLimit) {
+		t.Fatalf("guestSync = %v, want the output limit", err)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Fatalf("guestSync took %v", d)
+	}
+	if q := quiescentKeepVM(true, err)(context.Background()); q != treebackup.QuiescentNone {
+		t.Fatalf("a flooded sync is labelled %s", q)
 	}
 }

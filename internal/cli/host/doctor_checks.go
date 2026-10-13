@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1938,17 +1939,33 @@ func goVersionProbe(r proc.Runner) (string, error) {
 // broken shim (e.g. asdf/mise without the version installed) fails with an
 // opaque "exit status 126" deep inside apply; this turns it into an
 // up-front, actionable diagnosis. No build requested => no go needed => pass.
-func checkGoToolchain(scion config.ScionConfig, p doctorProbes) checkResult {
+// prebuilt (scionPrebuilt) means lever downloads this release's scion
+// instead of building it, so a missing Go passes: only a failed download
+// falls back to the build.
+func checkGoToolchain(scion config.ScionConfig, prebuilt bool, p doctorProbes) checkResult {
 	const name = "go toolchain"
 	if scion.Source == "" && scion.Version == "" {
 		return checkResult{name, true, "scion build not required", ""}
 	}
 	out, err := p.goVersion()
+	if err != nil && prebuilt {
+		return checkResult{name, true, "not required: lever downloads this release's prebuilt scion " + scion.Version +
+			" (only a failed download builds it, which needs Go)", ""}
+	}
 	if err != nil {
 		return checkResult{name, false, "go toolchain not usable: " + err.Error(),
 			`put a REAL Go toolchain on PATH (not just an asdf/mise shim), e.g. export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"; ` + "`go version` should print"}
 	}
 	return checkResult{name, true, strings.TrimSpace(out), ""}
+}
+
+// scionPrebuilt reports whether apply downloads the release's prebuilt scion
+// for app instead of building it: scion.version names this release's pin,
+// and no web UI build needs the module source (that build fetches it with
+// Go). The guest is assumed to run the host's architecture, as the early
+// host build of scion assumes.
+func scionPrebuilt(app *config.App) bool {
+	return app.Scion.Version != "" && !app.ScionWebAssets() && scionbin.DownloadsRelease(app.Scion.Version, runtime.GOARCH)
 }
 
 // nodeToolchainProbe resolves and validates node+npm for the scion web-asset

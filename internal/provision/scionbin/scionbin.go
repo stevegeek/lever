@@ -139,9 +139,19 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 	buildDir := spec.Source
 	stampKey := ""
 	if spec.Version != "" {
+		fetchErr := resolveRelease(ctx, spec.Version, goarch, out)
+		if fetchErr == nil {
+			return out, nil
+		}
+		if !errors.Is(fetchErr, errReleaseUnavailable) {
+			return "", fetchErr
+		}
 		gb, err := provision.GoBinary(ctx, r)
 		if err != nil {
-			return "", err
+			if errors.Is(fetchErr, errNoRelease) {
+				return "", err
+			}
+			return "", fmt.Errorf("%v; building scion instead needs a Go toolchain: %w", fetchErr, err)
 		}
 		// A pinned module's source never changes, so the last output is
 		// this build's when the stamp beside it says so (lever#187). Only

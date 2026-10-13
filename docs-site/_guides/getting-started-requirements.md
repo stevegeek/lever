@@ -23,9 +23,11 @@ command.
 | Network | Needed for the first boot (see [what the first boot downloads](#what-the-first-boot-downloads)) and for the agents' model calls | |
 
 The host keeps the jail VM's memory for as long as the VM runs, so leave the host itself 2-4 GB
-beside it. With a 2-core host, give lever a prebuilt scion binary (`scion.binary`): building scion
-from source takes about 4 CPU-minutes, so 2-3 minutes on 2 cores the first time and after every
-scion pin change.
+beside it. Building scion from source takes about 4 CPU-minutes, so 2-3 minutes on 2 cores the
+first time and after every scion pin change. A release build of lever downloads its release's
+prebuilt scion for the pin the examples use instead
+([prebuilt scion](/reference/config/#prebuilt-scion)). For another pin on a 2-core host, give lever
+a prebuilt scion binary (`scion.binary`).
 
 ## Where the memory goes
 
@@ -71,7 +73,8 @@ its start as it grows. An SSD is the single biggest help on an older machine.
 - **In the guest, with apt:** `podman`, `uidmap`, `passt`, `fuse-overlayfs`, `slirp4netns`,
   `dbus-user-session`, `iptables`, `curl` and `netcat-openbsd` when any is missing, and the
   guest release's HWE kernel (`linux-generic-hwe-26.04`) with `guest_kernel: hwe`.
-- **On the host:** the Go modules of the pinned scion (skipped with `scion.binary`); with
+- **On the host:** the Go modules of the pinned scion (skipped with `scion.binary`), or, for the
+  scion pin of a lever release, that release's prebuilt scion (about 40 MB); with
   `remote.enabled` and a `version:` or `source:` scion, the npm packages of scion's web UI.
 - **The agent image** is never pulled from inside the jail: `make lever-image` builds it on the host
   (that build downloads its base images and Claude Code), and `lever apply` copies it in. A host

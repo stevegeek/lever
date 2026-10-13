@@ -23,6 +23,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
@@ -483,7 +484,7 @@ func TestCheckMcpJsonInTreeNested(t *testing.T) {
 // PATH that isn't actually resolvable blows up as "exit status 126" deep
 // inside apply instead of an up-front, actionable diagnosis.
 func TestCheckGoToolchainBuildNotRequired(t *testing.T) {
-	r := checkGoToolchain(config.ScionConfig{}, doctorProbes{})
+	r := checkGoToolchain(config.ScionConfig{}, false, doctorProbes{})
 	if !r.ok {
 		t.Fatalf("no source and no version pinned => no build => pass; got %+v", r)
 	}
@@ -495,7 +496,7 @@ func TestCheckGoToolchainBuildNotRequired(t *testing.T) {
 func TestCheckGoToolchainProbeOK(t *testing.T) {
 	p := doctorProbes{goVersion: func() (string, error) { return "go version go1.26.4 darwin/arm64\n", nil }}
 
-	r := checkGoToolchain(config.ScionConfig{Version: "666333f9"}, p)
+	r := checkGoToolchain(config.ScionConfig{Version: "666333f9"}, false, p)
 	if !r.ok {
 		t.Fatalf("a working go on PATH must pass; got %+v", r)
 	}
@@ -504,10 +505,29 @@ func TestCheckGoToolchainProbeOK(t *testing.T) {
 	}
 }
 
+func TestCheckGoToolchainNotNeededForAPrebuiltScion(t *testing.T) {
+	p := doctorProbes{goVersion: func() (string, error) { return "", errors.New("executable file not found") }}
+	r := checkGoToolchain(config.ScionConfig{Version: scionbin.ReleasePin}, true, p)
+	if !r.ok || !strings.Contains(r.detail, "prebuilt") {
+		t.Fatalf("a downloaded scion needs no Go; got %+v", r)
+	}
+	ok := doctorProbes{goVersion: func() (string, error) { return "go version go1.26.4 linux/amd64\n", nil }}
+	if r := checkGoToolchain(config.ScionConfig{Version: scionbin.ReleasePin}, true, ok); !r.ok || !strings.Contains(r.detail, "go1.26.4") {
+		t.Fatalf("a working go is still reported; got %+v", r)
+	}
+}
+
+func TestScionPrebuiltFalseWithoutAMatchingRelease(t *testing.T) {
+	app := &config.App{Scion: config.ScionConfig{Version: "666333f9"}}
+	if scionPrebuilt(app) {
+		t.Fatal("a version this lever carries no release for is built")
+	}
+}
+
 func TestCheckGoToolchainProbeError(t *testing.T) {
 	p := doctorProbes{goVersion: func() (string, error) { return "", errors.New("exit status 126") }}
 
-	r := checkGoToolchain(config.ScionConfig{Source: "/home/devuser/scion"}, p)
+	r := checkGoToolchain(config.ScionConfig{Source: "/home/devuser/scion"}, false, p)
 	if r.ok {
 		t.Fatal("a broken go (e.g. a dead asdf shim) must fail the check")
 	}

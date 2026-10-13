@@ -23,11 +23,17 @@ version bump moves the block under the new version heading.
   running out of one makes a snapshot incomplete, recorded and shown, never absent, and a snapshot
   never shows what it did not see as deleted. Files the last complete snapshot held are looked up
   and read first, and each worker's directory has its own share of the budgets, so a flood of new
-  names cannot hide damage to existing files. Retention keeps the last 20, 7 daily and 8 weekly
-  snapshots, plus the newest complete, the newest taken with the VM off and pinned ones, and never
-  deletes history for space. A restore creates only links that cannot leave the restored tree and
-  renames git configuration, hooks, `commondir` and `.git` files. `lever doctor` has a *tree
-  backup* row.
+  names cannot hide damage to existing files. A snapshot holds about twice `limits.manifest`
+  (256 MiB) in memory; on a full disk its manifest is cut to the space lever reserved for it, so
+  it still commits. Retention keeps the last 20, 7 daily and 8 weekly snapshots, plus the newest
+  complete, the newest taken with the VM off and pinned ones. The store keeps runs of zeros as
+  holes, a snapshot adds at most `limits.new` (2 GiB) of new content once a complete one exists,
+  and `max_store` (32 GiB) caps the store: past it, GC deletes the oldest snapshots that are not
+  protected, and doctor warns. A restore creates only links that cannot leave the restored tree,
+  restores hard links as links, never applies group or other write, and renames the git,
+  Mercurial and Jujutsu files through which those tools would run a command. `lever tree diff`
+  prints rows of at most 80 columns, so agent text cannot pass for one of its headers.
+  `lever doctor` has a *tree backup* row.
 
 ### Security
 
@@ -38,9 +44,11 @@ version bump moves the block under the new version heading.
   did not exist yet could place a state directory in the tree while its path read as outside. It
   now also walks up from the state directory (or, before it exists, its deepest existing
   ancestor) and compares each directory's device and inode with the tree's, which needs only
-  search permission on the directories above it. When lever cannot complete that walk, the state
-  directory counts as inside, and doctor's rows name the error. The same check runs at config load
-  for `scion.binary`, `scion.source` and the boot files.
+  search permission on the directories above it. On Linux 5.8 and later each mount on the way is
+  looked up in `/proc/self/mountinfo`, so a directory of the tree bind-mounted outside it counts
+  as inside too. When lever cannot complete that walk, the state directory counts as inside, and
+  doctor's rows name the error. The same check runs at config load for `scion.binary`,
+  `scion.source` and the boot files.
 
 ## [0.38.0] - 2026-10-13
 

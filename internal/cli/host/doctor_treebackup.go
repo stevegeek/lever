@@ -62,7 +62,7 @@ func checkTreeBackup(app *config.App, st state.State, now time.Time) checkResult
 		if newest.Root.State == treebackup.StateUnreadable {
 			if tccSuspect(newest) {
 				return checkResult{name: treeBackupRow, detail: fmt.Sprintf("snapshot %s could not open the tree root although its mode allows it: macOS privacy controls (TCC) block lever", newest.ID),
-					fix: "grant Full Disk Access to the program that runs lever (the terminal, or launchd's job)"}
+					fix: "move the instance out of ~/Documents, ~/Desktop and iCloud Drive; granting Full Disk Access to the program that runs lever also works, but opens everything that program runs to all your files"}
 			}
 			warns = append(warns, "the tree root was made unreadable: the last snapshot holds nothing")
 		}

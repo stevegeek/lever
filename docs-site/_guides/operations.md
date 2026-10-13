@@ -1014,8 +1014,9 @@ lever tree snapshot -q; lever tree lock -- sh -c 'restic backup "$LEVER_TREE_BAC
   default 256 MiB, whatever the agents put in the tree. Lower `limits.manifest` on a small host.
 - **macOS privacy (TCC):** a tree under `~/Documents`, `~/Desktop` or iCloud Drive may be closed to
   the program that runs lever (a launchd job, for example). The snapshot then commits with the
-  tree root unreadable and doctor's *tree backup* row fails with the fix: grant Full Disk Access to
-  the program that runs lever. Files that iCloud has evicted (`dataless`) are recorded without
+  tree root unreadable and doctor's *tree backup* row fails. Move the instance out of those
+  folders. Granting Full Disk Access to the program that runs lever also works, but gives
+  everything run from that terminal or job access to all your files. Files that iCloud has evicted (`dataless`) are recorded without
   content rather than downloaded.
 - The stat cache trusts the change time the host kernel sets when the share applies a write. If an
   agent could forge it, a changed file would be missed until it is re-verified, within `reverify`.

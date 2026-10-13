@@ -59,6 +59,32 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
   && npm cache clean --force \
   && claude --version
 
+# tmux from trixie-backports (lever#201). scion runs the harness in a tmux
+# session, and the scion-claude base installs Debian trixie's tmux 3.5a
+# (3.5a-3), whose server segfaulted in a manager about 2.5 minutes in and took
+# the harness with it. The crash was a read past the end of a pane's grid in
+# grid_line_length, the function an upstream 3.5a crash report (tmux issue
+# 4556: copy mode after a size change) names. 3.6 and later carry fixes in
+# the reflow and copy-mode code around it; that they cover this crash is
+# likely, not proven (the operations guide, "tmux server crashes", keeps a
+# core of the next one). trixie-backports carries a newer tmux built
+# against trixie's own libraries, and apt checks it against the Debian archive
+# signatures the base already trusts. The version is pinned: a backports
+# update removes the old one from the archive, and the build then fails until
+# this ARG is bumped, rather than silently taking a new tmux. The backports
+# source is removed again, so instance Dockerfiles that extend this image get
+# trixie's apt sources unchanged.
+ARG TMUX_VERSION=3.6b-1~bpo13+1
+RUN . /etc/os-release \
+  && test "$VERSION_CODENAME" = trixie \
+  && echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/lever-trixie-backports.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends -t trixie-backports "tmux=${TMUX_VERSION}" \
+  && rm -f /etc/apt/sources.list.d/lever-trixie-backports.list \
+  && rm -rf /var/lib/apt/lists/* \
+  && test "$(tmux -V)" = "tmux ${TMUX_VERSION%%-*}"
+LABEL tmux_version="${TMUX_VERSION}"
+
 # Persist the baked version as an image label so `lever doctor` can report it
 # without running a container (build-arg → label; no runtime probe needed).
 LABEL claude_code_version="${CLAUDE_CODE_VERSION}"

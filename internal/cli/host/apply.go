@@ -462,9 +462,10 @@ func sameScopeSet(a, b []string) bool {
 // throwaway dev-auth window it mints the controller PAT the real hub is driven
 // with and, when remote access is on, the remote-access PAT; with remote
 // access on, every window also runs the remote web role and ceiling grant
-// (ensureRemoteWebRole), since role admin is hub-admin only. remote-role.json
-// alone opens a window when it does not cover every allowed user with the
-// current permissions and a ceiling. With no token missing and the grant
+// (ensureRemoteWebRole), since role admin is hub-admin only and a reset hub
+// database makes remote-role.json stale. That record alone opens a window
+// when it does not cover every allowed user with the current permissions and
+// a ceiling. With no token missing and the grant
 // complete, no window opens.
 //
 // The window never runs beside a running container: an agent reaches

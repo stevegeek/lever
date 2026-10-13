@@ -206,6 +206,8 @@ func requireLoopback(listenAddr string) error {
 	return nil
 }
 
+// newGatewayProxy passes headers through unscrubbed: it is the agent's own
+// proxy, and the broker gateway scrubs forwarding and X-Lever-* headers.
 func newGatewayProxy(brokerURL string, caPEM []byte, idDir string) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(brokerURL)
 	if err != nil {

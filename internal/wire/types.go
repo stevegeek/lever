@@ -247,7 +247,8 @@ type VerifiedMessage struct {
 	// recorded (dm:agent:<agent id>:user:<user id>). Information only.
 	Conversation string `json:"conversation,omitempty"`
 	// Repeat marks a message this agent already verified at FirstVerified,
-	// within the grace period. A repeat carries no text.
+	// within the grace period. A repeat carries no text and is not a second
+	// authority: act on it only if the message was not acted on yet.
 	Repeat        bool   `json:"repeat,omitempty"`
 	FirstVerified string `json:"first_verified,omitempty"`
 }

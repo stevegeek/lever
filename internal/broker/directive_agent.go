@@ -171,6 +171,8 @@ func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
 //     the consumed state, which a preview does not set.
 //   - The over-cap 429 is reachable only after the full gate, so it tells no
 //     other caller anything.
+//   - Every allowed, capped and refused preview is audited with the caller,
+//     in both the broker audit and the directive audit log.
 func (b *Broker) handleDirectivePreview(w http.ResponseWriter, r *http.Request) {
 	caller, ok := b.requireLiveAgent(w, r, "directive", "preview: ")
 	if !ok {

@@ -41,7 +41,9 @@ type Pusher struct {
 	// Deadline bounds one whole call, lock wait included (0 = none). Each
 	// git call also has Git.Timeout.
 	Deadline time.Duration
-	Limits   PackLimits
+	// Limits bound what the import inflates; scanBundle must run before any
+	// git command reads the bundle.
+	Limits PackLimits
 	// ImportBudget caps the bundle bytes one caller may import per hour,
 	// refused pushes included (0 = no cap).
 	ImportBudget int64

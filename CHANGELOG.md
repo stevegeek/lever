@@ -174,7 +174,7 @@ version bump moves the block under the new version heading.
   `/tmp/lever-claude-ready` in the container, naming the guest boot, the container's first process
   and claude's pane, so a file left by an earlier run never counts. A failed pre-start hook, a task
   past the tmux cap and a `--continue` with no conversation all end before claude starts a session.
-  lever polls for it inside the container (one guest call about every 4 s, a reading every 200 ms),
+  lever polls for it inside the container (one guest call about every 3 s, a reading every 200 ms),
   fails at once when the container stops, the pane dies or the hub record leaves running, and gives
   up after 2 min (`did not come up`: a claude waiting at a prompt, or hung). The file only claims
   that claude started, which a live pane already claims; lever compares it with what it reads

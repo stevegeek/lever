@@ -233,3 +233,22 @@ func TestAgentProbeAwaitClaudeReadyNoContainer(t *testing.T) {
 		t.Fatal("a flag-shaped ref must be refused before any call")
 	}
 }
+
+// Pane ids are split, never globbed: a "*" from tmux matches no file name.
+func TestReadyScriptDoesNotGlobPaneIDs(t *testing.T) {
+	f := newReadyFixture(t)
+	write(t, filepath.Join(f.dir, "x"), "", 0o644)
+	f.panes = "0 *"
+	if err := agent.WriteReadyMarker(f.marker, f.proc, "%0"); err != nil {
+		t.Fatal(err)
+	}
+	// The marker for pane "x" (a glob result in the cwd) must not match.
+	write(t, f.marker, wire.ReadyMarker("3f1e2d3c-aaaa-bbbb-cccc-0123456789ab", "4242", "x")+"\n", 0o600)
+	cmd := exec.Command("sh", "-c", readyScript, "sh", f.marker, "1", wire.ReadyHookCommand, f.settings, f.proc)
+	cmd.Dir = f.dir
+	cmd.Env = append(os.Environ(), "PATH="+f.bin+":"+os.Getenv("PATH"), "FAKE_PANES="+f.panes)
+	out, err := cmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "pending" {
+		t.Fatalf("got %q, %v; want pending", out, err)
+	}
+}

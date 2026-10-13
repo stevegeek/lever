@@ -512,10 +512,12 @@ const defaultReadyWait = 2 * time.Minute
 
 // readyPollWindow is how long one in-container wait for the marker polls
 // (jail.AgentProbe.AwaitClaudeReady, a reading every 200 ms): one guest call
-// per window instead of one per reading (cf. lever#190). It stays well under
-// the probe exec's 10 s deadline, with room for podman exec's own start. A
+// per window instead of one per reading (cf. lever#190). The script counts
+// polls, not time, and each poll forks a few programs, so the window stays
+// well under the guest's 8 s deadline for the exec (10 s less its margin),
+// with room for podman exec's own start on a busy VM. A
 // variable so tests can shorten it.
-var readyPollWindow = 4 * time.Second
+var readyPollWindow = 3 * time.Second
 
 // claudeReadyProbe is the optional half of AgentSessionProbe that waits for
 // claude's own report that its session started (jail.AgentProbe in
@@ -599,6 +601,9 @@ func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, l
 			case harnessAlive:
 				// The two readings disagree: neither is evidence.
 				unknownRun++
+				if lastErr == nil {
+					lastErr = errReadingsDisagree
+				}
 			default:
 				unknownRun++
 				if lastErr == nil {
@@ -608,7 +613,7 @@ func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, l
 		}
 		if unknownRun >= unknownHandover {
 			if log != nil {
-				log("lever: warning: could not wait for the manager's claude to report its session start (%s); the %s settle window decides", jail.ProbeErrorClass(lastErr), settle)
+				log("lever: warning: could not wait for the manager's claude to report its session start (%s); the %s settle window decides", readyErrClass(lastErr), settle)
 			}
 			return false, nil
 		}
@@ -632,6 +637,17 @@ func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, l
 		case <-time.After(interval):
 		}
 	}
+}
+
+// errReadingsDisagree names, in waitClaudeReady's handover warning, an
+// in-container wait that saw no live pane while the pane probe saw one.
+var errReadingsDisagree = errors.New("the pane readings disagree")
+
+func readyErrClass(err error) string {
+	if errors.Is(err, errReadingsDisagree) {
+		return err.Error()
+	}
+	return jail.ProbeErrorClass(err)
 }
 
 // recordLeftRunning re-reads the hub record and reports, with the reading,

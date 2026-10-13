@@ -223,3 +223,50 @@ func TestPostLiveProbesRunDuringTheReadyWait(t *testing.T) {
 		t.Fatalf("the probe's warning was not logged: %q", sink.lines)
 	}
 }
+
+// An in-container wait that sees no pane while the pane probe sees one is
+// no evidence either way: after unknownHandover rounds the window decides,
+// and the warning names the disagreement.
+func TestReadyMarkerDisagreeingReadingsHandOver(t *testing.T) {
+	shortHarnessSettle(t, time.Millisecond)
+	sink := &logSink{}
+	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{paneGone}}
+	if err := WaitManagerLive(context.Background(), readyDeps(p, sink), "hello", "/lever", nil); err != nil {
+		t.Fatalf("gate: %v", err)
+	}
+	if !strings.Contains(strings.Join(sink.lines, "\n"), "(the pane readings disagree)") {
+		t.Fatalf("warning does not name the disagreement: %q", sink.lines)
+	}
+}
+
+// onHarness runs exactly once on every path past the pane.
+func TestReadyGateRunsOnHarnessOnce(t *testing.T) {
+	shortHarnessSettle(t, time.Millisecond)
+	for name, answers := range map[string][]readyAnswer{
+		"ready":    {ready},
+		"no hook":  {noHook},
+		"handover": {{err: jail.ErrProbeTimedOut}},
+	} {
+		p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: answers}
+		d := readyDeps(p, nil)
+		n := 0
+		err := gateManagerLive(context.Background(), d, d.ManagerLiveRetry, "hello", "/lever", "up", nil, gateOpts{onHarness: func() { n++ }})
+		if err != nil || n != 1 {
+			t.Fatalf("%s: err %v, onHarness ran %d times, want once", name, err, n)
+		}
+	}
+}
+
+// A cancelled context ends the wait with the context's error.
+func TestReadyMarkerWaitEndsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{pending}}
+	p.onReady = func(call int) {
+		if call == 3 {
+			cancel()
+		}
+	}
+	if err := WaitManagerLive(ctx, readyDeps(p, nil), "hello", "/lever", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}

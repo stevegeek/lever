@@ -47,6 +47,9 @@ const readyStep = 200 * time.Millisecond
 // agent.RunIdentity does: the first line of the boot id, and field 22 of
 // PID 1's stat, counted after the last ')'.
 //
+// Globbing stays off (set -f) to the end: the pane ids tmux prints are
+// split, never expanded.
+//
 // Everything it reads is the agent's: the marker is compared for equality,
 // never parsed; a symbolic link at the marker counts as no marker (a link
 // swapped in between the test and the read is the agent racing itself);
@@ -58,7 +61,6 @@ st=$(head -c 1024 "$proc/1/stat") || exit 4
 st=${st##*)}
 set -f
 set -- $st
-set +f
 [ $# -ge 20 ] || exit 4
 eval "st=\${20}"
 hooked= i=0

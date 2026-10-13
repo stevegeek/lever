@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-13
+
 ### Added
 
 - **A small-machine profile: guest trimming, zram swap, per-agent limits and a worker cap

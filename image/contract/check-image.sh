@@ -68,7 +68,9 @@ fi
 user="$(inspect '{{.Config.User}}')"
 if [ "$user" = scion ]; then ok "user scion"; else fail "image user is '${user}', want scion"; fi
 
-label() { inspect "{{index .Config.Labels \"$1\"}}" 2>/dev/null | sed 's/^<no value>$//'; }
+# An image with no labels at all makes docker's index fail; that reads as a
+# missing label, which the checks below report.
+label() { { inspect "{{index .Config.Labels \"$1\"}}" 2>/dev/null || true; } | sed 's/^<no value>$//'; }
 claude_label="$(label claude_code_version)"
 tmux_label="$(label tmux_version)"
 abi_label="$(label lever_jail_abi)"

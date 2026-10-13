@@ -27,9 +27,13 @@
 #  - procps: sciontool doctor and the agent use pgrep and ps.
 #
 # Left out on purpose: sudo (the agent gets no root in its container), gh
-# (lever's agents reach GitHub through the broker's github tool), chromium, gcloud, gcsfuse, Go, kubectl, golangci-lint, bun, oh-my-zsh, delta
-# and scion's init-firewall (lever enforces egress in the jail, not in the
-# container). An instance that needs a toolchain adds it in its own
+# (lever's agents reach GitHub through the broker's github tool), chromium,
+# Playwright and Chrome DevTools MCP, gcloud, gcsfuse, Go, kubectl,
+# golangci-lint, bun, oh-my-zsh, delta and scion's init-firewall (lever
+# enforces egress in the jail, not in the container); and the convenience
+# tools scion's base adds (curl, wget, jq, ripgrep, less, make, g++, vim,
+# rsync, unzip, openssh-client and the like), which neither scion's runtime
+# nor lever uses. An instance that needs any of them adds it in its own
 # Dockerfile FROM the finished image.
 ARG NODE_IMAGE=node:24-trixie-slim
 FROM ${NODE_IMAGE}
@@ -42,9 +46,9 @@ RUN set -eu; \
   . /etc/os-release; \
   test "$VERSION_CODENAME" = trixie; \
   u="$(getent passwd 1000 | cut -d: -f1)"; \
-  if [ -n "$u" ]; then userdel -r "$u" 2>/dev/null || userdel "$u"; fi; \
+  if [ -n "$u" ]; then userdel -r "$u" 2>/dev/null || userdel "$u" 2>/dev/null || true; fi; \
   g="$(getent group 1000 | cut -d: -f1)"; \
-  if [ -n "$g" ]; then groupdel "$g"; fi; \
+  if [ -n "$g" ]; then groupdel "$g" 2>/dev/null || true; fi; \
   if getent passwd 1000 || getent group 1000; then exit 1; fi
 
 RUN apt-get update \
@@ -53,9 +57,10 @@ RUN apt-get update \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
-COPY bin/sciontool /usr/local/bin/sciontool
-COPY bin/scion     /usr/local/bin/scion
-RUN chmod 0755 /usr/local/bin/sciontool /usr/local/bin/scion
+# --chmod rather than a later RUN chmod, which would store both binaries
+# (about 160 MB) a second time in its own layer.
+COPY --chmod=0755 bin/sciontool /usr/local/bin/sciontool
+COPY --chmod=0755 bin/scion     /usr/local/bin/scion
 
 # scion's base resolves whoami to the agent's scion identity inside an agent.
 RUN printf '#!/bin/sh\nif [ -n "${SCION_AGENT_SLUG:-}" ] || [ -n "${SCION_AGENT_NAME:-}" ]; then\n    exec scion whoami "$@"\nfi\nexec /usr/bin/whoami "$@"\n' > /usr/local/bin/whoami \

@@ -21,7 +21,6 @@ fail() {
 }
 note() { printf 'note  %s\n' "$*"; }
 
-# ver_ge A B: version A >= version B.
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]; }
 
 elf_arch() {
@@ -174,12 +173,22 @@ if tmux -L "$sock" -f /dev/null new-session -d -s scion -n agent 'lever-agent cl
     sleep 0.1
     i=$((i + 1))
   done
+  # The run identity exactly as lever's manager gate computes it in the
+  # container (readyScript, internal/jail/claudeready.go), so the marker
+  # lever-agent wrote must equal it byte for byte.
   read -r boot </proc/sys/kernel/random/boot_id
+  st=$(head -c 1024 /proc/1/stat)
+  st=${st##*)}
+  set -f
+  set -- $st
+  eval "st=\${20}"
+  set +f
   got=$(head -c 256 "$marker" 2>/dev/null)
-  case "$got" in
-    "v1 $boot "*" $pane") ok "lever-agent claude-ready wrote the marker for pane $pane" ;;
-    *) fail "the claude-ready marker is '$got', want 'v1 $boot <start> $pane'" ;;
-  esac
+  if [ -n "$pane" ] && [ "$got" = "v1 $boot $st $pane" ]; then
+    ok "lever-agent claude-ready wrote the marker lever's gate expects for pane $pane"
+  else
+    fail "the claude-ready marker is '$got', lever's gate expects 'v1 $boot $st $pane'"
+  fi
   tmux -L "$sock" kill-server 2>/dev/null
 else
   fail "tmux cannot start a detached session as scion"

@@ -106,8 +106,8 @@ golangci-lint and bun, and a lever image built on it is about 5 GB. `make lever-
 base (`node:24-trixie-slim`) with only what scion and lever need in an agent container (sciontool
 and scion, the `scion` user, python3 for scion's Claude provisioner, git, zsh, tzdata, procps and
 nano), then the same lever layer as the full image (Claude Code at its pin, installed once, the
-pinned tmux, lever's binaries, the boot hook and `/etc/claude-code`). It should come to about 1 GB; `make
-image-contract` prints the built size.
+pinned tmux, lever's binaries, the boot hook and `/etc/claude-code`). It should come to about 1 GB;
+`make image-contract` prints the built size.
 
 ```sh
 make lever-image-slim SCION_VERSION=e0f61f2d   # your lever.yaml's scion.version
@@ -125,7 +125,9 @@ What the slim image leaves out, on purpose: `sudo` (the agent has no root in its
 cannot `apt-get install` at run time), `gh` (lever's agents reach GitHub through the
 [github tool](/github-tool/)), chromium and the Playwright and Chrome DevTools tools, gcloud, gcsfuse, Go, kubectl,
 golangci-lint, bun, oh-my-zsh and scion's in-container firewall script (lever enforces egress in
-the jail). An agent that needs a toolchain gets it from an instance Dockerfile `FROM
+the jail). It also lacks the everyday tools scion's base adds, which neither scion's runtime nor
+lever uses but agents often do: curl, wget, jq, ripgrep, less, make, g++, vim, rsync, unzip,
+openssh-client and the network utilities. An agent that needs a toolchain gets it from an instance Dockerfile `FROM
 scionlocal/lever-claude-slim:<arch>`, as below.
 
 **Checking an image: `make image-contract`.** `image/contract/check-image.sh` checks a built image

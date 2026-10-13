@@ -92,6 +92,18 @@ if [ "${FLAVOR}" = slim ]; then
       echo "${SLIM_CTX}/bin/${b} is missing — run \`make lever-image-slim\` (it stages sciontool and scion)." >&2
       exit 1
     }
+    # The base's arch comes from --platform, so the arch guard below cannot
+    # catch binaries staged by an earlier build for the other arch. Byte 18 of
+    # an ELF header is e_machine: 62 x86-64, 183 aarch64.
+    case "$(od -An -tu1 -j18 -N1 "${SLIM_CTX}/bin/${b}" | tr -d ' ')" in
+      62) bin_arch=amd64 ;;
+      183) bin_arch=arm64 ;;
+      *) bin_arch=unknown ;;
+    esac
+    [ "${bin_arch}" = "${ARCH}" ] || {
+      echo "${SLIM_CTX}/bin/${b} is ${bin_arch}, not ${ARCH} — re-run \`make lever-image-slim LEVER_IMAGE_ARCH=${ARCH}\`." >&2
+      exit 1
+    }
   done
   # --platform: the slim base starts from a multi-arch node image, so the
   # arch is chosen here rather than by an arch-tagged local base.
@@ -127,6 +139,8 @@ EOF
   exit 1
 fi
 
-docker build --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" --build-arg "LEVER_JAIL_ABI=${LEVER_JAIL_ABI:-}" -t "${NAME}:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
+PLATFORM_ARGS=()
+[ "${FLAVOR}" = slim ] && PLATFORM_ARGS=(--platform "linux/${ARCH}")
+docker build ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" --build-arg "LEVER_JAIL_ABI=${LEVER_JAIL_ABI:-}" -t "${NAME}:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
 
 echo "Built ${NAME}:${ARCH} (+ ${TARGET})."

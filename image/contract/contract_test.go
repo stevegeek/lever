@@ -28,7 +28,13 @@ func read(t *testing.T, p string) string {
 }
 
 func TestScriptsParse(t *testing.T) {
-	for _, c := range []struct{ shell, file string }{{"sh", "in-image.sh"}, {"bash", "check-image.sh"}} {
+	// The image's /bin/sh is dash; prefer it where present, since a bash
+	// posing as sh accepts bashisms.
+	posix := "sh"
+	if _, err := exec.LookPath("dash"); err == nil {
+		posix = "dash"
+	}
+	for _, c := range []struct{ shell, file string }{{posix, "in-image.sh"}, {"bash", "check-image.sh"}} {
 		if _, err := exec.LookPath(c.shell); err != nil {
 			t.Skipf("%s not found", c.shell)
 		}
@@ -43,14 +49,15 @@ func TestScriptsParse(t *testing.T) {
 func TestInImageCoversLever(t *testing.T) {
 	script := read(t, "in-image.sh")
 	want := []string{
-		path.Dir(wire.ManagedSettingsPath),
-		wire.ReadyMarkerPath,
-		wire.ReadyHookCommand,
-		jail.AgentUser,
-		path.Dir(jail.AgentTokenPath),
-		path.Dir(path.Dir(jail.AgentSessionsDir)),
-		"tmux",
-		"sciontool",
+		"[ -d " + path.Dir(wire.ManagedSettingsPath) + " ]",
+		"marker=" + wire.ReadyMarkerPath + "\n",
+		"'" + wire.ReadyHookCommand + ";",
+		`[ "$(id -un)" = ` + jail.AgentUser + " ]",
+		"[ -d " + path.Dir(jail.AgentTokenPath) + " ]",
+		`[ "$pw_home" = ` + path.Dir(path.Dir(jail.AgentSessionsDir)) + " ]",
+		"list-panes -t scion:agent",
+		"sciontool version",
+		"tmux -V",
 	}
 	for _, w := range want {
 		if !strings.Contains(script, w) {
@@ -160,7 +167,7 @@ func TestCheckImageWithFakeCLI(t *testing.T) {
 	run := func(t *testing.T, img string, over map[string]string) (string, int) {
 		t.Helper()
 		cmd := exec.Command("bash", "check-image.sh", img)
-		env := append(os.Environ(), "CONTAINER_CLI="+cli, "FAKE_DIR="+dir, "LEVER_IMAGE_ARCH=", "LEVER_JAIL_ABI=", "LEVER_IMAGE_MAX_MB=")
+		env := append(os.Environ(), "CONTAINER_CLI="+cli, "FAKE_DIR="+dir, "LEVER_IMAGE_ARCH=", "LEVER_JAIL_ABI=", "LEVER_IMAGE_MAX_MB=", "GIT_MIN_VERSION=")
 		for k, v := range good {
 			env = append(env, k+"="+v)
 		}
@@ -254,7 +261,7 @@ func TestBuildScriptFlavors(t *testing.T) {
 		code   int
 		builds []string
 	}
-	run := func(t *testing.T, flavor string, existing string, stageSlim bool) result {
+	run := func(t *testing.T, flavor string, existing string, stageSlim bool, slimMachine byte) result {
 		t.Helper()
 		dir := t.TempDir()
 		tree := filepath.Join(dir, "image")
@@ -273,8 +280,12 @@ func TestBuildScriptFlavors(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(slim, "bin"), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			// An ELF header far enough to name its machine (byte 18).
+			hdr := make([]byte, 20)
+			copy(hdr, "\x7fELF")
+			hdr[18] = slimMachine
 			for _, b := range []string{"sciontool", "scion"} {
-				if err := os.WriteFile(filepath.Join(slim, "bin", b), nil, 0o755); err != nil {
+				if err := os.WriteFile(filepath.Join(slim, "bin", b), hdr, 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -302,7 +313,7 @@ func TestBuildScriptFlavors(t *testing.T) {
 	}
 
 	t.Run("slim builds its base, then the lever layer from it", func(t *testing.T) {
-		r := run(t, "slim", "", true)
+		r := run(t, "slim", "", true, 183)
 		if r.code != 0 || len(r.builds) != 2 {
 			t.Fatalf("exit %d, %d builds:\n%s\n%s", r.code, len(r.builds), r.out, strings.Join(r.builds, "\n"))
 		}
@@ -312,14 +323,14 @@ func TestBuildScriptFlavors(t *testing.T) {
 				t.Errorf("base build lacks %q: %s", w, base)
 			}
 		}
-		for _, w := range []string{"SCION_BASE=lever-scion-slim:arm64", "LEVER_JAIL_ABI=3", "-t lever-claude-slim:arm64", "-t scionlocal/lever-claude-slim:arm64", "lever-claude/Dockerfile"} {
+		for _, w := range []string{"--platform linux/arm64", "SCION_BASE=lever-scion-slim:arm64", "LEVER_JAIL_ABI=3", "-t lever-claude-slim:arm64", "-t scionlocal/lever-claude-slim:arm64", "lever-claude/Dockerfile"} {
 			if !strings.Contains(layer, w) {
 				t.Errorf("lever layer build lacks %q: %s", w, layer)
 			}
 		}
 	})
 	t.Run("full is unchanged", func(t *testing.T) {
-		r := run(t, "", "scion-claude:arm64", false)
+		r := run(t, "", "scion-claude:arm64", false, 0)
 		if r.code != 0 || len(r.builds) != 1 {
 			t.Fatalf("exit %d, %d builds:\n%s", r.code, len(r.builds), r.out)
 		}
@@ -328,21 +339,30 @@ func TestBuildScriptFlavors(t *testing.T) {
 				t.Errorf("build lacks %q: %s", w, r.builds[0])
 			}
 		}
+		if strings.Contains(r.builds[0], "--platform") {
+			t.Errorf("the full flavor's build gained --platform: %s", r.builds[0])
+		}
 	})
 	t.Run("slim without staged scion binaries", func(t *testing.T) {
-		r := run(t, "slim", "", false)
+		r := run(t, "slim", "", false, 0)
 		if r.code == 0 || len(r.builds) != 0 || !strings.Contains(r.out, "make lever-image-slim") {
 			t.Fatalf("exit %d, %d builds:\n%s", r.code, len(r.builds), r.out)
 		}
 	})
 	t.Run("slim refuses to overwrite before building anything", func(t *testing.T) {
-		r := run(t, "slim", "scionlocal/lever-claude-slim:arm64", true)
+		r := run(t, "slim", "scionlocal/lever-claude-slim:arm64", true, 183)
 		if r.code == 0 || len(r.builds) != 0 || !strings.Contains(r.out, "already exists") {
 			t.Fatalf("exit %d, %d builds:\n%s", r.code, len(r.builds), r.out)
 		}
 	})
+	t.Run("slim with binaries staged for the other arch", func(t *testing.T) {
+		r := run(t, "slim", "", true, 62)
+		if r.code == 0 || len(r.builds) != 0 || !strings.Contains(r.out, "is amd64, not arm64") {
+			t.Fatalf("exit %d, %d builds:\n%s", r.code, len(r.builds), r.out)
+		}
+	})
 	t.Run("unknown flavor", func(t *testing.T) {
-		r := run(t, "tiny", "", true)
+		r := run(t, "tiny", "", true, 183)
 		if r.code == 0 || len(r.builds) != 0 {
 			t.Fatalf("exit %d, %d builds:\n%s", r.code, len(r.builds), r.out)
 		}

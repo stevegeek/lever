@@ -126,8 +126,9 @@ framework-image-stage:
 SCION_VERSION ?= e0f61f2d
 SCION_SRC ?=
 # What the slim base records as its scion version: the pin, or the commit of
-# the SCION_SRC checkout (never its path, which is the host's).
-SCION_IMAGE_VERSION = $(if $(SCION_SRC),$(shell git -C "$(SCION_SRC)" rev-parse --short=12 HEAD 2>/dev/null),$(SCION_VERSION))
+# the SCION_SRC checkout with -dirty for uncommitted changes (never its path,
+# which is the host's).
+SCION_IMAGE_VERSION = $(if $(SCION_SRC),$(or $(shell git -C "$(SCION_SRC)" describe --always --dirty --abbrev=12 2>/dev/null),unknown),$(SCION_VERSION))
 SLIM_BASE_CTX := image/scion-slim
 SCION_MODULE := github.com/GoogleCloudPlatform/scion
 .PHONY: lever-image-slim
@@ -143,27 +144,31 @@ slim-base-bins:
 	@mkdir -p $(SLIM_BASE_CTX)/bin
 	@set -e; out="$(abspath $(SLIM_BASE_CTX))/bin"; src="$(SCION_SRC)"; \
 	if [ -z "$$src" ]; then \
-		src=$$(cd / && go mod download -json $(SCION_MODULE)@$(SCION_VERSION) | sed -n 's/.*"Dir": "\(.*\)".*/\1/p'); \
+		dl=$$(cd / && go mod download -json $(SCION_MODULE)@$(SCION_VERSION) 2>&1) || true; \
+		src=$$(printf '%s\n' "$$dl" | sed -n 's/.*"Dir": "\(.*\)".*/\1/p'); \
+		[ -n "$$src" ] || printf '%s\n' "$$dl" | sed -n 's/.*"Error": "\(.*\)".*/go mod download: \1/p' >&2; \
 	fi; \
 	[ -n "$$src" ] && [ -f "$$src/go.mod" ] || { echo "no scion source for $(SCION_MODULE)@$(SCION_VERSION) (set SCION_VERSION or SCION_SRC)" >&2; exit 1; }; \
 	echo "building sciontool and scion from $$src"; \
 	cd "$$src" && \
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 go build -trimpath -tags no_embed_web \
-		-ldflags "-s -w -X $(SCION_MODULE)/cmd/sciontool/commands.Version=$(SCION_IMAGE_VERSION)" \
+		-ldflags "-s -w -X $(SCION_MODULE)/cmd/sciontool/commands.Version=$(SCION_IMAGE_VERSION) -X $(SCION_MODULE)/cmd/sciontool/commands.Commit=$(SCION_IMAGE_VERSION)" \
 		-o "$$out/sciontool" ./cmd/sciontool && \
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 go build -trimpath -tags no_embed_web \
-		-ldflags "-s -w -X $(SCION_MODULE)/pkg/version.Version=$(SCION_IMAGE_VERSION)" \
+		-ldflags "-s -w -X $(SCION_MODULE)/pkg/version.Version=$(SCION_IMAGE_VERSION) -X $(SCION_MODULE)/pkg/version.Commit=$(SCION_IMAGE_VERSION)" \
 		-o "$$out/scion" ./cmd/scion
 	@file $(SLIM_BASE_CTX)/bin/sciontool $(SLIM_BASE_CTX)/bin/scion
 
 # Check a built agent image against what lever and scion need in it
 # (image/contract). IMAGE defaults to the slim image for LEVER_IMAGE_ARCH;
 # LEVER_IMAGE_MAX_MB fails an image above that size. Needs docker (or
-# CONTAINER_CLI=podman); runs the image with no network.
+# CONTAINER_CLI=podman); runs the image with no network. The expected arch is
+# the image tag's unless LEVER_IMAGE_ARCH is given on the command line or in
+# the environment (the host default would wrongly fail a cross-arch image).
 IMAGE ?= scionlocal/lever-claude-slim:$(LEVER_IMAGE_ARCH)
 .PHONY: image-contract
 image-contract:
-	LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) bash image/contract/check-image.sh "$(IMAGE)"
+	LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" LEVER_IMAGE_ARCH=$(if $(filter command line environment,$(origin LEVER_IMAGE_ARCH)),$(LEVER_IMAGE_ARCH)) bash image/contract/check-image.sh "$(IMAGE)"
 
 # Print the lever_version label value for this source, for an instance image
 # build that stages the binaries itself (`make lever-image-bins`) and so sets

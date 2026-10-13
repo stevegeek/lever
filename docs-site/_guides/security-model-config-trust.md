@@ -171,8 +171,10 @@ downloads that release's prebuilt scion instead of building it
 module-proxy source of the pin and embeds the sha256 and size of each asset in the `lever` binary.
 lever installs a download only when it matches those embedded digests. It never reads a digest
 from the server, so a substituted asset, a compromised CDN or a hostile redirect cannot change
-what runs in the jail. The trust root is the `lever` release binary itself, the same as for every
-other part of lever.
+what runs in the jail. They can still deny the download: a download that cannot happen falls back
+to the source build (checksum-verified as above), and one with other bytes stops the apply. The
+trust root is the `lever` release binary itself and the release build that produced it, the same
+as for every other part of lever.
 
 **Execution plumbing:** argv-clean, no shell injection in the hot paths; the `bash -c` scripts in
 internal/backend/guest (scion install, scion settings write, web-assets staging) single-quote every

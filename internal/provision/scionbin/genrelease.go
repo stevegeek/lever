@@ -30,7 +30,7 @@ type GenerateOptions struct {
 }
 
 // GenerateRelease builds scion at opts.Pin for every ReleaseArches entry,
-// with the same recipe Resolve uses, writes the compressed binaries into
+// with Resolve's build flags plus CGO_ENABLED=0, writes the compressed binaries into
 // AssetDir and the manifest pinning their digests into ManifestDir. The
 // release build runs it before building lever, so the lever it ships embeds
 // the digests of the assets it ships beside.
@@ -68,6 +68,17 @@ func GenerateRelease(ctx context.Context, r proc.Runner, opts GenerateOptions) e
 	}
 	if err := os.MkdirAll(opts.AssetDir, 0o755); err != nil {
 		return err
+	}
+	// The release uploads every asset in the directory, so one left from
+	// another pin or run must not stay beside the new ones.
+	stale, err := filepath.Glob(filepath.Join(opts.AssetDir, "scion_*_linux_*.gz"))
+	if err != nil {
+		return err
+	}
+	for _, f := range stale {
+		if err := os.Remove(f); err != nil {
+			return err
+		}
 	}
 	stage, err := os.MkdirTemp("", "lever-scion-release-")
 	if err != nil {

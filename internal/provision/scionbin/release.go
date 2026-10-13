@@ -85,7 +85,7 @@ type Asset struct {
 const maxReleaseBytes = 1 << 30
 
 var (
-	releaseVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?$`)
+	releaseVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
 	assetNameRe      = regexp.MustCompile(`^scion_[0-9A-Za-z.-]+_linux_(amd64|arm64)\.gz$`)
 	sha256Re         = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	hexRe            = regexp.MustCompile(`^[0-9a-f]+$`)
@@ -146,6 +146,9 @@ func releaseFrom(fsys fs.FS) (*Release, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&r); err != nil {
 		return nil, fmt.Errorf("embedded scion release manifest: %w", err)
+	}
+	if dec.More() {
+		return nil, errors.New("embedded scion release manifest: data after the manifest")
 	}
 	if err := r.validate(); err != nil {
 		return nil, fmt.Errorf("embedded scion release manifest: %w", err)
@@ -263,8 +266,11 @@ func resolveRelease(ctx context.Context, version, goarch, out string) error {
 	if err != nil && ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if errors.Is(err, errReleaseUnavailable) {
-		progress.From(ctx).Note("prebuilt scion not downloaded, built from source")
+	switch {
+	case errors.Is(err, errReleaseUnavailable):
+		progress.From(ctx).Note("prebuilt scion not downloaded; using a source build")
+	case errors.Is(err, ErrReleaseTampered):
+		return fmt.Errorf("%w (set %s=off to build scion from source instead)", err, DownloadEnv)
 	}
 	return err
 }
@@ -348,6 +354,9 @@ func download(ctx context.Context, s releaseSite, rel *Release, a Asset, w io.Wr
 	if err != nil {
 		return fmt.Errorf("scion download: %w", err)
 	}
+	// The asset is a .gz file, not a gzip transfer: identity keeps the
+	// transport from decoding it before the digest check.
+	req.Header.Set("Accept-Encoding", "identity")
 	// A refused redirect is unavailable too, not tampering: the bytes are
 	// pinned, so a host lever does not know yet costs a source build, not a
 	// stopped apply.
@@ -364,9 +373,18 @@ func download(ctx context.Context, s releaseSite, rel *Release, a Asset, w io.Wr
 	}
 	h := sha256.New()
 	body := progressReader{r: resp.Body, onRead: func() { stall.Reset(stallTimeout) }}
-	n, err := io.Copy(io.MultiWriter(w, h), io.LimitReader(body, a.Size+1))
+	fw := &fileWriter{w: w}
+	n, err := io.Copy(io.MultiWriter(fw, h), io.LimitReader(body, a.Size+1))
+	if fw.err != nil {
+		return fmt.Errorf("scion download: write: %w", fw.err)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: GET %s: %v", errReleaseUnavailable, u, err)
+	}
+	// A body that ends early is a broken transfer, like one that errors;
+	// only more bytes than pinned, or other bytes, are tampering.
+	if n < a.Size {
+		return fmt.Errorf("%w: GET %s: %d of %d bytes", errReleaseUnavailable, u, n, a.Size)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); n != a.Size || got != a.SHA256 {
 		return fmt.Errorf("%w: %s is %d bytes with sha256 %s, pinned %d bytes with sha256 %s",
@@ -391,6 +409,21 @@ func (p progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// fileWriter keeps a local write error (a full disk) apart from the
+// network's and the archive's, which decide between fallback and refusal.
+type fileWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (f *fileWriter) Write(b []byte) (int, error) {
+	n, err := f.w.Write(b)
+	if err != nil && f.err == nil {
+		f.err = err
+	}
+	return n, err
+}
+
 // unpack decompresses a verified asset into w and checks the binary against
 // its pinned size and sha256.
 func unpack(r io.Reader, w io.Writer, a Asset) error {
@@ -399,7 +432,11 @@ func unpack(r io.Reader, w io.Writer, a Asset) error {
 		return fmt.Errorf("%w: %s: %v", ErrReleaseTampered, a.Name, err)
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(w, h), io.LimitReader(zr, a.BinarySize+1))
+	fw := &fileWriter{w: w}
+	n, err := io.Copy(io.MultiWriter(fw, h), io.LimitReader(zr, a.BinarySize+1))
+	if fw.err != nil {
+		return fmt.Errorf("scion download: write: %w", fw.err)
+	}
 	if err != nil {
 		return fmt.Errorf("%w: %s: %v", ErrReleaseTampered, a.Name, err)
 	}

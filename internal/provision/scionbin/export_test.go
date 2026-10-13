@@ -53,3 +53,6 @@ func SetStallTimeoutForTest(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { stallTimeout = old })
 	stallTimeout = d
 }
+
+// EmbeddedRelease is the manifest go:embed carried into this test binary.
+func EmbeddedRelease() (*Release, error) { return embeddedRelease() }

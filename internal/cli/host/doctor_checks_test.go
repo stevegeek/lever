@@ -517,7 +517,7 @@ func TestCheckGoToolchainNotNeededForAPrebuiltScion(t *testing.T) {
 	}
 }
 
-func TestScionPrebuiltNeedsNoWebUIBuild(t *testing.T) {
+func TestScionPrebuiltFalseWithoutAMatchingRelease(t *testing.T) {
 	app := &config.App{Scion: config.ScionConfig{Version: "666333f9"}}
 	if scionPrebuilt(app) {
 		t.Fatal("a version this lever carries no release for is built")

@@ -1,6 +1,9 @@
 package scionbin_test
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,9 +22,9 @@ func TestReleaseManifestEmbedded(t *testing.T) {
 	if want == "" {
 		t.Skip("LEVER_REQUIRE_SCION_RELEASE not set (only the release build requires the manifest)")
 	}
-	rel, err := scionbin.LoadRelease(".")
+	rel, err := scionbin.EmbeddedRelease()
 	if err != nil || rel == nil {
-		t.Fatalf("no valid release manifest under %s: %v", scionbin.ReleaseDir, err)
+		t.Fatalf("no valid release manifest embedded from %s: %v", scionbin.ReleaseDir, err)
 	}
 	if rel.LeverVersion != want || rel.ScionVersion != scionbin.ReleasePin {
 		t.Fatalf("manifest is for lever %s, scion %s; want lever %s, scion %s",
@@ -40,6 +43,19 @@ func TestReleaseManifestEmbedded(t *testing.T) {
 		if int64(len(gz)) != a.Size || sum(gz) != a.SHA256 {
 			t.Fatalf("asset %s does not match the manifest", a.Name)
 		}
+		zr, err := gzip.NewReader(bytes.NewReader(gz))
+		if err != nil {
+			t.Fatalf("asset %s: %v", a.Name, err)
+		}
+		bin, err := io.ReadAll(zr)
+		if err != nil || int64(len(bin)) != a.BinarySize || sum(bin) != a.BinarySHA256 {
+			t.Fatalf("asset %s does not unpack to the manifest's binary (err %v)", a.Name, err)
+		}
+	}
+	// The release uploads every asset in the directory: exactly these.
+	all, err := filepath.Glob(filepath.Join(assets, "scion_*_linux_*.gz"))
+	if err != nil || len(all) != len(rel.Assets) {
+		t.Fatalf("asset directory holds %v, want only the manifest's %d assets", all, len(rel.Assets))
 	}
 }
 

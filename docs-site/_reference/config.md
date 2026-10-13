@@ -210,12 +210,14 @@ building it. The host then needs no Go toolchain and skips the scion compile (ab
   the download against them, and checks the ELF architecture, before it installs anything.
   It does not use `checksums.txt` or any other file from the server.
 - A download whose bytes do not match is refused, and `lever apply` stops with an error that names
-  both digests. lever does not fall back to a build then.
+  both digests. lever does not fall back to a build then; set `LEVER_SCION_DOWNLOAD=off` to build
+  from source once you have looked.
 - When the download cannot happen (no network, the asset or release missing, a redirect to a host
   lever does not allow), lever builds scion from source as it does for any other pin, and the step
-  notes *prebuilt scion not downloaded, built from source*. That build needs Go.
-- The verified binary stays in `~/.cache/lever/scion-bin/`. lever hashes it on each apply and
-  downloads it again if it changed.
+  notes *prebuilt scion not downloaded; using a source build*. That build needs Go.
+- The verified binary stays in lever's cache directory (`~/.cache/lever/scion-bin/` on Linux,
+  `~/Library/Caches/lever/scion-bin/` on macOS). lever hashes it on each apply and downloads it
+  again if it changed.
 - Set `LEVER_SCION_DOWNLOAD=off` in lever's environment to always build from source.
 - A lever built from a checkout (`make install`, `go build`, `go install`) embeds no digests and
   always builds scion.

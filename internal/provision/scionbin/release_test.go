@@ -160,7 +160,6 @@ func TestResolveRefusesATamperedDownload(t *testing.T) {
 	cases := map[string][]byte{
 		"same size, other bytes": same,
 		"one byte longer":        append(bytes.Clone(fs.gz), 0),
-		"truncated":              fs.gz[:len(fs.gz)-1],
 		"much larger":            bytes.Repeat([]byte{0}, 10*len(fs.gz)),
 	}
 	for name, body := range cases {
@@ -170,8 +169,8 @@ func TestResolveRefusesATamperedDownload(t *testing.T) {
 			scionbin.UseReleaseForTest(t, fs.rel, srv)
 			f := buildScripted()
 			_, err := resolve(t, f, scionbin.ReleasePin)
-			if !errors.Is(err, scionbin.ErrReleaseTampered) {
-				t.Fatalf("err = %v, want ErrReleaseTampered", err)
+			if !errors.Is(err, scionbin.ErrReleaseTampered) || !strings.Contains(err.Error(), scionbin.DownloadEnv+"=off") {
+				t.Fatalf("err = %v, want ErrReleaseTampered naming the way out", err)
 			}
 			if len(f.Calls) != 0 {
 				t.Fatalf("a refused download must not fall back to a build: %+v", f.Calls)
@@ -231,6 +230,23 @@ func TestResolveBuildsWhenTheReleaseIsUnavailable(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 			scionbin.UseReleaseForTest(t, fs.rel, srv)
+		},
+		"truncated": func(t *testing.T) {
+			// Close-delimited, so the short body ends without a transport error.
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Connection", "close")
+				w.(http.Flusher).Flush()
+				_, _ = w.Write(fs.gz[:len(fs.gz)-1])
+			}))
+			t.Cleanup(srv.Close)
+			scionbin.UseReleaseForTest(t, fs.rel, srv)
+		},
+		"redirect with userinfo": func(t *testing.T) {
+			assets, _ := serve(t, fs.assetPath(), fs.gz)
+			target := strings.Replace(assets.URL, "https://", "https://user:pw@", 1) + fs.assetPath()
+			srv := httptest.NewTLSServer(http.RedirectHandler(target, http.StatusFound))
+			t.Cleanup(srv.Close)
+			scionbin.UseReleaseForTest(t, fs.rel, srv, assets)
 		},
 		"server down": func(t *testing.T) {
 			srv, _ := serve(t, fs.assetPath(), fs.gz)
@@ -383,8 +399,17 @@ func TestLoadReleaseValidates(t *testing.T) {
 	if rel, err := scionbin.LoadRelease(writeManifest(t, good)); err != nil || rel == nil {
 		t.Fatalf("good manifest: %v", err)
 	}
+	for _, v := range []string{"1.2.3-rc.1", "1.2.3-rc-1", "1.2.3-SNAPSHOT-abc1234"} {
+		if _, err := scionbin.LoadRelease(writeManifest(t, strings.Replace(good, `"1.2.3"`, `"`+v+`"`, 1))); err != nil {
+			t.Errorf("version %s refused: %v", v, err)
+		}
+	}
+	if _, err := scionbin.LoadRelease(writeManifest(t, good+"{}")); err == nil {
+		t.Error("data after the manifest accepted")
+	}
 	for name, edit := range map[string][2]string{
 		"version with a path":  {`"1.2.3"`, `"1.2.3/../x"`},
+		"version with a query": {`"1.2.3"`, `"1.2.3-a?b"`},
 		"asset name path":      {`scion_e0f61f2d_linux_amd64.gz`, `../scion_e0f61f2d_linux_amd64.gz`},
 		"asset for other arch": {`"amd64":{`, `"arm64":{`},
 		"short sha256":         {`"sha256":"` + h, `"sha256":"` + h[:63]},
@@ -492,5 +517,102 @@ func TestGenerateReleaseRemovesAStaleManifestOnFailure(t *testing.T) {
 	}
 	if _, serr := os.Stat(p); !os.IsNotExist(serr) {
 		t.Fatalf("stale manifest survived a failed generation: %v", serr)
+	}
+}
+
+// The binary digests are checked after decompression too: a manifest whose
+// gz digest matches but whose binary digest or size does not is refused.
+func TestResolveRefusesAnUnpackMismatch(t *testing.T) {
+	fs := newFakeScion(t, backendtest.EMX8664)
+	for name, edit := range map[string]func(a *scionbin.Asset){
+		"other binary digest": func(a *scionbin.Asset) { a.BinarySHA256 = strings.Repeat("0", 64) },
+		"larger than pinned":  func(a *scionbin.Asset) { a.BinarySize-- },
+		"smaller than pinned": func(a *scionbin.Asset) { a.BinarySize++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			backendtest.IsolateCache(t)
+			rel := *fs.rel
+			a := rel.Assets["amd64"]
+			edit(&a)
+			rel.Assets = map[string]scionbin.Asset{"amd64": a}
+			srv, _ := serve(t, fs.assetPath(), fs.gz)
+			scionbin.UseReleaseForTest(t, &rel, srv)
+			if _, err := resolve(t, noGo(), scionbin.ReleasePin); !errors.Is(err, scionbin.ErrReleaseTampered) {
+				t.Fatalf("err = %v, want ErrReleaseTampered", err)
+			}
+			out, _ := scionbin.OutputPath("m")
+			if _, err := os.Lstat(out); !os.IsNotExist(err) {
+				t.Fatalf("a refused download left %s (err %v)", out, err)
+			}
+		})
+	}
+}
+
+// A symlink at the output path is never taken as the cached binary, even
+// when it points at the pinned bytes, and its target is left alone.
+func TestResolveReplacesASymlinkedCache(t *testing.T) {
+	backendtest.IsolateCache(t)
+	fs := newFakeScion(t, backendtest.EMX8664)
+	srv, n := serve(t, fs.assetPath(), fs.gz)
+	scionbin.UseReleaseForTest(t, fs.rel, srv)
+	out, _ := scionbin.OutputPath("m")
+	if err := os.MkdirAll(filepath.Dir(out), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, fs.bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolve(t, noGo(), scionbin.ReleasePin); err != nil || n.Load() != 1 {
+		t.Fatalf("err %v, requests %d: want a fresh download", err, n.Load())
+	}
+	if fi, err := os.Lstat(out); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("output is not a regular file: %v %v", fi, err)
+	}
+	if got, _ := os.ReadFile(target); !bytes.Equal(got, fs.bin) {
+		t.Fatal("the symlink's target was changed")
+	}
+}
+
+// A server that labels the .gz with Content-Encoding: gzip does not get it
+// decoded before the digest check.
+func TestResolveKeepsTheAssetEncoded(t *testing.T) {
+	backendtest.IsolateCache(t)
+	fs := newFakeScion(t, backendtest.EMX8664)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "identity" {
+			t.Errorf("Accept-Encoding = %q, want identity", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(fs.gz)
+	}))
+	t.Cleanup(srv.Close)
+	scionbin.UseReleaseForTest(t, fs.rel, srv)
+	if _, err := resolve(t, noGo(), scionbin.ReleasePin); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+}
+
+// Cancelling the apply mid-download stops it: no fallback build.
+func TestResolveCancelledDownloadDoesNotBuild(t *testing.T) {
+	backendtest.IsolateCache(t)
+	fs := newFakeScion(t, backendtest.EMX8664)
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(fs.gz)))
+		_, _ = w.Write(fs.gz[:10])
+		w.(http.Flusher).Flush()
+		cancel()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	scionbin.UseReleaseForTest(t, fs.rel, srv)
+	f := buildScripted()
+	_, err := scionbin.Resolve(ctx, f, scionbin.Spec{Version: scionbin.ReleasePin}, "amd64", "m")
+	if !errors.Is(err, context.Canceled) || len(f.Calls) != 0 {
+		t.Fatalf("err %v, calls %+v: want context.Canceled and no build", err, f.Calls)
 	}
 }

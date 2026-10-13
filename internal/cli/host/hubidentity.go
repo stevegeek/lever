@@ -148,6 +148,9 @@ func (h *hubIdentity) run(ctx context.Context) error {
 			return err
 		}
 		if gone {
+			if _, err := h.checkProjectMarker(ctx, h.jailProject(), prevProject); err != nil {
+				return err
+			}
 			h.log("lever: WARNING: the jail's hub no longer holds lever's %s role (%s) and lever-admin was just created: "+
 				"the hub database is new. Forgetting the old hub's records and bootstrapping it as new.", controllerRoleName, rec.HubMarker)
 			if err := h.forgetHub(); err != nil {
@@ -642,7 +645,7 @@ func (h *hubIdentity) registerProject(ctx context.Context, jp, prev string) (str
 	if err != nil {
 		return "", errHubIdentity("%w", err)
 	}
-	if before != "" && id != before {
+	if before != "" && id != before || prev != "" && id != prev {
 		return "", errHubIdentity("the tree's project marker changed from project %s to %s during `scion init`; refusing", before, id)
 	}
 	if _, err := h.assertController(ctx, state.HubModeFresh); err != nil {
@@ -656,18 +659,27 @@ func (h *hubIdentity) registerProject(ctx context.Context, jp, prev string) (str
 }
 
 // checkProjectMarker returns the project ID the tree's marker names ("" when
-// there is no readable marker), refusing one that is not prev when prev is
-// known.
+// there is no readable marker and no prev). When prev is known the marker must
+// be readable and name it: an agent that could make it unreadable here could
+// write its own once scion init has run.
 func (h *hubIdentity) checkProjectMarker(ctx context.Context, jp, prev string) (string, error) {
 	id, _, err := readProjectMarker(ctx, h.jr, jp)
-	if err != nil {
+	switch {
+	case prev == "" && err != nil:
 		return "", nil
-	}
-	if prev != "" && id != prev {
-		return "", errHubIdentity("the tree's project marker %s/.scion names project %s, but lever last registered %s; an agent may have rewritten it. "+
-			"If the marker is lever's own, remove it on the host and run `lever apply` again", jp, id, prev)
+	case err != nil:
+		return "", errHubIdentity("lever last registered project %s, but the tree's project marker cannot be read (%v); an agent may have replaced it. %s",
+			prev, err, markerFix(jp, prev))
+	case prev != "" && id != prev:
+		return "", errHubIdentity("the tree's project marker %s/.scion names project %s, but lever last registered %s; an agent may have rewritten it. %s",
+			jp, id, prev, markerFix(jp, prev))
 	}
 	return id, nil
+}
+
+func markerFix(jp, prev string) string {
+	return fmt.Sprintf("Restore %s/.scion naming project-id %s, or, to register the tree as a new project, "+
+		"remove .lever-state/hub-identity.json and run `lever apply --reset-hub-identity`", jp, prev)
 }
 
 // readProjectMarker reads the project ID and slug scion init wrote into the
@@ -730,6 +742,12 @@ func (h *hubIdentity) mintPATs(ctx context.Context, mode, projectID string, life
 			h.warn("hub-identity: re-minting %s: %s", name, reason)
 		}
 		if _, err := h.assertController(ctx, mode); err != nil {
+			// A token in its renew window still works: a contested address then
+			// costs a warning, not the rest of the apply.
+			if errors.Is(err, errControllerContested) && !patUrgent(tok, old, found, scopes, now) {
+				h.warn("%s token not renewed this time (it stays valid until %s): %v", name, expiryText(old.ExpiresAt), err)
+				return nil
+			}
 			return err
 		}
 		secret, t, err := h.ctl.CreateToken(ctx, name, projectID, scopes, now.Add(patLifetime))

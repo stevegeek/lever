@@ -206,3 +206,49 @@ func TestHubIdentityRemoteOffRevokeFailureIsRetried(t *testing.T) {
 		t.Fatal("the record outlived the revoke")
 	}
 }
+
+// A token in its renew window still works, so a contested address costs a
+// warning: the rest of the apply (newly added logins, the proxy restart)
+// goes on, and a later apply renews it.
+func TestHubIdentityRenameLoopDuringARenewalWarns(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(true, hiOperator("op@example.com")))
+	e.seedMigrated("dev@localhost", true)
+	e.mustRun()
+	rec, _, _ := e.st.LoadControllerPATRecord()
+	rec.ExpiresAt = e.now.AddDate(0, 0, 10)
+	if err := e.st.SaveControllerPATRecord(rec); err != nil {
+		t.Fatal(err)
+	}
+	e.app.Remote.AllowedUsers = append(e.app.Remote.AllowedUsers, hiOperator("new@example.com"))
+	e.hub.user(devUserID).Email = "agent-chosen@example.org"
+	n := len(e.hub.events)
+	if err := e.loopedStep().run(context.Background()); err != nil {
+		t.Fatalf("run = %v, want a warning only", err)
+	}
+	if !hiAnyContains(e.warns, "not renewed this time") {
+		t.Fatalf("warns %q", e.warns)
+	}
+	if got := hiEventsWith(e.hub.eventsFrom(n), "mint"); len(got) > 0 {
+		t.Fatalf("minted under the loop: %q", got)
+	}
+	if e.hub.byEmail("new@example.com") == nil {
+		t.Fatal("the added login was not invited")
+	}
+}
+
+// With a project recorded, an unreadable marker is refused too: an agent
+// could otherwise hide the marker from the check and write its own after
+// scion init.
+func TestHubIdentityRebootstrapRefusesAnUnreadableMarker(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.mustRun()
+	e.jr.marker = ""
+	e.reset = true
+	n := len(e.hub.events)
+	if err := e.run(); err == nil || !strings.Contains(err.Error(), "cannot be read") {
+		t.Fatalf("run = %v", err)
+	}
+	if got := hiEventsWith(e.hub.eventsFrom(n), "register", "scion init", "revoke"); len(got) > 0 {
+		t.Fatalf("went on without the marker: %q", got)
+	}
+}

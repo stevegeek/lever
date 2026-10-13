@@ -186,6 +186,14 @@ func (h *hubIdentity) ensureRemoteUsers(ctx context.Context, rec *state.HubIdent
 			}
 			return err
 		}
+		if rec.Users[u.Email] != id {
+			// Recorded before it is bound: an apply that fails later must still
+			// find this hub user to suspend if the login is removed.
+			rec.Users[u.Email] = id
+			if err := h.st.SaveHubIdentity(*rec); err != nil {
+				return errHubIdentity("%w", err)
+			}
+		}
 		grant, drop, name, userCeiling := role.ID, contactRole.ID, remoteWebRoleName, ceiling
 		if u.Contact {
 			grant, drop, name, userCeiling = contactRole.ID, role.ID, contactRoleName, contactCeiling

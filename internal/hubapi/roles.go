@@ -9,11 +9,12 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 )
 
 // The calls below are hub-admin calls. scion refuses them to any UAT, so no
-// lever token can make them; they are used only from the bootstrap-token
-// step's throwaway dev-auth window, where the dev identity is the super-admin.
+// lever token can make them; they need a Client on AssertCurl signing as the
+// admin identity.
 
 // RoleScopeProject is scion's scope type for a role bound per project.
 const RoleScopeProject = "project"
@@ -45,13 +46,24 @@ type RoleBinding struct {
 	PrincipalID      string `json:"principalId"`
 	ScopeType        string `json:"scopeType"`
 	ScopeID          string `json:"scopeId"`
+	// CreatedBy is read only; the hub sets it.
+	CreatedBy string `json:"createdBy,omitempty"`
 }
 
-// User mirrors the fields of scion's store.User that lever reads.
+// User mirrors the fields of scion's store.User that lever reads. Role is
+// admin, member or viewer; Status is active, suspended or invited. The hub's
+// invite answer carries no role.
 type User struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
+	ID        string    `json:"id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role,omitempty"`
+	Status    string    `json:"status,omitempty"`
+	Created   time.Time `json:"created"`
+	InvitedBy string    `json:"invitedBy,omitempty"`
 }
+
+// UserRecord is the hub's user row as the identity steps read it.
+type UserRecord = User
 
 // ErrBindingExists is CreateRoleBinding's answer when the hub already holds
 // this exact binding (HTTP 409). Callers that want "bound" treat it as
@@ -126,22 +138,18 @@ func (c *Client) UpdateRoleDefinition(ctx context.Context, rd RoleDefinition) (R
 }
 
 // UserByEmail finds the hub user whose email is exactly email (ignoring
-// case). found is false when there is none — a user who has never signed in.
+// case), invited or signed in. found is false when there is none.
 //
 // The hub's search is a substring match on email and display name, so the
 // exact match here decides: "a@b" must not bind "xa@b".
 func (c *Client) UserByEmail(ctx context.Context, email string) (User, bool, error) {
-	var body struct {
-		Users []User `json:"users"`
+	if email == "" {
+		return User{}, false, errors.New("hubapi: looking up a user: empty email")
 	}
-	if err := c.get(ctx, "/api/v1/users?search="+url.QueryEscape(email), &body); err != nil {
+	matched, err := c.listUsers(ctx, url.Values{"search": {email}},
+		func(u User) bool { return strings.EqualFold(u.Email, email) })
+	if err != nil {
 		return User{}, false, err
-	}
-	var matched []User
-	for _, u := range body.Users {
-		if strings.EqualFold(u.Email, email) {
-			matched = append(matched, u)
-		}
 	}
 	if len(matched) > 1 {
 		return User{}, false, &APIError{Msg: fmt.Sprintf("the hub lists %d users with email %q; refusing to guess which one", len(matched), email)}

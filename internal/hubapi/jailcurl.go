@@ -72,14 +72,17 @@ func (j *JailCurl) run(ctx context.Context, method, path string, body []byte) (i
 		return 0, nil, fmt.Errorf("no controller PAT available for %s %s", method, path)
 	}
 
-	url := strings.TrimRight(j.BaseURL, "/") + path
 	env := map[string]string{"SCION_HUB_TOKEN": tok}
 	script := curlScript
 	if body != nil {
 		env["LEVER_HUB_BODY"] = string(body)
 		script = curlBodyScript
 	}
-	res, err := j.Runner.Run(ctx, env, "sh", "-c", script, "_", method, url)
+	return runCurl(ctx, j.Runner, env, script, method, path, strings.TrimRight(j.BaseURL, "/")+path)
+}
+
+func runCurl(ctx context.Context, r proc.Runner, env map[string]string, script, method, path, url string) (int, []byte, error) {
+	res, err := r.Run(ctx, env, "sh", "-c", script, "_", method, url)
 	if err != nil {
 		if res.Code == curlNotFound {
 			return 0, nil, fmt.Errorf("%s %s: %w (is it provisioned?): %s",

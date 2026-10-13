@@ -2,8 +2,8 @@
 // via a backend-supplied argv prefix (["orb","-m",m,"-u",u] for OrbStack,
 // ["limactl","shell",vm] for Lima) followed by `env [-C dir] K=V… cmd args`.
 // GNU env needs no shell quoting, so scion.Client runs unchanged inside the
-// jail. The controller PAT (SCION_HUB_TOKEN) never goes on the host argv; see
-// hubtoken.go.
+// jail. The controller PAT (SCION_HUB_TOKEN) and a hub assertion
+// (LEVER_HUB_ASSERTION) never go on the host argv; see hubtoken.go.
 package jail
 
 import (
@@ -78,22 +78,22 @@ func envKVs(env map[string]string) []string {
 	return kvs
 }
 
-// argv returns the hub token it withheld from the argv. With a token the
-// shape is
+// argv returns the secret (hub token or assertion) it withheld from the
+// argv. With one the shape is
 //
-//	<prefix> env <jailEnv> sh -c <hubTokenStdinScript> _ env [-C dir] K=V… cmd args
+//	<prefix> env <jailEnv> sh -c <stdin script for its key> _ env [-C dir] K=V… cmd args
 func (r *Runner) argv(dir string, env map[string]string, name string, args []string) ([]string, string, error) {
-	tok := env[hubTokenEnv]
-	if err := checkHubToken(tok); err != nil {
+	key, tok, err := stdinSecret(env)
+	if err != nil {
 		return nil, "", err
 	}
 	argv := append([]string{}, r.cfg.Prefix...)
 	if tok != "" {
 		env = maps.Clone(env)
-		delete(env, hubTokenEnv)
+		delete(env, key)
 		argv = append(argv, "env")
 		argv = append(argv, r.jailEnv()...)
-		argv = append(argv, "sh", "-c", hubTokenStdinScript, "_")
+		argv = append(argv, "sh", "-c", stdinSecretScripts[key], "_")
 	}
 	argv = append(argv, "env")
 	if dir != "" {

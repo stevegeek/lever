@@ -10,10 +10,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/treebackup"
 )
 
 func newDestroyCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag *string
+	var noTreeBackup bool
 	cmd := &cobra.Command{
 		Use:     "destroy",
 		Aliases: []string{"down"},
@@ -52,10 +54,14 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 				return err
 			}
 			cmd.Printf("jail %q destroyed\n", m)
+			if *machine == "" && ia.app != nil && !noTreeBackup {
+				treeSnapshotAt(cmd, ia.app, stateFor(ia.path), treebackup.TriggerDestroy, quiescentAfterStop(b))
+			}
 			return nil
 		},
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
+	cmd.Flags().BoolVar(&noTreeBackup, "no-tree-backup", false, "do not take the tree snapshot this destroy would take (tree_backup.at_stop)")
 	return cmd
 }
 

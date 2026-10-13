@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fileledger"
@@ -27,9 +26,8 @@ func checkFiles(app *config.App, st state.State) checkResult {
 	if !app.FilesOn() {
 		return checkResult{name, true, "off (no upload or download routes; share_file answers off and contact_files lists nothing)", ""}
 	}
-	if brokerctl.StateInsideTree(app, st) {
-		return checkResult{name, false, "on, but the state directory is inside the tree: no record can be kept, so every upload, share and download is refused",
-			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	if inside, what, fix := stateInTree(app, st); inside {
+		return checkResult{name, false, "on, but " + what + ": no record can be kept, so every upload, share and download is refused", fix}
 	}
 	onOff := func(on bool) string {
 		if on {

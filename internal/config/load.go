@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/wire"
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +38,22 @@ func confinedRel(p string) bool {
 func insideTree(tree, path string) bool {
 	rel, err := filepath.Rel(tree, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// insideTreeByIdentity is insideTree OR-ed with fsutil.InsideByIdentity,
+// which also sees a case alias, a firmlink or a bind mount of the tree. A
+// path that does not exist is judged by its deepest existing ancestor. An
+// identity check that fails is an error: the caller refuses the path.
+func insideTreeByIdentity(realTree, path string) (bool, error) {
+	if insideTree(realTree, path) {
+		return true, nil
+	}
+	return fsutil.InsideByIdentity(path, realTree)
+}
+
+func errCannotPlace(key, path string, err error) error {
+	return fmt.Errorf("config: %s (%s): lever cannot tell whether it lies in the mounted tree (%w), and it refuses "+
+		"what it cannot check — make the path's directories searchable by you, or move it", key, path, err)
 }
 
 // resolveExisting follows every symlink in p's deepest existing ancestor and
@@ -147,7 +164,11 @@ func LoadNoHostChecks(path string) (*App, error) {
 		if err != nil {
 			return nil, fmt.Errorf("config: %s (%s): %w", m.key, m.path, err)
 		}
-		if insideTree(realTree, p) {
+		inside, err := insideTreeByIdentity(realTree, p)
+		if err != nil {
+			return nil, errCannotPlace(m.key, m.path, err)
+		}
+		if inside {
 			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and it would be installed as the engine they run under",
 				m.key, m.path, app.Tree)
 		}
@@ -179,7 +200,11 @@ func LoadNoHostChecks(path string) (*App, error) {
 		if p, err = resolveExisting(p); err != nil {
 			return nil, fmt.Errorf("config: %s (%s): %w", m.key, m.path, err)
 		}
-		if insideTree(realTree, p) {
+		inside, err := insideTreeByIdentity(realTree, p)
+		if err != nil {
+			return nil, errCannotPlace(m.key, m.path, err)
+		}
+		if inside {
 			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and this file is boot material the host must own — move it up to the instance root",
 				m.key, m.path, app.Tree)
 		}

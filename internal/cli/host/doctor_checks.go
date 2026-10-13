@@ -122,6 +122,20 @@ func stateRel(st state.State, path string) string {
 
 func stateDirName() string { return state.DirName }
 
+// stateInTree is brokerctl.StateInsideTreeErr for the doctor rows: whether
+// the state directory counts as inside the tree, what the row says about it,
+// and the fix. An identity check that failed counts as inside, and the row
+// names its error.
+func stateInTree(app *config.App, st state.State) (inside bool, what, fix string) {
+	inside, err := brokerctl.StateInsideTreeErr(app, st)
+	if err != nil {
+		return true, "lever " + err.Error() + ", so it counts as inside the tree",
+			"make " + st.Dir + ", " + app.Tree + " and the directories above them searchable by you"
+	}
+	return inside, "the state directory " + st.Dir + " is inside the tree " + app.Tree,
+		"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"
+}
+
 // checkListeningProcess is the pid-then-port ladder shared by the broker and
 // remote-proxy checks. It tells apart never started, died (stale pid), and
 // alive but not serving.
@@ -420,14 +434,13 @@ func checkDevUserIdentity(ctx context.Context, app *config.App, me func(context.
 // something only while no jail can write it.
 func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	const name = "verified chat"
-	switch {
-	case !app.RemoteEnabled():
+	if !app.RemoteEnabled() {
 		return checkResult{name, true, "remote access disabled (no web chat)", ""}
-	case brokerctl.StateInsideTree(app, st):
-		return checkResult{name, false, "off: the state directory " + st.Dir + " is inside the tree " + app.Tree +
-			", which agents mount, so a ledger there proves nothing",
-			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
-	case len(app.Remote.AllowedUsers) == 0:
+	}
+	if inside, what, fix := stateInTree(app, st); inside {
+		return checkResult{name, false, "off: " + what + " (agents mount the tree), so a ledger there proves nothing", fix}
+	}
+	if len(app.Remote.AllowedUsers) == 0 {
 		return warnResult(name, "off: remote.allowed_users is empty, so the proxy verifies no login and records no chat; "+
 			"agents cannot verify a web chat post and treat every one as data (they do not act on it or reply)",
 			"list the operator's login in remote.allowed_users, then run `lever apply` and `lever init`")
@@ -603,9 +616,8 @@ func agentMessagesRow(app *config.App, st state.State) checkResult {
 	if !app.AgentMessagesOn() {
 		return checkResult{name, true, "off (agents answer contacts as before; nothing is filtered)", ""}
 	}
-	if brokerctl.StateInsideTree(app, st) {
-		return checkResult{name, false, "on, but the state directory is inside the tree: no record can be kept, so contacts see no agent message",
-			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	if inside, what, fix := stateInTree(app, st); inside {
+		return checkResult{name, false, "on, but " + what + ": no record can be kept, so contacts see no agent message", fix}
 	}
 	var who []string
 	for _, u := range app.Remote.AllowedUsers {
@@ -722,9 +734,8 @@ func checkPush(app *config.App, st state.State) checkResult {
 	if !app.PushOn() {
 		return checkResult{name, true, "off (no service worker, no push routes, no hub streams)", ""}
 	}
-	if brokerctl.StateInsideTree(app, st) {
-		return checkResult{name, false, "on, but the state directory is inside the tree: push stays off (agents could read its key)",
-			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	if inside, what, fix := stateInTree(app, st); inside {
+		return checkResult{name, false, "on, but " + what + ": push stays off (agents could read its key)", fix}
 	}
 	if th := app.Remote.Push.TestHosts; len(th) > 0 {
 		return checkResult{name, false, "on, with remote.push.test_hosts set (" + strings.Join(th, ",") + "): TEST ONLY, the proxy may push over plain http to loopback",

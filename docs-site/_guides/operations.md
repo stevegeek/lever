@@ -771,6 +771,266 @@ VM. A plain `lever stop` after a `--keep-vm` finds the hub down: its suspend war
 did not answer and that the earlier `--keep-vm` already suspended the agents, and the VM powers
 off as usual.
 
+## Tree backups
+
+Off by default. With `tree_backup: {enabled: true}` in `lever.yaml`, lever keeps snapshots of the
+instance tree on the host, in `.lever-state/tree-backups/` (0700), out of the agents' reach. They
+answer three questions: what did the tree look like before an agent damaged it, what changed
+between two points in time, and how to copy that history off the host. Every byte, name, link and
+timestamp in the tree was written by agents, so lever treats all of it as hostile: it never
+follows a link in the tree, never opens anything but a regular file, never runs anything from it,
+and records what it could not capture instead of failing.
+
+### When snapshots are taken
+
+| When | Trigger | Label |
+|---|---|---|
+| `lever stop`, after the VM is off | `stop` | `vm-off` |
+| `lever destroy`, after the machine is deleted | `destroy` | `vm-off` |
+| `lever stop --keep-vm`, after the agents are suspended, the hub stopped and the guest synced | `keep-vm` | `suspended` when every suspend took and the sync worked, else `none` |
+| `lever tree snapshot` | `manual` | `vm-off` when the machine is stopped before and after the walk, else `none` |
+
+lever asks the backend again after the walk: a `lever up` that started meanwhile turns `vm-off`
+into `none`. A failed or incomplete snapshot at stop or destroy is a warning; it never changes
+their exit status. `--no-tree-backup` skips it, `tree_backup.at_stop: false` turns it off, and
+`--machine` never takes one. There is no resident timer: run `lever tree snapshot` from cron or
+launchd for snapshots while the jail runs (exit `0` complete, `3` incomplete, `1` failed, `75`
+another snapshot running, with `--no-wait`).
+
+**The first snapshot** reads the whole tree, up to the `read` budget (8 GiB by default) within
+the `time` budget (5 min at stop). Take it with `lever tree snapshot` while the jail is up, so the
+first `lever stop` is fast. Later snapshots read only what changed: a file whose device, inode,
+size, modification and change times all match the previous snapshot is not read again (the stat
+cache). Each snapshot also re-reads the files verified longest ago, from the read budget left
+over, so every file is re-read at least every `reverify` (7 days); `lever tree snapshot --full`
+re-reads all of them.
+
+### What is captured, and what is not
+
+Captured: directories, regular files (content, all 12 mode bits, size, times, device, inode and
+link count), symbolic links (their target, never followed), and the type and mode of FIFOs,
+sockets and devices. Names are kept as raw bytes, so names that are not UTF-8 survive.
+`.lever/` directories, `.lever-files/` and workers' `bootstrap.json` are captured like any file.
+
+Not captured: the content of FIFOs, sockets and devices; anything inside a mount point in the
+tree (recorded as `mount`, never entered); extended attributes, ACLs, resource forks, file flags
+and birth times. Hard links are recorded through each name's device, inode and link count; their
+content is read and stored once. One file is hashed but never stored: the manager's broker
+ticket, `<tree>/.lever/bootstrap.json`, so a change to it shows as `M secret` without its content
+in the store. That is by name only: a copy or a hard link of the ticket elsewhere in the tree is
+stored like any other file.
+
+Everything else in the tree is stored, **secrets included**: a leaked secret lives on in every
+snapshot that holds it, and in every off-host copy. Rotating the secret is the fix.
+`tree_backup.exclude` leaves paths out (a pattern with no `/` matches a name at any depth; one with
+a `/` is anchored at the tree root, each component matched like a shell glob). An excluded path is
+recorded with its metadata and never read. Every exclude is a place where agents can hide changes
+from the record. In-tree `.gitignore` files have no effect.
+
+### Incomplete snapshots, and what `?` means
+
+Every limit in `tree_backup.limits` is a budget. Running out of one makes the snapshot
+**incomplete**, never absent: lever commits what it has, marks what it did not capture, and says
+so (`tree snapshot INCOMPLETE: truncated(entries) at docs (100000)` after `lever stop`, exit 3 from
+`lever tree snapshot`, and `lever doctor`'s *tree backup* row). The paths the newest complete
+snapshot held are looked up by name first, and their changed content is read before any new
+file, so flooding the tree with new names cannot keep damage to existing files out of the record.
+Each worker's directory and the rest of the tree get their own share of the budgets, so one worker
+cannot starve the others. What the manager can still do is flood the tree root so that its own
+*new* files are not captured in that snapshot; that is loud.
+
+A snapshot never shows something it did not see as deleted. Below a directory that was truncated,
+unreadable, could not be listed, changed while it was listed, or is a mount, `lever tree diff`
+shows each name it no longer sees as `?` with the reason, not as `D`. Making a file or directory
+unreadable (mode 000, a 0300 directory) shows as `?` "became unreadable"; the earlier content stays
+in history. A snapshot is complete when the root was readable and nothing was truncated or
+skipped; unreadable files, racy reads (`changed`, `unstable`) and excluded paths are counted and
+shown but do not make it incomplete.
+
+### Looking at history
+
+- `lever tree list`: the snapshots in order, with trigger, label, complete or not, and pins.
+- `lever tree log [-n N] [--all]`: one line per snapshot with what changed since the previous one.
+- `lever tree log -- <path>`: the snapshots in which that path changed, with size, short hash and
+  state: "which snapshot has the good version of X".
+- `lever tree ls <id> [<path>] [-r]`: what a snapshot holds.
+- `lever tree diff <a> [<b>] [-- <path>...]`: what changed between two snapshots (`<b>` defaults
+  to the newest), summary first, then line diffs of text files. `--stat`, `--meta` (changes of
+  modification time alone, as `~`), `--no-limit` (lift the 8 MiB output limit), `--full-diff`
+  (line diffs even over 500 changed paths).
+- `lever tree cat <id> <path>`: one file's content, verified against its hash, to stdout. It
+  refuses a terminal: redirect it to a file or a pager.
+
+A snapshot is named by its id, `latest`, or `latest~N` (N snapshots before the newest). Paths
+print in a quoted form when they hold anything but plain printable ASCII: `"odd\xffname"`, with
+every other byte as `\xNN`, so two different names never print the same and nothing an agent
+wrote can drive your terminal. To pass such a path back, prefix the printed form with `q:`:
+`lever tree cat latest 'q:"odd\xffname"'`. Text from files is shown with a two-character prefix;
+a line that holds control, format or invisible characters is shown escaped, marked by `\` in the
+second column. `lever tree diff` prints no row wider than 80 columns: a longer line goes on in rows
+that start with `| `, so text an agent padded past the edge of the terminal cannot start a row and
+pass for one of lever's own lines (`== M <path>`, `@@`). On a terminal narrower than 80 columns the
+terminal wraps rows itself and that no longer holds.
+
+### Restoring
+
+```
+lever tree restore <id> --to <dir> [--path <p>]... [--links=inside|all|none] [--keep-modes] [--keep-vcs]
+```
+
+lever never restores over the live tree. It creates `<dir>.lever-partial`, writes into it through
+directories it has just created, and renames it to `<dir>` at the end; a restore that stops leaves
+the `.lever-partial` directory. `<dir>` must not exist, and must not be inside the tree, the state
+directory or the store. `--path` restores those subtrees (and their parent directories).
+
+- Files are 0600 and directories 0700 unless `--keep-modes`, which applies the recorded permission
+  bits but never setuid, setgid, sticky, group write or other write: on a shared host, a writable
+  directory in the restore would let another local user plant files in it. `<dir>` itself stays
+  0700. The report lists every mode bit it did not apply.
+- Names that were hard links of one file in the snapshot are restored as hard links of one file,
+  written once, so a file with a thousand names takes its size once on your disk, not a thousand
+  times. Where the target refuses a hard link, the name gets its own copy. Runs of zeros are
+  written as holes, as the store keeps them.
+- **Links** (`--links`, default `inside`): only links whose target cannot leave the restored
+  tree are created: a relative target of some leading `..` (no more than the link's depth below
+  `<dir>`) followed by plain names. `all` creates every link as recorded (lever never follows
+  them); `none` creates none.
+- **Version control and code that runs on use:** restored files belong to you, and git, Mercurial
+  and Jujutsu trust a repository's own settings because you own it; shell prompts and editors run
+  them in any directory you enter. So lever renames, to `<name>.lever-restored`, every file through
+  which one of them would run a command an agent chose:
+  - git: `config`, `config.worktree`, `commondir` and `hooks` in any directory with an entry named
+    `HEAD`, and every `.git` that is not a directory (a gitlink file, or a link);
+  - Mercurial: `hgrc`, `hgrc-not-shared` and `sharedpath` in any `.hg` directory, and every `.hg`
+    that is not a directory;
+  - Jujutsu: `repo/config.toml` in any `.jj` directory, and every `.jj` or `.jj/repo` that is not a
+    directory.
+
+  Names are compared as a case-insensitive filesystem folds them. `--keep-vcs` turns this off. The
+  rule covers tools that run unasked and trust by ownership. Not covered, and restored as they are:
+  files a tool runs only when you ask it to (Makefiles, `package.json` scripts), files whose tool
+  asks for your approval first (direnv's `.envrc`, mise), editor project settings (`.vscode/`,
+  `.idea/`), which the editor's workspace trust gates (open the restored tree in restricted mode;
+  a folder under one you already trust inherits that trust), and other version control systems
+  (Subversion, Bazaar, Fossil, darcs).
+- FIFOs, sockets, devices, the broker ticket and entries without content are not created.
+- Two names that the target filesystem folds into one (by case on APFS) are a collision: lever
+  skips the later one and its subtree and reports both. An entry that already exists and that no
+  restored name folds to is reported as a foreign writer (Finder's `.DS_Store`).
+- The report lists every collision, link and special file not created, entry without content,
+  file that changed while it was read (`unstable`), name the target could not hold, hash failure,
+  renamed git file and stripped mode bit. The exit status is 0 only when everything selected was
+  restored.
+
+**Copying back into the tree**, from a restore of snapshot `<id>` into `<dir>`:
+
+1. `lever stop`, so that no agent writes while you copy.
+2. `lever tree snapshot`, then `lever tree diff <id> latest -- <paths>`: look for `T` and `L`
+   lines, on what you copy back and on every directory above it. Each is a file or directory an
+   agent turned into a link, possibly to one of your own files outside the tree (`~/.zshrc`). Delete
+   each such link from the tree (`rm`, which removes the link, not its target) before you copy.
+3. Copy with `rsync -r --no-links --checksum <dir>/ <tree>/` (or only the paths you need). rsync
+   replaces a link in the destination instead of writing through it. Never use `cp`, with or
+   without `-P`: `-P` concerns links in the source, and `cp` writes through a link it finds in the
+   destination, out of the tree. `--checksum` matters: the restore gives every file its recorded
+   modification time, and rsync's default check skips a file whose size and time match, so a file
+   an agent damaged but kept at the same size and time would stay damaged. If your rsync refuses
+   either option (macOS 15 ships openrsync), install rsync proper (Homebrew's `rsync`) rather than
+   leave one out.
+4. `lever tree snapshot` again, and `lever tree diff <id> latest -- <paths>` must show no `M`, `T`,
+   `L` or `D` line for what you copied back. A `P` line is a mode the restore did not keep (files
+   are 0600 unless `--keep-modes`).
+
+### Retention and garbage collection
+
+lever keeps the `keep.last` (20) newest snapshots, the newest of each day for the last
+`keep.daily` (7) days with snapshots, and the newest of each ISO week for the last `keep.weekly`
+(8) weeks with snapshots, plus always the newest complete snapshot, the newest `vm-off` one, and
+every snapshot taken with `lever tree snapshot --pin`.
+
+**Store size.** The store holds every retained snapshot's content, and agents choose that content.
+Three limits keep it from taking over the host's disk:
+
+- Runs of zeros are stored as holes, so a sparse file costs the store what it costs the tree.
+- `limits.new` (2 GiB) bounds the disk new content may take per snapshot, once any snapshot of
+  the tree exists (each file is charged at least one 4 KiB block for its content and one for the
+  file itself). Past it, new files are `skipped(new)` and the snapshot is incomplete; changed
+  files the last complete snapshot held are stored first.
+- `max_store` (32 GiB) caps the disk the retained snapshots take. Past it, GC deletes the oldest
+  snapshots until the rest fit, except the newest, the newest complete, the newest `vm-off` and
+  pinned ones, which stay even when they alone take more. This deletes history to make room: an
+  agent that writes new content before every snapshot can push the oldest unpinned snapshots out
+  (per snapshot, at most `limits.new` of content plus its manifest, up to `limits.manifest`), and
+  doctor warns for a week after each such deletion. Pin
+  the snapshots you rely on. Without the cap (`max_store: 0`) nothing is deleted for space, and
+  the same agent can instead hold your filesystem at `min_free` for weeks, with every snapshot in
+  that time `incomplete(disk)`.
+
+When free space on the store's filesystem falls below `min_free` (2 GiB, plus 1% of the inodes),
+new content is skipped (the snapshot is incomplete with reason `disk`) and the manifest still
+commits.
+
+**A full disk.** The tree and the store usually share a filesystem, so agents can fill it. The
+manifest then goes into space the store holds back for it (`reserve`: 64 MiB, or twice the last
+manifest, up to `limits.manifest`). Before the walk, lever caps the manifest at the space it is
+sure to have when it commits (the reserve, plus the part of `min_free` that new content may not
+take), so on a full disk the snapshot commits incomplete with `truncated(disk)` instead of failing.
+On a copy-on-write filesystem (APFS, btrfs, ZFS), where overwriting the reserve would itself
+need new blocks, lever deletes the reserve and writes the manifest into the space that frees. A
+commit that fails anyway gives the reserve back. A commit that used the reserve makes a new one
+once there is room; until then doctor says so, and another snapshot on the still-full disk may
+fail. With `min_free: 0` every manifest is held to the reserve alone, even on an empty disk: the
+first snapshot then stops at about 150 000 entries, and each later one at about twice the last. The status doctor reads is
+written even on a full disk.
+
+After each snapshot lever starts `lever tree gc` in the background (log in
+`.lever-state/logs/tree-gc.log`). GC deletes expired snapshots and content no snapshot references.
+It reads every snapshot while other snapshots may still run, and holds the store to itself only
+for the deletions, so a `lever stop` during a long GC still takes its snapshot.
+It validates every snapshot first, and when one is invalid it deletes nothing (doctor shows *GC
+blocked*); `lever tree verify` names the problem and `lever tree delete <id>` removes that
+snapshot, pinned or invalid. `lever tree verify` re-hashes every stored file; `--fix` moves damaged
+ones to `blobs/corrupt/`, and the next snapshot of the same content stores it again.
+
+### Off-host copies
+
+lever does not talk to any cloud. `lever tree lock -- <cmd>` runs your copy tool while garbage
+collection cannot change the store (snapshots still run). The command gets
+`LEVER_TREE_BACKUP_STORE` and `LEVER_TREE_BACKUP_LATEST` in its environment, and a `PATH` without
+empty, relative or in-tree entries; a command that resolves inside the tree is refused. It exits
+with the command's status, or 75 when the lock is not free within `--wait` (10 min).
+
+```
+lever tree snapshot -q; lever tree lock -- sh -c 'rsync -a "$LEVER_TREE_BACKUP_STORE/snapshots" "$LEVER_TREE_BACKUP_STORE/blobs" backup:lever/'
+lever tree snapshot -q; lever tree lock -- sh -c 'restic backup "$LEVER_TREE_BACKUP_STORE"'
+```
+
+- The store holds every retained snapshot and the secrets in them: use a tool that encrypts
+  off-host (restic, borg, rclone crypt).
+- Never pass paths from a manifest to a shell: they are agent-chosen.
+- A snapshot committed during a copy can reach that copy without all its content if the tool
+  copies `blobs/` before `snapshots/`; the next copy heals it, and the rsync recipe copies
+  `snapshots/` first. `lever tree verify` on a recovered copy names any gap.
+- Stop-time snapshots reach the copy at its next run.
+- `lever tree path` prints the store's path.
+
+### Limits of the host
+
+- The store must be on a local POSIX filesystem: NFS, SMB and exFAT are not supported (locks and
+  the 0700 owner check need it).
+- On Linux, tree backups need kernel 5.8 or later with `openat2` allowed; doctor says so.
+- On a network or FUSE tree, one blocked read can run past the time budget.
+- A snapshot holds about twice `limits.manifest` in memory, plus 64 MiB: about 576 MiB at the
+  default 256 MiB, whatever the agents put in the tree. Lower `limits.manifest` on a small host.
+- **macOS privacy (TCC):** a tree under `~/Documents`, `~/Desktop` or iCloud Drive may be closed to
+  the program that runs lever (a launchd job, for example). The snapshot then commits with the
+  tree root unreadable and doctor's *tree backup* row fails. Move the instance out of those
+  folders. Granting Full Disk Access to the program that runs lever also works, but gives
+  everything run from that terminal or job access to all your files. Files that iCloud has evicted (`dataless`) are recorded without
+  content rather than downloaded.
+- The stat cache trusts the change time the host kernel sets when the share applies a write. If an
+  agent could forge it, a changed file would be missed until it is re-verified, within `reverify`.
+
 ## Troubleshooting quick table
 
 | Symptom | Likely cause | Do |

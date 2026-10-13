@@ -17,7 +17,11 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/treebackup"
 )
+
+// errNoHub labels a keep-vm snapshot whose guest could not be synced.
+var errNoHub = errors.New("the jail did not answer")
 
 // newStopCmd powers the jail machine off but keeps its disk, so `lever up`
 // can resume without a re-apply. Unlike `destroy`, it keeps the machine and
@@ -28,7 +32,7 @@ import (
 // only the hub and the manager.
 func newStopCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag *string
-	var keepVM bool
+	var keepVM, noTreeBackup bool
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Power off the jail, keeping its disk (fast `lever up` resume)",
@@ -100,17 +104,31 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 				}
 			}
 
+			// A tree snapshot only for this instance, never for a --machine target.
+			snapshotTree := ia.app != nil && *machine == "" && !noTreeBackup
 			if keepVM {
-				return stopKeepVM(cmd, hub, m, suspended)
+				err := stopKeepVM(cmd, hub, m, suspended)
+				if snapshotTree {
+					var syncErr error = errNoHub
+					if hub != nil {
+						syncErr = guestSync(cmd.Context(), b)
+					}
+					treeSnapshotAt(cmd, ia.app, st, treebackup.TriggerKeepVM, quiescentKeepVM(suspended, syncErr))
+				}
+				return err
 			}
 			if err := b.Stop(cmd.Context()); err != nil {
 				return err
 			}
 			cmd.Printf("machine %q stopped — disk preserved; run `lever up` to resume.\n", m)
+			if snapshotTree {
+				treeSnapshotAt(cmd, ia.app, st, treebackup.TriggerStop, quiescentAfterStop(b))
+			}
 			return nil
 		},
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
+	cmd.Flags().BoolVar(&noTreeBackup, "no-tree-backup", false, "do not take the tree snapshot this stop would take (tree_backup.at_stop)")
 	cmd.Flags().BoolVar(&keepVM, "keep-vm", false, "suspend the agents and stop the hub and the broker, but leave the VM running (it keeps its memory on the host); the next `lever up` skips the VM boot")
 	return cmd
 }

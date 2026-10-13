@@ -7,6 +7,39 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **A live e2e of the whole stack on the pinned scion (lever#206).** `make test-lima-stack-e2e`
+  brings an instance up with the agent image (built in the guest from the pin, or from
+  `IMAGE_TAR`), starts a worker, sends messages both ways, signs in an operator and a contact
+  through the proxy, checks the experiment fence on the hub and in the proxy, runs doctor, then
+  `lever stop` and `lever up`. `make test-lima-e2e` does not start scion.
+- **Tree backups: host-side snapshots of the instance tree, off by default (lever#74).** With
+  `tree_backup: {enabled: true}`, `lever stop` and `lever destroy` snapshot the tree once the VM is
+  off (`--keep-vm` after the agents are suspended and the guest synced), and
+  `lever tree snapshot` takes one by hand. Snapshots go to `.lever-state/tree-backups/`: content
+  stored once by sha256, one manifest per snapshot. `lever tree list`, `log`, `ls`, `diff` and
+  `cat` show what changed, down to line diffs of text files, with every agent-written name and line
+  escaped; `lever tree restore` writes a snapshot into a new directory outside the tree; `verify`,
+  `delete` and `gc` maintain the store, and `lever tree lock -- <cmd>` runs an off-host copy tool
+  (restic, rsync) against it. The tree is treated as hostile: lever walks it through directory
+  handles checked by device and inode, never follows a link, opens only regular files, never
+  enters a mount, and keeps the manager's broker ticket as a hash only. Every limit is a budget:
+  running out of one makes a snapshot incomplete, recorded and shown, never absent, and a snapshot
+  never shows what it did not see as deleted. Files the last complete snapshot held are looked up
+  and read first, and each worker's directory has its own share of the budgets, so a flood of new
+  names cannot hide damage to existing files. A snapshot holds about twice `limits.manifest`
+  (256 MiB) in memory; on a full disk its manifest is cut to the space lever reserved for it, so
+  it still commits. Retention keeps the last 20, 7 daily and 8 weekly snapshots, plus the newest
+  complete, the newest taken with the VM off and pinned ones. The store keeps runs of zeros as
+  holes, a snapshot adds at most `limits.new` (2 GiB) of new content once one exists,
+  and `max_store` (32 GiB) caps the store: past it, GC deletes the oldest snapshots that are not
+  protected, and doctor warns. A restore creates only links that cannot leave the restored tree,
+  restores hard links as links, never applies group or other write, and renames the git,
+  Mercurial and Jujutsu files through which those tools would run a command. `lever tree diff`
+  prints rows of at most 80 columns, so agent text cannot pass for one of its headers.
+  `lever doctor` has a *tree backup* row.
+
 ### Changed
 
 - **scion is pinned to `b41cd6fe`, its nightly-20261013 (lever#206).** The examples, the release's
@@ -54,14 +87,18 @@ version bump moves the block under the new version heading.
   conduit, artifacts and writes to the experiments admin route for every login, and also an
   agent's port tunnel and delegations and scion's test-identity routes. On an older scion nothing
   changes.
-
-### Added
-
-- **A live e2e of the whole stack on the pinned scion (lever#206).** `make test-lima-stack-e2e`
-  brings an instance up with the agent image (built in the guest from the pin, or from
-  `IMAGE_TAR`), starts a worker, sends messages both ways, signs in an operator and a contact
-  through the proxy, checks the experiment fence on the hub and in the proxy, runs doctor, then
-  `lever stop` and `lever up`. `make test-lima-e2e` does not start scion.
+- **The state directory's inside-the-tree check compares file identity (lever#74).** Lever keeps
+  no ledger, conversation backup, push key or voice model in the state directory when that
+  directory lies in the tree, where agents could read or replace them. The check compared real
+  paths, so an APFS case alias, a firmlink, a bind mount, or a symlink in a part of the path that
+  did not exist yet could place a state directory in the tree while its path read as outside. It
+  now also walks up from the state directory (or, before it exists, its deepest existing
+  ancestor) and compares each directory's device and inode with the tree's, which needs only
+  search permission on the directories above it. On Linux 5.8 and later each mount on the way is
+  looked up in `/proc/self/mountinfo`, so a directory of the tree bind-mounted outside it counts
+  as inside too. When lever cannot complete that walk, the state directory counts as inside, and
+  doctor's rows name the error. The same check runs at config load for `scion.binary`,
+  `scion.source` and the boot files.
 
 ## [0.38.0] - 2026-10-13
 

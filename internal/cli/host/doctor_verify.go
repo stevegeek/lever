@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/agentledger"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/sentledger"
@@ -24,10 +23,8 @@ import (
 // note and directive notice, and the agents treat them as data.
 func checkSentLedger(app *config.App, st state.State) checkResult {
 	const name = "sent ledger"
-	if brokerctl.StateInsideTree(app, st) {
-		return checkResult{name, false, "off: the state directory " + st.Dir + " is inside the tree " + app.Tree +
-			", which agents mount, so the broker keeps no record of what it sends and no agent can verify a lever message",
-			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	if inside, what, fix := stateInTree(app, st); inside {
+		return checkResult{name, false, "off: " + what + " (agents mount the tree), so the broker keeps no record of what it sends and no agent can verify a lever message", fix}
 	}
 	p := st.SentLedger()
 	running := brokerRunning(st)

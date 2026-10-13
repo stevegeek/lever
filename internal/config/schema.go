@@ -455,6 +455,8 @@ type App struct {
 	// GuestProfile "small" trims the Lima guest for a small host; see
 	// EffectiveGuestProfile.
 	GuestProfile string `yaml:"guest_profile"`
+	// TreeBackup snapshots the tree on the host (off by default).
+	TreeBackup TreeBackup `yaml:"tree_backup"`
 
 	dir string // instance root (the config file's directory)
 }

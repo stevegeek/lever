@@ -36,7 +36,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/egress` | Jail egress allowlist as iptables/ip6tables rules. |
 | `internal/fileledger` | Host record of chat-page uploads and agent-shared files, with sha256 and size. |
 | `internal/fizzytool` | Host side of `lever-tool-fizzy`: board-confined operations through the `fizzy` CLI. |
-| `internal/fsutil` | Stdlib-only file helpers (`WriteFileAtomic`). |
+| `internal/fsutil` | File helpers (`WriteFileAtomic`, tree-confined access, `InsideByIdentity`); stdlib only, plus `golang.org/x/sys/unix` for the identity check. |
 | `internal/ghpush` | Host side of `lever-tool-github`: request checks, bundle import into a host mirror, the push, and the opt-in PR and release operations over the GitHub REST API. |
 | `internal/hostledger` | Safe JSON-lines file handling shared by the host-side ledgers. |
 | `internal/proc` | The single seam to external commands (`Runner`, `FakeRunner`). |

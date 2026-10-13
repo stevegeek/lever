@@ -87,6 +87,32 @@ func TestCheckSentLedgerSymlinkAndInsideTree(t *testing.T) {
 	}
 }
 
+// A state directory whose place lever cannot check counts as inside the tree,
+// and the row names the error rather than claiming it is inside.
+func TestStateRowsNameTheIdentityError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	base := t.TempDir()
+	tree := filepath.Join(base, "tree")
+	locked := filepath.Join(base, "locked")
+	for _, d := range []string{tree, filepath.Join(locked, ".lever-state")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o700) })
+	app := &config.App{Tree: tree}
+	st := state.State{Dir: filepath.Join(locked, ".lever-state")}
+	r := checkSentLedger(app, st)
+	if r.ok || !strings.Contains(r.detail, "cannot prove") || !strings.Contains(r.detail, "permission denied") || !strings.Contains(r.fix, "searchable") {
+		t.Fatalf("row = %+v, want a failure naming the error", r)
+	}
+}
+
 func TestCheckGuestClock(t *testing.T) {
 	now := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }

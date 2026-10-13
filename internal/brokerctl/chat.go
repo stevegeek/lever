@@ -1,10 +1,12 @@
 package brokerctl
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -39,14 +41,29 @@ func WebSenders(app *config.App) []string {
 }
 
 // StateInsideTree reports whether the state directory is the tree or inside
-// it, comparing real paths where they resolve.
+// it, by real path or by file identity (fsutil.InsideByIdentity), which also
+// sees case aliases, firmlinks and bind mounts of the tree. A state directory
+// lever cannot place counts as inside.
 func StateInsideTree(app *config.App, st state.State) bool {
+	inside, _ := StateInsideTreeErr(app, st)
+	return inside
+}
+
+// StateInsideTreeErr is StateInsideTree with the reason an identity check
+// failed, for doctor to name. inside is true whenever err is not nil.
+func StateInsideTreeErr(app *config.App, st state.State) (inside bool, err error) {
 	tree, dir := realPath(app.Tree), realPath(st.Dir)
-	rel, err := filepath.Rel(tree, dir)
-	if err != nil {
-		return false
+	if rel, err := filepath.Rel(tree, dir); err == nil &&
+		(rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+		return true, nil
 	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	// A missing state directory is judged by its deepest existing ancestor:
+	// where it would be created.
+	inside, err = fsutil.InsideByIdentity(st.Dir, app.Tree)
+	if err != nil {
+		return true, fmt.Errorf("cannot prove the state directory %s is outside the tree %s: %w", st.Dir, app.Tree, err)
+	}
+	return inside, nil
 }
 
 func realPath(p string) string {

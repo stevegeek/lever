@@ -440,6 +440,69 @@ for f in "$st/broker.out.log" "$st/broker.log" "$st"/tool-logs/*.log; do
   if grep -qF "$key" "$f"; then bad "the API key appears in ${f#$WORK/}"; fi
 done
 
+# 5b. Tree backup: the guest writes hostile names and objects into the tree,
+#     `lever stop` snapshots it with the VM off, the host then damages the
+#     tree, and diff, log, restore and verify must tell the truth without
+#     following anything out of the tree.
+say "tree backup: stop snapshot, host damage, diff, log, restore, verify"
+printf 'tree_backup: {enabled: true}\n' >> "$INST/lever.yaml"
+TREE="$INST/workspace"
+guest_tree_out=$(limactl shell "$MACHINE" -- sh -s <<'SH' 2>&1
+set -u
+cd /lever || exit 1
+mkdir -p docs sub/x/.lever
+printf 'alpha\nbeta\n' > docs/a.md
+printf 'odd name\n' > "$(printf 'odd\377name')"
+ln -s /etc/passwd evil
+printf 'not a ticket\n' > sub/x/.lever/secret
+mkfifo pipe 2>/dev/null && echo fifo=yes || echo fifo=no
+printf 'hidden\n' > locked && chmod 000 locked
+echo state=$(find /lever -name .lever-state | wc -l)
+SH
+)
+printf '%s\n' "$guest_tree_out" | sed 's/^/      | /'
+if printf '%s\n' "$guest_tree_out" | grep -q '^state=0$'; then ok "no .lever-state visible in the guest's tree"; else bad "the guest sees a .lever-state in the tree"; fi
+if ( cd "$INST" && "$LEVER" tree path ) >/dev/null 2>&1; then ok "lever tree path: the state directory is outside the tree by identity"; else bad "lever tree path refused the placement"; fi
+mkdir -p "$WORK/orig"
+cp "$TREE/docs/a.md" "$WORK/orig/a.md"; cp "$TREE/sub/x/.lever/secret" "$WORK/orig/secret"
+stopout="$WORK/stop.out"
+( cd "$INST" && "$LEVER" stop ) > "$stopout" 2>&1; src=$?
+sed 's/^/      | /' "$stopout" | mask_secrets
+if [ "$src" = "0" ] && grep -q '^tree snapshot [0-9TZ-]*: complete' "$stopout"; then ok "lever stop took a complete tree snapshot"; else bad "lever stop (exit $src) printed no complete tree snapshot line"; fi
+listout="$( cd "$INST" && "$LEVER" tree list 2>&1 )"
+printf '%s\n' "$listout" | sed 's/^/      | /'
+if [ "$(printf '%s\n' "$listout" | grep -c ' stop  *vm-off  *complete')" = "1" ]; then ok "one stop, vm-off snapshot listed"; else bad "tree list does not show exactly one vm-off stop snapshot"; fi
+rm -f "$TREE/docs/a.md"
+rm -rf "$TREE/sub" && ln -s "$HOME" "$TREE/sub"
+( cd "$INST" && "$LEVER" tree snapshot ) > "$WORK/snap.out" 2>&1; snrc=$?
+sed 's/^/      | /' "$WORK/snap.out"
+if [ "$snrc" = "0" ]; then ok "lever tree snapshot exit 0 (an unreadable file does not make it incomplete)"; else bad "lever tree snapshot exit $snrc"; fi
+diffout="$( cd "$INST" && "$LEVER" tree diff latest~1 2>&1 )"
+printf '%s\n' "$diffout" | head -n 40 | sed 's/^/      | /'
+printf '%s\n' "$diffout" | grep -q '^D docs/a.md' && ok "diff: D docs/a.md" || bad "diff: no D docs/a.md"
+printf '%s\n' "$diffout" | grep -q '^T sub' && ok "diff: T sub" || bad "diff: no T sub"
+printf '%s\n' "$diffout" | grep -qF '"odd\xffname"' && bad "diff shows the unchanged \\xff name" || ok "diff: the unchanged \\xff name is not reported"
+printf '%s\n' "$diffout" | grep -qE '^[AMLP?] sub/' && bad "diff reports entries below the sub link (content from \$HOME?)" || ok "diff: nothing below the sub link (no \$HOME content)"
+lsout="$( cd "$INST" && "$LEVER" tree ls latest~1 2>&1 )"
+printf '%s\n' "$lsout" | grep -qF '"odd\xffname"' && ok "ls: the \\xff name is quoted" || bad "ls: the \\xff name is not quoted as \"odd\\xffname\""
+logout="$( cd "$INST" && "$LEVER" tree log -- docs/a.md 2>&1 )"
+printf '%s\n' "$logout" | sed 's/^/      | /'
+printf '%s\n' "$logout" | grep -q '  D  absent' && ok "log -- docs/a.md shows the deletion" || bad "log -- docs/a.md does not show the deletion"
+restout="$WORK/restore.out"
+( cd "$INST" && "$LEVER" tree restore latest~1 --to "$WORK/restored" ) > "$restout" 2>&1; rrc=$?
+sed 's/^/      | /' "$restout"
+R="$WORK/restored"
+[ "$rrc" != "0" ] && ok "restore exits non-zero (the unreadable entry)" || bad "restore exit 0 despite an unreadable entry"
+cmp -s "$R/docs/a.md" "$WORK/orig/a.md" && ok "restored docs/a.md matches" || bad "restored docs/a.md differs"
+cmp -s "$R/sub/x/.lever/secret" "$WORK/orig/secret" && ok "restored sub/x/.lever/secret matches" || bad "restored sub/x/.lever/secret differs"
+[ -e "$R/evil" ] || [ -L "$R/evil" ] && bad "the evil link was created" || ok "the evil link was not created"
+grep -q 'evil' "$restout" && ok "the evil link is reported" || bad "the evil link is not reported"
+[ -p "$R/pipe" ] && bad "a FIFO was restored" || ok "no FIFO restored"
+grep -q 'locked' "$restout" && ok "the unreadable entry is reported" || bad "the unreadable entry is not reported"
+[ -e "$R.lever-partial" ] && bad "a .lever-partial was left behind" || ok "no .lever-partial left behind"
+( cd "$INST" && "$LEVER" tree verify ) > "$WORK/verify.out" 2>&1 && ok "lever tree verify passes" || { bad "lever tree verify failed"; sed 's/^/      | /' "$WORK/verify.out"; }
+rm -f "$TREE/sub"
+
 say "teardown"
 pkill -f "lever broker serve.*$INST" 2>/dev/null
 if ( cd "$INST" && "$LEVER" down ); then
@@ -448,6 +511,8 @@ if ( cd "$INST" && "$LEVER" down ); then
   else
     ok "VM torn down"
   fi
+  ntree="$( cd "$INST" && "$LEVER" tree list 2>/dev/null | grep -c '^[0-9]\{8\}T' )"
+  [ "$ntree" = "3" ] && ok "lever down added a destroy snapshot (3 listed)" || bad "tree list shows $ntree snapshots after lever down, want 3"
 else
   bad "lever down failed"
 fi

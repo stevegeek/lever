@@ -156,7 +156,8 @@ doctor_out=""
 doctor_run() { doctor_out=$(cd "$INST" && timeout 900 "$LEVER" doctor 2>&1); }
 doctor_row() { printf '%s\n' "$doctor_out" | grep -E "^(✓|✗|!|-) $1" | head -1; }
 row_ok() { local r; r=$(doctor_row "$1"); echo "      | ${r:-(no row)}" | cut -c1-300; [[ "$r" == ✓* ]]; }
-up() { (cd "$INST" && timeout 3600 "$LEVER" up 2>&1 | tee "$WORK/up.log" | mask_secrets | tail -${1:-25}); }
+# up runs `lever apply`: `lever up` ends by attaching, which needs a terminal.
+up() { (cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tee "$WORK/up.log" | mask_secrets | tail -${1:-25}); }
 
 say "clean slate"
 limactl delete --force "$VM" >/dev/null 2>&1 && echo "deleted stale $VM"
@@ -210,16 +211,16 @@ fi
 say "lever up on scion $SCION_VERSION"
 up 80
 if running; then ok "the manager runs"; else bad "the manager runs"; exit 1; fi
-checkx "the jail's scion is the pin" 'G scion version 2>&1 | grep -q "$SCION_VERSION"'
-G scion version 2>&1 | head -3 | sed 's/^/      | /'
+checkx "the jail runs scion $SCION_VERSION" 'grep -q "scion $SCION_VERSION ok" "$WORK/up.log"'
 rec="$INST/.lever-state/controller.pat.json"
 checkx "the controller PAT has a recorded expiry" 'python3 -c "import json,sys,datetime as d; e=json.load(open(sys.argv[1])).get(\"expires_at\",\"\"); t=d.datetime.fromisoformat(e.replace(\"Z\",\"+00:00\")); n=d.datetime.now(d.timezone.utc); sys.exit(0 if d.timedelta(days=300)<t-n<d.timedelta(days=366) else 1)" "$rec"'
 checkx "the controller PAT carries inbox:read" 'python3 -c "import json,sys; sys.exit(0 if \"inbox:read\" in json.load(open(sys.argv[1]))[\"requested_scopes\"] else 1)" "$rec"'
 
 say "manager, worker and messages"
-mgr agent start worker --task "stack e2e probe" | tail -2 | sed 's/^/      | /'
+# X joins its arguments into one shell line, so no argument here holds a space.
+mgr agent start worker --task probe | tail -2 | sed 's/^/      | /'
 checkx "the manager lists the worker" 'mgr agent list | grep -q worker'
-checkx "the manager messages the worker" 'X exec "lever--$NAME" lever-manager msg send --to worker "stack e2e hello" >/dev/null 2>&1'
+checkx "the manager messages the worker" 'X exec "lever--$NAME" lever-manager msg send --to worker stack-e2e-hello >/dev/null 2>&1'
 checkx "the manager reads its inbox through the broker (notifications)" 'X exec "lever--$NAME" lever-manager msg list >/dev/null 2>&1'
 checkx "lever msg send to the manager" '(cd "$INST" && "$LEVER" msg send --to "$NAME" "stack e2e host note" 2>&1) | grep -q Sent'
 checkx "the controller PAT lists notifications (inbox:read)" '[ "$(hub GET /api/v1/notifications)" = 200 ]'
@@ -233,6 +234,8 @@ done
 say "the experiment fence in the remote proxy"
 code=$(pcode "$OPERATOR" "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "the operator has a live session through the proxy ($code)" '[ "$code" = 200 ]'
+code=$(pcode "$CONTACT" "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "the contact has a live session through the proxy ($code)" '[ "$code" = 200 ]'
 for login in "$OPERATOR" "$CONTACT"; do
 	for p in /api/v1/conduit /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/artifacts/shared/x /api/v1/artifacts/view/x /api/v1/admin/conduit/grant-keys/rotate /auth/test-identity/redeem; do
 		checkx "proxy refuses $p for $login" 'refused "$login" "http://127.0.0.1:$RP$p"'
@@ -244,11 +247,12 @@ done
 say "doctor"
 doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
-check "doctor: scion experiments" row_ok "scion conduit and artifacts"
+check "doctor: scion conduit and artifacts" row_ok "scion conduit and artifacts"
 check "doctor: remote access" row_ok "remote access"
-check "doctor: remote web role" row_ok "remote web role"
 check "doctor: dev user identity" row_ok "dev user identity"
-checkx "doctor: no failed row" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+# Before a login's first sign-in its hub user does not exist, so the web role
+# binds at the next window (`lever stop`, then `lever up`); see below.
+checkx "doctor: no failed row but the pending web role" '! printf "%s\n" "$doctor_out" | grep "^✗ " | grep -vq "^✗ remote web role — the role is not bound yet"'
 
 say "lever stop, then lever up (agents resume)"
 (cd "$INST" && timeout 900 "$LEVER" stop 2>&1 | tail -3)
@@ -256,7 +260,12 @@ up 15
 check "the manager runs after the resume" running
 checkx "the manager still lists the worker" 'mgr agent list | grep -q worker'
 checkx "lever msg send after the resume" '(cd "$INST" && "$LEVER" msg send --to "$NAME" "stack e2e after resume" 2>&1) | grep -q Sent'
-checkx "a re-apply opens no dev-auth window" '! grep -q "dev-auth" "$WORK/up.log"'
+checkx "the apply skipped no dev-auth window" '! grep -q "skipped the dev-auth window" "$WORK/up.log"'
+doctor_run
+printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
+check "doctor: remote web role bound after the sign-ins" row_ok "remote web role"
+check "doctor: scion conduit and artifacts after the resume" row_ok "scion conduit and artifacts"
+checkx "doctor: no failed row after the resume" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
 
 say "teardown"
 (cd "$INST" && "$LEVER" destroy 2>&1 | tail -1)

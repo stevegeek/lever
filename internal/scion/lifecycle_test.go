@@ -272,10 +272,10 @@ func TestResumeStopSuspendResetAuthArgv(t *testing.T) {
 		joined = append(joined, strings.Join(cc.Args, " "))
 	}
 	all := strings.Join(joined, "|")
-	for _, want := range []string{"resume a -g /g/a", "stop a -g /g/a", "suspend a -g /g/a", "resume a --force -g /g/a", "reset-auth a -g /g/a --non-interactive"} {
-		if !strings.Contains(all, want) {
-			t.Fatalf("missing %q in %q", want, all)
-		}
+	want := "resume a -g /g/a --non-interactive|stop a -g /g/a --non-interactive|suspend a -g /g/a --non-interactive|" +
+		"resume a --force -g /g/a --non-interactive|reset-auth a -g /g/a --non-interactive"
+	if all != want {
+		t.Fatalf("argv =\n %q\nwant\n %q", all, want)
 	}
 }
 
@@ -337,6 +337,27 @@ func TestDeleteArgv(t *testing.T) {
 	got := startArgv(f)
 	if want := "delete scratch -g /lever --non-interactive"; got != want {
 		t.Fatalf("argv = %q, want exactly %q", got, want)
+	}
+}
+
+// scion delete exits 0 for a delete the hub accepted (202) but whose
+// completion its own wait did not see; lever does not report that as done.
+func TestDeleteAcceptedButUnconfirmed(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("scion delete", proc.Result{Stdout: "Using hub: http://127.0.0.1:8080\nDeleting agent 'scratch'...\n" +
+		"Agent 'scratch': delete accepted; cannot observe completion; local worktree kept (still running when the wait ended).\n"})
+	c := New(f, Options{})
+	err := c.Delete(context.Background(), "scratch", "/lever")
+	if !errors.Is(err, ErrDeleteUnconfirmed) {
+		t.Fatalf("Delete err = %v, want ErrDeleteUnconfirmed", err)
+	}
+	if !strings.Contains(err.Error(), "still running when the wait ended") || !strings.Contains(err.Error(), "scratch") {
+		t.Fatalf("error lacks scion's reason or the agent: %v", err)
+	}
+	f = proc.NewFakeRunner()
+	f.Script("scion delete", proc.Result{Stdout: "Deleting agent 'scratch'...\nCleaned up locally: scratch\nAgent 'scratch' deleted via Hub.\n"})
+	if err := New(f, Options{}).Delete(context.Background(), "scratch", "/lever"); err != nil {
+		t.Fatalf("confirmed delete: %v", err)
 	}
 }
 
@@ -805,7 +826,7 @@ func TestStartArgvPutsFlagsFirstThenTerminatorThenPositionals(t *testing.T) {
 	args := f.Calls[len(f.Calls)-1].Args
 	want := []string{"-g", "/g/a", "start", "--harness", "claude", "--harness-auth", "oauth-token",
 		"--role", "baseline", "--image", "img:1", "--model", "m1", "--workspace", "workers/a",
-		"--config", "-", "--", "a", "do x"}
+		"--config", "-", "--non-interactive", "--", "a", "do x"}
 	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("argv =\n %q\nwant\n %q", args, want)
 	}
@@ -861,7 +882,7 @@ func TestStartVolumesAndEnvGoOverStdin(t *testing.T) {
 	}
 	last := f.Calls[len(f.Calls)-1]
 	want := []string{"-g", "/g/a", "start", "--harness", "claude", "--harness-auth", "oauth-token",
-		"--role", "baseline", "--workspace", "workers/a", "--config", "-", "--", "a", "do x"}
+		"--role", "baseline", "--workspace", "workers/a", "--config", "-", "--non-interactive", "--", "a", "do x"}
 	if strings.Join(last.Args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("argv =\n %q\nwant\n %q", last.Args, want)
 	}

@@ -2159,7 +2159,7 @@ func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, kno
 	}
 	crec, _, _ := st.LoadControllerPATRecord()
 	checks := []tokenCheck{{"controller", st.LoadControllerPAT, st.LoadControllerPATRecord,
-		controllerPATScopes(controllerLifecycle(ctx, known, crec))}}
+		controllerPATScopes(controllerLifecycle(ctx, known, crec), controllerInbox(ctx, known, crec))}}
 	if remoteEnabled {
 		checks = append(checks, tokenCheck{"remote", st.LoadRemotePAT, st.LoadRemotePATRecord, remotePATScopes()})
 	}

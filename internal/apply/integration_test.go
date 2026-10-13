@@ -125,7 +125,7 @@ func agentState(t *testing.T, machine, runUser, name string) (string, string) {
 	t.Helper()
 	out := orbOut(t, machine, "-u", runUser, "env",
 		"XDG_RUNTIME_DIR=/run/user/501", "PATH=/usr/local/bin:/usr/bin:/bin",
-		"SCION_HUB_ENABLED=true", "SCION_HUB_ENDPOINT=http://127.0.0.1:8080",
+		"SCION_HUB_ENDPOINT=http://127.0.0.1:8080",
 		"scion", "list", "--all", "--format", "json")
 	i := strings.IndexByte(out, '[')
 	if i < 0 {

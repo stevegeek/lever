@@ -808,10 +808,33 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	if err := r.d.Scion.InitProject(ctx, jp); err != nil {
 		return err
 	}
+	if err := r.pinHubProject(ctx, jp); err != nil {
+		return err
+	}
 	if err := r.hubLink(ctx, jp); err != nil {
 		return err
 	}
 	return r.settleProject(ctx, path.Base(jp))
+}
+
+// pinHubProject points the fresh registration at the hub's existing record of
+// this project before the link. The re-init generated a new local ID, and a
+// hub link under the controller PAT refuses an ID the hub does not know (a
+// user token cannot register a project) instead of matching by name. With no
+// record on the hub yet, the link decides as before.
+func (r *run) pinHubProject(ctx context.Context, jp string) error {
+	name := path.Base(jp)
+	id, err := r.d.Scion.HubProjectID(ctx, name)
+	if err != nil {
+		return fmt.Errorf("looking up the hub's record of project %q: %w", name, err)
+	}
+	if id == "" {
+		return nil
+	}
+	if err := r.d.Scion.PinHubProject(ctx, jp, id); err != nil {
+		return fmt.Errorf("pointing %s at hub project %s: %w", jp, id, err)
+	}
+	return nil
 }
 
 // hubLinkRetryDelays are the waits before each retry of a hub link that failed
@@ -2107,6 +2130,10 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 		return fmt.Errorf("start-manager: %s: the delete was sent, but lever could not confirm the manager record is gone (%v); nothing was created. Run `lever up --fresh` again", deleteFailReason, lerr)
 	}
 	if rec := scion.FindAgent(agents, r.app.Name); rec != nil {
+		if errors.Is(derr, scion.ErrDeleteUnconfirmed) {
+			return fmt.Errorf("start-manager: %s: the hub accepted the delete but the manager record is still there (phase %s), so nothing was created. "+
+				"The hub may still be deleting it: check `lever doctor`, then run `lever up --fresh` again", deleteFailReason, scion.BoundedQuote(rec.Phase))
+		}
 		if derr != nil {
 			return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 		}

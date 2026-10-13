@@ -55,6 +55,24 @@ func TestMessageKeepsItsOwnFlagsBeforeTheTerminator(t *testing.T) {
 	}
 }
 
+// scion must never wait on a prompt: the flag precedes the terminator, so it
+// stays a flag.
+func TestMessageAndInboxAreNonInteractive(t *testing.T) {
+	got := msgArgv(t, MsgOpts{To: "agent:w", Body: "hello", Project: "/lever"})
+	want := "scion message -g /lever --non-interactive -- agent:w hello"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("argv = %q, want %q", strings.Join(got, " "), want)
+	}
+	f := proc.NewFakeRunner()
+	f.Script("scion notifications", proc.Result{Stdout: "[]"})
+	if _, err := New(f, Options{}).Inbox(context.Background(), false, "/lever"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(f.Calls[0].Args, " "), "notifications --json --non-interactive --all -g /lever"; got != want {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+}
+
 // TestWorkerReported: the message becomes one marked, bounded line; the
 // status is kept only when the hub could have produced it; every other field
 // is unchanged; a second pass changes nothing.

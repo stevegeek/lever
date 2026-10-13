@@ -325,16 +325,43 @@ const windowCleanupTimeout = 2 * time.Minute
 // agent-role ceiling on the project settings route (agent:manage does not
 // expand to it). Changing this set makes the next apply re-mint.
 //
+// The skill, template and harness_config reads let the token create a
+// baseline agent: a newer hub caps a token-created agent's role at what the
+// token's scopes cover, and baseline's project:read covers those reads. They
+// are read-only and every supported scion knows them.
+//
 // lifecycle adds agent:lifecycle, which a hub that has it requires for start,
 // stop, suspend and resume of an existing agent by a user token; a refused
-// resume answers 409 "already exists". An older hub rejects the unknown scope,
-// so it is added only when the jail's scion knows it.
-func controllerPATScopes(lifecycle bool) []string {
-	s := []string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update"}
+// resume answers 409 "already exists". inbox adds inbox:read, which a hub that
+// has it requires to list notifications (the broker inbox and the manager
+// watch). An older hub rejects an unknown scope, so each is added only when
+// the jail's scion knows it.
+func controllerPATScopes(lifecycle, inbox bool) []string {
+	s := []string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update",
+		"skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list"}
 	if lifecycle {
 		s = append(s, lifecycleScope)
 	}
+	if inbox {
+		s = append(s, inboxReadScope)
+	}
 	return s
+}
+
+// inboxReadScope is the UAT scope that lists the caller's notifications.
+const inboxReadScope = "inbox:read"
+
+// controllerInbox decides whether the controller PAT carries inbox:read, as
+// controllerLifecycle does for agent:lifecycle: what the jail's scion says or,
+// when it cannot be asked, what the token on disk was minted with. No alias
+// expands to it.
+func controllerInbox(ctx context.Context, known scopeKnownFunc, rec state.PATRecord) bool {
+	if known != nil {
+		if has, err := known(ctx, inboxReadScope); err == nil {
+			return has
+		}
+	}
+	return slices.Contains(rec.Requested, inboxReadScope)
 }
 
 // controllerLifecycle decides whether the controller PAT carries
@@ -494,7 +521,7 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	// The jail's scion answers this with the hub down, so a pin upgrade followed
 	// by `lever up` re-mints while no container runs.
 	clifecycle := controllerLifecycle(ctx, o.ScopeKnown, crec)
-	controllerScopes := controllerPATScopes(clifecycle)
+	controllerScopes := controllerPATScopes(clifecycle, controllerInbox(ctx, o.ScopeKnown, crec))
 	controllerReason := patMintReason(ctok, crec, cfound, controllerScopes, now)
 	urgent := patUrgent(ctok, crec, cfound, controllerScopes, now)
 	remoteReason := ""

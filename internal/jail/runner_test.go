@@ -63,7 +63,7 @@ func TestPrefixIsBackendShaped(t *testing.T) {
 	// netns, so SCION_FORCE_HOST_NETWORK is NOT emitted.
 	want := []string{"limactl", "shell", "lever-x", "env",
 		"XDG_RUNTIME_DIR=/run/user/501", "PATH=/usr/local/bin:/usr/bin:/bin",
-		"SCION_HUB_ENABLED=true", "A=1", "true"}
+		"A=1", "true"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv =\n %v\nwant\n %v", got, want)
 	}

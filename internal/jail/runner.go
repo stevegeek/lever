@@ -61,7 +61,6 @@ func (r *Runner) jailEnv() []string {
 	env := []string{
 		"XDG_RUNTIME_DIR=/run/user/" + r.cfg.UID,
 		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"SCION_HUB_ENABLED=true",
 	}
 	if r.cfg.ForceHostNetwork {
 		env = append(env, "SCION_FORCE_HOST_NETWORK=1")

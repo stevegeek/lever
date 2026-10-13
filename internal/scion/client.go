@@ -96,8 +96,10 @@ func (c *Client) currentHubToken() string {
 	return ""
 }
 
+// env selects the hub by SCION_HUB_ENDPOINT alone: it puts scion in hub
+// context on every pin lever supports, whatever the settings files say.
 func (c *Client) env() map[string]string {
-	m := map[string]string{"SCION_HUB_ENABLED": "true"}
+	m := map[string]string{}
 	if c.hubEndpoint != "" {
 		m["SCION_HUB_ENDPOINT"] = c.hubEndpoint
 	}
@@ -106,6 +108,12 @@ func (c *Client) env() map[string]string {
 	}
 	return m
 }
+
+// nonInteractive is on every scion command lever runs without a terminal.
+// scion answers a prompt with no terminal by its default, which is often No;
+// with the flag, a prompt either takes its Yes path or fails naming the flag
+// it needs, and never waits on stdin.
+const nonInteractive = "--non-interactive"
 
 func projectFlag(project string) []string {
 	if project == "" {

@@ -2015,7 +2015,7 @@ func TestCheckPATTokensFailsNearExpiry(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "tok")
 	now := time.Now()
-	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false), ExpiresAt: now.Add(3 * 24 * time.Hour)}); err != nil {
+	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false, false), ExpiresAt: now.Add(3 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	r := checkPATTokens(context.Background(), st, false, nil, now)

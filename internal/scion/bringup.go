@@ -37,6 +37,21 @@ func notRunning(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "server daemon is not running")
 }
 
+// startGaveUpWaiting reports whether err is scion server start giving up its
+// own /healthz wait (about 30 s, cmd/server_start_ready.go) while the daemon
+// it launched is still running. That daemon owns the pid file and may only be
+// slow, so the start counts as done and lever's longer waitHubReady decides.
+// A daemon that exited during the wait is worded differently and stays a
+// failure.
+func startGaveUpWaiting(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "server did not become ready within") &&
+		strings.Contains(s, "The server process is still running")
+}
+
 // IsBrokerUnavailable reports whether err is the bring-up race where the hub
 // serves before its runtime broker has registered. scion words it three ways:
 //   - scion start: "No runtime brokers available".
@@ -203,7 +218,7 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 				inGuest = false
 			}
 		}
-		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json")
+		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
 		if lastErr == nil || isHubAuthRefusal(lastErr) {
 			return true, nil
 		}
@@ -355,7 +370,7 @@ func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) err
 // backstop. Only ctx cancellation returns an error. project is passed only to
 // avoid scion's "no project" resolution failure; hub brokers is hub-wide.
 func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, error) {
-	args := append([]string{"hub", "brokers", "--format", "json"}, projectFlag(project)...)
+	args := append([]string{"hub", "brokers", "--format", "json", nonInteractive}, projectFlag(project)...)
 	budget := time.Duration(c.brokerReadyAttempts) * c.brokerReadyInterval
 	deadline := time.Now().Add(budget)
 	for {
@@ -410,7 +425,7 @@ func (c *Client) InitMachine(ctx context.Context) error {
 
 // ConfigSetGlobal sets a global scion config key (e.g. image_registry=scionlocal).
 func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
-	_, err := c.run(ctx, "", "config", "set", "--global", key, value)
+	_, err := c.run(ctx, "", "config", "set", "--global", nonInteractive, key, value)
 	return err
 }
 
@@ -419,7 +434,7 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 // project's own, in that precedence.
 func (c *Client) ConfigGetProject(ctx context.Context, projectDir, key string) (string, error) {
 	// runValue: the result is compared against an expected value.
-	return c.runValue(ctx, projectDir, "config", "get", key)
+	return c.runValue(ctx, projectDir, "config", "get", nonInteractive, key)
 }
 
 // ConfigSetProject sets a scion config key at PROJECT scope, resolved from
@@ -429,7 +444,7 @@ func (c *Client) ConfigGetProject(ctx context.Context, projectDir, key string) (
 // machine, then project settings, and writes default_template: default into
 // the project's own settings at registration.
 func (c *Client) ConfigSetProject(ctx context.Context, projectDir, key, value string) error {
-	_, err := c.run(ctx, projectDir, "config", "set", key, value)
+	_, err := c.run(ctx, projectDir, "config", "set", nonInteractive, key, value)
 	return err
 }
 
@@ -497,11 +512,14 @@ type ServerOpts struct {
 }
 
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises
-// and returns.
+// and returns once waitHubReady sees the hub answer.
 //
 // The options describe a start, not a desired state: a running daemon keeps
 // its argv, and this call tolerates scion's "already running" refusal. A
 // caller that needs a changed option to take effect must ServerStop first.
+//
+// scion's own readiness give-up (startGaveUpWaiting) is not a failure, even
+// with Exclusive: the daemon is the one this call launched.
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	if o.DisableWeb && o.EnableWeb {
 		return errors.New("scion server start: EnableWeb and DisableWeb are mutually exclusive")
@@ -538,7 +556,7 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	_, _ = c.serverPIDProbe(ctx)
 	// runSecret: the argv carries the session secret, which redactArgs does
 	// not know. The scrub is textual, so AlreadyRunning still matches.
-	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && (o.Exclusive || !AlreadyRunning(err)) {
+	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && !startGaveUpWaiting(err) && (o.Exclusive || !AlreadyRunning(err)) {
 		return err
 	}
 	return c.waitHubReady(ctx, o.Progress)
@@ -625,7 +643,7 @@ func (c *Client) waitPIDGone(ctx context.Context, pid int) error {
 // encoding=raw on every non-@file value. Encoding it here would hand the
 // agent a corrupt credential. An older pin fails loudly (errBase64Pin).
 func (c *Client) SecretSet(ctx context.Context, key, value string) error {
-	_, err := c.runSecret(ctx, "", value, "hub", "env", "set", "--secret", "--always", key, value)
+	_, err := c.runSecret(ctx, "", value, "hub", "env", "set", "--secret", "--always", nonInteractive, key, value)
 	return secretSetErr(key, err)
 }
 
@@ -660,6 +678,6 @@ var errBase64Pin = errors.New(
 // --always is needed as in SecretSet: an as_needed variable no harness
 // declares is never delivered.
 func (c *Client) EnvSet(ctx context.Context, projectDir, key, value string) error {
-	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", "--always", key+"="+value)
+	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", "--always", nonInteractive, key+"="+value)
 	return err
 }

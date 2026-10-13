@@ -921,10 +921,20 @@ directory or the store. `--path` restores those subtrees (and their parent direc
   renamed git file and stripped mode bit. The exit status is 0 only when everything selected was
   restored.
 
-**Copying back into the tree:** stop the instance, run `lever tree snapshot` and
-`lever tree diff latest~1`, and check that no directory became a link. Then copy with
-`rsync -r --no-links` or `cp -P`, never with plain `cp -r`, which follows links the agents left in
-the tree.
+**Copying back into the tree**, from a restore of snapshot `<id>` into `<dir>`:
+
+1. `lever stop`, so that no agent writes while you copy.
+2. `lever tree snapshot`, then `lever tree diff <id> latest -- <paths>`: check that no directory on
+   the way to what you copy back became a link (a `T` or `L` line). A copy into the tree follows
+   such a link out of it.
+3. Copy with `rsync -r --no-links --checksum <dir>/ <tree>/` (or only the paths you need), or with
+   `cp -RP <dir>/. <tree>/`; never with plain `cp -r`, which follows links the agents left in the
+   tree. `--checksum` matters: the restore gives every file its recorded modification time, and
+   rsync's default check skips a file whose size and time match, so a file an agent damaged but
+   kept at the same size and time would stay damaged. `cp -RP` copies every file.
+4. `lever tree snapshot` again, and `lever tree diff <id> latest -- <paths>` must show no `M`, `T`,
+   `L` or `D` line for what you copied back. A `P` line is a mode the restore did not keep (files
+   are 0600 unless `--keep-modes`).
 
 ### Retention and garbage collection
 

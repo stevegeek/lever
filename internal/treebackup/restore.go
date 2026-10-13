@@ -82,7 +82,8 @@ const neutralSuffix = ".lever-restored"
 
 // RestoreWarning is printed after every restore.
 const RestoreWarning = "restored content was written by agents: inspect it before running anything in it; " +
-	"copy back with `rsync -r --no-links` after `lever tree diff` shows no directory became a link"
+	"copy back with `rsync -r --no-links --checksum` after `lever tree diff` shows no directory became a link, " +
+	"then take a snapshot and check with `lever tree diff` that what you copied back shows no change"
 
 // OK reports whether everything selected was restored. Unstable files,
 // neutralised version-control files and stripped mode bits are restored, so they do not

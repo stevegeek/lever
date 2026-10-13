@@ -142,6 +142,13 @@ expand to it). It is:
     warning; one the instance needs (no controller token, an expired one, a scope change) fails the
     apply and names the repair: `lever stop`, then `lever up`.
 
+  The window also links the jail's runtime broker to the project: scion links a broker only for a
+  caller allowed to update it, which no hub token can be, so the controller PAT cannot. Its hub
+  link, as the dev identity, links the broker the live hub registered. On a fresh instance the
+  first window runs before the live hub ever registered one, so once the hub's broker is up,
+  bring-up checks (with the controller PAT) that the project lists a broker and, when it lists
+  none, runs the window again and starts the hub again.
+
   An interrupted apply (SIGINT, SIGTERM) still stops the throwaway, deletes the dev token and, when
   the window failed, starts the live hub again. `lever doctor`'s `dev-auth window` row fails if a
   hub answers on the jail's 127.0.0.1:48080 or the dev token file exists.

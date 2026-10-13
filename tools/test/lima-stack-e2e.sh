@@ -208,7 +208,7 @@ if [ -z "${IMAGE_TAR:-}" ]; then
 fi
 
 say "lever up on scion $SCION_VERSION"
-up 30
+up 80
 if running; then ok "the manager runs"; else bad "the manager runs"; exit 1; fi
 checkx "the jail's scion is the pin" 'G scion version 2>&1 | grep -q "$SCION_VERSION"'
 G scion version 2>&1 | head -3 | sed 's/^/      | /'

@@ -25,6 +25,13 @@ version bump moves the block under the new version heading.
   template and harness-config scopes the baseline role covers, and `inbox:read` when the jail's
   scion knows it. The re-mint needs the dev-auth window, which opens only while no container runs:
   after upgrading, run `lever stop`, then `lever up`.
+- **The jail's runtime broker is linked to the project as the dev identity (lever#206).** The new
+  scion links a broker to a project only for a caller allowed to update that broker, which no
+  hub token can be, so the controller token's hub link no longer links it and no agent could
+  start ("no runtime brokers available"). When the instance's hub project lists no broker once
+  the hub's broker has registered (on a fresh instance, the first bring-up), lever runs the
+  dev-auth window again, whose hub link links it, and starts the hub again. Beside running
+  containers the apply fails with `lever stop`, then `lever up`.
 - **The remote proxy follows the new hub (lever#206).** A contact may send `offer_wake`, which the
   hub's web chat now sends on every message (never `wake`: a contact wakes a worker only through
   the chat page). The hub's named SSE heartbeat passes through to the browser, a duplicate send's

@@ -71,6 +71,9 @@ func fillDeps(d Deps) Deps {
 	if d.EnsureHubExperimentsOff == nil {
 		d.EnsureHubExperimentsOff = func(context.Context) error { return nil }
 	}
+	if d.EnsureProjectProvider == nil {
+		d.EnsureProjectProvider = func(context.Context, string) (bool, error) { return false, nil }
+	}
 	if d.WaitBrokerReady == nil {
 		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
 	}
@@ -2801,6 +2804,58 @@ func TestRegisterRepairsHubEndpointOnTheSkipPath(t *testing.T) {
 	}
 	if len(repaired) != 1 || repaired[0] != "/lever" {
 		t.Fatalf("RepairScionHubEndpoint calls = %+v, want [/lever]", repaired)
+	}
+}
+
+// The provider repair runs on the register paths; its hub link against the
+// window's throwaway hub needs the endpoint repaired again, and its failure
+// stops the bring-up before any agent starts.
+func TestRegisterLinksAProviderBeforeSettling(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		linked  bool
+		err     error
+		repairs int
+	}{
+		{"linked already", false, nil, 1},
+		{"linked now", true, nil, 2},
+		{"refused", false, errors.New("containers are running"), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f := scionOKRunner()
+			app := helloApp(tree)
+			repairs, stripped := 0, 0
+			var asked []string
+			alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
+			deps := Deps{
+				JailMount:              "/lever",
+				Scion:                  scion.New(alr, scion.Options{HubEndpoint: testHubEndpoint}),
+				ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
+				RepairScionHubEndpoint: func(context.Context, string) error { repairs++; return nil },
+				EnsureProjectProvider: func(_ context.Context, name string) (bool, error) {
+					asked = append(asked, name)
+					return tc.linked, tc.err
+				},
+				StripProjectSharedDirs: func(context.Context, string) error { stripped++; return nil },
+			}
+			err := runApply(app, deps)
+			if (err != nil) != (tc.err != nil) {
+				t.Fatalf("Run = %v, want error %v", err, tc.err)
+			}
+			if len(asked) != 1 || asked[0] != "lever" {
+				t.Fatalf("EnsureProjectProvider asked for %v, want [lever]", asked)
+			}
+			if repairs != tc.repairs {
+				t.Fatalf("RepairScionHubEndpoint calls = %d, want %d", repairs, tc.repairs)
+			}
+			if tc.err != nil && (stripped != 0 || alr.startCalls+alr.resumeCalls != 0) {
+				t.Fatalf("after a failed provider repair: strip=%d start=%d resume=%d", stripped, alr.startCalls, alr.resumeCalls)
+			}
+		})
 	}
 }
 

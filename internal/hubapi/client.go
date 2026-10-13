@@ -47,6 +47,8 @@ type APIError struct {
 	// not the status (an undecodable body, or an absent project).
 	Status int
 	Msg    string
+	// NoProject marks ProjectID's answer for a name the hub does not list.
+	NoProject bool
 }
 
 func (e *APIError) Error() string { return e.Msg }
@@ -140,7 +142,7 @@ func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string)
 	if len(matched) == 1 {
 		return matched[0].ID, nil
 	}
-	return "", &APIError{Msg: fmt.Sprintf("no project named %q at hub %s (it listed %d project(s))",
+	return "", &APIError{NoProject: true, Msg: fmt.Sprintf("no project named %q at hub %s (it listed %d project(s))",
 		nameOrSlug, endpointHint, len(body.Projects))}
 }
 

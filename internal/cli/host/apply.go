@@ -413,6 +413,9 @@ type patMintOpts struct {
 	// ScopeKnown asks the jail's scion whether it knows a UAT scope. nil: the
 	// recorded variant is kept.
 	ScopeKnown scopeKnownFunc
+	// Require is a reason the window must open even with nothing to mint or
+	// grant; beside running containers the apply then fails with the repair.
+	Require string
 }
 
 func (o patMintOpts) now() time.Time {
@@ -549,13 +552,18 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 	if err != nil {
 		return fmt.Errorf("bootstrap-token: %w", err)
 	}
-	if controllerReason == "" && remoteReason == "" && roleReason == "" && exp.reason == "" {
+	if controllerReason == "" && remoteReason == "" && roleReason == "" && exp.reason == "" && o.Require == "" {
 		return nil // nothing to mint or grant; no dev-auth window
 	}
 	if blocked := windowBlocked(ctx, jr); blocked != "" {
 		why := strings.Join(nonEmpty(controllerReason, remoteReason, roleReason, exp.reason), "; ")
 		if exp.urgent {
 			return experimentsWindowBlocked(exp.reason, blocked)
+		}
+		if o.Require != "" {
+			return fmt.Errorf("bootstrap-token: %s, which needs the dev-auth window, but it cannot open: %s. "+
+				"Agents can reach the jail loopback, and the window's dev-auth hub would hand them admin-grade tokens. "+
+				"Run `lever stop`, then `lever up` (the manager conversation is kept)", o.Require, blocked)
 		}
 		if urgent {
 			return fmt.Errorf("bootstrap-token: the controller token must be minted (%s), but the dev-auth window cannot open: %s. "+
@@ -1195,6 +1203,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		EnsureControllerPAT:     w.ensureControllerPAT,
 		EnsureHubExperimentsOff: w.ensureHubExperimentsOff,
+		EnsureProjectProvider:   w.ensureProjectProvider,
 
 		// RemoveScionProjectConfigs clears stale ~/.scion/project-configs entries
 		// before re-init, so apply does not add a duplicate registration every run.
@@ -1279,7 +1288,13 @@ func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error
 // RestartHub starts the live hub exactly as the scion-server step would, so a
 // window that failed after stopping it does not leave the instance without one.
 func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
-	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), patMintOpts{
+	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), w.patOpts(""))
+}
+
+// patOpts are the window's options for this apply; require is
+// patMintOpts.Require.
+func (w *applyWiring) patOpts(require string) patMintOpts {
+	return patMintOpts{
 		RestartHub: func(ctx context.Context) error {
 			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret)
 			opts.Progress = w.deps.Log
@@ -1287,8 +1302,9 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 		},
 		ScopeKnown: w.sc.KnowsUATScope,
 		// Through the wiring's log: sanitized, and above the progress line.
-		Warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
-	})
+		Warn:    func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
+		Require: require,
+	}
 }
 
 func (w *applyWiring) recordVolumes(ctx context.Context, projectName, agentName string) ([]jail.Mount, error) {

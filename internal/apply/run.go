@@ -199,6 +199,12 @@ type Deps struct {
 	// the repair while containers run. A no-op on a scion without hub
 	// experiments.
 	EnsureHubExperimentsOff func(ctx context.Context) error
+	// EnsureProjectProvider runs after the hub's runtime broker registered:
+	// when the instance's hub project (by name) lists no runtime broker, it
+	// links the jail's broker through the dev-auth window and starts the hub
+	// again, or fails with the repair. A project the hub does not list yet is
+	// left to register-project. linked reports that the window ran.
+	EnsureProjectProvider func(ctx context.Context, projectName string) (linked bool, err error)
 	// WaitBrokerReady blocks until the scion runtime broker is registered and
 	// online. The workstation daemon brings up its Hub API and its runtime broker
 	// separately, so without it the first create or resume races the broker's
@@ -428,6 +434,7 @@ func (d Deps) check() error {
 		{"BrokerHealthy", d.BrokerHealthy == nil},
 		{"EnsureControllerPAT", d.EnsureControllerPAT == nil},
 		{"EnsureHubExperimentsOff", d.EnsureHubExperimentsOff == nil},
+		{"EnsureProjectProvider", d.EnsureProjectProvider == nil},
 		{"WaitBrokerReady", d.WaitBrokerReady == nil},
 		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
 		{"RearmBootstrap", d.RearmBootstrap == nil},
@@ -797,7 +804,7 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
 		}
-		return r.settleProject(ctx, path.Base(jp))
+		return r.settleProject(ctx, jp)
 	}
 
 	// Remove a stale .scion marker file left in the tree by a previous bring-up:
@@ -824,7 +831,7 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	if err := r.hubLink(ctx, jp); err != nil {
 		return err
 	}
-	return r.settleProject(ctx, path.Base(jp))
+	return r.settleProject(ctx, jp)
 }
 
 // pinHubProject points the fresh registration at the hub's existing record of
@@ -875,9 +882,21 @@ func (r *run) hubLink(ctx context.Context, jp string) error {
 }
 
 // settleProject is the hub-side project state both register paths converge on:
-// no cross-agent shared dir, and a role ceiling. Both must hold whether the
+// a runtime broker to start agents on, no cross-agent shared dir, and a role
+// ceiling. Both must hold whether the
 // registration was just made or found sound.
-func (r *run) settleProject(ctx context.Context, projectName string) error {
+func (r *run) settleProject(ctx context.Context, jp string) error {
+	projectName := path.Base(jp)
+	linked, err := r.d.EnsureProjectProvider(ctx, projectName)
+	if err != nil {
+		return err
+	}
+	// The repair ran a hub link against the window's throwaway hub.
+	if linked {
+		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
+			return err
+		}
+	}
 	if err := r.d.StripProjectSharedDirs(ctx, projectName); err != nil {
 		return err
 	}

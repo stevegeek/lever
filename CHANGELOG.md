@@ -7,6 +7,19 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Security
+
+- **The state directory's inside-the-tree check compares file identity (lever#74).** Lever keeps
+  no ledger, conversation backup, push key or voice model in the state directory when that
+  directory lies in the tree, where agents could read or replace them. The check compared real
+  paths, so an APFS case alias, a firmlink, a bind mount, or a symlink in a part of the path that
+  did not exist yet could place a state directory in the tree while its path read as outside. It
+  now also walks up from the state directory (or, before it exists, its deepest existing
+  ancestor) and compares each directory's device and inode with the tree's, which needs only
+  search permission on the directories above it. When lever cannot complete that walk, the state
+  directory counts as inside, and doctor's rows name the error. The same check runs at config load
+  for `scion.binary`, `scion.source` and the boot files.
+
 ## [0.38.0] - 2026-10-13
 
 ### Added

@@ -156,6 +156,17 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `scion.binary`, `scion.source` | must not resolve inside `tree` (an agent could otherwise supply the engine on the next bring-up); `binary`, `source`, `version` are mutually exclusive (checked in `config.Load`). |
 | `scion.binary` | regular file, Linux ELF, architecture matches the guest's; checked host-side at bring-up (`scionbin.VerifyELFArch`) before the file is copied into the jail. |
 
+**Inside the tree, by identity.** The boot files, `scion.binary` and `scion.source` above, and the
+state directory (`.lever-state`, beside `lever.yaml`) count as inside the tree when their real path
+lies in it, or when the walk up from them reaches the tree's own directory, compared by device and
+inode. A path that does not exist yet is walked from its deepest existing directory. The walk sees
+a case alias or firmlink on macOS, and a bind mount of the tree, which a comparison of paths
+misses, and it needs only search permission on the directories above. It cannot see a directory of
+the tree bind-mounted onto a path outside it; only the operator can make that mount. When the walk
+fails, the path counts as inside: config load refuses it and names the error, and a state
+directory that counts as inside turns off everything lever would keep there for agents not to
+reach (the ledgers, conversation backups, push and voice models), with doctor naming the error.
+
 **`scion.binary` is a trust decision, not only a convenience.** The bytes at that path are installed
 as root at `/usr/local/bin/scion` and become the engine every agent runs under. That sits inside the
 operator boundary this section describes — the config already names container images and mount

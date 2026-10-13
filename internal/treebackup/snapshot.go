@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -130,6 +131,11 @@ func Snapshot(ctx context.Context, o SnapshotOptions) (*SnapshotResult, error) {
 		return nil, err
 	}
 	defer s.Close()
+	// A soft limit: the collector works harder near it, so garbage from
+	// the walk does not double what the kept entries need.
+	if lim := memoryLimit(o.Limits); lim < debug.SetMemoryLimit(-1) {
+		defer debug.SetMemoryLimit(debug.SetMemoryLimit(lim))
+	}
 	res, err := snapshot(ctx, s, o, start, now)
 	if errors.Is(err, ErrBusy) {
 		// Written without the snapshot lock, which the other snapshot holds:
@@ -137,6 +143,10 @@ func Snapshot(ctx context.Context, o SnapshotOptions) (*SnapshotResult, error) {
 		writeStatus(s, o, start, nil, err)
 	}
 	return res, err
+}
+
+func memoryLimit(l Limits) int64 {
+	return satAdd(clampMul(uint64(max(l.Manifest, 0)), memoryPerManifest), memorySlack)
 }
 
 // writeStatus records the attempt in status-snapshot.json. A failure to
@@ -307,8 +317,10 @@ func guardIdentities(paths ...string) []DevIno {
 }
 
 // loadBases picks the cache base (the newest valid manifest of this tree)
-// and the known base (the newest complete one). A manifest that fails
-// validation is passed over, never trusted.
+// and the known base (the newest complete one). Each candidate is validated
+// in full here, by a streaming read, and passed over when it fails: it is
+// never trusted. The walk then streams the bases again rather than holding
+// them.
 func loadBases(s *Store, id treeID) (cache, known *Base, err error) {
 	infos, _, err := s.List()
 	if err != nil {
@@ -322,15 +334,12 @@ func loadBases(s *Store, id treeID) (cache, known *Base, err error) {
 		if cache != nil && !h.Complete {
 			continue
 		}
-		r, err := s.Open(infos[i].ID)()
+		open := s.Open(infos[i].ID)
+		vh, err := ValidateAll(open)
 		if err != nil {
 			continue
 		}
-		b, err := LoadBase(r)
-		r.Close()
-		if err != nil {
-			continue
-		}
+		b := &Base{Header: vh, Open: open}
 		if cache == nil {
 			cache = b
 		}

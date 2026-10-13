@@ -579,7 +579,7 @@ load error. Sizes take a number of bytes or a unit (`KiB`, `MiB`, `GiB`, `TiB`, 
 | `limits.file` | size | no | `256MiB` | A larger file is recorded without content (`too-big`). |
 | `limits.read` | size | no | `8GiB` | Bytes read from the tree per snapshot, retries included. |
 | `limits.entries` | int | no | `1000000` | New names listed per snapshot (at most 10 000 000). |
-| `limits.manifest` | size | no | `512MiB` | Encoded size of one snapshot's entries (at most 4 GiB). |
+| `limits.manifest` | size | no | `256MiB` | Encoded size of one snapshot's entries (at most 4 GiB), each charged at its widest encoding: about 550 000 entries at the default. A snapshot holds about twice this in memory, plus 64 MiB. |
 | `limits.dir_entries` | int | no | `100000` | Names read from one directory. |
 | `limits.depth` | int | no | `128` | Directory depth (at most 4096). |
 | `limits.path` | int | no | `4096` | Bytes of one path (at most 4096). |

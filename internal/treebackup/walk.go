@@ -16,33 +16,44 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // DevIno identifies a file by device and inode number.
 type DevIno struct{ Dev, Ino uint64 }
 
-// Base is an earlier snapshot of the same tree, entries in manifest order.
+// Base is an earlier snapshot of the same tree. Its entries are streamed
+// from Open each time they are needed and never held, so a base costs the
+// walk no memory per entry. Entries, when set, are used instead of Open.
 type Base struct {
 	Header  *Header
+	Open    OpenManifest
 	Entries []Entry
 }
 
-// LoadBase reads r to the end, so the reader's validation has run, and keeps
-// the entries. Any error means the manifest must not be used as a base.
-func LoadBase(r EntryReader) (*Base, error) {
-	b := &Base{Header: r.Header()}
+// each passes the base's entries to f in manifest order until f returns
+// false. f must not keep e or its slices. The manifest was validated in
+// full before the walk; a read error now (the store is the host user's
+// own) ends the stream early, and the walk does without the rest.
+func (b *Base) each(f func(e *Entry) bool) {
+	if b.Open == nil {
+		for i := range b.Entries {
+			if !f(&b.Entries[i]) {
+				return
+			}
+		}
+		return
+	}
+	r, err := b.Open()
+	if err != nil {
+		return
+	}
+	defer r.Close()
 	for {
 		e, err := r.Next()
-		if err == io.EOF {
-			return b, nil
+		if err != nil || !f(e) {
+			return
 		}
-		if err != nil {
-			return nil, err
-		}
-		c := *e
-		c.Path = bytes.Clone(e.Path)
-		c.Target = bytes.Clone(e.Target)
-		b.Entries = append(b.Entries, c)
 	}
 }
 
@@ -78,6 +89,10 @@ type WalkOptions struct {
 	// deadline, with reason interrupted. ctx is cancelled on the second.
 	Interrupt <-chan struct{}
 	Sink      BlobSink
+	// ManifestSpace, when positive and below Limits.Manifest, is the
+	// manifest budget instead: the space the manifest is sure to have.
+	// Running out of it truncates with reason disk.
+	ManifestSpace int64
 }
 
 // WalkResult is one walked tree, ready for the manifest.
@@ -298,13 +313,17 @@ type node struct {
 	// and set the state that explains any shortfall.
 	listed    bool
 	attempted bool
+	// knownContent: the known base captured this path's content.
+	// cacheHit: the stat cache supplied e.SHA256 and e.Verified.
+	knownContent bool
+	cacheHit     bool
 	// listedMtime and listedCtime are the directory's times right after its listing,
 	// for the recheck once every listing is done.
 	listedMtime, listedCtime int64
-	// kids are the names of walkable child directories.
-	kids   []string
-	known  *Entry
-	cached *Entry
+	// listedNames counts the names phase B read from this directory.
+	listedNames int64
+	// kids are the walkable child directories.
+	kids []*node
 }
 
 // writerRoot is the tree root or a worker directory: each gets a share of
@@ -327,21 +346,24 @@ type walker struct {
 	dev0     uint64
 	root     RootInfo
 	rootNode *node
-	nodes    map[string]*node
-	all      []*node
-	visited  map[DevIno]bool
-	guard    map[DevIno]bool
-	dirs     *dirCache
-	excl     excluder
+	// nodes is keyed by pathKey(e.Path), which shares the path's bytes.
+	nodes   map[string]*node
+	all     []*node
+	visited map[DevIno]bool
+	guard   map[DevIno]bool
+	dirs    *dirCache
+	excl    excluder
 
 	pathMax  int
 	manifest int64 // left, shared by phase A, worker roots and phase B
-	entries  int64 // left for phase B
-	stop     Reason
+	// manifestReason is what running out of manifest truncates with: disk
+	// when the space for the manifest, not the limit, set the budget.
+	manifestReason Reason
+	entries        int64 // left for phase B
+	stop           Reason
 
 	roots       []*writerRoot
 	rootsByPath map[string]*writerRoot
-	listedCount map[string]int64
 	badname     int64
 
 	pass2   bool
@@ -438,24 +460,27 @@ func Walk(ctx context.Context, o WalkOptions) (*WalkResult, error) {
 
 func newWalker(ctx context.Context, o WalkOptions) *walker {
 	w := &walker{
-		ctx:         ctx,
-		o:           o,
-		t:           o.Start,
-		sink:        o.Sink,
-		rootfd:      -1,
-		nodes:       make(map[string]*node),
-		visited:     make(map[DevIno]bool),
-		guard:       make(map[DevIno]bool),
-		excl:        newExcluder(o.Exclude),
-		pathMax:     int(min(max(o.Limits.Path, 0), MaxPathCap)),
-		manifest:    o.Limits.Manifest,
-		entries:     o.Limits.Entries,
-		rootsByPath: make(map[string]*writerRoot),
-		listedCount: make(map[string]int64),
-		linkBuf:     make([]byte, MaxTargetCap),
+		ctx:            ctx,
+		o:              o,
+		t:              o.Start,
+		sink:           o.Sink,
+		rootfd:         -1,
+		nodes:          make(map[string]*node),
+		visited:        make(map[DevIno]bool),
+		guard:          make(map[DevIno]bool),
+		excl:           newExcluder(o.Exclude),
+		pathMax:        int(min(max(o.Limits.Path, 0), MaxPathCap)),
+		manifest:       o.Limits.Manifest,
+		manifestReason: ReasonManifest,
+		entries:        o.Limits.Entries,
+		rootsByPath:    make(map[string]*writerRoot),
+		linkBuf:        make([]byte, MaxTargetCap),
 	}
 	if w.t.IsZero() {
 		w.t = time.Now()
+	}
+	if o.ManifestSpace > 0 && o.ManifestSpace < w.manifest {
+		w.manifest, w.manifestReason = o.ManifestSpace, ReasonDisk
 	}
 	for _, g := range o.Guard {
 		w.guard[g] = true
@@ -672,17 +697,23 @@ func (w *walker) lookupDir(p *probe, dirfd int, name string, st *sysStat) {
 	sysClose(fd)
 }
 
+// pathKey is p as a map key without a copy of its bytes. The paths of
+// recorded entries are never written after they are made, which is what
+// makes sharing them sound; each path is then held once, not once more per
+// map.
+func pathKey(p []byte) string { return unsafe.String(unsafe.SliceData(p), len(p)) }
+
+// add records a probe. Its path must not be written afterwards (pathKey).
 func (w *walker) add(p probe) *node {
 	n := &node{e: p.e}
-	key := string(p.e.Path)
-	w.nodes[key] = n
+	w.nodes[pathKey(p.e.Path)] = n
 	w.all = append(w.all, n)
 	if p.fd >= 0 {
 		n.walkable = true
 		w.visited[DevIno{p.e.Dev, p.e.Ino}] = true
-		w.dirs.put(key, p.fd, DevIno{p.e.Dev, p.e.Ino})
+		w.dirs.put(string(p.e.Path), p.fd, DevIno{p.e.Dev, p.e.Ino})
 		parent := w.nodeAt(ParentOf(p.e.Path))
-		parent.kids = append(parent.kids, string(BaseName(p.e.Path)))
+		parent.kids = append(parent.kids, n)
 	}
 	return n
 }
@@ -702,40 +733,41 @@ func (w *walker) phaseA() error {
 		return nil
 	}
 	var reserved int64
-	for i := range w.o.Known.Entries {
-		reserved += maxLineBytes(w.o.Known.Entries[i].Path, nil)
-	}
+	w.o.Known.each(func(ke *Entry) bool {
+		reserved += maxLineBytes(ke.Path, nil)
+		return true
+	})
 	reserve := reserved <= w.manifest
 	if reserve {
 		w.manifest -= reserved
 		defer func() { w.manifest += reserved }()
 	}
-	for i := range w.o.Known.Entries {
-		ke := &w.o.Known.Entries[i]
-		if r, err := w.halted(); err != nil {
-			return err
-		} else if r != "" {
-			return nil
+	var err error
+	w.o.Known.each(func(ke *Entry) bool {
+		var r Reason
+		if r, err = w.halted(); err != nil || r != "" {
+			return false
 		}
 		pp := ParentOf(ke.Path)
 		pn := w.nodeAt(pp)
 		if pn == nil || !pn.walkable || w.nodes[string(ke.Path)] != nil {
-			continue
+			return true
 		}
 		if !w.pathFits(ke.Path) {
 			w.truncate(pn, ReasonPath)
-			continue
+			return true
 		}
 		dfd, ok := w.dirs.get(pp)
 		if !ok {
-			continue
+			return true
 		}
-		p, gone, err := w.lookup(dfd, ke.Path, string(BaseName(ke.Path)))
-		if err != nil {
-			return err
+		p, gone, lerr := w.lookup(dfd, bytes.Clone(ke.Path), string(BaseName(ke.Path)))
+		if lerr != nil {
+			err = lerr
+			return false
 		}
 		if gone {
-			continue
+			return true
 		}
 		cost := maxLineBytes(p.e.Path, p.e.Target)
 		var held int64
@@ -744,14 +776,15 @@ func (w *walker) phaseA() error {
 		}
 		if cost-held > w.manifest {
 			p.release()
-			w.truncate(pn, ReasonManifest)
-			continue
+			w.truncate(pn, w.manifestReason)
+			return true
 		}
 		w.manifest -= cost - held
 		reserved -= held
 		w.add(p)
-	}
-	return nil
+		return true
+	})
+	return err
 }
 
 func (w *walker) setupRoots() error {
@@ -773,9 +806,10 @@ func (w *walker) setupRoots() error {
 		}
 	}
 	if w.o.Known != nil && len(w.roots) > 1 {
-		for i := range w.o.Known.Entries {
-			w.rootOf(w.o.Known.Entries[i].Path).known++
-		}
+		w.o.Known.each(func(e *Entry) bool {
+			w.rootOf(e.Path).known++
+			return true
+		})
 	}
 	sort.SliceStable(w.roots, func(i, j int) bool {
 		if w.roots[i].known != w.roots[j].known {
@@ -913,19 +947,17 @@ func (w *walker) walkDir(r *writerRoot, n *node, fd int) error {
 		return err
 	}
 	kids := n.kids
-	slices.Sort(kids)
+	slices.SortFunc(kids, func(a, b *node) int { return bytes.Compare(BaseName(a.e.Path), BaseName(b.e.Path)) })
 	kids = slices.Compact(kids)
 	n.kids = kids
-	for _, name := range kids {
+	for _, kn := range kids {
 		if reason, err := w.halted(); err != nil {
 			return err
 		} else if reason != "" {
 			r.stop = reason
 			return nil
 		}
-		rel := joinRel(n.e.Path, name)
-		kn := w.nodes[string(rel)]
-		if kn == nil || !kn.walkable || kn.listed || w.rootsByPath[string(rel)] != nil {
+		if !kn.walkable || kn.listed || w.rootsByPath[string(kn.e.Path)] != nil {
 			continue
 		}
 		cfd, ok := w.openChild(fd, kn)
@@ -966,6 +998,7 @@ func (w *walker) listDir(r *writerRoot, n *node, fd int) error {
 
 	var names []string
 	var count int64
+	var buf []byte
 	full := true
 read:
 	for chunk := 0; ; chunk++ {
@@ -988,7 +1021,7 @@ read:
 			}
 			r.eLeft--
 			r.eUsed++
-			w.listedCount[string(dir)]++
+			n.listedNames++
 			if count >= w.o.Limits.DirEntries {
 				w.truncate(n, ReasonDirEntries)
 				full = false
@@ -999,17 +1032,22 @@ read:
 				w.badname++
 				continue
 			}
-			rel := joinRel(dir, name)
-			if w.nodes[string(rel)] != nil {
+			// The path is built in a reused buffer: only the names that get
+			// an entry get their own copy, in the lookup below.
+			buf = append(append(append(buf[:0], dir...), '/'), name...)
+			if len(dir) == 0 {
+				buf = append(buf[:0], name...)
+			}
+			if w.nodes[string(buf)] != nil {
 				continue
 			}
-			if !w.pathFits(rel) {
+			if !w.pathFits(buf) {
 				w.truncate(n, ReasonPath)
 				continue
 			}
-			cost := maxLineBytes(rel, nil)
+			cost := maxLineBytes(buf, nil)
 			if cost > r.mLeft {
-				r.stop = ReasonManifest
+				r.stop = w.manifestReason
 				full = false
 				break read
 			}
@@ -1061,7 +1099,7 @@ read:
 			extra := maxLineBytes(rel, p.e.Target) - maxLineBytes(rel, nil)
 			if extra > r.mLeft {
 				p.release()
-				r.stop = ReasonManifest
+				r.stop = w.manifestReason
 				full = false
 				break
 			}
@@ -1167,10 +1205,18 @@ func (w *walker) finishPass1() {
 }
 
 func (w *walker) fillResult(res *WalkResult) {
+	res.Flood = w.flood()
+	// Every node becomes garbage as its entry is copied out (a parent comes
+	// before its children, and the maps are dropped first), so the nodes
+	// and the entries are not both held in full.
+	w.nodes, w.visited = nil, nil
+	w.rootNode.kids = nil
 	res.Root = w.root
 	res.Entries = make([]Entry, len(w.all))
 	for i, n := range w.all {
 		res.Entries[i] = n.e
+		n.kids = nil
+		w.all[i] = nil
 	}
 	res.Badname = w.badname
 	res.Bytes = w.bytes
@@ -1182,50 +1228,65 @@ func (w *walker) fillResult(res *WalkResult) {
 		}
 	}
 	res.UnreadableNew = w.unreadableNew(res.Entries)
+}
 
-	type fl struct {
-		at    string
-		count int64
-	}
-	var fs []fl
-	for at, c := range w.listedCount {
-		fs = append(fs, fl{at, c})
-	}
-	slices.SortFunc(fs, func(a, b fl) int {
-		if a.count != b.count {
-			if a.count > b.count {
-				return -1
-			}
-			return 1
+// flood returns the three directories phase B read the most names from.
+func (w *walker) flood() []Flood {
+	var top []*node
+	better := func(a, b *node) bool {
+		if a.listedNames != b.listedNames {
+			return a.listedNames > b.listedNames
 		}
-		return ComparePaths([]byte(a.at), []byte(b.at))
-	})
-	for i := 0; i < len(fs) && i < 3; i++ {
-		res.Flood = append(res.Flood, Flood{At: []byte(fs[i].at), HasAt: fs[i].at != "", Count: fs[i].count})
+		return ComparePaths(a.e.Path, b.e.Path) < 0
 	}
+	consider := func(n *node) {
+		if n.listedNames == 0 {
+			return
+		}
+		top = append(top, n)
+		for k := len(top) - 1; k > 0 && better(top[k], top[k-1]); k-- {
+			top[k], top[k-1] = top[k-1], top[k]
+		}
+		if len(top) > 3 {
+			top = top[:3]
+		}
+	}
+	consider(w.rootNode)
+	for _, n := range w.all {
+		consider(n)
+	}
+	var out []Flood
+	for _, n := range top {
+		out = append(out, Flood{At: n.e.Path, HasAt: n != w.rootNode, Count: n.listedNames})
+	}
+	return out
 }
 
 // unreadableNew counts unreadable entries whose path was not unreadable in
-// the cache base. Both lists are in manifest order.
+// the cache base. Both are in manifest order.
 func (w *walker) unreadableNew(es []Entry) int64 {
-	var base []Entry
-	if w.o.Cache != nil {
-		base = w.o.Cache.Entries
-	}
 	var n int64
-	j := 0
-	for i := range es {
-		if es[i].State != StateUnreadable {
-			continue
+	i := 0
+	countUntil := func(p []byte) {
+		for ; i < len(es) && (p == nil || ComparePaths(es[i].Path, p) < 0); i++ {
+			if es[i].State == StateUnreadable {
+				n++
+			}
 		}
-		for j < len(base) && ComparePaths(base[j].Path, es[i].Path) < 0 {
-			j++
-		}
-		if j < len(base) && bytes.Equal(base[j].Path, es[i].Path) && base[j].State == StateUnreadable {
-			continue
-		}
-		n++
 	}
+	if w.o.Cache != nil {
+		w.o.Cache.each(func(b *Entry) bool {
+			countUntil(b.Path)
+			if i < len(es) && bytes.Equal(es[i].Path, b.Path) {
+				if es[i].State == StateUnreadable && b.State != StateUnreadable {
+					n++
+				}
+				i++
+			}
+			return i < len(es)
+		})
+	}
+	countUntil(nil)
 	return n
 }
 

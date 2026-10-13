@@ -949,17 +949,25 @@ func TestWalkKnownBaseDeepAndWideTrees(t *testing.T) {
 	}
 }
 
-func TestLoadBase(t *testing.T) {
+func TestBaseStreamsAndStopsAtAnError(t *testing.T) {
 	h := &Header{ID: "x"}
 	es := []Entry{{Path: []byte("b"), Type: TypeFile}, {Path: []byte("a"), Type: TypeDir}}
-	r, _ := memManifest(h, es)()
-	b, err := LoadBase(r)
-	if err != nil || b.Header != h || len(b.Entries) != 2 || string(b.Entries[0].Path) != "a" {
-		t.Fatalf("LoadBase: %v %+v", err, b)
+	var got []string
+	(&Base{Header: h, Open: memManifest(h, es)}).each(func(e *Entry) bool {
+		got = append(got, string(e.Path))
+		return true
+	})
+	if strings.Join(got, ",") != "a,b" {
+		t.Fatalf("streamed %q", got)
 	}
-	bad := &memReader{h: h, entries: es, err: ErrInvalid}
-	if _, err := LoadBase(bad); !errors.Is(err, ErrInvalid) {
-		t.Errorf("LoadBase of an invalid manifest: %v", err)
+	got = nil
+	bad := func() (EntryReader, error) { return &memReader{h: h, entries: es[:1], err: ErrInvalid}, nil }
+	(&Base{Header: h, Open: bad}).each(func(e *Entry) bool {
+		got = append(got, string(e.Path))
+		return true
+	})
+	if len(got) != 1 {
+		t.Fatalf("streamed %q past an error", got)
 	}
 }
 

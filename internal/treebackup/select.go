@@ -1,6 +1,7 @@
 package treebackup
 
 import (
+	"bytes"
 	"slices"
 	"time"
 )
@@ -20,19 +21,25 @@ type groupKey struct {
 	secret bool
 }
 
+// mergeBase calls set for each node whose path the base holds. Both are
+// in manifest order, and the base is streamed.
 func mergeBase(nodes []*node, base *Base, set func(n *node, e *Entry)) {
 	if base == nil {
 		return
 	}
-	j := 0
-	for _, n := range nodes {
-		for j < len(base.Entries) && ComparePaths(base.Entries[j].Path, n.e.Path) < 0 {
-			j++
+	i := 0
+	base.each(func(e *Entry) bool {
+		for i < len(nodes) && ComparePaths(nodes[i].e.Path, e.Path) < 0 {
+			i++
 		}
-		if j < len(base.Entries) && ComparePaths(base.Entries[j].Path, n.e.Path) == 0 {
-			set(n, &base.Entries[j])
+		if i == len(nodes) {
+			return false
 		}
-	}
+		if bytes.Equal(nodes[i].e.Path, e.Path) {
+			set(nodes[i], e)
+		}
+		return true
+	})
 }
 
 // racyWindow is how long after a base started a ctime must predate for the
@@ -45,9 +52,11 @@ func racyWindow(h *Header) time.Duration {
 	return 120 * time.Second
 }
 
-func (w *walker) cacheHit(n *node) bool {
-	c := n.cached
-	if c == nil || w.o.Cache.Header == nil {
+// cacheHit reports whether c, the cache base's entry for n's path, may
+// stand for n's content without a read.
+func (w *walker) cacheHit(n *node, c *Entry) bool {
+	h := w.o.Cache.Header
+	if h == nil || n.e.Type != TypeFile || !n.e.HasMeta || n.e.State != StateOK || n.e.Size > w.o.Limits.File {
 		return false
 	}
 	if c.Type != TypeFile || c.State != StateOK || c.SHA256 == "" || !c.HasMeta {
@@ -56,7 +65,6 @@ func (w *walker) cacheHit(n *node) bool {
 	if c.Dev != n.e.Dev || c.Ino != n.e.Ino || c.Size != n.e.Size || c.Mtime != n.e.Mtime || c.Ctime != n.e.Ctime {
 		return false
 	}
-	h := w.o.Cache.Header
 	if n.e.Ctime >= h.Created.Add(-racyWindow(h)).UnixNano() {
 		return false
 	}
@@ -66,8 +74,13 @@ func (w *walker) cacheHit(n *node) bool {
 // selectContent: class 0 is a known path whose content was captured, read
 // first; class 1 is everything else, read per writer root.
 func (w *walker) selectContent() (class0 []*group, class1 map[*writerRoot][]*group, reverify []*group) {
-	mergeBase(w.all, w.o.Known, func(n *node, e *Entry) { n.known = e })
-	mergeBase(w.all, w.o.Cache, func(n *node, e *Entry) { n.cached = e })
+	mergeBase(w.all, w.o.Known, func(n *node, e *Entry) { n.knownContent = e.SHA256 != "" })
+	mergeBase(w.all, w.o.Cache, func(n *node, e *Entry) {
+		if w.cacheHit(n, e) {
+			n.cacheHit = true
+			n.e.SHA256, n.e.Verified = e.SHA256, e.Verified
+		}
+	})
 
 	groups := make(map[groupKey]*group)
 	var order []*group
@@ -85,8 +98,7 @@ func (w *walker) selectContent() (class0 []*group, class1 map[*writerRoot][]*gro
 			n.e.State, n.e.Reason = StateTooBig, ""
 			continue
 		}
-		if !secret && w.cacheHit(n) {
-			n.e.SHA256, n.e.Verified = n.cached.SHA256, n.cached.Verified
+		if n.cacheHit {
 			if w.o.Full || (w.o.Reverify > 0 && n.e.Verified < stale) {
 				id := DevIno{n.e.Dev, n.e.Ino}
 				g := revGroups[id]
@@ -99,15 +111,22 @@ func (w *walker) selectContent() (class0 []*group, class1 map[*writerRoot][]*gro
 			}
 			continue
 		}
+		// Only a file with more than one link can share a group; the map
+		// holds those alone, since it costs memory per entry.
+		var g *group
 		k := groupKey{DevIno{n.e.Dev, n.e.Ino}, secret}
-		g := groups[k]
+		if n.e.Nlink > 1 {
+			g = groups[k]
+		}
 		if g == nil {
 			g = &group{size: n.e.Size, class: 1, root: w.rootOf(n.e.Path), secret: secret}
-			groups[k] = g
+			if n.e.Nlink > 1 {
+				groups[k] = g
+			}
 			order = append(order, g)
 		}
 		g.members = append(g.members, n)
-		if n.known != nil && n.known.SHA256 != "" {
+		if n.knownContent {
 			g.class = 0
 		}
 	}

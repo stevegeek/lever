@@ -980,6 +980,8 @@ lever tree snapshot -q; lever tree lock -- sh -c 'restic backup "$LEVER_TREE_BAC
   the 0700 owner check need it).
 - On Linux, tree backups need kernel 5.8 or later with `openat2` allowed; doctor says so.
 - On a network or FUSE tree, one blocked read can run past the time budget.
+- A snapshot holds about twice `limits.manifest` in memory, plus 64 MiB: about 576 MiB at the
+  default 256 MiB, whatever the agents put in the tree. Lower `limits.manifest` on a small host.
 - **macOS privacy (TCC):** a tree under `~/Documents`, `~/Desktop` or iCloud Drive may be closed to
   the program that runs lever (a launchd job, for example). The snapshot then commits with the
   tree root unreadable and doctor's *tree backup* row fails with the fix: grant Full Disk Access to

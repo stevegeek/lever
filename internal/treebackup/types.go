@@ -75,7 +75,7 @@ const (
 // SkippedReasons and TruncatedReasons are the reasons each state allows.
 var (
 	SkippedReasons   = []Reason{ReasonRead, ReasonTime, ReasonDisk, ReasonInterrupted}
-	TruncatedReasons = []Reason{ReasonEntries, ReasonManifest, ReasonDirEntries, ReasonDepth, ReasonPath, ReasonTime, ReasonInterrupted}
+	TruncatedReasons = []Reason{ReasonEntries, ReasonManifest, ReasonDirEntries, ReasonDepth, ReasonPath, ReasonTime, ReasonInterrupted, ReasonDisk}
 )
 
 // ListingUnreadable is the only value of Entry.Listing and RootInfo.Listing:
@@ -166,13 +166,21 @@ const (
 	ManifestSlack = 64 << 20
 )
 
+// A snapshot holds about memoryPerManifest times Limits.Manifest in memory,
+// plus memorySlack: every entry it keeps is charged to the manifest budget
+// at its widest encoding, and costs less than twice that charge in memory.
+const (
+	memoryPerManifest = 2
+	memorySlack       = 64 << 20
+)
+
 // DefaultLimits are the budgets when the config sets none.
 func DefaultLimits() Limits {
 	return Limits{
 		File:       256 << 20,
 		Read:       8 << 30,
 		Entries:    1_000_000,
-		Manifest:   512 << 20,
+		Manifest:   256 << 20,
 		DirEntries: 100_000,
 		Depth:      128,
 		Path:       4096,

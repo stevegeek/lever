@@ -1,6 +1,7 @@
 // Package logging is the one log line shape of lever's long-running
-// processes (lever#197): the broker, the remote proxy, the first-party
-// tools. Each writes slog text lines,
+// processes: the broker, the remote proxy, the first-party tools, and
+// lever-agent's boot and sidecars in an agent container. Each writes slog
+// text lines,
 //
 //	time=2026-10-12T13:00:00.000Z level=INFO msg="..." component=broker key=value ...
 //
@@ -10,9 +11,10 @@
 // and so net/http's own error lines — through the same handler, so a
 // daemon's file holds one shape however a line was written.
 //
-// Messages for a person at a terminal (`lever apply`, `lever doctor`,
-// `lever-agent boot`) are not log lines and keep their prose form:
-// "<component>: <message>", "<component>: warning: <message>".
+// Messages for a person at a terminal (`lever apply`, `lever doctor`, the
+// results of lever-manager and of lever-agent's one-shot verbs) are not log
+// lines and keep their prose form: "<component>: <message>",
+// "<component>: warning: <message>".
 package logging
 
 import (

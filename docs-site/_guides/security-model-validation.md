@@ -26,7 +26,14 @@ Validated (by hand or by an automated gate):
 - Mid-session leaf rotation: the agent's leaf is renewed every 12h and every long-lived broker
   client re-reads it per handshake ([§6.3](/security-model/credentials/), [agent identity](/agent-identity/)).
 - `lima` backend (`make test-lima-e2e`): the six `lever acceptance` checks under both egress
-  postures, guest port-forward suppression, idempotent closed re-bring-up, and teardown on a real VM.
+  postures, guest port-forward suppression, idempotent closed re-bring-up, and teardown on a real VM;
+  and the manager read-only guard's guest-side live check against rootless keep-id containers
+  (namespace ownership as the check reads it and `lsns` as root reports it, a nested first process
+  refused, the tree mount's pins matched by mount root and inode, a directory moved in the guest
+  reported, one replaced on the host reported or followed by its mount (followed on 9p, read-only
+  kept)), on a Linux host (QEMU, 9p) so far; not yet run under vz/virtiofs; and every line of the
+  broker's and the tools' logs is in lever's log shape, with the test API key in none of them
+  ([§5.5](/security-model/config-trust/)).
 
 Not validated:
 

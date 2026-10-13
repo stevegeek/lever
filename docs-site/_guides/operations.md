@@ -122,7 +122,7 @@ All host-side state lives in `.lever-state/` at the instance root:
 |---|---|---|
 | `broker.log` | every capability decision — `allow`/`deny` with caller, tool, op, and the deny reason. Mint allows are a ledger line: the token `id`, the matched policy `rule` (`obtain:…`/`delegate:…`), `exp`, `epoch`, and any baked `constraints`. Gateway and LLM lines carry the same `id`, so a mint correlates with every later use — and denied use — of that token: `grep id=<id> .lever-state/broker.log`. (On deny lines the id is the token's *claimed* id — the signature was not necessarily valid.) | **first stop for any 403**: it names the difference between "no token attached", "not granted", and "revoked" |
 | `broker.out.log` | the broker process's own stdout and stderr (startup, proxy errors) | broker won't start, or brokered tool calls 502 (backend refused) |
-| `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
+| `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others, and the broker's lines about that tool: held back, or failed to start) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 | `logs/bringup-<command>-<time>.jsonl` | one record per `lever apply`, `lever up` and `lever acceptance`: each step with its time and outcome, and for a failed step the log lines shown with it; the last 10 runs are kept | a bring-up was slow or failed and the terminal output is gone; `lever doctor`'s *last bring-up* row summarises the newest |
 
@@ -137,31 +137,51 @@ briefly before the agent's terminal takes over the screen.
 
 ### The shape of a log line
 
-The broker, the remote proxy and every first-party tool write one line shape, slog's text form
-with the time in UTC to the millisecond and the process named in `component`:
+Every lever process that runs unattended writes one line shape: slog's text form, with the time
+in UTC to the millisecond, a level, the message, the process named in `component`, then
+`key=value` fields. A value with a space or a quote is quoted.
 
 ```text
-time=2026-10-12T13:00:00.000Z level=INFO msg="broker.decision" component=broker op=request caller=hello decision=allow ...
-time=2026-10-12T13:00:01.250Z level=WARN msg="could not remove /path/broker.pid: ..." component=broker
+time=2026-10-12T13:00:00.000Z level=INFO msg=broker.decision component=broker op=request caller=hello decision=allow detail="" id=…
+time=2026-10-12T13:00:01.250Z level=WARN msg="not starting the tool: …" component=broker tool=notes
+time=2026-10-12T13:00:02.400Z level=ERROR msg="gateway: resolve broker URL: …" component=lever-agent cmd=gateway
 ```
 
-The components are `broker`, `remote-proxy` and `lever-tool-<name>`; the few lines `lever` itself
-adds to `broker.log` carry `component=lever`. Lines the Go runtime writes for a daemon (an HTTP
-server's TLS handshake error, say) take the same shape, so `broker.out.log`, `remote.log` and
-`tool-logs/<tool>.log` read alike; a daemon that fails to start ends its file with the plain
-`Error: …` line `lever` prints. Every line passes one redaction rule before it is written: an
-env value in a `podman run` argv, Anthropic, GitHub and scion hub tokens, a JWT, an
-Authorization header, a bearer token and a `--…secret`/`--…token`/`--…password` flag value are
-masked (`***`). That is a backstop; lever does not log a
-credential on purpose. Files written before 0.36.0 keep their old lines; `lever doctor` reads both.
+The level is `INFO` for what happened (an audit decision is `INFO` whatever it decided), `WARN`
+for a problem the process carries on through, and `ERROR` for a failure: an operation that did
+not happen, or a process that exits. Lines Go itself writes (an HTTP server's TLS handshake
+error, a proxy error) are `INFO` whatever they say.
 
-Two kinds of record keep their own form, because tools and people parse them: the
+| Component | Where its lines go |
+|---|---|
+| `broker` | `broker.log` (its decisions), `broker.out.log` (start-up, warnings, Go's own lines such as an HTTP server's TLS handshake error), and `tool-logs/<tool>.log` for a line about one tool (held back, failed to start), with `tool=<name>` |
+| `lever` | the few lines `lever` adds to `broker.log` (a scion line hidden from your terminal) |
+| `lever-tool-<name>` (the tool's program, e.g. `lever-tool-db`) | `tool-logs/<tool>.log`, named after the tool in `lever.yaml`: the broker writes each supervised tool's output there |
+| `remote-proxy` | `remote.log` |
+| `lever-agent` | in the agent's container, with `cmd=<verb>`: `boot` (scion's pre-start hook) in the container's log; the `gateway` and `renew` sidecars in `~/.scion/services/logs/lever-gateway.stderr.log` and `lever-renew.stderr.log` in the agent's home; `serve-capability` in Claude Code's MCP server log |
+
+A daemon that fails to start ends its file with the plain `Error: …` line `lever` prints. Files
+written before 0.36.0 keep their old lines; `lever doctor` reads both.
+
+Every line passes one redaction rule before it is written, in its message and in each field: an
+env value in a `podman run` argv, Anthropic, GitHub and scion hub tokens, a JWT, an
+Authorization or `*-Token` header, a bearer token and a `--…secret`/`--…token`/`--…password`
+flag value are masked (`***`). That is a backstop; lever does not log a credential on purpose. A
+tool written with the captool SDK gets the same shape and masking from `captool.NewLogger`, and
+captool masks its decision lines' `detail` whatever logger the tool passes.
+
+**Audit lines** are records that you and your scripts parse, so their form does not change: the
+`broker.decision` lines in `broker.log` (fields `op`, `caller`, `decision` and `detail`, in that
+order, then the decision's own fields such as `id`, `rule` and `reason`), a tool's decision
+lines (`captool.decision`, `github.push`, `github.<op>`, `fizzy.<op>`) in its tool log, the
 JSON-lines audits (`remote-audit.jsonl`, `directives.log`) and the ledgers.
 
-What `lever` prints on your terminal is not a log line but a message to you, in one form:
-`<who>: <text>`, and for a warning `<who>: warning: <text>`, where *who* is `lever`, `jail` (the
-VM) or the bring-up step (`start-manager`, `load-image`). `lever-agent` inside a container prints
-`lever-agent: <text>` the same way.
+What a person reads is not a log line but a message. `lever` prints on your terminal in one
+form, `<who>: <text>`, and for a warning `<who>: warning: <text>`, where *who* is `lever`, `jail`
+(the VM) or the bring-up step (`start-manager`, `load-image`). In an agent's container,
+`lever-manager` prints its results and `Error: <text>` for the manager to read, and
+`lever-agent`'s one-shot verbs (`request`, `delegate`, `call` and the Claude Code hooks) print
+their result and, on a failure, `lever-agent: <text>`.
 
 ### Watching a bring-up
 
@@ -688,7 +708,7 @@ plausibly make it more likely; it has not been reproduced. The container's own t
   (background sessions are then possible, for example on an image without a writable
   `/etc/claude-code`: check that directory's permissions or rebuild the image). Claude Code documents
   them as equivalent: they turn off background agents and agent view (`claude agents`, `--bg`,
-  `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.281) the
+  `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.296) the
   left-arrow shortcut that backgrounds the session and opens agent view is gated on the same
   switch. This is read from that build, **not yet tested in a running container**; doctor's
   `claude background sessions` row is the check that matters.
@@ -975,8 +995,9 @@ running one. They are on by default and have no switch:
   cover the failure that does. A side effect: a soft lockup the host causes now reboots the
   guest instead of passing (see [soft lockups the host causes](#soft-lockups-the-host-causes)).
 - **No EFI pstore.** The panic path runs `kmsg_dump` too, so with the EFI backend registered a
-  panic could hang in the same EFI call. On Ubuntu 24.04's 6.8 kernel `efi_pstore` is a loadable
-  module, loaded at boot and registered as pstore's backend. lever unloads it now when it can, writes
+  panic could hang in the same EFI call. On Ubuntu's 6.8 (24.04) and 7.0 (26.04) kernels
+  `efi_pstore` is a loadable module, loaded at boot and registered as pstore's backend. lever
+  unloads it now when it can, writes
   `/etc/modprobe.d/lever-no-efi-pstore.conf` (`blacklist` plus `install efi_pstore /bin/true`) so
   nothing loads it again, and adds `efi_pstore.pstore_disable=1` to the kernel command line
   through `/etc/default/grub.d/99-lever-crash-recovery.cfg` and `update-grub`. The parameter is
@@ -1035,15 +1056,18 @@ OrbStack's, not lever's. lever changes nothing there, and the doctor rows say no
 
 ### The guest kernel
 
-[`guest_kernel`](/reference/config/#top-level) picks the Lima guest's kernel: `hwe` installs
-`linux-generic-hwe-24.04` (Ubuntu's hardware-enablement kernel, which tracks the newest interim
-release and is well past 6.8), `ga` keeps the 24.04 release kernel (6.8). Unset, it is `hwe` with
-`nested_virt` and `ga` without: the 6.8 GA kernel is the one that crashed under nested load, and an
-instance that runs no nested VM has no reason to change kernels under it. lever installs the
-package on the next apply or up and then warns that a reboot is pending until the guest runs the
-new kernel (`lever stop`, then `lever up`). The GA kernel stays installed; grub's *Advanced
-options* menu still offers it. lever counts the package installed only when dpkg says
-`install ok installed`.
+[`guest_kernel`](/reference/config/#top-level) picks the Lima guest's kernel: `hwe` installs the
+guest release's hardware-enablement kernel, `ga` keeps the release kernel the cloud image ships.
+On a 26.04 guest (every VM lever creates now) `hwe` means `linux-generic-hwe-26.04`, and `ga` the
+7.0 release kernel; until Ubuntu moves 26.04's HWE series to a newer kernel the two are the same
+7.0 series, and `hwe` only installs the newest 7.0 build. On a VM created on 24.04 `hwe` means
+`linux-generic-hwe-24.04` (well past 6.8) and `ga` the 6.8 release kernel. On any other release
+`hwe` installs nothing and warns. Unset, it is `hwe` with `nested_virt` and `ga` without: the 6.8
+GA kernel is the one that crashed under nested load, and an instance that runs no nested VM has
+no reason to change kernels under it. lever installs the package on the next apply or up and then
+warns that a reboot is pending until the guest runs the new kernel (`lever stop`, then `lever up`).
+The GA kernel stays installed; grub's *Advanced options* menu still offers it. lever counts the
+package installed only when dpkg says `install ok installed`.
 
 The install normally happens on the VM's first apply, before lever's egress chain exists, so it
 reaches the Ubuntu mirrors under either posture. `apt-get update` and the install each wait up to
@@ -1060,22 +1084,24 @@ Later, when the package is still missing:
   stamp makes the next apply or up try again. A recreated VM has a new machine id, so an old
   stamp does not apply to it.
 
-Doctor's *guest kernel* row shows `uname -r` and warns when `/boot/vmlinuz` names another kernel
-(a reboot is pending), when `guest_kernel` is `hwe` and the package is missing, and when
-`nested_virt` runs on a 6.8 kernel.
-
-**Ubuntu 26.04** is a later option, not part of this change: its podman generation differs from
-the one lever is tested with. Before the base image moves, it needs the rootless podman
-install, the pasta drop-in (`passt` version), scion's container lifecycle (create, suspend,
-resume, `--continue`), the agent image's layer copy and warm-up, the egress chains and the guest
-DNS path, and `lever-test` e2e on both Lima drivers, with nested load on the qemu driver.
+Doctor's *guest kernel* row shows the guest's Ubuntu release and `uname -r`, and warns when
+`/boot/vmlinuz` names another kernel (a reboot is pending), when `guest_kernel` is `hwe` and the
+release's package is missing or the release has none lever knows, and when `nested_virt` runs on a
+6.8 kernel.
 
 **Known host/guest kernel pairs under nested load.** Fill this in as pairs are tested (no host
-names):
+names). *Guest kernel* is the Lima guest's, the kernel that runs the nested VMs; *host kernel* is
+the kernel under the Lima guest's QEMU.
 
-| Host kernel | Host CPU | Guest kernel | Result |
-|---|---|---|---|
-| 7.2.x | AMD (`kvm_amd nested=1`) | 6.8.0-146 (24.04 GA) | crashed under nested load: oops, double fault, EFI pstore hang, soft lockups until QEMU was killed |
+| Host kernel | Host CPU | Guest kernel | Load | Result |
+|---|---|---|---|---|
+| 7.2.x | AMD (`kvm_amd nested=1`) | 6.8.0-146 (24.04 GA) | a nested VM run by the manager, about 45 min | crashed: oops, double fault, EFI pstore hang, soft lockups until QEMU was killed |
+| 7.0.0-38 (24.04 HWE), itself a KVM guest of an AMD host | AMD Zen 5 (`kvm_amd nested=1`) | 7.0.0-34 (26.04 GA, cloud image) | two 2-vCPU nested KVM guests busy on CPU and memory, the Lima guest busy on all 4 vCPUs and on disk with fsync; 5 min | clean: no oops, lockup, RCU stall or KVM error in the guest's kernel log or serial log |
+| same | same | 7.0.0-38 (`linux-generic-hwe-26.04`) | same; 5 min | clean, as above |
+
+The two 26.04 rows are short runs on a host that was itself a VM (three levels of KVM, one more
+than a Lima jail on a physical host has): evidence that the 26.04 kernel runs nested guests, not
+the 24 h soak that step 9 of the live test plan asks for.
 
 ### Recovery after a hard VM kill
 
@@ -1155,6 +1181,38 @@ driver).
    fails while the agent image's in-jail code is older than the host's (its `lever_jail_abi` label
    differs). When the new release changed no in-jail code, the row passes and names both
    releases: no image rebuild and no `lever up --fresh` is needed.
+
+### Moving a Lima VM to Ubuntu 26.04
+
+lever creates every new Lima VM from a pinned Ubuntu 26.04 LTS cloud image (one URL and sha256 per
+architecture; Lima refuses an image whose digest does not match). Lima reads the image only when
+it creates a VM, so upgrading lever does not change the release of an existing VM: a VM created
+on Ubuntu 24.04 keeps running 24.04, and lever keeps provisioning it as before (the crash
+recovery, `guest_kernel: hwe` with `linux-generic-hwe-24.04`, the doctor rows). Doctor's *guest
+kernel* row names the guest's release and says when it is not the one new VMs get.
+
+To move a VM to 26.04, recreate it:
+
+1. `lever conversation backup` (the jail must be up).
+2. `lever destroy`. It deletes the VM and everything in it: the hub's database, the agent homes,
+   the podman store, and anything an agent left in the guest outside the tree. The tree and the
+   instance's `.lever-state` are on the host and are not touched.
+3. `lever up`. This is a first boot: it downloads the 26.04 image (about 0.9 GB, once per host),
+   installs the guest packages, copies the agent image in again and starts the manager fresh,
+   10-15 minutes in all.
+4. `lever conversation restore`, which puts the backed-up conversation into the new manager.
+   Workers start in the new VM with new conversations when the manager next starts them.
+5. `lever doctor`.
+
+Settings that apply at create time only (`disk`, `nested_virt`'s `/dev/kvm`) come from the
+current config, so this is also the moment to change them.
+
+**Never run `do-release-upgrade` in the guest.** lever does not support an in-place release
+upgrade and never runs one. It swaps podman (4.9 to 5.7) under an existing rootless store, the
+kernel, iptables, passt and the cloud image's services in one step, none of which lever's
+provisioning, warm path or crash recovery has been checked against as an upgrade; under
+`egress: closed` the guest cannot reach the mirrors and the upgrade stops halfway. The
+recreate above is the tested path.
 
 ### Upgrading past 0.30.0: contacts, agent messages, files, push
 

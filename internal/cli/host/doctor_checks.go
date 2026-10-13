@@ -1461,8 +1461,8 @@ func networkCheckedAgents(manager string, workers []string) []string {
 type netModeLister func(ctx context.Context, ref string) (string, error)
 
 // checkAgentNetwork finds agent containers that do not run in their own
-// pasta netns (lever#35). On podman 4.9 (the Lima Ubuntu 24.04 guest) a
-// container created without lever's drop-in runs slirp4netns, where
+// pasta netns (lever#35). On podman 4.9 (a Lima guest created on Ubuntu
+// 24.04) a container created without lever's drop-in runs slirp4netns, where
 // host.containers.internal resolves to the guest's own address, which
 // LEVER_EGRESS drops: the agent cannot reach the hub (heartbeats, `scion
 // message`, token refresh all fail). The mode is fixed at create; scion
@@ -2207,7 +2207,7 @@ func brokerStartTime(pidPath string) (time.Time, bool) {
 // scanBrokerLogCertExpiry returns the timestamp of the most recent expired- /
 // bad-certificate TLS handshake error in the tail of the broker log at path.
 // Two line shapes are read: lever's daemon log line ("time=<RFC3339, UTC>
-// level=… msg=…", since lever#197) and the Go-stdlog prefix a broker before
+// level=… msg=…", from 0.36.0) and the Go-stdlog prefix a broker before
 // it wrote ("2006/01/02 15:04:05 …", local time), which an older file still
 // holds. Lines without the fingerprint or a parseable timestamp are ignored.
 func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {

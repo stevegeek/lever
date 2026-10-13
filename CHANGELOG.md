@@ -7,6 +7,80 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-13
+
+### Changed
+
+- **The rest of lever logs in the one line shape (lever#197).** `lever-agent`'s unattended verbs
+  now write lever's log lines (UTC time, level, message, `component=lever-agent cmd=<verb>`,
+  masked credentials): `boot` in the container's log, the `gateway` and `renew` sidecars in
+  scion's service logs, `serve-capability` in Claude Code's MCP log. Its one-shot verbs
+  (`request`, `delegate`, `call`, the Claude Code hooks) and `lever-manager` print what they
+  printed before. The broker's lines about one tool (held back, failed to start) are broker log
+  lines in that tool's log instead of bare `lever: …` text, and the broker's and the remote
+  proxy's warnings carry the cause in an `err` field instead of a prefix in the message. The
+  captool SDK gains `NewLogger` for a tool's own lines and masks its decision lines' `detail`
+  whatever logger a tool passes. Audit lines keep their form: `broker.decision`, the tools'
+  decision lines, `remote-audit.jsonl`, `directives.log` and the ledgers. The Lima e2e prints UTC
+  times, masks every credential shape lever masks, and checks that the broker's and the tool's
+  logs hold only lever's line shape. The operations guide describes the shape, the levels, where
+  each component logs, the redaction and the audit lines.
+- **The agent image bakes Claude Code 2.1.296 (was 2.1.281).** The messages lever reads from
+  Claude Code (a stale background session, no conversation to continue), its session records and
+  the SessionStart hook are unchanged in 2.1.296. It ships with the Jail ABI 3 image rebuild below.
+- **Jail ABI 3.** `lever-agent` and the shared packages in the image changed: rebuild the agent
+  image (`make lever-image`, then any instance image built from it) and recreate the manager on
+  it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. If
+  you also move a Lima VM to Ubuntu 26.04, its recreate (`lever conversation backup`,
+  `lever destroy`, `lever up`, `lever conversation restore`) loads the new image too.
+- **The Lima e2e checks the read-only guard against real containers (lever#162).**
+  `make test-lima-e2e` now runs the guard's guest-side live check against rootless keep-id
+  containers in its guest, mounted as the manager's create and checked as the guard plans them, with
+  nothing pulled: in Lima's guest the container's PID and mount namespaces are owned by its user
+  namespace, as the guard reads it and as `lsns` run as root shows it; the tree mount and its pins
+  pass with matching devices, mount roots and inode numbers, also after a guest cache drop; a first
+  process in a user and mount namespace made inside the container is refused; and a directory moved
+  in the guest is reported. On a Linux host Lima runs QEMU and mounts the tree over 9p, which
+  reaches a directory by its path: after a rename-based replace of an entry, and after an entry's
+  parent was removed and recreated on the host, the container read the new directories and the entry
+  stayed read-only, so the check rightly reports nothing. The step has not yet run under
+  vz/virtiofs (Lima on macOS).
+- **New Lima jail VMs run Ubuntu 26.04 LTS (lever#203).** The Lima template boots the 26.04 cloud
+  image from a dated release directory, pinned by URL and sha256 for each architecture, so Lima
+  refuses an image that does not match; before, it named the moving 24.04 `release/` alias with no
+  digest. The guest gets podman 5.7, passt with `--map-host-loopback`, iptables 1.8.11 (nf_tables)
+  and the 7.0 kernel; provisioning, the pasta drop-in, the egress chains and the warm path's
+  `iptables -S` comparison, the crash recovery, the tmux core capture and `guest_profile: small`
+  need no change there and were checked on a 26.04 guest. Lima reads the image only when it
+  creates a VM: an existing VM stays on 24.04 and lever keeps supporting it. To move one, recreate
+  it (`lever conversation backup`, `lever destroy`, `lever up`, `lever conversation restore`);
+  lever never runs `do-release-upgrade`, and the operations guide says why. OrbStack machines are
+  now created as `ubuntu:resolute` (26.04) rather than OrbStack's latest Ubuntu; existing machines
+  keep their release.
+- **`guest_kernel: hwe` installs the guest release's HWE kernel (lever#203, lever#179).**
+  `linux-generic-hwe-26.04` on a 26.04 guest, `linux-generic-hwe-24.04` on a VM created on 24.04,
+  and nothing (with a warning) on another release. On 26.04 it names the same 7.0 series as the
+  release kernel until Ubuntu moves it. The default is unchanged: `hwe` with `nested_virt`.
+  Doctor's *guest kernel* row now names the guest's Ubuntu release, checks that release's package,
+  and notes when an older VM is not on the release new VMs get. The operations guide records two
+  26.04 kernels that ran nested KVM guests under load without a fault, in short runs.
+
+### Fixed
+
+- **The read-only guard's namespace check works on Linux 7.0 guests (lever#162).** It read the
+  owners of the manager's namespaces with `lsns` as the run user, and on a 7.0 kernel (the
+  Ubuntu 26.04 guest) `lsns` from util-linux 2.41 exits 2 with "Unsupported ioctl
+  NS_GET_USERNS" on every call: it walks every process in `/proc` whatever `--task` says, and
+  the namespace links of a process the run user may not trace (its own `systemd --user`, which
+  holds `CAP_WAKE_ALARM`) now open as a directory instead of failing with "Permission denied".
+  The guard failed closed: every tool was held back and doctor's *manager read-only paths* row
+  failed for any instance with `read_only` paths. The check now reads the user, mount and PID
+  namespaces of the manager's first process only, with a short program run by the guest's
+  `perl` (part of every Debian and Ubuntu system): the same `NS_GET_USERNS` ioctl, each
+  descriptor proven a namespace of the expected type, and anything it cannot read is an error.
+  The rule is unchanged, and it no longer needs util-linux 2.38 in the guest. Checked on Ubuntu
+  26.04 (kernel 7.0) and 24.04 (kernel 6.8) Lima guests.
+
 ## [0.36.1] - 2026-10-13
 
 ### Added

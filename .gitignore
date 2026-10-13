@@ -39,6 +39,8 @@ image/lever-claude/scionhook/
 /lever-tool-whisper
 /lever-tool-tts
 /lever-tool-db
+examples/*/tools/*/lever-tool-*
+!examples/*/tools/*/lever-tool-*/
 /weather-stub
 /dist/
 

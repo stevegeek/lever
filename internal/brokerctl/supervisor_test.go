@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,9 @@ import (
 // exits 0 quickly to prove argv assembly + lifecycle, then a long-running one.
 // testToolSecret stands in for the per-boot secret Serve mints.
 const testToolSecret = "test-tool-secret"
+
+// logLineRE is one line of lever's log shape (internal/logging).
+var logLineRE = regexp.MustCompile(`^time=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z level=(INFO|WARN|ERROR) msg=.* component=[a-z-]+( |$)`)
 
 // trackedCount returns the number of currently-tracked child processes.
 func trackedCount(s *Supervisor) int {
@@ -266,14 +270,19 @@ func TestSupervisorHoldsReadOnlyToolUntilGuardPasses(t *testing.T) {
 	}
 	waitFor(t, func() bool {
 		b, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
-		return strings.Contains(string(b), "not starting tool \"ro\"") && strings.Contains(string(b), "lever up --fresh")
+		return strings.Contains(string(b), "not starting the tool") && strings.Contains(string(b), "lever up --fresh")
 	})
+	held, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
+	if line := strings.TrimSpace(string(held)); !logLineRE.MatchString(line) ||
+		!strings.Contains(line, "level=WARN") || !strings.Contains(line, "component=broker tool=ro") {
+		t.Fatalf("held-tool line is not a broker log line: %q", line)
+	}
 	time.Sleep(50 * time.Millisecond)
 	if n := trackedCount(s); n != 1 {
 		t.Fatalf("tracked = %d while the guard fails, want 1", n)
 	}
 	b, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
-	if c := strings.Count(string(b), "not starting tool"); c != 1 {
+	if c := strings.Count(string(b), "not starting the tool"); c != 1 {
 		t.Fatalf("the refusal was logged %d times, want once per reason", c)
 	}
 	mu.Lock()
@@ -345,5 +354,28 @@ func TestSupervisorStopsToolsGracefully(t *testing.T) {
 	}
 	if trackedCount(s) != 0 {
 		t.Fatal("tools still tracked")
+	}
+}
+
+// A held tool that fails to start once its guard passes says so in its own
+// log, as an ERROR line of the broker.
+func TestSupervisorLogsHeldToolStartFailure(t *testing.T) {
+	logs := filepath.Join(t.TempDir(), "tool-logs")
+	s := NewSupervisor([]ToolSpec{{Name: "ro", Command: []string{"/nonexistent/lever-tool-ro"}, ReadOnly: []string{"tools"}}},
+		"http://127.0.0.1:0", logs, testToolSecret)
+	s.retry = 10 * time.Millisecond
+	s.ReadOnlyGuard = func(context.Context, []string) error { return nil }
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+	var line string
+	waitFor(t, func() bool {
+		b, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
+		line = strings.TrimSpace(string(b))
+		return line != ""
+	})
+	if !logLineRE.MatchString(line) || !strings.Contains(line, `level=ERROR msg="could not start the tool" component=broker tool=ro err=`) {
+		t.Fatalf("start failure line: %q", line)
 	}
 }

@@ -41,7 +41,9 @@ another.
 
 macOS on Apple Silicon with [OrbStack](https://orbstack.dev). The runtime, the Scion server/broker,
 rootless podman, and every agent run inside one OrbStack **isolated machine** that shares no host
-files and has its own network namespace. This is the reference substrate the other backends are
+files and has its own network namespace. lever creates it as `ubuntu:resolute` (Ubuntu 26.04 LTS,
+the release of the Lima guest); OrbStack reads that only when it creates the machine, so an
+existing machine keeps its release. This is the reference substrate the other backends are
 measured against. Its trade: a **single kernel** shared across the manager and all
 workers (a kernel-level container escape reaches the whole jail — see [security model §8](/security-model/compromise/)).
 
@@ -50,8 +52,11 @@ workers (a kernel-level container escape reaches the whole jail — see [securit
 The [Lima](https://lima-vm.io) VM backend: macOS (`vz`) and Linux (QEMU/KVM), for anyone who does
 not run OrbStack. It preserves the VM boundary, its own kernel, not shared with the host or with
 other jails, so its guarantees match `orbstack`'s. The VM type is `vz` (with a `virtiofs` mount)
-on macOS and `qemu` on Linux, booting an Ubuntu 24.04 cloud image. The containment surface is a
-**lever-owned template** (stock Lima templates are not used), built from three mechanisms:
+on macOS and `qemu` on Linux, booting an Ubuntu 26.04 LTS cloud image pinned by URL and sha256 per
+architecture (a VM created by an earlier lever keeps its 24.04 guest until it is recreated; see
+[moving a Lima VM to Ubuntu 26.04](/operations/#moving-a-lima-vm-to-ubuntu-2604)). The
+containment surface is a **lever-owned template** (stock Lima templates are not used), built from
+three mechanisms:
 
 - **Exactly one writable mount**: the project tree, at `/lever`. Nothing else, in particular not
   Lima's stock `~` read-only home mount.

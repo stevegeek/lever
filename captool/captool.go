@@ -7,11 +7,14 @@ import (
 	"crypto/ed25519"
 	"crypto/subtle"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/stevegeek/lever/internal/logging"
 )
 
 const defaultEpochTTL = 5 * time.Second
@@ -30,6 +33,16 @@ const (
 	ToolSecretHeader = "X-Lever-Tool-Secret"
 	ToolSecretEnv    = "LEVER_TOOL_SECRET"
 )
+
+// NewLogger returns a logger that writes lever's log line shape to w, with
+// component naming the tool (lever's own tools use "lever-tool-<name>") and
+// lever's credential masking on every line. Pass it as Config.Log and, to
+// give the tool's other lines (the standard log package's included) the same
+// shape, make it the default with slog.SetDefault. The broker's supervisor
+// writes a tool's stderr to tool-logs/<tool>.log.
+func NewLogger(w io.Writer, component string) *slog.Logger {
+	return logging.New(w, component)
+}
 
 // ParamSpec is one declared argument of an Operation (drives the MCP schema).
 type ParamSpec struct{ Name, Type, Description string }
@@ -143,6 +156,9 @@ func (s *Server) secretOK(presented string) bool {
 // Handler returns the MCP-over-HTTP handler (mount on Config.Backend).
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 
+// audit writes the tool's decision line. Its message and fields are a stable
+// record that operators grep; the detail is masked here because Config.Log
+// may be any handler.
 func (s *Server) audit(op, caller, decision, detail string) {
-	s.log.Info("captool.decision", "tool", s.name, "op", op, "caller", caller, "decision", decision, "detail", detail)
+	s.log.Info("captool.decision", "tool", s.name, "op", op, "caller", caller, "decision", decision, "detail", logging.Redact(detail))
 }

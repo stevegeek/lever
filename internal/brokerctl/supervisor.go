@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
@@ -181,11 +183,11 @@ func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
 				// defeat the dedupe; the message is sanitised and bounded.
 				if class := guardClass(err); reported[t.Name] != class {
 					reported[t.Name] = class
-					s.logTool(t.Name, fmt.Sprintf("lever: not starting tool %q: its program lies in the tree under manager.read_only %v, "+
+					s.logTool(t.Name, slog.LevelWarn, fmt.Sprintf("not starting the tool: its program lies in the tree under manager.read_only %v, "+
 						"and %s. A manager without those read-only mounts could have rewritten it. To fix it, back up the manager's "+
 						"conversation, then run `lever up --fresh` to recreate the manager with the mounts, and check the program "+
 						"before you trust it again. Retrying every %s.",
-						t.Name, t.ReadOnly, boundedReason(err), retry))
+						t.ReadOnly, boundedReason(err), retry))
 				}
 				still = append(still, t)
 				continue
@@ -193,7 +195,7 @@ func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
 			s.mu.Lock()
 			if !s.stopped {
 				if err := s.spawnLocked(ctx, t); err != nil {
-					s.logTool(t.Name, "lever: "+err.Error())
+					s.logTool(t.Name, slog.LevelError, "could not start the tool", "err", err)
 				}
 			}
 			s.mu.Unlock()
@@ -222,14 +224,15 @@ func boundedReason(err error) string {
 	return r
 }
 
-// logTool appends one line to the tool's own log (best effort).
-func (s *Supervisor) logTool(name, line string) {
+// logTool appends one broker line about a tool to the tool's own log (best
+// effort), where whoever reads why the tool is silent will look.
+func (s *Supervisor) logTool(name string, level slog.Level, msg string, args ...any) {
 	f, err := os.OpenFile(filepath.Join(s.toolLogDir, toolLogName(name)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-	fmt.Fprintln(f, line)
+	logging.New(f, "broker").With("tool", name).Log(context.Background(), level, msg, args...)
 }
 
 // spawnLocked starts one tool. Caller must hold s.mu.

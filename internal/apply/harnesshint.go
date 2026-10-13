@@ -14,7 +14,7 @@ import (
 
 // staleBackgroundPhrases are what Claude Code prints when claude --continue
 // refuses because the last conversation moved into a background session
-// (Claude Code 2.1.281). The first is the case after a container restart:
+// (Claude Code 2.1.296). The first is the case after a container restart:
 // the session was registered in another container, so this one cannot tell
 // whether it still runs.
 var staleBackgroundPhrases = []string{

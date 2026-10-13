@@ -45,6 +45,7 @@ import (
 	"context"
 	"html"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -55,7 +56,6 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/chatledger"
-	"github.com/stevegeek/lever/internal/daemon"
 )
 
 // Config wires a Handler. All fields required unless noted.
@@ -773,7 +773,7 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 				// session so the next request heals it.
 				s.stale = true
 			}
-			recordChat(resp, s.login, tierOf(contacts, s.login), ledger, func(err error) { daemon.Warnf("remote proxy: %v", err) })
+			recordChat(resp, s.login, tierOf(contacts, s.login), ledger, func(err error) { slog.Warn("chat post not recorded", "err", err) })
 			if s.line != nil && audit != nil {
 				s.line.Status = resp.StatusCode
 				audit(*s.line)
@@ -836,7 +836,7 @@ func upstreamFailed(audit func(AuditLine)) func(http.ResponseWriter, *http.Reque
 				// No audit sink wired: the cause still must not vanish, or a
 				// 502 says nothing about whether the jail or the hub is at
 				// fault.
-				daemon.Warnf("remote proxy upstream: %v", err)
+				slog.Warn("upstream request failed", "err", err)
 			}
 		}
 		http.Error(w, "bad gateway", http.StatusBadGateway)

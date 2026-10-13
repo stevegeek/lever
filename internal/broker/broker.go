@@ -16,8 +16,8 @@ import (
 	"github.com/stevegeek/lever/internal/broker/rules"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/opsig"
-	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -589,9 +589,10 @@ func (b *Broker) isRevoked(agent string) bool {
 func (b *Broker) audit(op, caller, decision, detail string, kvs ...any) {
 	// The audit log is the operator's record and outlives the incident
 	// (rotated broker.log-*). A runtime error's detail can echo a container
-	// env (lever#37); the scion client already masks it, and this is the
-	// backstop for any detail that did not come through the client.
-	detail = scion.RedactSecrets(detail)
+	// env; the scion client already masks it, and this is the backstop for
+	// any detail that did not come through the client, whatever handler
+	// Config.Log has.
+	detail = logging.Redact(detail)
 	args := append([]any{"op", op, "caller", caller, "decision", decision, "detail", detail}, kvs...)
 	b.log.Info("broker.decision", args...)
 }

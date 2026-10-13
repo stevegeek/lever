@@ -115,7 +115,7 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/Users/x/tree"}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	want := "orb create --isolated --mount /Users/x/tree:/lever ubuntu " + machine
+	want := "orb create --isolated --mount /Users/x/tree:/lever ubuntu:resolute " + machine
 	if !f.Called(func(c proc.Call) bool { return c.Argv() == want }) {
 		t.Fatalf("expected `%s`; calls=%+v", want, f.Calls)
 	}

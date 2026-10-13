@@ -26,7 +26,7 @@ var Version = "dev"
 func buildServer(store *Store, name, backend, adminURL string) (*captool.Server, error) {
 	return captool.New(captool.Config{
 		Name: name, Version: Version, Backend: backend, AdminURL: adminURL,
-		Log: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Log: slog.Default(),
 		Operations: []captool.Operation{{
 			Name:        "list",
 			Description: "list todo items; pass pending=true for only unfinished ones",
@@ -54,6 +54,8 @@ func main() {
 	admin := flag.String("admin", "http://127.0.0.1:3401", "broker admin base URL")
 	csvPath := flag.String("csv", "data/todos.csv", "path to the todos CSV")
 	flag.Parse()
+	// Also the default logger, so the standard log package's lines take lever's log shape.
+	slog.SetDefault(captool.NewLogger(os.Stderr, "lever-tool-todo"))
 
 	srv, err := buildServer(OpenStore(*csvPath), *name, *backend, *admin)
 	if err != nil {

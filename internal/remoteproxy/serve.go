@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -113,8 +114,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 
 	if cfg.Stamp != nil {
 		if err := cfg.Stamp(); err != nil {
-			daemon.Warnf("could not record what this proxy is serving: %v\n"+
-				"lever: the next `lever apply` will restart the proxy rather than reuse it", err)
+			slog.Warn("could not record what this proxy is serving; the next lever apply restarts the proxy rather than reuse it", "err", err)
 		}
 	}
 
@@ -221,8 +221,8 @@ func listenProxy(bind string, port int, allowNonLoopback bool) (net.Listener, er
 		return nil, fmt.Errorf("remoteproxy: listener must be loopback, got %s", ln.Addr())
 	}
 	if !ip.IsLoopback() {
-		daemon.Warnf("remote proxy listening on %s, NOT loopback: anything that can reach it can assert any identity "+
-			"header — only the authenticating front may reach it (host firewall)", ln.Addr())
+		slog.Warn("listening on an address that is NOT loopback: anything that can reach it can assert any identity "+
+			"header, so only the authenticating front may reach it (host firewall)", "addr", ln.Addr().String())
 	}
 	return ln, nil
 }
@@ -284,14 +284,14 @@ func OpenAudit(path string) (func(AuditLine), io.Closer, error) {
 	write := func(line AuditLine) {
 		b, err := json.Marshal(line)
 		if err != nil {
-			daemon.Warnf("audit marshal: %v", err)
+			slog.Warn("remote audit line not written", "err", err)
 			return
 		}
 		b = append(b, '\n')
 		mu.Lock()
 		defer mu.Unlock()
 		if _, err := f.Write(b); err != nil {
-			daemon.Warnf("audit write: %v", err)
+			slog.Warn("remote audit line not written", "err", err)
 		}
 	}
 	return write, f, nil

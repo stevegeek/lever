@@ -125,7 +125,7 @@ func TestScanBrokerLogCertExpiry_PicksLatest(t *testing.T) {
 }
 
 // TestScanBrokerLogCertExpiry_ReadsBothShapes: a broker of this release logs
-// net/http's TLS errors as lever daemon lines (lever#197); a file written by
+// net/http's TLS errors as lever daemon lines; a file written by
 // an older broker holds the stdlog shape. The newest of either counts.
 func TestScanBrokerLogCertExpiry_ReadsBothShapes(t *testing.T) {
 	now := time.Now()

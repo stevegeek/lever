@@ -26,8 +26,10 @@ import (
 )
 
 // distro is the isolated-machine base image (arch-tagless: OrbStack selects the
-// host arch).
-const distro = "ubuntu"
+// host arch). The release is named so a new machine gets the Ubuntu LTS the
+// Lima guest runs, not whatever OrbStack calls the latest Ubuntu that day; it
+// is read only when a machine is created.
+const distro = "ubuntu:resolute"
 
 // orbVersionRe matches "Version: 2.2.1 (2020100)" lines from `orb version`.
 var orbVersionRe = regexp.MustCompile(`Version:\s*(\d+)\.(\d+)\.(\d+)`)

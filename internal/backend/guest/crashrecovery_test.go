@@ -387,7 +387,7 @@ func TestGuestKernelHWEInstallsAndReportsReboot(t *testing.T) {
 	// Before the install /boot/vmlinuz already names the new kernel in the
 	// stub; the real package moves it.
 	rep, calls := runKernelScript(t, GuestKernelHWE, "24.04", "6.8.0-146-generic", "6.17.0-5-generic", false, false)
-	if !strings.Contains(calls, "apt-get install -y -qq -o DPkg::Lock::Timeout=120 "+HWEPackage) || !strings.Contains(calls, "apt-get -o DPkg::Lock::Timeout=120 update -qq") {
+	if !strings.Contains(calls, "apt-get install -y -qq -o DPkg::Lock::Timeout=120 linux-generic-hwe-24.04") || !strings.Contains(calls, "apt-get -o DPkg::Lock::Timeout=120 update -qq") {
 		t.Errorf("want the HWE install; calls:\n%s", calls)
 	}
 	if len(rep.Reboot) != 1 || !strings.Contains(rep.Reboot[0], "runs kernel 6.8.0-146-generic; the default kernel is now 6.17.0-5-generic") {
@@ -407,7 +407,7 @@ func TestGuestKernelHWEAlreadyInstalledAndRunning(t *testing.T) {
 
 func TestGuestKernelHWEAptFailureWarns(t *testing.T) {
 	rep, _ := runKernelScript(t, GuestKernelHWE, "24.04", "6.8.0-146-generic", "6.8.0-146-generic", false, true)
-	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "installing "+HWEPackage+" failed") {
+	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "installing linux-generic-hwe-24.04 failed") {
 		t.Errorf("warn = %q", rep.Warn)
 	}
 	if len(rep.Reboot) != 0 {
@@ -416,12 +416,44 @@ func TestGuestKernelHWEAptFailureWarns(t *testing.T) {
 }
 
 func TestGuestKernelHWEOtherReleaseSkips(t *testing.T) {
-	rep, calls := runKernelScript(t, GuestKernelHWE, "26.04", "7.0.0-1-generic", "7.0.0-1-generic", false, false)
+	rep, calls := runKernelScript(t, GuestKernelHWE, "25.10", "6.17.0-5-generic", "6.17.0-5-generic", false, false)
 	if strings.Contains(calls, "apt-get") || strings.Contains(calls, "dpkg") {
 		t.Errorf("another release must install nothing; calls:\n%s", calls)
 	}
-	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "not 24.04") {
+	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "Ubuntu 25.10, not 24.04 or 26.04") {
 		t.Errorf("warn = %q", rep.Warn)
+	}
+}
+
+// Each supported release installs its own HWE metapackage and reports it.
+func TestGuestKernelHWEPackagePerRelease(t *testing.T) {
+	for _, rel := range []string{"24.04", "26.04"} {
+		want := "linux-generic-hwe-" + rel
+		r, calls := runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: rel, running: "7.0.0-34-generic", def: "7.0.0-38-generic"})
+		if !strings.Contains(calls, "apt-get install -y -qq -o DPkg::Lock::Timeout=120 "+want+"\n") {
+			t.Errorf("%s: want the install of %s; calls:\n%s", rel, want, calls)
+		}
+		if !strings.Contains(calls, "dpkg-query -W -f=${Status} "+want) {
+			t.Errorf("%s: want the dpkg check of %s; calls:\n%s", rel, want, calls)
+		}
+		if r.HWE != HWEInstalled || r.HWEPackage != want {
+			t.Errorf("%s: report = %+v", rel, r)
+		}
+		r, _ = runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: rel, running: "7.0.0-34-generic", def: "7.0.0-34-generic", egressClosed: true})
+		if len(r.Warn) != 1 || !strings.Contains(r.Warn[0], want+" is not installed, and lever did not run apt: the jail's egress is closed") {
+			t.Errorf("%s: closed warn = %q", rel, r.Warn)
+		}
+		r, _ = runKernelEnv(t, kernelEnv{kernel: GuestKernelHWE, osVersion: rel, running: "7.0.0-34-generic", def: "7.0.0-34-generic", aptFails: true})
+		if len(r.Warn) != 1 || !strings.Contains(r.Warn[0], "installing "+want+" failed") {
+			t.Errorf("%s: failed warn = %q", rel, r.Warn)
+		}
+	}
+}
+
+func TestParseKernelReportIgnoresUnknownPackage(t *testing.T) {
+	r := parseKernelReport("hwe-package: linux-generic-hwe-99.04\nhwe: installed\n")
+	if r.HWEPackage != "" || r.HWE != HWEInstalled {
+		t.Errorf("report = %+v", r)
 	}
 }
 

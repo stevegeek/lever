@@ -13,7 +13,7 @@ import (
 
 // AgentSessionsDir is where Claude Code keeps its live-session records in an
 // agent container: one <pid>.json per running claude, interactive or in the
-// background (Claude Code 2.1.281).
+// background (Claude Code 2.1.296).
 const AgentSessionsDir = "/home/scion/.claude/sessions"
 
 // maxSessionRecords and sessionRecordBytes bound what the probe reads: a

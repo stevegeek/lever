@@ -7,10 +7,9 @@ import (
 	"testing"
 )
 
-// recordingHub is the one fake upstream the proxy, session and jaildial tests
-// share. It records every request it receives and answers with whatever the
-// test queued in answer (200 "ok" when nothing is queued). Tests that need a
-// full scion login flow use fakeScionHub in login_test.go instead.
+// recordingHub is the shared fake upstream: it records requests and answers
+// with what was queued (200 "ok" by default). fakeScionHub in login_test.go
+// does the full login flow.
 type recordingHub struct {
 	*httptest.Server
 	mu     sync.Mutex
@@ -36,8 +35,6 @@ func newRecordingHub(t *testing.T) *recordingHub {
 	return h
 }
 
-// answerWith queues a fixed status (and optional response headers) for every
-// request that follows.
 func (h *recordingHub) answerWith(status int, hdr http.Header) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -57,14 +54,10 @@ func (h *recordingHub) requests() []*http.Request {
 	return append([]*http.Request(nil), h.seen...)
 }
 
-// hits is how many requests actually reached the hub; denied requests must
-// leave it at zero.
 func (h *recordingHub) hits() int {
 	return len(h.requests())
 }
 
-// lastHeader is the header block of the most recent request, or an empty
-// header when nothing has arrived.
 func (h *recordingHub) lastHeader() http.Header {
 	reqs := h.requests()
 	if len(reqs) == 0 {
@@ -73,9 +66,7 @@ func (h *recordingHub) lastHeader() http.Header {
 	return reqs[len(reqs)-1].Header
 }
 
-// testCookie is the session value testSession hands out.
 const testCookie = "sess-test"
 
-// testSession is a SessionSource for tests that only need SOME session: the
-// proxy refuses every request without one.
+// testSession: the proxy refuses every request without some session.
 func testSession() *stubSession { return &stubSession{cookie: testCookie} }

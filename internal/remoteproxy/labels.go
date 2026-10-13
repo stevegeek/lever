@@ -1,10 +1,9 @@
 package remoteproxy
 
-// Labels: short text the manager writes beside agent names (remote.labels_file).
-// The file is jail-written data. It is read host-side with no symbolic link
-// on its path (fsutil.ReadInTreeNoLinks), bounded, and each label is reduced
-// to one short line of text before it leaves this package. The page shows a
-// label only beside the agent's true name, and only as text.
+// Labels: short text the manager writes beside agent names. The file is
+// jail-written: it is read with no symbolic link on its path, bounded, and
+// each label is reduced to one short line of text before it leaves this
+// package. The page shows a label only as text beside the agent's true name.
 
 import (
 	"bytes"
@@ -21,9 +20,7 @@ import (
 )
 
 const (
-	// MaxLabelsFile caps the labels file (16 KiB).
 	MaxLabelsFile = 16 << 10
-	// MaxLabelRunes caps one label, by character.
 	MaxLabelRunes = 60
 	labelsTTL     = 10 * time.Second
 )
@@ -31,9 +28,7 @@ const (
 // ErrLabelsShape means the file is not a JSON object of strings.
 var ErrLabelsShape = errors.New("not a JSON object of strings")
 
-// CleanLabel applies the page's oneLine rules (chatcore.js): control and
-// format characters and the glyphs that draw as blank space become spaces,
-// runs of space collapse, and the text is cut to MaxLabelRunes characters.
+// CleanLabel applies the page's oneLine rules (chatcore.js).
 func CleanLabel(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -50,9 +45,8 @@ func CleanLabel(s string) string {
 	return string(out)
 }
 
-// ParseLabels decodes the file and cleans every label; an empty label is
-// dropped. Unknown names stay in the map: the caller only ever looks up
-// names it already shows.
+// ParseLabels drops empty labels. Unknown names stay: the caller only looks
+// up names it already shows.
 func ParseLabels(b []byte) (map[string]string, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	var raw map[string]string
@@ -71,7 +65,6 @@ func ParseLabels(b []byte) (map[string]string, error) {
 	return out, nil
 }
 
-// ReadLabels reads and parses the labels file at rel under tree.
 func ReadLabels(tree, rel string) (map[string]string, error) {
 	b, err := fsutil.ReadInTreeNoLinks(tree, rel, MaxLabelsFile)
 	if err != nil {
@@ -80,9 +73,8 @@ func ReadLabels(tree, rel string) (map[string]string, error) {
 	return ParseLabels(b)
 }
 
-// LabelSource is the proxy's cached view of the file: at most labelsTTL
-// old, and re-read only when the leaf's mtime or size changed. Any fault is
-// "no labels" (lever doctor names it).
+// LabelSource re-reads the file only when the leaf's mtime or size changed.
+// Any fault is "no labels" (lever doctor names it).
 type LabelSource struct {
 	Tree, Rel string
 	now       func() time.Time
@@ -94,8 +86,8 @@ type LabelSource struct {
 	labels map[string]string
 }
 
-// Labels is the current labels by agent name, nil for none: a copy, so a
-// caller cannot change the cache. Nil-safe.
+// Labels returns a copy, nil for none, so a caller cannot change the cache.
+// Nil-safe.
 func (s *LabelSource) Labels() map[string]string {
 	if s == nil || s.Rel == "" {
 		return nil

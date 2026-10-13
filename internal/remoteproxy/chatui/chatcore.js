@@ -1,16 +1,11 @@
-// The chat page's logic that needs no browser: what a hub answer means, in
-// which order messages show, and when to ask the hub again. chat.js does the
-// DOM and the network. Tested with `node --test` (chatcore.test.mjs).
-//
-// Everything that comes from the hub is treated as data of unknown shape: a
-// field that is not the expected type reads as absent, never as a fault.
+// The chat page's logic that needs no browser; chat.js does the DOM and the
+// network. Everything from the hub is data of unknown shape: a field of the
+// wrong type reads as absent, never as a fault.
 
-// MAX_MESSAGE is the hub's own cap on one message (scion
-// messages.MaxMessageLength). The hub counts characters, not UTF-16 units:
-// see messageLength.
+// MAX_MESSAGE is the hub's cap on one message (scion
+// messages.MaxMessageLength), counted in characters, not UTF-16 units.
 export const MAX_MESSAGE = 16000;
 
-// messageLength counts text the way the hub does, so an emoji is one.
 export function messageLength(text) {
   let n = 0;
   for (const _ of text) n++;
@@ -19,8 +14,6 @@ export function messageLength(text) {
 
 const str = (v) => (typeof v === 'string' ? v : '');
 
-// historyItems is the message list of a history answer, whichever key the
-// hub used.
 export function historyItems(body) {
   if (!body || typeof body !== 'object') return [];
   for (const key of ['messages', 'items']) {
@@ -29,20 +22,15 @@ export function historyItems(body) {
   return [];
 }
 
-// nextCursor is the history answer's cursor for the page before it, or ''.
 export function nextCursor(body) {
   return body && typeof body === 'object' ? str(body.nextCursor) : '';
 }
 
-// messageText is a message's text: history rows carry it as `msg`, the
-// answer to a send as `content`.
 export function messageText(m) {
   return str(m && m.msg) || str(m && m.content);
 }
 
-// mergeMessages adds items to the map by id and reports whether anything
-// changed. A message with no id cannot be told apart from its duplicates, so
-// it is left out.
+// A message with no id cannot be told from its duplicates, so it is left out.
 export function mergeMessages(map, items) {
   let changed = false;
   for (const m of items) {
@@ -62,20 +50,15 @@ const time = (m) => {
   return Number.isNaN(t) ? 0 : t;
 };
 
-// sortedMessages is the map's messages, oldest first; the id breaks a tie so
-// the order never depends on arrival.
+// The id breaks a tie so the order never depends on arrival.
 export function sortedMessages(map) {
   return [...map.values()].sort((a, b) => time(a) - time(b) || (str(a.id) < str(b.id) ? -1 : str(a.id) > str(b.id) ? 1 : 0));
 }
 
-// classify says how a message shows: 'mine' (the operator wrote it), 'agent',
-// 'system' (a state line, shown small), or 'hidden' (the hub's own copy of an
-// operator message for @mention routing, or a message with nothing to show).
-//
-// The agent chooses the type of what it sends, so a type never hides an
-// agent's message or makes it a state line: every type from the agent's
-// side (the DM agent's id, agentId, or an agent sender) shows as an agent
-// message.
+// classify is 'mine', 'agent', 'system' (a state line) or 'hidden' (the hub's
+// copy of an operator message for @mention routing, or nothing to show).
+// The agent chooses its message type, so every message from the agent's side
+// shows as 'agent': a type never hides it or makes it a state line.
 export function classify(m, userId, agentId) {
   const type = str(m && m.type);
   if (!messageText(m)) return 'hidden';
@@ -84,27 +67,23 @@ export function classify(m, userId, agentId) {
   return type === 'state-change' || type === 'system' ? 'system' : 'agent';
 }
 
-// isChatSubject reports whether an event subject is one of this user's own
-// chat subjects. The page only uses it as a hint to read the history again,
-// so a subject for anyone else is simply ignored.
+// A subject is only a hint to read the history again; anyone else's is
+// ignored.
 export function isChatSubject(subject, userId) {
   return !!userId && str(subject).startsWith(`user.${userId}.chat.`);
 }
 
-// oneLine makes another party's text safe to quote inside a sentence of the
-// page's own: one line, at most max characters. Control and format
-// characters go (a direction override would redraw the rest of the
-// sentence, the page's words included, right to left), as do the glyphs
-// that draw as blank space, so the text cannot set a part of itself apart
-// or push the page's words out of sight.
+// oneLine makes another party's text safe to quote in the page's own
+// sentence: one line, at most max characters, without control and format
+// characters (a direction override would redraw the page's words) or blank
+// glyphs, so it cannot set a part of itself apart or push the page's words
+// out of sight.
 export function oneLine(text, max) {
   const flat = str(text).replace(/[\p{Cc}\p{Cf}\u2800\u3164\u115F\u1160\uFFA0]/gu, ' ').replace(/\s+/g, ' ').trim();
   // By character, so a cut never splits one.
   return [...flat].slice(0, max).join('');
 }
 
-// errorText is what to show for a failed request: the hub's own message when
-// its answer has one, else the status.
 export function errorText(status, body) {
   let msg = '';
   if (body && typeof body === 'object') {
@@ -118,9 +97,8 @@ export function errorText(status, body) {
   return msg ? `${msg} (HTTP ${status})` : `request failed (HTTP ${status})`;
 }
 
-// makeCoalescer wraps fn so that a burst of calls runs it at most once per
-// gapMs: the first call runs at once, later ones inside the gap collapse
-// into ONE run at the end of it. now and setTimer are injected for the test.
+// makeCoalescer runs fn at most once per gapMs: the first call at once, later
+// ones in the gap as one run at its end.
 export function makeCoalescer(fn, gapMs, now = () => Date.now(), setTimer = (f, ms) => setTimeout(f, ms)) {
   let last = -Infinity;
   let pending = false;
@@ -141,12 +119,10 @@ export function makeCoalescer(fn, gapMs, now = () => Date.now(), setTimer = (f, 
   };
 }
 
-// The agent list (/lever/api/agents). The proxy builds it per login; the
-// page still reads it as data of unknown shape, and shows only fixed words
-// for what an agent reports about itself.
+// The agent list (/lever/api/agents) is read as data of unknown shape, and
+// shows only fixed words for what an agent reports about itself.
 
-// WAKE_POLL_MS and WAKE_POLLS: after a wake, the list is read every 3 s for
-// up to 90 s. LIST_MS: the list is read again this often while the page shows.
+// After a wake the list is read every 3 s for up to 90 s.
 export const WAKE_POLL_MS = 3000;
 export const WAKE_POLLS = 30;
 export const LIST_MS = 15000;
@@ -156,10 +132,9 @@ const ACTIVITIES = new Set(['working', 'waiting', 'idle']);
 const LABEL_MAX = 60;
 const UNREAD_MAX = 99;
 
-// agentList reads a list answer: {login, tier, userId, console, agents}, or
-// null when it is not one. A row needs a name and an access the page knows;
-// a later row with the same name is dropped. A see-only row keeps only its
-// name, role, access, state and label, whatever else the answer holds.
+// agentList is null when body is not a list. A row needs a name and a known
+// access; a duplicate name is dropped; a see-only row keeps only name, role,
+// access, state and label.
 export function agentList(body) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.agents)) return null;
   const seen = new Set();
@@ -195,8 +170,7 @@ export function agentList(body) {
   };
 }
 
-// rowTitle is the name, then the label: the name always comes first, so a
-// label cannot pass for another agent.
+// The name always comes first, so a label cannot pass for another agent.
 export function rowTitle(a) {
   return a.label ? `${a.name} · ${a.label}` : a.name;
 }
@@ -210,14 +184,12 @@ const CHIP = {
   'not-fresh': 'not fresh',
 };
 
-// chipText is the state as one of the page's fixed words.
 export function chipText(a) {
   const state = str(a && a.state);
   if (state === 'running') return ACTIVITIES.has(str(a.activity)) ? a.activity : 'running';
   return Object.hasOwn(CHIP, state) ? CHIP[state] : 'unknown';
 }
 
-// badgeText is the unread count to show, or '' for none or not known.
 export function badgeText(unread) {
   if (!Number.isInteger(unread) || unread <= 0) return '';
   return unread >= UNREAD_MAX ? `${UNREAD_MAX}+` : String(unread);
@@ -228,12 +200,9 @@ const NOTE_ASLEEP = 'asleep – your message wakes it';
 const NOTE_OFFLINE = 'the assistant is offline';
 const NOTE_UNKNOWN = 'state unknown – retrying';
 
-// inputView says what the chat of agent a offers: input (the composer is
-// on), note (a fixed line under it), ask (the "Ask the manager to start"
-// button; only when the login may message the manager), wake (a send wakes
-// the agent first), viewOnly (no history, no input). The manager is never
-// woken from the page. tier is the login's: a contact (anything but
-// 'operator') wakes only a suspended worker.
+// inputView is what agent a's chat offers: input, note, ask (only when the
+// login may message the manager), wake, viewOnly. The manager is never woken
+// from the page.
 export function inputView(a, canAskManager, tier) {
   const off = { input: false, note: '', ask: false, wake: false, viewOnly: false };
   if (!a || a.access !== 'message') return { ...off, viewOnly: true };
@@ -246,9 +215,8 @@ export function inputView(a, canAskManager, tier) {
     case 'suspended':
     case 'stopped':
       if (manager) return { ...off, note: NOTE_OFFLINE };
-      // A contact wakes only a suspended worker: a stopped one was stopped
-      // by the operator on purpose, so the manager is asked instead (the
-      // server refuses the wake too). Anything but 'operator' is a contact.
+      // A contact (anything but 'operator') wakes only a suspended worker: a
+      // stopped one was stopped by the operator on purpose. The server refuses too.
       if (a.state === 'stopped' && tier !== 'operator') return { ...off, ask: !!canAskManager };
       return { ...off, input: true, note: NOTE_ASLEEP, wake: true };
     case 'error':
@@ -260,8 +228,7 @@ export function inputView(a, canAskManager, tier) {
   }
 }
 
-// askDraft is the editable draft the "Ask the manager" button leaves in the
-// manager's chat. Nothing sends it but the person.
+// Nothing sends the draft but the person.
 export function askDraft(name) {
   return `Please start ${name} for me.`;
 }
@@ -276,25 +243,21 @@ const WAKE_TEXT = {
   origin: 'The request was refused.',
 };
 
-// wakeText is the page's own sentence for a refused wake: one per reason
-// word the proxy answers with, never the answer's text.
+// One fixed sentence per reason word, never the answer's text.
 export function wakeText(status, body, name) {
   const word = body && typeof body === 'object' ? str(body.error) : '';
   if (Object.hasOwn(WAKE_TEXT, word)) return WAKE_TEXT[word];
   return `${name} could not be woken (HTTP ${status || 'no answer'}).`;
 }
 
-// The operator's read-only view of contact conversations
-// (/lever/api/contacts). Like every answer, these are data of unknown shape.
+// The operator's read-only view of contact conversations (/lever/api/contacts).
 
 export const CONTACTS_MS = 30000; // the contact list and an open transcript refresh this often
 export const NOT_SHOWN = 'not shown to the contact';
 export const NOT_YET = 'not yet read by the contact';
 const FROM = new Set(['contact', 'agent', 'system']);
 
-// contactList reads the contact list: [{login, signedIn, agents: [{name,
-// label, state, access: 'see'}]}], or null when it is not one. access 'see'
-// keeps agent rows of this list off every input.
+// access 'see' keeps this list's agent rows off every input.
 export function contactList(body) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.contacts)) return null;
   const seen = new Set();
@@ -318,9 +281,8 @@ export function contactList(body) {
   return out;
 }
 
-// transcriptItems reads a transcript page's rows. A row without an id is
-// left out; an unknown writer reads as the agent; a row counts as shown to
-// the contact only when the answer says exactly true.
+// An unknown writer reads as the agent; a row is shown to the contact only
+// when the answer says exactly true.
 export function transcriptItems(body) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.messages)) return [];
   return body.messages
@@ -338,8 +300,6 @@ export function transcriptPath(login, name, cursor) {
   return `/lever/api/contacts/${encodeURIComponent(login)}/agents/${encodeURIComponent(name)}/messages?${q}`;
 }
 
-// viewFilesPath is the route of a contact's files with one agent
-// (remote.files, operator only).
 export function viewFilesPath(login, name) {
   return `/lever/api/contacts/${encodeURIComponent(login)}/agents/${encodeURIComponent(name)}/files`;
 }
@@ -349,8 +309,7 @@ export function transcriptWho(m, login, name) {
   return m.from === 'agent' ? name : 'hub';
 }
 
-// mergeRows adds transcript rows by id and reports whether anything
-// changed: a row, its text, or its mark (an agent row binds later).
+// A row's mark changes too: an agent row binds later.
 export function mergeRows(map, items) {
   let changed = false;
   for (const m of items) {
@@ -363,27 +322,23 @@ export function mergeRows(map, items) {
   return changed;
 }
 
-// viewErrorText says why a transcript cannot be read.
 export function viewErrorText(status, body) {
   const word = body && typeof body === 'object' ? str(body.error) : '';
-  // The hint is lever's fixed word: the contact's hub user is not the one
-  // lever apply bound. apply binds a login only while no agent container
-  // runs, so the fix is a stop and an up.
+  // lever apply binds a login only while no agent container runs, so a new
+  // hub user needs a stop and an up.
   if (word === 'not-signed-in' && body.hint === 'rebind') return 'the contact has a new hub user: run lever stop, then lever up';
   if (word === 'not-signed-in') return 'has not signed in yet';
   if (word === 'no-record') return 'the agent has no record on the hub yet';
   return errorText(status, body);
 }
 
-// hashAgent reads the agent a notification opened the page for
-// (#agent=<name>): a config name, else ''.
+// hashAgent is the #agent=<name> a notification opened, if a config name, else ''.
 export function hashAgent(hash) {
   const m = typeof hash === 'string' ? /^#agent=([a-z0-9][a-z0-9-]{0,62})$/.exec(hash) : null;
   return m ? m[1] : '';
 }
 
-// pushKeyBytes turns lever's VAPID key into what pushManager.subscribe
-// takes: the 65 bytes of an uncompressed P-256 point, else null.
+// pushKeyBytes is the 65-byte uncompressed P-256 point, else null.
 export function pushKeyBytes(key) {
   if (typeof key !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(key)) return null;
   let bin;
@@ -396,23 +351,18 @@ export function pushKeyBytes(key) {
   return Uint8Array.from(bin, (c) => c.charCodeAt(0));
 }
 
-// pushView is the notifications button and its note. Hidden where the
-// browser has no push or lever has it off; a note when the browser blocks it.
 export function pushView({ available, permission, subscribed, busy, error }) {
   if (!available) return { hidden: true, disabled: true, text: '', note: '' };
   if (permission === 'denied') return { hidden: true, disabled: true, text: '', note: 'Notifications are blocked for this page in the browser settings.' };
   return { hidden: false, disabled: !!busy, text: subscribed ? 'Turn off notifications' : 'Turn on notifications', note: error || '' };
 }
 
-// Files in the chat (remote.files).
 export const FILE_LIST_MAX = 200;
 export const UPLOAD_MS = 3600000; // the server's own body deadline: 10 min plus max_bytes at 64 KiB/s, at most 1 h
 
 const FILE_ID = /^[0-9a-f]{32}$/;
 const AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
-// filesConfig is the list's files object, or null when files are off (or
-// the object is not one the page understands).
 export function filesConfig(body) {
   const f = body && typeof body === 'object' ? body.files : null;
   if (!f || typeof f !== 'object' || !Number.isInteger(f.maxBytes) || f.maxBytes <= 0 || !Array.isArray(f.extensions)) return null;
@@ -421,8 +371,7 @@ export function filesConfig(body) {
     uploads: f.uploads !== false, shares: f.shares !== false };
 }
 
-// fileList reads /lever/api/files/<agent>: rows with a well-formed id only;
-// the name is one line of text; direction is "sent" or "received".
+// Only rows with a well-formed id; the name is one line of text.
 export function fileList(body) {
   if (!body || typeof body !== 'object' || !Array.isArray(body.files)) return null;
   const out = [];
@@ -434,15 +383,13 @@ export function fileList(body) {
   return out;
 }
 
-// sizeText is a byte count for people.
 export function sizeText(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1048576) return `${Math.round(n / 1024)} KB`;
   return `${(n / 1048576).toFixed(1)} MB`;
 }
 
-// fileCheck is why a picked file cannot go ('' when it can), before any
-// request: the server checks the same and more.
+// fileCheck runs before any request; the server checks the same and more.
 export function fileCheck(file, cfg) {
   const name = typeof file.name === 'string' ? file.name : '';
   const dot = name.lastIndexOf('.');
@@ -471,57 +418,46 @@ const UPLOAD_WORDS = {
   origin: 'the upload did not come from this page',
 };
 
-// uploadErrorText is what to show for a refused upload: the proxy's fixed
-// word in the page's own words, else errorText.
 export function uploadErrorText(status, body) {
   const word = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : '';
   return Object.hasOwn(UPLOAD_WORDS, word) ? UPLOAD_WORDS[word] : errorText(status, body);
 }
 
-// uploadNote is the chat message the page sends after an upload: the agent
-// reads it as this login's message and looks the file up (contact_files).
+// The agent reads the note as this login's message and looks the file up.
 export function uploadNote(name) {
   return `📎 uploaded ${name}`;
 }
 
-// downloadPath is lever's download route for a row, or '' when the agent
-// name or the id is not one the page builds a link from.
+// downloadPath is '' unless the agent name and id are ones the page builds a
+// link from.
 export function downloadPath(agent, id) {
   return AGENT_NAME.test(agent) && FILE_ID.test(id) ? `/lever/api/files/${agent}/${id}` : '';
 }
 
-// Dictation and read-aloud (remote.voice). The page records a clip, turns it
-// into WAV (16 kHz, mono, 16-bit) here, and posts it; the text that comes
-// back goes into the message box, never straight to the agent. Read-aloud
-// uses on-device voices, or lever's server voices (below).
+// Dictation and read-aloud (remote.voice). A transcript goes into the message
+// box, never straight to the agent.
 export const VOICE_RATE = 16000;
 export const VOICE_MAX_SECONDS = 600; // the config's ceiling
 export const VOICE_MIN_SAMPLES = VOICE_RATE / 10; // the server refuses less
 
-// voiceConfig is the list's voice object, or null when the login has no
-// dictation (or the object is not one the page understands).
 export function voiceConfig(body) {
   const v = body && typeof body === 'object' ? body.voice : null;
   if (!v || typeof v !== 'object' || !Number.isInteger(v.maxSeconds) || v.maxSeconds <= 0 || v.maxSeconds > VOICE_MAX_SECONDS) return null;
   return { maxSeconds: v.maxSeconds };
 }
 
-// voiceRequestMs bounds the transcription request: the server's own body
-// deadline for a clip of maxSeconds, plus the transcription.
+// The server's own body deadline for a clip of maxSeconds, plus transcription.
 export function voiceRequestMs(maxSeconds) {
   return (120 + 2 * maxSeconds) * 1000;
 }
 
-// resampledLength is how many samples a clip of inLength samples at inRate
-// has at outRate: the OfflineAudioContext's length.
 export function resampledLength(inLength, inRate, outRate = VOICE_RATE) {
   if (!(inLength > 0) || !(inRate > 0)) return 0;
   return Math.max(1, Math.ceil((inLength * outRate) / inRate));
 }
 
-// encodeWAV is samples (floats in [-1, 1]) as a WAV file: the canonical
-// 44-byte header the proxy checks byte for byte (voice.CheckWAV), then
-// PCM s16le, mono, at rate.
+// encodeWAV writes the canonical 44-byte header the proxy checks byte for
+// byte (voice.CheckWAV), then PCM s16le mono.
 export function encodeWAV(samples, rate = VOICE_RATE) {
   const n = samples.length;
   const buf = new ArrayBuffer(44 + 2 * n);
@@ -549,15 +485,11 @@ export function encodeWAV(samples, rate = VOICE_RATE) {
   return new Uint8Array(buf);
 }
 
-// clockText is seconds as m:ss.
 export function clockText(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// insertText puts text into value at the selection [start, end), with a
-// space on each side where a word would otherwise run on. It answers the
-// new value and where the cursor goes (after the text).
 export function insertText(value, start, end, text) {
   const v = typeof value === 'string' ? value : '';
   const t = typeof text === 'string' ? text.trim() : '';
@@ -584,14 +516,11 @@ const VOICE_WORDS = {
   unavailable: 'transcription is unavailable right now',
 };
 
-// voiceErrorText is what to show for a refused clip: the proxy's fixed word
-// in the page's own words, else errorText.
 export function voiceErrorText(status, body) {
   const word = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : '';
   return Object.hasOwn(VOICE_WORDS, word) ? VOICE_WORDS[word] : errorText(status, body);
 }
 
-// transcriptOf is the text of a transcription answer, or null.
 export function transcriptOf(body) {
   if (!body || typeof body !== 'object' || typeof body.text !== 'string') return null;
   return [...body.text.trim()].slice(0, MAX_MESSAGE).join('');
@@ -600,8 +529,6 @@ export function transcriptOf(body) {
 export const CODE_SKIPPED = 'code block skipped';
 const SPEAK_MAX = 20000; // characters read from one message
 
-// hostOf is a URL's host name, for reading a link aloud ('' when it is not
-// a URL).
 function hostOf(u) {
   try {
     return new URL(u).hostname.replace(/^www\./, '');
@@ -610,9 +537,6 @@ function hostOf(u) {
   }
 }
 
-// speechText is a message as it is read aloud: markdown formatting removed,
-// a code block replaced by "code block skipped", a link read as its text
-// (or, bare, as its host name), on-screen-only characters dropped.
 export function speechText(text) {
   let t = str(text).slice(0, SPEAK_MAX).replace(/\r\n?/g, '\n');
   // Fenced code blocks (``` or ~~~), closed or running to the end.
@@ -638,24 +562,19 @@ export function speechText(text) {
   return t.replace(/[ \t]+/g, ' ').replace(/ *\n+ */g, '\n').trim();
 }
 
-// localVoices is the on-device voices (localService true): read-aloud never
-// uses a voice that sends the text to a service.
+// Read-aloud never uses a voice that sends the text to a service.
 export function localVoices(voices) {
   return (Array.isArray(voices) ? voices : []).filter((v) => v && v.localService === true && typeof v.voiceURI === 'string');
 }
 
-// Server voices (remote.voice.read_aloud: server): lever-tool-tts on the
-// operator's host. The roster lists them while the tool is ready.
+// Server voices: lever-tool-tts on the operator's host.
 const SPEECH_VOICES_MAX = 100;
 const SPEECH_CHARS_MIN = 100;
 const SPEECH_CHARS_MAX = 2000;
-// SPEECH_FIRST is the longest first part of a message: a short first part
-// starts the voice sooner.
+// A short first part starts the voice sooner.
 export const SPEECH_FIRST = 200;
 const speechVoiceRE = /^[A-Za-z0-9_.-]{1,40}$/;
 
-// speechConfig is the roster's server voices, or null: the default voice,
-// the voices (name and language), and the longest text of one request.
 export function speechConfig(body) {
   const v = body && typeof body === 'object' ? body.speech : null;
   if (!v || typeof v !== 'object' || !Array.isArray(v.voices) || !Number.isInteger(v.maxChars) ||
@@ -670,29 +589,22 @@ export function speechConfig(body) {
   return { voice, voices, maxChars: v.maxChars };
 }
 
-// pickServerVoice is the server voice to read with: the one saved on this
-// device when the tool still has it, else the tool's default.
 export function pickServerVoice(cfg, saved) {
   if (!cfg) return '';
   return cfg.voices.some((x) => x.name === saved) ? saved : cfg.voice;
 }
 
-// speechParts splits read-aloud text (speechText) into the parts the page
-// asks the server for one after the other: whole sentences where it can,
-// the first part at most SPEECH_FIRST characters (so the voice starts
-// soon), the others at most maxChars. A sentence longer than that is cut
-// at a space, or, with none, anywhere. Characters are code points, as the
-// server counts them.
+// speechParts splits into whole sentences where it can, the first part at
+// most SPEECH_FIRST characters, the others maxChars. Characters are code
+// points, as the server counts them.
 export function speechParts(text, maxChars) {
   const max = Math.max(1, Math.min(maxChars, SPEECH_CHARS_MAX));
-  // No lookbehind: older Safari cannot parse it, and this module would
-  // not load at all.
+  // No lookbehind: older Safari cannot parse it, and the module would not load.
   const sentences = str(text).replace(/([.!?…:;])\s+/g, '$1\n').split(/\n+/).map((x) => x.trim()).filter(Boolean);
   const first = Math.min(SPEECH_FIRST, max);
   const pieces = [];
   for (const sentence of sentences) {
     let rest = [...sentence];
-    // The very first piece is cut at the first part's limit.
     for (let lim = pieces.length ? max : first; rest.length > lim; lim = max) {
       let cut = rest.lastIndexOf(' ', lim);
       if (cut <= 0) cut = lim;
@@ -732,15 +644,13 @@ const SPEAK_WORDS = {
   unavailable: 'the server voice is unavailable right now',
 };
 
-// speakErrorText is what to show when a server voice request is refused.
 export function speakErrorText(status, body) {
   const word = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : '';
   return Object.hasOwn(SPEAK_WORDS, word) ? SPEAK_WORDS[word] : errorText(status, body);
 }
 
-// pickVoice chooses the read-aloud voice among the on-device ones: the one
-// saved on this device, then the browser's default, then one in the page's
-// language, then the first. null when there is none.
+// pickVoice prefers the saved voice, then the browser's default, then the
+// page's language, then the first.
 export function pickVoice(voices, savedURI, lang) {
   const local = localVoices(voices);
   if (!local.length) return null;

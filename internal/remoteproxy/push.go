@@ -17,15 +17,10 @@ import (
 	"github.com/stevegeek/lever/internal/webpush"
 )
 
-// Web Push for the chat page (remote.push).
-//
-// A login turns notifications on from the page: the browser subscribes with
-// the VAPID public key and the page posts the subscription here. For each
-// login with a subscription the proxy keeps one hub events stream with that
-// login's own session (push_watch.go); a new message from one of the
-// login's agents becomes one push of {"v":1,"agent":"<name>"} to each of
-// its subscriptions (push_trigger.go). No message text, label or id is ever
-// in a push. The page and its worker (chatui/sw.js) do the rest.
+// Web Push for the chat page (remote.push). Each login with a subscription
+// has one hub events stream under its own session (push_watch.go); a new
+// message from one of its agents becomes a push of {"v":1,"agent":"<name>"}
+// (push_trigger.go). No message text, label or id is ever in a push.
 
 const (
 	pushKeyPath  = "/lever/api/push/key"
@@ -78,17 +73,14 @@ type Push struct {
 	mu   sync.Mutex
 	last map[string]time.Time // login\x00agent → last push (push_trigger.go)
 
-	// stopping closes when Run stops: outstanding sends get shutdownGrace
-	// more (push_trigger.go).
+	// stopping closes when Run stops; outstanding sends get shutdownGrace more.
 	stopping chan struct{}
 	stopOnce sync.Once
 
-	// Watcher pacing (push_watch.go); tests shorten them.
 	backoffMin, backoffMax, idle, healthy, debounce, shutdownGrace time.Duration
 }
 
-// NewPush opens the push directory, the key (created on first use) and
-// the store.
+// NewPush opens the push directory, key and store, creating the key on first use.
 func NewPush(o PushOptions) (*Push, error) {
 	store, err := OpenPushStore(o.Dir, o.Logins)
 	if err != nil {
@@ -119,7 +111,6 @@ func (p *Push) PublicKey() string { return p.pub }
 
 func (p *Push) attach(g *gate) { p.g = g }
 
-// stop starts the shutdown cap on outstanding sends.
 func (p *Push) stop() {
 	p.stopOnce.Do(func() {
 		if p.stopping != nil {
@@ -128,7 +119,6 @@ func (p *Push) stop() {
 	})
 }
 
-// kick asks Run to start or stop watchers for the store's logins.
 func (p *Push) kick() {
 	select {
 	case p.kicks <- struct{}{}:
@@ -152,18 +142,14 @@ func (p *Push) unsubscribe(login, endpoint string) error {
 	return nil
 }
 
-// isServeOrigin reports whether origin is the proxy's public origin
-// https://<serveHost> (remote.base_url is https), the host compared without
-// case.
+// isServeOrigin: origin must be exactly https://<serveHost> (host case-insensitive).
 func isServeOrigin(origin, serveHost string) bool {
 	return serveHost != "" && strings.EqualFold(origin, "https://"+serveHost)
 }
 
-// sameOriginWrite reports whether a write comes from the page itself: one
-// Origin, the proxy's public origin https://<serveHost> (remote.base_url is
-// https), and a Sec-Fetch-Site, when sent, of same-origin. A browser always
-// sends Origin on a POST or DELETE. The gate's own check (checkOrigin)
-// accepts the same origin but lets a request without one through.
+// sameOriginWrite requires Origin to be the proxy's public origin and
+// Sec-Fetch-Site, when sent, to be same-origin. Browsers always send Origin
+// on POST and DELETE; checkOrigin alone lets a request without one through.
 func sameOriginWrite(r *http.Request, serveHost string) bool {
 	if o := r.Header.Values("Origin"); len(o) != 1 || !isServeOrigin(o[0], serveHost) {
 		return false
@@ -258,8 +244,7 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 	g.answerWakeJSON(w, r, line, decision, http.StatusCreated, map[string]string{"ok": "true"})
 }
 
-// pushSubBody is what the page posts: PushSubscription.toJSON()'s fields, no
-// others. expirationTime is accepted and ignored (browsers send null).
+// pushSubBody is PushSubscription.toJSON(); expirationTime is ignored.
 type pushSubBody struct {
 	Endpoint       string          `json:"endpoint"`
 	ExpirationTime json.RawMessage `json:"expirationTime"`
@@ -269,9 +254,8 @@ type pushSubBody struct {
 	} `json:"keys"`
 }
 
-// decodePushSubBody reads body strictly: one JSON object, no unknown field, no
-// key twice in any object, nothing after it. Two readers of one body must
-// never see two different subscriptions.
+// decodePushSubBody is strict (one object, no unknown or repeated key, no
+// trailing data) so two readers of one body never see two subscriptions.
 func decodePushSubBody(body []byte, out *pushSubBody) error {
 	if err := noDuplicateKeys(body); err != nil {
 		return err
@@ -287,10 +271,9 @@ func decodePushSubBody(body []byte, out *pushSubBody) error {
 	return nil
 }
 
-// noDuplicateKeys walks body's tokens and refuses an object that names a
-// key twice (encoding/json would keep the last one silently). Keys compare
-// case-folded, as encoding/json matches them to fields: "endpoint" and
-// "ENDPOINT" (or "keys" and "keyſ") are the same field.
+// noDuplicateKeys refuses a repeated object key (encoding/json silently keeps
+// the last), compared case-folded as encoding/json matches fields: "keys" and
+// "keyſ" are the same field.
 func noDuplicateKeys(body []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	type frame struct {
@@ -344,9 +327,8 @@ func noDuplicateKeys(body []byte) error {
 	}
 }
 
-// foldKey maps each rune of k to the smallest rune of its simple case
-// folding orbit, so two keys encoding/json would match to one field fold to
-// one string.
+// foldKey maps each rune to the smallest rune of its simple case-folding
+// orbit, so keys encoding/json matches to one field fold alike.
 func foldKey(k string) string {
 	var b strings.Builder
 	for _, r := range k {

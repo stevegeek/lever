@@ -19,9 +19,8 @@ import (
 	"time"
 )
 
-// startProvider serves a Provider on a real loopback listener whose port the
-// provider knows, so its discovery document advertises endpoints that
-// resolve, as the guest forwarder arranges in production.
+// startProvider serves a Provider on a real loopback listener whose port it
+// knows, so discovery advertises endpoints that resolve.
 func startProvider(t *testing.T) (*Provider, *auditSink, *httptest.Server) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -40,25 +39,18 @@ func startProvider(t *testing.T) (*Provider, *auditSink, *httptest.Server) {
 	return p, sink, srv
 }
 
-// fakeScionHub models the parts of scion's web layer this handshake touches:
-//
-//   - ONE cookie, scion_sess, carrying the login state first and the session
-//     afterwards;
-//   - a redirect_uri built from the hub's own base_url (its localhost
-//     default, not an address the proxy can reach), so the driver has to
-//     rewrite the origin;
-//   - a callback that constant-time compares the state, then calls the
-//     provider's /token and /userinfo itself;
-//   - a web shell that answers 401 (or a redirect to the login page) without a
-//     session, and an API that passes a request carrying an Authorization
-//     header through untouched and otherwise runs as the session's user.
+// fakeScionHub models the parts of scion's web layer the handshake touches:
+// one scion_sess cookie carrying state then session; a redirect_uri built
+// from the hub's own unreachable base_url; a callback that compares state and
+// calls /token and /userinfo itself; and a shell/API that need a session
+// unless the request carries an Authorization header.
 type fakeScionHub struct {
 	*httptest.Server
 	issuer   string // the configured oidc_login.issuer_url
 	clientID string
 
-	// baseURL is what the hub builds redirect_uri from. Deliberately not its
-	// own test address: scion defaults to http://localhost:<web-port>.
+	// baseURL mirrors scion's default http://localhost:<web-port>, which the
+	// proxy cannot reach.
 	baseURL string
 
 	mu        sync.Mutex
@@ -152,8 +144,7 @@ func (h *fakeScionHub) handleCallback(w http.ResponseWriter, r *http.Request) {
 	h.callbacks++
 	h.mu.Unlock()
 	if h.callbackFails {
-		// A hub that neither redirects to its login page nor writes a session:
-		// the jar keeps the cookie it already had, which is the login STATE.
+		// Neither redirect nor session: the jar keeps the login STATE cookie.
 		http.Error(w, "boom", http.StatusInternalServerError)
 		return
 	}
@@ -182,8 +173,7 @@ func (h *fakeScionHub) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-// exchange is the hub's back channel: POST /token, then GET /userinfo. It
-// re-sends the SAME redirect_uri it issued, which is what binds the code.
+// exchange re-sends the SAME redirect_uri it issued, which binds the code.
 func (h *fakeScionHub) exchange(code string) (string, error) {
 	doc, err := h.discover()
 	if err != nil {
@@ -245,8 +235,6 @@ func (h *fakeScionHub) handleShell(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, "shell for %s", email)
 		return
 	}
-	// scion redirects a browser navigation to its login page and answers
-	// anything else 401.
 	if r.URL.Path == "/" {
 		http.Redirect(w, r, "/auth/login", http.StatusFound)
 		return
@@ -270,16 +258,13 @@ func (h *fakeScionHub) sessionEmail(r *http.Request) (string, bool) {
 	return email, ok
 }
 
-// handleAPI models sessionToBearerMiddleware: a request carrying an
-// Authorization header passes through to the hub's own auth, which is where
-// the narrow PAT is checked.
+// handleAPI models sessionToBearerMiddleware: a request with an Authorization
+// header passes through to the hub's own auth (where the narrow PAT is checked).
 func (h *fakeScionHub) handleAPI(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.apiCalls = append(h.apiCalls, r.Header.Clone())
 	h.mu.Unlock()
 	if r.Header.Get("Authorization") != "" {
-		// scion hands a request that carries its own Authorization straight
-		// to the API and never reads the cookie; no bearer is valid here.
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -296,8 +281,6 @@ func (h *fakeScionHub) counts() (logins, callbacks int) {
 	return h.logins, h.callbacks
 }
 
-// newTestDriver wires a driver at a hub, both fake, with the provider served
-// on its own listener.
 func newTestDriver(t *testing.T) (*LoginDriver, *fakeScionHub, *Provider, *auditSink) {
 	t.Helper()
 	p, psink, _ := startProvider(t)
@@ -307,8 +290,6 @@ func newTestDriver(t *testing.T) (*LoginDriver, *fakeScionHub, *Provider, *audit
 	return d, hub, p, psink
 }
 
-// TestHandshakeCompletesWithNoAuthorizeRouteRegistered: a full hub login,
-// driven server-side, while the provider has no authorization endpoint.
 func TestHandshakeCompletesWithNoAuthorizeRouteRegistered(t *testing.T) {
 	d, hub, p, psink := newTestDriver(t)
 
@@ -320,7 +301,6 @@ func TestHandshakeCompletesWithNoAuthorizeRouteRegistered(t *testing.T) {
 		t.Fatal("handshake returned an empty session")
 	}
 
-	// The session actually opens the hub's shell.
 	req, _ := http.NewRequest(http.MethodGet, hub.URL+"/auth/me", nil)
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookie})
 	resp, err := http.DefaultClient.Do(req)
@@ -336,9 +316,8 @@ func TestHandshakeCompletesWithNoAuthorizeRouteRegistered(t *testing.T) {
 		t.Fatalf("/auth/me = %q, want the operator the proxy verified", body)
 	}
 
-	// The provider answered ONLY the three endpoints the hub calls. If
-	// /authorize appears here, the login has grown a code-minting endpoint
-	// reachable from inside the jail — see TestAuthorizeIsPermanently404.
+	// The provider answered only the three hub endpoints. /authorize here
+	// means a code-minting endpoint reachable from the jail.
 	var paths []string
 	for _, l := range psink.all() {
 		paths = append(paths, l.Path)
@@ -360,10 +339,8 @@ func TestHandshakeCompletesWithNoAuthorizeRouteRegistered(t *testing.T) {
 	}
 }
 
-// TestLoginRewritesTheHubIssuedRedirectOrigin: the hub builds redirect_uri
-// from its own base_url, which the proxy cannot reach. Only the origin may be
-// replaced; the code stays bound to the redirect_uri as issued, which the hub
-// re-sends to /token.
+// The hub builds redirect_uri from its unreachable base_url: only the origin
+// may change, since the code is bound to the redirect_uri as issued.
 func TestLoginRewritesTheHubIssuedRedirectOrigin(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	if strings.Contains(hub.URL, "8080") {
@@ -401,9 +378,8 @@ func TestLoginRefusesAnUnexpectedClientID(t *testing.T) {
 	}
 }
 
-// TestLoginReportsAStateMismatch models the jar being dropped between the
-// login and the callback: scion stores the state in the very cookie that
-// becomes the session, so the two steps must share one jar.
+// TestLoginReportsAStateMismatch models a jar dropped between login and
+// callback: scion keeps the state in the cookie that becomes the session.
 func TestLoginReportsAStateMismatch(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	hub.dropState = true
@@ -416,8 +392,6 @@ func TestLoginReportsAStateMismatch(t *testing.T) {
 	}
 }
 
-// TestConcurrentCallersShareOneLogin: a browser opens several connections at
-// once and they all arrive before any session exists.
 func TestConcurrentCallersShareOneLogin(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	const callers = 12
@@ -457,9 +431,8 @@ func TestFailedLoginIsNotCached(t *testing.T) {
 	}
 }
 
-// TestSessionIsRenewedBeforeTheHubRefusesIt: scion refuses a scion_sess
-// older than 24 hours, and a POST that meets that refusal cannot be retried,
-// so the driver logs in again once a session reaches sessionMaxAge.
+// scion refuses a scion_sess older than 24 hours and a refused POST cannot be
+// retried, so the driver renews at sessionMaxAge.
 func TestSessionIsRenewedBeforeTheHubRefusesIt(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	clock := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
@@ -520,9 +493,7 @@ func TestInvalidateForcesAFreshLogin(t *testing.T) {
 	}
 }
 
-// TestDistinctOperatorsGetDistinctSessions: the identity asserted at
-// /userinfo is the tailnet login the proxy verified, so two operators end up
-// as two hub users rather than sharing one.
+// Two operators must become two hub users, not share one.
 func TestDistinctOperatorsGetDistinctSessions(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	ctx := context.Background()
@@ -583,7 +554,6 @@ func TestLoginAuditNeverCarriesTheSession(t *testing.T) {
 	assertNoSecretsInAudit(t, sink.all(), map[string]string{"session cookie": cookie})
 	assertNoSecretsInAudit(t, psink.all(), map[string]string{"session cookie": cookie})
 
-	// A failure is audited too, and its message is lever's own wording.
 	hub.dropState = true
 	d.Invalidate("op@example.test", cookie)
 	if _, err := d.Cookie(context.Background(), "op@example.test"); err == nil {
@@ -600,9 +570,8 @@ func TestLoginAuditNeverCarriesTheSession(t *testing.T) {
 	}
 }
 
-// TestALoginSurvivesTheRequestThatStartedIt: one browser request wins the race
-// to log in and the others wait on it, so a client that navigates away mid-
-// handshake must not take the login out from under everyone still waiting.
+// A client that navigates away mid-handshake must not cancel the login others
+// are waiting on.
 func TestALoginSurvivesTheRequestThatStartedIt(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	release := make(chan struct{})
@@ -618,8 +587,6 @@ func TestALoginSurvivesTheRequestThatStartedIt(t *testing.T) {
 		c, err := d.Cookie(ctx, "op@example.test")
 		first <- result{c, err}
 	}()
-	// Let the handshake reach the callback, then abandon the request that
-	// started it.
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	close(release)
@@ -635,8 +602,8 @@ func TestALoginSurvivesTheRequestThatStartedIt(t *testing.T) {
 	}
 }
 
-// mintedCodes reads the codes the provider holds: the one secret the audit
-// log must never contain, which no API exposes.
+// mintedCodes reads the provider's codes: the secret the audit log must never
+// contain.
 func mintedCodes(p *Provider) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -647,15 +614,13 @@ func mintedCodes(p *Provider) []string {
 	return out
 }
 
-// TestAFailedCallbackNeverAuditsTheCode: a *url.Error quotes the WHOLE request
-// URL, and the callback leg carries the authorization code in its query, so
-// a failed callback must not write the code into the audit log or remote.log.
+// A *url.Error quotes the whole URL, and the callback's query carries the
+// code: a failed callback must not put it in the audit log.
 func TestAFailedCallbackNeverAuditsTheCode(t *testing.T) {
 	d, hub, p, _ := newTestDriver(t)
 	sink := &auditSink{}
 	d.audit = sink.add
-	// Die at the callback the way a dropped jail transport does: no status, no
-	// body, just a closed connection.
+	// Die at the callback like a dropped jail transport: a closed connection.
 	hub.beforeCallback = func() { panic(http.ErrAbortHandler) }
 
 	_, err := d.Cookie(context.Background(), "op@example.test")
@@ -677,9 +642,8 @@ func TestAFailedCallbackNeverAuditsTheCode(t *testing.T) {
 	}
 }
 
-// TestALoginNeedsANewCookieNotTheStateOne: scion_sess carries the login state
-// before it carries the session, so "the jar has a scion_sess" is not proof of
-// a login. A hub that answers without replacing it must not look like success.
+// scion_sess holds the login state before the session, so a hub that answers
+// without replacing it must not look like success.
 func TestALoginNeedsANewCookieNotTheStateOne(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	hub.callbackFails = true
@@ -693,12 +657,9 @@ func TestALoginNeedsANewCookieNotTheStateOne(t *testing.T) {
 	}
 }
 
-// TestAPanickingAttemptDoesNotWedgeTheDriver: net/http recovers a handler
-// panic, so a panic under Cookie leaves the process alive; the operator's
-// single-flight entry must still be released, or every later request for
-// that login waits forever. The panic is injected through the audit sink
-// (operator-owned code on this goroutine); the property under test is the
-// release.
+// net/http recovers a handler panic, so the single-flight entry must still be
+// released or every later request for that login waits forever. The panic is
+// injected through the audit sink.
 func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())
@@ -723,8 +684,8 @@ func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 		_, _ = d.Cookie(context.Background(), operator)
 	}()
 
-	// A background context, so nothing but the driver itself can unblock this
-	// call: if the panicked attempt is still in the map, this never returns.
+	// Background context: if the panicked attempt is still in the map, this
+	// never returns.
 	type result struct {
 		cookie string
 		err    error
@@ -747,10 +708,8 @@ func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 	}
 }
 
-// TestAPanickingAttemptReleasesTheWaitersOnIt: callers that joined the
-// attempt are parked on a channel only its goroutine can close. They must be
-// released with an error: the zero cookie a panic leaves would otherwise
-// read as an empty session.
+// Waiters on a panicked attempt must get an error: the zero cookie a panic
+// leaves would otherwise read as an empty session.
 func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())
@@ -769,8 +728,6 @@ func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
 		_, _ = d.Cookie(context.Background(), operator)
 	}()
 
-	// While the handshake is held at the hub's callback, take the entry a
-	// concurrent caller would be parked on (Cookie's waiting branch).
 	<-reached
 	d.mu.Lock()
 	e := d.sessions[operator]
@@ -783,8 +740,6 @@ func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
 		t.Fatal("test bug: the sink did not panic, so nothing here was exercised")
 	}
 
-	// The panic has finished unwinding Cookie by now: the deferred release ran
-	// before this goroutine's own recover did.
 	select {
 	case <-e.done:
 	default:

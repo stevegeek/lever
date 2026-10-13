@@ -16,28 +16,21 @@ import (
 	"github.com/stevegeek/lever/internal/chatledger"
 )
 
-// The chat page's agent list (GET /lever/api/agents).
-//
-// The list is built here, per login, from what the server knows: the
-// login's tier and lists from lever.yaml, the hub's agent records (read with
-// the remote PAT, GET only), the labels file, and the login's own hub
-// session (its user id and DM read state). An agent outside the login's
-// lists never appears; a see-only agent carries no id, conversation, unread
-// count or activity, so the page has nothing to open its history with. The
-// page talks to the hub through the proxy for everything else, behind the
-// contact fence.
+// The chat page's agent list (GET /lever/api/agents), built per login from
+// lever.yaml, the hub's records (remote PAT, GET only), the labels file and
+// the login's own hub session. An agent outside the login's lists never
+// appears; a see-only agent carries no id, conversation, unread count or
+// activity, so the page has nothing to open its history with.
 
 // AgentRecord is one hub agent record as the chat page may use it. Phase
-// and Activity are already reduced to scion's known words
-// (scion.PhaseLabel, ActivityLabel): they are agent-reported text.
+// and Activity are agent-reported text, already reduced to scion's known
+// words.
 type AgentRecord struct {
 	ID, Phase, Activity string
-	// ContainerDown: the hub says running, the container is not live
-	// (scion.RunningContainerDown).
+	// ContainerDown: the hub says running, the container is not live.
 	ContainerDown bool
 }
 
-// viewer is what one login may see on the chat page.
 type viewer struct {
 	login, tier  string   // tier: chatledger.TierOperator | chatledger.TierContact
 	message, see []string // agent names, manager first, then config order
@@ -57,29 +50,25 @@ type agentEntry struct {
 }
 
 type agentsAnswer struct {
-	Login   string       `json:"login"`
-	Tier    string       `json:"tier"`
-	UserID  string       `json:"userId"`
-	Console string       `json:"console,omitempty"` // operator only
-	Agents  []agentEntry `json:"agents"`
-	Files   *filesInfo   `json:"files,omitempty"` // remote.files on
-	Voice   *voiceInfo   `json:"voice,omitempty"` // remote.voice on for this login, transcriber up
-	// ReadAloud: remote.voice on for this login and read_aloud not off.
-	ReadAloud bool `json:"readAloud,omitempty"`
-	// Speech: read_aloud server and lever-tool-tts ready: the page reads
-	// with these voices (the device's when a request fails).
+	Login     string       `json:"login"`
+	Tier      string       `json:"tier"`
+	UserID    string       `json:"userId"`
+	Console   string       `json:"console,omitempty"` // operator only
+	Agents    []agentEntry `json:"agents"`
+	Files     *filesInfo   `json:"files,omitempty"` // remote.files on
+	Voice     *voiceInfo   `json:"voice,omitempty"` // remote.voice on for this login, transcriber up
+	ReadAloud bool         `json:"readAloud,omitempty"`
+	// Speech: the page reads with these voices (the device's when a request
+	// fails).
 	Speech *speechInfo `json:"speech,omitempty"`
 }
 
-// filesInfo is the upload limits the page checks before it sends a file
-// (the proxy checks them again).
+// filesInfo is checked by the page; the proxy checks it again.
 type filesInfo struct {
 	MaxBytes   int64    `json:"maxBytes"`
 	Extensions []string `json:"extensions"`
-	// Uploads false: the page shows no paperclip. Shares false: shares are
-	// listed without a download link.
-	Uploads bool `json:"uploads"`
-	Shares  bool `json:"shares"`
+	Uploads    bool     `json:"uploads"`
+	Shares     bool     `json:"shares"`
 }
 
 const (
@@ -87,9 +76,8 @@ const (
 	accessSee     = "see"
 )
 
-// agentState maps a hub record to the page's fixed state words. Phase and
-// activity are agent-reported text the caller already reduced to scion's
-// known words; anything else is "unknown" (state) or left out (activity).
+// agentState: anything outside scion's known words is "unknown" (state) or
+// left out (activity).
 func agentState(rec AgentRecord, found, hubDown bool) (string, string) {
 	switch {
 	case hubDown:
@@ -104,8 +92,8 @@ func agentState(rec AgentRecord, found, hubDown bool) (string, string) {
 		}
 		return "running", activityWord(rec.Activity)
 	case "resumed", "created", "provisioning", "cloning", "starting":
-		// "resumed" is scion's interim phase after a resume: the hub refuses
-		// a message until the agent runs, so it reads as starting.
+		// "resumed" is scion's interim phase after a resume: the hub refuses a
+		// message until the agent runs.
 		return "starting", ""
 	case "suspended":
 		return "suspended", ""
@@ -124,16 +112,14 @@ func activityWord(a string) string {
 	case "waiting_for_input", "blocked":
 		return "waiting"
 	case "completed", "stalled":
-		// stalled = no report for a while: what an agent at its prompt looks
-		// like.
+		// stalled is what an agent at its prompt looks like.
 		return "idle"
 	}
 	return ""
 }
 
-// viewerFor is what login may see. An operator messages the manager and
-// every worker; a contact messages its agents: list and sees its see: list.
-// The manager, when listed, comes first.
+// viewerFor: an operator messages the manager and every worker; a contact
+// messages its agents: list and sees its see: list.
 func (g *gate) viewerFor(login string) viewer {
 	mgr := g.cfg.ChatAgent
 	if names, ok := g.cfg.Contacts[login]; ok {
@@ -158,9 +144,8 @@ func managerFirst(mgr string, names []string) []string {
 
 func (v viewer) mayMessage(name string) bool { return slices.Contains(v.message, name) }
 
-// buildAgents is the list for v: the manager first (whichever list it is
-// in), then the message agents in config order, then the see agents. fresh
-// is Config.ContactSession.
+// buildAgents: the manager first, then message agents in config order, then
+// see agents. fresh is Config.ContactSession.
 func buildAgents(v viewer, manager, uid string, recs map[string]AgentRecord, hubDown bool,
 	labels map[string]string, fresh func(string) error) agentsAnswer {
 	op := v.tier == chatledger.TierOperator
@@ -176,8 +161,8 @@ func buildAgents(v viewer, manager, uid string, recs map[string]AgentRecord, hub
 		rec, found := recs[name]
 		down := hubDown
 		if found && !validHubID(rec.ID) {
-			// A record whose id cannot be a path segment reads as unknown,
-			// and no id, conversation or link is built from it.
+			// A record whose id cannot be a path segment reads as unknown, and nothing
+			// is built from it.
 			rec, down = AgentRecord{}, true
 		}
 		e.State, e.Activity = agentState(rec, found, down)
@@ -205,7 +190,6 @@ func buildAgents(v viewer, manager, uid string, recs map[string]AgentRecord, hub
 	for _, n := range v.see {
 		rows = append(rows, row{n, accessSee})
 	}
-	// The manager first, whichever list names it.
 	slices.SortStableFunc(rows, func(a, b row) int {
 		return cmp.Compare(boolInt(b.name == manager), boolInt(a.name == manager))
 	})
@@ -222,10 +206,8 @@ func boolInt(b bool) int {
 	return 0
 }
 
-// contactFresh reports whether a contact's message agent in state may take
-// its posts as far as the session check goes. "no-record" and "unknown"
-// keep their own words. A nil fresh (no Config.ContactSession) refuses every
-// contact post in the fence (sessionAllows), so it reads as not fresh here.
+// contactFresh: a nil fresh refuses every contact post in the fence
+// (sessionAllows), so it reads as not fresh here.
 func contactFresh(state, name string, fresh func(string) error) bool {
 	if state == "no-record" || state == "unknown" {
 		return true
@@ -233,7 +215,6 @@ func contactFresh(state, name string, fresh func(string) error) bool {
 	return fresh != nil && fresh(name) == nil
 }
 
-// Unread counts.
 const (
 	maxUnread      = 99
 	unreadPage     = 100
@@ -250,11 +231,8 @@ type hubMessage struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// countUnread counts the agent's messages newer than lastRead in one page
-// of history (sorted here, newest first, so the hub's order does not
-// matter). A marker that is not in a full page means at least a page: cap.
-// keep, when set, is the agent-messages filter: only the agent rows it
-// keeps count (the rows the login is shown).
+// countUnread: a marker that is not in a full page means at least a page.
+// keep, when set, counts only the agent rows the login is shown.
 func countUnread(items []hubMessage, agentID, lastRead string, full bool, keep func(hubMessage) bool) int {
 	at := func(m hubMessage) time.Time {
 		t, _ := time.Parse(time.RFC3339Nano, m.CreatedAt)
@@ -279,16 +257,14 @@ func countUnread(items []hubMessage, agentID, lastRead string, full bool, keep f
 	return min(n, maxUnread)
 }
 
-// hubDM is one entry of the hub's /api/v1/chat/dms answer.
 type hubDM struct {
 	ConversationKey   string `json:"conversationKey"`
 	LastReadMessageID string `json:"lastReadMessageId"`
 	HasUnread         bool   `json:"hasUnread"`
 }
 
-// addUnread sets each message agent's unread count from the login's own DM
-// read state. Any fault leaves the counts out: the page shows no badge
-// rather than a wrong one.
+// addUnread leaves the counts out on any fault: no badge rather than a
+// wrong one.
 func (g *gate) addUnread(ctx context.Context, login, cookie string, ans *agentsAnswer) {
 	ctx, cancel := context.WithTimeout(ctx, unreadBudget)
 	defer cancel()
@@ -298,7 +274,6 @@ func (g *gate) addUnread(ctx context.Context, login, cookie string, ans *agentsA
 	}
 	status, err := c.hubGet(ctx, cookie, "/api/v1/chat/dms", &list)
 	if status == http.StatusUnauthorized {
-		// The session lapsed since the user id was cached: replace it once.
 		g.cfg.Session.Invalidate(login, cookie)
 		fresh, cerr := g.cfg.Session.Cookie(ctx, login)
 		if cerr != nil {
@@ -340,8 +315,8 @@ func (g *gate) addUnread(ctx context.Context, login, cookie string, ans *agentsA
 		}
 		var keep func(hubMessage) bool
 		if g.cfg.MatchAgentMessages != nil && ans.Tier == chatledger.TierContact {
-			// Agent messages on: a contact's count holds only the agent rows
-			// it is shown (agentmsgs.go); no answer, no count.
+			// A contact's count holds only the agent rows it is shown; no answer, no
+			// count.
 			rows := make([]historyRow, len(items))
 			for i, m := range items {
 				rows[i] = historyRow{ID: m.ID, Sender: m.Sender, SenderID: m.SenderID, Type: m.Type, Msg: m.Msg, CreatedAt: m.CreatedAt}
@@ -357,12 +332,10 @@ func (g *gate) addUnread(ctx context.Context, login, cookie string, ans *agentsA
 	}
 }
 
-// errBadUserID means the hub named a user id the page cannot use.
 var errBadUserID = errors.New("the hub named an unusable user id")
 
-// hubUserID is the login's hub user id (cached for contactCacheTTL), asked
-// of the hub with its own session; a 401 replaces the session once. It
-// returns the cookie to use for further calls (the replacement, if any).
+// hubUserID returns the cookie to use for further calls (the replacement
+// session, if any).
 func (g *gate) hubUserID(ctx context.Context, login, cookie string) (string, string, error) {
 	c := g.chat
 	now := c.now
@@ -374,8 +347,8 @@ func (g *gate) hubUserID(ctx context.Context, login, cookie string) (string, str
 	}
 	uid, err := c.whoAmI(ctx, cookie)
 	if errors.Is(err, errSessionUnknown) {
-		// The hub no longer knows this session (it restarted, or the
-		// session lapsed): replace it once, as forward does for a GET.
+		// The hub does not know this session (restart or lapse): replace it once,
+		// as forward does for a GET.
 		g.cfg.Session.Invalidate(login, cookie)
 		if fresh, cerr := g.cfg.Session.Cookie(ctx, login); cerr == nil {
 			cookie = fresh
@@ -397,8 +370,7 @@ func (g *gate) hubUserID(ctx context.Context, login, cookie string) (string, str
 	return uid, cookie, nil
 }
 
-// records is Config.AgentRecords, nil-safe: no source is an error (every
-// state reads "unknown").
+// records: no source is an error (every state reads "unknown").
 func (g *gate) records(ctx context.Context) (map[string]AgentRecord, error) {
 	if g.cfg.AgentRecords == nil {
 		return nil, errors.New("no agent records source")
@@ -406,7 +378,6 @@ func (g *gate) records(ctx context.Context) (map[string]AgentRecord, error) {
 	return g.cfg.AgentRecords(ctx)
 }
 
-// labels is Config.Labels, nil-safe.
 func (g *gate) labels() map[string]string {
 	if g.cfg.Labels == nil {
 		return nil
@@ -414,9 +385,8 @@ func (g *gate) labels() map[string]string {
 	return g.cfg.Labels()
 }
 
-// agentsAnswerTTL is how long a login's list answer is reused. One list
-// costs up to ten hub calls with the login's own session; the page asks
-// every few seconds at most, so a burst gets the answer of a moment ago.
+// agentsAnswerTTL: one list costs up to ten hub calls with the login's own
+// session.
 const agentsAnswerTTL = 2 * time.Second
 
 type cachedAnswer struct {
@@ -424,8 +394,8 @@ type cachedAnswer struct {
 	at   time.Time
 }
 
-// cachedAgents is login's answer of less than agentsAnswerTTL ago, if any.
-// Keyed by login alone: an answer is never handed to another login.
+// cachedAgents is keyed by login alone: an answer is never handed to another
+// login.
 func (c *chatPage) cachedAgents(login string) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -443,7 +413,6 @@ func (c *chatPage) storeAgents(login string, body []byte) {
 		c.answers = map[string]cachedAnswer{}
 	}
 	now := c.now()
-	// Old answers go: the map holds at most the logins of the last moment.
 	maps.DeleteFunc(c.answers, func(_ string, a cachedAnswer) bool { return now.Sub(a.at) >= agentsAnswerTTL })
 	c.answers[login] = cachedAnswer{body: body, at: now}
 }
@@ -459,8 +428,7 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 	answer := func(body []byte) {
 		g.answerChat(w, line, DecisionAllow, http.StatusOK, func() {
 			w.Header().Set("Content-Type", "application/json")
-			// Like every /api/ answer the proxy forwards (sandboxAPIDocument):
-			// opened as a page, this is an inert document.
+			// Like every forwarded /api/ answer: opened as a page, an inert document.
 			w.Header().Set("Content-Security-Policy", "sandbox")
 		}, body, r)
 	}
@@ -493,9 +461,7 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 	answer(body)
 }
 
-// hubGetJSON reads a hub route with a login's own session and decodes a
-// 200 answer (at most 1 MiB) into out. It reports the status; a non-200
-// answer is not decoded.
+// hubGetJSON decodes only a 200 answer, at most 1 MiB.
 func hubGetJSON(cfg Config) func(ctx context.Context, cookie, path string, out any) (int, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	if cfg.DialContext != nil {

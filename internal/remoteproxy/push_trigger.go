@@ -16,15 +16,10 @@ import (
 	"github.com/stevegeek/lever/internal/webpush"
 )
 
-// Which new message raises a push.
-//
-// A check reads the newest page of one DM as the login (its own session,
-// what the page itself would read), picks the newest row the DM agent
-// wrote, and, for a contact with agent messages on, only a row the agent
-// message matcher shows (agentmsgs.go): a contact is never told about a
-// message it would not be shown. The mark per (login, agent) is the newest
-// row a decision covered; it is stored before the push goes out, so a crash
-// or restart never sends one row twice.
+// A push check reads the newest page of a DM with the login's own session and
+// takes the newest row the agent wrote; for a contact with agent messages on,
+// only a row the matcher would show (agentmsgs.go). The mark is stored before
+// the push goes out, so a restart never sends one row twice.
 
 const (
 	pushHistoryPage = 20
@@ -34,9 +29,8 @@ const (
 
 type pushTarget struct{ name, id, key string }
 
-// pushSession is one connected stream's view: the login's hub user, its
-// session, its tier; stale is set when the hub rejects the session, and
-// schedule asks for a later check (the trailing push).
+// pushSession is one connected stream's view of a login; schedule asks for a
+// later check (the trailing push).
 type pushSession struct {
 	uid, cookie, tier string
 	stale             atomic.Bool
@@ -77,7 +71,6 @@ func newerRow(at time.Time, id string, than time.Time, thanID string) bool {
 	return c > 0 || c == 0 && id > thanID
 }
 
-// newestForPush is the newest pushable row of t's DM for login, or ok=false.
 func (g *gate) newestForPush(ctx context.Context, login, cookie, uid, tier string, t pushTarget) (historyRow, time.Time, bool, error) {
 	var page struct {
 		Messages json.RawMessage `json:"messages"`
@@ -103,11 +96,8 @@ func (g *gate) newestForPush(ctx context.Context, login, cookie, uid, tier strin
 	}
 	var keep map[string]bool
 	if tier == chatledger.TierContact && g.cfg.MatchAgentMessages != nil {
-		// The peek, never the binding match: a push check must not decide
-		// which row a ledger record shows (on a 20-row page, before the
-		// contact reads anything). It answers what the contact's own read
-		// would keep now; pending rows are kept too, and pending itself is
-		// not needed here. No peek means no answer: fail closed.
+		// The peek, never the binding match: a push check must not decide which
+		// row a ledger record shows. No peek means no answer: fail closed.
 		var peek func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
 		if g.cfg.PeekAgentMessages != nil {
 			peek = func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error) {
@@ -155,14 +145,11 @@ func (g *gate) dmUnread(ctx context.Context, cookie, key string) bool {
 	return true
 }
 
-// errCheck is a check that decided nothing (the history or the store
-// failed): the scheduler runs it again.
+// errCheck: the check decided nothing (history or store failed); it is retried.
 var errCheck = errors.New("push check: no decision")
 
-// check decides one (login, agent). catchUp is the pass after a (re)connect:
-// a DM never seen sets the mark only, and a row older than pushCatchUp only
-// moves it. It returns errCheck when it decided nothing and
-// errSessionUnknown when the hub refused the session; nil otherwise.
+// check decides one (login, agent). On catchUp (after a connect) a DM never
+// seen only sets the mark, and a row older than pushCatchUp only moves it.
 func (p *Push) check(ctx context.Context, login string, t pushTarget, s *pushSession, catchUp bool) error {
 	row, at, ok, err := p.g.newestForPush(ctx, login, s.cookie, s.uid, s.tier, t)
 	if errors.Is(err, errSessionUnknown) {
@@ -211,15 +198,13 @@ func (p *Push) check(ctx context.Context, login string, t pushTarget, s *pushSes
 		p.record(login, t.name, "", DecisionPushFailed, 0, "store")
 		return errCheck
 	}
-	// The mark is stored: from here the sends must not die with the stream
-	// (an idle drop or a hub restart), or the push is lost. notify bounds
-	// the sends itself.
+	// The mark is stored: the sends must outlive the stream (idle drop, hub
+	// restart) or the push is lost. notify bounds them itself.
 	p.notify(context.WithoutCancel(ctx), login, t.name)
 	return nil
 }
 
-// takeSlot spends the (login, agent) push slot, or reports how long until
-// it is free. release gives a spent slot back (no push went out).
+// release gives back a spent slot when no push went out.
 func (p *Push) takeSlot(login, agent string) (wait time.Duration, release func()) {
 	k := login + "\x00" + agent
 	p.mu.Lock()
@@ -244,11 +229,9 @@ func (p *Push) takeSlot(login, agent string) (wait time.Duration, release func()
 	}
 }
 
-// notify sends the content-free push to each of login's subscriptions, at
-// once (the store keeps at most maxSubsPerLogin), each bounded by
-// SendTimeout: a slow push service holds this login's checks for one send
-// time, not one per subscription. After Run stops, the sends get
-// shutdownGrace more.
+// notify sends the content-free push to every subscription at once, each
+// bounded by SendTimeout, so a slow push service holds the login's checks for
+// one send time. After Run stops the sends get shutdownGrace more.
 func (p *Push) notify(ctx context.Context, login, agent string) {
 	payload, _ := json.Marshal(struct {
 		V     int    `json:"v"`
@@ -293,7 +276,6 @@ func (p *Push) notify(ctx context.Context, login, agent string) {
 	wg.Wait()
 }
 
-// sendFault names a failed send in fixed words.
 func sendFault(err error) string {
 	switch {
 	case webpush.StatusOf(err) != 0:
@@ -312,7 +294,6 @@ func (p *Push) record(login, agent, host string, d Decision, status int, reason 
 	p.recordCount(login, agent, host, d, status, reason, nil)
 }
 
-// recordCount is record with the line's Count set (nil leaves it out).
 func (p *Push) recordCount(login, agent, host string, d Decision, status int, reason string, count *int) {
 	if p.audit != nil {
 		p.audit(AuditLine{Time: p.now().UTC(), TSLogin: truncateAudit(login), Method: "PUSH", Path: "/lever/push/" + agent,

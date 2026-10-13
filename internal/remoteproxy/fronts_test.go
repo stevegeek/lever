@@ -13,14 +13,8 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// Tests for the non-Tailscale-front knobs: a configurable identity header,
-// X-Forwarded-Host, and a non-loopback bind.
-
 const exeHeader = "X-ExeDev-Email"
 
-// frontProbe sends one GET /api/v1/agents through a handler built from cfg
-// (Target and Session filled in), with hdr added — a repeated key sends every
-// value — and returns the status and the hub it went to.
 func frontProbe(t *testing.T, cfg Config, host string, hdr http.Header) (int, *recordingHub) {
 	t.Helper()
 	hub := newRecordingHub(t)
@@ -42,8 +36,8 @@ func frontProbe(t *testing.T, cfg Config, host string, hdr http.Header) (int, *r
 	return rw.Code, hub
 }
 
-// The configured header, not Tailscale's, decides allowed_users — and a
-// Tailscale-User-Login a client adds is then just another header.
+// The configured header decides allowed_users; a client-added
+// Tailscale-User-Login is just another header.
 func TestIdentityHeaderDecidesAllowedUsers(t *testing.T) {
 	cfg := Config{IdentityHeader: exeHeader, AllowedUsers: []string{"me@example.com"}}
 	for _, tc := range []struct {
@@ -56,8 +50,6 @@ func TestIdentityHeaderDecidesAllowedUsers(t *testing.T) {
 		{"the configured header, another login", http.Header{exeHeader: {"z@example.com"}}, 403},
 		{"no header", nil, 403},
 		{"only Tailscale's header", http.Header{"Tailscale-User-Login": {"me@example.com"}}, 403},
-		// A front that APPENDS instead of overwriting yields either shape;
-		// both are refused rather than resolved first-value-wins.
 		{"the header twice", http.Header{exeHeader: {"me@example.com", "z@example.com"}}, 403},
 		{"the header twice, forged second", http.Header{exeHeader: {"z@example.com", "me@example.com"}}, 403},
 		{"a comma-joined value", http.Header{exeHeader: {"me@example.com, z@example.com"}}, 403},
@@ -75,10 +67,8 @@ func TestIdentityHeaderDecidesAllowedUsers(t *testing.T) {
 	}
 }
 
-// With the default header, duplicates and comma-joined values are refused
-// too — the rule is the gate's, not the front's. The denial is the comma
-// check itself, not the allowlist miss that would follow it: here the first
-// value IS allowed, so only the comma rule can refuse.
+// With the default header too: the first value is allowed, so only the
+// comma rule can refuse.
 func TestDefaultHeaderRefusesCommaJoinedLogin(t *testing.T) {
 	for _, v := range []string{"a@github,b@github", "b@github, a@github"} {
 		var lines []AuditLine
@@ -98,8 +88,6 @@ func TestDefaultHeaderRefusesCommaJoinedLogin(t *testing.T) {
 	}
 }
 
-// The asserted hub identity comes from the configured header: the login
-// driver is asked for exactly that login.
 func TestIdentityHeaderIsTheAssertedOperator(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := testSession()
@@ -121,8 +109,6 @@ func TestIdentityHeaderIsTheAssertedOperator(t *testing.T) {
 	}
 }
 
-// The configured header is stripped before the hub sees the request, along
-// with Tailscale-* and the rest of clientIdentityHeader's set.
 func TestIdentityHeaderStrippedFromForward(t *testing.T) {
 	status, hub := frontProbe(t, Config{IdentityHeader: exeHeader, AllowedUsers: []string{"me@example.com"}}, "",
 		http.Header{exeHeader: {"me@example.com"}, "Tailscale-User-Login": {"x@github"}, "X-Scion-Agent-Token": {"t"}})
@@ -139,20 +125,17 @@ func TestIdentityHeaderStrippedFromForward(t *testing.T) {
 	}
 }
 
-// X-Forwarded-Host is ignored unless the operator opted in: a rebinding page
-// could otherwise name base_url's host in it.
+// X-Forwarded-Host is ignored unless opted in: a rebound page could name
+// base_url's host in it.
 func TestForwardedHostIgnoredByDefault(t *testing.T) {
 	for _, host := range []string{"internal-name:8445", "10.1.2.3:9000", "127.0.0.1"} {
-		// An IP-literal Host is exactly the case the opt-in would admit, so
-		// it is the one that shows the default really ignores the header.
+		// An IP-literal Host is the case the opt-in would admit.
 		status, hub := frontProbe(t, Config{ListenPort: 8445}, host,
 			http.Header{"X-Forwarded-Host": {testServeHost}})
 		if status != http.StatusForbidden || hub.hits() != 0 {
 			t.Fatalf("Host %s: status = %d, hits = %d; X-Forwarded-Host must not replace Host by default", host, status, hub.hits())
 		}
 	}
-	// And the default does not judge the header at all: repeated or
-	// comma-joined values on an otherwise good request are not refused.
 	for _, xfh := range [][]string{{"a.example", "b.example"}, {"a.example, b.example"}} {
 		if status, _ := frontProbe(t, Config{ListenPort: 8445}, "", http.Header{"X-Forwarded-Host": xfh}); status != 200 {
 			t.Fatalf("X-Forwarded-Host %q with the flag off: status %d, want 200", xfh, status)
@@ -174,13 +157,9 @@ func TestForwardedHostOptIn(t *testing.T) {
 		{"forwarded host names another site", "127.0.0.1", http.Header{"X-Forwarded-Host": {"evil.example"}}, 403},
 		{"two forwarded hosts", "127.0.0.1", http.Header{"X-Forwarded-Host": {testServeHost, "evil.example"}}, 403},
 		{"comma-joined forwarded hosts", "127.0.0.1", http.Header{"X-Forwarded-Host": {"evil.example, " + testServeHost}}, 403},
-		// A DNS rebind with the header added: the browser sends the
-		// attacker's NAME in Host, so the header is not believed.
 		{"rebound name with a forged forwarded host", "evil.example:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
 		{"localhost is a name, not an IP", "localhost:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
 		{"a rewritten name is not supported", "internal-name:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
-		// Without the header the ordinary Host check applies: the loopback
-		// doctor probe still passes, a rebound name still does not.
 		{"no header, loopback probe", "127.0.0.1:8445", nil, 200},
 		{"no header, base_url host", testServeHost, nil, 200},
 		{"no header, rebound name", "evil.example", nil, 403},
@@ -197,8 +176,6 @@ func TestForwardedHostOptIn(t *testing.T) {
 	}
 }
 
-// A non-loopback bind adds exactly "<bind>:<port>" to the Host allowlist:
-// the Host a front sends when it dials that address.
 func TestBindHostAdmittedOnlyOnItsPort(t *testing.T) {
 	cfg := Config{ListenPort: 8445, BindHost: "10.0.0.5"}
 	for host, want := range map[string]int{
@@ -215,19 +192,16 @@ func TestBindHostAdmittedOnlyOnItsPort(t *testing.T) {
 			}
 		})
 	}
-	// With no bind host configured, the address is just another name.
 	if status, _ := frontProbe(t, Config{ListenPort: 8445}, "10.0.0.5:8445", nil); status != http.StatusForbidden {
 		t.Fatalf("a bind address must not be admitted when the proxy is not bound to it, got %d", status)
 	}
-	// A wildcard is never a Host.
 	if status, _ := frontProbe(t, Config{ListenPort: 8445, BindHost: "0.0.0.0"}, "0.0.0.0:8445", nil); status != http.StatusForbidden {
 		t.Fatalf("0.0.0.0 must never be an admitted Host, got %d", status)
 	}
 }
 
-// A login without "@" (a front's user id) becomes a distinct synthesized hub
-// email; an email stays itself; HubUserEmails agrees with identityFor, so the
-// remote role binds the users the proxy signs in.
+// HubUserEmails must agree with identityFor, so the remote role binds the
+// users the proxy signs in.
 func TestIdentityForUserIDs(t *testing.T) {
 	if got := identityFor("usr_01HZX"); got.Email != "usr_01HZX@"+IDEmailDomain || got.Name != "usr_01HZX" || got.Subject != "lever-remote:usr_01HZX" {
 		t.Fatalf("identityFor(user id) = %+v", got)
@@ -241,9 +215,8 @@ func TestIdentityForUserIDs(t *testing.T) {
 	}
 }
 
-// config refuses allowed_users entries that would alias the synthesized
-// addresses; that only works while both packages name the same domain and
-// placeholder.
+// config refuses allowed_users that alias the synthesized addresses, which
+// works only while both packages name the same domain and placeholder.
 func TestIDEmailDomainAgreesWithConfig(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://h.ts.net\"\n  allowed_users: [%q]\n"
 	for _, addr := range []string{"alice@" + IDEmailDomain, unnamedOperatorEmail} {
@@ -255,15 +228,12 @@ func TestIDEmailDomainAgreesWithConfig(t *testing.T) {
 	}
 }
 
-// Every header the proxy strips as a client identity, other than
-// Tailscale-User-Login (the default), must be refused by config as an
-// identity header — trusting one would let a browser, a scion-facing caller
-// or the user's own display settings choose.
+// Every stripped client-identity header other than Tailscale-User-Login
+// must be refused by config as the identity header: a browser, a
+// scion-facing caller or display settings could choose it.
 func TestConfigRefusesStrippedIdentityHeaders(t *testing.T) {
 	for _, h := range []string{"Authorization", "Cookie", "X-Scion-Agent-Token", "X-Scion-Broker-Signature",
 		"X-Forwarded-User-Email", "X-Goog-Iap-Jwt-Assertion", "X-Api-Key",
-		// Tailscale-* is stripped too, and only its User-Login is a unique
-		// login; the display name and avatar must be refused.
 		"Tailscale-User-Name", "Tailscale-User-Profile-Pic"} {
 		if h != "Authorization" && h != "Cookie" && !clientIdentityHeader(h) {
 			t.Fatalf("test premise: %s is not a stripped header", h)
@@ -277,8 +247,6 @@ func TestConfigRefusesStrippedIdentityHeaders(t *testing.T) {
 	}
 }
 
-// listenProxy: loopback by default; a non-loopback address only with the
-// acknowledgement; never a hostname.
 func TestListenProxyBind(t *testing.T) {
 	port := freeTCPPort(t)
 	ln, err := listenProxy("", port, false)
@@ -302,8 +270,6 @@ func TestListenProxyBind(t *testing.T) {
 	if _, err := listenProxy("localhost", port, true); err == nil {
 		t.Fatal("a hostname bind must be refused")
 	}
-	// The wildcard with the acknowledgement binds (every interface, so this
-	// works on any test host).
 	ln, err = listenProxy("0.0.0.0", port, true)
 	if err != nil {
 		t.Fatalf("acknowledged wildcard: %v", err)
@@ -311,9 +277,8 @@ func TestListenProxyBind(t *testing.T) {
 	_ = ln.Close()
 }
 
-// writeLeverYAML writes a minimal instance (the tree directory included) with
-// body as its lever.yaml, defaulting llm_auth to subscription so no api key
-// file is needed, and returns the config path.
+// writeLeverYAML defaults llm_auth to subscription so no api key file is
+// needed.
 func writeLeverYAML(t *testing.T, dir, body string) string {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(dir, "tree"), 0o755); err != nil {

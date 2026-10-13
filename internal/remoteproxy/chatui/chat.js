@@ -1,17 +1,11 @@
 // lever's chat page: the login's agents, and a chat with each one it may
-// message.
-//
-// The list comes from lever (/lever/api/agents), built per login on the
-// server: the page shows what it is given and nothing else. Each chat talks
-// to the hub's own chat routes through the remote proxy, so a message sent
-// here is recorded and verified exactly like one sent from the hub's web UI.
-// The page holds no credential: the proxy attaches the login's hub session
-// to every request.
+// message. The page holds no credential: the proxy attaches the login's hub
+// session to every request.
 //
 // SECURITY: everything read from the network is agent- or hub-chosen text on
-// the login's origin. It is only ever written as TEXT (textContent). No
-// markup sink, no code evaluation, and no URL is built from message text.
-// A test in the proxy package fails the build if one appears in this file.
+// the login's origin. It is only ever written as text (textContent): no
+// markup sink, no code evaluation, no URL built from message text. A test in
+// the proxy package enforces this.
 
 import {
   CONTACTS_MS,
@@ -76,15 +70,12 @@ import {
 const PAGE = 50; // messages per history request
 const REFRESH_GAP_MS = 1500; // at most one read per gap on a burst
 const RETRY_MS = 5000; // between attempts to start while the hub is away
-// No request may wait for ever: a phone that changes network mid-request can
-// leave one that never settles, and the page reads and sends one at a time.
-// Longer than the proxy's own wait for the hub (45 s), so the proxy's answer
-// comes first when there is one.
+// No request may wait for ever: a network change can leave one unsettled.
+// Longer than the proxy's 45 s wait for the hub, so its answer comes first.
 const REQUEST_MS = 60000;
 const HOLD_MS = 2000; // Send stays off this long after the replay note
 const SYSTEM_MAX = 500; // characters of a hub line, on one line
 const OPEN_KEY = 'lever-chat-open'; // the name of the open chat
-// Drafts and unsent records are kept per agent name (draftKey, unsentKey).
 // The bare keys are a single-agent layout's; start adopts them once.
 const OLD_DRAFT_KEY = 'lever-chat-draft';
 const OLD_UNSENT_KEY = 'lever-chat-unsent';
@@ -136,28 +127,20 @@ let appliedSeq = 0; // the request whose answer the page shows
 let listing = false; // a list read is under way
 let listAgain = false; // something asked for one while it was
 let current = ''; // the name of the open chat ('' = none)
-// The open chat with an agent the login may message: {name, id,
-// conversation, userId, unsent, view}. null for none, and for a see-only
-// agent. A request keeps the chat it was made for and answers only it.
+// The open chat: {name, id, conversation, userId, unsent, view}; null for none
+// and for a see-only agent. A request answers only the chat it was made for.
 let chat = null;
 const lastMarked = new Map(); // conversation → message id marked read
 
 const messages = new Map();
 const fromHistory = new Set(); // ids a history read returned (not a send answer)
 let generation = 0; // counts restarts of the list
-// chat.unsent: the send that is under way or got no clear "stored": {text,
-// key, conversation, tries}, written before the post and kept in
-// sessionStorage per agent. key is its idempotency key. While the same text
-// goes again to the same conversation it goes under that key, so the hub
-// stores it once if it still knows the key (it keeps one for a few minutes,
-// per user, not per conversation, hence the conversation here). One record
-// per agent: an unclear send of one text, then another text, then the first
-// again gets a new key. tries counts the posts made under the key.
-//
-// The page concludes nothing from this record. It never decides from the
-// history that a send "must have arrived": only the hub's answer to the
-// same key says so. A wrong guess there would clear a draft that was never
-// stored.
+// chat.unsent: {text, key, conversation, tries} for a send under way or
+// without a clear "stored", written before the post and kept per agent in
+// sessionStorage. The same text to the same conversation reuses key, so the
+// hub stores it once while it remembers the key (a few minutes, per user,
+// hence conversation). The page never infers from history that a send
+// arrived: only the hub's answer to the same key clears the draft.
 let loaded = false; // a history read has succeeded
 let reading = false; // a history read is under way
 let readAgain = false; // something changed while it was
@@ -171,10 +154,9 @@ let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
 
-// The operator's read-only view of contact conversations. contacts is the
-// list from /lever/api/contacts (null for a contact login: it never asks).
-// view is the open transcript ({login, name}); a transcript has its own
-// rows and never touches chat, the composer or the read marker.
+// contacts: the operator's read-only view of contact conversations (null for
+// a contact login). view is the open transcript ({login, name}); it never
+// touches chat, the composer or the read marker.
 let contacts = null;
 const openContacts = new Set(); // contact logins whose agents show
 let view = null;
@@ -183,12 +165,9 @@ let viewReading = false;
 let viewOlder = '';
 const transcript = new Map();
 
-// api does one same-origin request and reads the answer as JSON when it is
-// JSON, else as text. It never throws: a network fault is status 0.
-//
-// A redirect is never followed. The hub answers a session it no longer knows
-// with a redirect to its login page; followed, that ends in a page and a
-// 200, which would read as success. It comes back as {redirect: true}.
+// api never throws: a network fault is status 0. A redirect is never
+// followed: the hub answers an unknown session with a redirect to its login
+// page, which followed would read as a 200.
 async function api(path, init, ms = REQUEST_MS) {
   const limit = new AbortController();
   const timer = setTimeout(() => limit.abort(), ms);
@@ -260,13 +239,10 @@ function stored(key) {
   }
 }
 
-// localLink turns a path from the list into a link target on this origin,
-// or '' when it would lead anywhere else. The browser's own URL parser
-// decides, since it is what reads the link: it drops tabs and newlines, and
-// removes dot segments, which a check on the string would miss. The result
-// is the parsed URL itself, whole, so nothing is parsed a second time into
-// something else ("/.//evil.test" has the path "//evil.test", which read
-// again as a link is another host).
+// localLink is p as a link target on this origin, or ''. The browser's URL
+// parser decides (it drops tabs, newlines and dot segments a string check
+// would miss), and the parsed URL is returned whole so nothing reparses it:
+// "/.//evil.test" has the path "//evil.test", another host if read again.
 function localLink(p) {
   if (typeof p !== 'string' || !p.startsWith('/')) return '';
   try {
@@ -277,9 +253,7 @@ function localLink(p) {
   }
 }
 
-// setLink shows a with path as its target, or hides it when path is not a
-// link on this origin. The page asks only for the operator's links; a
-// contact's list carries none, and the page builds none for a contact.
+// A contact's list carries no links, and the page builds none for a contact.
 function setLink(a, path) {
   const href = localLink(path);
   a.hidden = !href;
@@ -343,8 +317,6 @@ function span(className, text) {
   return s;
 }
 
-// renderRows draws the list: per agent a button with its title (name, then
-// label), its state chip and its unread badge, all text.
 function renderRows() {
   const frag = document.createDocumentFragment();
   for (const a of roster.agents) {
@@ -361,8 +333,6 @@ function renderRows() {
   el.agents.replaceChildren(frag);
 }
 
-// renderContacts draws the Contacts section: per contact a button with its
-// login (and a note when it never signed in), and, opened, its agents.
 function renderContacts() {
   const has = !!contacts && contacts.length > 0;
   el.contactsTitle.hidden = !has;
@@ -407,9 +377,6 @@ async function reloadContacts() {
   renderContacts();
 }
 
-// renderTranscript draws the open transcript, all text. A row the contact
-// is not shown carries a mark: "not yet read" when a record would show it
-// on the contact's next read, else "not shown".
 function renderTranscript(toBottom) {
   const stick = toBottom || nearBottom();
   const frag = document.createDocumentFragment();
@@ -436,9 +403,7 @@ function renderTranscript(toBottom) {
   if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
 }
 
-// readTranscript reads the newest page (cursor '') or the page before
-// cursor, one read at a time; an answer for a transcript no longer open
-// is dropped.
+// One read at a time; an answer for a transcript no longer open is dropped.
 async function readTranscript(cursor) {
   const v = view;
   if (!v || viewReading) return;
@@ -472,8 +437,6 @@ function leaveTranscript() {
   el.refresh.hidden = true;
 }
 
-// openTranscript shows a contact's conversation with one of its agents,
-// read-only: no composer, no read marker, no events.
 function openTranscript(login, name) {
   const c = contacts && contacts.find((x) => x.login === login);
   const a = c && c.agents.find((x) => x.name === name);
@@ -506,8 +469,6 @@ function pollView() {
   }
 }
 
-// loadViewFiles lists the open transcript's files (the contact's uploads to
-// the agent and the agent's shares to it), read-only, while files are on.
 async function loadViewFiles() {
   const v = view;
   if (!v || v.noFiles || !roster || !roster.files) return;
@@ -530,14 +491,9 @@ function historyPath(c, cursor) {
   return `/api/v1/chat/conversations/${encodeURIComponent(c.conversation)}/messages?${q}`;
 }
 
-// refresh reads the open chat's newest page again and merges it. Every live
-// signal ends here: the page never trusts an event's payload, only the
-// hub's history.
-//
-// One read at a time: a signal that arrives during a read asks for one more
-// after it. So answers apply in the order they were asked for, and a slow
-// hub under a steady stream of events still gets every read applied. An
-// answer for a chat that is no longer open is dropped.
+// Every live signal ends in refresh: the page never trusts an event's
+// payload, only the hub's history. One read at a time, a signal during a read
+// asking for one more, so answers apply in order.
 async function refresh() {
   const c = chat;
   if (!c || !c.conversation) return;
@@ -569,13 +525,9 @@ function applyHistory(res) {
     return;
   }
   const items = historyItems(res.body);
-  // A full page with nothing the page already holds means more arrived than
-  // one page while it was not looking. Start again from this page instead of
-  // showing the two ends with a hole between them; "Load earlier" then
-  // reaches the rest.
-  //
-  // Only ids from earlier history reads count as "already holds": the id of
-  // a message just sent is in every newest page, and proves no overlap.
+  // A full page with nothing already held means more than a page arrived
+  // unseen: restart from it rather than show a hole. Only ids from history
+  // reads count: a just-sent message is in every newest page.
   const restart = !loaded || (items.length >= PAGE && !items.some((m) => fromHistory.has(m.id)));
   if (restart) {
     messages.clear();
@@ -590,22 +542,15 @@ function applyHistory(res) {
   if (mergeMessages(messages, items) || restart) render(first);
 }
 
-// acted is set by the user's first tap or key on this page load (onAct).
 let acted = false;
 
-// hasActed reports whether the user has acted on this page load. Until then
-// the page marks nothing read: a link from another site can open the page,
-// even in a window it closes again, and choose the chat with #agent=, so
-// opening and showing a chat is no sign that anyone read it. A tap on one of
-// lever's notifications counts too, when the service worker sends it to this
-// page (onWorkerMessage). The browser's own sticky activation is used where
-// it exists.
+// Until the user acts the page marks nothing read: a link from another site
+// can open it (even in a window it closes) and pick the chat with #agent=.
+// A tap on a lever notification, relayed by the worker, counts.
 function hasActed() {
   return acted || Boolean(navigator.userActivation && navigator.userActivation.hasBeenActive);
 }
 
-// onAct records the first act and marks the open chat read then, as a read
-// that was held back for it.
 function onAct() {
   if (acted) return;
   acted = true;
@@ -613,10 +558,6 @@ function onAct() {
 }
 for (const type of ['pointerdown', 'keydown', 'touchstart']) document.addEventListener(type, onAct, { capture: true, passive: true });
 
-// markRead moves the login's read marker to the newest message a history
-// read showed, while the chat is in view and once the user has acted on the
-// page (hasActed), so the agent's badge drops. It uses the hub's own read
-// route; the list is read again after it.
 async function markRead(c) {
   if (document.visibilityState !== 'visible' || !hasActed()) return;
   const newest = sortedMessages(messages).filter((m) => fromHistory.has(m.id)).pop();
@@ -635,13 +576,9 @@ async function markRead(c) {
   if (unclear(res) && lastMarked.get(c.conversation) === newest.id) lastMarked.delete(c.conversation);
 }
 
-// What the page says when the hub answers a repeated key: the earlier
-// attempt was stored, and nothing was stored now. The draft stays, since the
-// page cannot tell a retry from the same words meant a second time. The
-// answer to that first attempt may have been lost before the proxy, which
-// then recorded nothing, so the agent may be unable to verify the message.
-// And when the hub stores, under a key sent before, a message it should have
-// known if the earlier attempt arrived within its memory: both may be there.
+// NOTE_REPLAY keeps the draft: a retry and the same words meant twice look
+// alike. The first answer may have been lost before the proxy recorded it,
+// so the agent may be unable to verify the message.
 const NOTE_STORED_AGAIN = 'Stored now. An earlier attempt had no clear answer: if the message shows twice above, both arrived.';
 const NOTE_TWICE = 'If it shows twice above, two attempts arrived.';
 const NOTE_REPLAY = 'The earlier attempt did arrive: the message is in the conversation, and nothing new was stored. ' +
@@ -653,10 +590,8 @@ function setUnsent(c, v) {
   store(unsentKey(c.name), v ? JSON.stringify(v) : null);
 }
 
-// loadUnsent restores the record of a send that had no clear answer, so that
-// after a reload the same draft still goes under the same key. A record for
-// another conversation (the agent has a new hub record) is dropped: its key
-// would get the hub's answer for the message in the old one.
+// A record for another conversation is dropped: its key would get the hub's
+// answer for the old one.
 function loadUnsent(c) {
   try {
     const v = JSON.parse(stored(unsentKey(c.name)) || 'null');
@@ -671,8 +606,7 @@ function loadUnsent(c) {
   }
 }
 
-// adoptOldRecords moves the bare-key draft and unsent record (both the
-// manager's) to the per-agent keys, once: an unclear send keeps its key.
+// Moved to the per-agent keys once, so an unclear send keeps its key.
 function adoptOldRecords(l) {
   const oldUnsent = stored(OLD_UNSENT_KEY);
   const oldDraft = stored(OLD_DRAFT_KEY);
@@ -719,8 +653,6 @@ async function loadOlder() {
   }
 }
 
-// readList asks lever which agents this login has, in which state. The
-// answer carries seq, the order it was asked in.
 async function readList() {
   const seq = ++listSeq;
   const res = await api('/lever/api/agents');
@@ -732,11 +664,9 @@ async function readList() {
 
 const managerRow = () => roster && roster.agents.find((a) => a.role === 'manager' && a.access === 'message');
 
-// applyRoster shows a list answer: the rows, the operator's console link,
-// and the open chat's state. An answer older than the one shown is
-// dropped. The open agent with a new hub record (a fresh start gives it a
-// new id) moves its chat to the new conversation: a message to the old one
-// would be stored and reach nobody.
+// An answer older than the one shown is dropped. An agent with a new hub
+// record moves its chat to the new conversation: a message to the old one
+// would reach nobody.
 function applyRoster(l) {
   if (l.seq < appliedSeq) return;
   appliedSeq = l.seq;
@@ -758,15 +688,14 @@ function applyRoster(l) {
   applyView(a);
 }
 
-// degrade keeps the rows of the last list when a new one cannot be read,
-// with every state unknown: inputs go off until a read succeeds.
+// Every state goes unknown, so inputs stay off until a read succeeds.
 function degrade(failed) {
   if (!roster) return;
   showListNote(`The agent list cannot be read: ${failed.error}. Trying again.`);
   applyRoster({ ...roster, seq: failed.seq, agents: roster.agents.map((a) => ({ ...a, state: 'unknown', ...(a.access === 'message' ? { activity: '' } : {}) })) });
 }
 
-// reloadList reads the list again. One read at a time, like refresh.
+// One read at a time, like refresh.
 async function reloadList() {
   if (listing) {
     listAgain = true;
@@ -790,8 +719,6 @@ async function reloadList() {
   }
 }
 
-// applyView sets the open chat's header state, composer, note and "Ask the
-// manager" button from the agent's row (inputView).
 function applyView(a) {
   if (!chat || a.name !== chat.name) return;
   const v = inputView(a, !!managerRow(), roster && roster.tier);
@@ -819,8 +746,6 @@ function showFilesNote(text) {
   el.filesnote.hidden = !text;
 }
 
-// syncAttach shows the paperclip and the Files button for an open chat
-// with an agent the login may message, while files are on.
 function syncAttach() {
   const on = !!(roster && roster.files && chat);
   el.attach.hidden = !on || !roster.files.uploads;
@@ -830,11 +755,9 @@ function syncAttach() {
   syncReadVoice();
 }
 
-// Dictation (remote.voice). The mic records a clip in the browser; on stop
-// the page decodes it, resamples it to 16 kHz mono (OfflineAudioContext),
-// encodes WAV and posts it to lever, which answers its text. The text goes
-// into the message box at the cursor, for the login to review: the page
-// never sends it by itself.
+// Dictation (remote.voice): the clip is resampled to 16 kHz mono WAV and
+// posted to lever; its text goes into the message box for review and is
+// never sent by itself.
 let recording = null; // {recorder, stream, chunks, started, max, agent, timer, discard, done}
 let transcribing = false;
 
@@ -846,10 +769,7 @@ function showVoice(text) {
   el.voice.hidden = !text;
 }
 
-// syncMic shows the mic for an open chat while the list carries voice for
-// this login and the browser can record, and always while it records (it is
-// the stop control). It is off while the message box is, and while a clip
-// is being transcribed.
+// The mic stays shown while recording: it is the stop control.
 function syncMic() {
   el.mic.hidden = !recording && !(roster && roster.voice && chat && micSupported());
   el.mic.disabled = transcribing || (!recording && (!chat || !chat.view || !chat.view.input));
@@ -873,8 +793,7 @@ async function toggleMic() {
   if (!c || !cfg || transcribing || micStarting || !micSupported()) return;
   showError('');
   let stream;
-  // One permission prompt at a time: a second tap while it is up does
-  // nothing.
+  // One permission prompt at a time.
   micStarting = true;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
@@ -917,7 +836,6 @@ async function toggleMic() {
   syncMic();
 }
 
-// tickDictation shows the time recorded, and stops at the clip limit.
 function tickDictation(r) {
   if (recording !== r) return;
   const s = (Date.now() - r.started) / 1000;
@@ -925,9 +843,7 @@ function tickDictation(r) {
   if (s >= r.max) stopDictation();
 }
 
-// stopDictation ends the recording; its clip is transcribed (finishDictation
-// runs on the recorder's stop event, after the last chunk, and releases the
-// microphone).
+// finishDictation runs on the recorder's stop event and releases the mic.
 function stopDictation() {
   const r = recording;
   if (!r) return;
@@ -943,17 +859,13 @@ function stopDictation() {
   syncMic();
 }
 
-// cancelDictation ends a recording without transcribing it (the chat it was
-// for closed).
 function cancelDictation() {
   if (recording) recording.discard = true;
   stopDictation();
 }
 
-// dropHiddenDictation discards a recording when the page is hidden or put
-// away: the microphone must not go on listening behind the login's back, and
-// the 500 ms tick that would stop it at the limit is throttled in the
-// background. The clip is not sent.
+// The microphone must not go on listening while the page is hidden, where
+// the tick that stops it at the limit is throttled. The clip is not sent.
 function dropHiddenDictation() {
   if (!recording) return;
   cancelDictation();
@@ -1001,8 +913,7 @@ async function finishDictation(r) {
   }
 }
 
-// toWAV decodes a recorded clip and resamples it to 16 kHz mono WAV, at most
-// max seconds; null for a clip too short to hold a word.
+// null for a clip too short to hold a word.
 async function toWAV(buf, max) {
   const decoder = new window.OfflineAudioContext(1, 1, VOICE_RATE);
   const audio = await decoder.decodeAudioData(buf);
@@ -1017,9 +928,6 @@ async function toWAV(buf, max) {
   return encodeWAV(out.getChannelData(0));
 }
 
-// placeTranscript inserts text at the cursor of agent's message box, or,
-// when another chat is open by now, at the end of agent's draft. Nothing is
-// sent.
 function placeTranscript(agent, text) {
   if (chat && chat.name === agent) {
     const { value, cursor } = insertText(el.text.value, el.text.selectionStart, el.text.selectionEnd, text);
@@ -1038,14 +946,9 @@ function placeTranscript(agent, text) {
   store(draftKey(agent), insertText(draft, draft.length, draft.length, text).value);
 }
 
-// Read-aloud. With server voices (remote.voice.read_aloud: server, the
-// roster lists them while lever-tool-tts is ready) the page sends the
-// cleaned text, part by part, to lever, which answers each part spoken by a
-// voice on the operator's own host, and plays it with Web Audio. When the
-// first part cannot be had, or there are no server voices, it reads with
-// the browser's speech synthesis, with on-device voices only (localService
-// true), so the text never goes to a speech service either way. The voice
-// chosen is kept per device, one for each kind.
+// Read-aloud: server voices (lever-tool-tts on the operator's host) or, as
+// fallback, the browser's on-device voices only (localService), so the text
+// never goes to a speech service. The voice is kept per device and kind.
 const READ_VOICE_KEY = 'lever-read-voice';
 const SERVER_VOICE_KEY = 'lever-read-server-voice';
 const SPEAK_PATH = '/lever/api/voice/speak';
@@ -1056,15 +959,10 @@ let speaking = null; // {id, button, stop}: the message being read
 let audioCtx = null; // one per page, made and resumed on a tap
 
 const speechOn = () => !!(window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function');
-// serverSpeech is the roster's server voices, or null.
 const serverSpeech = () => (roster && roster.readAloud && roster.speech) || null;
-// readAloudOn: lever offers read-aloud to this login (remote.voice on and
-// read_aloud not off; the roster says so) and there is a voice to read
-// with: a server voice, or the device's own.
 const readAloudOn = () => !!(roster && roster.readAloud) && (speechOn() || !!serverSpeech());
 
-// kept and keep read and write a voice choice in localStorage (it lasts on
-// the device, unlike drafts, which are per tab).
+// A voice choice lasts on the device (localStorage), unlike per-tab drafts.
 function kept(key) {
   try {
     return localStorage.getItem(key) || '';
@@ -1107,15 +1005,12 @@ function stopSpeaking() {
   if (s && speechOn()) window.speechSynthesis.cancel();
 }
 
-// finished ends s's reading when it is still the one going.
 function finished(s) {
   if (speaking !== s) return;
   speaking = null;
   setText(s.button, '🔊');
 }
 
-// speak reads m aloud; a tap on the message being read stops it, a tap on
-// another stops it and reads that one.
 function speak(m, button) {
   const again = !!speaking && speaking.id === m.id;
   stopSpeaking();
@@ -1151,8 +1046,6 @@ function speakDevice(m, button, text) {
   window.speechSynthesis.speak(u);
 }
 
-// audioContext is the page's Web Audio context, made on first use (null
-// when the browser has none).
 function audioContext() {
   if (audioCtx) return audioCtx;
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -1165,8 +1058,7 @@ function audioContext() {
   return audioCtx;
 }
 
-// speakPart asks lever for one part spoken. It never throws: {ok, data}
-// with the WAV, or {ok: false, status, body}.
+// Never throws.
 async function speakPart(s, agent, id, text, voice) {
   const limit = new AbortController();
   s.aborts.add(limit);
@@ -1201,8 +1093,6 @@ async function speakPart(s, agent, id, text, voice) {
   }
 }
 
-// playBuffer plays one decoded part and resolves when it ends (or is
-// stopped).
 function playBuffer(ctx, buf, s) {
   return new Promise((resolve) => {
     const src = ctx.createBufferSource();
@@ -1214,7 +1104,6 @@ function playBuffer(ctx, buf, s) {
   });
 }
 
-// decode is one WAV part as an AudioBuffer, or null.
 async function decode(ctx, data) {
   try {
     return await ctx.decodeAudioData(data);
@@ -1223,10 +1112,8 @@ async function decode(ctx, data) {
   }
 }
 
-// speakServer reads text with a server voice, part by part: the next part
-// is asked for while one plays (one request at a time, as the proxy
-// allows). When the first part fails, the device's voice reads the whole
-// message instead; a later failure stops with a note.
+// One request at a time, as the proxy allows: the next part is asked for
+// while one plays. A first-part failure falls back to the device voice.
 function speakServer(m, button, text, sv, agent) {
   const ctx = audioContext();
   try {
@@ -1279,10 +1166,7 @@ function speakServer(m, button, text, sv, agent) {
   })();
 }
 
-// syncReadVoice offers the voice choice in an open chat when there is more
-// than one voice to read with: the server voices while the roster lists
-// them, else the device's on-device voices. The options are built again
-// only when the voices change.
+// The options are rebuilt only when the voices change.
 let readVoices = '';
 function syncReadVoice() {
   const sv = readAloudOn() ? serverSpeech() : null;
@@ -1310,7 +1194,6 @@ function syncReadVoice() {
   el.readvoice.value = chosen;
 }
 
-// saveReadVoice keeps the voice chosen, for the kind the picker shows.
 function saveReadVoice(value) {
   keep(serverSpeech() ? SERVER_VOICE_KEY : READ_VOICE_KEY, value);
 }
@@ -1324,8 +1207,7 @@ function closeFiles() {
   showFilesNote('');
 }
 
-// sendFile posts one file to the agent's upload route. XMLHttpRequest, not
-// fetch: only it reports upload progress. It never throws.
+// XMLHttpRequest, not fetch: only it reports upload progress.
 function sendFile(name, file, progress) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
@@ -1356,10 +1238,8 @@ function sendFile(name, file, progress) {
   });
 }
 
-// upload sends the picked file to the open chat's agent, then tells the
-// agent in the chat with the normal send path (deliver: the list check, a
-// wake, the idempotency key), so the agent verifies the note as this
-// login's message.
+// The note goes through deliver, so the agent verifies it as this login's
+// message.
 async function upload(file) {
   const c = chat;
   const cfg = roster && roster.files;
@@ -1416,9 +1296,8 @@ async function loadFiles() {
   el.filelist.replaceChildren(...list.map((f) => fileRow(c.name, f)));
 }
 
-// fileRow is one file as text, with a download link only to lever's own
-// route for that agent and id (built here, never taken from the answer).
-// sender names who uploaded a "sent" row ('' = this login).
+// The download link is built here, to lever's own route, never taken from
+// the answer. sender '' is this login.
 function fileRow(agent, f, sender = '') {
   const li = document.createElement('li');
   li.className = `file ${f.direction}`;
@@ -1448,8 +1327,6 @@ function resetHistory() {
   el.list.replaceChildren();
 }
 
-// openChat shows the chat with name. A see-only agent shows its name,
-// label and state, and nothing is read for it.
 function openChat(name) {
   leaveTranscript();
   cancelDictation();
@@ -1495,7 +1372,6 @@ function openChat(name) {
   void refresh();
 }
 
-// closeChat goes back to the list.
 function closeChat() {
   leaveTranscript();
   cancelDictation();
@@ -1522,10 +1398,8 @@ function closeChat() {
   if (contacts) renderContacts();
 }
 
-// openStream listens for the hub's chat events for this login: one stream
-// for the page's life. An event is only a hint to read the list and the
-// open history again. A stream the browser gave up on is replaced by the
-// poll, which also reopens it.
+// An event is only a hint to read again. A stream the browser gave up on is
+// replaced by the poll, which also reopens it.
 function openStream() {
   if (!roster || !roster.userId) return;
   const uid = roster.userId;
@@ -1574,35 +1448,31 @@ function post(c, text, key) {
   });
 }
 
-// unclear reports whether an answer leaves open that the hub stored the
-// message: no answer at all, or a fault somewhere between the page and the
-// hub. A refusal by the hub (4xx) is not unclear.
+// unclear: the hub may have stored the message (no answer, or a fault in
+// between). A 4xx refusal is not unclear.
 function unclear(res) {
   return !res.status || res.status >= 500;
 }
 
-// okButNoMessage reports whether an answer claims success without being the
-// stored message or a replay of it. Something answered in the hub's place
-// (a front, a cache), so whether the hub stored the message is open.
+// A success that is not the stored message came from something in the hub's
+// place (a front, a cache), so whether it was stored is open.
 function okButNoMessage(res) {
   return res.status >= 200 && res.status < 300 && res.status !== 201;
 }
 
-// reason is the text for an answer that is not a stored message. The body
-// of a success that is none is not shown: it is some other party's page.
+// The body of a success that is not a message is not shown: it is another
+// party's page.
 function reason(res) {
   return okButNoMessage(res) ? `unexpected answer (HTTP ${res.status})` : errorText(res.status, res.body);
 }
 
-// replayed reports whether the hub's answer is the one it gives a key it has
-// seen: 200, naming the message it stored then.
+// The hub answers a key it has seen with 200 and the message stored then.
 function replayed(res) {
   return res.status === 200 && !!res.body && typeof res.body === 'object' && typeof res.body.id === 'string';
 }
 
-// send posts the composer's text to the open chat. It keeps that chat (c)
-// to the end: the records it writes are c's, and what it shows, it shows
-// only while c's agent is still the open chat.
+// send keeps chat c to the end: what it shows, it shows only while c's agent
+// is still open.
 async function send() {
   const c = chat;
   const text = el.text.value.trim();
@@ -1646,11 +1516,9 @@ async function send() {
     if (again) say(NOTE_STORED_AGAIN);
     refreshSoon();
   } else if (again && replayed(res)) {
-    // The hub had this key already (see NOTE_REPLAY). The record goes, so
-    // one more press is a new message; Send rests a moment first, so a
-    // double tap is not that press.
-    // After two or more attempts with no clear answer, the hub may have
-    // forgotten the key between them and stored the message each time.
+    // The hub had this key already. The record goes, so another press is a new
+    // message; Send rests first so a double tap is not that press. After two or
+    // more unclear attempts the hub may have stored each.
     setUnsent(c, null);
     say(earlier > 1 ? `${NOTE_REPLAY} ${NOTE_TWICE}` : NOTE_REPLAY);
     hold();
@@ -1676,8 +1544,6 @@ async function send() {
   if (here) el.text.focus();
 }
 
-// hold keeps Send off for a moment after a note the operator must read
-// before pressing again.
 function hold() {
   held = true;
   syncSend();
@@ -1687,14 +1553,10 @@ function hold() {
   }, HOLD_MS);
 }
 
-// deliver posts text to chat c. It returns {res, again, earlier}: the hub's
-// answer, whether this text had been posted before under the same key with
-// no clear answer, and how often. {blocked} means nothing was posted.
+// deliver returns {res, again, earlier}, or {blocked} when nothing was posted.
 async function deliver(c, text) {
-  // Ask lever first: the agent may have a new hub record since the chat
-  // opened (a fresh start), and the hub would store a message for the old
-  // one and deliver it to nobody; or it may not take messages now. The
-  // draft is kept either way.
+  // Ask lever first: a fresh start gives the agent a new hub record, and a
+  // message to the old one would reach nobody.
   const l = await readList();
   if (l.error) return { blocked: l.error };
   applyRoster(l);
@@ -1709,11 +1571,8 @@ async function deliver(c, text) {
     const woken = await wake(c, text);
     if (woken) return woken;
   }
-  // The same text sent again after an unclear answer keeps its key, so the
-  // hub stores it once if it still knows the key.
   const reuse = !!c.unsent && c.unsent.text === text && c.unsent.conversation === c.conversation;
   const key = reuse ? c.unsent.key : newKey();
-  // How many times this text went out before under this key.
   const earlier = reuse ? c.unsent.tries : 0;
   const again = earlier > 0;
   // The record is written BEFORE the post: a reload while the post is under
@@ -1731,13 +1590,8 @@ async function deliver(c, text) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// wake asks lever to wake c's asleep agent, then reads the list until it
-// runs. It returns null when it runs (deliver then posts) or {blocked} with
-// the page's own words; the text is kept either way.
-//
-// The unsent record is written first, with no post counted: a reload during
-// the wake restores the text with its key, and the later post goes under
-// that key. An earlier unclear send of the same text keeps its own.
+// wake returns null once the agent runs, or {blocked}. The unsent record is
+// written first with no post counted, so a reload keeps the text's key.
 async function wake(c, text) {
   const name = c.name;
   if (!(c.unsent && c.unsent.text === text && c.unsent.conversation === c.conversation)) {
@@ -1773,8 +1627,6 @@ async function wake(c, text) {
   }
 }
 
-// showWakeView applies the open chat's row again, so its note says
-// whether a wake is under way.
 function showWakeView() {
   const a = chat && roster && roster.agents.find((x) => x.name === chat.name);
   if (a) applyView(a);
@@ -1793,8 +1645,7 @@ function loadDraft() {
   el.text.value = stored(draftKey(chat.name)) || '';
 }
 
-// askManager opens the manager's chat with a draft asking it to start the
-// open agent. Nothing is sent: the draft is the person's to edit and send.
+// Nothing is sent: the draft is the person's to edit.
 function askManager() {
   const mgr = managerRow();
   if (!chat || !mgr) return;
@@ -1808,19 +1659,14 @@ function askManager() {
   el.text.focus();
 }
 
-// Notifications (remote.push). The page asks lever for its key only where
-// the browser can push, and registers the push-only worker only when the
-// login turns notifications on (a click: iOS and Chrome ask for permission
-// only then). The worker has no fetch handler: it never stands between the
-// page and its requests.
+// Notifications (remote.push). The worker is registered only when the login
+// turns them on (iOS and Chrome ask permission only on a click). It has no
+// fetch handler, so it never stands between the page and its requests.
 const PUSH_SCOPE = '/lever/';
 
-// serviceWorker.register is a script-URL sink: with the page's Trusted
-// Types policy on (require-trusted-types-for 'script'), Chrome refuses a
-// plain string there. With push on, the CSP allows exactly one policy,
-// lever-sw, and this is it: its only output is the literal worker URL;
-// anything else throws. Created once, on the first Turn on. A browser
-// without Trusted Types takes the plain string.
+// serviceWorker.register is a Trusted Types script-URL sink. The CSP allows
+// one policy, lever-sw, whose only output is the literal worker URL;
+// anything else throws. A browser without Trusted Types takes the string.
 let swPolicy = null;
 function swScriptURL() {
   const tt = window.trustedTypes;
@@ -1856,11 +1702,8 @@ async function pushRegistration() {
   }
 }
 
-// The per-login opt-in marker. A browser has one push subscription per
-// worker scope, whoever is signed in, so on a shared device another login
-// finds the subscription a first login made. Only the login that turned
-// notifications on here re-sends it at load; any other sees "Turn on" and
-// gets pushes only after it opts in itself.
+// One push subscription per worker scope whoever is signed in, so on a
+// shared device only the login that opted in here re-sends it at load.
 const optInKey = () => `lever-push-optin:${roster ? roster.login : ''}`;
 
 function optedIn() {
@@ -1880,9 +1723,7 @@ function setOptIn(on) {
   }
 }
 
-// onWorkerMessage handles the service worker's one message: a tap on a
-// notification while this page is loaded (sw.js). Only lever's own worker can
-// send it, so it counts as the user acting on the page (hasActed).
+// A notification tap relayed by lever's own worker counts as acting (hasActed).
 function onWorkerMessage(ev) {
   const d = ev && ev.data;
   const name = d && typeof d.agent === 'string' ? hashAgent(`#agent=${d.agent}`) : '';
@@ -2052,8 +1893,7 @@ document.addEventListener('visibilitychange', () => {
   // requests would go on in the background.
   if (speaking && speaking.aborts) stopSpeaking();
 });
-// pagehide (the tab closed, navigated away or put in the back/forward
-// cache) also stops reading aloud, which would otherwise go on speaking.
+// pagehide also stops reading aloud.
 window.addEventListener('pagehide', () => {
   dropHiddenDictation();
   stopSpeaking();

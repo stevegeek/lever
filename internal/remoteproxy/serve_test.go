@@ -16,9 +16,8 @@ import (
 	"time"
 )
 
-// freePort asks the OS for an unused loopback port, then releases it. Another
-// process could grab it before Serve binds; the production path has the same
-// race.
+// freePort releases the port it finds, so another process could take it
+// first; production has the same race.
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -32,8 +31,6 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// waitFor polls cond until it returns true or the timeout elapses, failing
-// the test on timeout.
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -94,10 +91,8 @@ func TestServeWritesAndRemovesPIDFile(t *testing.T) {
 	}
 }
 
-// TestServeStampsWhatThisProcessIsServing: only the serving process can keep
-// apply's host-side record honest, since every serve writes the pid file.
-// Serve calls Stamp after the bind and after the pid file: brokerctl keys
-// its record on that pid.
+// TestServeStampsWhatThisProcessIsServing: Stamp runs after the bind and
+// the pid file, since brokerctl keys its record on that pid.
 func TestServeStampsWhatThisProcessIsServing(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "remote.pid")
@@ -110,8 +105,7 @@ func TestServeStampsWhatThisProcessIsServing(t *testing.T) {
 	seen := make(chan observation, 4)
 	stamp := func() error {
 		b, _ := os.ReadFile(pidPath)
-		// Connect rather than request: the listener is bound by now, but
-		// Serve has not started handling on it yet.
+		// Connect, not request: Serve may not be handling yet.
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
 		if err == nil {
 			_ = c.Close()
@@ -154,8 +148,7 @@ func TestServeStampsWhatThisProcessIsServing(t *testing.T) {
 }
 
 // TestServeDoesNotStampWhenTheBindFails: the losing proxy must leave the
-// incumbent's record alone, or the next apply would restart a good proxy or
-// trust a record for a config nothing is serving.
+// incumbent's record alone.
 func TestServeDoesNotStampWhenTheBindFails(t *testing.T) {
 	dir := t.TempDir()
 	port := freePort(t)
@@ -179,9 +172,8 @@ func TestServeDoesNotStampWhenTheBindFails(t *testing.T) {
 	}
 }
 
-// TestServeKeepsServingWhenStampFails: the record is bookkeeping for the next
-// apply, not a precondition for serving; a failed write costs one redundant
-// restart later.
+// TestServeKeepsServingWhenStampFails: the record is bookkeeping, not a
+// precondition for serving.
 func TestServeKeepsServingWhenStampFails(t *testing.T) {
 	port := freePort(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -240,9 +232,7 @@ func TestServeSecondOnSamePortErrors(t *testing.T) {
 }
 
 func TestServeFailsClosedOnNonLoopbackAddr(t *testing.T) {
-	// A loopback bind cannot yield a non-loopback listener, so the
-	// fail-closed branch cannot be reached through Serve's inputs; this
-	// exercises the loopback check directly.
+	// Unreachable through Serve's inputs, so test the loopback check directly.
 	nonLoopback := &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 12345}
 	if isLoopbackAddr(nonLoopback) {
 		t.Fatal("0.0.0.0 must not be treated as loopback")
@@ -361,11 +351,9 @@ func statPerm(t *testing.T, path string) os.FileMode {
 	return fi.Mode().Perm()
 }
 
-// TestServerTimeouts pins which http.Server timeouts the proxy sets and
-// which it must never set. The two zeros are the point: WriteTimeout would
-// cut the hub's streamed transcripts mid-stream, and ReadTimeout would make
-// the header deadline persist across the whole request. Nothing else fails
-// if someone "completes the set".
+// TestServerTimeouts: the two zeros are the point. WriteTimeout would cut
+// streamed transcripts and ReadTimeout would make the header deadline
+// cover the whole request.
 func TestServerTimeouts(t *testing.T) {
 	srv := newServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	if srv.ReadHeaderTimeout != serverReadHeaderTimeout {
@@ -386,10 +374,7 @@ func TestServerTimeouts(t *testing.T) {
 }
 
 // TestHeaderAndIdleTimeoutsDoNotBoundTheBody checks the stdlib property
-// newServer relies on: ReadHeaderTimeout covers the header phase only, and
-// IdleTimeout applies between requests, so neither bounds a response still
-// being written. Short values stand in for the real ones, which
-// TestServerTimeouts pins.
+// newServer relies on: neither timeout bounds a response being written.
 func TestHeaderAndIdleTimeoutsDoNotBoundTheBody(t *testing.T) {
 	const tick = 80 * time.Millisecond
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

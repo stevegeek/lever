@@ -61,9 +61,7 @@ func chatPost(t *testing.T, hub *httptest.Server, allowed []string, login, metho
 	return rw
 }
 
-// TestChatPostIsRecordedForAVerifiedLogin: a DM post the hub accepted is
-// recorded with the verified login, the DM's agent, the hub's id, sender and
-// time (to the second, as the agent's envelope shows it), and the text — and
+// The entry's time is to the second, as the agent's envelope shows it, and
 // the client still gets the hub's answer byte for byte.
 func TestChatPostIsRecordedForAVerifiedLogin(t *testing.T) {
 	spy := &ledgerSpy{}
@@ -85,8 +83,7 @@ func TestChatPostIsRecordedForAVerifiedLogin(t *testing.T) {
 	}
 }
 
-// TestChatPostsThatAreNotRecorded: only a 201 answer to an agent-DM send from
-// a verified login is recorded. Everything else stays unverifiable.
+// Only a 201 to an agent-DM send from a verified login is recorded.
 func TestChatPostsThatAreNotRecorded(t *testing.T) {
 	allowed := []string{"op@example.com"}
 	cases := []struct {
@@ -122,7 +119,6 @@ func TestChatPostsThatAreNotRecorded(t *testing.T) {
 	}
 }
 
-// TestChatDMAgent pins the route parser: only the exact agent-DM send route.
 func TestChatDMAgent(t *testing.T) {
 	if key, id, ok := chatDMAgent("POST", chatDMPath); !ok || id != chatAgentID || !strings.HasPrefix(key, "dm:agent:") {
 		t.Fatalf("chatDMAgent(DM send) = %q, %q, %v", key, id, ok)
@@ -141,8 +137,7 @@ func TestChatDMAgent(t *testing.T) {
 	}
 }
 
-// TestALedgerFailureNeverFailsTheRequest: the message is already delivered
-// when the hub answers, so a ledger that cannot write only loses the record.
+// The message is already delivered, so a ledger failure only loses the record.
 func TestALedgerFailureNeverFailsTheRequest(t *testing.T) {
 	hub := chatHub(t, http.StatusCreated, chatAnswer)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
@@ -157,8 +152,7 @@ func TestALedgerFailureNeverFailsTheRequest(t *testing.T) {
 	}
 }
 
-// TestChatPostWithAnEncodedKeyIsRecorded: the SPA sends the conversation key
-// through encodeURIComponent, so the colons arrive as %3A.
+// The SPA encodes the key with encodeURIComponent, so colons arrive as %3A.
 func TestChatPostWithAnEncodedKeyIsRecorded(t *testing.T) {
 	spy := &ledgerSpy{}
 	encoded := strings.ReplaceAll(chatDMPath, ":", "%3A")
@@ -171,10 +165,9 @@ func TestChatPostWithAnEncodedKeyIsRecorded(t *testing.T) {
 	}
 }
 
-// TestAPIResponsesAreSandboxed: an agent-written HTML file the hub serves
-// inline under /api/ must not run on the proxy's origin with the operator's
-// session (it could post chat that verifies as the operator). Every /api/
-// answer carries a CSP sandbox; the SPA shell does not.
+// An agent-written HTML file served inline under /api/ must not run on the
+// proxy's origin with the operator's session (it could post chat that
+// verifies as the operator), so every /api/ answer carries a CSP sandbox.
 func TestAPIResponsesAreSandboxed(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -206,8 +199,7 @@ func TestAPIResponsesAreSandboxed(t *testing.T) {
 	}
 }
 
-// TestASandboxedDocumentCannotPost: a request from a sandboxed document
-// carries Origin: null, which the gate refuses before the hub sees it.
+// A sandboxed document sends Origin: null, which the gate refuses.
 func TestASandboxedDocumentCannotPost(t *testing.T) {
 	spy := &ledgerSpy{}
 	hub := chatHub(t, http.StatusCreated, chatAnswer)
@@ -223,10 +215,8 @@ func TestASandboxedDocumentCannotPost(t *testing.T) {
 	}
 }
 
-// TestCrossSiteNavigationRefused: a navigation from a sandboxed document
-// (opaque origin) carries Sec-Fetch-Site: cross-site. It may load an entry
-// page like any link (TestEntryNavigation), but nothing else: not an /api/
-// route, where the agent's own files live, and not a hub page.
+// A sandboxed document's navigation is cross-site: it may load an entry page
+// like any link, but not an /api/ route (agent files) or a hub page.
 func TestCrossSiteNavigationRefused(t *testing.T) {
 	hub := chatHub(t, http.StatusOK, "<html>")
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost})

@@ -16,67 +16,47 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// The server-side login handshake.
+// The server-side login handshake. The proxy drives scion's OIDC browser flow
+// itself with a per-attempt cookie jar; the browser is never redirected:
 //
-// The proxy performs every step of scion's OIDC browser flow itself, with its
-// own cookie jar; the browser is never redirected anywhere:
+//  1. GET the hub's /auth/login/oidc without following the 302, which yields
+//     state, redirect_uri and client_id and sets the state cookie.
+//  2. Mint a code in-process with Provider.Mint (so /authorize need not exist).
+//  3. GET the hub's callback with that code and state using the SAME jar; the
+//     hub answers with a scion_sess cookie that is now a session.
 //
-//  1. GET the hub's /auth/login/oidc and DO NOT follow the 302. The answer
-//     carries state, redirect_uri and client_id, and sets the cookie that
-//     holds the state.
-//  2. Mint a code by calling Provider.Mint, an in-process call. This is why
-//     /authorize need not exist.
-//  3. GET the hub's own callback with that code and state, carrying the SAME
-//     jar. The hub calls the provider (/token, then /userinfo) and answers
-//     with a `scion_sess` cookie that is now a session.
-//
-// The jar must survive from step 1 to step 3: scion stores the login state in
-// the cookie that later becomes the session and compares it at the callback,
-// so a dropped or swapped jar fails as state_mismatch.
-//
-// The resulting cookie stays HOST-SIDE: it is injected into the hub-bound half
-// of a request and stripped from every response (see proxy.go), so the
-// browser never holds a hub credential.
+// scion keeps the login state in the cookie that becomes the session, so a
+// dropped or swapped jar fails as state_mismatch. The session cookie stays
+// host-side: proxy.go injects it hub-bound and strips it from every response,
+// so the browser never holds a hub credential.
 
 const (
-	// sessionCookieName is scion's web session cookie. It carries the login
-	// state first and the session afterwards.
+	// sessionCookieName carries the login state first and the session after.
 	sessionCookieName = "scion_sess"
 
-	// oidcLoginPath starts a login for the generic OIDC provider, and
-	// callbackPathPrefix is where the hub expects to be called back
-	// (pkg/hub/web.go routes /auth/login/ and /auth/callback/).
+	// pkg/hub/web.go routes /auth/login/ and /auth/callback/.
 	oidcLoginPath      = "/auth/login/oidc"
 	callbackPathPrefix = "/auth/callback/"
 
-	// loginTimeout bounds one whole handshake (three short requests) while a
-	// browser request waits on the answer.
 	loginTimeout = 30 * time.Second
 
-	// sessionMaxAge bounds how long the driver hands out one hub session.
-	// scion refuses a scion_sess cookie older than 24 hours and answers as if
-	// there were no session; a POST cannot be retried once its body is spent,
-	// so the driver renews well before that. The access token INSIDE the
-	// cookie lapses after 15 minutes, but the hub refreshes it itself from
-	// the refresh token the cookie carries.
+	// scion refuses a scion_sess older than 24 hours as if there were no
+	// session, and a spent POST body cannot be retried, so renew well before.
+	// The hub refreshes the 15-minute access token inside the cookie itself.
 	sessionMaxAge = 12 * time.Hour
 
-	// maxLoginBody caps what the driver reads from a hub response: the
-	// handshake carries nothing in a body, so this only drains for keep-alive.
+	// maxLoginBody only drains for keep-alive: the handshake has no body.
 	maxLoginBody = 8 << 10
 )
 
 type LoginConfig struct {
-	// Hub is the hub base URL AS DIALLED (as Config.Target), so the
-	// handshake travels the same route as proxied traffic.
+	// Hub is the hub base URL as dialled (as Config.Target).
 	Hub *url.URL
-	// DialContext, when non-nil, is how the driver reaches Hub (the jail
-	// dial in production; nil uses the default dialer in tests).
+	// DialContext reaches Hub (the jail dial); nil uses the default dialer.
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	// Provider mints the authorization codes. Required.
-	Provider *Provider
-	// Audit receives one line per login outcome; nil disables (tests). It
-	// never carries the cookie or the code.
+	Provider    *Provider
+	// Audit receives one line per login outcome; nil disables. It never
+	// carries the cookie or the code.
 	Audit func(line AuditLine)
 }
 
@@ -93,9 +73,8 @@ type LoginDriver struct {
 	sessions map[string]*sessionEntry
 }
 
-// sessionEntry is one login attempt and its result. done is closed once the
-// attempt finishes; cookie/err are written before that and read only after,
-// so concurrent callers share one attempt.
+// sessionEntry is one login attempt shared by concurrent callers: cookie, err
+// and at are written before done closes and read only after.
 type sessionEntry struct {
 	done   chan struct{}
 	cookie string
@@ -103,16 +82,14 @@ type sessionEntry struct {
 	at     time.Time // when the login succeeded; see sessionMaxAge
 }
 
-// NewLoginDriver builds the driver. Its HTTP client carries no jar (each
-// attempt gets a fresh one) and never follows a redirect: every hop in this
-// handshake is inspected.
+// NewLoginDriver builds the driver. Its client has no jar (each attempt gets
+// its own) and never follows a redirect: every hop is inspected.
 func NewLoginDriver(cfg LoginConfig) *LoginDriver {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	if cfg.DialContext != nil {
 		t.DialContext = cfg.DialContext
 	}
-	// An HTTP_PROXY in the operator's environment must never redirect this
-	// handshake off the host.
+	// An operator's HTTP_PROXY must never route this handshake off the host.
 	t.Proxy = nil
 	return &LoginDriver{
 		hub:      cfg.Hub,
@@ -130,14 +107,10 @@ func (d *LoginDriver) hubURL(pathAndQuery string) string {
 	return strings.TrimSuffix(d.hub.String(), "/") + pathAndQuery
 }
 
-// Cookie returns the session cookie value for the given verified operator
-// login, performing the handshake on first use.
-//
-// The first caller for a login runs the handshake while every other caller
-// waits on its result, so a page load's parallel connections drive one
-// login. A failed or panicking attempt is NOT cached (see errLoginPanicked):
-// the next request retries. A session older than sessionMaxAge is replaced
-// by a fresh login.
+// Cookie returns the hub session cookie for a verified operator login,
+// logging in on first use. Concurrent callers share one attempt; a failed or
+// panicking attempt is not cached, and a session older than sessionMaxAge is
+// replaced.
 func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) {
 	d.mu.Lock()
 	if e, ok := d.sessions[login]; ok && !d.expired(e) {
@@ -153,15 +126,10 @@ func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) 
 	d.sessions[login] = e
 	d.mu.Unlock()
 
-	// Every other caller for this login is parked on e.done, so it must be
-	// released on EVERY exit path, panic included: net/http recovers a
-	// handler panic, and an entry left with its channel open would block
-	// every later request for that operator for the life of the process.
-	//
-	// A panic leaves cookie and err at their zero values, which would read as
-	// a session. Name it a failure instead, so waiters get an error and the
-	// eviction below lets the next request retry. The panic itself is not
-	// recovered: net/http logs it with its stack trace.
+	// Waiters are parked on e.done, so it must close on every exit path, panic
+	// included, or that operator's requests block for the life of the process.
+	// A panic leaves zero values that would read as a session, so mark it a
+	// failure; the panic itself is left for net/http to log.
 	completed := false
 	defer func() {
 		if !completed {
@@ -184,8 +152,7 @@ func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) 
 }
 
 // expired reports whether a finished, successful attempt is past
-// sessionMaxAge. An attempt still running is never expired: its waiters get
-// its result. Called with d.mu held; e.at is written before e.done closes.
+// sessionMaxAge; a running attempt is never expired. Called with d.mu held.
 func (d *LoginDriver) expired(e *sessionEntry) bool {
 	select {
 	case <-e.done:
@@ -195,31 +162,21 @@ func (d *LoginDriver) expired(e *sessionEntry) bool {
 	}
 }
 
-// errLoginPanicked is what the waiters on a shared attempt get when the
-// caller running it panicked. It says nothing about the panic value: an
-// audit line must never carry text this package has not bounded.
+// errLoginPanicked says nothing about the panic value: an audit line must
+// never carry text this package has not bounded.
 var errLoginPanicked = errors.New("remoteproxy: login: the shared login attempt panicked")
 
-// Login refusals the driver decides itself (the hub's own reasons travel
-// verbatim in the message). Tests match on these.
+// Tests match on these.
 var (
-	// errForeignProvider: the hub redirected to an authorization endpoint that
-	// is not this proxy's, so it is configured against another OIDC provider.
 	errForeignProvider = errors.New("remoteproxy: login: the hub is configured against a different OIDC provider")
-	// errForeignClientID: the hub asked for a client_id other than LoginClientID.
-	// The message is completed in place ("... client_id %q, not lever's %q").
+	// errForeignClientID is completed in place ("... client_id %q, not lever's %q").
 	errForeignClientID = errors.New("remoteproxy: login: the hub asked for client_id")
-	// errNoSessionMinted: the callback answered without replacing the
-	// login-state cookie with a session.
 	errNoSessionMinted = errors.New("remoteproxy: login: the hub answered without turning the login-state cookie into a session")
 )
 
-// Invalidate drops a cached session, so the next request logs in again: a
-// session the hub no longer accepts heals without operator action.
-//
-// The cookie value is compared before dropping: a request that started with
-// an old session can complete after a concurrent renewal, and must not
-// discard the fresh session.
+// Invalidate drops a cached session so the next request logs in again. It
+// compares the cookie first: a request that started on an old session must
+// not discard a concurrent renewal.
 func (d *LoginDriver) Invalidate(login, cookie string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -233,15 +190,12 @@ func (d *LoginDriver) Invalidate(login, cookie string) {
 			delete(d.sessions, login)
 		}
 	default:
-		// An attempt is still running; it will install its own result.
 	}
 }
 
-// login runs the whole handshake and returns the session cookie value.
-//
-// The handshake is detached from the triggering request's cancellation and
-// keeps only its own timeout: other requests wait on it (see Cookie), and a
-// browser that navigated away must not abort their login.
+// login is detached from the triggering request's cancellation (keeping its
+// own timeout): other requests wait on it and must not fail because one
+// browser navigated away.
 func (d *LoginDriver) login(ctx context.Context, operator string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginTimeout)
 	defer cancel()
@@ -250,8 +204,8 @@ func (d *LoginDriver) login(ctx context.Context, operator string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("remoteproxy: login: cookie jar: %w", err)
 	}
-	// The jar lives for this attempt only: two logins must never share the
-	// state cookie that decides which callback belongs to which attempt.
+	// Two logins must never share the state cookie that ties a callback to
+	// its attempt.
 	client := *d.client
 	client.Jar = jar
 
@@ -260,9 +214,8 @@ func (d *LoginDriver) login(ctx context.Context, operator string) (string, error
 		d.recordLogin(operator, 0, err)
 		return "", err
 	}
-	// scion_sess carries the login state now and becomes the session at the
-	// callback. Remember the state value, so a callback that fails without
-	// replacing it cannot be mistaken for a login.
+	// Remember the state value so a callback that fails without replacing it
+	// is not mistaken for a session.
 	stateCookie := jarCookie(client.Jar, d.hub)
 	code, err := d.provider.Mint(start.state, start.redirectURI, start.clientID, identityFor(operator))
 	if err != nil {
@@ -289,8 +242,6 @@ type loginStart struct {
 	clientID    string
 }
 
-// begin performs step 1 and reads the redirect the hub would have sent a
-// browser.
 func (d *LoginDriver) begin(ctx context.Context, client *http.Client) (loginStart, error) {
 	resp, err := d.get(ctx, client, d.hubURL(oidcLoginPath))
 	if err != nil {
@@ -302,9 +253,8 @@ func (d *LoginDriver) begin(ctx context.Context, client *http.Client) (loginStar
 		return loginStart{}, fmt.Errorf("remoteproxy: login: the hub answered %s to %s instead of starting an OIDC login — "+
 			"is oidc_login configured in the guest ~/.scion/settings.yaml, and was the hub restarted since?", resp.Status, oidcLoginPath)
 	}
-	// The hub builds this URL from OUR discovery document. Anything else
-	// means the hub is configured against a different OIDC provider, and
-	// lever must not mint a code for somebody else's login.
+	// The hub builds this URL from our discovery document; anything else means
+	// another OIDC provider, and lever must not mint a code for its login.
 	if !strings.HasPrefix(loc, DeadAuthorizationEndpoint) {
 		return loginStart{}, fmt.Errorf("%w (it redirected somewhere other than %s)", errForeignProvider, DeadAuthorizationEndpoint)
 	}
@@ -324,13 +274,9 @@ func (d *LoginDriver) begin(ctx context.Context, client *http.Client) (loginStar
 	return st, nil
 }
 
-// callback performs step 3 and keeps the session cookie the jar receives.
-//
-// The redirect_uri is built from the hub's base_url, a name this host need
-// not resolve (the proxy reaches the hub through the jail). Only the ORIGIN
-// is replaced; the path and query are exactly what the hub asked for, and
-// the code stays bound to the redirect_uri as issued, which the hub re-sends
-// to /token.
+// callback performs step 3. Only the redirect_uri's origin is replaced (the
+// hub's base_url need not resolve here); path and query stay as issued, since
+// the hub re-sends the redirect_uri to /token.
 func (d *LoginDriver) callback(ctx context.Context, client *http.Client, redirectURI string, q url.Values, stateCookie string) (string, error) {
 	ru, err := url.Parse(redirectURI)
 	if err != nil {
@@ -344,25 +290,22 @@ func (d *LoginDriver) callback(ctx context.Context, client *http.Client, redirec
 		return "", fmt.Errorf("remoteproxy: login: callback: %w", err)
 	}
 	defer drain(resp)
-	// A failed login redirects to the SPA's login page with a reason in the
-	// query (state_mismatch, exchange_failed, unauthorized_domain, ...).
-	// Report it: it is the hub's own fixed vocabulary.
+	// A failed login redirects to /login?error=<reason>, the hub's own fixed
+	// vocabulary, so the reason is safe to report.
 	if loc := resp.Header.Get("Location"); strings.HasPrefix(loc, "/login?") {
 		if reason := loginErrorReason(loc); reason != "" {
 			return "", fmt.Errorf("remoteproxy: login: the hub refused the callback (%s)", reason)
 		}
 		return "", fmt.Errorf("remoteproxy: login: the hub refused the callback")
 	}
-	// A NEW value, not merely a present one: the jar already held this cookie
-	// with the login state, so a hub that answers without replacing it would
-	// otherwise hand back the state as though it were a session.
+	// The jar already held this cookie with the login state: require a new
+	// value, or the state would pass for a session.
 	if c := jarCookie(client.Jar, d.hub); c != "" && c != stateCookie {
 		return c, nil
 	}
 	return "", fmt.Errorf("%w (it answered %s and left the %s cookie as it was)", errNoSessionMinted, resp.Status, sessionCookieName)
 }
 
-// jarCookie returns the scion_sess value the jar holds for u, or "".
 func jarCookie(jar http.CookieJar, u *url.URL) string {
 	for _, c := range jar.Cookies(u) {
 		if c.Name == sessionCookieName {
@@ -372,9 +315,7 @@ func jarCookie(jar http.CookieJar, u *url.URL) string {
 	return ""
 }
 
-// loginErrorReason extracts the hub's `error` query value from a /login
-// redirect. Returned into an error message, so it is bounded and stripped of
-// anything but the value itself.
+// loginErrorReason is bounded because it is returned in an error message.
 func loginErrorReason(location string) string {
 	u, err := url.Parse(location)
 	if err != nil {
@@ -386,9 +327,8 @@ func loginErrorReason(location string) string {
 func (d *LoginDriver) get(ctx context.Context, client *http.Client, rawURL string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		// Not %w, and not rawURL: on a malformed URL the stdlib's error quotes
-		// the URL it was given, and one of this handshake's two requests
-		// carries the authorization code in its query. See requoted.
+		// Not %w and not rawURL: the stdlib error quotes the URL, and the
+		// callback request carries the authorization code in its query.
 		return nil, fmt.Errorf("remoteproxy: login: building the request: %v", redactURL(err))
 	}
 	resp, err := client.Do(req)
@@ -398,12 +338,9 @@ func (d *LoginDriver) get(ctx context.Context, client *http.Client, rawURL strin
 	return resp, nil
 }
 
-// requoted restates a transport failure WITHOUT the URL that produced it.
-//
-// A *url.Error quotes the whole request URL, and the callback leg carries
-// the authorization code (the one secret in the flow) in its query, which
-// would then reach the audit log and remote.log. The path tells the two legs
-// apart; url.Error.Err keeps the cause, which quotes an address, not a URL.
+// requoted restates a transport failure without its URL: a *url.Error quotes
+// the full URL, and the callback's query carries the authorization code,
+// which would reach the audit log and remote.log.
 func requoted(path string, err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
@@ -412,8 +349,7 @@ func requoted(path string, err error) error {
 	return err
 }
 
-// redactURL strips a query string from an error's text, for the one path where
-// the error is not a *url.Error and its content is not otherwise known.
+// redactURL strips a query string from an error that is not a *url.Error.
 func redactURL(err error) string {
 	msg := err.Error()
 	if i := strings.Index(msg, "?"); i >= 0 {
@@ -427,8 +363,7 @@ func drain(resp *http.Response) {
 	_ = resp.Body.Close()
 }
 
-// recordLogin audits one login outcome. The cookie value is never part of it;
-// err is lever's own message, which quotes no secret.
+// recordLogin never records the cookie; err is lever's own message.
 func (d *LoginDriver) recordLogin(operator string, status int, err error) {
 	if d.audit == nil {
 		return
@@ -447,32 +382,24 @@ func (d *LoginDriver) recordLogin(operator string, status int, err error) {
 	d.audit(line)
 }
 
-// unnamedOperator is the identity asserted when the gate hands the driver no
-// login: every request while remote.allowed_users is unset. With the
-// allowlist empty the identity header is an unverified claim and the gate
-// withholds it (see gate.operatorFor), so this is a placeholder for the
-// hub's user row, not a claim about who is connected.
+// unnamedOperator is the placeholder hub identity when remote.allowed_users
+// is unset: the gate then withholds the unverified identity header (see
+// gate.operatorFor), so this is not a claim about who is connected.
 const (
 	unnamedOperator      = "lever-operator"
 	unnamedOperatorEmail = "lever-operator@lever.local"
 )
 
-// IDEmailDomain is the domain identityFor gives a login that is not an email
-// address (a front's opaque user id, such as exe.dev's X-ExeDev-UserID).
-// config.validRemoteLogin keeps this domain (and the unnamed operator's
-// address) out of allowed_users, so no listed login can alias another's hub
-// user; a test pins that the two packages agree.
+// IDEmailDomain is the email domain for a login that is not an address (such
+// as exe.dev's X-ExeDev-UserID). config.validRemoteLogin keeps this domain out
+// of allowed_users so no login can alias another's hub user; a test pins that
+// the packages agree.
 const IDEmailDomain = "id.lever.local"
 
-// identityFor turns the login the proxy already verified into the claims the
-// hub records. scion keys its user row on the email, so two operators get
-// two hub users.
-//
-// The email is the login itself when it contains "@". A login without one
-// becomes <id>@IDEmailDomain, a domain nobody can receive mail at, so it is
-// never mistaken for a real address; config.validRemoteLogin restricts such
-// ids to characters that make a plain local part. The subject and display
-// name stay the login as sent.
+// identityFor maps a verified login to hub claims. scion keys users on email,
+// so each operator gets its own hub user. A login without "@" becomes
+// <id>@IDEmailDomain, an undeliverable domain that cannot be mistaken for a
+// real address.
 func identityFor(login string) Identity {
 	if login == "" {
 		return Identity{Subject: unnamedOperator, Email: unnamedOperatorEmail, Name: "Lever operator"}
@@ -480,10 +407,8 @@ func identityFor(login string) Identity {
 	return Identity{Subject: "lever-remote:" + login, Email: config.HubEmailFor(login), Name: login}
 }
 
-// HubUserEmails is the set of hub user emails the proxy's sign-ins can
-// create, given remote.allowed_users: one per allowed login, or the single
-// placeholder operator when the list is empty. The bootstrap-token step
-// binds exactly these to the remote web role.
+// HubUserEmails returns the hub user emails sign-ins can create: one per
+// allowed login, or the placeholder operator when the list is empty.
 func HubUserEmails(allowedUsers []string) []string {
 	if len(allowedUsers) == 0 {
 		return []string{config.HubEmailFor("")}

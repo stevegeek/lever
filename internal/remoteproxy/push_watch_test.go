@@ -15,7 +15,6 @@ import (
 	"github.com/stevegeek/lever/internal/chatledger"
 )
 
-// sseHub is a hub whose /events the test drives.
 type sseHub struct {
 	mu       sync.Mutex
 	streams  int
@@ -84,10 +83,8 @@ func pushDMEvent(uid, key string) string {
 	return fmt.Sprintf("id: 1\nevent: update\ndata: {\"subject\":\"user.%s.chat.dm\",\"data\":{\"threadId\":%q,\"msg\":\"SECRET\"}}\n\n", uid, key)
 }
 
-// hubDMEvent is one DM message event as the pinned hub writes it: the SSE
-// frame of pkg/hub/web.go (id, event: update, {"subject","data"}) around a
-// UserMessageEvent (pkg/hub/events.go), published on user.<id>.chat.dm for
-// a web message whose threadId is the DM key.
+// hubDMEvent is a DM message event as the pinned hub writes it: an SSE update
+// frame around a UserMessageEvent on user.<id>.chat.dm, threadId the DM key.
 func hubDMEvent(uid, agentID, key string) string {
 	data, _ := json.Marshal(map[string]any{
 		"id": "m-evt", "projectId": "p1", "sender": "agent:w1", "senderId": agentID,
@@ -155,8 +152,6 @@ func waitBaseline(t *testing.T, e *watchEnv, login string) {
 	})
 }
 
-// TestRunRestoresWatchersFromTheStore: a proxy restart with stored
-// subscriptions reconnects every subscribed login, with its own session.
 func TestRunRestoresWatchersFromTheStore(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
@@ -189,9 +184,8 @@ func TestWatchPushesOnAHubShapedDMEvent(t *testing.T) {
 	eventually(t, "a push", func() bool { return len(e.fs.all()) == 1 })
 }
 
-// TestWatchChecksEveryDMForAnUnknownKey: a threadId that names none of the
-// login's DM keys (another spelling of the key) checks every DM of the
-// login instead of being dropped, and leaves an audit line.
+// TestWatchChecksEveryDMForAnUnknownKey: an unknown threadId checks every DM
+// of the login instead of being dropped, and leaves an audit line.
 func TestWatchChecksEveryDMForAnUnknownKey(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.idle = time.Minute; e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
@@ -278,9 +272,6 @@ func TestWatchRenewsASessionTheHubRedirects(t *testing.T) {
 	}
 }
 
-// TestStreamClientBoundsTheHeaders: with or without the jail dial, the
-// stream client bounds the wait for the response headers and follows no
-// redirect.
 func TestStreamClientBoundsTheHeaders(t *testing.T) {
 	g := &gate{}
 	p := &Push{g: g}
@@ -429,9 +420,8 @@ func TestWatchRetriesAreBounded(t *testing.T) {
 	}
 }
 
-// TestWatchRejectedSessionReconnectsAndCatchesUp: a history read the hub
-// refuses (401) ends the stream at once; the next connect logs in again and
-// its catch-up pushes the message.
+// TestWatchRejectedSessionReconnectsAndCatchesUp: a 401 on a history read
+// ends the stream; the next connect logs in again and its catch-up pushes.
 func TestWatchRejectedSessionReconnectsAndCatchesUp(t *testing.T) {
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID
 	var sess *stubSession
@@ -457,8 +447,6 @@ func TestWatchRejectedSessionReconnectsAndCatchesUp(t *testing.T) {
 	}
 }
 
-// TestWatchHeartbeatsKeepTheStream: any event or heartbeat resets the idle
-// timer.
 func TestWatchHeartbeatsKeepTheStream(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) {
 		e.p.idle = 300 * time.Millisecond
@@ -563,7 +551,6 @@ func TestSchedulerKeepsACatchUpFlag(t *testing.T) {
 	}
 }
 
-// failingRecords makes the agent records fail n times, then answer as rec.
 func failingRecords(n int, rec func(context.Context) (map[string]AgentRecord, error)) func(context.Context) (map[string]AgentRecord, error) {
 	var left atomic.Int32
 	left.Store(int32(n))
@@ -575,8 +562,6 @@ func failingRecords(n int, rec func(context.Context) (map[string]AgentRecord, er
 	}
 }
 
-// TestWatchRetriesWhenTheTargetsFail: the catch-up pass cannot list the
-// login's agents (the hub's records fail) and is tried again.
 func TestWatchRetriesWhenTheTargetsFail(t *testing.T) {
 	key := "dm:agent:" + agentW1 + ":user:" + chatUID
 	e := startWatch(t, func(e *watchEnv) {
@@ -606,8 +591,6 @@ func TestWatchTargetsRetryKeepsTheCatchUpFlag(t *testing.T) {
 	}
 }
 
-// TestSchedulerRetryBackoffDoubles: each retry of a key waits twice the
-// last, from backoffMin up to backoffMax.
 func TestSchedulerRetryBackoffDoubles(t *testing.T) {
 	p := &Push{debounce: time.Millisecond, backoffMin: 100 * time.Millisecond, backoffMax: 350 * time.Millisecond}
 	q := newPushScheduler(context.Background(), p, chatOp, &pushSession{})
@@ -624,8 +607,6 @@ func TestSchedulerRetryBackoffDoubles(t *testing.T) {
 	}
 }
 
-// TestSchedulerSuccessResetsTheRetryCount: a check that succeeds clears its
-// count, so a later run of failures gets the full five retries again.
 func TestSchedulerSuccessResetsTheRetryCount(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))
@@ -663,8 +644,6 @@ func TestSchedulerSuccessResetsTheRetryCount(t *testing.T) {
 	}
 }
 
-// TestSchedulerAuditsUnknownKeysOncePerPass: many made-up DM keys in one
-// pass write one unknown-dm line with their count, not a line per key.
 func TestSchedulerAuditsUnknownKeysOncePerPass(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))

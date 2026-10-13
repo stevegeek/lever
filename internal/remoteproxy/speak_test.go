@@ -213,7 +213,6 @@ func TestSpeakLimits(t *testing.T) {
 	if rw := speakPost(h, chatOp, speakJSON("boss", "m", text, "")); rw.Code != http.StatusTooManyRequests || errorWord(rw) != "rate" {
 		t.Fatalf("over the hour: %d %s", rw.Code, rw.Body)
 	}
-	// Another login is not affected.
 	if rw := speakPost(h, "op2@x", speakJSON("boss", "m", text, "")); rw.Code != http.StatusOK {
 		t.Fatalf("other login: %d", rw.Code)
 	}
@@ -230,7 +229,6 @@ func TestSpeakLimits(t *testing.T) {
 	if rw := speakPost(h, chatOp, speakJSON("boss", "m", text, "")); rw.Code != http.StatusTooManyRequests || errorWord(rw) != "quota" {
 		t.Fatalf("over the day: %d %s", rw.Code, rw.Body)
 	}
-	// Not sent: given back.
 	cfg2, rec2 := speakCfg(t, hub)
 	h2 := NewHandler(cfg2)
 	rec2.err = errNotSentTest

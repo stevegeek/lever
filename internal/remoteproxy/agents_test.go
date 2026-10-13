@@ -86,8 +86,8 @@ func TestBuildAgentsContact(t *testing.T) {
 	if !reflect.DeepEqual(got.Agents, want) || got.Console != "" {
 		t.Fatalf("got %+v", got)
 	}
-	// No session check wired: every contact post would be refused, so the
-	// list says not fresh too.
+	// No session check wired: every contact post would be refused, so not
+	// fresh.
 	if got := buildAgents(v, "boss", "u-c", recs, false, nil, nil); got.Agents[0].State != "not-fresh" {
 		t.Fatalf("nil fresh: %+v", got.Agents[0])
 	}
@@ -116,7 +116,7 @@ func TestBuildAgentsRefusesABadHubID(t *testing.T) {
 
 func TestCountUnread(t *testing.T) {
 	m := func(id, sender, at string) hubMessage { return hubMessage{ID: id, SenderID: sender, CreatedAt: at} }
-	// The hub's order is not trusted: sorted here by time, then id.
+	// The hub's order is not trusted.
 	items := []hubMessage{m("m3", "a", "2026-10-06T10:03:00Z"), m("m1", "a", "2026-10-06T10:01:00Z"),
 		m("m5", "a", "2026-10-06T10:05:00Z"), m("m2", "a", "2026-10-06T10:02:00Z"), m("m4", "u", "2026-10-06T10:04:00Z")}
 	if n := countUnread(items, "a", "m2", false, nil); n != 2 { // m5, m3; m4 is the user's own
@@ -133,7 +133,6 @@ func TestCountUnread(t *testing.T) {
 	}
 }
 
-// agentsAs runs the agent list handler as login would reach it.
 func agentsAs(t *testing.T, h http.Handler, login string) (*httptest.ResponseRecorder, agentsAnswer) {
 	t.Helper()
 	rw := chatDo(h, login, "GET", chatAgentsPath)
@@ -176,8 +175,6 @@ func TestAgentsListOperatorOrderAndLinks(t *testing.T) {
 	}
 }
 
-// TestAgentsListHidesWhatALoginMayNotSee: a contact's answer names only its
-// own agents.
 func TestAgentsListHidesWhatALoginMayNotSee(t *testing.T) {
 	hub := newPageHub(t)
 	cfg := chatConfig(t, hub) // contact c@x: agents [w1]; see [w2]; hidden w3; manager boss
@@ -229,8 +226,6 @@ func TestAgentsListHubDown(t *testing.T) {
 	}
 }
 
-// TestAgentsListHealsALapsedSession: a 401 from the identity lookup
-// replaces the session once.
 func TestAgentsListHealsALapsedSession(t *testing.T) {
 	hub := newPageHub(t)
 	hub.me = func(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +253,6 @@ func TestAgentsListFailsClosedOnABadUserID(t *testing.T) {
 	}
 }
 
-// dmHub answers the DM list and history reads the unread count needs.
 func dmHub(t *testing.T, dms string, history map[string]string) *pageHub {
 	hub := newPageHub(t)
 	hub.route = func(w http.ResponseWriter, r *http.Request) bool {
@@ -315,7 +309,7 @@ func TestAgentsListUnread(t *testing.T) {
 			unread[a.Name] = fmt.Sprint(*a.Unread)
 		}
 	}
-	// boss: read; w1: two after the marker; w2: one, never read; w3: no DM yet.
+	// boss: read; w1: two after the marker; w2: one, never read; w3: no DM.
 	if want := map[string]string{"boss": "0", "w1": "2", "w2": "1", "w3": "0"}; !reflect.DeepEqual(unread, want) {
 		t.Fatalf("unread %v, want %v", unread, want)
 	}
@@ -330,7 +324,6 @@ func TestAgentsListUnread(t *testing.T) {
 		t.Fatalf("contact answer %s", rw.Body)
 	}
 
-	// The DM list down: no unread key at all.
 	hub = dmHub(t, "500", nil)
 	if rw, _ := agentsAs(t, NewHandler(chatConfig(t, hub)), chatOp); strings.Contains(rw.Body.String(), "unread") {
 		t.Fatalf("DM list down: %s", rw.Body)
@@ -342,8 +335,7 @@ func TestAgentsListUnread(t *testing.T) {
 	}
 }
 
-// At most maxUnreadReads history reads per list: the ninth unread DM gets no
-// count rather than a ninth read.
+// At most maxUnreadReads history reads per list: the ninth DM gets no count.
 func TestAgentsListUnreadReadBudget(t *testing.T) {
 	var workers []string
 	recs := map[string]AgentRecord{"boss": {ID: chatMgrID, Phase: "running"}}
@@ -384,9 +376,7 @@ func TestAgentsListUnreadReadBudget(t *testing.T) {
 	}
 }
 
-// Each list costs several hub calls with the login's session; a page (or a
-// script) asking in a burst gets the answer of a moment ago instead, per
-// login and never another login's.
+// The answer cache is per login, never another login's.
 func TestAgentsListIsCachedPerLogin(t *testing.T) {
 	hub := newPageHub(t)
 	hub.me = func(w http.ResponseWriter, r *http.Request) {
@@ -407,7 +397,6 @@ func TestAgentsListIsCachedPerLogin(t *testing.T) {
 	if recCalls.Load() != 1 || len(hub.reached()) != hubCalls || !reflect.DeepEqual(a1, a2) {
 		t.Fatalf("a quick second list asked again: records %d, hub %d → %d", recCalls.Load(), hubCalls, len(hub.reached()))
 	}
-	// Another login gets its own answer, built for it.
 	_, c := agentsAs(t, g, "c@x")
 	if c.Login != "c@x" || c.Tier != "contact" || c.UserID != "u-sess-c-x" || recCalls.Load() != 2 {
 		t.Fatalf("contact got %+v (records %d)", c, recCalls.Load())
@@ -422,7 +411,6 @@ func TestAgentsListIsCachedPerLogin(t *testing.T) {
 	}
 }
 
-// perLoginSession hands each login a cookie of its own.
 type perLoginSession struct{}
 
 func (perLoginSession) Cookie(_ context.Context, login string) (string, error) {
@@ -444,9 +432,8 @@ func TestUnreadCountsOnlyRecordedAgentRows(t *testing.T) {
 	}
 }
 
-// With agent messages on, a contact's unread count holds only the rows the
-// broker keeps; a broker that cannot answer leaves the count out. The
-// operator's count does not depend on the broker.
+// A broker that cannot answer leaves the contact's count out; the
+// operator's does not depend on the broker.
 func TestUnreadOmittedWhenTheBrokerIsDown(t *testing.T) {
 	w1Key := "dm:agent:" + agentW1 + ":user:" + chatUID
 	dms := `{"dms":[{"conversationKey":"` + w1Key + `","hasUnread":true}]}`
@@ -504,9 +491,8 @@ func TestUnreadOmittedWhenTheBrokerIsDown(t *testing.T) {
 	}
 }
 
-// The hub answers history under "messages": an answer with its rows under
-// any other key gives no count, as the contact's history filter shows
-// nothing.
+// Rows under any key but "messages" give no count, as the history filter
+// shows nothing.
 func TestUnreadOmittedForRowsUnderItems(t *testing.T) {
 	w1Key := "dm:agent:" + agentW1 + ":user:" + chatUID
 	dms := `{"dms":[{"conversationKey":"` + w1Key + `","hasUnread":true}]}`

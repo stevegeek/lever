@@ -18,19 +18,15 @@ import (
 	"time"
 )
 
-// helperEnv switches this test binary into "guest-side nc" mode, so a dial's
-// prefix can be the test binary itself, with no orb, limactl or real nc.
+// helperEnv makes this test binary act as the guest-side nc.
 const helperEnv = "LEVER_TEST_JAILDIAL_HELPER"
 
-// helperAddrEnv redirects the helper to a fixed address instead of the one
-// JailDial appended, so a test can point Target at an address nothing
-// listens on and pass only over the jail transport.
+// helperAddrEnv redirects the helper, so Target can name an address nothing
+// listens on and only the jail transport passes.
 const helperAddrEnv = "LEVER_TEST_JAILDIAL_ADDR"
 
-// TestJailDialHelperProcess is not a test: re-executed with helperEnv set, it
-// impersonates the `nc <host> <port>` that JailDial runs inside the jail. It
-// exits the process itself so the testing package never prints its PASS
-// line into the stream the parent is reading as HTTP.
+// TestJailDialHelperProcess is not a test: with helperEnv set it acts as
+// the guest's nc, and exits itself so no PASS line enters the HTTP stream.
 func TestJailDialHelperProcess(t *testing.T) {
 	if os.Getenv(helperEnv) != "1" {
 		return
@@ -43,8 +39,6 @@ func TestJailDialHelperProcess(t *testing.T) {
 		code = 2
 		return
 	}
-	// JailDial appends `nc <host> <port>`, so the target is always the last
-	// two arguments regardless of what the prefix itself carried.
 	addr := net.JoinHostPort(args[len(args)-2], args[len(args)-1])
 	if override := os.Getenv(helperAddrEnv); override != "" {
 		addr = override
@@ -65,8 +59,6 @@ func TestJailDialHelperProcess(t *testing.T) {
 	_, _ = io.Copy(os.Stdout, c)
 }
 
-// helperPrefix is a jail prefix that re-executes this test binary as the
-// guest-side nc (see TestJailDialHelperProcess).
 func helperPrefix(t *testing.T) []string {
 	t.Helper()
 	t.Setenv(helperEnv, "1")
@@ -77,8 +69,7 @@ func staticPrefix(argv ...string) func() []string {
 	return func() []string { return argv }
 }
 
-// shPrefix builds a prefix that runs script through sh, swallowing the
-// `nc host port` arguments JailDial appends (they land in $1..$3).
+// shPrefix runs script through sh; JailDial's `nc host port` lands in $1..$3.
 func shPrefix(script string) []string {
 	return []string{"sh", "-c", script, "jail"}
 }
@@ -89,8 +80,6 @@ func dialTest(t *testing.T, prefix []string, addr string) (net.Conn, error) {
 }
 
 func TestJailDialRoundTripsBytes(t *testing.T) {
-	// `exec cat` echoes stdin to stdout: proof that Write reaches the child's
-	// stdin and Read drains its stdout.
 	c, err := dialTest(t, shPrefix("exec cat"), "127.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -124,14 +113,12 @@ func TestJailDialCloseReapsChild(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	// wait.done closes only after cmd.Wait returned, so the child was reaped
-	// (no zombie per connection).
+	// wait.done closes only after cmd.Wait, so the child was reaped.
 	select {
 	case <-jc.wait.done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close returned but the child was never reaped")
 	}
-	// Close is idempotent: the proxy can close a conn it has already closed.
 	if err := c.Close(); err != nil {
 		t.Fatalf("second close: %v", err)
 	}
@@ -151,8 +138,6 @@ func TestJailDialMissingBinaryIsActionable(t *testing.T) {
 }
 
 func TestJailDialMissingNCIsActionable(t *testing.T) {
-	// Exit 127 with the shell's own wording is exactly what a guest without
-	// netcat produces.
 	c, err := dialTest(t, shPrefix("echo 'nc: command not found' >&2; exit 127"), "127.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -186,8 +171,7 @@ func TestJailDialChildFailureNamesTheCause(t *testing.T) {
 }
 
 func TestJailDialCleanExitIsEOF(t *testing.T) {
-	// A hub that closes the connection is a normal end of stream: the child
-	// exits 0 and the conn must report plain io.EOF, or every completed
+	// A hub closing is a normal end: plain io.EOF, or every completed
 	// response would look like a transport failure.
 	c, err := dialTest(t, shPrefix("exit 0"), "127.0.0.1:8080")
 	if err != nil {
@@ -217,8 +201,7 @@ func TestJailDialRejectsNonTCP(t *testing.T) {
 }
 
 func TestJailDialHonorsReadDeadline(t *testing.T) {
-	// `cat` with nothing written blocks forever; a conn whose deadlines were
-	// a silent no-op would hang here instead of timing out.
+	// A no-op deadline would hang here on `cat`.
 	c, err := dialTest(t, shPrefix("exec cat"), "127.0.0.1:8080")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -251,9 +234,6 @@ func TestJailDialRemoteAddrNamesTheJailTarget(t *testing.T) {
 	}
 }
 
-// TestJailDialCarriesHTTPKeepAlive: two sequential requests through a real
-// http.Transport on one connection, with the test binary standing in for the
-// guest's nc.
 func TestJailDialCarriesHTTPKeepAlive(t *testing.T) {
 	var conns atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -290,10 +270,9 @@ func TestJailDialCarriesHTTPKeepAlive(t *testing.T) {
 	}
 }
 
-// TestJailDialCarriesWebSocketUpgrade drives a real 101 Switching Protocols
-// handshake and a bidirectional exchange over a jailConn, through the full
-// NewHandler stack: the hub's attach stream. It fails if http.Transport is
-// swapped for a RoundTripper that breaks upgrades.
+// TestJailDialCarriesWebSocketUpgrade: a real 101 and two-way exchange over
+// a jailConn through NewHandler; fails if Transport is swapped for a
+// RoundTripper that breaks upgrades.
 func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	var gotAuth, gotCookie string
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -314,8 +293,6 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 		if err := buf.Flush(); err != nil {
 			return
 		}
-		// Echo one line back, proving bytes move in both directions after
-		// the switch rather than the tunnel merely opening.
 		line, err := buf.ReadString('\n')
 		if err != nil {
 			return
@@ -325,9 +302,8 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	}))
 	defer hub.Close()
 
-	// The tunnel really runs over a jailConn's pipes: Target names an
-	// address nothing listens on and the helper is redirected to the hub,
-	// so a handler that kept the default dialer fails here.
+	// Target names a dead address, so a handler keeping the default dialer
+	// fails here.
 	t.Setenv(helperAddrEnv, mustURL(t, hub.URL).Host)
 	proxy := httptest.NewServer(NewHandler(Config{
 		Target:      mustURL(t, "http://127.0.0.1:1"),
@@ -380,7 +356,6 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	if echo != "echo:ping\n" {
 		t.Fatalf("tunnelled reply = %q, want %q", echo, "echo:ping\n")
 	}
-	// The upgrade path must not become a hole in the credential rules.
 	if gotAuth != "" {
 		t.Errorf("Authorization = %q — the client's header must not survive the upgrade path", gotAuth)
 	}
@@ -389,9 +364,8 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	}
 }
 
-// TestEndChildRefusesAfterReap is the pid-reuse guard: once the child is
-// reaped its pid may belong to an unrelated process group, so endChild must
-// decline.
+// TestEndChildRefusesAfterReap: after the reap the pid may belong to an
+// unrelated process group.
 func TestEndChildRefusesAfterReap(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -406,8 +380,6 @@ func TestEndChildRefusesAfterReap(t *testing.T) {
 	}
 }
 
-// TestEndChildEndsALiveChild: a live child still has to die, or Close leaks
-// one jail process per connection.
 func TestEndChildEndsALiveChild(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exec sleep 30")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -422,9 +394,6 @@ func TestEndChildEndsALiveChild(t *testing.T) {
 	}
 }
 
-// TestJailDialCloseAfterChildExited: the hub closes, the child exits and is
-// reaped, then the proxy closes the conn. That Close must be quiet and must
-// not disturb the recorded exit.
 func TestJailDialCloseAfterChildExited(t *testing.T) {
 	c, err := dialTest(t, shPrefix("exit 0"), "127.0.0.1:8080")
 	if err != nil {
@@ -447,9 +416,6 @@ func TestJailDialCloseAfterChildExited(t *testing.T) {
 	}
 }
 
-// TestJailDialMissingMachineIsNotDiagnosedAsMissingNC: `orb -m <gone>` says
-// "machine not found", which is not a missing netcat; the hint keys on the
-// shell's full "command not found".
 func TestJailDialMissingMachineIsNotDiagnosedAsMissingNC(t *testing.T) {
 	c, err := dialTest(t, shPrefix("echo 'orb: machine not found' >&2; exit 1"), "127.0.0.1:8080")
 	if err != nil {
@@ -468,12 +434,10 @@ func TestJailDialMissingMachineIsNotDiagnosedAsMissingNC(t *testing.T) {
 	}
 }
 
-// TestJailDialDroppedConnEndsItsChild: Close is the real path, but a caller
-// that drops a conn without closing it must not leak a jail process (and its
-// wait goroutine) for the life of the proxy.
+// TestJailDialDroppedConnEndsItsChild: a conn dropped without Close must
+// not leak a jail process for the life of the proxy.
 func TestJailDialDroppedConnEndsItsChild(t *testing.T) {
-	// Take only the wait channel, so the conn itself becomes unreachable here.
-	// It closes only after cmd.Wait returned, so the child was waited on.
+	// Keep only the wait channel, so the conn becomes unreachable.
 	done := func() chan struct{} {
 		c, err := dialTest(t, shPrefix("exec cat"), "127.0.0.1:8080")
 		if err != nil {

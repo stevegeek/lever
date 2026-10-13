@@ -5,32 +5,18 @@ import (
 	"strings"
 )
 
-// DecisionDenyPath is the audit decision for a request whose path the proxy
-// refuses to read (see unsafePath).
+// DecisionDenyPath audits a path unsafePath refuses.
 const DecisionDenyPath Decision = "deny-path"
 
-// unsafePath reports why the request's path is refused, or "" when it is not.
+// unsafePath reports why the request's path is refused, or "".
 //
-// Every route decision in the proxy (mintsCredential, refusedRoute, the chat
-// page, the contact fence's allow-list) reads r.URL.Path as given, by prefix
-// or by segment. A path that a later reader could resolve to a different
-// route would pass under one name and land on another (for example
-// /assets/../lever/api/chat under the contact's allowed "/assets/" prefix).
-// The proxy does not rely on the hub's mux redirecting such paths: for every
-// tier it refuses any path not already in the one spelling every reader
-// agrees on:
-//
-//   - not rooted ("*", an opaque form);
-//   - a "." or ".." segment, or an empty one ("//");
-//   - a backslash or a NUL, decoded or not;
-//   - an encoded slash, backslash, dot or NUL (%2f, %5c, %2e, %00) in the
-//     raw path, which a reader that decodes before it splits would see as a
-//     separator or a dot segment.
-//
-// What passes decodes to the same segments however it is read, so the
-// decisions and the forwarded request (ReverseProxy sends r.URL's escaped
-// path) name the same route. ServeHTTP runs it first, before authorize and
-// every tier decision.
+// Every route decision reads r.URL.Path by prefix or segment, so a path a
+// later reader could resolve differently would pass under one route and land
+// on another (/assets/../lever/api/chat). Refused for every tier, without
+// relying on the hub's mux: unrooted paths; ".", ".." or empty segments; a
+// backslash or NUL; and %2f, %5c, %2e or %00 in the raw path. What passes
+// reads the same however decoded, so decisions and the forwarded request
+// name the same route. ServeHTTP runs it before every other check.
 func unsafePath(r *http.Request) string {
 	p := r.URL.Path
 	if !strings.HasPrefix(p, "/") {

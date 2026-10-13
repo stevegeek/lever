@@ -187,10 +187,12 @@ version bump moves the block under the new version heading.
   sets the same activity and time as claude's SessionStart, before claude runs. `start-manager`'s
   post-start checks (the workers' session heal and the read-only, nested-virt and claude-settings
   warnings) run during the wait; their lines print once the start is confirmed, and the warnings
-  are dropped when it is not. `lever up` on a terminal attaches as soon as claude runs, without
-  the wait, and checks the manager again after you detach: a manager that died is reported then,
-  with the start's hints and a non-zero exit. `--no-attach`, `lever apply` and a stdin that is not
-  a terminal wait. The hook is in-jail code (jail ABI 2, below): a manager gets it on an agent
+  are dropped when it is not. `lever up` on a terminal attaches to a manager it has just created
+  as soon as claude runs, without the wait, and checks the manager again after you detach: a
+  manager that died is reported then, with the start's hints and a non-zero exit. A resumed
+  manager is attached only after the wait, because a `claude --continue` with no conversation
+  exits a second or two after its pane comes up (lever#202). `--no-attach`, `lever apply` and a
+  stdin that is not a terminal always wait. The hook is in-jail code (jail ABI 2, below): a manager gets it on an agent
   image rebuilt from this release.
 - **Independent bring-up steps run alongside each other (lever#189).** The host's scion build starts
   before the VM and runs while it boots and is provisioned; the scion step uses it once the guest
@@ -292,14 +294,19 @@ version bump moves the block under the new version heading.
   through the same link-refusing scripts as the conversation backup (lever#198), and only when
   `.claude/projects` holds no transcript with content, no link or special file, and no other
   `projects*` directory beside it does it start the manager fresh, as `--fresh` would: the
-  backup runs first, the record is deleted, a new enrolment ticket is minted and the new session
-  is recorded. It prints a line saying so. Anything not proven, a failed backup, or a resume whose
-  tree mounts failed their check keeps the record and prints the reason. This covers the resumes
-  `up` runs through its bring-up (a crashed manager, and every `up` after `lever stop`). When `up`
-  resumes a suspended manager itself (the hub was still running, or the guest restarted under
-  it), or when claude dies only after `up` has attached the terminal, `up` names the cause, and
-  the next `lever up` makes the fresh start. `lever apply` never starts a manager fresh. Doctor's
-  manager row names the cause for an error-phase manager.
+  backup runs first, the record is deleted and a new enrolment ticket is minted. It prints a line
+  saying so. Anything not proven, a failed backup, or a resume whose tree mounts failed their
+  check keeps the record and prints the reason. This covers the resumes `up` runs through its
+  bring-up (a crashed manager, and every `up` after `lever stop`), on a terminal too: `up`
+  attaches to a resumed manager only once claude has reported its session start, so the exit is
+  caught first. When `up` resumes a suspended manager itself (the hub was still running, or the
+  guest restarted under it), it names the cause and keeps the record; `lever stop && lever up`
+  then makes the fresh start. Because the agent can bring this start about and can write its
+  skill, the start records the new session for the contact gate only when the manager's lever
+  skill on disk is the one its last recorded session started with; otherwise it records a session
+  that matches no skill, so contacts cannot post to the manager until the operator's
+  `lever up --fresh` (putting the old skill back does not lift it), and says so. `lever apply`
+  never starts a manager fresh. Doctor's manager row names the cause for an error-phase manager.
 - **A command that fails at run time no longer prints its usage text.** `lever up`, `lever apply`
   and most other commands printed the usage after any error, so a manager that did not come up
   read as a flag problem. The usage now follows only flag and argument errors (an unknown or

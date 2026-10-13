@@ -751,6 +751,50 @@ test('send: an answer that leaves the outcome open says so; a refusal says not s
   }
 });
 
+test('send: a send the hub is still running leaves the outcome open, keeps the key, and counts once', async () => {
+  // The first attempt's answer is lost while the hub still runs it (a wake
+  // can take minutes); the retry under the same key is told send_in_progress.
+  let n = 0;
+  const inFlight = { status: 409, body: { error: { code: 'send_in_progress', message: 'A send with this idempotency key is still in progress' } } };
+  const env = await loadChat(hubWith({ post: (body) => (++n === 1 ? { down: true } : n === 2 ? inFlight : { status: 200, body: { id: 's1', content: body.content, sender: 'user:op' } }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await env.runTimers();
+  const before = env.count('GET', HISTORY);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await env.runTimers();
+  assert.match(env.els.error.textContent, UNCLEAR);
+  assert.match(env.els.error.textContent, /still in progress \(HTTP 409\)/);
+  assert.equal(env.els.text.value, 'yes');
+  const record = JSON.parse(env.store['lever-chat-unsent:boss']);
+  assert.equal(record.tries, 1, 'the refused retry stored nothing, so it is not counted');
+  assert.ok(env.count('GET', HISTORY) > before, 'the history is read again');
+  // The third press finds the first attempt stored: one copy.
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const posts = sends(env);
+  assert.equal(new Set(posts.map((p) => p.body.idempotency_key)).size, 1);
+  assert.match(env.els.error.textContent, REPLAY);
+  assert.doesNotMatch(env.els.error.textContent, /shows twice/);
+});
+
+test('send: a first attempt answered send_in_progress is not a refusal', async () => {
+  const env = await loadChat(hubWith({ post: () => ({ status: 409, body: { error: { code: 'send_in_progress', message: 'busy' } } }) }));
+  await type(env, 'yes');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, UNCLEAR);
+  assert.ok(env.store['lever-chat-unsent:boss'], 'the key stays for the next press');
+  // Any other 409 is the hub's refusal.
+  const other = await loadChat(hubWith({ post: () => ({ status: 409, body: { error: { code: 'agent_not_running', message: 'suspended' } } }) }));
+  await type(other, 'yes');
+  other.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(other.els.error.textContent, 'Not sent: suspended (HTTP 409)');
+});
+
 test('send: stored but the answer was lost: the retry is told so, and nothing is stored twice', async () => {
   const hub = storingHub((n) => n === 1);
   const env = await loadChat(hub);

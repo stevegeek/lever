@@ -203,9 +203,35 @@ func mintsCredential(method, p string) bool {
 //     whatever the hub's state.
 //   - /auth/callback/*: only the login driver needs it, and it dials the hub
 //     directly.
+//   - Conduit (the hub's shell, sftp and port relay into agents) and artifacts
+//     (hub-held files with unauthenticated share and view links): lever has
+//     not reviewed either, and both reach past the agent's own surface.
+//   - Experiment writes, which switch those features on. Reading the list
+//     changes nothing and stays admin-only at the hub.
+//   - An agent's port tunnel and delegations: the tunnel is the agent side's
+//     own socket, and a delegation hands the signed-in user's authority to
+//     the agent, which lever assumes hostile.
+//   - Test identities: each mints a credential or a session.
 //
-// p is the decoded path.
+// p is the decoded path. It is compared in lower case, and the feature
+// prefixes without a segment boundary, so no spelling the hub might route
+// slips past ("/api/v1/Conduit", "/api/v1/conduit.", "/api/v1/conduit/").
 func refusedRoute(method, p string) bool {
+	p = strings.ToLower(p)
+	for _, prefix := range refusedPrefixes {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(p, "/api/v1/admin/experiments") {
+		return method != http.MethodGet && method != http.MethodHead
+	}
+	if rest, ok := strings.CutPrefix(p, "/api/v1/agents/"); ok {
+		if _, sub, ok := strings.Cut(rest, "/"); ok &&
+			(strings.HasPrefix(sub, "ports/tunnel") || strings.HasPrefix(sub, "delegations")) {
+			return true
+		}
+	}
 	if p == "/api/v1/system" || strings.HasPrefix(p, "/api/v1/system/") {
 		return !(p == "/api/v1/system/status" && (method == http.MethodGet || method == http.MethodHead))
 	}
@@ -232,6 +258,15 @@ func refusedRoute(method, p string) bool {
 }
 
 const callbackPath = "/auth/callback"
+
+// refusedPrefixes are lower case, with no trailing slash on purpose.
+var refusedPrefixes = []string{
+	"/api/v1/conduit",
+	"/api/v1/admin/conduit",
+	"/api/v1/artifacts",
+	"/api/v1/test-identit", // test-identities and test-identity-delegations
+	"/auth/test-identity",
+}
 
 // loginPathPrefix is the hub's login route, bare or /auth/login/<provider>.
 const loginPathPrefix = "/auth/login"

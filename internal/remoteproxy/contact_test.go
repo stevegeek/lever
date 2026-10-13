@@ -90,7 +90,15 @@ func TestContactFenceAllows(t *testing.T) {
 		{"POST", dmPath(agentW1, contactUID, "/read"), ""},
 		{"POST", dmPath(agentW1, contactUID, "/typing"), ""},
 		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"ok","idempotency_key":"k1"}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"ok","idempotency_key":"k1","offer_wake":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"ok","offer_wake": false }`},
 		{"GET", "/favicon.svg", ""},
+		{"GET", "/favicon.ico", ""},
+		{"GET", "/manifest.webmanifest", ""},
+		{"GET", "/apple-touch-icon.png", ""},
+		{"GET", "/icon-192.png", ""},
+		{"GET", "/icon-512.png", ""},
+		{"GET", "/icon-maskable-512.png", ""},
 		{"GET", "/api/v1/auth/me", ""},
 		{"GET", "/api/v1/chat/dms", ""},
 		{"GET", "/assets/app.js", ""},
@@ -153,6 +161,28 @@ func TestContactFenceRefuses(t *testing.T) {
 		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","mentions":["w2"]}`},
 		{"GET", dmPath(agentW1, contactUID, "/messages/m1"), ""},
 		{"GET", "/auth/logout", ""},
+		// Waking goes through lever's own route; the hub page's field types
+		// are held exactly.
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","wake":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","wake":false}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","Wake":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","OFFER_WAKE":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":"true"}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":1}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":null}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":true,"interrupt":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":true,"offer_wake":"y"}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":null}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","idempotency_key":7}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","idempotency_key":null}`},
+		{"GET", "/api/v1/conduit", ""},
+		{"GET", "/api/v1/conduit/grant-keys", ""},
+		{"GET", "/api/v1/artifacts/shared/tok", ""},
+		{"GET", "/api/v1/artifacts/view/cap/index.html", ""},
+		{"PUT", "/api/v1/admin/experiments", `{}`},
+		{"GET", "/api/v1/agents/" + agentW1 + "/ports/tunnel", ""},
+		{"POST", "/auth/test-identity/redeem", `{"code":"c"}`},
+		{"GET", "/api/v1/experiments", ""},
 	} {
 		if rw := contactDo(h, "c@x", c.method, c.path, c.body); rw.Code != http.StatusForbidden {
 			t.Errorf("%s %s: %d, want 403", c.method, c.path, rw.Code)
@@ -167,7 +197,8 @@ func TestContactFenceCannedAndRewritten(t *testing.T) {
 	hub := newContactHub(t)
 	h := contactHandler(t, hub, nil)
 	for p, want := range map[string]string{"/api/v1/agents?limit=100": `"agents":[]`, "/api/v1/projects?limit=1": `"projects":[]`,
-		"/api/v1/users?limit=100": `"users":[]`, "/api/v1/chat/spaces": `"spaces":[]`} {
+		"/api/v1/users?limit=100": `"users":[]`, "/api/v1/chat/spaces": `"spaces":[]`,
+		"/api/v1/chat/unread-count": `{"conversations":0,"threads":0,"dms":0}`} {
 		if rw := contactDo(h, "c@x", "GET", p, ""); rw.Code != 200 || !strings.Contains(rw.Body.String(), want) {
 			t.Errorf("%s: %d %s", p, rw.Code, rw.Body)
 		}
@@ -184,7 +215,8 @@ func TestContactFenceCannedAndRewritten(t *testing.T) {
 		t.Fatalf("event subjects %v, want only the contact's own", got)
 	}
 	for _, r := range hub.reached() {
-		if strings.Contains(r, "/api/v1/agents") || strings.Contains(r, "/api/v1/projects") || strings.Contains(r, "/api/v1/users") {
+		if strings.Contains(r, "/api/v1/agents") || strings.Contains(r, "/api/v1/projects") || strings.Contains(r, "/api/v1/users") ||
+			strings.Contains(r, "/api/v1/chat/unread-count") {
 			t.Fatalf("a canned list reached the hub: %s", r)
 		}
 	}

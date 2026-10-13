@@ -663,3 +663,39 @@ func TestDeleteKeepsTheSeqOfTheManifestsItRemoves(t *testing.T) {
 		t.Fatalf("next seq = %d, %v; want 3", n, err)
 	}
 }
+
+// On a copy-on-write filesystem the reserve's blocks are freed for the
+// manifest, not overwritten, and a failed commit makes a reserve again.
+func TestReserveOnCopyOnWriteIsFreedNotOverwritten(t *testing.T) {
+	s := newStore(t)
+	snap(t, s, snapOpts{files: map[string]string{"a": "x"}})
+	copyOnWrite = func(*os.File) bool { return true }
+	t.Cleanup(func() { copyOnWrite = isCopyOnWrite })
+	reserve := filepath.Join(s.Dir(), reserveName)
+	var atRetry []string
+	manifestWriteFault = func(attempt int) error {
+		if attempt == 1 {
+			atRetry = tmpNames(t, s)
+			if _, err := os.Lstat(reserve); err == nil {
+				t.Error("the reserve was still there at the retry")
+			}
+		}
+		return syscall.ENOSPC
+	}
+	t.Cleanup(func() { manifestWriteFault = nil })
+	id, _ := s.FreeID(time.Now())
+	h := testHeader(id)
+	Summarize(h, nil)
+	if _, err := s.CommitManifest(h, nil); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("commit: %v", err)
+	}
+	if len(atRetry) != 1 {
+		t.Fatalf("tmp/ at the retry: %v", atRetry)
+	}
+	if _, err := os.Lstat(reserve); err != nil {
+		t.Fatalf("no reserve after the failed commit: %v", err)
+	}
+	if got := tmpNames(t, s); len(got) != 0 {
+		t.Fatalf("tmp/ = %v", got)
+	}
+}

@@ -14,6 +14,9 @@ var (
 	// error it returns aborts the commit as a crash would, leaving every
 	// file where it is.
 	commitCrash func(stage string) error
+	// copyOnWrite reports whether the store's filesystem allocates new
+	// blocks for every overwrite.
+	copyOnWrite = isCopyOnWrite
 	// gcPhaseHook, when set, is called by GC at the named stage of its
 	// shared-lock phase.
 	gcPhaseHook func(stage string)

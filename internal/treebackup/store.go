@@ -433,6 +433,16 @@ func (s *Store) writeManifestTemp(h *Header, entries []Entry, attempt int, useRe
 	var name string
 	var err error
 	var reserved int64 = -1
+	freed := false
+	if useReserve && copyOnWrite(s.dirf) {
+		// Overwriting the reserve's blocks would need new ones here, so
+		// its space is freed for the manifest instead. At lever stop no
+		// agent runs to take it first.
+		if err := s.root.Remove(reserveName); err == nil {
+			freed = true
+		}
+		useReserve = false
+	}
 	if useReserve {
 		name = tmpDir + "/" + h.ID + "." + randomSuffix()
 		if err = s.root.Rename(reserveName, name); err == nil {
@@ -481,9 +491,13 @@ func (s *Store) writeManifestTemp(h *Header, entries []Entry, attempt int, useRe
 		err = cerr
 	}
 	if err != nil {
-		if reserved >= 0 {
+		switch {
+		case reserved >= 0:
 			s.giveBackReserve(name, reserved)
-		} else {
+		case freed:
+			_ = s.root.Remove(name)
+			_, _ = s.resizeReserve(h.Limits.Manifest, 0)
+		default:
 			_ = s.root.Remove(name)
 		}
 		return "", 0, fmt.Errorf("tree backups: write manifest: %w", err)

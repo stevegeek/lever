@@ -975,7 +975,9 @@ manifest then goes into space the store holds back for it (`reserve`: 64 MiB, or
 manifest, up to `limits.manifest`). Before the walk, lever caps the manifest at the space it is
 sure to have when it commits (the reserve, plus the part of `min_free` that new content may not
 take), so on a full disk the snapshot commits incomplete with `truncated(disk)` instead of failing.
-A commit that fails anyway gives the reserve back. A commit that used the reserve makes a new one
+On a copy-on-write filesystem (APFS, btrfs, ZFS), where overwriting the reserve would itself
+need new blocks, lever deletes the reserve and writes the manifest into the space that frees. A
+commit that fails anyway gives the reserve back. A commit that used the reserve makes a new one
 once there is room; until then doctor says so, and another snapshot on the still-full disk may
 fail. With `min_free: 0` every manifest is held to the reserve alone, even on an empty disk: the
 first snapshot then stops at about 150 000 entries, and each later one at about twice the last. The status doctor reads is

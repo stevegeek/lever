@@ -98,3 +98,14 @@ func fileKey(fi fs.FileInfo) (string, bool) {
 	}
 	return strconv.FormatUint(uint64(st.Dev), 10) + ":" + strconv.FormatUint(st.Ino, 10), true
 }
+
+// isCopyOnWrite: APFS and ZFS write every overwrite to new blocks, so a
+// preallocated file's blocks are no reserve.
+func isCopyOnWrite(dir *os.File) bool {
+	var st unix.Statfs_t
+	if unix.Fstatfs(int(dir.Fd()), &st) != nil {
+		return false
+	}
+	name := unix.ByteSliceToString(st.Fstypename[:])
+	return name == "apfs" || name == "zfs"
+}

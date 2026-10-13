@@ -87,3 +87,17 @@ func fileKey(fi fs.FileInfo) (string, bool) {
 	}
 	return strconv.FormatUint(uint64(st.Dev), 10) + ":" + strconv.FormatUint(st.Ino, 10), true
 }
+
+// isCopyOnWrite: btrfs, ZFS and bcachefs write every overwrite to new
+// blocks, so a preallocated file's blocks are no reserve.
+func isCopyOnWrite(dir *os.File) bool {
+	var st unix.Statfs_t
+	if unix.Fstatfs(int(dir.Fd()), &st) != nil {
+		return false
+	}
+	switch uint32(st.Type) {
+	case 0x9123683e, 0x2fc12fc1, 0xca451a4e:
+		return true
+	}
+	return false
+}

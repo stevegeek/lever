@@ -89,7 +89,6 @@ func parseFlags(args []string) (opts, error) {
 		}
 		listed = append(listed, e)
 	}
-	// A stable order whatever the flag's order, with no duplicates.
 	o.ops = slices.DeleteFunc(slices.Clone(allOps), func(op string) bool { return !slices.Contains(listed, op) })
 	return o, nil
 }
@@ -132,8 +131,7 @@ func op(name, desc string, params []captool.ParamSpec, h func(captool.ValidatedC
 		Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) { return asResult(h(c, a)) }}
 }
 
-// operations lists the captool operations this instance offers: those -ops
-// names, in allOps order. An operation not listed is not registered at all.
+// An operation -ops does not list is not registered at all.
 func operations(ctx context.Context, o opts, t *fizzytool.Tool) []captool.Operation {
 	num := captool.ParamSpec{Name: "number", Type: "string", Description: "card number"}
 	prefix := strings.TrimSpace(o.prefix)

@@ -19,7 +19,7 @@ var ErrOtherBoard = errors.New("card is not on the Lever board")
 // together the tool sends in any one minute when Tool.WriteLimit is 0.
 const DefaultWriteLimit = 10
 
-// Tool is the six operations of spec §4b.3, and the opt-in close_card.
+// Tool implements the fizzy operations on one board.
 type Tool struct {
 	CLI    CLI
 	Board  string

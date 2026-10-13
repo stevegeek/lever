@@ -7,6 +7,28 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Tree backups: host-side snapshots of the instance tree, off by default (lever#74).** With
+  `tree_backup: {enabled: true}`, `lever stop` and `lever destroy` snapshot the tree once the VM is
+  off (`--keep-vm` after the agents are suspended and the guest synced), and
+  `lever tree snapshot` takes one by hand. Snapshots go to `.lever-state/tree-backups/`: content
+  stored once by sha256, one manifest per snapshot. `lever tree list`, `log`, `ls`, `diff` and
+  `cat` show what changed, down to line diffs of text files, with every agent-written name and line
+  escaped; `lever tree restore` writes a snapshot into a new directory outside the tree; `verify`,
+  `delete` and `gc` maintain the store, and `lever tree lock -- <cmd>` runs an off-host copy tool
+  (restic, rsync) against it. The tree is treated as hostile: lever walks it through directory
+  handles checked by device and inode, never follows a link, opens only regular files, never
+  enters a mount, and keeps the manager's broker ticket as a hash only. Every limit is a budget:
+  running out of one makes a snapshot incomplete, recorded and shown, never absent, and a snapshot
+  never shows what it did not see as deleted. Files the last complete snapshot held are looked up
+  and read first, and each worker's directory has its own share of the budgets, so a flood of new
+  names cannot hide damage to existing files. Retention keeps the last 20, 7 daily and 8 weekly
+  snapshots, plus the newest complete, the newest taken with the VM off and pinned ones, and never
+  deletes history for space. A restore creates only links that cannot leave the restored tree and
+  renames git configuration, hooks, `commondir` and `.git` files. `lever doctor` has a *tree
+  backup* row.
+
 ### Security
 
 - **The state directory's inside-the-tree check compares file identity (lever#74).** Lever keeps

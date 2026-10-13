@@ -171,6 +171,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `security` | object | no | - | Optional image policy: registry allowlist and digest pinning (see below). |
 | `operator` | object | no | - | Optional operator-directives config: signer trust anchor, signing key, expiry policy (see below). Unset ⇒ directives disabled. |
 | `remote` | object | no | - | Optional remote-access proxy config: expose the hub web UI to a Tailscale tailnet (see below). Unset/`enabled: false` ⇒ remote access disabled. |
+| `tree_backup` | object | no | - | Optional host-side snapshots of the tree (see below). Unset/`enabled: false` ⇒ no snapshots. |
 | `disk` | string | no | `24GiB` | **Lima only** — guest disk size (e.g. `24GiB`, `40GiB`). Lima's own omitted-disk default is 100GiB, a grow-only qcow2 that can wedge a smaller host; lever caps it at a conservative `24GiB` by default. Applied only at jail **creation**; resizing an existing jail needs `limactl disk resize` or a recreate. Ignored by the OrbStack backend, which manages its own disk. |
 | `nested_virt` | bool | no | `false` | **Lima on an x86_64 (Intel/AMD) Linux host only.** The manager container gets `/dev/kvm`, so the manager can run KVM guests (e.g. Lima, to test lever itself) inside its container. Workers and the hub do not get the device. Apply refuses on a host that is not x86_64, or when the host's KVM `nested` module parameter (`kvm_intel`/`kvm_amd`) is off, and installs a udev rule (`/dev/kvm` mode 0666 in the guest). The manager gets the device as a `/dev/kvm` bind-mount volume on its scion record. The jail VM must be created with it (create-time `vmOpts.qemu.cpuType: host`); an existing VM without `/dev/kvm` needs a recreate (`lever conversation backup`, `lever destroy`, `lever up`, `lever conversation restore`). The volume is create-time only: an existing manager gets or drops the device only on a fresh create (`lever up --fresh --keep-conversation`); `lever stop` + `lever up` keeps the old volumes, and apply warns. Turning it off removes the udev rule and sets the device back to mode 0660. Apply also removes the podman drop-in `20-lever-kvm.conf` that earlier builds wrote (it gave every container the device; workers created while it was there keep the device until they are recreated). Doctor row *nested virt*. **Security:** exposes the host kernel's nested-virtualization code to the jail guest, and the manager's `/dev/kvm` ioctl surface to the guest kernel; use it only for dev instances and keep the host kernel patched. Rejected on OrbStack and on darwin. |
 | `cpus` | int | no | Lima default | **Lima only** — guest vCPUs (1-256). Create-time only: apply warns when an existing VM has a different value. |
@@ -557,6 +558,33 @@ remote:
   #   read_aloud: server                    # optional; device (default), server or off
   #   speak_socket: /home/you/my-instance/.lever-state/tts/speak.sock    # with server: lever-tool-tts's -speak-socket
 ```
+
+### `tree_backup`
+
+Snapshots of the tree on the host, in `.lever-state/tree-backups/`: see
+[tree backups](/operations/#tree-backups). Every key of the block is checked: an unknown key is a
+load error. Sizes take a number of bytes or a unit (`KiB`, `MiB`, `GiB`, `TiB`, `KB`, `MB`, `GB`,
+`TB`); durations take Go's form (`90s`, `5m`, `2h`) or whole days (`7d`), and `0` for none.
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `enabled` | bool | no | `false` | Turns tree backups on. |
+| `at_stop` | bool | no | `true` | Snapshot at `lever stop` (also `--keep-vm`) and `lever destroy`, after the VM is off. |
+| `keep.last` | int | no | `20` | Keep the newest N snapshots (at least 1). |
+| `keep.daily` | int | no | `7` | Keep the newest snapshot of each of the last N days that have one. |
+| `keep.weekly` | int | no | `8` | Keep the newest snapshot of each of the last N ISO weeks that have one. |
+| `reverify` | duration | no | `7d` | Re-read a cached file verified longer ago than this, from the read budget left over (`0`: never). |
+| `lock_wait` | duration | no | `2m` | How long a snapshot waits for the store's locks before it is skipped with a warning. |
+| `min_free` | size | no | `2GiB` | Free space (plus 1% of the inodes) below which no new content is stored; the snapshot then commits as incomplete. |
+| `limits.file` | size | no | `256MiB` | A larger file is recorded without content (`too-big`). |
+| `limits.read` | size | no | `8GiB` | Bytes read from the tree per snapshot, retries included. |
+| `limits.entries` | int | no | `1000000` | New names listed per snapshot (at most 10 000 000). |
+| `limits.manifest` | size | no | `512MiB` | Encoded size of one snapshot's entries (at most 4 GiB). |
+| `limits.dir_entries` | int | no | `100000` | Names read from one directory. |
+| `limits.depth` | int | no | `128` | Directory depth (at most 4096). |
+| `limits.path` | int | no | `4096` | Bytes of one path (at most 4096). |
+| `limits.time` | duration | no | `5m` | Time for the walk and the reads at stop and destroy (`0`: none). `lever tree snapshot` has none unless `--time`. |
+| `exclude` | list of string | no | `[]` | Paths never read: a pattern without `/` matches a name at any depth, one with `/` is anchored at the tree root and matched per component like a shell glob. Relative, no `..`, no empty or `.` component. An excluded path is recorded with its metadata only, and is a place agents can hide changes. |
 
 ## Conventions & derived values
 

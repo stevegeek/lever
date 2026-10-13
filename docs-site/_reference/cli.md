@@ -30,6 +30,33 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 | `lever conversation list\|backup\|restore [ID]` | The manager's conversation backups in `.lever-state/conversations/` (0700, files 0600; the last 10 are kept; none when the state directory is inside the tree). `list` shows them, newest first. `backup` copies the manager's `~/.claude/projects` from the jail (which must be up). `restore` puts a backup (default: the newest) back into a running or suspended manager: it backs up the conversation it replaces (`--no-backup` skips that), suspends the manager, swaps the transcripts (the replaced ones stay in the manager's home as `~/.claude/projects.lever-replaced-<stamp>`), records the session with the lever skill the restored conversation started with, and resumes and gates the manager. Only the transcripts travel; `~/.claude.json` stays the record's own. |
 | `lever worker purge NAME` | Discard a declared worker's scion record and staged bootstrap ticket so it can be re-dispatched fresh with a new task — a worker's task is fixed at creation, so `lever-manager agent start` against an existing worker returns 409. Never touches the worker's workspace (its work product); requires `--force`. Host-side (operator) command. The in-jail manager cannot purge, but it can recycle a worker the config marks `recyclable: true` (`lever-manager agent recycle`, which runs the same teardown). |
 
+### Tree backups
+
+Snapshots of the instance tree in `.lever-state/tree-backups/`, when `tree_backup.enabled` is set
+(see [tree backups](/operations/#tree-backups)). A snapshot is named by its id, `latest` or
+`latest~N`; a path is given as raw bytes or as `q:` plus the quoted form lever prints. Every
+command refuses when the store, the state directory or its parent is inside the tree, or the tree
+inside the store, compared by file identity.
+
+| Command | What it does |
+|---|---|
+| `lever tree snapshot [--full] [--pin] [--time D] [--no-wait] [-q]` | Take a snapshot now. `--full` re-reads every cached file (within the read budget), `--pin` keeps it until `lever tree delete`, `--time` sets a time budget (none by default), `--no-wait` exits 75 when another snapshot runs, `-q` prints nothing for a complete one. Exit `0` complete, `3` incomplete, `1` failed, `75` busy. Refused while `tree_backup.enabled` is off. |
+| `lever tree list` | The snapshots, oldest first: id, sequence number, time, trigger, label (`vm-off`, `suspended`, `none`), complete or not, files, size, pin. |
+| `lever tree ls <id> [<path>] [-r]` | What a snapshot holds: type, mode, size, short hash, state, path. |
+| `lever tree log [-n N] [--all] [-- <path>]` | One line per snapshot with its change counts and the first 20 changed paths (`--all`: every one), or, with a path, the snapshots in which it changed. |
+| `lever tree diff <a> [<b>] [--stat] [--meta] [--no-limit] [--full-diff] [-- <path>...]` | What changed between two snapshots (`<b>` defaults to `latest`): `A` added, `D` deleted, `M` content, `T` type, `L` link target, `P` mode, `?` unknown (with the reason), `~` modification time alone (with `--meta`). Summary first, then line diffs of text files. |
+| `lever tree cat <id> <path>` | One file's content to stdout, verified against its hash. Refuses a terminal. |
+| `lever tree restore <id> --to <dir> [--path <p>]... [--links=inside\|all\|none] [--keep-modes] [--keep-git]` | Restore into a new directory outside the tree, through `<dir>.lever-partial`, and print a report. Exit `0` only when everything selected was restored. |
+| `lever tree verify [--fix]` | Validate every snapshot and re-hash every stored file; `--fix` moves damaged ones to `blobs/corrupt/`. |
+| `lever tree delete <id>... [--yes]` | Delete snapshots, pinned or invalid ones too, then collect garbage. Asks first unless `--yes`. |
+| `lever tree gc` | Apply retention and remove content no snapshot references. Deletes nothing while a snapshot is invalid. |
+| `lever tree lock [--wait D] -- <cmd> [args...]` | Run an off-host copy tool while GC cannot change the store, with `LEVER_TREE_BACKUP_STORE`, `LEVER_TREE_BACKUP_LATEST` and a `PATH` without in-tree entries. Exits with the command's status, or `75` when the lock is not free within `--wait` (10 min). |
+| `lever tree path` | Print the store's path. |
+
+`lever stop` and `lever destroy` take a snapshot after the VM is off when tree backups are on and
+`tree_backup.at_stop` is not `false`; `--no-tree-backup` skips it. Inside `lever tree lock`, the
+commands that write the store (`snapshot`, `gc`, `delete`, `verify --fix`, `lock`) refuse.
+
 ### Setup and diagnosis
 
 | Command | What it does |
@@ -64,7 +91,9 @@ text from the jail):
 A command prints its usage text only after a flag or argument error (an unknown or missing flag, a
 wrong combination of flags, the wrong number of arguments), not after a failure at run time.
 
-`lever doctor` and `lever init --check` exit `1` when a check fails.
+`lever doctor` and `lever init --check` exit `1` when a check fails. `lever tree snapshot` exits
+`3` for an incomplete snapshot and `75` when another snapshot holds the store, and
+`lever tree lock` exits with its command's status (`75` when the lock is busy).
 
 ### Operator directives
 

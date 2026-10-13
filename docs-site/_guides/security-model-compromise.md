@@ -55,6 +55,20 @@ not.
 > it from a known-good state / discard it). Containment limits the blast radius to that tree; it
 > does not clean the tree for you.
 
+**Tree backups** ([operations](/operations/#tree-backups)) give that audit and that known-good
+state, when `tree_backup` is on. The snapshots live in the host state directory, which lever
+refuses to use when it is inside the tree by file identity, and are taken by the `lever` process on
+the host, never in the broker or the jail. The snapshot code reads the tree only through directory
+handles it has checked by device and inode, never follows a link, never opens a FIFO, socket or
+device, never enters a mount, and never runs anything from the tree. What an agent can do to it: make
+a snapshot incomplete (budgets, unreadable files, a flood of new names in its own part of the
+tree), which is recorded and shown, never as a deletion; it cannot remove or alter a committed
+snapshot, push the newest complete or `vm-off` snapshot out of retention, or keep a changed
+existing file out of the record by flooding. A restore writes only into a new directory outside
+the tree, creates only links that cannot leave it, and renames git configuration and hooks so the
+restored tree runs nothing an agent planted. The store holds the tree's secrets, apart from the
+manager's broker ticket, which is only hashed.
+
 ## 8. What this model does *not* claim
 
 - **Data-exfiltration protection.** The bound is on host-secret and LAN reach, **not** on

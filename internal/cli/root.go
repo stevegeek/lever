@@ -1,8 +1,7 @@
 // Package cli holds what the two lever binaries share: the release Version
-// constant and the `version` command. Everything that runs in a specific
-// trust domain lives in a subpackage — cli/host for the operator's machine
-// (`lever`) and cli/manager for the agent container (`lever-manager`) — so
-// that neither binary links the other's code.
+// constant and the `version` command. Code for a specific trust domain lives in
+// cli/host (the operator's machine) or cli/manager (the agent container), so
+// neither binary links the other's code.
 //
 // The release workflow greps `const Version = "..."` from this file; keep the
 // constant here.
@@ -30,21 +29,13 @@ func VersionCmd() *cobra.Command {
 	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(VersionString()) }}
 }
 
-// VersionString augments the hardcoded release Version with Go's embedded VCS
-// stamp when present: the commit the binary was built from (short) plus a
-// "-dirty" marker for an uncommitted tree, or — for a `go install module@vX`
-// build, which carries no VCS stamp — the module version. This stops `lever
-// version` from masking a stale or local build behind the bare release string
-// (a make-install binary can lag the source it was built from, which the
-// hardcoded const alone hides).
+// VersionString is the release Version plus the build's VCS commit (with
+// "-dirty") or, for a `go install module@vX` build, the module version.
 //
-// Two builds get the binary's own content hash as well: one with no
-// provenance at all, and a dirty one. Go stamps no VCS info for a build in a
-// git worktree (its .git is a file, which Go's VCS detection does not
-// accept), and every dirty build of one commit carries the same stamp. apply
-// restarts the broker and the remote proxy when this string changes, so
-// without the hash a new build of the same release kept the old daemons
-// running.
+// A build with no provenance, or a dirty one, also gets the binary's content
+// hash: Go stamps no VCS info in a git worktree (its .git is a file), and all
+// dirty builds of one commit share a stamp. apply restarts the broker and the
+// remote proxy when this string changes, so it must differ between builds.
 func VersionString() string { return versionString() }
 
 var versionString = sync.OnceValue(func() string {
@@ -96,10 +87,7 @@ func executableHash() string {
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
-// formatVersion renders the version line from the release string plus whichever
-// build provenance is available: a VCS commit (local builds) takes precedence
-// over a module version (go install builds); with neither, just the release.
-// bin, the binary's content hash, is appended when set (see VersionString).
+// A VCS commit takes precedence over a module version; bin is appended when set.
 func formatVersion(base, rev string, dirty bool, modVersion, bin string) string {
 	var parts []string
 	switch {
@@ -151,12 +139,9 @@ func (e *ExitError) Unwrap() error { return e.Err }
 func WithExitCode(err error, code int) error { return &ExitError{Code: code, Err: err} }
 
 // Execute runs root and returns the process exit code: 0, the code of an
-// ExitError, or 1 when a command returned any other error. The error line is printed here, not by cobra:
-// an error can wrap text the jail chose (scion's stderr, a hub slug, a
-// container status), and cobra's own `Error: <err>` would relay it raw. The
-// line is passed through termsafe.Sanitize first. Execute sets
-// SilenceErrors on root so cobra prints nothing; SilenceUsage is left to
-// each command as before.
+// ExitError, or 1 for any other error. Execute prints the error itself, through
+// termsafe.Sanitize, and silences cobra's: an error can wrap text the jail chose
+// (scion's stderr, a hub slug, a container status).
 func Execute(root *cobra.Command, stderr io.Writer) int {
 	root.SilenceErrors = true
 	if err := root.Execute(); err != nil {

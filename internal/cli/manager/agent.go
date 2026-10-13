@@ -7,7 +7,6 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// workerCall is brokerCall specialized to the worker-command response shape.
 func workerCall(ctx context.Context, c brokerCaller, endpoint string, body any) (workerResult, error) {
 	return brokerCall[workerResult](ctx, c, endpoint, body)
 }

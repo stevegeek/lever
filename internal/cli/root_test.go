@@ -20,9 +20,7 @@ func TestVersionCommand(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	// The line starts with the release version and may carry a build-provenance
-	// suffix (commit / -dirty / module version) depending on how the binary was
-	// built — so assert the prefix, not exact equality.
+	// The version may carry a build-provenance suffix, so assert the prefix.
 	if got := out.String(); !strings.HasPrefix(got, Version) || !strings.HasSuffix(got, "\n") {
 		t.Fatalf("version output %q should start with %q and end with a newline", got, Version)
 	}
@@ -50,8 +48,7 @@ func TestFormatVersion(t *testing.T) {
 	}
 }
 
-// TestNeedsBinaryHash: only a build whose stamp cannot tell two builds apart
-// pays for hashing the binary — a clean commit and a tagged module do not.
+// TestNeedsBinaryHash: a clean commit and a tagged module are not hashed.
 func TestNeedsBinaryHash(t *testing.T) {
 	for _, c := range []struct {
 		rev    string
@@ -74,10 +71,8 @@ func TestNeedsBinaryHash(t *testing.T) {
 	}
 }
 
-// TestExecutePrintsErrorsSanitized: a returned error is printed by Execute,
-// not cobra, so guest-supplied text in it (a scion stderr line, a hub slug)
-// reaches the terminal with its escape sequences stripped. The exit code
-// stays 1 on error, 0 otherwise, and success prints nothing.
+// TestExecutePrintsErrorsSanitized: guest-supplied text in an error reaches
+// the terminal with its escape sequences stripped.
 func TestExecutePrintsErrorsSanitized(t *testing.T) {
 	newRoot := func(err error) *cobra.Command {
 		root := &cobra.Command{Use: "lever"}

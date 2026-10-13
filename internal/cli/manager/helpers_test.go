@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// fakeBroker starts an httptest broker answering every request with handle,
-// which receives the request path and the JSON-decoded body, and returns a
-// brokerCaller aimed at it.
+// fakeBroker answers every request with handle, given the path and the
+// JSON-decoded body.
 func fakeBroker(t *testing.T, handle func(w http.ResponseWriter, gotPath string, gotBody map[string]any)) brokerCaller {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

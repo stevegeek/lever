@@ -20,7 +20,6 @@ func TestBrokerInboxer_postsFullInboxRequest(t *testing.T) {
 		})
 	})
 
-	// Mirrors how bridge.Bridge.PollOnce calls Inbox: unread=false, project="".
 	events, err := newBrokerInboxer(c).Inbox(context.Background(), false, "")
 	if err != nil {
 		t.Fatal(err)
@@ -55,9 +54,7 @@ func TestBrokerInboxer_unreadTrueRequestsAllFalse(t *testing.T) {
 
 func TestBrokerInboxer_malformedResponseIsAnError(t *testing.T) {
 	c := fakeBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
-		// Valid JSON but the wrong shape ("events" not an array): the adapter
-		// must return the decode error so bridge.PollOnce fails loudly instead
-		// of treating a broken broker as "no new events" forever.
+		// A wrong-shaped body must fail PollOnce loudly, not read as "no new events".
 		_, _ = w.Write([]byte(`{"events": 42}`))
 	})
 

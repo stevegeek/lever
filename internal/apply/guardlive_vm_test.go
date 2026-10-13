@@ -21,11 +21,11 @@ import (
 )
 
 // TestReadOnlyGuardLiveInRealGuest runs the read-only guard's live check
-// (jail.ContainerLiveMounts: the lsns namespace check, the kernel's mount
-// table and the device and inode match) through a real jail runner against
-// real rootless keep-id containers in a lever-provisioned guest. Unit tests
-// stub every guest answer; this is where the guest's own lsns, mountinfo and
-// the tree mount's inode numbers meet the parser.
+// (jail.ContainerLiveMounts: the namespace ownership check, the kernel's
+// mount table and the device and inode match) through a real jail runner
+// against real rootless keep-id containers in a lever-provisioned guest.
+// Unit tests stub every guest answer; this is where the guest's own perl
+// and kernel, mountinfo and the tree mount's inode numbers meet the parser.
 //
 // The container's tree mounts come from managerVolumes and the checked plan
 // from ManagerLivePlan over ReadOnlyEntryMounts, as the manager's create and
@@ -105,7 +105,7 @@ func TestReadOnlyGuardLiveInRealGuest(t *testing.T) {
 		}
 	}
 	fstype := sh("findmnt -n -o FSTYPE -T " + guestTree)
-	t.Logf("guest: %s", sh("uname -r; lsns --version; podman --version; findmnt -n -o FSTYPE,OPTIONS -T "+guestTree))
+	t.Logf("guest: %s", sh("uname -r; lsns --version; perl -e 'print \"perl $^V\\n\"'; podman --version; findmnt -n -o FSTYPE,OPTIONS -T "+guestTree))
 
 	// A minimal image from the guest's own binaries, so the check needs no
 	// registry: sleep is the first process, unshare stages the nested one.
@@ -153,24 +153,48 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 
 	// Under rootless keep-id the pid namespace's owner is the user
 	// namespace, which also owns the mnt namespace (what
-	// checkRuntimeNamespaces requires; ContainerLiveMounts passing below
-	// proves it parses), and that user namespace is not the guest shell's.
-	nsOut := sh("lsns --raw --noheadings --output NS,TYPE,ONS --task " + heldPID)
-	t.Logf("lsns (held container, pid %s):\n%s", heldPID, nsOut)
-	ns := map[string][]string{}
-	for _, line := range strings.Split(nsOut, "\n") {
-		if f := strings.Fields(line); len(f) == 3 {
-			ns[f[1]] = f
+	// checkRuntimeNamespaces requires), and that user namespace is not the
+	// guest shell's. lsns is the independent witness, as root: as the run
+	// user it fails on Linux 7.0 guests (see jail.NamespaceReader). The
+	// guard's reader, run as the run user, must print the same ids and
+	// owners for both containers.
+	namespaces := func(which, pid string) map[string][]string {
+		t.Helper()
+		out := sh("sudo -n lsns --raw --noheadings --output NS,TYPE,ONS --task " + pid)
+		reader := sh("perl -T - " + pid + " <<'LEVER_NS_READER'\n" + jail.NamespaceReader + "LEVER_NS_READER\n")
+		t.Logf("%s container, pid %s: lsns as root:\n%s\nthe guard's reader:\n%s", which, pid, out, reader)
+		ns := map[string][]string{}
+		for _, line := range strings.Split(out, "\n") {
+			if f := strings.Fields(line); len(f) == 3 {
+				ns[f[1]] = f
+			}
 		}
+		var witness []string
+		for _, typ := range []string{"user", "mnt", "pid"} {
+			if ns[typ] == nil {
+				t.Fatalf("%s container: lsns shows no %s namespace", which, typ)
+			}
+			owner := ns[typ][2]
+			if typ == "user" {
+				owner = "0"
+			}
+			witness = append(witness, ns[typ][0]+" "+typ+" "+owner)
+		}
+		if reader != strings.Join(witness, "\n") {
+			t.Fatalf("%s container: the guard's reader printed %q, lsns as root shows %q", which, reader, witness)
+		}
+		return ns
 	}
+	ns := namespaces("held", heldPID)
 	if ns["pid"] == nil || ns["mnt"] == nil || ns["user"] == nil || ns["pid"][2] == "0" || ns["mnt"][2] != ns["pid"][2] || ns["user"][0] != ns["pid"][2] {
 		t.Fatalf("held container's namespaces = %v: the mnt namespace's owner and the user namespace must be the pid namespace's owner", ns)
 	}
-	if own := sh("lsns --raw --noheadings --output NS --type user --task $$"); own == "" || own == ns["user"][0] {
+	if own := sh("stat -L -c %i /proc/self/ns/user"); own == "" || own == ns["user"][0] {
 		t.Fatalf("held container in the guest shell's user namespace %q", own)
 	}
-	nestedOut := sh("lsns --raw --noheadings --output NS,TYPE,ONS --task " + nestedPID)
-	t.Logf("lsns (nested container, pid %s):\n%s", nestedPID, nestedOut)
+	if nested := namespaces("nested", nestedPID); nested["mnt"][2] == nested["pid"][2] || nested["user"][0] == nested["pid"][2] {
+		t.Fatalf("nested container's namespaces = %v: the mnt and user namespaces must not be the pid namespace's owner's", nested)
+	}
 
 	want := ManagerLivePlan(jp, app.ReadOnlyEntryMounts())
 	if len(want) != 4 {

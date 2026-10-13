@@ -398,9 +398,10 @@ func confirmHarnessPane(ctx context.Context, h harnessCheck, settle time.Duratio
 // (lever#188). Only when there is no marker to wait for (an older image), or
 // none came in that time over a pane that stayed alive (then with a warning
 // once the window passes), does it hold a window: harnessSettle once the
-// pane was seen, b.Settle otherwise. With o.attach the gate ends once the pane is alive: the caller
-// attaches the operator's terminal at once and checks the manager after
-// the detach (CheckManagerAfterDetach) instead.
+// // pane was seen, b.Settle otherwise. With o.attach (a manager start-manager
+// created, under `lever up` on a terminal) the gate ends once the pane is
+// alive: the caller attaches the operator's terminal at once and checks the
+// manager after the detach (CheckManagerAfterDetach) instead.
 func gateManagerLive(ctx context.Context, d Deps, b RetryBudget, name, project, subject string, prog *Progress, o gateOpts) error {
 	err := gateManagerLiveSteps(ctx, d, b, name, project, prog, o)
 	if err == nil {
@@ -416,8 +417,11 @@ func gateManagerLive(ctx context.Context, d Deps, b RetryBudget, name, project, 
 type gateOpts struct {
 	// attach ends the gate once claude's pane is alive, with no settle
 	// window: `lever up` on a terminal attaches then and checks the
-	// manager after the detach (lever#188). A gate that never sees the
-	// pane holds the window as usual.
+	// manager after the detach (lever#188). Only for a manager the run
+	// created: a resume's claude --continue exits soon after its pane comes
+	// up when it finds no conversation, so a resume always waits for
+	// claude's session start (lever#202). A gate that never sees the pane
+	// holds the window as usual.
 	attach bool
 	// onHarness, when set, runs once, when the gate has seen the harness
 	// (or the record, for a gate without a probe or a window) and the wait
@@ -738,8 +742,8 @@ func recordLeftRunning(ctx context.Context, list func(context.Context) ([]scion.
 }
 
 // CheckManagerAfterDetach is `lever up`'s look at the manager once the
-// operator's attach has ended (lever#188). An up on a terminal attaches as
-// soon as claude's pane is alive (WaitManagerStarted), with no settle
+// operator's attach has ended (lever#188). An up on a terminal attaches to
+// a manager it created as soon as claude's pane is alive, with no settle
 // window, so a claude that dies in its first seconds is caught here: the
 // attach ends with it, and this names what it finds, with the same hints as
 // the start gate. It reports only positive evidence: a missing or

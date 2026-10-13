@@ -141,11 +141,18 @@ type run struct {
 	// fresh is PlanOpts.Fresh: discard any present manager record at
 	// start-manager (lever#33).
 	fresh bool
-	// attach is PlanOpts.Attach: start-manager's gate ends once claude's
-	// pane is alive (lever#188).
+	// attach is PlanOpts.Attach: start-manager's gate for a manager this
+	// run created ends once claude's pane is alive (lever#188); a resume's
+	// gate waits for claude's session start as without it (lever#202).
 	attach bool
 	// freshNoConv is PlanOpts.FreshWithoutConversation (lever#202).
 	freshNoConv bool
+	// unattended is set while start-manager makes the fresh start of a
+	// manager with no conversation (lever#202): the create records its
+	// session with unattendedCommit (Deps.BeginUnattendedSession), never
+	// with Deps.BeginSession. A nil unattendedCommit records nothing.
+	unattended       bool
+	unattendedCommit func() error
 	// managerCreated records that THIS run created the manager record (a
 	// create that answered "already exists" does not count). Only a created
 	// record is known to carry the manager.read_only mounts; any other is
@@ -325,6 +332,21 @@ type Deps struct {
 	// error is logged, not fatal: the manager is up, and without the record
 	// contacts are refused (fail closed). Nil records nothing.
 	BeginSession func(agent string) (commit func() error)
+	// BeginUnattendedSession is BeginSession for the fresh start lever makes
+	// on its own, without the operator's --fresh: a manager with no
+	// conversation to continue (lever#202). The agent can bring that start
+	// about (an emptied home, a claude that exits), and its tree holds the
+	// skill the record names, so such a start must not re-baseline the
+	// session on a skill the agent wrote. It is called before the record
+	// is deleted. commit records the start only when the skill on disk is
+	// the one the manager's last recorded session started with; otherwise
+	// it writes nothing and returns why, after the call itself has already
+	// recorded a session matching no skill, so contacts stay refused until
+	// a deliberate `lever up --fresh` (even if the old skill text comes
+	// back). An error means that refusing record could not be written:
+	// lever then does not start the manager fresh on its own. When
+	// BeginSession is set and this is nil, lever does not either.
+	BeginUnattendedSession func(agent string) (commit func() error, err error)
 	// BackupManagerConversation, when set, runs under PlanOpts.Fresh just
 	// before the manager record rec is deleted (scion deletes the record's
 	// home, and the conversation with it). An error stops the fresh start
@@ -1295,8 +1317,12 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 // delete, returns cause with the record kept. It is loud: one line says
 // what lever does and why.
 //
-// A fresh start records a new session (Deps.BeginSession), as --fresh does:
-// the new conversation starts on the skill on disk now. The failed resume
+// A fresh start records a new session only when the skill on disk is the
+// one the manager's last recorded session started with
+// (Deps.BeginUnattendedSession): the agent can bring this start about, and
+// can write the skill, so unlike --fresh it never re-baselines the session
+// on a changed skill; contacts then stay refused until `lever up --fresh`,
+// and a line says so. The failed resume
 // may have spent the enrolment ticket this run staged, so the create
 // re-arms the broker for a new one (ensureFreshBootstrap).
 func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts scion.StartOpts, cause error, onHarness func()) error {
@@ -1322,8 +1348,27 @@ func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts
 			return fmt.Errorf("%w; lever went to start it fresh, but backing up its conversation failed, so the manager was NOT deleted: %w", cause, err)
 		}
 	}
+	// The session record before anything is deleted, and after the
+	// backup (which carries the last session's skill with it): a start the
+	// agent can bring about must not record a skill it wrote
+	// (BeginUnattendedSession).
+	var commit func() error
+	switch {
+	case r.d.BeginUnattendedSession != nil:
+		c, serr := r.d.BeginUnattendedSession(r.app.Name)
+		if serr != nil {
+			r.d.Log("start-manager: manager %q has no conversation to continue, but lever did not start it fresh on its own: it could not record that the new session's skill is unchecked (%s)", r.app.Name, termsafe.Sanitize(serr.Error()))
+			return cause
+		}
+		commit = c
+	case r.d.BeginSession != nil:
+		r.d.Log("start-manager: manager %q has no conversation to continue, but lever did not start it fresh on its own: it cannot check the skill the new session would be recorded with", r.app.Name)
+		return cause
+	}
 	// The resume's boot may have redeemed this run's ticket: mint anew.
 	r.minted = false
+	r.unattended, r.unattendedCommit = true, commit
+	defer func() { r.unattended, r.unattendedCommit = false, nil }()
 	if err := r.recoverDeleteAndCreate(ctx, jp, opts,
 		fmt.Sprintf("start-manager: manager %q has no conversation to continue: claude --continue found none, and its agent home holds no transcript, so it was never used. Starting it FRESH, as `lever up --fresh` would (deleting record in phase %s; nothing is lost)", r.app.Name, scion.BoundedQuote(rec.Phase)),
 		"a fresh start of a manager with no conversation"); err != nil {
@@ -2460,7 +2505,10 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 		return err
 	}
 	var commit func() error
-	if r.d.BeginSession != nil {
+	switch {
+	case r.unattended:
+		commit = r.unattendedCommit
+	case r.d.BeginSession != nil:
 		commit = r.d.BeginSession(r.app.Name)
 	}
 	created := false
@@ -2493,7 +2541,11 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	}
 	if err == nil && created && commit != nil {
 		if cerr := commit(); cerr != nil {
-			r.d.Log("start-manager: could not record the manager's fresh session (%v); contacts cannot post to it until the next fresh start", cerr)
+			if r.unattended {
+				r.d.Log("start-manager: this fresh start, which lever made on its own, is not recorded as a new session (%s); contacts cannot post to the manager until `lever up --fresh` starts it fresh", termsafe.Sanitize(cerr.Error()))
+			} else {
+				r.d.Log("start-manager: could not record the manager's fresh session (%v); contacts cannot post to it until the next fresh start", cerr)
+			}
 		}
 	}
 	return err
@@ -2577,7 +2629,17 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool, onHarn
 		// One look still refuses a running RECORD over a dead container.
 		b.Settle = 0
 	}
-	err := gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress, gateOpts{attach: r.attach, onHarness: onHarness})
+	// Only a manager this run created is attached at its pane. A resume
+	// runs claude --continue, which exits a second or two after its pane
+	// comes up when there is no conversation (lever#202): the gate waits
+	// for claude's session start (or the settle window) first, so that exit
+	// is caught here, where start-manager can start the manager fresh,
+	// instead of after the operator attached to a dead session. A created
+	// manager's claude starts no conversation it could fail to find, and
+	// the look after the detach (CheckManagerAfterDetach) catches a later
+	// death as before.
+	attach := r.attach && r.managerCreated
+	err := gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress, gateOpts{attach: attach, onHarness: onHarness})
 	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
@@ -2589,18 +2651,6 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool, onHarn
 // as the start-manager step (withHarnessDeathHint).
 func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
 	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{})
-	return withHarnessDeathHint(ctx, d, err, project, name)
-}
-
-// WaitManagerStarted is WaitManagerLive for a `lever up` that attaches the
-// operator's terminal next (lever#188): it ends as soon as claude's tmux
-// pane is alive, with no settle window, so the operator is attached the
-// moment claude runs. The caller must check the manager after the detach
-// (CheckManagerAfterDetach): a claude that dies in the first seconds is
-// reported then. A gate that cannot see the pane holds the window as
-// WaitManagerLive does.
-func WaitManagerStarted(ctx context.Context, d Deps, name, project string, prog *Progress) error {
-	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{attach: true})
 	return withHarnessDeathHint(ctx, d, err, project, name)
 }
 

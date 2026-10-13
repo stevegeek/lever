@@ -72,14 +72,21 @@ func TestNoPaneSignalHoldsTheLongWindow(t *testing.T) {
 	}
 }
 
-// TestAttachGateEndsAtThePane: for an up that attaches next the gate ends
-// once the pane is alive, with no window and no second look.
+// attachGate is start-manager's gate for a manager it created under an up
+// that attaches next (gateOpts.attach).
+func attachGate(ctx context.Context, d Deps, name, project string) error {
+	return gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", nil, gateOpts{attach: true})
+}
+
+// TestAttachGateEndsAtThePane: for a created manager under an up that
+// attaches next the gate ends once the pane is alive, with no window and no
+// second look.
 func TestAttachGateEndsAtThePane(t *testing.T) {
 	shortHarnessSettle(t, time.Minute)
 	p := &gateProbe{alive: []harnessAnswer{{alive: true}}}
 	d := liveGateDeps(p, time.Minute)
 	start := time.Now()
-	if err := WaitManagerStarted(context.Background(), d, "hello", "/lever", nil); err != nil {
+	if err := attachGate(context.Background(), d, "hello", "/lever"); err != nil {
 		t.Fatalf("gate: %v", err)
 	}
 	if el := time.Since(start); el > 20*time.Second {
@@ -97,7 +104,7 @@ func TestAttachGateStillRefusesADeath(t *testing.T) {
 		alive:   []harnessAnswer{{alive: false}},
 		running: []runningAnswer{{up: false}},
 	}
-	err := WaitManagerStarted(context.Background(), liveGateDeps(p, time.Minute), "hello", "/lever", nil)
+	err := attachGate(context.Background(), liveGateDeps(p, time.Minute), "hello", "/lever")
 	if !errors.Is(err, scion.ErrAgentDied) {
 		t.Fatalf("want ErrAgentDied, got %v", err)
 	}

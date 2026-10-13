@@ -208,7 +208,7 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := gateAfterUp(context.Background(), deps, c.action, "/lever", "assistant", nil, false, guard); err != nil {
+		if err := gateAfterUp(context.Background(), deps, c.action, "/lever", "assistant", nil, guard); err != nil {
 			t.Fatalf("%s: a running manager must pass: %v", c.action, err)
 		}
 		lists := 0
@@ -230,7 +230,7 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, false, guard); err == nil {
+	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, guard); err == nil {
 		t.Fatal("a resume over a dead manager must not pass the gate")
 	}
 }
@@ -355,7 +355,7 @@ func TestResumeForUpChecksTreeMounts(t *testing.T) {
 			case err != nil:
 				t.Fatalf("unexpected error: %v", err)
 			default:
-				gerr := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, false, guard)
+				gerr := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, guard)
 				if tc.wantGateErr == "" && gerr != nil || tc.wantGateErr != "" && (gerr == nil || !strings.Contains(gerr.Error(), tc.wantGateErr)) {
 					t.Fatalf("gate err = %v, want %q", gerr, tc.wantGateErr)
 				}
@@ -375,7 +375,7 @@ func TestResumeForUpChecksTreeMounts(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"running","containerStatus":"Up 1 second"}]`})
 	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond}}
-	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, false, nil); err == nil {
+	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, nil); err == nil {
 		t.Fatal("a resume with no mount checks must not pass the gate")
 	}
 }

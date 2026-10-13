@@ -290,7 +290,7 @@ func TestReadyMarkerRecordLeavesRunningIsADeath(t *testing.T) {
 // start, and the look after the detach catches a death.
 func TestAttachGateDoesNotWaitForTheMarker(t *testing.T) {
 	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{pending}}
-	if err := WaitManagerStarted(context.Background(), readyDeps(p, nil), "hello", "/lever", nil); err != nil {
+	if err := attachGate(context.Background(), readyDeps(p, nil), "hello", "/lever"); err != nil {
 		t.Fatalf("gate: %v", err)
 	}
 	if p.readyN != 0 {

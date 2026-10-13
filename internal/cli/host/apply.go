@@ -1489,6 +1489,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		BeginSession: func(agent string) func() error {
 			return brokerctl.BeginSession(w.app, st, cli.VersionString(), agent)
 		},
+		// BeginUnattendedSession records the fresh start lever makes on its
+		// own (lever#202) only over an unchanged skill.
+		BeginUnattendedSession: func(agent string) (func() error, error) {
+			return brokerctl.BeginUnattendedSession(w.app, st, cli.VersionString(), agent)
+		},
 		// InspectContainerMounts lets apply warn when a manager it kept or
 		// resumed lacks the manager.read_only mounts (create-time only), and
 		// refuse a resume whose record mounts a directory that is gone.

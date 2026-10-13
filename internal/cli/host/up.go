@@ -91,22 +91,19 @@ func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name strin
 // prog (may be nil) is the resume's progress line (lever#168), handed the
 // gate's stages.
 //
-// attach (an up that attaches a terminal next) ends the resume's gate once
-// claude's pane is alive, with no settle window; the attach then follows
-// at once and the manager is checked after the detach (lever#188).
+// A resume's gate is the same whether or not a terminal is attached next:
+// it waits for claude to report its session start (lever#188). Attaching at
+// the pane would attach the operator to a claude --continue that exits a
+// second later for want of a conversation (lever#202); the gate names that
+// cause instead.
 //
 // guard (the resume path's lever#158 checks, nil elsewhere) reads the tree
 // mounts back once the manager is live, if that could not be done right
 // after the resume: the manager is not reported up before.
-func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, attach bool, guard *apply.ManagerResume) error {
+func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, guard *apply.ManagerResume) error {
 	switch d {
 	case upResume:
-		var err error
-		if attach {
-			err = apply.WaitManagerStarted(ctx, deps, name, project, prog)
-		} else {
-			err = apply.WaitManagerLive(ctx, deps, name, project, prog)
-		}
+		err := apply.WaitManagerLive(ctx, deps, name, project, prog)
 		if err != nil {
 			if guard != nil {
 				err = guard.AfterFailure(ctx, err)
@@ -216,10 +213,13 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				}
 			}
 			decision := upDecision(phase, fresh)
-			// On a terminal the operator is attached as soon as claude runs,
-			// and the manager is checked after the detach, instead of after
-			// a settle window nobody watches (lever#188). --no-attach and a
-			// stdin that is not a terminal keep the window.
+			// On a terminal the operator is attached to a manager apply
+			// created as soon as claude runs, and the manager is checked
+			// after the detach, instead of after a wait nobody watches
+			// (lever#188). A resume waits for claude's session start first,
+			// so a claude --continue with no conversation is caught before
+			// the attach (lever#202). --no-attach and a stdin that is not a
+			// terminal wait on every path.
 			attachTTY := !noAttach && isTerminal(os.Stdin)
 			// A record left "running" by a hard VM kill (a new guest boot,
 			// no live container) is suspended here and resumed below: what
@@ -320,7 +320,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// the "is up." print with no observation at all, and the apply
 			// paths returned on the first live look — over a harness that dies
 			// a moment later (lever#31). Gate every path before claiming up.
-			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, attachTTY, guard)
+			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, guard)
 			prog.Stop()
 			if err != nil {
 				return err

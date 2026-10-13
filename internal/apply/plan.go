@@ -63,10 +63,13 @@ type PlanOpts struct {
 	// (lever#33). The plan itself is unchanged.
 	Fresh bool
 	// Attach says the caller (`lever up` on a terminal) attaches the
-	// operator to the manager once Run returns: start-manager's gate then
-	// ends as soon as claude's tmux pane is alive, with no settle window,
-	// and the caller checks the manager after the detach
-	// (CheckManagerAfterDetach) (lever#188). The plan itself is unchanged.
+	// operator to the manager once Run returns: start-manager's gate for a
+	// manager it created then ends as soon as claude's tmux pane is alive,
+	// with no settle window, and the caller checks the manager after the
+	// detach (CheckManagerAfterDetach) (lever#188). A resume's gate is
+	// unchanged by it: it waits for claude's session start, so a claude
+	// --continue that finds no conversation is caught before the attach
+	// (lever#202). The plan itself is unchanged.
 	Attach bool
 	// FreshWithoutConversation lets start-manager replace a resume that died
 	// because claude --continue found no conversation with a fresh start, as

@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
@@ -19,23 +23,23 @@ type liveRunner struct {
 	mountinfo string
 	stat      string
 	statErr   bool
-	ns        []string // successive lsns answers (the last repeats); nil = nsHeld
+	ns        []string // successive namespace answers (the last repeats); nil = nsHeld
 	nsErr     bool
 	calls     []string
 	stdin     []string // what each stdin call carried
 	unbounded bool     // a call ran without the guest timeout
 }
 
-// nsHeld is lsns for a first process in its runtime's namespaces: the
-// pid and mnt namespaces owned by its user namespace.
 var statRE = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
 
-const nsHeld = "4026531834 time 0\n4026532463 user 4026531837\n4026532464 mnt 4026532463\n4026532536 pid 4026532463\n4026532537 net 4026532400\n"
+// nsHeld is nsReader's answer for a first process in its runtime's
+// namespaces: the pid and mnt namespaces owned by its user namespace.
+const nsHeld = "4026532463 user 0\n4026532464 mnt 4026532463\n4026532536 pid 4026532463\n"
 
-// nsNested is lsns after the first process moved into a user and mount
-// namespace made inside the container: the pid namespace (which it cannot
-// leave) is still owned by the container's user namespace.
-const nsNested = "4026531834 time 0\n4026532900 user 4026532463\n4026532901 mnt 4026532900\n4026532536 pid 4026532463\n4026532537 net 4026532400\n"
+// nsNested is the answer after the first process moved into a user and
+// mount namespace made inside the container: the pid namespace (which it
+// cannot leave) is still owned by the container's user namespace.
+const nsNested = "4026532900 user 0\n4026532901 mnt 4026532900\n4026532536 pid 4026532463\n"
 
 func (l *liveRunner) Run(_ context.Context, _ map[string]string, name string, args ...string) (proc.Result, error) {
 	if name != "timeout" || len(args) < 3 || !strings.HasPrefix(args[0], "--kill-after=") || !strings.HasSuffix(args[1], "s") {
@@ -53,9 +57,15 @@ func (l *liveRunner) Run(_ context.Context, _ map[string]string, name string, ar
 		return proc.Result{Stdout: pid + "\n"}, nil
 	case "head":
 		return proc.Result{Stdout: l.mountinfo}, nil
-	case "lsns":
+	case "perl":
+		if len(args) != 3 || args[0] != "-T" || args[1] != "-" || l.stdin[len(l.stdin)-1] != nsReader {
+			return proc.Result{Code: 1}, errors.New("unexpected perl call")
+		}
 		if l.nsErr {
-			return proc.Result{Code: 1, Stderr: "lsns: unknown column: ONS"}, errors.New("exit status 1")
+			// The reader exits non-zero (on Linux 7.0 the namespace link
+			// of a process the run user may not ptrace opens as a
+			// directory): whatever it printed must not count.
+			return proc.Result{Code: 25, Stdout: "4026532463 user 0\n4026532464 mnt 4026532463\n4026532536 pid 4026532463\n", Stderr: "type pid"}, errors.New("exit status 25")
 		}
 		ns := nsHeld
 		if len(l.ns) > 0 {
@@ -171,15 +181,15 @@ func TestContainerLiveMounts(t *testing.T) {
 			ns: []string{strings.Replace(nsHeld, "4026532463 user", "4026532900 user", 1)}}, nil, ErrForeignNamespace},
 		{"owner not shown", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
 			ns: []string{"4026532463 user 0\n4026532464 mnt 0\n4026532536 pid 0\n"}}, nil, ErrForeignNamespace},
-		{"lsns fails", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same, nsErr: true}, nil, errLiveMounts},
-		{"lsns empty", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same, ns: []string{""}}, nil, errLiveMounts},
-		{"lsns no mnt line", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
+		{"namespace read fails", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same, nsErr: true}, nil, errLiveMounts},
+		{"namespaces empty", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same, ns: []string{""}}, nil, errLiveMounts},
+		{"no mnt line", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
 			ns: []string{"4026532463 user 0\n4026532536 pid 4026532463\n"}}, nil, errLiveMounts},
-		{"lsns garbage", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
+		{"namespaces garbage", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
 			ns: []string{nsHeld + "x mnt 1\n"}}, nil, errLiveMounts},
-		{"lsns other type without owner", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
+		{"other type without owner", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
 			ns: []string{"4026531834 time\n" + nsHeld}}, nil, nil},
-		{"lsns duplicate type", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
+		{"duplicate type", liveRunner{pids: []string{"4242"}, mountinfo: miRoot + miTree + miPin + miEntry, stat: same,
 			ns: []string{nsHeld + "4026532999 mnt 4026532463\n"}}, nil, errLiveMounts},
 	}
 	for _, tc := range cases {
@@ -208,10 +218,10 @@ func TestContainerLiveMountsReadsFromTheGuest(t *testing.T) {
 	}
 	want := []string{
 		"podman inspect --type container --format {{.State.Pid}} lever--m",
-		"lsns --raw --noheadings --output NS,TYPE,ONS --task 4242",
+		"perl -T - 4242",
 		"head -c 65536 /proc/4242/mountinfo",
 		"xargs -0 stat -c %d:%i:%n --",
-		"lsns --raw --noheadings --output NS,TYPE,ONS --task 4242",
+		"perl -T - 4242",
 		"podman inspect --type container --format {{.State.Pid}} lever--m",
 	}
 	if !reflect.DeepEqual(r.calls, want) {
@@ -220,8 +230,8 @@ func TestContainerLiveMountsReadsFromTheGuest(t *testing.T) {
 	if r.unbounded {
 		t.Fatal("every guest read must run under the guest's timeout")
 	}
-	if wantIn := []string{"/lever/a\x00/proc/4242/root/workspace/a\x00/lever/a/tools\x00/proc/4242/root/workspace/a/tools\x00"}; !reflect.DeepEqual(r.stdin, wantIn) {
-		t.Fatalf("stat stdin = %q, want %q", r.stdin, wantIn)
+	if wantIn := []string{nsReader, "/lever/a\x00/proc/4242/root/workspace/a\x00/lever/a/tools\x00/proc/4242/root/workspace/a/tools\x00", nsReader}; !reflect.DeepEqual(r.stdin, wantIn) {
+		t.Fatalf("stdin = %q, want %q", r.stdin, wantIn)
 	}
 	for _, c := range r.calls {
 		if strings.Contains(c, "exec") {
@@ -252,8 +262,8 @@ func TestContainerLiveMountsPathWithSpace(t *testing.T) {
 			t.Fatalf("a path rode the command line: %q", c)
 		}
 	}
-	if r.stdin[0] != "/lever/my tools\x00/proc/4242/root/workspace/my tools\x00" {
-		t.Fatalf("stdin = %q", r.stdin[0])
+	if r.stdin[1] != "/lever/my tools\x00/proc/4242/root/workspace/my tools\x00" {
+		t.Fatalf("stat stdin = %q", r.stdin[1])
 	}
 }
 
@@ -319,5 +329,72 @@ func TestContainerLiveMountsSelfMount(t *testing.T) {
 				t.Fatalf("got %v, %v; want %v", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// parseNamespaces takes nsReader's lines and lsns's, as seen in Lima
+// guests: nsReader on Ubuntu 26.04, lsns as the run user on 24.04
+// (util-linux 2.39, time owned by the initial user namespace) and as root
+// on 26.04 (util-linux 2.41).
+func TestParseNamespacesGuestOutputs(t *testing.T) {
+	want := map[string]nsEntry{
+		"user": {4026532398, 0},
+		"mnt":  {4026532399, 4026532398},
+		"pid":  {4026532402, 4026532398},
+	}
+	reader := "4026532398 user 0\n4026532399 mnt 4026532398\n4026532402 pid 4026532398\n"
+	lsns := "4026531834 time 4026531837\n4026532398 user 4026532282\n4026532399 mnt 4026532398\n4026532400 uts 4026532398\n" +
+		"4026532401 ipc 4026532398\n4026532402 pid 4026532398\n4026532403 net 4026532398\n4026532462 cgroup 4026532398\n"
+	for name, out := range map[string]string{"nsReader": reader, "lsns": lsns} {
+		got, err := parseNamespaces(out)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if name == "lsns" {
+			got["user"] = nsEntry{got["user"].id, 0}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: %v, want %v", name, got, want)
+		}
+	}
+}
+
+// nsReader against this test's own process, where perl is installed: the
+// ids are the kernel's, the owners are user namespaces, and a pid it
+// cannot read is an error.
+func TestNsReaderRunsOnThisKernel(t *testing.T) {
+	if _, err := exec.LookPath("perl"); err != nil {
+		t.Skip("no perl")
+	}
+	run := func(pid string) (string, error) {
+		cmd := exec.Command("perl", "-T", "-", pid)
+		cmd.Stdin = strings.NewReader(nsReader)
+		out, err := cmd.Output()
+		return string(out), err
+	}
+	out, err := run(strconv.Itoa(os.Getpid()))
+	if err != nil {
+		t.Fatalf("nsReader: %v", err)
+	}
+	ns, err := parseNamespaces(out)
+	if err != nil {
+		t.Fatalf("parse %q: %v", out, err)
+	}
+	for _, typ := range []string{"user", "mnt", "pid"} {
+		fi, err := os.Stat("/proc/self/ns/" + typ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ino := fi.Sys().(*syscall.Stat_t).Ino; ns[typ].id != ino {
+			t.Fatalf("%s: id %d, kernel %d", typ, ns[typ].id, ino)
+		}
+	}
+	if ns["mnt"].owner == 0 || ns["pid"].owner == 0 || ns["user"].owner != 0 {
+		t.Fatalf("owners: %v", ns)
+	}
+	for _, pid := range []string{"0", "-1", "1x", "4294967296123"} {
+		if out, err := run(pid); err == nil {
+			t.Fatalf("pid %q: %q, want an error", pid, out)
+		}
 	}
 }

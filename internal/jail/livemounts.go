@@ -234,10 +234,10 @@ func containerPID(ctx context.Context, r proc.Runner, ref string) (int, error) {
 // conmon is in the rootless user and mount namespaces, never the
 // container's, so neither is a sound reference.
 //
-// lsns (util-linux 2.38 or later, for the ONS column) reads the owners
-// with the NS_GET_USERNS ioctl; anything it cannot answer is an error.
+// The guest's perl (nsReader) reads the owners with the NS_GET_USERNS
+// ioctl, for this one process only; anything it cannot answer is an error.
 func checkRuntimeNamespaces(ctx context.Context, r proc.Runner, pid int) error {
-	res, err := runGuestBounded(ctx, r, "lsns", "--raw", "--noheadings", "--output", "NS,TYPE,ONS", "--task", strconv.Itoa(pid))
+	res, err := runGuestBoundedStdin(ctx, r, strings.NewReader(nsReader), "perl", "-T", "-", strconv.Itoa(pid))
 	if err != nil {
 		return errLiveMounts
 	}
@@ -252,13 +252,60 @@ func checkRuntimeNamespaces(ctx context.Context, r proc.Runner, pid int) error {
 	return nil
 }
 
-// nsEntry is one lsns line: a namespace's id and its owner's (0 = none
-// shown).
+// nsReader prints "<id> <type> <owner id>" for the user, mnt and pid
+// namespaces of the process whose guest pid is its argument (owner 0 for
+// the user namespace, whose owner the check does not use), and exits
+// non-zero on anything else. It runs as perl from stdin because perl-base
+// is Essential on Debian and Ubuntu, so every lever guest has it; under -T,
+// which makes perl ignore PERL5LIB and PERL5OPT, and with no module, so
+// nothing but the interpreter and this text runs.
+//
+// Not lsns: lsns walks every process in /proc whatever --task says, and
+// aborts on a namespace link it cannot query. On Linux 7.0 the namespace
+// link of a same-user process the caller may not ptrace (the run user's
+// systemd --user, which holds CAP_WAKE_ALARM) opens as the /proc/<pid>/ns
+// directory rather than failing with EACCES, so lsns fails for the run user
+// on every call. A container process the run user may not ptrace fails
+// here the same way: an error, never "held".
+//
+// NS_GET_NSTYPE proves each descriptor is a namespace of the expected type
+// (a directory or any other file fails it), and all of them must be on the
+// one nsfs device. 0xb701 is NS_GET_USERNS and 0xb703 NS_GET_NSTYPE
+// (linux/nsfs.h); the types are CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWPID.
+const nsReader = `my $pid = shift;
+$pid =~ /\A[1-9][0-9]{0,9}\z/ or die "pid\n";
+my %clone = (user => 0x10000000, mnt => 0x00020000, pid => 0x20000000);
+my $dev;
+for my $t ("user", "mnt", "pid") {
+	sysopen(my $ns, "/proc/$pid/ns/$t", 0) or die "open $t\n";
+	my $type = ioctl($ns, 0xb703, 0);
+	defined $type && $type == $clone{$t} or die "type $t\n";
+	my @s = stat($ns) or die "stat $t\n";
+	$dev //= $s[0];
+	$s[0] == $dev && $s[1] > 0 or die "dev $t\n";
+	my $owner = 0;
+	if ($t ne "user") {
+		my $fd = ioctl($ns, 0xb701, 0);
+		defined $fd && $fd > 0 or die "owner $t\n";
+		open(my $o, "<&=", $fd) or die "owner fd $t\n";
+		my @w = stat($o) or die "owner stat $t\n";
+		ioctl($o, 0xb703, 0) == $clone{user} or die "owner type $t\n";
+		$w[0] == $dev && $w[1] > 0 or die "owner dev $t\n";
+		$owner = $w[1];
+		close($o);
+	}
+	close($ns);
+	print "$s[1] $t $owner\n";
+}
+`
+
+// nsEntry is one namespace line: a namespace's id and its owner's (0 =
+// none shown).
 type nsEntry struct{ id, owner uint64 }
 
-// parseNamespaces reads lsns --raw --noheadings --output NS,TYPE,ONS. Only
-// the pid, mnt and user lines are read (another type may show no owner on
-// some systems), and those strictly: each once, a numeric id and owner, a
+// parseNamespaces reads nsReader's output, which has the shape of lsns
+// --raw --noheadings --output NS,TYPE,ONS. Only the pid, mnt and user lines
+// are read, and those strictly: each once, a numeric id and owner, a
 // non-zero id. A missing one is an error.
 func parseNamespaces(out string) (map[string]nsEntry, error) {
 	if len(out) > liveMountsMaxOutput {
@@ -295,6 +342,10 @@ func parseNamespaces(out string) (map[string]nsEntry, error) {
 	}
 	return got, nil
 }
+
+// NamespaceReader is the program checkRuntimeNamespaces runs as
+// perl -T - <pid>, for the live guest test to compare with lsns.
+const NamespaceReader = nsReader
 
 var nsNumRE = regexp.MustCompile(`^[0-9]{1,20}$`)
 

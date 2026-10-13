@@ -8,11 +8,9 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// Files is remote.files as the broker enforces it: the tree and each
-// agent's workspace, the limits, shares off, who may receive files from
-// which agent (never a login with files: false),
-// and the ledger directory ("" when the state directory is inside the tree,
-// where an agent could write a record).
+// Files is remote.files as the broker enforces it. A login with files: false
+// never receives files, and the ledger directory is "" when the state
+// directory is inside the tree, where an agent could write a record.
 func Files(app *config.App, st state.State) broker.FilesConfig {
 	if !app.FilesOn() {
 		return broker.FilesConfig{}

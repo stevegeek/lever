@@ -2,28 +2,16 @@
 
 package brokerctl
 
-// integration_test.go is the host-side acceptance test. It builds the real
-// cmd/lever-tool-db binary with `go build`, so it runs only under
-// `go test -tags integration`. It
-// drives the WHOLE host-side capability stack end to end:
+// The host-side acceptance test (build tag integration: it builds the real
+// cmd/lever-tool-db). It drives the whole host-side capability stack:
+// config.Load, EnsureKeys, BuildBroker, broker.New, ServeListeners on real
+// loopback listeners, a supervised lever-tool-db subprocess, and a simulated
+// worker (CA-issued cert, delegated token) calling /mcp/db/ over mTLS.
 //
-//	config.Load(lever.yaml)  →  EnsureKeys + LoadRevocation + BuildBroker + broker.New
-//	→  ServeListeners on real loopback listeners  →  a REAL lever-tool-db SUBPROCESS
-//	(supervised, self-registering over the admin listener)  →  a simulated worker
-//	agent (CA-issued client cert + a directly-minted, broker-key-signed delegated
-//	token) exercising the gated /mcp/db/ gateway over mTLS.
-//
-// Unlike internal/broker/e2e_captool_test.go (which runs an INLINE captool server
-// behind jailServer), this test runs the broker exactly as `brokerctl.Serve`
-// assembles it, but inline so the test can bind 127.0.0.1:0 for BOTH the jail and
-// admin listeners and learn the OS-assigned ports. The "db" backend is the real
-// cmd/lever-tool-db binary, built to a temp path and launched by the Supervisor.
-//
-// It asserts the host-side scenario: a delegated, table=A/filter=alice-constrained
-// db.read returns ONLY alice's rows; table=C and a dropped filter are denied with
-// no rows reaching the agent; /bootstrap is a single-shot latch; and revocation
-// (bump-epoch) denies the next call AND survives a broker restart from the same
-// persisted state.
+// It asserts: a table=A/filter=alice-constrained db.read returns only
+// alice's rows; table=C and a dropped filter are denied with no rows;
+// /bootstrap is a single-shot latch; and revocation denies the next call and
+// survives a broker restart from the same state.
 
 import (
 	"context"
@@ -47,12 +35,9 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// freeLoopbackPort grabs an OS-assigned loopback port, then releases it so a
-// child process (the real lever-tool-db) can bind it as its own MCP backend. A
-// brief race window exists between close and re-bind, but on loopback in a test
-// it is reliable; the alternative (binding :0 in the tool and reporting back)
-// would require changing the reference tool, which this integration test must
-// NOT do.
+// freeLoopbackPort grabs a loopback port and releases it for the real tool to
+// bind. The close/re-bind race is acceptable in a test; the alternative
+// would change the reference tool.
 func freeLoopbackPort(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -64,8 +49,7 @@ func freeLoopbackPort(t *testing.T) string {
 	return addr
 }
 
-// buildToolDB compiles cmd/lever-tool-db to a temp path and returns it. If the
-// build is impossible in this environment the test is skipped (per the brief).
+// buildToolDB skips the test when the binary cannot be built here.
 func buildToolDB(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "lever-tool-db")
@@ -78,8 +62,6 @@ func buildToolDB(t *testing.T) string {
 	return bin
 }
 
-// repoRoot walks up from the package dir to the module root (where go.mod lives)
-// so `go build ./cmd/lever-tool-db` resolves regardless of the test's cwd.
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -98,9 +80,8 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-// mintWorkerToken mints a delegated db.read token bound to "worker" constrained to
-// table=A + filter=alice, signed with the broker's capability private key at the
-// given epoch, and base64url-encodes it for the _capability arg.
+// mintWorkerToken mints a delegated db.read token bound to "worker",
+// constrained to table=A and filter=alice, at epoch.
 func mintWorkerToken(t *testing.T, kp token.KeyPair, epoch int) string {
 	t.Helper()
 	tok, err := token.Mint(kp.Private, token.Grant{
@@ -119,8 +100,6 @@ func mintWorkerToken(t *testing.T, kp token.KeyPair, epoch int) string {
 	return base64.RawURLEncoding.EncodeToString(tok)
 }
 
-// mcpRead POSTs a tools/call read{table,filter,_capability} to /mcp/db/ on the
-// jail base URL and returns the HTTP response.
 func mcpRead(t *testing.T, client *http.Client, baseURL, tok string, args map[string]any) *http.Response {
 	t.Helper()
 	a := map[string]any{"_capability": tok}
@@ -138,15 +117,11 @@ func mcpRead(t *testing.T, client *http.Client, baseURL, tok string, args map[st
 	return resp
 }
 
-// TestBrokerctlHostIntegration proves the host-side scenario through config →
-// brokerctl → a real lever-tool-db subprocess with a simulated worker, plus
-// revocation persistence across a broker restart.
 func TestBrokerctlHostIntegration(t *testing.T) {
 	toolBin := buildToolDB(t) // skips if the env can't build it
 
-	// ── Fixture config ────────────────────────────────────────────────────────
-	// manager delegates db.read → worker; worker has no obtain (pure executor).
-	// The db tool's backend is a fixed free loopback port the real tool binds.
+	// The manager delegates db.read to the worker; the worker obtains
+	// nothing.
 	work := t.TempDir()
 	treeDir := filepath.Join(work, "tree")
 	if err := os.MkdirAll(treeDir, 0o755); err != nil {
@@ -190,7 +165,7 @@ broker:
 		t.Fatalf("config.Load: %v", err)
 	}
 
-	// ── Assemble the broker exactly like brokerctl.Serve, but on :0 listeners ──
+	// Assembled like brokerctl.Serve, but on :0 listeners.
 	st := state.ForConfig(work)
 	kp, caInst, err := EnsureKeys(st)
 	if err != nil {
@@ -206,9 +181,6 @@ broker:
 	}
 	cfg.Persistence.Revocation = rev
 	cfg.Persistence.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
-	// The per-boot broker-to-tool secret, exactly as serve.go wires it: the
-	// gateway presents it to the first-party tool and the supervisor hands it
-	// to the tool it spawns; the tool refuses a request without it.
 	toolSecret, err := NewToolSecret()
 	if err != nil {
 		t.Fatalf("NewToolSecret: %v", err)
@@ -232,7 +204,6 @@ broker:
 		t.Fatal(err)
 	}
 
-	// ── Supervise the REAL lever-tool-db subprocess ────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	specs, err := ToolSpecs(app)
@@ -245,22 +216,17 @@ broker:
 	}
 	defer sup.Stop()
 
-	// ── Run the broker on the pre-bound listeners ──────────────────────────────
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- b.ServeListeners(ctx, jailLn, adminLn, nil, nil, certSrc) }()
 
-	// Wait until the real tool's MCP backend is accepting connections. The "db"
-	// gateway route already exists (BuildBroker pre-loads the config-authoritative
-	// envelope, so JailHandler bound /mcp/db/ at serve time); we only need the
-	// tool process up + listening before the gateway proxies to it. The tool's
-	// /register (loopback admin) lands at roughly the same moment.
+	// The /mcp/db/ route exists from serve time (BuildBroker pre-loads the
+	// envelope); only the tool process must be listening.
 	waitBackend(t, backendAddr)
 
-	// ── Simulated worker: CA-issued cert + directly-minted delegated token ─────
 	wClient := workerClient(t, caInst, workerCert(t, caInst, "worker"))
 	tok := mintWorkerToken(t, kp, 0)
 
-	// ── (1) ALLOWED: read{table:A, filter:alice} → only alice's rows ───────────
+	// (1) Allowed: only alice's rows.
 	resp := mcpRead(t, wClient, jailURL, tok, map[string]any{"table": "A", "filter": "alice"})
 	allowedText := readBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
@@ -273,7 +239,7 @@ broker:
 		t.Fatalf("SECURITY: allowed read leaked a forbidden row: %s", allowedText)
 	}
 
-	// ── (2) DENIED forbidden table C: read{table:C} → denied, no rows ──────────
+	// (2) Forbidden table C: denied, no rows.
 	respC := mcpRead(t, wClient, jailURL, tok, map[string]any{"table": "C", "filter": "secret"})
 	bodyC := readBody(t, respC)
 	if respC.StatusCode == http.StatusOK {
@@ -283,7 +249,7 @@ broker:
 		t.Fatalf("SECURITY: table=C leaked a row: %s", bodyC)
 	}
 
-	// ── (3) DENIED dropped filter: read{table:A} (no filter) → denied, no rows ─
+	// (3) Dropped filter: denied, no rows.
 	respNF := mcpRead(t, wClient, jailURL, tok, map[string]any{"table": "A"})
 	bodyNF := readBody(t, respNF)
 	if respNF.StatusCode == http.StatusOK {
@@ -293,7 +259,7 @@ broker:
 		t.Fatalf("SECURITY: dropped-filter leaked alice: %s", bodyNF)
 	}
 
-	// ── (4) /bootstrap single-shot latch: first → ticket, second → refused ─────
+	// (4) /bootstrap is single-shot.
 	first, err := http.Post(adminURL+"/bootstrap", "application/json", nil)
 	if err != nil {
 		t.Fatalf("bootstrap #1: %v", err)
@@ -317,8 +283,7 @@ broker:
 		t.Fatalf("bootstrap #2: status=%d want 403 (already bootstrapped), body=%s", second.StatusCode, secondBody)
 	}
 
-	// ── (5) REVOCATION: bump-epoch → the worker's next call is denied ──────────
-	// Re-confirm the token works right now, then bump and re-exercise the SAME token.
+	// (5) Revocation: the same token works, then is denied after bump-epoch.
 	okAgain := mcpRead(t, wClient, jailURL, tok, map[string]any{"table": "A", "filter": "alice"})
 	_ = readBody(t, okAgain)
 	if okAgain.StatusCode != http.StatusOK {
@@ -341,10 +306,8 @@ broker:
 		t.Fatalf("SECURITY: epoch-revoked call leaked alice: %s", deniedBody)
 	}
 
-	// ── (6) PERSISTENCE: a SECOND broker from the SAME state still denies ──────
-	// bump-epoch persisted minEpoch=1 via SaveRevocation. Rebuild broker.New from
-	// the same state dir and prove the same epoch-0 token is denied with NO fresh
-	// bump — the floor survived the "restart".
+	// (6) Persistence: a second broker from the same state denies the
+	// epoch-0 token with no fresh bump.
 	rev2, err := LoadRevocation(st)
 	if err != nil {
 		t.Fatalf("reload revocation: %v", err)
@@ -360,12 +323,8 @@ broker:
 	cfg2.Persistence.PersistRevocation = func(rs broker.RevocationState) error { return SaveRevocation(st, rs) }
 	b2 := broker.New(cfg2)
 
-	// Stand up the second broker on its own listeners. We do NOT start a second
-	// tool: the persisted epoch floor denies the revoked token at the gateway's
-	// token check, BEFORE any proxy to a backend — so no backend is needed to
-	// prove the floor survived the restart. (The /mcp/db/ route still exists,
-	// because BuildBroker pre-loaded the config-authoritative "db" envelope into
-	// b2's registry.)
+	// No second tool: the epoch floor denies at the gateway's token check,
+	// before any proxy to a backend.
 	jailLn2, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -384,8 +343,6 @@ broker:
 	go func() { _ = b2.ServeListeners(ctx2, jailLn2, adminLn2, nil, nil, certSrc2) }()
 	waitEpoch(t, "http://"+adminLn2.Addr().String()) // broker #2 up
 
-	// The same epoch-0 token, against the freshly-restarted broker, is denied by
-	// the persisted minEpoch floor — no bump-epoch was issued to b2.
 	wClient2 := workerClient(t, caInst, workerCert(t, caInst, "worker"))
 	persisted := mcpRead(t, wClient2, jailURL2, tok, map[string]any{"table": "A", "filter": "alice"})
 	persistedBody := readBody(t, persisted)
@@ -400,8 +357,6 @@ broker:
 	}
 }
 
-// waitBackend blocks until addr accepts a TCP connection (the real lever-tool-db
-// MCP backend is up), or fails after a generous timeout.
 func waitBackend(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
@@ -409,7 +364,7 @@ func waitBackend(t *testing.T, addr string) {
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
-			// Brief settle so /register (loopback admin) has also landed.
+			// Brief settle so /register has also landed.
 			time.Sleep(100 * time.Millisecond)
 			return
 		}
@@ -418,8 +373,6 @@ func waitBackend(t *testing.T, addr string) {
 	t.Fatalf("timed out waiting for lever-tool-db backend %s to listen", addr)
 }
 
-// waitEpoch blocks until the broker's admin /epoch endpoint responds 200 (the
-// admin server is up), or fails after a timeout.
 func waitEpoch(t *testing.T, adminURL string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -436,7 +389,6 @@ func waitEpoch(t *testing.T, adminURL string) {
 	t.Fatalf("timed out waiting for broker admin %s/epoch", adminURL)
 }
 
-// readBody fully reads + closes a response body and returns it as a string.
 func readBody(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	defer resp.Body.Close()

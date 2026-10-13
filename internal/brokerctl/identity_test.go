@@ -9,9 +9,8 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// ConfigHash must be deterministic, sensitive to broker-relevant config
-// (tools, worker specs), and INSENSITIVE to config the broker does not bake
-// in at start (a manager-image change must not bounce the broker).
+// ConfigHash is deterministic, sensitive to broker-relevant config, and
+// insensitive to config the broker does not bake in at start.
 func TestConfigHash(t *testing.T) {
 	mk := func() *config.App {
 		return &config.App{
@@ -67,9 +66,8 @@ func TestConfigHash(t *testing.T) {
 	}
 }
 
-// A config that sets none of the claude keys hashes exactly as on 673beaa
-// (v0.33.1, before they existed), so upgrading lever does not restart the
-// broker for them. The golden value was computed on that commit.
+// A config that sets none of the claude keys keeps a golden hash, so
+// upgrading lever does not restart the broker for them.
 func TestConfigHashUnchangedWithoutClaudeKeys(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: "/tmp/tree",
@@ -116,8 +114,8 @@ func TestConfigHashFollowsTheRemoteLogins(t *testing.T) {
 	}
 }
 
-// Off, the broker's stamp is the one it had before agent_messages existed:
-// an upgrade alone never bounces the broker.
+// Off, agent_messages leaves the broker's stamp unchanged: an upgrade alone
+// never bounces the broker.
 func TestConfigHashUnchangedWhileAgentMessagesOff(t *testing.T) {
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Remote: config.Remote{Enabled: true,
 		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
@@ -177,7 +175,7 @@ func TestRemoteConfigHashFilesOnlyWhileOn(t *testing.T) {
 	}
 }
 
-// Off, the proxy's stamp is the one it had before remote.files existed.
+// Off, remote.files leaves the proxy's stamp unchanged.
 func TestRemoteConfigHashUnchangedWhileFilesOff(t *testing.T) {
 	app := remoteTestApp(t)
 	id := state.RemoteIdentity{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net", AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
@@ -188,9 +186,8 @@ func TestRemoteConfigHashUnchangedWhileFilesOff(t *testing.T) {
 	}
 }
 
-// The per-direction and per-login switches change both stamps only when
-// set to their non-default value: an instance with files on and neither
-// key keeps the stamps it had.
+// The per-direction and per-login switches change the stamps only when set
+// to their non-default value.
 func TestFilesSwitchesInTheStamps(t *testing.T) {
 	app := remoteTestApp(t)
 	app.Remote.Files.Enabled = true
@@ -296,9 +293,8 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 	}
 }
 
-// shared_folders and manager.read_only feed the broker's worker specs,
-// shared mounts and guard plan, so changing either must restart it; an
-// instance that sets neither keeps the hash it had (the golden above).
+// shared_folders and manager.read_only must restart the broker when
+// changed; an instance that sets neither keeps the golden hash.
 func TestConfigHashCoversSharedFoldersAndReadOnly(t *testing.T) {
 	mk := func() *config.App {
 		return &config.App{
@@ -333,7 +329,7 @@ func TestConfigHashCoversSharedFoldersAndReadOnly(t *testing.T) {
 		t.Fatal("changing a read_only entry must change the hash")
 	}
 
-	// Neither set: the hash is the one from before either was hashed.
+	// Neither set: the golden hash.
 	plain := mk()
 	plain.SharedFolders = nil
 	plain.Manager.ReadOnly = []string{} // empty, not nil: still omitted

@@ -27,21 +27,19 @@ import (
 )
 
 // ServeEnv is what `lever apply` hands the detached `broker serve` child
-// through the environment (see internal/cli/apply.go detachedSelfCmd).
-// Without it (a manual `lever broker serve` with no prior apply) the
-// worker-dispatch runtime stays unset and the server cert carries no IP SAN.
+// through the environment (detachedSelfCmd). Without it (a manual `lever
+// broker serve`) the worker-dispatch runtime stays unset and the server cert
+// carries no IP SAN.
 type ServeEnv struct {
-	// JailUser and JailUID are the resolved run-user inside the jail
-	// ($LEVER_JAIL_USER / $LEVER_JAIL_UID); both must be set for the broker
-	// to build its host-side worker-dispatch runtime.
+	// JailUser and JailUID are the jail's run user; both must be set for the
+	// broker to build its worker-dispatch runtime.
 	JailUser, JailUID string
-	// HostAliasIP is the jail's resolved host-alias IP ($LEVER_HOST_ALIAS_IP),
-	// added to the server cert as an IP SAN and used as the broker URL host
-	// agents dial under closed-internet egress.
+	// HostAliasIP is the jail's resolved host-alias IP, added to the server
+	// cert as an IP SAN and used as the broker URL host under closed-internet
+	// egress.
 	HostAliasIP string
 }
 
-// ServeEnvFromOS reads ServeEnv from the process environment.
 func ServeEnvFromOS() ServeEnv {
 	return ServeEnv{
 		JailUser:    os.Getenv("LEVER_JAIL_USER"),
@@ -50,23 +48,15 @@ func ServeEnvFromOS() ServeEnv {
 	}
 }
 
-// machineName is the jail's machine name for app.
 func machineName(app *config.App) string { return "lever-" + app.Name }
 
-// HostScionClient builds the host-side scion client used by every operator-side
-// verb (apply's start-manager, stop's suspend, attach, msg send, worker purge,
-// and the broker's own worker-dispatch runtime). It threads the loopback hub
-// endpoint (DefaultHubEndpoint is load-bearing: an empty HubEndpoint would omit
-// SCION_HUB_ENDPOINT and defer to the scion binary's default) and a lazy
-// HubTokenSource that reads the controller PAT from state at call time — so a
-// PAT minted mid-apply is picked up live (see scion.Options.HubTokenSource).
-//
-// agentRole is the instance's configured scion.agent_role; empty omits the
-// --role flag (see config.ScionConfig.AgentRole). It is threaded in rather than
-// read from config here so package scion stays a thin, config-free wrapper.
-// workerLiveSettle is DispatchConfig.LiveSettle in production (see there).
+// workerLiveSettle is DispatchConfig.LiveSettle in production.
 const workerLiveSettle = 10 * time.Second
 
+// HostScionClient builds the host-side scion client every operator-side verb
+// uses. DefaultHubEndpoint is load-bearing: an empty HubEndpoint would defer
+// to the scion binary's default. The controller PAT is read at call time, so
+// a PAT minted mid-apply is picked up. An empty agentRole omits --role.
 func HostScionClient(jr proc.Runner, st state.State, agentRole string) *scion.Client {
 	return scion.New(jr, scion.Options{
 		HubEndpoint:     scion.DefaultHubEndpoint,
@@ -76,12 +66,10 @@ func HostScionClient(jr proc.Runner, st state.State, agentRole string) *scion.Cl
 	})
 }
 
-// StateLogAppender returns a sink that appends one record per line to the
-// state directory's broker.log, opening and closing the file for each call
-// (O_APPEND keeps a record whole beside the broker's own writes). It is how a
-// scion line lever hides from the operator's console (the settings-keys
-// warning, lever#169) stays in the log. A failure to open the file (no state
-// directory yet) drops the line: it is only a record.
+// StateLogAppender returns a sink that appends one line per call to the
+// state directory's broker.log (O_APPEND keeps a record whole beside the
+// broker's own writes). It keeps scion lines lever hides from the console in
+// the log. A failure to open the file drops the line: it is only a record.
 func StateLogAppender(st state.State) func(line string) {
 	return func(line string) {
 		f, err := os.OpenFile(st.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -94,28 +82,23 @@ func StateLogAppender(st state.State) func(line string) {
 	}
 }
 
-// controllerPAT is a lazy reader of the controller PAT in st, so a PAT minted
-// mid-apply is picked up live; a read failure reads as "no token".
+// controllerPAT reads the PAT at call time, so a PAT minted mid-apply is
+// picked up; a read failure reads as "no token".
 func controllerPAT(st state.State) func() string {
 	return func() string { t, _ := st.LoadControllerPAT(); return t }
 }
 
-// Serve runs the host-side broker for app until ctx is cancelled: ensure keys +
-// revocation state, build the broker, pre-bind both loopback listeners (learning
-// OS-assigned ports), issue the server cert, supervise the first-party tools, and
-// serve. The supervisor is torn down on shutdown. version is this binary's
-// version string, reported by /epoch alongside ConfigHash(app) so apply's
-// broker-reuse shortcut can detect a stale broker (#19). env is what apply
-// passed through the environment (ServeEnvFromOS).
+// Serve runs the host-side broker for app until ctx is cancelled. version is
+// reported by /epoch alongside ConfigHash(app) so apply can detect a stale
+// broker. env is what apply passed through the environment.
 func Serve(ctx context.Context, app *config.App, st state.State, version string, env ServeEnv) error {
 	kp, caInst, err := EnsureKeys(st)
 	if err != nil {
 		return err
 	}
 
-	// app.Backend was validated selectable at config.Load, so this cannot pick a
-	// planned backend; routing through the registry keeps the mount dest coming
-	// from the SELECTED backend rather than a hardwired one.
+	// Routing through the registry keeps the mount dest coming from the
+	// selected backend.
 	be, err := registry.Select(app.Backend, proc.RealRunner{}, machineName(app))
 	if err != nil {
 		return err
@@ -129,10 +112,8 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 
-	// Persist the broker's audit decisions (provision/enrol/request/revoke …) to
-	// the state-dir log. Without this the broker defaults to a discard logger, so
-	// every allow/deny — the first thing you need when a worker can't enrol — is
-	// lost. Opened before broker.New so cfg.Log is set; reused by the supervisor.
+	// The broker's audit decisions go to the state-dir log; without it the
+	// broker discards them. Reused by the supervisor.
 	logf, err := os.OpenFile(st.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -141,8 +122,8 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	cfg.Log = logging.New(logf, "broker")
 
 	// Per-boot broker-to-tool shared secret: the gateway presents it to every
-	// first-party tool, the supervisor hands it to each tool it spawns, and a
-	// tool refuses any request without it (a direct dial past the broker).
+	// first-party tool, and a tool refuses any request without it (a direct
+	// dial past the broker).
 	toolSecret, err := NewToolSecret()
 	if err != nil {
 		return err
@@ -155,10 +136,9 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	if err != nil {
 		return err
 	}
-	// Own the listeners until ServeListeners takes over: any early return below
-	// (pid file, cert source, supervisor) must not leak a bound port. Once we
-	// hand off to ServeListeners the flag flips — it closes all three on its own
-	// fail-closed paths, and a double-close would be benign anyway (ErrClosed).
+	// Own the listeners until ServeListeners takes over: an early return below
+	// must not leak a bound port. ServeListeners closes them on its own
+	// fail-closed paths.
 	served := false
 	defer func() {
 		if !served {
@@ -167,26 +147,18 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	}()
 	adminURL := "http://" + adminLn.Addr().String()
 
-	// The serve process owns its pid file: written now that both listeners are
-	// bound (a pid on disk ⇒ a broker actually serving, not a failed-bind ghost),
-	// removed when we stop. This also makes a manual `lever broker serve`
-	// doctor-visible, which a parent-written pid never was.
+	// Written once both listeners are bound, so a pid on disk means a broker
+	// actually serving; removed when we stop.
 	if err := daemon.WritePIDFile(st.PID()); err != nil {
 		return err
 	}
 	defer daemon.RemovePIDFile(st.PID())
 
-	// Broker server cert: a self-rotating SOURCE, not a one-shot mint — leaf
-	// certs live certTTL (24h), and a broker that outlives its serving cert
-	// fails every gateway handshake, including the agents' own /renew calls,
-	// so the whole fleet's certs decay behind it. SANs: always the selected
-	// backend's host alias (be.HostToolAlias(), e.g. host.orb.internal) as DNS;
-	// additionally the jail's resolved host-alias IP (passed by `lever apply`
-	// via $LEVER_HOST_ALIAS_IP) so agents under closed-internet egress can dial
-	// the broker by IP — DNS/53 is dropped in that posture, so they cannot
-	// resolve the hostname and instead connect to the already-allowlisted alias
-	// IP, which TLS validates against this IP SAN. Absent (e.g. a direct
-	// `lever broker serve`), fall back to the hostname-only cert.
+	// A self-rotating serving cert: a broker that outlives a one-shot cert
+	// fails every gateway handshake, including agents' /renew, and the fleet's
+	// certs decay behind it. SANs: the backend's host alias as DNS, plus the
+	// jail's host-alias IP when apply passed it, since under closed-internet
+	// egress DNS is dropped and agents dial the allowlisted IP.
 	serverName := be.HostToolAlias()
 	certSrc, err := caInst.NewServerCertSource(serverName, []string{serverName}, []string{env.HostAliasIP})
 	if err != nil {
@@ -199,9 +171,9 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	}
 	sup := NewSupervisor(specs, adminURL, st.ToolLogDir(), toolSecret)
 	// A tool whose program sits in the tree under manager.read_only starts
-	// only once the running manager holds those mounts. Without the jail
-	// run-user (a manual `broker serve`) there is no way to look, and such
-	// a tool stays down.
+	// only once the running manager holds those mounts. Without the jail run
+	// user (a manual `broker serve`) there is no way to look, and it stays
+	// down.
 	if env.JailUser != "" && env.JailUID != "" {
 		jr, err := registry.JailRunner(app.Backend, proc.RealRunner{}, machineName(app), env.JailUser, env.JailUID)
 		if err != nil {
@@ -218,14 +190,10 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, opLn, certSrc)
 }
 
-// decorateConfig fills the host-side groups of a broker.Config that BuildBroker
-// leaves unset — Persistence (state-dir revocation/directive state and their
-// write-through closures), Directives (the operator-directive channel, when
-// enabled), Dispatch (the worker-dispatch runtime, worker specs, instance
-// project and URLs) — plus the /epoch Version, ConfigHash and InstanceID. It is the exact
-// wiring Serve applies between BuildBroker and broker.New;
-// single_project_dispatch_test drives this same function so the two can never
-// drift.
+// decorateConfig fills the host-side groups of a broker.Config that
+// BuildBroker leaves unset (Persistence, Directives, Dispatch) plus the
+// /epoch Version, ConfigHash and InstanceID. Serve and
+// single_project_dispatch_test both use it so the wiring cannot drift.
 func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be backend.Backend, version string, env ServeEnv) error {
 	pe, err := persistenceConfig(st)
 	if err != nil {
@@ -245,26 +213,22 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 			ExpiryMax:  app.EffectiveDirectiveExpiryMax(),
 		}
 	}
-	// The host records agents verify their messages against: the chat
-	// ledger (web posts, only with verified chat on) and the sent ledger
-	// (lever's own sends), plus the record of which were verified. None of
-	// them is kept inside the tree, where an agent could write it.
+	// The records agents verify messages against (chat ledger, sent ledger,
+	// verified record) are never kept inside the tree, where an agent could
+	// write them.
 	cfg.Chat = broker.ChatConfig{Configured: ChatConfigured(app), LedgerPath: ChatLedgerPath(app, st), WebSenders: WebSenders(app)}
 	if !StateInsideTree(app, st) {
 		cfg.Chat.UsedPath = st.ChatVerified()
 		cfg.Chat.SentLedgerDir = st.SentLedger()
 	}
-	// remote.agent_messages: the contacts each agent may message, the
-	// limits, and the agent ledger (off inside the tree, like the others).
 	cfg.AgentMessages = AgentMessages(app, st)
-	// remote.files: the file exchange (share_file and its ledger).
 	cfg.Files = Files(app, st)
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
-	// The instance id (lever#181), made here when apply did not make it
-	// first (a `lever broker serve` run by hand). Made before any port is
-	// bound, so no broker of this instance ever answers without it.
+	// Made here when apply did not make it first (a manual `lever broker
+	// serve`), before any port is bound, so no broker of this instance ever
+	// answers without it.
 	id, err := st.EnsureInstanceID()
 	if err != nil {
 		return err
@@ -273,8 +237,6 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	return nil
 }
 
-// persistenceConfig loads the persisted revocation + directive state from st
-// and wires their write-through closures.
 func persistenceConfig(st state.State) (broker.PersistenceConfig, error) {
 	rev, err := LoadRevocation(st)
 	if err != nil {
@@ -292,38 +254,30 @@ func persistenceConfig(st state.State) (broker.PersistenceConfig, error) {
 	}, nil
 }
 
-// dispatchConfig builds the host-side worker-dispatch group: the worker specs
-// and instance project from the selected backend's mount dest, the scion
-// runtime + hub lookups when apply passed the jail run-user through env, and
-// the CA/URL every staged bootstrap carries.
 func dispatchConfig(app *config.App, st state.State, be backend.Backend, env ServeEnv) (broker.DispatchConfig, error) {
 	jailMount := be.MountDest()
 	d := broker.DispatchConfig{
 		Workers:         WorkerSpecs(app, jailMount, env.JailUID),
 		InstanceProject: jailMount,
 		WorkerToWorker:  app.WorkerToWorkerMessaging(),
-		// Natural-lapse auto-re-enrol (#22): mode from config; the manager's
-		// bootstrap.json lives at <tree>/.lever (mint-manager-bootstrap stages it
-		// there; a worker's goes to the guest through Tickets, see below).
+		// The manager's bootstrap.json lives at <tree>/.lever; a worker's goes
+		// to the guest through Tickets.
 		AutoReenrol:         string(app.EffectiveAutoReenrol()),
 		ManagerBootstrapDir: filepath.Join(app.Tree, ".lever"),
-		// Confinement anchor for every bootstrap.json the broker stages (see
-		// broker.DispatchConfig.Tree): the mount point, which no agent can replace.
+		// Confinement anchor for every staged bootstrap.json: the mount point,
+		// which no agent can replace.
 		Tree: app.Tree,
-		// manager.read_only: worker workspaces may not be created through a
-		// symlink, nor over a protected directory (see the field doc).
-		// shared_folders count too: a worker workspace over one would write
-		// it whatever its writers list says.
+		// Worker workspaces may not be created through a symlink or over a
+		// protected directory; shared_folders count too, or a worker workspace
+		// over one would write it whatever its writers list says.
 		ReadOnlyDirs: app.ProtectedDirs(),
-		// A dispatched worker must hold live for this long before the manager
-		// hears "running" (lever#31): scion reports the record running before
-		// the harness runs a line, and every observed harness death landed
-		// within three seconds of that. Same value as apply's manager gate.
-		LiveSettle: workerLiveSettle,
-		// broker.max_running_workers (0 = no cap).
+		// scion reports the record running before the harness runs a line, and
+		// every observed harness death landed within three seconds of that.
+		// Same value as apply's manager gate.
+		LiveSettle:        workerLiveSettle,
 		MaxRunningWorkers: app.Broker.MaxRunningWorkers,
-		// Agents under closed-internet egress dial the host-alias IP; otherwise
-		// the backend's host alias hostname (the server cert's DNS SAN).
+		// Closed-internet agents dial the host-alias IP; otherwise the alias
+		// hostname (the cert's DNS SAN).
 		BrokerURL: workerBrokerURL(cmp.Or(env.HostAliasIP, be.HostToolAlias()), app.EffectiveJailPort()),
 	}
 	if caPEM, err := os.ReadFile(st.CACert()); err == nil {
@@ -332,11 +286,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		slog.Warn("could not read the broker CA", "err", err)
 	}
 
-	// Worker dispatch runs host-side with operator identity (jail runner). apply
-	// passes the resolved run-user/uid via env (ServeEnv). Without the env
-	// (manual `broker serve` with no prior apply) Runtime stays nil; the worker
-	// handlers detect this via runtimeReady and return 502 — they do not panic.
-	// apply is the real path.
+	// Without the jail run user from apply (a manual `broker serve`) Runtime
+	// stays nil and the worker handlers return 502 (runtimeReady).
 	if env.JailUser == "" || env.JailUID == "" {
 		return d, nil
 	}
@@ -344,28 +295,23 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	if err != nil {
 		return broker.DispatchConfig{}, err
 	}
-	// HostScionClient lets the broker's own worker-dispatch scion client
-	// (host-side, operator identity) authenticate against the real,
-	// dev-auth-off hub with the controller PAT minted by `lever apply`'s
-	// bootstrap-token step (see internal/cli/apply.go's ensureControllerPAT).
+	// Authenticates against the dev-auth-off hub with the controller PAT
+	// apply mints.
 	sc := HostScionClient(jr, st, app.Scion.AgentRole)
 	d.Runtime = sc
-	// Worker enrolment tickets go to the guest runtime dir over the same jail
-	// runner, never into the tree the manager mounts (jail.StageWorkerTicket;
-	// the spec's TicketDir names the directory the worker container mounts).
+	// Worker tickets go to the guest runtime dir over the jail runner, never
+	// into the tree the manager mounts.
 	d.Tickets = jailTicketStager{jr}
-	// A recycle deletes the record and the ticket the way `lever worker
-	// purge` does (PurgeWorker), with the same client and runner.
+	// A recycle deletes the record and ticket like `lever worker purge`.
 	d.Purge = jailWorkerPurger{sc: sc, r: jr, project: jailMount}
 	d.ContainerRunning = func(ctx context.Context, worker string) (bool, error) {
 		return jail.ContainerRunning(ctx, jr, jail.ContainerName(filepath.Base(jailMount), worker))
 	}
 	// Expired agent hub tokens are read in each agent's container and reset
-	// with `scion reset-auth` under the controller PAT (broker tokenwatch.go).
+	// with `scion reset-auth` under the controller PAT.
 	d.HubTokens = hubTokenHealer{probe: jail.AgentProbe{R: jr}, sc: sc, project: jailMount}
 	// Worker resume meets the same pre-role record hazard as the manager's
-	// (see broker.DispatchConfig.VerifyAgentRole). The hub read rides the same
-	// jail runner and controller PAT as every other lever hub call.
+	// (broker.DispatchConfig.VerifyAgentRole).
 	hc := &hubapi.Client{T: &hubapi.JailCurl{
 		Runner:  jr,
 		BaseURL: scion.DefaultHubEndpoint,
@@ -375,25 +321,22 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	d.VerifyAgentRole = func(ctx context.Context, agent string) error {
 		return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, projectKey, agent)
 	}
-	// /msg/list cuts the controller's fleet-wide notification feed down to
-	// one agent, and needs the hub's agent id to attribute events (see
-	// broker.DispatchConfig.ResolveAgentID).
+	// /msg/list cuts the controller's fleet-wide feed to one agent and needs
+	// the hub's agent id to attribute events.
 	d.ResolveAgentID = func(ctx context.Context, agentSlug string) (string, error) {
 		return hc.AgentID(ctx, projectKey, scion.DefaultHubEndpoint, agentSlug)
 	}
-	// Every message lever sends wears the controller PAT's hub user as its
+	// Every message lever sends wears the controller PAT's hub user as
 	// sender; /message/verify learns that label from the hub, the way the hub
-	// stamps it (the email, else the user id), rather than assuming the dev
-	// user's default address.
+	// stamps it, rather than assuming the dev user's address.
 	d.ResolveControllerSender = controllerSenderFrom(hc)
-	// shared_folders: no worker that mounts one starts or resumes while the
+	// No worker that mounts a shared folder starts or resumes while the
 	// running manager lacks the pins that keep it from swapping a folder.
 	d.SharedGuard = sharedGuard(app, jr, jailMount)
-	// shared_folders: a resume is refused when the worker's record holds a
-	// shared mount the config no longer grants (broker.refuseStaleShares).
-	// With a folder configured a failed read refuses the resume; with none,
-	// only a record that does hold a /shared mount is refused, and a failed
-	// read is ignored (an instance without folders never waits on the hub).
+	// A resume is refused when the worker's record holds a shared mount the
+	// config does not grant (broker.refuseStaleShares). With a folder
+	// configured a failed read refuses the resume; with none, only a record
+	// holding a /shared mount is refused and a failed read is ignored.
 	readVolumes := func(ctx context.Context, agent string) ([]scion.VolumeMount, error) {
 		agents, err := hc.Agents(ctx, projectKey, scion.DefaultHubEndpoint)
 		if err != nil {
@@ -411,8 +354,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		}
 		return nil, fmt.Errorf("no hub record for worker %q", agent)
 	}
-	// The re-enrol bounce of the manager is a resume: the checks apply
-	// runs around its own (lever#158), with the same client and runner.
+	// The manager's re-enrol bounce is a resume: the checks apply runs
+	// around its own, with the same client and runner.
 	d.ManagerResumeGuard = managerResumeGuard(app, apply.Deps{
 		Scion: sc,
 		Log:   daemon.Warnf,
@@ -423,7 +366,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 			return jail.ContainerLiveMounts(ctx, jr, ref, want)
 		},
 		// The record's mounts when the manager has no container, for the
-		// gone-directory check (as apply reads them).
+		// gone-directory check.
 		RecordVolumes: func(ctx context.Context, _, agent string) ([]jail.Mount, error) {
 			vols, err := readVolumes(ctx, agent)
 			if err != nil {
@@ -444,9 +387,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	return d, nil
 }
 
-// controllerSenderFrom resolves the envelope sender of the controller PAT's
-// hub user from auth/me: "user:" + the email, else "user:" + the user id,
-// the way scion stamps a user's sends (handlers_agent_messaging.go).
+// controllerSenderFrom resolves the controller PAT's hub user from auth/me as
+// scion stamps a user's sends: "user:" + the email, else "user:" + the user
+// id.
 func controllerSenderFrom(hc *hubapi.Client) func(ctx context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
 		u, err := hc.Me(ctx)
@@ -461,23 +404,18 @@ func controllerSenderFrom(hc *hubapi.Client) func(ctx context.Context) (string, 
 }
 
 // bindListeners pre-binds the broker's loopback listeners so Serve learns the
-// OS-assigned ports before serving: the jail-facing TCP listener, the admin TCP
-// listener, the directive UDS (only when operator directives are enabled) and
-// the operator note UDS (only when the state directory is outside the tree).
-// Both sockets are 0600, gated by filesystem permissions rather than network
-// origin, and a stale socket from an unclean shutdown is removed first. dirLn
-// or opLn is nil when its channel is off — ServeListeners treats nil as "no
-// channel".
+// OS-assigned ports: the jail TCP listener, the admin TCP listener, the
+// directive UDS (when directives are enabled) and the operator note UDS
+// (when the state directory is outside the tree). Both sockets are 0600,
+// gated by filesystem permissions rather than network origin. dirLn or opLn
+// is nil when its channel is off.
 //
 // The operator note socket stays unbound when the state directory is inside
-// the tree: agents mount the tree, and on a backend where a socket in a shared
-// mount is connectable from a container, the manager could post notes that
-// record as the operator's. `lever msg send` then reports that the broker has
-// no operator socket. An operator socket that cannot be bound (a state path too
-// long for a socket) is reported and skipped, never fatal: nothing else
-// depends on it, and doctor fails its row. On any other bind/chmod failure
-// every already-bound listener is closed so no port leaks, and nil listeners
-// are returned with the error.
+// the tree: agents mount the tree, and where a socket in a shared mount is
+// connectable from a container, the manager could post notes recorded as the
+// operator's. An operator socket that cannot be bound (path too long) is
+// reported and skipped. On any other failure every bound listener is closed
+// so no port leaks.
 func bindListeners(app *config.App, st state.State) (jailLn, adminLn, dirLn, opLn net.Listener, err error) {
 	jailLn, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", app.EffectiveJailPort()))
 	if err != nil {
@@ -508,11 +446,9 @@ func bindListeners(app *config.App, st state.State) (jailLn, adminLn, dirLn, opL
 }
 
 // maxSocketPath is the longest UNIX socket path every host platform binds
-// (macOS's sun_path holds 104 bytes with the terminating NUL; Linux's 108).
+// (macOS's sun_path holds 104 bytes with the NUL; Linux's 108).
 const maxSocketPath = 103
 
-// bindSocket binds a UNIX socket at sock with mode 0600, removing a stale
-// one first.
 func bindSocket(sock string) (net.Listener, error) {
 	if len(sock) > maxSocketPath {
 		return nil, fmt.Errorf("%s is %d bytes, longer than a UNIX socket path may be (%d); move the state directory to a shorter path",
@@ -530,17 +466,15 @@ func bindSocket(sock string) (net.Listener, error) {
 	return ul, nil
 }
 
-// jailTicketStager is broker.TicketStager over the jail runner.
 type jailTicketStager struct{ r proc.Runner }
 
 func (s jailTicketStager) StageWorkerTicket(ctx context.Context, worker string, payload []byte) error {
 	return jail.StageWorkerTicket(ctx, s.r, worker, payload)
 }
 
-// hubTokenHealer is broker.HubTokenHealer over the jail: the expiry is read
-// in the agent's container by scion's container name, and the reset is the
-// host scion client's `reset-auth`, which mints a token of the agent's own
-// stored role.
+// hubTokenHealer reads the expiry in the agent's container and resets with
+// the host scion client's `reset-auth`, which mints a token of the agent's
+// own stored role.
 type hubTokenHealer struct {
 	probe   jail.AgentProbe
 	sc      *scion.Client
@@ -559,10 +493,10 @@ func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
 	return h.sc.ResetAuth(ctx, agent, h.project)
 }
 
-// managerResumeGuard is broker.DispatchConfig.ManagerResumeGuard: the
-// checks before the resume (apply.BeginManagerResume), and after it the
-// read-back of the tree mounts, again until the container runs (there is
-// no liveness gate on the bounce), suspending the manager on a mismatch.
+// managerResumeGuard runs the checks before the resume
+// (apply.BeginManagerResume) and afterwards reads back the tree mounts until
+// the container runs (the bounce has no liveness gate), suspending the
+// manager on a mismatch.
 func managerResumeGuard(app *config.App, d apply.Deps, jailMount string) func(context.Context) (broker.ManagerResumeCheck, error) {
 	return func(ctx context.Context) (broker.ManagerResumeCheck, error) {
 		g, err := apply.BeginManagerResume(ctx, d, app, jailMount, "broker")
@@ -573,7 +507,6 @@ func managerResumeGuard(app *config.App, d apply.Deps, jailMount string) func(co
 	}
 }
 
-// resumeCheck is broker.ManagerResumeCheck over an apply.ManagerResume.
 type resumeCheck struct{ g *apply.ManagerResume }
 
 func (c resumeCheck) After(ctx context.Context) error {

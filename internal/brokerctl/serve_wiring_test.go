@@ -35,14 +35,11 @@ func wiringApp(tree, signers string) *config.App {
 	}
 }
 
-// decorateForTest builds a cfg and decorates it against a real orbstack backend
-// with a deterministic environment (no jail-runner, no host-alias override), so
-// the assertions see only the config-derived wiring.
+// decorateForTest decorates against a real orbstack backend with no jail
+// runner or host-alias override, so assertions see only config-derived
+// wiring.
 func decorateForTest(t *testing.T, app *config.App, version string) (broker.Config, state.State) {
 	t.Helper()
-	// Deterministic env: unset the jail-runner and host-alias hooks so
-	// decorateConfig takes the no-Runtime path and BrokerURL falls back to the
-	// backend's host alias.
 
 	kp, err := token.Generate()
 	if err != nil {
@@ -75,8 +72,8 @@ func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
 	app := wiringApp(tree, "") // directives OFF
 	cfg, st := decorateForTest(t, app, "v1.2.3")
 
-	// The instance id (lever#181) is made before the broker binds, and is
-	// the one the state dir records.
+	// The instance id is made before the broker binds, and is the one the
+	// state dir records.
 	if id, err := st.ReadInstanceID(); err != nil || cfg.InstanceID != id || !state.ValidInstanceID(id) {
 		t.Errorf("InstanceID = %q, state dir's = %q (%v)", cfg.InstanceID, id, err)
 	}
@@ -86,7 +83,7 @@ func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
 	if len(cfg.Dispatch.Workers) != 2 {
 		t.Fatalf("Workers = %d, want 2 (WorkerSpecs of the two config workers)", len(cfg.Dispatch.Workers))
 	}
-	// InstanceProject + the mount are the SELECTED backend's dest, not hardwired.
+	// InstanceProject is the selected backend's dest, not hardwired.
 	if cfg.Dispatch.InstanceProject != "/lever" {
 		t.Errorf("InstanceProject = %q, want %q (backend MountDest)", cfg.Dispatch.InstanceProject, "/lever")
 	}
@@ -110,8 +107,6 @@ func TestDecorateConfigWiresConfigDerivedFields(t *testing.T) {
 	if want := filepath.Join(tree, ".lever"); cfg.Dispatch.ManagerBootstrapDir != want {
 		t.Errorf("ManagerBootstrapDir = %q, want %q", cfg.Dispatch.ManagerBootstrapDir, want)
 	}
-	// Persist closures are the state's writers — non-nil so the broker can
-	// write revocation/directive state through on mutation.
 	if cfg.Persistence.PersistRevocation == nil {
 		t.Error("PersistRevocation is nil, want state.SaveRevocation")
 	}
@@ -151,9 +146,8 @@ func TestDecorateConfigWiresDirectiveFieldsWhenEnabled(t *testing.T) {
 	}
 }
 
-// freePort grabs an OS-assigned loopback TCP port then releases it, so a
-// subsequent bind of that number almost always succeeds without colliding with
-// the fixed default broker ports.
+// freePort grabs and releases a loopback port, so a later bind of that number
+// almost always succeeds without colliding with the default broker ports.
 func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -170,8 +164,8 @@ func TestBindListenersBindsAllThreeAndChmodsSocket(t *testing.T) {
 	app.Broker.JailPort = freePort(t)
 	app.Broker.AdminPort = freePort(t)
 
-	// os.MkdirTemp (not t.TempDir): the deep t.TempDir path + ".lever-state" +
-	// "directive.sock" overruns macOS's ~104-byte unix socket path limit.
+	// Not t.TempDir: its deep path overruns macOS's ~104-byte unix socket
+	// path limit.
 	dir, err := os.MkdirTemp("", "b")
 	if err != nil {
 		t.Fatalf("mkdir temp: %v", err)
@@ -247,8 +241,7 @@ func TestBindListenersClosesJailWhenAdminBindFails(t *testing.T) {
 	if jailLn != nil || adminLn != nil || dirLn != nil || opLn != nil {
 		t.Fatalf("failure returned non-nil listeners: (%v,%v,%v,%v)", jailLn, adminLn, dirLn, opLn)
 	}
-	// The jail listener must have been closed on the failure path — proven by
-	// the port being re-bindable now.
+	// The jail listener was closed on the failure path: the port re-binds.
 	reln, rerr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if rerr != nil {
 		t.Fatalf("jail port %d still bound after failure — jail listener leaked: %v", port, rerr)

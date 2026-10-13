@@ -399,7 +399,8 @@ const IDEmailDomain = "id.lever.local"
 // identityFor maps a verified login to hub claims. scion keys users on email,
 // so each operator gets its own hub user. A login without "@" becomes
 // <id>@IDEmailDomain, an undeliverable domain that cannot be mistaken for a
-// real address.
+// real address; config.validRemoteLogin limits such ids to plain local-part
+// characters, so the result cannot spell another address.
 func identityFor(login string) Identity {
 	if login == "" {
 		return Identity{Subject: unnamedOperator, Email: unnamedOperatorEmail, Name: "Lever operator"}

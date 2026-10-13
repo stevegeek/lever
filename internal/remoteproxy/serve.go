@@ -23,7 +23,9 @@ type ServeConfig struct {
 	// AllowNonLoopback.
 	Bind string
 	// AllowNonLoopback acknowledges a non-loopback Bind, so an address alone
-	// cannot widen the listener. The provider's listener is always loopback.
+	// cannot widen the listener. Callers pass only an address the jail cannot
+	// reach (config.validateRemoteBind): a jail that reaches the listener can
+	// forge the identity header. The provider's listener is always loopback.
 	AllowNonLoopback bool
 	// Handler is NewHandler's result; its Audit must be wired before Serve.
 	Handler http.Handler

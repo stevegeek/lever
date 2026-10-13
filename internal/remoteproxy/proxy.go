@@ -17,8 +17,9 @@
 // front, which sets the identity header (Config.IdentityHeader) and
 // OVERWRITES any client value. The header is stripped before forwarding, but
 // the AllowedUsers check trusts it; a directly reachable listener (LAN,
-// port-forward, DNS rebind) lets any caller forge it (see
-// config.validateRemoteBind).
+// port-forward, DNS rebind) lets any caller forge it. A non-loopback bind
+// must be on an address the jail cannot reach, behind the operator's firewall
+// (config.validateRemoteBind).
 package remoteproxy
 
 import (
@@ -196,8 +197,10 @@ func mintsCredential(method, p string) bool {
 //   - /api/v1/system/*: no RBAC, and assertLoopback passes because the proxy
 //     reaches the hub from loopback in the jail. Only GET status is
 //     forwarded; unknown routes fail closed.
-//   - Project creation (and register, clone, the /groves aliases): a
-//     first-time user holds project.create until the next `lever apply`.
+//   - Project creation (and register, clone, the /groves aliases): each makes
+//     the caller the new project's owner, and a first-time user holds
+//     project.create until the next `lever apply`, so these are refused
+//     whatever the hub's state.
 //   - /auth/callback/*: only the login driver needs it, and it dials the hub
 //     directly.
 //
@@ -825,6 +828,7 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 		g.denyNoSession(w, state.line)
 		return
 	}
+	// retryable stays false: one retry, then the hub's answer stands.
 	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM, rewrite: state.rewrite}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }

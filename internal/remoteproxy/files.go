@@ -521,7 +521,10 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	// Any refusal after the copy into the tree removes it.
+	// Reserve, copy into in/<key>/ (no link, O_EXCL) outside the ledger lock,
+	// require the copy's hash and size to match the staged file, then record
+	// under the lock with the limits checked again. Any refusal after the copy
+	// removes it.
 	release, limitWord, err := s.reserve(led, agent, v.login, now, size)
 	if err != nil {
 		line.Error = err.Error()

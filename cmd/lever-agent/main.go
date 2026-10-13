@@ -10,7 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,16 +21,37 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/agent"
+	"github.com/stevegeek/lever/internal/logging"
 )
 
-func main() {
-	log.SetFlags(0)
-	log.SetPrefix("lever-agent: ")
-	if err := run(os.Args); err != nil {
-		log.Print(err)
-		os.Exit(1)
+func main() { os.Exit(realMain(os.Args, os.Stderr)) }
+
+// logVerbs run unattended: boot in scion's pre-start hook, the others as
+// sidecars or as Claude Code's MCP server. Nobody reads their stderr but the
+// container log, so it takes lever's log line shape. The other verbs answer
+// whoever ran them, in prose.
+var logVerbs = map[string]bool{"boot": true, "serve-capability": true, "renew": true, "gateway": true}
+
+// realMain runs argv and returns the exit code, writing diagnostics to stderr.
+func realMain(argv []string, stderr io.Writer) int {
+	if len(argv) > 1 && logVerbs[argv[1]] {
+		l := logging.Install(stderr, "lever-agent").With("cmd", argv[1])
+		slog.SetDefault(l)
+		if err := run(argv); err != nil {
+			l.Error(err.Error())
+			return 1
+		}
+		return 0
 	}
+	if err := run(argv); err != nil {
+		fmt.Fprintf(stderr, "lever-agent: %v\n", err)
+		return 1
+	}
+	return 0
 }
+
+// warnf is boot's log: a WARN line in the process's log shape.
+func warnf(format string, args ...any) { slog.Warn(fmt.Sprintf(format, args...)) }
 
 // errNoIdentity means the id-dir holds no enrolled identity. Every verb that
 // needs one wraps it ("<verb>: no identity in <dir>").
@@ -130,11 +151,9 @@ func cmdBoot(ctx context.Context, args []string) error {
 		DiscoverTools:       !tools.set,
 		SettingsPath:        *settingsPath,
 		ManagedSettingsPath: *managedPath,
-		Log: func(format string, args ...any) {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
-		},
-		LLMAuth: *llmAuth,
-		MCPAdd:  newClaudeMCP().Add,
+		Log:                 warnf,
+		LLMAuth:             *llmAuth,
+		MCPAdd:              newClaudeMCP().Add,
 	}
 	if *enrolOnly {
 		// Enrol + write identity only: skip the env overlay, the llm token and
@@ -356,7 +375,7 @@ func cmdRenew(ctx context.Context, args []string) error {
 	// Loop mode: renew once immediately, then on each ticker tick, until the
 	// signal-bound ctx is cancelled.
 	if err := renewOnce(ctx, opts); err != nil {
-		log.Print("renew: ", err)
+		slog.Warn("renewal failed; trying again at the next interval", "err", err, "interval", *interval)
 	}
 
 	ticker := time.NewTicker(*interval)
@@ -367,7 +386,7 @@ func cmdRenew(ctx context.Context, args []string) error {
 			return nil
 		case <-ticker.C:
 			if err := renewOnce(ctx, opts); err != nil {
-				log.Print("renew: ", err)
+				slog.Warn("renewal failed; trying again at the next interval", "err", err, "interval", *interval)
 			}
 		}
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 // LoadJSON reads a JSON-encoded state value from path; an absent file is the
-// zero value. `what` names the state in error messages (e.g. "revocation").
+// zero value. what names the state in error messages.
 func LoadJSON[T any](path, what string) (T, error) {
 	var v T
 	b, err := os.ReadFile(path)
@@ -26,8 +26,7 @@ func LoadJSON[T any](path, what string) (T, error) {
 	return v, nil
 }
 
-// SaveJSON persists a JSON-encoded state value (0600), atomically. `what`
-// names the state in error messages.
+// SaveJSON persists a JSON-encoded state value atomically, 0600.
 func SaveJSON[T any](path, what string, v T) error {
 	b, err := json.Marshal(v)
 	if err != nil {

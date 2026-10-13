@@ -29,8 +29,7 @@ func TestPATRecordRoundTrips(t *testing.T) {
 	if len(got.Requested) != 2 || got.Requested[0] != "agent:manage" || len(got.Granted) != 2 {
 		t.Errorf("scopes did not round-trip: %+v", got)
 	}
-	// Not a secret, but it names the token's id and lives beside a secret, so
-	// it gets the same mode as everything else in the state dir.
+	// It names the token's id and lives beside a secret: same mode.
 	fi, err := os.Stat(st.ControllerPATRecord())
 	if err != nil {
 		t.Fatal(err)
@@ -40,8 +39,8 @@ func TestPATRecordRoundTrips(t *testing.T) {
 	}
 }
 
-// A PAT minted by a lever older than the record is a token nobody can vouch
-// for: absent must be distinguishable from a record that says little.
+// A token without a record is one nobody can vouch for: absent must be
+// distinguishable from a record that says little.
 func TestPATRecordAbsentIsNotFound(t *testing.T) {
 	st := ForConfig(t.TempDir())
 	rec, found, err := st.LoadControllerPATRecord()

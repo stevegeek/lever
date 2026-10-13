@@ -73,9 +73,8 @@ func TestParseProcArgs2(t *testing.T) {
 	}
 }
 
-// A real process: ServeProcess recognises the argv of a lever daemon for
-// this state dir and nothing else; a pid that is gone is not one, nor is
-// this test process.
+// A real process: ServeProcess recognises a lever daemon's argv for this
+// state dir and nothing else.
 func TestServeProcessReadsARealProcess(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("argv is read on linux and darwin only")

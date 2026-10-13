@@ -8,9 +8,9 @@ import (
 	"strings"
 )
 
-// processArgs is pid's argv, from /proc. A process that is gone, a zombie
-// and a kernel thread (whose cmdline is empty) are errNotAProcess; any
-// other read failure is errNoArgs-like (Identify says Unknown).
+// processArgs reads /proc. A process that is gone, a zombie and a kernel
+// thread (empty cmdline) are errNotAProcess; any other read failure makes
+// Identify say Unknown.
 func processArgs(pid int) ([]string, error) {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if errors.Is(err, fs.ErrNotExist) {

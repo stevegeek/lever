@@ -1111,3 +1111,225 @@ func TestVerifyEndToEndOverMTLS(t *testing.T) {
 		t.Fatalf("note: %+v", got)
 	}
 }
+
+// renamableController is a controller resolver whose label the test can
+// change, with a clock the test advances; it counts hub calls.
+type renamableController struct {
+	label atomic.Value // string
+	err   atomic.Value // error wrapper; nil error when unset
+	calls atomic.Int32
+	now   atomic.Int64 // unix nanos
+}
+
+type resolveErr struct{ err error }
+
+func newRenamable(label string) *renamableController {
+	c := &renamableController{}
+	c.label.Store(label)
+	c.err.Store(resolveErr{})
+	c.now.Store(time.Now().UnixNano())
+	return c
+}
+
+func (c *renamableController) resolve(context.Context) (string, error) {
+	c.calls.Add(1)
+	if e := c.err.Load().(resolveErr).err; e != nil {
+		return "", e
+	}
+	return c.label.Load().(string), nil
+}
+
+func (c *renamableController) clock() time.Time        { return time.Unix(0, c.now.Load()) }
+func (c *renamableController) advance(d time.Duration) { c.now.Add(int64(d)) }
+
+func renamableBroker(t *testing.T, rc *renamableController, opts ...verifyOpt) *verifyFixture {
+	t.Helper()
+	opts = append([]verifyOpt{func(c *Config) { c.Dispatch.ResolveControllerSender = rc.resolve }}, opts...)
+	f := verifyBroker(t, []chatledger.Entry{ledgerEntry(chatManagerID, "go", "m1")}, opts...)
+	f.b.controller.nowFn = rc.clock
+	return f
+}
+
+const renamedSender = "user:lever-controller@lever.local"
+
+// TestVerifyReResolvesARenamedController: when the controller's hub email is
+// renamed under a running broker, a verify from an unknown user: label
+// re-resolves the controller once; a message wearing the new label then
+// verifies, and the old label is unknown from then on.
+func TestVerifyReResolvesARenamedController(t *testing.T) {
+	rc := newRenamable(ctlSender)
+	f := renamableBroker(t, rc)
+	o := f.send(t, "scratch", "agent:assistant", "before")
+	resp, raw := f.verify(t, "manager", envelope(t, o))
+	wantResult(t, "before the rename", resp, raw, wire.VerifyLever, "")
+
+	rc.label.Store(renamedSender)
+	rc.advance(controllerRefreshEvery)
+	o = f.send(t, "scratch", "agent:assistant", "after")
+	req := envelope(t, o)
+	req.From = renamedSender
+	resp, raw = f.verify(t, "manager", req)
+	wantResult(t, "new label", resp, raw, wire.VerifyLever, "")
+	if l, _ := f.b.controller.cached(); l != renamedSender {
+		t.Fatalf("cached label %q, want %q", l, renamedSender)
+	}
+	if n := rc.calls.Load(); n != 2 {
+		t.Fatalf("%d hub calls, want 2", n)
+	}
+
+	// The earlier label no longer selects the sent ledger.
+	o = f.send(t, "scratch", "agent:assistant", "third")
+	resp, raw = f.verify(t, "manager", envelope(t, o))
+	wantResult(t, "old label", resp, raw, wire.VerifyNone, reasonUnknownSender)
+}
+
+// TestVerifyReResolveIsRateLimited: unknown user: labels from any caller
+// cost at most one hub call per controllerRefreshEvery, and a failed or
+// unchanged re-resolution keeps the label.
+func TestVerifyReResolveIsRateLimited(t *testing.T) {
+	rc := newRenamable(ctlSender)
+	f := renamableBroker(t, rc)
+	unknown := wire.MessageVerifyRequest{Timestamp: chatTS, From: "user:someone@example.com"}
+	resp, raw := f.verify(t, "manager", unknown)
+	wantResult(t, "first", resp, raw, wire.VerifyNone, reasonUnknownSender)
+	if n := rc.calls.Load(); n != 1 {
+		t.Fatalf("a re-resolve right after the first resolution: %d hub calls", n)
+	}
+	rc.advance(controllerRefreshEvery)
+	for i := 0; i < 5; i++ {
+		for _, cn := range []string{"manager", "scratch"} {
+			resp, raw = f.verify(t, cn, unknown)
+			wantResult(t, "unknown", resp, raw, wire.VerifyNone, reasonUnknownSender)
+		}
+	}
+	if n := rc.calls.Load(); n != 2 {
+		t.Fatalf("%d hub calls inside one refresh period, want 2", n)
+	}
+
+	// A failed re-resolution spends the period and keeps the label.
+	rc.err.Store(resolveErr{errors.New("hub down")})
+	rc.advance(controllerRefreshEvery)
+	f.verify(t, "manager", unknown)
+	f.verify(t, "manager", unknown)
+	if n := rc.calls.Load(); n != 3 {
+		t.Fatalf("%d hub calls after a failed re-resolve, want 3", n)
+	}
+	if l, ok := f.b.controller.cached(); !ok || l != ctlSender {
+		t.Fatalf("label after a failed re-resolve: %q %v", l, ok)
+	}
+	o := f.send(t, "scratch", "agent:assistant", "still lever")
+	resp, raw = f.verify(t, "manager", envelope(t, o))
+	wantResult(t, "kept label", resp, raw, wire.VerifyLever, "")
+}
+
+// TestVerifyWebSenderNeverReResolves: the web branch reads only the chat
+// ledger and never asks the hub again, whatever the clock says.
+func TestVerifyWebSenderNeverReResolves(t *testing.T) {
+	rc := newRenamable(ctlSender)
+	f := renamableBroker(t, rc)
+	if _, err := f.b.controller.get(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rc.label.Store(renamedSender)
+	rc.advance(10 * controllerRefreshEvery)
+	for _, from := range []string{chatSender, contactSender} {
+		f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: from})
+	}
+	if n := rc.calls.Load(); n != 1 {
+		t.Fatalf("web verifies made %d hub calls, want 1", n)
+	}
+}
+
+// TestVerifyReResolvedLabelCollides: a re-resolved label that is also a web
+// sender answers neither partition, for this request and later ones.
+func TestVerifyReResolvedLabelCollides(t *testing.T) {
+	rc := newRenamable(ctlSender)
+	f := renamableBroker(t, rc)
+	if _, err := f.b.controller.get(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rc.label.Store(contactSender)
+	rc.advance(controllerRefreshEvery)
+	resp, raw := f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: "user:someone@example.com"})
+	wantResult(t, "refreshing request", resp, raw, wire.VerifyUnavailable, reasonSenderCollision)
+	for _, from := range []string{chatSender, contactSender, ctlSender} {
+		resp, raw = f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: from})
+		wantResult(t, from, resp, raw, wire.VerifyUnavailable, reasonSenderCollision)
+	}
+}
+
+// TestControllerRefreshCancelledKeepsTheSlot: a caller that gives up mid
+// re-resolution does not spend the shared period.
+func TestControllerRefreshCancelledKeepsTheSlot(t *testing.T) {
+	now := time.Now()
+	release := make(chan struct{})
+	var calls atomic.Int32
+	c := &controllerSender{nowFn: func() time.Time { return now }, label: ctlSender, resolvedAt: now.Add(-controllerRefreshEvery),
+		resolve: func(ctx context.Context) (string, error) {
+			if calls.Add(1) == 1 {
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+			}
+			return renamedSender, nil
+		}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if l, changed := c.refresh(ctx); changed || l != ctlSender {
+			t.Errorf("cancelled refresh: %q %v", l, changed)
+		}
+	}()
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	close(release)
+	if l, changed := c.refresh(context.Background()); !changed || l != renamedSender {
+		t.Fatalf("refresh after a cancelled one: %q %v", l, changed)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("%d hub calls, want 2", n)
+	}
+}
+
+// TestControllerRefreshIsShared: callers that arrive while a re-resolution
+// runs wait for it and see its label, without a second hub call.
+func TestControllerRefreshIsShared(t *testing.T) {
+	now := time.Now()
+	release := make(chan struct{})
+	var calls atomic.Int32
+	c := &controllerSender{nowFn: func() time.Time { return now }, label: ctlSender, resolvedAt: now.Add(-controllerRefreshEvery),
+		resolve: func(context.Context) (string, error) {
+			calls.Add(1)
+			<-release
+			return renamedSender, nil
+		}}
+	type got struct {
+		l       string
+		changed bool
+	}
+	out := make(chan got, 3)
+	for i := 0; i < 3; i++ {
+		go func() { l, ch := c.refresh(context.Background()); out <- got{l, ch} }()
+	}
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	for i := 0; i < 3; i++ {
+		// A caller scheduled after the call ended finds the new label held
+		// (changed false) inside the period: still no second call.
+		if g := <-out; g.l != renamedSender {
+			t.Fatalf("caller saw %q %v", g.l, g.changed)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d hub calls, want 1", n)
+	}
+}

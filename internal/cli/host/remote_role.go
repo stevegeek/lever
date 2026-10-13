@@ -222,6 +222,34 @@ func (h *hubIdentity) ensureRemoteUsers(ctx context.Context, rec *state.HubIdent
 	return nil
 }
 
+// suspendRemovedLogins suspends and unbinds every recorded login the config
+// no longer has (all of them with remote access off). It runs right after
+// lever-admin is asserted, before anything else hub-identity does, so a
+// failure later in the apply cannot leave a removed login active at the hub.
+func (h *hubIdentity) suspendRemovedLogins(ctx context.Context, rec *state.HubIdentity, defs []hubapi.RoleDefinition) error {
+	configured := map[string]bool{}
+	for _, u := range remoteUsersFor(h.app) {
+		configured[u.Email] = true
+	}
+	var roles []string
+	if rec.ProjectID != "" {
+		for _, name := range []string{remoteWebRoleName, contactRoleName} {
+			if r, ok := projectRoleNamed(defs, name); ok {
+				roles = append(roles, r.ID)
+			}
+		}
+	}
+	for email, id := range rec.Users {
+		if configured[email] || id == "" {
+			continue
+		}
+		if err := h.suspendRemoteUser(ctx, email, id, rec.ProjectID, roles...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // errLoginRefused marks a login lever will not bind.
 var errLoginRefused = errors.New("remote login refused")
 

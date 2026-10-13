@@ -51,6 +51,8 @@ type hiHub struct {
 	staleAfterRename int
 	// resolveSuspended lets /auth/me answer for a suspended row.
 	resolveSuspended bool
+	// openAccess admits any signed address, as a hub not in invite_only does.
+	openAccess bool
 	// keepRole lists users whose role a PATCH silently does not change.
 	keepRole map[string]bool
 	// down answers "METHOD /path" with the status, before any routing.
@@ -271,8 +273,13 @@ func (h *hiHub) resolve(email string) (*hiUser, int) {
 	}
 	u := h.byEmail(e)
 	if u == nil {
-		if e != hubauth.AdminEmail {
+		if e != hubauth.AdminEmail && !h.openAccess {
 			return nil, http.StatusForbidden
+		}
+		if e != hubauth.AdminEmail {
+			u = h.addUser("", e, "member", "active", h.now())
+			h.event("open signup %s", e)
+			return u, 0
 		}
 		u = h.addUser("", e, "admin", "active", h.now())
 		h.addBinding(hiSuperAdminRole, u.ID, hubapi.RoleScopeSystem, "", "system-reconcile")
@@ -869,6 +876,8 @@ func (e *hiEnv) seedMigrated(devEmail string, lifecycle bool) {
 	acts := controllerActions(lifecycle)
 	h.agents = []hiAgent{{Slug: "manager", Actions: acts}, {Slug: "worker", Actions: acts}}
 	e.sc.lifecycle = lifecycle
+	// scion hub link registered the project under the tree's marker ID.
+	e.jr.marker = "project-id: proj-1\nproject-slug: lever\n"
 	if err := e.st.SaveControllerPAT("scion_pat_old"); err != nil {
 		e.t.Fatal(err)
 	}
@@ -1089,19 +1098,27 @@ func TestHubIdentityMigrates(t *testing.T) {
 	}
 }
 
-func TestHubIdentityMigrationProbeFailureRestoresTheAdmin(t *testing.T) {
+// A probe that finds an authority missing fails the apply and leaves the
+// controller a member: re-promoting the PAT holder to admin through the API
+// would outlive scion's own reconcile.
+func TestHubIdentityMigrationProbeFailureKeepsTheControllerDemoted(t *testing.T) {
 	e := newHIEnv(t, hiRemoteApp(false))
 	e.seedMigrated("scion@localhost", false)
 	e.hub.agents[1].Actions = []string{"read", "start", "stop", "message", "delete"}
 
 	err := e.run()
-	if err == nil || !strings.Contains(err.Error(), "agent worker: attach") || !strings.Contains(err.Error(), "restored") {
-		t.Fatalf("run = %v, want the missing attach on worker and the restore", err)
+	if err == nil || !strings.Contains(err.Error(), "agent worker: attach") || !strings.Contains(err.Error(), "stays a member") {
+		t.Fatalf("run = %v, want the missing attach on worker and no rollback", err)
 	}
-	if dev := e.hub.user(devUserID); dev.Role != "admin" {
-		t.Fatalf("dev row role %q, want admin restored", dev.Role)
+	if dev := e.hub.user(devUserID); dev.Role != "member" {
+		t.Fatalf("dev row role %q, want it left a member", dev.Role)
 	}
-	hiWantOrder(t, e.hub, "patch "+devUserID+" role=member status=", "agents by "+devUserID, "patch "+devUserID+" role=admin status=")
+	if e.hub.at("patch "+devUserID+" role=admin status=") >= 0 {
+		t.Fatalf("the controller was re-promoted: %q", e.hub.events)
+	}
+	if rec := e.record(); !rec.ProbePending {
+		t.Fatalf("record = %+v, want the probe still owed", rec)
+	}
 }
 
 func TestHubIdentityRepairsADevUserRenamedToTheAdmin(t *testing.T) {
@@ -1392,7 +1409,7 @@ func TestHubIdentityControllerRowChecks(t *testing.T) {
 		e := newHIEnv(t, hiRemoteApp(false))
 		e.hub.addUser("", hubauth.ControllerEmail, "admin", "active", e.now)
 		rec := state.HubIdentity{}
-		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
+		if _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
 			!strings.Contains(err.Error(), "want an active member") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1402,7 +1419,7 @@ func TestHubIdentityControllerRowChecks(t *testing.T) {
 		e.hub.resolveSuspended = true
 		e.hub.addUser("", hubauth.ControllerEmail, "member", "suspended", e.now)
 		rec := state.HubIdentity{}
-		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
+		if _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
 			!strings.Contains(err.Error(), "want an active member") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1411,7 +1428,7 @@ func TestHubIdentityControllerRowChecks(t *testing.T) {
 		e := newHIEnv(t, hiRemoteApp(false))
 		e.hub.addUser("", hubauth.ControllerEmail, "member", "active", e.now)
 		rec := state.HubIdentity{ControllerID: "user-recorded"}
-		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
+		if _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
 			!strings.Contains(err.Error(), "not the recorded controller") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1429,13 +1446,29 @@ func TestHubIdentityControllerRowChecks(t *testing.T) {
 	})
 }
 
+// Another row at lever-controller's address cannot make lever sign for it:
+// with no mint due nothing is asserted as the controller (the controller is
+// found by its PAT, and the address is only warned about); with one due the
+// assertion resolves to the wrong row and the step stops.
 func TestHubIdentityMigratedControllerAddressTaken(t *testing.T) {
 	e := newHIEnv(t, hiRemoteApp(false))
 	e.seedMigrated("scion@localhost", false)
 	e.hub.addUser("", hubauth.ControllerEmail, "member", "active", e.now.Add(-time.Hour))
+	e.mustRun()
+	if !hiAnyContains(e.warns, "renaming scion's dev user") {
+		t.Fatalf("warns %q", e.warns)
+	}
+	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-old", Requested: []string{"agent:manage"},
+		MintedAt: e.now.Add(-10 * 24 * time.Hour), ExpiresAt: e.now.Add(300 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	n := len(e.hub.events)
 	err := e.run()
 	if err == nil || !strings.Contains(err.Error(), "another hub user holds the address") {
 		t.Fatalf("run = %v", err)
+	}
+	if got := hiEventsWith(e.hub.eventsFrom(n), "mint"); len(got) > 0 {
+		t.Fatalf("minted: %q", got)
 	}
 	if e.hub.at("identity "+hubauth.ControllerEmail+" ignored by "+e.hub.byEmail(hubauth.AdminEmail).ID) < 0 {
 		t.Fatalf("events %q", e.hub.events)
@@ -1489,8 +1522,8 @@ func TestHubIdentityProbeRunsAfterAnInterruptedMigration(t *testing.T) {
 	if got := hiEventsWith(e.hub.eventsFrom(n), "agents by "+devUserID); len(got) == 0 {
 		t.Fatalf("the second run did not probe: %q", e.hub.eventsFrom(n))
 	}
-	if dev := e.hub.user(devUserID); dev.Role != "admin" {
-		t.Fatalf("dev row role %q, want admin restored", dev.Role)
+	if dev := e.hub.user(devUserID); dev.Role != "member" {
+		t.Fatalf("dev row role %q, want it left a member", dev.Role)
 	}
 }
 
@@ -1514,8 +1547,8 @@ func TestHubIdentityProbePendingSurvivesAStopBeforeTheFirstSave(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "agent worker: attach") {
 		t.Fatalf("second run = %v, want the pending probe to find the missing attach", err)
 	}
-	if dev := e.hub.user(devUserID); dev.Role != "admin" {
-		t.Fatalf("dev row role %q, want admin restored", dev.Role)
+	if dev := e.hub.user(devUserID); dev.Role != "member" {
+		t.Fatalf("dev row role %q, want it left a member", dev.Role)
 	}
 }
 
@@ -1564,17 +1597,18 @@ func TestHubIdentityResetOnAHubWithTheDevUserMigrates(t *testing.T) {
 	}
 }
 
-// TestHubIdentityProbeForbiddenRollsBack and ...ServerErrorDoesNot: a 403 is
-// the hub refusing the controller, a 500 says nothing about its authority.
-func TestHubIdentityProbeForbiddenRollsBack(t *testing.T) {
+// TestHubIdentityProbeForbiddenFailsClosed and ...ServerError: a 403 is the
+// hub refusing the controller, a 500 says nothing about its authority;
+// neither re-promotes it.
+func TestHubIdentityProbeForbiddenFailsClosed(t *testing.T) {
 	e := newHIEnv(t, hiRemoteApp(false))
 	e.seedMigrated("scion@localhost", false)
 	e.hub.down = map[string]int{"GET /api/v1/projects/proj-1/shared-dirs": 403}
-	if err := e.run(); err == nil || !strings.Contains(err.Error(), "restored") {
-		t.Fatalf("run = %v, want a rollback", err)
+	if err := e.run(); err == nil || !strings.Contains(err.Error(), "lacks an authority") {
+		t.Fatalf("run = %v, want the missing authority", err)
 	}
-	if dev := e.hub.user(devUserID); dev.Role != "admin" {
-		t.Fatalf("dev row role %q, want admin restored", dev.Role)
+	if dev := e.hub.user(devUserID); dev.Role != "member" {
+		t.Fatalf("dev row role %q, want it left a member", dev.Role)
 	}
 }
 
@@ -1582,7 +1616,7 @@ func TestHubIdentityProbeServerErrorDoesNotRollBack(t *testing.T) {
 	e := newHIEnv(t, hiRemoteApp(false))
 	e.seedMigrated("scion@localhost", false)
 	e.hub.down = map[string]int{"GET /api/v1/projects/proj-1/shared-dirs": 500}
-	if err := e.run(); err == nil || strings.Contains(err.Error(), "restored") {
+	if err := e.run(); err == nil || strings.Contains(err.Error(), "lacks an authority") {
 		t.Fatalf("run = %v, want a failure without a rollback", err)
 	}
 	if dev := e.hub.user(devUserID); dev.Role != "member" {

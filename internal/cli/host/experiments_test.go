@@ -429,21 +429,33 @@ func TestEnsureHubExperimentsOff(t *testing.T) {
 		startErr    error
 		probeAfter  error
 		probeBefore error
+		// scionUnsure: the jail's scion cannot be asked and nothing was
+		// recorded.
+		scionUnsure bool
+		olderScion  bool
 		wantWindow  bool
 		wantStart   bool
 		wantErr     string
+		wantProbe   bool
 	}{
-		{name: "off: nothing to do"},
-		{name: "no answer from the probe fails closed", probeBefore: errors.New("refused"), wantErr: "could not tell"},
-		{name: "live: pinned off and restarted", liveBefore: true, windowFixes: true, wantWindow: true, wantStart: true},
-		{name: "window refused", liveBefore: true, windowErr: errors.New("containers are running"), wantWindow: true, wantErr: "containers are running"},
-		{name: "restart failed", liveBefore: true, windowFixes: true, startErr: errors.New("boom"), wantWindow: true, wantStart: true, wantErr: "starting the hub"},
-		{name: "still live after the restart", liveBefore: true, wantWindow: true, wantStart: true, wantErr: "still on"},
-		{name: "unconfirmed after the restart", liveBefore: true, windowFixes: true, probeAfter: errors.New("refused"), wantWindow: true, wantStart: true, wantErr: "could not confirm"},
+		{name: "off: nothing to do", wantProbe: true},
+		{name: "older scion: no probe", olderScion: true, liveBefore: true},
+		{name: "scion unsure, off", scionUnsure: true, wantProbe: true},
+		{name: "scion unsure, live fails closed", scionUnsure: true, liveBefore: true, windowFixes: true, wantProbe: true, wantErr: "cannot pin it off"},
+		{name: "scion unsure, no answer from the probe", scionUnsure: true, probeBefore: errors.New("refused"), wantProbe: true, wantErr: "could not tell"},
+		{name: "no answer from the probe fails closed", probeBefore: errors.New("refused"), wantErr: "could not tell", wantProbe: true},
+		{name: "live: pinned off and restarted", liveBefore: true, windowFixes: true, wantWindow: true, wantStart: true, wantProbe: true},
+		{name: "window refused", liveBefore: true, windowErr: errors.New("containers are running"), wantWindow: true, wantErr: "containers are running", wantProbe: true},
+		{name: "restart failed", liveBefore: true, windowFixes: true, startErr: errors.New("boom"), wantWindow: true, wantStart: true, wantErr: "starting the hub", wantProbe: true},
+		{name: "still live after the restart", liveBefore: true, wantWindow: true, wantStart: true, wantErr: "still on", wantProbe: true},
+		{name: "unconfirmed after the restart", liveBefore: true, windowFixes: true, probeAfter: errors.New("refused"), wantWindow: true, wantStart: true, wantErr: "could not confirm", wantProbe: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := state.ForConfig(t.TempDir())
-			if err := st.SaveHubExperimentsRecord(pinned); err != nil {
+			known := knowsExperiments(!tc.olderScion)
+			if tc.scionUnsure {
+				known = func(context.Context, string) (bool, error) { return false, errors.New("no scion") }
+			} else if err := st.SaveHubExperimentsRecord(pinned); err != nil {
 				t.Fatal(err)
 			}
 			h := newFakeExperimentsHub()
@@ -451,7 +463,7 @@ func TestEnsureHubExperimentsOff(t *testing.T) {
 			h.probeErr = tc.probeBefore
 			windows, starts := 0, 0
 			err := ensureHubExperimentsOff(context.Background(), experimentsRepair{
-				live: &hubapi.Client{T: h}, st: st, known: knowsExperiments(true),
+				live: &hubapi.Client{T: h}, st: st, known: known,
 				window: func(context.Context) error {
 					windows++
 					if tc.windowFixes {
@@ -468,6 +480,9 @@ func TestEnsureHubExperimentsOff(t *testing.T) {
 			})
 			if (windows > 0) != tc.wantWindow || (starts > 0) != tc.wantStart {
 				t.Fatalf("windows=%d starts=%d, want window=%v start=%v", windows, starts, tc.wantWindow, tc.wantStart)
+			}
+			if tc.wantProbe != (len(h.calls) > 0) {
+				t.Fatalf("probed = %v, want %v (%v)", len(h.calls) > 0, tc.wantProbe, h.calls)
 			}
 			if tc.wantErr == "" && err != nil {
 				t.Fatal(err)

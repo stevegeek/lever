@@ -5,7 +5,7 @@
 # a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
-# Needs: Lima >= 2.0, Go, perl. The agent image comes from IMAGE_TAR (a
+# Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
 # docker archive holding $IMAGE:<arch>) or, without it, is built inside the
 # guest from the scion module at SCION_VERSION (the guest then needs to reach
 # Debian, npm and Docker Hub). `go mod download` of that version must work on
@@ -51,8 +51,9 @@ INST="$WORK/i"
 cleanup() {
 	rc=$?
 	if [ "${KEEP:-0}" = 1 ]; then echo "KEEP=1: leaving $VM and $WORK"; return; fi
-	pkill -f "lever broker serve.*$INST" 2>/dev/null
-	pkill -f "lever remote serve.*$INST" 2>/dev/null
+	# By the instance path, not the binary's name: LEVER may name a binary not
+	# called lever, and a daemon left behind keeps any lock this run holds.
+	pkill -f "(broker|remote) serve .*$INST/" 2>/dev/null
 	limactl delete --force "$VM" >/dev/null 2>&1
 	rm -rf "$WORK"
 	exit $rc
@@ -85,11 +86,9 @@ mkdir -p "$INST/workspace" "$INST/workers/worker"
 touch "$INST/workspace/.gitkeep" "$INST/workers/worker/.gitkeep"
 echo "Manager for the stack e2e. Do nothing unless asked." > "$INST/manager.md"
 printf 'sk-ant-FAKE-stack-%s' "$$" > "$INST/console-api-key"; chmod 600 "$INST/console-api-key"
-imagetar=""
-if [ -n "${IMAGE_TAR:-}" ]; then
-	ln -f "$IMAGE_TAR" "$INST/img.tar" 2>/dev/null || cp "$IMAGE_TAR" "$INST/img.tar"
-	imagetar="  image_tar: img.tar"
-fi
+# write_config <image_tar line>: lever loads the image from a docker archive,
+# since the host may have no docker.
+write_config() {
 cat > "$INST/lever.yaml" <<EOF
 name: $NAME
 scion:
@@ -101,7 +100,7 @@ egress: open
 tree: workspace
 manager:
   image: $IMAGE
-$imagetar
+$1
   prompt_file: manager.md
   allow_ports: []
 workers:
@@ -122,6 +121,13 @@ remote:
     - $OPERATOR
     - { login: $CONTACT, tier: contact, agents: [$NAME] }
 EOF
+}
+if [ -n "${IMAGE_TAR:-}" ]; then
+	ln -f "$IMAGE_TAR" "$INST/img.tar" 2>/dev/null || cp "$IMAGE_TAR" "$INST/img.tar"
+	write_config "  image_tar: img.tar"
+else
+	write_config ""
+fi
 
 G() { limactl shell --workdir / "$VM" -- "$@"; }
 X() { G sh -c "XDG_RUNTIME_DIR=/run/user/\$(id -u) podman $*"; }
@@ -139,6 +145,13 @@ proxy() {
 	curl -sS -m 30 -H "Host: 127.0.0.1:$RP" -H "Tailscale-User-Login: $login" "$@"
 }
 pcode() { local login=$1; shift; proxy "$login" -o /dev/null -w '%{http_code}' "$@"; }
+# refused <login> <curl args...>: a 403 from the proxy's own route fence, not
+# from an earlier check or the hub.
+refused() {
+	local login=$1 out; shift
+	out=$(proxy "$login" -w '\n%{http_code}' "$@")
+	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not forward this route"* ]]
+}
 doctor_out=""
 doctor_run() { doctor_out=$(cd "$INST" && timeout 900 "$LEVER" doctor 2>&1); }
 doctor_row() { printf '%s\n' "$doctor_out" | grep -E "^(✓|✗|!|-) $1" | head -1; }
@@ -149,7 +162,7 @@ say "clean slate"
 limactl delete --force "$VM" >/dev/null 2>&1 && echo "deleted stale $VM"
 (cd "$INST" && "$LEVER" init >/dev/null 2>&1)
 
-if [ -z "$imagetar" ]; then
+if [ -z "${IMAGE_TAR:-}" ]; then
 	say "first lever up (stops at the image: none yet)"
 	up 8
 	limactl list --format '{{.Name}}' 2>/dev/null | grep -qx "$VM" || { bad "no VM after the first up"; exit 1; }
@@ -181,11 +194,22 @@ if [ -z "$imagetar" ]; then
 		bad "agent image build"; exit 1
 	fi
 	G rm -rf /tmp/stackctx
+	# podman names a local build localhost/<ref>; lever looks the archive up by
+	# the docker form of manager.image.
+	if G podman tag "$IMAGE:$ARCH" "docker.io/$IMAGE:$ARCH" &&
+		G podman save --format docker-archive -o /tmp/stack-img.tar "docker.io/$IMAGE:$ARCH" >/dev/null 2>&1 &&
+		limactl copy "$VM:/tmp/stack-img.tar" "$INST/img.tar" >/dev/null; then
+		ok "agent image saved to an archive for lever to load"
+	else
+		bad "saving the agent image"; exit 1
+	fi
+	G rm -f /tmp/stack-img.tar
+	write_config "  image_tar: img.tar"
 fi
 
 say "lever up on scion $SCION_VERSION"
 up 30
-check "the manager runs" running
+if running; then ok "the manager runs"; else bad "the manager runs"; exit 1; fi
 checkx "the jail's scion is the pin" 'G scion version 2>&1 | grep -q "$SCION_VERSION"'
 G scion version 2>&1 | head -3 | sed 's/^/      | /'
 rec="$INST/.lever-state/controller.pat.json"
@@ -211,11 +235,10 @@ code=$(pcode "$OPERATOR" "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "the operator has a live session through the proxy ($code)" '[ "$code" = 200 ]'
 for login in "$OPERATOR" "$CONTACT"; do
 	for p in /api/v1/conduit /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/artifacts/shared/x /api/v1/artifacts/view/x /api/v1/admin/conduit/grant-keys/rotate /auth/test-identity/redeem; do
-		code=$(pcode "$login" "http://127.0.0.1:$RP$p")
-		checkx "proxy refuses $p for $login ($code)" '[ "$code" = 403 ]'
+		checkx "proxy refuses $p for $login" 'refused "$login" "http://127.0.0.1:$RP$p"'
 	done
-	code=$(pcode "$login" -X PUT -H 'Content-Type: application/json' --data '{"overrides":{"hub.conduit":true}}' "http://127.0.0.1:$RP/api/v1/admin/experiments")
-	checkx "proxy refuses an experiments write for $login ($code)" '[ "$code" = 403 ]'
+	checkx "proxy refuses an experiments write for $login" \
+		'refused "$login" -X PUT -H "Content-Type: application/json" --data "{\"overrides\":{\"hub.conduit\":true}}" "http://127.0.0.1:$RP/api/v1/admin/experiments"'
 done
 
 say "doctor"

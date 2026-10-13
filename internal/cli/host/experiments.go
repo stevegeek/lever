@@ -51,12 +51,22 @@ func pinnedOffNames() []string {
 // hubHasExperiments reports whether the jail's scion has hub-wide
 // experiments. When scion cannot be asked, a record of an earlier pin decides.
 func hubHasExperiments(ctx context.Context, known scopeKnownFunc, rec state.HubExperimentsRecord, found bool) bool {
+	has, _ := hubExperimentsSupport(ctx, known, rec, found)
+	return has
+}
+
+// hubExperimentsSupport is hubHasExperiments with sure false when neither the
+// jail's scion nor a record answered.
+func hubExperimentsSupport(ctx context.Context, known scopeKnownFunc, rec state.HubExperimentsRecord, found bool) (has, sure bool) {
 	if known != nil {
 		if has, err := known(ctx, experimentsScope); err == nil {
-			return has
+			return has, true
 		}
 	}
-	return found && !rec.NotApplicable
+	if found {
+		return !rec.NotApplicable, true
+	}
+	return false, false
 }
 
 // liveExperiments returns the pinned-off experiments the hub serves now. Any
@@ -212,13 +222,16 @@ type experimentsRepair struct {
 // window pins it off and the hub starts again without it, or apply fails.
 //
 // The hub is up and the controller PAT is fresh here, so a probe that gets no
-// answer fails the apply rather than pass as off.
+// answer fails the apply rather than pass as off. A scion that could not say
+// whether it has hub experiments is probed too: a hub without them answers
+// 404 to both probes, and the window could not pin one that answers otherwise.
 func ensureHubExperimentsOff(ctx context.Context, r experimentsRepair) error {
 	rec, found, err := r.st.LoadHubExperimentsRecord()
 	if err != nil {
 		return fmt.Errorf("hub experiments: %w", err)
 	}
-	if !hubHasExperiments(ctx, r.known, rec, found) {
+	has, sure := hubExperimentsSupport(ctx, r.known, rec, found)
+	if !has && sure {
 		return nil
 	}
 	on, err := liveExperiments(ctx, r.live)
@@ -227,6 +240,10 @@ func ensureHubExperimentsOff(ctx context.Context, r experimentsRepair) error {
 	}
 	if len(on) == 0 {
 		return nil
+	}
+	if !has {
+		return fmt.Errorf("hub experiments: %s is on at the hub, and lever cannot pin it off because the jail's scion did not say whether it has hub experiments (`scion hub token create --help`); "+
+			"run `lever stop` and check the hub's admin experiments page before `lever up`", strings.Join(on, " and "))
 	}
 	r.log("lever: scion experiment %s is on at the hub; pinning it off in the dev-auth window and restarting the hub", strings.Join(on, " and "))
 	if err := r.window(ctx); err != nil {

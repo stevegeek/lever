@@ -27,23 +27,15 @@ const (
 	// tree altogether (lever-tool-whisper's and lever-tool-tts's -server):
 	// a manager.read_only mount does not excuse it.
 	hostProgramOutside
-	// hostPrivate is a host path an agent must neither replace nor reach:
-	// lever-tool-whisper's -models (the model whisper-server loads, and its
-	// working directory) and -dictate-socket (remote.voice.socket), and
-	// lever-tool-tts's -models and -speak-socket (remote.voice.speak_socket).
-	// Never safe in the tree, read-only or not.
+	// hostPrivate is a host path an agent must neither replace nor reach
+	// (the voice tools' models and sockets). Never safe in the tree,
+	// read-only or not.
 	hostPrivate
 	// hostUnchecked is a known flag whose value is not a host program or
-	// secret: the github tool's -tree (it names the tree on purpose) or a
-	// data file the agent may edit by design (-csv, -dsn). Consumed so it
-	// is not mistaken for anything else, and not checked.
+	// secret. It is consumed so it is not mistaken for anything else.
 	hostUnchecked
 )
 
-// hostPath is one host-side path from the config, absolute, with the key
-// that named it (for the error), and the tool whose command holds it ("" for
-// a top-level key). raw is the path as written; dotDot marks one with a
-// ".." component.
 type hostPath struct {
 	key    string
 	path   string
@@ -53,11 +45,9 @@ type hostPath struct {
 	dotDot bool
 }
 
-// toolPathFlags are the path flags of the tools lever ships
-// (cmd/lever-tool-github, cmd/lever-tool-fizzy, cmd/lever-tool-db, and the
-// assistant-demo example's lever-tool-todo) and what each names, read in
-// every supervised tool's command. Lever cannot know what an unknown flag's
-// value is, so no other flag is checked.
+// toolPathFlags are the path flags of the tools lever ships, read in every
+// supervised tool's command. lever cannot know what an unknown flag's value
+// is, so no other flag is checked.
 var toolPathFlags = map[string]hostPathKind{
 	"app-key":    hostSecret,    // github: the GitHub App private key
 	"token-file": hostSecret,    // fizzy: the personal access token
@@ -68,28 +58,20 @@ var toolPathFlags = map[string]hostPathKind{
 	"csv":        hostUnchecked, // todo (example): the agent-editable todo list
 }
 
-// whisperToolFlags are lever-tool-whisper's flags config load reads, read
-// only in the command of a tool that runs lever-tool-whisper
-// (isWhisperCommand): generic names such as -server or -model mean
-// something else to another tool.
+// whisperToolFlags are read only in a lever-tool-whisper command: generic
+// names such as -server or -model mean something else to another tool.
 var whisperToolFlags = map[string]hostPathKind{
-	"server":         hostProgramOutside, // the whisper-server program it runs
-	"models":         hostPrivate,        // the model directory
-	"dictate-socket": hostPrivate,        // the dictation socket (remote.voice.socket)
-	// Non-path flags (WhisperTools): consumed with their values, never
-	// checked as paths.
+	"server":            hostProgramOutside, // the whisper-server program it runs
+	"models":            hostPrivate,        // the model directory
+	"dictate-socket":    hostPrivate,        // the dictation socket (remote.voice.socket)
 	"whisper-port":      hostUnchecked,
 	"model":             hostUnchecked,
 	"max-seconds":       hostUnchecked,
 	"agent-max-seconds": hostUnchecked,
 }
 
-// whisperProgram is the base name of lever-tool-whisper's program.
 const whisperProgram = "lever-tool-whisper"
 
-// isWhisperCommand reports whether t runs lever-tool-whisper: its program,
-// after an env(1) prefix, has that base name, or its command takes
-// -dictate-socket (a renamed copy or wrapper keeps the whisper checks).
 func isWhisperCommand(t Tool) bool {
 	if t.External || len(t.Command) == 0 {
 		return false
@@ -112,9 +94,6 @@ func isWhisperCommand(t Tool) bool {
 	return false
 }
 
-// knownFlag is the kind of a flag name, and whether lever reads it in a
-// command: toolPathFlags in every tool's, whisperToolFlags in a whisper
-// tool's, ttsToolFlags in a tts tool's.
 func knownFlag(whisper, tts bool, name string) (hostPathKind, bool) {
 	if k, ok := toolPathFlags[name]; ok {
 		return k, true
@@ -132,9 +111,9 @@ func knownFlag(whisper, tts bool, name string) (hostPathKind, bool) {
 	return 0, false
 }
 
-// hostPaths lists every host-run program and host secret the config names.
-// Paths are made absolute against the instance dir, which the supervisor
-// also makes every tool's working directory (brokerctl.ToolSpec.Dir).
+// hostPaths lists every host-run program and host secret the config names,
+// absolute against the instance dir, which is also every tool's working
+// directory.
 func (a *App) hostPaths() []hostPath {
 	var out []hostPath
 	add := func(p hostPath) {
@@ -168,24 +147,12 @@ func (a *App) hostPaths() []hostPath {
 }
 
 // toolHostPaths lists the paths in one supervised tool's command that lever
-// can classify — a best-effort guard, not a sandbox:
-//
-//   - the program itself when it is given as a path (a bare name is looked
-//     up on the supervisor's fixed PATH, which is not in the tree), after
-//     an env(1) prefix and the command wrappers lever reads too
-//     (parseEnvPrefix: nice, nohup, setsid, timeout, stdbuf, ionice,
-//     taskset, uv run, nested in any order), and the values of the
-//     wrapper options that name code (uv run --with, --project);
-//   - the value of each known path flag of the shipped tools
-//     (toolPathFlags; whisperToolFlags only in lever-tool-whisper's and
-//     ttsToolFlags only in lever-tool-tts's
-//     command), as "-f v", "-f=v" or "--f=v";
-//   - the code an interpreter runs (interpreterPaths): its script, the
-//     values of its code-path flags (ruby -I, node --require), and the
-//     paths in inline code (sh -c, -e).
-//
-// Other flags and arguments are not checked: lever cannot tell a secret
-// from a data file in an unknown tool's argv.
+// can classify, a best-effort guard, not a sandbox: the program when given
+// as a path (a bare name is looked up on the supervisor's fixed PATH, not in
+// the tree), past an env(1) prefix and the wrappers parseEnvPrefix reads;
+// the values of known path flags; and the code an interpreter runs
+// (interpreterPaths). lever cannot tell a secret from a data file in an
+// unknown tool's argv, so nothing else is checked.
 func toolHostPaths(t Tool) []hostPath {
 	if t.External || len(t.Command) == 0 {
 		return nil
@@ -199,8 +166,6 @@ func toolHostPaths(t Tool) []hostPath {
 	}
 	// After an env prefix, a relative path resolves against env's -C
 	// directory (joinRaw keeps a ".." in it for the refusal).
-	// Decided by argv[0], not by length: an -S string can make the command
-	// env runs as long as the prefix, or longer.
 	argv, chdir := t.Command, ""
 	if p := parseEnvPrefix(argv); p.unread == "" && p.wrapped && len(p.argv) > 0 {
 		argv, chdir = p.argv, p.chdir
@@ -229,34 +194,26 @@ func toolHostPaths(t Tool) []hostPath {
 	return out
 }
 
-// toolFlag is one known flag in a tool's command (knownFlag), its kind,
-// and its value ("" when it has none).
 type toolFlag struct {
 	name, val string
 	kind      hostPathKind
-	// dashNext is the following word when it starts with "-" and so was
-	// not taken as the value: Go's flag package would take it, so a path
-	// flag's check covers it too (toolHostPaths).
+	// dashNext is a following word that starts with "-" and so was not taken
+	// as the value; Go's flag package would take it, so a path flag's check
+	// covers it too.
 	dashNext string
 }
 
-// toolFlags lists the known flags in t's command (knownFlag), as "-f v",
-// "-f=v", "--f v" or "--f=v", in order. Unknown flags and other arguments
-// are skipped. A following word that starts with "-" is never taken as a
-// flag's value: it is read as a flag itself, so "-model -state x" cannot
-// hide -state from its check (the flag before it then has no value; a path
-// flag's check still covers that word as its value, as Go's flag package
-// would read it).
+// toolFlags lists the known flags in t's command. A following word that
+// starts with "-" is read as a flag itself, so "-model -state x" cannot hide
+// -state from its check.
 func toolFlags(t Tool) []toolFlag {
 	if len(t.Command) == 0 {
 		return nil
 	}
 	whisper, tts := isWhisperCommand(t), isTTSCommand(t)
 	var out []toolFlag
-	// The words the tool itself gets: past an env(1) prefix, with a plain
-	// env -S string split into words. The env forms this cannot read as env
-	// does (parseEnvPrefix: quotes, escapes or $ in -S, -vS, an unknown
-	// option) are refused at config load (envFormUnread).
+	// The env forms this cannot read as env does are refused at config load
+	// (envFormUnread).
 	argv, _ := unwrapEnv(t.Command)
 	if len(argv) == 0 {
 		argv = t.Command
@@ -286,10 +243,10 @@ func toolFlags(t Tool) []toolFlag {
 	return out
 }
 
-// checkHostPathsOutsideTree refuses a host-run program or host secret that
-// lies in the mounted tree, where an agent can write (and read) it. A
-// program is allowed there only under a manager.read_only entry, reached
-// through no symbolic link inside the tree, and in no worker dir.
+// checkHostPathsOutsideTree refuses a host-run program or host secret in
+// the mounted tree, where an agent can write and read it. A program is
+// allowed there only under a manager.read_only entry, reached through no
+// symbolic link inside the tree, and in no worker dir.
 func (a *App) checkHostPathsOutsideTree() error {
 	paths := a.hostPaths()
 	if len(paths) == 0 {
@@ -344,11 +301,10 @@ func (a *App) checkHostPathsOutsideTree() error {
 	return nil
 }
 
-// ToolsOnReadOnly maps each supervised tool whose command runs a program
-// from inside the tree to the manager.read_only entries that excuse it
-// (checkHostPathsOutsideTree). That excuse holds only while the running
-// manager carries those read-only mounts, which are create-time only, so the
-// broker starts such a tool only after it has seen them (brokerctl).
+// ToolsOnReadOnly maps each supervised tool whose program lies in the tree
+// to the manager.read_only entries that excuse it. The excuse holds only
+// while the running manager carries those create-time mounts, so the broker
+// starts such a tool only after it has seen them.
 func (a *App) ToolsOnReadOnly() (map[string][]string, error) {
 	out := map[string][]string{}
 	paths := a.hostPaths()
@@ -374,7 +330,6 @@ func (a *App) ToolsOnReadOnly() (map[string][]string, error) {
 	return out, nil
 }
 
-// treeWalk is what walkTree learnt about one path.
 type treeWalk struct {
 	inTree  bool   // the path is the tree, lies in it, or reaches it through a link
 	viaLink bool   // a symbolic link inside the tree, or one pointing into it, is on the way
@@ -382,16 +337,14 @@ type treeWalk struct {
 	worker  string // the worker whose dir holds the path ("" = none)
 }
 
-// maxLinkDepth bounds the links walkTree follows (the kernel's own limit).
+// maxLinkDepth is the kernel's own limit.
 const maxLinkDepth = 40
 
-// walkTree follows p one component at a time, as the kernel resolves it,
-// and reports where it passes. The tree, the read_only entries and the
-// worker dirs are recognised by identity (os.SameFile), not by spelling, so
-// a case alias on a case-insensitive filesystem or a link at the instance
+// walkTree follows p one component at a time, as the kernel resolves it.
+// The tree, read_only entries and worker dirs are recognised by identity
+// (os.SameFile), not spelling, so a case alias or a link at the instance
 // root is seen through. A missing tail is placed lexically below the deepest
-// existing component; and in case the tree does not exist yet, the resolved
-// path is also compared with the tree lexically.
+// existing component.
 func (a *App) walkTree(realTree, p string) (treeWalk, error) {
 	var w treeWalk
 	treeFI, err := os.Stat(realTree)
@@ -406,7 +359,6 @@ func (a *App) walkTree(realTree, p string) (treeWalk, error) {
 		w.inTree = insideTree(realTree, r)
 		return w, nil
 	}
-	// Each read_only entry and worker dir that exists, to recognise.
 	type mark struct {
 		name string
 		fi   os.FileInfo

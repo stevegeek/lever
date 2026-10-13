@@ -13,25 +13,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// CanonicalName is the config filename for a lever instance — a manifest at the
-// instance root (package.json / Cargo.toml style). It is resolved from the
-// current directory ONLY — there is deliberately no walk-up discovery, so a
-// `lever.yaml` planted in a parent directory can never be picked up. See
-// docs-site/_guides/security-model-config-trust.md §5.
+// CanonicalName is the config filename at a lever instance root. It is
+// resolved from the current directory only, with no walk-up discovery, so a
+// `lever.yaml` planted in a parent directory is never picked up.
 const CanonicalName = "lever.yaml"
 
-// ManifestName is the filename of the legacy sanitized runtime manifest the host
-// used to write INTO the mount at apply time. The file is no longer written by
-// `lever apply` (the manifest was removed as write-only dead code). The const is
-// retained so `lever down` can remove any legacy manifest left from a prior
-// version (see internal/cli/down.go clearStagedRuntimeState).
+// ManifestName is a legacy runtime manifest in the mount that `lever down`
+// removes when it finds one.
 const ManifestName = ".lever-manifest.yaml"
 
-// confinedRel reports whether p is a relative path that stays strictly inside
-// its base (not absolute, not ".", no ".." escape). Used for `tree`,
-// `prompt_file` and `instructions_file` so none can point outside the instance
-// root. Root confinement alone does not keep a file out of the mounted tree —
-// that is insideTree's job at load time.
+// confinedRel reports whether p is a relative path strictly inside its base.
+// It does not keep a file out of the mounted tree; insideTree does that.
 func confinedRel(p string) bool {
 	if p == "" || filepath.IsAbs(p) {
 		return false
@@ -40,24 +32,17 @@ func confinedRel(p string) bool {
 	return clean != "." && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator))
 }
 
-// insideTree reports whether path (absolute) is tree itself or lies under it,
-// component-wise — a sibling that merely shares a prefix ("ws-notes" beside
-// "ws") is outside. The test is lexical: callers pass both sides through
-// resolveExisting first, so a symlink on either side has already been
-// followed.
+// insideTree is lexical: callers pass both sides through resolveExisting
+// first, so a symlink on either side has already been followed.
 func insideTree(tree, path string) bool {
 	rel, err := filepath.Rel(tree, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// resolveExisting returns p (absolute) with every symlink in its deepest
-// existing ancestor followed (filepath.EvalSymlinks) and the missing tail
-// re-joined lexically. A path that does not exist yet — a prompt file apply
-// reports later, a tree `lever init` has not created — is thereby placed in
-// the real directory it would land in, so a link at the instance root that
-// points into the tree (`img -> ws`) cannot make `img/boot.md` look like
-// root-owned material (R3). Any error other than "does not exist" is the
-// caller's to report.
+// resolveExisting follows every symlink in p's deepest existing ancestor and
+// re-joins the missing tail lexically, so a path that does not exist yet is
+// placed in the real directory it would land in: a link at the instance root
+// into the tree (`img -> ws`) cannot make `img/boot.md` look root-owned.
 func resolveExisting(p string) (string, error) {
 	p = filepath.Clean(p)
 	var tail []string
@@ -78,8 +63,6 @@ func resolveExisting(p string) (string, error) {
 	}
 }
 
-// resolvePath expands a leading ~/ to the home dir, makes a relative path
-// relative to baseDir, and returns an absolute path. Empty in -> empty out.
 func resolvePath(p, baseDir string) string {
 	if p == "" {
 		return ""
@@ -110,9 +93,7 @@ func Load(path string) (*App, error) {
 	return app, nil
 }
 
-// LoadNoHostChecks is Load without CheckHost: the shape is validated but
-// nothing on the host is probed (tool binaries, the api-key file's mode, the
-// tree's .git, the Go toolchain).
+// LoadNoHostChecks is Load without CheckHost.
 func LoadNoHostChecks(path string) (*App, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -123,12 +104,9 @@ func LoadNoHostChecks(path string) (*App, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	app.dir = filepath.Dir(path)
-	// `tree:` is the bind-mounted workspace and MUST be a confined subdirectory
-	// of the instance root (the config's own directory). The root itself is NOT
-	// mounted — it holds the config and the boot prompt, which must stay out of
-	// the agent-writable mount (a compromised agent could otherwise rewrite the
-	// config the host trusts on the next bring-up). So `tree: .` (root == mount)
-	// is rejected. See docs-site/_guides/security-model-config-trust.md §5.
+	// The instance root holds the config and boot material and must not be
+	// mounted, or a compromised agent could rewrite the config the host
+	// trusts on the next bring-up, so `tree: .` is rejected.
 	if !confinedRel(app.Tree) {
 		return nil, fmt.Errorf("config: tree %q must be a relative subdirectory inside the instance root (not %q, not absolute, no \"..\")", app.Tree, ".")
 	}
@@ -136,20 +114,17 @@ func LoadNoHostChecks(path string) (*App, error) {
 	if abs, err := filepath.Abs(app.Tree); err == nil {
 		app.Tree = abs
 	}
-	// realTree is what the tree checks below compare against: app.Tree with
-	// symlinks followed (the lexical path stays in app.Tree — it is what gets
-	// mounted). Both sides of every insideTree test below are resolved the
-	// same way, so a link on either side is seen through (R3).
+	// Both sides of every insideTree test are resolved the same way, so a
+	// link on either side is seen through. app.Tree stays lexical: it is what
+	// gets mounted.
 	realTree, err := resolveExisting(app.Tree)
 	if err != nil {
 		return nil, fmt.Errorf("config: tree %s: %w", app.Tree, err)
 	}
 	app.Scion.Source = resolvePath(app.Scion.Source, app.dir)
 	app.Scion.Binary = resolvePath(app.Scion.Binary, app.dir)
-	// At most one scion mode. NOT "exactly one": config.Load also runs for
-	// commands that never bring anything up (doctor, msg, attach), and a
-	// minimal config legitimately declares no scion block at all — the missing
-	// mode is reported at bring-up by scionbin.Resolve instead.
+	// At most one scion mode, not exactly one: commands that bring nothing
+	// up load configs too, and scionbin.Resolve reports a missing mode.
 	scionModes := 0
 	for _, v := range []string{app.Scion.Binary, app.Scion.Source, app.Scion.Version} {
 		if v != "" {
@@ -159,12 +134,8 @@ func LoadNoHostChecks(path string) (*App, error) {
 	if scionModes > 1 {
 		return nil, fmt.Errorf("config: scion.binary, scion.source and scion.version are mutually exclusive")
 	}
-	// Neither the prebuilt binary nor the source checkout may live inside the
-	// mounted tree. Whatever they point at is cross-compiled or installed as
-	// root at /usr/local/bin/scion and becomes the engine every agent runs
-	// under — and the tree is exactly the place agents CAN write. An in-tree
-	// path would let a compromised agent choose its own engine on the next
-	// bring-up.
+	// The scion binary or source becomes the engine every agent runs under,
+	// so an in-tree path would let a compromised agent choose its own engine.
 	for _, m := range []struct{ key, path string }{
 		{"scion.binary", app.Scion.Binary},
 		{"scion.source", app.Scion.Source},
@@ -181,15 +152,10 @@ func LoadNoHostChecks(path string) (*App, error) {
 				m.key, m.path, app.Tree)
 		}
 	}
-	// Boot material the host must own: the manager's task and every standing
-	// instructions file. Confinement to the root (Validate) is not enough on
-	// its own, because the tree is INSIDE the root and is the one place agents
-	// can write — `prompt_file: workspace/boot.md` with `tree: workspace` would
-	// hand the manager authorship of its own next boot task, and an in-tree
-	// instructions_file its own standing CLAUDE.md. Same test as the engine
-	// above, for the same reason (lever#30 review).
-	// image_tar is the same kind of material — it is the code the agent
-	// runs — so it gets the same test (lever#32).
+	// Boot material the host must own. Confinement to the root is not enough,
+	// because the tree is inside the root: `prompt_file: workspace/boot.md`
+	// with `tree: workspace` would let the manager author its own next boot
+	// task. image_tar is the code the agent runs.
 	bootFiles := []struct{ key, path string }{
 		{"manager.prompt_file", app.ManagerPromptPath()},
 		{"manager.instructions_file", app.ManagerInstructionsPath()},
@@ -204,11 +170,8 @@ func LoadNoHostChecks(path string) (*App, error) {
 		if m.path == "" {
 			continue
 		}
-		// Abs: app.dir is the config's directory as given, so a relative
-		// config path yields a relative file path, and Rel against the
-		// absolute tree would then fail — passing the check by accident.
-		// Then symlinks are followed (resolveExisting), so a link at the
-		// root into the tree is caught like a plain in-tree path.
+		// Abs first: a relative path would fail Rel against the absolute
+		// tree and pass the check by accident.
 		p, err := filepath.Abs(m.path)
 		if err != nil {
 			return nil, fmt.Errorf("config: %s (%s): %w", m.key, m.path, err)
@@ -220,10 +183,7 @@ func LoadNoHostChecks(path string) (*App, error) {
 			return nil, fmt.Errorf("config: %s (%s) is inside the mounted tree (%s); agents can write there, and this file is boot material the host must own — move it up to the instance root",
 				m.key, m.path, app.Tree)
 		}
-		// When the file exists it must be a regular file (same rule as the
-		// scion binary, scionbin.VerifyELFArch): a directory, FIFO or device
-		// is not material the host can read as a prompt or an archive. A
-		// missing file is apply's to report — it names the step that needs it.
+		// A missing file is apply's to report; it names the step that needs it.
 		if fi, err := os.Stat(p); err == nil && !fi.Mode().IsRegular() {
 			return nil, fmt.Errorf("config: %s (%s) is not a regular file", m.key, m.path)
 		}
@@ -233,33 +193,24 @@ func LoadNoHostChecks(path string) (*App, error) {
 			r, strings.Join(scionAgentRoles, ", "))
 	}
 	app.Manager.CredentialFile = resolvePath(app.Manager.CredentialFile, app.dir)
-	// APIKeyFile is a host-side secret like CredentialFile: expanded against
-	// the instance dir (and ~/), not confined to the root, because the key
-	// should live outside the agent-writable tree (checkHostPathsOutsideTree
-	// refuses it there).
+	// Host secrets are not confined to the root: they should live outside
+	// it, and checkHostPathsOutsideTree refuses them in the tree.
 	app.Broker.APIKeyFile = resolvePath(app.Broker.APIKeyFile, app.dir)
-	// SigningKey is a host-side path OUTSIDE the instance tree by design (the
-	// operator's private key must never live where a compromised agent could
-	// read it) — expanded like CredentialFile/Scion.Source, but deliberately
-	// NOT confined.
 	app.Operator.SigningKey = resolvePath(app.Operator.SigningKey, app.dir)
 	app.injectLLMGrants()
 	if err := app.Validate(); err != nil {
 		return nil, err
 	}
-	// Host-run programs and host secrets (credential files, broker tool
-	// commands and their path arguments): the same tree test as the engine
-	// and the boot files above, after Validate so manager.read_only and the
-	// worker dirs it consults are well formed (Fizzy #161).
+	// After Validate, so manager.read_only and the worker dirs it consults
+	// are well formed.
 	if err := app.checkHostPathsOutsideTree(); err != nil {
 		return nil, err
 	}
 	return &app, nil
 }
 
-// injectLLMGrants adds the implicit obtain {llm, generate} capability to every
-// api-key agent (R3). LLM access is universal in api-key mode; a worker opts out
-// with llm_auth: subscription. Idempotent.
+// injectLLMGrants adds the implicit llm capability to every api-key agent.
+// Idempotent.
 func (a *App) injectLLMGrants() {
 	add := func(obtain *[]Grant) {
 		for _, g := range *obtain {

@@ -5,11 +5,9 @@ import (
 	"testing"
 )
 
-// A first-party (supervised) tool trusts the X-Lever-Caller header the broker
-// sets on every proxied request. Opening its backend port to the jail via
-// manager.allow_ports would let an agent dial the tool directly, naming any
-// caller it likes and skipping the broker's mTLS CN binding, per-agent
-// revocation and audit — so config load must refuse the combination.
+// A first-party tool trusts the X-Lever-Caller header the broker sets, so
+// opening its backend port to the jail would let an agent dial it directly
+// and name any caller.
 const firstPartyPortCfg = `
 name: demo
 backend: orbstack
@@ -29,9 +27,7 @@ func TestManagerAllowPortsRejectsFirstPartyToolPort(t *testing.T) {
 	rejectNoHost(t, firstPartyPortCfg, "allow_ports", "3201", "db", "bypass")
 }
 
-// An external tool is the operator's own already-running server; the broker
-// fronts it but does not own it, so its port stays allowed (the operator may
-// deliberately expose it directly as well).
+// An external tool is the operator's own server, so its port stays allowed.
 func TestManagerAllowPortsAcceptsExternalToolPort(t *testing.T) {
 	cfg := `
 name: demo
@@ -52,8 +48,6 @@ broker:
 	}
 }
 
-// A first-party tool's port not listed in allow_ports is the normal shape and
-// must keep loading.
 func TestManagerAllowPortsAcceptsUnrelatedPortBesideFirstPartyTool(t *testing.T) {
 	cfg := strings.Replace(firstPartyPortCfg, "allow_ports: [3201]", "allow_ports: [3305]", 1)
 	if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {

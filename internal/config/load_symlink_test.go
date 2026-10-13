@@ -8,7 +8,6 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// mustWrite creates a regular file (and its parents) at path.
 func mustWrite(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -19,9 +18,9 @@ func mustWrite(t *testing.T, path string) {
 	}
 }
 
-// The tree check must follow symlinks (R3): a link at the instance root that
-// points INTO the tree (`img -> ws`) is lexically outside it, but the bytes it
-// names are agent-writable all the same.
+// The tree check must follow symlinks: a link at the instance root into the
+// tree (`img -> ws`) is lexically outside it, but the bytes it names are
+// agent-writable all the same.
 func TestLoadRejectsBootFilesReachedThroughRootSymlink(t *testing.T) {
 	cases := []struct{ key, body string }{
 		{"image_tar", "manager:\n  image: scionlocal/x\n  image_tar: img/x.tar\n"},
@@ -62,9 +61,6 @@ func TestLoadAcceptsRootSymlinkToFileOutsideTree(t *testing.T) {
 	}
 }
 
-// A boot file that exists must be a regular file: a directory (or a FIFO,
-// device, …) is not material the host can read as the prompt, the
-// instructions, or the archive.
 func TestLoadRejectsDirectoryAsBootFile(t *testing.T) {
 	cases := []struct{ key, body string }{
 		{"prompt_file", "manager:\n  prompt_file: boot\n"},
@@ -82,9 +78,8 @@ func TestLoadRejectsDirectoryAsBootFile(t *testing.T) {
 	}
 }
 
-// A boot file that does not exist yet is still load's business only as far
-// as the tree check goes: it is resolved against its deepest existing
-// ancestor, and its absence is reported later by apply (unchanged).
+// A boot file that does not exist yet is resolved against its deepest
+// existing ancestor for the tree check; apply reports its absence.
 func TestLoadMissingBootFileResolvesAgainstExistingAncestor(t *testing.T) {
 	p := writeConfig(t, "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  prompt_file: img/later/boot.md\n")
 	root := filepath.Dir(p)

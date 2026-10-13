@@ -50,8 +50,8 @@ func TestInstructionsPathsAreRootRelativeAndNotInherited(t *testing.T) {
 	if got := app.WorkerInstructionsPath(app.Workers[0]); got != wantW {
 		t.Fatalf("worker instructions path = %q, want %q", got, wantW)
 	}
-	// Deliberately NOT inherited from the manager (unlike image/model): the
-	// manager's manual describes orchestration authority a worker must not read.
+	// Not inherited: the manager's manual describes orchestration authority
+	// a worker must not read.
 	if got := app.WorkerInstructionsPath(app.Workers[1]); got != "" {
 		t.Fatalf("worker without instructions_file must resolve to \"\", got %q", got)
 	}
@@ -68,10 +68,8 @@ func TestNoInstructionsFileMeansNoPath(t *testing.T) {
 	}
 }
 
-// Root confinement is not enough: the tree is inside the root and is the one
-// place agents can write. A boot file inside it would let the agent author its
-// own next task or standing instructions, which is exactly what these keys
-// exist to prevent.
+// Root confinement is not enough: the tree is inside the root, and a boot
+// file there would let the agent author its own next task or instructions.
 func TestLoadRejectsBootFilesInsideTheTree(t *testing.T) {
 	cases := map[string]string{
 		"manager prompt in tree":       "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  prompt_file: ws/boot.md\n",

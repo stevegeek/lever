@@ -11,23 +11,18 @@ import (
 )
 
 // ClaudeSettings is the allowlisted part of an agent's Claude Code settings
-// that lever delivers (`claude_settings:` under manager or a worker). Each
-// key maps to one Claude Code setting; a key not in claudeSettingKeys is a
-// load error, so a typo never passes as an unset value. To add a key: add
-// the field, its yaml name to claudeSettingKeys, its check to validate, and
-// its delivery to wire.Claude and lever-agent boot.
+// that lever delivers. An unknown key is a load error, so a typo never
+// passes as an unset value. A new key also needs its check in validate and
+// its delivery in wire.Claude and lever-agent boot.
 type ClaudeSettings struct {
-	// AutoCompactWindow is Claude Code's CLAUDE_CODE_AUTO_COMPACT_WINDOW
-	// (the autoCompactWindow setting): the context size, in tokens, at which
-	// the session compacts. 0 = unset (Claude Code's own default).
+	// AutoCompactWindow is Claude Code's CLAUDE_CODE_AUTO_COMPACT_WINDOW, in
+	// tokens.
 	AutoCompactWindow int `yaml:"auto_compact_window"`
 }
 
-// claudeSettingKeys are the keys ClaudeSettings accepts.
 var claudeSettingKeys = []string{"auto_compact_window"}
 
-// UnmarshalYAML refuses any key outside claudeSettingKeys (the rest of the
-// config decodes leniently), then decodes the known ones.
+// UnmarshalYAML is strict, unlike the rest of the config.
 func (c *ClaudeSettings) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind != yaml.MappingNode {
 		return fmt.Errorf("line %d: claude_settings must be a mapping", n.Line)
@@ -42,8 +37,6 @@ func (c *ClaudeSettings) UnmarshalYAML(n *yaml.Node) error {
 	return n.Decode((*plain)(c))
 }
 
-// claudeFor builds the wire form of an agent's Claude config, nil when it
-// configures nothing (so the envelope carries no claude block at all).
 func claudeFor(s ClaudeSettings, note string) *wire.Claude {
 	c := &wire.Claude{AutoCompactWindow: s.AutoCompactWindow, AfterCompactNote: note}
 	if c.IsZero() {
@@ -58,15 +51,12 @@ func (a *App) ManagerClaude() *wire.Claude {
 	return claudeFor(a.Manager.ClaudeSettings, a.Manager.AfterCompactNote)
 }
 
-// Claude is worker g's own Claude Code config; nil when none is set.
-// Deliberately not inherited from the manager: the window and the note
-// describe one agent's work.
+// Claude is worker g's own Claude Code config, not inherited from the
+// manager: the window and the note describe one agent's work.
 func (g Worker) Claude() *wire.Claude {
 	return claudeFor(g.ClaudeSettings, g.AfterCompactNote)
 }
 
-// validateClaude checks one agent's Claude config; who names the agent in
-// the error ("manager", `worker "x"`).
 func validateClaude(who string, s ClaudeSettings, note string) error {
 	if err := claudeFor(s, note).Validate(); err != nil {
 		return fmt.Errorf("config: %s: %w", who, err)

@@ -9,12 +9,10 @@ import (
 	"github.com/stevegeek/lever/internal/voice"
 )
 
-// githubProgram is the base name of lever-tool-github's program.
 const githubProgram = "lever-tool-github"
 
-// isGithubCommand reports whether t is the github tool: named github, its
-// program (after an env(1) prefix) lever-tool-github, or a command that
-// takes -app-key (the GitHub App key flag, no other lever tool has it).
+// isGithubCommand also matches a command that takes -app-key, which no other
+// lever tool has.
 func isGithubCommand(t Tool) bool {
 	if t.Name == "github" {
 		return true
@@ -38,14 +36,11 @@ func isGithubCommand(t Tool) bool {
 	return false
 }
 
-// validateLeverFilesTools refuses a worker dir that overlaps the tree
-// root's .lever-files (case-folded, like the remote.files check) while a
-// tool reads the manager's files there: the whisper tool transcribes WAVs
-// from .lever-files/whisper for any caller, and the github tool pushes
-// bundles from .lever-files/github. A worker mounts its dir read-write, so
-// one over or inside .lever-files could plant what those tools then act on
-// as the manager's. remote.files makes the same refusal (validateRemote),
-// which runs only with remote access on; this one does not depend on it.
+// validateLeverFilesTools refuses a worker dir that overlaps .lever-files
+// while a tool acts on the manager's files there (whisper transcribes clips,
+// github pushes bundles): a worker mounts its dir read-write, so it could
+// plant what those tools act on as the manager's. Unlike the remote.files
+// check, this does not depend on remote access.
 func (a *App) validateLeverFilesTools() error {
 	var reason string
 	for _, t := range a.Broker.Tools {

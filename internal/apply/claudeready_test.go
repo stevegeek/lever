@@ -91,14 +91,121 @@ func TestReadyMarkerWaitsWhilePending(t *testing.T) {
 	}
 }
 
-// A claude that never reports is not up once the ready wait is over.
-func TestReadyMarkerNeverWrittenIsNotUp(t *testing.T) {
+// A claude that never reports over a pane that stays alive is not failed
+// when the ready wait is over: the settle window and its second look decide,
+// and a pass is up with a warning that names the missing signal.
+func TestReadyMarkerNeverWrittenFallsBackToTheWindow(t *testing.T) {
+	settle := 60 * time.Millisecond
+	shortHarnessSettle(t, settle)
+	sink := &logSink{}
 	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{pending}}
+	d := readyDeps(p, sink)
+	d.ReadyWait = 20 * time.Millisecond
+	start := time.Now()
+	if err := WaitManagerLive(context.Background(), d, "hello", "/lever", nil); err != nil {
+		t.Fatalf("want up after the settle window, got %v", err)
+	}
+	if el := time.Since(start); el < d.ReadyWait+settle {
+		t.Fatalf("the gate held %s, want at least the ready wait and the %s window", el, settle)
+	}
+	if p.aliveN != 2 {
+		t.Fatalf("pane probes = %d, want 2 (seen, then confirmed after the window)", p.aliveN)
+	}
+	logged := strings.Join(sink.lines, "\n")
+	for _, want := range []string{"warning: the manager's claude never reported its session start", "dialog", "/tmp", "hooks disabled", "no readiness signal", "settle window"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("warning does not say %q: %q", want, sink.lines)
+		}
+	}
+}
+
+// After a ready wait with no report, a pane that dies during the settle
+// window is a death, and the error says claude never reported either.
+func TestReadyMarkerNeverWrittenThenPaneDiesIsADeath(t *testing.T) {
+	shortHarnessSettle(t, time.Millisecond)
+	sink := &logSink{}
+	p := &readyGateProbe{
+		gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}, {alive: false}}, running: []runningAnswer{{up: true}}},
+		ready:     []readyAnswer{pending},
+	}
+	d := readyDeps(p, sink)
+	d.ReadyWait = 20 * time.Millisecond
+	err := WaitManagerLive(context.Background(), d, "hello", "/lever", nil)
+	if !errors.Is(err, scion.ErrAgentDied) || !strings.Contains(err.Error(), "died during the") || !strings.Contains(err.Error(), "had not reported its session start") {
+		t.Fatalf("want ErrAgentDied during the settle window, got %v", err)
+	}
+	if strings.Contains(strings.Join(sink.lines, "\n"), "never reported its session start") {
+		t.Fatalf("a failed gate warned as if up: %q", sink.lines)
+	}
+}
+
+// The same with the container gone during the settle window.
+func TestReadyMarkerNeverWrittenThenContainerStopsIsADeath(t *testing.T) {
+	shortHarnessSettle(t, time.Millisecond)
+	p := &readyGateProbe{
+		gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}, {err: jail.ErrNoContainer}}},
+		ready:     []readyAnswer{pending},
+	}
 	d := readyDeps(p, nil)
 	d.ReadyWait = 20 * time.Millisecond
 	err := WaitManagerLive(context.Background(), d, "hello", "/lever", nil)
-	if !errors.Is(err, scion.ErrAgentNotLive) || !strings.Contains(err.Error(), "did not report its session started") {
-		t.Fatalf("want ErrAgentNotLive naming the missing report, got %v", err)
+	if !errors.Is(err, scion.ErrAgentDied) || !strings.Contains(err.Error(), "container stopped during the") {
+		t.Fatalf("want ErrAgentDied during the settle window, got %v", err)
+	}
+}
+
+// A window that passes on the container alone (the pane cannot be read
+// after it) is up, and the warning says what it saw.
+func TestReadyMarkerNeverWrittenWindowPassesOnTheContainer(t *testing.T) {
+	shortHarnessSettle(t, time.Millisecond)
+	sink := &logSink{}
+	p := &readyGateProbe{
+		gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}, {err: &jail.ProbeExitError{Code: 1}}}, running: []runningAnswer{{up: true}}},
+		ready:     []readyAnswer{pending},
+	}
+	d := readyDeps(p, sink)
+	d.ReadyWait = 20 * time.Millisecond
+	if err := WaitManagerLive(context.Background(), d, "hello", "/lever", nil); err != nil {
+		t.Fatalf("want up, got %v", err)
+	}
+	logged := strings.Join(sink.lines, "\n")
+	if !strings.Contains(logged, "never reported its session start") || !strings.Contains(logged, "could not be read but its container still ran") {
+		t.Fatalf("warning does not say the window passed on the container: %q", sink.lines)
+	}
+}
+
+// A ready wait whose last reading could not tell whether the pane is alive
+// is the handover's case at its end: the window decides, with the
+// handover's warning, not the one that claims a live pane.
+func TestReadyMarkerTimeoutAfterAnUnknownReadingHandsOver(t *testing.T) {
+	shortHarnessSettle(t, time.Millisecond)
+	sink := &logSink{}
+	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{{err: jail.ErrProbeTimedOut}}}
+	d := readyDeps(p, sink)
+	d.ReadyWait = time.Nanosecond
+	if err := WaitManagerLive(context.Background(), d, "hello", "/lever", nil); err != nil {
+		t.Fatalf("want up after the window, got %v", err)
+	}
+	if p.readyN != 1 {
+		t.Fatalf("ready waits = %d, want 1", p.readyN)
+	}
+	logged := strings.Join(sink.lines, "\n")
+	if !strings.Contains(logged, "could not wait for the manager's claude") || strings.Contains(logged, "never reported its session start") {
+		t.Fatalf("want the handover's warning only: %q", sink.lines)
+	}
+}
+
+// A context that ends during the fallback window passes through unwrapped.
+func TestReadyMarkerNeverWrittenWindowEndsOnDeadline(t *testing.T) {
+	shortHarnessSettle(t, time.Hour)
+	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{pending}}
+	d := readyDeps(p, nil)
+	d.ReadyWait = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := WaitManagerLive(ctx, d, "hello", "/lever", nil)
+	if !errors.Is(err, context.DeadlineExceeded) || err.Error() != context.DeadlineExceeded.Error() {
+		t.Fatalf("want context.DeadlineExceeded unwrapped, got %v", err)
 	}
 }
 
@@ -246,9 +353,11 @@ func TestReadyGateRunsOnHarnessOnce(t *testing.T) {
 		"ready":    {ready},
 		"no hook":  {noHook},
 		"handover": {{err: jail.ErrProbeTimedOut}},
+		"silent":   {pending},
 	} {
 		p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: answers}
 		d := readyDeps(p, nil)
+		d.ReadyWait = 20 * time.Millisecond
 		n := 0
 		err := gateManagerLive(context.Background(), d, d.ManagerLiveRetry, "hello", "/lever", "up", nil, gateOpts{onHarness: func() { n++ }})
 		if err != nil || n != 1 {

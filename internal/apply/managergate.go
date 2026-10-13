@@ -353,20 +353,28 @@ func waitHarness(ctx context.Context, h harnessCheck, list func(context.Context)
 // confirmHarness is the look after the settle window: claude's pane still
 // alive, or — when the pane cannot be probed — the container still running.
 func confirmHarness(ctx context.Context, h harnessCheck, settle time.Duration) error {
+	_, err := confirmHarnessPane(ctx, h, settle)
+	return err
+}
+
+// confirmHarnessPane is confirmHarness that also says whether it saw
+// claude's pane alive (false with a nil error: the pane could not be read,
+// and the container runs).
+func confirmHarnessPane(ctx context.Context, h harnessCheck, settle time.Duration) (bool, error) {
 	r := h.read(ctx)
 	switch {
 	case r.state == harnessAlive:
-		return nil
+		return true, nil
 	case r.state == harnessContainerDown:
-		return fmt.Errorf("%w: its container stopped during the %s settle window; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
+		return false, fmt.Errorf("%w: its container stopped during the %s settle window; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
 	case r.state == harnessNoServer:
-		return fmt.Errorf("%w: the tmux server in its container went away during the %s settle window, over a running container; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
+		return false, fmt.Errorf("%w: the tmux server in its container went away during the %s settle window, over a running container; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
 	case r.state == harnessNotAlive:
-		return fmt.Errorf("%w: claude's tmux pane (scion:agent) died during the %s settle window, over a running container; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
+		return false, fmt.Errorf("%w: claude's tmux pane (scion:agent) died during the %s settle window, over a running container; its container log in the guest holds the last output", scion.ErrAgentDied, settle)
 	case r.containerUp:
-		return nil
+		return false, nil
 	}
-	return fmt.Errorf("%w: after the %s settle window neither claude's tmux pane nor the container state could be read (%s); run `lever doctor` for the manager row",
+	return false, fmt.Errorf("%w: after the %s settle window neither claude's tmux pane nor the container state could be read (%s); run `lever doctor` for the manager row",
 		scion.ErrAgentUnverified, settle, jail.ProbeErrorClass(r.err))
 }
 
@@ -387,9 +395,10 @@ func confirmHarness(ctx context.Context, h harnessCheck, settle time.Duration) e
 // Once the pane is alive the gate waits for claude's own report that its
 // session started (waitClaudeReady: lever's claude-ready marker, up to
 // defaultReadyWait) and ends as soon as it is there, with no settle window
-// (lever#188). Only when there is no marker to wait for (an older image)
-// does it hold a window: harnessSettle once the pane was seen, b.Settle
-// otherwise. With o.attach the gate ends once the pane is alive: the caller
+// (lever#188). Only when there is no marker to wait for (an older image), or
+// none came in that time over a pane that stayed alive (then with a warning
+// once the window passes), does it hold a window: harnessSettle once the
+// pane was seen, b.Settle otherwise. With o.attach the gate ends once the pane is alive: the caller
 // attaches the operator's terminal at once and checks the manager after
 // the detach (CheckManagerAfterDetach) instead.
 func gateManagerLive(ctx context.Context, d Deps, b RetryBudget, name, project, subject string, prog *Progress, o gateOpts) error {
@@ -473,9 +482,30 @@ func gateManagerLiveSteps(ctx context.Context, d Deps, b RetryBudget, name, proj
 			if readyWait <= 0 {
 				readyWait = defaultReadyWait
 			}
-			ready, err := waitClaudeReady(ctx, h, rp, list, name, b.Interval, readyWait, settle, d.Log)
-			if err != nil || ready {
+			outcome, err := waitClaudeReady(ctx, h, rp, list, name, b.Interval, readyWait, settle, d.Log)
+			if err != nil || outcome == readyUp {
 				return err
+			}
+			if outcome == readySilent {
+				// Claude's pane stayed alive for the whole wait, but claude
+				// never reported its session start: the settle window
+				// decides, and a pass is up with a warning (lever#188).
+				prog.Stage(fmt.Sprintf("claude never reported its session start; holding the %s settle window", settle))
+				paneSeen, err := holdAndConfirmPane(ctx, h, list, name, b.Interval, settle)
+				if err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						return err
+					}
+					return fmt.Errorf("%w (and claude had not reported its session start in the %s before it)", err, readyWait)
+				}
+				if d.Log != nil {
+					after := "claude's pane was still alive after it"
+					if !paneSeen {
+						after = "after it claude's pane could not be read but its container still ran"
+					}
+					d.Log("lever: warning: the manager's claude never reported its session start to lever (lever's claude-ready hook) in %s, though its tmux pane stayed alive — likely a dialog that waits for a key before claude starts its session (a trust, login or update prompt), a /tmp in the container claude cannot write, or hooks disabled in its settings; with no readiness signal, lever held the %s settle window instead, %s, and the manager counts as up. `lever attach` shows the session, `lever doctor` the manager row", readyWait, settle, after)
+				}
+				return nil
 			}
 			// No marker to wait for: the settle window decides, as before.
 			prog.Stage(fmt.Sprintf("claude started; holding the %s settle window", settle))
@@ -500,14 +530,26 @@ func holdAndConfirm(ctx context.Context, h harnessCheck, list func(context.Conte
 	return confirmHarness(ctx, h, settle)
 }
 
+// holdAndConfirmPane is holdAndConfirm that also says whether the look
+// after the window saw claude's pane alive (confirmHarnessPane).
+func holdAndConfirmPane(ctx context.Context, h harnessCheck, list func(context.Context) ([]scion.Agent, error), name string, interval, settle time.Duration) (bool, error) {
+	if err := scion.HoldAgentLive(ctx, list, name, interval, settle); err != nil {
+		return false, err
+	}
+	return confirmHarnessPane(ctx, h, settle)
+}
+
 // defaultReadyWait bounds how long the manager gate waits, once claude's
 // tmux pane is alive, for claude to report its session started (lever's
 // claude-ready hook, lever#188). Claude runs its SessionStart hooks once it
 // has set up the session: for --continue, after it has loaded the
 // conversation, which for a long transcript takes seconds, not minutes. A
-// claude that has not got there in two minutes is stuck (a prompt that
-// waits for a key, a hang) and is reported as not up rather than up. The
-// same bound as the pane wait.
+// claude that has not got there in two minutes will most likely not get
+// there: a dialog that waits for a key before its session start, a /tmp it
+// cannot write, hooks disabled. That is no death, so the gate does not fail
+// it: it falls back to the settle window and its second look, and a pass is
+// up with a warning that the readiness signal is missing. The same bound as
+// the pane wait.
 const defaultReadyWait = 2 * time.Minute
 
 // readyPollWindow is how long one in-container wait for the marker polls
@@ -526,8 +568,23 @@ type claudeReadyProbe interface {
 	AwaitClaudeReady(ctx context.Context, ref string, window time.Duration) (jail.ClaudeReady, error)
 }
 
+// readyOutcome is how waitClaudeReady ended, when it ended with no error.
+type readyOutcome int
+
+const (
+	// readyUp: claude reported its session start; the gate is done.
+	readyUp readyOutcome = iota + 1
+	// readyNoSignal: there is no marker to wait for (no hook, or a wait
+	// that cannot run); a line said so, and the settle window decides.
+	readyNoSignal
+	// readySilent: the wait ran its full length with no marker and no
+	// death seen, its last reading a live pane; the settle window decides,
+	// with a warning once it passes.
+	readySilent
+)
+
 // waitClaudeReady is the gate's wait after claude's pane came alive
-// (lever#188): it returns true as soon as claude's pane is alive AND
+// (lever#188): it returns readyUp as soon as claude's pane is alive AND
 // lever's claude-ready marker names this container run and that pane, which
 // claude writes from its SessionStart hook once its session has started
 // (a new one, or the conversation --continue resumed). There is no settle
@@ -541,8 +598,10 @@ type claudeReadyProbe interface {
 // A death while it waits fails at once: the container stopped, the pane
 // died or the tmux server went away (read by the pane probe whenever the
 // in-container wait does not see a live pane), or the hub record left
-// running. A claude that never reports is not up after wait. It returns
-// false with a nil error when there is no marker to wait for — the managed
+// running. A claude that has not reported after wait, with no death seen,
+// is readySilent: the caller holds the settle window (which looks at the
+// pane and container again) and warns once it passes. It returns
+// readyNoSignal when there is no marker to wait for — the managed
 // settings carry no claude-ready hook (an image built by an older lever, or
 // a boot that could not write the file), or the wait cannot run in the
 // container (unknownHandover failures in a row) — and the caller then holds
@@ -551,7 +610,7 @@ type claudeReadyProbe interface {
 // The marker is the agent's word: an agent that writes it itself claims
 // only that claude started, which a live pane already claims. lever acts on
 // nothing in it beyond its equality with what the probe computes.
-func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, list func(context.Context) ([]scion.Agent, error), name string, interval, wait, settle time.Duration, log func(string, ...any)) (bool, error) {
+func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, list func(context.Context) ([]scion.Agent, error), name string, interval, wait, settle time.Duration, log func(string, ...any)) (readyOutcome, error) {
 	if interval <= 0 {
 		interval = time.Second
 	}
@@ -563,20 +622,20 @@ func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, l
 		call := time.Now()
 		st, err := rp.AwaitClaudeReady(ctx, h.ref, readyPollWindow)
 		if cerr := ctx.Err(); cerr != nil {
-			return false, cerr
+			return 0, cerr
 		}
 		pace := true
 		switch {
 		case err == nil && st == jail.ClaudeReadyYes:
 			if reading, left := recordLeftRunning(ctx, list, name); left {
-				return false, fmt.Errorf("%w: claude reported its session started, but the hub record left running (%s); its container log in the guest holds the last output", scion.ErrAgentDied, reading)
+				return 0, fmt.Errorf("%w: claude reported its session started, but the hub record left running (%s); its container log in the guest holds the last output", scion.ErrAgentDied, reading)
 			}
-			return true, ctx.Err()
+			return readyUp, ctx.Err()
 		case err == nil && st == jail.ClaudeReadyNoHook:
 			if log != nil {
 				log("lever: note: the manager's claude does not report its session start to lever (no claude-ready hook in its managed settings: an image built by an older lever, or a boot that could not write the file); the %s settle window decides", settle)
 			}
-			return false, nil
+			return readyNoSignal, nil
 		case err == nil && st == jail.ClaudeReadyPending:
 			unknownRun = 0
 			// An in-container wait that came back early (its sleep could
@@ -590,13 +649,13 @@ func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, l
 			}
 			switch r := h.read(ctx); r.state {
 			case harnessContainerDown:
-				return false, fmt.Errorf("%w: its container stopped after claude's tmux pane came up, before claude reported its session started, after %s; its container log in the guest holds the last output",
+				return 0, fmt.Errorf("%w: its container stopped after claude's tmux pane came up, before claude reported its session started, after %s; its container log in the guest holds the last output",
 					scion.ErrAgentDied, since())
 			case harnessNotAlive:
-				return false, fmt.Errorf("%w: claude's tmux pane (scion:agent) died before claude reported its session started, after %s, over a running container (a failed --continue exits so); `lever attach` shows the session, its container log in the guest the last output",
+				return 0, fmt.Errorf("%w: claude's tmux pane (scion:agent) died before claude reported its session started, after %s, over a running container (a failed --continue exits so); `lever attach` shows the session, its container log in the guest the last output",
 					scion.ErrAgentDied, since())
 			case harnessNoServer:
-				return false, fmt.Errorf("%w: the tmux server in its container went away before claude reported its session started, after %s, over a running container; its container log in the guest holds the last output",
+				return 0, fmt.Errorf("%w: the tmux server in its container went away before claude reported its session started, after %s, over a running container; its container log in the guest holds the last output",
 					scion.ErrAgentDied, since())
 			case harnessAlive:
 				// The two readings disagree: neither is evidence.
@@ -615,25 +674,33 @@ func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, l
 			if log != nil {
 				log("lever: warning: could not wait for the manager's claude to report its session start (%s); the %s settle window decides", readyErrClass(lastErr), settle)
 			}
-			return false, nil
+			return readyNoSignal, nil
 		}
 		if reading, left := recordLeftRunning(ctx, list, name); left {
-			return false, fmt.Errorf("%w: the hub record left running (%s) before claude reported its session started, after %s; its container log in the guest holds the last output",
+			return 0, fmt.Errorf("%w: the hub record left running (%s) before claude reported its session started, after %s; its container log in the guest holds the last output",
 				scion.ErrAgentDied, reading, since())
 		}
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return 0, err
 		}
 		if time.Since(start) >= wait {
-			return false, fmt.Errorf("%w: claude's tmux pane is alive, but claude did not report its session started (lever's claude-ready hook) in %s — it may wait at a prompt, or hang; `lever attach` shows the session, `lever doctor` the manager row",
-				scion.ErrAgentNotLive, wait)
+			// No reading saw a death (each returned above). Only a last
+			// reading that saw the pane alive (pending) is readySilent;
+			// one that could not tell is the handover's case.
+			if unknownRun > 0 {
+				if log != nil {
+					log("lever: warning: could not wait for the manager's claude to report its session start (%s), and it had not reported in %s; the %s settle window decides", readyErrClass(lastErr), wait, settle)
+				}
+				return readyNoSignal, nil
+			}
+			return readySilent, nil
 		}
 		if !pace {
 			continue
 		}
 		select {
 		case <-ctx.Done():
-			return false, ctx.Err()
+			return 0, ctx.Err()
 		case <-time.After(interval):
 		}
 	}

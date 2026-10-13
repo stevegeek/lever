@@ -33,24 +33,85 @@ const StaleBackgroundHint = "cause: Claude refused to continue, because the last
 	"lever up. `lever doctor` lists such records while the container runs; see the operations guide, " +
 	"\"Background sessions and /login\""
 
-// HarnessDeathHint classifies the log tail of an agent container whose
-// harness died and returns the hint to print, or "" when it knows no cause.
-// The tail is the agent's word: only fixed phrases are matched, and nothing
-// of it is returned.
+// noConversationPhrases are what Claude Code prints when claude --continue
+// finds no conversation to continue in the agent home: a manager that was
+// started and never sent anything has no transcript, so scion's resume of it
+// (which passes --continue) ends there and the harness exits 1 (lever#202).
+var noConversationPhrases = []string{
+	"No conversation found to continue",
+}
+
+// NoConversationHint is the cause and the recovery lever prints when a
+// manager's harness died because claude --continue found no conversation.
+// The log says nothing about whether the home holds a transcript elsewhere,
+// so this says "most likely"; `lever up` proves it from the guest before it
+// starts the manager fresh on its own (Deps.ManagerConversationEmpty).
+const NoConversationHint = "cause: no conversation to continue: Claude found none (scion resumes the manager with " +
+	"claude --continue), so the manager was most likely never used. `lever up --fresh` starts it fresh and loses " +
+	"nothing: it backs up any transcript in the agent home first (`lever conversation list`)"
+
+// ErrNoConversation marks a manager liveness failure whose cause is
+// NoConversationHint; its text is the hint.
+var ErrNoConversation = errors.New(NoConversationHint)
+
+// harnessCause is a known cause of a harness death, read from its log.
+type harnessCause int
+
+const (
+	causeNone harnessCause = iota
+	causeStaleBackground
+	causeNoConversation
+)
+
+// harnessCauseOf classifies the log tail of an agent container whose harness
+// died. The tail is the agent's word: only fixed phrases are matched, and
+// nothing of it is returned. When it holds the phrases of more than one
+// cause (a container restarted in place keeps its earlier output), the one
+// printed last wins.
 //
 // The tail is a terminal stream (the harness runs in tmux), so it is
 // normalised before the match: terminal control sequences are removed, case
 // is folded, and all whitespace is dropped from both the tail and the
 // phrases. A phrase split by pane wrapping (a newline, or cursor movement
 // in place of spaces) still matches.
-func HarnessDeathHint(logTail string) string {
+func harnessCauseOf(logTail string) harnessCause {
 	norm := squashForMatch(logTail)
-	for _, p := range staleBackgroundPhrases {
-		if strings.Contains(norm, squashForMatch(p)) {
-			return StaleBackgroundHint
+	best, at := causeNone, -1
+	for _, c := range []struct {
+		cause   harnessCause
+		phrases []string
+	}{
+		{causeStaleBackground, staleBackgroundPhrases},
+		{causeNoConversation, noConversationPhrases},
+	} {
+		for _, p := range c.phrases {
+			if i := strings.LastIndex(norm, squashForMatch(p)); i > at {
+				best, at = c.cause, i
+			}
 		}
 	}
-	return ""
+	return best
+}
+
+// HarnessDeathHint classifies the log tail of an agent container whose
+// harness died (harnessCauseOf) and returns the hint to print, or "" when it
+// knows no cause. A tmux server crash that sciontool logged (lever#201) is
+// named when no other cause is. Nothing of the tail is returned.
+func HarnessDeathHint(logTail string) string {
+	switch harnessCauseOf(logTail) {
+	case causeStaleBackground:
+		return StaleBackgroundHint
+	case causeNoConversation:
+		return NoConversationHint
+	}
+	return tmuxServerDeathHint(squashForMatch(logTail))
+}
+
+// NoConversationInLog reports whether the log tail of an agent container
+// names a missing conversation as the latest known cause of its harness's
+// death (harnessCauseOf). Doctor's manager row uses it.
+func NoConversationInLog(logTail string) bool {
+	return harnessCauseOf(logTail) == causeNoConversation
 }
 
 // squashForMatch removes terminal control sequences and every whitespace
@@ -139,8 +200,10 @@ func skipString(s string, i int) int {
 // stale background records in it (jail.BackgroundRecords.Stale). When that
 // finds none, cannot run (no container, no reader) or fails, the fallback
 // matches fixed phrases in the container log tail (d.HarnessLogTail,
-// HarnessDeathHint). Any other error, or no known cause, returns err as it
-// is. err stays wrapped, so errors.Is still finds the gate's sentinel.
+// HarnessDeathHint). A missing conversation also wraps ErrNoConversation, so
+// start-manager can tell it apart (startFreshWithoutConversation). Any other
+// error, or no known cause, returns err as it is. err stays wrapped, so
+// errors.Is still finds the gate's sentinel.
 func withHarnessDeathHint(ctx context.Context, d Deps, err error, project, name string) error {
 	if err == nil {
 		return err
@@ -161,9 +224,14 @@ func withHarnessDeathHint(ctx context.Context, d Deps, err error, project, name 
 	if rerr != nil && tail == "" {
 		return err
 	}
-	hint := HarnessDeathHint(tail)
-	if hint == "" {
-		return err
+	switch harnessCauseOf(tail) {
+	case causeStaleBackground:
+		return fmt.Errorf("%w — %s", err, StaleBackgroundHint)
+	case causeNoConversation:
+		return fmt.Errorf("%w — %w", err, ErrNoConversation)
 	}
-	return fmt.Errorf("%w — %s", err, hint)
+	if h := tmuxServerDeathHint(squashForMatch(tail)); h != "" {
+		return fmt.Errorf("%w — %s", err, h)
+	}
+	return err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -627,6 +628,25 @@ func scriptedList(script ...[]Agent) (func(context.Context) ([]Agent, error), *i
 	}, &calls
 }
 
+// stepClock is a settle clock for tests whose outcome depends on WHERE in
+// the window an observation lands: every wait returns at once and moves the
+// clock on by exactly the interval waited, so the Nth settle poll lands at
+// exactly N intervals and no amount of CPU load can push it past the
+// deadline. elapsed reports how far the clock has moved.
+func stepClock() (clk settleClock, elapsed func() time.Duration) {
+	start := time.Unix(1_000_000, 0)
+	now := start
+	return settleClock{
+		now: func() time.Time { return now },
+		after: func(d time.Duration) <-chan time.Time {
+			now = now.Add(d)
+			c := make(chan time.Time, 1)
+			c <- now
+			return c
+		},
+	}, func() time.Duration { return now.Sub(start) }
+}
+
 var (
 	liveMgr = []Agent{{Slug: "mgr", Phase: "running", ContainerStatus: "Up 1 second"}}
 	deadMgr = []Agent{{Slug: "mgr", Phase: "error", ContainerStatus: "Exited (1) 2 seconds ago"}}
@@ -651,7 +671,8 @@ func TestWaitAgentLiveZeroSettleReturnsOnFirstLiveObservation(t *testing.T) {
 // carrying the observation that failed.
 func TestWaitAgentLiveSettleFailsWhenTheRecordFlips(t *testing.T) {
 	list, _ := scriptedList(liveMgr, liveMgr, deadMgr) // dead repeats: two strikes
-	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 200 * time.Millisecond})
+	clk, _ := stepClock()
+	err := waitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 200 * time.Millisecond}, clk)
 	if !errors.Is(err, ErrAgentDied) {
 		t.Fatalf("want ErrAgentDied, got %v", err)
 	}
@@ -676,18 +697,19 @@ func TestWaitAgentLiveSettleFailsWhenTheRecordVanishes(t *testing.T) {
 }
 
 // Holding live for the whole window passes, and the window really is
-// observed: more than one list call happens after the first live one.
+// observed: one list call per interval after the first live one, until the
+// window has elapsed.
 func TestWaitAgentLiveSettleHoldsThenPasses(t *testing.T) {
 	list, calls := scriptedList(liveMgr)
-	start := time.Now()
-	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond}); err != nil {
+	clk, elapsed := stepClock()
+	if err := waitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 3, Interval: 20 * time.Millisecond, Settle: 60 * time.Millisecond}, clk); err != nil {
 		t.Fatalf("WaitAgentLive: %v", err)
 	}
-	if el := time.Since(start); el < 60*time.Millisecond {
+	if el := elapsed(); el < 60*time.Millisecond {
 		t.Fatalf("returned after %s, before the 60ms settle window elapsed", el)
 	}
-	if *calls < 3 {
-		t.Fatalf("list called %d times; the settle window must re-observe, not sleep", *calls)
+	if *calls != 4 {
+		t.Fatalf("list called %d times, want 4 (the first live look, then one per 20ms interval of the 60ms window); the settle window must re-observe, not sleep", *calls)
 	}
 }
 
@@ -695,7 +717,8 @@ func TestWaitAgentLiveSettleHoldsThenPasses(t *testing.T) {
 // phase: a hub hiccup is not a dead harness.
 func TestWaitAgentLiveSettleToleratesAListError(t *testing.T) {
 	list, _ := scriptedList(liveMgr, nil, liveMgr)
-	if err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 60 * time.Millisecond}); err != nil {
+	clk, _ := stepClock()
+	if err := waitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: 60 * time.Millisecond}, clk); err != nil {
 		t.Fatalf("one hiccup inside the window must not fail the gate: %v", err)
 	}
 }
@@ -738,15 +761,21 @@ func TestWaitAgentLiveSettleForgivesOneBadReading(t *testing.T) {
 // A pending strike at the end of the window is decided by one more
 // observation, never left hanging as a pass.
 func TestWaitAgentLiveSettleDecidesAPendingStrike(t *testing.T) {
-	// Polls land at ~20, ~40, ~60 ms against a 30 ms window: the second poll —
-	// the first past the deadline — is the first dead reading. A gate that
-	// ended the window on elapsed time alone would pass here with one strike
-	// pending; the rule is that the next observation decides it. Ten
-	// milliseconds of slack either side of the deadline.
-	list, _ := scriptedList(liveMgr, liveMgr, deadMgr)
-	err := WaitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: 20 * time.Millisecond, Settle: 30 * time.Millisecond})
+	// Polls land at exactly 20, 40 and 60 ms against a 30 ms window (a step
+	// clock: on the wall clock a loaded machine fires the first poll past the
+	// deadline and the window closes on a live reading before the script
+	// reaches its dead ones). The second poll — the first past the deadline —
+	// is the first dead reading. A gate that ended the window on elapsed time
+	// alone would pass here with one strike pending; the rule is that the next
+	// observation decides it.
+	list, calls := scriptedList(liveMgr, liveMgr, deadMgr)
+	clk, elapsed := stepClock()
+	err := waitAgentLive(context.Background(), list, "mgr", LiveBudget{Attempts: 1, Interval: 20 * time.Millisecond, Settle: 30 * time.Millisecond}, clk)
 	if !errors.Is(err, ErrAgentDied) {
 		t.Fatalf("want ErrAgentDied once two dead readings are consecutive, got %v", err)
+	}
+	if *calls != 4 || elapsed() != 60*time.Millisecond {
+		t.Fatalf("decided after %d list calls at %s, want the third settle poll (4 calls, 60ms)", *calls, elapsed())
 	}
 }
 
@@ -945,6 +974,57 @@ func TestStartInlineConfigCarriesInstructionsVolumesAndEnvTogether(t *testing.T)
 	}
 	if body.AgentInstructions != "manual" || len(body.Volumes) != 1 || body.Env["K"] != "v" {
 		t.Fatalf("inline config = %+v", body)
+	}
+}
+
+// Container limits travel as inline config resources.limits in scion's
+// ResourceSpec shape, and on their own still switch the start to `--config -`.
+func TestStartResourcesGoOverStdin(t *testing.T) {
+	f := fakeScion(true)
+	c := New(f, Options{})
+	err := c.Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a",
+		Resources: Resources{Memory: "1536Mi", CPU: "1.5"}})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := f.Calls[len(f.Calls)-1]
+	if !slices.Contains(last.Args, "--config") {
+		t.Fatalf("argv %q: resources alone must send the inline config", last.Args)
+	}
+	var body struct {
+		Resources struct {
+			Limits struct {
+				CPU    string `json:"cpu"`
+				Memory string `json:"memory"`
+			} `json:"limits"`
+			Requests *json.RawMessage `json:"requests"`
+		} `json:"resources"`
+	}
+	if err := json.Unmarshal([]byte(last.Stdin), &body); err != nil {
+		t.Fatalf("stdin is not valid JSON: %v (%q)", err, last.Stdin)
+	}
+	if body.Resources.Limits.CPU != "1.5" || body.Resources.Limits.Memory != "1536Mi" {
+		t.Fatalf("resources = %+v (stdin %q)", body.Resources, last.Stdin)
+	}
+	if body.Resources.Requests != nil {
+		t.Fatalf("lever sends limits only, got requests in %q", last.Stdin)
+	}
+	// One limit alone: the other is absent, so scion's default for it applies.
+	f2 := fakeScion(true)
+	if err := New(f2, Options{}).Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a",
+		Resources: Resources{Memory: "2Gi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f2.Calls[len(f2.Calls)-1].Stdin; !strings.Contains(got, `"resources":{"limits":{"memory":"2Gi"}}`) {
+		t.Fatalf("memory-only stdin = %q", got)
+	}
+	// No limits: no resources key at all, and no stdin when nothing else is set.
+	f3 := fakeScion(true)
+	if err := New(f3, Options{}).Start(context.Background(), StartOpts{Worker: "a", Task: "x", Project: "/g/a"}); err != nil {
+		t.Fatal(err)
+	}
+	if last := f3.Calls[len(f3.Calls)-1]; slices.Contains(last.Args, "--config") || last.Stdin != "" {
+		t.Fatalf("a start with no inline material sent config: argv %q stdin %q", last.Args, last.Stdin)
 	}
 }
 

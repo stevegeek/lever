@@ -1,9 +1,12 @@
 package host
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
@@ -252,5 +255,79 @@ func TestFormatNoteDeterministicAndVerdict(t *testing.T) {
 	}
 	if !strings.Contains(failNote, "egress-refused") || !strings.Contains(failNote, "FAIL") {
 		t.Fatalf("note should mark egress-refused FAIL:\n%s", failNote)
+	}
+}
+
+// TestClassifyLinkLocalProbe pins how a /dev/tcp dial is read: only the
+// REJECT's EHOSTUNREACH is "rejected", only timeout's 124 is "dropped", a
+// connect or a reset is "open", and anything else fails closed.
+func TestClassifyLinkLocalProbe(t *testing.T) {
+	e := fmt.Errorf("exit")
+	for _, tc := range []struct {
+		name string
+		res  proc.Result
+		err  error
+		want linkState
+	}{
+		{"connected", proc.Result{}, nil, linkOpen},
+		{"reset", proc.Result{Code: 1, Stderr: "bash: connect: Connection refused\nbash: line 1: /dev/tcp/169.254.169.254/80: Connection refused\n"}, e, linkOpen},
+		{"rejected", proc.Result{Code: 1, Stderr: "bash: connect: No route to host\nbash: line 1: /dev/tcp/169.254.169.254/80: No route to host\n"}, e, linkRejected},
+		{"dropped", proc.Result{Code: 124}, e, linkDropped},
+		{"bash missing", proc.Result{Code: 127, Stderr: "timeout: failed to run command 'bash': No such file or directory"}, e, linkUncertain},
+		{"net unreachable", proc.Result{Code: 1, Stderr: "bash: connect: Network is unreachable"}, e, linkUncertain},
+	} {
+		got, err := classifyLinkLocalProbe("169.254.169.254", tc.res, tc.err)
+		if got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
+		}
+		if (got == linkUncertain) != (err != nil) {
+			t.Errorf("%s: an error iff uncertain, got %v", tc.name, err)
+		}
+	}
+}
+
+// TestMetadataVerdict: PASS only for a rejected metadata address with a
+// dropped control; everything else fails.
+func TestMetadataVerdict(t *testing.T) {
+	all := []linkState{linkOpen, linkRejected, linkDropped, linkUncertain}
+	for _, m := range all {
+		for _, c := range all {
+			pass, err := metadataVerdict(m, c)
+			want := m == linkRejected && c == linkDropped
+			if pass != want || (err == nil) != want {
+				t.Errorf("meta=%s control=%s: pass=%v err=%v, want pass=%v", m, c, pass, err, want)
+			}
+		}
+	}
+}
+
+func TestWaitToolsListening(t *testing.T) {
+	app := &config.App{Broker: config.Broker{Tools: []config.Tool{
+		{Name: "db", Backend: "127.0.0.1:3201"},
+		{Name: "ext", Backend: "127.0.0.1:3901/mcp", External: true},
+		{Name: "web", Backend: "http://127.0.0.1:3202/mcp"},
+	}}}
+	// Listens on the third try: waits, then passes; the external tool is
+	// never dialled, and a backend with a scheme is dialled at host:port.
+	var dialled []string
+	n := 0
+	dial := func(_ context.Context, addr string) error {
+		dialled = append(dialled, addr)
+		if n++; n < 3 {
+			return errors.New("connection refused")
+		}
+		return nil
+	}
+	if err := waitToolsListening(context.Background(), app, dial, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(dialled, " "); got != "127.0.0.1:3201 127.0.0.1:3201 127.0.0.1:3201 127.0.0.1:3202" {
+		t.Fatalf("dialled %q", got)
+	}
+	// Never listens: a named error after the wait.
+	never := func(context.Context, string) error { return errors.New("connection refused") }
+	err := waitToolsListening(context.Background(), app, never, 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), `tool "db" is not listening on 127.0.0.1:3201`) || !strings.Contains(err.Error(), "tool-logs/db.log") {
+		t.Fatalf("err = %v", err)
 	}
 }

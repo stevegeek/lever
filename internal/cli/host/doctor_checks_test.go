@@ -1487,7 +1487,7 @@ func TestCheckManagerLive(t *testing.T) {
 		{"running record, blank column", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "no container status", ""},
 	}
 	for _, c := range cases {
-		r := checkManagerLive(context.Background(), "/lever", "assistant", c.list, nil, now)
+		r := checkManagerLive(context.Background(), "/lever", "assistant", c.list, nil, nil, now)
 		if r.ok != c.ok {
 			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
 		}
@@ -1502,7 +1502,7 @@ func TestCheckManagerLive(t *testing.T) {
 	// and never a finding of its own — a down jail is another row's job.
 	r := checkManagerLive(context.Background(), "/lever", "assistant", func(context.Context, string) ([]scion.Agent, error) {
 		return nil, errors.New("connection refused\nusage: scion list ...")
-	}, nil, now)
+	}, nil, nil, now)
 	if !r.ok || !strings.Contains(r.detail, "not checked") || strings.Contains(r.detail, "usage") {
 		t.Fatalf("list error must read as not-checked with only the first line: %+v", r)
 	}
@@ -1547,42 +1547,96 @@ func TestCheckManagerLiveSessionFaults(t *testing.T) {
 	expired := map[string]jail.HubTokenTimes{"lever--assistant": {Expiry: now.Add(-20 * time.Minute), Now: now}}
 	valid := map[string]jail.HubTokenTimes{"lever--assistant": {Expiry: now.Add(5 * time.Hour), Now: now}}
 
-	r := checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tok: expired}, now)
+	r := checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tok: expired}, nil, now)
 	if r.ok || !strings.Contains(r.detail, "hub token expired at 2026-10-06T19:10:00Z (20m0s ago") || !strings.Contains(r.detail, "401") ||
 		!strings.Contains(r.fix, "lever apply") || !strings.Contains(r.fix, "scion reset-auth assistant -g /lever") {
 		t.Fatalf("expired token under a stalled activity must fail with the reset-auth fix: %+v", r)
 	}
-	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tok: valid}, now)
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tok: valid}, nil, now)
 	if !r.ok || !strings.Contains(r.detail, "idle at its prompt") {
 		t.Fatalf("a valid token keeps the idle-manager pass: %+v", r)
 	}
 	// A token that cannot be read is no finding: the stalled pass stands.
-	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tokErr: errors.New("exit status 1")}, now)
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tokErr: errors.New("exit status 1")}, nil, now)
 	if !r.ok {
 		t.Fatalf("an unreadable token must not fail the row: %+v", r)
 	}
 
 	stoppedLive := scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "Up 3 hours"}
-	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{alive: true}, now)
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{alive: true}, nil, now)
 	if r.ok || !strings.Contains(r.detail, "claude still runs in its container") || !strings.Contains(r.detail, "SessionEnd") ||
 		!strings.Contains(r.fix, "lever apply") {
 		t.Fatalf("stopped over a live harness: %+v", r)
 	}
-	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{alive: false}, now)
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{alive: false}, nil, now)
 	if r.ok || !strings.Contains(r.detail, "claude has exited") || !strings.Contains(r.fix, "/resume") {
 		t.Fatalf("stopped with claude gone: %+v", r)
 	}
 	// The harness probe failing falls back to the plain not-live row, with
 	// the stopped fix that names the new session.
-	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{aliveErr: errors.New("exit status 125")}, now)
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{aliveErr: errors.New("exit status 125")}, nil, now)
 	if r.ok || !strings.Contains(r.detail, `phase "stopped"`) || !strings.Contains(r.fix, "new claude session") {
 		t.Fatalf("stopped, harness unknown: %+v", r)
 	}
 	// A stopped record with no container is not probed at all.
 	s := &stubSession{alive: true}
-	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "stopped"}), s, now)
+	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "stopped"}), s, nil, now)
 	if r.ok || len(s.refs) != 0 || !strings.Contains(r.fix, "/resume") {
 		t.Fatalf("stopped, no container: %+v (probed %v)", r, s.refs)
+	}
+}
+
+// TestCheckManagerLiveNoConversation (lever#202): an error-phase manager
+// whose container log says claude found no conversation to continue is
+// named as such, with the fresh start as the fix; the log is never printed,
+// and only an error-phase record's log is read.
+func TestCheckManagerLiveNoConversation(t *testing.T) {
+	now := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	listing := func(agents ...scion.Agent) agentLister {
+		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
+	}
+	crashed := scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}
+	var refs []string
+	tail := func(log string, err error) containerLogReader {
+		return func(_ context.Context, ref string) (string, error) {
+			refs = append(refs, ref)
+			return log, err
+		}
+	}
+	const log = "SECRET-LINE\n\x1b[31mNo conversation found to continue\x1b[0m\n"
+	r := checkManagerLive(context.Background(), "/lever", "assistant", listing(crashed), nil, tail(log, nil), now)
+	if r.ok || !strings.Contains(r.detail, "no conversation to continue") || r.fix != noConversationFix {
+		t.Fatalf("no conversation not named: %+v", r)
+	}
+	if strings.Contains(r.detail+r.fix, "SECRET") || len(refs) != 1 || refs[0] != "lever--assistant" {
+		t.Fatalf("log repeated or read wrongly: %+v (refs %v)", r, refs)
+	}
+	for _, w := range []string{"lever up", "--fresh", "backs up", "holds no transcript"} {
+		if !strings.Contains(noConversationFix, w) {
+			t.Errorf("fix lacks %q", w)
+		}
+	}
+	// Any other log, or a failed read, keeps the plain error row.
+	for _, tr := range []containerLogReader{tail("Error: other", nil), tail("", errors.New("no container")), nil} {
+		r = checkManagerLive(context.Background(), "/lever", "assistant", listing(crashed), nil, tr, now)
+		if r.ok || !strings.Contains(r.fix, "--force") {
+			t.Fatalf("plain error row changed: %+v", r)
+		}
+	}
+	// Other phases do not read the log.
+	refs = nil
+	for _, a := range []scion.Agent{
+		{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"},
+		{Slug: "assistant", Phase: "stopped", ContainerStatus: "stopped"},
+		{Slug: "assistant", Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"},
+	} {
+		r = checkManagerLive(context.Background(), "/lever", "assistant", listing(a), nil, tail(log, nil), now)
+		if r.fix == noConversationFix {
+			t.Errorf("phase %s got the no-conversation fix", a.Phase)
+		}
+	}
+	if len(refs) != 0 {
+		t.Fatalf("read the log of %v", refs)
 	}
 }
 
@@ -1810,14 +1864,20 @@ func TestCheckManagerReadOnly(t *testing.T) {
 			return mounts, nil
 		}
 	}
-	// probeOf answers the live write probe: targets listed in writable are
-	// writable; err, when set, is every probe's answer.
-	probeOf := func(err error, writable ...string) apply.WritableProbe {
-		return func(_ context.Context, _ string, target string) (bool, error) {
+	// probeOf answers the live check: targets listed in replaced cover
+	// another directory than the host's; err, when set, is the answer.
+	probeOf := func(err error, replaced ...string) liveMountChecker {
+		return func(_ context.Context, _ string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
 			if err != nil {
-				return false, err
+				return nil, err
 			}
-			return slices.Contains(writable, target), nil
+			var out []jail.LiveMountProblem
+			for _, w := range want {
+				if slices.Contains(replaced, w.Target) {
+					out = append(out, jail.LiveMountProblem{Target: w.Target, Reason: jail.LiveMountReplaced})
+				}
+			}
+			return out, nil
 		}
 	}
 	refused := probeOf(nil)
@@ -1848,16 +1908,16 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		want       []config.TreeMount
 		list       agentLister
 		inspect    mountInspector
-		probe      apply.WritableProbe
+		probe      liveMountChecker
 		ok         bool
 		warn       bool
 		wantDetail string
 		wantFix    string
 	}{
-		{"all mounted, probe refused", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, false, "1 path(s) read-only in \"assistant\" (mounted, and a write probe refused), 3 pin(s)", ""},
+		{"all mounted, probe refused", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, false, "1 path(s) read-only in \"assistant\", 3 pin(s) mounted (checked live from the guest", ""},
 		{"created before the setting", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, false, false,
 			"assistant/tools not mounted read-only: the agent can write it", "lever up --fresh"},
-		{"entry pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, ro)}), refused, false, false, "assistant not pinned: the agent can rename it away", "back up the manager's conversation"},
+		{"entry pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, ro)}), refused, false, false, "assistant not pinned: the agent can rename it away", "--keep-conversation"},
 		{"worker pin missing", want, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, pin, ro, wpins[0]}}), refused, false, false,
 			"workers/w (a worker dir) not pinned: the manager can replace it with a symbolic link and have that worker mount a protected directory", "lever up --fresh"},
 		{"entry mounted rw", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, pin, jail.Mount{Source: "/lever/assistant/tools", Destination: "/workspace/assistant/tools", RW: true})}), refused, false, false,
@@ -1867,14 +1927,20 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		// The false OK the inspect alone gave: the mount is listed, but the
 		// host replaced the directory and a write lands in the new one.
 		{"entry replaced on the host", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(nil, "/workspace/assistant/tools"), false, false,
-			"assistant/tools writable from the container although its read-only mount is listed", "edit protected directories in place"},
-		{"probe cannot run", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(errors.New("podman exec failed")), true, true, "write probe could not run", "re-run doctor"},
-		{"probe not wired", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), nil, true, true, "write probe is not wired", "lever wiring gap"},
+			"assistant/tools covers another directory than the host has there now", "edit protected directories in place"},
+		// A replaced pin is reported too: the whole plan is checked live.
+		{"pin replaced on the host", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(nil, "/workspace/assistant"), false, false,
+			"assistant covers another directory than the host has there now", "edit protected directories in place"},
+		{"probe cannot run", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(errors.New("cannot read the running container's mounts from the guest")), true, true, "live check could not run", "re-run doctor"},
+		// The first process moved into a namespace made inside the
+		// container: a staged view, so the row fails.
+		{"foreign namespace", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(jail.ErrForeignNamespace), false, false, "mount namespace made inside the container", "compromised"},
+		{"probe not wired", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), nil, true, true, "live check is not wired", "lever wiring gap"},
 		{"container not running", want, listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "Exited (0) 2 minutes ago", ContainerID: "cm"}),
-			inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, true, "write probe did not run (the manager container is not running)", "lever up"},
+			inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, true, "live check did not run (the manager container is not running)", "lever up"},
 		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
 		{"no container id, found by name", want, listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "running"}),
-			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), refused, true, false, "a write probe refused", ""},
+			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), refused, true, false, "checked live from the guest", ""},
 		{"none configured", nil, mgr, inspectOf(nil), refused, true, false, "none configured", ""},
 		{"none configured, nothing mounted", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, true, false, "none configured", ""},
 		{"none configured, list fails", nil, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, inspectOf(nil), refused, true, false, "none configured", ""},
@@ -1925,7 +1991,7 @@ func TestCheckManagerReadOnlyFallsBackToTheHubRecord(t *testing.T) {
 		return []scion.Agent{{Slug: "assistant", Phase: "suspended"}}, nil
 	}
 	noContainer := func(context.Context, string) ([]jail.Mount, error) { return nil, jail.ErrNoContainer }
-	refused := func(context.Context, string, string) (bool, error) { return false, nil }
+	refused := func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil }
 	recordOf := func(ms ...jail.Mount) recordVolumeReader {
 		return func(_ context.Context, project, agent string) ([]jail.Mount, error) {
 			if project != "lever" || agent != "assistant" {
@@ -2349,7 +2415,7 @@ func TestCheckNestedVirt(t *testing.T) {
 	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", has); !r.ok {
 		t.Fatalf("all good: %+v", r)
 	}
-	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", lacks); r.ok || !strings.Contains(r.fix, "lever up --fresh") || !strings.Contains(r.fix, "back up") {
+	if r := checkNestedVirt(ctx, true, true, guestOK(), "p--m", lacks); r.ok || !strings.Contains(r.fix, "lever up --fresh --keep-conversation") {
 		t.Fatalf("container lacks kvm: %+v", r)
 	}
 	bad := proc.NewFakeRunner()

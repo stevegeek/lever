@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -32,6 +33,8 @@ import (
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
@@ -205,8 +208,10 @@ func (rc *remoteController) addr() string {
 // remote.pid with a dead pid, the same failure mode brokerController.Start's
 // #19 reuse shortcut guards against for the broker. Liveness is the same
 // pidfile+TCP-dial check `lever remote status` uses (state.PIDStatus +
-// tcpDial): a live-but-not-yet-listening pid (a startup race) or a
-// stale/absent pid both fall through to a fresh spawn.
+// tcpDial), where the live pid must also be this instance's `lever remote
+// serve` (state.State.RemoteStatus): a live-but-not-yet-listening pid (a
+// startup race) or a stale/absent pid, a reused one included, both fall
+// through to a fresh spawn.
 //
 // The stamp check is the third condition, and it is NOT optional. The proxy
 // reads its config once and caches all of it in the handler it builds at
@@ -221,8 +226,9 @@ func (rc *remoteController) addr() string {
 // not grow one — it fronts the hub, so any listener of its own would be
 // reachable by whatever reaches the proxy. Hence a host-side stamp file.
 func (rc *remoteController) Start(ctx context.Context) error {
-	if _, found, alive := state.PIDStatus(rc.state.RemotePID()); found && alive {
+	if _, found, alive := rc.state.RemoteStatus(); found && alive {
 		if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) && tcpDial(rc.addr()) == nil {
+			progress.From(ctx).Note("reused")
 			return nil // already serving: this binary, this config, this port
 		}
 		// A live proxy that is NOT the one this config asks for. Stop it before
@@ -502,7 +508,7 @@ func (o patMintOpts) warn(format string, args ...any) {
 		o.Warn(format, args...)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+	fmt.Fprintln(os.Stderr, termsafe.Sanitize(fmt.Sprintf("lever: warning: "+format, args...)))
 }
 
 // patReasonAbsent is patMintReason's answer for a first mint.
@@ -925,26 +931,27 @@ func applySignalContext(parent context.Context) (ctx context.Context, stop func(
 
 func newApplyCmd(bf BackendFactory) *cobra.Command {
 	var dryRun bool
+	var progressMode string
 	c := &cobra.Command{
 		Use:   "apply [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an agent-manager application up from a config",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
-			// State the containment posture every bring-up runs under, so the
-			// selected backend's guarantees are visible, not assumed.
-			if p, ok := registry.ProfileFor(app.Backend); ok {
-				cmd.Printf("backend: %s\n", p.Summary())
-			}
-			printRemoteWarnings(cmd, app)
-			if err := checkContactGate(app, stateFor(path)); err != nil {
-				return err
-			}
-			printContactSessionWarnings(cmd, app, stateFor(path))
 			if dryRun {
+				// State the containment posture every bring-up runs under, so
+				// the selected backend's guarantees are visible, not assumed.
+				if p, ok := registry.ProfileFor(app.Backend); ok {
+					cmd.Printf("backend: %s\n", p.Summary())
+				}
+				printRemoteWarnings(cmd, app)
+				if err := checkContactGate(app, stateFor(path)); err != nil {
+					return err
+				}
+				printContactSessionWarnings(cmd, app, stateFor(path))
 				for _, s := range apply.Plan(app, apply.PlanOpts{}) {
 					if s.TarPath != "" {
 						cmd.Printf("  %-16s %s (from %s)\n", s.Kind, s.Target, s.TarPath)
@@ -954,20 +961,35 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			ctx, stop := applySignalContext(cmd.Context())
+			// The header states the containment posture every bring-up runs
+			// under, so the backend's guarantees are visible, not assumed.
+			run, pctx, err := startBringup(cmd, app, stateFor(path), "apply", progressMode)
+			if err != nil {
+				return err
+			}
+			defer run.finishOnReturn(&err)
+			printRemoteWarnings(cmd, app)
+			if err := checkContactGate(app, stateFor(path)); err != nil {
+				return err
+			}
+			printContactSessionWarnings(cmd, app, stateFor(path))
+			ctx, stop := applySignalContext(pctx)
 			defer stop()
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
+			run.rep.Group("jail", 0)
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep})
 			if err != nil {
 				return err
 			}
 			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
+			run.finish(nil)
 			cmd.Printf("application %q is up.\n", app.Name)
 			return nil
 		},
 	}
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "print the bring-up plan and exit")
+	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
 }
 
@@ -1015,24 +1037,57 @@ const brokerAdminTimeout = 5 * time.Second
 // duplicate — it would fail to bind the ports, die, and clobber broker.pid with
 // a dead PID. A fast single-shot probe (no listener => instant
 // connection-refused, so no penalty on a fresh apply). But only reuse a broker
-// that matches THIS binary and THIS broker config (#19): a broker started by an
-// older binary (no healer, stale routes) or with an older tool set would
-// otherwise keep serving while apply reports success — so on identity mismatch,
-// stop it and fall through to spawn.
+// that is THIS instance's (lever#181) and matches THIS binary and THIS broker
+// config (#19): a broker started by an older binary (no healer, stale routes)
+// or with an older tool set would otherwise keep serving while apply reports
+// success — so on identity mismatch, stop it and fall through to spawn.
+// Another instance's broker on the same ports is never stopped and never
+// used: apply fails and says which ports to change (judgeRunningBroker).
 func (bc *brokerController) Start(ctx context.Context) error {
+	ours, err := bc.state.EnsureInstanceID()
+	if err != nil {
+		return err
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	var er wire.EpochResponse
 	// Anything but a decodable 200 — connection refused, a non-200, a body that
-	// is not the epoch JSON — means no broker of ours is serving: fall through
-	// to the spawn.
-	if err := httpjson.Get(probeCtx, bc.admin, bc.adminURL+wire.PathEpoch, &er); err == nil {
-		if brokerReusable(er, cli.VersionString(), brokerctl.ConfigHash(bc.app)) {
-			return nil // same binary + same broker config; keep the process + PID
+	// is not the epoch JSON — means no lever broker is serving: fall through
+	// to the spawn. Something else holding a port makes the child's bind
+	// fail, which Healthy reports.
+	if er, err := readBrokerIdentity(probeCtx, bc.admin, bc.adminURL); err == nil {
+		// alive: broker.pid names a live `lever broker serve` of this
+		// instance; a pid the OS gave to another process is a stale file.
+		_, _, alive := bc.state.BrokerStatus()
+		switch judgeRunningBroker(er, ours, cli.VersionString(), brokerctl.ConfigHash(bc.app), alive) {
+		case brokerReuse:
+			progress.From(ctx).Note("reused")
+			return nil // same instance, binary and broker config; keep the process + PID
+		case brokerRefuse:
+			if er.InstanceID == "" {
+				return fmt.Errorf("%w (this instance's %s names no live process)", foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours), stateRel(bc.state, bc.state.PID()))
+			}
+			return foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours)
 		}
 		bc.log.printf("lever: broker predates this binary or its tool config changed — restarting it (was %q)", er.Version)
 		if err := brokerctl.StopBroker(bc.state); err != nil {
 			return fmt.Errorf("stopping the stale broker before restart: %w", err)
+		}
+		// StopBroker stops only the process this instance's broker.pid
+		// names, and waits for it to exit. A broker that still answers on
+		// the admin port once the port had time to fall silent was not that
+		// process: a spawn could not bind the port and would die, and the
+		// health check must not adopt what answers. Refuse instead.
+		still, ok := bc.stillAnswering(ctx, brokerQuietWait)
+		if err := ctx.Err(); err != nil {
+			return err // a cancelled probe proves nothing: spawn nothing
+		}
+		if ok {
+			if still.InstanceID == ours {
+				return fmt.Errorf("this instance's broker still answers on 127.0.0.1:%d after the stop: %s names another process or none; stop the broker by hand (find it with lsof -nP -iTCP:%d -sTCP:LISTEN), then run this again",
+					bc.app.EffectiveAdminPort(), stateRel(bc.state, bc.state.PID()), bc.app.EffectiveAdminPort())
+			}
+			return fmt.Errorf("a broker still answers on 127.0.0.1:%d after this instance's broker was stopped: %w",
+				bc.app.EffectiveAdminPort(), foreignBrokerError(bc.app.EffectiveAdminPort(), still, ours))
 		}
 	}
 	cmd, logf, err := brokerServeCmd(bc.selfExe, bc.configPath, bc.state.OutLog(), bc.aliasV4, bc.runUser, bc.runUID)
@@ -1055,17 +1110,37 @@ const (
 	brokerHealthInterval = 200 * time.Millisecond
 )
 
-// Healthy polls GET /epoch until 200 or brokerHealthTimeout elapses.
+// Healthy polls GET /epoch until the broker this apply runs answers or
+// brokerHealthTimeout elapses: this instance's id (lever#181), this
+// binary's version and this broker config's hash (heldBrokerErr). Any
+// other broker answering fails at once rather than being adopted: another
+// instance's broker means the spawned child lost the ports to it, and
+// minting from it would hand this instance's manager another instance's
+// broker; this instance's broker with another version or config is not the
+// one this apply started.
 func (bc *brokerController) Healthy(ctx context.Context) error {
+	ours, err := bc.state.ReadInstanceID()
+	if err != nil {
+		return fmt.Errorf("broker health: %w", err)
+	}
 	pollCtx, cancel := context.WithTimeout(ctx, brokerHealthTimeout)
 	defer cancel()
+	wantV, wantH := cli.VersionString(), brokerctl.ConfigHash(bc.app)
 	var last error
-	err := retry.Until(pollCtx, 0, brokerHealthInterval, func() (bool, error) {
-		last = httpjson.Get(pollCtx, bc.admin, bc.adminURL+wire.PathEpoch, nil)
-		return last == nil, nil
+	err = retry.Until(pollCtx, 0, brokerHealthInterval, func() (bool, error) {
+		got, gerr := readBrokerIdentity(pollCtx, bc.admin, bc.adminURL)
+		if gerr != nil {
+			last = gerr
+			return false, nil
+		}
+		if err := heldBrokerErr(got, ours, wantV, wantH, bc.app.EffectiveAdminPort()); err != nil {
+			return false, err
+		}
+		return true, nil
 	})
-	if err != nil && ctx.Err() == nil {
-		return fmt.Errorf("broker did not become healthy within %s (last err: %v)", brokerHealthTimeout, last)
+	if err != nil && ctx.Err() == nil && pollCtx.Err() != nil {
+		return fmt.Errorf("broker did not become healthy within %s (last err: %v); if another process holds 127.0.0.1:%d or 127.0.0.1:%d, the broker could not bind it: see %s",
+			brokerHealthTimeout, last, bc.app.EffectiveJailPort(), bc.app.EffectiveAdminPort(), stateRel(bc.state, bc.state.OutLog()))
 	}
 	return err
 }
@@ -1172,6 +1247,9 @@ type applyWiring struct {
 	// broker cert carries it as a SAN.
 	brokerHost string
 	cmd        *cobra.Command // for Log; nil ⇒ stderr
+	// rep, when set, takes the Log lines, so they print above its live
+	// line (lever#185).
+	rep *progress.Reporter
 }
 
 // applyOpts carries the per-invocation knobs of buildApplyDeps that are not
@@ -1182,6 +1260,8 @@ type applyOpts struct {
 	// that never exercise a Log-emitting path), in which case Log falls back
 	// to stderr.
 	Cmd *cobra.Command
+	// Rep is the bring-up's progress list; nil prints Log lines directly.
+	Rep *progress.Reporter
 	// SelfExe is the executable the broker and remote controllers re-exec as
 	// `broker serve` / `remote serve`. Empty means os.Args[0].
 	//
@@ -1204,7 +1284,7 @@ type applyOpts struct {
 // configPath is the resolved config file path; it is passed to `lever broker
 // serve` and used to locate the broker state dir.
 func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf BackendFactory, opts applyOpts) (*applyWiring, error) {
-	b, err := bringUpBackend(ctx, app, bf, stateFor(configPath), (&applyWiring{cmd: opts.Cmd}).log)
+	b, err := bringUpBackend(ctx, app, bf, stateFor(configPath), (&applyWiring{cmd: opts.Cmd, rep: opts.Rep}).log)
 	if err != nil {
 		return nil, err
 	}
@@ -1226,7 +1306,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return nil, err
 	}
 
-	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd}
+	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd, rep: opts.Rep}
 	aliasV4 := b.HostAliasV4()
 	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
 	selfExe := cmp.Or(opts.SelfExe, os.Args[0])
@@ -1273,10 +1353,30 @@ func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, st 
 	if st.Dir != "" {
 		cfg.HWEFailStamp = st.HWEFailStamp()
 	}
+	// The host's scion build runs while the VM boots and is provisioned
+	// (lever#189); the scion step takes it once the guest confirms the
+	// architecture. Stopped (cancelled, if nothing took it) on the way out.
+	cfg.ScionPrebuild = startScionPrebuild(ctx, b, cfg)
+	defer cfg.ScionPrebuild.Stop()
 	if err := b.EnsureUp(ctx, cfg); err != nil {
 		return nil, err
 	}
 	return b, nil
+}
+
+// startScionPrebuild starts the host build of cfg's scion for the host's
+// architecture through the backend's host runner, or returns nil when the
+// backend has none or there is nothing to build.
+func startScionPrebuild(ctx context.Context, b backend.Backend, cfg backend.Config) *scionbin.Prebuild {
+	hr, ok := b.(interface{ Runner() proc.Runner })
+	if !ok || !cfg.HasScion() {
+		return nil
+	}
+	return scionbin.StartPrebuild(ctx, hr.Runner(), scionbin.Spec{
+		Binary:  cfg.ScionBinary,
+		Source:  cfg.ScionSource,
+		Version: cfg.ScionVersion,
+	}, runtime.GOARCH, cfg.MachineName)
 }
 
 // backendConfigFor is the backend.Config apply brings the jail up with.
@@ -1295,6 +1395,7 @@ func backendConfigFor(app *config.App, machine string) backend.Config {
 		Memory:         app.Memory,
 		NestedVirt:     app.NestedVirt,
 		GuestKernel:    app.EffectiveGuestKernel(),
+		GuestProfile:   app.EffectiveGuestProfile(),
 	}
 }
 
@@ -1368,7 +1469,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// registered + online (see the Deps field doc): the broker registers
 		// asynchronously after the Hub API, so the first create/resume would
 		// otherwise race it. Fail-soft in the client, so it never fails bring-up.
-		WaitBrokerReady: sc.WaitRuntimeBrokerReady,
+		WaitBrokerReady: sc.RuntimeBrokerReady,
 
 		// RearmBootstrap backs Deps.RearmBootstrap — see brokerController.Rearm
 		// for the full rationale (re-arm the single-use latch on the create path,
@@ -1388,14 +1489,19 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		BeginSession: func(agent string) func() error {
 			return brokerctl.BeginSession(w.app, st, cli.VersionString(), agent)
 		},
+		// BeginUnattendedSession records the fresh start lever makes on its
+		// own (lever#202) only over an unchanged skill.
+		BeginUnattendedSession: func(agent string) (apply.UnattendedSession, error) {
+			return brokerctl.BeginUnattendedSession(w.app, st, cli.VersionString(), agent)
+		},
 		// InspectContainerMounts lets apply warn when a manager it kept or
 		// resumed lacks the manager.read_only mounts (create-time only), and
 		// refuse a resume whose record mounts a directory that is gone.
 		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
 			return jail.ContainerMounts(ctx, b.JailRunner(), ref)
 		},
-		ProbeContainerWritable: func(ctx context.Context, ref, target string) (bool, error) {
-			return jail.ContainerPathWritable(ctx, b.JailRunner(), ref, target)
+		CheckLiveMounts: func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return jail.ContainerLiveMounts(ctx, b.JailRunner(), ref, want)
 		},
 		ProbeContainerDevice: func(ctx context.Context, ref, path string) (bool, error) {
 			return jail.ContainerHasCharDevice(ctx, b.JailRunner(), ref, path)
@@ -1417,6 +1523,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ContainerRunning: func(ctx context.Context, ref string) (bool, error) {
 			return jail.ContainerRunning(ctx, b.JailRunner(), ref)
 		},
+		// ContainerStartedBeforeBoot is the guest-restart recovery's
+		// evidence when no boot id was kept (lever#179).
+		ContainerStartedBeforeBoot: func(ctx context.Context, ref string) (bool, error) {
+			return jail.ContainerStartedBeforeBoot(ctx, b.JailRunner(), ref)
+		},
 		AgentRevoked: agentRevoked(w.app, st),
 		// GuestBoot lets start-manager and up recover a manager record a
 		// hard VM kill left "running" (lever#179).
@@ -1430,6 +1541,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		EnsureScionTelemetry: w.ensureScionTelemetry,
 		EnsureAgentTemplate:  w.ensureAgentTemplate,
 		Log:                  w.log,
+		StepTail:             w.stepTail,
 	}
 }
 
@@ -1451,6 +1563,9 @@ func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
 			return w.sc.ServerStart(ctx, opts)
 		},
 		ScopeKnown: w.sc.KnowsUATScope,
+		// Through the wiring's log: sanitized, and above the progress
+		// list's live line rather than written over it.
+		Warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
 	})
 }
 
@@ -1608,6 +1723,10 @@ func (w *applyWiring) ensureAgentTemplate(ctx context.Context, projectDir string
 // one, e.g. a direct test) falls back to os.Stderr so the line is never
 // silently lost.
 func (w *applyWiring) log(format string, args ...any) {
+	if w.rep != nil {
+		w.rep.Log(fmt.Sprintf(format, args...))
+		return
+	}
 	if w.cmd != nil {
 		logLine(w.cmd.ErrOrStderr(), format, args...)
 		return

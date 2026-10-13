@@ -36,6 +36,33 @@ var (
 	ipv6Local = []string{"fe80::/10", "fc00::/7"} // link-local + ULA (the host alias ULA is a /128 inside fc00::/7, so allow-before-drop ordering is essential)
 )
 
+// MetadataV4 is the cloud instance-metadata address (GCP, AWS, Azure). It
+// lies inside 169.254/16, which the chain drops, but it is the one address
+// in the chain that is REJECTed rather than dropped (lever#182): the scion
+// hub looks up a GCP project ID there at every start, and a dropped dial
+// costs it six 2 s timeouts (~13 s) before it serves, where an ICMP
+// host-prohibited reply (EHOSTUNREACH, which its client does not retry) ends
+// the lookup at once. A REJECT is still a refusal: nothing is delivered to
+// the address, and every other link-local address stays dropped.
+const MetadataV4 = "169.254.169.254"
+
+// metadataReject is the argv tail of the one REJECT rule, after "-A Chain".
+func metadataReject() []string {
+	return []string{"-d", MetadataV4 + "/32", "-j", "REJECT", "--reject-with", "icmp-host-prohibited"}
+}
+
+// rejectReplyAccept is the argv tail of the ACCEPT that lets the REJECT's
+// answer reach the dialling socket. The kernel sends that ICMP error from
+// and to the guest's own address, out through lo and through OUTPUT, so it
+// meets this chain too; on Lima the guest's address is in 192.168/16, whose
+// DROP would swallow it, and the dial would hang as if dropped. (The closed
+// posture's leading lo ACCEPT already covers it; the open posture has none.)
+// Only a host-prohibited error, only on lo — delivered inside the guest,
+// never leaving it — and only RELATED to a connection conntrack saw.
+func rejectReplyAccept() []string {
+	return []string{"-o", "lo", "-p", "icmp", "--icmp-type", "host-prohibited", "-m", "conntrack", "--ctstate", "RELATED", "-j", "ACCEPT"}
+}
+
 // BuildRules returns ordered OUTPUT rules. aliasV4/aliasV6 are the resolved
 // host.orb.internal addresses; allowedPorts are host-loopback tool ports.
 // Assumes the OUTPUT chain default policy is ACCEPT: the public internet stays
@@ -44,11 +71,12 @@ var (
 // per-port ACCEPTs, so the jail can reach ONLY the already-ACCEPTed destinations
 // (the broker port on the host alias). This is the api-key mode posture.
 // When closedInternet is false, behaviour matches the pre-existing open posture
-// (no catch-all DROP; public internet remains reachable) with one addition present
+// (no catch-all DROP; public internet remains reachable) with two additions present
 // in BOTH postures: rule 1b, an alias-scoped ESTABLISHED ACCEPT that lets a
 // host-initiated control channel into the jail (e.g. Lima's SSH, seen by the guest
 // as the alias IP) answer through the alias DROP below, without granting the guest
-// any NEW outbound (see rule 1b's comment for why this doesn't widen containment).
+// any NEW outbound (see rule 1b's comment for why this doesn't widen containment);
+// and rule 2b, the metadata REJECT with the lo ACCEPT for its answer (MetadataV4).
 // allowedPorts is config.App.EffectiveAllowedPorts() on every config-driven
 // path (`lever apply`/`up`); the low-level `lever provision --allow-port`
 // takes its list straight from the flag, since it runs without a config at
@@ -152,8 +180,8 @@ func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet b
 	// 127.0.0.1:8080 (its readiness check) and host-loopback tools. Only added in
 	// the closed posture; in the open posture the default-ACCEPT policy already
 	// permits loopback, so this rule is unnecessary there. (The open posture is
-	// not otherwise byte-identical to pre-existing: rule 1b below is emitted in
-	// both postures — see the BuildRules docstring.)
+	// not otherwise byte-identical to pre-existing: rules 1b and 2b below are
+	// emitted in both postures — see the BuildRules docstring.)
 	if closedInternet {
 		rules = append(rules,
 			Rule{IPv4, out("-o", "lo", "-j", "ACCEPT")},
@@ -207,6 +235,15 @@ func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet b
 	if aliasV6 != "" {
 		rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-j", "DROP")})
 	}
+	// 2b) REJECT the instance-metadata address, just before the 169.254/16
+	// DROP below that would otherwise swallow it (see MetadataV4). Both
+	// postures: in the closed one it also precedes the catch-all DROP. This
+	// is the only REJECT in the chain; it is a /32 and admits nothing. Its
+	// ICMP answer to the guest itself needs rejectReplyAccept, first.
+	rules = append(rules,
+		Rule{IPv4, out(rejectReplyAccept()...)},
+		Rule{IPv4, out(metadataReject()...)},
+	)
 	// 3) DROP private/LAN ranges explicitly (don't rely on OrbStack routing alone).
 	for _, c := range privateV4 {
 		rules = append(rules, Rule{IPv4, out("-d", c, "-j", "DROP")})
@@ -263,7 +300,8 @@ func (r Rule) Render() string { return r.Family.Binary() + " " + strings.Join(r.
 
 // DroppedForJail reports whether ip lies in a range the jail's egress rules
 // DROP in EVERY posture (the private/special-use ranges of rule 3 in
-// BuildRulesDNS), so no jailed process can open a connection to it, whatever
+// BuildRulesDNS; MetadataV4 inside 169.254/16 is REJECTed by rule 2b
+// instead, which refuses it just as surely), so no jailed process can open a connection to it, whatever
 // port it listens on. It is what makes a non-loopback host listener safe from
 // the jail: config.validateRemote accepts a non-loopback remote.bind only on
 // such an address. Loopback is NOT in the set — the jail reaches host

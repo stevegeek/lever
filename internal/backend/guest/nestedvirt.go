@@ -17,12 +17,15 @@ const KVMUdevRulePath = "/etc/udev/rules.d/65-lever-kvm.rules"
 // Every apply removes it, so an upgraded instance loses it.
 const legacyKVMDropInPath = "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"
 
+// kvmUdevRule is the rule written to KVMUdevRulePath.
+const kvmUdevRule = `KERNEL=="kvm", MODE="0666"`
+
 const kvmOnRootScript = `set -e
 if ! test -c /dev/kvm; then
   echo "lever: no /dev/kvm in the jail VM" >&2
   exit 4
 fi
-printf '%s\n' 'KERNEL=="kvm", MODE="0666"' > ` + KVMUdevRulePath + `
+printf '%s\n' '` + kvmUdevRule + `' > ` + KVMUdevRulePath + `
 chmod 0666 /dev/kvm
 `
 
@@ -50,7 +53,7 @@ func (g Guest) EnsureNestedVirt(ctx context.Context, on bool) error {
 			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
 		}
 		if on {
-			return fmt.Errorf("nested_virt: the jail VM has no usable /dev/kvm: it was created before nested_virt, or the host nested module is off; recreate the VM: back up the manager conversation, then `lever destroy` (alias `down`; deletes the VM and the conversation) and `lever up`: %w", err)
+			return fmt.Errorf("nested_virt: the jail VM has no usable /dev/kvm: it was created before nested_virt, or the host nested module is off; recreate the VM: `lever conversation backup`, then `lever destroy` (alias `down`; deletes the VM and the conversation) and `lever up`, then `lever conversation restore`: %w", err)
 		}
 		return fmt.Errorf("nested_virt off: remove udev rule: %w", err)
 	}

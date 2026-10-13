@@ -38,6 +38,8 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 			Recyclable:       g.Recyclable,
 			Claude:           g.Claude(),
 			Shared:           sharedMounts(app, jailMount, g.Name),
+			// Own resources only — never the manager's.
+			Resources: apply.ScionResources(g.Resources),
 		})
 	}
 	return specs

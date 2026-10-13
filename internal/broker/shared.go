@@ -105,7 +105,7 @@ func sharedAccessHint(worker string, err error) string {
 	case errors.Is(err, ErrSharedCheckUnavailable):
 		return "lever could not read what it needs to check worker " + worker + "'s shared folder access (the hub record or the manager's mounts); retry, and if it persists ask the operator to run lever doctor"
 	case errors.Is(err, ErrManagerUnpinned):
-		return "the running manager does not hold the mounts that protect the shared folders and worker dirs (it was created before the current plan, or a protected directory was replaced on the host); the operator should run lever doctor, then back up the manager's conversation and run lever up --fresh"
+		return "the running manager does not hold the mounts that protect the shared folders and worker dirs (it was created before the current plan, or a protected directory was replaced on the host); the operator should run lever doctor, then run lever up --fresh --keep-conversation"
 	}
 	return sharedFolderHint(worker)
 }

@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -106,6 +107,10 @@ func checkSharedFolders(ctx context.Context, project string, app *config.App, li
 		slices.SortFunc(want, func(x, y jail.LiveMount) int { return strings.Compare(x.Target, y.Target) })
 		if len(want) > 0 {
 			problems, err := live(ctx, ref, want)
+			if errors.Is(err, jail.ErrForeignNamespace) {
+				fails = append(fails, fmt.Sprintf("%s: %v (treat it as compromised)", name, err))
+				continue
+			}
 			if err != nil {
 				warns = append(warns, fmt.Sprintf("%s: live check could not run (%s)", name, firstLine(err.Error())))
 				continue
@@ -124,10 +129,10 @@ func checkSharedFolders(ctx context.Context, project string, app *config.App, li
 	switch {
 	case len(fails) > 0:
 		return checkResult{check, false, strings.Join(append(fails, warns...), "; "),
-			"discard and recreate each agent named (a worker: `lever worker purge <worker>`, or the manager's `agent recycle` for a recyclable one; the manager: back up its conversation, then `lever up --fresh`); a folder replaced on the host needs the same, and from then on change its contents in place"}
+			"discard and recreate each agent named (a worker: `lever worker purge <worker>`, or the manager's `agent recycle` for a recyclable one; the manager: `lever up --fresh --keep-conversation`); a folder replaced on the host needs the same, and from then on change its contents in place"}
 	case len(warns) > 0:
 		return warnResult(check, strings.Join(warns, "; "),
-			"an agent created before a folder was added gets it only when created again (a worker: purge or recycle; the manager: back up, then `lever up --fresh`); bring stopped agents up and re-run doctor for the live check")
+			"an agent created before a folder was added gets it only when created again (a worker: purge or recycle; the manager: `lever up --fresh --keep-conversation`); bring stopped agents up and re-run doctor for the live check")
 	case len(app.SharedFolders) == 0:
 		return checkResult{check, true, "none configured", ""}
 	case len(oks) == 0:

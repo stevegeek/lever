@@ -145,9 +145,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	recordVolumes := func(ctx context.Context, project, agent string) ([]jail.Mount, error) {
 		return hubRecordVolumes(ctx, hc, project, agent)
 	}
-	// The live half: can the manager's user write a read_only entry?
-	probeWritable := func(ctx context.Context, ref, target string) (bool, error) {
-		return jail.ContainerPathWritable(ctx, jr, ref, target)
+	// The live half, from the guest side (no program in the container).
+	liveMounts := func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+		return jail.ContainerLiveMounts(ctx, jr, ref, want)
 	}
 	probeDevice := func(ctx context.Context, ref, path string) (bool, error) {
 		return jail.ContainerHasCharDevice(ctx, jr, ref, path)
@@ -178,7 +178,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	checks := []func() checkResult{
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
 		func() checkResult {
-			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, time.Now())
+			return checkInstancePorts(app, state, instancePortsProbesFor(ctx, state, probes))
+		},
+		func() checkResult {
+			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, agentSession.LogTail, time.Now())
 		},
 		func() checkResult {
 			return checkAgentHubTokens(ctx, b.MountDest(), app.Name, networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)
@@ -208,6 +211,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
 		},
 		func() checkResult { return checkAgentCert(state, time.Now()) },
+		func() checkResult { return checkLastBringup(state, time.Now()) },
 		func() checkResult { return checkToolBackends(app.Broker.Tools, app.InstanceDir(), probes) },
 		func() checkResult { return checkClaudeVersion(app.ManagerImage(), app.ManagerImageTarPath(), probes) },
 		func() checkResult {
@@ -231,6 +235,8 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkVoice(app) },
 		func() checkResult { return checkVoiceTool(ctx, app) },
 		func() checkResult { return checkVoiceModel(app) },
+		func() checkResult { return checkTTSTool(ctx, app) },
+		func() checkResult { return checkTTSModel(app) },
 		func() checkResult { return checkAgentMessages(app, state, liveAgentMessages(ctx, app, state)) },
 		func() checkResult { return checkSentLedger(app, state) },
 		func() checkResult { return checkGuestClock(ctx, jr, time.Now, app.AgentMessagesOn()) },
@@ -250,13 +256,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkWorkerTicketMounts(ctx, b.MountDest(), workerNames, listAgents, inspectMounts)
 		},
 		func() checkResult {
-			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, probeWritable)
+			return checkManagerReadOnly(ctx, b.MountDest(), app.Tree, app.Name, app.ManagerTreeMounts(), listAgents, inspectMountsRW, recordVolumes, liveMounts)
 		},
 		func() checkResult {
-			return checkSharedFolders(ctx, b.MountDest(), app, listAgents, inspectMountsRW, recordVolumes,
-				func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
-					return jail.ContainerLiveMounts(ctx, jr, ref, want)
-				})
+			return checkSharedFolders(ctx, b.MountDest(), app, listAgents, inspectMountsRW, recordVolumes, liveMounts)
 		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult { return checkRecyclableWorkers(app.Workers) },

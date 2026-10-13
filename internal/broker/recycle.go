@@ -150,8 +150,17 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "instructions error; nothing was deleted", http.StatusInternalServerError)
 		return
 	}
+	// broker.max_running_workers: refuse before the purge, so nothing is
+	// deleted. The start below admits again under the same name, which the
+	// count allows (a worker never counts against itself).
+	release, ok := b.admitOrRefuse(ctx, w, b.manager, "recycle", spec.Name)
+	if !ok {
+		return
+	}
+	defer release()
 	// Counted last, so a refusal above does not use up the worker's slot.
-	if ok, wait := b.recycleRate.take(spec.Name, time.Now()); !ok {
+	counted := time.Now()
+	if ok, wait := b.recycleRate.take(spec.Name, counted); !ok {
 		secs := int(wait.Round(time.Second) / time.Second)
 		if secs < 1 {
 			secs = 1
@@ -165,7 +174,7 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 	// shared_folders: the fresh start would be refused while the manager
 	// lacks its pins; refuse before the purge, so nothing is deleted.
 	if err := b.checkSharedAccess(ctx, spec, false); err != nil {
-		b.recycleRate.refund(spec.Name)
+		b.recycleRate.refund(spec.Name, counted)
 		b.audit("worker", b.manager, "deny", verb+": "+err.Error())
 		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err)+". Nothing was deleted.", http.StatusForbidden)
 		return
@@ -178,7 +187,7 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		ticketErr, err := b.purger.PurgeWorker(ctx, spec.Name)
 		if err != nil {
 			// Nothing was deleted: the next try may go ahead at once.
-			b.recycleRate.refund(spec.Name)
+			b.recycleRate.refund(spec.Name, counted)
 			b.audit("worker", b.manager, "error", verb+": purge (phase "+phase+"): "+err.Error())
 			http.Error(w, "runtime error: the record of worker "+spec.Name+" was not deleted; check `lever-manager agent list` and try again. "+
 				"If it persists, the operator should run `lever doctor`.", http.StatusBadGateway)

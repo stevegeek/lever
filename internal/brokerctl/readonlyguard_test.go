@@ -50,6 +50,11 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		{"not running", full, nil, func(context.Context, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
 			return nil, jail.ErrContainerNotRunning
 		}, "is not running", "not-running"},
+		// The manager's first process moved into a namespace made inside
+		// the container: refused as a gap, not as a read to retry.
+		{"foreign namespace", full, nil, func(context.Context, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return nil, jail.ErrForeignNamespace
+		}, "mount namespace made inside the container", "foreign-namespace"},
 		{"live unreadable", full, nil, func(context.Context, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
 			return nil, errors.New(leak)
 		}, "cannot read manager \"m\"'s live mounts", "live-unreadable"},
@@ -77,8 +82,8 @@ func TestCheckManagerReadOnly(t *testing.T) {
 			}
 			if tc.name == "held" {
 				wantPlan := []jail.LiveMount{
-					{Target: "/workspace/assistant", Source: "/lever/assistant"},
-					{Target: "/workspace/assistant/tools", Source: "/lever/assistant/tools", ReadOnly: true},
+					{Target: "/workspace/assistant", Source: "/lever/assistant", SelfMount: true},
+					{Target: "/workspace/assistant/tools", Source: "/lever/assistant/tools", ReadOnly: true, SelfMount: true},
 				}
 				if len(plan) != 2 || plan[0] != wantPlan[0] || plan[1] != wantPlan[1] {
 					t.Fatalf("live plan = %v, want %v", plan, wantPlan)
@@ -154,7 +159,7 @@ func TestSharedGuardDecision(t *testing.T) {
 			t.Errorf("%s: %v, want nil", class, err)
 		}
 	}
-	for _, class := range []string{"gaps:x", "live:x", "missing:x"} {
+	for _, class := range []string{"gaps:x", "live:x", "missing:x", "foreign-namespace"} {
 		if err := sharedGuardDecision(&guardError{class, "refused"}); err == nil || errors.Is(err, broker.ErrSharedCheckUnavailable) {
 			t.Errorf("%s: %v, want the refusal kept as a gap", class, err)
 		}

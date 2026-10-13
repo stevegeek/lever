@@ -100,14 +100,14 @@ func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, er
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", agentTokenScript, "sh", AgentTokenPath)
 	if err != nil {
 		switch {
 		case noSuchContainer(res.Stderr):
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrNoContainer)
 		case errors.Is(err, proc.ErrOutputLimit):
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, proc.ErrOutputLimit)
-		case ctx.Err() != nil:
+		case ctx.Err() != nil, errors.Is(err, ErrProbeTimedOut):
 			return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, ErrProbeTimedOut)
 		}
 		return HubTokenTimes{}, fmt.Errorf("reading agent hub token in %s: %w", ref, &ProbeExitError{Code: res.Code})
@@ -146,7 +146,7 @@ func ProbeErrorClass(err error) string {
 		return "timed out"
 	case errors.Is(err, proc.ErrOutputLimit):
 		return "output over its limit"
-	case errors.Is(err, ErrTokenShape), errors.Is(err, ErrClaudeShape), errors.Is(err, ErrSessionsShape):
+	case errors.Is(err, ErrTokenShape), errors.Is(err, ErrClaudeShape), errors.Is(err, ErrSessionsShape), errors.Is(err, ErrReadyShape):
 		return "unexpected output"
 	case errors.As(err, &exit):
 		return exit.Error()
@@ -199,7 +199,7 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "tmux", "list-panes", "-t", "scion:agent", "-F", "#{pane_dead}")
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "tmux", "list-panes", "-t", "scion:agent", "-F", "#{pane_dead}")
 	if err == nil {
 		for _, ln := range strings.Fields(res.Stdout) {
 			if ln == "0" {
@@ -210,6 +210,8 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	}
 	s := strings.ToLower(res.Stderr)
 	switch {
+	case errors.Is(err, ErrProbeTimedOut):
+		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrProbeTimedOut)
 	case noSuchContainer(res.Stderr):
 		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrNoContainer)
 	case strings.Contains(s, "can't find window"), strings.Contains(s, "can't find session"):
@@ -240,7 +242,7 @@ func (p AgentProbe) ReportSessionRunning(ctx context.Context, ref string) error 
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sciontool", "hook", "--dialect=claude", "SessionStart")
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sciontool", "hook", "--dialect=claude", "SessionStart")
 	if err != nil {
 		if noSuchContainer(res.Stderr) {
 			return fmt.Errorf("reporting agent session in %s: %w", ref, ErrNoContainer)
@@ -262,4 +264,69 @@ func checkRef(ref string) error {
 func noSuchContainer(stderr string) bool {
 	s := strings.ToLower(stderr)
 	return strings.Contains(s, "no such container") || strings.Contains(s, "no such object")
+}
+
+// AttachSession is scion's tmux session in an agent container, the one
+// `scion attach` attaches to (scion pkg/runtime/podman.go).
+const AttachSession = "scion"
+
+// detachClientsScript detaches the tmux clients of the scion session that
+// a `podman exec` started (an attach), and prints one "d" line for each.
+// $1 is the /proc root (a test seam).
+//
+// It must spare the container's own client: under podman scion's start
+// command ends in a foreground `attach-session -t scion` (scion
+// pkg/runtime/common.go, tmuxAttachSession), the container's main process.
+// Detaching it would end that process and stop the agent. An exec'd
+// process has no parent inside the container's pid namespace (its parent
+// is podman's, outside), so /proc/<pid>/status reads "PPid: 0"; the main
+// client descends from the container's init and reads a non-zero PPid.
+// Only clients with PPid 0 are detached. PID 1 also reads PPid 0, so it
+// is never detached: an image whose main process is the tmux client
+// itself would otherwise lose it. A pid tmux reports that is not a
+// number, or whose status cannot be read, is left attached. A stale
+// client whose exec session died is reparented inside the container and
+// stays (incomplete cleanup, never harm). The count is the agent's own
+// word, as every AgentProbe answer is.
+const detachClientsScript = `clients=$(tmux list-clients -t ` + AttachSession + ` -F '#{client_pid} #{client_tty}' 2>/dev/null) || exit 0
+printf '%s\n' "$clients" | while read -r pid tty; do
+  case "$pid" in ''|*[!0-9]*|1) continue ;; esac
+  [ -n "$tty" ] || continue
+  ppid=
+  while read -r k v; do
+    if [ "$k" = PPid: ]; then ppid=$v; break; fi
+  done 2>/dev/null < "$1/$pid/status" || continue
+  [ "$ppid" = 0 ] || continue
+  tmux detach-client -t "$tty" </dev/null 2>/dev/null && echo d
+done
+exit 0`
+
+// DetachClients detaches the tmux clients that earlier attaches left on
+// the agent's scion session and returns how many it detached. An earlier
+// attach whose terminal went away (a closed window, a dropped ssh, a host
+// that slept) can stay attached as a stale client and freeze or misdraw
+// the view of the next one (lever#170); `lever attach` and `lever up` call
+// this before they attach, as `tmux attach -d` would, sparing the
+// container's own client (detachClientsScript). Only a count leaves the
+// container. No server or no session detaches nothing.
+func (p AgentProbe) DetachClients(ctx context.Context, ref string) (int, error) {
+	if err := checkRef(ref); err != nil {
+		return 0, fmt.Errorf("detaching tmux clients: %w", err)
+	}
+	ctx, cancel := BoundAgentExec(ctx)
+	defer cancel()
+	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", detachClientsScript, "sh", "/proc")
+	if err != nil {
+		if noSuchContainer(res.Stderr) {
+			return 0, fmt.Errorf("detaching tmux clients in %s: %w", ref, ErrNoContainer)
+		}
+		return 0, fmt.Errorf("detaching tmux clients in %s: exit status %d", ref, res.Code)
+	}
+	n := 0
+	for _, f := range strings.Fields(res.Stdout) {
+		if f == "d" {
+			n++
+		}
+	}
+	return n, nil
 }

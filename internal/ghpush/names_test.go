@@ -1,6 +1,9 @@
 package ghpush
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestValidateBranch(t *testing.T) {
 	good := []string{"agent/x", "agent/fix-123", "agent/a.b_c/d", "agent/main2"}
@@ -57,6 +60,50 @@ func TestValidateRepo(t *testing.T) {
 	for _, r := range []string{"", "stevegeek/other", "stevegeek/lever/x", "../lever", "stevegeek/lever.git"} {
 		if err := ValidateRepo(r, allowed); err == nil {
 			t.Errorf("%q should be refused", r)
+		}
+	}
+}
+
+func TestValidatePRText(t *testing.T) {
+	for _, c := range []struct {
+		title, body string
+		want        error
+	}{
+		{"t", "cc @stevegeek/maintainers", ErrTeamMention},
+		{"ping @org/team", "", ErrTeamMention},
+		{"t", "(@Org-1/team.x)", ErrTeamMention},
+		{"t", "@org/team", ErrTeamMention},
+		{"Fixes #12", "", ErrClosingKeyword},
+		{"t", "This closes #3.", ErrClosingKeyword},
+		{"t", "close #3", ErrClosingKeyword},
+		{"t", "CLOSED #3", ErrClosingKeyword},
+		{"t", "fix #1", ErrClosingKeyword},
+		{"t", "fixed #1", ErrClosingKeyword},
+		{"t", "Resolve owner/repo#44", ErrClosingKeyword},
+		{"t", "resolves: #44", ErrClosingKeyword},
+		{"t", "the fix: #3", ErrClosingKeyword},
+		{"t", "Fixes\u00a0#1", ErrClosingKeyword},
+		{"t", "closes\u2003#1", ErrClosingKeyword},
+		{"t", "resolved\n#44", ErrClosingKeyword},
+		{"t", "fixes https://github.com/o/r/issues/9", ErrClosingKeyword},
+		{"t", "@a @b @c @d @e @f", ErrTooManyMentions},
+		{"@a @b @c", "@d @e @f", ErrTooManyMentions},
+	} {
+		err := ValidatePRText(c.title, c.body)
+		if !errors.Is(err, c.want) {
+			t.Errorf("%q / %q: got %v, want %v", c.title, c.body, err, c.want)
+		}
+	}
+	for _, c := range []struct{ title, body string }{
+		{"t", "refs #12, see #13"},
+		{"Add a prefix #3 option", "a fixture #3 is not a keyword"},
+		{"t", "mail me@example.com or a.b@host/path"},
+		{"t", "@a @b @c @d @e and @A again"},
+		{"t", "closest #3; fixture #4; unresolved #5"},
+		{"Fix the parser", "Fixes the bug in #12's area"},
+	} {
+		if err := ValidatePRText(c.title, c.body); err != nil {
+			t.Errorf("%q / %q: %v", c.title, c.body, err)
 		}
 	}
 }

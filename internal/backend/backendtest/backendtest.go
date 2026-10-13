@@ -6,11 +6,14 @@ package backendtest
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
@@ -39,13 +42,27 @@ type ClosedChainRunner struct {
 }
 
 // ClosedChain6 is the `ip6tables -S LEVER_EGRESS` output of the same closed
-// posture (every closed ruleset ends each family with the catch-all DROP).
-const ClosedChain6 = "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d fd07::fe/128 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d fd07::fe/128 -j DROP\n-A LEVER_EGRESS -j DROP\n"
+// posture (every closed ruleset ends each family with the catch-all DROP):
+// exactly what the closed ruleset for HostAliasV6 and port 8443 lists, as
+// the re-apply skip requires (guest.existingClosedAlias).
+var ClosedChain6 = closedListing(egress.IPv6)
 
 // ClosedChain is the `iptables -S LEVER_EGRESS` output of a live closed
-// posture: loopback accepted, one allowlisted port to the alias, the alias
-// dropped, everything else dropped.
-const ClosedChain = "-N LEVER_EGRESS\n-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n-A LEVER_EGRESS -j DROP\n"
+// posture for HostAliasV4 and port 8443: loopback accepted, the port to the
+// alias, the alias and the private ranges dropped, everything else dropped.
+var ClosedChain = closedListing(egress.IPv4)
+
+// JumpListing is `iptables -S OUTPUT` (or ip6tables) of a converged guest:
+// the jump to the lever chain is OUTPUT's first and only rule.
+const JumpListing = "-P OUTPUT ACCEPT\n" + egress.JumpRule + "\n"
+
+// HostAliasV6 is the IPv6 alias the closed fixtures name.
+const HostAliasV6 = "fd07::fe"
+
+func closedListing(f egress.Family) string {
+	rules := egress.BuildRulesDNS(HostAliasV4, HostAliasV6, []int{8443}, true, nil)
+	return strings.Join(egress.Listing(rules, f), "\n") + "\n"
+}
 
 func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	argv := strings.Join(args, " ")
@@ -58,6 +75,11 @@ func (r *ClosedChainRunner) RunIn(ctx context.Context, dir string, env map[strin
 		case strings.Contains(argv, "iptables -S LEVER_EGRESS"):
 			if !r.Open {
 				return proc.Result{Stdout: ClosedChain}, nil
+			}
+		case strings.Contains(argv, "tables -S OUTPUT"):
+			// A live closed posture: the jump is OUTPUT's first rule.
+			if !r.Open {
+				return proc.Result{Stdout: JumpListing}, nil
 			}
 		case strings.Contains(argv, "-F LEVER_EGRESS"):
 			r.Flushed = true
@@ -210,24 +232,50 @@ func (g Guest) ScriptEgress(f *proc.FakeRunner, ahosts string) {
 func (g Guest) scriptFirewall(f *proc.FakeRunner) {
 	f.Script(g.Root+" iptables", proc.Result{})
 	f.Script(g.Root+" ip6tables", proc.Result{})
+	// A converged OUTPUT: the jump is first, so no jump repair is made
+	// (the longer key wins over the two above).
+	f.Script(g.Root+" iptables -S OUTPUT", proc.Result{Stdout: JumpListing})
+	f.Script(g.Root+" ip6tables -S OUTPUT", proc.Result{Stdout: JumpListing})
 	// The atomic commit: `<root> bash -c 'exec ip[6]tables-restore --noflush'`
 	// with the ruleset on stdin (guest.commitEgressChain).
 	f.Script(g.Root+" bash -c exec ip", proc.Result{})
 }
 
-// RestoreCommits returns the stdin of every iptables-restore / ip6tables-restore
-// commit ApplyEgress made, in order, keyed by the restore binary.
+// RestoreCommits returns the stdin of every chain commit ApplyEgress made
+// (an iptables-restore / ip6tables-restore that declares LEVER_EGRESS), in
+// order, keyed by the restore binary. The commits that only place the
+// OUTPUT jump are JumpCommits.
 func RestoreCommits(f *proc.FakeRunner) (bins []string, inputs []string) {
+	return restoreCalls(f, true)
+}
+
+// JumpCommits returns the restore commits that only (re)place the OUTPUT
+// jump (egress.JumpRestoreInput), in order, keyed by the restore binary.
+func JumpCommits(f *proc.FakeRunner) (bins []string, inputs []string) {
+	return restoreCalls(f, false)
+}
+
+// chainDecl is how a chain commit declares the lever chain.
+const chainDecl = "\n:" + egress.Chain + " "
+
+func restoreCalls(f *proc.FakeRunner, chain bool) (bins []string, inputs []string) {
 	for _, c := range f.Calls {
 		argv := c.Argv()
 		for _, bin := range []string{"ip6tables-restore", "iptables-restore"} {
-			if strings.Contains(argv, "exec "+bin+" --noflush") {
+			if strings.Contains(argv, "exec "+bin+" --noflush") && strings.Contains(c.Stdin, chainDecl) == chain {
 				bins, inputs = append(bins, bin), append(inputs, c.Stdin)
 				break
 			}
 		}
 	}
 	return bins, inputs
+}
+
+// firstChainCommit is the index of the first IPv6 chain commit, or -1.
+func firstChainCommit(f *proc.FakeRunner) int {
+	return f.CallIndex(func(c proc.Call) bool {
+		return strings.Contains(c.Argv(), "exec ip6tables-restore --noflush") && strings.Contains(c.Stdin, chainDecl)
+	})
 }
 
 // ScriptProvision scripts everything EnsureUp does AFTER the machine is up:
@@ -313,7 +361,7 @@ func AssertAtomicCommit(t *testing.T, f *proc.FakeRunner, alias string) {
 		t.Fatalf("ApplyEgress must never flush LEVER_EGRESS (that opens egress until the rules are back): %+v", f.Calls[i])
 	}
 	getentIdx := f.CallIndex(proc.ArgvContains("getent ahosts " + alias))
-	commitIdx := f.CallIndex(proc.ArgvContains("exec ip6tables-restore --noflush"))
+	commitIdx := firstChainCommit(f)
 	if getentIdx < 0 || commitIdx < 0 || getentIdx > commitIdx {
 		t.Fatalf("resolve (idx %d) must precede the commit (idx %d)", getentIdx, commitIdx)
 	}
@@ -469,4 +517,103 @@ func RunVersionCases(t *testing.T, cases []VersionCase, check func(f *proc.FakeR
 			}
 		})
 	}
+}
+
+// ProbeItem is one answer of the warm-path probe (guest.Probe): a command's
+// stdout and exit code.
+type ProbeItem struct {
+	Out  string
+	Code int
+}
+
+// ProbeRunner answers the warm-path probe (the `/bin/bash -c <script>
+// lever-probe <nonce>` calls through Host) from Items, keyed by the section
+// names the script emits; a section with no item answers exit 1 and no
+// output. It records each probe and each provisioning-stamp write, and falls
+// through to the embedded FakeRunner for everything else.
+type ProbeRunner struct {
+	*proc.FakeRunner
+	Host   string
+	Items  map[string]ProbeItem
+	Probes int
+	Stamps []string // the key of each stamp write
+	// OnProbe, when set, runs before probe n (1-based) is answered, so a
+	// test can change Items between the probe and a later re-read.
+	OnProbe func(n int, items map[string]ProbeItem)
+}
+
+var emitRe = regexp.MustCompile(`(?m)^emit ([a-z0-9]+) `)
+
+func (r *ProbeRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	n := len(args)
+	if name == r.Host && n >= 4 && args[n-2] == "lever-probe" && args[n-4] == "-c" {
+		r.Probes++
+		if r.OnProbe != nil {
+			r.OnProbe(r.Probes, r.Items)
+		}
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		var b strings.Builder
+		for _, m := range emitRe.FindAllStringSubmatch(args[n-3], -1) {
+			it, ok := r.Items[m[1]]
+			if !ok {
+				it = ProbeItem{Code: 1}
+			}
+			fmt.Fprintf(&b, "@@%s %s %d\n%s\n", args[n-1], m[1], it.Code, strings.TrimRight(it.Out, "\n"))
+		}
+		return proc.Result{Stdout: b.String()}, nil
+	}
+	if name == r.Host && n >= 2 && args[n-2] == "lever-stamp" {
+		r.Stamps = append(r.Stamps, args[n-1])
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{}, nil
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// Run is re-declared for the same reason as ClosedChainRunner.Run.
+func (r *ProbeRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// PastaDropIn is the drop-in the provisioning writes for a pasta with
+// --map-host-loopback (guest.pastaDropInModern; this package cannot import
+// guest). TestWarmFixturePastaDropIn in guest pins the two together.
+const PastaDropIn = `[containers]
+host_containers_internal_ip = "169.254.1.2"
+
+[network]
+default_rootless_network_cmd = "pasta"
+pasta_options = ["--map-host-loopback", "169.254.1.2"]
+`
+
+// ProbeBoot is the boot key a WarmItems guest reports.
+const ProbeBoot = "4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5\n42\n"
+
+// WarmItems is the probe of a converged guest for an open-posture, nested
+// virt off EnsureUp with allowedPorts, resolving to AhostsDual, provisioned
+// in this boot with stampKey (guest.ProvisionStampKey("leveruser"); this
+// package cannot import guest, whose tests import it). forwards are the DNS targets the chain already
+// accepts (Lima's LIMADNS ones); nat, when not empty, is the LIMADNS listing
+// they come from.
+func WarmItems(stampKey string, allowedPorts []int, forwards []egress.DNSForward, nat string) map[string]ProbeItem {
+	rules := egress.BuildRulesDNS(HostAliasV4, HostAliasV6, allowedPorts, false, forwards)
+	jump := JumpListing
+	items := map[string]ProbeItem{
+		"user":      {Out: "leveruser\n"},
+		"uid":       {Out: "501\n"},
+		"arch":      {Out: "aarch64\n"},
+		"ahosts":    {Out: AhostsDual},
+		"boot":      {Out: ProbeBoot},
+		"pasta":     {Out: PastaDropIn},
+		"pastahelp": {Out: "Usage: pasta [OPTION]... [COMMAND] [ARGS]...\n  --map-host-loopback ADDR\n"},
+		"stamp":     {Out: stampKey + " 4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5:42\n"},
+		"out4":      {Out: jump},
+		"out6":      {Out: jump},
+		"chain4":    {Out: strings.Join(egress.Listing(rules, egress.IPv4), "\n") + "\n"},
+		"chain6":    {Out: strings.Join(egress.Listing(rules, egress.IPv6), "\n") + "\n"},
+	}
+	if nat != "" {
+		items["dnschain"] = ProbeItem{Out: nat}
+	}
+	return items
 }

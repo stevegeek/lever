@@ -3,11 +3,15 @@ package host
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
@@ -181,8 +185,10 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 		f := proc.NewFakeRunner()
 		f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"running","containerStatus":"Up 1 second"}]`})
 		return apply.Deps{
-			Scion:            scion.New(f, scion.Options{}),
-			ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond, Settle: 5 * time.Millisecond},
+			Scion:                  scion.New(f, scion.Options{}),
+			ManagerLiveRetry:       apply.RetryBudget{Attempts: 2, Interval: time.Millisecond, Settle: 5 * time.Millisecond},
+			InspectContainerMounts: noMounts,
+			CheckLiveMounts:        noProblems,
 		}, f
 	}
 	for _, c := range []struct {
@@ -195,7 +201,14 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 		{upResume, 2, 1 << 20}, // live, then held: at least one re-observation
 	} {
 		deps, f := newDeps()
-		if err := gateAfterUp(context.Background(), deps, c.action, "/lever", "assistant", nil); err != nil {
+		var guard *apply.ManagerResume
+		if c.action == upResume {
+			var err error
+			if guard, err = apply.BeginManagerResume(context.Background(), deps, &config.App{Name: "assistant", Tree: t.TempDir()}, "/lever", "up"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := gateAfterUp(context.Background(), deps, c.action, "/lever", "assistant", nil, guard); err != nil {
 			t.Fatalf("%s: a running manager must pass: %v", c.action, err)
 		}
 		lists := 0
@@ -211,8 +224,13 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 	// And a dead manager on the resume path is a refusal, not "is up."
 	f := proc.NewFakeRunner()
 	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"error","containerStatus":"Exited (1) 2 seconds ago"}]`})
-	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond}}
-	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil); err == nil {
+	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond},
+		InspectContainerMounts: noMounts, CheckLiveMounts: noProblems}
+	guard, err := apply.BeginManagerResume(context.Background(), deps, &config.App{Name: "assistant", Tree: t.TempDir()}, "/lever", "up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, guard); err == nil {
 		t.Fatal("a resume over a dead manager must not pass the gate")
 	}
 }
@@ -224,11 +242,168 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 func TestUpProbeNotice(t *testing.T) {
 	err := errors.New("hub is not responding\nUsage: scion list ...")
 	plain := upProbeNotice(err, false)
-	if !strings.Contains(plain, "hub is not responding") || strings.Contains(plain, "Usage") || strings.Contains(plain, "--fresh") {
+	if !strings.Contains(plain, "hub is not running") || strings.Contains(plain, "Usage") || strings.Contains(plain, "--fresh") {
 		t.Errorf("plain notice = %q", plain)
 	}
 	fresh := upProbeNotice(err, true)
-	if !strings.Contains(fresh, "--fresh") || !strings.Contains(fresh, "discard") || !strings.Contains(fresh, "hub is not responding") {
+	if !strings.Contains(fresh, "--fresh") || !strings.Contains(fresh, "discard") || !strings.Contains(fresh, "hub is not running") {
 		t.Errorf("fresh notice = %q, want the flag, the discard, and the reason", fresh)
+	}
+}
+
+// TestUpProbeReason: the probe failure in the operator's words, never the
+// raw client error (lever#195); an unknown error keeps its first line only.
+func TestUpProbeReason(t *testing.T) {
+	cases := map[string]string{
+		"dial tcp 127.0.0.1:8080: connect: connection refused": "hub is not running",
+		"Error: project not found":                             "not registered with the hub yet",
+		"weird\nUsage: scion list":                             "no running manager (weird)",
+	}
+	for in, want := range cases {
+		if got := upProbeReason(errors.New(in)); !strings.Contains(got, want) || strings.Contains(got, "Usage") {
+			t.Errorf("upProbeReason(%q) = %q, want it to contain %q", in, got, want)
+		}
+	}
+}
+
+func TestUpDecisionNote(t *testing.T) {
+	cases := []struct {
+		phase string
+		d     upAction
+		want  string
+	}{
+		{scion.PhaseRunning, upNone, "running"},
+		{scion.PhaseSuspended, upResume, "suspended; resuming it"},
+		{scion.PhaseRunning, upResume, "the VM restarted under it; resuming it"},
+		{"", upApply, "no manager yet; starting it"},
+	}
+	for _, c := range cases {
+		if got := upDecisionNote(c.phase, c.d); got != c.want {
+			t.Errorf("upDecisionNote(%q, %q) = %q, want %q", c.phase, c.d, got, c.want)
+		}
+	}
+}
+
+// up's own resume (lever#158, also after a guest restart, lever#179) runs
+// the checks apply's start-manager runs around its resume: a mount whose
+// directory is gone refuses before the resume; a tree mount that comes
+// from elsewhere after it suspends the manager, right after the resume or
+// once it is live, and up never reports it up.
+func TestResumeForUpChecksTreeMounts(t *testing.T) {
+	mounts := []jail.Mount{
+		{Source: "/lever", Destination: "/workspace", RW: true},
+		{Source: "/lever/kb", Destination: "/workspace/kb"},
+	}
+	elsewhere := []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}
+	for _, tc := range []struct {
+		name        string
+		noDir       bool
+		resumeErr   error
+		answers     []error // successive live-check errors; nil = the problems below
+		problems    []jail.LiveMountProblem
+		wantResume  bool
+		wantErr     string // from resumeForUp
+		wantGateErr string // from gateAfterUp
+		wantSuspend bool
+	}{
+		{name: "held", answers: []error{nil}, wantResume: true},
+		{name: "gone before the resume", noDir: true, wantErr: "cannot be resumed"},
+		{name: "elsewhere after the resume", answers: []error{nil}, problems: elsewhere, wantResume: true,
+			wantErr: "is mounted from another place", wantSuspend: true},
+		{name: "resume failed, container started anyway", answers: []error{nil}, problems: elsewhere, resumeErr: errors.New("hook failed"),
+			wantResume: true, wantErr: "is mounted from another place", wantSuspend: true},
+		{name: "not running yet, elsewhere once live", answers: []error{jail.ErrContainerNotRunning, nil}, problems: elsewhere,
+			wantResume: true, wantGateErr: "is mounted from another place", wantSuspend: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := t.TempDir()
+			if !tc.noDir {
+				if err := os.Mkdir(filepath.Join(tree, "kb"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f := proc.NewFakeRunner()
+			f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"running","containerStatus":"Up 1 second"}]`})
+			i := 0
+			deps := apply.Deps{
+				Scion:                  scion.New(f, scion.Options{}),
+				ManagerLiveRetry:       apply.RetryBudget{Attempts: 2, Interval: time.Millisecond, Settle: time.Millisecond},
+				InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
+				CheckLiveMounts: func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+					err := tc.answers[min(i, len(tc.answers)-1)]
+					i++
+					if err != nil {
+						return nil, err
+					}
+					return tc.problems, nil
+				},
+			}
+			resumed := false
+			app := &config.App{Name: "assistant", Tree: tree}
+			guard, err := resumeForUp(context.Background(), deps, app, "/lever", func(context.Context) error {
+				resumed = true
+				return tc.resumeErr
+			})
+			if resumed != tc.wantResume {
+				t.Fatalf("resumed = %v, want %v (err %v)", resumed, tc.wantResume, err)
+			}
+			switch {
+			case tc.wantErr != "":
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+			case err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			default:
+				gerr := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, guard)
+				if tc.wantGateErr == "" && gerr != nil || tc.wantGateErr != "" && (gerr == nil || !strings.Contains(gerr.Error(), tc.wantGateErr)) {
+					t.Fatalf("gate err = %v, want %q", gerr, tc.wantGateErr)
+				}
+			}
+			suspended := false
+			for _, c := range f.Calls {
+				if len(c.Args) > 0 && c.Args[0] == "suspend" {
+					suspended = true
+				}
+			}
+			if suspended != tc.wantSuspend {
+				t.Fatalf("suspended = %v, want %v (calls %+v)", suspended, tc.wantSuspend, f.Calls)
+			}
+		})
+	}
+	// The resume path never passes the gate without its checks.
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"running","containerStatus":"Up 1 second"}]`})
+	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond}}
+	if err := gateAfterUp(context.Background(), deps, upResume, "/lever", "assistant", nil, nil); err == nil {
+		t.Fatal("a resume with no mount checks must not pass the gate")
+	}
+}
+
+// noMounts and noProblems are mount readers for a manager with no tree
+// mounts: wired (BeginManagerResume refuses without them), checking nothing.
+func noMounts(context.Context, string) ([]jail.Mount, error) { return nil, nil }
+
+func noProblems(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+	return nil, nil
+}
+
+// up's resume checks the host tree first, as apply does: a read_only entry
+// reached through a symbolic link refuses before anything is resumed.
+func TestResumeForUpRefusesLinkedReadOnly(t *testing.T) {
+	tree := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tree, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(tree, "tools")); err != nil {
+		t.Fatal(err)
+	}
+	app := &config.App{Name: "assistant", Tree: tree}
+	app.Manager.ReadOnly = []string{"tools"}
+	deps := apply.Deps{InspectContainerMounts: noMounts, CheckLiveMounts: noProblems}
+	resumed := false
+	_, err := resumeForUp(context.Background(), deps, app, "/lever", func(context.Context) error { resumed = true; return nil })
+	if err == nil || resumed || !strings.Contains(err.Error(), "read_only") {
+		t.Fatalf("err = %v resumed %v, want a refusal before the resume", err, resumed)
 	}
 }

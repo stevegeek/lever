@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,5 +182,37 @@ func TestRoutesRejectWrongMethod(t *testing.T) {
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("%s %s: status = %d, want 405", tc.method, tc.path, w.Code)
 		}
+	}
+}
+
+// TestEpochReportsTheInstanceID: /epoch carries the instance id for lever on
+// the host (lever#181), and stays a wire.EpochResponse for the tools that
+// read only the epoch.
+func TestEpochReportsTheInstanceID(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Version, cfg.ConfigHash, cfg.InstanceID = "v1", "h1", "0123456789abcdef0123456789abcdef"
+	b := New(cfg)
+	w := httptest.NewRecorder()
+	b.AdminHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, wire.PathEpoch, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var got EpochAnswer
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.InstanceID != cfg.InstanceID || got.Version != "v1" || got.ConfigHash != "h1" {
+		t.Fatalf("answer = %+v", got)
+	}
+	var tool wire.EpochResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &tool); err != nil || tool.Version != "v1" {
+		t.Fatalf("a tool's decode = %+v, %v", tool, err)
+	}
+	// A broker with no id reports none, which callers treat as not theirs.
+	cfg.InstanceID = ""
+	w = httptest.NewRecorder()
+	New(cfg).AdminHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, wire.PathEpoch, nil))
+	if strings.Contains(w.Body.String(), "instance_id") {
+		t.Fatalf("empty id serialized: %s", w.Body.String())
 	}
 }

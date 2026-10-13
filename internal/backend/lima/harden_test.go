@@ -95,7 +95,7 @@ func TestEnsureUpReportsRebootAndWarnings(t *testing.T) {
 	}
 	all := strings.Join(lines, "\n")
 	for _, want := range []string{
-		"jail: WARNING: guest_kernel hwe: installing it failed",
+		"jail: warning: guest_kernel hwe: installing it failed",
 		"jail: reboot pending: the kernel command line gets efi_pstore.pstore_disable=1 at the next boot; " + RebootAdvice,
 		"jail: reboot pending: the guest runs kernel 6.8.0-146-generic",
 	} {

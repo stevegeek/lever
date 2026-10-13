@@ -44,7 +44,14 @@ host's. Validated behaviour and its limits:
   not depend on OrbStack routing alone: the allowlist drops the private/special-use ranges
   unconditionally, `10/8`, `172.16/12`, `192.168/16`, **`169.254/16` (link-local/metadata)**,
   **`100.64/10` (CGNAT/Tailscale)**, and IPv6 `fe80::/10` + `fc00::/7`
-  (`internal/egress/allowlist.go`). LAN-unreachability must still be re-checked on OrbStack upgrades.
+  (`internal/egress/allowlist.go`). One address in them is refused out loud instead of dropped: the
+  cloud metadata address `169.254.169.254/32` is REJECTed (`icmp-host-prohibited`) just before the
+  `169.254/16` DROP, so the scion hub's GCP project lookup at each start fails at once instead of
+  timing out for about 13 s. Its ICMP answer goes from and to the guest's own address over `lo`, so
+  one narrow ACCEPT (`-o lo`, ICMP host-prohibited, conntrack `RELATED`) lets it through the private
+  range DROPs. It is the only REJECT in the chain, and `lever acceptance` checks that the address
+  answers "no route to host" while a neighbouring link-local address is still dropped.
+  LAN-unreachability must still be re-checked on OrbStack upgrades.
 - **Host loopback services are reachable via the alias** (`host.orb.internal`), which forwards to
   the host's `127.0.0.1` over **both IPv4 and IPv6**. This is how the manager reaches local tool
   servers (e.g. the broker, an MCP server) without exposing them on the LAN. The alias exposes *all*
@@ -52,7 +59,12 @@ host's. Validated behaviour and its limits:
 
 **Network egress: two postures.** All lever rules live in a dedicated **`LEVER_EGRESS`** iptables/
 ip6tables chain that `OUTPUT` jumps to (never direct `OUTPUT` rules), so re-apply replaces only that
-chain (idempotent, and it never touches non-lever rules). The replacement is **atomic per address
+chain (idempotent, and it never touches non-lever rules). The jump must be **`OUTPUT`'s first rule**
+in both families: a rule ahead of it (an ACCEPT, a RETURN, a goto) would decide packets before the
+lever chain saw them. Whenever a bring-up does not verify the egress state unchanged (below), it
+makes the jump first and unique before anything else, deleting any other copy of it and inserting it
+at position 1 in one `iptables-restore` commit per family, so `OUTPUT` is never without it. Other `OUTPUT` rules are left where they are: behind the jump they
+cannot weaken it. The replacement is **atomic per address
 family**: one `iptables-restore --noflush` commit per family empties the chain and loads the whole
 new ruleset in a single transaction, so within a family the old rules stay in force until the new
 ones are, and a failed commit leaves that family's old chain in place. The two families are
@@ -60,11 +72,37 @@ committed one after the other, IPv6 first and IPv4 last: if the IPv6 commit fail
 if the IPv4 commit fails (or the apply is interrupted between them), IPv6 has the new rules and IPv4
 the old, and the error says so. The re-apply skip for a live closed instance (below) requires
 **both** families to carry the closed catch-all DROP, so a half-applied closed posture is always
-rebuilt, never skipped. The host alias is resolved under the old chain; when that lookup fails and
+rebuilt, never skipped.
+
+**Every bring-up verifies the chains; none assumes them.** On an `apply` or `up` of a jail that is
+already provisioned (a root-owned provisioning stamp in the guest names the exact provisioning
+scripts and the current boot), lever reads both families' `LEVER_EGRESS` and `OUTPUT` listings in
+one guest call and compares them, rule for rule and in order, with the ruleset it would commit
+(`internal/egress/listing.go`, `guest.Snapshot.VerifyEgress`). It leaves them alone only when they
+match exactly and the jump is `OUTPUT`'s first rule, and its only copy, in both families; a chain that is missing, has a rule
+added, removed or changed, names another alias or other ports, or is half-applied is rebuilt by the
+atomic commit above. The stamp only lets lever skip re-installing packages and runtimes; it never
+stands in for the firewall. In the open posture the alias is resolved again for the comparison; in
+the closed posture it is read from the live chains, as below. The host alias is resolved under the old chain; when that lookup fails and
 the live IPv4 chain is closed (the guest resolves over IPv4, and that DROP blocks DNS by design),
 the aliases are read back from the live rules, each from its own family, with a warning naming them. Under an open or absent chain a failed lookup fails the apply. The rules are not persisted
 in the guest: after a guest reboot there is no chain until the next `lever apply`/`up`, which applies
-egress before it starts any agent. The posture is chosen by the
+egress before it starts any agent.
+
+What that verification can and cannot vouch for:
+
+- It reads the chains as `iptables -S` prints them. On an nf_tables guest, a rule written into the
+  lever chain with `nft` itself, in a form `iptables` cannot print back, may not show in that
+  listing, and is then not noticed. Before the verification, every apply re-declared the chain in
+  its `iptables-restore` commit, which emptied it and so removed such a rule as a side effect; a
+  verified bring-up no longer rewrites a matching chain. Writing such a rule takes root in the guest.
+- It is only as trustworthy as root in the guest. On **Lima**, lever's root commands (the
+  verification's read included) run as `limactl shell <vm> sudo ...` in the run user's session, and
+  the run user has passwordless sudo: a process running as the run user in the VM is root there,
+  and can make any root command lever runs, the verification and the full rebuild alike, report or
+  do what it likes. This was so before the verification existed. On Lima the boundary against a
+  compromised agent is the rootless container it runs in (and the VM around it), not the guest's
+  run user. On **OrbStack** root commands run as `orb -u root`, without the run user. The posture is chosen by the
 explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
 
 - **`egress: open` (default):** `OUTPUT` default-ACCEPT; `LEVER_EGRESS` ACCEPTs the allowlisted host
@@ -86,7 +124,10 @@ explicit, jail-wide **`egress:`** knob, **independent of `llm_auth`**:
   validates (`internal/cap/ca/rotate.go NewServerCertSource`, which mints via `IssueServerCertSANs`;
   `internal/brokerctl/serve.go` passes the IP from `$LEVER_HOST_ALIAS_IP`, which
   `internal/cli/host/apply.go` sets on the broker child). Re-applying a *live* closed instance detects the active catch-all DROP
-  in both the IPv4 and the IPv6 chain and leaves them untouched.
+  in both the IPv4 and the IPv6 chain and leaves them untouched when they are exactly the closed
+  ruleset for the aliases they name and the configured ports; otherwise (a port added to
+  `manager.allow_ports`, a rule changed by hand) it rebuilds them atomically, taking the alias from
+  the live chains when the closed chain blocks the lookup.
 
 **Enforcement** lives in the jail's network namespace, for both postures. A **non-privileged** agent
 container is in a separate namespace from the rules and cannot flush them; reaching the rules would
@@ -94,8 +135,8 @@ require a container/namespace escape (which reduces to the kernel/runtime caveat
 
 ### 2.3 Rootless podman (required)
 
-Scion runs the agents in **rootless podman** (it auto-prefers podman over Docker; a rootless Docker
-daemon is provisioned in the guest too, but the agent containers are podman). Inside an isolated
+Scion runs the agents in **rootless podman** (it auto-prefers podman over Docker, and lever installs
+no Docker daemon in the guest). Inside an isolated
 machine, **rootful containers do not work** and a **rootless runtime is required.** An isolated
 machine applies a seccomp filter that blocks the `bpf()` syscall, which a rootful OCI runtime
 (`runc`/`crun`) needs to program the cgroup-v2 device controller; containers fail with
@@ -132,7 +173,7 @@ so a containment posture is never silently substituted.
 - **Lima's in-guest kernel attack surface is intentionally widened for rootless runtimes.**
   Provisioning re-enables the unprivileged user-namespace knob
   (`kernel.apparmor_restrict_unprivileged_userns=0`) that Ubuntu ≥ 23.10 disables by default, a
-  prerequisite for rootless Docker/Podman's rootlesskit/pasta. This widens attack surface *inside the
+  prerequisite for rootless podman and pasta. This widens attack surface *inside the
   guest kernel* only, in exchange for the rootless containers the whole containment model depends on;
   the boundary that actually matters — the hypervisor (guarantee 0) — is untouched. An escalation via
   this surface reaches VM root, not the host, consistent with the [§8](/security-model/compromise/) "containing runtime authority

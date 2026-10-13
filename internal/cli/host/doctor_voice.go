@@ -34,10 +34,18 @@ func checkVoice(app *config.App) checkResult {
 	default:
 		detail += " (no lever-tool-whisper entry in broker.tools: the tool serving it is yours to run)"
 	}
-	if x := app.VoiceExcludedLogins(); len(x) > 0 {
-		detail += "; no dictation for " + strings.Join(x, ", ")
+	switch app.EffectiveReadAloud() {
+	case config.ReadAloudServer:
+		detail += "; read-aloud with server voices through " + app.Remote.Voice.SpeakSocket + " (the device's voices when it is down)"
+	case config.ReadAloudOff:
+		detail += "; read-aloud off"
+	default:
+		detail += "; read-aloud with the device's voices"
 	}
-	return checkResult{name, true, detail + "; audio and transcripts are never stored", ""}
+	if x := app.VoiceExcludedLogins(); len(x) > 0 {
+		detail += "; no dictation or read-aloud for " + strings.Join(x, ", ")
+	}
+	return checkResult{name, true, detail + "; audio, transcripts and read-aloud text are never stored", ""}
 }
 
 // doctorWhisperTool is the whisper tool the `voice tool` and `voice model`

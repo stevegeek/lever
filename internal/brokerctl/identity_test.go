@@ -269,14 +269,29 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 	for name, mut := range map[string]func(a *config.App){
 		"socket":     func(a *config.App) { a.Remote.Voice.Socket = "/run/lever/other.sock" },
 		"max":        func(a *config.App) { a.Remote.Voice.MaxSeconds = 120 },
-		"read aloud": func(a *config.App) { a.Remote.Voice.ReadAloud = &no },
-		"login":      func(a *config.App) { a.Remote.AllowedUsers[1].Voice = &no },
+		"read aloud": func(a *config.App) { a.Remote.Voice.ReadAloud = config.ReadAloudOff },
+		"server": func(a *config.App) {
+			a.Remote.Voice.ReadAloud, a.Remote.Voice.SpeakSocket = config.ReadAloudServer, "/run/lever/tts.sock"
+		},
+		"login": func(a *config.App) { a.Remote.AllowedUsers[1].Voice = &no },
 	} {
 		c := *app
 		c.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
 		mut(&c)
 		if RemoteConfigHash(&c) == on {
 			t.Errorf("%s: no proxy restart", name)
+		}
+	}
+	// read_aloud device, written or not, and a speak_socket it does not
+	// use, keep the stamp.
+	for name, mut := range map[string]func(a *config.App){
+		"device":       func(a *config.App) { a.Remote.Voice.ReadAloud = config.ReadAloudDevice },
+		"speak socket": func(a *config.App) { a.Remote.Voice.SpeakSocket = "/run/lever/tts.sock" },
+	} {
+		c := *app
+		mut(&c)
+		if RemoteConfigHash(&c) != on {
+			t.Errorf("%s: the stamp changed", name)
 		}
 	}
 }

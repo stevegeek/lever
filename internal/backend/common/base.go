@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 )
 
 const (
@@ -25,8 +26,8 @@ const (
 	// mounted (via `orb create --mount <host>:/lever` or the lima template).
 	// Agents work exclusively within this directory; no host home is visible.
 	MountDest = "/lever"
-	// DefaultRunUID is the fallback UID used for the rootless Docker socket path
-	// (/run/user/<uid>/docker.sock) before EnsureUp has resolved the real UID.
+	// DefaultRunUID is the fallback run-user UID (the /run/user/<uid> runtime
+	// dir) before EnsureUp has resolved the real UID.
 	// It matches an OrbStack guest user (the macOS uid, 501 by default) but NOT
 	// a Lima guest user (1000): every command that reaches into the jail calls
 	// EnsureUp or ResolveRunUser first, or its XDG_RUNTIME_DIR is wrong on Lima.
@@ -54,6 +55,11 @@ type Hooks struct {
 	// nil when the backend's resolver path is not routed through the alias
 	// (orbstack); lima reads its LIMADNS nat chain.
 	DNSForward func(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error)
+	// DNSProbe computes DNSForward's answer from the warm-path probe
+	// (guest.Snapshot.VerifyEgress): what to read, and the same parse. nil
+	// with a DNSForward set means the open posture always takes the full
+	// egress path.
+	DNSProbe *guest.DNSProbe
 }
 
 // Options is the caller-supplied part of a backend's construction — what the
@@ -89,6 +95,11 @@ type Base struct {
 	user    string // resolved in-jail run user
 	uid     string // resolved in-jail run-user uid
 	aliasV4 string // resolved IPv4 of hostAlias as seen from the jail
+
+	// warm is the probe of the last Provision when its warm path held (the
+	// provisioning stamp matched, so nothing changed the guest since the
+	// probe); nil otherwise. See WarmSnapshot.
+	warm *guest.Snapshot
 }
 
 // NewBase builds the shared half of a prefix-reached backend.
@@ -107,11 +118,6 @@ func (b *Base) Guest() guest.Guest { return b.hooks.Guest(b.r, b.machine) }
 
 // jailPrefix is the in-jail transport argv prefix for the current run user.
 func (b *Base) jailPrefix() []string { return b.hooks.JailPrefix(b.machine, b.user) }
-
-// DockerHost is the rootless Docker socket endpoint the broker drives.
-func (b *Base) DockerHost() string {
-	return fmt.Sprintf("unix:///run/user/%s/docker.sock", b.RunUID())
-}
 
 // HostToolAlias is how an agent reaches allowlisted host tools.
 func (b *Base) HostToolAlias() string { return b.hostAlias }
@@ -136,7 +142,7 @@ func (b *Base) RunUID() string {
 }
 
 // ReadRunUser caches the in-jail run user and UID (via the guest UserPrefix +
-// whoami / id -u) so the subid/linger script and the rootless Docker socket path
+// whoami / id -u) so the subid/linger script and the runtime dir path
 // work for any guest user, not a hardcoded one. Called after the machine exists
 // and before guest provisioning.
 func (b *Base) ReadRunUser(ctx context.Context) error {
@@ -160,24 +166,126 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 // per backend: the ScionSpec literal drifted between the two once (ScionBinary
 // was added to both literals while the guard around them was updated in
 // neither — see backend.Config.HasScion).
+//
+// It starts with the warm-path probe (guest.Probe, lever#187): two guest
+// calls that read what the steps below would otherwise each read with calls
+// of their own. When the provisioning stamp matches, the runtimes are left
+// alone, scion's arch and installed digest come from the probe, and the
+// egress chains are VERIFIED against the exact ruleset and left alone only
+// when they match (read once more just before that decision when a scion
+// step ran in between, guest.RefreshEgress). When the stamp does not match (a new guest, a reboot, a
+// lever whose provisioning scripts differ), or the probe fails, every step
+// takes its full path as before, and a successful provisioning writes the
+// stamp for the next bring-up.
 func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
-	if err := b.ReadRunUser(ctx); err != nil {
-		return err
+	rep := progress.From(ctx)
+	g := b.Guest()
+	b.warm = nil
+	s := rep.Start("guest state")
+	snap, perr := g.Probe(ctx, b.probeSpec(cfg))
+	if perr != nil {
+		snap = nil
+		s.Note("unread; provisioning in full")
 	}
-	if err := b.Guest().EnsureRuntimes(ctx, b.RunUser()); err != nil {
+	s.Done(nil)
+
+	s = rep.Start("packages and runtimes")
+	var err error
+	if user, uid, ok := snap.RunUser(); ok {
+		b.user, b.uid = user, uid
+	} else {
+		snap = nil
+		err = b.ReadRunUser(ctx)
+	}
+	if err == nil {
+		key := guest.ProvisionStampKey(b.RunUser())
+		if snap != nil && snap.Provisioned(key) {
+			s.Note("already provisioned")
+		} else {
+			// Something may change below the probe now: nothing else of
+			// it is used.
+			snap = nil
+			err = g.EnsureRuntimes(ctx, b.RunUser())
+			if err == nil {
+				// Best-effort: a missing stamp costs the next bring-up a
+				// full provisioning, nothing more.
+				_ = g.WriteProvisionStamp(ctx, key)
+			}
+		}
+	}
+	s.Done(err)
+	if err != nil {
 		return err
 	}
 	if cfg.HasScion() {
-		if err := b.Guest().EnsureScion(ctx, guest.ScionSpec{
-			Binary:  cfg.ScionBinary,
-			Source:  cfg.ScionSource,
-			Version: cfg.ScionVersion,
-			WebUI:   cfg.ScionWebUI,
-		}); err != nil {
+		s = rep.Start(scionStepLabel(cfg))
+		err := g.EnsureScionFrom(ctx, guest.ScionSpec{
+			Binary:   cfg.ScionBinary,
+			Source:   cfg.ScionSource,
+			Version:  cfg.ScionVersion,
+			WebUI:    cfg.ScionWebUI,
+			Prebuilt: cfg.ScionPrebuild,
+		}, snap)
+		s.Done(err)
+		if err != nil {
 			return err
 		}
 	}
-	return b.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+	s = rep.Start("egress firewall")
+	if cfg.HasScion() {
+		// The scion step can take minutes (a build): judge the chains as
+		// they are now, not as the probe found them before it.
+		g.RefreshEgress(ctx, snap)
+	}
+	if v4, ok := snap.VerifyEgress(cfg.AllowedPorts, cfg.ClosedInternet, b.hooks.DNSForward != nil, b.hooks.DNSProbe); ok {
+		b.aliasV4 = v4
+		s.Note("verified, unchanged")
+		s.Done(nil)
+	} else {
+		err = b.ApplyEgress(ctx, cfg.AllowedPorts, cfg.ClosedInternet)
+		s.Done(err)
+		if err != nil {
+			return err
+		}
+	}
+	b.warm = snap
+	return nil
+}
+
+// probeSpec is what the warm-path probe reads for cfg: the alias lookup in
+// the open posture only (the closed chain blocks DNS; its alias is read from
+// the chain), the resolver state the DNSForward hook reads, and the scion
+// binary's digest when cfg installs one.
+func (b *Base) probeSpec(cfg backend.Config) guest.ProbeSpec {
+	var spec guest.ProbeSpec
+	if !cfg.ClosedInternet {
+		spec.HostAlias = b.hostAlias
+		if p := b.hooks.DNSProbe; p != nil && b.hooks.DNSForward != nil {
+			spec.DNSChain, spec.ResolvConf = p.NATChain, p.ResolvConf
+		}
+	}
+	if cfg.HasScion() {
+		spec.HashPaths = []string{guest.ScionProbePath}
+	}
+	return spec
+}
+
+// WarmSnapshot is the probe of the last Provision when its warm path held,
+// for an embedder's own steps after Provision (lima's nested virt); nil when
+// Provision took the full path, which the embedder's steps then take too.
+func (b *Base) WarmSnapshot() *guest.Snapshot { return b.warm }
+
+// scionStepLabel names the scion step by the pin it installs.
+func scionStepLabel(cfg backend.Config) string {
+	switch {
+	case cfg.ScionBinary != "":
+		return "scion (prebuilt binary)"
+	case len(cfg.ScionVersion) > 12:
+		return "scion " + cfg.ScionVersion[:12]
+	case cfg.ScionVersion != "":
+		return "scion " + cfg.ScionVersion
+	}
+	return "scion"
 }
 
 // ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records the

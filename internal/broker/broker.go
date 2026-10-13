@@ -78,6 +78,12 @@ type Config struct {
 	// instead of silently reusing it (#19). Both optional (empty = unreported).
 	Version    string
 	ConfigHash string
+	// InstanceID is this instance's id (state.EnsureInstanceID), reported
+	// by /epoch so a host-side caller can tell this instance's broker from
+	// another instance's on the same ports (lever#181). Optional (empty =
+	// unreported, which every caller treats as "not ours"). Not
+	// DirectiveConfig.InstanceID, the instance name signed directives carry.
+	InstanceID string
 	// ToolSecret is the per-boot broker-to-tool shared secret (minted by
 	// brokerctl.Serve, delivered to each supervised first-party tool through
 	// its environment). The gateway presents it in X-Lever-Tool-Secret on
@@ -138,6 +144,20 @@ type LLMConfig struct {
 	Upstream string
 }
 
+// ManagerResumeCheck is the half of DispatchConfig.ManagerResumeGuard that
+// runs after the bounce's resume (apply.ManagerResume in production).
+type ManagerResumeCheck interface {
+	// After reads back, from the guest, where each of the resumed
+	// manager's tree mounts comes from, until its container runs; a
+	// mismatch suspends the manager and is the error.
+	After(ctx context.Context) error
+	// AfterFailure is After for a resume that failed with cause: a
+	// container it started anyway is checked, its error joined to cause.
+	AfterFailure(ctx context.Context, cause error) error
+	// Verified reports whether After could read the mounts back.
+	Verified() bool
+}
+
 // DispatchConfig is the host-side worker dispatch and messaging wiring.
 type DispatchConfig struct {
 	// Runtime is the scion client the broker drives; Workers are the
@@ -189,6 +209,10 @@ type DispatchConfig struct {
 	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
 	// "manager" | "off" (resolved by brokerctl from config; empty = all).
 	AutoReenrol string
+	// MaxRunningWorkers is broker.max_running_workers: the broker refuses to
+	// bring up a worker while this many other workers are running or
+	// starting (workercap.go). 0 = no cap.
+	MaxRunningWorkers int
 	// Tree is the host path to the instance tree: the confinement anchor for
 	// staging enrolment material. Everything below it is agent-writable and the
 	// broker writes there as the operator, so wire.Stage confines every write to
@@ -231,6 +255,13 @@ type DispatchConfig struct {
 	// shared folders are configured; nil skips the check. A refusal that
 	// wraps ErrSharedCheckUnavailable means the mounts could not be read.
 	SharedGuard func(ctx context.Context) error
+	// ManagerResumeGuard runs the checks apply runs around a resume of the
+	// manager (lever#158) for the broker's own: the re-enrol bounce.
+	// Called before anything is staged, it refuses when the host tree or
+	// the manager record's mounts are not what lever planned; the check it
+	// returns runs after the resume (see ManagerResumeCheck). nil: the
+	// broker never resumes the manager (fail closed).
+	ManagerResumeGuard func(ctx context.Context) (ManagerResumeCheck, error)
 	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
 	// instance tree (jail.StageWorkerTicket in production). The manager
 	// mounts the whole tree, so nothing a worker must redeem may be written
@@ -328,6 +359,7 @@ type Broker struct {
 	// configured (refuseStaleShares).
 	leftoverShareVolumes RecordVolumesFunc
 	sharedGuard          func(ctx context.Context) error
+	managerResumeGuard   func(ctx context.Context) (ManagerResumeCheck, error)
 	// afterWorkspaceMkdir is a test seam: called between a strict worker
 	// workspace mkdir and the walk that follows it. nil outside tests.
 	afterWorkspaceMkdir func()
@@ -355,6 +387,12 @@ type Broker struct {
 	// onWorkerLockWait, when set, runs when lockWorker finds the lock held
 	// and starts to wait (a test seam).
 	onWorkerLockWait func(name string)
+	// maxRunningWorkers is broker.max_running_workers (0 = no cap);
+	// admitting holds the starts admitted and not yet returned, guarded by
+	// admitMu (workercap.go).
+	maxRunningWorkers int
+	admitMu           sync.Mutex
+	admitting         map[string]int
 
 	mu           sync.Mutex
 	minEpoch     int
@@ -416,10 +454,11 @@ type Broker struct {
 	fileLedger *fileRecord // FilesConfig.LedgerDir
 	filesRate  *rateWindow // list + share calls
 
-	version    string // reported by /epoch (see Config.Version)
-	configHash string // reported by /epoch (see Config.ConfigHash)
-	toolSecret string // presented to first-party tools (see Config.ToolSecret)
-	timeouts   TimeoutConfig
+	version         string // reported by /epoch (see Config.Version)
+	configHash      string // reported by /epoch (see Config.ConfigHash)
+	epochInstanceID string // reported by /epoch (see Config.InstanceID)
+	toolSecret      string // presented to first-party tools (see Config.ToolSecret)
+	timeouts        TimeoutConfig
 }
 
 // New builds a Broker from c.
@@ -454,7 +493,7 @@ func New(c Config) *Broker {
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
-		log: c.Log, version: c.Version, configHash: c.ConfigHash, toolSecret: c.ToolSecret,
+		log: c.Log, version: c.Version, configHash: c.ConfigHash, epochInstanceID: c.InstanceID, toolSecret: c.ToolSecret,
 		timeouts: c.Timeouts.withDefaults(),
 		// persisted state
 		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
@@ -466,7 +505,9 @@ func New(c Config) *Broker {
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
-		liveAttempts: defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
+		managerResumeGuard: d.ManagerResumeGuard,
+		liveAttempts:       defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
+		maxRunningWorkers:   d.MaxRunningWorkers,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
 		ticketStager:        d.Tickets,

@@ -2,7 +2,9 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,8 +15,10 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -27,7 +31,7 @@ func acceptanceCheckNames() []string {
 		"no-table-c",     // worker CANNOT read a scope outside the envelope
 		"no-drop-filter", // worker CANNOT widen by dropping the delegated filter caveat
 		"no-self-path",   // worker CANNOT self-mint an un-granted capability
-		"egress-refused", // jail reaches the allowlisted broker port but NOT the non-allowlisted admin port
+		"egress-refused", // jail reaches the allowlisted broker port but NOT the non-allowlisted admin port, and the metadata REJECT is exactly its /32
 		"revocation",     // after revoke/bump-epoch the next call is denied
 	}
 }
@@ -67,18 +71,28 @@ func formatNote(results map[string]bool, date string) string {
 }
 
 func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
-	return &cobra.Command{
+	var progressMode string
+	c := &cobra.Command{
 		Use:   "acceptance [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring up a real jail and drive the six acceptance capability checks (live gate)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
-			return runAcceptance(cmd.Context(), cmd, app, path, bf)
+			// The bring-up is listed and timed like apply's (lever#184,
+			// #185): the e2e reads the phase times from its record.
+			run, ctx, err := startBringup(cmd, app, stateFor(path), "acceptance", progressMode)
+			if err != nil {
+				return err
+			}
+			defer run.finishOnReturn(&err)
+			return runAcceptance(ctx, cmd, app, path, bf)
 		},
 	}
+	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	return c
 }
 
 // runAcceptance is the live acceptance gate. It brings a REAL jail up (manager +
@@ -100,7 +114,9 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	//    scion/container/registration steps (incl. init-machine, which needs a
 	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
 	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
-	w, err := buildApplyDeps(ctx, app, configPath, bf, applyOpts{Cmd: cmd})
+	rep := progress.From(ctx)
+	rep.Group("jail", 0)
+	w, err := buildApplyDeps(ctx, app, configPath, bf, applyOpts{Cmd: cmd, Rep: rep})
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}
@@ -130,22 +146,43 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	// 2b. Setup phase: install lever-agent in the VM, then enrol the manager and
 	//     mint+enrol the worker. FAIL-CLOSED — any setup error aborts the
 	//     gate with a clear message (never a vacuous check pass).
-	if err := h.setup(ctx, b); err != nil {
+	rep.Group("acceptance", 0)
+	setup := rep.Start("enrol test agents")
+	err = h.setup(ctx, b)
+	setup.Done(err)
+	if err != nil {
 		return fmt.Errorf("acceptance: setup: %w", err)
 	}
+	// 2c. Wait until every supervised tool listens: the broker starts them
+	//     with itself, and a first check that reaches the gateway before the
+	//     tool binds its backend gets a 502 that says nothing about the
+	//     capability under test. A tool that never listens fails the gate
+	//     here, naming its log.
+	tools := rep.Start("wait for tools to listen")
+	err = waitToolsListening(ctx, app, defaultToolDial, toolListenWait)
+	tools.Done(err)
+	if err != nil {
+		return fmt.Errorf("acceptance: %w", err)
+	}
+	checks := rep.Start("capability checks")
 
 	results := map[string]bool{}
 	for _, name := range acceptanceCheckNames() {
 		ok, derr := h.run(ctx, name)
 		results[name] = ok
 		if derr != nil {
-			cmd.PrintErrf("check %-14s error: %v\n", name, derr)
+			acceptanceLine(cmd, rep, fmt.Sprintf("check %-14s error: %v", name, derr))
 		}
 		status := "FAIL"
 		if ok {
 			status = "PASS"
 		}
-		cmd.Printf("check %-14s %s\n", name, status)
+		acceptanceLine(cmd, rep, fmt.Sprintf("check %-14s %s", name, status))
+	}
+	if overallPass(results) {
+		checks.Done(nil)
+	} else {
+		checks.Done(errors.New("a capability check failed"))
 	}
 
 	// 3. Write the dated note.
@@ -169,6 +206,16 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	}
 	cmd.Println("acceptance PASSED")
 	return nil
+}
+
+// acceptanceLine prints a check result above the progress list's live line,
+// or on the command's output when there is no list.
+func acceptanceLine(cmd *cobra.Command, rep *progress.Reporter, line string) {
+	if rep != nil {
+		rep.Log(line)
+		return
+	}
+	cmd.Println(line)
 }
 
 // bootstrapDirInJail returns the in-jail directory holding the manager's
@@ -482,7 +529,10 @@ func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (probe
 // behind host.orb.internal, so the contrast is non-vacuous and directly proves
 // the egress allowlist. FAIL-CLOSED on any ambiguous result. (The public internet
 // is intentionally left OPEN by the allowlist, so curling example.com would NOT
-// test containment — the broker port contrast does.)
+// test containment — the broker port contrast does.) It then checks the
+// chain's one REJECT (metadataVerdict): the metadata address answers
+// "No route to host" at once, and a neighbouring link-local address is
+// still dropped, so the REJECT neither opens nor widens anything.
 func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
 	jailState, jerr := h.probeReachable(ctx, h.app.EffectiveJailPort())
 	if jailState == stateUncertain {
@@ -492,7 +542,87 @@ func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error
 	if adminState == stateUncertain {
 		return false, aerr // FAIL-CLOSED: cannot classify the admin-port probe
 	}
-	return egressVerdict(jailState, adminState)
+	if ok, err := egressVerdict(jailState, adminState); !ok {
+		return false, err
+	}
+	// The chain's one REJECT (lever#182): the metadata address is refused at
+	// once, and a neighbouring link-local address is still silently dropped,
+	// so the REJECT is exactly that /32 and opens nothing.
+	meta, merr := h.probeLinkLocal(ctx, egress.MetadataV4)
+	if meta == linkUncertain {
+		return false, merr
+	}
+	other, oerr := h.probeLinkLocal(ctx, linkLocalControl)
+	if other == linkUncertain {
+		return false, oerr
+	}
+	return metadataVerdict(meta, other)
+}
+
+// linkLocalControl is a link-local address next to egress.MetadataV4 that the
+// chain must DROP (169.254/16) and not REJECT: the control for the one REJECT.
+const linkLocalControl = "169.254.169.253"
+
+// linkState is the outcome of a raw TCP dial from the jail to a link-local
+// address (probeLinkLocal), consumed by metadataVerdict.
+type linkState string
+
+const (
+	linkOpen      linkState = "open"      // the dial reached something (connected, or a host answered with a reset)
+	linkRejected  linkState = "rejected"  // EHOSTUNREACH: the chain's icmp-host-prohibited REJECT
+	linkDropped   linkState = "dropped"   // no answer before the timeout: a DROP
+	linkUncertain linkState = "uncertain" // cannot classify — FAIL-CLOSED
+)
+
+// linkLocalTimeout bounds one link-local dial, in seconds: a DROP costs this
+// long, a REJECT returns at once.
+const linkLocalTimeout = "3"
+
+// probeLinkLocal dials ip:80 from the jail with bash's /dev/tcp, which, unlike
+// curl, reports the connect errno ("No route to host" for the REJECT,
+// "Connection refused" for a reset) so the two can be told apart. ip is one of
+// two constants, never input.
+func (h *acceptanceHarness) probeLinkLocal(ctx context.Context, ip string) (linkState, error) {
+	res, err := h.jr.Run(ctx, nil, "timeout", linkLocalTimeout, "bash", "-c", "exec 3<>/dev/tcp/"+ip+"/80")
+	return classifyLinkLocalProbe(ip, res, err)
+}
+
+// classifyLinkLocalProbe maps a probeLinkLocal result to a linkState: exit 0
+// is open; "Connection refused" is open too (a reset came back, so packets
+// reached a host); "No route to host" is rejected; timeout's exit 124 is
+// dropped; anything else (bash or timeout missing, another errno) is
+// uncertain.
+func classifyLinkLocalProbe(ip string, res proc.Result, err error) (linkState, error) {
+	if err == nil {
+		return linkOpen, nil
+	}
+	out := res.Stdout + res.Stderr
+	switch {
+	case res.Code == 124:
+		return linkDropped, nil
+	case strings.Contains(out, "No route to host"):
+		return linkRejected, nil
+	case strings.Contains(out, "Connection refused"):
+		return linkOpen, nil
+	default:
+		return linkUncertain, fmt.Errorf("egress-refused: link-local probe of %s exited %d with unexpected output (FAIL-CLOSED): %s", ip, res.Code, out)
+	}
+}
+
+// metadataVerdict is the PURE decision for the metadata REJECT: PASS iff the
+// metadata address is rejected and the control address is dropped. A dropped
+// metadata address is contained but means the REJECT is not in force, or its
+// ICMP answer is dropped on the way back (a closed chain from before lever#182
+// that a re-apply left alone, or a chain without the lo ACCEPT); a rejected
+// control means the REJECT is wider than its /32; an open address is a hole.
+func metadataVerdict(meta, control linkState) (bool, error) {
+	if meta != linkRejected {
+		return false, fmt.Errorf("egress-refused: metadata address %s was %q, want %q (the chain's icmp-host-prohibited REJECT and the lo ACCEPT for its answer; a closed chain from before them needs lever down and up)", egress.MetadataV4, meta, linkRejected)
+	}
+	if control != linkDropped {
+		return false, fmt.Errorf("egress-refused: link-local control %s was %q, want %q (only the metadata /32 may be rejected)", linkLocalControl, control, linkDropped)
+	}
+	return true, nil
 }
 
 // checkRevocation — PASS = after /bump-epoch the worker's previously-working
@@ -517,4 +647,57 @@ func (h *acceptanceHarness) checkRevocation(ctx context.Context) (bool, error) {
 		return true, nil // denied post-revocation — correct
 	}
 	return false, fmt.Errorf("token still accepted after bump-epoch (must be 403): %s", out)
+}
+
+// toolListenWait bounds how long acceptance waits for the supervised tools
+// to listen before it runs the checks.
+const toolListenWait = 30 * time.Second
+
+// defaultToolDial reports whether addr accepts a TCP connection now.
+func defaultToolDial(ctx context.Context, addr string) error {
+	d := net.Dialer{Timeout: 2 * time.Second}
+	c, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	return c.Close()
+}
+
+// waitToolsListening polls each supervised (not external) tool's backend
+// until it accepts a TCP connection, for at most wait in all. A tool that
+// does not listen in time is an error that names the tool, its address and
+// its log, so the gate fails on the real cause instead of a 502 in a check.
+func waitToolsListening(ctx context.Context, app *config.App, dial func(context.Context, string) error, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	// A tool whose program lies under manager.read_only is held back until
+	// the manager holds those mounts, which a broker-only run never starts:
+	// it is not expected to listen.
+	held, err := app.ToolsOnReadOnly()
+	if err != nil {
+		return fmt.Errorf("which tools manager.read_only holds back: %w", err)
+	}
+	for _, t := range app.Broker.Tools {
+		if t.External || t.Backend == "" || len(held[t.Name]) > 0 {
+			continue
+		}
+		addr := backendHostPort(t.Backend)
+		for {
+			err := dial(ctx, addr)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("tool %q is not listening on %s after %s (%v); see its log, tool-logs/%s.log in the state directory", t.Name, addr, wait, err, t.Name)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}
+	return nil
 }

@@ -159,7 +159,7 @@ func validateLimaKeys(a *App, goos string) error {
 		for _, k := range []struct {
 			key string
 			set bool
-		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}} {
+		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}, {"guest_profile", a.GuestProfile != ""}} {
 			if k.set {
 				return fmt.Errorf("config: %s is Lima-only; OrbStack manages its own machine resources", k.key)
 			}
@@ -174,6 +174,12 @@ func validateLimaKeys(a *App, goos string) error {
 	default:
 		return fmt.Errorf("config: guest_kernel %q invalid (want %q or %q, or unset: %q with nested_virt, else %q)",
 			a.GuestKernel, GuestKernelHWE, GuestKernelGA, GuestKernelHWE, GuestKernelGA)
+	}
+	switch a.GuestProfile {
+	case "", GuestProfileStandard, GuestProfileSmall:
+	default:
+		return fmt.Errorf("config: guest_profile %q invalid (want %q or %q, or unset: %q)",
+			a.GuestProfile, GuestProfileStandard, GuestProfileSmall, GuestProfileStandard)
 	}
 	if a.CPUs < 0 || a.CPUs > 256 {
 		return fmt.Errorf("config: cpus %d out of range (1-256, or unset for the Lima default)", a.CPUs)
@@ -314,6 +320,12 @@ func (a *App) Validate() error {
 	if err := validateClaude("manager", a.Manager.ClaudeSettings, a.Manager.AfterCompactNote); err != nil {
 		return err
 	}
+	if err := a.validateResources("manager", a.Manager.Resources); err != nil {
+		return err
+	}
+	if err := a.validateWorkerCap(); err != nil {
+		return err
+	}
 	for _, g := range a.Workers {
 		if err := a.validateWorker(g); err != nil {
 			return err
@@ -335,6 +347,9 @@ func (a *App) Validate() error {
 		return err
 	}
 	if err := a.validateWhisperTools(); err != nil {
+		return err
+	}
+	if err := a.validateTTSTools(); err != nil {
 		return err
 	}
 	if err := a.validateLeverFilesTools(); err != nil {
@@ -475,7 +490,7 @@ func (a *App) validateWorker(g Worker) error {
 	if err := validateClaude(fmt.Sprintf("worker %q", g.Name), g.ClaudeSettings, g.AfterCompactNote); err != nil {
 		return err
 	}
-	return nil
+	return a.validateResources(fmt.Sprintf("worker %q", g.Name), g.Resources)
 }
 
 // validateOperator fails closed on operator-directive-channel config
@@ -715,8 +730,14 @@ func (a *App) validateVoice() error {
 	if v.MaxSeconds < 0 || v.MaxSeconds > MaxVoiceMaxSeconds {
 		return fmt.Errorf("config: remote: voice.max_seconds %d; use 1 to %d (or leave it out for %d)", v.MaxSeconds, MaxVoiceMaxSeconds, DefaultVoiceMaxSeconds)
 	}
+	if !v.ReadAloud.valid() {
+		return fmt.Errorf("config: remote: voice.read_aloud %q; use device, server or off", v.ReadAloud)
+	}
 	if !v.Enabled {
 		return nil
+	}
+	if err := a.validateSpeech(); err != nil {
+		return err
 	}
 	if a.Remote.Landing != RemoteLandingChat {
 		return fmt.Errorf("config: remote: voice needs landing: chat (the mic is on the chat page)")
@@ -743,6 +764,38 @@ func (a *App) validateVoice() error {
 	if a.EffectiveVoiceMaxSeconds() > w.EffectiveMaxSeconds() {
 		return fmt.Errorf("config: remote: voice.max_seconds %d is more than broker tool %q's -max-seconds %d, which would refuse such a clip",
 			a.EffectiveVoiceMaxSeconds(), w.Name, w.EffectiveMaxSeconds())
+	}
+	return nil
+}
+
+// validateSpeech checks read_aloud: server (voice on): the speech socket of
+// lever-tool-tts, which must be the -speak-socket of a tts tool in
+// broker.tools when there is one (the tool may also be run by hand).
+func (a *App) validateSpeech() error {
+	v := a.Remote.Voice
+	if a.EffectiveReadAloud() != ReadAloudServer {
+		return nil
+	}
+	if v.SpeakSocket == "" {
+		return fmt.Errorf("config: remote: voice.speak_socket is required with read_aloud: server: the -speak-socket of the lever-tool-tts entry in broker.tools")
+	}
+	if err := voice.CheckSocketPath(v.SpeakSocket); err != nil {
+		return fmt.Errorf("config: remote: voice.speak_socket: %w", err)
+	}
+	if v.SpeakSocket == v.Socket {
+		return fmt.Errorf("config: remote: voice.speak_socket is voice.socket, the dictation socket; give lever-tool-tts its own")
+	}
+	tools := a.TTSTools()
+	if len(tools) == 0 {
+		return nil
+	}
+	if _, ok := a.SpeechTool(); !ok {
+		var names []string
+		for _, t := range tools {
+			names = append(names, fmt.Sprintf("%s (-speak-socket %s)", t.Name, t.Socket))
+		}
+		return fmt.Errorf("config: remote: voice.speak_socket %s is not the -speak-socket of any tts tool in broker.tools: %s; set them to the same path",
+			v.SpeakSocket, strings.Join(names, ", "))
 	}
 	return nil
 }

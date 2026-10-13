@@ -34,6 +34,11 @@ image/lever-claude/scionhook/
 
 # Stray local build outputs at repo root.
 /lever-tool-todo
+/lever-tool-github
+/lever-tool-fizzy
+/lever-tool-whisper
+/lever-tool-tts
+/lever-tool-db
 /weather-stub
 /dist/
 

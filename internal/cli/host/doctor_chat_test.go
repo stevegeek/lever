@@ -3,6 +3,7 @@ package host
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -290,7 +292,8 @@ func TestCheckAgentMessagesScionFloor(t *testing.T) {
 		"version before the fix": {config.ScionConfig{Version: "v0.0.0-20260801000000-0123456789ab"}, nil, false, false, "predates b3562fb1"},
 		"version bare hash":      {config.ScionConfig{Version: "63d5d65d"}, nil, true, true, "cannot tell"},
 		"source with the fix":    {config.ScionConfig{Source: "/s"}, has(true, nil), true, false, ""},
-		"source before the fix":  {config.ScionConfig{Source: "/s"}, has(false, nil), false, false, "checkout predates b3562fb1"},
+		"source before the fix":  {config.ScionConfig{Source: "/s"}, has(false, nil), false, false, "checkout does not hold b3562fb1"},
+		"source shallow":         {config.ScionConfig{Source: "/s"}, has(false, fmt.Errorf("/s: %w", scionbin.ErrShallowSource)), false, false, "shallow clone"},
 		"source git cannot tell": {config.ScionConfig{Source: "/s"}, has(false, errors.New("not a git repository")), true, true, "not a git repository"},
 		"binary":                 {config.ScionConfig{Binary: "/b"}, nil, true, true, "scion.binary"},
 	} {

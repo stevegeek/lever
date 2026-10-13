@@ -529,3 +529,70 @@ func TestFreshStartResetsTheAttemptCount(t *testing.T) {
 		t.Fatalf("heal attempts after a fresh start = %d, want 0", n)
 	}
 }
+
+// The manager's bounce is a resume: the lever#158 checks run around it
+// (DispatchConfig.ManagerResumeGuard). Unwired, or refusing before, the
+// manager is neither staged a ticket nor bounced; refusing after the
+// resume, the heal fails (the guard suspended the manager); a failed
+// resume is checked too; a check that never ran is said in the audit.
+func TestHealManagerResumeGuard(t *testing.T) {
+	guardOf := func(c *fakeResumeCheck, err error) func(context.Context) (ManagerResumeCheck, error) {
+		return func(context.Context) (ManagerResumeCheck, error) {
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		check      *fakeResumeCheck
+		guardErr   error
+		unwired    bool
+		resumeErr  error
+		wantStaged bool
+		wantResume bool
+		wantHeal   bool
+		wantAudit  string
+	}{
+		{name: "unwired", unwired: true, wantAudit: "no check of the manager's tree mounts is wired"},
+		{name: "refused before", guardErr: errors.New("kb mounted by the manager record but no longer on the host"),
+			wantAudit: "refusing to bounce appname: kb mounted"},
+		{name: "refused after", check: &fakeResumeCheck{afterErr: errors.New("kb is mounted from another place")},
+			wantStaged: true, wantResume: true, wantAudit: "tree mounts failed their check: kb is mounted from another place"},
+		{name: "resume failed, started anyway", check: &fakeResumeCheck{failErr: errors.New("kb is mounted from another place")},
+			resumeErr: errors.New("hook failed"), wantStaged: true, wantResume: true, wantAudit: "resume failed: hook failed"},
+		{name: "unverified", check: &fakeResumeCheck{}, wantStaged: true, wantResume: true, wantHeal: true,
+			wantAudit: "could not be checked after the resume"},
+		{name: "verified", check: &fakeResumeCheck{verified: true}, wantStaged: true, wantResume: true, wantHeal: true,
+			wantAudit: "healed via resume"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &fakeRuntime{staticPhases: true, resumeErr: tc.resumeErr, agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "appname", Phase: "suspended", ContainerStatus: "stopped"}},
+			}}
+			var buf bytes.Buffer
+			managerDir := filepath.Join(t.TempDir(), ".lever")
+			b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt), withAudit(&buf),
+				func(c *Config) {
+					c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = "all", managerDir
+					if !tc.unwired {
+						c.Dispatch.ManagerResumeGuard = guardOf(tc.check, tc.guardErr)
+					}
+				}))
+			b.healLapse(context.Background(), "test-manager")
+			if staged := stagedCN(t, managerDir) != ""; staged != tc.wantStaged {
+				t.Fatalf("staged = %v, want %v", staged, tc.wantStaged)
+			}
+			if resumed := len(rt.resumed) > 0; resumed != tc.wantResume {
+				t.Fatalf("resumed = %v, want %v", resumed, tc.wantResume)
+			}
+			if !strings.Contains(buf.String(), tc.wantAudit) || strings.Contains(buf.String(), "healed via") != tc.wantHeal {
+				t.Fatalf("audit %q, want %q (healed %v)", buf.String(), tc.wantAudit, tc.wantHeal)
+			}
+			if tc.resumeErr != nil && (tc.check.failedWith == nil || !strings.Contains(buf.String(), "kb is mounted from another place")) {
+				t.Fatal("a failed resume must be checked too")
+			}
+		})
+	}
+}

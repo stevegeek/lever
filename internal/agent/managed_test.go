@@ -50,13 +50,20 @@ func sessionStartCommands(t *testing.T, m map[string]any) map[string]string {
 }
 
 // assertOnlyAgentViewOff fails unless the file at path holds exactly what
-// lever writes with no claude config: agent view off, nothing else.
+// lever writes with no claude config: agent view off and the claude-ready
+// hook, nothing else.
 func assertOnlyAgentViewOff(t *testing.T, path string) {
 	t.Helper()
 	m := readManaged(t, path)
 	env, _ := m["env"].(map[string]any)
-	if len(m) != 2 || m[DisableAgentViewSetting] != true || len(env) != 1 || env[DisableAgentViewEnv] != "1" {
-		t.Fatalf("managed settings = %v, want only %s=1 and %s: true", m, DisableAgentViewEnv, DisableAgentViewSetting)
+	hooks, _ := m["hooks"].(map[string]any)
+	cmds := sessionStartCommands(t, m)
+	if len(m) != 3 || m[DisableAgentViewSetting] != true || len(env) != 1 || env[DisableAgentViewEnv] != "1" ||
+		len(hooks) != 1 || len(cmds) != 1 || cmds[ReadyHookCommand] != "" {
+		t.Fatalf("managed settings = %v, want only %s=1, %s: true and the claude-ready hook", m, DisableAgentViewEnv, DisableAgentViewSetting)
+	}
+	if _, ok := cmds[ReadyHookCommand]; !ok {
+		t.Fatalf("managed settings = %v, want the claude-ready hook", m)
 	}
 }
 
@@ -101,8 +108,8 @@ func TestWriteManagedSettingsWritesWindowAndHook(t *testing.T) {
 	}
 	cmds := sessionStartCommands(t, m)
 	want := AfterCompactHookCommand(note)
-	if cmds[want] != "compact" || len(cmds) != 1 {
-		t.Fatalf("SessionStart hooks = %v, want only %q with matcher compact", cmds, want)
+	if _, ready := cmds[ReadyHookCommand]; cmds[want] != "compact" || !ready || cmds[ReadyHookCommand] != "" || len(cmds) != 2 {
+		t.Fatalf("SessionStart hooks = %v, want only %q with matcher compact and the claude-ready hook with none", cmds, want)
 	}
 	// The shell that runs the hook sees no character of the note itself.
 	if strings.ContainsAny(strings.TrimPrefix(want, "lever-agent after-compact --note-b64 "), " ;'\"$`\\") {
@@ -143,8 +150,8 @@ func TestWriteManagedSettingsMergesAndReplaces(t *testing.T) {
 	if cmds["sciontool hook --dialect=claude"] != "*" {
 		t.Errorf("dropped the foreign SessionStart hook: %v", cmds)
 	}
-	if cmds[AfterCompactHookCommand("second")] != "compact" || len(cmds) != 2 {
-		t.Errorf("SessionStart hooks = %v, want the foreign one and lever's second note only", cmds)
+	if _, ready := cmds[ReadyHookCommand]; cmds[AfterCompactHookCommand("second")] != "compact" || !ready || len(cmds) != 3 {
+		t.Errorf("SessionStart hooks = %v, want the foreign one, lever's second note and one claude-ready hook only", cmds)
 	}
 
 	// Unset: lever's keys go, the foreign ones stay.
@@ -160,8 +167,8 @@ func TestWriteManagedSettingsMergesAndReplaces(t *testing.T) {
 	if env[DisableAgentViewEnv] != "1" || env["OTHER"] != "keep" || m[DisableAgentViewSetting] != true {
 		t.Errorf("after unset env = %v, %s = %v; want agent view off and the foreign key kept", env, DisableAgentViewSetting, m[DisableAgentViewSetting])
 	}
-	if cmds := sessionStartCommands(t, m); len(cmds) != 1 || cmds["sciontool hook --dialect=claude"] == "" {
-		t.Errorf("after unset SessionStart hooks = %v, want the foreign one only", cmds)
+	if cmds := sessionStartCommands(t, m); len(cmds) != 2 || cmds["sciontool hook --dialect=claude"] == "" {
+		t.Errorf("after unset SessionStart hooks = %v, want the foreign one and the claude-ready hook only", cmds)
 	}
 }
 

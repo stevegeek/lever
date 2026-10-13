@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -49,10 +50,16 @@ func joinedCalls(f *proc.FakeRunner) string {
 	return b.String()
 }
 
-// logSink collects Deps.Log lines; wire it with Log: sink.logf.
-type logSink struct{ lines []string }
+// logSink collects Deps.Log lines; wire it with Log: sink.logf. Safe for
+// the steps Run runs alongside each other (lever#189).
+type logSink struct {
+	mu    sync.Mutex
+	lines []string
+}
 
 func (s *logSink) logf(format string, args ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lines = append(s.lines, fmt.Sprintf(format, args...))
 }
 

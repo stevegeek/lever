@@ -191,6 +191,7 @@ export function agentList(body) {
     files: filesConfig(body),
     voice: voiceConfig(body),
     readAloud: !!(body && typeof body === 'object' && body.readAloud === true),
+    speech: speechConfig(body),
   };
 }
 
@@ -643,6 +644,100 @@ export function speechText(text) {
 // uses a voice that sends the text to a service.
 export function localVoices(voices) {
   return (Array.isArray(voices) ? voices : []).filter((v) => v && v.localService === true && typeof v.voiceURI === 'string');
+}
+
+// Server voices (remote.voice.read_aloud: server): lever-tool-tts on the
+// operator's host. The roster lists them while the tool is ready.
+const SPEECH_VOICES_MAX = 100;
+const SPEECH_CHARS_MIN = 100;
+const SPEECH_CHARS_MAX = 2000;
+// SPEECH_FIRST is the longest first part of a message: a short first part
+// starts the voice sooner.
+export const SPEECH_FIRST = 200;
+const speechVoiceRE = /^[A-Za-z0-9_.-]{1,40}$/;
+
+// speechConfig is the roster's server voices, or null: the default voice,
+// the voices (name and language), and the longest text of one request.
+export function speechConfig(body) {
+  const v = body && typeof body === 'object' ? body.speech : null;
+  if (!v || typeof v !== 'object' || !Array.isArray(v.voices) || !Number.isInteger(v.maxChars) ||
+    v.maxChars < SPEECH_CHARS_MIN || v.maxChars > SPEECH_CHARS_MAX) return null;
+  const voices = [];
+  for (const x of v.voices.slice(0, SPEECH_VOICES_MAX)) {
+    if (!x || typeof x !== 'object' || typeof x.name !== 'string' || !speechVoiceRE.test(x.name)) continue;
+    voices.push({ name: x.name, lang: oneLine(x.lang, 20) });
+  }
+  if (!voices.length) return null;
+  const voice = voices.some((x) => x.name === v.voice) ? v.voice : voices[0].name;
+  return { voice, voices, maxChars: v.maxChars };
+}
+
+// pickServerVoice is the server voice to read with: the one saved on this
+// device when the tool still has it, else the tool's default.
+export function pickServerVoice(cfg, saved) {
+  if (!cfg) return '';
+  return cfg.voices.some((x) => x.name === saved) ? saved : cfg.voice;
+}
+
+// speechParts splits read-aloud text (speechText) into the parts the page
+// asks the server for one after the other: whole sentences where it can,
+// the first part at most SPEECH_FIRST characters (so the voice starts
+// soon), the others at most maxChars. A sentence longer than that is cut
+// at a space, or, with none, anywhere. Characters are code points, as the
+// server counts them.
+export function speechParts(text, maxChars) {
+  const max = Math.max(1, Math.min(maxChars, SPEECH_CHARS_MAX));
+  // No lookbehind: older Safari cannot parse it, and this module would
+  // not load at all.
+  const sentences = str(text).replace(/([.!?…:;])\s+/g, '$1\n').split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  const first = Math.min(SPEECH_FIRST, max);
+  const pieces = [];
+  for (const sentence of sentences) {
+    let rest = [...sentence];
+    // The very first piece is cut at the first part's limit.
+    for (let lim = pieces.length ? max : first; rest.length > lim; lim = max) {
+      let cut = rest.lastIndexOf(' ', lim);
+      if (cut <= 0) cut = lim;
+      pieces.push(rest.slice(0, cut).join('').trim());
+      rest = rest.slice(cut);
+      while (rest[0] === ' ') rest.shift();
+    }
+    if (rest.length) pieces.push(rest.join(''));
+  }
+  const parts = [];
+  let cur = '';
+  for (const piece of pieces) {
+    const limit = parts.length === 0 ? Math.min(SPEECH_FIRST, max) : max;
+    const joined = cur ? `${cur} ${piece}` : piece;
+    if (cur && [...joined].length > limit) {
+      parts.push(cur);
+      cur = piece;
+    } else {
+      cur = joined;
+    }
+  }
+  if (cur) parts.push(cur);
+  // A part with nothing to say (only symbols) would be refused.
+  return parts.filter((p) => /[\p{L}\p{N}]/u.test(p));
+}
+
+const SPEAK_WORDS = {
+  'voice-off': 'read-aloud is off for this login',
+  origin: 'the request did not come from this page',
+  rate: 'too much read aloud this hour; try again later',
+  quota: 'too much read aloud today; try again tomorrow',
+  busy: 'other messages are being read; try again in a moment',
+  'too-long': 'a part of the message is too long',
+  'bad-text': 'nothing in the message can be read aloud',
+  'bad-voice': 'the voice is not available; choose another',
+  agent: 'this agent is not on your list',
+  unavailable: 'the server voice is unavailable right now',
+};
+
+// speakErrorText is what to show when a server voice request is refused.
+export function speakErrorText(status, body) {
+  const word = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : '';
+  return Object.hasOwn(SPEAK_WORDS, word) ? SPEAK_WORDS[word] : errorText(status, body);
 }
 
 // pickVoice chooses the read-aloud voice among the on-device ones: the one

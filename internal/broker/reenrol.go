@@ -148,13 +148,35 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
 		return
 	}
+	// The manager's bounce is a resume like apply's: the same checks
+	// around it (lever#158), the first of them before the stage too.
+	var afterResume ManagerResumeCheck
+	if _, isWorker := b.workerSpec(cn); !isWorker {
+		if b.managerResumeGuard == nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": no check of the manager's tree mounts is wired; run `lever up`")
+			return
+		}
+		after, err := b.managerResumeGuard(hctx)
+		if err == nil && after == nil {
+			err = errors.New("no post-resume check")
+		}
+		if err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
+			return
+		}
+		afterResume = after
+	}
 	if err := stage(hctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return
 	}
-	verb, ok := b.bounceForReenrol(hctx, cn, slug)
+	verb, ok := b.bounceForReenrol(hctx, cn, slug, afterResume)
 	if !ok {
 		return
+	}
+	if afterResume != nil && !afterResume.Verified() {
+		// Healed, but the audit says plainly the mounts were not read back.
+		verb += "; warning: the manager's tree mounts could not be checked after the resume, run `lever doctor` (row \"manager read-only paths\")"
 	}
 	// Success resets the cap so the NEXT independent lapse (weeks later) can
 	// heal again; the cap only bounds consecutive failures.
@@ -234,8 +256,9 @@ func (b *Broker) admitReenrol(cn string) bool {
 // bounceForReenrol restarts agent slug by its observed phase so boot
 // re-enrols with the staged ticket. It audits every failure itself and
 // returns the verb it used for the caller's success line; ok is false when
-// the heal must stop here.
-func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb string, ok bool) {
+// the heal must stop here. afterResume (the manager's, see
+// DispatchConfig.ManagerResumeGuard) checks the resumed manager.
+func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string, afterResume ManagerResumeCheck) (verb string, ok bool) {
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
 		b.audit("reenrol", cn, "error", "list: "+err.Error())
@@ -262,6 +285,22 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 			return "", false
 		}
 	}
+	// broker.max_running_workers: bringing back a worker that is not
+	// running takes a slot like any resume. A bounce of a running one does
+	// not (it holds its slot throughout).
+	resumes := phase == scion.PhaseSuspended || phase == scion.PhaseStopped || phase == scion.PhaseError
+	if _, isWorker := b.workers[slug]; isWorker && resumes {
+		release, err := b.admitWorker(ctx, slug)
+		if err != nil {
+			outcome := "error"
+			if errors.Is(err, ErrWorkerCap) {
+				outcome = "deny"
+			}
+			b.audit("reenrol", cn, outcome, "natural lapse: not resuming "+slug+": "+err.Error())
+			return "", false
+		}
+		defer release()
+	}
 	switch phase {
 	case scion.PhaseRunning:
 		verb = "suspend+resume"
@@ -279,8 +318,18 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 		return "", false
 	}
 	if err != nil {
+		if afterResume != nil {
+			// The resume may have started the container all the same.
+			err = afterResume.AfterFailure(ctx, err)
+		}
 		b.audit("reenrol", cn, "error", "natural lapse: "+verb+" failed: "+err.Error())
 		return "", false
+	}
+	if afterResume != nil {
+		if err := afterResume.After(ctx); err != nil {
+			b.audit("reenrol", cn, "deny", "natural lapse: "+verb+" done, then the manager's tree mounts failed their check: "+err.Error())
+			return "", false
+		}
 	}
 	return verb, true
 }

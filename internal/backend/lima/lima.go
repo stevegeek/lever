@@ -1,7 +1,7 @@
 // Package lima implements the Backend contract via a Lima VM (own kernel) +
-// rootless Docker + iptables egress.
+// rootless podman + iptables egress.
 //
-// The prefix/guest-delegating half of the contract (DockerHost, the jail
+// The prefix/guest-delegating half of the contract (the jail
 // transport + image ops, the guest scion/egress delegations, run-user caching)
 // lives once in internal/backend/common.Base, which this embeds; only the
 // Lima-specific verbs (version preflight, VM create/start/stop, realized-config
@@ -24,6 +24,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -57,6 +58,11 @@ func New(r proc.Runner, vm string, opts common.Options) *Lima {
 			},
 			ResolveHostAlias: l.resolveHostAlias,
 			DNSForward:       l.resolverForward,
+			DNSProbe: &guest.DNSProbe{
+				NATChain:   limaDNSChain,
+				ResolvConf: limaResolvConf,
+				Forwards:   limaDNSForwards,
+			},
 		},
 	})
 	return l
@@ -105,7 +111,16 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	// Before Provision: on a fresh VM no egress chain exists yet, so the
 	// HWE kernel install reaches the mirrors (a re-apply under the closed
 	// posture may not, which the kernel step reports as a warning).
-	if err := l.hardenGuest(ctx, cfg); err != nil {
+	rep := progress.From(ctx)
+	s := rep.Start("guest hardening")
+	err = l.hardenGuest(ctx, cfg)
+	s.Done(err)
+	if err != nil {
+		return err
+	}
+	// Before Provision too: the small profile stops the apt timers that
+	// would otherwise compete with provisioning for the dpkg lock.
+	if err := l.ensureGuestProfile(ctx, cfg); err != nil {
 		return err
 	}
 	if err := l.Provision(ctx, cfg); err != nil {
@@ -114,7 +129,15 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.NestedVirtUnknown {
 		return nil
 	}
-	return l.Guest().EnsureNestedVirt(ctx, cfg.NestedVirt)
+	s = rep.Start("nested virt")
+	if l.WarmSnapshot().NestedVirtConverged(cfg.NestedVirt) {
+		s.Note("unchanged")
+		s.Done(nil)
+		return nil
+	}
+	err = l.Guest().EnsureNestedVirt(ctx, cfg.NestedVirt)
+	s.Done(err)
+	return err
 }
 
 // ensureVM creates the jail VM from the rendered template (template.go) if it
@@ -122,13 +145,17 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 // mount is set only at `limactl create` time; changing it on an existing VM
 // requires Teardown+EnsureUp — the same documented limitation as orbstack.
 func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
+	rep := progress.From(ctx)
 	status, err := l.vmStatus(ctx)
 	if err != nil {
 		return err
 	}
 	created := status == ""
 	if created {
-		if err := l.createVM(ctx, cfg); err != nil {
+		s := rep.Start("create VM")
+		err := l.createVM(ctx, cfg)
+		s.Done(err)
+		if err != nil {
 			return err
 		}
 		status = "Stopped" // freshly created, not yet started
@@ -147,17 +174,28 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	}
 	if !created && cfg.Warn != nil {
 		for _, d := range inst.sizingDrift(cfg.CPUs, cfg.Memory) {
-			cfg.Warn("jail: WARNING: %s; Lima applies it only when it creates the VM (back up the conversation, then `lever destroy` and `lever up` to recreate)", d)
+			cfg.Warn("jail: warning: %s; Lima applies it only when it creates the VM (to recreate: `lever conversation backup`, `lever destroy`, `lever up`, then `lever conversation restore`)", d)
 		}
 	}
+	s := rep.Start("start VM")
 	if status == "Running" {
 		// Idempotent: already up (and just verified un-drifted).
+		s.Skip("already running")
 		return nil
 	}
-	if _, err := l.Runner().Run(ctx, nil, "limactl", "start", "--tty=false", l.Machine()); err != nil {
-		return fmt.Errorf("limactl start: %w", err)
+	// Lima's own log says what the boot waits for ("Waiting for the
+	// essential requirement 1 of 4: ssh"); show it on the step, and its
+	// tail if the start fails.
+	haLog := filepath.Join(l.instanceDir(inst), "ha.stderr.log")
+	s.TailFrom(func() (string, []string) { return haLog, lastLines(haLog, 15) })
+	stopWatch := watchLimaStage(ctx, haLog, s.Detail)
+	_, err = l.Runner().Run(ctx, nil, "limactl", "start", "--tty=false", l.Machine())
+	stopWatch()
+	if err != nil {
+		err = fmt.Errorf("limactl start: %w", err)
 	}
-	return nil
+	s.Done(err)
+	return err
 }
 
 // realizedInstance is the subset of `limactl list --json <vm>` needed to
@@ -170,6 +208,9 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 // the only read-back that can catch a global override widening the surface
 // (see security-model-jail.md §2.4's lima operational notes).
 type realizedInstance struct {
+	// Dir is the instance's directory (its logs live there); progress
+	// output only, never the containment check.
+	Dir    string `json:"dir"`
 	Config struct {
 		Mounts []struct {
 			Location   string `json:"location"`
@@ -418,16 +459,33 @@ const limaDNSChain = "LIMADNS"
 // targets, the resolver's upstream file is read, and an alias nameserver
 // gives the port-53 targets (egress.ParseResolverUpstreams).
 func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error) {
-	if res, err := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain); err == nil {
-		if targets := egress.ParseDNATTargets(res.Stdout, aliasV4); len(targets) > 0 {
+	nat, natErr := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain)
+	if natErr == nil {
+		if targets := egress.ParseDNATTargets(nat.Stdout, aliasV4); len(targets) > 0 {
 			return targets, nil
 		}
 	}
-	res, err := l.Guest().RootRun(ctx, "cat", "/run/systemd/resolve/resolv.conf")
-	if err != nil {
-		return nil, nil
+	res, err := l.Guest().RootRun(ctx, "cat", limaResolvConf)
+	return limaDNSForwards(nat.Stdout, natErr == nil, res.Stdout, err == nil, aliasV4), nil
+}
+
+// limaResolvConf is systemd-resolved's upstream file, read when LIMADNS
+// yields no targets.
+const limaResolvConf = "/run/systemd/resolve/resolv.conf"
+
+// limaDNSForwards is resolverForward's decision on what it read, shared with
+// the warm-path probe (guest.DNSProbe): the LIMADNS targets when the chain
+// was read and has any, else the resolver upstream's, else none.
+func limaDNSForwards(nat string, natOK bool, resolv string, resolvOK bool, aliasV4 string) []egress.DNSForward {
+	if natOK {
+		if targets := egress.ParseDNATTargets(nat, aliasV4); len(targets) > 0 {
+			return targets
+		}
 	}
-	return egress.ParseResolverUpstreams(res.Stdout, aliasV4), nil
+	if !resolvOK {
+		return nil
+	}
+	return egress.ParseResolverUpstreams(resolv, aliasV4)
 }
 
 var _ backend.Backend = (*Lima)(nil)
@@ -435,6 +493,33 @@ var _ backend.Backend = (*Lima)(nil)
 // RebootAdvice is how an operator reboots the jail VM without losing the
 // manager's conversation.
 const RebootAdvice = "`lever stop`, then `lever up`, reboots the VM and keeps the manager conversation"
+
+// ensureGuestProfile converges the guest on cfg.GuestProfile (lever#193):
+// the small profile's trimmed services and zram swap, or standard, which
+// undoes them. "" (no config) skips the step. What systemd refuses is a
+// warning; a failed write of lever's own files fails the bring-up.
+func (l *Lima) ensureGuestProfile(ctx context.Context, cfg backend.Config) error {
+	if cfg.GuestProfile == "" {
+		return nil
+	}
+	warn := cfg.Warn
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
+	s := progress.From(ctx).Start("guest profile " + cfg.GuestProfile)
+	rep, err := l.Guest().EnsureGuestProfile(ctx, cfg.GuestProfile)
+	s.Done(err)
+	if err != nil {
+		return err
+	}
+	for _, w := range rep.Warn {
+		warn("jail: warning: %s", w)
+	}
+	for _, r := range rep.Reboot {
+		warn("jail: reboot pending: %s; %s", r, RebootAdvice)
+	}
+	return nil
+}
 
 // hardenGuest converges the guest's crash recovery (always) and its kernel
 // flavour (cfg.GuestKernel) on every bring-up, so an existing VM gets them
@@ -455,7 +540,7 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
 	var opts guest.KernelOpts
 	stamp, stampErr := loadHWEStamp(cfg.HWEFailStamp)
 	if stampErr != nil {
-		warn("jail: WARNING: %v", stampErr)
+		warn("jail: warning: %v", stampErr)
 	}
 	if cfg.GuestKernel == guest.GuestKernelHWE && cfg.ClosedInternet {
 		opts.SkipIfMachineID = stamp.MachineID
@@ -464,13 +549,13 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
 	if err != nil {
 		// The kernel step only installs a package and reads two paths; a
 		// failure to run it must not keep the jail down.
-		warn("jail: WARNING: %v", err)
+		warn("jail: warning: %v", err)
 	}
 	if cfg.GuestKernel == guest.GuestKernelHWE {
 		l.keepHWEStamp(cfg.HWEFailStamp, stamp, kernel, warn)
 	}
 	for _, w := range append(crash.Warn, kernel.Warn...) {
-		warn("jail: WARNING: %s", w)
+		warn("jail: warning: %s", w)
 	}
 	for _, r := range append(crash.Reboot, kernel.Reboot...) {
 		warn("jail: reboot pending: %s; %s", r, RebootAdvice)
@@ -517,16 +602,16 @@ func (l *Lima) keepHWEStamp(path string, was hweStamp, k guest.KernelReport, war
 			err = state.SaveJSON(path, "HWE install stamp", hweStamp{MachineID: k.MachineID, FailedAt: time.Now().UTC()})
 		}
 		if err != nil {
-			warn("jail: WARNING: %v", err)
+			warn("jail: warning: %v", err)
 		}
 	case guest.HWEInstalled:
 		if was.MachineID != "" {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				warn("jail: WARNING: remove %s: %v", path, err)
+				warn("jail: warning: remove %s: %v", path, err)
 			}
 		}
 	case guest.HWESkippedStamp:
-		warn("jail: WARNING: guest_kernel hwe: %s is not installed; the install failed in this VM on %s, and lever does not run apt again while the egress posture is closed (apt would wait up to %d s each time). Run lever apply once with the open posture, install it by hand in the guest, or delete %s to retry",
+		warn("jail: warning: guest_kernel hwe: %s is not installed; the install failed in this VM on %s, and lever does not run apt again while the egress posture is closed (apt would wait up to %d s each time). Run lever apply once with the open posture, install it by hand in the guest, or delete %s to retry",
 			guest.HWEPackage, was.FailedAt.Format(time.RFC3339), guest.AptLockWait, path)
 	}
 }

@@ -7,6 +7,429 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-13
+
+### Added
+
+- **A small-machine profile: guest trimming, zram swap, per-agent limits and a worker cap
+  (lever#193).** `guest_profile: small` (Lima only, opt-in) disables the guest services a jail does
+  not use (snapd, unattended upgrades and the apt timers, multipathd, ModemManager) and adds zram
+  swap through lever's own unit, with no apt package; `standard`, the default, restores exactly the
+  units lever disabled. It is opt-in because the guest then stops installing its own security
+  updates. `manager.resources` and `workers[].resources` (`memory`, `cpu`) become the container's
+  scion resource limits (podman `--memory` and `--cpus`); create-time only, like `model`.
+  `broker.max_running_workers` makes the broker refuse a worker start, resume, recycle or wake that
+  would pass the cap, with a 409 naming the workers that hold it and nothing staged or deleted.
+  Together they make a 2-core, 8 GB host workable for a manager and one or two workers.
+- **System requirements and a sizing guide (lever#194).** A new getting-started page states the
+  minimum and recommended host CPU, RAM and disk, VM memory per agent, what the first boot
+  downloads, typical cold and warm bring-up times per backend, and the small-machine profile.
+- **github tool: PRs, merges and releases (`-ops`, opt-in).** `lever-tool-github` can now also
+  offer `pr_open`, `pr_status`, `pr_merge` and `release`. With `-ops` unset only `push` exists, as
+  before. Each operation is its own fine-gated capability, acts only on `-repos`, and gets a token
+  narrowed to the one repository and the permissions it needs. `pr_open` opens a PR from a pushed
+  prefix branch into the default branch (or returns the open one); it refuses team mentions,
+  issue-closing keywords (`fixes #N`) and more than 5 mentioned users. `pr_status` reports state,
+  mergeability and the checks on the head. `pr_merge` merges only an open, mergeable PR from a
+  prefix branch of the same repository into the default branch, pinned to the checked head SHA,
+  with a method from `-merge-methods`, once the checks pass (`-merge-checks`: check names, `any` or
+  `none`, with no default when `pr_merge` is offered) and, by default, once a person approved that
+  head SHA with no change request outstanding (`-merge-require-review`; turning it off logs a
+  warning). It reports a PR that was retargeted during the merge. `release` creates only a tag on
+  the default branch's head, matching `-release-tag` and greater than every existing one; the
+  repository's release workflow makes the release. Titles and bodies are bounded (`-text-max`),
+  refuse control characters, and appear in the audit line only as a length and a hash. The App
+  needs more permissions for these (Pull requests, Checks, Commit statuses), and `release` needs
+  the App in the release tag creation ruleset's bypass list; it never needs Workflows. See the
+  github tool guide.
+- **github tool: read CI (`ci_runs`, `ci_log`, opt-in).** Two read-only operations so an agent can
+  see why CI failed without a credential in the jail. `ci_runs` lists the newest workflow runs on a
+  branch, with the jobs and failed steps of the newest runs that did not pass. `ci_log` returns a
+  job log's failure-looking lines and its last lines as plain text (no timestamps or escape
+  sequences, credentials masked, at most 64 MiB read). The log download follows GitHub's redirect
+  only over https to its log hosts, with no credential. Both need only Actions: read on the App.
+- **github tool: triage issues (`issue_list`, `issue_read`, `issue_comment`, `issue_close`,
+  opt-in).** List and read the repository's issues (cleaned text, credentials masked, marked as
+  data), comment on one, and close one as `completed` or `not_planned` with an optional comment.
+  Pull requests are never listed, read, commented on or closed through these. Comments follow the
+  PR body rules (bounded; no team mentions, closing keywords or more than 5 mentions) and are
+  audited as a length and a hash. Reading needs Issues: read on the App; commenting and closing
+  need Issues: read and write.
+- **`lever apply`, `lever up` and `lever acceptance` list their steps as they run (lever#185).**
+  The jail's steps (start VM, guest hardening and guest profile on Lima, guest state, packages and
+  runtimes, scion, egress firewall, nested virt), apply's numbered steps (`[5/11] scion-server`)
+  and the manager's, each with its time and a note when nothing needed doing (*reused*, *already loaded*, *already running*). On a
+  terminal one live line shows the running step and what it waits for (Lima's boot stage, the hub
+  not answering yet, the manager start's stage); the run ends with its total and slowest steps.
+  `--progress auto|tty|plain|json|quiet` or `LEVER_PROGRESS` chooses the output; `plain` prints a
+  timestamped line per step and a *still running* line every 15 s. The manager start's 15 s line
+  (lever#168) feeds the list instead of printing its own when the list is shown.
+- **A failed step shows the log that explains it (lever#186):** the step, its time and the last 15
+  lines of its own log (`broker.out.log`, `remote.log`, the hub's `~/.scion/server.log` in the
+  jail, Lima's `ha.stderr.log`), masked and made safe for the terminal. The manager container's
+  log is never shown.
+- **Bring-up records and timings (lever#184).** Every run is recorded in
+  `.lever-state/logs/bringup-<command>-<time>.jsonl` (the last 10 kept), and `lever doctor` has a
+  *last bring-up* row with its total and slowest steps. `LEVER_TRACE=1` adds a line per external
+  command with its time and exit code, showing only the command's leading plain words. The Lima
+  e2e prints a time on every line, each phase's duration and a table of them, and on a failed
+  acceptance the end of the broker and tool logs.
+- **`lever stop --keep-vm` (lever#196).** Suspends the manager and the running workers and stops
+  the jail's hub, the broker and the remote proxy, as `lever stop` does, but leaves the VM
+  running, so the next `lever up` skips the VM boot. The VM keeps its memory on the host until it
+  is powered off (with Lima nothing hands the guest's memory back), so a plain `lever stop` is
+  still the choice when the RAM matters. It acts on the current instance only and refuses
+  `--machine`, and it exits non-zero when the jail does not answer or a suspend did not take
+  (that agent's container would go on running in the VM). A plain `lever stop` that finds the
+  hub already down says so in its suspend warning. Operations guide: "Stopping without powering
+  off".
+- **`lever up --fresh` keeps a copy of the manager's conversation, and can carry it over
+  (lever#198).** A fresh create deletes the manager's record and its home in the jail, where
+  Claude Code keeps the transcripts. `up --fresh` now backs up the manager's `~/.claude/projects`
+  to `.lever-state/conversations/<id>/` (0700, files 0600, the last 10 kept) before it deletes
+  anything, suspending a running manager for the copy; a failed backup stops the fresh start with
+  the record kept, and `--no-backup` skips it. `--keep-conversation` then suspends the new manager,
+  puts the old transcripts in its home and resumes it, so `claude --continue` picks the old
+  conversation up on the new image, model, mounts or devices; the boot turn is cut short. `lever
+  conversation list|backup|restore [ID]` lists, takes and restores backups by hand (a restore
+  backs up what it replaces). Only the transcripts travel: `~/.claude.json` (account, onboarding,
+  the MCP setup lever writes, an API key) stays the new record's. The agent wrote every byte, so
+  lever follows no link in its home, keeps only directories and regular files with clean names
+  within size limits, and restores only that checked copy. A restored conversation is recorded as
+  started on the skill its backup names, so contacts are refused when that is not the skill on
+  disk. No backup is kept while the state directory is inside the tree, so there `up --fresh`
+  needs `--no-backup`. Doctor and apply hints
+  that said "back up the conversation, then `lever up --fresh`" now name `--keep-conversation`.
+- **A broker is never shared between two instances (lever#181).** Each instance has a random
+  instance id, made on first use in `.lever-state/instance-id.json` with the state directory it
+  belongs to, and its broker reports it on `/epoch`. `lever apply`, `up` and `reload` reuse or
+  restart a running broker only when it reports this instance's id; another instance's broker on
+  the same ports, even with the same version and config hash, is left running and apply stops with
+  an error naming the ports to change. A broker from an older lever (no id) is restarted only when
+  this instance's `broker.pid` names a live process, and only once the port fell silent after the
+  stop (apply waits up to 3 s for that, then refuses rather than adopt what still answers). The
+  health wait accepts only the broker this apply runs, one that reports this instance's id, this
+  binary's version and this config's hash, and fails at once on any other: before, when another
+  broker held the ports, the new broker could not bind and died, and the health check accepted
+  the other one. `lever revoke` and `lever broker bump-epoch` refuse a broker of another instance.
+  A copied instance directory makes its own id, and its stop paths drop the copied pid files
+  instead of signalling the original's processes. The id lives outside the in-jail wire types, so
+  the jail ABI is unchanged.
+- **Doctor's `instance ports` row (lever#181)** warns when a configured port (the broker's, a
+  supervised tool's backend, the remote proxy's) is held by a process that is not this
+  instance's, naming it when `lsof` can. The operations guide has a section on running two
+  instances on one host.
+- **Natural read-aloud: server voices with Kokoro on your own host (lever#200).** With
+  `remote.voice.read_aloud: server` the chat page's speaker button reads agent messages with a
+  neural voice (Kokoro's American and British English voices, or a lighter Piper voice) run by the
+  new first-party broker tool `lever-tool-tts`, which runs sherpa-onnx's
+  `sherpa-onnx-offline-tts` once per part of a message, as its child, with no port. You install
+  sherpa-onnx yourself, outside the tree, as for whisper.cpp; `lever voice fetch kokoro-en-v0_19`
+  downloads the model's archive from sherpa-onnx's `tts-models` GitHub release, pinned by size and
+  sha256, unpacks it only once verified (regular files and directories only, nothing outside its
+  top directory) and records every file's size and sha256 in a manifest; before every run whenever
+  something changed, the tool checks every file against that manifest and refuses any file it does
+  not list. The engine gets the text after `--`, so no text is ever read as an option. The page sends the cleaned text in parts of whole sentences, the first
+  one short so the voice starts quickly, to `POST /lever/api/voice/speak` (same origin,
+  `X-Lever-Voice`, an agent the login's list shows, at most the tool's `-max-chars`, 40,000
+  characters an hour and 200,000 a day per login), plays each part with Web Audio (also on iPhone
+  Safari) while it asks for the next, and falls back to the device's on-device voice when the
+  first part cannot be had. Agent text goes only to your host, never to a cloud speech service;
+  text and audio are never stored or logged (the audit line has the agent, message id, length,
+  outcome and latency). `read_aloud` now takes `device` (the default), `server` or `off`; `true`
+  and `false` still mean device and off. New `remote.voice.speak_socket`, `lever doctor` rows
+  *tts tool* and *tts model*, and the tts tool guide. Nothing in the jail changed for it: no image
+  rebuild.
+
+### Changed
+
+- **`lever stop` no longer warns when the manager is already suspended (lever#198).** scion
+  refuses to suspend a suspended record, and `stop` printed that as a failed suspend; it now
+  checks the record and prints a note instead.
+- **The hub starts about 13 s sooner: the jail rejects the cloud metadata address (lever#182).**
+  The scion hub looks up a GCP project ID at `169.254.169.254` at every start; the egress chain
+  dropped it, so the lookup spent six 2 s timeouts before the hub served. The `LEVER_EGRESS` chain
+  now REJECTs `169.254.169.254/32` (`icmp-host-prohibited`) just before the `169.254/16` DROP, in
+  both postures and on both backends, so the lookup fails within about a second. The kernel sends
+  that answer to the guest's own address over `lo`, so one narrow ACCEPT (ICMP host-prohibited,
+  `RELATED`, on `lo` only) lets it through the private-range DROPs. Nothing more is reachable: it
+  is the chain's only REJECT, and every other link-local address is still dropped. `lever
+  acceptance`'s egress-refused check now also dials the metadata address (it must answer "no
+  route to host") and a neighbouring link-local address (it must still be dropped). A running
+  jail gets the new chain at its next `lever apply` or `lever up`: the old chain is not the exact
+  ruleset lever would write, so it is rebuilt (atomically), in the closed posture too (lever#187).
+- **The guest no longer runs a rootless Docker daemon (lever#183).** Provisioning installed rootless
+  Docker and started `dockerd` on every apply, then waited up to 30 s for it, but scion runs the
+  agents in podman and nothing used it. Lever no longer installs or starts it, and stops and
+  disables the one an older lever started on an existing VM (its files stay in the run user's
+  `~/bin`). That saves about 100-150 MB of guest memory and some seconds of each apply. `lever
+  provision` no longer prints a `DOCKER_HOST`.
+- **A smaller scion binary (lever#191).** Lever builds scion with `-trimpath -ldflags="-s -w"`
+  (about 173 MB to 121 MB), so less is streamed into the guest and paged in at each hub start. The
+  first apply after the upgrade rebuilds and reinstalls scion once. A `scion.binary` is installed
+  as it is.
+- **A manager start is confirmed from claude itself, not after a fixed 10 s (lever#188).** After a
+  start or resume lever waits for claude's tmux pane to be alive (the lever#164 probe), then for
+  claude to report that its session started, and reports the manager up as soon as it has, with
+  no settle window. The report is a new `SessionStart` hook, `lever-agent claude-ready`, that
+  `lever-agent boot` writes into the managed settings of every agent: it writes
+  `/tmp/lever-claude-ready` in the container, naming the guest boot, the container's first process
+  and claude's pane, so a file left by an earlier run never counts. A failed pre-start hook, a task
+  past the tmux cap and a `--continue` with no conversation all end before claude starts a session.
+  lever polls for it inside the container (one guest call about every 3 s, a reading every 200 ms),
+  fails at once when the container stops, the pane dies or the hub record leaves running. After
+  2 min with no report over a pane that stays alive (a dialog before the session starts, a `/tmp`
+  claude cannot write, hooks disabled) it does not fail: it falls back to the 3 s settle window and
+  its second look, and reports the manager up with a warning that claude never reported its session
+  start; a death in that window still fails. The file only claims
+  that claude started, which a live pane already claims; lever compares it with what it reads
+  itself and acts on nothing in it. A manager image without the hook (built by an older lever)
+  keeps a 3 s settle window counted from the pane, with a note; a start whose pane cannot be
+  probed keeps the 10 s window. The hub record's activity is not used: scion's own start report
+  sets the same activity and time as claude's SessionStart, before claude runs. `start-manager`'s
+  post-start checks (the workers' session heal and the read-only, nested-virt and claude-settings
+  warnings) run during the wait; their lines print once the start is confirmed, and the warnings
+  are dropped when it is not. `lever up` on a terminal attaches to a manager it has just created
+  as soon as claude runs, without the wait, and checks the manager again after you detach: a
+  manager that died is reported then, with the start's hints and a non-zero exit. A resumed
+  manager is attached only after the wait, because a `claude --continue` with no conversation
+  exits a second or two after its pane comes up (lever#202). `--no-attach`, `lever apply` and a
+  stdin that is not a terminal always wait. The hook is in-jail code (jail ABI 2, below): a manager gets it on an agent
+  image rebuilt from this release.
+- **Independent bring-up steps run alongside each other (lever#189).** The host's scion build starts
+  before the VM and runs while it boots and is provisioned; the scion step uses it once the guest
+  reports the same architecture, and builds again otherwise. `broker-up` and the image loads with
+  their keep-id warm-up (one image at a time) run while `init-machine`, `scion-server` and the
+  registration steps run; the enrol-ticket mint and the remote proxy wait for the broker, and
+  `start-manager` for the broker and every image. A changed image's load and a first warm-up now
+  hide behind the hub's start. The progress list shows these steps as running alongside the one in
+  front. A failed step alongside prints its failure at once and stops the run after the step in
+  front; a failed step in front stops the others, which are listed as stopped, not failed.
+- **A bring-up of a provisioned jail reads its state in two guest calls instead of about twenty
+  (lever#187).** `lever apply` and `lever up` used to make one guest round trip per check on every
+  run (on Lima each is a `limactl shell`, a quarter to half a second), even to attach to a running
+  manager. A new *guest state* step reads the run user, the guest arch, the installed scion's
+  digest, both families' egress chains, the resolver state and the nested-virt state at once. On
+  Lima the steps that converge the guest on every bring-up still make their own calls: guest
+  hardening two (crash recovery, kernel flavour) and the guest profile one, so a warm Lima
+  bring-up makes five. A
+  root-owned stamp (`/var/lib/lever/provision.stamp`) that names the exact provisioning scripts and
+  the current boot, with the run user's pasta drop-in still as written, lets the packages and
+  runtimes step skip; the egress chains are always compared rule for rule with the ruleset lever would commit and are
+  rebuilt on any difference, so a missing or tampered chain never passes. The first bring-up after a
+  VM restart, or after a lever whose provisioning changed, provisions in full and writes the stamp.
+  With a `scion.version` that is a commit or a semantic or pseudo-version (not a branch), the host
+  skips `go mod download` and `go build` when a stamp beside the last build names the same pin,
+  arch, Go toolchain and Go environment and the output is unchanged.
+- **A closed-egress re-apply now applies a changed ruleset (lever#187).** The re-apply skip for a
+  live closed posture held for any closed chain; it now holds only when both chains are exactly the
+  closed ruleset for their aliases and the configured ports. A port added to `manager.allow_ports`,
+  or a rule changed by hand, is applied by the next `apply` or `up` (atomically, as before) instead
+  of needing `lever destroy` and `up`. The `OUTPUT` jump is ensured before that skip too.
+- **Readiness waits run in the guest (lever#190).** The hub wait polls the hub's `/healthz` from
+  inside the jail every 150 ms (one guest call per 5 s) instead of starting the scion CLI through
+  the jail every second, and the runtime-broker wait polls `scion hub brokers` in the guest every
+  200 ms in one call. Each still ends on the same check as before (the CLI probe, lever's parse of
+  the broker list), and falls back to the old polling when the jail has no `curl` or the hub does
+  not answer `/healthz` with a 200. `start-manager` no longer waits for the broker again when the
+  `scion-server` step of the same run saw it online. A hub link that finds no runtime broker yet is
+  retried after 1, 2, 4, 8 and 16 s (was 5, 10 and 20 s).
+- **`lever up` says what it is doing from its first line (lever#195):** a header naming the
+  application and the backend's containment posture (as `apply` printed already) comes before
+  the VM is touched, and the probe of the manager reads as a step with a plain reason ("the jail's
+  hub is not running (after `lever stop` or a VM restart); starting it") instead of scion's raw
+  "connection refused". `apply` prints the posture in the same header, on stderr with the rest of
+  the list (also with `--progress quiet`); `lever acceptance`'s `check …` lines moved to stderr
+  with it.
+- **One log line shape for lever's daemons (lever#197).** The broker, the remote proxy and the
+  first-party tools write slog text lines with a UTC millisecond time and `component=`; lines the
+  Go runtime writes for them (TLS handshake errors) and their startup prints take the same shape,
+  so `broker.out.log`, `remote.log`, `broker.log` and `tool-logs/<tool>.log` read alike. Every
+  line passes one redaction rule (env values in an argv, Anthropic, GitHub and scion hub tokens,
+  JWTs, Authorization headers, bearer tokens, `--…secret`/`--…token` flag values), which the
+  `scion` errors shown to the operator now use too. `lever doctor`'s
+  expired-certificate check reads both the new and the old `broker.out.log` lines. The audit
+  JSON-lines files and the ledgers keep their form. A daemon that fails to start still ends its
+  file with the plain `Error: …` line the `lever` binary prints.
+- **Operator warnings read the same everywhere:** `<who>: warning: <text>` (`lever`, `jail`, or the
+  bring-up step), replacing the mix of `WARNING:`, bare `warning:` and `lever: warning:`.
+- **Jail ABI 2.** The in-jail code changed (shared packages); rebuild the agent image
+  (`make lever-image`) and recreate the manager on it when convenient. Doctor's *agent lever
+  version* row says so.
+- **`lever attach --detach-others` and `lever up --detach-others` clear a stale terminal
+  (lever#170).** An earlier attach whose terminal went away (a closed window, a dropped ssh, a
+  host that slept) stays attached to the agent's tmux session and can freeze the next view while
+  the agent works. By default an attach still keeps the other terminals attached, so a second
+  terminal does not take the first one's view; with the new `--detach-others` flag, both verbs
+  first detach the terminals earlier attaches left on the agent, as `tmux attach -d` does, and
+  print how many. The container's own tmux client (scion's start command attaches one; detaching
+  it would stop the agent) is never detached: only clients a `podman exec` started are.
+  Operations guide: "A frozen attach view", with the recovery (`Ctrl-L`, else
+  `lever attach --detach-others` from another terminal, or `Ctrl-b d` and `lever attach` again;
+  `Esc` leaves Claude Code's background-agent view).
+- **The recovery after a hard VM kill also works without a recorded boot id (lever#179).** When
+  `.lever-state/guest-boot.json` holds no boot id (an instance last brought up before 0.35.0, or a
+  lost file), `lever up` and `lever apply` now take podman's word instead: a manager record that
+  says running, over a container podman says is not running and last started before the guest's
+  current boot, is suspended and resumed with its conversation, as with a recorded boot id. A
+  container podman never started is not evidence, and a read that fails leaves the old message.
+- **The Lima e2e picks free host ports (lever#181).** The broker's ports, the db tool's backend
+  and the port-forward check's port are chosen free on the host unless set (`JAIL_PORT`,
+  `ADMIN_PORT`, the new `TOOL_PORT`, `SUPPRESS_PORT`); a port set explicitly that is in use stops
+  the run before it starts, naming the process. Any failed run now prints the end of the broker
+  and tool logs, masked, with or without `KEEP=1`.
+- **`lever-tool-db` moves to modernc.org/sqlite v1.60.1 on modernc.org/libc v1.77.1 (lever#180)**,
+  from v1.53.0 on v1.73.4; SQLite itself goes from 3.53.2 to 3.53.4. A host with Go 1.27 saw the
+  old pair hang on first use. Built with Go 1.27.1 and 1.27.2, the new pair opens, seeds and
+  queries both an in-memory and an on-disk database, and its tests pass. No shipped `lever` binary
+  links SQLite; only the reference tool does. It is baked into the agent image, which this release
+  rebuilds anyway (jail ABI 2).
+
+### Fixed
+
+- **A manager with no conversation to continue starts fresh, and says why (lever#202).** A manager
+  started and never sent a message has no transcript in its home, so scion's resume of it (`claude
+  --continue`, after a crash or a `lever stop`) ended with Claude's "No conversation found to
+  continue", and lever reported only that the harness was not live. Now the start gate reads that
+  phrase in the container log (bounded, never printed) and names the cause, with `lever up
+  --fresh` as the way out. `lever up` goes further: it looks at the manager's home from the guest,
+  through the same link-refusing scripts as the conversation backup (lever#198), and only when
+  `.claude/projects` holds no transcript with content, no link or special file, and no other
+  `projects*` directory beside it does it start the manager fresh, as `--fresh` would: the
+  backup runs first, the record is deleted and a new enrolment ticket is minted. It prints a line
+  saying so. Anything not proven, a failed backup, a session record lever cannot write, or a
+  resume whose tree mounts failed their check keeps the record and prints the reason. This covers the resumes `up` runs through its
+  bring-up (a crashed manager, and every `up` after `lever stop`), on a terminal too: `up`
+  attaches to a resumed manager only once claude has reported its session start, so the exit is
+  caught first. When `up` resumes a suspended manager itself (the hub was still running, or the
+  guest restarted under it), it names the cause and keeps the record; `lever stop && lever up`
+  then makes the fresh start. Because the agent can bring this start about and can write its
+  skill, the start records the new session for the contact gate only when the manager's lever
+  skill, read before the delete and again right before the create, is the one its last recorded
+  session started with. Otherwise it records a session that matches no skill and says so: contacts
+  cannot post to the manager until it next starts fresh other than on its own (`lever up
+  --fresh`), and putting the old skill back does not lift that. A manager with no session record
+  gets none, so contacts stay refused there too. On a terminal, a resumed manager whose claude
+  waits at a dialog (a login, trust or update prompt) is attached only after the 2 min wait for
+  its session start. `lever apply`
+  never starts a manager fresh. Doctor's manager row names the cause for an error-phase manager.
+- **A command that fails at run time no longer prints its usage text.** `lever up`, `lever apply`
+  and most other commands printed the usage after any error, so a manager that did not come up
+  read as a flag problem. The usage now follows only flag and argument errors (an unknown or
+  missing flag, a wrong flag combination, the wrong number of arguments).
+- **A tmux server crash no longer goes unexplained, and the agent image takes a newer tmux
+  (lever#201).** A manager's tmux 3.5a server (Debian trixie's) segfaulted about 2.5 minutes after
+  a fresh start, taking claude and the container with it. The fault was a read past the end of a
+  pane's grid in grid_line_length, the function an upstream 3.5a crash report names for copy mode
+  after a size change. The agent image now installs a pinned tmux from trixie-backports
+  (`ARG TMUX_VERSION`, 3.6b-1~bpo13+1, label `tmux_version`) through apt, so the Debian archive
+  signatures cover it; its dependencies stay trixie's. When sciontool logged that it reaped the tmux server after a fault signal,
+  `lever up` names it as the cause (after the attach ends and at the start gate), or names a
+  SIGKILL as a likely out-of-memory kill. In a Lima jail the guest now keeps the core of a crashed
+  tmux server: `kernel.core_pattern` pipes dumps to a lever handler that keeps only `tmux: server`
+  dumps, root only in `/var/lib/lever/cores`, one at a time, 256 MiB each, the newest two and at
+  most one a minute; `kernel.core_pipe_limit` is 1, so the kernel runs one handler at a time and
+  skips a dump past it. Cores never leave the guest. A core holds the tmux server's memory, which
+  can include the container's environment and the tokens in it, besides the panes' contents. The
+  handler replaces apport (masked) and drops other processes' dumps. The log line and a kept core
+  come from the agent's side, so lever words them as leads, not proof. OrbStack is unchanged,
+  because its kernel is shared. Rebuild the image (`make lever-image`), then
+  `lever up --fresh --keep-conversation` puts the manager on it.
+- **`lever acceptance` waits for its tools to listen** (up to 30 s) before it runs the checks, and
+  fails naming the tool, its address and its log when one never does. A first check could reach
+  the gateway before the tool bound its port and fail with a 502 unrelated to the capability under
+  test. A tool held back by `manager.read_only` is not waited for.
+- **Agent messages refuse an old `scion.source` checkout at bring-up (lever#159).** Config load
+  refused `remote.agent_messages` only on an old `scion.version` pseudo-version; an old
+  `scion.source` checkout failed only `lever doctor`'s row. `lever apply`, `lever up` and `lever
+  remote serve` now refuse it too when git says the checkout does not hold `b3562fb1`: an older
+  `HEAD`, a checkout git has no such commit in (never fetched since, or a fork without it), or a
+  shallow clone that does not show it. A checkout git cannot answer for stays a doctor warning.
+  A pseudo-version is still judged by its commit time, so a later-dated fork commit that lacks the
+  fix passes; the docs say so.
+- **A verify miss gives its call back only to the window that counted it (lever#22).** A miss
+  (and a recycle that deletes nothing) returns its call to the per-minute budget; a call that
+  ran past its window could lower the count of the window a later call had opened.
+
+### Security
+
+- **The egress jump must be `OUTPUT`'s first rule (lever#187).** The check that egress is in force
+  required only that `OUTPUT` jump to `LEVER_EGRESS` somewhere, both on the warm path ("verified,
+  unchanged") and in the full apply. An ACCEPT, RETURN or goto placed in `OUTPUT` ahead of the jump
+  decided every packet before the lever chain saw it, and neither path noticed or fixed it. The jump
+  must now be `OUTPUT`'s first rule, and its only copy, in both families. A bring-up that does not
+  verify it so makes it so: any other copy is deleted and the jump inserted at position 1 in one
+  `iptables-restore` commit per family, so `OUTPUT` is never without it, and `OUTPUT` is read back
+  to confirm it. Other `OUTPUT` rules stay where they are; behind the jump they cannot weaken it.
+  When a scion step ran between the warm path's probe and the egress decision (a build can take
+  minutes), the chains are read again just before that decision. The jail security model now says
+  what the check cannot see: rules written with `nft` that `iptables` cannot print, and, on Lima, a
+  run user (which has passwordless sudo) that controls what root commands report.
+- **A reused pid is never signalled as the broker or the remote proxy.** `lever stop`, `down`,
+  `destroy`, and `apply`'s restarts stopped whatever process `broker.pid` or `remote.pid` named,
+  and `apply` restarted a broker that reports no instance id whenever `broker.pid` named any live
+  process. A pid file can outlive its daemon, and the OS can give the pid to an unrelated process,
+  which would then have been sent SIGTERM and SIGKILL. lever now reads the process's arguments
+  (`/proc` on Linux, the `kern.procargs2` sysctl on macOS) and treats the pid as the daemon only
+  when they are `lever broker serve` (or `remote serve`) and, where they name the config by an
+  absolute path (as `apply` starts them), this instance's config. It is checked again before the
+  SIGKILL, and on Linux the signals go through a pidfd taken before the check. Anything else is a
+  stale pid file: it is removed and nothing is signalled. A live process whose arguments cannot be
+  read is not signalled either; the stop fails and keeps the pid file rather than guess. `lever
+  doctor` and `lever remote status` still report liveness by the pid alone.
+- **The read-only guard checks the manager's namespaces (lever#162).** The guest-side live check
+  (the broker's tool guard, doctor's *manager read-only paths* and *shared folders* rows, apply's
+  keep and resume warning) read the mounts of the manager's first process. A root agent that could
+  ptrace that process could move it into a user and mount namespace made inside the container,
+  showing a staged read-only mount while the agent writes from the real one. The check now requires
+  that process to be in the mount and user namespaces the container runtime created: their owner
+  must be the owner of its PID namespace, which a process can never leave. It needs `lsns` from
+  util-linux 2.38 or later in the guest (Ubuntu 24.04 has 2.39); without it the check cannot run
+  and fails closed. A foreign namespace holds the tools back and fails the doctor rows.
+- **Doctor and apply no longer ask the manager whether it can write (lever#162).** The *manager
+  read-only paths* row and apply's keep/resume warning ran `test -w` inside the manager, whose
+  programs the agent controls. Both now use the guest-side check the tool guard uses, for every
+  entry and pin. The check also reads where each mount comes from in the kernel's mount table: a
+  protected directory mounted through a symbolic link, or renamed away since, is reported without
+  relying on stable inode numbers.
+- **A resumed manager's tree mounts are checked after the resume (lever#158).** The stale-mount
+  check reads the host tree before a resume, but the runtime resolves each mount source again,
+  following symbolic links, when it recreates the container. A directory swapped for a link in
+  between got whatever the link named mounted into the manager. Right after the resume (again once
+  the manager is live, if it was not running yet) apply reads back where every tree mount comes
+  from, the dropped ones included. A mount from elsewhere, missing at its place (the runtime
+  resolves the destination in the same tree, so a link moves the mount point too) or read-write
+  where it should be read-only, or a foreign namespace, suspends the manager and fails the
+  bring-up. The same checks run, before and after the resume, on every other resume of the
+  manager: `lever up`'s own (also the one after a VM restart, lever#179), which now checks the
+  `read_only` paths on the host before it as apply does, `lever conversation restore` and its
+  resume after a failed restore or backup, and the broker's re-enrol bounce, which does not resume
+  the manager when it cannot run them and says in its audit line when the read-back could not
+  run. A resume that reports a failure is checked as well (the container may have started all the
+  same), and an interrupt (^C) right after a resume no longer skips the check or the suspend. A
+  source that is gone no longer makes the whole live check
+  unreadable: that mount alone is reported. The swap itself cannot be prevented: until that check, the
+  manager may already hold the wrong mount.
+- **A hung probe's `podman exec` ends in the guest too (lever#158).** A host-side deadline killed
+  only the `orb` or `limactl` client, and a `podman exec` the agent made hang could stay behind in
+  the guest on every token-watch pass. Every exec into an agent container, `podman logs`, and the
+  live check's guest reads now run under the guest's `timeout`, with what is left of the 10 s host
+  deadline less 2 s (SIGKILL 1 s after SIGTERM). This ends the `podman exec` client. Whether the
+  process it started inside the container (and its exec `conmon`) ends with it is not verified
+  live; `podman exec` is not known to pass the signal on.
+- **A `read_only` path with a space cannot be split on its way to the guest (lever#162).** The live
+  check passes the paths to `stat` on stdin (`xargs -0`), never as words of the guest command
+  line, so a transport that joins and re-splits the command line cannot cut such a path in two.
+- **Tool commands are read past common wrappers (lever#162).** The check that a tool's program, or
+  the script its interpreter runs, is not agent-writable now reads past `nice`, `nohup`, `setsid`,
+  `timeout`, `stdbuf`, `ionice`, `taskset` and `uv run`, nested in any order with `env`. For
+  `uv run` it reads the script, `-m` module or command, checks the options that name code
+  (`--with`, `--with-editable`, `--with-requirements`, `--project`, `--directory`, `--find-links`,
+  the index options, `--cache-dir`, `--config-file`, `--env-file`, `--python`) as programs, and resolves relative paths against
+  `--directory`. `pypy` and `nodejs` count as interpreters. Config load refuses a wrapper form it
+  cannot read (an unknown option, `--help`, `ionice -p`, `uv tool run`, a missing command). Other
+  wrappers (`chrt`, `time`, `flock`, `sudo` and the like) and `UV_*` variables are still not read.
+
 ## [0.35.0] - 2026-10-12
 
 ### Added

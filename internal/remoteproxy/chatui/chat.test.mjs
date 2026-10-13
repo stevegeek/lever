@@ -30,6 +30,7 @@ function hubWith(parts = {}) {
     files: () => ({ status: 200, body: { files: [] } }),
     viewFiles: () => ({ status: 200, body: { files: [] } }),
     transcribe: () => ({ status: 200, body: { text: 'hello from the mic' } }),
+    speak: (body) => ({ status: 200, audio: `audio:${body.text}` }),
     ...parts,
   };
   const fn = (method, path, body) => {
@@ -40,6 +41,7 @@ function hubWith(parts = {}) {
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
     if (path.startsWith('/lever/api/files/')) return method === 'POST' ? h.upload(body, path) : h.files(path);
     if (path === '/lever/api/voice/transcribe') return h.transcribe(body, path);
+    if (path === '/lever/api/voice/speak') return h.speak(body, path);
     if (method === 'POST' && path.endsWith('/read')) return h.read(body, path);
     if (method === 'POST') return h.post(body, path);
     return h.history(path);
@@ -2212,6 +2214,128 @@ test('read-aloud: off unless the roster offers it (remote.voice off or read_alou
   assert.equal(env.els.readvoice.hidden, true);
 });
 
+
+// Server voices (read_aloud: server): the roster lists lever-tool-tts's.
+const SPEECH = { voice: 'bf_emma', voices: [{ name: 'bf_emma', lang: 'en-GB' }, { name: 'am_adam', lang: 'en-US' }], maxChars: 600 };
+const serverAgents = (speech = SPEECH) => () => roster([BOSS(), A('w1')], { readAloud: true, speech });
+const speaks = (env) => env.calls.filter((c) => c.path === '/lever/api/voice/speak');
+const speaker = (env, i = 0) => env.els.list.children[i].children.find((c) => c.className === 'speak');
+// LONG is a message of three parts: a first sentence under 200 characters,
+// then two more that do not fit with it.
+const S1 = `${'a'.repeat(149)}.`;
+const S2 = `${'b'.repeat(399)}.`;
+const S3 = `${'c'.repeat(399)}.`;
+const LONG = `${S1} ${S2} ${S3}`;
+
+test('read-aloud, server voice: parts asked for one at a time, played in order with Web Audio, no device voice', async () => {
+  const env = await loadChat(hubWith({ agents: serverAgents(), history: () => ({ status: 200, body: { messages: [msg(1, { msg: `**${S1}** ${S2} ${S3}` })] } }) }),
+    { speech: { voices: [LOCAL] }, audio: {} });
+  const b = speaker(env);
+  b.dispatch('click');
+  assert.equal(b.textContent, '⏹');
+  assert.equal(env.audio.resumes, 1, 'the audio context is resumed within the tap');
+  assert.equal(globalThis.navigator.audioSession.type, 'playback');
+  await tick(10);
+  const first = speaks(env)[0];
+  assert.deepEqual(first.body, { agent: 'boss', id: 'm001', text: S1, voice: 'bf_emma' });
+  assert.equal(first.method, 'POST');
+  assert.equal(first.headers['X-Lever-Voice'], '1');
+  assert.equal(first.headers['Content-Type'], 'application/json');
+  assert.deepEqual(env.audio.played, [`audio:${S1}`]);
+  // The next part is asked for while the first plays; no third yet.
+  assert.deepEqual(speaks(env).map((c) => c.body.text), [S1, S2]);
+  await env.endAudio();
+  assert.deepEqual(env.audio.played, [`audio:${S1}`, `audio:${S2}`]);
+  assert.deepEqual(speaks(env).map((c) => c.body.text), [S1, S2, S3]);
+  await env.endAudio();
+  await env.endAudio();
+  assert.equal(env.audio.played.length, 3);
+  assert.equal(b.textContent, '🔊');
+  assert.equal(env.speech.spoken.length, 0, 'the device voice was not used');
+});
+
+test('read-aloud, server voice: the first part failing falls back to the device voice for the whole message', async () => {
+  for (const answer of [{ status: 503, body: { error: 'unavailable' } }, { down: true }, { status: 200, audio: 'not audio' }, { status: 429, body: { error: 'busy' } }]) {
+    const env = await loadChat(hubWith({ agents: serverAgents(), speak: () => answer, history: () => ({ status: 200, body: { messages: [msg(1, { msg: 'Hello there.' })] } }) }),
+      { speech: { voices: [LOCAL] }, audio: {} });
+    speaker(env).dispatch('click');
+    await tick(10);
+    assert.equal(env.speech.spoken.length, 1, JSON.stringify(answer));
+    assert.equal(env.speech.spoken[0].text, 'Hello there.');
+    assert.equal(env.speech.spoken[0].voice, LOCAL);
+    assert.equal(speaker(env).textContent, '⏹');
+    assert.equal(env.els.error.textContent, '');
+  }
+});
+
+test('read-aloud, server voice: a later part failing stops with a note', async () => {
+  let n = 0;
+  const env = await loadChat(hubWith({ agents: serverAgents(), speak: (body) => (n++ ? { status: 429, body: { error: 'quota' } } : { status: 200, audio: `audio:${body.text}` }),
+    history: () => ({ status: 200, body: { messages: [msg(1, { msg: LONG })] } }) }), { speech: { voices: [LOCAL] }, audio: {} });
+  speaker(env).dispatch('click');
+  await tick(10);
+  await env.endAudio();
+  assert.equal(env.audio.played.length, 1);
+  assert.match(env.els.error.textContent, /Reading aloud stopped: too much read aloud today/);
+  assert.equal(env.speech.spoken.length, 0);
+  assert.equal(speaker(env).textContent, '🔊');
+  assert.equal(speaks(env).length, 2);
+});
+
+test('read-aloud, server voice: a tap stops the playing part and the request under way; hiding the page stops it too', async () => {
+  const env = await loadChat(hubWith({ agents: serverAgents(), history: () => ({ status: 200, body: { messages: [msg(1, { msg: LONG }), msg(2, { msg: 'Second.' })] } }) }),
+    { speech: { voices: [LOCAL] }, audio: {} });
+  speaker(env).dispatch('click');
+  await tick(10);
+  speaker(env).dispatch('click');
+  await tick(10);
+  assert.equal(env.audio.stopped, 1);
+  assert.equal(speaker(env).textContent, '🔊');
+  assert.equal(env.audio.played.length, 1, 'nothing more plays');
+  assert.equal(speaks(env).length, 2, 'no part asked for after the stop');
+  // Another message: the hidden page stops it.
+  speaker(env, 1).dispatch('click');
+  await tick(10);
+  assert.equal(speaker(env, 1).textContent, '⏹');
+  await env.hide();
+  assert.equal(speaker(env, 1).textContent, '🔊');
+  assert.equal(env.audio.stopped, 2);
+});
+
+test('read-aloud, server voice: the picker lists the server voices and the choice is kept per device', async () => {
+  const env = await loadChat(hubWith({ agents: serverAgents(), history: () => ({ status: 200, body: { messages: [msg(1, { msg: 'Hi.' })] } }) }),
+    { speech: { voices: [LOCAL, { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true }] }, audio: {} });
+  assert.equal(env.els.readvoice.hidden, false);
+  assert.deepEqual(env.els.readvoice.children.map((o) => [o.value, o.textContent]), [['bf_emma', 'bf_emma (en-GB)'], ['am_adam', 'am_adam (en-US)']]);
+  assert.equal(env.els.readvoice.value, 'bf_emma');
+  env.els.readvoice.value = 'am_adam';
+  env.els.readvoice.dispatch('change');
+  assert.equal(env.local['lever-read-server-voice'], 'am_adam');
+  assert.equal(env.local['lever-read-voice'], undefined, 'the device choice is untouched');
+  speaker(env).dispatch('click');
+  await tick(10);
+  assert.equal(speaks(env)[0].body.voice, 'am_adam');
+});
+
+test('read-aloud, server voice: offered on a device with no speech synthesis; none without Web Audio or roster voices', async () => {
+  const hist = () => ({ status: 200, body: { messages: [msg(1, { msg: 'Hi.' })] } });
+  let env = await loadChat(hubWith({ agents: serverAgents(), history: hist }), { audio: {} });
+  speaker(env).dispatch('click');
+  await tick(10);
+  assert.equal(env.audio.played.length, 1);
+  // The tool down: the roster lists no server voice, and the device reads.
+  env = await loadChat(hubWith({ agents: readAloudAgents, history: hist }), { speech: { voices: [LOCAL] }, audio: {} });
+  speaker(env).dispatch('click');
+  await tick(10);
+  assert.equal(speaks(env).length, 0);
+  assert.equal(env.speech.spoken.length, 1);
+  // No Web Audio: the device reads.
+  env = await loadChat(hubWith({ agents: serverAgents(), history: hist }), { speech: { voices: [LOCAL] } });
+  speaker(env).dispatch('click');
+  await tick(10);
+  assert.equal(speaks(env).length, 0);
+  assert.equal(env.speech.spoken.length, 1);
+});
 
 test('mic: a second tap while the permission prompt is up opens no second stream; one chunk at the stop', async () => {
   const env = await loadChat(hubWith({ agents: withVoice([BOSS()]) }), { media: {} });

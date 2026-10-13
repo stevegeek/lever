@@ -223,7 +223,10 @@ func TestToolHostPaths(t *testing.T) {
 	// are consumed, not checked; other flags and arguments are not read.
 	check("shipped flags", paths("lever-tool-github", "-tree", "/a/ws", "-app-key", "k.pem", "--state=/s",
 		"-repos", "o/n", "-branch-prefix=agent", "-fizzy=/bin/fizzy", "--token-file", "/t", "-tree=/a/ws",
-		"-csv", "ws/x.csv", "-dsn", "file:ws/x.db", "-key-file", "/k", "plain/path"), []got{
+		"-csv", "ws/x.csv", "-dsn", "file:ws/x.db", "-key-file", "/k", "plain/path",
+		// lever-tool-github's opt-in operation flags are not paths.
+		"-ops", "push,pr_open,release", "-merge-methods", "squash", "-merge-checks", "ci/test",
+		"-release-tag", `^v[0-9]+\.[0-9]+\.[0-9]+$`, "-text-max", "8000"), []got{
 		{"broker.tools[t] -app-key", "k.pem", hostSecret},
 		{"broker.tools[t] -state", "/s", hostSecret},
 		{"broker.tools[t] -fizzy", "/bin/fizzy", hostProgram},

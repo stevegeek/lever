@@ -16,9 +16,9 @@ make all
 This builds the host binaries into `~/.local/bin` (make sure that's on your `PATH`):
 
 - **`lever`** (host control plane).
-- **`lever-tool-github`**, **`lever-tool-fizzy`** and **`lever-tool-whisper`**, optional host-side
-  broker tools (see the [github tool](/github-tool/), the [fizzy tool](/fizzy-tool/) and the
-  [whisper tool](/whisper-tool/)).
+- **`lever-tool-github`**, **`lever-tool-fizzy`**, **`lever-tool-whisper`** and **`lever-tool-tts`**,
+  optional host-side broker tools (see the [github tool](/github-tool/), the
+  [fizzy tool](/fizzy-tool/), the [whisper tool](/whisper-tool/) and the [tts tool](/tts-tool/)).
 
 The in-jail orchestration binary, **`lever-manager`**, isn't built here; it's baked into your agent
 image. `make lever-image-bins` cross-compiles `lever-manager` (alongside `lever-agent` and
@@ -50,10 +50,19 @@ self-update; upgrades happen by rebuild. To bump: edit the ARG (or pass `--build
 CLAUDE_CODE_VERSION=X.Y.Z`), rebuild the image with `make lever-image LEVER_IMAGE_FORCE=1` (the
 build script refuses to overwrite an existing `scionlocal/lever-claude:<arch>` without it),
 `lever apply`, and recreate the manager on the new image with `lever up --fresh` — a record keeps
-the image it was created with, so `lever stop && lever up` resumes the old one. `--fresh` discards
-the manager's conversation; back it up first if you want it. Don't rely on the scion
+the image it was created with, so `lever stop && lever up` resumes the old one. `--fresh` starts a
+new conversation after backing up the old one; add `--keep-conversation` to keep it. Don't rely on the scion
 base image's copy: it installs claude unpinned, so it's whatever was current when that base was
 last rebuilt.
+
+**tmux version:** scion runs each agent's harness in a tmux session, and the scion base installs
+Debian trixie's tmux 3.5a, whose server can crash and take the agent with it (see [tmux server
+crashes](/operations/#tmux-server-crashes)). The image replaces it with a pinned tmux from
+trixie-backports (`ARG TMUX_VERSION` in the Dockerfile, recorded in the `tmux_version` label),
+installed through apt, which checks the Debian archive signatures. When backports moves on, the old
+version leaves the archive and the build fails at that step: bump the ARG to the version
+`https://packages.debian.org/trixie-backports/tmux` shows and rebuild. An instance Dockerfile that
+copies the binaries in itself (below) does not get this step; copy it.
 
 **lever version:** the image tag names only the arch, so a rebuild from another lever checkout
 replaces `scionlocal/lever-claude:<arch>` for every instance on the host. `make lever-image` records

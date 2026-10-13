@@ -1,8 +1,8 @@
 // Package orbstack implements the Backend contract on macOS via an OrbStack
-// isolated machine + rootless Docker + iptables egress. See docs-site/_guides/security-model-compromise.md §8 for the validated commands. Rootful Docker FAILS inside an isolated machine (seccomp blocks
+// isolated machine + rootless podman + iptables egress. See docs-site/_guides/security-model-compromise.md §8 for the validated commands. Rootful Docker FAILS inside an isolated machine (seccomp blocks
 // bpf()); rootless is required.
 //
-// The prefix/guest-delegating half of the contract (DockerHost, the jail
+// The prefix/guest-delegating half of the contract (the jail
 // transport + image ops, the guest scion/egress delegations, run-user caching)
 // lives once in internal/backend/common.Base, which this embeds; only the
 // OrbStack-specific verbs (version preflight, machine create/start/stop) and the
@@ -21,6 +21,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/retry"
 )
 
@@ -100,7 +101,14 @@ func (o *OrbStack) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if !ok {
 		return fmt.Errorf("lever requires OrbStack >= 2.1.1 for isolated-machine mounts; found %s", got)
 	}
-	if err := o.ensureMachine(ctx, cfg.ProjectTree); err != nil {
+	s := progress.From(ctx).Start("start machine")
+	skip, err := o.ensureMachine(ctx, cfg.ProjectTree)
+	if err == nil && skip != "" {
+		s.Skip(skip)
+	} else {
+		s.Done(err)
+	}
+	if err != nil {
 		return err
 	}
 	return o.Provision(ctx, cfg)
@@ -130,31 +138,31 @@ func (o *OrbStack) ResolveRunUser(ctx context.Context) error {
 // is set at CREATE time only. Changing the tree on an existing machine requires
 // teardown+recreate — mounts cannot be modified on a running machine (acceptable
 // limitation; document it in operator notes).
-func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) error {
+func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) (skip string, err error) {
 	status, found, err := o.machineStatus(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if found {
 		if strings.EqualFold(status, "running") {
 			// Idempotent: already up (and we cannot alter the mount after
 			// creation, so no action is taken here). To change the project
 			// tree, call Teardown() first, then EnsureUp() again.
-			return nil
+			return "already running", nil
 		}
 		// Machine exists but is powered off (e.g. after `lever stop`) — power
 		// it back on so `up` resumes a halted machine rather than silently
 		// no-op'ing into an unreachable jail.
 		if _, err := o.Runner().Run(ctx, nil, "orb", "start", o.Machine()); err != nil {
-			return fmt.Errorf("orb start: %w", err)
+			return "", fmt.Errorf("orb start: %w", err)
 		}
-		return o.waitMachineReachable(ctx)
+		return "", o.waitMachineReachable(ctx)
 	}
 	mountArg := projectTree + ":" + common.MountDest
 	if _, err := o.Runner().Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.Machine()); err != nil {
-		return fmt.Errorf("orb create: %w", err)
+		return "", fmt.Errorf("orb create: %w", err)
 	}
-	return nil
+	return "", nil
 }
 
 // waitMachineReachable polls a lightweight in-machine command after `orb

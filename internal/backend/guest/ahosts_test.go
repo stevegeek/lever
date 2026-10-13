@@ -32,3 +32,12 @@ func TestParseAhostsIgnoresUnparseableLines(t *testing.T) {
 		t.Fatalf("v6=%q, want empty", v6)
 	}
 }
+
+// With several addresses of a family, the last one listed is returned (the
+// doc says so; the chains and their verification depend on the same pick).
+func TestParseAhostsReturnsTheLastOfEachFamily(t *testing.T) {
+	v4, v6 := ParseAhosts("10.0.0.1 STREAM a\n10.0.0.1 DGRAM\nfd00::1 STREAM\n10.0.0.2 STREAM\nfd00::2 STREAM\n")
+	if v4 != "10.0.0.2" || v6 != "fd00::2" {
+		t.Fatalf("v4=%q v6=%q, want the last of each family", v4, v6)
+	}
+}

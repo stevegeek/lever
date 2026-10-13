@@ -237,6 +237,8 @@ type FakeRunner struct {
 func NewFakeRunner() *FakeRunner { return &FakeRunner{scripts: map[string]Result{}} }
 
 // Script registers a canned Result for a "name arg0 arg1 ..." prefix key.
+// When several keys are prefixes of a call, the longest wins, so a specific
+// key can override a general one.
 func (f *FakeRunner) Script(key string, res Result) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -245,10 +247,14 @@ func (f *FakeRunner) Script(key string, res Result) {
 
 func (f *FakeRunner) scriptedResult(name string, args []string) (Result, error) {
 	full := strings.TrimSpace(name + " " + strings.Join(args, " "))
-	for key, res := range f.scripts {
-		if full == key || strings.HasPrefix(full, key) {
-			return res, nil
+	best, found := "", false
+	for key := range f.scripts {
+		if strings.HasPrefix(full, key) && (!found || len(key) > len(best)) {
+			best, found = key, true
 		}
+	}
+	if found {
+		return f.scripts[best], nil
 	}
 	return Result{Code: 1}, fmt.Errorf("fakerunner: %w %q", ErrUnscripted, full)
 }

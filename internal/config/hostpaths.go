@@ -24,13 +24,14 @@ const (
 	// read-only mount still lets the manager read it.
 	hostSecret
 	// hostProgramOutside is code the host runs that must lie outside the
-	// tree altogether (lever-tool-whisper's -server): a manager.read_only
-	// mount does not excuse it.
+	// tree altogether (lever-tool-whisper's and lever-tool-tts's -server):
+	// a manager.read_only mount does not excuse it.
 	hostProgramOutside
 	// hostPrivate is a host path an agent must neither replace nor reach:
 	// lever-tool-whisper's -models (the model whisper-server loads, and its
-	// working directory) and -dictate-socket (remote.voice.socket). Never
-	// safe in the tree, read-only or not.
+	// working directory) and -dictate-socket (remote.voice.socket), and
+	// lever-tool-tts's -models and -speak-socket (remote.voice.speak_socket).
+	// Never safe in the tree, read-only or not.
 	hostPrivate
 	// hostUnchecked is a known flag whose value is not a host program or
 	// secret: the github tool's -tree (it names the tree on purpose) or a
@@ -112,15 +113,21 @@ func isWhisperCommand(t Tool) bool {
 }
 
 // knownFlag is the kind of a flag name, and whether lever reads it in a
-// command: toolPathFlags in every tool's, whisperToolFlags in a
-// whisper tool's.
-func knownFlag(whisper bool, name string) (hostPathKind, bool) {
+// command: toolPathFlags in every tool's, whisperToolFlags in a whisper
+// tool's, ttsToolFlags in a tts tool's.
+func knownFlag(whisper, tts bool, name string) (hostPathKind, bool) {
 	if k, ok := toolPathFlags[name]; ok {
 		return k, true
 	}
 	if whisper {
-		k, ok := whisperToolFlags[name]
-		return k, ok
+		if k, ok := whisperToolFlags[name]; ok {
+			return k, true
+		}
+	}
+	if tts {
+		if k, ok := ttsToolFlags[name]; ok {
+			return k, true
+		}
 	}
 	return 0, false
 }
@@ -155,6 +162,7 @@ func (a *App) hostPaths() []hostPath {
 	}
 	if a.RemoteEnabled() && a.Remote.Voice.Enabled {
 		add(hostPath{key: "remote.voice.socket", path: a.Remote.Voice.Socket, kind: hostPrivate})
+		add(hostPath{key: "remote.voice.speak_socket", path: a.Remote.Voice.SpeakSocket, kind: hostPrivate})
 	}
 	return out
 }
@@ -164,9 +172,13 @@ func (a *App) hostPaths() []hostPath {
 //
 //   - the program itself when it is given as a path (a bare name is looked
 //     up on the supervisor's fixed PATH, which is not in the tree), after
-//     an env(1) prefix too (unwrapEnv);
+//     an env(1) prefix and the command wrappers lever reads too
+//     (parseEnvPrefix: nice, nohup, setsid, timeout, stdbuf, ionice,
+//     taskset, uv run, nested in any order), and the values of the
+//     wrapper options that name code (uv run --with, --project);
 //   - the value of each known path flag of the shipped tools
-//     (toolPathFlags; whisperToolFlags only in lever-tool-whisper's
+//     (toolPathFlags; whisperToolFlags only in lever-tool-whisper's and
+//     ttsToolFlags only in lever-tool-tts's
 //     command), as "-f v", "-f=v" or "--f=v";
 //   - the code an interpreter runs (interpreterPaths): its script, the
 //     values of its code-path flags (ruby -I, node --require), and the
@@ -190,8 +202,11 @@ func toolHostPaths(t Tool) []hostPath {
 	// Decided by argv[0], not by length: an -S string can make the command
 	// env runs as long as the prefix, or longer.
 	argv, chdir := t.Command, ""
-	if real, dir := unwrapEnv(argv); baseName(argv[0]) == "env" && len(real) > 0 {
-		argv, chdir = real, dir
+	if p := parseEnvPrefix(argv); p.unread == "" && p.wrapped && len(p.argv) > 0 {
+		argv, chdir = p.argv, p.chdir
+		for _, x := range p.paths {
+			add(x.what, x.path, hostProgram)
+		}
 		if strings.ContainsRune(argv[0], '/') {
 			add("command (after env)", joinRaw(chdir, argv[0]), hostProgram)
 		}
@@ -236,7 +251,7 @@ func toolFlags(t Tool) []toolFlag {
 	if len(t.Command) == 0 {
 		return nil
 	}
-	whisper := isWhisperCommand(t)
+	whisper, tts := isWhisperCommand(t), isTTSCommand(t)
 	var out []toolFlag
 	// The words the tool itself gets: past an env(1) prefix, with a plain
 	// env -S string split into words. The env forms this cannot read as env
@@ -253,7 +268,7 @@ func toolFlags(t Tool) []toolFlag {
 			continue
 		}
 		name, val, hasVal := strings.Cut(strings.TrimPrefix(name, "-"), "=")
-		kind, known := knownFlag(whisper, name)
+		kind, known := knownFlag(whisper, tts, name)
 		if !known {
 			continue
 		}

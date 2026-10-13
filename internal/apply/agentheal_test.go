@@ -390,7 +390,7 @@ func TestStartManagerHealRunsBeforeTheStaleMountCheck(t *testing.T) {
 		err := runApply(app, Deps{
 			Scion: scion.New(r, scion.Options{}), AgentSession: probe, Log: sink.logf,
 			InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
-			ProbeContainerWritable: func(context.Context, string, string) (bool, error) { return false, nil },
+			CheckLiveMounts:        func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil },
 		})
 		if alive {
 			if err != nil || r.resumeCalls != 0 || !logged(&sink, "no longer on the host") {

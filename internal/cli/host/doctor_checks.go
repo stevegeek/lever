@@ -27,10 +27,10 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
-	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/jailabi"
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
@@ -39,7 +39,6 @@ import (
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/webpush"
-	"github.com/stevegeek/lever/internal/wire"
 )
 
 // checkResult is one diagnostic outcome. detail is shown in both the pass and
@@ -96,6 +95,9 @@ type doctorProbes struct {
 	remoteLogin func(port int) (loginProbeResult, error)
 	// remoteJailLogin asks the hub, from inside the jail, to start a login.
 	remoteJailLogin func(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error)
+	// portHolder names the process listening on a host loopback port
+	// ("pid 123, python3"), or "" when it cannot tell.
+	portHolder func(ctx context.Context, port int) string
 }
 
 // productionProbes wires the real probes. Host subprocesses (go, node,
@@ -120,6 +122,7 @@ func productionProbes(r proc.Runner) doctorProbes {
 		remoteHealthz:   remoteHealthzProbe,
 		remoteLogin:     remoteLoginProbe,
 		remoteJailLogin: remoteJailLoginProbe,
+		portHolder:      func(ctx context.Context, port int) string { return lsofHolder(ctx, r, port) },
 	}
 }
 
@@ -539,12 +542,16 @@ func liveAgentMessages(ctx context.Context, app *config.App, st state.State) age
 		brokerHash: func() (string, bool) {
 			ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
-			var er wire.EpochResponse
-			u := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), wire.PathEpoch)
 			// A redirect is not the broker's answer: never followed.
 			client := &http.Client{Timeout: 2 * time.Second,
 				CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-			if err := httpjson.Get(ctx, client, u, &er); err != nil {
+			er, err := readBrokerIdentity(ctx, client, fmt.Sprintf("http://127.0.0.1:%d", app.EffectiveAdminPort()))
+			if err != nil {
+				return "", false
+			}
+			// Another instance's broker on these ports says nothing about
+			// this instance's (the instance ports row reports it).
+			if ours, err := st.ReadInstanceID(); err != nil || er.InstanceID != ours {
 				return "", false
 			}
 			return er.ConfigHash, true
@@ -625,9 +632,10 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 
 // agentMessagesScion checks the configured scion against
 // config.AgentMessagesScionFloor, the first hub that sets a message's sender
-// itself (the filter trusts it). bad: known to be older (note says why);
-// otherwise note is set when lever cannot tell (a prebuilt binary, a bare
-// commit hash or tag, a checkout git cannot answer for).
+// itself (the filter trusts it). bad: known to be older, a checkout without
+// the floor commit, or a shallow clone that does not show it (note says
+// why); otherwise note is set when lever cannot tell (a prebuilt binary, a
+// bare commit hash or tag, a path git cannot answer for).
 func agentMessagesScion(app *config.App, hasCommit func(source, commit string) (bool, error)) (bad bool, note string) {
 	floor := config.AgentMessagesScionFloor[:8]
 	sc := app.Scion
@@ -644,11 +652,14 @@ func agentMessagesScion(app *config.App, hasCommit func(source, commit string) (
 			return false, ""
 		}
 		has, err := hasCommit(sc.Source, config.AgentMessagesScionFloor)
+		if errors.Is(err, scionbin.ErrShallowSource) {
+			return true, "the scion.source checkout is a shallow clone that does not show " + floor + ", so it cannot be shown to set a message's sender itself (run git fetch --unshallow)"
+		}
 		if err != nil {
 			return false, "cannot tell whether the scion.source checkout holds " + floor + ": " + err.Error()
 		}
 		if !has {
-			return true, "the scion.source checkout predates " + floor + ": its hub takes a message's sender from the caller, so an agent can post as its contact"
+			return true, "the scion.source checkout does not hold " + floor + " (it predates it, or is a fork without it): its hub takes a message's sender from the caller, so an agent can post as its contact"
 		}
 	case sc.Binary != "":
 		return false, "cannot tell whether the scion.binary holds " + floor + " (the hub sets a message's sender from " + floor + " on)"
@@ -1106,7 +1117,12 @@ type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, er
 // whether claude still runs: another claude process in the container firing
 // the shared SessionEnd hook leaves the harness running (apply reports it
 // running again), a claude that exited does not.
-func checkManagerLive(ctx context.Context, project, name string, list agentLister, session agentSessionReader, now time.Time) checkResult {
+//
+// A manager whose forced resume died because claude --continue found no
+// conversation (lever#202) is named as such: logTail (nil = not read) reads
+// its container log, which is matched for a fixed phrase only
+// (apply.NoConversationInLog) and never printed.
+func checkManagerLive(ctx context.Context, project, name string, list agentLister, session agentSessionReader, logTail containerLogReader, now time.Time) checkResult {
 	const check = "manager agent"
 	if list == nil {
 		return checkResult{check, true, "not checked", ""}
@@ -1177,9 +1193,27 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	if a.Phase == "error" {
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
 	}
-	return checkResult{check, false,
-		fmt.Sprintf("manager %q is not live: phase %s, container %s", name, scionpkg.BoundedQuote(a.Phase), scionpkg.BoundedQuote(a.ContainerStatus)), fix}
+	detail := fmt.Sprintf("manager %q is not live: phase %s, container %s", name, scionpkg.BoundedQuote(a.Phase), scionpkg.BoundedQuote(a.ContainerStatus))
+	// Only an error-phase record: `lever up` resumes it with --force (and
+	// --continue), and starts it fresh when that finds no conversation. A
+	// stopped record resumes in a new session anyway.
+	if a.Phase == scionpkg.PhaseError && logTail != nil {
+		if tail, err := logTail(ctx, ref); (err == nil || tail != "") && apply.NoConversationInLog(tail) {
+			return checkResult{check, false, detail + " — its claude found no conversation to continue, so the manager was most likely never used", noConversationFix}
+		}
+	}
+	return checkResult{check, false, detail, fix}
 }
+
+// containerLogReader reads the tail of an agent container's log
+// (jail.AgentProbe.LogTail in production): the agent's word, matched for
+// fixed phrases and never printed.
+type containerLogReader func(ctx context.Context, ref string) (string, error)
+
+// noConversationFix is the manager row's fix for a manager whose claude
+// found no conversation to continue (lever#202).
+const noConversationFix = "run `lever up`: it starts the manager fresh on its own once it has checked from the guest that the agent home holds no transcript. " +
+	"`lever up --fresh` starts it fresh in any case, and loses nothing: it backs up any transcript first"
 
 // stoppedResumeFix is the fix for a manager whose session really ended:
 // scion's hub resumes a stopped record with a fresh harness session (only a
@@ -1336,7 +1370,7 @@ func checkNestedVirt(ctx context.Context, on, lima bool, jr proc.Runner, manager
 				got = "missing"
 			}
 			return checkResult{check, false, "guest /dev/kvm: " + got,
-				"`lever apply` installs the rule; if /dev/kvm is missing the VM was created before nested_virt or the host nested module is off: back up the conversation, `lever destroy`, `lever up`"}
+				"`lever apply` installs the rule; if /dev/kvm is missing the VM was created before nested_virt or the host nested module is off: `lever conversation backup`, `lever destroy`, `lever up`, `lever conversation restore`"}
 		}
 	}
 	if res, err := jr.Run(ctx, nil, "sh", "-c", legacyKVMDropInTest); err == nil && res.Code == 0 {
@@ -1412,7 +1446,7 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 	}
 	return checkResult{check, false,
 		fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want),
-		"run `lever up --fresh` to recreate the manager on the configured image (the conversation is discarded)"}
+		"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
 }
 
 // networkCheckedAgents is every agent the agent-network row inspects: the
@@ -1577,9 +1611,13 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // The inspect is not enough on its own: when the host replaces a protected
 // directory after the create, podman still lists the read-only mount while
 // a write from the container lands in the new directory (verified on
-// OrbStack 2026-10-04). So for a RUNNING container every entry is also
-// probed live (apply.ProbeReplacedEntries); a probe that cannot run, or a
-// container that is not running, is a warning that says so — never a pass.
+// OrbStack 2026-10-04). So for a RUNNING container the whole plan is also
+// checked live from the guest side (apply.LiveTreeMountGaps through
+// jail.ContainerLiveMounts: the kernel's mountinfo and the device and inode
+// behind each mount, never a program inside the container, which the agent
+// controls); a check that cannot run, or a container that is not running,
+// is a warning that says so — never a pass. A first process found in a
+// namespace made inside the container fails the row.
 // The container is found by the id scion reports or else by scion's
 // container name, as for the worker ticket mounts. No manager record or
 // container, a listing or an inspect failure, is "not checked".
@@ -1595,7 +1633,7 @@ type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 // With no container to inspect (or an inspect that fails), that half reads
 // the hub record's volumes instead (record; nil skips it), which a resume
 // recreates the container from; the plan half then stays "not checked".
-func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, record recordVolumeReader, probe apply.WritableProbe) checkResult {
+func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, record recordVolumeReader, live liveMountChecker) checkResult {
 	const check = "manager read-only paths"
 	notChecked := func(detail string) checkResult {
 		if len(want) == 0 {
@@ -1641,7 +1679,7 @@ func checkManagerReadOnly(ctx context.Context, project, tree, name string, want 
 		}
 		return checkResult{check, true, "none configured", ""}
 	}
-	r := managerReadOnlyGaps(ctx, check, project, name, ref, a.ContainerStatus, want, mounts, probe)
+	r := managerReadOnlyGaps(ctx, check, project, name, ref, a.ContainerStatus, want, mounts, live)
 	if stale.Empty() {
 		return r
 	}
@@ -1654,26 +1692,30 @@ func checkManagerReadOnly(ctx context.Context, project, tree, name string, want 
 }
 
 // managerReadOnlyGaps is checkManagerReadOnly's half for the current plan:
-// every planned mount present, and (on a running container) every entry
-// refusing a write.
-func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, containerStatus string, want []config.TreeMount, mounts []jail.Mount, probe apply.WritableProbe) checkResult {
+// every planned mount present, and (on a running container) the whole plan
+// held live, as the guest sees it.
+func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, containerStatus string, want []config.TreeMount, mounts []jail.Mount, live liveMountChecker) checkResult {
 	gaps := apply.ManagerTreeMountGaps(project, want, mounts)
 	if gaps.Empty() {
 		if !scionpkg.ContainerLive(containerStatus) {
-			return warnResult(check, "the mounts are listed, but the write probe did not run (the manager container is not running), so a protected directory replaced on the host would go unnoticed",
+			return warnResult(check, "the mounts are listed, but the live check did not run (the manager container is not running), so a protected directory replaced on the host would go unnoticed",
 				"bring the manager up (`lever up`) and re-run doctor")
 		}
-		if probe == nil {
+		if live == nil {
 			// A warning row needs a fix to print as one ("!"), never as "✓".
-			return warnResult(check, "the mounts are listed, but the write probe is not wired, so a protected directory replaced on the host would go unnoticed",
-				"this is a lever wiring gap; check the manager by hand (`podman exec <container> test -w <entry>` in the guest must fail) and report it")
+			return warnResult(check, "the mounts are listed, but the live check is not wired, so a protected directory replaced on the host would go unnoticed",
+				"this is a lever wiring gap; report it")
 		}
-		replaced, err := apply.ProbeReplacedEntries(ctx, probe, ref, want)
-		if err != nil {
-			return warnResult(check, "the mounts are listed, but the write probe could not run ("+firstLine(err.Error())+"), so protection is not confirmed",
+		lg, err := apply.LiveTreeMountGaps(ctx, apply.LiveMountChecker(live), project, ref, want)
+		switch {
+		case errors.Is(err, jail.ErrForeignNamespace):
+			return checkResult{check, false, fmt.Sprintf("manager %q: %v", name, err),
+				"something in the container moved its first process there to show lever a staged view of its mounts: treat the manager as compromised; back up what you need, then recreate it (`lever up --fresh`)"}
+		case err != nil:
+			return warnResult(check, "the mounts are listed, but the live check could not run ("+firstLine(err.Error())+"), so protection is not confirmed",
 				"re-run doctor once the manager container is up")
 		}
-		gaps.Replaced = replaced
+		gaps = lg
 	}
 	if !gaps.Empty() {
 		return checkResult{check, false, fmt.Sprintf("manager %q: %s", name, gaps), apply.ManagerTreeMountsFix(gaps)}
@@ -1686,7 +1728,7 @@ func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, contain
 			pins++
 		}
 	}
-	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q (mounted, and a write probe refused), %d pin(s) mounted (pins are checked by inspect only)", entries, name, pins), ""}
+	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q, %d pin(s) mounted (checked live from the guest: each a mount point over the host's directory)", entries, name, pins), ""}
 }
 
 // staleTreeMountsResult is checkManagerReadOnly's row for mounts the
@@ -1806,10 +1848,14 @@ func braceList(names []string) string {
 	return "{" + strings.Join(names, ",") + "}"
 }
 
-// backendHostPort strips an optional path from a "host:port[/path]" backend,
-// leaving the "host:port" a TCP dial needs. External backends are validated
-// scheme-less, so no scheme handling is required.
+// backendHostPort strips an optional scheme and path from a
+// "[scheme://]host:port[/path]" backend, leaving the "host:port" a TCP dial
+// needs. External backends are validated scheme-less; a supervised tool's
+// may carry a scheme (as config's backendPort accepts).
 func backendHostPort(backend string) string {
+	if i := strings.Index(backend, "://"); i >= 0 {
+		backend = backend[i+3:]
+	}
 	if i := strings.IndexByte(backend, '/'); i >= 0 {
 		return backend[:i]
 	}
@@ -2160,9 +2206,10 @@ func brokerStartTime(pidPath string) (time.Time, bool) {
 
 // scanBrokerLogCertExpiry returns the timestamp of the most recent expired- /
 // bad-certificate TLS handshake error in the tail of the broker log at path.
-// Lines are Go-stdlog-prefixed ("2006/01/02 15:04:05 …"); the prefix is parsed
-// in local time (the broker logs local time). Lines without the fingerprint or
-// without a parseable timestamp are ignored.
+// Two line shapes are read: lever's daemon log line ("time=<RFC3339, UTC>
+// level=… msg=…", since lever#197) and the Go-stdlog prefix a broker before
+// it wrote ("2006/01/02 15:04:05 …", local time), which an older file still
+// holds. Lines without the fingerprint or a parseable timestamp are ignored.
 func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 	data, err := readFileTail(path, brokerLogTailBytes)
 	if err != nil {
@@ -2174,11 +2221,8 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 		if !strings.Contains(line, "certificate has expired") && !strings.Contains(line, "tls: bad certificate") {
 			continue
 		}
-		if len(line) < 19 {
-			continue
-		}
-		ts, perr := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local)
-		if perr != nil {
+		ts, ok := brokerLogLineTime(line)
+		if !ok {
 			continue
 		}
 		if !found || ts.After(latest) {
@@ -2186,6 +2230,23 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 		}
 	}
 	return latest, found, nil
+}
+
+// brokerLogLineTime is a broker log line's time, in either shape
+// scanBrokerLogCertExpiry reads.
+func brokerLogLineTime(line string) (time.Time, bool) {
+	if rest, ok := strings.CutPrefix(line, "time="); ok {
+		if i := strings.IndexByte(rest, ' '); i > 0 {
+			rest = rest[:i]
+		}
+		ts, err := time.Parse(logging.TimeFormat, rest)
+		return ts, err == nil
+	}
+	if len(line) < 19 {
+		return time.Time{}, false
+	}
+	ts, err := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local)
+	return ts, err == nil
 }
 
 // The labels image/lever-claude/Dockerfile bakes from build args: the pinned
@@ -2267,7 +2328,7 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 func checkLeverVersion(imageRef, tarPath, host, hostFull string, hostABI int, p doctorProbes) checkResult {
 	const name = "agent lever version"
 	const rebuildFix = "rebuild the agent image from this lever's source (`make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built FROM it), " +
-		"then `lever apply`; a running manager keeps its image until `lever up --fresh` (the conversation is discarded)"
+		"then `lever apply`; a running manager keeps its image until `lever up --fresh --keep-conversation`"
 	source := imageRef
 	var v, abi string
 	var err error

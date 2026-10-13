@@ -1001,10 +1001,16 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   while the state directory is inside the tree. The disk is not enough: a resumed session keeps
   the skill text it read before. Lever records each fresh session start (a manager created by
   apply, a worker created by the broker; never a resume) with the skill on disk then, in
-  `.lever-state/sessions.jsonl` (0600, a host record like the ledgers). The proxy lets a contact
+  `.lever-state/sessions.jsonl` (0600, a host record like the ledgers). The fresh start `lever up`
+  makes on its own for a manager with no conversation to continue is the exception: the agent can
+  bring it about, so it is recorded only when the skill on disk (read before the delete and again
+  right before the create) is the one the manager's last recorded session started with. Otherwise
+  lever records a session matching no skill, which refuses contacts until the manager next starts
+  fresh other than on its own (`lever up --fresh`); a manager with no record gets none. The proxy
+  lets a contact
   post to an agent only while that agent's last fresh start saw the skill that is on disk now;
   otherwise it answers 403 "this agent cannot take your messages yet". Every bring-up prints one
-  warning line that names such agents (at most eight, grouped by reason). For the manager, run `lever up --fresh` after you back up its conversation; a
+  warning line that names such agents (at most eight, grouped by reason). For the manager, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` does not help, the kept conversation keeps its old skill); a
   worker takes contact messages once the broker next creates it fresh.
 - **Which agents to list.** Prefer workers with a narrow task. Listing the manager gives the
   contact a chat with the agent that holds the whole tree; the skills tell agents to answer a
@@ -1022,6 +1028,15 @@ grants no hub route: the fence below admits nothing for a see-only agent.
 - **Manager messages are recorded.** A worker verifies every message too, so a manager message
   answers `lever` with the kind `manager` and a contact's post answers `web` with the tier
   `contact`, whatever either says.
+- **A record names the sender, not the words' origin.** When the manager forwards a contact's
+  words to a worker, the message verifies as `lever`, kind `manager`: the record shows who sent
+  it, and nothing can follow text through an agent. The skills tell the manager to say whose
+  words it forwards, and every agent to keep the contact's tier for quoted or forwarded text; that
+  is an instruction, not a fence.
+- **The session check covers the agents a contact lists.** A contact can post only to those, so
+  the proxy checks only their sessions. Other agents get a contact's words only inside a lever
+  message (a relay or a manager message), whose first line lever writes and whose record the
+  agent verifies, so a marker the contact typed is never that message's marker.
 
 ## Messages agents start
 
@@ -1041,8 +1056,9 @@ remote:
 ```
 
 Config load refuses `enabled: true` when `allowed_users` has no `tier: contact` entry (agents
-message only contacts), and on a `scion.version` older than `b3562fb1` (see **Scion version**
-below). It works with either `landing`.
+message only contacts), and on a `scion.version` older than `b3562fb1`; `lever apply`, `lever up`
+and `lever remote serve` refuse it on a `scion.source` checkout that does not hold that commit (see
+**Scion version** below). It works with either `landing`.
 
 - **The agent's two steps.** The agent calls `contact_message` (a tool of its `lever-capability`
   MCP server) with the contact's login, the whole text and, for a reply, the `message_id` that
@@ -1091,8 +1107,8 @@ below). It works with either `landing`.
   proxy (the key is part of their config stamps); until it runs, they keep the old setting, and
   the `agent messages` row of `lever doctor` says so. The agent image must contain this
   release's `lever-agent`, which has the two tools: run `make lever-image` (and rebuild an
-  instance image built from it), then `lever up --fresh` for the manager after you back up its
-  conversation. Each contact agent must start fresh on the new skill: `lever up --fresh` for the
+  instance image built from it), then `lever up --fresh` for the manager (it backs the conversation up
+  first). Each contact agent must start fresh on the new skill: `lever up --fresh` for the
   manager, purge and start for a worker. Until then a contact's post to it is refused as not
   fresh. Turning it off again restores the earlier behaviour, with the same steps.
 - **Clocks.** The hub stamps a message with the VM's clock, and lever binds it to its
@@ -1105,9 +1121,18 @@ below). It works with either `landing`.
 - **Scion version.** The filter trusts the sender the hub stamps on a row, which scion sets from
   the caller's own auth only from commit `b3562fb1` (2026-08-28). On an older scion an agent could
   post a row as its contact and the contact would see it. Config load refuses
-  `agent_messages.enabled` with a `scion.version` pseudo-version older than that commit; the
-  `agent messages` row of `lever doctor` fails when a `scion.source` checkout does not hold it,
-  and warns when lever cannot tell (a `scion.binary`, a bare commit hash or a tag).
+  `agent_messages.enabled` with a `scion.version` pseudo-version older than that commit; `lever
+  apply`, `lever up` and `lever remote serve` refuse it, and the `agent messages` row of `lever
+  doctor` fails, when a `scion.source` checkout does not hold it (git `merge-base
+  --is-ancestor`): one whose `HEAD` is older, and one git has no such commit in at all (a
+  checkout never fetched since, or a fork without it). A shallow clone that does not show the
+  commit is refused too, since its cut-off history cannot show it either way; `git fetch
+  --unshallow` fixes that. The `lever doctor` row warns when lever cannot tell (a `scion.binary`,
+  a bare commit hash or a tag, a `scion.source` path git cannot answer for: not a repository, git
+  not runnable, or no answer within 5 seconds). A pseudo-version is judged by its
+  commit time alone: a commit dated after `b3562fb1` on a branch or fork that lacks it passes.
+  `scion.version` is the operator's choice, not the agent's, so this is a guard against a
+  mistake, not a boundary; pin an upstream `main` commit.
 - **Known limits.** The hub's own web UI (the console landing) shows a new agent message to a
   contact only after a reload, since the events carry no text, and shows no unread marks (lever's
   chat page counts them itself). A message older than the two 4 MiB record files of that
@@ -1363,7 +1388,7 @@ covers it.
   so run `lever init` first (it rewrites them), then `lever apply` (it restarts the broker and
   the proxy). From then on a contact sees every agent as not fresh, and cannot post or upload to
   it, until that agent starts a fresh session on the new skill: `lever up --fresh` for the
-  manager (back up its conversation first), purge and start for a worker. The operator is not
+  manager (it backs the conversation up first), purge and start for a worker. The operator is not
   held back. The agent image must contain this release's lever-agent: run `make lever-image` (and
   rebuild an instance image built from it) before the fresh starts. It has the two tools; they are
   direct lever-capability tools, called with no `request` mint. While files are off,
@@ -1407,9 +1432,11 @@ which runs whisper.cpp's `whisper-server` as its child. The proxy hands each cli
 a Unix socket on the host that only your user can reach. It does not go through the broker, and
 agents cannot reach the socket.
 
-While voice is on, each agent message also has a speaker button that reads it aloud with the
-browser's own on-device speech synthesis (`read_aloud: false` turns that off). With voice off,
-the page shows neither.
+While voice is on, each agent message also has a speaker button that reads it aloud: with the
+browser's own on-device speech synthesis (`read_aloud: device`, the default), or with a natural
+neural voice on your host ([server voices](#server-voices), `read_aloud: server`), falling back to
+the device's voice when that is down. `read_aloud: off` turns it off. With voice off, the page
+shows neither.
 
 ```yaml
 remote:
@@ -1418,7 +1445,8 @@ remote:
     enabled: true
     socket: /home/you/my-instance/.lever-state/whisper/dictate.sock   # the tool's -dictate-socket
     # max_seconds: 300                        # one clip; at most 600, and at most the tool's -max-seconds
-    # read_aloud: true                        # the speaker button on agent messages
+    # read_aloud: device                      # the speaker button: device (default), server or off
+    # speak_socket: /home/you/my-instance/.lever-state/tts/speak.sock   # with server: lever-tool-tts's -speak-socket
   allowed_users:
     - operator@example.com
     - {login: client@example.com, tier: contact, agents: [deal], voice: false}   # no dictation for this login
@@ -1430,7 +1458,8 @@ except an `allowed_users` entry with `voice: false`.
 **Browsers.** Dictation needs MediaRecorder and OfflineAudioContext: current Chrome, Edge, Firefox,
 and Safari 14.1 or later (iOS included). The microphone needs a secure context (the HTTPS front);
 without one, or without those APIs, the page simply shows no mic. Read-aloud needs the Web Speech
-synthesis API and at least one on-device voice.
+synthesis API and at least one on-device voice, or, for server voices, Web Audio (every current
+browser).
 
 ### Setting it up
 
@@ -1535,7 +1564,8 @@ synthesis API and at least one on-device voice.
   `[BLANK_AUDIO]`, `[MUSIC]`, `(inaudible)`) are removed from the text; other brackets, such as
   dictated code, stay. Sending a clip may take one minute plus the time for the largest clip at
   64 KiB/s.
-- **Read-aloud.** The page uses the browser's speech synthesis with **on-device voices only**
+- **Read-aloud.** With the device's voices (`read_aloud: device`, or [server voices](#server-voices)
+  that are down), the page uses the browser's speech synthesis with **on-device voices only**
   (those the browser marks as local): a voice that would send the text to a speech service is
   never used, even if it is the browser's default. Before reading, the page removes markdown
   formatting, reads a code block as "code block skipped" and a link as its text or host name.
@@ -1591,14 +1621,69 @@ synthesis API and at least one on-device voice.
   audio is never stored in the browser. A crash of whisper-server could leave a core dump with
   audio in it, under your system's core dump settings.
 - **Doctor.** The `voice` row is about dictation: off, or on with the socket, the clip limit, the
-  whisper tool and its port, and the logins with no dictation; it fails if the jail could reach
-  the port. The `voice tool` and `voice model` rows run for any configured whisper tool, with
+  whisper tool and its port, which read-aloud the page uses, and the logins with no dictation; it
+  fails if the jail could reach the port. The `voice tool` and `voice model` rows run for any configured whisper tool, with
   `remote.voice` on or off: with it on they check the tool that serves `remote.voice.socket`, with
   it off the first whisper tool in `broker.tools` (agents only). The `voice tool` row asks the
   tool's dictation socket for its health: not running, running with whisper-server not ready
   (starting, or the program or the model failed a check; the reason is in the tool's log), or
   ready with the model. The `voice model` row fails when the model is missing from `-models`, is
   not the pinned file, or lever's table entry for it is not verified.
+
+### Server voices
+
+The browsers' on-device voices vary: on an iPhone, Safari offers no Siri voice to a web page, and
+its voices sound robotic. With `read_aloud: server`, the page reads with a neural voice that runs
+on your host instead: [Kokoro](/tts-tool/) (American and British English voices) through the
+first-party broker tool [`lever-tool-tts`](/tts-tool/), which runs sherpa-onnx. The text goes only
+to your own host, never to a cloud speech service.
+
+1. **Install sherpa-onnx's `sherpa-onnx-offline-tts` yourself**, outside the tree, owned by you or
+   root and writable by no one else ([how](/tts-tool/#install-sherpa-onnx)).
+2. **Add the tool to `broker.tools`** with `-tree`, `-models`, `-server` and `-speak-socket`
+   ([every flag](/tts-tool/#configure-the-tool)).
+3. **Set `remote.voice.read_aloud: server`** and `speak_socket` to the tool's `-speak-socket`.
+   Config load refuses a `speak_socket` that is no tts tool's `-speak-socket`, or that is the
+   dictation socket.
+4. **Fetch the model:** `lever voice fetch kokoro-en-v0_19`.
+5. **Reload and check:** `lever reload`, then the `tts tool` and `tts model` rows of
+   `lever doctor`.
+
+- **The page.** While the tool answers ready (the proxy asks at most every 5 seconds), the agent
+  list carries its voices, and the speaker button reads with them. The page cleans the text as for
+  the device's voice, splits it into parts of whole sentences (the first one short, so the voice
+  starts within about a second for a short message; the others at most the tool's `-max-chars`)
+  and asks `POST /lever/api/voice/speak` for one part at a time, the next while one plays. It plays
+  each answer with Web Audio, so it plays on iPhone Safari too, even with the ring switch on silent
+  (Safari 16.4 and later). If the first part cannot be had (the tool is down, busy or over a limit),
+  the device's on-device voice reads the whole message instead; a later failure stops with a note.
+  A tap stops it, and so does hiding or leaving the page. The voice picker lists the server voices;
+  the choice is kept per device, apart from the device-voice choice.
+- **The route.** Only for a verified login with read-aloud (`voice: false` turns it off), with
+  `X-Lever-Voice: 1` from the page's own origin, a JSON body `{agent, id, text, voice}` of at most
+  64 KiB, an `agent` the login's list shows and an `id` of the message the text is from (both for
+  the audit line), a `voice` of the tool's, and at most `-max-chars` characters of text. The page
+  sends the text it shows, not only a reference: a lookup on the server would have to repeat every
+  rule of what a login is shown, and a mistake there would read out a message the login may not
+  see. The text is bounded instead. The answer is `audio/wav`, or `{"error": "<word>"}`:
+  `voice-off`, `origin` and `agent` (403), `bad-request`, `bad-voice` and `bad-text` (400 or
+  415), `too-long` (413), `timeout` (408), `rate`, `quota` and `busy` (429), `unavailable` (503).
+- **Limits.** Per login, 40,000 characters an hour, 200,000 a day and 1,200 requests an hour, in
+  memory. Three requests at a time, of which a contact never takes the last; one per login; one
+  with the engine at a time (separate from dictation's: the engine runs on the CPU). A text the
+  engine never got does not count.
+- **Privacy.** The text and the audio are held in memory only, by the proxy and the tool; the
+  engine gets the text as its argument (a local user who can list processes with their arguments
+  can read it while a part is spoken) and writes the audio to a private directory of the tool's,
+  which the tool reads and removes at once. The proxy's audit line (`voice-speak` or `deny-speak`) has the login, the agent, the
+  message id, the length, the outcome and the latency; the tool's log line the length, the voice,
+  the outcome and the latency. Never the text, never the audio.
+- **Agent text is untrusted input to the engine.** It is bounded, control characters and markup
+  are removed, and it is never passed as an option. lever gives the engine no path in the tree
+  and expects it to use no network, but it is not sandboxed: it runs as your user, like
+  whisper-server, so install a sherpa-onnx you trust. The jail reaches neither the speech socket nor the engine, which has no port.
+- **Doctor.** The `tts tool` row asks the speech socket for its health; the `tts model` row
+  hashes every file of the model against the manifest of its verified archive. See the [tts tool](/tts-tool/) guide.
 
 ## What this does NOT do
 

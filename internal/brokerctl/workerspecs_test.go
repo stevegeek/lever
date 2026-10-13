@@ -14,13 +14,14 @@ import (
 func TestWorkerSpecs(t *testing.T) {
 	app := &config.App{
 		Tree:    "/host/tree",
-		Manager: config.Manager{Image: "mgr:img", Model: "mgr-model"},
+		Manager: config.Manager{Image: "mgr:img", Model: "mgr-model", Resources: config.Resources{Memory: "4GiB", CPU: "2"}},
 		// Explicit subscription: api-key is the default post-7d86f73; this makes the helper worker assert APIKey:false.
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},
 			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md", Recyclable: true,
-				ClaudeSettings: config.ClaudeSettings{AutoCompactWindow: 300000}, AfterCompactNote: "Re-read TASK.md"},
+				ClaudeSettings: config.ClaudeSettings{AutoCompactWindow: 300000}, AfterCompactNote: "Re-read TASK.md",
+				Resources: config.Resources{Memory: "1536MiB", CPU: "500m"}},
 		},
 	}
 	specs := WorkerSpecs(app, "/lever", "501")
@@ -54,6 +55,13 @@ func TestWorkerSpecs(t *testing.T) {
 	}
 	if w.InstructionsPath != "" {
 		t.Fatalf("worker without instructions_file must get none, got %q", w.InstructionsPath)
+	}
+	// resources: the worker's own, in scion's notation; never the manager's.
+	if want := (scion.Resources{Memory: "1536Mi", CPU: "500m"}); specs[1].Resources != want {
+		t.Fatalf("helper Resources = %+v, want %+v", specs[1].Resources, want)
+	}
+	if w.Resources != (scion.Resources{}) {
+		t.Fatalf("worker Resources = %+v, want none (the manager's are not inherited)", w.Resources)
 	}
 }
 

@@ -84,3 +84,27 @@ func AgentMaxSeconds(n, maxSeconds int) int {
 	}
 	return min(n, maxSeconds)
 }
+
+// CheckSpeed accepts a speaking rate of MinSpeed to MaxSpeed.
+func CheckSpeed(s float64) error {
+	if !(s >= MinSpeed && s <= MaxSpeed) {
+		return fmt.Errorf("speed %v; use %.1f to %.1f (1 = the model's own pace)", s, MinSpeed, MaxSpeed)
+	}
+	return nil
+}
+
+// CheckThreads accepts 1 to MaxThreads.
+func CheckThreads(n int) error {
+	if n < 1 || n > MaxThreads {
+		return fmt.Errorf("threads %d; use 1 to %d", n, MaxThreads)
+	}
+	return nil
+}
+
+// CheckSpeakMaxChars accepts MinSpeakMaxChars to MaxSpeakMaxChars.
+func CheckSpeakMaxChars(n int) error {
+	if n < MinSpeakMaxChars || n > MaxSpeakMaxChars {
+		return fmt.Errorf("max chars %d; use %d to %d", n, MinSpeakMaxChars, MaxSpeakMaxChars)
+	}
+	return nil
+}

@@ -62,7 +62,7 @@ on macOS and `qemu` on Linux, booting an Ubuntu 24.04 cloud image. The containme
   lever template's `portForwards` block carries an ignore-all rule for both `0.0.0.0` and
   `127.0.0.1` guest binds, closing it.
 - **Lima's bundled containerd disabled** (`containerd: {system: false, user: false}`). Lever
-  provisions rootless podman/Docker itself, exactly as it does for `orbstack`.
+  provisions rootless podman itself, exactly as it does for `orbstack`.
 
 Requires **Lima ≥ 2.0.0**, checked at bring-up: the ignore rules depend on Lima 2.0's
 `portForwards` semantics, and an older `limactl` forwards guest ports despite the rendered ignore
@@ -100,7 +100,7 @@ create time only: an existing VM needs a recreate. Inside the guest, lever write
 (`/etc/udev/rules.d/65-lever-kvm.rules`, mode 0666). The manager gets the device as a bind-mount
 volume on its scion record (scion has no per-agent device field; rootless podman passes a
 `--device` as the same bind mount). The volume is create-time only: to give an existing manager
-the device, or to take it away, back up the conversation, then run `lever up --fresh`. When the
+the device, or to take it away, run `lever up --fresh --keep-conversation`. When the
 key is off, apply removes the rule and sets the device back to mode 0660. Each apply also removes
 the podman drop-in (`20-lever-kvm.conf`) that earlier builds wrote, which gave every container the
 device. `lever doctor` has a *nested virt* row. The key is rejected on OrbStack and on darwin.
@@ -111,6 +111,9 @@ See the [`nested_virt` config row](/reference/config/) for the full contract.
 
 **Sizing.** `disk` (default `24GiB`; Lima's own default is 100GiB), `cpus` (1-256) and `memory`
 (at least `2GiB`) size the VM. They are Lima only (config load rejects `cpus`, `memory`,
-`nested_virt` and `guest_kernel` on OrbStack, and OrbStack ignores `disk`) and create-time only: apply warns when
+`nested_virt`, `guest_kernel` and `guest_profile` on OrbStack, and OrbStack ignores `disk`) and create-time only: apply warns when
 `cpus` or `memory` differ from the existing VM's, and a bigger disk needs `limactl disk resize` or
-a recreate. Unset `cpus` and `memory` keep Lima's defaults.
+a recreate. Unset `cpus` and `memory` keep Lima's defaults (4 vCPUs and 4 GiB, or fewer on a smaller host). `guest_profile: small`
+trims the guest's services and adds zram swap, on an existing VM too. See
+[system requirements & sizing](/getting-started/requirements/) for the numbers and a small-machine
+profile.

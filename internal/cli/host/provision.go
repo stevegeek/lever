@@ -22,7 +22,7 @@ func newProvisionCmd(factory BackendFactory) *cobra.Command {
 			if err := b.EnsureUp(cmd.Context(), backend.Config{MachineName: machine, ProjectTree: tree, AllowedPorts: allow, NestedVirtUnknown: true}); err != nil {
 				return err
 			}
-			cmd.Printf("jail %q up; DOCKER_HOST=%s; alias=%s\n", machine, b.DockerHost(), b.HostToolAlias())
+			cmd.Printf("jail %q up; alias=%s\n", machine, b.HostToolAlias())
 			return nil
 		},
 	}

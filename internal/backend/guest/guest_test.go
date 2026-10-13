@@ -44,8 +44,8 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			if err := g.EnsureRuntimes(context.Background(), "devuser"); err != nil {
 				t.Fatalf("EnsureRuntimes: %v", err)
 			}
-			if len(f.Calls) != 6 {
-				t.Fatalf("expected 6 calls, got %d: %+v", len(f.Calls), f.Calls)
+			if len(f.Calls) != 5 {
+				t.Fatalf("expected 5 calls, got %d: %+v", len(f.Calls), f.Calls)
 			}
 
 			// call 0: root apt install — RootPrefix then bash -lc <script>.
@@ -79,34 +79,31 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 				t.Errorf("call 2 script missing subid/linger for runUser: %q", secondScript)
 			}
 
-			// call 3: user rootless install.
+			// call 3: user disables a leftover rootless dockerd (lever#183);
+			// nothing installs or starts one any more.
 			third := f.Calls[3]
 			if third.Name != shape.userPrefix[0] {
 				t.Fatalf("call 3 should be user-prefixed, got %+v", third)
 			}
 			thirdScript := third.Args[len(third.Args)-1]
-			if !strings.Contains(thirdScript, "get.docker.com/rootless") {
-				t.Errorf("call 3 script missing rootless install: %q", thirdScript)
+			if !strings.Contains(thirdScript, "disable --now docker") {
+				t.Errorf("call 3 script does not disable the old dockerd: %q", thirdScript)
+			}
+			for i, c := range f.Calls {
+				script := c.Args[len(c.Args)-1]
+				if strings.Contains(script, "get.docker.com") || strings.Contains(script, "dockerd-rootless.sh") || strings.Contains(script, "enable --now docker") {
+					t.Errorf("call %d still installs or starts dockerd: %q", i, script)
+				}
 			}
 
-			// call 4: user dockerd start.
-			fourth := f.Calls[4]
-			if fourth.Name != shape.userPrefix[0] {
-				t.Fatalf("call 4 should be user-prefixed, got %+v", fourth)
-			}
-			fourthScript := fourth.Args[len(fourth.Args)-1]
-			if !strings.Contains(fourthScript, "docker info") {
-				t.Errorf("call 4 script missing dockerd start: %q", fourthScript)
-			}
-
-			// call 5: user stages the pasta host-loopback mapping (per-agent netns).
-			fifth := f.Calls[5]
+			// call 4: user stages the pasta host-loopback mapping (per-agent netns).
+			fifth := f.Calls[4]
 			if fifth.Name != shape.userPrefix[0] {
-				t.Fatalf("call 5 should be user-prefixed, got %+v", fifth)
+				t.Fatalf("call 4 should be user-prefixed, got %+v", fifth)
 			}
 			fifthScript := fifth.Args[len(fifth.Args)-1]
 			if !strings.Contains(fifthScript, "containers.conf.d") || !strings.Contains(fifthScript, "map-host-loopback") {
-				t.Errorf("call 5 script missing pasta host-loopback mapping: %q", fifthScript)
+				t.Errorf("call 4 script missing pasta host-loopback mapping: %q", fifthScript)
 			}
 		})
 	}
@@ -218,7 +215,7 @@ func TestEnsureScionVersionBuildsFromPinnedModule(t *testing.T) {
 	f.Script("go env GOROOT", proc.Result{Stdout: "/opt/go\n"})
 	f.Script("/opt/go/bin/go mod download -json github.com/GoogleCloudPlatform/scion@"+pin,
 		proc.Result{Stdout: `{"Version":"v0.0.0-x","Dir":"` + moduleDir + `"}`})
-	f.Script("/opt/go/bin/go build -o", proc.Result{})
+	f.Script("/opt/go/bin/go build -trimpath -ldflags=-s -w -o", proc.Result{})
 	f.Script("orb -m lever-vtest uname -m", proc.Result{Stdout: "arm64\n"})
 	f.Script("orb -m lever-vtest cat", proc.Result{Code: 1})
 	f.Script("orb -u root -m lever-vtest", proc.Result{})
@@ -679,5 +676,44 @@ func TestInstallIfChangedRefusesBytesThatChangedUnderTheHandle(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("error should say the file changed under the install: %v", err)
+	}
+}
+
+// TestEnsureScionTakesTheEarlyBuild (lever#189): a build started while the
+// VM booted is installed when the guest has the architecture it was built
+// for, and the guest step builds nothing itself; a guest of another
+// architecture gets its own build.
+func TestEnsureScionTakesTheEarlyBuild(t *testing.T) {
+	for _, tc := range []struct {
+		uname     string
+		ownBuilds int
+	}{{"aarch64", 0}, {"x86_64", 1}} {
+		t.Run(tc.uname, func(t *testing.T) {
+			user, root := []string{"orb", "-m", "lever-jail"}, []string{"orb", "-u", "root", "-m", "lever-jail"}
+			f := proc.NewFakeRunner()
+			f.Script(strings.Join(user, " ")+" uname -m", proc.Result{Stdout: tc.uname + "\n"})
+			f.Script("go build", proc.Result{})
+			f.Script(strings.Join(user, " ")+" /usr/bin/sha256sum", proc.Result{Code: 1})
+			f.Script(strings.Join(root, " "), proc.Result{})
+			src := t.TempDir()
+			backendtest.StageFakeBuildOutput(t, "lever-jail")
+			early := proc.NewFakeRunner()
+			early.Script("go build", proc.Result{})
+			pre := scionbin.StartPrebuild(context.Background(), early, scionbin.Spec{Source: src}, "arm64", "lever-jail")
+			defer pre.Stop()
+			g := Guest{Host: f, UserPrefix: user, RootPrefix: root, Machine: "lever-jail"}
+			if err := g.EnsureScion(context.Background(), ScionSpec{Source: src, Prebuilt: pre}); err != nil {
+				t.Fatalf("EnsureScion: %v", err)
+			}
+			own := 0
+			for _, c := range f.Calls {
+				if c.Name == "go" {
+					own++
+				}
+			}
+			if own != tc.ownBuilds || len(early.Calls) != 1 {
+				t.Fatalf("guest-step builds %d (want %d), early builds %d", own, tc.ownBuilds, len(early.Calls))
+			}
+		})
 	}
 }

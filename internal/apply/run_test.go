@@ -72,7 +72,7 @@ func fillDeps(d Deps) Deps {
 		d.EnsureControllerPAT = func(context.Context) error { return nil }
 	}
 	if d.WaitBrokerReady == nil {
-		d.WaitBrokerReady = func(context.Context, string) error { return nil }
+		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
 	}
 	if d.MintManagerBootstrap == nil {
 		d.MintManagerBootstrap = func(context.Context) (BootstrapMaterial, error) {
@@ -805,13 +805,13 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	var waitCalls, startCallsAtGate int
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
-		WaitBrokerReady: func(ctx context.Context, project string) error {
+		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return nil // scion-server's wait after the hub start
+				return false, nil // scion-server's wait after the hub start: timed out
 			}
 			waitCalls++
 			startCallsAtGate = r.startCalls
-			return nil
+			return true, nil
 		},
 	}
 	if err := runApply(app, deps); err != nil {
@@ -828,6 +828,30 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	}
 }
 
+// lever#190: when the scion-server step saw the broker online, start-manager
+// does not wait for it a second time in the same run.
+func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	var waits []string
+	deps := Deps{
+		Scion: scion.New(r, scion.Options{}),
+		WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
+			waits = append(waits, project)
+			return true, nil
+		},
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(waits) != 1 || waits[0] != "global" {
+		t.Fatalf("waits = %q, want only scion-server's", waits)
+	}
+	if r.startCalls != 1 {
+		t.Errorf("startCalls = %d, want 1", r.startCalls)
+	}
+}
+
 // TestStartManagerBrokerReadyErrorAbortsBeforeActing: a gate error (e.g. ctx
 // cancellation — the gate's only non-nil return, since it is otherwise
 // fail-soft) aborts start-manager before it touches any record.
@@ -836,11 +860,11 @@ func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
-		WaitBrokerReady: func(ctx context.Context, project string) error {
+		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return nil // scion-server's wait after the hub start
+				return false, nil // scion-server's wait after the hub start: timed out
 			}
-			return context.Canceled
+			return false, context.Canceled
 		},
 	}
 	err := runApply(app, deps)
@@ -3092,9 +3116,9 @@ func TestScionServerWaitsForTheBroker(t *testing.T) {
 		deps := Deps{
 			Scion:          hubScion(f, app),
 			EnsureHubLogin: func(context.Context) (bool, error) { return changed, nil },
-			WaitBrokerReady: func(_ context.Context, project string) error {
+			WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
 				waits = append(waits, project)
-				return nil
+				return false, nil
 			},
 		}
 		if err := runApply(app, deps); err != nil {
@@ -3658,8 +3682,12 @@ func TestStartManagerFailsWhenHarnessDiesDuringSettle(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", dieAfterLiveLists: 2}
 	deps := Deps{
-		Scion:            scion.New(r, scion.Options{}),
-		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 60 * time.Millisecond},
+		Scion: scion.New(r, scion.Options{}),
+		// A long window on purpose: two dead readings end it a few
+		// milliseconds in. A short one raced the scheduler — a settle poll
+		// fired late on a loaded machine read the record still live after
+		// the deadline and passed the gate before the death was due.
+		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 10 * time.Second},
 	}
 	err := runApply(app, deps)
 	if !errors.Is(err, scion.ErrAgentDied) {
@@ -3938,6 +3966,55 @@ func TestStartManagerFreshWithNoRecordJustCreates(t *testing.T) {
 	}
 	if r.deleteCalls != 0 || r.startCalls != 1 {
 		t.Fatalf("delete/start = %d/%d, want 0/1", r.deleteCalls, r.startCalls)
+	}
+}
+
+// TestStartManagerFreshBacksUpBeforeTheDelete (lever#198): the backup runs
+// on the record about to be deleted, before the delete; a failed backup stops
+// the fresh start with the record kept and nothing created.
+func TestStartManagerFreshBacksUpBeforeTheDelete(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 2 days"}
+	var seen *scion.Agent
+	var deletesAtBackup int
+	deps := Deps{
+		Scion: scion.New(r, scion.Options{}),
+		BackupManagerConversation: func(_ context.Context, rec *scion.Agent) error {
+			seen, deletesAtBackup = rec, r.deleteCalls
+			return nil
+		},
+	}
+	if err := runApplyFresh(app, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if seen == nil || seen.Phase != "running" || deletesAtBackup != 0 || r.deleteCalls != 1 {
+		t.Fatalf("backup saw %+v with %d deletes before it; deletes %d", seen, deletesAtBackup, r.deleteCalls)
+	}
+
+	app, f = newObserveFirstApp(t)
+	r = &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	deps = Deps{
+		Scion:                     scion.New(r, scion.Options{}),
+		BackupManagerConversation: func(context.Context, *scion.Agent) error { return errors.New("disk full") },
+	}
+	err := runApplyFresh(app, deps)
+	testutil.WantErrContaining(t, err, "disk full")
+	testutil.WantErrContaining(t, err, "NOT deleted")
+	testutil.WantErrContaining(t, err, "--no-backup")
+	if r.deleteCalls != 0 || r.startCalls != 0 || r.resumeCalls != 0 {
+		t.Fatalf("delete/start/resume = %d/%d/%d after a failed backup, want 0/0/0", r.deleteCalls, r.startCalls, r.resumeCalls)
+	}
+
+	// No record: nothing to back up, and the hook is not called.
+	app, f = newObserveFirstApp(t)
+	r = &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	called := false
+	deps = Deps{
+		Scion:                     scion.New(r, scion.Options{}),
+		BackupManagerConversation: func(context.Context, *scion.Agent) error { called = true; return nil },
+	}
+	if err := runApplyFresh(app, deps); err != nil || called {
+		t.Fatalf("absent record: err %v, backup called %v", err, called)
 	}
 }
 
@@ -4281,7 +4358,7 @@ func TestWarnManagerNestedVirt(t *testing.T) {
 	r := &run{app: &config.App{Name: "assistant", Backend: config.BackendLima, NestedVirt: true}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
 	r.d.ProbeContainerDevice = func(ctx context.Context, ref, p string) (bool, error) { return false, nil }
 	r.warnManagerNestedVirt(context.Background(), "/lever/proj")
-	if len(logs) != 1 || !strings.Contains(logs[0], "has no /dev/kvm") || !strings.Contains(logs[0], "lever up --fresh") || !strings.Contains(logs[0], "back up") {
+	if len(logs) != 1 || !strings.Contains(logs[0], "has no /dev/kvm") || !strings.Contains(logs[0], "lever up --fresh --keep-conversation") {
 		t.Fatalf("on, lacks: logs = %q", logs)
 	}
 	logs = nil
@@ -4337,6 +4414,27 @@ func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
 	}
 	if !slices.Contains(opts.Volumes, scion.VolumeMount{Source: KVMDevice, Target: KVMDevice}) {
 		t.Fatalf("the manager create must carry the /dev/kvm volume, got %v", opts.Volumes)
+	}
+}
+
+// manager.resources reaches the manager's create as scion limits, the
+// memory in scion's notation; unset sends none.
+func TestManagerStartOptsResources(t *testing.T) {
+	app := &config.App{Name: "m", Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}
+	r := &run{app: app}
+	opts, err := r.managerStartOpts(context.Background(), "/lever/proj", "task", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Resources != (scion.Resources{}) {
+		t.Fatalf("unset: resources = %+v, want none", opts.Resources)
+	}
+	app.Manager.Resources = config.Resources{Memory: "3GiB", CPU: "1.5"}
+	if opts, err = r.managerStartOpts(context.Background(), "/lever/proj", "task", ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := (scion.Resources{Memory: "3Gi", CPU: "1.5"}); opts.Resources != want {
+		t.Fatalf("resources = %+v, want %+v", opts.Resources, want)
 	}
 }
 

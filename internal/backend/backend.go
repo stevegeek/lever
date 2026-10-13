@@ -19,6 +19,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
 // Profile DECLARES what a backend actually guarantees, so the security posture
@@ -60,6 +61,11 @@ type Config struct {
 	// backend obeys it rather than re-deriving it, so the flag lever passes to
 	// the hub and the assets lever staged cannot disagree.
 	ScionWebUI bool
+	// ScionPrebuild, when set, is the host build of the configured scion,
+	// started before EnsureUp so it runs while the VM boots (lever#189). The
+	// scion step uses it when the guest's architecture matches the one it
+	// was built for. nil: the scion step builds.
+	ScionPrebuild *scionbin.Prebuild
 	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
 	// so the jail can reach ONLY the broker port on the host alias. Required for
 	// api-key mode: LLM traffic must flow broker→Anthropic, not
@@ -86,6 +92,11 @@ type Config struct {
 	// config) installs nothing and only reports a pending reboot. Ignored
 	// by OrbStack, whose kernel is OrbStack's.
 	GuestKernel string
+	// GuestProfile is the Lima guest profile to converge on ("small" or
+	// "standard"; config.App.EffectiveGuestProfile, guest.GuestProfile*).
+	// "" (`lever provision`, no config) leaves the guest as it is. Ignored
+	// by OrbStack.
+	GuestProfile string
 	// HWEFailStamp is the host path of the stamp lever keeps when the HWE
 	// kernel install failed in this VM (state.State.HWEFailStamp, 0600,
 	// keyed by the guest's machine id). While it names the VM and the
@@ -120,7 +131,6 @@ func (c Config) HasScion() bool {
 // and doctor both rely on that.
 type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
-	DockerHost() string    // endpoint the broker drives (valid after EnsureUp)
 	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
 	HostAliasV4() string   // resolved IPv4 of HostToolAlias as seen from the jail ("" if unresolved)
 	MountDest() string     // path inside the jail where the project tree is bind-mounted

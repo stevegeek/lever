@@ -16,17 +16,70 @@
 # through `limactl shell` (the scion + lever-agent install pipes), and
 # header-free `limactl list --format`.
 #
-# Env overrides: NAME, JAIL_PORT, ADMIN_PORT, SUPPRESS_PORT, SCION_VERSION,
-# KEEP=1 (skip teardown for inspection).
+# Host ports: the broker's jail and admin ports, the db tool's backend and the
+# port the suppression check listens on in the guest (which must be free on
+# the host too, or the check would reach the host's listener). Each is picked
+# free on 127.0.0.1 unless set, so a run never lands on another lever
+# instance's ports (lever#181). A port set explicitly that is in use stops the
+# run before anything starts, naming the process holding it.
+#
+# Env overrides: NAME, JAIL_PORT, ADMIN_PORT, TOOL_PORT, SUPPRESS_PORT,
+# SCION_VERSION, KEEP=1 (skip teardown for inspection). On failure the end of
+# the broker and tool logs is printed (masked), with or without KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 NAME="${NAME:-limae2e}"
-JAIL_PORT="${JAIL_PORT:-8443}"
-ADMIN_PORT="${ADMIN_PORT:-8444}"
-SUPPRESS_PORT="${SUPPRESS_PORT:-8898}"
 MACHINE="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
+
+# --- host ports ------------------------------------------------------------------
+# Chosen before anything is created, so a refusal leaves nothing to clean up.
+# port_busy <port>: something accepts connections on 127.0.0.1:<port>.
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+# port_holder <port>: the process listening on <port>, as best the host can tell.
+port_holder() {
+  local out=""
+  if command -v lsof >/dev/null 2>&1; then
+    out="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -Fpc 2>/dev/null | awk '
+      /^p/ && !p { p = substr($0, 2) } /^c/ && !c { c = substr($0, 2) }
+      END { if (p) printf "pid %s (%s)", p, c }')"
+  fi
+  if [ -z "$out" ] && command -v ss >/dev/null 2>&1; then
+    out="$(ss -ltnpH "sport = :$1" 2>/dev/null | sed -n 's/.*users:(\(.*\))$/\1/p' | head -1)"
+  fi
+  echo "${out:-an unknown process (lsof/ss could not tell)}"
+}
+
+# pick_port <var>: keep <var> when set (refusing to start if it is in use),
+# else set it to a free port at or above $next_port, not one already taken by
+# this run.
+picked=" "
+next_port=$((20000 + RANDOM % 9000))
+pick_port() {
+  local var="$1" val="${!1:-}"
+  if [ -n "$val" ]; then
+    if port_busy "$val"; then
+      echo "$var=$val is in use on 127.0.0.1 by $(port_holder "$val"); stop it or pick another port"
+      exit 1
+    fi
+  else
+    val=$next_port
+    while port_busy "$val" || [[ "$picked" == *" $val "* ]]; do
+      val=$((val + 1))
+      [ "$val" -lt 65000 ] || { echo "no free port found for $var"; exit 1; }
+    done
+    next_port=$((val + 1))
+  fi
+  picked="$picked$val "
+  printf -v "$var" '%s' "$val"
+}
+for v in JAIL_PORT ADMIN_PORT TOOL_PORT SUPPRESS_PORT; do pick_port "$v"; done
+if [ "$(printf '%s\n' "$JAIL_PORT" "$ADMIN_PORT" "$TOOL_PORT" "$SUPPRESS_PORT" | sort -u | wc -l)" -ne 4 ]; then
+  echo "JAIL_PORT, ADMIN_PORT, TOOL_PORT and SUPPRESS_PORT must differ:$picked"; exit 1
+fi
+
 
 # Ensure the REAL Go toolchain is on PATH regardless of CWD. lever shells out to
 # `go` (the host-side scion cross-compile) from the instance dir; under an
@@ -42,11 +95,67 @@ INST="$WORK/instance"
 BIN="$WORK/bin"
 fail=0
 
-say()  { printf '\n=== %s ===\n' "$*"; }
-ok()   { printf '  PASS: %s\n' "$*"; }
-bad()  { printf '  FAIL: %s\n' "$*"; fail=1; }
+# Every line carries the time, and each phase its duration, so a slow run
+# shows where the time went (lever#184). lever itself prints its bring-up
+# steps as plain timestamped lines (LEVER_PROGRESS=plain) and records them in
+# the instance's .lever-state/logs/.
+export LEVER_PROGRESS="${LEVER_PROGRESS:-plain}"
+ts()   { date +%H:%M:%S; }
+phase_name=""; phase_start=$SECONDS; phase_times=""
+end_phase() {
+  [ -n "$phase_name" ] || return 0
+  d=$((SECONDS - phase_start))
+  printf '%s --- %s took %ds\n' "$(ts)" "$phase_name" "$d"
+  phase_times="$phase_times$(printf '  %5ds  %s' "$d" "$phase_name")
+"
+}
+say()  { end_phase; phase_name="$*"; phase_start=$SECONDS; printf '\n%s === %s ===\n' "$(ts)" "$*"; }
+ok()   { printf '%s   PASS: %s\n' "$(ts)" "$*"; }
+bad()  { printf '%s   FAIL: %s\n' "$(ts)" "$*"; fail=1; }
+
+# mask_secrets hides anything shaped like a credential, on top of lever's own
+# masking in these logs: API keys, GitHub tokens, bearer tokens, PEM private
+# keys, and the value of any secret/token/password/key field. perl, because
+# BSD sed has no case-insensitive substitution; without perl nothing is
+# printed rather than something unmasked.
+mask_secrets() {
+  if ! command -v perl >/dev/null 2>&1; then
+    echo "      | (perl not found: log not shown unmasked)"
+    return 0
+  fi
+  perl -pe '
+    s/sk-ant-[A-Za-z0-9_-]+/sk-ant-***/g;
+    s/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/$1***/g;
+    s/(authorization["\x27]?\s*[:=]\s*).*/$1***/gi;
+    s/(bearer\s+)[A-Za-z0-9._~+\/=-]+/$1***/gi;
+    s/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/***jwt***/g;
+    s#(://)[^/\s:@]+:[^/\s@]+@#$1***@#g;
+    $k = 1 if /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+    if ($k) { $k = 0 if /-----END [A-Z ]*PRIVATE KEY-----/; $_ = "[private key masked]\n"; }
+    s/((?:secret|token|password|passwd|credential|private[_-]?key|api[_-]?key)[A-Za-z_-]*["\x27]?\s*[:=]\s*["\x27]?)[^"\x27\s,}]+/$1***/gi;
+  '
+}
+
+# show_logs prints the end of the instance's broker and tool logs, masked, so a
+# failed run explains itself without KEEP=1. lever masks credentials in
+# these files; they hold no keys. The exit trap prints them on a failed run
+# unless a failed acceptance already did.
+logs_shown=""
+show_logs() {
+  logs_shown=1
+  st="$INST/.lever-state"
+  for f in "$st/broker.out.log" "$st/broker.log" "$st"/tool-logs/*.log; do
+    [ -f "$f" ] || continue
+    printf '%s   --- last lines of %s:\n' "$(ts)" "${f#$WORK/}"
+    tail -n 30 "$f" | mask_secrets | sed 's/^/      | /'
+  done
+}
 
 cleanup() {
+  rc=$?
+  if { [ "$rc" != "0" ] || [ "$fail" != "0" ]; } && [ -z "$logs_shown" ]; then
+    show_logs
+  fi
   if [ "${KEEP:-0}" = "1" ]; then
     echo "KEEP=1: leaving VM $MACHINE + broker up; work dir $WORK"
     return
@@ -60,6 +169,7 @@ trap cleanup EXIT
 # --- preflight -------------------------------------------------------------------
 command -v limactl >/dev/null 2>&1 || { echo "limactl not found (brew install lima)"; exit 1; }
 say "lima $(limactl --version 2>&1 | head -1)"
+echo "host ports: jail $JAIL_PORT, admin $ADMIN_PORT, db tool $TOOL_PORT, suppression check $SUPPRESS_PORT"
 
 # Lima's vz VMs run the host's native arch; build the in-guest lever-agent to match.
 case "$(uname -m)" in
@@ -135,7 +245,7 @@ $authblock
   tools:
     - name: db
       command: [$BIN/lever-tool-db, -dsn, "file:$INST/ref.db"]
-      backend: 127.0.0.1:3201
+      backend: 127.0.0.1:$TOOL_PORT
       operations:
         - name: read
           caveat_param:
@@ -154,6 +264,15 @@ limactl delete --force "$MACHINE" >/dev/null 2>&1 && echo "deleted stale $MACHIN
 # egress_closed_in_guest — true iff the LEVER_EGRESS chain has the catch-all DROP.
 egress_closed_in_guest() {
   limactl shell "$MACHINE" sudo iptables -S LEVER_EGRESS 2>/dev/null | grep -qE '^-A LEVER_EGRESS -j DROP'
+}
+
+# egress_one_reject_in_guest — true iff the chain's only REJECT, in either
+# family, is the metadata /32 (lever#182); everything else it refuses is a DROP.
+egress_one_reject_in_guest() {
+  local v4 v6
+  v4=$(limactl shell "$MACHINE" sudo iptables -S LEVER_EGRESS 2>/dev/null | grep -e '-j REJECT')
+  v6=$(limactl shell "$MACHINE" sudo ip6tables -S LEVER_EGRESS 2>/dev/null | grep -e '-j REJECT')
+  [ "$v4" = "-A LEVER_EGRESS -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited" ] && [ -z "$v6" ]
 }
 
 # stop_broker — stop the host-side broker via its PID file (fallback: pattern),
@@ -176,16 +295,65 @@ stop_broker() {
 # idempotent bootstrap-latch path (§4), and a posture switch is done with an
 # explicit `lever down` first (§3), which stops the broker via its PID file.
 run_acceptance() {
-  ( cd "$INST" && "$LEVER" acceptance )
+  if ( cd "$INST" && "$LEVER" acceptance ); then
+    return 0
+  fi
+  show_logs
+  return 1
 }
 
 # ================================================================================
-# 1. OPEN posture — full VM bring-up (slow: apt + rootless docker + scion) then the
+# 1. OPEN posture — full VM bring-up (slow: apt + podman + scion) then the
 #    six §19 checks.
 # ================================================================================
 say "OPEN posture: lever acceptance (first bring-up — several minutes)"
 write_config open
 if run_acceptance; then ok "acceptance PASSED (open egress)"; else bad "acceptance FAILED (open egress)"; fi
+if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (open egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (open egress)"; fi
+# lever#183: provisioning installs and starts no dockerd (scion runs podman).
+if limactl shell "$MACHINE" pgrep -x dockerd >/dev/null 2>&1; then bad "a dockerd runs in the guest"; else ok "no dockerd in the guest"; fi
+# lever#201: the guest keeps the core of a crashed process named "tmux: server"
+# (and drops other dumps), root only, even with the crashing process's core
+# size limit at 0. Two python processes stand in: one renames itself and
+# segfaults, a decoy segfaults under its own name. A second "tmux: server"
+# crash right after is dropped (one kept core a minute), and the kernel runs
+# one core handler at a time (core_pipe_limit=1).
+core_capture_in_guest() {
+  limactl shell "$MACHINE" -- sh -s <<'SH'
+set -u
+d=/var/lib/lever/cores
+sudo sh -c "rm -f $d/core.tmux.*" || exit 1
+ulimit -c 0
+python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGSEGV)' 2>/dev/null
+python3 -c 'import ctypes, os, signal; ctypes.CDLL(None).prctl(15, b"tmux: server", 0, 0, 0); os.kill(os.getpid(), signal.SIGSEGV)' 2>/dev/null
+i=0
+while [ "$i" -lt 20 ]; do
+  n=$(sudo sh -c "ls $d" 2>/dev/null | grep -c '^core\.tmux\.[0-9]*\.[0-9]*$')
+  [ "$n" -ge 1 ] && break
+  sleep 0.5; i=$((i+1))
+done
+python3 -c 'import ctypes, os, signal; ctypes.CDLL(None).prctl(15, b"tmux: server", 0, 0, 0); os.kill(os.getpid(), signal.SIGSEGV)' 2>/dev/null
+sleep 1
+echo "pattern=$(cat /proc/sys/kernel/core_pattern)"
+echo "pipelimit=$(cat /proc/sys/kernel/core_pipe_limit)"
+echo "cores=$n"
+echo "after=$(sudo sh -c "ls $d" 2>/dev/null | grep -c '^core\.tmux\.[0-9]*\.[0-9]*$')"
+echo "dir=$(sudo stat -c '%a %U' $d)"
+echo "file=$(sudo sh -c "stat -c '%a %U %s' $d/core.tmux.*" 2>/dev/null | head -1)"
+sudo sh -c "rm -f $d/core.tmux.*"
+SH
+}
+core_out=$(core_capture_in_guest 2>&1)
+if printf '%s\n' "$core_out" | grep -q '^pattern=|/usr/local/libexec/lever-core-handler %P %t %e$' &&
+  printf '%s\n' "$core_out" | grep -q '^pipelimit=1$' &&
+  printf '%s\n' "$core_out" | grep -q '^cores=1$' &&
+  printf '%s\n' "$core_out" | grep -q '^after=1$' &&
+  printf '%s\n' "$core_out" | grep -q '^dir=700 root$' &&
+  printf '%s\n' "$core_out" | grep -Eq '^file=600 root [1-9][0-9]*$'; then
+  ok "the guest keeps a crashed tmux server's core, root only, drops the decoy's and a second within the minute"
+else
+  bad "guest tmux core capture: $(printf '%s' "$core_out" | tr '\n' ' ')"
+fi
 
 # ================================================================================
 # 2. Guest port-forward suppression — the template hazard. A guest 0.0.0.0
@@ -250,6 +418,7 @@ say "switch posture: lever down (open) then bring up CLOSED"
 write_config closed
 if run_acceptance; then ok "acceptance PASSED (closed egress)"; else bad "acceptance FAILED (closed egress)"; fi
 if egress_closed_in_guest; then ok "LEVER_EGRESS chain is closed (catch-all DROP present)"; else bad "closed posture did not install the catch-all DROP"; fi
+if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (closed egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (closed egress)"; fi
 
 # ================================================================================
 # 4. Idempotent closed re-apply (I2: never briefly reopen egress). Re-run the gate
@@ -281,6 +450,8 @@ else
 fi
 
 # --- verdict ---------------------------------------------------------------------
+end_phase; phase_name=""
 say "result"
+printf 'phase times:\n%s' "$phase_times"
 if [ "$fail" = "0" ]; then echo "lima e2e: PASS"; else echo "lima e2e: FAIL"; fi
 exit "$fail"

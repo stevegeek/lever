@@ -62,6 +62,22 @@ type PlanOpts struct {
 	// up, so `up` can neither see the record nor delete it beforehand
 	// (lever#33). The plan itself is unchanged.
 	Fresh bool
+	// Attach says the caller (`lever up` on a terminal) attaches the
+	// operator to the manager once Run returns: start-manager's gate for a
+	// manager it created then ends as soon as claude's tmux pane is alive,
+	// with no settle window, and the caller checks the manager after the
+	// detach (CheckManagerAfterDetach) (lever#188). A resume's gate is
+	// unchanged by it: it waits for claude's session start, so a claude
+	// --continue that finds no conversation is caught before the attach
+	// (lever#202). The plan itself is unchanged.
+	Attach bool
+	// FreshWithoutConversation lets start-manager replace a resume that died
+	// because claude --continue found no conversation with a fresh start, as
+	// `lever up --fresh` would, once Deps.ManagerConversationEmpty proved
+	// from the guest that the home holds no transcript (lever#202). `lever
+	// up` sets it; `lever apply` does not, and never deletes a record. The
+	// plan itself is unchanged.
+	FreshWithoutConversation bool
 }
 
 // brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.
@@ -71,9 +87,12 @@ var brokerOnlyKinds = map[StepKind]bool{
 }
 
 // Plan returns the ordered bring-up for an app. Order is load-bearing: the
-// image must be loaded before scion runs in the jail; projects must be
-// registered before the manager (which orchestrates them) starts. The jail
-// itself is not a step: it is up before Run can be called at all (see Run).
+// images must be loaded before the manager starts; projects must be
+// registered before the manager (which orchestrates them) starts. Run starts
+// broker-up and load-image alongside the steps after them and waits for them
+// where a step needs them (lever#189; see waitsFor), so the order here is
+// also the order the list numbers them in. The jail itself is not a step: it
+// is up before Run can be called at all (see Run).
 func Plan(a *config.App, opts PlanOpts) []Step {
 	// Bring the host broker (+ first-party tools) up first; the jail reaches it
 	// at host.orb.internal. Health-checked before the manager starts.

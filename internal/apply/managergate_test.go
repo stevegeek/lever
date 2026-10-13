@@ -197,7 +197,7 @@ func TestHarnessWaitProgressShowsFreshHubReadings(t *testing.T) {
 			}
 		}
 	}
-	prog := StartProgress(deps, "up", "hello", "waiting")
+	prog := StartProgress(context.Background(), deps, "up", "hello", "waiting")
 	defer prog.Stop()
 	if err := WaitManagerLive(context.Background(), deps, "hello", "/lever", prog); err != nil {
 		t.Fatalf("want up, got %v", err)
@@ -324,7 +324,7 @@ func TestProgressPrintsAtTheIntervalWithStageAndElapsed(t *testing.T) {
 	ft := newFakeTicks()
 	sink := newLineSink()
 	d := Deps{Log: sink.logf, clock: ft.now, progressTicker: ft.ticker}
-	p := StartProgress(d, "up", "hello", "asking scion to resume the container")
+	p := StartProgress(context.Background(), d, "up", "hello", "asking scion to resume the container")
 	if got := time.Duration(ft.interval.Load()); got != 15*time.Second {
 		t.Fatalf("ticker interval = %s, want 15s", got)
 	}

@@ -132,17 +132,20 @@ func TestBuildRulesClosedInternetExemptsLoopback(t *testing.T) {
 			t.Fatalf("loopback ACCEPT (idx %d) must precede the catch-all DROP (idx %d) for family %v", lo, drop, fam)
 		}
 	}
-	// Open posture stays byte-identical to pre-existing: no loopback rule added.
+	// The open posture gets no blanket loopback ACCEPT.
 	if loIdx(open, IPv4) >= 0 || loIdx(open, IPv6) >= 0 {
-		t.Fatal("open posture must NOT add a loopback rule (byte-identical to pre-existing)")
+		t.Fatal("open posture must NOT add a blanket loopback ACCEPT")
 	}
 }
 
-// loIdx returns the index of the `-o lo -j ACCEPT` rule for a family, or -1.
+// loIdx returns the index of the blanket `-o lo -j ACCEPT` rule for a family,
+// or -1. (The narrow lo ACCEPT for the metadata REJECT's ICMP answer, in both
+// postures, is not it; TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop
+// pins that one.)
 func loIdx(rules []Rule, fam Family) int {
+	blanket := []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}
 	for i, r := range rules {
-		args := strings.Join(r.Args, " ")
-		if r.Family == fam && strings.Contains(args, "-o lo") && strings.Contains(args, "-j ACCEPT") {
+		if r.Family == fam && slices.Equal(r.Args, blanket) {
 			return i
 		}
 	}
@@ -365,5 +368,54 @@ func TestParseResolverUpstreams(t *testing.T) {
 		if got := ParseResolverUpstreams(c.conf, c.alias); got != nil {
 			t.Errorf("%s: got %v, want nothing", name, got)
 		}
+	}
+}
+
+// lever#182: the metadata address is REJECTed (so the hub's GCP lookup fails
+// at once) just before the 169.254/16 DROP, in both postures, and that /32
+// REJECT is the ONLY non-DROP refusal in the chain: every other rule is an
+// ACCEPT already asserted elsewhere or a DROP.
+func TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop(t *testing.T) {
+	const want = "-A " + Chain + " -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited"
+	for _, closed := range []bool{false, true} {
+		rules := BuildRulesDNS("192.168.5.2", "fd07::fe", []int{8443}, closed, []DNSForward{{"udp", 41234}})
+		v4 := familyArgs(rules, IPv4)
+		rej := indexOfRule(v4, "-j REJECT")
+		if rej < 0 || v4[rej] != want {
+			t.Fatalf("closed=%v: metadata REJECT missing or not exact: %v", closed, v4)
+		}
+		drop := indexOfRule(v4, "-d 169.254.0.0/16 -j DROP")
+		if drop < 0 || rej > drop {
+			t.Fatalf("closed=%v: metadata REJECT (idx %d) must precede the 169.254/16 DROP (idx %d)", closed, rej, drop)
+		}
+		if closed && rej > dropIdxFamily(rules, IPv4) {
+			t.Fatal("metadata REJECT must precede the catch-all DROP")
+		}
+		// The REJECT's ICMP answer goes from and to the guest's own address
+		// (192.168.5.15 on Lima) over lo: it must be ACCEPTed before the
+		// private-range DROPs, narrowly, or the dial hangs as if dropped.
+		const reply = "-A " + Chain + " -o lo -p icmp --icmp-type host-prohibited -m conntrack --ctstate RELATED -j ACCEPT"
+		acc := indexOfRule(v4, "--icmp-type")
+		if acc < 0 || v4[acc] != reply || acc > indexOfRule(v4, "-d 192.168.0.0/16 -j DROP") {
+			t.Fatalf("closed=%v: the REJECT's reply ACCEPT is missing, wider than it should be, or after the 192.168/16 DROP: %v", closed, v4)
+		}
+		if indexOfRule(familyArgs(rules, IPv6), "icmp") >= 0 {
+			t.Fatalf("closed=%v: no IPv6 ICMP rule is needed", closed)
+		}
+		var rejects int
+		for _, r := range rules {
+			if slices.Contains(r.Args, "REJECT") {
+				rejects++
+				if r.Family != IPv4 {
+					t.Fatalf("closed=%v: a REJECT in the IPv6 chain: %v", closed, r.Args)
+				}
+			}
+		}
+		if rejects != 1 {
+			t.Fatalf("closed=%v: want exactly one REJECT, got %d", closed, rejects)
+		}
+	}
+	if !DroppedForJail(net.ParseIP(MetadataV4)) {
+		t.Fatal("the metadata address must stay inside the refused set")
 	}
 }

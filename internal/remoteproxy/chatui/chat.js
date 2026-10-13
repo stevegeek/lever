@@ -22,8 +22,11 @@ import {
   encodeWAV,
   insertText,
   localVoices,
+  pickServerVoice,
   pickVoice,
   resampledLength,
+  speakErrorText,
+  speechParts,
   speechText,
   transcriptOf,
   voiceErrorText,
@@ -1038,32 +1041,50 @@ function placeTranscript(agent, text) {
   store(draftKey(agent), insertText(draft, draft.length, draft.length, text).value);
 }
 
-// Read-aloud: the browser's speech synthesis, with on-device voices only
-// (localService true), so the text never goes to a speech service. The
-// voice chosen is kept per device.
+// Read-aloud. With server voices (remote.voice.read_aloud: server, the
+// roster lists them while lever-tool-tts is ready) the page sends the
+// cleaned text, part by part, to lever, which answers each part spoken by a
+// voice on the operator's own host, and plays it with Web Audio. When the
+// first part cannot be had, or there are no server voices, it reads with
+// the browser's speech synthesis, with on-device voices only (localService
+// true), so the text never goes to a speech service either way. The voice
+// chosen is kept per device, one for each kind.
 const READ_VOICE_KEY = 'lever-read-voice';
-let speaking = null; // {id, button}: the message being read
+const SERVER_VOICE_KEY = 'lever-read-server-voice';
+const SPEAK_PATH = '/lever/api/voice/speak';
+// SPEAK_MS bounds one part: the tool gives a run 2 minutes, and the proxy
+// may queue it behind two others.
+const SPEAK_MS = 7 * 60000;
+let speaking = null; // {id, button, stop}: the message being read
+let audioCtx = null; // one per page, made and resumed on a tap
 
 const speechOn = () => !!(window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function');
-// readAloudOn: the device can speak, and lever offers read-aloud to this
-// login (remote.voice on and read_aloud not off; the roster says so).
-const readAloudOn = () => speechOn() && !!(roster && roster.readAloud);
+// serverSpeech is the roster's server voices, or null.
+const serverSpeech = () => (roster && roster.readAloud && roster.speech) || null;
+// readAloudOn: lever offers read-aloud to this login (remote.voice on and
+// read_aloud not off; the roster says so) and there is a voice to read
+// with: a server voice, or the device's own.
+const readAloudOn = () => !!(roster && roster.readAloud) && (speechOn() || !!serverSpeech());
 
-function savedReadVoice() {
+// kept and keep read and write a voice choice in localStorage (it lasts on
+// the device, unlike drafts, which are per tab).
+function kept(key) {
   try {
-    return localStorage.getItem(READ_VOICE_KEY) || '';
+    return localStorage.getItem(key) || '';
   } catch {
     return ''; // storage is off
   }
 }
 
-function saveReadVoice(uri) {
+function keep(key, value) {
   try {
-    localStorage.setItem(READ_VOICE_KEY, uri);
+    localStorage.setItem(key, value);
   } catch {
     // storage is off: the choice lasts for this page load
   }
 }
+
+const savedReadVoice = () => kept(READ_VOICE_KEY);
 
 function speechLang() {
   return (document.documentElement && document.documentElement.lang) || navigator.language || '';
@@ -1085,7 +1106,15 @@ function stopSpeaking() {
   const s = speaking;
   speaking = null;
   if (s && s.button) setText(s.button, '🔊');
+  if (s && s.stop) s.stop();
   if (s && speechOn()) window.speechSynthesis.cancel();
+}
+
+// finished ends s's reading when it is still the one going.
+function finished(s) {
+  if (speaking !== s) return;
+  speaking = null;
+  setText(s.button, '🔊');
 }
 
 // speak reads m aloud; a tap on the message being read stops it, a tap on
@@ -1093,48 +1122,201 @@ function stopSpeaking() {
 function speak(m, button) {
   const again = !!speaking && speaking.id === m.id;
   stopSpeaking();
-  if (again || !speechOn()) return;
+  if (again) return;
+  const text = speechText(messageText(m));
+  if (!text) return;
+  const sv = serverSpeech();
+  if (sv && chat && audioContext()) {
+    speakServer(m, button, text, sv, chat.name);
+    return;
+  }
+  speakDevice(m, button, text);
+}
+
+// speakDevice reads text with the device's own voice.
+function speakDevice(m, button, text) {
+  if (!speechOn()) {
+    showError('This device has no on-device voice to read with.');
+    return;
+  }
   const v = pickVoice(window.speechSynthesis.getVoices(), savedReadVoice(), speechLang());
   if (!v) {
     showError('This device has no on-device voice to read with.');
     return;
   }
-  const text = speechText(messageText(m));
-  if (!text) return;
   const u = new window.SpeechSynthesisUtterance(text);
   u.voice = v;
   u.lang = v.lang;
   const s = { id: m.id, button };
-  const done = () => {
-    if (speaking !== s) return;
-    speaking = null;
-    setText(s.button, '🔊');
-  };
-  u.addEventListener('end', done);
-  u.addEventListener('error', done);
+  u.addEventListener('end', () => finished(s));
+  u.addEventListener('error', () => finished(s));
   speaking = s;
   setText(button, '⏹');
   window.speechSynthesis.speak(u);
 }
 
-// syncReadVoice offers the voice choice in an open chat when the device has
-// more than one on-device voice. The options are built again only when the
-// voices change.
+// audioContext is the page's Web Audio context, made on first use (null
+// when the browser has none).
+function audioContext() {
+  if (audioCtx) return audioCtx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (typeof AC !== 'function') return null;
+  try {
+    audioCtx = new AC();
+  } catch {
+    audioCtx = null;
+  }
+  return audioCtx;
+}
+
+// speakPart asks lever for one part spoken. It never throws: {ok, data}
+// with the WAV, or {ok: false, status, body}.
+async function speakPart(s, agent, id, text, voice) {
+  const limit = new AbortController();
+  s.aborts.add(limit);
+  const timer = setTimeout(() => limit.abort(), SPEAK_MS);
+  try {
+    const res = await fetch(SPEAK_PATH, {
+      method: 'POST',
+      credentials: 'same-origin',
+      redirect: 'manual',
+      signal: limit.signal,
+      // The proxy refuses a request without X-Lever-Voice: a custom header
+      // needs a CORS preflight across origins.
+      headers: { Accept: 'audio/wav, application/json', 'Content-Type': 'application/json', 'X-Lever-Voice': '1' },
+      body: JSON.stringify({ agent, id: String(id), text, voice }),
+    });
+    if (res.ok && (res.headers.get('Content-Type') || '').startsWith('audio/wav')) {
+      return { ok: true, data: await res.arrayBuffer() };
+    }
+    const raw = await res.text();
+    let body = raw;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      // not JSON: keep the text
+    }
+    return { ok: false, status: res.status, body };
+  } catch {
+    return { ok: false, status: 0, body: limit.signal.aborted ? 'no answer in time' : 'cannot reach the server' };
+  } finally {
+    clearTimeout(timer);
+    s.aborts.delete(limit);
+  }
+}
+
+// playBuffer plays one decoded part and resolves when it ends (or is
+// stopped).
+function playBuffer(ctx, buf, s) {
+  return new Promise((resolve) => {
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.addEventListener('ended', () => resolve());
+    s.source = src;
+    src.start();
+  });
+}
+
+// decode is one WAV part as an AudioBuffer, or null.
+async function decode(ctx, data) {
+  try {
+    return await ctx.decodeAudioData(data);
+  } catch {
+    return null;
+  }
+}
+
+// speakServer reads text with a server voice, part by part: the next part
+// is asked for while one plays (one request at a time, as the proxy
+// allows). When the first part fails, the device's voice reads the whole
+// message instead; a later failure stops with a note.
+function speakServer(m, button, text, sv, agent) {
+  const ctx = audioContext();
+  try {
+    // iOS: play even with the ring switch on silent, as a media player
+    // does (Safari 16.4 and later).
+    if (navigator.audioSession) navigator.audioSession.type = 'playback';
+  } catch {
+    // not settable here: the browser's default applies
+  }
+  // Resumed within the tap, so the browser lets it play once the audio
+  // arrives.
+  if (typeof ctx.resume === 'function') void ctx.resume().catch(() => {});
+  const parts = speechParts(text, sv.maxChars);
+  if (!parts.length) return;
+  const voice = pickServerVoice(sv, kept(SERVER_VOICE_KEY));
+  const s = { id: m.id, button, aborts: new Set(), source: null };
+  s.stop = () => {
+    for (const a of s.aborts) a.abort();
+    if (s.source) {
+      try {
+        s.source.stop();
+      } catch {
+        // not started, or ended already
+      }
+    }
+  };
+  speaking = s;
+  setText(button, '⏹');
+  void (async () => {
+    let next = speakPart(s, agent, m.id, parts[0], voice);
+    for (let i = 0; i < parts.length; i++) {
+      const got = await next;
+      if (speaking !== s) return;
+      const buf = got.ok ? await decode(ctx, got.data) : null;
+      if (speaking !== s) return;
+      if (!buf) {
+        finished(s);
+        if (i === 0 && speechOn()) {
+          speakDevice(m, button, text);
+          return;
+        }
+        showError(`Reading aloud stopped: ${got.ok ? 'the audio could not be played' : speakErrorText(got.status, got.body)}`);
+        return;
+      }
+      next = i + 1 < parts.length ? speakPart(s, agent, m.id, parts[i + 1], voice) : null;
+      await playBuffer(ctx, buf, s);
+      if (speaking !== s) return;
+    }
+    finished(s);
+  })();
+}
+
+// syncReadVoice offers the voice choice in an open chat when there is more
+// than one voice to read with: the server voices while the roster lists
+// them, else the device's on-device voices. The options are built again
+// only when the voices change.
 let readVoices = '';
 function syncReadVoice() {
-  const voices = readAloudOn() ? localVoices(window.speechSynthesis.getVoices()) : [];
-  el.readvoice.hidden = !chat || voices.length < 2;
-  const key = voices.map((v) => v.voiceURI).join('\n');
+  const sv = readAloudOn() ? serverSpeech() : null;
+  let options = [];
+  let chosen = '';
+  if (sv) {
+    options = sv.voices.map((v) => ({ value: v.name, label: v.lang ? `${v.name} (${v.lang})` : v.name }));
+    chosen = pickServerVoice(sv, kept(SERVER_VOICE_KEY));
+  } else if (readAloudOn()) {
+    const voices = localVoices(window.speechSynthesis.getVoices());
+    options = voices.map((v) => ({ value: v.voiceURI, label: `${oneLine(v.name, 60)} (${oneLine(v.lang, 20)})` }));
+    const v = pickVoice(voices, savedReadVoice(), speechLang());
+    chosen = v ? v.voiceURI : '';
+  }
+  el.readvoice.hidden = !chat || options.length < 2;
+  const key = `${sv ? 'server' : 'device'}\n${options.map((o) => o.value).join('\n')}`;
   if (el.readvoice.hidden || key === readVoices) return;
   readVoices = key;
-  const chosen = pickVoice(voices, savedReadVoice(), speechLang());
-  el.readvoice.replaceChildren(...voices.map((v) => {
-    const o = document.createElement('option');
-    o.value = v.voiceURI;
-    setText(o, `${oneLine(v.name, 60)} (${oneLine(v.lang, 20)})`);
-    return o;
+  el.readvoice.replaceChildren(...options.map((o) => {
+    const opt = document.createElement('option');
+    opt.value = o.value;
+    setText(opt, o.label);
+    return opt;
   }));
-  el.readvoice.value = chosen ? chosen.voiceURI : '';
+  el.readvoice.value = chosen;
+}
+
+// saveReadVoice keeps the voice chosen, for the kind the picker shows.
+function saveReadVoice(value) {
+  keep(serverSpeech() ? SERVER_VOICE_KEY : READ_VOICE_KEY, value);
 }
 
 function closeFiles() {
@@ -1868,7 +2050,11 @@ el.files.addEventListener('click', () => {
 });
 window.addEventListener('resize', grow);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') dropHiddenDictation();
+  if (document.visibilityState !== 'hidden') return;
+  dropHiddenDictation();
+  // A server voice stops with the page hidden, as dictation does: its
+  // requests would go on in the background.
+  if (speaking && speaking.aborts) stopSpeaking();
 });
 // pagehide (the tab closed, navigated away or put in the back/forward
 // cache) also stops reading aloud, which would otherwise go on speaking.

@@ -38,7 +38,7 @@ var errNoIdentity = errors.New("no identity")
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|request|delegate|call|after-compact>")
+		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|request|delegate|call|after-compact|claude-ready>")
 	}
 	// One signal-bound context for every verb: SIGINT/SIGTERM cancels the
 	// network call in flight (or the renew loop, the gateway listener, the
@@ -61,6 +61,8 @@ func run(argv []string) error {
 		return cmdCLI(ctx, argv[1], argv[2:])
 	case "after-compact":
 		return cmdAfterCompact(argv[2:], os.Stdout)
+	case "claude-ready":
+		return cmdClaudeReady(argv[2:], os.Getenv("TMUX_PANE"))
 	default:
 		return fmt.Errorf("unknown subcommand %q", argv[1])
 	}
@@ -184,6 +186,26 @@ func cmdAfterCompact(args []string, out io.Writer) error {
 		return err
 	}
 	_, err = out.Write(append(b, '\n'))
+	return err
+}
+
+// cmdClaudeReady is the command of lever's claude-ready hook, which boot
+// writes into the managed settings (agent.WriteManagedSettings): Claude Code
+// runs it at every session start, and it writes the marker the manager gate
+// waits for after a start (agent.WriteReadyMarker, lever#188). A session
+// outside a tmux pane is not scion's harness and writes nothing. It prints
+// nothing on stdout (Claude Code would add it to the session's context),
+// ignores the hook input on stdin, and takes no flags: the command line is in
+// a file the agent can rewrite, and nothing it could pass would change what
+// the marker says.
+func cmdClaudeReady(args []string, pane string) error {
+	if len(args) != 0 {
+		return errors.New("claude-ready: takes no arguments")
+	}
+	err := agent.WriteReadyMarker(agent.ReadyMarkerPath, "/proc", pane)
+	if errors.Is(err, agent.ErrNotHarness) {
+		return nil
+	}
 	return err
 }
 

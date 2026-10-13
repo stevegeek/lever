@@ -64,6 +64,8 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 func scriptFirewall(f *proc.FakeRunner) {
 	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
 	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	f.Script("orb -u root -m lever-jail iptables -S OUTPUT", proc.Result{Stdout: jumpListing})
+	f.Script("orb -u root -m lever-jail ip6tables -S OUTPUT", proc.Result{Stdout: jumpListing})
 	f.Script("orb -u root -m lever-jail bash -c exec ip", proc.Result{})
 }
 
@@ -98,9 +100,15 @@ func TestApplyEgressCommitsAtomicallyAfterResolving(t *testing.T) {
 		t.Fatal("rebuilt should be true when the chain is not already closed")
 	}
 	backendtest.AssertAtomicCommit(t, f, "host.orb.internal")
-	// The chain and the jump are ensured without touching live rules.
-	if !f.Called(proc.ArgvContains("iptables -N LEVER_EGRESS")) || !f.Called(proc.ArgvContains("iptables -C OUTPUT -j LEVER_EGRESS")) {
-		t.Fatal("ApplyEgress must ensure the chain and the OUTPUT jump")
+	// The chain and the jump are ensured without touching live rules; the
+	// fake's OUTPUT already has the jump first, so it is left alone.
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		if !f.Called(proc.ArgvContains(bin+" -N LEVER_EGRESS")) || !f.Called(proc.ArgvContains(bin+" -S OUTPUT")) {
+			t.Fatalf("%s: ApplyEgress must ensure the chain and read OUTPUT", bin)
+		}
+	}
+	if bins, _ := backendtest.JumpCommits(f); len(bins) != 0 {
+		t.Fatalf("an OUTPUT already right was rewritten: %v", bins)
 	}
 	// The whole v4 ruleset, in order, is in the one commit.
 	want := egress.RestoreInput(egress.BuildRules("0.250.250.254", "fd07::fe", []int{8443}, true), egress.IPv4)
@@ -112,10 +120,11 @@ func TestApplyEgressCommitsAtomicallyAfterResolving(t *testing.T) {
 // A failed commit leaves the previous chain in force: nothing flushes it
 // first, and the error says so.
 func TestApplyEgressFailedCommitKeepsTheOldChain(t *testing.T) {
-	f := proc.NewFakeRunner()
+	f := &listingRunner{FakeRunner: proc.NewFakeRunner(), Out4: jumpListing, Out6: jumpListing}
 	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
 	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
-	// No script for the restore: the commit fails.
+	// No script for the restore: the commit fails. (The jump is already
+	// first, so the chain commit is the only restore.)
 	g := orbGuest(f, "lever-jail")
 	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "", nil }
 	_, _, rebuilt, err := g.ApplyEgress(context.Background(), resolve, nil, []int{8443}, false)
@@ -251,18 +260,30 @@ func TestApplyEgressResolverForwardErrorFails(t *testing.T) {
 	}
 }
 
+// jumpListing is an OUTPUT listing whose first and only rule is the jump.
+const jumpListing = "-P OUTPUT ACCEPT\n-A OUTPUT -j LEVER_EGRESS\n"
+
 // listingRunner answers `iptables -S LEVER_EGRESS` and `ip6tables -S
-// LEVER_EGRESS` with fixed listings ("" = no chain), and fails the
-// ip6tables-restore commit while FailV6 is set; everything else falls
-// through to the embedded FakeRunner (scripted by scriptFirewall).
+// LEVER_EGRESS` with fixed listings ("" = no chain), and `-S OUTPUT` with
+// Out4/Out6 ("" = fall through), and fails the ip6tables-restore CHAIN
+// commit while FailV6 is set; everything else falls through to the embedded
+// FakeRunner (scripted by scriptFirewall).
 type listingRunner struct {
 	*proc.FakeRunner
-	V4, V6 string
-	FailV6 bool
+	V4, V6     string
+	Out4, Out6 string
+	FailV6     bool
+	NoJumpFix  bool // a jump commit "succeeds" but leaves OUTPUT as it was
 }
 
 func (r *listingRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	argv := strings.Join(args, " ")
+	for _, c := range []struct{ probe, out string }{{"ip6tables -S OUTPUT", r.Out6}, {"iptables -S OUTPUT", r.Out4}} {
+		if strings.Contains(argv, c.probe) && c.out != "" {
+			r.Calls = append(r.Calls, proc.Call{Name: name, Args: args})
+			return proc.Result{Stdout: c.out}, nil
+		}
+	}
 	for _, c := range []struct{ probe, out string }{{"ip6tables -S LEVER_EGRESS", r.V6}, {"iptables -S LEVER_EGRESS", r.V4}} {
 		if strings.Contains(argv, c.probe) {
 			r.Calls = append(r.Calls, proc.Call{Name: name, Args: args})
@@ -280,11 +301,21 @@ func (r *listingRunner) Run(ctx context.Context, env map[string]string, name str
 }
 
 func (r *listingRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
-	if r.FailV6 && strings.Contains(strings.Join(args, " "), "exec ip6tables-restore") {
-		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args})
+	in, _ := io.ReadAll(stdin)
+	// A jump commit leaves that family's OUTPUT with the jump first, as
+	// the real one does (unless NoJumpFix keeps it as it was).
+	if argv := strings.Join(args, " "); strings.Contains(string(in), "-I OUTPUT 1 ") && !r.NoJumpFix {
+		if strings.Contains(argv, "exec ip6tables-restore") {
+			r.Out6 = jumpListing
+		} else if strings.Contains(argv, "exec iptables-restore") {
+			r.Out4 = jumpListing
+		}
+	}
+	if r.FailV6 && strings.Contains(strings.Join(args, " "), "exec ip6tables-restore") && strings.Contains(string(in), ":LEVER_EGRESS ") {
+		r.Calls = append(r.Calls, proc.Call{Name: name, Args: args, Stdin: string(in)})
 		return proc.Result{Code: 1}, errors.New("ip6tables-restore: boom")
 	}
-	return r.FakeRunner.RunStdin(ctx, stdin, env, name, args...)
+	return r.FakeRunner.RunStdin(ctx, strings.NewReader(string(in)), env, name, args...)
 }
 
 func newListingRunner(v4, v6 string) *listingRunner {
@@ -419,5 +450,147 @@ func TestAliasFallbackHalfClosedStates(t *testing.T) {
 	}
 	if bins, _ := backendtest.RestoreCommits(r.FakeRunner); len(bins) != 0 {
 		t.Fatalf("v6 closed + v4 open: nothing may be committed, got %v", bins)
+	}
+}
+
+// The re-apply skip for a live closed posture holds only for a chain that is
+// exactly the closed ruleset (lever#187): a rule added or removed by hand,
+// or a port the config now allows, is rebuilt, with the alias read back from
+// the live chain when the closed chain blocks the lookup.
+func TestApplyEgressRebuildsAClosedChainThatDiffers(t *testing.T) {
+	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
+	cases := map[string]struct {
+		v4    string
+		ports []int
+	}{
+		"accept added":   {strings.Replace(backendtest.ClosedChain, "-A LEVER_EGRESS -o lo -j ACCEPT\n", "-A LEVER_EGRESS -o lo -j ACCEPT\n-A LEVER_EGRESS -d 1.2.3.4/32 -j ACCEPT\n", 1), []int{8443}},
+		"drop removed":   {strings.Replace(backendtest.ClosedChain, "-A LEVER_EGRESS -d 10.0.0.0/8 -j DROP\n", "", 1), []int{8443}},
+		"port added":     {backendtest.ClosedChain, []int{8443, 9000}},
+		"port withdrawn": {backendtest.ClosedChain, nil},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newListingRunner(c.v4, backendtest.ClosedChain6)
+			v4, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, c.ports, true)
+			if err != nil || !rebuilt || v4 != backendtest.HostAliasV4 {
+				t.Fatalf("v4=%q rebuilt=%v err=%v; want a rebuild from the live alias", v4, rebuilt, err)
+			}
+			backendtest.AssertAtomicCommitOrder(t, r.FakeRunner)
+			if got, want := committedV4(t, r.FakeRunner), egress.RestoreInput(egress.BuildRules(backendtest.HostAliasV4, backendtest.HostAliasV6, c.ports, true), egress.IPv4); got != want {
+				t.Fatalf("committed:\n%s\nwant:\n%s", got, want)
+			}
+		})
+	}
+}
+
+// The chain and the OUTPUT jump are ensured before the skip, so a closed
+// chain that OUTPUT no longer jumps to is never left that way.
+func TestApplyEgressEnsuresTheJumpBeforeTheClosedSkip(t *testing.T) {
+	r := newListingRunner(backendtest.ClosedChain, backendtest.ClosedChain6)
+	if _, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), noopResolve(t), nil, []int{8443}, true); err != nil || rebuilt {
+		t.Fatalf("rebuilt=%v err=%v; want the skip", rebuilt, err)
+	}
+	for _, bin := range []string{"iptables", "ip6tables"} {
+		if !r.Called(proc.ArgvContains(bin + " -S OUTPUT")) {
+			t.Errorf("%s: the OUTPUT jump was not checked on the skip path", bin)
+		}
+	}
+}
+
+// A rule ahead of the jump (here an ACCEPT, which would let every packet
+// past the lever chain) is fixed on the skip path too: every copy of the
+// jump is deleted and one inserted first, in ONE commit per family, and
+// the other OUTPUT rules are left alone. An OUTPUT already right is not
+// touched.
+func TestApplyEgressMakesTheJumpFirst(t *testing.T) {
+	bypassed := "-P OUTPUT ACCEPT\n-A OUTPUT -j ACCEPT\n-A OUTPUT -j LEVER_EGRESS\n-A OUTPUT -o eth0 -j LEVER_EGRESS\n-A OUTPUT -j LEVER_EGRESS\n"
+	r := newListingRunner(backendtest.ClosedChain, backendtest.ClosedChain6)
+	r.Out4, r.Out6 = bypassed, jumpListing
+	if _, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), noopResolve(t), nil, []int{8443}, true); err != nil || rebuilt {
+		t.Fatalf("rebuilt=%v err=%v; want the chain skip", rebuilt, err)
+	}
+	bins, inputs := backendtest.JumpCommits(r.FakeRunner)
+	if len(bins) != 1 || bins[0] != "iptables-restore" {
+		t.Fatalf("want one IPv4 jump commit and none for the IPv6 OUTPUT already right, got %v", bins)
+	}
+	want := "*filter\n-D OUTPUT -j LEVER_EGRESS\n-D OUTPUT -j LEVER_EGRESS\n-I OUTPUT 1 -j LEVER_EGRESS\nCOMMIT\n"
+	if inputs[0] != want {
+		t.Fatalf("jump commit:\n%s\nwant:\n%s", inputs[0], want)
+	}
+	for _, c := range r.Calls {
+		if a := c.Argv(); strings.Contains(a, "-D OUTPUT") || strings.Contains(a, "-I OUTPUT") || strings.Contains(a, "-A OUTPUT") {
+			t.Fatalf("OUTPUT changed outside the one commit: %s", a)
+		}
+	}
+	// The repair is read back.
+	n := 0
+	for _, c := range r.Calls {
+		if strings.Contains(c.Argv(), "lever-jail iptables -S OUTPUT") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("IPv4 OUTPUT read %d times, want 2 (before and after the repair)", n)
+	}
+}
+
+// A fresh guest: OUTPUT has no jump; one is inserted first in each family,
+// before either chain commit.
+func TestApplyEgressInsertsTheJumpOnAFreshGuest(t *testing.T) {
+	r := newListingRunner("", "")
+	r.Out4, r.Out6 = "-P OUTPUT ACCEPT\n", "-P OUTPUT ACCEPT\n"
+	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "fd07::fe", nil }
+	if _, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, []int{8443}, false); err != nil || !rebuilt {
+		t.Fatalf("rebuilt=%v err=%v", rebuilt, err)
+	}
+	bins, inputs := backendtest.JumpCommits(r.FakeRunner)
+	if len(bins) != 2 || bins[0] != "iptables-restore" || bins[1] != "ip6tables-restore" {
+		t.Fatalf("want one jump commit per family, got %v", bins)
+	}
+	for _, in := range inputs {
+		if in != "*filter\n-I OUTPUT 1 -j LEVER_EGRESS\nCOMMIT\n" {
+			t.Fatalf("jump commit:\n%s", in)
+		}
+	}
+	first := r.CallIndex(func(c proc.Call) bool { return strings.Contains(c.Stdin, ":LEVER_EGRESS ") })
+	last := -1
+	for i, c := range r.Calls {
+		if strings.Contains(c.Stdin, "-I OUTPUT 1 ") {
+			last = i
+		}
+	}
+	if first < 0 || last > first {
+		t.Fatalf("the jumps (last at %d) must be placed before the first chain commit (%d)", last, first)
+	}
+}
+
+// A jump commit that succeeds without leaving the jump first fails the
+// apply, naming what OUTPUT holds, before any chain commit.
+func TestApplyEgressFailsWhenTheJumpRepairDidNotTake(t *testing.T) {
+	r := newListingRunner("", "")
+	r.Out4, r.Out6, r.NoJumpFix = "-P OUTPUT ACCEPT\n-A OUTPUT -j ACCEPT\n", jumpListing, true
+	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "", nil }
+	_, _, rebuilt, err := orbGuest(r, "lever-jail").ApplyEgress(context.Background(), resolve, nil, []int{8443}, false)
+	if err == nil || rebuilt || !strings.Contains(err.Error(), "still not OUTPUT's first") || !strings.Contains(err.Error(), "-A OUTPUT -j ACCEPT") {
+		t.Fatalf("rebuilt=%v err=%v", rebuilt, err)
+	}
+	if bins, _ := backendtest.RestoreCommits(r.FakeRunner); len(bins) != 0 {
+		t.Fatalf("a chain commit followed a failed repair: %v", bins)
+	}
+}
+
+// A failed jump commit fails the apply before anything else: the chain
+// stays as it was, and OUTPUT too (the commit is all or nothing).
+func TestApplyEgressFailedJumpCommitFails(t *testing.T) {
+	f := &listingRunner{FakeRunner: proc.NewFakeRunner()}
+	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
+	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
+	resolve := func(context.Context) (string, string, error) { return "0.250.250.254", "", nil }
+	_, _, rebuilt, err := orbGuest(f, "lever-jail").ApplyEgress(context.Background(), resolve, nil, []int{8443}, false)
+	if err == nil || rebuilt || !strings.Contains(err.Error(), "first rule") {
+		t.Fatalf("rebuilt=%v err=%v; want the jump commit failure", rebuilt, err)
+	}
+	if bins, _ := backendtest.RestoreCommits(f.FakeRunner); len(bins) != 0 {
+		t.Fatalf("no chain commit may follow a failed jump commit, got %v", bins)
 	}
 }

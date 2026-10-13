@@ -40,8 +40,7 @@ func TestHostRootHasProvisioningOnly(t *testing.T) {
 // TestHostRootLeavesErrorPrintingToExecute: cobra's own `Error: <err>` line
 // would relay guest-supplied text raw (scion stderr wrapped into an error,
 // a hub slug), so the host root silences it; cli.Execute prints the
-// sanitized line instead. Cobra's usage print on error stays as it was
-// (every subcommand sets SilenceUsage itself).
+// sanitized line instead.
 func TestHostRootLeavesErrorPrintingToExecute(t *testing.T) {
 	guest := "scion: \x1b]0;pwned\x07all good"
 	newRoot := func() *cobra.Command {
@@ -84,5 +83,74 @@ func TestRootVersionFlag(t *testing.T) {
 	}
 	if strings.TrimSpace(flag) == "" || strings.TrimSpace(flag) != strings.TrimSpace(verb) {
 		t.Fatalf("--version printed %q, version printed %q", flag, verb)
+	}
+}
+
+// TestUsageOnlyForUsageErrors (lever#202): a command that fails at run time
+// prints its error and no usage text, which read as a flag problem; cobra's
+// own flag and argument errors, and a RunE's usageError, keep it.
+func TestUsageOnlyForUsageErrors(t *testing.T) {
+	const usage = "Usage:\n  lever up [CONFIG] [flags]"
+	missing := t.TempDir() + "/nope/lever.yaml"
+	for _, c := range []struct {
+		name      string
+		argv      []string
+		wantUsage bool
+	}{
+		{"runtime failure", []string{"up", missing}, false},
+		{"unknown flag", []string{"up", "--bogus"}, true},
+		{"too many arguments", []string{"up", "a", "b"}, true},
+		{"flag combination checked in RunE", []string{"up", "--no-backup"}, true},
+		{"bad --action JSON", []string{"directive", "send", "hello", "--action", "{"}, true},
+		{"invalid action", []string{"directive", "send", "hello", "--action", `{"kind":"nope"}`}, true},
+		{"bad --not-before", []string{"directive", "send", "hello", "--instruction", "x", "--not-before", "soon"}, true},
+		{"--not-before too far ahead", []string{"directive", "send", "hello", "--instruction", "x", "--not-before", "2999-01-01T00:00:00Z"}, true},
+	} {
+		out, err := clitest.Exec(t, NewRoot(), c.argv...)
+		if err == nil {
+			t.Fatalf("%s: no error", c.name)
+		}
+		usage := usage
+		if c.argv[0] == "directive" {
+			usage = "Usage:\n  lever directive send"
+		}
+		if got := strings.Contains(out, usage); got != c.wantUsage {
+			t.Errorf("%s: usage printed = %v, want %v:\n%s", c.name, got, c.wantUsage, out)
+		}
+	}
+}
+
+// TestSilenceUsageOnRunErrors: every RunE in the tree is wrapped, nested
+// ones too; success and a command that already silences usage are left as
+// they are.
+func TestSilenceUsageOnRunErrors(t *testing.T) {
+	var fail, wrong error
+	root := &cobra.Command{Use: "lever"}
+	group := &cobra.Command{Use: "group"}
+	leaf := &cobra.Command{Use: "leaf", RunE: func(*cobra.Command, []string) error { return fail }}
+	flags := &cobra.Command{Use: "flags", RunE: func(*cobra.Command, []string) error { return wrong }}
+	group.AddCommand(leaf, flags)
+	root.AddCommand(group)
+	silenceUsageOnRunErrors(root)
+
+	fail = errors.New("boom")
+	out, err := clitest.Exec(t, root, "group", "leaf")
+	if err != fail || strings.Contains(out, "Usage:") || !leaf.SilenceUsage {
+		t.Fatalf("runtime error: err=%v usage printed=%v", err, strings.Contains(out, "Usage:"))
+	}
+	wrong = usageError{errors.New("--a goes with --b")}
+	out, err = clitest.Exec(t, root, "group", "flags")
+	if err == nil || err.Error() != "--a goes with --b" || !strings.Contains(out, "Usage:") {
+		t.Fatalf("usage error: err=%v out=%q", err, out)
+	}
+	// A command that silences usage itself keeps it silenced.
+	leaf.SilenceUsage = true
+	fail = nil
+	if _, err := clitest.Exec(t, root, "group", "leaf"); err != nil || !leaf.SilenceUsage {
+		t.Fatalf("a silenced command changed: err=%v silenced=%v", err, leaf.SilenceUsage)
+	}
+	leaf.SilenceUsage = false
+	if out, err := clitest.Exec(t, root, "group", "leaf"); err != nil || out != "" || leaf.SilenceUsage {
+		t.Fatalf("success: err=%v out=%q silenced=%v", err, out, leaf.SilenceUsage)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 // TestStopSuspendsManager verifies the happy path: with a reachable jail,
@@ -107,9 +107,11 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 		{
 			// The manager's suspend failing is a warning too: the worker pass
 			// still runs under its own budget, then the power-off.
-			name:     "manager suspend fails",
+			name: "manager suspend fails",
+			// The extra list checks whether the record was already suspended
+			// (a refusal that is no failure); it reads running here.
 			scripts:  map[string]string{"scion suspend scratch": "ok", argvScionList: stopFleetJSON},
-			wantArgv: []string{"list", "suspend demo", "list", "suspend scratch"},
+			wantArgv: []string{"list", "suspend demo", "list", "list", "suspend scratch"},
 			wantOut:  "warning: scion suspend failed",
 			alsoOut:  `worker "scratch" suspended`,
 		},
@@ -240,11 +242,7 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("sleep", "60")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	cmd, done := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(fmt.Sprintf("%d\n", cmd.Process.Pid)), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +260,18 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	if _, err := os.Stat(st.RemotePID()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("remote.pid should be removed after stop, stat err = %v", err)
 	}
-	_ = cmd.Wait()
+	waitStopped(t, done, "the remote proxy")
+}
+
+// waitStopped fails unless the stand-in daemon whose done channel this is
+// exits soon.
+func waitStopped(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s was not stopped", what)
+	}
 }
 
 // TestStopWithExplicitMachineDoesNotStopBroker mirrors destroy's --machine
@@ -569,6 +578,243 @@ func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
 		}
 		if len(p.reportAfterReset) != 1 || !p.reportAfterReset[0] {
 			t.Fatalf("the session report must follow the reset: %v (%s)", p.reportAfterReset, out.String())
+		}
+	}
+}
+
+// TestStopKeepVM: --keep-vm suspends the manager and stops the jail's hub
+// and the host daemons as a plain stop does, but never powers the VM off
+// (lever#196). The suspend comes before the hub stop: a suspend needs the
+// hub.
+func TestStopKeepVM(t *testing.T) {
+	dir := writeInstance(t, managerYAML)
+	t.Chdir(dir)
+
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
+	if err := os.WriteFile(st.RemotePID(), []byte(fmt.Sprintf("%d\n", proxy.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := scionOKRunner()
+	sb := &stubBackend{runner: f}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop", "--keep-vm"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("stop --keep-vm: %v", err)
+	}
+	if sb.stopped || sb.down {
+		t.Fatal("--keep-vm must leave the VM running")
+	}
+	suspend := f.CallIndex(proc.Subcommand("scion", "suspend"))
+	hubStop := f.CallIndex(proc.ArgvPrefix("scion", "server", "stop"))
+	if suspend < 0 || hubStop < 0 || suspend > hubStop {
+		t.Fatalf("want the suspend, then the hub stop; got %+v", f.Calls)
+	}
+	if _, err := os.Stat(st.RemotePID()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the host daemons must be stopped too: remote.pid stat err = %v", err)
+	}
+	waitStopped(t, proxyDone, "the remote proxy")
+	got := out.String()
+	for _, want := range []string{"left running", "keeps its memory on the host", "`lever up`"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// A hub stop that fails is a warning: the agents are suspended, the VM is
+// left running, and the command succeeds.
+func TestStopKeepVMHubStopFailureWarns(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetContext(context.Background())
+	if err := stopKeepVM(cmd, failingHub{}, "lever-demo", true); err != nil {
+		t.Fatalf("stopKeepVM: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "warning: stopping the jail's hub failed") || !strings.Contains(got, "left running") {
+		t.Errorf("output:\n%s", got)
+	}
+}
+
+type failingHub struct{}
+
+func (failingHub) ServerStop(context.Context) error { return errors.New("scion: no answer") }
+
+// With the jail not answering, --keep-vm suspended nothing: it runs nothing
+// there, never powers the VM off, and fails naming plain `lever stop` (a VM
+// that is up after all still runs its agents).
+func TestStopKeepVMJailUnreachable(t *testing.T) {
+	dir := writeInstance(t, managerYAML)
+	t.Chdir(dir)
+
+	f := proc.NewFakeRunner()
+	sb := &stubBackend{resolveRunUserErr: errors.New("machine not up"), runner: f}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop", "--keep-vm"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "no agent was suspended") || !strings.Contains(err.Error(), "`lever stop`") {
+		t.Fatalf("err = %v", err)
+	}
+	if sb.stopped || len(f.Calls) != 0 {
+		t.Fatalf("stopped=%t calls=%+v", sb.stopped, f.Calls)
+	}
+}
+
+// --keep-vm acts on the current instance only: with --machine, or outside
+// an instance, it refuses before touching anything.
+func TestStopKeepVMRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"machine", []string{"stop", "--keep-vm", "--machine", "lever-other"}, "without --machine"},
+		{"no instance", []string{"stop", "--keep-vm"}, "needs an instance"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			sb := &stubBackend{}
+			root := stubRoot(sb)
+			var out bytes.Buffer
+			root.SetOut(&out)
+			root.SetErr(&out)
+			root.SetArgs(tc.args)
+			err := root.Execute()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if sb.stopped || sb.resolvedRunUser {
+				t.Fatal("a refused --keep-vm must touch nothing")
+			}
+		})
+	}
+}
+
+// A plain stop after `lever stop --keep-vm` finds the hub down: the
+// suspend warning names that case, and the VM is powered off.
+func TestStopAfterKeepVMHubDown(t *testing.T) {
+	dir := writeInstance(t, twoWorkersYAML)
+	t.Chdir(dir)
+
+	f := hubDownRunner{proc.NewFakeRunner()}
+	sb := &stubBackend{runner: f}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !sb.stopped {
+		t.Fatal("the VM must still be powered off")
+	}
+	got := out.String()
+	if !strings.Contains(got, "warning: scion suspend failed: the jail's hub did not answer (after `lever stop --keep-vm`") {
+		t.Errorf("output:\n%s", got)
+	}
+}
+
+// hubDownRunner answers every scion call as a hub that does not serve.
+type hubDownRunner struct{ *proc.FakeRunner }
+
+func (r hubDownRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r hubDownRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "scion" {
+		_, _ = r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+		return proc.Result{Code: 1, Stderr: "Error: dial tcp 127.0.0.1:8080: connect: connection refused"}, errors.New("exit status 1")
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// A suspend that did not take under --keep-vm: the hub is still stopped and
+// the VM left up, but the command fails rather than claim the agents are
+// suspended (that container goes on running in the VM).
+func TestStopKeepVMSuspendFailureFails(t *testing.T) {
+	dir := writeInstance(t, managerYAML)
+	t.Chdir(dir)
+
+	f := suspendFailsRunner{proc.NewFakeRunner()}
+	sb := &stubBackend{runner: f}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop", "--keep-vm"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "not every agent was suspended") {
+		t.Fatalf("err = %v", err)
+	}
+	if sb.stopped {
+		t.Fatal("--keep-vm must leave the VM running")
+	}
+	if !f.Called(proc.ArgvPrefix("scion", "server", "stop")) {
+		t.Errorf("the hub must still be stopped: %+v", f.Calls)
+	}
+	if strings.Contains(out.String(), "agents suspended") {
+		t.Errorf("must not claim the agents are suspended:\n%s", out.String())
+	}
+}
+
+// suspendFailsRunner fails `scion suspend` and answers every other scion
+// call ok.
+type suspendFailsRunner struct{ *proc.FakeRunner }
+
+func (r suspendFailsRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r suspendFailsRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	res, _ := r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+	if name != "scion" {
+		return res, nil
+	}
+	if len(args) > 0 && args[0] == "suspend" {
+		return proc.Result{Code: 1, Stderr: "Error: the hub said no"}, errors.New("exit status 1")
+	}
+	return proc.Result{Stdout: "ok"}, nil
+}
+
+// TestReportManagerSuspendErrorQuietWhenSuspended: a suspend refused because
+// the record is already suspended is a note, not a warning; any other
+// failure still warns.
+func TestReportManagerSuspendErrorQuietWhenSuspended(t *testing.T) {
+	for _, c := range []struct {
+		phase string
+		warn  bool
+	}{{scion.PhaseSuspended, false}, {scion.PhaseRunning, true}, {"", true}} {
+		var out, errOut strings.Builder
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetContext(context.Background())
+		f := &fakeSuspender{}
+		if c.phase != "" {
+			f.agents = []scion.Agent{{Slug: "demo", Phase: c.phase}}
+		}
+		suspended := reportManagerSuspendError(cmd, f, "demo", "/lever", errors.New("cannot suspend: phase suspended"))
+		if suspended == c.warn {
+			t.Errorf("phase %q: reported suspended=%v", c.phase, suspended)
+		}
+		if got := strings.Contains(errOut.String(), "warning"); got != c.warn {
+			t.Errorf("phase %q: warned=%v (stderr %q, stdout %q)", c.phase, got, errOut.String(), out.String())
 		}
 	}
 }

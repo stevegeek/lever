@@ -66,9 +66,8 @@ func (g Guest) pipeInto(ctx context.Context, prefix []string, stdin io.Reader, s
 	return err
 }
 
-// EnsureRuntimes installs prereqs + rootless Docker and rootless Podman.
-// Idempotent: the rootless install script and systemctl --start are safe to re-run.
-// Podman is daemonless so no service startup is needed; scion auto-prefers it over Docker.
+// EnsureRuntimes installs the prereqs and rootless Podman, which scion runs
+// the agents in. Idempotent. Podman is daemonless, so nothing is started.
 func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	root := func(script string) error {
 		_, err := g.RootRun(ctx, "bash", "-lc", script)
@@ -104,7 +103,7 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships
 	// kernel.apparmor_restrict_unprivileged_userns=1, which blocks the rootless
 	// runtimes' rootlesskit/pasta from creating the unprivileged user namespace
-	// they require — without this the rootless Docker/Podman install fails with
+	// they require — without this rootless podman fails with
 	// "fork/exec /proc/self/exe: permission denied". The jail is a dedicated VM
 	// whose OWN kernel is the containment boundary (backend Guarantee 0:
 	// separate-kernel), and its sole purpose is to run the agent's untrusted
@@ -116,8 +115,8 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	if err := root(`printf 'kernel.apparmor_restrict_unprivileged_userns=0\n' > /etc/sysctl.d/99-lever-userns.conf; sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true`); err != nil {
 		return fmt.Errorf("relax unprivileged userns for rootless runtimes: %w", err)
 	}
-	// Enable lingering so the run user's systemd instance (and thus rootless
-	// dockerd) survives after the provisioning SSH session closes. `loginctl
+	// Enable lingering so the run user's systemd instance (and its runtime
+	// dir, which rootless podman uses) survives after the provisioning SSH session closes. `loginctl
 	// enable-linger` is the canonical path (used on OrbStack), but on the Lima
 	// Ubuntu guest systemd-logind's D-Bus interface intermittently hangs — every
 	// loginctl call then blocks until timeout and the step fails ("Could not
@@ -129,11 +128,14 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 		runUser, runUser, runUser, runUser, runUser, runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)
 	}
-	if err := user(`command -v dockerd-rootless.sh >/dev/null 2>&1 || curl -fsSL https://get.docker.com/rootless | sh`); err != nil {
-		return fmt.Errorf("rootless install: %w", err)
-	}
-	if err := user(`export XDG_RUNTIME_DIR=/run/user/$(id -u); export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock; systemctl --user enable --now docker 2>/dev/null || (nohup dockerd-rootless.sh >/tmp/lever-dockerd.log 2>&1 &); timeout 30 sh -c 'until docker info >/dev/null 2>&1; do sleep 1; done'`); err != nil {
-		return fmt.Errorf("start rootless dockerd: %w", err)
+	// Lever used to install and start a rootless dockerd here. Nothing uses it
+	// (scion runs the agents in podman; lever#183), so a VM provisioned
+	// before that has it running and enabled: stop and disable it. A no-op
+	// once it is off or was never installed. The pid file covers the
+	// non-systemd start lever also used; it lives in the run user's runtime
+	// dir, which no agent container sees. The installed files stay.
+	if err := user(dockerOffScript); err != nil {
+		return fmt.Errorf("disable the unused rootless dockerd: %w", err)
 	}
 	// Per-agent network isolation: agents run in their own pasta netns, and
 	// reach the VM-loopback hub at PastaHostAddr. The drop-in depends on the
@@ -144,6 +146,20 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	return nil
 }
 
+// dockerOffScript stops and disables the rootless dockerd an older lever
+// started in the guest (lever#183), if it is there; it exits 0 either way.
+// A pid file left by a dockerd that died is only acted on while that pid is
+// still a dockerd, so a reused pid is never killed.
+const dockerOffScript = `export XDG_RUNTIME_DIR=/run/user/$(id -u)
+if timeout 10 systemctl --user -q is-enabled docker 2>/dev/null || timeout 10 systemctl --user -q is-active docker 2>/dev/null; then
+  timeout 30 systemctl --user disable --now docker >/dev/null 2>&1 || true
+fi
+pid=$(cat "$XDG_RUNTIME_DIR/docker.pid" 2>/dev/null) || pid=
+case "$pid" in ''|*[!0-9]*) ;; *)
+  [ "$(cat /proc/$pid/comm 2>/dev/null)" = dockerd ] && kill "$pid" 2>/dev/null ;;
+esac
+true`
+
 // GOARCH returns the guest's Go cross-compile arch, detected via `uname -m`
 // run inside the guest (as the run user).
 func (g Guest) GOARCH(ctx context.Context) (string, error) {
@@ -151,7 +167,12 @@ func (g Guest) GOARCH(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("uname -m: %w", err)
 	}
-	switch u := strings.TrimSpace(res.Stdout); u {
+	return goarchOf(res.Stdout)
+}
+
+// goarchOf maps `uname -m` output to a Go arch.
+func goarchOf(uname string) (string, error) {
+	switch u := strings.TrimSpace(uname); u {
 	case "aarch64", "arm64":
 		return "arm64", nil
 	case "x86_64", "amd64":
@@ -175,24 +196,48 @@ type ScionSpec = scionbin.Spec
 // is what lets the jail host carry no Go — issue #27) and streamed in by
 // InstallRootBinaryIfChanged.
 func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
+	return g.EnsureScionFrom(ctx, spec, nil)
+}
+
+// EnsureScionFrom is EnsureScion with the guest's arch and the installed
+// binary's digest taken from a warm-path probe (ScionProbePath in
+// ProbeSpec.HashPaths) instead of their own guest calls. A nil snapshot, or
+// one that could not read either, reads it from the guest as EnsureScion
+// does.
+func (g Guest) EnsureScionFrom(ctx context.Context, spec ScionSpec, snap *Snapshot) error {
 	// Validate the spec BEFORE touching the guest, so a plainly wrong config
 	// fails without a round-trip and without depending on the guest being up.
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	arch, err := g.GOARCH(ctx)
-	if err != nil {
-		return fmt.Errorf("detect guest architecture: %w", err)
+	arch, ok := snap.GOARCH()
+	if !ok {
+		var err error
+		if arch, err = g.GOARCH(ctx); err != nil {
+			return fmt.Errorf("detect guest architecture: %w", err)
+		}
 	}
-	bin, err := scionbin.Resolve(ctx, g.Host, spec, arch, g.Machine)
+	// A build started while the VM booted (lever#189) is used when it was
+	// for this guest's architecture; otherwise build now.
+	bin, err, ok := spec.Prebuilt.Result(ctx, spec, arch, g.Machine)
+	if !ok {
+		bin, err = scionbin.Resolve(ctx, g.Host, spec, arch, g.Machine)
+	}
 	if err != nil {
 		return err
 	}
-	if _, err := g.InstallRootBinaryIfChanged(ctx, bin, scionDestPath); err != nil {
+	guestDigest := func() string { return g.guestFileDigest(ctx, scionDestPath) }
+	if d, ok := snap.Digest(scionDestPath); ok {
+		guestDigest = func() string { return d }
+	}
+	if _, err := g.installRootBinaryIfChanged(ctx, bin, scionDestPath, guestDigest); err != nil {
 		return err
 	}
 	return g.EnsureScionWebAssets(ctx, spec)
 }
+
+// ScionProbePath is the installed scion binary, for ProbeSpec.HashPaths.
+const ScionProbePath = scionDestPath
 
 // InstallRootBinary streams a host-local executable into the guest at destPath
 // (mode +x), owned by root, via the RootPrefix transport. It is the backend-
@@ -326,6 +371,13 @@ func (g Guest) guestFileDigest(ctx context.Context, path string) string {
 // decided the install (hashedHandle). Reopening by path between the two
 // would let anyone who can write the path swap the file in the gap.
 func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) (bool, error) {
+	return g.installRootBinaryIfChanged(ctx, localPath, destPath, func() string { return g.guestFileDigest(ctx, destPath) })
+}
+
+// installRootBinaryIfChanged is InstallRootBinaryIfChanged with the guest
+// digest supplied: read in place, or by the warm-path probe moments earlier
+// (the same sha256sum of the same file, batched with the probe's other reads).
+func (g Guest) installRootBinaryIfChanged(ctx context.Context, localPath, destPath string, guestDigest func() string) (bool, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return false, fmt.Errorf("hashing %s: %w", localPath, err)
@@ -335,7 +387,7 @@ func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPa
 	if err != nil {
 		return false, fmt.Errorf("hashing %s: %w", localPath, err)
 	}
-	if g.guestFileDigest(ctx, destPath) == h.digest {
+	if guestDigest() == h.digest {
 		return false, nil
 	}
 	if err := g.installFromHandle(ctx, h, destPath); err != nil {

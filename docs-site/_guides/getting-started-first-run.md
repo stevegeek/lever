@@ -118,7 +118,9 @@ lever up
 
 `lever up` runs the plan from step 3 (creating the jail if needed), starts the manager, and hands
 you its terminal. **First boot takes ~10-15 minutes** (runtimes + a multi-GB image load); after
-that it is fast.
+that a `lever up` after `lever stop` typically takes 1-2 minutes, and one with the manager already
+running only seconds. [System requirements & sizing](/getting-started/requirements/) has the
+numbers per backend and what the first boot downloads.
 
 `up` is idempotent: re-running it resumes a suspended manager and re-attaches. Detach with
 `Ctrl-b d`; the manager keeps running in the jail, and `lever attach` or the next `lever up`
@@ -192,3 +194,8 @@ Three levels, from lightest to heaviest:
 next `lever up` resumes the same manager conversation. `destroy` removes the jail machine
 `lever-<name>`; your tree on disk is untouched, and the next `lever up` re-provisions from scratch.
 See the [CLI reference](/reference/cli/#everyday-lifecycle).
+
+`lever stop --keep-vm` does everything `stop` does except power the VM off: the agents are
+suspended and the hub and the broker stopped, so the next `lever up` skips the VM boot. The VM
+keeps its memory on the host until you power it off; see
+[stopping without powering off](/operations/#stopping-without-powering-off).

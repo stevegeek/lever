@@ -8,12 +8,13 @@ import (
 
 	"github.com/stevegeek/lever/internal/daemon"
 	"github.com/stevegeek/lever/internal/egress"
+	"github.com/stevegeek/lever/internal/progress"
 )
 
 // ApplyEgress applies the LEVER_EGRESS ruleset inside the guest via RootPrefix,
 // preserving the I2 no-reopen property: if closedInternet and the closed chain
-// is already live, it returns the alias parsed from the live chain and does NOT
-// touch it. resolve returns the (v4, v6) host-alias addresses as seen from the
+// is already live and exactly the closed ruleset, it returns the alias parsed
+// from the live chain and does NOT touch it. resolve returns the (v4, v6) host-alias addresses as seen from the
 // guest. dns (nil = none) returns the guest resolver's DNAT targets on the alias
 // (egress.DNSForward, lever#34) to ACCEPT in the OPEN posture; it is never
 // called in the closed posture, where DNS stays dropped by design.
@@ -52,31 +53,26 @@ import (
 // NOT treat that empty v6 as authoritative (e.g. must not use it to overwrite
 // a previously-resolved v6 alias). Only trust v6 when rebuilt is true.
 func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v4, v6 string, err error), dns func(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error), allowedPorts []int, closedInternet bool) (v4, v6 string, rebuilt bool, err error) {
-	// I2 — never touch a running closed instance's chain. If the closed
-	// posture is ALREADY active (LEVER_EGRESS has the catch-all DROP), a running
-	// jailed agent depends on it. The ruleset is a pure function of (alias,
-	// ports, closed) and is unchanged on a normal re-apply, so leave the
-	// working chain intact and skip the rebuild. (The commit below is atomic
-	// now, so a rebuild would no longer open a window; the skip stays because
-	// it also spares a closed chain the DNS lookup its DROP would block.)
-	//
-	// NOTE what the skip does NOT do: it tests only that the chain is closed and
-	// carries a parseable alias. It never compares the LIVE ruleset against the
-	// desired one, so a genuine egress-config change — a new manager.allow_ports
-	// entry, or the remote-access login port (config.App.EffectiveAllowedPorts) —
-	// is NOT applied to a live closed instance. That needs `lever down` + `up`,
-	// which is the documented requirement; it is not, as an earlier version of
-	// this comment claimed, something the skip detects and falls through for.
-	if closedInternet {
-		if alias, ok := g.existingClosedAlias(ctx); ok {
-			return alias, "", false, nil
-		}
-	}
 	// The chain must exist and OUTPUT must jump to it. Neither step changes
 	// what is enforced: an existing chain is left as it is, and a new one is
-	// empty until the commit fills it.
+	// empty until the commit fills it. First, so that the skip below can never
+	// leave a closed chain that OUTPUT no longer jumps to.
 	if err := g.ensureEgressChain(ctx); err != nil {
 		return "", "", false, err
+	}
+	// I2 — leave a running closed instance's chain alone when it is already
+	// exactly right. If the closed posture is ALREADY active in both families,
+	// and the live chains are, rule for rule, the closed ruleset for the
+	// alias they name and these ports (existingClosedAlias), there is nothing
+	// to commit, and the skip spares a closed chain the DNS lookup its DROP
+	// would block. Anything else (a port added to manager.allow_ports or the
+	// login port, a rule missing or added by hand, a half-applied commit) is
+	// rebuilt below: the commit is atomic, so a rebuild opens no window, and
+	// a failed lookup under the closed chain falls back to the alias it names.
+	if closedInternet {
+		if alias, ok := g.existingClosedAlias(ctx, allowedPorts); ok {
+			return alias, "", false, nil
+		}
 	}
 	v4, v6, err = resolve(ctx)
 	if err != nil {
@@ -94,8 +90,14 @@ func (g Guest) ApplyEgress(ctx context.Context, resolve func(context.Context) (v
 		if !closed4 || (lv4 == "" && lv6 == "") {
 			return "", "", false, fmt.Errorf("%w (the live %s chains are left as they are; the alias is read back from them only when the IPv4 chain is closed and names one)", err, egress.Chain)
 		}
-		daemon.Warnf("egress: could not resolve the host alias (%v) — the live closed IPv4 %s chain blocks DNS; "+
+		msg := fmt.Sprintf("egress: could not resolve the host alias (%v) — the live closed IPv4 %s chain blocks DNS; "+
 			"using the alias it names instead: v4 %q, v6 %q", err, egress.Chain, lv4, lv6)
+		// Above the progress list's live line when a bring-up shows one.
+		if rep := progress.From(ctx); rep != nil {
+			rep.Log("jail: warning: " + msg)
+		} else {
+			daemon.Warnf("%s", msg)
+		}
 		v4, v6 = lv4, lv6
 	}
 	var forwards []egress.DNSForward
@@ -149,13 +151,7 @@ func (g Guest) liveAliases(ctx context.Context) (v4, v6 string, closed4 bool) {
 		if wantV4 && closedChain(out) {
 			closed4 = true
 		}
-		alias := aliasFromChain(out)
-		// Only an address of the chain's own family: a v4 address in the
-		// ip6tables ruleset (or the reverse) would be a rule that never loads.
-		if ip := net.ParseIP(alias); ip == nil || (ip.To4() != nil) != wantV4 {
-			return ""
-		}
-		return alias
+		return aliasOfFamily(out, wantV4)
 	}
 	v4 = read("iptables", true)
 	v6 = read("ip6tables", false)
@@ -166,6 +162,17 @@ func (g Guest) liveAliases(ctx context.Context) (v4, v6 string, closed4 bool) {
 // the closed posture's catch-all DROP.
 func closedChain(listing string) bool {
 	return strings.Contains(listing, "-A "+egress.Chain+" -j DROP")
+}
+
+// aliasOfFamily is aliasFromChain restricted to the chain's own family: a
+// v4 address in the ip6tables ruleset (or the reverse) would be a rule that
+// never loads, so it counts as none.
+func aliasOfFamily(listing string, wantV4 bool) string {
+	alias := aliasFromChain(listing)
+	if ip := net.ParseIP(alias); ip == nil || (ip.To4() != nil) != wantV4 {
+		return ""
+	}
+	return alias
 }
 
 // aliasFromChain returns the destination of the first per-port ACCEPT in an
@@ -189,52 +196,76 @@ func aliasFromChain(listing string) string {
 }
 
 // existingClosedAlias returns the v4 host alias of a LEVER_EGRESS posture
-// that is closed in BOTH families (each chain carries the catch-all DROP), so
-// ApplyEgress can leave it untouched (I2). Returns ("", false) when either
-// chain is absent, open (no catch-all DROP), or unreadable — the caller then
-// (re)builds both normally. Requiring both matters: a closed apply that
-// committed one family and failed before the other must be finished by the
-// next apply, not skipped as done (ApplyEgress also commits v4 last, so v4
-// alone never looks closed first). The alias is read from the v4 per-port
-// ACCEPT rule (`-d <ip>/32 … --dport … -j ACCEPT`), so no DNS is needed
-// (which the active DROP blocks anyway).
-func (g Guest) existingClosedAlias(ctx context.Context) (string, bool) {
+// that is closed in BOTH families and is exactly the closed ruleset for the
+// aliases the chains name and allowedPorts, so ApplyEgress can leave it
+// untouched (I2). Returns ("", false) when either chain is absent, open (no
+// catch-all DROP), unreadable, or differs from that ruleset in any rule —
+// the caller then (re)builds both normally. Requiring both families matters:
+// a closed apply that committed one family and failed before the other must
+// be finished by the next apply, not skipped as done (ApplyEgress also
+// commits v4 last, so v4 alone never looks closed first). The aliases are
+// read from the per-port ACCEPT rules (`-d <ip>/32 … --dport … -j ACCEPT`),
+// so no DNS is needed (which the active DROP blocks anyway). The comparison
+// reads stdout only: iptables -S prints the chain there.
+func (g Guest) existingClosedAlias(ctx context.Context, allowedPorts []int) (string, bool) {
 	res, err := g.RootRun(ctx, "iptables", "-S", egress.Chain)
-	if err != nil {
-		return "", false // chain absent (fresh machine) or unreadable
-	}
-	out := res.Stdout + res.Stderr
-	if !closedChain(out) {
-		return "", false // not in the closed posture (no catch-all DROP)
+	if err != nil || !closedChain(res.Stdout) {
+		return "", false // chain absent, unreadable, or not closed
 	}
 	res6, err := g.RootRun(ctx, "ip6tables", "-S", egress.Chain)
-	if err != nil || !closedChain(res6.Stdout+res6.Stderr) {
+	if err != nil || !closedChain(res6.Stdout) {
 		return "", false // IPv6 not closed (yet): rebuild both
 	}
-	if alias := aliasFromChain(out); alias != "" {
-		return alias, true
+	v4 := aliasOfFamily(res.Stdout, true)
+	if v4 == "" {
+		return "", false // closed but no parseable alias — rebuild to be safe
 	}
-	return "", false // closed but no parseable alias — rebuild to be safe
+	rules := egress.BuildRulesDNS(v4, aliasOfFamily(res6.Stdout, false), allowedPorts, true, nil)
+	if !egress.ListingMatches(rules, egress.IPv4, res.Stdout) || !egress.ListingMatches(rules, egress.IPv6, res6.Stdout) {
+		return "", false // not exactly the closed ruleset: rebuild
+	}
+	return v4, true
 }
 
-// ensureEgressChain makes sure the LEVER_EGRESS chain exists and OUTPUT jumps
-// to it exactly once, for both address families, WITHOUT flushing it: the
-// live rules stay in force until commitEgressChain replaces them atomically.
-// A freshly created chain is empty, which enforces nothing more than the
-// absence of the chain did.
+// ensureEgressChain makes sure the LEVER_EGRESS chain exists and that the
+// jump to it is OUTPUT's FIRST rule, exactly once, for both address
+// families, WITHOUT flushing the chain: the live rules stay in force until
+// commitEgressChain replaces them atomically. A freshly created chain is
+// empty, which enforces nothing more than the absence of the chain did.
+//
+// First, not merely present: a rule ahead of the jump (an ACCEPT, a RETURN,
+// a goto) would decide packets before the lever chain sees them. When the
+// jump is not already first and unique (egress.JumpFirst), every copy of it
+// is deleted and one inserted at position 1 in ONE iptables-restore commit
+// (egress.JumpRestoreInput), so OUTPUT is never without it. Other OUTPUT
+// rules are left where they are: behind the jump they cannot weaken it.
+// This is the state Snapshot.VerifyEgress requires, so the warm path's
+// check and this repair agree, and a repaired OUTPUT verifies next time.
 func (g Guest) ensureEgressChain(ctx context.Context) error {
-	for _, bin := range []string{"iptables", "ip6tables"} {
-		run := func(args ...string) error {
-			_, err := g.RootRun(ctx, append([]string{bin}, args...)...)
-			return err
-		}
+	for _, fam := range []egress.Family{egress.IPv4, egress.IPv6} {
+		bin := fam.Binary()
 		// Create the chain if absent (-N errors if it already exists — tolerate).
-		_ = run("-N", egress.Chain)
-		// Ensure the OUTPUT jump exists exactly once: -C checks, -A adds if missing.
-		if err := run("-C", "OUTPUT", "-j", egress.Chain); err != nil {
-			if err := run("-A", "OUTPUT", "-j", egress.Chain); err != nil {
-				return fmt.Errorf("egress: add OUTPUT jump (%s): %w", bin, err)
-			}
+		_, _ = g.RootRun(ctx, bin, "-N", egress.Chain)
+		res, err := g.RootRun(ctx, bin, "-S", "OUTPUT")
+		if err != nil {
+			return fmt.Errorf("egress: list OUTPUT (%s): %w", bin, err)
+		}
+		if egress.JumpFirst(res.Stdout) {
+			continue
+		}
+		in := egress.JumpRestoreInput(res.Stdout)
+		if err := g.pipeInto(ctx, g.RootPrefix, strings.NewReader(in), "exec "+fam.RestoreBinary()+" --noflush"); err != nil {
+			return fmt.Errorf("egress: make the %s jump OUTPUT's first rule (%s): %w", egress.Chain, fam.RestoreBinary(), err)
+		}
+		// Read it back: a commit that succeeded without leaving the jump
+		// first (a listing this parse misread) fails here, naming what
+		// OUTPUT holds, rather than at every later warm check.
+		after, err := g.RootRun(ctx, bin, "-S", "OUTPUT")
+		if err != nil {
+			return fmt.Errorf("egress: list OUTPUT (%s): %w", bin, err)
+		}
+		if !egress.JumpFirst(after.Stdout) {
+			return fmt.Errorf("egress: after the repair, the %s jump is still not OUTPUT's first and only rule (%s); OUTPUT lists:\n%s", egress.Chain, bin, strings.TrimSpace(after.Stdout))
 		}
 	}
 	return nil

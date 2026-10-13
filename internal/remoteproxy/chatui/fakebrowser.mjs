@@ -215,6 +215,59 @@ export async function load(hub, opts = {}) {
       for (const f of u.listeners.end || []) f({});
     };
   }
+  // Server voices (opts.audio): a Web Audio context that records each part
+  // decoded and played in env.audio; env.endAudio() ends the part playing.
+  if (opts.audio) {
+    const au = (env.audio = { contexts: 0, resumes: 0, decoded: [], played: [], stopped: 0 });
+    globalThis.window.AudioContext = class {
+      constructor() {
+        au.contexts++;
+        this.destination = { kind: 'destination' };
+      }
+      async resume() {
+        au.resumes++;
+      }
+      async decodeAudioData(buf) {
+        const text = new TextDecoder().decode(new Uint8Array(buf));
+        if (opts.audio.decodeFails || text === 'not audio') throw new Error('EncodingError');
+        au.decoded.push(text);
+        return { text };
+      }
+      createBufferSource() {
+        const src = {
+          listeners: {},
+          connect(dest) {
+            this.dest = dest;
+          },
+          addEventListener(t, f) {
+            (this.listeners[t] ||= []).push(f);
+          },
+          start() {
+            au.played.push(this.buffer.text);
+            au.current = this;
+          },
+          stop() {
+            au.stopped++;
+            this.end();
+          },
+          end() {
+            if (this.ended) return;
+            this.ended = true;
+            for (const f of this.listeners.ended || []) f({});
+          },
+        };
+        return src;
+      }
+    };
+    globalThis.navigator.audioSession = { type: 'auto' };
+    env.endAudio = async () => {
+      au.current.end();
+      await tick(5);
+    };
+  } else {
+    delete globalThis.window.AudioContext;
+    delete globalThis.navigator.audioSession;
+  }
   // The browser's sticky activation (opts.activation): absent unless a test
   // asks, as in a browser without navigator.userActivation.
   if (opts.activation) globalThis.navigator.userActivation = opts.activation;
@@ -260,8 +313,16 @@ export async function load(hub, opts = {}) {
       if (init.redirect === 'error') throw new Error('redirect');
       return { ok: true, status: 200, type: 'basic', text: async () => '<!doctype html><title>Sign in</title>' };
     }
-    const text = typeof r.body === 'string' ? r.body : JSON.stringify(r.body);
-    return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => text };
+    // r.audio: an audio answer (read-aloud), its bytes the given text.
+    const text = r.audio !== undefined ? r.audio : typeof r.body === 'string' ? r.body : JSON.stringify(r.body);
+    const type = r.audio !== undefined ? 'audio/wav' : typeof r.body === 'string' ? 'text/plain' : 'application/json';
+    return {
+      ok: r.status >= 200 && r.status < 300,
+      status: r.status,
+      headers: { get: (k) => (k.toLowerCase() === 'content-type' ? type : null) },
+      text: async () => text,
+      arrayBuffer: async () => new TextEncoder().encode(text).buffer,
+    };
   };
   // Files: a FormData that records its parts, and an XMLHttpRequest that
   // sends them to the scripted hub; the hub's answer may carry progress

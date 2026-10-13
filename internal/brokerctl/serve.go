@@ -4,12 +4,12 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/broker"
@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/daemon"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -87,7 +88,7 @@ func StateLogAppender(st state.State) func(line string) {
 			return
 		}
 		defer f.Close()
-		slog.New(slog.NewTextHandler(f, nil)).Info("scion output hidden from the console",
+		logging.New(f, "lever").Info("scion output hidden from the console",
 			"reason", "known-benign settings warning (lever#169)", "line", line)
 	}
 }
@@ -136,7 +137,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 	defer logf.Close()
-	cfg.Log = slog.New(slog.NewTextHandler(logf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg.Log = logging.New(logf, "broker")
 
 	// Per-boot broker-to-tool shared secret: the gateway presents it to every
 	// first-party tool, the supervisor hands it to each tool it spawns, and a
@@ -220,7 +221,7 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 // leaves unset — Persistence (state-dir revocation/directive state and their
 // write-through closures), Directives (the operator-directive channel, when
 // enabled), Dispatch (the worker-dispatch runtime, worker specs, instance
-// project and URLs) — plus the /epoch Version/ConfigHash pair. It is the exact
+// project and URLs) — plus the /epoch Version, ConfigHash and InstanceID. It is the exact
 // wiring Serve applies between BuildBroker and broker.New;
 // single_project_dispatch_test drives this same function so the two can never
 // drift.
@@ -260,6 +261,14 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
+	// The instance id (lever#181), made here when apply did not make it
+	// first (a `lever broker serve` run by hand). Made before any port is
+	// bound, so no broker of this instance ever answers without it.
+	id, err := st.EnsureInstanceID()
+	if err != nil {
+		return err
+	}
+	cfg.InstanceID = id
 	return nil
 }
 
@@ -310,6 +319,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		// the harness runs a line, and every observed harness death landed
 		// within three seconds of that. Same value as apply's manager gate.
 		LiveSettle: workerLiveSettle,
+		// broker.max_running_workers (0 = no cap).
+		MaxRunningWorkers: app.Broker.MaxRunningWorkers,
 		// Agents under closed-internet egress dial the host-alias IP; otherwise
 		// the backend's host alias hostname (the server cert's DNS SAN).
 		BrokerURL: workerBrokerURL(cmp.Or(env.HostAliasIP, be.HostToolAlias()), app.EffectiveJailPort()),
@@ -399,6 +410,31 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		}
 		return nil, fmt.Errorf("no hub record for worker %q", agent)
 	}
+	// The re-enrol bounce of the manager is a resume: the checks apply
+	// runs around its own (lever#158), with the same client and runner.
+	d.ManagerResumeGuard = managerResumeGuard(app, apply.Deps{
+		Scion: sc,
+		Log:   daemon.Warnf,
+		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
+			return jail.ContainerMounts(ctx, jr, ref)
+		},
+		CheckLiveMounts: func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return jail.ContainerLiveMounts(ctx, jr, ref, want)
+		},
+		// The record's mounts when the manager has no container, for the
+		// gone-directory check (as apply reads them).
+		RecordVolumes: func(ctx context.Context, _, agent string) ([]jail.Mount, error) {
+			vols, err := readVolumes(ctx, agent)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]jail.Mount, 0, len(vols))
+			for _, v := range vols {
+				out = append(out, jail.Mount{Source: v.Source, Destination: v.Target, RW: !v.ReadOnly})
+			}
+			return out, nil
+		},
+	}, jailMount)
 	if len(app.SharedFolders) > 0 {
 		d.RecordVolumes = readVolumes
 	} else {
@@ -521,3 +557,33 @@ func (h hubTokenHealer) TokenExpired(ctx context.Context, agent string) (bool, e
 func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
 	return h.sc.ResetAuth(ctx, agent, h.project)
 }
+
+// managerResumeGuard is broker.DispatchConfig.ManagerResumeGuard: the
+// checks before the resume (apply.BeginManagerResume), and after it the
+// read-back of the tree mounts, again until the container runs (there is
+// no liveness gate on the bounce), suspending the manager on a mismatch.
+func managerResumeGuard(app *config.App, d apply.Deps, jailMount string) func(context.Context) (broker.ManagerResumeCheck, error) {
+	return func(ctx context.Context) (broker.ManagerResumeCheck, error) {
+		g, err := apply.BeginManagerResume(ctx, d, app, jailMount, "broker")
+		if err != nil {
+			return nil, err
+		}
+		return resumeCheck{g}, nil
+	}
+}
+
+// resumeCheck is broker.ManagerResumeCheck over an apply.ManagerResume.
+type resumeCheck struct{ g *apply.ManagerResume }
+
+func (c resumeCheck) After(ctx context.Context) error {
+	if err := c.g.Resumed(ctx); err != nil {
+		return err
+	}
+	return c.g.Settle(ctx)
+}
+
+func (c resumeCheck) AfterFailure(ctx context.Context, cause error) error {
+	return c.g.AfterFailure(ctx, cause)
+}
+
+func (c resumeCheck) Verified() bool { return c.g.Verified() }

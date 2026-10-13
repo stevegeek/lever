@@ -235,7 +235,7 @@ func (b *Broker) serveVerify(w http.ResponseWriter, r *http.Request, legacy bool
 		// overall one (its call is given back), so a flood of misses cannot
 		// crowd out genuine messages, which are matches.
 		if a.resp.Result == wire.VerifyNone || a.resp.Result == wire.VerifyAlreadyVerified {
-			b.verifyRate.refund(caller)
+			b.verifyRate.refund(caller, now)
 			if ok, wait := b.verifyMissRate.take(caller, now); !ok {
 				a = b.verifyUnavailable(a.branch, reasonRateLimited, retrySeconds(wait),
 					"too many verifications that matched no message this minute", "miss rate limited ("+a.audit+")")

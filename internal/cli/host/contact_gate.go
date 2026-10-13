@@ -1,6 +1,7 @@
 package host
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -13,6 +14,8 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/skills"
 	"github.com/stevegeek/lever/internal/state"
@@ -37,6 +40,11 @@ import (
 // An adopted (owner-customized) skill counts as current only when it was
 // adopted at this version.
 //
+// With remote.agent_messages on, it also refuses a scion.source checkout
+// that predates config.AgentMessagesScionFloor: the contact filter trusts
+// the sender the hub sets, and an older hub lets an agent post as its
+// contact (doctor's agent messages row says the same).
+//
 // The disk is not the whole story: a resumed session keeps the skill text it
 // loaded before. That part is checked per agent, per post, by the remote
 // proxy (contactSession), because only then is it known which agents exist
@@ -58,7 +66,27 @@ func checkContactGate(app *config.App, st state.State) error {
 			"these are not: %s. Run `lever init` (or `lever init --force` over an edited skill), then apply again",
 			cli.Version, strings.Join(stale, ", "))
 	}
+	// Config load refuses agent messages on a scion.version pseudo-version
+	// older than the floor; a scion.source checkout needs git, so it is
+	// checked here. A checkout without the floor commit (older and never
+	// fetched, or a fork) is refused, and so is a shallow clone that does
+	// not show it; a path git cannot answer for (not a repository, git not
+	// runnable, the timeout) is doctor's warning, as a scion.binary is.
+	if app.AgentMessagesOn() && app.Scion.Version == "" && app.Scion.Source != "" {
+		if bad, note := agentMessagesScion(app, scionSourceHasCommit); bad {
+			return fmt.Errorf("remote: agent_messages needs scion %s (2026-08-28) or later, where the hub sets a message's sender itself; %s. "+
+				"Update the checkout, or turn remote.agent_messages off", config.AgentMessagesScionFloor[:8], note)
+		}
+	}
 	return nil
+}
+
+// scionSourceHasCommit is how checkContactGate asks whether the scion.source
+// checkout holds a commit (a test replaces it).
+var scionSourceHasCommit = func(source, commit string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return scionbin.SourceHasCommit(ctx, proc.RealRunner{}, source, commit)
 }
 
 // staleSkillList names each agent skill on disk that is not this version's
@@ -135,7 +163,11 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	r, ok := recs[agent]
 	switch {
 	case !ok:
-		return errors.New("lever has no record of its session starting fresh")
+		return errNoSessionRecord
+	case r.SkillHash == restoredUnknownSkill:
+		return errors.New("its conversation was restored from a backup that does not say which skill it started with")
+	case r.SkillHash == brokerctl.UncheckedSkill:
+		return errors.New("lever started it fresh on its own while its skill differed from its last session's")
 	case r.SkillHash != skills.ContentHash(onDisk) && r.SkillHash != hash:
 		// ContentHash leaves out the release stamp, so a release that
 		// renders the same skill text keeps the session fresh; the full
@@ -144,6 +176,10 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	}
 	return nil
 }
+
+// errNoSessionRecord is contactSession's refusal of an agent lever has no
+// session record of.
+var errNoSessionRecord = errors.New("lever has no record of its session starting fresh")
 
 // staleSessionError is contactSession's refusal of a session that started
 // before the current skill. Its text carries the start time and version;
@@ -231,10 +267,11 @@ func contactSessionWarning(manager string, blocked []blockedContactAgent) string
 	}
 	var reasons []string
 	byReason := map[string][]string{}
-	hasManager, hasWorker := false, false
+	hasManager, hasWorker, managerNoRecord := false, false, false
 	for i, b := range blocked {
 		if b.name == manager {
 			hasManager = true
+			managerNoRecord = b.reason == errNoSessionRecord.Error()
 		} else {
 			hasWorker = true
 		}
@@ -258,8 +295,12 @@ func contactSessionWarning(manager string, blocked []blockedContactAgent) string
 		how = append(how, "a worker takes contact messages once the broker next creates it fresh")
 	}
 	if hasManager {
-		how = append(how, fmt.Sprintf("for the manager %s, run `lever up --fresh` (back up the manager's conversation first), or let this bring-up create it",
-			termsafe.Sanitize(manager)))
+		create := ""
+		if managerNoRecord {
+			create = ", or let this bring-up create it"
+		}
+		how = append(how, fmt.Sprintf("for the manager %s, run `lever up --fresh` (it backs the conversation up first; --keep-conversation does not help here, the kept conversation keeps the skill it started with)%s",
+			termsafe.Sanitize(manager), create))
 	}
 	if len(blocked) == 1 {
 		return fmt.Sprintf("lever: warning: remote: contacts cannot post to %s until its session starts fresh; %s",

@@ -88,14 +88,31 @@ type LiveBudget struct {
 // exhausted budget with nothing observed, not "poll forever" (retry.Until's
 // reading of a non-positive count).
 func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, b LiveBudget) error {
+	return waitAgentLive(ctx, list, slug, b, wallClock)
+}
+
+// waitAgentLive is WaitAgentLive with the settle window's clock injected.
+func waitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, b LiveBudget, clk settleClock) error {
 	if err := waitLiveOnce(ctx, list, slug, b.Attempts, b.Interval); err != nil {
 		return err
 	}
 	if b.Settle <= 0 {
 		return nil
 	}
-	return holdLive(ctx, list, slug, b.Interval, b.Settle)
+	return holdLive(ctx, list, slug, b.Interval, b.Settle, clk)
 }
+
+// settleClock is the settle window's view of time: now reads it, after waits
+// for one poll interval. Production uses the wall clock. Tests substitute a
+// clock on which every wait returns at once and moves time on by exactly the
+// interval, so a window's outcome follows from the order of observations
+// alone and never from how late a loaded scheduler fires a timer.
+type settleClock struct {
+	now   func() time.Time
+	after func(time.Duration) <-chan time.Time
+}
+
+var wallClock = settleClock{now: time.Now, after: time.After}
 
 // HoldAgentLive is WaitAgentLive's settle phase on its own: the record was
 // just seen live, and must stay live (phase running over a live container)
@@ -107,7 +124,7 @@ func HoldAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 	if settle <= 0 {
 		return nil
 	}
-	return holdLive(ctx, list, slug, interval, settle)
+	return holdLive(ctx, list, slug, interval, settle, wallClock)
 }
 
 // waitLiveOnce is the first phase: poll until the record is live or the
@@ -165,7 +182,7 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 // jail forever (lever#31 review R1). A list error between two non-live
 // readings does not break the chain: it is neither confirmation nor
 // contradiction.
-func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration) error {
+func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration, clk settleClock) error {
 	if interval <= 0 {
 		// Never spin: a zero interval would call list as fast as the CPU
 		// allows for the whole window. One second is the manager gate's own
@@ -175,7 +192,7 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 	// strikeGrace bounds how many polls past the deadline a pending strike may
 	// wait for a deciding observation.
 	const strikeGrace = 3
-	start := time.Now()
+	start := clk.now()
 	var lastErr error
 	var lastPhase, lastContainer string
 	observed := false
@@ -184,7 +201,7 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-clk.after(interval):
 		}
 		agents, err := list(ctx)
 		if err != nil {
@@ -205,11 +222,11 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 			default:
 				if strikes++; strikes >= 2 {
 					return fmt.Errorf("%w after %s (%s) — scion reported success and the record was live, then the harness died; its container log in the guest holds the last output",
-						ErrAgentDied, time.Since(start).Round(100*time.Millisecond), describeReading(lastPhase, lastContainer))
+						ErrAgentDied, clk.now().Sub(start).Round(100*time.Millisecond), describeReading(lastPhase, lastContainer))
 				}
 			}
 		}
-		if time.Since(start) >= settle {
+		if clk.now().Sub(start) >= settle {
 			if strikes == 0 {
 				break
 			}
@@ -538,6 +555,12 @@ type StartOpts struct {
 	// broker sets LEVER_BOOTSTRAP so lever-agent boot reads the mounted
 	// ticket. CREATE-time only, as Volumes.
 	Env map[string]string
+	// Resources caps the agent container's memory and CPU, sent as inline
+	// config `resources.limits` (scion ResourceSpec), which scion's podman
+	// runtime turns into --memory and --cpus. The zero value sends nothing,
+	// so scion's own defaults apply. CREATE-time only, as Volumes: scion
+	// stores the resolved spec in the record and a resume reuses it.
+	Resources Resources
 	// Workspace is the path mounted as /workspace in the agent container,
 	// passed as `--workspace`. For directory projects this MUST be set to the
 	// (in-jail) project tree to get a live in-place bind mount: scion's default
@@ -649,7 +672,7 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	// so no quoting rule of a config language can alter the text. Inline
 	// content, not a file:// URI, so nothing depends on where the scion
 	// binary runs or what its working directory is. See StartOpts.Instructions.
-	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions, Volumes: o.Volumes, Env: o.Env})
+	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions, Volumes: o.Volumes, Env: o.Env, Resources: o.Resources.spec()})
 	if err != nil {
 		return fmt.Errorf("encoding inline agent config: %w", err)
 	}
@@ -713,10 +736,39 @@ func startArgs(o StartOpts, role string) []string {
 }
 
 // hasInlineConfig reports whether Start must send an inline config on stdin:
-// any of instructions, volumes or env is set. Absent all three, the argv is
-// byte-identical to a plain start and nothing is written to scion's stdin.
+// any of instructions, volumes, env or resources is set. Absent all four, the
+// argv is byte-identical to a plain start and nothing is written to scion's
+// stdin.
 func (o StartOpts) hasInlineConfig() bool {
-	return o.Instructions != "" || len(o.Volumes) > 0 || len(o.Env) > 0
+	return o.Instructions != "" || len(o.Volumes) > 0 || len(o.Env) > 0 || o.Resources != (Resources{})
+}
+
+// Resources is an agent's container limits in scion's own notation: Memory a
+// Kubernetes quantity ("1536Mi", "2Gi"), CPU in cores ("1.5") or millicores
+// ("500m"). Config validation (config.Resources) is what bounds them; scion
+// parses them again when it builds the container.
+type Resources struct {
+	Memory string
+	CPU    string
+}
+
+// resourceSpec is the subset of scion's ResourceSpec (pkg/api) lever sends:
+// limits only.
+type resourceSpec struct {
+	Limits resourceList `json:"limits"`
+}
+
+type resourceList struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
+}
+
+// spec is r as inline config, nil when neither limit is set.
+func (r Resources) spec() *resourceSpec {
+	if r == (Resources{}) {
+		return nil
+	}
+	return &resourceSpec{Limits: resourceList{CPU: r.CPU, Memory: r.Memory}}
 }
 
 // ContainerWorkspace is where scion mounts an agent's workspace (the
@@ -733,15 +785,17 @@ type VolumeMount struct {
 }
 
 // inlineAgentConfig is the subset of scion's inline agent config (`scion
-// config-schema`) lever sends: the standing instructions, extra volumes and
-// extra env. Everything else an agent needs is already a flag, and an inline
-// value would silently override the template chain for that field. Every
+// config-schema`) lever sends: the standing instructions, extra volumes,
+// extra env and the container limits. Everything else an agent needs is
+// already a flag, and an inline value would silently override the template
+// chain for that field. Every
 // field is omitempty: scion reads a PRESENT empty agent_instructions as
 // "inline-provided" and would then skip the template's instructions.
 type inlineAgentConfig struct {
 	AgentInstructions string            `json:"agent_instructions,omitempty"`
 	Volumes           []VolumeMount     `json:"volumes,omitempty"`
 	Env               map[string]string `json:"env,omitempty"`
+	Resources         *resourceSpec     `json:"resources,omitempty"`
 }
 
 func (c *Client) Resume(ctx context.Context, worker, project string) error {

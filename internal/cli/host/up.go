@@ -2,11 +2,15 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/convbackup"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
@@ -86,10 +90,30 @@ func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name strin
 //
 // prog (may be nil) is the resume's progress line (lever#168), handed the
 // gate's stages.
-func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress) error {
+//
+// A resume's gate is the same whether or not a terminal is attached next:
+// it waits for claude to report its session start (lever#188). Attaching at
+// the pane would attach the operator to a claude --continue that exits a
+// second later for want of a conversation (lever#202); the gate names that
+// cause instead.
+//
+// guard (the resume path's lever#158 checks, nil elsewhere) reads the tree
+// mounts back once the manager is live, if that could not be done right
+// after the resume: the manager is not reported up before.
+func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, guard *apply.ManagerResume) error {
 	switch d {
 	case upResume:
-		return apply.WaitManagerLive(ctx, deps, name, project, prog)
+		err := apply.WaitManagerLive(ctx, deps, name, project, prog)
+		if err != nil {
+			if guard != nil {
+				err = guard.AfterFailure(ctx, err)
+			}
+			return err
+		}
+		if guard == nil {
+			return errors.New("up: internal error: the resume's mount checks are missing")
+		}
+		return guard.Live(ctx)
 	case upNone:
 		return apply.ObserveManagerLive(ctx, deps, name, project)
 	default:
@@ -97,17 +121,55 @@ func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name
 	}
 }
 
+// resumeForUp is up's own resume of the manager, between the checks
+// apply's start-manager step runs around its resume (lever#158): before it
+// the host tree and a mount whose directory is gone, right after it where
+// each tree mount comes from (a mismatch suspends the manager). The
+// returned guard's Live runs after the gate (gateAfterUp).
+func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project string, resume func(context.Context) error) (*apply.ManagerResume, error) {
+	guard, err := apply.BeginManagerResume(ctx, deps, app, project, "up")
+	if err != nil {
+		return nil, err
+	}
+	if err := resume(ctx); err != nil {
+		if scion.IsRefusedByHub(err) {
+			err = apply.HubRefusedResume("resume", err)
+		} else {
+			err = apply.ResumeFailed("resume", err)
+		}
+		// The container may have started all the same.
+		return nil, guard.AfterFailure(ctx, err)
+	}
+	if err := guard.Resumed(ctx); err != nil {
+		return nil, err
+	}
+	return guard, nil
+}
+
 func newUpCmd(bf BackendFactory) *cobra.Command {
-	var fresh, noAttach bool
+	var fresh, noAttach, detachOthers, noBackup, keepConv bool
+	var progressMode string
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Bring an application up (if needed) and attach the manager",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if err := checkFreshFlags(fresh, noBackup, keepConv); err != nil {
+				return err
+			}
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
+			// The first line of every up, before the jail is touched: what
+			// runs, on which backend (lever#195). A VM boot can take a
+			// minute; it is never silent.
+			run, pctx, err := startBringup(cmd, app, stateFor(path), "up", progressMode)
+			if err != nil {
+				return err
+			}
+			defer run.finishOnReturn(&err)
+			rep := run.rep
 			printRemoteWarnings(cmd, app)
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
@@ -116,19 +178,22 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// The bring-up runs under a signal-aware context (see
 			// applySignalContext); the attach below does not, so the
 			// operator's keys go to the manager, not to this handler.
-			ctx, stop := applySignalContext(cmd.Context())
+			ctx, stop := applySignalContext(pctx)
 			defer stop()
 			// buildApplyDeps brings the jail up through the backend's EnsureUp
 			// on every path below, before up looks at the manager: on Lima
 			// that converges the guest hardening (crash recovery, guest_kernel;
 			// lever#179) whether up then applies, resumes or only attaches.
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
+			rep.Group("jail", 0)
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
 			if err != nil {
 				return err
 			}
 			deps, b, sc := w.deps, w.b, w.sc
 			project := b.MountDest() // in-jail project path == mount root
 
+			rep.Group("manager", 0)
+			check := rep.Start("check manager")
 			phase, probeErr := managerPhase(ctx, sc, project, app.Name)
 			phase, err = phaseOrAbsent(phase, probeErr)
 			if err != nil {
@@ -142,9 +207,20 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// NOT prove the record is absent: after `stop` a suspended
 				// record is waiting behind the down hub, which is why --fresh
 				// rides into apply rather than being decided here (lever#33).
-				cmd.Println(upProbeNotice(probeErr, fresh))
+				check.Note(upProbeReason(probeErr))
+				if fresh {
+					rep.Log(upProbeNotice(probeErr, fresh))
+				}
 			}
 			decision := upDecision(phase, fresh)
+			// On a terminal the operator is attached to a manager apply
+			// created as soon as claude runs, and the manager is checked
+			// after the detach, instead of after a wait nobody watches
+			// (lever#188). A resume waits for claude's session start first,
+			// so a claude --continue with no conversation is caught before
+			// the attach (lever#202). --no-attach and a stdin that is not a
+			// terminal wait on every path.
+			attachTTY := !noAttach && isTerminal(os.Stdin)
 			// A record left "running" by a hard VM kill (a new guest boot,
 			// no live container) is suspended here and resumed below: what
 			// the operator used to do by hand with `lever stop` + `lever up`
@@ -152,14 +228,53 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if decision == upNone && apply.RecoverAfterGuestRestart(ctx, deps, app.Name, project) {
 				decision = upResume
 			}
+			if probeErr == nil {
+				check.Note(upDecisionNote(phase, decision))
+			}
+			check.Done(nil)
 			var prog *apply.Progress
+			// guard is set on the resume path: it checked the tree before the
+			// resume and reads the mounts back after it (lever#158).
+			var guard *apply.ManagerResume
 			switch decision {
 			case upApply:
 				// --fresh: apply's start-manager step deletes any record it
 				// finds once the hub is up and creates anew; a failed delete
 				// is fatal there, so the old session is never resumed silently.
-				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh}); err != nil {
+				// Unless --no-backup, the conversation is backed up first, and
+				// a failed backup keeps the record (lever#198).
+				//
+				// Without --fresh, a resume whose claude finds no
+				// conversation to continue is started fresh, once the guest
+				// shows the home holds no transcript (lever#202); the backup
+				// guards that start too.
+				var saved *convbackup.Meta
+				conv := newConvOps(w, app, stateFor(path))
+				switch {
+				case fresh && !noBackup:
+					deps.BackupManagerConversation = conv.backupBeforeDelete(&saved)
+				case !fresh:
+					deps.BackupManagerConversation = conv.backupBeforeNoConversationFresh(&saved)
+				}
+				deps.ManagerConversationEmpty = conv.conversationEmpty
+				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh, Attach: attachTTY, FreshWithoutConversation: !fresh}); err != nil {
+					if saved != nil {
+						rep.Log(fmt.Sprintf("lever: the previous conversation is backed up as %s; once the manager is up, `lever conversation restore %s` brings it back", saved.ID, saved.ID))
+					}
 					return err
+				}
+				if keepConv {
+					rep.Group("conversation", 0)
+					step := rep.Start("restore conversation")
+					if saved == nil {
+						step.Skip("there was no conversation to keep")
+					} else {
+						err := conv.restore(ctx, saved.ID, false)
+						step.Done(err)
+						if err != nil {
+							return fmt.Errorf("%w. The previous conversation is backed up as %s: `lever conversation restore %s` tries again", err, saved.ID, saved.ID)
+						}
+					}
 				}
 			case upResume:
 				// `up` resumes a suspended manager ITSELF, without going through
@@ -169,22 +284,20 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
-				// shared_folders: the resume re-resolves every mount source,
-				// as apply's start-manager step checks before its resume.
-				if err := app.PrepareSharedFoldersHost(); err != nil {
-					return err
-				}
-				// The resume and the gate after it can run over a minute
-				// (container start, pre-start hook, claude, settle): print
-				// progress about every 15 s (lever#168). Stopped on every
-				// return; the gate below gets the stages.
-				prog = apply.StartProgress(deps, "up", app.Name, "asking scion to resume the container")
+				guard, err = resumeForUp(ctx, deps, app, project, func(ctx context.Context) error {
+					resume := rep.Start("resume manager")
+					resume.TailFrom(w.stepTail(apply.KindStartManager))
+					// The resume and the gate after it can run over a minute
+					// (container start, pre-start hook, claude, settle): print
+					// progress about every 15 s (lever#168), or hand the stages
+					// to the progress list. Stopped on every return; the gate
+					// below gets the stages.
+					prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
+					return sc.Resume(ctx, app.Name, project)
+				})
 				defer prog.Stop()
-				if err := sc.Resume(ctx, app.Name, project); err != nil {
-					if scion.IsRefusedByHub(err) {
-						return apply.HubRefusedResume("resume", err)
-					}
-					return apply.ResumeFailed("resume", err)
+				if err != nil {
+					return err
 				}
 			case upNone:
 				// A running manager is not exempt: it refreshes its own token
@@ -198,29 +311,100 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// A running manager can still hold an expired hub token (the
 				// refresh timer stalls while the host sleeps), and its workers
 				// too; apply.Run would heal them, but this path bypasses it.
+				heal := rep.Start("refresh agent sessions")
 				apply.HealSessions(ctx, deps, app, project)
+				heal.Done(nil)
+				rep.Start("check manager is live")
 			}
 			// The paths that act on the manager without apply.Run used to reach
 			// the "is up." print with no observation at all, and the apply
 			// paths returned on the first live look — over a harness that dies
 			// a moment later (lever#31). Gate every path before claiming up.
-			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog)
+			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, guard)
 			prog.Stop()
 			if err != nil {
 				return err
 			}
 			apply.RecordGuestBoot(ctx, deps)
 			stop()
+			// The list ends before the attach: from here the terminal is the
+			// manager's.
+			run.finish(nil)
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
 			}
-			return execAttach(cmd.Context(), b, sc, app.Name, project)
+			if !attachTTY {
+				return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
+			}
+			attachErr := runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
+			if err := apply.CheckManagerAfterDetach(cmd.Context(), deps, app.Name, project); err != nil {
+				return err
+			}
+			return attachErr
 		},
 	}
-	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread")
+	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread (the old conversation is backed up first)")
+	c.Flags().BoolVar(&noBackup, "no-backup", false, "with --fresh: discard the old conversation without backing it up")
+	c.Flags().BoolVar(&keepConv, "keep-conversation", false, "with --fresh: recreate the manager and resume it on the old conversation")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
+	c.Flags().BoolVar(&detachOthers, "detach-others", false, detachOthersFlagUsage)
+	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
+}
+
+// checkFreshFlags refuses flag combinations that mean nothing: --no-backup
+// and --keep-conversation act on the record --fresh deletes, and keeping a
+// conversation needs its backup.
+func checkFreshFlags(fresh, noBackup, keepConv bool) error {
+	switch {
+	case (noBackup || keepConv) && !fresh:
+		return usageError{errors.New("--no-backup and --keep-conversation go with --fresh")}
+	case noBackup && keepConv:
+		return usageError{errors.New("--keep-conversation needs the backup that --no-backup skips")}
+	}
+	return nil
+}
+
+// upDecisionNote says, on the check step, what up found and will do.
+func upDecisionNote(phase string, d upAction) string {
+	switch d {
+	case upNone:
+		return "running"
+	case upResume:
+		if phase == scion.PhaseRunning {
+			return "the VM restarted under it; resuming it"
+		}
+		return "suspended; resuming it"
+	}
+	if phase == "" {
+		return "no manager yet; starting it"
+	}
+	if phase == scion.PhaseRunning || phase == scion.PhaseSuspended {
+		return fmt.Sprintf("phase %s; recreating it (--fresh)", scion.PhaseLabel(phase))
+	}
+	return fmt.Sprintf("phase %s; bringing it up", scion.PhaseLabel(phase))
+}
+
+// upProbeReason is the probe failure in the operator's words (lever#195):
+// the hub after `lever stop` or a VM restart answers "connection refused",
+// which says nothing to someone who did not write the hub client.
+func upProbeReason(probeErr error) string {
+	msg := strings.ToLower(probeErr.Error())
+	switch {
+	case hubNotRunning(probeErr):
+		return "the jail's hub is not running (after `lever stop` or a VM restart); starting it"
+	case strings.Contains(msg, "project not found"), strings.Contains(msg, "no git origin remote found"):
+		return "the project is not registered with the hub yet; registering it"
+	}
+	return "no running manager (" + firstLine(probeErr.Error()) + "); bringing the application up"
+}
+
+// hubNotRunning reports scion's answer when the jail's hub does not serve:
+// after `lever stop --keep-vm`, a VM restart, or a hub that exited.
+func hubNotRunning(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "is not responding")
 }
 
 // upProbeNotice is the line `up` prints when the phase probe could not see
@@ -230,11 +414,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 // --fresh it must say what the flag will do, because the probe failing is
 // exactly the case where a silent resume used to happen (lever#33).
 func upProbeNotice(probeErr error, fresh bool) string {
-	reason := firstLine(probeErr.Error())
+	reason := upProbeReason(probeErr)
 	if fresh {
-		return fmt.Sprintf("No running manager observed (%s) — bringing the application up; --fresh will discard any manager record found once the hub is up.", reason)
+		return fmt.Sprintf("lever: no running manager observed (%s) — --fresh will discard any manager record found once the hub is up", reason)
 	}
-	return fmt.Sprintf("No running manager (%s) — bringing the application up.", reason)
+	return "lever: " + reason
 }
 
 // firstLine returns the first line of s, trimmed of surrounding whitespace

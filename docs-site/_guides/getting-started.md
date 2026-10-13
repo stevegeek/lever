@@ -17,6 +17,7 @@ The walkthrough is split across three pages; step numbers are continuous:
 | 1, 1a — build `lever` and the agent image | [Install & build the image](/getting-started/install/) |
 | 2–6, 8 — configure, bring up, dispatch a worker, lifecycle | [First run](/getting-started/first-run/) |
 | 7 — give agents MCP servers (ambient vs brokered) | [Give agents MCP tools](/getting-started/mcp-tools/) |
+| — what the host needs, and sizing | [System requirements & sizing](/getting-started/requirements/) |
 
 ## What you'll end up with
 
@@ -33,6 +34,9 @@ the real files. See the [security model](/security-model/) for what the jail doe
 protect.
 
 ## Prerequisites
+
+A host with at least 2 cores, 8 GB of RAM and 30 GB of free SSD space runs a manager and one or
+two workers; see [system requirements & sizing](/getting-started/requirements/).
 
 - **macOS on Apple Silicon** with [OrbStack](https://orbstack.dev) running (`backend: orbstack`,
   used by this walkthrough). A `lima` backend also exists for macOS and Linux; see

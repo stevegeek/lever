@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/testutil"
 )
 
 func TestClearStagedRuntimeState(t *testing.T) {
@@ -128,11 +128,7 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	}
 	// A real child of this test, not the test's own pid: destroy kills
 	// whatever remote.pid names.
-	proxy := exec.Command("/bin/sh", "-c", "sleep 30")
-	if err := proxy.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = proxy.Process.Kill(); _, _ = proxy.Process.Wait() })
+	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -158,10 +154,8 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	// Reaped with Wait, not signal(0): a killed-but-unreaped child is a
 	// ZOMBIE, and signal 0 succeeds on a zombie — so the obvious liveness
 	// check passes whether or not the kill landed.
-	done := make(chan struct{})
-	go func() { _, _ = proxy.Process.Wait(); close(done) }()
 	select {
-	case <-done:
+	case <-proxyDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the remote proxy outlived `lever destroy`: it keeps serving a destroyed instance, and the next `up` would reuse it")
 	}

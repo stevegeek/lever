@@ -27,16 +27,24 @@ const (
 // race the SIGKILLed process's release of its listen port and hit EADDRINUSE.
 // Idempotent: a missing, unparseable, or already-dead pid file is a no-op.
 //
-// Note: the pid could in principle have been recycled by the OS after the
-// original process died. On the single-operator workstation this targets, the
-// window is small and the pid file is written immediately after spawn;
-// callers that need certainty can additionally confirm the process is still
-// listening before relying on it being gone.
+// identify says what the pid is now (state.State.Identify). A pid file can
+// outlive its process and the OS can give the pid to another one, which
+// signal 0 cannot tell apart; so nothing is signalled unless the pid is the
+// daemon just before the signal, the SIGKILL included. A pid that is not
+// the daemon is a stale file: it is removed and nothing is signalled. A
+// live pid whose argv cannot be read is neither: the file is kept, nothing
+// is signalled, and the stop fails saying so. The wait ends when the pid
+// is no longer the daemon (gone, a zombie, or reused).
+//
+// The process handle is taken BEFORE the check: on Linux os.FindProcess
+// holds a pidfd, and the signals go through it, so a pid reused after the
+// check gets nothing (the pidfd names the checked process, and signalling
+// it once gone fails). Elsewhere a window of the check's duration remains.
 //
 // Shared by StopBroker (broker.pid) and StopRemoteProxy (remote.pid): both
 // daemons are spawned the same Setsid way (see internal/cli/apply.go's
 // brokerServeCmd/remoteServeCmd) and torn down identically.
-func stopProcessByPIDFile(pidPath string) error {
+func stopProcessByPIDFile(pidPath string, identify func(pid int) state.Identity) error {
 	pid, err := state.ReadPID(pidPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -53,12 +61,21 @@ func stopProcessByPIDFile(pidPath string) error {
 		_ = os.Remove(pidPath)
 		return nil
 	}
+	defer proc.Release()
+	switch identify(pid) {
+	case state.NotServe:
+		_ = os.Remove(pidPath) // gone, or the pid is another process's now
+		return nil
+	case state.Unknown:
+		return fmt.Errorf("brokerctl: %s names pid %d, a live process whose arguments cannot be read, so lever cannot tell whether it is its daemon: "+
+			"nothing was signalled and the file is kept; stop that process by hand if it is, then remove the file", pidPath, pid)
+	}
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
 		_ = os.Remove(pidPath) // already gone (ESRCH)
 		return nil
 	}
-	gone := func() (bool, error) { return !state.ProcessAlive(pid), nil }
-	if retry.Until(context.Background(), stopPollAttempts, stopPollInterval, gone) != nil {
+	gone := func() (bool, error) { return identify(pid) != state.IsServe, nil }
+	if retry.Until(context.Background(), stopPollAttempts, stopPollInterval, gone) != nil && identify(pid) == state.IsServe {
 		_ = proc.Signal(syscall.SIGKILL) // graceless fallback
 		_ = retry.Until(context.Background(), stopPollAttempts, stopPollInterval, gone)
 	}
@@ -72,8 +89,25 @@ func stopProcessByPIDFile(pidPath string) error {
 // its already-consumed single-use bootstrap latch — from poisoning the next
 // `lever apply` (which would otherwise reuse it and stage no bootstrap
 // ticket).
+//
+// In an instance directory copied or moved from another (lever#181), the
+// pid file came with it and names the other directory's broker: it is
+// removed, never signalled.
 func StopBroker(st state.State) error {
-	return stopProcessByPIDFile(st.PID())
+	return stopOwnPIDFile(st, st.PID(), state.BrokerDaemon)
+}
+
+// stopOwnPIDFile is stopProcessByPIDFile for the `lever <sub> serve`
+// daemon of this state directory, except that a pid file this state
+// directory inherited from another (state.FromAnotherDir) is only removed.
+func stopOwnPIDFile(st state.State, pidPath, sub string) error {
+	if st.FromAnotherDir() {
+		if err := os.Remove(pidPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("brokerctl: %w", err)
+		}
+		return nil
+	}
+	return stopProcessByPIDFile(pidPath, func(pid int) state.Identity { return st.Identify(pid, sub) })
 }
 
 // StopRemoteProxy stops the remote-access proxy process recorded in the state
@@ -84,5 +118,5 @@ func StopBroker(st state.State) error {
 // both call sites may run against an already-stopped proxy, so idempotence
 // matters here as much as it does for StopBroker.
 func StopRemoteProxy(st state.State) error {
-	return stopProcessByPIDFile(st.RemotePID())
+	return stopOwnPIDFile(st, st.RemotePID(), state.RemoteDaemon)
 }

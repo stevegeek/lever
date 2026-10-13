@@ -69,9 +69,10 @@ broker-supervised first-party tool is always fine-gated:
 ## Using a token: calling a brokered tool
 
 Brokered tools are MCP servers the broker fronts over mTLS at `/mcp/<name>/`: your own external
-servers, and the first-party tools lever ships, such as [`github`](/github-tool/) (op `push`) and
+servers, and the first-party tools lever ships, such as [`github`](/github-tool/) (op `push`, and the opt-in `pr_open`, `pr_status`,
+`pr_merge` and `release`) and
 [`fizzy`](/fizzy-tool/) (`list_cards`, `show_card`, `list_comments`, `comment`, `move_card`,
-`create_card`) and [`whisper`](/whisper-tool/) (`transcribe`). To call a
+`create_card`), [`whisper`](/whisper-tool/) (`transcribe`) and [`tts`](/tts-tool/) (`voices`). To call a
 gated operation, the agent passes the token as an extra **`_capability`** string argument on the
 tool call (the broker advertises this argument in every tool schema). The broker then:
 

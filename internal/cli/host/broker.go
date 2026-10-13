@@ -43,6 +43,9 @@ func newBrokerServeCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Run the capability broker + first-party tools (foreground)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A daemon: every line it writes (broker.out.log when apply
+			// spawned it) takes lever's log shape (lever#197).
+			daemonLogging(cmd, "broker")
 			path, err := resolveConfigPath(argOrEmpty(args))
 			if err != nil {
 				return err
@@ -95,8 +98,13 @@ func newRevokeCmd() *cobra.Command {
 var adminClient = &http.Client{Timeout: 10 * time.Second}
 
 // adminPost POSTs body as JSON to the running broker's loopback admin port
-// (from config), discarding the response body.
+// (from config), discarding the response body. It first checks the broker
+// there is this instance's (requireOwnBroker): another instance's broker on
+// the same port would take the revoke for its own agents.
 func adminPost(ctx context.Context, app *config.App, path string, body any) error {
+	if err := requireOwnBroker(ctx, adminClient, app.EffectiveAdminPort(), state.ForConfig(app.InstanceDir())); err != nil {
+		return err
+	}
 	url := fmt.Sprintf("http://127.0.0.1:%d%s", app.EffectiveAdminPort(), path)
 	err := httpjson.Post(ctx, adminClient, url, body, nil)
 	if code := httpjson.Status(err); code != 0 {

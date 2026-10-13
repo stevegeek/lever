@@ -875,7 +875,7 @@ terminal wraps rows itself and that no longer holds.
 ### Restoring
 
 ```
-lever tree restore <id> --to <dir> [--path <p>]... [--links=inside|all|none] [--keep-modes] [--keep-git]
+lever tree restore <id> --to <dir> [--path <p>]... [--links=inside|all|none] [--keep-modes] [--keep-vcs]
 ```
 
 lever never restores over the live tree. It creates `<dir>.lever-partial`, writes into it through
@@ -894,12 +894,24 @@ directory or the store. `--path` restores those subtrees (and their parent direc
   tree are created: a relative target of some leading `..` (no more than the link's depth below
   `<dir>`) followed by plain names. `all` creates every link as recorded (lever never follows
   them); `none` creates none.
-- **Git and code that runs on use:** in any directory with an entry named `HEAD`, the entries
-  `config`, `config.worktree`, `commondir` and `hooks` are written as `<name>.lever-restored`, and
-  every `.git` that is not a directory (a gitlink file, or a link) as `.git.lever-restored`, so
-  `git status` in the restored tree runs nothing an agent planted. Names are compared as a
-  case-insensitive filesystem folds them. `--keep-git` turns this off. Other files that run on use
-  (`.envrc`, editor settings, Makefiles) are restored as they are.
+- **Version control and code that runs on use:** restored files belong to you, and git, Mercurial
+  and Jujutsu trust a repository's own settings because you own it; shell prompts and editors run
+  them in any directory you enter. So lever renames, to `<name>.lever-restored`, every file through
+  which one of them would run a command an agent chose:
+  - git: `config`, `config.worktree`, `commondir` and `hooks` in any directory with an entry named
+    `HEAD`, and every `.git` that is not a directory (a gitlink file, or a link);
+  - Mercurial: `hgrc`, `hgrc-not-shared` and `sharedpath` in any `.hg` directory, and every `.hg`
+    that is not a directory;
+  - Jujutsu: `repo/config.toml` in any `.jj` directory, and every `.jj` or `.jj/repo` that is not a
+    directory.
+
+  Names are compared as a case-insensitive filesystem folds them. `--keep-vcs` turns this off. The
+  rule covers tools that run unasked and trust by ownership. Not covered, and restored as they are:
+  files a tool runs only when you ask it to (Makefiles, `package.json` scripts), files whose tool
+  asks for your approval first (direnv's `.envrc`, mise), editor project settings (`.vscode/`,
+  `.idea/`), which the editor's workspace trust gates (open the restored tree in restricted mode;
+  a folder under one you already trust inherits that trust), and other version control systems
+  (Subversion, Bazaar, Fossil, darcs).
 - FIFOs, sockets, devices, the broker ticket and entries without content are not created.
 - Two names that the target filesystem folds into one (by case on APFS) are a collision: lever
   skips the later one and its subtree and reports both. An entry that already exists and that no

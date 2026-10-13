@@ -46,7 +46,7 @@ inside the store, compared by file identity.
 | `lever tree log [-n N] [--all] [-- <path>]` | One line per snapshot with its change counts and the first 20 changed paths (`--all`: every one), or, with a path, the snapshots in which it changed. |
 | `lever tree diff <a> [<b>] [--stat] [--meta] [--no-limit] [--full-diff] [-- <path>...]` | What changed between two snapshots (`<b>` defaults to `latest`): `A` added, `D` deleted, `M` content, `T` type, `L` link target, `P` mode, `?` unknown (with the reason), `~` modification time alone (with `--meta`). Summary first, then line diffs of text files. |
 | `lever tree cat <id> <path>` | One file's content to stdout, verified against its hash. Refuses a terminal. |
-| `lever tree restore <id> --to <dir> [--path <p>]... [--links=inside\|all\|none] [--keep-modes] [--keep-git]` | Restore into a new directory outside the tree, through `<dir>.lever-partial`, and print a report. Exit `0` only when everything selected was restored. |
+| `lever tree restore <id> --to <dir> [--path <p>]... [--links=inside\|all\|none] [--keep-modes] [--keep-vcs]` | Restore into a new directory outside the tree, through `<dir>.lever-partial`, and print a report. Exit `0` only when everything selected was restored. |
 | `lever tree verify [--fix]` | Validate every snapshot and re-hash every stored file; `--fix` moves damaged ones to `blobs/corrupt/`. |
 | `lever tree delete <id>... [--yes]` | Delete snapshots, pinned or invalid ones too, then collect garbage. Asks first unless `--yes`. |
 | `lever tree gc` | Apply retention and remove content no snapshot references. Deletes nothing while a snapshot is invalid. |

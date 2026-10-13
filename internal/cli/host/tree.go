@@ -533,7 +533,7 @@ func newTreeCatCmd() *cobra.Command {
 func newTreeRestoreCmd() *cobra.Command {
 	var to, links string
 	var paths []string
-	var keepModes, keepGit bool
+	var keepModes, keepVCS bool
 	cmd := &cobra.Command{
 		Use:   "restore <id> --to <dir>",
 		Args:  cobra.ExactArgs(1),
@@ -567,7 +567,7 @@ func newTreeRestoreCmd() *cobra.Command {
 					Paths:     sel,
 					Links:     treebackup.LinkPolicy(links),
 					KeepModes: keepModes,
-					KeepGit:   keepGit,
+					KeepVCS:   keepVCS,
 					Forbidden: []string{e.app.Tree, e.place.Store, e.st.Dir},
 					InsideFD:  fsutil.InsideByIdentityFD,
 					MinFree:   e.app.TreeBackup.EffectiveMinFree(),
@@ -590,7 +590,7 @@ func newTreeRestoreCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&paths, "path", nil, "restore only this path and what is below it (repeatable)")
 	cmd.Flags().StringVar(&links, "links", "inside", "symbolic links to create: inside (only ones that cannot leave the restored tree), all, or none")
 	cmd.Flags().BoolVar(&keepModes, "keep-modes", false, "apply the recorded permission bits (never setuid, setgid, sticky, group or other write)")
-	cmd.Flags().BoolVar(&keepGit, "keep-git", false, "write git config, hooks, commondir and .git files under their own names")
+	cmd.Flags().BoolVar(&keepVCS, "keep-vcs", false, "write git, Mercurial and Jujutsu settings, hooks and links under their own names")
 	return cmd
 }
 

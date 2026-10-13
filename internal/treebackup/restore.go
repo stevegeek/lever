@@ -42,7 +42,9 @@ type RestoreOptions struct {
 	Paths     [][]byte
 	Links     LinkPolicy
 	KeepModes bool
-	KeepGit   bool
+	// KeepVCS writes version-control control files under their own names
+	// (see diskName).
+	KeepVCS bool
 	// Forbidden are directories (the tree, the store, the state dir) the
 	// target's parent must not be inside.
 	Forbidden []string
@@ -74,7 +76,8 @@ type RestoreReport struct {
 // rename, so an interrupted restore is visibly incomplete.
 const partialSuffix = ".lever-partial"
 
-// neutralSuffix is appended to the names of files git would act on.
+// neutralSuffix is appended to the names of version-control files that
+// would run a command (see diskName).
 const neutralSuffix = ".lever-restored"
 
 // RestoreWarning is printed after every restore.
@@ -82,7 +85,7 @@ const RestoreWarning = "restored content was written by agents: inspect it befor
 	"copy back with `rsync -r --no-links` after `lever tree diff` shows no directory became a link"
 
 // OK reports whether everything selected was restored. Unstable files,
-// neutralised git files and stripped mode bits are restored, so they do not
+// neutralised version-control files and stripped mode bits are restored, so they do not
 // clear it.
 func (r *RestoreReport) OK() bool {
 	return len(r.Collisions) == 0 && len(r.ForeignWriters) == 0 && len(r.LinksNotCreated) == 0 &&
@@ -105,7 +108,7 @@ func (r *RestoreReport) Write(w io.Writer) {
 		{"unstable (content may be torn)", r.Unstable},
 		{"names the target could not hold", r.BadNames},
 		{"hash failures (not restored)", r.HashFailures},
-		{"neutralised git files", r.Neutralised},
+		{"neutralised version-control files", r.Neutralised},
 		{"mode bits not restored (setuid, setgid, sticky, group and other write)", r.StrippedBits},
 	}
 	for _, s := range sections {
@@ -960,19 +963,31 @@ func (r *restorer) noteDirState(e *Entry) {
 	}
 }
 
-// diskName is the name an entry is written under: git's control files are
-// renamed so that nothing in the restored tree makes the operator's git
-// run a command.
+// diskName is the name an entry is written under. Restored files belong
+// to the operator, and git, Mercurial and Jujutsu trust a repository's own
+// settings by that ownership; shell prompts and editors run them in any
+// directory the operator enters. So the files through which one of those
+// tools would run a command the agent chose are renamed: git's config,
+// config.worktree, commondir and hooks next to a HEAD, and any .git that is
+// not a directory; Mercurial's hgrc, hgrc-not-shared and sharedpath in a
+// .hg, and any .hg that is not a directory; Jujutsu's repo/config.toml in a
+// .jj, and any .jj or .jj/repo that is not a directory. A link counts as
+// not a directory: the tool would follow it to settings with other names.
 func (r *restorer) diskName(e *Entry) string {
 	name := string(BaseName(e.Path))
-	if r.o.KeepGit {
+	if r.o.KeepVCS {
 		return name
 	}
-	if r.headDirs[string(ParentOf(e.Path))] && isGitControl(name) {
-		return name + neutralSuffix
-	}
-	// A .git link is a gitlink too, through whatever file it points at.
-	if e.Type != TypeDir && isGitLink(name) {
+	parent := ParentOf(e.Path)
+	key := gitKey(name)
+	up := gitKey(string(BaseName(parent)))
+	notDir := e.Type != TypeDir
+	switch {
+	case r.headDirs[string(parent)] && isGitControl(name),
+		notDir && (key == ".git" || key == ".hg" || key == ".jj"),
+		up == ".hg" && (key == "hgrc" || key == "hgrc-not-shared" || key == "sharedpath"),
+		up == ".jj" && notDir && key == "repo",
+		up == "repo" && len(parent) > 0 && gitKey(string(BaseName(ParentOf(parent)))) == ".jj" && key == "config.toml":
 		return name + neutralSuffix
 	}
 	return name
@@ -988,8 +1003,6 @@ func isGitControl(name string) bool {
 	k := gitKey(name)
 	return k == "config" || k == "config.worktree" || k == "commondir" || k == "hooks"
 }
-
-func isGitLink(name string) bool { return gitKey(name) == ".git" }
 
 // gitKey reduces a name to the ASCII a folding filesystem might read it
 // as, erring towards a match: renaming one file too many is cheap, and one

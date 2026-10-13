@@ -59,10 +59,10 @@ func TestRestoreNeutralisesGitControlFiles(t *testing.T) {
 	}
 
 	o := tr.opts(filepath.Join(base, "kept"))
-	o.KeepGit = true
+	o.KeepVCS = true
 	rep = restore(t, o)
 	if len(rep.Neutralised) != 0 {
-		t.Fatalf("KeepGit neutralised %q", rep.Neutralised)
+		t.Fatalf("KeepVCS neutralised %q", rep.Neutralised)
 	}
 	if _, err := os.Lstat(filepath.Join(base, "kept/r/w/commondir")); err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestRestoreNeutralisesGitControlFiles(t *testing.T) {
 }
 
 // git status in the restored layouts must run nothing; the same layouts
-// restored with KeepGit do run the planted command, which shows the
+// restored with KeepVCS do run the planted command, which shows the
 // layouts are live.
 func TestRestoreGitStatusInRestoredTreeRunsNothing(t *testing.T) {
 	gitBin, err := exec.LookPath("git")
@@ -89,7 +89,7 @@ func TestRestoreGitStatusInRestoredTreeRunsNothing(t *testing.T) {
 		tr := gitLayouts(marker)
 		target := filepath.Join(base, name)
 		o := tr.opts(target)
-		o.KeepGit = keep
+		o.KeepVCS = keep
 		o.KeepModes = true
 		restore(t, o)
 		for _, dir := range []string{"plain", "r/work", "r2/work"} {

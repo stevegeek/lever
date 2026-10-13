@@ -4,7 +4,8 @@
 # OLDER lever (the dev-auth window flow), renames the dev user to
 # lever-admin's address from the manager (the R1 hazard), migrates it with
 # this lever while the manager and a worker run, adds and removes a contact
-# while they run, forces a controller PAT rotation, checks what an agent can
+# while they run, removes one while the manager loops that rename with a token
+# due, forces a controller PAT rotation, checks what an agent can
 # and cannot do, and finally brings a fresh instance up with this lever.
 #
 # Needs: Lima >= 2.0, Go, an agent image archive (IMAGE_TAR: a docker archive
@@ -190,6 +191,59 @@ write_config ""
 code=$(proxy contact2@example.com -o /dev/null -w '%{http_code}' "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "the removed contact is refused ($code)" '[ "$code" != 200 ]'
 check "doctor: the removed contact's hub user is suspended" row_ok "remote web role"
+
+say "a contact removed while an agent loops the controller rename, with a token due"
+# The manager renames scion's dev user every few ms through the hub's identity
+# route. A removal must still take effect: at the proxy before any step, and at
+# the hub before any controller work. A token is due, so the apply needs the
+# controller's address and should fail naming the cause; the stale proxy must
+# refuse the removed contact all the same.
+write_config "    - { login: contact3@example.com, tier: contact, agents: [$NAME] }"
+(cd "$INST" && timeout 1800 "$LEVER" reload 2>&1 | tail -3)
+code=$(proxy contact3@example.com -o /dev/null -w '%{http_code}' "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "contact3 signs in before the removal ($code)" '[ "$code" = 200 ]'
+cat > "$WORK/loop.py" <<'PY'
+import json, os, time, urllib.request
+tok = open(os.path.expanduser("~/.scion/scion-token")).read().strip()
+ep = os.environ.get("SCION_HUB_ENDPOINT") or os.environ.get("SCION_HUB_URL")
+end = time.time() + float(os.environ.get("LOOP_SECS", "600"))
+while time.time() < end:
+    req = urllib.request.Request(ep + "/api/v1/system/identity", data=json.dumps({"email": "agent-chosen@example.org"}).encode(), method="PUT",
+                                 headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+    time.sleep(0.002)
+PY
+limactl copy "$WORK/loop.py" "$VM:/tmp/loop.py"
+X cp /tmp/loop.py "lever--$NAME:/tmp/loop.py"
+X exec -d -e LOOP_SECS=600 "lever--$NAME" python3 /tmp/loop.py
+sleep 3
+python3 - "$INST/.lever-state/controller.pat.json" <<'PY'
+import json, sys, datetime
+p = sys.argv[1]; d = json.load(open(p))
+d["expires_at"] = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+json.dump(d, open(p, "w"))
+PY
+ppid0=$(cat "$INST/.lever-state/remote.pid" 2>/dev/null)
+write_config ""
+(cd "$INST" && timeout 1800 "$LEVER" reload > "$WORK/race.log" 2>&1); race_rc=$?
+tail -4 "$WORK/race.log"
+code=$(proxy contact3@example.com -o /dev/null -w '%{http_code}' "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "the removed contact is refused under the rename loop ($code)" '[ "$code" = 403 ]'
+check "doctor: the removed contact's hub user is suspended under the loop" row_ok "remote web role"
+if [ "$race_rc" != 0 ]; then
+	check "the failed apply names the rename and says removals took effect" grep -q "does not stay on the controller.*already took effect" "$WORK/race.log"
+	checkx "the proxy was not restarted (the fence refused the contact)" '[ "$ppid0" = "$(cat "$INST/.lever-state/remote.pid")" ]'
+	check "the stale proxy audited the refusal as deny-revoked" grep -q '"ts_login":"contact3@example.com".*"decision":"deny-revoked"' "$INST/.lever-state/remote-audit.jsonl"
+else
+	echo "      | note: the controller assertion won the race; the apply minted and restarted the proxy"
+fi
+X exec "lever--$NAME" pkill -f loop.py
+sleep 2
+(cd "$INST" && timeout 1800 "$LEVER" apply 2>&1 | tail -3)
+check "after the loop stops, doctor: hub identities" row_ok "hub identities"
 
 say "forced controller PAT rotation while agents run"
 old_id=$(python3 -c 'import json; print(json.load(open("'"$INST"'/.lever-state/controller.pat.json"))["id"])')

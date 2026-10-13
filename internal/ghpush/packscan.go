@@ -13,9 +13,9 @@ import (
 )
 
 // PackLimits bound what git index-pack must inflate and hold in memory for
-// one bundle. A small, highly compressible pack can declare objects of many
-// GiB; index-pack holds a delta base and its result in memory to resolve a
-// delta, whatever core.bigFileThreshold says. Zero fields are not checked.
+// one bundle: a small compressible pack can declare objects of many GiB, and
+// index-pack holds a delta base and result in memory whatever
+// core.bigFileThreshold says. Zero fields are not checked.
 type PackLimits struct {
 	MaxObjects    uint32 // objects in the pack
 	MaxObjectSize int64  // inflated size of one object, delta base or delta result
@@ -29,11 +29,10 @@ var ErrPackLimit = errors.New("bundle pack refused")
 // prerequisites, refs) the scanner reads before the pack.
 const maxBundleHeader = 16 << 20
 
-// scanBundle walks the pack in the bundle at path, inflating each object
-// with bounded memory, and refuses it when it is over a limit. It reads the
-// header as git does (read_bundle_header): lines up to the first blank one.
-// It treats more characters as blank than git, so where the two disagree the
-// scanner stops first and git then fails on a "PACK" header line.
+// scanBundle walks the bundle's pack, inflating each object with bounded
+// memory, and refuses it over a limit. It reads the header as git's
+// read_bundle_header does but treats more characters as blank, so where the
+// two disagree the scanner stops first and git fails on a "PACK" line.
 func scanBundle(ctx context.Context, path string, l PackLimits) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -130,16 +129,16 @@ func scanBundle(ctx context.Context, path string, l PackLimits) error {
 			if err := checkSize(l, "delta result", i, result); err != nil {
 				return err
 			}
-			// git inflates the delta stream and then builds the result:
-			// both count, or a pack of deltas with tiny results could
-			// carry gigabytes of instruction data past the total cap.
+			// git inflates the delta stream and then builds the result: both
+			// count, or tiny-result deltas could carry gigabytes of instruction
+			// data past the total cap.
 			inflated = size + result
 		}
 		total += inflated
 		if l.MaxInflated > 0 && total > l.MaxInflated {
 			return fmt.Errorf("%w: objects inflate to more than %d bytes", ErrPackLimit, l.MaxInflated)
 		}
-		// Inflate at most the declared size plus one byte: the work stays
+		// Inflate at most the declared size plus one byte, so the work stays
 		// bounded by the sizes checked above.
 		rest := size - lr.n
 		n, err := io.CopyN(io.Discard, lr, rest+1)
@@ -160,7 +159,6 @@ func checkSize(l PackLimits, what string, i uint32, size int64) error {
 	return nil
 }
 
-// readLine reads one line of at most max bytes, the newline included.
 func readLine(r *bufio.Reader, max int) ([]byte, error) {
 	var line []byte
 	for {

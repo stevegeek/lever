@@ -29,7 +29,6 @@ type Git struct {
 // Auth makes one git call authenticate to BaseURL with a GitHub token.
 type Auth struct{ BaseURL, Token string }
 
-// RunOpts are the per-call exceptions.
 type RunOpts struct {
 	AllowFile bool   // the bundle import reads a local file
 	Auth      *Auth  // ls-remote and push only
@@ -69,7 +68,7 @@ func Scrub(s, token string) string {
 	return scion.RedactSecrets(s)
 }
 
-// Run executes git in dir and returns its stdout. Errors carry scrubbed stderr.
+// Run executes git in dir and returns stdout. Errors carry scrubbed stderr.
 func (g Git) Run(ctx context.Context, dir string, o RunOpts, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, g.Timeout)
 	defer cancel()
@@ -115,8 +114,8 @@ func (g Git) Run(ctx context.Context, dir string, o RunOpts, args ...string) (st
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		// Scrub BEFORE truncating: a token cut at the edge would no longer
-		// match the exact-match scrub.
+		// Scrub before truncating: a token cut at the edge would no longer match
+		// the exact-match scrub.
 		msg := Scrub(strings.TrimSpace(stderr.String()), token)
 		if len(msg) > 4000 {
 			msg = msg[:4000] + "…"
@@ -135,7 +134,6 @@ func (g Git) Run(ctx context.Context, dir string, o RunOpts, args ...string) (st
 // Older git imports a bundle unchecked.
 var MinGitVersion = [3]int{2, 46, 0}
 
-// CheckVersion refuses a git older than MinGitVersion.
 func (g Git) CheckVersion(ctx context.Context, dir string) error {
 	out, err := g.Run(ctx, dir, RunOpts{}, "version")
 	if err != nil {
@@ -156,8 +154,8 @@ func (g Git) CheckVersion(ctx context.Context, dir string) error {
 	return nil
 }
 
-// parseGitVersion reads "git version 2.49.0" (also "2.39.5 (Apple Git-154)"
-// and "2.46.0.windows.1").
+// parseGitVersion also reads "2.39.5 (Apple Git-154)" and
+// "2.46.0.windows.1".
 func parseGitVersion(s string) ([3]int, bool) {
 	var v [3]int
 	f := strings.Fields(s)

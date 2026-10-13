@@ -85,6 +85,11 @@ make lever-image      # cross-compile in-jail binaries + docker build the agent 
 make lever-image-bins # cross-compile in-jail binaries into an instance's image build context only
 ```
 
+Never build a binary into the tree: `go build ./cmd/x` writes `./x` into the current directory.
+Build to a scratch path (`go build -o /tmp/x ./cmd/x`), or use `go vet` and `go test`. Stage files
+by name, not with `git add -A` or `git add .`, and check `git diff --cached --stat` before each
+commit.
+
 Machine-specific paths (`LEVER_INSTANCE`, `LEVER_IMAGE_CTX`, `PREFIX`) go in an untracked
 `local.mk`; see `local.mk.example`. `make lever-image` refuses to overwrite an existing image tag
 unless `LEVER_IMAGE_FORCE=1`.

@@ -175,8 +175,11 @@ version bump moves the block under the new version heading.
   and claude's pane, so a file left by an earlier run never counts. A failed pre-start hook, a task
   past the tmux cap and a `--continue` with no conversation all end before claude starts a session.
   lever polls for it inside the container (one guest call about every 3 s, a reading every 200 ms),
-  fails at once when the container stops, the pane dies or the hub record leaves running, and gives
-  up after 2 min (`did not come up`: a claude waiting at a prompt, or hung). The file only claims
+  fails at once when the container stops, the pane dies or the hub record leaves running. After
+  2 min with no report over a pane that stays alive (a dialog before the session starts, a `/tmp`
+  claude cannot write, hooks disabled) it does not fail: it falls back to the 3 s settle window and
+  its second look, and reports the manager up with a warning that claude never reported its session
+  start; a death in that window still fails. The file only claims
   that claude started, which a live pane already claims; lever compares it with what it reads
   itself and acts on nothing in it. A manager image without the hook (built by an older lever)
   keeps a 3 s settle window counted from the pane, with a note; a start whose pane cannot be

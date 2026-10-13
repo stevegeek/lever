@@ -40,9 +40,8 @@ import (
 // many handlers run at once; the kernel skips a dump past it. With a
 // non-zero limit the kernel also waits for the handler before it reaps the
 // crashed process, which the handler's bounded read keeps short. The same
-// freedom lets
-// it drop or push out a real core with fakes: a kept core is untrusted
-// diagnostic material, not proof. The handler writes only into a real,
+// freedom lets it drop or push out a real core with fakes: a kept core is
+// untrusted diagnostic material, not proof. The handler writes only into a real,
 // root-owned directory (no symlink).
 //
 // The guest's own core handler, if any, is replaced: Ubuntu's apport is

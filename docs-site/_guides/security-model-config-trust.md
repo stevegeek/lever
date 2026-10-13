@@ -88,7 +88,13 @@ closes that for the directories it names:
   bound to the directory that existed at the manager's create. If the host replaces it (`rm -rf` and
   recreate, a rename-based deploy, a `git checkout` that removes and re-adds it), podman still lists
   the read-only mount but it covers the old directory, and a write from the manager lands in the new
-  one (verified on OrbStack). The protection is gone until the next fresh create. `lever doctor` and
+  one (verified on OrbStack). The protection is gone until the next fresh create. Lima under QEMU
+  (a Linux host) behaved differently in `make test-lima-e2e`: its 9p tree mount reaches a directory
+  by its path, so after a rename-based replace of an entry, and after an entry's parent was removed
+  and recreated with the entry, the manager read the new directories and the entry was still
+  read-only; the live check then reports nothing, rightly. Other ways of replacing, and Lima's
+  virtiofs mount under vz (macOS), were not checked; treat the rule below as holding there too.
+  `lever doctor` and
   `lever apply` check every entry and pin live from the guest side, as the tool guard below does,
   and fail or warn when a mount covers another directory than the host has there now; a check that
   cannot run is reported as unconfirmed, never as protected. The same holds for a worker dir (or an
@@ -273,13 +279,23 @@ container from the guest side, without running any program inside it (the agent 
 and could replace it; lever does not rely on the agent lacking root there): the kernel's `/proc/<pid>/mountinfo` for the container's process must list every
 planned directory as a mount point, the entries read-only, each coming from the tree directory at its
 place (the parent mount's device, at the parent's root joined with the path below it: a symbolic
-link the runtime followed, or a directory renamed away, shows as another place), and `stat` must find
+link the runtime followed, or a directory renamed away, shows as another place; a directory renamed
+in the guest, where it is no mount point, takes the container's mount with it, so the target is
+reported as no mount point or from another place), and `stat` must find
 the same device and inode at the guest path and at `/proc/<pid>/root/<target>`, so a protected
-directory replaced on the host (the mount stays on the old one) is caught. That process must also be
+directory replaced on the host (the mount stays on the old one) is caught; on Lima under QEMU the 9p mount was seen to follow to the new directory instead, still read-only (§5.1.1). That process must also be
 in the mount and user namespaces the container runtime created: a root agent that could ptrace it
 could otherwise move it into namespaces made inside the container and show a staged view. The
 reference is the owner of its PID namespace, which a process can never leave; `lsns` (util-linux
-2.38 or later in the guest) reads the owners. The paths reach `stat` on stdin, never as words of
+2.38 or later in the guest) reads the owners. Under rootless podman with scion's keep-id mapping the
+container's PID and mount namespaces are owned by its user namespace, as the check requires.
+`make test-lima-e2e` runs the whole check against real keep-id containers in a Lima guest on every
+run: the guest's `lsns` output parses, the tree mounts and their pins pass with matching devices,
+mount roots and inode numbers (also after the guest drops its caches), a first process moved into a
+user and mount namespace of its own is refused, a directory moved in the guest is reported, and a
+directory replaced on the host is either reported or followed by its mount (new content read,
+read-only kept). That run uses Lima under QEMU, whose tree mount is 9p (where the mount follows);
+Lima's virtiofs mount under vz (macOS) has not been checked live. The paths reach `stat` on stdin, never as words of
 the guest command line, and every read runs under the guest's own deadline. It fails closed: no
 container yet, a stopped manager, a foreign namespace, or anything it cannot read or parse holds the
 tool back. The reasons it logs are fixed text, never

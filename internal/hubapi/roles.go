@@ -11,28 +11,17 @@ import (
 	"strings"
 )
 
-// The calls below are hub-ADMIN calls: role definitions, role bindings and
-// the user directory. scion refuses them to any UAT (role and binding
-// administration is super-admin/hub-admin only, and UATs are denied on
-// hub-level resources), so no lever token can make them. They exist for one
-// caller: the bootstrap-token step's throwaway dev-auth window, where the dev
-// identity is the super-admin (see ensureRemoteWebRole in internal/cli/host).
-//
-// Shapes are scion's pkg/hub/handlers_roles.go (createRoleDefinitionRequest,
-// updateRoleDefinitionRequest, createRoleBindingRequest,
-// listRoleDefinitionsResponse, listRoleBindingsResponse) and
-// pkg/hub/handlers_users_core.go (ListUsersResponse).
+// The calls below are hub-admin calls. scion refuses them to any UAT, so no
+// lever token can make them; they are used only from the bootstrap-token
+// step's throwaway dev-auth window, where the dev identity is the super-admin.
 
-// RoleScopeProject is scion's scope type for a role that is bound per project
-// (store.RoleScopeProject).
+// RoleScopeProject is scion's scope type for a role bound per project.
 const RoleScopeProject = "project"
 
-// RoleScopeSystem is scion's scope type for a hub-wide role
-// (store.RoleScopeSystem), such as the seeded hub-member role.
+// RoleScopeSystem is scion's scope type for a hub-wide role.
 const RoleScopeSystem = "system"
 
-// PrincipalUser is scion's principal type for a hub user
-// (store.RoleBindingPrincipalUser).
+// PrincipalUser is scion's principal type for a hub user.
 const PrincipalUser = "user"
 
 // RoleDefinition mirrors the fields of scion's store.RoleDefinition that
@@ -69,8 +58,6 @@ type User struct {
 // success.
 var ErrBindingExists = errors.New("role binding already exists")
 
-// send issues one request with a JSON body and decodes a 2xx reply into out
-// (nil discards it). A non-2xx reply is an APIError carrying the status.
 func (c *Client) send(ctx context.Context, method, path string, in, out any) error {
 	body, err := json.Marshal(in)
 	if err != nil {
@@ -100,8 +87,8 @@ func (c *Client) RoleDefinitions(ctx context.Context) ([]RoleDefinition, error) 
 	if err := c.get(ctx, "/api/v1/admin/roles", &raw); err != nil {
 		return nil, err
 	}
-	// Require the key, for the reason SharedDirs does: a renamed field would
-	// decode to "no roles" and the caller would create a duplicate.
+	// Require the key: a renamed field would decode to "no roles" and the
+	// caller would create a duplicate.
 	field, ok := raw["items"]
 	if !ok {
 		return nil, &APIError{Msg: "role list has no \"items\" field; the hub API changed shape"}
@@ -141,10 +128,8 @@ func (c *Client) UpdateRoleDefinition(ctx context.Context, rd RoleDefinition) (R
 // UserByEmail finds the hub user whose email is exactly email (ignoring
 // case). found is false when there is none — a user who has never signed in.
 //
-// The hub's user list has no exact-email filter, only `search`, a
-// case-insensitive substring match on email and display name
-// (store/entadapter user_store.go). So the search narrows and the exact match
-// here decides: "a@b" must not bind "xa@b".
+// The hub's search is a substring match on email and display name, so the
+// exact match here decides: "a@b" must not bind "xa@b".
 func (c *Client) UserByEmail(ctx context.Context, email string) (User, bool, error) {
 	var body struct {
 		Users []User `json:"users"`

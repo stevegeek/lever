@@ -9,17 +9,17 @@ import (
 )
 
 // RoleCeiling is the pair of project settings that bound agent roles hub-side.
-// Max caps the role any create may request (scion's `max_agent_role`,
-// annotation scion.io/max-agent-role); Default is the role a create gets when
-// it names none. Empty means unset, which scion reads as `full`.
+// Max caps the role any create may request (scion's max_agent_role); Default
+// is the role a create gets when it names none. Empty means unset, which scion
+// reads as full.
 type RoleCeiling struct {
 	Max     string
 	Default string
 }
 
-// settings is the subset of the project settings object lever reads. The
-// write goes through a raw map (see EnsureAgentRoleCeiling), never this
-// struct, so an upstream field lever does not know cannot be dropped.
+// settings is read-only: writes go through a raw map (see
+// EnsureAgentRoleCeiling) so an upstream field lever does not know cannot be
+// dropped.
 type settings struct {
 	MaxAgentRole     string `json:"maxAgentRole"`
 	DefaultAgentRole string `json:"defaultAgentRole"`
@@ -44,20 +44,15 @@ func (c *Client) AgentRoleCeiling(ctx context.Context, projectNameOrSlug, endpoi
 
 // EnsureAgentRoleCeiling sets both the maximum and the default agent role of
 // a project to role, by project name or slug, and VERIFIES the hub kept them.
-// It reports whether it wrote anything, so a re-apply stays quiet.
+// It reports whether it wrote anything.
 //
-// This is the hub-side counterpart of the `--role` lever stamps on every
-// `scion start`: with the ceiling in place the hub itself refuses a create
-// above it, whoever asks — a manager with a stolen controller PAT, a template,
-// a scion path lever does not drive. Without it, lever's stamp is the only
-// bound.
+// With the ceiling in place the hub itself refuses a create above it, whoever
+// asks (for example a manager with a stolen controller PAT); otherwise
+// lever's --role stamp on scion start is the only bound.
 //
-// scion's settings route is a whole-object PUT: a field absent from the body
-// is DELETED from the project (setOrDelete on every key). So the write is a
-// read-modify-write over the raw object the hub returned — every setting lever
-// does not know about goes back exactly as it came — and it needs a transport
-// with a body path (BodyDoer). Requires project:update on the caller's token,
-// the same scope the shared-dir strip needs.
+// scion's settings route is a whole-object PUT that deletes any field absent
+// from the body, so the write is a read-modify-write over the raw object and
+// needs a BodyDoer. Requires project:update on the caller's token.
 func (c *Client) EnsureAgentRoleCeiling(ctx context.Context, projectNameOrSlug, endpointHint, role string) (bool, error) {
 	id, err := c.ProjectID(ctx, projectNameOrSlug, endpointHint)
 	if err != nil {
@@ -92,8 +87,7 @@ func (c *Client) EnsureAgentRoleCeiling(ctx context.Context, projectNameOrSlug, 
 		return false, &APIError{Status: status,
 			Msg: fmt.Sprintf("PUT %s: HTTP %d: %s", path, status, snippet(resp))}
 	}
-	// The verify read is the point, as for the shared-dir strip: a 200 with
-	// nothing stored must not read as done.
+	// A 200 with nothing stored must not read as done.
 	var got settings
 	if err := c.get(ctx, path, &got); err != nil {
 		return false, fmt.Errorf("verifying the agent-role ceiling on project %q: %w", projectNameOrSlug, err)
@@ -106,7 +100,6 @@ func (c *Client) EnsureAgentRoleCeiling(ctx context.Context, projectNameOrSlug, 
 	return true, nil
 }
 
-// fieldIs reports whether raw[key] is the JSON string want.
 func fieldIs(raw map[string]json.RawMessage, key, want string) bool {
 	v, ok := raw[key]
 	if !ok {

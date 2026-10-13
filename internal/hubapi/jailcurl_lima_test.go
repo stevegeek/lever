@@ -12,25 +12,19 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// TestJailCurlAgainstRealVM runs the REAL curl script through a REAL jail
-// runner against a real HTTP endpoint inside a VM. It is the only test that
-// covers argv transport: whether the backend's shell wrapper (`limactl shell`,
-// `orb -m`) delivers curlScript intact, single quotes and `%{http_code}` and
-// all, and whether the `env K=V` prefix reaches the shell so the Authorization
-// header expands.
+// TestJailCurlAgainstRealVM runs the real curl script through a real jail
+// runner against an HTTP endpoint inside a VM. It is the only test that covers
+// whether the backend's shell wrapper delivers curlScript intact and whether
+// the env K=V prefix reaches the shell so the Authorization header expands.
 //
-// Unit tests cannot cover that — they stub the runner, so the script never
-// meets a real shell. This is exactly where a backend difference would hide.
-//
-// Gated behind the `integration` build tag and skipped unless LEVER_VM_PREFIX
-// is set. Run it as:
+// Skipped unless LEVER_VM_PREFIX is set. Run it as:
 //
 //	# Lima (start a VM, then serve JSON on :8080 inside it)
 //	LEVER_VM_PREFIX='limactl,shell,levercurltest' \
 //	  go test -tags integration ./internal/hubapi/ -run TestJailCurlAgainstRealVM -v
 //
 //	# OrbStack
-//	LEVER_VM_PREFIX='orb,-m,lever-assistant' ...
+//	LEVER_VM_PREFIX='orb,-m,<vm>' ...
 //
 // LEVER_VM_URL overrides the endpoint (default http://127.0.0.1:8080/probe).
 func TestJailCurlAgainstRealVM(t *testing.T) {
@@ -53,10 +47,8 @@ func TestJailCurlAgainstRealVM(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("status = %d, want 200 — the script reached curl but the endpoint did not answer as expected; body=%q", status, body)
 	}
-	// The endpoint echoes the Authorization header it received, which proves the
-	// `env K=V` prefix survived AND the shell expanded $SCION_HUB_TOKEN inside
-	// the script rather than passing it through literally. Decode rather than
-	// compare bytes: the probe server's JSON spacing is not part of the contract.
+	// The echoed Authorization header proves the env prefix survived and the
+	// shell expanded $SCION_HUB_TOKEN rather than passing it literally.
 	var echoed struct {
 		Auth string `json:"auth"`
 	}

@@ -11,59 +11,46 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// curlNotFound is the shell's exit code for an absent command. lever's guest
-// provisioning installs curl (internal/backend/guest/guest.go), so this means
-// the jail is not provisioned, not that the hub is down — worth saying so.
+// curlNotFound is the shell's exit code for an absent command. Guest
+// provisioning installs curl, so this means the jail is not provisioned, not
+// that the hub is down.
 const curlNotFound = 127
 
-// errCurlMissing means the jail has no curl, so the request never left. It is
-// a provisioning problem, not a hub problem, and the wrapped error says so.
 var errCurlMissing = errors.New("curl is missing from the jail")
 
-// maxBody caps the response lever reads. The hub's replies here are small; a
-// wrong service on the hub port is not bounded by anything else.
+// maxBody caps the response read: a wrong service on the hub port is not
+// bounded by anything else.
 const maxBody = 64 << 10
 
 // curlScript runs one request from inside the jail. The Authorization header is
-// built HERE, from $SCION_HUB_TOKEN, so the shell expands it: a token embedded
-// in an argument value would not be re-expanded. The token reaches the jail
-// through the runner's env, exactly as every scion CLI call already passes it
-// (internal/scion/client.go env()); the jail runner keeps that one key off the
-// host command line (internal/jail/hubtoken.go), so it is never visible to
-// `ps` on the host — only curl's own in-guest argv carries it, as before.
+// built from $SCION_HUB_TOKEN by the in-guest shell; the token reaches the jail
+// through the runner's env, and the jail runner keeps that key off the host
+// command line, so it is never visible to ps on the host.
 //
-// -o - writes the body to stdout and -w appends a final line holding the status
-// code, so one stream carries both. curl expands the `\n` itself (verified live
-// against the jail). --fail is deliberately NOT set: curl exits 0 on a 4xx
-// without it, which is what lever wants — a 403 or 404 must arrive as a status
-// to act on, not as a bare non-zero exit indistinguishable from an unreachable
-// hub.
+// -w appends a final line holding the status code; curl expands the \n
+// itself. --fail is deliberately not set, so a 403 or 404 arrives as a status
+// rather than a non-zero exit indistinguishable from an unreachable hub.
 const curlScript = `exec curl -sS --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' "$2"`
 
-// curlBodyScript is curlScript for a request with a JSON body. The body
-// rides the environment for the same reason the token does: sh expands it
-// into curl's in-guest argv, so lever never quotes JSON into script text.
+// curlBodyScript is curlScript for a request with a JSON body. The body rides
+// the environment so lever never quotes JSON into script text.
 const curlBodyScript = `exec curl -sS --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' ` +
 	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
 
-// JailCurl is a Doer that runs each request inside the jail with curl.
-//
-// The hub binds the jail's loopback. Lever's Lima template suppresses every
-// guest→host port forward on purpose (a jailed agent must not be able to squat
-// a host loopback port), so the host cannot reach the hub on that backend at
-// all. Running in the jail is also the only way to address the right hub when
-// two lever instances are up: each has its own 127.0.0.1:8080.
+// JailCurl is a Doer that runs each request inside the jail with curl. The
+// host cannot reach the hub: the Lima template suppresses every guest-to-host
+// port forward so a jailed agent cannot squat a host loopback port.
 type JailCurl struct {
-	// Runner executes inside the jail (internal/jail.Runner).
+	// Runner executes inside the jail.
 	Runner proc.Runner
-	// BaseURL is the hub root AS SEEN FROM THE JAIL, e.g. "http://127.0.0.1:8080".
+	// BaseURL is the hub root as seen from the jail.
 	BaseURL string
-	// Token returns the controller PAT. Called per request so a re-mint between
-	// calls is picked up without rebuilding the transport.
+	// Token returns the controller PAT. Called per request so a re-mint is
+	// picked up.
 	Token func() string
 }
 
@@ -104,19 +91,16 @@ func (j *JailCurl) run(ctx context.Context, method, path string, body []byte) (i
 
 	body, status, perr := splitCurlOutput(res.Stdout)
 	if perr != nil {
-		// curl exited 0, so the request completed and SOMETHING answered — it
-		// just did not answer like the hub. That is an APIError, not a
-		// transport failure: a caller that distinguishes the two (lever doctor)
-		// must report this rather than pass it off as an unreachable hub.
+		// curl exited 0, so something answered, just not like the hub: an
+		// APIError, not a transport failure.
 		return 0, nil, &APIError{Msg: fmt.Sprintf("%s %s: %v", method, path, perr)}
 	}
 	return status, body, nil
 }
 
-// splitCurlOutput separates the response body from the trailing status-code
-// line that -w appends. It returns an error rather than a zero status when the
-// tail is not a status code, so a truncated or hijacked response can never read
-// as a successful request.
+// splitCurlOutput returns an error rather than a zero status when the tail is
+// not a status code, so a truncated or hijacked response never reads as a
+// successful request.
 func splitCurlOutput(out string) ([]byte, int, error) {
 	i := strings.LastIndexByte(out, '\n')
 	if i < 0 {
@@ -127,10 +111,8 @@ func splitCurlOutput(out string) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("curl wrote no status line: %q", snippet([]byte(out)))
 	}
 	body := []byte(out[:i])
-	// Say "too large" rather than truncate. A silently cut body reaches the
-	// caller as "decoding response: unexpected end of JSON input", which points
-	// at the wrong cause — and the doctor would render that as a red line
-	// blaming the hub's answer.
+	// Say "too large" rather than truncate: a cut body surfaces as a JSON
+	// decode error that points at the wrong cause.
 	if len(body) > maxBody {
 		return nil, 0, fmt.Errorf("response body exceeds %d bytes (is something other than the hub on this port?)", maxBody)
 	}

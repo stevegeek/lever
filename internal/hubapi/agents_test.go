@@ -10,7 +10,6 @@ import (
 
 const agentsPath = "GET /api/v1/agents?limit=500&projectId=" + leverUUID
 
-// agentsScript answers the project lookup plus one page of agent records.
 func agentsScript(body string) *fakeDoer {
 	return &fakeDoer{
 		replies: map[string]reply{
@@ -43,9 +42,8 @@ func TestAgentsReadsTheStoredRole(t *testing.T) {
 	}
 }
 
-// A hub that renamed the list field must not read as "this project has no
-// agents" — that would let the pre-role guard pass vacuously, which is the one
-// failure it exists to catch. Same rationale as SharedDirs' required key.
+// A hub that renamed the list field must not read as "no agents": that would
+// let the pre-role guard pass vacuously.
 func TestAgentsRequiresTheAgentsField(t *testing.T) {
 	f := agentsScript(`{"items":[],"totalCount":0}`)
 	_, err := (&Client{T: f}).Agents(context.Background(), "lever", "hub")
@@ -217,9 +215,8 @@ func TestAgentIDRefusesARecordWithNoID(t *testing.T) {
 	}
 }
 
-// scion's role migration stamps `full` on every record that stored no role,
-// with a marker saying so. That is the same promotion the empty-role guard
-// exists to refuse, wearing a stored role.
+// scion's role migration stamps full on every record that stored no role, with
+// a marker; that is the promotion the empty-role guard refuses.
 func TestAgentsReadsTheGrandfatheredFlag(t *testing.T) {
 	f := agentsScript(`{"agents":[
 	  {"slug":"legacy","appliedConfig":{"agentRole":"full","agentRoleGrandfathered":true}},

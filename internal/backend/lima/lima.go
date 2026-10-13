@@ -494,6 +494,10 @@ var _ backend.Backend = (*Lima)(nil)
 // manager's conversation.
 const RebootAdvice = "`lever stop`, then `lever up`, reboots the VM and keeps the manager conversation"
 
+// RecreateAdvice is how an operator replaces the jail VM (a new image, a
+// create-time setting) and keeps the manager conversation.
+const RecreateAdvice = "`lever conversation backup`, then `lever destroy` (deletes the VM and the conversation) and `lever up`, then `lever conversation restore`"
+
 // ensureGuestProfile converges the guest on cfg.GuestProfile (lever#193):
 // the small profile's trimmed services and zram swap, or standard, which
 // undoes them. "" (no config) skips the step. What systemd refuses is a
@@ -611,7 +615,11 @@ func (l *Lima) keepHWEStamp(path string, was hweStamp, k guest.KernelReport, war
 			}
 		}
 	case guest.HWESkippedStamp:
+		pkg := k.HWEPackage
+		if pkg == "" {
+			pkg = "the HWE kernel package"
+		}
 		warn("jail: warning: guest_kernel hwe: %s is not installed; the install failed in this VM on %s, and lever does not run apt again while the egress posture is closed (apt would wait up to %d s each time). Run lever apply once with the open posture, install it by hand in the guest, or delete %s to retry",
-			guest.HWEPackage, was.FailedAt.Format(time.RFC3339), guest.AptLockWait, path)
+			pkg, was.FailedAt.Format(time.RFC3339), guest.AptLockWait, path)
 	}
 }

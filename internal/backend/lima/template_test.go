@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -179,5 +180,44 @@ func TestRenderedTemplateLimaValidates(t *testing.T) {
 	}
 	if b, err := exec.Command(limactl, "validate", p).CombinedOutput(); err != nil {
 		t.Fatalf("limactl validate: %v\n%s\n%s", err, b, out)
+	}
+}
+
+// Every image the template offers is pinned: a dated release directory (the
+// "release/" alias moves and would fail the digest) and a sha256 digest Lima
+// checks before it boots, one per architecture.
+func TestRenderTemplateImagesPinned(t *testing.T) {
+	out, err := RenderTemplate("/tmp/tree", TemplateOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Images []struct {
+			Location string `yaml:"location"`
+			Arch     string `yaml:"arch"`
+			Digest   string `yaml:"digest"`
+		} `yaml:"images"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("yaml: %v\n%s", err, out)
+	}
+	digest := regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	dated := regexp.MustCompile(`^https://cloud-images\.ubuntu\.com/releases/[a-z]+/release-[0-9]{8}/ubuntu-` + regexp.QuoteMeta(GuestRelease) + `-server-cloudimg-(amd64|arm64)\.img$`)
+	arches := map[string]bool{}
+	for _, im := range doc.Images {
+		arches[im.Arch] = true
+		if !digest.MatchString(im.Digest) {
+			t.Errorf("%s: digest %q", im.Arch, im.Digest)
+		}
+		if !dated.MatchString(im.Location) {
+			t.Errorf("%s: location %q is not a dated %s release image", im.Arch, im.Location, GuestRelease)
+		}
+		want := map[string]string{"x86_64": "amd64", "aarch64": "arm64"}[im.Arch]
+		if want == "" || !strings.HasSuffix(im.Location, "-"+want+".img") {
+			t.Errorf("arch %q does not match location %q", im.Arch, im.Location)
+		}
+	}
+	if len(doc.Images) != 2 || !arches["x86_64"] || !arches["aarch64"] {
+		t.Errorf("want one image for each of x86_64 and aarch64, got %+v", doc.Images)
 	}
 }

@@ -498,8 +498,8 @@ func (a *App) VoiceExcludedLogins() []string {
 
 // Lima guest kernel flavours (guest_kernel).
 const (
-	GuestKernelHWE = "hwe" // Ubuntu 24.04's hardware-enablement kernel (linux-generic-hwe-24.04)
-	GuestKernelGA  = "ga"  // the 24.04 release kernel the cloud image ships (6.8)
+	GuestKernelHWE = "hwe" // the guest release's hardware-enablement kernel (linux-generic-hwe-<release>)
+	GuestKernelGA  = "ga"  // the release kernel the cloud image ships
 )
 
 // EffectiveGuestKernel is the Lima guest kernel flavour apply converges on:

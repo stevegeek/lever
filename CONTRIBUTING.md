@@ -112,7 +112,7 @@ time, and never on a VM whose agents you need.
 1. **A fresh `nested_virt` VM.** After the first apply: the three files
    (`/etc/sysctl.d/99-lever-crash-recovery.conf`, `/etc/modprobe.d/lever-no-efi-pstore.conf`,
    `/etc/default/grub.d/99-lever-crash-recovery.cfg`), the four sysctls live, `efi_pstore` not
-   loaded, apply's `jail: reboot pending:` lines, and `linux-generic-hwe-24.04` installed. Then
+   loaded, apply's `jail: reboot pending:` lines, and `linux-generic-hwe-26.04` installed. Then
    `lever stop`, `lever up`: doctor's *guest crash recovery* and *guest kernel* rows are green and
    `/proc/cmdline` has `efi_pstore.pstore_disable=1`.
 2. **Re-apply.** No `update-grub` and no apt run; record the time the hardening adds to apply.
@@ -134,6 +134,22 @@ time, and never on a VM whose agents you need.
 
 Record results (no host names) in the operations guide's table of host/guest kernel pairs, and
 update its "verified/unverified" notes.
+
+### Refreshing the Lima guest image
+
+`GuestImages` in `internal/backend/lima/template.go` pins the Ubuntu cloud image new Lima VMs boot:
+one dated release directory (`releases/<codename>/release-YYYYMMDD/`, never the moving `release/`
+alias) and one sha256 per architecture. A VM made from it starts at that serial's patch level, so
+move the pin forward now and then:
+
+1. Pick the newest `release-YYYYMMDD` directory under
+   `https://cloud-images.ubuntu.com/releases/<codename>/`.
+2. Check the signature of its `SHA256SUMS` (`SHA256SUMS.gpg`, the Ubuntu cloud image signing key
+   `D2EB 4462 6FDD C30B 513D 5BB7 1A5D 6C4C 7DB8 7C81`) and copy the two `server-cloudimg`
+   `amd64` and `arm64` `.img` digests from it. Never type a digest by hand.
+3. Run `make test-lima-e2e` on the new pin.
+
+Existing VMs are not affected: Lima reads the image only at create time.
 
 ### Bumping the jail ABI
 

@@ -132,9 +132,9 @@ GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} ` + EFIPstoreCmdline + `"`
 // doctor's probe use to tell whether the EFI pstore backend may still be
 // registered: the module (or built-in) is present, and either pstore names
 // it as its backend or it was not loaded with pstore_disable. Unknown reads
-// as active. The backend's name is "efi_pstore" on Ubuntu's 6.8 kernel
-// (read from a 24.04 Lima guest, where efi_pstore is a loadable module with
-// no holders) and "efi" on older kernels.
+// as active. The backend's name is "efi_pstore" on Ubuntu's 6.8 and 7.0
+// kernels (read from 24.04 and 26.04 Lima guests, where efi_pstore is a
+// loadable module with no holders) and "efi" on older kernels.
 const EFIPstoreActiveShell = `efi_pstore_active() {
   [ -d "$1/efi_pstore" ] || return 1
   b=$(cat "$1/pstore/parameters/backend" 2>/dev/null || true)
@@ -222,9 +222,38 @@ const (
 	GuestKernelHWE = "hwe"
 )
 
-// HWEPackage is the Ubuntu 24.04 hardware-enablement kernel metapackage:
-// it tracks the kernel of the newest Ubuntu interim release.
-const HWEPackage = "linux-generic-hwe-24.04"
+// HWEReleases are the Ubuntu LTS releases whose hardware-enablement kernel
+// guest_kernel hwe installs. Each has the metapackage HWEPackage(release),
+// which tracks the kernel of the newest Ubuntu interim release; until a
+// release's first point release with a newer kernel it names the release's
+// own GA kernel.
+var HWEReleases = []string{"24.04", "26.04"}
+
+// HWEPackage is the hardware-enablement kernel metapackage of release.
+func HWEPackage(release string) string { return "linux-generic-hwe-" + release }
+
+// hwePackageFor is HWEPackage for one of HWEReleases, else "".
+func hwePackageFor(release string) string {
+	for _, r := range HWEReleases {
+		if r == release {
+			return HWEPackage(r)
+		}
+	}
+	return ""
+}
+
+// HWEPackageShell sets pkg to the HWE metapackage of the release in
+// $VERSION_ID, or to "" when lever knows none for it. Shared with doctor's
+// probe so both name the same package.
+func HWEPackageShell() string {
+	var b strings.Builder
+	b.WriteString("case \"$VERSION_ID\" in\n")
+	for _, r := range HWEReleases {
+		fmt.Fprintf(&b, "  %s) pkg=%s ;;\n", r, HWEPackage(r))
+	}
+	b.WriteString("  *) pkg= ;;\nesac\n")
+	return b.String()
+}
 
 // kernelPaths are the guest paths the kernel script reads; see crashPaths.
 type kernelPaths struct {
@@ -254,12 +283,13 @@ type KernelOpts struct {
 
 // KernelReport is EnsureGuestKernel's GuestReport plus what the host needs
 // to keep its failed-install stamp: the HWE outcome ("" when guest_kernel
-// is not hwe or the release is not 24.04) and the guest's machine id ("" if
-// unreadable).
+// is not hwe or the release is not one of HWEReleases), the package it is
+// about, and the guest's machine id ("" if unreadable).
 type KernelReport struct {
 	GuestReport
-	HWE       string
-	MachineID string
+	HWE        string
+	HWEPackage string
+	MachineID  string
 }
 
 // machineIDRE is the shape of /etc/machine-id (32 lowercase hex digits).
@@ -274,6 +304,12 @@ func parseKernelReport(out string) KernelReport {
 			switch v := strings.TrimPrefix(line, "hwe: "); v {
 			case HWEInstalled, HWEFailed, HWESkippedClose, HWESkippedStamp:
 				r.HWE = v
+			}
+		case strings.HasPrefix(line, "hwe-package: "):
+			for _, rel := range HWEReleases {
+				if v := strings.TrimPrefix(line, "hwe-package: "); v == HWEPackage(rel) {
+					r.HWEPackage = v
+				}
 			}
 		case strings.HasPrefix(line, "machine-id: "):
 			if v := strings.TrimPrefix(line, "machine-id: "); machineIDRE.MatchString(v) {
@@ -290,8 +326,9 @@ func parseKernelReport(out string) KernelReport {
 const AptLockWait = 120
 
 // guestKernelScript is the root script EnsureGuestKernel runs. Under hwe it
-// installs HWEPackage unless dpkg-query says "install ok installed" (a
-// package in state rc, or a cut-off install, is installed again). It does
+// installs the HWE package of the guest's release (HWEPackageShell) unless
+// dpkg-query says "install ok installed" (a package in state rc, or a
+// cut-off install, is installed again). It does
 // not try apt when the host's stamp names this VM (opts.SkipIfMachineID)
 // or when lever's egress chain in the guest ends in the closed posture's
 // catch-all DROP: the mirrors are unreachable there, and apt would only
@@ -311,15 +348,16 @@ func guestKernelScript(kernel string, opts KernelOpts, p kernelPaths) string {
 . %[1]s 2>/dev/null || true
 mid=$(cat %[2]s 2>/dev/null || true)
 echo "machine-id: $mid"
-if [ "$VERSION_ID" != 24.04 ]; then
-  echo "warn: guest_kernel hwe: the guest is Ubuntu ${VERSION_ID:-unknown}, not 24.04; lever installed no kernel"
-elif [ "$(dpkg-query -W -f='${Status}' %[3]s 2>/dev/null)" = "install ok installed" ]; then
+%[3]s[ -z "$pkg" ] || echo "hwe-package: $pkg"
+if [ -z "$pkg" ]; then
+  echo "warn: guest_kernel hwe: the guest is Ubuntu ${VERSION_ID:-unknown}, not %[10]s; lever installed no kernel"
+elif [ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null)" = "install ok installed" ]; then
   echo "hwe: installed"
 elif [ -n %[4]s ] && [ "$mid" = %[4]s ]; then
   echo "hwe: skipped-stamp"
 elif iptables -S %[5]s 2>/dev/null | grep -qx -- %[6]s; then
   echo "hwe: skipped-egress"
-  echo %[7]s
+  printf %[7]s "$pkg"
 else
   export DEBIAN_FRONTEND=noninteractive
   ok=0
@@ -330,17 +368,18 @@ else
     [ "$(date +%%s)" -lt "$end" ] || break
     sleep 5
   done
-  if [ "$ok" = 1 ] && apt-get install -y -qq -o DPkg::Lock::Timeout=%[8]d %[3]s >/dev/null 2>&1; then
+  if [ "$ok" = 1 ] && apt-get install -y -qq -o DPkg::Lock::Timeout=%[8]d "$pkg" >/dev/null 2>&1; then
     echo "hwe: installed"
   else
     echo "hwe: failed"
-    echo %[9]s
+    printf %[9]s "$pkg"
   fi
 fi
-`, q(p.OSRelease), q(p.MachineID), HWEPackage, q(opts.SkipIfMachineID), q(egressChain), q("-A "+egressChain+" -j DROP"),
-			q("warn: guest_kernel hwe: "+HWEPackage+" is not installed, and lever did not run apt: the jail's egress is closed (the closed posture's catch-all DROP is in place), so the Ubuntu mirrors are unreachable; run lever apply once with the open posture, or install it by hand in the guest"),
+`, q(p.OSRelease), q(p.MachineID), HWEPackageShell(), q(opts.SkipIfMachineID), q(egressChain), q("-A "+egressChain+" -j DROP"),
+			q("warn: guest_kernel hwe: %s is not installed, and lever did not run apt: the jail's egress is closed (the closed posture's catch-all DROP is in place), so the Ubuntu mirrors are unreachable; run lever apply once with the open posture, or install it by hand in the guest\n"),
 			AptLockWait,
-			q("warn: guest_kernel hwe: installing "+HWEPackage+" failed (the guest may not reach the Ubuntu mirrors); run lever apply again with the open posture, or install it by hand in the guest"))
+			q("warn: guest_kernel hwe: installing %s failed (the guest may not reach the Ubuntu mirrors); run lever apply again with the open posture, or install it by hand in the guest\n"),
+			strings.Join(HWEReleases, " or "))
 	}
 	fmt.Fprintf(&b, `running=$(uname -r)
 default=$(readlink -f %s 2>/dev/null || true)
@@ -352,9 +391,9 @@ fi
 	return b.String()
 }
 
-// EnsureGuestKernel converges the guest kernel flavour: hwe installs
-// HWEPackage (idempotent), ga changes nothing (switching back does not
-// remove an installed HWE kernel). Under either it reports a reboot when
+// EnsureGuestKernel converges the guest kernel flavour: hwe installs the
+// release's HWE package (idempotent), ga changes nothing (switching back
+// does not remove an installed HWE kernel). Under either it reports a reboot when
 // the default kernel is not the running one. "" (lever provision, which
 // has no config) only reports.
 func (g Guest) EnsureGuestKernel(ctx context.Context, kernel string, opts KernelOpts) (KernelReport, error) {

@@ -995,8 +995,9 @@ running one. They are on by default and have no switch:
   cover the failure that does. A side effect: a soft lockup the host causes now reboots the
   guest instead of passing (see [soft lockups the host causes](#soft-lockups-the-host-causes)).
 - **No EFI pstore.** The panic path runs `kmsg_dump` too, so with the EFI backend registered a
-  panic could hang in the same EFI call. On Ubuntu 24.04's 6.8 kernel `efi_pstore` is a loadable
-  module, loaded at boot and registered as pstore's backend. lever unloads it now when it can, writes
+  panic could hang in the same EFI call. On Ubuntu's 6.8 (24.04) and 7.0 (26.04) kernels
+  `efi_pstore` is a loadable module, loaded at boot and registered as pstore's backend. lever
+  unloads it now when it can, writes
   `/etc/modprobe.d/lever-no-efi-pstore.conf` (`blacklist` plus `install efi_pstore /bin/true`) so
   nothing loads it again, and adds `efi_pstore.pstore_disable=1` to the kernel command line
   through `/etc/default/grub.d/99-lever-crash-recovery.cfg` and `update-grub`. The parameter is
@@ -1055,15 +1056,18 @@ OrbStack's, not lever's. lever changes nothing there, and the doctor rows say no
 
 ### The guest kernel
 
-[`guest_kernel`](/reference/config/#top-level) picks the Lima guest's kernel: `hwe` installs
-`linux-generic-hwe-24.04` (Ubuntu's hardware-enablement kernel, which tracks the newest interim
-release and is well past 6.8), `ga` keeps the 24.04 release kernel (6.8). Unset, it is `hwe` with
-`nested_virt` and `ga` without: the 6.8 GA kernel is the one that crashed under nested load, and an
-instance that runs no nested VM has no reason to change kernels under it. lever installs the
-package on the next apply or up and then warns that a reboot is pending until the guest runs the
-new kernel (`lever stop`, then `lever up`). The GA kernel stays installed; grub's *Advanced
-options* menu still offers it. lever counts the package installed only when dpkg says
-`install ok installed`.
+[`guest_kernel`](/reference/config/#top-level) picks the Lima guest's kernel: `hwe` installs the
+guest release's hardware-enablement kernel, `ga` keeps the release kernel the cloud image ships.
+On a 26.04 guest (every VM lever creates now) `hwe` means `linux-generic-hwe-26.04`, and `ga` the
+7.0 release kernel; until Ubuntu moves 26.04's HWE series to a newer kernel the two are the same
+7.0 series, and `hwe` only installs the newest 7.0 build. On a VM created on 24.04 `hwe` means
+`linux-generic-hwe-24.04` (well past 6.8) and `ga` the 6.8 release kernel. On any other release
+`hwe` installs nothing and warns. Unset, it is `hwe` with `nested_virt` and `ga` without: the 6.8
+GA kernel is the one that crashed under nested load, and an instance that runs no nested VM has
+no reason to change kernels under it. lever installs the package on the next apply or up and then
+warns that a reboot is pending until the guest runs the new kernel (`lever stop`, then `lever up`).
+The GA kernel stays installed; grub's *Advanced options* menu still offers it. lever counts the
+package installed only when dpkg says `install ok installed`.
 
 The install normally happens on the VM's first apply, before lever's egress chain exists, so it
 reaches the Ubuntu mirrors under either posture. `apt-get update` and the install each wait up to
@@ -1080,22 +1084,24 @@ Later, when the package is still missing:
   stamp makes the next apply or up try again. A recreated VM has a new machine id, so an old
   stamp does not apply to it.
 
-Doctor's *guest kernel* row shows `uname -r` and warns when `/boot/vmlinuz` names another kernel
-(a reboot is pending), when `guest_kernel` is `hwe` and the package is missing, and when
-`nested_virt` runs on a 6.8 kernel.
-
-**Ubuntu 26.04** is a later option, not part of this change: its podman generation differs from
-the one lever is tested with. Before the base image moves, it needs the rootless podman
-install, the pasta drop-in (`passt` version), scion's container lifecycle (create, suspend,
-resume, `--continue`), the agent image's layer copy and warm-up, the egress chains and the guest
-DNS path, and `lever-test` e2e on both Lima drivers, with nested load on the qemu driver.
+Doctor's *guest kernel* row shows the guest's Ubuntu release and `uname -r`, and warns when
+`/boot/vmlinuz` names another kernel (a reboot is pending), when `guest_kernel` is `hwe` and the
+release's package is missing or the release has none lever knows, and when `nested_virt` runs on a
+6.8 kernel.
 
 **Known host/guest kernel pairs under nested load.** Fill this in as pairs are tested (no host
-names):
+names). *Guest kernel* is the Lima guest's, the kernel that runs the nested VMs; *host kernel* is
+the kernel under the Lima guest's QEMU.
 
-| Host kernel | Host CPU | Guest kernel | Result |
-|---|---|---|---|
-| 7.2.x | AMD (`kvm_amd nested=1`) | 6.8.0-146 (24.04 GA) | crashed under nested load: oops, double fault, EFI pstore hang, soft lockups until QEMU was killed |
+| Host kernel | Host CPU | Guest kernel | Load | Result |
+|---|---|---|---|---|
+| 7.2.x | AMD (`kvm_amd nested=1`) | 6.8.0-146 (24.04 GA) | a nested VM run by the manager, about 45 min | crashed: oops, double fault, EFI pstore hang, soft lockups until QEMU was killed |
+| 7.0.0-38 (24.04 HWE), itself a KVM guest of an AMD host | AMD Zen 5 (`kvm_amd nested=1`) | 7.0.0-34 (26.04 GA, cloud image) | two 2-vCPU nested KVM guests busy on CPU and memory, the Lima guest busy on all 4 vCPUs and on disk with fsync; 5 min | clean: no oops, lockup, RCU stall or KVM error in the guest's kernel log or serial log |
+| same | same | 7.0.0-38 (`linux-generic-hwe-26.04`) | same; 5 min | clean, as above |
+
+The two 26.04 rows are short runs on a host that was itself a VM (three levels of KVM, one more
+than a Lima jail on a physical host has): evidence that the 26.04 kernel runs nested guests, not
+the 24 h soak that step 9 of the live test plan asks for.
 
 ### Recovery after a hard VM kill
 
@@ -1175,6 +1181,38 @@ driver).
    fails while the agent image's in-jail code is older than the host's (its `lever_jail_abi` label
    differs). When the new release changed no in-jail code, the row passes and names both
    releases: no image rebuild and no `lever up --fresh` is needed.
+
+### Moving a Lima VM to Ubuntu 26.04
+
+lever creates every new Lima VM from a pinned Ubuntu 26.04 LTS cloud image (one URL and sha256 per
+architecture; Lima refuses an image whose digest does not match). Lima reads the image only when
+it creates a VM, so upgrading lever does not change the release of an existing VM: a VM created
+on Ubuntu 24.04 keeps running 24.04, and lever keeps provisioning it as before (the crash
+recovery, `guest_kernel: hwe` with `linux-generic-hwe-24.04`, the doctor rows). Doctor's *guest
+kernel* row names the guest's release and says when it is not the one new VMs get.
+
+To move a VM to 26.04, recreate it:
+
+1. `lever conversation backup` (the jail must be up).
+2. `lever destroy`. It deletes the VM and everything in it: the hub's database, the agent homes,
+   the podman store, and anything an agent left in the guest outside the tree. The tree and the
+   instance's `.lever-state` are on the host and are not touched.
+3. `lever up`. This is a first boot: it downloads the 26.04 image (about 0.9 GB, once per host),
+   installs the guest packages, copies the agent image in again and starts the manager fresh,
+   10-15 minutes in all.
+4. `lever conversation restore`, which puts the backed-up conversation into the new manager.
+   Workers start in the new VM with new conversations when the manager next starts them.
+5. `lever doctor`.
+
+Settings that apply at create time only (`disk`, `nested_virt`'s `/dev/kvm`) come from the
+current config, so this is also the moment to change them.
+
+**Never run `do-release-upgrade` in the guest.** lever does not support an in-place release
+upgrade and never runs one. It swaps podman (4.9 to 5.7) under an existing rootless store, the
+kernel, iptables, passt and the cloud image's services in one step, none of which lever's
+provisioning, warm path or crash recovery has been checked against as an upgrade; under
+`egress: closed` the guest cannot reach the mirrors and the upgrade stops halfway. The
+recreate above is the tested path.
 
 ### Upgrading past 0.30.0: contacts, agent messages, files, push
 

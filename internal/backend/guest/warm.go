@@ -424,10 +424,10 @@ const bootKeyScript = `bootkey() { /usr/bin/cat /proc/sys/kernel/random/boot_id 
 
 // probeIptables picks the iptables binaries by absolute path, as the rest
 // of the probe names its commands, so no PATH entry chooses them: Ubuntu
-// (24.04, and OrbStack's Ubuntu machines) installs them in /usr/sbin; /sbin
-// is the fallback for a guest without the merged /usr. With neither, the
-// listings fail (exit 127), and an unread listing sends the egress step
-// down the full path.
+// (24.04, 26.04, and OrbStack's Ubuntu machines) installs them in
+// /usr/sbin; /sbin is the fallback for a guest without the merged /usr.
+// With neither, the listings fail (exit 127), and an unread listing sends
+// the egress step down the full path.
 const probeIptables = `IPT=/usr/sbin/iptables; [ -x "$IPT" ] || IPT=/sbin/iptables
 IP6T=/usr/sbin/ip6tables; [ -x "$IP6T" ] || IP6T=/sbin/ip6tables
 `

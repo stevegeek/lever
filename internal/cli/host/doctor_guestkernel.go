@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend/guest"
@@ -21,7 +22,9 @@ type guestKernelProbe struct {
 	cmdline        bool              // guest.EFIPstoreCmdline is on /proc/cmdline
 	efiPstore      bool              // the EFI pstore backend may be registered
 	running, deflt string            // uname -r; the kernel /boot/vmlinuz names
-	hwe            bool              // guest.HWEPackage is installed
+	release        string            // VERSION_ID of /etc/os-release
+	hwePkg         string            // the guest release's HWE package; "" when lever knows none
+	hwe            bool              // hwePkg is installed
 }
 
 // guestKernelProbeScript prints key=value lines; a value it cannot read is
@@ -39,9 +42,18 @@ func guestKernelProbeScript() string {
 	// readlink -f prints a missing path as it is: only a vmlinuz-<version>
 	// target names a default kernel.
 	b.WriteString("d=$(readlink -f /boot/vmlinuz 2>/dev/null); case \"$d\" in */vmlinuz-*) d=${d##*/vmlinuz-} ;; *) d= ;; esac; echo \"default=$d\"\n")
-	fmt.Fprintf(&b, "if [ \"$(dpkg-query -W -f='${Status}' %s 2>/dev/null)\" = \"install ok installed\" ]; then echo hwe=1; else echo hwe=0; fi\n", guest.HWEPackage)
+	// dash exits on a "." whose file it cannot open, || or not.
+	b.WriteString("VERSION_ID=; if [ -r /etc/os-release ]; then . /etc/os-release; fi\n")
+	b.WriteString(guest.HWEPackageShell())
+	b.WriteString("echo \"release=$VERSION_ID\"\n")
+	b.WriteString("echo \"hwepkg=$pkg\"\n")
+	b.WriteString("if [ -n \"$pkg\" ] && [ \"$(dpkg-query -W -f='${Status}' \"$pkg\" 2>/dev/null)\" = \"install ok installed\" ]; then echo hwe=1; else echo hwe=0; fi\n")
 	return b.String()
 }
+
+// releaseRE is the shape of an Ubuntu VERSION_ID; anything else the guest
+// reports is not shown.
+var releaseRE = regexp.MustCompile(`^[0-9]{2}\.[0-9]{2}$`)
 
 func parseGuestKernelProbe(out string) guestKernelProbe {
 	p := guestKernelProbe{sysctl: map[string]string{}}
@@ -63,6 +75,16 @@ func parseGuestKernelProbe(out string) guestKernelProbe {
 			p.deflt = v
 		case k == "hwe":
 			p.hwe = v == "1"
+		case k == "release":
+			if releaseRE.MatchString(v) {
+				p.release = v
+			}
+		case k == "hwepkg":
+			for _, r := range guest.HWEReleases {
+				if v == guest.HWEPackage(r) {
+					p.hwePkg = v
+				}
+			}
 		}
 	}
 	return p
@@ -122,8 +144,8 @@ func checkGuestCrashRecovery(backendName string, p guestKernelProbe, perr error)
 
 // checkGuestKernel is the doctor row "guest kernel": the running guest
 // kernel, and a warning when the default kernel differs from it (a reboot
-// is pending), when guest_kernel is hwe but the HWE kernel is not
-// installed, or when nested_virt runs on the 24.04 GA kernel (6.8), the
+// is pending), when guest_kernel is hwe but the guest's release has no HWE
+// kernel lever knows or it is not installed, or when nested_virt runs on the 24.04 GA kernel (6.8), the
 // kernel a nested VM crashed (lever#179).
 func checkGuestKernel(app *config.App, p guestKernelProbe, perr error) checkResult {
 	const name = "guest kernel"
@@ -138,11 +160,17 @@ func checkGuestKernel(app *config.App, p guestKernelProbe, perr error) checkResu
 	}
 	flavour := app.EffectiveGuestKernel()
 	detail := "running " + p.running + " (guest_kernel " + flavour + ")"
+	if p.release != "" {
+		detail = "Ubuntu " + p.release + ", " + detail
+	}
 	switch {
 	case p.deflt != "" && p.deflt != p.running:
 		return warnResult(name, detail+"; the default kernel is "+p.deflt+" (reboot pending)", lima.RebootAdvice)
+	case flavour == config.GuestKernelHWE && p.hwePkg == "":
+		return warnResult(name, detail+"; the guest's Ubuntu release has no HWE kernel lever installs (it knows "+strings.Join(guest.HWEReleases, " and ")+")",
+			"recreate the VM on lever's current image ("+lima.RecreateAdvice+"), or set guest_kernel: ga")
 	case flavour == config.GuestKernelHWE && !p.hwe:
-		return warnResult(name, detail+"; "+guest.HWEPackage+" is not installed",
+		return warnResult(name, detail+"; "+p.hwePkg+" is not installed",
 			"run `lever apply` (it installs the package; under the closed egress posture the guest may not reach the Ubuntu mirrors), then reboot the VM ("+lima.RebootAdvice+")")
 	case app.NestedVirt && strings.HasPrefix(p.running, "6.8."):
 		fix := "run `lever apply`, then reboot the VM (" + lima.RebootAdvice + ")"
@@ -151,6 +179,11 @@ func checkGuestKernel(app *config.App, p guestKernelProbe, perr error) checkResu
 			fix = "guest_kernel: ga is set explicitly; to move off 6.8, remove it (hwe is the default with nested_virt) or set hwe, then " + fix
 		}
 		return warnResult(name, detail+"; nested_virt runs on the 24.04 GA kernel (6.8), which crashed under nested VM load", fix)
+	}
+	if p.release != "" && p.release != lima.GuestRelease {
+		// Not a warning: an older guest keeps working, and lever never
+		// upgrades a guest's release in place.
+		detail += "; lever creates new VMs on Ubuntu " + lima.GuestRelease + ", and this VM stays on " + p.release + " until it is recreated (" + lima.RecreateAdvice + ")"
 	}
 	return checkResult{name, true, detail, ""}
 }

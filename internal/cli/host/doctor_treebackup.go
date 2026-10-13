@@ -97,6 +97,13 @@ func checkTreeBackup(app *config.App, st state.State, now time.Time) checkResult
 	case !gc.Time.IsZero() && (gc.LastOK.IsZero() || now.Sub(gc.LastOK) > 7*24*time.Hour):
 		warns = append(warns, "GC has not finished for 7 days")
 	}
+	if !gc.LastEvicted.IsZero() && now.Sub(gc.LastEvicted) < 7*24*time.Hour {
+		warns = append(warns, fmt.Sprintf("GC deleted snapshots to keep the store under max_store (last %s): if agents write new content to push history out, pin the snapshots you need (`lever tree snapshot --pin`)",
+			gc.LastEvicted.Local().Format("2006-01-02 15:04")))
+	}
+	if max := tb.EffectiveMaxStore(); max > 0 && gc.StoreBytes > max {
+		warns = append(warns, fmt.Sprintf("the store holds %s, over max_store (%s): the snapshots GC never deletes take that much", humanBytes(gc.StoreBytes), humanBytes(max)))
+	}
 	if len(strays) > 0 {
 		warns = append(warns, fmt.Sprintf("stray files in snapshots/: %s", strings.Join(quoteAll(strays), ", ")))
 	}

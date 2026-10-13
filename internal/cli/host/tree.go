@@ -656,7 +656,8 @@ func printVerify(w io.Writer, r *treebackup.VerifyReport) bool {
 
 func (e *treeEnv) gcOptions(wait time.Duration) treebackup.GCOptions {
 	last, daily, weekly := e.app.TreeBackup.EffectiveKeep()
-	return treebackup.GCOptions{Keep: treebackup.Keep{Last: last, Daily: daily, Weekly: weekly}, Wait: wait}
+	return treebackup.GCOptions{Keep: treebackup.Keep{Last: last, Daily: daily, Weekly: weekly},
+		MaxStore: e.app.TreeBackup.EffectiveMaxStore(), Wait: wait}
 }
 
 func newTreeDeleteCmd() *cobra.Command {
@@ -717,7 +718,15 @@ func printGC(w io.Writer, r *treebackup.GCResult) {
 	case r.Blocked != "":
 		fmt.Fprintf(w, "tree gc: BLOCKED by %s: nothing was deleted (`lever tree verify` names the problem; `lever tree delete` removes a bad manifest)\n", treebackup.Q([]byte(r.Blocked)))
 	}
+	evicted := make(map[string]bool)
+	for _, id := range r.Evicted {
+		evicted[id] = true
+	}
 	for _, id := range r.Deleted {
+		if evicted[id] {
+			fmt.Fprintf(w, "deleted snapshot %s to keep the store under max_store\n", treebackup.Q([]byte(id)))
+			continue
+		}
 		fmt.Fprintf(w, "deleted snapshot %s\n", treebackup.Q([]byte(id)))
 	}
 	for _, n := range r.Strays {

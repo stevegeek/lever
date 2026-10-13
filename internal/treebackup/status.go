@@ -37,6 +37,10 @@ type GCStatus struct {
 	BlobCount  int64     `json:"blob_count"`
 	// LastOK is the last GC that finished.
 	LastOK time.Time `json:"last_ok,omitzero"`
+	// Evicted counts the snapshots the last GC deleted for max_store, and
+	// LastEvicted is the last GC that deleted any.
+	Evicted     int       `json:"evicted,omitempty"`
+	LastEvicted time.Time `json:"last_evicted,omitzero"`
 }
 
 // GC results.

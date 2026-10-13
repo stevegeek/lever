@@ -30,6 +30,9 @@ func TestTreeBackupDefaults(t *testing.T) {
 	if tb.EffectiveLimits() != treebackup.DefaultLimits() {
 		t.Fatalf("limits = %+v, want the defaults", tb.EffectiveLimits())
 	}
+	if tb.EffectiveMaxStore() != 32<<30 {
+		t.Fatalf("max_store %d, want 32 GiB", tb.EffectiveMaxStore())
+	}
 }
 
 func TestTreeBackupLoad(t *testing.T) {
@@ -40,6 +43,7 @@ func TestTreeBackupLoad(t *testing.T) {
   reverify: 1d
   lock_wait: 30s
   min_free: 512MiB
+  max_store: 0
   limits:
     file: 1GiB
     read: 100MB
@@ -65,6 +69,9 @@ func TestTreeBackupLoad(t *testing.T) {
 	}
 	if tb.EffectiveReverify() != 24*time.Hour || tb.EffectiveLockWait() != 30*time.Second || tb.EffectiveMinFree() != 512<<20 {
 		t.Fatalf("reverify %v lock_wait %v min_free %d", tb.EffectiveReverify(), tb.EffectiveLockWait(), tb.EffectiveMinFree())
+	}
+	if tb.EffectiveMaxStore() != 0 {
+		t.Fatalf("max_store %d, want 0 (no cap)", tb.EffectiveMaxStore())
 	}
 	want := treebackup.Limits{File: 1 << 30, Read: 100e6, New: 50e6, Entries: 2000, Manifest: 64 << 20, DirEntries: 50, Depth: 16, Path: 1024, Time: 0}
 	if got := tb.EffectiveLimits(); got != want {

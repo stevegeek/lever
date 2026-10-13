@@ -280,6 +280,18 @@ func TestDoctorTreeBackupRow(t *testing.T) {
 	if r := checkTreeBackup(app, st, now); !r.ok || !strings.Contains(r.detail, "no space is reserved") {
 		t.Fatalf("no reserve: %+v", r)
 	}
+	s, err := treebackup.OpenStore(store, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.WriteGCStatus(treebackup.GCStatus{Time: now, Result: treebackup.GCOK, LastOK: now, Evicted: 2, LastEvicted: now})
+	s.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := checkTreeBackup(app, st, now); !r.ok || !strings.Contains(r.detail, "under max_store") {
+		t.Fatalf("an eviction: %+v", r)
+	}
 	if err := os.WriteFile(filepath.Join(store, "snapshots", ".DS_Store"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -25,6 +25,7 @@ type TreeBackup struct {
 	Reverify *Days          `yaml:"reverify"`
 	LockWait *Days          `yaml:"lock_wait"`
 	MinFree  *ByteSize      `yaml:"min_free"`
+	MaxStore *ByteSize      `yaml:"max_store"`
 	Limits   TreeLimits     `yaml:"limits"`
 	Exclude  []string       `yaml:"exclude"`
 }
@@ -49,7 +50,7 @@ type TreeLimits struct {
 }
 
 var (
-	treeBackupKeys = []string{"enabled", "at_stop", "keep", "reverify", "lock_wait", "min_free", "limits", "exclude"}
+	treeBackupKeys = []string{"enabled", "at_stop", "keep", "reverify", "lock_wait", "min_free", "max_store", "limits", "exclude"}
 	treeKeepKeys   = []string{"last", "daily", "weekly"}
 	treeLimitKeys  = []string{"file", "read", "new", "entries", "manifest", "dir_entries", "depth", "path", "time"}
 )
@@ -170,6 +171,7 @@ const (
 	DefaultTreeReverify   = 7 * 24 * time.Hour
 	DefaultTreeLockWait   = 2 * time.Minute
 	DefaultTreeMinFree    = 2 << 30
+	DefaultTreeMaxStore   = 32 << 30
 )
 
 func (t TreeBackup) EffectiveAtStop() bool { return t.AtStop == nil || *t.AtStop }
@@ -200,6 +202,14 @@ func (t TreeBackup) EffectiveMinFree() int64 {
 		return DefaultTreeMinFree
 	}
 	return int64(*t.MinFree)
+}
+
+// EffectiveMaxStore is the store-size cap; 0 is none.
+func (t TreeBackup) EffectiveMaxStore() int64 {
+	if t.MaxStore == nil {
+		return DefaultTreeMaxStore
+	}
+	return int64(*t.MaxStore)
 }
 
 // EffectiveLimits are the configured budgets over the defaults. Time is the
@@ -249,6 +259,9 @@ func (t TreeBackup) validate() error {
 	}
 	if t.MinFree != nil && *t.MinFree < 0 {
 		return fmt.Errorf("config: tree_backup.min_free must not be negative")
+	}
+	if t.MaxStore != nil && *t.MaxStore < 0 {
+		return fmt.Errorf("config: tree_backup.max_store must not be negative")
 	}
 	l := t.EffectiveLimits()
 	for _, c := range []struct {

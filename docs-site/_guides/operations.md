@@ -941,9 +941,27 @@ directory or the store. `--path` restores those subtrees (and their parent direc
 lever keeps the `keep.last` (20) newest snapshots, the newest of each day for the last
 `keep.daily` (7) days with snapshots, and the newest of each ISO week for the last `keep.weekly`
 (8) weeks with snapshots, plus always the newest complete snapshot, the newest `vm-off` one, and
-every snapshot taken with `lever tree snapshot --pin`. History is never deleted to make room: when
-free space on the store's filesystem falls below `min_free` (2 GiB, plus 1% of the inodes), new
-content is skipped (the snapshot is incomplete with reason `disk`) and the manifest still commits.
+every snapshot taken with `lever tree snapshot --pin`.
+
+**Store size.** The store holds every retained snapshot's content, and agents choose that content.
+Three limits keep it from taking over the host's disk:
+
+- Runs of zeros are stored as holes, so a sparse file costs the store what it costs the tree.
+- `limits.new` (2 GiB) bounds the disk new content may take per snapshot, once a complete snapshot
+  exists. Past it, new files are `skipped(new)` and the snapshot is incomplete; changed files the
+  last complete snapshot held are stored first.
+- `max_store` (32 GiB) caps the disk the retained snapshots take. Past it, GC deletes the oldest
+  snapshots until the rest fit, except the newest, the newest complete, the newest `vm-off` and
+  pinned ones, which stay even when they alone take more. This deletes history to make room: an
+  agent that writes new content before every snapshot can push the oldest unpinned snapshots out
+  (at most `limits.new` per snapshot), and doctor warns for a week after each such deletion. Pin
+  the snapshots you rely on. Without the cap (`max_store: 0`) nothing is deleted for space, and
+  the same agent can instead hold your filesystem at `min_free` for weeks, with every snapshot in
+  that time `incomplete(disk)`.
+
+When free space on the store's filesystem falls below `min_free` (2 GiB, plus 1% of the inodes),
+new content is skipped (the snapshot is incomplete with reason `disk`) and the manifest still
+commits.
 
 **A full disk.** The tree and the store usually share a filesystem, so agents can fill it. The
 manifest then goes into space the store holds back for it (`reserve`: 64 MiB, or twice the last

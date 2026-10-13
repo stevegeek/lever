@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,5 +67,52 @@ func TestSnapshotRunsWhileGCValidates(t *testing.T) {
 	rep, err := s.Verify(false, time.Second)
 	if err != nil || len(rep.MissingBlobs) != 0 || len(rep.BadBlobs) != 0 {
 		t.Fatalf("verify after GC: %v %+v", err, rep)
+	}
+}
+
+// Past max_store, GC deletes the oldest snapshots that are not protected:
+// the newest, the newest complete, the newest vm-off and pinned ones stay,
+// even when retention would keep the others.
+func TestGCEvictsOldestUnprotectedPastMaxStore(t *testing.T) {
+	e := newSnapEnv(t)
+	var ids []string
+	for i := 1; i <= 6; i++ {
+		os.RemoveAll(filepath.Join(e.tree, "data"))
+		writeFile(t, filepath.Join(e.tree, "data", fmt.Sprintf("f%d", i)), strings.Repeat(string(rune('a'+i)), 256<<10))
+		o := e.opts(TriggerManual)
+		o.Pinned = i == 2
+		o.Now = func() time.Time { return time.Date(2026, 10, 1, i, 0, 0, 0, time.UTC) }
+		res, err := Snapshot(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, res.Header.ID)
+	}
+	s := e.store(t)
+	res, err := s.GC(GCOptions{Keep: Keep{Last: 20, Daily: 7, Weekly: 8}, MaxStore: 700 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{ids[0], ids[2], ids[3], ids[4]}
+	if !slices.Equal(res.Evicted, want) || !slices.Equal(res.Deleted, want) {
+		t.Fatalf("evicted %v, deleted %v; want %v", res.Evicted, res.Deleted, want)
+	}
+	infos, _, _ := s.List()
+	if len(infos) != 2 || infos[0].ID != ids[1] || infos[1].ID != ids[5] {
+		t.Fatalf("left %+v", infos)
+	}
+	if res.BlobCount != 2 || res.StoreBytes > 700<<10 {
+		t.Fatalf("store after the eviction: %d blobs, %d bytes", res.BlobCount, res.StoreBytes)
+	}
+	st, err := s.ReadGCStatus()
+	if err != nil || st.Evicted != 4 || st.LastEvicted.IsZero() {
+		t.Fatalf("status %+v, %v", st, err)
+	}
+	// Under the cap nothing more goes.
+	if res, err := s.GC(GCOptions{Keep: Keep{Last: 20}, MaxStore: 700 << 10}); err != nil || len(res.Deleted) != 0 {
+		t.Fatalf("second GC: %v %+v", err, res)
+	}
+	if st, _ := s.ReadGCStatus(); st.Evicted != 0 || st.LastEvicted.IsZero() {
+		t.Fatalf("status after a GC that evicted nothing: %+v", st)
 	}
 }

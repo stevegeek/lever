@@ -18,10 +18,13 @@ import (
 type Keep struct{ Last, Daily, Weekly int }
 
 // GCOptions configure GC and Delete. A Wait of 0 tries the lock once.
+// MaxStore, when positive, caps the disk the kept snapshots take (see
+// capEvict).
 type GCOptions struct {
-	Keep Keep
-	Wait time.Duration
-	Now  func() time.Time
+	Keep     Keep
+	MaxStore int64
+	Wait     time.Duration
+	Now      func() time.Time
 }
 
 // GCResult is what a GC or Delete did. Busy means the lock was held and
@@ -36,6 +39,9 @@ type GCResult struct {
 	Busy         bool
 	// Quarantined are blobs moved to blobs/corrupt/ after a crash.
 	Quarantined []string
+	// Evicted are the snapshots deleted to keep the store under MaxStore;
+	// they are in Deleted too.
+	Evicted []string
 }
 
 func (o *GCOptions) now() time.Time {
@@ -146,6 +152,9 @@ func (s *Store) writeGC(o GCOptions, st GCStatus, keepSizes bool) error {
 	prev, perr := s.ReadGCStatus()
 	if perr == nil {
 		st.LastOK = prev.LastOK
+		if st.LastEvicted.IsZero() {
+			st.LastEvicted = prev.LastEvicted
+		}
 	}
 	if st.Result == GCOK {
 		st.LastOK = o.now()
@@ -192,8 +201,8 @@ func (s *Store) cleanTmp() error {
 // gcPlan is what the shared phase of a GC found: the manifests it
 // validated, and a filter marking the blobs of every one it would keep.
 type gcPlan struct {
-	seen, marked map[string]bool
-	bf           *bloom
+	seen, marked, evict map[string]bool
+	bf                  *bloom
 }
 
 // block records that the manifest id stopped GC.
@@ -233,6 +242,16 @@ func (s *Store) plan(res *GCResult, o GCOptions) (*gcPlan, error) {
 		gcPhaseHook("validated")
 	}
 	keep := KeepSet(infos, o.Keep)
+	if o.MaxStore > 0 {
+		evict, err := s.capEvict(infos, keep, o.MaxStore)
+		if err != nil {
+			return nil, err
+		}
+		p.evict = evict
+		for id := range evict {
+			delete(keep, id)
+		}
+	}
 	var refs int64
 	for _, in := range infos {
 		if keep[in.ID] {
@@ -277,7 +296,7 @@ func (s *Store) apply(res *GCResult, o GCOptions, p *gcPlan) error {
 	}
 	keep := KeepSet(infos, o.Keep)
 	for _, in := range infos {
-		if keep[in.ID] {
+		if keep[in.ID] && !p.evict[in.ID] {
 			if !p.marked[in.ID] {
 				if err := s.markManifest(in.ID, p.bf, nil); err != nil {
 					return s.block(res, o, in.ID, err)
@@ -289,6 +308,9 @@ func (s *Store) apply(res *GCResult, o GCOptions, p *gcPlan) error {
 			return fmt.Errorf("tree backups: %w", err)
 		}
 		res.Deleted = append(res.Deleted, in.ID)
+		if keep[in.ID] {
+			res.Evicted = append(res.Evicted, in.ID)
+		}
 	}
 	if err := s.syncSubdir(snapshotsDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("tree backups: %w", err)
@@ -312,7 +334,85 @@ func (s *Store) apply(res *GCResult, o GCOptions, p *gcPlan) error {
 	if err := s.clearCrash(res); err != nil {
 		return err
 	}
-	return s.writeGC(o, GCStatus{Result: GCOK, StoreBytes: res.StoreBytes, BlobCount: res.BlobCount}, false)
+	st := GCStatus{Result: GCOK, StoreBytes: res.StoreBytes, BlobCount: res.BlobCount, Evicted: len(res.Evicted)}
+	if len(res.Evicted) > 0 {
+		st.LastEvicted = o.now()
+	}
+	return s.writeGC(o, st, false)
+}
+
+// capEvict picks the snapshots to delete, beyond retention, so that the
+// kept ones take at most max of disk: the oldest first. Never evicted are
+// the newest snapshot, the newest complete one, the newest vm-off one and
+// pinned ones, even when they alone take more than max. A snapshot costs
+// its manifest plus the blobs no newer kept snapshot already holds, each
+// counted at the disk it takes; the Bloom filter can count a blob as held
+// when it is not, so the estimate errs low, by about 1%.
+//
+// Evicting is the lesser harm: without a cap, an agent that writes new
+// content before every snapshot holds the host's filesystem at min_free
+// for weeks; with one, it can only push out the oldest unprotected
+// history, at limits.new per snapshot, and doctor warns.
+func (s *Store) capEvict(infos []ManifestInfo, keep map[string]bool, max int64) (map[string]bool, error) {
+	var kept []ManifestInfo
+	for _, in := range infos {
+		if in.Header != nil && keep[in.ID] {
+			kept = append(kept, in)
+		}
+	}
+	slices.SortFunc(kept, func(a, b ManifestInfo) int { return cmpUint(b.Header.Seq, a.Header.Seq) })
+	protected := make(map[string]bool)
+	complete, vmOff := false, false
+	var refs int64
+	for i, in := range kept {
+		h := in.Header
+		refs += h.Counts.ByType[TypeFile]
+		switch {
+		case i == 0, h.Pinned, h.Complete && !complete, h.Quiescent == QuiescentVMOff && !vmOff:
+			protected[in.ID] = true
+		}
+		complete = complete || h.Complete
+		vmOff = vmOff || h.Quiescent == QuiescentVMOff
+	}
+	seen := newBloom(refs)
+	var total int64
+	cost := func(id string) error {
+		if fi, err := lstatRegular(s.root, manifestName(id)); err == nil {
+			total += allocated(fi)
+		}
+		return s.markManifest(id, nil, func(e *Entry) {
+			if seen.has(e.SHA256) {
+				return
+			}
+			seen.add(e.SHA256)
+			if fi, err := lstatRegular(s.root, blobName(e.SHA256)); err == nil {
+				total += allocated(fi)
+			}
+		})
+	}
+	for _, in := range kept {
+		if protected[in.ID] {
+			if err := cost(in.ID); err != nil {
+				return nil, err
+			}
+		}
+	}
+	evict := make(map[string]bool)
+	for _, in := range kept {
+		if protected[in.ID] {
+			continue
+		}
+		if len(evict) == 0 {
+			if err := cost(in.ID); err != nil {
+				return nil, err
+			}
+			if total <= max {
+				continue
+			}
+		}
+		evict[in.ID] = true
+	}
+	return evict, nil
 }
 
 // clearCrash runs when a snapshot crashed after writing blobs: it re-hashes
@@ -366,8 +466,8 @@ func (s *Store) clearCrash(res *GCResult) error {
 	return nil
 }
 
-// markManifest streams one manifest into bf, calling each (when set) for
-// every referenced blob.
+// markManifest streams one manifest into bf (when set), calling each (when
+// set) for every referenced blob.
 func (s *Store) markManifest(id string, bf *bloom, each func(e *Entry)) error {
 	rd, err := s.Open(id)()
 	if err != nil {
@@ -385,7 +485,9 @@ func (s *Store) markManifest(id string, bf *bloom, each func(e *Entry)) error {
 		if !referencesBlob(e) {
 			continue
 		}
-		bf.add(e.SHA256)
+		if bf != nil {
+			bf.add(e.SHA256)
+		}
 		if each != nil {
 			each(e)
 		}
@@ -396,10 +498,10 @@ func (s *Store) markManifest(id string, bf *bloom, each func(e *Entry)) error {
 // but never stored.
 func referencesBlob(e *Entry) bool { return e.SHA256 != "" && e.State != StateSecret }
 
-// walkBlobs calls blob for every blob file, and stray (when set) for every
-// other name under blobs/sha256. Only a 62-hex regular file in a 2-hex
+// walkBlobs calls blob for every blob file, with the disk it takes, and
+// stray (when set) for every other name under blobs/sha256. Only a 62-hex regular file in a 2-hex
 // directory is a blob; nothing else is ever passed to blob.
-func (s *Store) walkBlobs(blob func(sum string, size int64) error, stray func(name string)) error {
+func (s *Store) walkBlobs(blob func(sum string, disk int64) error, stray func(name string)) error {
 	top, err := s.root.Open(sumsDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -426,7 +528,7 @@ func (s *Store) walkBlobs(blob func(sum string, size int64) error, stray func(na
 	return nil
 }
 
-func (s *Store) walkFan(fan string, blob func(sum string, size int64) error, stray func(name string)) error {
+func (s *Store) walkFan(fan string, blob func(sum string, disk int64) error, stray func(name string)) error {
 	d, err := s.root.Open(sumsDir + "/" + fan)
 	if err != nil {
 		return err
@@ -449,7 +551,7 @@ func (s *Store) walkFan(fan string, blob func(sum string, size int64) error, str
 			if ierr != nil {
 				return ierr
 			}
-			if berr := blob(fan+name, fi.Size()); berr != nil {
+			if berr := blob(fan+name, allocated(fi)); berr != nil {
 				return berr
 			}
 		}

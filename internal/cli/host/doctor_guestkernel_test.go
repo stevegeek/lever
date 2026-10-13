@@ -21,6 +21,8 @@ cmdline=1
 efi_pstore=off
 running=6.17.0-5-generic
 default=6.17.0-5-generic
+release=26.04
+hwepkg=linux-generic-hwe-26.04
 hwe=1
 `
 
@@ -34,7 +36,8 @@ func probeWith(edits ...string) guestKernelProbe {
 
 func TestParseGuestKernelProbe(t *testing.T) {
 	p := parseGuestKernelProbe(hardenedProbe + "garbage\n")
-	if p.sysctl["kernel.panic"] != "10" || !p.cmdline || p.efiPstore || p.running != "6.17.0-5-generic" || p.deflt != p.running || !p.hwe {
+	if p.sysctl["kernel.panic"] != "10" || !p.cmdline || p.efiPstore || p.running != "6.17.0-5-generic" || p.deflt != p.running || !p.hwe ||
+		p.release != "26.04" || p.hwePkg != "linux-generic-hwe-26.04" {
 		t.Fatalf("parsed %+v", p)
 	}
 }
@@ -87,12 +90,18 @@ func TestCheckGuestKernel(t *testing.T) {
 		want    string
 		wantFix string
 	}{
-		{"hwe running", lima(true, ""), probeWith(), "running 6.17.0-5-generic (guest_kernel hwe)", ""},
+		{"hwe running", lima(true, ""), probeWith(), "Ubuntu 26.04, running 6.17.0-5-generic (guest_kernel hwe)", ""},
+		{"older release", lima(false, ""), probeWith("release=26.04", "release=24.04", "hwe-26.04", "hwe-24.04"),
+			"Ubuntu 24.04, running 6.17.0-5-generic (guest_kernel ga); lever creates new VMs on Ubuntu 26.04, and this VM stays on 24.04 until it is recreated (`lever conversation backup`", ""},
+		{"hwe on an unknown release", lima(true, ""), probeWith("release=26.04", "release=25.10", "hwepkg=linux-generic-hwe-26.04", "hwepkg="),
+			"the guest's Ubuntu release has no HWE kernel lever installs (it knows 24.04 and 26.04)", "guest_kernel: ga"},
+		{"unknown package name ignored", lima(true, ""), probeWith("hwepkg=linux-generic-hwe-26.04", "hwepkg=linux-evil"),
+			"no HWE kernel lever installs", "recreate the VM"},
 		{"ga no nested", lima(false, ""), probeWith("6.17.0-5-generic", "6.8.0-146-generic", "6.17.0-5-generic", "6.8.0-146-generic", "hwe=1", "hwe=0"),
 			"running 6.8.0-146-generic (guest_kernel ga)", ""},
 		{"reboot pending", lima(true, ""), probeWith("running=6.17.0-5-generic", "running=6.8.0-146-generic"),
 			"the default kernel is 6.17.0-5-generic (reboot pending)", "lever stop"},
-		{"hwe missing", lima(true, ""), probeWith("hwe=1", "hwe=0"), "linux-generic-hwe-24.04 is not installed", "lever apply"},
+		{"hwe missing", lima(true, ""), probeWith("hwe=1", "hwe=0"), "linux-generic-hwe-26.04 is not installed", "lever apply"},
 		{"nested on ga", lima(true, "ga"), probeWith("6.17.0-5-generic", "6.8.0-146-generic", "6.17.0-5-generic", "6.8.0-146-generic"),
 			"nested_virt runs on the 24.04 GA kernel", "guest_kernel: ga is set explicitly"},
 		{"nested on 6.8 by default", lima(true, ""), probeWith("6.17.0-5-generic", "6.8.0-146-generic", "6.17.0-5-generic", "6.8.0-146-generic"),
@@ -123,7 +132,7 @@ func TestReadGuestKernelProbeUsesJail(t *testing.T) {
 		t.Fatalf("got %+v, %v", p, err)
 	}
 	script := f.Calls[0].Args[len(f.Calls[0].Args)-1]
-	for _, want := range []string{"/proc/sys/kernel/panic_on_oops", "/proc/sys/kernel/softlockup_panic", "/proc/cmdline", "/sys/module", "uname -r", "/boot/vmlinuz", guest.HWEPackage} {
+	for _, want := range []string{"/proc/sys/kernel/panic_on_oops", "/proc/sys/kernel/softlockup_panic", "/proc/cmdline", "/sys/module", "uname -r", "/boot/vmlinuz", "/etc/os-release", guest.HWEPackage("24.04"), guest.HWEPackage("26.04")} {
 		if !strings.Contains(script, want) {
 			t.Errorf("probe missing %q", want)
 		}
@@ -155,6 +164,11 @@ func TestGuestKernelProbeScriptRuns(t *testing.T) {
 	for _, s := range guest.CrashSysctls {
 		if _, ok := p.sysctl[s.Key]; !ok {
 			t.Errorf("no %s in:\n%s", s.Key, out)
+		}
+	}
+	for _, k := range []string{"release=", "hwepkg=", "hwe="} {
+		if !strings.Contains(string(out), "\n"+k) {
+			t.Errorf("no %s line in:\n%s", k, out)
 		}
 	}
 }

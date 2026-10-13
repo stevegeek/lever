@@ -33,7 +33,7 @@ func TestEnsureUpHardensGuestBeforeProvision(t *testing.T) {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	crash := rootBashScript(f, guest.CrashSysctlPath)
-	kernel := rootBashScript(f, guest.HWEPackage)
+	kernel := rootBashScript(f, guest.HWEPackage("26.04"))
 	whoami := callIndex(f, "shell", vm, "whoami")
 	if crash < 0 || kernel < 0 {
 		t.Fatalf("want the crash-recovery and kernel scripts; calls=%+v", f.Calls)
@@ -172,12 +172,12 @@ func writeStamp(t *testing.T) string {
 
 func TestHWEStampSkipsUnderClosedEgress(t *testing.T) {
 	stamp := writeStamp(t)
-	f, lines := hardenWithKernelOut(t, "machine-id: "+stampMID+"\nhwe: skipped-stamp\n", backend.Config{HWEFailStamp: stamp, ClosedInternet: true})
+	f, lines := hardenWithKernelOut(t, "machine-id: "+stampMID+"\nhwe-package: linux-generic-hwe-26.04\nhwe: skipped-stamp\n", backend.Config{HWEFailStamp: stamp, ClosedInternet: true})
 	if !strings.Contains(kernelScriptOf(f), stampMID) {
 		t.Error("closed egress with a stamp must pass the stamped machine id to the script")
 	}
 	all := strings.Join(lines, "\n")
-	if !strings.Contains(all, "delete "+stamp) || !strings.Contains(all, "2026-10-01") {
+	if !strings.Contains(all, "delete "+stamp) || !strings.Contains(all, "2026-10-01") || !strings.Contains(all, "linux-generic-hwe-26.04 is not installed") {
 		t.Errorf("want the stamp warning, got:\n%s", all)
 	}
 	if _, err := os.Stat(stamp); err != nil {

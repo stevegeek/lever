@@ -90,7 +90,15 @@ type Signer struct {
 	key        *Key
 	instanceID string
 	clock      Clock
+	// iss and aud override the instance's, for checks that a hub refuses an
+	// assertion meant for another one.
+	iss, aud string
 }
+
+// WithIssuer and WithAudience return a signer that differs from s in that
+// one claim only.
+func (s *Signer) WithIssuer(iss string) *Signer   { c := *s; c.iss = iss; return &c }
+func (s *Signer) WithAudience(aud string) *Signer { c := *s; c.aud = aud; return &c }
 
 func NewSigner(k *Key, instanceID string, c Clock) *Signer {
 	return &Signer{key: k, instanceID: instanceID, clock: c}
@@ -130,9 +138,16 @@ func (s *Signer) Sign(email, sub string) (string, error) {
 		return "", fmt.Errorf("hubauth: jti: %w", err)
 	}
 	now := s.clock.Now()
+	iss, aud := Issuer(s.instanceID), Audience(s.instanceID)
+	if s.iss != "" {
+		iss = s.iss
+	}
+	if s.aud != "" {
+		aud = s.aud
+	}
 	body, err := json.Marshal(claims{
-		Iss:   Issuer(s.instanceID),
-		Aud:   Audience(s.instanceID),
+		Iss:   iss,
+		Aud:   aud,
 		Sub:   sub,
 		Email: strings.ToLower(email),
 		Iat:   now.Add(-Backdate).Unix(),

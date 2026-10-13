@@ -22,13 +22,14 @@ const AssertionHeader = "X-Lever-Hub-Assertion"
 // The header line ends in a bare \n: curl strips only the \n, so a \r\n line
 // would send a stray CR inside the header value.
 //
-// -q skips any .curlrc and --noproxy '*' ignores proxy variables in the guest
+// -g turns off curl's URL globbing, which would turn one signed request into
+// several. -q skips any .curlrc and --noproxy '*' ignores proxy variables in the guest
 // environment: either could otherwise add headers or route an admin-grade
 // credential through another host. No Authorization header is ever sent: a
 // bearer takes precedence over the assertion on the hub.
 const assertCurlScript = `[ -n "$` + jail.HubAssertionEnv + `" ] || exit 1; ` +
 	`printf '` + AssertionHeader + `: %s\n' "$` + jail.HubAssertionEnv + `" | ` +
-	`exec curl -q -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' "$2"`
 
@@ -36,7 +37,7 @@ const assertCurlScript = `[ -n "$` + jail.HubAssertionEnv + `" ] || exit 1; ` +
 // environment, like curlBodyScript.
 const assertCurlBodyScript = `[ -n "$` + jail.HubAssertionEnv + `" ] || exit 1; ` +
 	`printf '` + AssertionHeader + `: %s\n' "$` + jail.HubAssertionEnv + `" | ` +
-	`exec curl -q -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' ` +
 	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`

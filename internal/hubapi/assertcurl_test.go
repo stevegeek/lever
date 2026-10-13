@@ -306,3 +306,13 @@ func TestAssertCurlDoBodySendsJSONFromEnv(t *testing.T) {
 		t.Fatalf("method = %q", r.call.Args[3])
 	}
 }
+
+// TestAssertCurlScriptsTurnOffGlobbing: curl expands [] and {} in a URL into
+// several requests, which would send one signed assertion more than once.
+func TestAssertCurlScriptsTurnOffGlobbing(t *testing.T) {
+	for _, s := range []string{assertCurlScript, assertCurlBodyScript} {
+		if !strings.Contains(s, "exec curl -q -g ") {
+			t.Fatalf("script lacks -g:\n%s", s)
+		}
+	}
+}

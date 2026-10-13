@@ -375,11 +375,10 @@ type Deps struct {
 	// hub enforces but it does not is a silent regression.
 	EnsureAgentRoleCeiling func(ctx context.Context, projectName string) error
 	// RepairScionHubEndpoint rewrites the project's recorded hub endpoint when it
-	// no longer matches the real hub. Older levers hub-linked the project against
-	// a throwaway hub on its own port, and the register step's re-init is skipped
-	// when the registration is sound, so that link points at a dead port. lever
-	// passes the endpoint explicitly, so this only breaks where scion runs bare in
-	// the jail (lever attach).
+	// differs from the real hub's. A registration linked against a hub on another
+	// port keeps that endpoint, since the register step's re-init is skipped when
+	// the registration is sound. lever passes the endpoint explicitly, so a stale
+	// one only breaks where scion runs bare in the jail (lever attach).
 	RepairScionHubEndpoint func(ctx context.Context, jailWorkspacePath string) error
 	// VerifyAgentRole gates keeping an existing agent record: it errors when the
 	// hub's record stores no authorization role while the installed scion
@@ -790,9 +789,8 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	// an unsound registration (zero, duplicate or torn) falls through to the
 	// destructive path: fail open, never a hard failure over an observe read.
 	if ok, err := r.d.ScionProjectRegistered(ctx, jp); err == nil && ok {
-		// The recorded hub endpoint can still be stale: an older lever linked the
-		// project against a throwaway hub on its own port, and that link survives
-		// because this path skips the re-init.
+		// The recorded hub endpoint can be another port's (a link made against a
+		// throwaway hub), and this path skips the re-init that would rewrite it.
 		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
 		}
@@ -2285,6 +2283,7 @@ func HubAuthEnv(instanceID, keyFingerprint string) map[string]string {
 		"SCION_SERVER_AUTH_PROXY_JWT_AUDIENCE":      hubauth.Audience(instanceID),
 		"SCION_SERVER_AUTH_PROXY_JWT_PUBLICKEYFILE": hubauth.GuestPublicKeyPath,
 		"SCION_SERVER_HUB_ADMINEMAILS":              hubauth.AdminEmail,
+		"SCION_SERVER_AUTH_DEFAULTUSERROLE":         "member",
 		"LEVER_HUB_AUTH_KEY":                        keyFingerprint,
 	}
 }

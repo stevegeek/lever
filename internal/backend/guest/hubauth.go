@@ -21,9 +21,9 @@ const (
 	HubAuthKeyDir  = "/etc/lever"
 )
 
-// LoginForwardPath is where an older lever installed its guest login
-// forwarder. EnsureHubAuth removes it: it bridged guest loopback to a host
-// port and has no use with proxy auth.
+// LoginForwardPath is a guest login forwarder that bridges guest loopback to
+// a host port. Nothing uses it with proxy auth, and a bridge left in place
+// reaches whatever later binds that host port, so EnsureHubAuth removes it.
 const LoginForwardPath = "/usr/local/bin/lever-login-forward"
 
 // removeLoginForwardScript runs as root, which can signal the run user's

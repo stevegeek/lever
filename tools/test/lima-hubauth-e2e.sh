@@ -14,7 +14,8 @@
 # proxy-auth change, the merge base with main).
 #
 # Env: IMAGE_TAR (required), IMAGE (default scionlocal/lever-claude-slim),
-# OLD_LEVER | OLD_REF, LEVER (default ~/.local/bin/lever), NAME, KEEP=1.
+# OLD_LEVER | OLD_REF, LEVER (default ~/.local/bin/lever), SCION_VERSION
+# (default e0f61f2d), NAME, KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -78,6 +79,8 @@ ln -f "$IMAGE_TAR" "$INST/img.tar" 2>/dev/null || cp "$IMAGE_TAR" "$INST/img.tar
 write_config() { # $1: extra allowed_users lines
 	cat > "$INST/lever.yaml" <<EOF
 name: $NAME
+scion:
+  version: ${SCION_VERSION:-e0f61f2d}
 backend: lima
 cpus: 4
 memory: 6GiB
@@ -126,7 +129,7 @@ say "old lever: apply (dev-auth window flow)"
 write_config ""
 (cd "$INST" && "$OLD_LEVER" init >/dev/null 2>&1)
 for i in 1 2; do
-	(cd "$INST" && timeout 3600 "$OLD_LEVER" apply 2>&1 | tail -5) && break
+	(cd "$INST" && timeout 3600 "$OLD_LEVER" apply 2>&1 | tail -15) && break
 done
 check "old flow: manager runs" running
 X exec "lever--$NAME" lever-manager agent start worker --task probe 2>&1 | tail -1
@@ -234,7 +237,11 @@ check "doctor: hub identities after R2" row_ok "hub identities"
 
 say "a fresh instance with this lever"
 (cd "$INST" && "$LEVER" destroy 2>&1 | tail -2)
-(cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tail -8)
+# A first apply on a new VM can lose the image tag right after the load (a
+# pre-existing flake of image_tar); the second apply finds the image loaded.
+for i in 1 2; do
+	(cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tail -15) && break
+done
 check "the record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
 check "no dev-token file and no dev user" row_ok "hub identities"
 check "doctor: hub authentication (fresh)" row_ok "hub authentication"

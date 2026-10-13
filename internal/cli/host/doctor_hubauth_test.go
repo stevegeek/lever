@@ -189,7 +189,7 @@ func TestDoctorHubAuthRowsOverTheJail(t *testing.T) {
 	t.Run("hub accepts any key", func(t *testing.T) {
 		d.acceptAny = true
 		defer func() { d.acceptAny = false }()
-		hiWantRow(t, checkHubAuthentication(ctx, d.auth(), nil), false, "another key, want 401", "another hub (iss/aud), want 401")
+		hiWantRow(t, checkHubAuthentication(ctx, d.auth(), nil), false, "another key, want 401", "another issuer, want 401")
 	})
 	t.Run("dev token and a login provider", func(t *testing.T) {
 		d.devToken, d.providers = true, `{"providers":[{"id":"github"}]}`

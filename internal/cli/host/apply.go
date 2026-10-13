@@ -332,13 +332,12 @@ func controllerLifecycle(ctx context.Context, known scopeKnownFunc, rec state.PA
 	return slices.Contains(rec.Requested, lifecycleScope)
 }
 
-// remotePATScopes is the exact scope set of the remote-access PAT: attach,
-// message, read and list, nothing that creates, deletes or reconfigures. The
-// proxy does not send this token, but the lever-remote web role is derived
-// from it (remoteRolePermissions), so it must never carry agent:manage,
-// agent:create/delete, project:update or any secret scope.
+// remotePATScopes is the exact scope set of the remote proxy's PAT: the proxy
+// only lists the project's agents with it (the chat page and the contact
+// fence), so it reads and nothing else. It is the controller's token, so
+// anything sent with it would wear lever's sender label.
 func remotePATScopes() []string {
-	return []string{"agent:read", "agent:list", "project:read", "agent:attach", "agent:message"}
+	return []string{"agent:read", "agent:list", "project:read"}
 }
 
 // patRenewWindow is how long before expiry apply re-mints.
@@ -1032,7 +1031,7 @@ func ensureAgentRoleCeiling(ctx context.Context, rolesSupported func(context.Con
 }
 
 // repairScionHubEndpoint points the project's recorded hub endpoint back at
-// the real hub after an older lever linked it to its throwaway hub.
+// the real hub when the registration names another port.
 func (w *applyWiring) repairScionHubEndpoint(ctx context.Context, wp string) error {
 	return w.b.RepairScionHubEndpoint(ctx, wp, scion.DefaultHubEndpoint)
 }

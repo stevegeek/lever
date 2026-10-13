@@ -45,6 +45,7 @@ func TestHubAuthEnvPinsTheProxyJWTConfiguration(t *testing.T) {
 		"SCION_SERVER_AUTH_PROXY_JWT_AUDIENCE":      "scion-hub:inst1",
 		"SCION_SERVER_AUTH_PROXY_JWT_PUBLICKEYFILE": hubauth.GuestPublicKeyPath,
 		"SCION_SERVER_HUB_ADMINEMAILS":              hubauth.AdminEmail,
+		"SCION_SERVER_AUTH_DEFAULTUSERROLE":         "member",
 		"LEVER_HUB_AUTH_KEY":                        "sha256:fp1",
 	}
 	if !maps.Equal(got, want) {

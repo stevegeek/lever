@@ -76,11 +76,15 @@ func checkHubAuthentication(ctx context.Context, d doctorHubAuth, running func(c
 		return checkResult{name, false, err.Error(), ""}
 	}
 	forged := hubauth.NewSigner(other, d.id, d.clock)
-	foreign := hubauth.NewSigner(d.key, d.id+"-doctor-elsewhere", d.clock)
+	// iss and aud are probed apart: scion checks each only when it is configured.
+	otherIss := d.signer.WithIssuer(hubauth.Issuer(d.id + "-doctor-elsewhere"))
+	otherAud := d.signer.WithAudience(hubauth.Audience(d.id + "-doctor-elsewhere"))
 	for _, c := range []struct {
 		what string
 		sign func() (string, error)
-	}{{"an assertion signed by another key", forged.Admin}, {"an assertion for another hub (iss/aud)", foreign.Admin}} {
+	}{{"an assertion signed by another key", forged.Admin},
+		{"an assertion from another issuer", otherIss.Admin},
+		{"an assertion for another hub (audience)", otherAud.Admin}} {
 		status, _, err := d.client(c.sign).T.Do(ctx, http.MethodGet, "/api/v1/auth/me")
 		switch {
 		case err != nil:

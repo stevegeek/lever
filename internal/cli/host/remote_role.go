@@ -27,22 +27,17 @@ const remoteWebRoleName = "lever-remote"
 
 const remoteWebRoleDescription = "Managed by lever: the remote web UI's read, attach and message surface on this project."
 
-// remoteRolePermissions is the remote web role's permission set, derived from
-// remotePATScopes so the two cannot drift; scion names each permission as its
-// UAT scope with a dot for the colon.
+// remoteRolePermissions is the remote web role's permission set: read, list,
+// attach and message, nothing that creates, deletes or reconfigures. It must
+// never carry agent.manage, agent.create/delete, project.update or any secret
+// permission. project.list keeps the SPA's project list from coming back
+// empty.
 //
 // lifecycle adds agent.lifecycle, which a hub that has it uses to gate
 // start/stop/suspend/restart/restore in the web UI. An older hub rejects the
 // unknown permission, so it is added only when the hub lists agent:lifecycle.
 func remoteRolePermissions(lifecycle bool) []string {
-	scopes := remotePATScopes()
-	out := make([]string, len(scopes))
-	for i, s := range scopes {
-		out[i] = strings.Replace(s, ":", ".", 1)
-	}
-	// project.list is web-only and read-only: without it the SPA's project list
-	// comes back empty. The remote PAT does not need it.
-	out = append(out, "project.list")
+	out := []string{"agent.read", "agent.list", "project.read", "agent.attach", "agent.message", "project.list"}
 	if lifecycle {
 		out = append(out, lifecyclePermission)
 	}
@@ -121,12 +116,12 @@ type remoteUser struct {
 }
 
 // remoteUsersFor is every login whose hub user lever invites and binds:
-// allowed_users whether remote access is on or off (an address lever has not
-// invited yet is one an agent could put on the controller row through scion's
-// identity route), and the placeholder operator only when remote access is on
-// with no allowed_users.
+// allowed_users, or the placeholder operator when there are none, while
+// remote access is on. With it off no login can sign in, so none is kept
+// active; turning it back on reactivates and binds them before the proxy
+// starts.
 func remoteUsersFor(app *config.App) []remoteUser {
-	if !app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {
+	if !app.RemoteEnabled() {
 		return nil
 	}
 	contacts := remoteproxy.HubUserEmails(app.Remote.LoginsWithTier(config.TierContact))
@@ -141,7 +136,7 @@ func remoteUsersFor(app *config.App) []remoteUser {
 	return out
 }
 
-// ensureRemoteUsers is hub-identity step F. Every configured login's hub user
+// ensureRemoteUsers converges the remote logins. Every configured login's hub user
 // is invited when absent, capped, then bound to its tier's role, before it
 // first signs in; the first sign-in then activates that same row with its
 // role and ceiling already in force. A login whose row is lever's own, the dev

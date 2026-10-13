@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -167,5 +168,21 @@ func TestApplySignalContextCancelsOnSIGINT(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("SIGINT did not cancel the apply context")
+	}
+}
+
+// TestRemotePATScopesAreReadOnly: the proxy only lists agents with the remote
+// PAT, and it is the controller's token, so it must not attach, message or
+// change anything.
+func TestRemotePATScopesAreReadOnly(t *testing.T) {
+	got := remotePATScopes()
+	if !slices.Equal(got, []string{"agent:read", "agent:list", "project:read"}) {
+		t.Fatalf("remotePATScopes() = %v", got)
+	}
+	perms := remoteRolePermissions(false)
+	for _, want := range []string{"agent.attach", "agent.message", "project.list"} {
+		if !slices.Contains(perms, want) {
+			t.Fatalf("the web role lost %s: %v", want, perms)
+		}
 	}
 }

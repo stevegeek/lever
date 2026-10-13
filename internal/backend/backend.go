@@ -173,9 +173,8 @@ type Backend interface {
 	// in-tree marker workspacePath/.scion. Read-only, machine-only transport.
 	ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error)
 	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the
-	// registration(s) for workspacePath when it differs from endpoint. Older
-	// levers linked the project against a throwaway hub on another port, and
-	// the register step skips re-init when the registration is sound, so
-	// without this the project would point at a hub that no longer exists.
+	// registration(s) for workspacePath when it differs from endpoint. A
+	// registration linked against a hub on another port keeps that endpoint,
+	// since the register step skips re-init when the registration is sound.
 	RepairScionHubEndpoint(ctx context.Context, workspacePath, endpoint string) error
 }

@@ -1433,12 +1433,14 @@ func TestHubIdentityRemoteUsersFor(t *testing.T) {
 	if got := remoteUsersFor(hiRemoteApp(false)); got != nil {
 		t.Fatalf("remote off, no logins: %v", got)
 	}
-	// Invited while remote access is off, so an agent cannot claim the address
-	// first.
-	got := remoteUsersFor(hiRemoteApp(false, hiOperator("Op@Example.com"), hiContact("c1@example.com")))
+	// With remote access off no login is kept active, configured or not.
+	if got := remoteUsersFor(hiRemoteApp(false, hiOperator("Op@Example.com"), hiContact("c1@example.com"))); got != nil {
+		t.Fatalf("remote off: %v, want none", got)
+	}
+	got := remoteUsersFor(hiRemoteApp(true, hiOperator("Op@Example.com"), hiContact("c1@example.com")))
 	want := []remoteUser{{Email: "op@example.com"}, {Email: "c1@example.com", Contact: true}}
 	if !slices.Equal(got, want) {
-		t.Fatalf("remote off: %v, want %v", got, want)
+		t.Fatalf("remote on: %v, want %v", got, want)
 	}
 	if got := remoteUsersFor(hiRemoteApp(true)); len(got) != 1 || got[0].Contact || got[0].Email != config.HubEmailFor("") {
 		t.Fatalf("remote on, no logins: %v", got)
@@ -1473,5 +1475,54 @@ func TestHubIdentityProbeRunsAfterAnInterruptedMigration(t *testing.T) {
 	}
 	if dev := e.hub.user(devUserID); dev.Role != "admin" {
 		t.Fatalf("dev row role %q, want admin restored", dev.Role)
+	}
+}
+
+// TestHubIdentityProbePendingSurvivesAStopBeforeTheFirstSave: the probe is
+// owed from the moment a migration starts, so a run that demoted and re-pinned
+// the controller, then stopped before writing anything else, still leaves the
+// next run a probe.
+func TestHubIdentityProbePendingSurvivesAStopBeforeTheFirstSave(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.seedMigrated("scion@localhost", false)
+	e.hub.down = map[string]int{"GET /api/v1/projects": 500}
+	if err := e.run(); err == nil {
+		t.Fatal("the first run must fail looking up the project")
+	}
+	if rec := e.record(); !rec.ProbePending {
+		t.Fatalf("record = %+v, want the probe pending", rec)
+	}
+	e.hub.down = nil
+	e.hub.agents[1].Actions = []string{"read", "delete"}
+	err := e.run()
+	if err == nil || !strings.Contains(err.Error(), "agent worker: attach") {
+		t.Fatalf("second run = %v, want the pending probe to find the missing attach", err)
+	}
+	if dev := e.hub.user(devUserID); dev.Role != "admin" {
+		t.Fatalf("dev row role %q, want admin restored", dev.Role)
+	}
+}
+
+// TestHubIdentityProbeThatCannotReadDoesNotRollBack: a probe that cannot read
+// the hub is no evidence of missing authority, so the controller stays
+// demoted and the probe stays owed.
+func TestHubIdentityProbeThatCannotReadDoesNotRollBack(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.seedMigrated("scion@localhost", false)
+	e.sc.listErr = errors.New("scion list: connection reset")
+	err := e.run()
+	if err == nil || !strings.Contains(err.Error(), "could not complete") {
+		t.Fatalf("run = %v, want an incomplete probe", err)
+	}
+	if dev := e.hub.user(devUserID); dev.Role != "member" {
+		t.Fatalf("dev row role %q, want it left a member", dev.Role)
+	}
+	if rec := e.record(); !rec.ProbePending {
+		t.Fatalf("record = %+v, want the probe still pending", rec)
+	}
+	e.sc.listErr = nil
+	e.mustRun()
+	if rec := e.record(); rec.ProbePending {
+		t.Fatal("a passing probe must clear the pending flag")
 	}
 }

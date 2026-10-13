@@ -15,19 +15,14 @@ import (
 // id.
 //
 // Doctor reads the hub itself; the record says what the last apply bound.
-// Pending is left from older levers, which could not bind a user before its
-// first sign-in.
-//
 // Ceilings and CeilingPermissions record the access constraint on each bound
 // user, so the hub-member baseline cannot create a project (see
-// ensureRemoteCeiling in internal/cli/host). A record without them reads as
-// incomplete, so the next apply adds the ceiling.
+// ensureRemoteCeiling in internal/cli/host).
 type RemoteRoleRecord struct {
 	RoleID      string            `json:"role_id"`
 	Permissions []string          `json:"permissions"`
 	ProjectID   string            `json:"project_id"`
 	Bound       map[string]string `json:"bound"` // email -> hub user id
-	Pending     []string          `json:"pending,omitempty"`
 	Ceilings    map[string]string `json:"ceilings,omitempty"`
 	// CeilingPermissions is the maximum-permission set lever wrote into
 	// every ceiling.

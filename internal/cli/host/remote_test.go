@@ -400,7 +400,6 @@ func TestRemoteContactUser(t *testing.T) {
 	rec := state.RemoteRoleRecord{
 		Bound:    map[string]string{"c@example.com": "u-c", "op@example.com": "u-op", "7@id.lever.local": "u-7"},
 		Contacts: []string{"c@example.com", "7@id.lever.local", "gone@example.com"},
-		Pending:  []string{"d@example.com"},
 	}
 	if err := st.SaveRemoteRoleRecord(rec); err != nil {
 		t.Fatal(err)

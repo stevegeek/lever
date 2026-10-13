@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"path"
 	"slices"
 	"strings"
@@ -18,9 +19,8 @@ import (
 )
 
 // devUserID is scion's fixed ID for its dev-auth user (pkg/hub/devauth.go).
-// On an instance an older lever brought up with dev-auth windows it owns the
-// project, issued the PATs and created every agent; this lever keeps it as
-// the controller.
+// On a migrated hub it owns the project, issued the PATs and created every
+// agent, so it stays the controller: moving any of that would cut agents off.
 const devUserID = "be67fbc9-c869-5d43-b15d-c28ca3e8d355"
 
 // hubCacheWait bounds the wait for the hub's 60 s email-to-user cache after a
@@ -44,7 +44,7 @@ type identityScion interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 }
 
-// hubIdentity is the hub-identity apply step (design: steps A to G).
+// hubIdentity is the hub-identity apply step.
 type hubIdentity struct {
 	app       *config.App
 	st        state.State
@@ -104,19 +104,17 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	if !found {
 		mode = state.HubModeFresh
 		if tok, _ := h.st.LoadControllerPAT(); tok != "" {
-			// An older lever minted this PAT as scion's dev user in a dev-auth
-			// window: the hub is migrated, not new.
+			// A PAT with no identity record was minted as scion's dev user: the
+			// hub has a dev row that owns everything.
 			mode = state.HubModeMigrated
 		}
 	}
 	stepStart := h.guestNow()
 
-	// A: the admin.
 	admin, err := h.ensureAdmin(ctx, mode, &rec)
 	if err != nil {
 		return err
 	}
-	// Flow 7: a record whose hub marker is provably gone means a new hub DB.
 	if found && rec.HubMarker != "" {
 		gone, err := h.markerGone(ctx, rec.HubMarker, admin, stepStart)
 		if err != nil {
@@ -132,21 +130,27 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		}
 	}
 	rec.AdminID = admin.ID
+	if mode == state.HubModeMigrated && !found {
+		// Recorded before anything is demoted or renamed: a run that stops after
+		// that still leaves the next one a probe to run.
+		rec.ProbePending = true
+		rec.Version, rec.Mode, rec.KeyFingerprint = state.HubIdentityVersion, mode, h.keyFP
+		if err := h.st.SaveHubIdentity(rec); err != nil {
+			return errHubIdentity("%w", err)
+		}
+	}
 
-	// A': only lever-admin is an admin, by role and by binding.
 	demoted, err := h.adminHygiene(ctx, admin.ID)
 	if err != nil {
 		return err
 	}
 
-	// B: the controller.
 	ctlUser, renamed, err := h.ensureController(ctx, mode, &rec)
 	if err != nil {
 		return err
 	}
 	rec.ControllerID = ctlUser.ID
 
-	// C: the project.
 	jp := h.jailProject()
 	registered := false
 	if rec.ProjectID == "" {
@@ -165,7 +169,6 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		}
 	}
 
-	// D: the controller role, bound to the controller on the project.
 	lifecycle := h.controllerLifecycle(ctx)
 	defs, err := h.admin.RoleDefinitions(ctx)
 	if err != nil {
@@ -189,30 +192,33 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		return errHubIdentity("%w", err)
 	}
 
-	// E: the PATs, minted by the controller.
 	if err := h.mintPATs(ctx, rec.ProjectID, lifecycle); err != nil {
 		return err
 	}
 
-	// C': link the local registration to the hub project.
+	// The PAT cannot register a project, so the link comes after the REST
+	// registration and the mint, and takes scion's already-linked path.
 	if registered {
 		if err := h.sc.HubLink(ctx, jp); err != nil {
 			return errHubIdentity("hub link: %w", err)
 		}
 	}
 
-	// F: remote logins, invited and bound before they first sign in.
 	if err := h.ensureRemoteUsers(ctx, &rec, defs, lifecycle); err != nil {
 		return err
 	}
 
-	// G: records, then the probe after a migration changed the controller.
 	if err := h.st.SaveHubIdentity(rec); err != nil {
 		return errHubIdentity("%w", err)
 	}
 	if mode == state.HubModeMigrated && rec.ProbePending {
 		if err := probeControllerAuthority(ctx, h.pat, h.sc, rec.ProjectID, jp, lifecycle); err != nil {
-			return h.rollbackDemotion(ctx, err)
+			if errors.Is(err, errAuthorityMissing) {
+				return h.rollbackDemotion(ctx, err)
+			}
+			// The probe could not read the hub: no evidence either way, so the
+			// controller stays demoted and the next apply probes again.
+			return errHubIdentity("%v", err)
 		}
 		rec.ProbePending = false
 		if err := h.st.SaveHubIdentity(rec); err != nil {
@@ -307,12 +313,13 @@ func (h *hubIdentity) markerGone(ctx context.Context, marker string, admin hubap
 
 // forgetHub drops every host record that belongs to the old hub.
 func (h *hubIdentity) forgetHub() error {
+	// The record goes last: while it remains, a failed forget is retried.
 	for _, rm := range []func() error{
-		h.st.RemoveHubIdentity,
 		h.st.RemoveRemotePAT,
 		func() error { return removeIfPresent(h.st.ControllerPAT()) },
 		func() error { return removeIfPresent(h.st.ControllerPATRecord()) },
 		func() error { return removeIfPresent(h.st.RemoteRole()) },
+		h.st.RemoveHubIdentity,
 	} {
 		if err := rm(); err != nil {
 			return errHubIdentity("forgetting the old hub's records: %w", err)
@@ -529,42 +536,58 @@ func (h *hubIdentity) rollbackDemotion(ctx context.Context, probeErr error) erro
 		"report this, the fix is a permission on the %s role", msg, controllerRoleName)
 }
 
-// controllerActions are the agent actions lever performs with the controller
-// PAT; lifecycle adds agent.lifecycle's action on a hub that has it.
+// controllerActions are the per-agent capability actions the hub reports for
+// what lever does with the controller PAT: start, stop, suspend and resume
+// are "lifecycle" on a hub that has it and "attach" on one that does not.
+// Messaging is a scope action the agent list does not report; it is not
+// probed here.
 func controllerActions(lifecycle bool) []string {
-	a := []string{"read", "start", "stop", "message", "attach", "delete"}
+	a := []string{"read", "attach", "delete"}
 	if lifecycle {
 		a = append(a, "lifecycle")
 	}
 	return a
 }
 
+// errAuthorityMissing marks a probe that read the hub's answer and found an
+// authority missing, as opposed to one that could not read it.
+var errAuthorityMissing = errors.New("missing authority")
+
 // probeControllerAuthority checks, without changing anything, that the
 // controller PAT still does everything lever does with it: the hub's own
 // capability read for every agent action, plus the project reads and writes'
 // read halves and the CLI list.
 func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identityScion, projectID, jp string, lifecycle bool) error {
-	var failed []string
-	if _, err := pat.Me(ctx); err != nil {
-		failed = append(failed, "auth/me: "+err.Error())
+	var missing, failed []string
+	note := func(what string, err error) {
+		if forbidden(err) {
+			missing = append(missing, what+": "+err.Error())
+		} else {
+			failed = append(failed, what+": "+err.Error())
+		}
 	}
-	if _, ok, err := pat.GetProject(ctx, projectID); err != nil || !ok {
-		failed = append(failed, fmt.Sprintf("project %s: found=%v %v", projectID, ok, err))
+	if _, err := pat.Me(ctx); err != nil {
+		note("auth/me", err)
+	}
+	if _, ok, err := pat.GetProject(ctx, projectID); err != nil {
+		note("project "+projectID, err)
+	} else if !ok {
+		missing = append(missing, "project "+projectID+" is not visible to the controller")
 	}
 	if _, err := pat.SharedDirs(ctx, projectID); err != nil {
-		failed = append(failed, "shared dirs: "+err.Error())
+		note("shared dirs", err)
 	}
 	caps, err := pat.ProjectAgentCapabilities(ctx, projectID)
 	if err != nil {
-		failed = append(failed, "agent capabilities: "+err.Error())
+		note("agent capabilities", err)
 	} else {
 		if !slices.Contains(caps.Scope, "create") {
-			failed = append(failed, fmt.Sprintf("agent create (scope actions %v)", caps.Scope))
+			missing = append(missing, fmt.Sprintf("agent create (scope actions %v)", caps.Scope))
 		}
 		for slug, acts := range caps.Agents {
 			for _, want := range controllerActions(lifecycle) {
 				if !slices.Contains(acts, want) {
-					failed = append(failed, fmt.Sprintf("agent %s: %s (actions %v)", slug, want, acts))
+					missing = append(missing, fmt.Sprintf("agent %s: %s (actions %v)", slug, want, acts))
 				}
 			}
 		}
@@ -572,8 +595,18 @@ func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identi
 	if _, err := sc.List(ctx, jp); err != nil {
 		failed = append(failed, "scion list: "+err.Error())
 	}
+	slices.Sort(missing)
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: controller PAT probe: %s", errAuthorityMissing, strings.Join(missing, "; "))
+	}
 	if len(failed) > 0 {
-		return fmt.Errorf("controller PAT probe failed: %s", strings.Join(failed, "; "))
+		return fmt.Errorf("controller PAT probe could not complete: %s", strings.Join(failed, "; "))
 	}
 	return nil
+}
+
+// forbidden reports a hub answer that refused the credential's authority.
+func forbidden(err error) bool {
+	var ae *hubapi.APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusForbidden
 }

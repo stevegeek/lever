@@ -694,11 +694,15 @@ type hiJailRunner struct {
 	t      *testing.T
 	marker string
 	// curl, when set, answers AssertCurl's in-jail curl and the doctor's
-	// plain curl and jail reads.
-	curl func(env map[string]string, name string, args []string) (proc.Result, bool)
+	// plain curl and jail reads; stdin is what RunStdin was given.
+	curl func(env map[string]string, stdin, name string, args []string) (proc.Result, bool)
 }
 
-func (r *hiJailRunner) Run(_ context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+func (r *hiJailRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.run(ctx, env, "", name, args...)
+}
+
+func (r *hiJailRunner) run(_ context.Context, env map[string]string, stdin, name string, args ...string) (proc.Result, error) {
 	argv := name + " " + strings.Join(args, " ")
 	if strings.Contains(argv, "podman") {
 		r.t.Errorf("the hub identity code ran %q; it must never touch containers", name)
@@ -711,7 +715,7 @@ func (r *hiJailRunner) Run(_ context.Context, env map[string]string, name string
 		return proc.Result{Stdout: r.marker}, nil
 	}
 	if r.curl != nil {
-		if res, ok := r.curl(env, name, args); ok {
+		if res, ok := r.curl(env, stdin, name, args); ok {
 			if res.Code != 0 {
 				return res, fmt.Errorf("exit status %d", res.Code)
 			}
@@ -733,8 +737,16 @@ func (r *hiJailRunner) RunIn(ctx context.Context, _ string, env map[string]strin
 	return r.Run(ctx, env, name, args...)
 }
 
-func (r *hiJailRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
-	return r.Run(ctx, env, name, args...)
+func (r *hiJailRunner) RunStdin(ctx context.Context, in io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	var stdin string
+	if in != nil {
+		b, err := io.ReadAll(in)
+		if err != nil {
+			return proc.Result{}, err
+		}
+		stdin = string(b)
+	}
+	return r.run(ctx, env, stdin, name, args...)
 }
 
 // hiEnv is one instance's host state and jail around a fake hub.

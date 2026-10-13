@@ -116,7 +116,7 @@ func TestSignTimesFollowTheGuestClock(t *testing.T) {
 		_, c := verifyJWS(t, &k.priv.PublicKey, must(t)(NewSigner(k, "i", fixedClock(host, off)).Sign("a@b.c", "x")))
 		iat, exp := int64(c["iat"].(float64)), int64(c["exp"].(float64))
 		guest := host.Add(off).Unix()
-		if iat != guest-30 || exp != guest+90 || exp-iat != 120 {
+		if iat != guest-5 || exp != guest+30 || exp-iat != 35 {
 			t.Errorf("offset %v: iat=%d exp=%d guest=%d", off, iat, exp, guest)
 		}
 	}

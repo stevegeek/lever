@@ -24,7 +24,7 @@ func assertCurl(r proc.Runner) (*AssertCurl, *int) {
 	}}, &signed
 }
 
-func TestAssertCurlSendsTheAssertionThroughEnvAndNeverABearer(t *testing.T) {
+func TestAssertCurlSendsTheAssertionOnStdinAndNeverABearer(t *testing.T) {
 	r := &scriptedRunner{res: proc.Result{Stdout: "{\"id\":\"u\"}\n200"}}
 	a, signed := assertCurl(r)
 	status, body, err := a.Do(context.Background(), "GET", "/api/v1/auth/me")
@@ -40,9 +40,13 @@ func TestAssertCurlSendsTheAssertionThroughEnvAndNeverABearer(t *testing.T) {
 	if r.call.Args[3] != "GET" || r.call.Args[4] != "http://127.0.0.1:8080/api/v1/auth/me" {
 		t.Fatalf("method/url = %q %q", r.call.Args[3], r.call.Args[4])
 	}
-	// The jail runner moves exactly this key to stdin.
-	if r.call.Env[jail.HubAssertionEnv] != testAssertion {
-		t.Fatalf("assertion must travel as %s, got env %v", jail.HubAssertionEnv, r.call.Env)
+	if r.call.Stdin != testAssertion+"\n" {
+		t.Fatalf("stdin = %q, want the assertion line", r.call.Stdin)
+	}
+	for k, v := range r.call.Env {
+		if strings.Contains(v, "assertion-secret") {
+			t.Fatalf("assertion in the env as %s", k)
+		}
 	}
 	if _, has := r.call.Env["SCION_HUB_TOKEN"]; has {
 		t.Fatal("an assertion request must not carry the PAT")
@@ -148,10 +152,10 @@ func TestAssertionPathAllowed(t *testing.T) {
 		{"POST", "/api/v1/auth/tokens/t-1/revoke"},
 		{"POST", "/api/v1/projects/register"},
 		{"PUT", "/api/v1/system/identity"},
-		{"GET", "/api/v1/runtime-brokers"},
 		{"GET", "/api/v1/projects"},
-		{"GET", "/api/v1/projects/p-1"},
-		{"GET", "/api/v1/projects/p-1/providers"},
+		{"PUT", "/api/v1/admin/roles/r-1"},
+		{"GET", "/api/v1/admin/access-constraints/c-1"},
+		{"DELETE", "/api/v1/admin/access-constraints/c-1"},
 	}
 	for _, c := range allowed {
 		if err := AssertionPathAllowed(c.method, c.path); err != nil {
@@ -167,6 +171,23 @@ func TestAssertionPathAllowed(t *testing.T) {
 		{"GET", "/api/v1/auth/tokensfoo"},
 		{"GET", "/api/v1/auth/meow"},
 		{"GET", "/api/v1/runtime-brokers-x"},
+		{"GET", "/api/v1/runtime-brokers"},
+		{"POST", "/api/v1/runtime-brokers/connect"},
+		{"GET", "/api/v1/runtime-brokers/b-1"},
+		{"GET", "/api/v1/projects/p-1"},
+		{"GET", "/api/v1/projects/p-1/providers"},
+		{"DELETE", "/api/v1/users/u-1"},
+		{"PUT", "/api/v1/users/u-1"},
+		{"POST", "/api/v1/users"},
+		{"GET", "/api/v1/auth/me?x=1"},
+		{"DELETE", "/api/v1/admin/roles/r-1"},
+		{"GET", "/api/v1/admin/roles/r-1/x"},
+		{"POST", "/api/v1/admin/users/u-1/invite"},
+		{"GET", "/api/v1/admin/settings"},
+		{"PUT", "/api/v1/system/identity/x"},
+		{"POST", "/api/v1/auth/tokens/t-1"},
+		{"GET", "/api/v1/users/u.1"},
+		{"GET", "/api/v1/users/"},
 		{"POST", "/api/v1/projects"},
 		{"PUT", "/api/v1/projects/p-1/settings"},
 		{"DELETE", "/api/v1/projects/p-1/shared-dirs/scratchpad"},
@@ -304,6 +325,37 @@ func TestAssertCurlDoBodySendsJSONFromEnv(t *testing.T) {
 	}
 	if r.call.Args[3] != "PATCH" {
 		t.Fatalf("method = %q", r.call.Args[3])
+	}
+}
+
+// The guest shell never exports the assertion: curl, and anything else
+// running as the jail user, cannot read it from /proc/<pid>/environ.
+func TestAssertCurlScriptKeepsTheAssertionOutOfTheEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	fake := "#!/bin/sh\nenv > \"$OUT/env\"\ncat > \"$OUT/stdin\"\nprintf '{}\\n200'\n"
+	if err := os.WriteFile(dir+"/curl", []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, script := range []string{assertCurlScript, assertCurlBodyScript} {
+		r := proc.RealRunner{}
+		env := map[string]string{"PATH": dir + ":/usr/bin:/bin", "OUT": dir, "LEVER_HUB_BODY": "{}"}
+		res, err := r.RunStdin(context.Background(), strings.NewReader(testAssertion+"\n"), env, "sh", "-c", script, "_", "GET", "http://h/api/v1/auth/me")
+		if err != nil {
+			t.Fatalf("run: %v (%s)", err, res.Stderr)
+		}
+		envDump, _ := os.ReadFile(dir + "/env")
+		if strings.Contains(string(envDump), "assertion-secret") {
+			t.Fatalf("curl's environment holds the assertion:\n%s", envDump)
+		}
+		in, _ := os.ReadFile(dir + "/stdin")
+		if string(in) != AssertionHeader+": "+testAssertion+"\n" {
+			t.Fatalf("curl's stdin = %q", in)
+		}
+	}
+	res, err := proc.RealRunner{}.RunStdin(context.Background(), strings.NewReader(""), map[string]string{"PATH": dir + ":/usr/bin:/bin", "OUT": dir},
+		"sh", "-c", assertCurlScript, "_", "GET", "http://h/api/v1/auth/me")
+	if err == nil {
+		t.Fatalf("an empty stdin must fail before curl runs: %q", res.Stdout)
 	}
 }
 

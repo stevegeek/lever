@@ -17,7 +17,6 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/hubauth"
-	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -77,13 +76,19 @@ func newHIDoctor(t *testing.T, app *config.App) *hiDoctor {
 	}
 	pub := parsed.(*ecdsa.PublicKey)
 	d := &hiDoctor{hiEnv: e, key: key, providers: `{"providers":null,"authMode":"proxy"}`}
-	e.jr.curl = func(env map[string]string, name string, args []string) (proc.Result, bool) {
+	e.jr.curl = func(env map[string]string, stdin, name string, args []string) (proc.Result, bool) {
+		assertion, _, _ := strings.Cut(stdin, "\n")
 		switch {
 		case name == "date":
 			return proc.Result{Stdout: strconv.FormatInt(e.now.Unix(), 10) + "\n"}, true
-		case name == "sh" && len(args) == 5 && args[0] == "-c" && args[2] == "_" && env[jail.HubAssertionEnv] != "":
-			if strings.Contains(strings.Join(args, " "), env[jail.HubAssertionEnv]) {
+		case name == "sh" && len(args) == 5 && args[0] == "-c" && args[2] == "_" && assertion != "":
+			if strings.Contains(strings.Join(args, " "), assertion) {
 				t.Error("the assertion is on the jail command line")
+			}
+			for k, v := range env {
+				if strings.Contains(v, assertion) {
+					t.Errorf("the assertion is in the jail env as %s", k)
+				}
 			}
 			d.assertions++
 			path, ok := strings.CutPrefix(args[4], scion.DefaultHubEndpoint)
@@ -92,7 +97,7 @@ func newHIDoctor(t *testing.T, app *config.App) *hiDoctor {
 			}
 			var st int
 			var b []byte
-			if email, ok := d.verify(env[jail.HubAssertionEnv], pub, id); !ok {
+			if email, ok := d.verify(assertion, pub, id); !ok {
 				st, b = hiErr(401, "invalid assertion")
 			} else {
 				var body []byte

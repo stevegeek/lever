@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -83,6 +84,16 @@ func (j *JailCurl) run(ctx context.Context, method, path string, body []byte) (i
 
 func runCurl(ctx context.Context, r proc.Runner, env map[string]string, script, method, path, url string) (int, []byte, error) {
 	res, err := r.Run(ctx, env, "sh", "-c", script, "_", method, url)
+	return curlResult(res, err, method, path)
+}
+
+// runCurlStdin is runCurl with stdin for the script.
+func runCurlStdin(ctx context.Context, r proc.Runner, stdin io.Reader, env map[string]string, script, method, path, url string) (int, []byte, error) {
+	res, err := r.RunStdin(ctx, stdin, env, "sh", "-c", script, "_", method, url)
+	return curlResult(res, err, method, path)
+}
+
+func curlResult(res proc.Result, err error, method, path string) (int, []byte, error) {
 	if err != nil {
 		if res.Code == curlNotFound {
 			return 0, nil, fmt.Errorf("%s %s: %w (is it provisioned?): %s",

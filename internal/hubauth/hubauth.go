@@ -22,9 +22,13 @@ const (
 	ControllerEmail = "lever-controller@lever.local"
 	Header          = "X-Lever-Hub-Assertion"
 	Algorithm       = "ES256"
-	Lifetime        = 90 * time.Second
+	// Lifetime is short because scion keeps no record of a used assertion
+	// (it ignores jti) and adds 30 s of skew to exp: a captured assertion
+	// replays for Lifetime plus that. The signer reads the guest clock, so
+	// the lifetime only has to cover one request.
+	Lifetime = 30 * time.Second
 	// Backdate absorbs guest clock drift between the reading and the request.
-	Backdate = 30 * time.Second
+	Backdate = 5 * time.Second
 )
 
 // GuestPublicKeyPath is where the guest holds the public half for the hub:
@@ -206,12 +210,27 @@ func NewRemoteSigner(s *Signer, allowedEmails []string) *RemoteSigner {
 	return &RemoteSigner{s: s, allowed: allowed}
 }
 
-func (r *RemoteSigner) Sign(email string) (string, error) {
+// Allowed reports why r would refuse to sign for email, or nil.
+func (r *RemoteSigner) Allowed(email string) error {
 	if IsReserved(email) {
-		return "", fmt.Errorf("hubauth: %q is reserved for lever's own hub identities or scion's dev user", email)
+		return fmt.Errorf("hubauth: %q is reserved for lever's own hub identities or scion's dev user", email)
 	}
 	if !r.allowed[strings.ToLower(email)] {
-		return "", fmt.Errorf("hubauth: %q is not an allowed remote login", email)
+		return fmt.Errorf("hubauth: %q is not an allowed remote login", email)
+	}
+	return nil
+}
+
+func (r *RemoteSigner) Sign(email string) (string, error) {
+	if err := r.Allowed(email); err != nil {
+		return "", err
 	}
 	return r.s.Sign(email, remoteSub)
+}
+
+// WithClock returns r signing on c.
+func (r *RemoteSigner) WithClock(c Clock) *RemoteSigner {
+	s := *r.s
+	s.clock = c
+	return &RemoteSigner{s: &s, allowed: r.allowed}
 }

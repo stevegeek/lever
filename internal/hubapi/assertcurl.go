@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -15,9 +14,11 @@ import (
 // assertion from.
 const AssertionHeader = "X-Lever-Hub-Assertion"
 
-// assertCurlScript sends the assertion as a header that curl reads from
-// stdin (-H @-), so the value is in neither the host nor the guest argv;
-// printf is a shell builtin, so it does not exec with the value either.
+// assertCurlScript reads the assertion from the first line of stdin into an
+// unexported shell variable and hands it to curl as a header read from stdin
+// (-H @-), so the value is in no argv and in no environment, host or guest:
+// nothing else running as the jail user can read it from /proc. printf is a
+// shell builtin, so it does not exec with the value either.
 //
 // The header line ends in a bare \n: curl strips only the \n, so a \r\n line
 // would send a stray CR inside the header value.
@@ -27,16 +28,16 @@ const AssertionHeader = "X-Lever-Hub-Assertion"
 // environment: either could otherwise add headers or route an admin-grade
 // credential through another host. No Authorization header is ever sent: a
 // bearer takes precedence over the assertion on the hub.
-const assertCurlScript = `[ -n "$` + jail.HubAssertionEnv + `" ] || exit 1; ` +
-	`printf '` + AssertionHeader + `: %s\n' "$` + jail.HubAssertionEnv + `" | ` +
+const assertCurlScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
+	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
 	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' "$2"`
 
 // assertCurlBodyScript is assertCurlScript with a JSON body from the
 // environment, like curlBodyScript.
-const assertCurlBodyScript = `[ -n "$` + jail.HubAssertionEnv + `" ] || exit 1; ` +
-	`printf '` + AssertionHeader + `: %s\n' "$` + jail.HubAssertionEnv + `" | ` +
+const assertCurlBodyScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
+	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
 	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' ` +
@@ -55,34 +56,78 @@ type AssertCurl struct {
 // ErrAssertionPathRefused means AssertCurl would not sign for the request.
 var ErrAssertionPathRefused = errors.New("refusing to send a hub assertion")
 
-// assertionPrefixes are the hub routes an assertion may reach. Everything
-// else is refused: scion's agent port proxy forwards request headers into the
-// agent, so an assertion sent there would hand the agent a hub credential.
-var assertionPrefixes = []string{
-	"/api/v1/admin/",
-	"/api/v1/users",
-	"/api/v1/auth/me",
-	"/api/v1/auth/tokens",
-	"/api/v1/projects/register",
-	"/api/v1/system/identity",
-	"/api/v1/runtime-brokers",
+// assertionRoute is one hub call lever makes with an assertion. A pattern
+// segment "{id}" matches one hub-issued ID; query says whether the call
+// carries a query string.
+type assertionRoute struct {
+	method, pattern string
+	query           bool
 }
 
-// assertionReadOnlyPrefix is reachable with GET only: it holds the project
-// lookups the identity steps need, and every project mutation stays with the
-// PAT.
-const assertionReadOnlyPrefix = "/api/v1/projects"
-
-var assertionMethods = map[string]bool{
-	http.MethodGet: true, http.MethodPost: true, http.MethodPut: true,
-	http.MethodPatch: true, http.MethodDelete: true,
+// assertionRoutes are exactly the calls lever signs for, by method and path.
+// Everything else is refused: scion's agent port proxy forwards request
+// headers into the agent, so an assertion sent there would hand the agent a
+// hub credential, and an admin-grade assertion has no business on a route
+// lever does not use.
+var assertionRoutes = []assertionRoute{
+	{http.MethodGet, "/api/v1/auth/me", false},
+	{http.MethodGet, "/api/v1/users", true},
+	{http.MethodGet, "/api/v1/users/{id}", false},
+	{http.MethodPatch, "/api/v1/users/{id}", false},
+	{http.MethodPost, "/api/v1/admin/users/invite", false},
+	{http.MethodGet, "/api/v1/admin/roles", false},
+	{http.MethodPost, "/api/v1/admin/roles", false},
+	{http.MethodPut, "/api/v1/admin/roles/{id}", false},
+	{http.MethodGet, "/api/v1/admin/role-bindings", true},
+	{http.MethodPost, "/api/v1/admin/role-bindings", false},
+	{http.MethodDelete, "/api/v1/admin/role-bindings/{id}", false},
+	{http.MethodGet, "/api/v1/admin/access-constraints", true},
+	{http.MethodGet, "/api/v1/admin/access-constraints/{id}", false},
+	{http.MethodPost, "/api/v1/admin/access-constraints", false},
+	{http.MethodDelete, "/api/v1/admin/access-constraints/{id}", false},
+	{http.MethodPost, "/api/v1/admin/access-constraint-previews", false},
+	{http.MethodGet, "/api/v1/auth/tokens", false},
+	{http.MethodPost, "/api/v1/auth/tokens", false},
+	{http.MethodPost, "/api/v1/auth/tokens/{id}/revoke", false},
+	{http.MethodGet, "/api/v1/projects", false},
+	{http.MethodPost, "/api/v1/projects/register", false},
+	{http.MethodPut, "/api/v1/system/identity", false},
 }
 
-func underPrefix(p, prefix string) bool {
-	if strings.HasSuffix(prefix, "/") {
-		return strings.HasPrefix(p, prefix)
+// idSegment is what a hub-issued ID may look like in a signed path: scion's
+// IDs are UUIDs, so this is generous and still excludes every separator.
+func idSegment(seg string) bool {
+	if seg == "" || len(seg) > 128 {
+		return false
 	}
-	return p == prefix || strings.HasPrefix(p, prefix+"/")
+	for _, r := range seg {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (rt assertionRoute) matches(method, p string, hasQuery bool) bool {
+	if method != rt.method || (hasQuery && !rt.query) {
+		return false
+	}
+	want, got := strings.Split(rt.pattern, "/"), strings.Split(p, "/")
+	if len(want) != len(got) {
+		return false
+	}
+	for i, w := range want {
+		if w == "{id}" {
+			if !idSegment(got[i]) {
+				return false
+			}
+		} else if got[i] != w {
+			return false
+		}
+	}
+	return true
 }
 
 // AssertionPathAllowed reports whether AssertCurl may sign an assertion for
@@ -92,9 +137,6 @@ func underPrefix(p, prefix string) bool {
 func AssertionPathAllowed(method, path string) error {
 	refuse := func(why string) error {
 		return fmt.Errorf("%w for %s %q: %s", ErrAssertionPathRefused, method, path, why)
-	}
-	if !assertionMethods[method] {
-		return refuse("method not allowed")
 	}
 	for _, r := range path {
 		if r < 0x20 || r == 0x7f || r == ' ' {
@@ -121,18 +163,13 @@ func AssertionPathAllowed(method, path string) error {
 			return refuse("dot or ports segment")
 		}
 	}
-	for _, prefix := range assertionPrefixes {
-		if underPrefix(p, prefix) {
+	q := strings.Contains(path, "?")
+	for _, rt := range assertionRoutes {
+		if rt.matches(method, p, q) {
 			return nil
 		}
 	}
-	if underPrefix(p, assertionReadOnlyPrefix) {
-		if method == http.MethodGet {
-			return nil
-		}
-		return refuse("projects routes are read-only")
-	}
-	return refuse("path not on the assertion allowlist")
+	return refuse("not a call lever signs for")
 }
 
 func (a *AssertCurl) Do(ctx context.Context, method, path string) (int, []byte, error) {
@@ -163,11 +200,14 @@ func (a *AssertCurl) run(ctx context.Context, method, path string, body []byte) 
 		return 0, nil, fmt.Errorf("signing a hub assertion for %s %s: empty assertion", method, path)
 	}
 
-	env := map[string]string{jail.HubAssertionEnv: assertion}
+	if strings.ContainsAny(assertion, "\r\n") {
+		return 0, nil, fmt.Errorf("signing a hub assertion for %s %s: the assertion has a line break", method, path)
+	}
+	var env map[string]string
 	script := assertCurlScript
 	if body != nil {
-		env["LEVER_HUB_BODY"] = string(body)
+		env = map[string]string{"LEVER_HUB_BODY": string(body)}
 		script = assertCurlBodyScript
 	}
-	return runCurl(ctx, a.Runner, env, script, method, path, strings.TrimRight(a.BaseURL, "/")+path)
+	return runCurlStdin(ctx, a.Runner, strings.NewReader(assertion+"\n"), env, script, method, path, strings.TrimRight(a.BaseURL, "/")+path)
 }

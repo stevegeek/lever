@@ -8,41 +8,27 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// The controller PAT and a hub assertion never ride the host command line:
-// every in-jail command is a host process whose argv any local host user can
-// read with `ps`. Neither prefix binary is relied on to forward the host
-// environment (ssh-backed prefixes do not by default), so the host argv
-// carries only a fixed script and the secret goes one of two guest-side ways:
+// The controller PAT never rides the host command line: every in-jail
+// command is a host process whose argv any local host user can read with
+// `ps`. Neither prefix binary is relied on to forward the host environment
+// (ssh-backed prefixes do not by default), so the host argv carries only a
+// fixed script and the token goes one of two guest-side ways:
 //
-//   - Run/RunIn/RunStdin: the secret is the first line of the child's stdin,
+//   - Run/RunIn/RunStdin: the token is the first line of the child's stdin,
 //     ahead of any payload. A POSIX sh reads a pipe one byte at a time for
 //     `read`, so the payload behind it reaches the command untouched.
-//   - AttachArgv (PAT only): stdin is the user's terminal, so StageHubToken
-//     writes a 0600 file in the run user's XDG_RUNTIME_DIR (a 0700 tmpfs),
-//     which hubTokenReadScript reads and removes before the exec.
+//   - AttachArgv: stdin is the user's terminal, so StageHubToken writes a
+//     0600 file in the run user's XDG_RUNTIME_DIR (a 0700 tmpfs), which
+//     hubTokenReadScript reads and removes before the exec.
 //
 // Both scripts refuse to run without XDG_RUNTIME_DIR rather than fall back
 // to a shared path.
 
 const hubTokenEnv = "SCION_HUB_TOKEN"
 
-// HubAssertionEnv carries a signed hub assertion into a jailed command. It is
-// as sensitive as the PAT while it lives, so the runner moves it to stdin the
-// same way.
-const HubAssertionEnv = "LEVER_HUB_ASSERTION"
-
 // hubTokenStdinScript: `IFS=` and -r keep the value byte-exact; a missing
 // line is an error, never an empty token.
 const hubTokenStdinScript = `IFS= read -r t || exit 1; export ` + hubTokenEnv + `="$t"; exec "$@"`
-
-const hubAssertionStdinScript = `IFS= read -r t || exit 1; export ` + HubAssertionEnv + `="$t"; exec "$@"`
-
-// stdinSecretScripts maps every env key the runner withholds from the argv to
-// the guest script that re-exports it from the first stdin line.
-var stdinSecretScripts = map[string]string{
-	hubTokenEnv:     hubTokenStdinScript,
-	HubAssertionEnv: hubAssertionStdinScript,
-}
 
 const hubTokenFile = "$XDG_RUNTIME_DIR/lever-hub.pat"
 
@@ -62,29 +48,6 @@ func checkHubToken(tok string) error {
 		return fmt.Errorf("hub token contains a line break; it cannot be passed to the jail")
 	}
 	return nil
-}
-
-// stdinSecret picks the one withheld key env carries. Two would need two
-// stdin lines and an order both sides agree on; no caller needs that, so it
-// is refused.
-func stdinSecret(env map[string]string) (key, val string, err error) {
-	_, hasTok := env[hubTokenEnv]
-	_, hasAssert := env[HubAssertionEnv]
-	if hasTok && hasAssert {
-		return "", "", fmt.Errorf("both %s and %s are set; a jailed command takes at most one", hubTokenEnv, HubAssertionEnv)
-	}
-	if hasAssert {
-		val = env[HubAssertionEnv]
-		if strings.ContainsAny(val, "\r\n") {
-			return "", "", fmt.Errorf("hub assertion contains a line break; it cannot be passed to the jail")
-		}
-		return HubAssertionEnv, val, nil
-	}
-	val = env[hubTokenEnv]
-	if err := checkHubToken(val); err != nil {
-		return "", "", err
-	}
-	return hubTokenEnv, val, nil
 }
 
 // StageHubToken writes tok (mode 0600) to the run user's runtime directory

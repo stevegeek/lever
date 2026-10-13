@@ -164,18 +164,38 @@ func TestRestoreKeepModesStripsSBitsAndReportsThem(t *testing.T) {
 	o.KeepModes = true
 	rep := restore(t, o)
 	t.Cleanup(func() { os.Chmod(filepath.Join(target, "closed"), 0o700) })
-	want := map[string]os.FileMode{"tmp": 0o777, "tmp/suid": 0o755, "sgid": 0o750, "ro": 0o400, "closed": 0o500, "closed/in": 0o644}
+	want := map[string]os.FileMode{"tmp": 0o755, "tmp/suid": 0o755, "sgid": 0o750, "ro": 0o400, "closed": 0o500, "closed/in": 0o644}
 	for p, w := range want {
 		m := mode(t, filepath.Join(target, p))
 		if m.Perm() != w || m&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 			t.Errorf("%s mode %v, want %v", p, m, w)
 		}
 	}
-	if len(rep.StrippedSBits) != 3 || !rep.OK() {
-		t.Fatalf("stripped %q, OK %v", rep.StrippedSBits, rep.OK())
+	if len(rep.StrippedBits) != 3 || !rep.OK() {
+		t.Fatalf("stripped %q, OK %v", rep.StrippedBits, rep.OK())
 	}
 	if got := readFile(t, filepath.Join(target, "closed/in")); got != "w" {
 		t.Fatal("closed/in content")
+	}
+}
+
+// --keep-modes never applies group or other write, and the restore root
+// stays 0700 whatever the snapshot recorded for the tree root.
+func TestRestoreKeepModesDropsGroupAndOtherWrite(t *testing.T) {
+	tr := newRTree().dir("open", 0o777).file("open/f", "x", 0o666).file("g", "y", 0o664).file("plain", "z", 0o644)
+	tr.root.Mode = 0o777
+	target := filepath.Join(t.TempDir(), "out")
+	o := tr.opts(target)
+	o.KeepModes = true
+	rep := restore(t, o)
+	want := map[string]os.FileMode{".": 0o700, "open": 0o755, "open/f": 0o644, "g": 0o644, "plain": 0o644}
+	for p, w := range want {
+		if m := mode(t, filepath.Join(target, p)); m.Perm() != w {
+			t.Errorf("%s mode %v, want %v", p, m.Perm(), w)
+		}
+	}
+	if len(rep.StrippedBits) != 3 || !rep.OK() {
+		t.Fatalf("stripped %q, OK %v", rep.StrippedBits, rep.OK())
 	}
 }
 

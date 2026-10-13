@@ -64,7 +64,7 @@ type RestoreReport struct {
 	BadNames           []string
 	HashFailures       []string
 	Neutralised        []string
-	StrippedSBits      []string
+	StrippedBits       []string
 
 	Files, Dirs, Links int64
 }
@@ -81,7 +81,7 @@ const RestoreWarning = "restored content was written by agents: inspect it befor
 	"copy back with `rsync -r --no-links` after `lever tree diff` shows no directory became a link"
 
 // OK reports whether everything selected was restored. Unstable files,
-// neutralised git files and stripped s-bits are restored, so they do not
+// neutralised git files and stripped mode bits are restored, so they do not
 // clear it.
 func (r *RestoreReport) OK() bool {
 	return len(r.Collisions) == 0 && len(r.ForeignWriters) == 0 && len(r.LinksNotCreated) == 0 &&
@@ -105,7 +105,7 @@ func (r *RestoreReport) Write(w io.Writer) {
 		{"names the target could not hold", r.BadNames},
 		{"hash failures (not restored)", r.HashFailures},
 		{"neutralised git files", r.Neutralised},
-		{"setuid, setgid and sticky bits not restored", r.StrippedSBits},
+		{"mode bits not restored (setuid, setgid, sticky, group and other write)", r.StrippedBits},
 	}
 	for _, s := range sections {
 		if len(s.lines) == 0 {
@@ -580,10 +580,10 @@ func (r *restorer) restoreFile(ctx context.Context, top *frame, e *Entry) error 
 		return nil
 	}
 	if r.o.KeepModes && e.HasMeta {
-		if err := r.fs.chmod(fd, e.Mode&0o777); err != nil {
+		if err := r.fs.chmod(fd, e.Mode&keptModeBits); err != nil {
 			return fmt.Errorf("mode of %s: %w", Q(e.Path), err)
 		}
-		r.noteSBits(e.Path, e.Mode)
+		r.noteModeBits(e.Path, e.Mode)
 	}
 	if e.HasMeta {
 		if err := r.fs.setTimes(fd, e.Mtime); err != nil {
@@ -834,11 +834,13 @@ func (r *restorer) applyDirMeta(fd int, d dirRec) error {
 	if name == nil {
 		name = []byte(".")
 	}
-	if r.o.KeepModes {
-		if err := r.fs.chmod(fd, d.mode&0o777); err != nil {
+	// The restore root keeps the 0700 it was created with: it holds
+	// everything restored, and its recorded mode is the agent's choice.
+	if r.o.KeepModes && d.path != nil {
+		if err := r.fs.chmod(fd, d.mode&keptModeBits); err != nil {
 			return fmt.Errorf("mode of %s: %w", Q(name), err)
 		}
-		r.noteSBits(name, d.mode)
+		r.noteModeBits(name, d.mode)
 	}
 	if err := r.fs.setTimes(fd, d.mtime); err != nil {
 		return fmt.Errorf("mtime of %s: %w", Q(name), err)
@@ -846,10 +848,16 @@ func (r *restorer) applyDirMeta(fd int, d dirRec) error {
 	return nil
 }
 
-func (r *restorer) noteSBits(p []byte, mode uint32) {
-	if mode&0o7000 != 0 {
-		r.rep.StrippedSBits = append(r.rep.StrippedSBits,
-			fmt.Sprintf("%s: mode %04o restored as %04o", Q(p), mode&0o7777, mode&0o777))
+// keptModeBits are the recorded mode bits --keep-modes applies. Group and
+// other write are dropped with the s-bits: the modes were set by agents, and
+// on a shared host a writable restored directory lets another local user
+// plant files (a .git) in what the operator is about to inspect and copy.
+const keptModeBits = 0o755
+
+func (r *restorer) noteModeBits(p []byte, mode uint32) {
+	if mode&0o7777&^keptModeBits != 0 {
+		r.rep.StrippedBits = append(r.rep.StrippedBits,
+			fmt.Sprintf("%s: mode %04o restored as %04o", Q(p), mode&0o7777, mode&keptModeBits))
 	}
 }
 

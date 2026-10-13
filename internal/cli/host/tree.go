@@ -589,7 +589,7 @@ func newTreeRestoreCmd() *cobra.Command {
 	cmd.Flags().StringVar(&to, "to", "", "the new directory to restore into (must not exist)")
 	cmd.Flags().StringArrayVar(&paths, "path", nil, "restore only this path and what is below it (repeatable)")
 	cmd.Flags().StringVar(&links, "links", "inside", "symbolic links to create: inside (only ones that cannot leave the restored tree), all, or none")
-	cmd.Flags().BoolVar(&keepModes, "keep-modes", false, "apply the recorded permission bits (never setuid, setgid or sticky)")
+	cmd.Flags().BoolVar(&keepModes, "keep-modes", false, "apply the recorded permission bits (never setuid, setgid, sticky, group or other write)")
 	cmd.Flags().BoolVar(&keepGit, "keep-git", false, "write git config, hooks, commondir and .git files under their own names")
 	return cmd
 }

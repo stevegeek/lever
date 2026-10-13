@@ -881,8 +881,10 @@ directories it has just created, and renames it to `<dir>` at the end; a restore
 the `.lever-partial` directory. `<dir>` must not exist, and must not be inside the tree, the state
 directory or the store. `--path` restores those subtrees (and their parent directories).
 
-- Files are 0600 and directories 0700 unless `--keep-modes`, which applies the permission bits but
-  never setuid, setgid or sticky. Hard-linked files become separate files.
+- Files are 0600 and directories 0700 unless `--keep-modes`, which applies the recorded permission
+  bits but never setuid, setgid, sticky, group write or other write: on a shared host, a writable
+  directory in the restore would let another local user plant files in it. `<dir>` itself stays
+  0700. The report lists every mode bit it did not apply. Hard-linked files become separate files.
 - **Links** (`--links`, default `inside`): only links whose target cannot leave the restored
   tree are created: a relative target of some leading `..` (no more than the link's depth below
   `<dir>`) followed by plain names. `all` creates every link as recorded (lever never follows

@@ -8,55 +8,38 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// The controller PAT never rides the host command line.
+// The controller PAT never rides the host command line: every in-jail
+// command is a host process whose argv any local host user can read with
+// `ps`. Neither prefix binary is relied on to forward the host environment
+// (ssh-backed prefixes do not by default), so the host argv carries only a
+// fixed script and the token goes one of two guest-side ways:
 //
-// Every in-jail command is a host process — `orb …` or `limactl shell …` —
-// whose full argv any local host user can read with `ps`. An `env
-// SCION_HUB_TOKEN=<pat>` word in that argv therefore published the PAT for as
-// long as the command ran, and for the whole session on the attach path.
-// Neither prefix binary is relied on to forward the host process environment
-// into the guest (nothing in lever verifies that either does, and ssh-backed
-// prefixes do not by default), so the token takes one of two guest-side
-// routes, and the host argv carries only a fixed script:
-//
-//   - Non-interactive commands (Run/RunIn/RunStdin): the token is the FIRST
-//     LINE of the child's stdin, ahead of any payload. hubTokenStdinScript
-//     reads that one line in the guest, exports it and execs the real
-//     command. A POSIX sh reads a pipe one byte at a time for `read`, so a
-//     payload behind the line (an inline config for `--config -`, an image
-//     archive) reaches the command untouched.
-//   - Interactive commands (AttachArgv): stdin is the user's terminal, so
-//     StageHubToken first writes the token to a 0600 file in the run user's
-//     XDG_RUNTIME_DIR (a 0700 tmpfs owned by that user, emptied on reboot),
-//     and hubTokenReadScript reads it back into the environment, removes the
-//     file, then execs — the file exists only between stage and read.
+//   - Run/RunIn/RunStdin: the token is the first line of the child's stdin,
+//     ahead of any payload. A POSIX sh reads a pipe one byte at a time for
+//     `read`, so the payload behind it reaches the command untouched.
+//   - AttachArgv: stdin is the user's terminal, so StageHubToken writes a
+//     0600 file in the run user's XDG_RUNTIME_DIR (a 0700 tmpfs), which
+//     hubTokenReadScript reads and removes before the exec.
 //
 // Both scripts refuse to run without XDG_RUNTIME_DIR rather than fall back
-// to a shared path; jailEnv sets it on every in-jail command.
+// to a shared path.
 
-// hubTokenEnv is the one env key the runner keeps off the host argv.
 const hubTokenEnv = "SCION_HUB_TOKEN"
 
-// hubTokenStdinScript reads the token line from stdin, exports it and execs
-// the positionals. `IFS=` and -r keep the value byte-exact; a missing line
-// is an error, never an empty token.
+// hubTokenStdinScript: `IFS=` and -r keep the value byte-exact; a missing
+// line is an error, never an empty token.
 const hubTokenStdinScript = `IFS= read -r t || exit 1; export ` + hubTokenEnv + `="$t"; exec "$@"`
 
-// hubTokenFile is the staged token's guest path, expanded by the guest shell.
 const hubTokenFile = "$XDG_RUNTIME_DIR/lever-hub.pat"
 
-// stageHubTokenScript writes stdin to hubTokenFile as a fresh 0600 file.
-// The old file is removed first so the write never follows a planted link
-// and the mode is set by umask, not inherited.
+// stageHubTokenScript removes the old file first so the write never follows
+// a planted link and the mode is set by umask, not inherited.
 const stageHubTokenScript = `[ -n "$XDG_RUNTIME_DIR" ] || exit 1; umask 077; rm -f "` + hubTokenFile + `" && cat > "` + hubTokenFile + `"`
 
-// hubTokenReadScript exports the staged token and execs the positionals.
-// `$(…)` strips trailing newlines only, which the token never carries.
-// The file is removed as soon as it is read, before the exec: the value is
-// in the environment from then on, and the attach is a syscall.Exec on the
-// host that never returns, so nothing host-side could clean up afterwards.
-// The staged file therefore lives only between StageHubToken and this read,
-// not for the whole session (and until reboot) as an at-rest copy of the PAT.
+// hubTokenReadScript removes the file before the exec, so the PAT is not at
+// rest in the guest for the session: the attach is a syscall.Exec on the
+// host, so nothing host-side could clean up afterwards. `$(…)` strips
+// trailing newlines only, which the token never carries.
 const hubTokenReadScript = `[ -n "$XDG_RUNTIME_DIR" ] || exit 1; t=$(cat "` + hubTokenFile + `") || exit 1; rm -f "` + hubTokenFile + `"; export ` + hubTokenEnv + `="$t"; exec "$@"`
 
 // checkHubToken refuses a token the one-line transport could only truncate.
@@ -67,13 +50,10 @@ func checkHubToken(tok string) error {
 	return nil
 }
 
-// StageHubToken writes tok to the run user's runtime directory inside the
-// jail (mode 0600) through r, the jail runner, so an interactive command
-// wrapped by WithHubTokenFromFile can read it there. The token travels on
-// stdin; the host argv carries only the fixed staging script. Call it right
-// before EVERY attach: the read script consumes (removes) the file, so a
-// second attach without a fresh stage fails rather than run token-less —
-// and a re-minted PAT is what the session uses.
+// StageHubToken writes tok (mode 0600) to the run user's runtime directory
+// inside the jail for WithHubTokenFromFile; the token travels on stdin. Call
+// it right before every attach: the read script removes the file, so an
+// attach without a fresh stage fails rather than run token-less.
 func StageHubToken(ctx context.Context, r proc.Runner, tok string) error {
 	if tok == "" {
 		return fmt.Errorf("staging hub token: empty token")
@@ -90,8 +70,6 @@ func StageHubToken(ctx context.Context, r proc.Runner, tok string) error {
 
 // WithHubTokenFromFile wraps an in-jail interactive command so the guest
 // shell exports the token StageHubToken staged, then execs inner unchanged.
-// Every positional after the script is the inner command, so nothing in
-// inner can be read as an argument of the wrapper.
 func WithHubTokenFromFile(inner []string) []string {
 	return append([]string{"sh", "-c", hubTokenReadScript, "_"}, inner...)
 }

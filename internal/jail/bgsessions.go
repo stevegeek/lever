@@ -11,24 +11,20 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// AgentSessionsDir is where Claude Code keeps its live-session records in an
-// agent container: one <pid>.json per running claude, interactive or in the
-// background (Claude Code 2.1.296).
+// AgentSessionsDir is where Claude Code (2.1.296) keeps one <pid>.json per
+// running claude, interactive or in the background.
 const AgentSessionsDir = "/home/scion/.claude/sessions"
 
-// maxSessionRecords and sessionRecordBytes bound what the probe reads: a
-// record is a few hundred bytes, and the total stays under the exec cap.
+// A record is a few hundred bytes; the total stays under the exec cap.
 const (
 	maxSessionRecords  = 24
 	sessionRecordBytes = 2048
 )
 
 // bgSessionsScript prints the container's pid domain as Claude Code computes
-// it ("linux:" + /etc/machine-id + ":" + the pid namespace link; a podman
-// exec joins the container's pid namespace), then each regular file in the
-// sessions directory named by $1 as one line after a "@@file" line, bounded
-// and with its newlines folded, and "@@more" when there are more files than
-// it reads. No directory prints the domain alone.
+// it ("linux:" + /etc/machine-id + ":" + the pid namespace link), then each
+// record, bounded, on one line after "@@file", and "@@more" when there are
+// more files than it reads.
 var bgSessionsScript = `printf 'linux:%s:%s\n' "$(head -c 256 /etc/machine-id 2>/dev/null)" "$(readlink /proc/self/ns/pid 2>/dev/null)"
 [ -d "$1" ] || exit 0
 n=0
@@ -41,28 +37,24 @@ for f in "$1"/*.json; do
   echo
 done`
 
-// BackgroundRecords is what lever reads of an agent's Claude session
-// records. Only counts leave the probe.
+// BackgroundRecords counts an agent's Claude session records. Only counts
+// leave the probe.
 type BackgroundRecords struct {
 	// Stale counts background records ("kind":"bg", or an interactive one
 	// with a "parkedJobId") whose pidDomain is not this container's, or that
 	// name none: Claude cannot tell whether such a session still runs, so it
 	// refuses the next claude --continue.
-	Stale int
-	// Unreadable counts records that did not parse (or were cut at the
-	// read bound).
+	Stale      int
 	Unreadable int
-	// More is set when the directory held more records than were read.
-	More bool
+	More       bool // more records than were read
 }
 
 // ErrSessionsShape is probe output with no pid-domain line.
 var ErrSessionsShape = errors.New("reading agent session records: unexpected output")
 
-// BackgroundSessions reads the agent's Claude session records in its
-// container and counts stale background ones (BackgroundRecords). The
-// records are the agent's word; nothing of them comes back but counts.
-// ErrNoContainer when podman knows no such container.
+// BackgroundSessions counts the stale background Claude sessions in the
+// agent's container. The records are the agent's word; nothing of them comes
+// back but counts.
 func (p AgentProbe) BackgroundSessions(ctx context.Context, ref string) (BackgroundRecords, error) {
 	if err := checkRef(ref); err != nil {
 		return BackgroundRecords{}, fmt.Errorf("reading agent session records: %w", err)
@@ -84,7 +76,6 @@ func (p AgentProbe) BackgroundSessions(ctx context.Context, ref string) (Backgro
 	return parseBackgroundRecords(res.Stdout)
 }
 
-// parseBackgroundRecords reads bgSessionsScript's output.
 func parseBackgroundRecords(out string) (BackgroundRecords, error) {
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	domain := strings.TrimSpace(lines[0])

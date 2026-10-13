@@ -15,38 +15,34 @@ import (
 )
 
 // StoreHealth is what `lever doctor` reads about the jail's rootless podman
-// store (lever#173): how many layers no image and no container uses, how many
-// layers carry containers/storage's "incomplete" flag, and any warning podman
-// itself prints about corruption.
+// store: orphan and incomplete layers, and podman's own corruption warnings.
 //
-// Why orphan layers matter: when podman loads or pulls an image it looks for
-// an existing layer with the same content to reuse, and it searches every
-// layer in the store, used or not. An orphan layer left damaged by an
-// interrupted write (its overlay link gone) is then picked, and the load
-// fails with "creating file-getter: readlink .../overlay/l/: no such file or
-// directory". `podman image prune` removes dangling images, never layers no
-// image owns, and podman before 5.x has no command that removes them.
+// Orphan layers matter because podman reuses any layer in the store with the
+// same content, used or not, so an orphan left damaged by an interrupted
+// write makes a load fail with "creating file-getter: readlink
+// .../overlay/l/: no such file or directory". `podman image prune` never
+// removes layers no image owns, and podman before 5.x has no command that
+// does.
 type StoreHealth struct {
 	Version    string // podman version, e.g. "4.9.3"
 	Driver     string // storage driver, e.g. "overlay"
 	Images     int
 	Containers int
 	Layers     int
-	// Orphans counts layers reachable from no image (its top layer or an
-	// id-mapped copy of it) and no container, walking parent links.
+	// Orphans counts layers no image (or id-mapped copy) and no container
+	// reaches.
 	Orphans     int
 	OrphanBytes int64 // their uncompressed size, as the store records it
 	Incomplete  int   // layers flagged incomplete (a write that never finished)
-	// Warnings are podman's own stderr lines that say the store is corrupted
-	// ("storage corruption", "may be corrupted"), sanitized and clipped, at
-	// most storeWarningsMax. They fail the doctor row.
+	// Warnings are podman's own stderr lines that say the store is corrupted,
+	// sanitized and clipped. They fail the doctor row.
 	Warnings []string
 	// Notices are podman stderr lines that hint at damage but also appear in
 	// stores that work ("layer not known", a bare "corrupt"). They warn.
 	Notices []string
 }
 
-// MajorVersion returns the leading number of Version, or 0 when it has none.
+// MajorVersion is the leading number of Version, or 0.
 func (h StoreHealth) MajorVersion() int {
 	n := 0
 	for _, c := range h.Version {
@@ -63,17 +59,14 @@ const (
 	// under `timeout storeCmdSeconds`, so a hung podman cannot outlive it.
 	storeReadTimeout = 60 * time.Second
 	storeCmdSeconds  = "20"
-	// storeOutputLimit caps each stream of each command (proc.WithOutputLimit).
 	// layers.json takes about 1 KB a layer, so this is thousands of layers.
 	storeOutputLimit = 16 << 20
 	storeWarningsMax = 3
 )
 
-// driverName is the shape of a containers/storage driver name; the store's
-// metadata directories are named after it.
+// driverName is checked because the store's metadata paths are built from it.
 var driverName = regexp.MustCompile(`^[a-z0-9]+$`)
 
-// podmanInfo is the part of `podman info --format json` the read needs.
 type podmanInfo struct {
 	Store struct {
 		GraphRoot       string `json:"graphRoot"`
@@ -84,12 +77,9 @@ type podmanInfo struct {
 	} `json:"version"`
 }
 
-// The records of containers/storage's metadata files that the walk needs:
-// <graphroot>/<driver>-layers/layers.json, -images/images.json and
-// -containers/containers.json. These files are internal to containers/storage,
-// but stable for years and written atomically (a rename), so a reader sees a
-// whole file; podman before 5.x has no command that lists layers, so they are
-// the only read-only way to count orphans there.
+// containers/storage's metadata files are internal but stable and written
+// atomically, so a reader sees a whole file; podman before 5.x has no command
+// that lists layers, so they are the only read-only way to count orphans.
 type storeLayer struct {
 	ID       string         `json:"id"`
 	Parent   string         `json:"parent"`
@@ -108,16 +98,13 @@ type storeContainer struct {
 	Layer string `json:"layer"`
 }
 
-// storeFileScript prints the file named by $1, or exits 3 when there is none
-// (a store with no containers yet has no containers.json). Read-only.
+// storeFileScript exits 3 when $1 is absent: a store with no containers yet
+// has no containers.json.
 const storeFileScript = `test -e "$1" || exit 3; exec timeout ` + storeCmdSeconds + ` cat -- "$1"`
 
-// ReadStoreHealth reads the health of the jail's rootless podman store. r is
-// the in-jail runner (Backend.JailRunner), so every command runs as the jail
-// run user with its XDG_RUNTIME_DIR. lever changes nothing (podman's own
-// startup cleanup may still run inside podman info): `podman
-// info`, `podman images -a -q` (for podman's own warnings) and a cat of the
-// three metadata files. Nothing is changed and no layer is ever removed.
+// ReadStoreHealth reads the health of the jail's rootless podman store
+// through the in-jail runner r. It is read-only: no layer is ever removed
+// (podman's own startup cleanup may still run inside podman info).
 func ReadStoreHealth(ctx context.Context, r proc.Runner) (StoreHealth, error) {
 	ctx, cancel := context.WithTimeout(proc.WithOutputLimit(ctx, storeOutputLimit), storeReadTimeout)
 	defer cancel()
@@ -168,9 +155,8 @@ func ReadStoreHealth(ctx context.Context, r proc.Runner) (StoreHealth, error) {
 	return h, nil
 }
 
-// readStoreFile reads one metadata file into v. A missing file is an empty
-// list; an empty file is too (containers/storage writes "[]", but a fresh
-// store may hold a zero-length file).
+// readStoreFile treats a missing or zero-length file as an empty list: a
+// fresh store may hold a zero-length file.
 func readStoreFile(ctx context.Context, r proc.Runner, file string, v any) error {
 	res, err := r.Run(ctx, nil, "sh", "-c", storeFileScript, "_", file)
 	if err != nil {
@@ -191,11 +177,9 @@ func readStoreFile(ctx context.Context, r proc.Runner, file string, v any) error
 	return nil
 }
 
-// orphanLayers counts the layers no image and no container reaches. The
-// roots are every image's top layer and its id-mapped copies (a rootless run
-// under another user-namespace mapping makes one) and every container's own
-// layer; each root's parent chain is walked to the base. A layer the walk
-// does not reach is an orphan. It also counts layers flagged incomplete.
+// orphanLayers counts the layers no image and no container reaches. An
+// image's id-mapped copies (made by a run under another user-namespace
+// mapping) are roots too.
 func orphanLayers(layers []storeLayer, images []storeImage, containers []storeContainer) (orphans int, orphanBytes int64, incomplete int) {
 	parent := make(map[string]string, len(layers))
 	for _, l := range layers {
@@ -230,11 +214,9 @@ func orphanLayers(layers []storeLayer, images []storeImage, containers []storeCo
 	return orphans, orphanBytes, incomplete
 }
 
-// appendCorruptionWarnings sorts podman's stderr lines that name damage
-// into ws (podman says the store is corrupted: they fail the doctor row) and
-// ns (hints such as "layer not known" that also appear in working stores:
-// they warn), sanitized, clipped and de-duplicated, up to storeWarningsMax
-// each.
+// appendCorruptionWarnings sorts podman's stderr lines that name damage into
+// ws (the store is corrupted) and ns (hints that also appear in working
+// stores).
 func appendCorruptionWarnings(ws, ns []string, stderr string) ([]string, []string) {
 	add := func(list []string, l string) []string {
 		if len(list) >= storeWarningsMax {

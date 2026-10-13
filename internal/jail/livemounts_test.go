@@ -115,8 +115,6 @@ func (l *liveRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[stri
 	return l.Run(ctx, env, name, args...)
 }
 
-// mountinfo lines as the kernel writes them, for a manager with the tree,
-// a pin and a read-only entry.
 const (
 	miRoot  = "500 400 0:50 / / rw,relatime - overlay overlay rw\n"
 	miTree  = "510 500 0:60 /lever /workspace rw,relatime - virtiofs mac rw\n"

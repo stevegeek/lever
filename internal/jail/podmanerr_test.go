@@ -11,9 +11,9 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// loadFailureStderr has the shape of the field report (lever#173): podman
-// load's copy progress first, podman's corruption warning, then the error,
-// whose cause is at the very end of a long line.
+// loadFailureStderr has the shape of a real podman load failure: copy
+// progress first, the corruption warning, then the error, whose cause is at
+// the very end of a long line.
 func loadFailureStderr(blobs int) string {
 	var b strings.Builder
 	b.WriteString("Getting image source signatures\n")

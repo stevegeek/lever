@@ -13,14 +13,11 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// LiveMount is one directory of a container's mount plan, as
-// ContainerLiveMounts checks it: Target is the in-container mount point,
-// Source the guest path the mount must cover, ReadOnly whether it must be
-// mounted read-only. SelfMount says the mount is a directory of the tree
-// mounted over its own place: Target lies under another mount of the same
-// tree (the workspace, or a pin), at the same relative path as Source, so
-// the kernel's record of where the mount comes from must be that parent's
-// device, and its root joined with that path (see LiveMountElsewhere).
+// LiveMount is one directory of a container's mount plan: Target is the
+// in-container mount point, Source the guest path the mount must cover.
+// SelfMount says the mount is a directory of the tree mounted over its own
+// place under another mount of the same tree, so the kernel must record it
+// as coming from that parent (see LiveMountElsewhere).
 type LiveMount struct {
 	Target, Source string
 	ReadOnly       bool
@@ -39,20 +36,16 @@ const (
 	LiveMountWritable = "mounted read-write in the running container"
 	LiveMountReplaced = "covers another directory than the one on the host (it was replaced after the container started)"
 	// LiveMountElsewhere: by the kernel's mount table, the mount does not
-	// come from the tree directory at its place (another device, or another
-	// path in the tree's file system): the runtime followed a symbolic link
-	// that stood in the path when it mounted, or the directory was moved
-	// away (renamed) since through the guest's own view of the tree. It needs no stable inode numbers, unlike
-	// LiveMountReplaced.
+	// come from the tree directory at its place: the runtime followed a
+	// symbolic link when it mounted, or the directory was renamed since.
+	// Unlike LiveMountReplaced it needs no stable inode numbers.
 	LiveMountElsewhere = "is mounted from another place than the tree's directory there (a symbolic link was followed when the container started, or the directory was moved since)"
 )
 
-// liveMountsMaxOutput bounds what ContainerLiveMounts reads from the guest.
 const liveMountsMaxOutput = 64 << 10
 
-// errLiveMounts is the one error ContainerLiveMounts returns for anything
-// it cannot read or parse: fixed text, so no guest or container output
-// reaches a log through it.
+// errLiveMounts is fixed text so no guest or container output reaches a
+// log through it.
 var errLiveMounts = errors.New("cannot read the running container's mounts from the guest")
 
 // ErrContainerNotRunning: the container has no process to read mounts from.
@@ -64,28 +57,16 @@ var ErrContainerNotRunning = errors.New("the container is not running")
 var ErrForeignNamespace = errors.New("the container's first process is in a mount namespace made inside the container, not the one its runtime created")
 
 // ContainerLiveMounts checks the running container ref against want from
-// the GUEST side, without running a program inside the container (the
-// agent controls it, and lever treats it as root there: any of them may be
-// replaced). Through r, as the
-// guest user that owns the rootless container:
+// the guest side, never running a program inside the container: the agent
+// is root there and may have replaced any of them. It reads the kernel's
+// mountinfo for the container's first process, and compares device and
+// inode of Source with the container's view of Target, since a directory
+// replaced on the host leaves the mount on the old one. The process must
+// stay in its runtime's namespaces and keep its pid across the reads.
 //
-//   - podman inspect gives the container's process id;
-//   - that process must still be in the namespaces its runtime created
-//     (checkRuntimeNamespaces, before and after the reads below);
-//   - /proc/<pid>/mountinfo, which the kernel writes, must list each
-//     Target as a mount point (the topmost entry counts), read-only where
-//     ReadOnly is set;
-//   - stat must find the same device and inode at Source and at
-//     /proc/<pid>/root<Target>: a directory replaced on the host leaves
-//     the mount on the old one. The paths travel on stdin, NUL-separated,
-//     never as words of the guest command line: a transport that joins
-//     and re-splits the argv cannot cut a path with a space in two;
-//   - the process id is read again at the end and must not have changed.
-//
-// Every read is bounded in time and size (BoundAgentExec), and runs under
-// the guest's own deadline too (runGuestBounded), so a read that hangs
-// does not stay behind in the guest. Output is parsed defensively;
-// anything unexpected is an error, never "held".
+// Paths travel on stdin, NUL-separated, so a transport that re-splits the
+// argv cannot cut one in two. Every read is bounded in time and size, also
+// in the guest. Anything unexpected is an error, never "held".
 func ContainerLiveMounts(ctx context.Context, r proc.Runner, ref string, want []LiveMount) ([]LiveMountProblem, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return nil, fmt.Errorf("checking container mounts: invalid container reference %q", ref)
@@ -150,14 +131,11 @@ func ContainerLiveMounts(ctx context.Context, r proc.Runner, ref string, want []
 }
 
 // fromParentTree reports whether the mount o at target comes from the
-// same file system as the nearest mount above it, at the parent's root
-// joined with target's path below the parent's point. The kernel records
-// the root of a bind mount as the path of the directory it resolved, after
-// any symbolic link, so a link that stood anywhere in the source path when
-// the runtime mounted, or a directory renamed since (the kernel follows the
-// rename, or marks a removed one "//deleted"), shows as another root or
-// another device. A target with no mount above it but the container's
-// root, or an unreadable root, is no match.
+// nearest mount above it, at the parent's root joined with target's path
+// below it. The kernel records a bind mount's root after resolving symbolic
+// links, and follows renames (or marks a removed directory "//deleted"), so
+// either shows as another root or device. No parent mount but "/", or an
+// unreadable root, is no match.
 func fromParentTree(opts map[string]mountOpts, target string, o mountOpts) bool {
 	if o.root == "" {
 		return false
@@ -180,8 +158,6 @@ func fromParentTree(opts map[string]mountOpts, target string, o mountOpts) bool 
 
 var pidRE = regexp.MustCompile(`^[0-9]{1,10}$`)
 
-// containerPID is the container's process id in the guest (0 = not
-// running).
 func containerPID(ctx context.Context, r proc.Runner, ref string) (int, error) {
 	res, err := runGuestBounded(ctx, r, "podman", "inspect", "--type", "container", "--format", "{{.State.Pid}}", ref)
 	if err != nil {
@@ -206,36 +182,23 @@ func containerPID(ctx context.Context, r proc.Runner, ref string) (int, error) {
 
 // checkRuntimeNamespaces requires the container's first process (pid, in
 // the guest) to be in the mount and user namespaces the container runtime
-// created, and not in ones made inside the container.
+// created, not ones made inside the container.
 //
-// The threat: a root agent that can ptrace that process can make it setns
-// into a user namespace it created (unprivileged, inside the container)
-// and a mount namespace owned by it, holding a read-only bind of whatever
-// it likes — say a protected directory the host replaced, which the agent
-// itself still writes from the real namespace. /proc/<pid>/mountinfo and
-// /proc/<pid>/root then show that staged view, and both checks above
-// would pass.
+// Threat: a root agent that can ptrace that process can make it setns into
+// a user and mount namespace it created, holding a read-only bind of
+// whatever it likes, so mountinfo and /proc/<pid>/root show a staged view
+// and the mount checks pass.
 //
-// The reference this check uses is one that process cannot change: its PID
-// namespace. A process never changes its own PID namespace (setns on one
-// only affects children), and the runtime created the container's PID
-// namespace together with its user namespace, so the PID namespace's owner
-// is the container's user namespace for the life of the process. The
-// runtime's mount namespace is owned by that same user namespace. A
-// namespace made inside the container is owned by a user namespace made
-// there, a child of the container's: so the mount namespace's owner must
-// equal the PID namespace's owner, and the process must be in that user
-// namespace too. (Making a mount namespace owned by the container's own
-// user namespace needs CAP_SYS_ADMIN there, which a rootless container is
-// not given; an agent with it could unmount a protected path anyway.)
-//
-// Recording the namespaces at create and comparing later would trust
-// whatever ran before the first record (and a resume makes new ones), and
-// conmon is in the rootless user and mount namespaces, never the
-// container's, so neither is a sound reference.
-//
-// The guest's perl (nsReader) reads the owners with the NS_GET_USERNS
-// ioctl, for this one process only; anything it cannot answer is an error.
+// The reference is the process's PID namespace, which it can never change
+// (setns on one only affects children); its owner is the container's user
+// namespace for the life of the process. A namespace made inside the
+// container is owned by a child user namespace, so the mount namespace's
+// owner must equal the PID namespace's owner, and the process must be in
+// that user namespace. Making a mount namespace owned by the container's own
+// user namespace needs CAP_SYS_ADMIN there, which a rootless container lacks.
+// Recording namespaces at create would trust whatever ran before the record,
+// and conmon is never in the container's namespaces, so neither is a sound
+// reference.
 func checkRuntimeNamespaces(ctx context.Context, r proc.Runner, pid int) error {
 	res, err := runGuestBoundedStdin(ctx, r, strings.NewReader(nsReader), "perl", "-T", "-", strconv.Itoa(pid))
 	if err != nil {
@@ -253,25 +216,19 @@ func checkRuntimeNamespaces(ctx context.Context, r proc.Runner, pid int) error {
 }
 
 // nsReader prints "<id> <type> <owner id>" for the user, mnt and pid
-// namespaces of the process whose guest pid is its argument (owner 0 for
-// the user namespace, whose owner the check does not use), and exits
-// non-zero on anything else. It runs as perl from stdin because perl-base
-// is Essential on Debian and Ubuntu, so every lever guest has it; under -T,
-// which makes perl ignore PERL5LIB and PERL5OPT, and with no module, so
-// nothing but the interpreter and this text runs.
+// namespaces of the given guest pid (owner 0 for user) and exits non-zero on
+// anything else. It is perl because perl-base is Essential on Debian and
+// Ubuntu, so every guest has it; -T makes perl ignore PERL5LIB and PERL5OPT,
+// and no module is loaded, so nothing but the interpreter and this text runs.
 //
-// Not lsns: lsns walks every process in /proc whatever --task says, and
-// aborts on a namespace link it cannot query. On Linux 7.0 the namespace
-// link of a same-user process the caller may not ptrace (the run user's
-// systemd --user, which holds CAP_WAKE_ALARM) opens as the /proc/<pid>/ns
-// directory rather than failing with EACCES, so lsns fails for the run user
-// on every call. A container process the run user may not ptrace fails
-// here the same way: an error, never "held".
+// Not lsns: it walks every process in /proc and aborts on a namespace link
+// it cannot query. On Linux 7.0 the link of a same-user process the caller
+// may not ptrace (the run user's systemd --user) opens as a directory rather
+// than failing with EACCES, so lsns fails for the run user on every call.
 //
-// NS_GET_NSTYPE proves each descriptor is a namespace of the expected type
-// (a directory or any other file fails it), and all of them must be on the
-// one nsfs device. 0xb701 is NS_GET_USERNS and 0xb703 NS_GET_NSTYPE
-// (linux/nsfs.h); the types are CLONE_NEWUSER, CLONE_NEWNS, CLONE_NEWPID.
+// NS_GET_NSTYPE proves each descriptor is a namespace of the expected type,
+// and all must be on the one nsfs device. 0xb701 is NS_GET_USERNS and 0xb703
+// NS_GET_NSTYPE (linux/nsfs.h).
 const nsReader = `my $pid = shift;
 $pid =~ /\A[1-9][0-9]{0,9}\z/ or die "pid\n";
 my %clone = (user => 0x10000000, mnt => 0x00020000, pid => 0x20000000);
@@ -299,14 +256,10 @@ for my $t ("user", "mnt", "pid") {
 }
 `
 
-// nsEntry is one namespace line: a namespace's id and its owner's (0 =
-// none shown).
 type nsEntry struct{ id, owner uint64 }
 
 // parseNamespaces reads nsReader's output, which has the shape of lsns
-// --raw --noheadings --output NS,TYPE,ONS. Only the pid, mnt and user lines
-// are read, and those strictly: each once, a numeric id and owner, a
-// non-zero id. A missing one is an error.
+// --raw --noheadings --output NS,TYPE,ONS.
 func parseNamespaces(out string) (map[string]nsEntry, error) {
 	if len(out) > liveMountsMaxOutput {
 		return nil, errLiveMounts
@@ -351,14 +304,9 @@ var nsNumRE = regexp.MustCompile(`^[0-9]{1,20}$`)
 
 var statLineRE = regexp.MustCompile(`^([0-9]+:[0-9]+):(/.*)$`)
 
-// statIDs is "device:inode" by path for each want's Source and
-// container-side Target: one xargs-run stat, the paths on stdin (so none
-// of them is a word of the command line), every line checked. stat names
-// each path it answers for, and a path it cannot stat (gone, or a link
-// that no longer resolves) is simply absent: xargs then exits 123, which
-// is not an error here, so an agent that deletes a source cannot turn the
-// whole check into "could not read". Any other failure, a line of another
-// shape, or a path that was not asked for is an error.
+// statIDs maps each path to "device:inode". A path stat cannot answer is
+// absent and xargs exits 123, which is not an error here, so an agent that
+// deletes a source cannot turn the whole check into "could not read".
 func statIDs(ctx context.Context, r proc.Runner, procDir string, want []LiveMount) (map[string]string, error) {
 	var in strings.Builder
 	asked := map[string]bool{}
@@ -388,28 +336,21 @@ func statIDs(ctx context.Context, r proc.Runner, procDir string, want []LiveMoun
 	return ids, nil
 }
 
-// sameID reports whether stat answered for both paths with the same
-// device and inode.
 func sameID(ids map[string]string, a, b string) bool {
 	x, okA := ids[a]
 	y, okB := ids[b]
 	return okA && okB && x == y
 }
 
-// mountOpts is what parseMountinfo keeps of one mount: read-only, the
-// device (major:minor) and the root of the mount within its file system
-// ("" when the kernel's text could not be read).
+// mountOpts.root is "" when the kernel's text could not be read.
 type mountOpts struct {
 	ro        bool
 	dev, root string
 }
 
-// parseMountinfo maps each mount point in a /proc/<pid>/mountinfo text to
-// its per-mount options, device and root; a later line for the same point (a mount over a
-// mount) replaces an earlier one. Only complete lines with the documented
-// shape count (proc(5): id parent major:minor root point options
-// [optional...] - type source super), and a point is unescaped from the
-// kernel's octal form (\040 for a space).
+// parseMountinfo keeps the last line for each point, since a mount over a
+// mount is the one that counts, and only complete lines of the proc(5)
+// shape.
 func parseMountinfo(text string) map[string]mountOpts {
 	out := map[string]mountOpts{}
 	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
@@ -435,7 +376,6 @@ func parseMountinfo(text string) map[string]mountOpts {
 	return out
 }
 
-// unescapeMountinfo decodes the kernel's \ooo escapes in a mountinfo path.
 func unescapeMountinfo(s string) (string, bool) {
 	if !strings.HasPrefix(s, "/") {
 		return "", false

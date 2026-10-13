@@ -10,11 +10,9 @@ import (
 )
 
 // ContainerNetworkMode returns the network mode podman created the jail
-// container named by ref with (HostConfig.NetworkMode: "pasta",
-// "slirp4netns", "host", ...), through r. ErrNoContainer when there is
-// none. The mode is fixed at create, so a container made before lever's
-// pasta drop-in took effect keeps slirp4netns until it is recreated
-// (lever#35).
+// container ref with ("pasta", "slirp4netns", "host", ...). The mode is fixed
+// at create, so a container made before lever's pasta drop-in took effect
+// keeps slirp4netns until it is recreated.
 func ContainerNetworkMode(ctx context.Context, r proc.Runner, ref string) (string, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return "", fmt.Errorf("inspecting container network: invalid container reference %q", ref)
@@ -29,13 +27,12 @@ func ContainerNetworkMode(ctx context.Context, r proc.Runner, ref string) (strin
 	return strings.TrimSpace(res.Stdout), nil
 }
 
-// containerStateTimeout bounds ContainerRunning's podman inspect.
 var containerStateTimeout = 10 * time.Second
 
-// ContainerRunning reports whether the jail container named by ref is
-// running or paused (podman's State, through r): false, with no error, when
-// podman knows no such container. Unlike the hub's agent record, which the
-// agent can update about itself, this is the runtime's own view.
+// ContainerRunning reports whether the jail container ref is running or
+// paused; false, with no error, when podman knows no such container. Unlike
+// the hub's agent record, which the agent can update about itself, this is
+// the runtime's own view.
 func ContainerRunning(ctx context.Context, r proc.Runner, ref string) (bool, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return false, fmt.Errorf("inspecting container state: invalid container reference %q", ref)

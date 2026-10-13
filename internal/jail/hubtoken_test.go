@@ -85,8 +85,8 @@ func TestRunStdinPrependsHubTokenLineToPayload(t *testing.T) {
 	}
 }
 
-// Without a token nothing changes: no wrapper, no stdin, the exact argv every
-// existing test pins (TestPrefixIsBackendShaped).
+// Without a token nothing changes: no wrapper, no stdin, the argv
+// TestPrefixIsBackendShaped pins.
 func TestRunWithoutHubTokenHasNoWrapper(t *testing.T) {
 	host := proc.NewFakeRunner()
 	host.Script("orb", proc.Result{})
@@ -119,11 +119,9 @@ func TestRunRefusesHubTokenWithLineBreak(t *testing.T) {
 	}
 }
 
-// The wrapper is a real shell script: run it through the host's own sh (no
-// prefix) to prove it exports the token to the exec'd command and hands the
-// REST of stdin on untouched — `read` on a pipe must consume exactly one
-// line. On Linux CI this is dash, the guest's sh; on macOS it is bash in sh
-// mode. Both read a pipe a byte at a time.
+// The wrapper run through the host's sh exports the token and hands the
+// rest of stdin on untouched: `read` on a pipe must consume exactly one line.
+// On Linux CI this is dash, the guest's sh; on macOS it is bash in sh mode.
 func TestHubTokenStdinScriptWithRealShell(t *testing.T) {
 	jr := New(Config{Host: proc.RealRunner{}, Prefix: nil, UID: "501"})
 	res, err := jr.RunStdin(context.Background(), strings.NewReader("payload line 1\npayload line 2"),
@@ -196,12 +194,10 @@ func TestWithHubTokenFromFileWrapsInner(t *testing.T) {
 	}
 }
 
-// The read script, run by a real sh against a staged file, exports the token
-// and execs the inner command with every positional intact — and removes the
-// staged file BEFORE the exec, so the PAT does not stay at rest in the guest
-// for the whole attach session and beyond (the attach is a syscall.Exec on
-// the host, so nothing host-side can clean up afterwards). The exec'd
-// command must not see the file either: the value is already in its env.
+// The read script exports the token, execs the inner command with every
+// positional intact, and removes the staged file before the exec so the PAT
+// does not stay at rest in the guest: the attach is a syscall.Exec on the
+// host, so nothing host-side can clean up afterwards.
 func TestHubTokenReadScriptWithRealShell(t *testing.T) {
 	dir := t.TempDir()
 	staged := dir + "/lever-hub.pat"

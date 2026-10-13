@@ -150,8 +150,6 @@ func listJail(t *testing.T, root, arch string) (pkgs, mods, files []string) {
 	return pkgs, mods, files
 }
 
-// goModPins is the go and toolchain lines of go.mod: the Go release the
-// in-jail binaries are built with.
 func goModPins(t *testing.T, root string) []string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
@@ -168,20 +166,15 @@ func goModPins(t *testing.T, root string) []string {
 	return pins
 }
 
-// goTok is one token of a Go file: its kind and literal.
 type goTok struct {
 	kind token.Token
 	lit  string
 }
 
 // canonicalGo is a Go file reduced to what reaches the binary: its token
-// stream from go/scanner, each token's kind and literal, one per line.
-// Comments, blank lines and spacing are not tokens, so a comment or layout
-// edit needs no bump; any change to the code does count. Compiler directives
-// (//go:build, //go:embed, //go:linkname, ...) are comments to the scanner
-// but change the build, so they stay in the stream where they appear.
-// Semicolons are hashed alike whether written or inserted at a line end.
-// In the internal/cli package, the value of the release constant Version is
+// stream, so a comment or layout edit needs no bump. Compiler directives
+// (//go:build, //go:embed, ...) are comments to the scanner but change the
+// build, so they stay. In internal/cli the release constant Version is
 // blanked (see versionValues).
 func canonicalGo(path string, src []byte) ([]byte, error) {
 	fset := token.NewFileSet()
@@ -221,18 +214,14 @@ func canonicalGo(path string, src []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// isVersionPackage reports whether path is a file of internal/cli, the
-// package that holds the release constant.
 func isVersionPackage(path string) bool {
 	return filepath.ToSlash(filepath.Dir(path)) == "internal/cli"
 }
 
 // versionValues returns the indexes of the STRING tokens that give a
-// top-level constant named Version its value: CONST IDENT(Version) [type]
-// ASSIGN STRING, alone or as a spec of a const ( ... ) group. lever-manager
-// links internal/cli (whose root.go holds the release constant), but a
-// release bump alone changes no in-jail behaviour (that is the point of
-// JailABI).
+// top-level constant named Version its value, alone or in a const group.
+// lever-manager links internal/cli, but a release bump alone changes no
+// in-jail behaviour.
 func versionValues(toks []goTok) []int {
 	var out []int
 	depth := 0       // ( [ { nesting
@@ -277,8 +266,6 @@ func versionValues(toks []goTok) []int {
 	return out
 }
 
-// fingerprint hashes the build pins and external modules, then every
-// file's path and canonical content, in order.
 func fingerprint(t *testing.T, root string, pins, mods, files []string) string {
 	t.Helper()
 	h := sha256.New()
@@ -357,7 +344,7 @@ func writeFingerprint(path string, pins, pkgs, mods []string, sum string) error 
 }
 
 // TestJailFingerprint fails when the code baked into the agent image changed
-// without a JailABI bump (lever#171). See the package doc.
+// without a JailABI bump. See the package doc.
 func TestJailFingerprint(t *testing.T) {
 	root := repoRoot(t)
 	pkgs, mods, files := jailSources(t, root)

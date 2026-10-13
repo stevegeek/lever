@@ -9,27 +9,21 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// logTailLines is how many lines of an agent container's log LogTail reads:
-// enough to hold the harness's last words through a terminal redraw.
-// logTailOutputLimit is its output cap, above the general agent-exec cap
-// because terminal lines carry control sequences; a cut read keeps the older
-// lines and loses the newest.
+// logTailLines is enough to hold the harness's last words through a terminal
+// redraw. logTailOutputLimit is above the general agent-exec cap because
+// terminal lines carry control sequences.
 const (
 	logTailLines       = 200
 	logTailOutputLimit = 256 << 10
 )
 
-// LogTail returns the last lines of the agent container's log (podman logs
-// --tail, run in the guest), stdout and stderr together. It works on an
-// exited container too, which is when a caller wants it: the harness died.
+// LogTail returns the last lines of the agent container's log, stdout and
+// stderr together. It works on an exited container too.
 //
-// The log is the agent's word and may carry anything the agent printed. A
-// caller matches fixed phrases in it and never prints or forwards it; no
-// error repeats it. The read is bounded like every agent exec
-// (BoundAgentExec, with logTailOutputLimit as its cap): podman is stopped at
-// the cap, and what was read up to it is still returned with
-// proc.ErrOutputLimit (it holds the older lines of the tail, so a phrase may
-// be missed, never invented).
+// The log is the agent's word: a caller only matches fixed phrases in it and
+// never prints or forwards it; no error repeats it. At the output cap what
+// was read is still returned with proc.ErrOutputLimit; it holds the older
+// lines, so a phrase may be missed, never invented.
 func (p AgentProbe) LogTail(ctx context.Context, ref string) (string, error) {
 	if err := checkRef(ref); err != nil {
 		return "", fmt.Errorf("reading agent container log: %w", err)

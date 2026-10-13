@@ -38,10 +38,8 @@ func TestImageInspectArgs(t *testing.T) {
 	}
 }
 
-// TestNormalizeImageID pins the docker-vs-podman prefix reconciliation: docker
-// prints the ID as "sha256:<hex>", (some) podman versions print bare "<hex>".
-// Without stripping the prefix on both sides, the host-vs-jail comparison in
-// ImageLoaded would never match and the guard would never skip a redundant load.
+// TestNormalizeImageID: docker prints the ID as "sha256:<hex>", some podman
+// versions print bare "<hex>"; ImageLoaded must strip both sides to match.
 func TestNormalizeImageID(t *testing.T) {
 	hex := "eb84fdc6f2a3a064445bb2a2fbc89c515666c428d6c96b6ab68a4cd218819688"
 	for _, in := range []string{
@@ -64,10 +62,9 @@ const (
 	testImgRef  = "scionlocal/lever-claude:latest"
 )
 
-// imageLoadedRunner scripts the FakeRunner so hostImageID (a `docker …` call)
-// and jailImageID (an `orb …` prefix call) resolve independently. A missing
-// script for either binary makes that side error — the real-world "image not
-// present / inspect exits non-zero" case — which the readers map to "".
+// imageLoadedRunner scripts the host docker and the jail prefix call
+// independently. A missing script makes that side error, as an absent image
+// does, which the readers map to "".
 func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *proc.FakeRunner {
 	t.Helper()
 	r := proc.NewFakeRunner()
@@ -80,9 +77,8 @@ func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *proc.FakeRunner {
 	return r
 }
 
-// TestImageLoaded exercises the fail-open host-vs-jail comparison offline
-// through the proc.Runner seam — previously unreachable because the readers
-// shelled out to os/exec directly.
+// TestImageLoaded: the host-vs-jail comparison fails open (reports not
+// loaded) whenever either side cannot be read.
 func TestImageLoaded(t *testing.T) {
 	prefix := orbPrefix("lever-demo", "leveruser")
 	cases := []struct {
@@ -97,8 +93,7 @@ func TestImageLoaded(t *testing.T) {
 		{"jail-missing", testImageID, "", false},
 		// identical IDs on both sides -> the redundant load can be skipped.
 		{"matching", testImageID, testImageID, true},
-		// docker prints "sha256:<hex>", podman prints bare "<hex>": normalizeImageID
-		// must reconcile BOTH sides or this guard would never fire.
+		// docker prints "sha256:<hex>", podman prints bare "<hex>".
 		{"sha256-prefix-reconciled", "sha256:" + testImageID + "\n", testImageID + "\n", true},
 		// a rebuilt tag with a genuinely different jail ID -> fail-open false.
 		{"genuine-mismatch", testImageID, strings.Repeat("a", 64), false},
@@ -143,8 +138,6 @@ func TestPruneImagesErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestPruneImagesSuccess: a clean prune returns nil and drives the prune argv
-// through the host runner.
 func TestPruneImagesSuccess(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
@@ -172,7 +165,7 @@ func TestPruneImagesArgs(t *testing.T) {
 	}
 }
 
-// TestWarmImageArgs pins the warm-up argv (lever#165): scion's exact keep-id
+// TestWarmImageArgs pins the warm-up argv: scion's exact keep-id
 // flag (a different mapping builds a different layer copy), `true` as the
 // entrypoint so neither sciontool's hook nor claude runs, and no pull or
 // network.
@@ -190,8 +183,6 @@ func TestWarmImageArgs(t *testing.T) {
 	}
 }
 
-// TestWarmImage drives the warm-up through the host runner and wraps a
-// failure with the image.
 func TestWarmImage(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
@@ -288,12 +279,11 @@ func TestLoadImageLoadFailureBeforeDrainKeepsLoadStderr(t *testing.T) {
 	}
 }
 
-// TestLocalhostAliasArgs pins the post-load re-tag that closes lever#26: a
-// docker archive's unqualified RepoTag lands in podman as docker.io/<ref>,
-// while a container spec's unqualified <ref> resolves through the short-name
-// path to localhost/<ref> — which, after a rebuild, still points at the OLD
-// image. Tagging the fresh docker.io/ name as localhost/ makes both names
-// one image, and the superseded copy goes dangling for the prune.
+// TestLocalhostAliasArgs pins the post-load re-tag: a docker archive's
+// unqualified RepoTag lands in podman as docker.io/<ref>, while a container
+// spec's unqualified <ref> resolves to localhost/<ref>, which after a rebuild
+// still points at the old image. Tagging the fresh image as localhost/ makes
+// both names one image.
 func TestLocalhostAliasArgs(t *testing.T) {
 	got := localhostAliasArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64")
 	want := []string{
@@ -361,7 +351,7 @@ func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
 }
 
 // An alias failure is fatal: the container would otherwise run the stale
-// localhost/ image while apply reports success — the exact #26 failure.
+// localhost/ image while apply reports success.
 func TestLocalhostAliasFailureIsFatal(t *testing.T) {
 	r := &loadThenFail{FakeRunner: proc.NewFakeRunner()}
 	err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x:latest", func(w io.Writer) error { return nil })

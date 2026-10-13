@@ -112,9 +112,8 @@ func TestAgentProbeHubTokenErrors(t *testing.T) {
 	}
 }
 
-// codeRunner answers every call with one result, as an error when its code
-// is non-zero (FakeRunner returns a nil error for any scripted result), and
-// records the argv.
+// codeRunner returns an error for a non-zero code, which FakeRunner does
+// not.
 type codeRunner struct {
 	res   proc.Result
 	calls *[]string
@@ -181,8 +180,6 @@ func TestAgentProbeReportSessionRunning(t *testing.T) {
 	}
 }
 
-// runTokenScript runs agentTokenScript in a real sh against a file holding
-// content, as the container would.
 func runTokenScript(t *testing.T, content []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "scion-token")

@@ -1,4 +1,7 @@
-// Package fsutil holds the stdlib-only file helpers the host packages share.
+// Package fsutil holds the file helpers the host packages share. It uses the
+// standard library only, plus golang.org/x/sys/unix for InsideByIdentity,
+// whose fstatat and openat the syscall package does not export on every
+// platform.
 package fsutil
 
 import (

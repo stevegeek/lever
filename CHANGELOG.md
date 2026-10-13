@@ -23,6 +23,9 @@ version bump moves the block under the new version heading.
   times, masks every credential shape lever masks, and checks that the broker's and the tool's
   logs hold only lever's line shape. The operations guide describes the shape, the levels, where
   each component logs, the redaction and the audit lines.
+- **The agent image bakes Claude Code 2.1.296 (was 2.1.281).** The messages lever reads from
+  Claude Code (a stale background session, no conversation to continue), its session records and
+  the SessionStart hook are unchanged in 2.1.296. It ships with the Jail ABI 3 image rebuild below.
 - **Jail ABI 3.** `lever-agent` and the shared packages in the image changed: rebuild the agent
   image (`make lever-image`, then any instance image built from it) and recreate the manager on
   it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. If

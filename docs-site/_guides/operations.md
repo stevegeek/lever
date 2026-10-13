@@ -708,7 +708,7 @@ plausibly make it more likely; it has not been reproduced. The container's own t
   (background sessions are then possible, for example on an image without a writable
   `/etc/claude-code`: check that directory's permissions or rebuild the image). Claude Code documents
   them as equivalent: they turn off background agents and agent view (`claude agents`, `--bg`,
-  `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.281) the
+  `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.296) the
   left-arrow shortcut that backgrounds the session and opens agent view is gated on the same
   switch. This is read from that build, **not yet tested in a running container**; doctor's
   `claude background sessions` row is the check that matters.

@@ -11,7 +11,7 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// What Claude Code 2.1.281 prints when claude --continue meets a background
+// What Claude Code 2.1.296 prints when claude --continue meets a background
 // session registered in another container.
 const staleBgLog = "Your most recent conversation moved to a background session (abc) registered from another machine or container, so this one can't tell whether it is still running. Use `claude --resume` to pick a session, or add --fork-session to branch off a copy."
 

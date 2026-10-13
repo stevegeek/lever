@@ -149,13 +149,14 @@ time=2026-10-12T13:00:02.400Z level=ERROR msg="gateway: resolve broker URL: …"
 
 The level is `INFO` for what happened (an audit decision is `INFO` whatever it decided), `WARN`
 for a problem the process carries on through, and `ERROR` for a failure: an operation that did
-not happen, or a process that exits.
+not happen, or a process that exits. Lines Go itself writes (an HTTP server's TLS handshake
+error, a proxy error) are `INFO` whatever they say.
 
 | Component | Where its lines go |
 |---|---|
 | `broker` | `broker.log` (its decisions), `broker.out.log` (start-up, warnings, Go's own lines such as an HTTP server's TLS handshake error), and `tool-logs/<tool>.log` for a line about one tool (held back, failed to start), with `tool=<name>` |
 | `lever` | the few lines `lever` adds to `broker.log` (a scion line hidden from your terminal) |
-| `lever-tool-<name>` | `tool-logs/<name>.log`: the broker writes each supervised tool's output there |
+| `lever-tool-<name>` (the tool's program, e.g. `lever-tool-db`) | `tool-logs/<tool>.log`, named after the tool in `lever.yaml`: the broker writes each supervised tool's output there |
 | `remote-proxy` | `remote.log` |
 | `lever-agent` | in the agent's container, with `cmd=<verb>`: `boot` (scion's pre-start hook) in the container's log; the `gateway` and `renew` sidecars in `~/.scion/services/logs/lever-gateway.stderr.log` and `lever-renew.stderr.log` in the agent's home; `serve-capability` in Claude Code's MCP server log |
 

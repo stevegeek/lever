@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -22,8 +23,14 @@ var logLineRE = regexp.MustCompile(`^time=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z
 // as `lever remote serve` does, and returns what it wrote.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	prev, w, flags := slog.Default(), log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		// Restoring slog's own default leaves the log package writing to
+		// the replaced handler.
+		log.SetOutput(w)
+		log.SetFlags(flags)
+	})
 	var b bytes.Buffer
 	slog.SetDefault(logging.New(&b, "remote-proxy"))
 	return &b

@@ -32,7 +32,7 @@ func main() { os.Exit(realMain(os.Args, os.Stderr)) }
 // whoever ran them, in prose.
 var logVerbs = map[string]bool{"boot": true, "serve-capability": true, "renew": true, "gateway": true}
 
-// realMain runs argv and returns the exit code, writing diagnostics to stderr.
+// realMain takes stderr so a test can read what each kind of verb writes.
 func realMain(argv []string, stderr io.Writer) int {
 	if len(argv) > 1 && logVerbs[argv[1]] {
 		l := logging.Install(stderr, "lever-agent").With("cmd", argv[1])
@@ -50,7 +50,7 @@ func realMain(argv []string, stderr io.Writer) int {
 	return 0
 }
 
-// warnf is boot's log: a WARN line in the process's log shape.
+// warnf is boot's Log: what boot reports is a problem it carried on through.
 func warnf(format string, args ...any) { slog.Warn(fmt.Sprintf(format, args...)) }
 
 // errNoIdentity means the id-dir holds no enrolled identity. Every verb that

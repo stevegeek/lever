@@ -54,7 +54,8 @@ func main() {
 	admin := flag.String("admin", "http://127.0.0.1:3401", "broker admin base URL")
 	csvPath := flag.String("csv", "data/todos.csv", "path to the todos CSV")
 	flag.Parse()
-	// lever's log line shape for every line, the log package's included.
+	// The default too, so the log package's lines below share the shape the
+	// broker's other logs have.
 	slog.SetDefault(captool.NewLogger(os.Stderr, "lever-tool-todo"))
 
 	srv, err := buildServer(OpenStore(*csvPath), *name, *backend, *admin)

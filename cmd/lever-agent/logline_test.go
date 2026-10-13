@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"log"
 	"log/slog"
 	"path/filepath"
 	"regexp"
@@ -14,8 +15,14 @@ var agentLogLineRE = regexp.MustCompile(`^time=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\
 // keepDefaultLogger restores the process's default logger after a test that
 // runs a log verb (realMain installs lever's logger as the default).
 func keepDefaultLogger(t *testing.T) {
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	prev, w, flags := slog.Default(), log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		// Restoring slog's own default leaves the log package writing to
+		// the replaced handler.
+		log.SetOutput(w)
+		log.SetFlags(flags)
+	})
 }
 
 // The unattended verbs write lever's log line shape, their failure included.
@@ -45,7 +52,7 @@ func TestBootWarningsAreLogLines(t *testing.T) {
 	}
 }
 
-// The one-shot verbs answer whoever ran them in prose, as before.
+// The one-shot verbs answer whoever ran them in prose.
 func TestCLIVerbsKeepTheirProseErrors(t *testing.T) {
 	keepDefaultLogger(t)
 	var stderr bytes.Buffer

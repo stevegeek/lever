@@ -37,8 +37,12 @@ func TestNewLineShapeAndRedaction(t *testing.T) {
 }
 
 func TestInstallRoutesTheStdlibLog(t *testing.T) {
-	prev := slog.Default()
-	defer slog.SetDefault(prev)
+	prev, w, flags := slog.Default(), log.Writer(), log.Flags()
+	defer func() {
+		slog.SetDefault(prev)
+		log.SetOutput(w)
+		log.SetFlags(flags)
+	}()
 	var b bytes.Buffer
 	Install(&b, "broker")
 	log.Printf("http: TLS handshake error from 10.0.0.1:1234: remote error: tls: bad certificate")

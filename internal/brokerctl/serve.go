@@ -297,7 +297,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	}
 	// Authenticates against the dev-auth-off hub with the controller PAT
 	// apply mints.
-	sc := HostScionClient(jr, st, app.Scion.AgentRole)
+	sc := HostScionClient(patRetryRunner{r: jr, load: controllerPAT(st)}, st, app.Scion.AgentRole)
 	d.Runtime = sc
 	// Worker tickets go to the guest runtime dir over the jail runner, never
 	// into the tree the manager mounts.
@@ -312,11 +312,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	d.HubTokens = hubTokenHealer{probe: jail.AgentProbe{R: jr}, sc: sc, project: jailMount}
 	// Worker resume meets the same pre-role record hazard as the manager's
 	// (broker.DispatchConfig.VerifyAgentRole).
-	hc := &hubapi.Client{T: &hubapi.JailCurl{
-		Runner:  jr,
-		BaseURL: scion.DefaultHubEndpoint,
-		Token:   controllerPAT(st),
-	}}
+	hc := &hubapi.Client{T: newPATRetryJailCurl(jr, scion.DefaultHubEndpoint, controllerPAT(st))}
 	projectKey := filepath.Base(jailMount)
 	d.VerifyAgentRole = func(ctx context.Context, agent string) error {
 		return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, projectKey, agent)

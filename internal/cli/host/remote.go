@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +28,8 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/hubauth"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -64,10 +67,17 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			}
 			defer auditCloser.Close()
 
-			// One dialer for proxied traffic and the login handshake: the handshake is hub
-			// traffic and must take the same route into this instance's jail.
-			dial := remoteproxy.JailDial(jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr()))
-			provider, handler, push, err := buildRemoteHandler(app, st, dial, auditFn, cmd.ErrOrStderr())
+			// One jail route for proxied traffic, the login and the clock read: the login is
+			// hub traffic and must reach this instance's jail.
+			prefix := jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr())
+			dial := remoteproxy.JailDial(prefix)
+			hubLogin, err := loadRemoteHubLogin(app, st, func() (hubauth.Clock, error) {
+				return guestClock(cmd.Context(), prefix, proc.RealRunner{}, time.Now)
+			})
+			if err != nil {
+				return err
+			}
+			handler, push, err := buildRemoteHandler(app, st, dial, hubLogin, auditFn, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -84,15 +94,15 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 				}
 			}()
 			printRemoteWarnings(cmd, app)
-			cmd.Printf("remote proxy %q serving on %s, identity header %s (login provider on 127.0.0.1:%d, issuer %s)\n",
-				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader(), provider.Port(), provider.IssuerURL())
+			cmd.Printf("remote proxy %q serving on %s, identity header %s\n",
+				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader())
 			if app.VoiceOn() {
 				cmd.Printf("dictation on: through lever-tool-whisper's socket %s\n", app.Remote.Voice.Socket)
 				if app.EffectiveReadAloud() == config.ReadAloudServer {
 					cmd.Printf("read-aloud with server voices: through lever-tool-tts's socket %s (the device's voices when it is down)\n", app.Remote.Voice.SpeakSocket)
 				}
 			}
-			err = serveRemote(ctx, app, st, provider, handler)
+			err = serveRemote(ctx, app, st, handler)
 			stop()
 			<-pushDone
 			return err
@@ -117,36 +127,109 @@ func loadRemoteApp(args []string) (string, *config.App, error) {
 	return path, app, nil
 }
 
-func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), auditFn func(remoteproxy.AuditLine), warn io.Writer) (*remoteproxy.Provider, http.Handler, *remoteproxy.Push, error) {
+// remoteHubLogin is what the login driver needs to turn a verified login into
+// a hub session. A zero value refuses every login.
+type remoteHubLogin struct {
+	sign      func(email string) (string, error)
+	hubUserID func(email string) (string, bool)
+}
+
+// loadRemoteHubLogin reads the assertion key, the instance id and the
+// recorded hub users once: apply restarts the proxy after changing any of
+// them. clock is read for every sign-in, after the login passed the signer's
+// allowlist: the proxy lives across VM suspends and clock steps, and one
+// reading at start would leave every later sign-in failing until a restart.
+// A failed read refuses the sign-in.
+func loadRemoteHubLogin(app *config.App, st state.State, clock func() (hubauth.Clock, error)) (remoteHubLogin, error) {
+	key, err := hubauth.LoadKey(st.HubAuthKey())
+	if err != nil {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: no usable hub assertion key (%v); run `lever apply`", err)
+	}
+	id, err := st.ReadInstanceID()
+	if err != nil {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: no instance id (%v); run `lever apply`", err)
+	}
+	rec, found, err := st.LoadHubIdentity()
+	if err != nil {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: %v; run `lever apply`", err)
+	}
+	if !found {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: no hub identity record (%s); run `lever apply`", st.HubIdentityFile())
+	}
+	emails := remoteproxy.HubUserEmails(app.Remote.Logins())
+	for i, e := range emails {
+		emails[i] = strings.ToLower(e)
+	}
+	signer := hubauth.NewRemoteSigner(hubauth.NewSigner(key, id, hubauth.Clock{}), emails)
+	users := make(map[string]string, len(rec.Users))
+	for email, uid := range rec.Users {
+		users[strings.ToLower(email)] = uid
+	}
+	return remoteHubLogin{
+		sign: func(email string) (string, error) {
+			if err := signer.Allowed(email); err != nil {
+				return "", err
+			}
+			c, err := clock()
+			if err != nil {
+				return "", fmt.Errorf("remote proxy: %w; refusing the sign-in rather than sign on the host clock", err)
+			}
+			return signer.WithClock(c).Sign(email)
+		},
+		hubUserID: func(email string) (string, bool) {
+			uid, ok := users[strings.ToLower(email)]
+			return uid, ok && uid != ""
+		},
+	}, nil
+}
+
+// guestClockTimeout bounds one clock read, so a wedged jail delays a sign-in
+// by at most this.
+const guestClockTimeout = 15 * time.Second
+
+// guestClock reads the guest's clock: the hub checks an assertion's iat and
+// exp against its own clock, and the assertion lifetime is too short to
+// absorb an unknown skew.
+func guestClock(ctx context.Context, prefixFn func() []string, run proc.Runner, now func() time.Time) (hubauth.Clock, error) {
+	prefix := prefixFn()
+	if len(prefix) == 0 {
+		return hubauth.Clock{}, errors.New("could not read the guest clock: the jail is not reachable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, guestClockTimeout)
+	defer cancel()
+	ctx = proc.WithOutputLimit(ctx, 64)
+	before := now()
+	res, err := run.Run(ctx, nil, prefix[0], append(slices.Clone(prefix[1:]), "date", "-u", "+%s")...)
+	after := now()
+	if err != nil {
+		return hubauth.Clock{}, fmt.Errorf("could not read the guest clock: %s", firstLine(err.Error()))
+	}
+	epoch, err := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
+	if err != nil {
+		return hubauth.Clock{}, errors.New("could not read the guest clock: unexpected `date` output")
+	}
+	return hubauth.ClockFromGuestEpoch(epoch, before.Add(after.Sub(before)/2)), nil
+}
+
+func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), hubLogin remoteHubLogin, auditFn func(remoteproxy.AuditLine), warn io.Writer) (http.Handler, *remoteproxy.Push, error) {
 	// The hub's address inside the guest, where the dialer lands, so also the
 	// right Host header. It is deliberately not host-reachable (see
 	// scion.DefaultHubEndpoint).
 	target, err := url.Parse(scion.DefaultHubEndpoint)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	push, err := remotePush(app, st, auditFn, warn)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	// The OIDC provider and its login driver live in this process because an
-	// authorization code must be mintable only by an in-process call (see the
-	// provider's documentation). The guest reaches this listener through the
-	// forwarder apply installed (guest.EnsureHubLogin).
-	provider := remoteproxy.NewProvider(remoteproxy.ProviderConfig{
-		Port: app.EffectiveRemoteLoginPort(),
-		// The hub dials the guest port; the forwarder carries it here. Two numbers on
-		// purpose: see config.GuestLoginIssuerPort.
-		IssuerPort: config.GuestLoginIssuerPort,
-		Audit:      auditFn,
-	})
 	login := remoteproxy.NewLoginDriver(remoteproxy.LoginConfig{
 		Hub:         target,
 		DialContext: dial,
-		Provider:    provider,
+		Sign:        hubLogin.sign,
+		HubUserID:   hubLogin.hubUserID,
 		Audit:       auditFn,
-		BoundUser:   remoteBoundUser(st),
 	})
 
 	records, resolve := remoteHubAgents(st, target, dial)
@@ -158,6 +241,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// one port.
 		ListenPort:         app.EffectiveRemotePort(),
 		AllowedUsers:       app.Remote.Logins(),
+		LoginCurrent:       remoteLoginCurrent(app, st),
 		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
 		TrustForwardedHost: app.Remote.TrustForwardedHost,
 		BindHost:           remoteBindHost(app),
@@ -189,7 +273,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		Files:   remoteFiles(app, st),
 		Voice:   remoteVoiceConfig(app),
 	})
-	return provider, handler, push, nil
+	return handler, push, nil
 }
 
 // remoteVoiceConfig sends each checked clip to lever-tool-whisper's socket and,
@@ -566,7 +650,7 @@ func removeOldChatLedger(st state.State) {
 // live proxy only when the stamp matches, and a proxy can be started by hand,
 // so stamping here keeps a hand-started proxy from inheriting the record of
 // an apply-started one. See ServeConfig.Stamp.
-func serveRemote(ctx context.Context, app *config.App, st state.State, provider *remoteproxy.Provider, handler http.Handler) error {
+func serveRemote(ctx context.Context, app *config.App, st state.State, handler http.Handler) error {
 	return remoteproxy.Serve(ctx, remoteproxy.ServeConfig{
 		Port: app.EffectiveRemotePort(),
 		Bind: app.EffectiveRemoteBind(),
@@ -575,9 +659,8 @@ func serveRemote(ctx context.Context, app *config.App, st state.State, provider 
 		AllowNonLoopback: !app.RemoteBindLoopback(),
 		Handler:          handler,
 		PIDPath:          st.RemotePID(),
-		Provider:         provider,
 		Stamp: func() error {
-			return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app))
+			return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app, st))
 		},
 	})
 }
@@ -677,7 +760,7 @@ func remoteBindHost(app *config.App) string {
 // treat every web post as data and do not answer, which would otherwise look
 // like agents ignoring the operator.
 func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
-	for _, w := range app.RemoteWarnings() {
+	for _, w := range append(app.Warnings(), app.RemoteWarnings()...) {
 		cmd.PrintErrf("lever: warning: %s\n", w)
 	}
 	if app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {
@@ -753,11 +836,6 @@ func newRemoteStatusCmd() *cobra.Command {
 			for _, w := range app.RemoteWarnings() {
 				cmd.Printf("lever: warning: %s\n", w)
 			}
-			// The provider's port is a second host listener this instance owns; a second
-			// remote-enabled instance needs its own, and validation only sees one
-			// instance.
-			cmd.Printf("login provider port: %d on host loopback; the jail reaches it from 127.0.0.1:%d\n",
-				app.EffectiveRemoteLoginPort(), config.GuestLoginIssuerPort)
 
 			if app.Remote.BaseURL != "" {
 				cmd.Printf("serve URL: %s\n", app.Remote.BaseURL)
@@ -774,22 +852,6 @@ func newRemoteStatusCmd() *cobra.Command {
 			}
 			return nil
 		},
-	}
-}
-
-// remoteBoundUser returns the hub user id apply recorded for any login,
-// operator or contact (remote-role.json), read per call because apply rewrites
-// it while the proxy runs. A login apply has not bound yet (no hub user at
-// grant time) has none, and the login driver then enforces only the dev-user
-// rule.
-func remoteBoundUser(st state.State) func(login string) (string, bool) {
-	return func(login string) (string, bool) {
-		rec, found, err := st.LoadRemoteRoleRecord()
-		if err != nil || !found {
-			return "", false
-		}
-		id := rec.Bound[config.HubEmailFor(login)]
-		return id, id != ""
 	}
 }
 

@@ -13,11 +13,10 @@ import (
 // set for a subject at a scope. A constraint only ever reduces what bindings
 // grant; several on one principal intersect.
 //
-// These are hub-admin calls, made only from the bootstrap-token step's
-// dev-auth window. Every mutation is preview-bound: the hub issues a
-// single-use token bound to the actor, the draft's hash and the hub's state,
-// held only in that hub process's memory, so the preview and the commit must
-// reach the same hub.
+// These are hub-admin calls, made through AssertCurl as the admin identity.
+// Every mutation is preview-bound: the hub issues a single-use token bound to
+// the actor, the draft's hash and the hub's state, held only in that hub
+// process's memory, so the preview and the commit must reach the same hub.
 
 // ConstraintScopeSystem is scion's scope type for a constraint that applies
 // at every scope, system and project alike.

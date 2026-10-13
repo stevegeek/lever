@@ -98,15 +98,83 @@ it performs and verifies the removal either way.
 the hub record, so it describes newly started agents: an agent that started before the removal
 keeps its bind mount until it restarts.
 
-### 4.2 No agent holds hub authority: dev-auth off, host-only controller PAT
+### 4.2 No agent holds hub authority: proxy auth with a host-held key, host-only controller PAT
 
 Cross-worker mount isolation would still be moot if a compromised agent could simply ask Scion's
 hub to attach an arbitrary mount, or start a new agent, itself. Scion's **development auth** mode
 (a built-in convenience that issues a shared, admin-equivalent bearer token to any caller) would let
-it do exactly that. Lever closes this: the real, long-lived Scion hub inside the jail runs with
-**`--dev-auth=false`** — no agent, manager or worker, is ever handed a hub credential.
+it do exactly that. Lever never runs it: the Scion hub inside the jail starts with
+**`--dev-auth=false`**, always, and no agent, manager or worker, is handed any hub credential
+beyond scion's own per-agent token.
 
-Instead, every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
+**How lever itself is a hub user.** The hub runs in scion's **proxy auth mode** with its JWT
+provider: it trusts a short-lived assertion that lever signs on the host, and nothing else, as an
+interactive sign-in.
+
+- **The key stays on the host.** Lever holds an ES256 (P-256) private key in
+  `.lever-state/hub-auth.key` (`0600`, directory `0700`). The hub reads only the public half, from
+  `/etc/lever/hub-auth.pub` in the jail: root-owned, `0644`, in a root-owned `0755` directory outside
+  every home, written by an atomic rename. No process in the jail can sign an assertion, and an
+  agent cannot replace the key the hub reads.
+- **One assertion per request, never stored.** Each carries `iss` = `lever:<instance-id>`,
+  `aud` = `scion-hub:<instance-id>` (scion checks either only when it is configured, so lever always
+  sets both), a lifetime of 30 seconds and an `iat` 5 seconds in the past, signed against the
+  guest's clock. Scion does not remember a used assertion (it ignores `jti`) and adds 30 seconds of
+  skew, so the short lifetime is what bounds a replay. It travels in the `X-Lever-Hub-Assertion`
+  header over lever's existing jail transports, on the child's stdin, never in host or guest argv
+  and never in an environment: the jail-side shell reads it into an unexported variable and hands
+  it to `curl` on a pipe. `curl` sends it only for the exact method and path of each call lever
+  makes (no other route, no other method, no agent port-proxy path), and never with an
+  `Authorization` header (scion tries the assertion only on a request with no bearer token).
+- **Pinned through the environment.** Lever starts the hub with the auth settings as `SCION_SERVER_*`
+  variables (`AUTH_MODE=proxy`, `AUTH_USERACCESSMODE=invite_only`, `AUTH_PROXY_PROVIDER=jwt`, the
+  JWT algorithm, header, issuer, audience and `AUTH_PROXY_JWT_PUBLICKEYFILE`, and
+  `HUB_ADMINEMAILS=lever-admin@lever.local`), which override the settings file. It also writes the
+  same keys to the jail's `~/.scion/settings.yaml` for readers, and removes any `oidc_login` block
+  (scion builds its OAuth login whenever that block is present, whatever the auth mode). An agent
+  that rewrites `settings.yaml` through scion's workstation routes therefore changes nothing the hub
+  enforces, and causes no restart: the scion-server step restarts the hub only when the running
+  hub's env, its `--dev-auth=false` or its web-assets argv differ from what lever starts it with, or
+  when the public key file changed or an `oidc_login` block was removed.
+- **`invite_only`.** The hub admits only `lever-admin@lever.local` and users that exist (invited or
+  active). An assertion for any other address is refused; `lever doctor` proves it by signing one
+  for a random address.
+
+**The identities.**
+
+| Identity | Scion role | Holds | Used for |
+|---|---|---|---|
+| `lever-admin@lever.local` | admin, through `admin_emails` | no credential at rest | governance as the host CLI: roles, bindings, ceilings, invites, suspensions |
+| `lever-controller@lever.local` | member; project owner and `lever-controller` on the project | the controller PAT | minting and revoking its own PATs; owns the project and every agent |
+| each remote login's hub user | member; `lever-remote` or `lever-remote-contact`, plus a ceiling | nothing (the proxy keeps the session host-side) | the remote web UI, see [remote access](/remote-access/) |
+
+The `hub-identity` apply step converges these on the live hub on every `lever apply`, `lever up` and
+`lever reload`. It never lists or stops containers and runs while agents run. It demotes every admin
+other than `lever-admin`, by role and by super-admin binding. On an instance an older lever brought
+up, the controller is scion's dev user (the row an older lever minted its tokens as), renamed to
+`lever-controller@lever.local` and demoted to member; it keeps the project, the PAT and every agent.
+
+**Workstation routes.** Lever runs the hub non-hosted, so scion's `/api/v1/system/*` routes accept
+any authenticated loopback caller, an agent token included. One of them renames scion's dev user.
+On a fresh instance there is no dev user, so this is a no-op. On a migrated one an agent can rename
+the controller, between applies or in a loop. Lever therefore identifies the controller by user ID,
+through its PAT, and needs its address only to mint or revoke a controller token; then it re-pins
+the address and asserts the controller together, a bounded number of times, and fails naming the
+cause if a loop keeps winning. The next apply re-pins the address, and if the agent had taken
+`lever-admin@lever.local` for it, lever restores the controller's address with the controller PAT
+and waits out the hub's 60-second email cache before it asserts the admin again. None of this can
+hold up a revocation: a removed remote login is refused at the proxy before any apply step, and
+suspended at the hub right after lever-admin is asserted. The proxy also refuses a remote login
+whose hub user is not the one lever recorded, so a rename costs at most the login it aims at. See
+[credentials](/security-model/credentials/) for the controller's sender label.
+
+**Why the controller stays scion's dev user.** On a migrated instance that row owns the project,
+created every agent and is the root of every agent's attested ancestry, and scion grants an agent's
+owner and ancestry by user ID. Scion can transfer a project's ownership but not an agent's, so
+moving the controller to a fresh, unrenamable user would cut every existing agent off from it. The
+rename route is contained instead, as above.
+
+Every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
 capability broker on the manager's behalf, and by `lever` itself for attach/msg/stop) is
 authenticated with a **controller PAT**: a Scion hub token scoped to exactly
 `agent:manage,agent:attach,agent:message,project:read,project:update`, the read-only
@@ -122,85 +190,77 @@ actions on `agent:attach`; `agent:message` is what newer scions gate a token's m
 and the alias did not expand to it when older tokens were minted; `project:update` is required
 because the shared-dirs endpoint used for the scratchpad removal in §4.1 and the project-settings
 route used for the role ceiling in §4.4 both gate on project update, and `agent:manage` does not
-expand to it). It is:
+expand to it). A PAT acts as its scopes on top of its issuer's live bindings, so the controller's
+member role plus project ownership and `lever-controller` is all it can ever do. It is:
 
-- **Minted through a throwaway, jail-local hub, with no container running.** Bring-up stops the
-  live hub (scion keeps one server pid file per jail home), then starts a temporary
-  `scion server start --port 48080 --enable-web=false --dev-auth=true`, initializes the instance's
-  single project against it, mints the PAT, stops that throwaway server, deletes the dev-auth token
-  file it left behind, and starts the real `--dev-auth=false` hub agents actually run against. The
-  port is NOT secret: an agent container reaches jail-loopback ports through pasta's
-  `--map-host-loopback` address. Two things keep the window closed to agents instead:
-  - The throwaway runs with the web frontend OFF. With it on, scion signs any request without a
-    session in as the dev super-admin (`devAuthMiddleware`). With it off, every non-public Hub API
-    route needs the Bearer dev token, which lives only in the jail user's `~/.scion/dev-token` and
-    is never mounted into an agent container.
-  - The window does not open while any container runs in the jail (`podman ps`). A dev-auth hub
-    re-issues an agent's token with the full role on refresh, signed with the key the live hub
-    also uses, so an agent must not reach it at all. When containers run, a window needed only for
-    optional work (the remote role grant, a token inside its renew window) is skipped with a
-    warning; one the instance needs (no controller token, an expired one, a scope change) fails the
-    apply and names the repair: `lever stop`, then `lever up`.
-
-  The window also links the jail's runtime broker to the project: scion links a broker only for a
-  caller allowed to update it, which no hub token can be, so the controller PAT cannot. Its hub
-  link, as the dev identity, links the broker the live hub registered. On a fresh instance the
-  first window runs before the live hub ever registered one, so once the hub's broker is up,
-  bring-up checks (with the controller PAT) that the project lists a broker and, when it lists
-  none, runs the window again and starts the hub again.
-
-  An interrupted apply (SIGINT, SIGTERM) still stops the throwaway, deletes the dev token and, when
-  the window failed, starts the live hub again. `lever doctor`'s `dev-auth window` row fails if a
-  hub answers on the jail's 127.0.0.1:48080 or the dev token file exists.
+- **Minted by the controller, while agents run.** `lever apply` asserts
+  `lever-controller@lever.local` and asks the hub for the token (`POST /api/v1/auth/tokens`). A PAT
+  can neither mint another token nor invite a user.
 - **Persisted host-side only**, `0600`, under `.lever-state/` — never written into the mounted
   tree, never set as a container environment variable or Scion hub secret, so there is no path by
   which an agent inside the jail can read it.
 - **Recorded, and re-minted only for a reason.** Beside each token lever keeps a record
   (`controller.pat.json`) of the scopes it asked for, the scopes the hub granted, and the expiry.
-  Tokens are minted with `--expires 360d` (scion's default is 90 days, its maximum a year), and
-  `lever apply` re-opens the mint window (after it stops the live hub, which shares the same
-  database) only when the record says it must: no token on disk, no record (a token minted by a
-  lever older than records, whose scopes and 90-day expiry nobody can vouch for), a scope set that
-  differs from the one this lever mints, or fewer than 30 days of life left. A re-mint persists the
-  new token and record first, then revokes the superseded token by the id the record kept (best
-  effort, reported if it fails). `lever doctor`'s `hub tokens` row applies the same test and names
-  the reason. Nothing else touches the token: it persists across `stop`→`up`, and only
-  `lever destroy` clears it. A PAT the hub no longer accepts for a reason the record cannot see —
-  after the hub database is reset, or after the jail is deleted out of band rather than with
-  `lever destroy` — is still a **hard bring-up failure** the operator resolves by clearing
-  `.lever-state/controller.pat` (which re-runs the mint window on the next apply) or by destroying
-  the instance.
+  Tokens are minted for 360 days (scion's maximum is a year), and `lever apply` re-mints only when
+  the record says it must: no token on disk, no record (a token minted by a lever older than
+  records, whose scopes and expiry nobody can vouch for), a scope set that differs from the one this
+  lever mints, or fewer than 30 days of life left. A re-mint saves the new token and record first,
+  then revokes the superseded token by the id the record kept (best effort, reported if it fails).
+  The broker reads the PAT file on every use, and a hub `401` on a call made with a token the file
+  no longer holds is retried once with the new one, so a rotation needs no broker restart. An open
+  `lever attach` keeps streaming across a rotation; a new attach uses the new token. `lever doctor`'s
+  `hub tokens` row applies the same test and names the reason, and its `hub identities` row fails
+  if the controller holds a token lever did not record. Nothing else touches the token: it persists
+  across `stop`→`up`, and only `lever destroy` clears it.
+- **Tied to one hub database.** A hub whose database is new (the VM recreated out of band, the
+  database moved aside) no longer lists the `lever-controller` role whose ID lever recorded. Lever
+  re-bootstraps on its own only on positive evidence: that role is absent from a role list the hub
+  answered, **and** `lever-admin`'s row was created by this run. Anything less fails closed and names
+  the repair, `lever up --reset-hub-identity`.
 - **Injected only into lever's own host-side Scion client calls**, as the `SCION_HUB_TOKEN`
   environment variable, by the capability broker and by `lever attach`/`lever msg`/`lever stop`.
   It is handed to the guest on the child's stdin (or, for the interactive attach, through a 0600
   file under the run user's `XDG_RUNTIME_DIR`), never on the host command line, so `ps` on the
   host does not show it.
-- **Not the only host-side PAT.** A second, narrower host-side PAT
-  (`agent:read,agent:list,project:read,agent:attach,agent:message`) is minted in the same window when
-  `remote.enabled: true`; it is also stored under `.lever-state/` and never enters the jail. The
-  remote proxy no longer sends it (every remote request rides the signed-in user's own hub
-  session); its scope set is what the `lever-remote` web role is derived from. See
-  [remote access](/remote-access/#the-remote-pat).
-- **Also used to keep two scion experiments off.** On a scion with hub-wide experiments, every
-  window writes explicit `false` overrides for `hub.conduit` (an inbound shell, sftp and port path
-  into every agent, reaching the jail loopback and any Unix socket) and `hub.artifacts` (hub-held
-  publishing with unauthenticated share links), through scion's admin experiments route as the dev
-  identity. It never writes `true` and leaves every other override as it is. Both are off by
-  scion's default; the explicit override keeps them off if a later scion changes the default. The
-  window records what it wrote in `.lever-state/hub-experiments.json`; on a hub without the route
-  (an older scion) it records "not applicable". A scion with experiments but no record opens a
-  window for the pin, skipped with a warning while containers run. On every apply lever also asks
-  the live hub, with the controller PAT, whether either is on: `GET /api/v1/conduit/grant-keys`
-  and `GET /api/v1/artifacts?mine=1` answer 404 exactly while their experiment is off. A live one
-  makes the window mandatory: beside running containers the apply fails with `lever stop`, then
-  `lever up`. lever probes again right after it starts the hub, because conduit's relay starts only
-  with the hub. scion has no API to write the artifacts section's own `enabled` switch, so the
-  experiment is the one lever pins. `lever doctor`'s `scion conduit and artifacts` row fails while
-  either is on and warns while they are off only by scion's default.
+- **Not the only host-side PAT.** A second, read-only host-side PAT
+  (`agent:read,agent:list,project:read`) is minted by the controller in the same way when
+  `remote.enabled: true`, and revoked when it is turned off; it is also stored under `.lever-state/`
+  and never enters the jail. The remote proxy sends it only on GETs of the agent list (the chat
+  page and the contact fence); every remote request a person makes rides that person's own hub
+  session. See [remote access](/remote-access/#the-remote-pat).
 
-The result: even a fully compromised worker or manager container has no credential that lets it
-talk to the Scion hub directly. It cannot register a project, request an arbitrary mount, or
-list/attach to another agent. All of that is host-side-only, gated by the controller PAT, and, for
+Two things need more than the controller's authority, and `lever-admin` does them:
+
+- **The runtime broker link.** scion links a runtime broker to a project only for a caller allowed
+  to update that broker (its owner or a super-admin), which no hub token can be, so the controller
+  PAT's hub link links none and no agent could start. After the link, `lever apply` checks with the
+  controller PAT that the project lists a broker; when it lists none, it links the jail's own broker
+  as `lever-admin` (`POST /api/v1/projects/<id>/providers`, with the tree's jail path), and refuses
+  when the hub lists any number of brokers but one.
+- **Two scion experiments kept off.** On a scion with hub-wide experiments, every apply's
+  hub-identity step writes explicit `false` overrides for `hub.conduit` (an inbound shell, sftp and
+  port path into every agent, reaching the jail loopback and any Unix socket) and `hub.artifacts`
+  (hub-held publishing with unauthenticated share links), as `lever-admin` through scion's admin
+  experiments route. It never writes `true` and leaves every other override as it is. Both are off
+  by scion's default; the explicit override keeps them off if a later scion changes the default.
+  lever records what it wrote in `.lever-state/hub-experiments.json`; on a hub without the route (an
+  older scion) it records "not applicable". Before and after the write lever asks the hub whether
+  either is on: `GET /api/v1/conduit/grant-keys` and `GET /api/v1/artifacts?mine=1` answer 404
+  exactly while their experiment is off. One found on is pinned off and the hub restarted, because
+  conduit's relay starts only with the hub; one still on after that fails the apply. scion has no
+  API to write the artifacts section's own `enabled` switch, so the experiment is the one lever
+  pins. `lever doctor`'s `scion conduit and artifacts` row fails while either is on and warns while
+  they are off only by scion's default.
+
+`lever doctor`'s `hub authentication` row tests the effective configuration by behaviour, since
+file contents cannot prove it: an assertion signed by another key and one for another instance get
+`401`, `lever-admin` is an admin, the hub offers no OAuth or OIDC login, the running hub carries
+lever's auth env and no dev auth, no scion dev token exists in the jail, and the jail's public key
+is the host key's.
+
+The result: even a fully compromised worker or manager container has no hub credential beyond
+scion's own per-agent token, which grants none of the following. It cannot register a project,
+request an arbitrary mount, or list/attach to another agent. All of that is host-side-only, gated by the controller PAT, and, for
 dispatch specifically, further gated by the config-declared subdirectory per [§5.4](/security-model/config-trust/).
 
 ### 4.3 Per-agent network namespace: a private loopback per agent

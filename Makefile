@@ -8,16 +8,9 @@ PREFIX ?= $(HOME)/.local/bin
 # The instance tree, bind-mounted into the manager container.
 LEVER_INSTANCE ?= $(HOME)/lever-instance
 
-# Cross-compile the guest's login forwarder into
-# internal/provision/loginfwd/prebuilt/ for go:embed, so the built lever needs
-# no Go toolchain for remote access. The release workflow runs the same command.
-.PHONY: loginfwd-prebuilt
-loginfwd-prebuilt:
-	go run ./internal/provision/loginfwd/genprebuilt
-
 # Install the host `lever` binary and the host tools onto PATH.
 .PHONY: install
-install: loginfwd-prebuilt
+install:
 	@mkdir -p $(PREFIX)
 	go build -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
@@ -191,3 +184,11 @@ test-lima-e2e: install
 .PHONY: test-lima-stack-e2e
 test-lima-stack-e2e: install
 	bash tools/test/lima-stack-e2e.sh
+
+# Live e2e of the hub's proxy auth on a real Lima VM: migrates an instance an
+# older lever brought up, binds and removes a contact while agents run,
+# rotates the controller PAT, then brings a fresh instance up. Needs
+# IMAGE_TAR (a docker archive of the agent image); see the script's header.
+.PHONY: test-lima-hubauth-e2e
+test-lima-hubauth-e2e: install
+	bash tools/test/lima-hubauth-e2e.sh

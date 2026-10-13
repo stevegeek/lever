@@ -25,7 +25,7 @@ type ServeConfig struct {
 	// AllowNonLoopback acknowledges a non-loopback Bind, so an address alone
 	// cannot widen the listener. Callers pass only an address the jail cannot
 	// reach (config.validateRemoteBind): a jail that reaches the listener can
-	// forge the identity header. The provider's listener is always loopback.
+	// forge the identity header.
 	AllowNonLoopback bool
 	// Handler is NewHandler's result; its Audit must be wired before Serve.
 	Handler http.Handler
@@ -38,32 +38,19 @@ type ServeConfig struct {
 	// pid file, before the first request. An error is only a warning, so the
 	// implementation must leave no record behind on failure.
 	Stamp func() error
-	// Provider, when non-nil, is the OIDC provider, on its own loopback
-	// listener: the proxy serves the operator's browser, the provider the hub's
-	// back channel, and neither should be reachable by the other's callers.
-	Provider *Provider
 }
 
-// Serve runs the proxy and the provider until ctx is cancelled, then shuts
-// both down and removes the pid file. The caller opens the audit log
-// (OpenAudit) before building Handler.
+// Serve runs the proxy until ctx is cancelled, then shuts it down and removes
+// the pid file. The caller opens the audit log (OpenAudit) before building
+// Handler.
 func Serve(ctx context.Context, cfg ServeConfig) error {
 	ln, err := listenProxy(cfg.Bind, cfg.Port, cfg.AllowNonLoopback)
 	if err != nil {
 		return err
 	}
-	// Bind both first, so a port collision fails the serve outright.
-	var provLn net.Listener
-	if cfg.Provider != nil {
-		provLn, err = listenLoopback(cfg.Provider.Port())
-		if err != nil {
-			_ = ln.Close()
-			return err
-		}
-	}
 
 	if err := daemon.WritePIDFile(cfg.PIDPath); err != nil {
-		daemon.CloseListeners(ln, provLn)
+		daemon.CloseListeners(ln)
 		return err
 	}
 	defer daemon.RemovePIDFile(cfg.PIDPath)
@@ -74,45 +61,20 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		}
 	}
 
-	// Each goroutine closes over its own *http.Server, never the slice:
-	// appending rewrites the slice header while the proxy goroutine runs.
-	proxySrv := newServer(cfg.Handler)
-	servers := []*http.Server{proxySrv}
-	serveErr := make(chan error, 2)
-	go func() { serveErr <- proxySrv.Serve(ln) }()
-	if provLn != nil {
-		prov := newServer(cfg.Provider.Handler())
-		servers = append(servers, prov)
-		go func() { serveErr <- prov.Serve(provLn) }()
-	}
-
-	shutdownAll := func() error {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var first error
-		for _, s := range servers {
-			if err := s.Shutdown(shutdownCtx); err != nil && first == nil {
-				first = fmt.Errorf("remoteproxy: shutdown: %w", err)
-			}
-		}
-		return first
-	}
+	srv := newServer(cfg.Handler)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
 
 	select {
 	case <-ctx.Done():
-		if err := shutdownAll(); err != nil {
-			return err
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("remoteproxy: shutdown: %w", err)
 		}
-		for range servers {
-			<-serveErr
-		}
+		<-serveErr
 		return nil
 	case err := <-serveErr:
-		// Half-running is never useful: one stopped, so stop the other.
-		_ = shutdownAll()
-		for range servers[1:] {
-			<-serveErr
-		}
 		if err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("remoteproxy: serve: %w", err)
 		}
@@ -122,8 +84,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 
 // listenLoopback fails closed on anything but a loopback address: the
 // identity-header gate holds only while just the front can reach the
-// listener, and off loopback the provider is an unauthenticated identity
-// endpoint.
+// listener.
 func listenLoopback(port int) (net.Listener, error) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {

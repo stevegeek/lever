@@ -24,12 +24,8 @@ const (
 	DefaultBrokerAdminPort = 8444
 )
 
-// Default remote-access ports. 8446 is taken by the jail's mirrored login
-// forwarder (GuestLoginIssuerPort).
-const (
-	DefaultRemotePort      = 8445
-	DefaultRemoteLoginPort = 8447
-)
+// DefaultRemotePort is remote.port when unset.
+const DefaultRemotePort = 8445
 
 // DefaultDirectiveExpiry is operator.directive_expiry when unset.
 const DefaultDirectiveExpiry = 10 * time.Minute
@@ -108,14 +104,10 @@ func (a *App) EffectiveRemotePort() int {
 
 // EffectiveAllowedPorts is the complete set of host loopback ports the jail
 // may reach through the host alias: the egress allowlist's ACCEPT set. It is
-// the broker's jail port, manager.allow_ports, and, while remote access is
-// on, the login port the guest's login forwarder must reach. A port no longer
-// needed drops out of the next rebuild.
+// the broker's jail port and manager.allow_ports. A port no longer needed
+// drops out of the next rebuild.
 func (a *App) EffectiveAllowedPorts() []int {
 	ports := append([]int{a.EffectiveJailPort()}, a.Manager.AllowPorts...)
-	if a.RemoteEnabled() {
-		ports = append(ports, a.EffectiveRemoteLoginPort())
-	}
 	out := ports[:0:0]
 	for _, p := range ports {
 		if !slices.Contains(out, p) {
@@ -125,10 +117,14 @@ func (a *App) EffectiveAllowedPorts() []int {
 	return out
 }
 
-// EffectiveRemoteLoginPort is the host loopback port the local OIDC provider
-// binds.
-func (a *App) EffectiveRemoteLoginPort() int {
-	return cmp.Or(max(a.Remote.LoginPort, 0), DefaultRemoteLoginPort)
+// Warnings are settings that load but no longer do anything, one sentence
+// each. Unlike RemoteWarnings they apply whether or not remote access is on.
+func (a *App) Warnings() []string {
+	var out []string
+	if a.Remote.LoginPort != 0 {
+		out = append(out, "remote.login_port is no longer used (the hub login needs no port); remove it")
+	}
+	return out
 }
 
 // DefaultRemoteIdentityHeader is remote.identity_header when unset: the

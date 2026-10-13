@@ -14,21 +14,15 @@ import (
 // the project it is bound on, and each bound user by email with its hub user
 // id.
 //
-// It is the only way apply and doctor can tell the grant is done: role
-// admin needs the throwaway dev-auth window, so neither can ask the hub.
-// Pending lists allowed users with no hub user yet at grant time; a record
-// with any is incomplete and the next apply retries them.
-//
+// Doctor reads the hub itself; the record says what the last apply bound.
 // Ceilings and CeilingPermissions record the access constraint on each bound
 // user, so the hub-member baseline cannot create a project (see
-// ensureRemoteCeiling in internal/cli/host). A record without them reads as
-// incomplete, so the next apply adds the ceiling.
+// ensureRemoteCeiling in internal/cli/host).
 type RemoteRoleRecord struct {
 	RoleID      string            `json:"role_id"`
 	Permissions []string          `json:"permissions"`
 	ProjectID   string            `json:"project_id"`
 	Bound       map[string]string `json:"bound"` // email -> hub user id
-	Pending     []string          `json:"pending,omitempty"`
 	Ceilings    map[string]string `json:"ceilings,omitempty"`
 	// CeilingPermissions is the maximum-permission set lever wrote into
 	// every ceiling.

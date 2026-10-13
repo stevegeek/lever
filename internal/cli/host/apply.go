@@ -31,14 +31,13 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
-	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
-	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/wire"
@@ -59,8 +58,8 @@ func hubJailTransport(jr proc.Runner, state state.State) *hubapi.JailCurl {
 	}
 }
 
-// hubProjectKey is the hub's name for an instance's project. It must match the
-// key ensureControllerPAT uses for `hub token create`.
+// hubProjectKey is the hub's name for an instance's project: the jail mount's
+// basename, the name the project is registered and looked up under.
 func hubProjectKey(jailMount string) string { return filepath.Base(jailMount) }
 
 // detachedSelfCmd re-execs this binary in its own session (Setsid, no
@@ -144,7 +143,9 @@ type remoteController struct {
 	// probeHost is the host of app.RemoteProbeAddr(); "" means 127.0.0.1.
 	probeHost string
 	version   string // this binary, for the reuse stamp
-	cfgHash   string // brokerctl.RemoteConfigHash(app), for the reuse stamp
+	// cfgHash is brokerctl.RemoteConfigHash, for the reuse stamp. It is read at
+	// Start: hub-identity rewrites the record it covers earlier in the run.
+	cfgHash func() string
 	// startTimeout/startInterval bound the waits for bind and pid file; zero
 	// means remoteProxyStartTimeout/Interval.
 	startTimeout  time.Duration
@@ -160,7 +161,7 @@ func newRemoteController(app *config.App, st state.State, configPath, selfExe st
 		port:       app.EffectiveRemotePort(),
 		probeHost:  remoteProbeHost(app),
 		version:    cli.VersionString(),
-		cfgHash:    brokerctl.RemoteConfigHash(app),
+		cfgHash:    func() string { return brokerctl.RemoteConfigHash(app, st) },
 		log:        log,
 	}
 }
@@ -183,8 +184,9 @@ func (rc *remoteController) addr() string {
 // listener of its own is reachable by whatever reaches the proxy; hence a
 // host-side stamp file.
 func (rc *remoteController) Start(ctx context.Context) error {
+	hash := rc.cfgHash()
 	if _, found, alive := rc.state.RemoteStatus(); found && alive {
-		if rc.state.RemoteStampMatches(rc.version, rc.cfgHash) && tcpDial(rc.addr()) == nil {
+		if rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
 			progress.From(ctx).Note("reused")
 			return nil // already serving: this binary, this config, this port
 		}
@@ -210,7 +212,7 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	}
 	// Stamp only once the proxy is proven listening. Best-effort: a write failure
 	// costs the next apply a redundant restart, never a stale process kept alive.
-	if err := rc.recordStamp(ctx, cmd.Process.Pid); err != nil {
+	if err := rc.recordStamp(ctx, cmd.Process.Pid, hash); err != nil {
 		rc.log.printf("lever: could not record the remote proxy stamp (%v) — the next apply will restart it", err)
 	}
 	return nil
@@ -218,7 +220,7 @@ func (rc *remoteController) Start(ctx context.Context) error {
 
 // recordStamp waits until remote.pid names pid: the proxy binds its port
 // before it writes that file.
-func (rc *remoteController) recordStamp(ctx context.Context, pid int) error {
+func (rc *remoteController) recordStamp(ctx context.Context, pid int, hash string) error {
 	timeout := cmp.Or(rc.startTimeout, remoteProxyStartTimeout)
 	interval := cmp.Or(rc.startInterval, remoteProxyStartInterval)
 	var last error
@@ -238,7 +240,7 @@ func (rc *remoteController) recordStamp(ctx context.Context, pid int) error {
 	if err != nil {
 		return err
 	}
-	return rc.state.WriteRemoteStamp(rc.version, rc.cfgHash)
+	return rc.state.WriteRemoteStamp(rc.version, hash)
 }
 
 // remoteProxyStartTimeout/Interval are the default bounds on the waits for the
@@ -293,30 +295,6 @@ func removeJailFile(ctx context.Context, jr proc.Runner, jailPath string) error 
 	}
 	return nil
 }
-
-// throwawayHubPort is the Hub API port of ensureControllerPAT's throwaway
-// dev-auth hub, distinct from the real hub (8080).
-//
-// The throwaway runs with the web frontend off (scion.ServerOpts.DisableWeb).
-// With it on, scion's devAuthMiddleware signs any session-less request in as
-// the dev super-admin, and an agent container reaches jail-loopback ports
-// through pasta --map-host-loopback. With it off, the Hub API runs its own
-// server on --port and every non-public route needs the Bearer dev token;
-// --web-port is then inert.
-//
-// Web off is not enough: a dev-auth hub upgrades an agent's token to the full
-// role on refresh, signed with the key the live hub also uses. So the window
-// also refuses to open while any container runs (see ensureControllerPAT).
-const throwawayHubPort = 48080
-
-// throwawayHubURL is the endpoint the window's scion CLI and admin calls use.
-// The scion CLI falls back to ~/.scion/dev-token by itself; the admin calls
-// read it with readDevToken.
-var throwawayHubURL = fmt.Sprintf("http://127.0.0.1:%d", throwawayHubPort)
-
-// windowCleanupTimeout bounds the window's cleanup, which runs on a context
-// detached from the apply's so an interrupted apply still cleans up.
-const windowCleanupTimeout = 2 * time.Minute
 
 // controllerPATScopes is the exact scope set the controller PAT is minted
 // with. agent:attach gates scion's start/stop/suspend/restart for a user
@@ -381,57 +359,16 @@ func controllerLifecycle(ctx context.Context, known scopeKnownFunc, rec state.PA
 	return slices.Contains(rec.Requested, lifecycleScope)
 }
 
-// remotePATScopes is the exact scope set of the remote-access PAT: attach,
-// message, read and list, nothing that creates, deletes or reconfigures. The
-// proxy does not send this token, but the lever-remote web role is derived
-// from it (remoteRolePermissions), so it must never carry agent:manage,
-// agent:create/delete, project:update or any secret scope.
+// remotePATScopes is the exact scope set of the remote proxy's PAT: the proxy
+// only lists the project's agents with it (the chat page and the contact
+// fence), so it reads and nothing else. It is the controller's token, so
+// anything sent with it would wear lever's sender label.
 func remotePATScopes() []string {
-	return []string{"agent:read", "agent:list", "project:read", "agent:attach", "agent:message"}
+	return []string{"agent:read", "agent:list", "project:read"}
 }
-
-// patExpires is the lifetime asked for at mint: just under scion's one-year
-// maximum, clear of its "no later than now+1y" check on either clock. scion's
-// default is 90 days, and an expired token breaks every hub call.
-const patExpires = "360d"
 
 // patRenewWindow is how long before expiry apply re-mints.
 const patRenewWindow = 30 * 24 * time.Hour
-
-// patMintOpts are ensureControllerPAT's seams; zero values mean time.Now,
-// stderr and the real throwaway hub.
-type patMintOpts struct {
-	Now  func() time.Time
-	Warn func(format string, args ...any)
-	// AdminHub replaces the throwaway hub transport for the remote web role grant.
-	// Tests only.
-	AdminHub hubapi.Doer
-	// RestartHub starts the live hub with its normal options; a failed window
-	// calls it because the window stopped the live hub. nil: the error says the
-	// hub is down and how to recover.
-	RestartHub func(ctx context.Context) error
-	// ScopeKnown asks the jail's scion whether it knows a UAT scope. nil: the
-	// recorded variant is kept.
-	ScopeKnown scopeKnownFunc
-	// Require is a reason the window must open even with nothing to mint or
-	// grant; beside running containers the apply then fails with the repair.
-	Require string
-}
-
-func (o patMintOpts) now() time.Time {
-	if o.Now != nil {
-		return o.Now()
-	}
-	return time.Now()
-}
-
-func (o patMintOpts) warn(format string, args ...any) {
-	if o.Warn != nil {
-		o.Warn(format, args...)
-		return
-	}
-	fmt.Fprintln(os.Stderr, termsafe.Sanitize(fmt.Sprintf("lever: warning: "+format, args...)))
-}
 
 const patReasonAbsent = "no token on disk"
 
@@ -488,287 +425,6 @@ func sameScopeSet(a, b []string) bool {
 	return true
 }
 
-// ensureControllerPAT backs the "bootstrap-token" apply step. In one
-// throwaway dev-auth window it mints the controller PAT the real hub is driven
-// with and, when remote access is on, the remote-access PAT; with remote
-// access on, every window also runs the remote web role and ceiling grant
-// (ensureRemoteWebRole), since role admin is hub-admin only and a reset hub
-// database makes remote-role.json stale. That record alone opens a window
-// when it does not cover every allowed user with the current permissions and
-// a ceiling. With no token missing and the grant
-// complete, no window opens.
-//
-// The window never runs beside a running container: an agent reaches
-// jail-loopback ports, and a dev-auth hub refreshes an agent token to a full
-// role the live hub accepts (see throwawayHubPort). When any container runs,
-// or the list fails, a window that is only needed for optional work (the role
-// grant, the remote PAT, a renewal) is skipped with a warning; one the
-// instance cannot run without fails the apply and names the repair (`lever
-// stop`, then `lever up`).
-//
-// The window stops the live hub, starts a dev-auth-on, web-off hub on
-// throwawayHubPort, runs `scion init` and `hub link` (idempotent), mints the
-// missing PATs with exactly the wanted scopes, persists each 0600, runs the
-// role grant, stops the throwaway and deletes scion's residual dev-token so it
-// does not linger as an admin credential. Both hubs share the jail's ~/.scion
-// database. The cleanup runs on a context detached from ctx
-// (windowCleanupTimeout) so an interrupted apply still closes the window;
-// `lever doctor` reports one left open (checkDevAuthWindow).
-func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tree, jailMount string, remote remoteAccess, o patMintOpts) (err error) {
-	now := o.now()
-	ctok, _ := st.LoadControllerPAT()
-	crec, cfound, err := st.LoadControllerPATRecord()
-	if err != nil {
-		return fmt.Errorf("bootstrap-token: %w", err)
-	}
-	// The jail's scion answers this with the hub down, so a pin upgrade followed
-	// by `lever up` re-mints while no container runs.
-	clifecycle := controllerLifecycle(ctx, o.ScopeKnown, crec)
-	controllerScopes := controllerPATScopes(clifecycle, controllerInbox(ctx, o.ScopeKnown, crec))
-	controllerReason := patMintReason(ctok, crec, cfound, controllerScopes, now)
-	urgent := patUrgent(ctok, crec, cfound, controllerScopes, now)
-	remoteReason := ""
-	var rrec state.PATRecord
-	roleReason := ""
-	lifecycle := false
-	if remote.Enabled {
-		rtok, _ := st.LoadRemotePAT()
-		var rfound bool
-		rrec, rfound, err = st.LoadRemotePATRecord()
-		if err != nil {
-			return fmt.Errorf("bootstrap-token: %w", err)
-		}
-		remoteReason = patMintReason(rtok, rrec, rfound, remotePATScopes(), now)
-		rolerec, rolefound, err := st.LoadRemoteRoleRecord()
-		if err != nil {
-			return fmt.Errorf("bootstrap-token: %w", err)
-		}
-		// The jail's scion answers this with the hub down, so a pin upgrade followed
-		// by `lever up` re-grants the role while no container runs.
-		lifecycle = remoteRoleLifecycle(ctx, o.ScopeKnown, rolerec)
-		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remote.Contacts, remoteRolePermissions(lifecycle))
-	}
-	exp, err := checkHubExperimentsForApply(ctx, &hubapi.Client{T: hubJailTransport(jr, st)}, st, o.ScopeKnown)
-	if err != nil {
-		return fmt.Errorf("bootstrap-token: %w", err)
-	}
-	if controllerReason == "" && remoteReason == "" && roleReason == "" && exp.reason == "" && o.Require == "" {
-		return nil // nothing to mint or grant; no dev-auth window
-	}
-	if blocked := windowBlocked(ctx, jr); blocked != "" {
-		why := strings.Join(nonEmpty(controllerReason, remoteReason, roleReason, exp.reason), "; ")
-		if exp.urgent {
-			return experimentsWindowBlocked(exp.reason, blocked)
-		}
-		if o.Require != "" {
-			return fmt.Errorf("bootstrap-token: %s, which needs the dev-auth window, but it cannot open: %s. "+
-				"Agents can reach the jail loopback, and the window's dev-auth hub would hand them admin-grade tokens. "+
-				"Run `lever stop`, then `lever up` (the manager conversation is kept)", o.Require, blocked)
-		}
-		if urgent {
-			return fmt.Errorf("bootstrap-token: the controller token must be minted (%s), but the dev-auth window cannot open: %s. "+
-				"Agents can reach the jail loopback, and the window's dev-auth hub would hand them admin-grade tokens. "+
-				"Run `lever stop`, then `lever up` (the manager conversation is kept)", controllerReason, blocked)
-		}
-		o.warn("bootstrap-token: skipped the dev-auth window (%s): %s; apply goes on without it. "+
-			"To run it, `lever stop`, then `lever up`", why, blocked)
-		return nil
-	}
-
-	tw := scion.New(jr, scion.Options{HubEndpoint: throwawayHubURL, SettingsWarnLog: brokerctl.StateLogAppender(st)})
-	started := false
-	defer func() {
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), windowCleanupTimeout)
-		defer cancel()
-		err = closeDevAuthWindow(cctx, jr, tw, started, err, o)
-	}()
-	// The live hub (or a throwaway left behind) is stopped first: scion keeps one
-	// server pid file per jail home, so the throwaway's start would be refused and
-	// its stop would stop the live hub. ServerStop waits for the daemon to exit so
-	// the throwaway's port check does not race it. A failure from here on restarts
-	// the live hub in the cleanup.
-	if err := tw.ServerStop(ctx); err != nil {
-		return fmt.Errorf("bootstrap-token: stopping the hub for the dev-auth window: %w", err)
-	}
-	if err := tw.ServerStart(ctx, scion.ServerOpts{HubPort: throwawayHubPort, DisableWeb: true, DisableRuntimeBroker: true, DevAuth: true, Exclusive: true}); err != nil {
-		// A start that launched the daemon but timed out on readiness still owns the
-		// pid file; stop it unless scion refused outright (the pid file then names
-		// another daemon).
-		started = !scion.AlreadyRunning(err)
-		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
-	}
-	started = true
-	if exp.has {
-		if err := pinHubExperimentsOff(ctx, jr, st, now, o); err != nil {
-			return err
-		}
-	}
-
-	jp := apply.JailPath(tree, tree, jailMount)
-	if err := tw.InitProject(ctx, jp); err != nil {
-		return fmt.Errorf("bootstrap-token: init project: %w", err)
-	}
-	if err := tw.HubLink(ctx, jp); err != nil {
-		return fmt.Errorf("bootstrap-token: hub link: %w", err)
-	}
-	// scion's `hub token create` requires --project and --name; the project name
-	// is jp's basename and each PAT's label is fixed.
-	//
-	// Each mint persists the token, then its record, and only then revokes the
-	// token it replaced, so a failure at any point leaves a working token on disk.
-	// The revoke is best-effort but reported: a valid token nobody holds is still
-	// a valid token.
-	mint := func(name string, scopes []string, old state.PATRecord, reason string,
-		save func(string) error, saveRec func(state.PATRecord) error) error {
-		// A first mint is silent; replacing a token an operator may hold elsewhere is
-		// worth a line.
-		if reason != patReasonAbsent {
-			o.warn("bootstrap-token: re-minting %s: %s", name, reason)
-		}
-		tok, err := tw.HubTokenCreate(ctx, jp, filepath.Base(jp), name, scopes, patExpires)
-		if err != nil {
-			return fmt.Errorf("bootstrap-token: hub token create %s: %w", name, err)
-		}
-		if err := save(tok.Token); err != nil {
-			return fmt.Errorf("bootstrap-token: persisting %s: %w", name, err)
-		}
-		if err := saveRec(state.PATRecord{
-			ID: tok.ID, Requested: scopes, Granted: tok.Scopes, MintedAt: now, ExpiresAt: tok.ExpiresAt,
-		}); err != nil {
-			return fmt.Errorf("bootstrap-token: persisting %s record: %w", name, err)
-		}
-		if old.ID != "" {
-			if err := tw.HubTokenRevoke(ctx, jp, old.ID); err != nil {
-				o.warn("bootstrap-token: could not revoke the superseded %s token %s (it stays valid in the hub until %s): %v",
-					name, old.ID, expiryText(old.ExpiresAt), err)
-			}
-		}
-		return nil
-	}
-	if controllerReason != "" || remoteReason != "" {
-		grantControllerRole(ctx, jr, filepath.Base(jp), clifecycle, o)
-	}
-	if controllerReason != "" {
-		if err := mint("lever-controller", controllerScopes, crec, controllerReason,
-			st.SaveControllerPAT, st.SaveControllerPATRecord); err != nil {
-			return err
-		}
-	}
-	if remoteReason != "" {
-		if err := mint("lever-remote", remotePATScopes(), rrec, remoteReason,
-			st.SaveRemotePAT, st.SaveRemotePATRecord); err != nil {
-			return err
-		}
-	}
-	if remote.Enabled {
-		if err := grantRemoteWebRole(ctx, jr, st, filepath.Base(jp), remote, lifecycle, now, o); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func nonEmpty(ss ...string) []string {
-	var out []string
-	for _, s := range ss {
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
-// windowBlocked says why the dev-auth window must not open now, or "" when it
-// may. Any running container blocks it, not only scion's agents (any container
-// with the loopback map can reach the throwaway hub), and so does a failed
-// list: the window cannot then prove it runs agent-free.
-func windowBlocked(ctx context.Context, jr proc.Runner) string {
-	res, err := jr.Run(ctx, nil, "podman", "ps", "--format", "{{.Names}}")
-	if err != nil {
-		return "lever cannot list the jail's running containers (" + firstLine(err.Error()) + ")"
-	}
-	names := strings.Fields(res.Stdout)
-	if len(names) == 0 {
-		return ""
-	}
-	return "containers are running in the jail (" + strings.Join(names, ", ") + ")"
-}
-
-// closeDevAuthWindow is the window's cleanup; its return value replaces err.
-// It stops the throwaway (when this window started it), deletes the residual
-// dev token, and restarts the live hub when the window failed.
-//
-// A throwaway that will not stop is an error even on a successful window: a
-// running dev-auth hub is an open admin surface.
-//
-// scion writes the dev token to ~/.scion/dev-token of the jail user (not
-// /home/scion, the agent-container user); that home is resolved in-jail.
-// scion reuses an existing file on the next dev-auth start, so a file this
-// misses becomes the next window's token; `lever doctor` reports it.
-func closeDevAuthWindow(ctx context.Context, jr proc.Runner, tw *scion.Client, started bool, err error, o patMintOpts) error {
-	stopFailed := false
-	if started {
-		// No container ran when the window opened. One running now started during it
-		// and may hold a full-role token from the dev-auth hub: fail loudly.
-		if b := windowBlocked(ctx, jr); b != "" {
-			err = errors.Join(err, fmt.Errorf("bootstrap-token: a container started during the dev-auth window (%s); "+
-				"it may hold a full-role agent token. Run `lever stop`, then check the hub's agents before `lever up`", b))
-		}
-		if serr := tw.ServerStop(ctx); serr != nil {
-			stopFailed = true
-			err = errors.Join(err, fmt.Errorf("bootstrap-token: the throwaway dev-auth hub on 127.0.0.1:%d did not stop: %w; "+
-				"stop it with `scion server stop` in the jail, then run `lever apply`", throwawayHubPort, serr))
-		}
-	}
-	if home, herr := jr.Run(ctx, nil, "sh", "-c", `printf %s "$HOME"`); herr == nil {
-		if h := strings.TrimSpace(home.Stdout); h != "" {
-			_ = removeJailFile(ctx, jr, h+"/"+layout.DevTokenRel)
-		}
-	}
-	if err == nil {
-		return nil
-	}
-	if o.RestartHub == nil || stopFailed {
-		// With the throwaway still up, a restart would be answered "already running"
-		// about the throwaway and wrongly reported as done.
-		return fmt.Errorf("%w; the live hub is stopped (the dev-auth window stopped it): run `lever apply` again to start it", err)
-	}
-	if rerr := o.RestartHub(ctx); rerr != nil {
-		return fmt.Errorf("%w; the live hub is stopped (the dev-auth window stopped it) and restarting it failed: %v. "+
-			"Run `lever apply` again, or `lever stop`, then `lever up`", err, rerr)
-	}
-	return fmt.Errorf("%w (the live hub was started again)", err)
-}
-
-// grantRemoteWebRole runs ensureRemoteWebRole against the throwaway hub and
-// persists its record. Most failures only warn: the PATs are minted, the
-// instance works without the web UI, and the missing record makes the next
-// apply retry. errCeilingRemoved fails the apply: a user's ceiling was deleted
-// and not rewritten, so that user can create projects until the next apply.
-func grantRemoteWebRole(ctx context.Context, jr proc.Runner, st state.State, projectKey string, remote remoteAccess, lifecycle bool, now time.Time, o patMintOpts) error {
-	fail := func(err error) {
-		o.warn("bootstrap-token: remote web role not granted, so the web UI may answer 403; the next `lever apply` retries: %v", err)
-	}
-	hub, err := windowAdminHub(ctx, jr, o)
-	if err != nil {
-		fail(err)
-		return nil
-	}
-	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: hub}, projectKey, remote.Emails, remote.Contacts, lifecycle, now, o.warn)
-	if errors.Is(err, errCeilingRemoved) {
-		return fmt.Errorf("bootstrap-token: remote web role: %w", err)
-	}
-	if err != nil {
-		fail(err)
-		return nil
-	}
-	if err := st.SaveRemoteRoleRecord(rec); err != nil {
-		fail(fmt.Errorf("persisting remote-role.json: %w", err))
-	}
-	return nil
-}
-
-// expiryText: zero means scion did not say.
 func expiryText(t time.Time) string {
 	if t.IsZero() {
 		return "its expiry (unknown)"
@@ -776,10 +432,14 @@ func expiryText(t time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
+// resetHubIdentityUsage: a hub whose database was reset loses lever's role,
+// users and tokens; lever re-bootstraps on its own only with positive evidence
+// (hubIdentity.markerGone), and this flag is the operator's explicit say-so.
+const resetHubIdentityUsage = "forget lever's recorded hub identities and tokens and bootstrap the hub as new (after a deliberate hub database reset)"
+
 // applySignalContext returns a context that SIGINT or SIGTERM cancels, so the
 // step in flight fails and its cleanup runs. Without it a signal kills lever
-// at once and can leave a dev-auth hub listening, its dev token on disk and the
-// live hub stopped. The first signal restores the default action, so a second
+// at once, mid-step. The first signal restores the default action, so a second
 // Ctrl-C still kills lever. stop must be called.
 func applySignalContext(parent context.Context) (ctx context.Context, stop func()) {
 	ctx, stop = signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -791,7 +451,7 @@ func applySignalContext(parent context.Context) (ctx context.Context, stop func(
 }
 
 func newApplyCmd(bf BackendFactory) *cobra.Command {
-	var dryRun bool
+	var dryRun, resetHubIdentity bool
 	var progressMode string
 	c := &cobra.Command{
 		Use:   "apply [CONFIG]",
@@ -826,6 +486,9 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			}
 			defer run.finishOnReturn(&err)
 			printRemoteWarnings(cmd, app)
+			if err := fenceNow(app, stateFor(path)); err != nil {
+				return err
+			}
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
 			}
@@ -833,7 +496,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			ctx, stop := applySignalContext(pctx)
 			defer stop()
 			run.rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep, ResetHubIdentity: resetHubIdentity})
 			if err != nil {
 				return err
 			}
@@ -847,6 +510,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 	}
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "print the bring-up plan and exit")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	c.Flags().BoolVar(&resetHubIdentity, "reset-hub-identity", false, resetHubIdentityUsage)
 	return c
 }
 
@@ -1052,7 +716,14 @@ type applyWiring struct {
 	app   *config.App
 	jr    proc.Runner
 	state state.State
-	// brokerHost is what agents and the guest login forwarder dial the host by:
+	// hubKey signs every assertion; instanceID names the hub in iss and aud;
+	// clock is the guest's, read once per run.
+	hubKey           *hubauth.Key
+	instanceID       string
+	clock            hubauth.Clock
+	signer           *hubauth.Signer
+	resetHubIdentity bool
+	// brokerHost is what agents dial the host by:
 	// the host-alias IP when the backend has one. Under closed-internet egress DNS
 	// is dropped; the IP is allowlisted and is a SAN on the broker cert.
 	brokerHost string
@@ -1066,6 +737,9 @@ type applyOpts struct {
 	Cmd *cobra.Command
 	// Rep is the bring-up's progress list; nil prints Log lines directly.
 	Rep *progress.Reporter
+	// ResetHubIdentity forgets the recorded hub identities and bootstraps the
+	// hub as new (`--reset-hub-identity`).
+	ResetHubIdentity bool
 	// SelfExe is the executable re-exec'd as `broker serve` / `remote serve`;
 	// empty means os.Args[0]. Tests must set it: under `go test` os.Args[0] is the
 	// test binary, and the Setsid child outlives the run with nothing to reap it.
@@ -1083,7 +757,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	jr := b.JailRunner()
 
 	// state must exist before sc: sc's HubTokenSource reads the controller PAT at
-	// call time, so verbs pick it up once ensureControllerPAT persists it mid-apply.
+	// call time, so verbs pick it up once hub-identity mints it mid-apply.
 	st := stateFor(configPath)
 	sc := brokerctl.HostScionClient(jr, st, app.Scion.AgentRole)
 
@@ -1094,7 +768,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 		return nil, err
 	}
 
-	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd, rep: opts.Rep}
+	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd, rep: opts.Rep, resetHubIdentity: opts.ResetHubIdentity}
+	if err := w.initHubAuth(ctx); err != nil {
+		return nil, err
+	}
 	aliasV4 := b.HostAliasV4()
 	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
 	selfExe := cmp.Or(opts.SelfExe, os.Args[0])
@@ -1117,6 +794,42 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
 	return w, nil
+}
+
+// initHubAuth loads (or creates) the host's assertion key and reads the guest
+// clock once: assertions are signed relative to the clock the hub checks them
+// against.
+func (w *applyWiring) initHubAuth(ctx context.Context) error {
+	k, created, err := hubauth.EnsureKey(w.state.HubAuthKey())
+	if err != nil {
+		return fmt.Errorf("hub auth key: %w", err)
+	}
+	if created {
+		w.log("lever: created the hub assertion key %s (%s)", w.state.HubAuthKey(), k.Fingerprint())
+	}
+	id, err := w.state.EnsureInstanceID()
+	if err != nil {
+		return err
+	}
+	w.hubKey, w.instanceID = k, id
+	w.clock = readGuestClock(ctx, w.jr, w.log)
+	w.signer = hubauth.NewSigner(k, id, w.clock)
+	return nil
+}
+
+// readGuestClock reads `date +%s` in the jail. A failed read signs on the
+// host clock: the jail is then unreachable for the assertions too, and doctor
+// reports a large skew.
+func readGuestClock(ctx context.Context, jr proc.Runner, log func(string, ...any)) hubauth.Clock {
+	at := time.Now()
+	res, err := jr.Run(ctx, nil, "date", "+%s")
+	if err == nil {
+		if epoch, perr := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64); perr == nil {
+			return hubauth.ClockFromGuestEpoch(epoch, at)
+		}
+	}
+	log("lever: warning: could not read the jail's clock (%v); signing hub assertions on the host clock", err)
+	return hubauth.Clock{}
 }
 
 // bringUpBackend brings the jail up so the run user and host alias are known
@@ -1201,9 +914,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// unlink/init race; see the register-project case in internal/apply/run.go).
 		RemoveJailFile: w.removeJailFile,
 
-		EnsureControllerPAT:     w.ensureControllerPAT,
-		EnsureHubExperimentsOff: w.ensureHubExperimentsOff,
-		EnsureProjectProvider:   w.ensureProjectProvider,
+		EnsureHubIdentity:     w.ensureHubIdentity,
+		EnsureHubAuth:         w.ensureHubAuth,
+		HubAuthEnv:            apply.HubAuthEnv(w.instanceID, w.hubKey.Fingerprint()),
+		ProjectLinked:         w.projectLinked,
+		EnsureProjectProvider: w.ensureProjectProvider,
 
 		// RemoveScionProjectConfigs clears stale ~/.scion/project-configs entries
 		// before re-init, so apply does not add a duplicate registration every run.
@@ -1231,6 +946,9 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// StopRemoteProxy needs no controller: teardown is by pid file.
 		StartRemoteProxy: rc.Start,
 		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
+		FenceRemoteLogins: func(context.Context) error {
+			return fenceRemoteLogins(w.app, st, func() error { return brokerctl.StopRemoteProxy(st) })
+		},
 		// BeginSession records the manager's fresh starts for the contact gate (see
 		// sessionrec and remoteContactSession).
 		BeginSession: func(agent string) func() error {
@@ -1272,8 +990,6 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// left "running".
 		GuestBoot: jailGuestBoot{jr: b.JailRunner(), st: st},
 
-		EnsureHubLogin:       w.ensureHubLogin,
-		DisableHubLogin:      b.DisableHubLogin,
 		EnsureScionTelemetry: w.ensureScionTelemetry,
 		EnsureAgentTemplate:  w.ensureAgentTemplate,
 		Log:                  w.log,
@@ -1283,28 +999,6 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error {
 	return removeJailFile(ctx, w.jr, jailPath)
-}
-
-// RestartHub starts the live hub exactly as the scion-server step would, so a
-// window that failed after stopping it does not leave the instance without one.
-func (w *applyWiring) ensureControllerPAT(ctx context.Context) error {
-	return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), w.patOpts(""))
-}
-
-// patOpts are the window's options for this apply; require is
-// patMintOpts.Require.
-func (w *applyWiring) patOpts(require string) patMintOpts {
-	return patMintOpts{
-		RestartHub: func(ctx context.Context) error {
-			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret)
-			opts.Progress = w.deps.Log
-			return w.sc.ServerStart(ctx, opts)
-		},
-		ScopeKnown: w.sc.KnowsUATScope,
-		// Through the wiring's log: sanitized, and above the progress line.
-		Warn:    func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
-		Require: require,
-	}
 }
 
 func (w *applyWiring) recordVolumes(ctx context.Context, projectName, agentName string) ([]jail.Mount, error) {
@@ -1371,7 +1065,7 @@ func ensureAgentRoleCeiling(ctx context.Context, rolesSupported func(context.Con
 }
 
 // repairScionHubEndpoint points the project's recorded hub endpoint back at
-// the real hub after a re-mint linked it to the throwaway.
+// the real hub when the registration names another port.
 func (w *applyWiring) repairScionHubEndpoint(ctx context.Context, wp string) error {
 	return w.b.RepairScionHubEndpoint(ctx, wp, scion.DefaultHubEndpoint)
 }
@@ -1383,19 +1077,74 @@ func (w *applyWiring) verifyAgentRole(ctx context.Context, projectName, agentNam
 	return hubapi.VerifyAgentRole(ctx, w.sc.RolesSupported, w.hub(), projectName, agentName)
 }
 
-// ensureHubLogin is a no-op with remote access off: no provider runs then, so a
-// forwarder would point at nothing and an oidc_login block would advertise a
-// login that cannot complete.
-func (w *applyWiring) ensureHubLogin(ctx context.Context) (bool, error) {
-	if !w.app.RemoteEnabled() {
+// ensureHubAuth installs the assertion public key and the hub's auth block
+// in the guest (see guest.EnsureHubAuth).
+func (w *applyWiring) ensureHubAuth(ctx context.Context) (bool, error) {
+	return w.b.EnsureHubAuth(ctx, types.HubAuth{
+		PublicKeyPEM: w.hubKey.PublicPEM(),
+		Issuer:       hubauth.Issuer(w.instanceID),
+		Audience:     hubauth.Audience(w.instanceID),
+		AdminEmail:   hubauth.AdminEmail,
+		Header:       hubauth.Header,
+		RemoteOn:     w.app.RemoteEnabled(),
+	})
+}
+
+// assertHub is the hub REST client in the jail authenticated as one of
+// lever's identities by a fresh assertion per request.
+func (w *applyWiring) assertHub(sign func() (string, error)) *hubapi.Client {
+	return &hubapi.Client{T: &hubapi.AssertCurl{Runner: w.jr, BaseURL: scion.DefaultHubEndpoint, Sign: sign}}
+}
+
+// ensureHubIdentity runs the hub-identity step (hubIdentity.run).
+func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
+	h := &hubIdentity{
+		app: w.app, st: w.state, jr: w.jr, sc: w.sc,
+		admin:     w.assertHub(w.signer.Admin),
+		ctl:       w.assertHub(w.signer.Controller),
+		pat:       w.hub(),
+		jailMount: w.b.MountDest(),
+		keyFP:     w.hubKey.Fingerprint(),
+		guestNow:  w.clock.Now,
+		reset:     w.resetHubIdentity,
+		restartHub: func(ctx context.Context) error {
+			if err := w.sc.ServerStop(ctx); err != nil {
+				return err
+			}
+			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret, w.deps.HubAuthEnv)
+			opts.Progress = w.deps.Log
+			if err := w.sc.ServerStart(ctx, opts); err != nil {
+				return err
+			}
+			_, err := w.sc.RuntimeBrokerReady(ctx, "global")
+			return err
+		},
+		log:  w.log,
+		warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
+	}
+	return h.run(ctx)
+}
+
+// projectLinked is the register-project soundness predicate's link half: the
+// jail's scion says linked, and the tree's project is the one hub-identity
+// recorded.
+func (w *applyWiring) projectLinked(ctx context.Context, jp string) (bool, error) {
+	rec, found, err := w.state.LoadHubIdentity()
+	if err != nil || !found || rec.ProjectID == "" {
+		return false, err
+	}
+	linked, err := w.sc.ConfigGetProject(ctx, jp, "hub.linked")
+	if err != nil {
+		return false, err
+	}
+	if linked != "true" {
 		return false, nil
 	}
-	return w.b.EnsureHubLogin(ctx, types.HubLogin{
-		IssuerPort:  config.GuestLoginIssuerPort,
-		HostPort:    w.app.EffectiveRemoteLoginPort(),
-		HostAddress: w.brokerHost,
-		ClientID:    remoteproxy.LoginClientID,
-	})
+	id, _, err := readProjectMarker(ctx, w.jr, jp)
+	if err != nil {
+		return false, err
+	}
+	return id == rec.ProjectID, nil
 }
 
 func (w *applyWiring) ensureScionTelemetry(ctx context.Context) (bool, error) {

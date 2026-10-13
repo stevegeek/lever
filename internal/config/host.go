@@ -3,11 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/stevegeek/lever/internal/provision/loginfwd"
 )
 
 // ToolSupervisorPATH is the exact PATH the broker supervisor spawns command
@@ -52,7 +49,7 @@ func (a *App) CheckHost() error {
 			return err
 		}
 	}
-	return a.checkRemoteToolchain()
+	return nil
 }
 
 // ResolveToolCommand is the program a supervised tool's command names, as
@@ -115,28 +112,6 @@ func (a *App) checkNonGitTree() error {
 		return fmt.Errorf("config: tree %q is itself a git repository; lever targets non-git trees "+
 			"(per-worker git workflows are deferred, spec §13). A plain subdirectory inside a larger "+
 			"git repo is fine — point tree at a non-git directory (or a subdir) instead", a.Tree)
-	}
-	return nil
-}
-
-// remoteForwarderPrebuilt is a variable so tests do not depend on how the
-// test binary was built.
-var remoteForwarderPrebuilt = loginfwd.PrebuiltComplete
-
-// checkRemoteToolchain: a lever built without the embedded guest login
-// forwarder cross-compiles it at apply time and needs Go. Only
-// `scion.binary:` is checked, the one mode that needs no Go for scion
-// itself. It runs at config load because apply would only find out after it
-// has opened a mint window and touched the hub.
-func (a *App) checkRemoteToolchain() error {
-	if !a.Remote.Enabled || a.Scion.Binary == "" || remoteForwarderPrebuilt() {
-		return nil
-	}
-	if _, err := exec.LookPath("go"); err != nil {
-		return fmt.Errorf("config: remote: this lever carries no prebuilt guest login forwarder, so remote access " +
-			"cross-compiles it at apply time and needs a Go toolchain — but `go` is not on PATH. Use a release build of " +
-			"lever (or build it with `make install`, which embeds the forwarder), install Go (a REAL go on PATH, not just " +
-			"an asdf/mise shim), or set remote.enabled: false")
 	}
 	return nil
 }

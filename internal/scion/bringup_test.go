@@ -369,29 +369,6 @@ func TestServerPIDProbeScriptRemovesAStalePidFile(t *testing.T) {
 	}
 }
 
-// The throwaway dev-auth hub's argv: web off, so the Hub API binds --port and
-// every non-public route needs the Bearer dev token.
-func TestServerStartArgvWebDisabled(t *testing.T) {
-	f, c := okScion()
-	if err := c.ServerStart(context.Background(), ServerOpts{HubPort: 48080, DisableWeb: true, DevAuth: true, Exclusive: true}); err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(serverStartCall(t, f).Args, " ")
-	if got != "server start --port 48080 --enable-web=false --dev-auth=true" {
-		t.Errorf("args = %q", got)
-	}
-}
-
-func TestServerStartRejectsEnableAndDisableWeb(t *testing.T) {
-	f, c := okScion()
-	if err := c.ServerStart(context.Background(), ServerOpts{EnableWeb: true, DisableWeb: true}); err == nil {
-		t.Fatal("want an error for EnableWeb with DisableWeb")
-	}
-	if len(f.Calls) != 0 {
-		t.Fatalf("ran %d call(s) for an invalid option set", len(f.Calls))
-	}
-}
-
 // notRunningRunner simulates scion server stop failing because no server is
 // running; FakeRunner cannot carry a custom error message.
 type notRunningRunner struct {
@@ -502,29 +479,6 @@ func TestIsAgentAbsent(t *testing.T) {
 		[]error{nil, errors.New("No runtime brokers available"), errors.New("timeout")})
 }
 
-// alreadyRunningRunner answers every `scion server start` the way scion does
-// when the jail's one server pid file names a live daemon.
-type alreadyRunningRunner struct{ *proc.FakeRunner }
-
-func (r *alreadyRunningRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
-	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "start" {
-		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
-		return proc.Result{Code: 1, Stderr: "Error: server is already running (PID: 1731)"}, fmt.Errorf("exit status 1")
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
-
-// An exclusive start must fail on "already running": that answer is about
-// another hub, and tolerating it would stop the live hub on cleanup.
-func TestServerStartExclusiveRefusesAlreadyRunning(t *testing.T) {
-	r := &alreadyRunningRunner{FakeRunner: proc.NewFakeRunner()}
-	c := New(r, Options{})
-	err := c.ServerStart(context.Background(), ServerOpts{WebPort: 48080, DevAuth: true, Exclusive: true})
-	if err == nil || !AlreadyRunning(err) {
-		t.Fatalf("exclusive ServerStart err = %v, want an already-running error", err)
-	}
-}
-
 func TestIsRefusedByHub(t *testing.T) {
 	for _, s := range []string{
 		`failed to start agent via Hub: conflict: agent "m" already exists in this project (status: 409)`,
@@ -593,9 +547,8 @@ func (r *startOutputRunner) RunIn(ctx context.Context, dir string, env map[strin
 }
 
 // scion's own readiness wait gives up after about 30 s and leaves the daemon
-// running (cmd/server_start_ready.go). That start happened, also for an
-// exclusive start, and lever's longer wait decides; a daemon that exited
-// during the wait is still a failure.
+// running (cmd/server_start_ready.go). That start happened, and lever's longer
+// wait decides; a daemon that exited during the wait is still a failure.
 func TestServerStartToleratesScionReadinessGiveUp(t *testing.T) {
 	const gaveUp = "Error: server did not become ready within 30s: hub API at http://127.0.0.1:48080/healthz did not answer " +
 		"(last error: Get \"http://127.0.0.1:48080/healthz\": dial tcp 127.0.0.1:48080: connect: connection refused)\n\n" +
@@ -604,21 +557,19 @@ func TestServerStartToleratesScionReadinessGiveUp(t *testing.T) {
 		"The server process has exited. Check the log at /home/u/.scion/server.log and 'scion server status'; use 'scion server stop' to stop it\n"
 	const exitedEarly = "Error: the server exited during startup before it became ready. Check log at: /home/u/.scion/server.log\n"
 	for _, tc := range []struct {
-		name      string
-		out       string
-		exclusive bool
-		wantErr   bool
+		name    string
+		out     string
+		wantErr bool
 	}{
-		{"gave up, still running", gaveUp, false, false},
-		{"gave up, still running, exclusive", gaveUp, true, false},
-		{"gave up, process exited", exited, false, true},
-		{"exited during startup", exitedEarly, true, true},
+		{"gave up, still running", gaveUp, false},
+		{"gave up, process exited", exited, true},
+		{"exited during startup", exitedEarly, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := proc.NewFakeRunner()
 			f.Script("scion list", proc.Result{Stdout: "[]"})
 			c := New(&startOutputRunner{FakeRunner: f, out: tc.out}, Options{})
-			err := c.ServerStart(context.Background(), ServerOpts{HubPort: 48080, DisableWeb: true, DevAuth: true, Exclusive: tc.exclusive})
+			err := c.ServerStart(context.Background(), ServerOpts{WebPort: 48080})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ServerStart err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -627,7 +578,7 @@ func TestServerStartToleratesScionReadinessGiveUp(t *testing.T) {
 				t.Fatalf("hub readiness wait ran = %v; want it exactly when the start counts as done", waited)
 			}
 			if err != nil && AlreadyRunning(err) {
-				t.Fatalf("a failed start reads as already running (the window would not stop it): %v", err)
+				t.Fatalf("a failed start reads as already running: %v", err)
 			}
 		})
 	}

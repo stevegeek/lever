@@ -67,8 +67,8 @@ func TestCheckHubExperiments(t *testing.T) {
 			if !r.ok && r.fix == "" {
 				t.Fatalf("a failed row needs a fix: %+v", r)
 			}
-			if strings.Contains(r.detail, " on at the hub") && !strings.Contains(r.fix, "`lever stop`, then `lever up`") {
-				t.Fatalf("live fix = %q, want the stop/up repair", r.fix)
+			if strings.Contains(r.detail, " on at the hub") && !strings.Contains(r.fix, "`lever apply`") {
+				t.Fatalf("live fix = %q, want the apply repair", r.fix)
 			}
 		})
 	}

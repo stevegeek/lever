@@ -62,46 +62,8 @@ func loadInstance(t *testing.T, extra string) *config.App {
 // unreaped. `true` exits 0, so cmd.Start() still succeeds.
 var inertApplyOpts = applyOpts{SelfExe: "/usr/bin/true"}
 
-// Argv prefixes of the calls the PAT mint window issues, named once.
-const (
-	argvScionServerStart = "scion server start"
-	argvScionList        = "scion list" // waitHubReady's poll, run inside ServerStart
-	argvScionInit        = "scion init"
-	argvScionHubLink     = "scion hub link"
-	argvScionServerStop  = "scion server stop"
-	argvScionTokenCreate = "scion hub token create"
-	argvScionTokenRevoke = "scion hub token revoke"
-	argvShPrintf         = "sh -c printf" // $HOME resolution for the dev-token path
-	argvShGuardedRm      = "sh -c if"     // the guarded removeJailFile rm
-	argvPodmanPs         = "podman ps"    // the window's running-container check
-)
-
-// scriptPATMintChain scripts the throwaway-window call chain shared by every
-// ensureControllerPAT test, except "hub token create", which each test
-// scripts via scriptTokenCreate or patMintRunner.
-func scriptPATMintChain(f *proc.FakeRunner) {
-	f.Script(argvPodmanPs, proc.Result{}) // no container running
-	f.Script(argvScionServerStart, proc.Result{})
-	f.Script(argvScionList, proc.Result{})
-	f.Script(argvScionInit, proc.Result{})
-	f.Script(argvScionHubLink, proc.Result{})
-	f.Script(argvScionServerStop, proc.Result{})
-	f.Script(argvShPrintf, proc.Result{Stdout: "/home/tester"})
-	f.Script(argvShGuardedRm, proc.Result{})
-}
-
-// scriptTokenCreate scripts a token create for --name name, which lands right
-// after --project in the argv.
-func scriptTokenCreate(f *proc.FakeRunner, name, token string) {
-	f.Script(argvScionTokenCreate+" --project lever --name "+name, proc.Result{Stdout: "Token: " + token + "\n"})
-}
-
-func patMintRunner(token string) *proc.FakeRunner {
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	f.Script(argvScionTokenCreate, proc.Result{Stdout: "Token: " + token + "\n"})
-	return f
-}
+// argvScionList is the hub-readiness poll's argv prefix.
+const argvScionList = "scion list"
 
 func scionOKRunner() *proc.FakeRunner {
 	f := proc.NewFakeRunner()

@@ -168,7 +168,7 @@ func (a *App) validateWhisperTools() error {
 		}
 		seen[w.Port] = w.Name
 		if slices.Contains(a.EffectiveAllowedPorts(), w.Port) {
-			return fmt.Errorf("config: %s -whisper-port %d is a port the jail may reach (manager.allow_ports, the broker's jail port or the login port): "+
+			return fmt.Errorf("config: %s -whisper-port %d is a port the jail may reach (manager.allow_ports or the broker's jail port): "+
 				"whisper-server has no authentication, and only the egress rules keep agents from it; pick another port, or remove it from manager.allow_ports", key, w.Port)
 		}
 		own := []struct {
@@ -176,7 +176,6 @@ func (a *App) validateWhisperTools() error {
 			what string
 		}{
 			{a.EffectiveAdminPort(), "the broker's admin port"},
-			{GuestLoginIssuerPort, "the port the jail's login forwarder is mirrored onto"},
 		}
 		if a.RemoteEnabled() {
 			own = append(own, struct {

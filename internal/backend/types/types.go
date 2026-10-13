@@ -3,23 +3,22 @@
 // internal/backend/guest can both name them without importing each other.
 package types
 
-// HubLogin is what the guest needs in order to serve lever's remote-access
-// login path.
-type HubLogin struct {
-	// IssuerPort is the port the forwarder listens on INSIDE the guest, and
-	// the one the hub's issuer_url names. Always config.GuestLoginIssuerPort
-	// in production; a field so tests can vary it.
-	IssuerPort int
-	// HostPort is the port the provider binds ON THE HOST, and the one the
-	// forwarder dials there. Never equal to IssuerPort; see
-	// config.GuestLoginIssuerPort.
-	HostPort int
-	// HostAddress is how the GUEST reaches the host, e.g. "host.orb.internal"
-	// or its resolved IPv4.
-	HostAddress string
-	// ClientID is the client_id lever's provider expects
-	// (remoteproxy.LoginClientID).
-	ClientID string
+// HubAuth is what the guest needs for the hub's proxy auth mode: lever signs
+// an assertion per request with a host-held key, and the hub verifies it with
+// the public half installed root-owned in the guest.
+type HubAuth struct {
+	// PublicKeyPEM is the PKIX PEM of lever's assertion key.
+	PublicKeyPEM []byte
+	// Issuer and Audience are the iss and aud the hub requires.
+	Issuer   string
+	Audience string
+	// AdminEmail is the hub's only admin_emails entry.
+	AdminEmail string
+	// Header carries the assertion.
+	Header string
+	// RemoteOn keeps the web-only settings (the first-run display name and
+	// native chat) converged on; off removes lever's display name.
+	RemoteOn bool
 }
 
 // ScionProjectState is the scion project-registration state `lever doctor`

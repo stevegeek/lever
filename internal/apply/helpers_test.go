@@ -27,7 +27,39 @@ func helloApp(tree string) *config.App {
 func scionOKRunner() *proc.FakeRunner {
 	f := proc.NewFakeRunner()
 	f.Script("scion", proc.Result{Stdout: "ok"})
+	scriptRunningHub(f, "")
 	return f
+}
+
+// runningHubKey is the FakeRunner key of scion.Client.RunningHub's probe,
+// read off the call itself: the pid-file probe shares the script's first
+// lines and must stay unanswered.
+var runningHubKey = func() string {
+	f := proc.NewFakeRunner()
+	_, _ = scion.New(f, scion.Options{}).RunningHub(context.Background())
+	if len(f.Calls) != 1 || f.Calls[0].Name != "sh" || len(f.Calls[0].Args) < 2 {
+		panic(fmt.Sprintf("RunningHub probe call: %+v", f.Calls))
+	}
+	return "sh " + f.Calls[0].Args[0] + " " + f.Calls[0].Args[1]
+}()
+
+// scriptRunningHub answers RunningHub's probe with out ("" is no hub).
+func scriptRunningHub(f *proc.FakeRunner, out string) {
+	f.Script(runningHubKey, proc.Result{Stdout: out})
+}
+
+// runningHubOut renders the probe output of a hub started with argv and env.
+func runningHubOut(pid int, argv []string, env map[string]string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d\n", pid)
+	for _, a := range argv {
+		b.WriteString(a + "\n")
+	}
+	b.WriteString("--lever-env--\n")
+	for k, v := range env {
+		b.WriteString(k + "=" + v + "\n")
+	}
+	return b.String()
 }
 
 func hubScion(f *proc.FakeRunner, app *config.App) *scion.Client {

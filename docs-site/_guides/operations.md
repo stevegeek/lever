@@ -1031,6 +1031,153 @@ lever tree snapshot -q; lever tree lock -- sh -c 'restic backup "$LEVER_TREE_BAC
 - The stat cache trusts the change time the host kernel sets when the share applies a write. If an
   agent could forge it, a changed file would be missed until it is re-verified, within `reverify`.
 
+## Hub identities
+
+The jail's scion hub runs in scion's proxy auth mode. It trusts one thing: a short-lived assertion
+(an ES256 JWT, 30 s) that lever signs on the host for each request, with a key the jail never
+holds. Nothing in the jail can mint a hub session, so lever governs the hub while agents run, and
+there is no dev-auth window and no "stop every container first". See
+[security model §4.2](/security-model/worker-isolation/) for the reasoning.
+
+What lever holds:
+
+| File | What it is |
+|---|---|
+| `.lever-state/hub-auth.key` | the assertion signing key (P-256), `0600` in a `0700` directory. Its public half is `/etc/lever/hub-auth.pub` in the jail, root-owned, `0644` |
+| `.lever-state/hub-identity.json` | no secret: whether the hub was set up fresh or migrated, the admin's and the controller's hub user IDs, the project ID, the key fingerprint, the **hub marker** (the ID of lever's `lever-controller` role), the hub user ID recorded for each remote login, and any repairs lever made |
+| `.lever-state/controller.pat` (+ `.json`) | the controller PAT the broker and lever's own scion calls use, as before |
+| `.lever-state/remote.pat` (+ `.json`) | with remote access on: the PAT the proxy lists agents with (for the chat page and the contact fence); it never enters the jail |
+| `.lever-state/remote-grants.json` | no secret: what each remote login may do under the config the last apply started from. Written before every other apply step; the running proxy refuses a login whose entry is gone or changed |
+
+The hub users:
+
+- **`lever-admin@lever.local`** is the hub's only admin, through scion's `admin_emails`. It holds
+  no credential at rest; `lever apply`, `lever reload` and `lever doctor` assert it for roles,
+  invites and checks.
+- **`lever-controller@lever.local`** is an ordinary member. It owns the project, holds the
+  `lever-controller` role, mints the PATs, and every message lever sends carries its sender label,
+  `user:lever-controller@lever.local`.
+- **Remote logins** (operators and contacts) are members, each bound to its tier's role and capped,
+  see [remote access](/remote-access/).
+
+lever pins the hub's auth settings in the environment it starts the hub with, and writes the same
+keys to the jail's `~/.scion/settings.yaml` for readers. A change to that file cannot change the
+hub's auth, and does not restart it.
+
+### Adding and removing logins while agents run
+
+Edit `remote.allowed_users`, then `lever reload` (or `lever apply`). The `hub-identity` step
+invites each new login's hub user, writes its ceiling, then binds its tier's role, all before the
+login first signs in; the first sign-in activates that same user with its role already in force.
+Only then is the proxy restarted with the new list. No agent is stopped.
+
+Removing a login suspends its hub user and drops its bindings. A suspended user is refused at once
+on the web and within 60 s on the API (the hub caches users by email for that long). Adding the
+login back reactivates the same user and binds it again.
+
+### Token rotation
+
+`lever apply` re-mints the controller PAT (and the remote PAT, with remote access on) when it is
+missing, has no record, carries other scopes than this lever mints, or has fewer than 30 days
+left. The controller mints the new token while agents run; lever saves it, then its record, then
+revokes the old one. The broker reads the PAT file on every use, and when the hub answers 401 to a
+call whose token the file no longer holds, it retries that call once with the new token. An open
+`lever attach` keeps streaming after its token is revoked; a new attach uses the new token.
+
+### Rotating the assertion key
+
+Delete `.lever-state/hub-auth.key` and run `lever apply`. lever makes a new key, installs the new
+public half in the jail and restarts the hub once (the hub reads the key only at startup). Agents
+keep running; the hub users are found again by address, so nothing else changes. `lever destroy`
+keeps the key: it is not tied to one hub database. It removes the PATs, their records,
+`remote-role.json` and `hub-identity.json`, which describe the hub that dies with the VM.
+
+### `--reset-hub-identity`
+
+If the hub database is replaced (the jail's `~/.scion` restored from elsewhere, the database moved
+aside), lever's role, users and tokens are gone from it. lever starts over on its own only on
+positive evidence: the hub's role list answers without the recorded `lever-controller` role **and**
+the `lever-admin` user was created by this run. It then forgets the old hub's records with a loud
+warning and sets the hub up as new. Anything less (a role missing while the admin user is old, an
+unexpected error) fails the apply and names the flag.
+
+When the reset was deliberate, run `lever up --reset-hub-identity` (or `lever apply
+--reset-hub-identity`). It revokes the recorded PATs on the hub, best effort (they would stay valid
+and unrecorded on a hub whose database was in fact kept), forgets `hub-identity.json`, both PATs
+and their records and `remote-role.json`, then sets the hub up as new. The tree's `.scion` marker
+must still name the project lever registered before; a marker that names another is refused,
+since the tree is the manager's workspace.
+
+### The first apply after upgrading
+
+On an instance an older lever brought up, the first `lever apply` (or `reload`, or `up`) migrates
+the hub. Agents keep running; the hub restarts once.
+
+1. lever makes the key, installs the public half and the settings, removes the old login
+   forwarder from the jail (`/usr/local/bin/lever-login-forward`), and restarts the hub.
+2. `lever-admin` becomes the only admin. Every other admin is demoted to member, by role and by
+   super-admin binding.
+3. Scion's dev user (on lever instances usually `scion@localhost`), which an older lever minted its
+   tokens as, is renamed `lever-controller@lever.local` and is now a member. It keeps the project,
+   the PATs and every agent; nothing moves.
+4. lever then checks, without changing anything, that the controller PAT still has every authority
+   lever uses: the hub's own per-agent capability answer for each agent, the project reads, and
+   `scion list`. If any is missing, lever fails the apply with the evidence and checks again on the
+   next apply. The controller stays a member: lever never gives it the admin role back, since an
+   admin role granted through the hub's API outlives scion's own reconcile. Report the evidence;
+   the fix is a permission on lever's `lever-controller` role.
+5. Remote logins are invited and bound by their existing user IDs.
+
+If an agent had renamed scion's dev user to `lever-admin@lever.local` (scion lets any loopback
+caller rename that user), lever restores the address with the controller PAT and waits out the
+hub's 60 s user cache before it goes on. Every later apply re-pins the dev user's address the same
+way.
+
+Lever finds the controller by its user ID, through the controller PAT, so an agent renaming the dev
+user does not stop an apply. Only minting or revoking a controller token needs the address: lever
+re-pins it and asserts the controller together, up to five times. If an agent keeps renaming the
+dev user faster than that and the token is only in its last 30 days, lever warns and renews it on a
+later apply. If the token is missing or has other scopes, the apply fails with `lever-controller's
+address does not stay on the controller`, and says that remote login removals already took effect:
+they come before any of this. Stop the agents (`lever stop`), then run `lever apply`.
+
+Two effects to know:
+
+- The controller's sender label changes from `user:<the dev user's address>` to
+  `user:lever-controller@lever.local`. A message delivered before the migration but checked with
+  `message_verify` after it answers `unknown_sender`. Agents verify on receipt, so this touches
+  only messages in flight across the upgrade.
+- `remote.login_port` is ignored; `lever apply` warns until you remove it.
+
+### Downgrading
+
+Not supported; do not downgrade after this migration. An older lever starts the hub without
+lever's environment, but the jail's `~/.scion/settings.yaml` still carries the proxy auth block and
+`admin_emails` this lever wrote, so the hub stays in proxy mode. The older lever keeps using the
+existing controller PAT until it needs a re-mint, but its remote login and its dev-auth window do
+not work as before. Removing `server.auth.mode`, `server.auth.user_access_mode`,
+`server.auth.proxy` and `server.hub.admin_emails` from that file after a `lever stop` would put
+the hub back in its old mode on the older lever's `lever up`, but that lever's dev-auth window
+would act as scion's dev user, now a member named `lever-controller@lever.local`: scion re-adds
+that user's super-admin binding on a dev-auth start, yet admin-only writes check the role, which
+stays member. This revert is untested. The safe path is `lever conversation backup`, `lever destroy`, then the older lever's
+`lever up` and `lever conversation restore`.
+
+### Break-glass
+
+If lever's admin is lost (its role changed by hand, an access constraint locking everyone out),
+inside the jail:
+
+```sh
+scion server stop
+scion admin promote --email lever-admin@lever.local       # direct database write; the user must exist
+scion server recover-authz --disable-constraint <id>      # offline; deactivates one broken constraint
+```
+
+Both open the hub database directly; `recover-authz` refuses while a hub runs. Then run
+`lever apply`: it starts the hub with lever's settings and demotes every admin other than
+`lever-admin`, so promoting anyone else is temporary.
+
 ## Troubleshooting quick table
 
 | Symptom | Likely cause | Do |
@@ -1046,7 +1193,7 @@ lever tree snapshot -q; lever tree lock -- sh -c 'restic backup "$LEVER_TREE_BAC
 | `lever up` fails: "manager … cannot be resumed: <dir> mounted by the manager record but no longer on the host" (before 0.30.0: podman `statfs /lever/<dir>: no such file or directory`) | the manager was created with `manager.read_only` naming `<dir>` (or a worker dir while the list was set); the record keeps that mount for life, and the directory was deleted after the entry was removed from `lever.yaml`. lever reads the mounts off the stopped manager container, or, with no container, off the hub record, and refuses every resume (the forced resume of an `error` phase too); it only warns when it keeps a running manager as it is | recreate the directory (`mkdir`, empty is enough) and run `lever up` again; to drop the mount, run `lever up --fresh --keep-conversation`. Keep a removed entry's directory until that fresh create |
 | `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own after a failed resume | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` resumes the new manager on it). In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
 | `lever up`/`apply` fails at `start-manager`: "did not come up … the harness is not live — cause: no conversation to continue" | the manager was never sent a message, so its home holds no transcript, and the resume's `claude --continue` found nothing to continue. `lever up` starts such a manager fresh on its own once it has checked the home from the guest, when the resume ran in its bring-up (on a terminal too: a resumed manager is attached only after claude reports its session start); this message means it could not prove the home empty (the line before it says why), the resume was `up`'s own (a suspended manager under a running hub, or after a guest restart), or the command was `lever apply` | `lever stop && lever up` (the resume then runs in the bring-up, which makes the fresh start when the line before did not give a reason), or `lever up --fresh`: it backs up any transcript first, so nothing is lost ([the manager's conversation across `--fresh`](#the-managers-conversation-across---fresh)) |
-| `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever stop`, then `lever up` (re-mints the token), or wait and retry. Do **not** answer exit 4 with `--fresh` |
+| `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever apply` (it re-mints a token whose scopes changed, while agents run), or wait and retry. Do **not** answer exit 4 with `--fresh` |
 | Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (add `--keep-conversation` to keep the conversation; plain `--fresh` starts a new one after backing the old one up; before 0.21 the flag was silently dropped after `stop`) |
 | Doctor's `agent lever version` row fails | the agent image's in-jail code does not match the host `lever`: its `lever_jail_abi` label differs from the host's jail ABI (or, on an image without that label, its `lever_version` release differs). The tag names only the arch, so any `make lever-image` on the host (a throwaway instance, another checkout) replaces it. A release that changed no in-jail code keeps the jail ABI, so the row passes and shows the release difference as information | rebuild from the host lever's source: `make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built `FROM` it; `lever apply`; `lever up --fresh` to recreate the manager on it (the conversation is discarded) |
 | On `lima` with `egress: open`, every agent turn ends in `Request timed out` (about 4.5 min) while `lever up` looks fine; doctor's `guest DNS` row fails | the guest resolver is a nat DNAT to the host alias on a per-boot port, which the `LEVER_EGRESS` alias DROP swallowed (lever < 0.22.2, lever#34); in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows the `-d <alias> DROP` counter climbing with every lookup | upgrade lever and re-run `lever apply` — the open posture now ACCEPTs the live `LIMADNS` DNAT targets ahead of the alias DROP; `lever doctor`'s `guest DNS` row confirms a lookup completes |
@@ -1066,6 +1213,14 @@ lever tree snapshot -q; lever tree lock -- sh -c 'restic backup "$LEVER_TREE_BAC
 | `lever up` (or `apply`) prints `start-manager: manager "<name>" still starting — …; 45s elapsed` | a manager start takes a while: the container start, the pre-start hook and claude's boot up to its session start can run over a minute | nothing: it prints a line about every 15 s with what it waits for, the hub's phase and container, and the time since the start. A line that repeats the same stage for minutes names where it is stuck |
 | The manager start fails (`claude exited before it came up`, or `came up, then died`) and the error names a stale background session; or doctor's `claude background sessions` row warns | the conversation was moved into a Claude Code background session (`/background`, `/bg`, the left-arrow key) before the last restart; its session records name the old container, and `claude --continue` refuses | move the stale records aside in the agent home, then `lever stop && lever up`; see [background sessions and /login](#background-sessions-and-login) |
 | Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
+| `lever apply`/`up` fails at `hub-identity`: "lever-admin resolves to scion's dev user on a hub lever brought up without dev auth" | something started this instance's hub with dev auth (scion's workstation default), which seeds scion's dev user | stop that hub; if the hub database is disposable, `lever up --reset-hub-identity`. See [hub identities](#hub-identities) |
+| `lever apply`/`up` fails at `hub-identity`: "the hub does not list lever's lever-controller role …, but lever-admin's row predates this run" | the hub database is not the one lever recorded, and lever cannot tell a deliberate reset from damage | if you reset the hub database on purpose, `lever up --reset-hub-identity`; otherwise find out what changed the hub before re-running |
+| `lever apply` fails at `hub-identity`: "the controller (scion's dev user) lacks an authority lever needs after its demotion … It stays a member" | the first apply after an upgrade demoted the controller, and the probe of the controller PAT then failed | lever's agent operations that need the missing authority fail until it is fixed; lever does not make the controller an admin again. Report the error text; the fix is a permission on lever's `lever-controller` role |
+| `lever apply` fails at `hub-identity`: "lever-controller's address does not stay on the controller … long enough to mint or revoke its token" | a token was due (missing, near expiry, or with other scopes), and something, most likely an agent, kept renaming scion's dev user through the hub's identity route | removals of remote logins already took effect and the old token keeps working. `lever stop`, then `lever apply`; find which agent made the calls |
+| `lever apply` warns "the controller's address is … right after lever re-pinned it" | something keeps renaming scion's dev user, most likely an agent; the apply does not need the address unless a token is due | find the agent; until it stops, lever's messages carry the agent-chosen sender label (see [credentials](/security-model/credentials/)) |
+| `lever apply`/`up --reset-hub-identity` fails: "the tree's project marker … names project …, but lever last registered …" | the tree's `.scion` marker, in the manager's workspace, names another project than the one lever registered | if the marker is lever's own (a project you re-created on purpose), remove `<tree>/.scion` on the host and run again; otherwise an agent wrote it |
+| Doctor's `hub authentication` row fails | the hub runs without lever's auth settings (started by hand, or before a key change), the hub admits an address nobody invited (not `invite_only`), the jail's public key differs from the host key or its directory or file is not root's or is writable by others, a login provider is configured, or scion's dev token exists | `lever apply` (it reinstalls the key, pins the settings, removes the dev token and restarts the hub when they differ) |
+| Doctor's `hub identities` row fails | another hub admin exists, the controller holds a token lever did not record, or scion's dev user was renamed since the last apply | `lever apply` (it demotes extra admins and restores the controller's address); revoke an unrecorded token with scion |
 
 ## Two instances on one host
 
@@ -1076,8 +1231,8 @@ instance:
 
 - **its own `name`.** The jail VM is `lever-<name>`; two instances with one name share a VM.
 - **its own broker ports**, `broker.jail_port` and `broker.admin_port` (defaults 8443 and 8444).
-- **its own remote ports** when remote access is on, `remote.port` and `remote.login_port`
-  (defaults 8445 and 8447); see [several remote-enabled instances](/remote-access/).
+- **its own remote port** when remote access is on, `remote.port` (default 8445); see
+  [several remote-enabled instances](/remote-access/).
 - **its own tool ports**: each supervised tool's `backend` port, and a whisper tool's
   `-whisper-port`.
 
@@ -1442,6 +1597,12 @@ driver).
    fails while the agent image's in-jail code is older than the host's (its `lever_jail_abi` label
    differs). When the new release changed no in-jail code, the row passes and names both
    releases: no image rebuild and no `lever up --fresh` is needed.
+
+### Upgrading onto lever-signed hub identities
+
+The first apply after upgrading from a lever that used dev-auth windows migrates the hub's
+identities while agents run, with one hub restart. Read [the first apply after
+upgrading](#the-first-apply-after-upgrading) before you upgrade, and do not downgrade afterwards.
 
 ### Moving a Lima VM to Ubuntu 26.04
 

@@ -193,7 +193,7 @@ func TestCheckAgentMessagesNamesAStaleProcess(t *testing.T) {
 		return func() (string, bool) { return brokerctl.ConfigHash(a), true }
 	}
 	proxy := func(a *config.App) func(string) (bool, bool) {
-		return func(h string) (bool, bool) { return true, h == brokerctl.RemoteConfigHash(a) }
+		return func(h string) (bool, bool) { return true, h == brokerctl.RemoteConfigHash(a, st) }
 	}
 	none := func() (string, bool) { return "", false }
 	noProxy := func(string) (bool, bool) { return false, false }

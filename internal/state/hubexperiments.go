@@ -10,9 +10,8 @@ import (
 )
 
 // HubExperimentsRecord is what lever last pinned in the jail hub's experiment
-// overrides. Writing them needs the throwaway dev-auth window, so apply and
-// doctor read this record to tell whether the pin was ever made; whether a
-// feature is live they ask the hub.
+// overrides. Doctor reads it to tell whether the pin was ever made without
+// an admin call; whether a feature is live it asks the hub.
 //
 // NotApplicable means the hub had no experiments admin route (an older scion).
 // Off lists the names lever holds at an explicit false; a name this hub does

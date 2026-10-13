@@ -14,6 +14,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/retry"
@@ -125,8 +126,7 @@ type run struct {
 	// manager.read_only mounts; any other is probed (warnManagerTreeMounts).
 	managerCreated bool
 	// brokerOnline records that the scion-server step already saw the runtime
-	// broker online, so start-manager need not wait for it again. A step that
-	// starts the hub again clears it.
+	// broker online, so start-manager need not wait for it again.
 	brokerOnline bool
 	// subject prefixes the resume checks' messages; empty means "start-manager".
 	subject string
@@ -190,22 +190,21 @@ type Deps struct {
 	HubSessionSecret string
 	StartBroker      func(ctx context.Context) error
 	BrokerHealthy    func(ctx context.Context) error
-	// EnsureControllerPAT runs the bootstrap-token step: the whole controller-PAT
-	// mint window as one op (see plan.go's bootstrap-token Step). It must be
-	// idempotent: a no-op when a valid PAT is already persisted.
-	EnsureControllerPAT func(ctx context.Context) error
-	// EnsureHubExperimentsOff runs right after the scion-server step starts the
-	// hub: when scion's conduit or artifacts experiment is on there, it pins it
-	// off through the dev-auth window and starts the hub again, or fails with
-	// the repair while containers run. A no-op on a scion without hub
-	// experiments.
-	EnsureHubExperimentsOff func(ctx context.Context) error
-	// EnsureProjectProvider runs after the hub's runtime broker registered:
-	// when the instance's hub project (by name) lists no runtime broker, it
-	// links the jail's broker through the dev-auth window and starts the hub
-	// again, or fails with the repair. A project the hub does not list is
-	// left alone. linked reports that the window ran.
-	EnsureProjectProvider func(ctx context.Context, projectName string) (linked bool, err error)
+	// EnsureHubIdentity runs the hub-identity step against the live hub: the
+	// admin and controller identities, scion's experiments lever keeps off,
+	// the project, the controller PAT and the remote logins (invited and bound
+	// before they first sign in). It is idempotent, never lists containers,
+	// and runs while agents run.
+	EnsureHubIdentity func(ctx context.Context) error
+	// HubAuthEnv pins the hub's auth configuration on every hub start (see
+	// scion.ServerOpts.Env). It also carries the assertion key's fingerprint,
+	// so a hub started before a key change is detected and restarted.
+	HubAuthEnv map[string]string
+	// EnsureProjectProvider runs after hub-identity and the hub link: when the
+	// instance's hub project lists no runtime broker, it links the jail's
+	// broker to it as lever-admin, or fails. A project the hub does not list
+	// is left alone.
+	EnsureProjectProvider func(ctx context.Context, jailWorkspacePath string) error
 	// WaitBrokerReady blocks until the scion runtime broker is registered and
 	// online. The workstation daemon brings up its Hub API and its runtime broker
 	// separately, so without it the first create or resume races the broker's
@@ -219,18 +218,10 @@ type Deps struct {
 	// survive), then mints and stages fresh bootstrap material. start-manager's
 	// create path calls it when this apply minted none.
 	RearmBootstrap func(ctx context.Context) error
-	// EnsureHubLogin converges the guest half of the remote-access login path
-	// before the hub starts: the loopback forwarder to lever's host-side OIDC
-	// provider and the oidc_login block in ~/.scion/settings.yaml. A reported
-	// change means a running hub must restart (see scionServer). It must be a
-	// no-op when remote access is off.
-	EnsureHubLogin func(ctx context.Context) (bool, error)
-	// DisableHubLogin converges the guest half of the login path off: it stops and
-	// removes the forwarder and drops the oidc_login block. It is not a Plan step;
-	// Run calls it whenever remote access is off, so no unauthenticated jail-to-host
-	// loopback bridge outlives the feature. A reported change restarts a running
-	// hub, as with EnsureHubLogin (see disableHubLogin).
-	DisableHubLogin func(ctx context.Context) (bool, error)
+	// EnsureHubAuth installs the assertion public key in the guest and
+	// converges the hub's auth settings before the hub starts. It reports
+	// whether a running hub must restart to read them.
+	EnsureHubAuth func(ctx context.Context) (bool, error)
 	// EnsureScionTelemetry converges the telemetry block of the guest's
 	// ~/.scion/settings.yaml on config scion.telemetry and reports whether it
 	// changed. A change is only logged: the runtime broker reads the block at every
@@ -351,6 +342,13 @@ type Deps struct {
 	// stale one. Run calls it whenever remote access is off, so a proxy left by a
 	// prior apply stops serving traffic the config no longer authorizes.
 	StopRemoteProxy func(ctx context.Context) error
+	// FenceRemoteLogins runs before every step: it records what each remote
+	// login may now do, which a running proxy checks on every request, and
+	// stops the proxy when remote access is off. A removed or narrowed login
+	// so loses the proxy at once, whatever a later step does: nothing an
+	// agent can disturb (the hub, the controller's address) stands between
+	// the operator's edit and the revocation.
+	FenceRemoteLogins func(ctx context.Context) error
 	// RemoveJailFile removes a regular file at a jail-absolute path through the
 	// jail's own view, so removing the stale .scion marker cannot race the in-jail
 	// scion init across VirtioFS (a host-side unlink is not promptly visible in the
@@ -367,6 +365,11 @@ type Deps struct {
 	// resumable agent record. A query error falls through to the destructive path
 	// (fail-open: zero, duplicate or torn registrations need it).
 	ScionProjectRegistered func(ctx context.Context, jailWorkspacePath string) (bool, error)
+	// ProjectLinked reports whether the jail's scion settings for
+	// jailWorkspacePath say the project is hub-linked to the project ID
+	// hub-identity recorded. A sound registration that is not linked is
+	// re-linked, never settled as is.
+	ProjectLinked func(ctx context.Context, jailWorkspacePath string) (bool, error)
 	// StripProjectSharedDirs removes scion's default scratchpad shared dir from
 	// the hub's record of the project. The hub stamps it on every new project and
 	// mounts it read-write into every agent: a writable channel between the manager
@@ -385,11 +388,10 @@ type Deps struct {
 	// hub enforces but it does not is a silent regression.
 	EnsureAgentRoleCeiling func(ctx context.Context, projectName string) error
 	// RepairScionHubEndpoint rewrites the project's recorded hub endpoint when it
-	// no longer matches the real hub. Minting the controller PAT hub-links the
-	// project against a throwaway hub on its own port, and the register step's
-	// re-init is skipped when the registration is sound, so a re-mint leaves it
-	// pointing at a dead port. lever passes the endpoint explicitly, so this only
-	// breaks where scion runs bare in the jail (lever attach).
+	// differs from the real hub's. A registration linked against a hub on another
+	// port keeps that endpoint, since the register step's re-init is skipped when
+	// the registration is sound. lever passes the endpoint explicitly, so a stale
+	// one only breaks where scion runs bare in the jail (lever attach).
 	RepairScionHubEndpoint func(ctx context.Context, jailWorkspacePath string) error
 	// VerifyAgentRole gates keeping an existing agent record: it errors when the
 	// hub's record stores no authorization role while the installed scion
@@ -433,21 +435,21 @@ func (d Deps) check() error {
 		{"Scion", d.Scion == nil},
 		{"StartBroker", d.StartBroker == nil},
 		{"BrokerHealthy", d.BrokerHealthy == nil},
-		{"EnsureControllerPAT", d.EnsureControllerPAT == nil},
-		{"EnsureHubExperimentsOff", d.EnsureHubExperimentsOff == nil},
+		{"EnsureHubIdentity", d.EnsureHubIdentity == nil},
 		{"EnsureProjectProvider", d.EnsureProjectProvider == nil},
 		{"WaitBrokerReady", d.WaitBrokerReady == nil},
 		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
 		{"RearmBootstrap", d.RearmBootstrap == nil},
-		{"EnsureHubLogin", d.EnsureHubLogin == nil},
-		{"DisableHubLogin", d.DisableHubLogin == nil},
+		{"EnsureHubAuth", d.EnsureHubAuth == nil},
 		{"EnsureScionTelemetry", d.EnsureScionTelemetry == nil},
 		{"EnsureAgentTemplate", d.EnsureAgentTemplate == nil},
 		{"StartRemoteProxy", d.StartRemoteProxy == nil},
 		{"StopRemoteProxy", d.StopRemoteProxy == nil},
+		{"FenceRemoteLogins", d.FenceRemoteLogins == nil},
 		{"RemoveJailFile", d.RemoveJailFile == nil},
 		{"RemoveScionProjectConfigs", d.RemoveScionProjectConfigs == nil},
 		{"ScionProjectRegistered", d.ScionProjectRegistered == nil},
+		{"ProjectLinked", d.ProjectLinked == nil},
 		{"StripProjectSharedDirs", d.StripProjectSharedDirs == nil},
 		{"RepairScionHubEndpoint", d.RepairScionHubEndpoint == nil},
 		{"VerifyAgentRole", d.VerifyAgentRole == nil},
@@ -488,8 +490,9 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		attach:      opts.Attach,
 		freshNoConv: opts.FreshWithoutConversation,
 	}
-	// The converge-to-off reconciliation below needs the plan to know whether this
-	// run manages the hub (see disableHubLogin).
+	if err := d.FenceRemoteLogins(ctx); err != nil {
+		return fmt.Errorf("remote-proxy: %w", err)
+	}
 	steps := Plan(app, opts)
 	rep := progress.From(ctx)
 	rep.Group("apply", len(steps))
@@ -504,13 +507,6 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		if err := d.StopRemoteProxy(ctx); err != nil {
 			return fmt.Errorf("remote-proxy: %w", err)
 		}
-		// The login forwarder is an unauthenticated TCP bridge from guest loopback,
-		// reachable from every agent's netns, to a host loopback port beside lever's
-		// broker listeners. Left running after the feature is off, it bridges that port
-		// into the jail for whatever binds it next.
-		if err := r.disableHubLogin(ctx, steps); err != nil {
-			return fmt.Errorf("hub login: %w", err)
-		}
 		// Deliberately left in place:
 		//
 		//   - lever's overlay agent template and the project's default_template: they
@@ -523,39 +519,6 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		//     defaults keep the web frontend on either way (scion.ServerOpts.EnableWeb).
 	}
 	return nil
-}
-
-// disableHubLogin converges the guest half of the login path off, and restarts
-// the hub when that removed something the running hub was started from. The
-// hub reads oidc_login only at startup and takes --web-assets-dir from its argv,
-// and scion server start tolerates an already-running daemon, so only a restart
-// drops them. The restart does not turn off the web UI: scion's workstation
-// defaults keep the frontend on, and the Hub API is on 8080 only because of that
-// (scion.ServerOpts.EnableWeb).
-//
-// It restarts only on a real change, since a restart drops every agent's hub
-// connection. If the settings edit succeeds and the restart fails, the next
-// apply sees no change and the hub keeps serving the removed oidc_login from
-// memory until lever stop and lever up; the ON path has the same residual.
-// scion's server-args.json is not a usable signal: it outlives the daemon that
-// wrote it.
-//
-// Skipped when the plan does not manage the hub (BrokerOnly). That check also
-// makes d.Scion safe to dereference: the scion-server step ran earlier in this
-// Run.
-func (r *run) disableHubLogin(ctx context.Context, steps []Step) error {
-	changed, err := r.d.DisableHubLogin(ctx)
-	if err != nil {
-		return err
-	}
-	if !changed || !planHas(steps, KindScionServer) {
-		return nil
-	}
-	r.d.Log("lever: remote access is off — restarting the hub so it stops offering the remote login")
-	if err := r.d.Scion.ServerStop(ctx); err != nil {
-		return fmt.Errorf("restart the hub: %w", err)
-	}
-	return r.d.Scion.ServerStart(ctx, r.hubServerOpts())
 }
 
 func planHas(steps []Step, kind StepKind) bool {
@@ -587,10 +550,10 @@ func (r *run) step(ctx context.Context, s Step) error {
 		return r.d.Scion.InitMachine(ctx)
 	case KindConfigRegistry:
 		return r.d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
-	case KindBootstrapToken:
-		return r.d.EnsureControllerPAT(ctx)
 	case KindScionServer:
 		return r.scionServer(ctx)
+	case KindHubIdentity:
+		return r.d.EnsureHubIdentity(ctx)
 	case KindCredential:
 		return runCredential(ctx, s, r.d)
 	case KindRegisterProject:
@@ -609,17 +572,11 @@ func (r *run) step(ctx context.Context, s Step) error {
 	}
 }
 
-// scionServer runs the scion-server step. scion reads oidc_login only at
-// startup, so a hub already running when the login block changed must restart.
-// It restarts only on a change, because a restart drops every agent's hub
-// connection.
-//
-// A failure after EnsureHubLogin deliberately leaves the guest forwarder
-// running with no hub behind it: it reaches either nothing or a host-side lever
-// login provider, which hands out nothing without a code. (Two instances on the
-// same host port would reach each other's provider: a login that cannot
-// complete, not an exposure.) Tearing it down would also remove one a previous
-// apply legitimately left; the next apply converges it.
+// scionServer runs the scion-server step. It restarts a running hub only when
+// it was started with other auth settings, another key, or another argv than
+// this apply wants (HubRestartReason), or when the guest's key file or
+// settings changed in a way the hub reads only at startup: a restart drops
+// every agent's hub connection.
 func (r *run) scionServer(ctx context.Context) error {
 	telemetryChanged, err := r.d.EnsureScionTelemetry(ctx)
 	if err != nil {
@@ -629,23 +586,28 @@ func (r *run) scionServer(ctx context.Context) error {
 		r.d.Log("lever: agent telemetry in the jail's scion settings is now %q (scion.telemetry) — agents started from here on use it; "+
 			"a hub or manager that was already running keeps the old setting until `lever stop && lever up`", r.app.EffectiveScionTelemetry())
 	}
-	changed, err := r.d.EnsureHubLogin(ctx)
+	guestChanged, err := r.d.EnsureHubAuth(ctx)
 	if err != nil {
-		return fmt.Errorf("hub login: %w", err)
+		return fmt.Errorf("hub auth: %w", err)
 	}
-	if changed {
-		r.d.Log("lever: the hub's login configuration changed — restarting the hub so it is read")
-		// Stop-then-start, not scion server restart: scion's restart refuses when the
-		// daemon is not running, which is ordinary here (after lever stop, a reboot or
-		// a crash).
+	opts := r.hubServerOpts()
+	live, err := r.d.Scion.RunningHub(ctx)
+	if err != nil {
+		return fmt.Errorf("hub auth: %w", err)
+	}
+	reason := HubRestartReason(live, opts)
+	if reason == "" && guestChanged && live.Running {
+		reason = "the hub's key file or settings changed"
+	}
+	if reason != "" {
+		r.d.Log("lever: restarting the hub: %s", reason)
+		// Stop-then-start, not scion server restart: scion's restart replays the
+		// old argv without this apply's env, and refuses when no daemon runs.
 		if err := r.d.Scion.ServerStop(ctx); err != nil {
-			return fmt.Errorf("hub login: restart the hub: %w", err)
+			return fmt.Errorf("restart the hub: %w", err)
 		}
 	}
-	if err := r.d.Scion.ServerStart(ctx, r.hubServerOpts()); err != nil {
-		return err
-	}
-	if err := r.d.EnsureHubExperimentsOff(ctx); err != nil {
+	if err := r.d.Scion.ServerStart(ctx, opts); err != nil {
 		return err
 	}
 	// A just-started hub registers its runtime broker only after it serves, and
@@ -661,6 +623,51 @@ func (r *run) scionServer(ctx context.Context) error {
 	return nil
 }
 
+// HubRestartReason says why a running hub does not match the start opts, or ""
+// when it does (or none runs). It compares the env lever pins, dev auth (a hub
+// an operator started by hand gets scion's dev-auth default) and the web
+// assets argv that toggling remote access changes. scion re-execs its daemon
+// with a normalised argv, so the argv is compared flag by flag, not as a whole.
+func HubRestartReason(live scion.RunningHub, want scion.ServerOpts) string {
+	if !live.Running {
+		return ""
+	}
+	for k, v := range want.Env {
+		if got, ok := live.Env[k]; !ok || got != v {
+			return fmt.Sprintf("it was started without lever's %s setting", k)
+		}
+	}
+	for k := range live.Env {
+		if _, ok := want.Env[k]; !ok {
+			return fmt.Sprintf("it was started with %s, which lever does not set", k)
+		}
+	}
+	if flagValue(live.Argv, "--dev-auth") != "false" {
+		return "it was started without --dev-auth=false"
+	}
+	if got := flagValue(live.Argv, "--web-assets-dir"); got != want.WebAssetsDir {
+		return fmt.Sprintf("its web assets argv is %q, lever wants %q", got, want.WebAssetsDir)
+	}
+	return ""
+}
+
+// flagValue returns the value of --name=value or --name value in argv; a bare
+// boolean --name reads as "true".
+func flagValue(argv []string, name string) string {
+	for i, a := range argv {
+		if v, ok := strings.CutPrefix(a, name+"="); ok {
+			return v
+		}
+		if a == name {
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				return argv[i+1]
+			}
+			return "true"
+		}
+	}
+	return ""
+}
+
 // scionGlobalProject is the value of scion's -g flag that names its global
 // settings (~/.scion, made by init-machine) instead of a project directory.
 const scionGlobalProject = "global"
@@ -668,7 +675,7 @@ const scionGlobalProject = "global"
 // hubServerOpts makes the run's log the start's progress sink, so a slow cold
 // start says it is waiting.
 func (r *run) hubServerOpts() scion.ServerOpts {
-	opts := HubServerOpts(r.app, r.d.HubSessionSecret)
+	opts := HubServerOpts(r.app, r.d.HubSessionSecret, r.d.HubAuthEnv)
 	opts.Progress = r.d.Log
 	return opts
 }
@@ -677,12 +684,13 @@ func (r *run) hubServerOpts() scion.ServerOpts {
 // config. Every start and restart shares it: a restart exists to replace an
 // argv that no longer matches the config, and a second copy could re-apply the
 // flags it should drop.
-func HubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
+func HubServerOpts(app *config.App, sessionSecret string, authEnv map[string]string) scion.ServerOpts {
 	opts := scion.ServerOpts{
 		WebPort:       scion.DefaultHubPort,
 		DevAuth:       false,
 		EnableWeb:     app.RemoteEnabled(),
 		SessionSecret: sessionSecret,
+		Env:           authEnv,
 	}
 	if app.ScionWebAssets() {
 		// Same predicate as the asset staging, so the flag never points at an empty
@@ -799,11 +807,26 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	// an unsound registration (zero, duplicate or torn) falls through to the
 	// destructive path: fail open, never a hard failure over an observe read.
 	if ok, err := r.d.ScionProjectRegistered(ctx, jp); err == nil && ok {
-		// The recorded hub endpoint can still be stale: minting the controller PAT
-		// links the project against a throwaway hub on its own port, and that link
-		// survives because this path skips the re-init.
+		// The recorded hub endpoint can be another port's (a link made against a
+		// throwaway hub), and this path skips the re-init that would rewrite it.
 		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
+		}
+		linked, err := r.d.ProjectLinked(ctx, jp)
+		if err != nil {
+			return fmt.Errorf("register-project: %w", err)
+		}
+		if !linked {
+			// hub-identity registered the project with this ID and name, so the link
+			// takes scion's already-linked path, which a project PAT may run.
+			if err := r.hubLink(ctx, jp); err != nil {
+				return err
+			}
+			if linked, err = r.d.ProjectLinked(ctx, jp); err != nil {
+				return fmt.Errorf("register-project: %w", err)
+			} else if !linked {
+				return fmt.Errorf("register-project: scion hub link ran but the project is still not linked to the hub project lever recorded")
+			}
 		}
 		return r.settleProject(ctx, jp)
 	}
@@ -888,17 +911,8 @@ func (r *run) hubLink(ctx context.Context, jp string) error {
 // sound.
 func (r *run) settleProject(ctx context.Context, jp string) error {
 	projectName := path.Base(jp)
-	linked, err := r.d.EnsureProjectProvider(ctx, projectName)
-	if err != nil {
+	if err := r.d.EnsureProjectProvider(ctx, jp); err != nil {
 		return err
-	}
-	// The repair ran a hub link against the window's throwaway hub, and started
-	// the hub again: start-manager must not trust scion-server's broker wait.
-	if linked {
-		r.brokerOnline = false
-		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
-			return err
-		}
 	}
 	if err := r.d.StripProjectSharedDirs(ctx, projectName); err != nil {
 		return err
@@ -956,7 +970,8 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// Wait for runtime-broker readiness before any create or resume: the daemon
 	// registers its broker asynchronously after its Hub API is up. Fail-soft; the
 	// broker-unavailable retry backstops it. Skipped when the scion-server step of
-	// this run saw the broker online and no later step started the hub again.
+	// this run saw the broker online, since nothing between the two restarts the
+	// hub.
 	if !r.brokerOnline {
 		if _, err := r.d.WaitBrokerReady(ctx, jp); err != nil {
 			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
@@ -2299,4 +2314,26 @@ func defaultReadCred(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// HubAuthEnv is the env every hub start carries: scion's proxy auth mode with
+// the JWT provider, invite-only sign-in and lever-admin as the only admin
+// email. scion maps compound settings only when written without inner
+// underscores (USERACCESSMODE, PUBLICKEYFILE); the underscored spellings are
+// silently ignored, and an ignored user-access mode admits anyone.
+// LEVER_HUB_AUTH_KEY records which key the hub read, for HubRestartReason.
+func HubAuthEnv(instanceID, keyFingerprint string) map[string]string {
+	return map[string]string{
+		"SCION_SERVER_AUTH_MODE":                    "proxy",
+		"SCION_SERVER_AUTH_USERACCESSMODE":          "invite_only",
+		"SCION_SERVER_AUTH_PROXY_PROVIDER":          "jwt",
+		"SCION_SERVER_AUTH_PROXY_JWT_ALGORITHM":     hubauth.Algorithm,
+		"SCION_SERVER_AUTH_PROXY_JWT_HEADER":        hubauth.Header,
+		"SCION_SERVER_AUTH_PROXY_JWT_ISSUER":        hubauth.Issuer(instanceID),
+		"SCION_SERVER_AUTH_PROXY_JWT_AUDIENCE":      hubauth.Audience(instanceID),
+		"SCION_SERVER_AUTH_PROXY_JWT_PUBLICKEYFILE": hubauth.GuestPublicKeyPath,
+		"SCION_SERVER_HUB_ADMINEMAILS":              hubauth.AdminEmail,
+		"SCION_SERVER_AUTH_DEFAULTUSERROLE":         "member",
+		"LEVER_HUB_AUTH_KEY":                        keyFingerprint,
+	}
 }

@@ -693,8 +693,8 @@ func (c *Client) ResetAuth(ctx context.Context, agent, project string) error {
 // execs it to hand over the TTY, bypassing env().
 //
 // It pins the endpoint with an env SCION_HUB_ENDPOINT= prefix, or scion would
-// fall back to the endpoint persisted in the jail's project config, which the
-// mint window can leave pointing at the throwaway hub. It must not embed the
+// fall back to the endpoint persisted in the jail's project config, which can
+// name another port (a link made against a throwaway hub). It must not embed the
 // controller PAT: the argv lands on a host command line readable via ps. The
 // caller stages the token in the guest instead (jail.StageHubToken).
 func (c *Client) AttachArgv(worker, project string) []string {

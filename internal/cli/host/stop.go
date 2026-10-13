@@ -80,8 +80,8 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			suspended := true
 			if appName != "" {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
-					// HubTokenSource authenticates against the dev-auth-off hub with the
-					// controller PAT. Empty agent role: only start emits --role.
+					// HubTokenSource authenticates with the controller PAT. Empty agent
+					// role: only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
 					hub = sc
 					// The heal has its own budget, so a slow one cannot cost the manager its

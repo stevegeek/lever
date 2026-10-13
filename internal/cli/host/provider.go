@@ -4,100 +4,91 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
+	"strings"
 
-	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// errNoProvider is the reason the provider repair opens the dev-auth window.
+// errNoProvider is a project no agent can start in ("no_runtime_broker").
 var errNoProvider = errors.New("the instance's hub project has no runtime broker linked")
 
-// providerRepair is ensureProjectProvider's seams.
-type providerRepair struct {
-	live    *hubapi.Client
-	project string
-	// window runs the bootstrap-token step with a required reason: its hub link
-	// as the dev identity links the jail's runtime broker.
-	window func(ctx context.Context, reason string) error
-	// startHub starts the live hub with its normal options; waitBroker waits
-	// for its runtime broker to register.
-	startHub   func(ctx context.Context) error
-	waitBroker func(ctx context.Context) error
-	log        func(format string, args ...any)
+// providerLink is ensureProjectProvider's seams.
+type providerLink struct {
+	// live is the hub as the controller PAT; admin as lever-admin.
+	live, admin *hubapi.Client
+	// jp is the project's jail path: its name on the hub, and the directory the
+	// broker runs its agents from.
+	jp  string
+	log func(format string, args ...any)
 }
 
-// ensureProjectProvider makes the instance's hub project list a runtime broker,
-// without which no agent starts ("no_runtime_broker").
+// ensureProjectProvider makes the instance's hub project list a runtime
+// broker, without which no agent starts.
 //
-// A hub link under the controller PAT cannot link one: scion links a broker to
-// a project only for a caller holding broker.update on it, which no user
-// access token scope grants. The dev identity in the window can, but the
-// window's hub link knows the jail's broker only after the live hub has
-// registered it, so a fresh instance's first window creates the project with
-// none. Here, after the live hub registered its broker, a project without one
-// gets a second window, and the hub starts again.
+// scion links a broker to a project only for a caller holding broker.update
+// on that broker (its owner or a super-admin), which no token scope grants,
+// so the controller PAT's hub link registers the project but links no
+// broker. lever-admin, the hub's only admin, links it here. The jail's hub
+// runs exactly one broker, its own; anything else is refused rather than
+// guessed at.
 //
-// A project the hub does not list is not repaired here: the settle steps
-// after it fail on the same name.
-func ensureProjectProvider(ctx context.Context, r providerRepair) (linked bool, err error) {
-	n, err := projectProviderCount(ctx, r.live, r.project)
+// A project the hub does not list is not linked here: the settle steps after
+// it fail on the same name.
+func ensureProjectProvider(ctx context.Context, r providerLink) error {
+	id, n, err := projectProviderCount(ctx, r.live, path.Base(r.jp))
 	if err != nil || n != 0 {
-		return false, err
+		return err
 	}
-	r.log("lever: %s; linking it in the dev-auth window and restarting the hub", errNoProvider)
-	if err := r.window(ctx, errNoProvider.Error()); err != nil {
-		return false, err
-	}
-	if err := r.startHub(ctx); err != nil {
-		return true, fmt.Errorf("runtime broker: starting the hub after linking the broker: %w", err)
-	}
-	if err := r.waitBroker(ctx); err != nil {
-		return true, fmt.Errorf("runtime broker: %w", err)
-	}
-	n, err = projectProviderCount(ctx, r.live, r.project)
+	brokers, err := r.admin.RuntimeBrokers(ctx)
 	if err != nil {
-		return true, err
+		return fmt.Errorf("runtime broker: listing the hub's brokers as lever-admin: %w", err)
+	}
+	if len(brokers) != 1 {
+		var ids []string
+		for _, b := range brokers {
+			ids = append(ids, b.ID+" ("+b.Name+")")
+		}
+		return fmt.Errorf("runtime broker: %w, and lever links only the jail's own broker, but the hub lists %d brokers [%s]; "+
+			"check `scion hub brokers` in the jail, then run `lever apply`", errNoProvider, len(brokers), strings.Join(ids, ", "))
+	}
+	b := brokers[0]
+	r.log("lever: linking the jail's runtime broker %s (%s) to hub project %s as lever-admin", b.ID, b.Name, id)
+	if err := r.admin.AddProjectProvider(ctx, id, b.ID, r.jp); err != nil {
+		return fmt.Errorf("runtime broker: linking broker %s to hub project %s as lever-admin: %w", b.ID, id, err)
+	}
+	if _, n, err = projectProviderCount(ctx, r.live, path.Base(r.jp)); err != nil {
+		return err
 	}
 	if n == 0 {
-		return true, fmt.Errorf("runtime broker: %w after the dev-auth window linked it; check `scion hub brokers` in the jail, then run `lever apply`", errNoProvider)
+		return fmt.Errorf("runtime broker: %w after lever-admin linked broker %s; check `scion hub brokers` in the jail, then run `lever apply`", errNoProvider, b.ID)
 	}
-	return true, nil
+	return nil
 }
 
 // projectProviderCount is -1 for a project the hub does not list.
-func projectProviderCount(ctx context.Context, hc *hubapi.Client, project string) (int, error) {
+func projectProviderCount(ctx context.Context, hc *hubapi.Client, project string) (string, int, error) {
 	id, err := hc.ProjectID(ctx, project, scion.DefaultHubEndpoint)
 	if apiErr := (*hubapi.APIError)(nil); errors.As(err, &apiErr) && apiErr.NoProject {
-		return -1, nil
+		return "", -1, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("runtime broker: finding the hub project %q: %w", project, err)
+		return "", 0, fmt.Errorf("runtime broker: finding the hub project %q: %w", project, err)
 	}
 	ps, err := hc.ProjectProviders(ctx, id)
 	if err != nil {
-		return 0, fmt.Errorf("runtime broker: listing hub project %q's brokers: %w", project, err)
+		return "", 0, fmt.Errorf("runtime broker: listing hub project %q's brokers: %w", project, err)
 	}
-	return len(ps), nil
+	return id, len(ps), nil
 }
 
 // ensureProjectProvider backs Deps.EnsureProjectProvider.
-func (w *applyWiring) ensureProjectProvider(ctx context.Context, projectName string) (bool, error) {
-	return ensureProjectProvider(ctx, providerRepair{
-		live:    w.hub(),
-		project: projectName,
-		window: func(ctx context.Context, reason string) error {
-			return ensureControllerPAT(ctx, w.jr, w.state, w.app.Tree, w.b.MountDest(), remoteAccessFor(w.app), w.patOpts(reason))
-		},
-		startHub: func(ctx context.Context) error {
-			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret)
-			opts.Progress = w.deps.Log
-			return w.sc.ServerStart(ctx, opts)
-		},
-		waitBroker: func(ctx context.Context) error {
-			_, err := w.sc.RuntimeBrokerReady(ctx, "global")
-			return err
-		},
-		log: w.log,
+func (w *applyWiring) ensureProjectProvider(ctx context.Context, jp string) error {
+	return ensureProjectProvider(ctx, providerLink{
+		live:  w.hub(),
+		admin: w.assertHub(w.signer.Admin),
+		jp:    jp,
+		log:   w.log,
 	})
 }

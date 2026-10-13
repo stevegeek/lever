@@ -1,24 +1,20 @@
 package host
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
-	"github.com/stevegeek/lever/internal/proc"
-	"github.com/stevegeek/lever/internal/state"
 )
 
-// fakeAdminHub is an in-memory throwaway-hub admin API answering with scion's
+// fakeAdminHub is an in-memory hub admin API answering with scion's
 // shapes (see internal/hubapi/roles.go).
 type fakeAdminHub struct {
 	projectID string
@@ -46,6 +42,7 @@ type fakeConstraint struct {
 	hubapi.ConstraintDraft
 	id       string
 	revision int
+	status   string // "" is active
 }
 
 type fakePreview struct {
@@ -178,7 +175,7 @@ func (h *fakeAdminHub) constraintRoute(method string, u *url.URL, body []byte) (
 	const base = "/api/v1/admin/access-constraints"
 	wire := func(c *fakeConstraint, detail bool) map[string]any {
 		m := map[string]any{"id": c.id, "name": c.Name, "subject": c.Subject,
-			"scope": map[string]string{"type": c.Scope.Type}, "status": "active",
+			"scope": map[string]string{"type": c.Scope.Type}, "status": cmp.Or(c.status, "active"),
 			"revision": fmt.Sprint(c.revision)}
 		if detail {
 			var perms []map[string]string
@@ -288,14 +285,6 @@ func (h *fakeAdminHub) count(prefix string) int {
 	return n
 }
 
-// seedAllPATs persists both tokens with current records, so a window opens
-// only for the role grant.
-func seedAllPATs(t *testing.T, st state.State) {
-	t.Helper()
-	seedPAT(t, st, "controller", "pat-controller")
-	seedPAT(t, st, "remote", "pat-remote")
-}
-
 func collectWarnings() (*[]string, func(string, ...any)) {
 	var w []string
 	return &w, func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
@@ -310,375 +299,306 @@ func TestRemoteRolePermissionsMirrorTheRemotePAT(t *testing.T) {
 	}
 }
 
-// First grant: the window opens for the role alone, creates it with exactly
-// the expected permissions, binds the allowed user and records it.
-func TestRemoteWebRoleFirstGrant(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	hub := newFakeAdminHub("you@github")
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	warned, warn := collectWarnings()
+// The ceiling is hub-member minus project.create plus the role, deduplicated
+// and sorted.
+func TestRemoteCeilingPermissions(t *testing.T) {
+	got := remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))
+	if slices.Contains(got, projectCreatePermission) {
+		t.Fatalf("ceiling keeps project.create: %v", got)
+	}
+	if !slices.IsSorted(got) || len(slices.Compact(slices.Clone(got))) != len(got) {
+		t.Fatalf("ceiling not sorted and unique: %v", got)
+	}
+	for _, p := range append(slices.Clone(remoteRolePermissions(false)), "user.read", "hub.settings.read") {
+		if !slices.Contains(got, p) {
+			t.Fatalf("ceiling drops %s: %v", p, got)
+		}
+	}
+	if got := remoteCeilingPermissions(nil, []string{"project.create", "agent.message"}); !slices.Equal(got, []string{"agent.message"}) {
+		t.Fatalf("project.create from the role side must be dropped too: %v", got)
+	}
+}
 
-	ra := remoteAccess{Enabled: true, Emails: []string{"you@github"}}
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
+// A lever role is created with exactly its permissions, kept when it matches,
+// and rewritten with a warning when it drifted; a system role of the same
+// name is never touched.
+func TestEnsureProjectRole(t *testing.T) {
+	ctx := context.Background()
+	hub := newFakeAdminHub()
+	hc := &hubapi.Client{T: hub}
+	warned, warn := collectWarnings()
+	perms := remoteRolePermissions(false)
+	defs := func() []hubapi.RoleDefinition {
+		d, err := hc.RoleDefinitions(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	r, err := ensureProjectRole(ctx, hc, defs(), remoteWebRoleName, remoteWebRoleDescription, perms, warn)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvScionServerStart) }); n != 1 {
-		t.Fatalf("server start calls = %d, want 1", n)
+	if r.ID == "" || len(hub.roles) != 1 || hub.roles[0].ScopeType != hubapi.RoleScopeProject || !slices.Equal(hub.roles[0].Permissions, perms) {
+		t.Fatalf("roles = %+v", hub.roles)
 	}
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvScionTokenCreate) }); n != 0 {
-		t.Fatalf("token create calls = %d, want 0 (both PATs current)", n)
+	before := len(hub.calls)
+	if r2, err := ensureProjectRole(ctx, hc, defs(), remoteWebRoleName, remoteWebRoleDescription, perms, warn); err != nil || r2.ID != r.ID {
+		t.Fatalf("second run: %+v %v", r2, err)
 	}
-	if len(hub.roles) != 1 {
-		t.Fatalf("roles = %+v, want one", hub.roles)
+	for _, c := range hub.calls[before:] {
+		if !strings.HasPrefix(c, "GET ") {
+			t.Fatalf("a matching role was written: %v", hub.calls[before:])
+		}
 	}
-	r := hub.roles[0]
-	if r.Name != remoteWebRoleName || r.ScopeType != "project" || !slices.Equal(r.Permissions, remoteRolePermissions(false)) {
-		t.Fatalf("role = %+v", r)
+	hub.roles[0].Permissions = append(slices.Clone(perms), "agent.manage")
+	if _, err := ensureProjectRole(ctx, hc, defs(), remoteWebRoleName, remoteWebRoleDescription, perms, warn); err != nil {
+		t.Fatal(err)
 	}
-	want := hubapi.RoleBinding{ID: "binding-2", RoleDefinitionID: r.ID, PrincipalType: "user", PrincipalID: "user-1", ScopeType: "project", ScopeID: "proj-uuid"}
-	if len(hub.bindings) != 1 || hub.bindings[0] != want {
-		t.Fatalf("bindings = %+v, want [%+v]", hub.bindings, want)
+	if hub.count("PUT /api/v1/admin/roles/"+r.ID) != 1 || !hubapi.SamePermissions(hub.roles[0].Permissions, perms) {
+		t.Fatalf("drift not converged: %v %v", hub.calls, hub.roles[0].Permissions)
 	}
-	rec, found, err := st.LoadRemoteRoleRecord()
-	if err != nil || !found {
-		t.Fatalf("record: found=%v err=%v", found, err)
+	if len(*warned) != 1 || !strings.Contains((*warned)[0], "agent.manage") {
+		t.Fatalf("warnings = %q", *warned)
 	}
-	if rec.RoleID != r.ID || rec.ProjectID != "proj-uuid" || rec.Bound["you@github"] != "user-1" || len(rec.Pending) != 0 {
-		t.Fatalf("record = %+v", rec)
+
+	sys := newFakeAdminHub()
+	sys.systemRoles = append(sys.systemRoles, hubapi.RoleDefinition{ID: "sys-x", Name: contactRoleName, ScopeType: hubapi.RoleScopeProject, System: true})
+	sc := &hubapi.Client{T: sys}
+	sdefs, err := sc.RoleDefinitions(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// One system-scope constraint on that user: hub-member minus project.create
-	// plus the role's permissions.
-	wantCeiling := remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))
+	if _, err := ensureProjectRole(ctx, sc, sdefs, contactRoleName, contactRoleDescription, contactRolePermissions(), warn); err == nil {
+		t.Fatal("a system role of lever's name must be refused")
+	}
+	if sys.count("PUT ")+sys.count("POST ") != 0 {
+		t.Fatalf("the system role was written: %v", sys.calls)
+	}
+}
+
+// A binding is posted once; an existing one is not posted again, and drop
+// removes only the named role's binding on the project.
+func TestEnsureAndDropProjectRoleBinding(t *testing.T) {
+	ctx := context.Background()
+	hub := newFakeAdminHub()
+	hc := &hubapi.Client{T: hub}
+	for range 2 {
+		if err := ensureProjectRoleBinding(ctx, hc, "role-a", "user-1", "proj-uuid"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ensureProjectRoleBinding(ctx, hc, "role-b", "user-1", "proj-uuid"); err != nil {
+		t.Fatal(err)
+	}
+	if hub.count("POST /api/v1/admin/role-bindings") != 2 || len(hub.bindings) != 2 {
+		t.Fatalf("bindings = %+v, calls %v", hub.bindings, hub.calls)
+	}
+	if err := dropProjectRoleBinding(ctx, hc, "role-a", "user-1", "proj-uuid"); err != nil {
+		t.Fatal(err)
+	}
+	if len(hub.bindings) != 1 || hub.bindings[0].RoleDefinitionID != "role-b" {
+		t.Fatalf("after drop: %+v", hub.bindings)
+	}
+	before := len(hub.calls)
+	if err := dropProjectRoleBinding(ctx, hc, "", "user-1", "proj-uuid"); err != nil || len(hub.calls) != before {
+		t.Fatalf("drop of role \"\" must be a no-op: %v %v", err, hub.calls[before:])
+	}
+}
+
+// ceilingFor is a system-scope ceiling on userID under name.
+func ceilingFor(id, name, userID string, perms []string) *fakeConstraint {
+	return &fakeConstraint{id: id, revision: 3, ConstraintDraft: hubapi.ConstraintDraft{
+		Name: name, Purpose: "x",
+		Subject:            hubapi.ConstraintSubject{Kind: "principal", PrincipalType: "user", PrincipalID: userID},
+		Scope:              hubapi.ConstraintScope{Type: "system"},
+		MaximumPermissions: perms,
+	}}
+}
+
+func webCeiling() []string {
+	return remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))
+}
+
+// callAt is the index of the first call with prefix, or -1.
+func (h *fakeAdminHub) callAt(prefix string) int {
+	return slices.IndexFunc(h.calls, func(c string) bool { return strings.HasPrefix(c, prefix) })
+}
+
+// A first ceiling goes under the user's first name: system scope, on that
+// user, hub-member minus project.create plus the role.
+func TestRemoteCeilingFirstCreate(t *testing.T) {
+	hub := newFakeAdminHub()
+	warned, warn := collectWarnings()
+	id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(hub.constraints) != 1 {
 		t.Fatalf("constraints = %+v, want one", hub.constraints)
 	}
 	c := hub.constraints[0]
-	if c.Name != remoteCeilingName("you@github") || c.Scope.Type != "system" ||
+	if c.id != id || c.Name != remoteCeilingName("you@github") || c.Scope.Type != "system" ||
 		c.Subject != (hubapi.ConstraintSubject{Kind: "principal", PrincipalType: "user", PrincipalID: "user-1"}) ||
-		!hubapi.SamePermissions(c.MaximumPermissions, wantCeiling) {
-		t.Fatalf("constraint = %+v", c)
+		!hubapi.SamePermissions(c.MaximumPermissions, webCeiling()) {
+		t.Fatalf("constraint = %+v (id %q)", c, id)
 	}
-	if slices.Contains(c.MaximumPermissions, "project.create") {
-		t.Fatalf("ceiling keeps project.create: %v", c.MaximumPermissions)
-	}
-	for _, p := range append(slices.Clone(remoteRolePermissions(false)), "user.read", "hub.settings.read") {
-		if !slices.Contains(c.MaximumPermissions, p) {
-			t.Fatalf("ceiling drops %s, which the web user holds: %v", p, c.MaximumPermissions)
-		}
-	}
-	if rec.Ceilings["you@github"] != c.id || !hubapi.SamePermissions(rec.CeilingPermissions, wantCeiling) {
-		t.Fatalf("record ceiling = %v %v, want %s %v", rec.Ceilings, rec.CeilingPermissions, c.id, wantCeiling)
-	}
-	if fi, err := os.Stat(st.RemoteRole()); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("remote-role.json: %v, %v", fi, err)
-	}
-	if len(*warned) != 0 {
-		t.Fatalf("warnings = %q, want none", *warned)
+	if hub.count("DELETE ") != 0 || len(*warned) != 0 {
+		t.Fatalf("a first create deleted or warned: %v %q", hub.calls, *warned)
 	}
 }
 
-// A complete record means no window at all: no scion call, no hub call.
-func TestRemoteWebRoleCompleteRecordOpensNoWindow(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	hub := newFakeAdminHub("you@github")
-	ra := remoteAccess{Enabled: true, Emails: []string{"you@github"}}
-
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub}); err != nil {
-		t.Fatal(err)
-	}
-	calls := len(hub.calls)
-
-	again := proc.NewFakeRunner() // no scripts: any call is an error
-	if err := ensureControllerPAT(context.Background(), again, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub}); err != nil {
-		t.Fatal(err)
-	}
-	if len(again.Calls) != 0 || len(hub.calls) != calls {
-		t.Fatalf("re-run made %d jail calls and %d hub calls, want none", len(again.Calls), len(hub.calls)-calls)
-	}
-}
-
-// A user who never signed in has no hub user: warned once, recorded as
-// pending, and the record stays incomplete so the next apply retries.
-func TestRemoteWebRoleMissingUserWarnsAndStaysPending(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	hub := newFakeAdminHub("you@github") // the second allowed user has never signed in
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	warned, warn := collectWarnings()
-
-	ra := remoteAccess{Enabled: true, Emails: []string{"you@github", "partner@github"}}
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
-		t.Fatalf("a missing user must not fail apply: %v", err)
-	}
-	if len(*warned) != 1 || !strings.Contains((*warned)[0], "partner@github") || !strings.Contains((*warned)[0], remoteRoleFix) {
-		t.Fatalf("warnings = %q, want one naming partner@github with the fix", *warned)
-	}
-	rec, found, _ := st.LoadRemoteRoleRecord()
-	if !found || !slices.Equal(rec.Pending, []string{"partner@github"}) || rec.Bound["you@github"] == "" {
-		t.Fatalf("record = %+v", rec)
-	}
-	if reason := remoteRoleReason(rec, found, ra.Emails, nil, remoteRolePermissions(false)); !strings.Contains(reason, "partner@github") {
-		t.Fatalf("reason = %q, want the record incomplete for partner@github", reason)
-	}
-
-	// Once the partner signs in, the next apply binds them and not the first user
-	// again.
-	hub.users = append(hub.users, hubapi.User{ID: "user-2", Email: "partner@github"})
-	f2 := proc.NewFakeRunner()
-	scriptPATMintChain(f2)
-	if err := ensureControllerPAT(context.Background(), f2, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
-		t.Fatal(err)
-	}
-	if len(hub.bindings) != 2 || hub.count("POST /api/v1/admin/role-bindings") != 2 {
-		t.Fatalf("bindings = %+v (posts %d), want one per user", hub.bindings, hub.count("POST /api/v1/admin/role-bindings"))
-	}
-	rec, found, _ = st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, nil, remoteRolePermissions(false)); reason != "" {
-		t.Fatalf("reason = %q, want complete", reason)
-	}
-}
-
-// Adding an allowed user re-triggers the window; the role is reused, not
-// recreated, and the existing binding is not posted again.
-func TestRemoteWebRoleAllowedUsersChangeRetriggers(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	hub := newFakeAdminHub("you@github", "partner@github")
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever",
-		remoteAccess{Enabled: true, Emails: []string{"you@github"}}, patMintOpts{AdminHub: hub}); err != nil {
-		t.Fatal(err)
-	}
-
-	f2 := proc.NewFakeRunner()
-	scriptPATMintChain(f2)
-	ra := remoteAccess{Enabled: true, Emails: []string{"you@github", "partner@github"}}
-	if err := ensureControllerPAT(context.Background(), f2, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub}); err != nil {
-		t.Fatal(err)
-	}
-	if n := countCalls(f2.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvScionServerStart) }); n != 1 {
-		t.Fatalf("server start calls = %d, want 1 (the new user re-opens the window)", n)
-	}
-	if len(hub.roles) != 1 || hub.count("POST /api/v1/admin/roles") != 1 {
-		t.Fatalf("roles = %+v, want the first one reused", hub.roles)
-	}
-	if len(hub.bindings) != 2 || hub.count("POST /api/v1/admin/role-bindings") != 2 {
-		t.Fatalf("bindings = %+v, want one per user and no duplicate post", hub.bindings)
-	}
-	rec, found, _ := st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, nil, remoteRolePermissions(false)); reason != "" {
-		t.Fatalf("reason = %q, want complete", reason)
-	}
-}
-
-// A role with a drifted permission set is rewritten with a warning; a record
-// with an older set re-triggers the window too.
-func TestRemoteWebRolePermissionDriftConverges(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{
-		RoleID: "role-old", Permissions: []string{"agent.read"}, Bound: map[string]string{"you@github": "user-1"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	hub := newFakeAdminHub("you@github")
-	hub.roles = []hubapi.RoleDefinition{{ID: "role-old", Name: remoteWebRoleName, ScopeType: "project", Permissions: []string{"agent.read", "agent.manage"}}}
-	hub.bindings = []hubapi.RoleBinding{{ID: "b-1", RoleDefinitionID: "role-old", PrincipalType: "user", PrincipalID: "user-1", ScopeType: "project", ScopeID: "proj-uuid"}}
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	warned, warn := collectWarnings()
-
-	ra := remoteAccess{Enabled: true, Emails: []string{"you@github"}}
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
-		t.Fatal(err)
-	}
-	if hub.count("PUT /api/v1/admin/roles/role-old") != 1 || hub.count("POST /api/v1/admin/roles") != 0 {
-		t.Fatalf("calls = %v, want one PUT of role-old and no create", hub.calls)
-	}
-	if !hubapi.SamePermissions(hub.roles[0].Permissions, remoteRolePermissions(false)) {
-		t.Fatalf("role permissions = %v, want %v", hub.roles[0].Permissions, remoteRolePermissions(false))
-	}
-	if hub.count("POST /api/v1/admin/role-bindings") != 0 {
-		t.Fatalf("the existing binding was posted again: %v", hub.calls)
-	}
-	if len(*warned) != 1 || !strings.Contains((*warned)[0], "agent.manage") {
-		t.Fatalf("warnings = %q, want one naming the drifted set", *warned)
-	}
-	rec, found, _ := st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, nil, remoteRolePermissions(false)); reason != "" {
-		t.Fatalf("reason = %q, want complete", reason)
-	}
-}
-
-// A hub failure mid-grant is a warning, not an apply error, and leaves no
-// record, so the next apply retries.
-func TestRemoteWebRoleHubFailureIsAWarning(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	warned, warn := collectWarnings()
-	bad := failingDoer{} // every hub call answers 403
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever",
-		remoteAccess{Enabled: true, Emails: []string{"you@github"}}, patMintOpts{AdminHub: bad, Warn: warn}); err != nil {
-		t.Fatalf("a failed grant must not fail apply: %v", err)
-	}
-	if len(*warned) != 1 || !strings.Contains((*warned)[0], "remote web role not granted") {
-		t.Fatalf("warnings = %q", *warned)
-	}
-	if _, found, _ := st.LoadRemoteRoleRecord(); found {
-		t.Fatal("a failed grant must not leave a record")
-	}
-}
-
-// A record without ceilings re-opens the window; role and binding are reused
-// and only the ceiling is added.
-func TestRemoteCeilingPreCeilingRecordRetriggers(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	hub := newFakeAdminHub("you@github")
-	hub.roles = []hubapi.RoleDefinition{{ID: "role-1", Name: remoteWebRoleName, ScopeType: "project", Permissions: remoteRolePermissions(false)}}
-	hub.bindings = []hubapi.RoleBinding{{ID: "b-1", RoleDefinitionID: "role-1", PrincipalType: "user", PrincipalID: "user-1", ScopeType: "project", ScopeID: "proj-uuid"}}
-	// A record with no ceilings and no ceiling_permissions.
-	if err := os.WriteFile(st.RemoteRole(), []byte(`{"role_id":"role-1","permissions":["agent.read","agent.list","project.read","agent.attach","agent.message","project.list"],"project_id":"proj-uuid","bound":{"you@github":"user-1"},"granted_at":"2026-09-23T20:00:00Z"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ra := remoteAccess{Enabled: true, Emails: []string{"you@github"}}
-	rec, found, err := st.LoadRemoteRoleRecord()
-	if err != nil || !found {
-		t.Fatalf("old record: found=%v err=%v", found, err)
-	}
-	if reason := remoteRoleReason(rec, found, ra.Emails, nil, remoteRolePermissions(false)); !strings.Contains(reason, "ceiling") {
-		t.Fatalf("reason = %q, want the missing ceiling", reason)
-	}
-
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub}); err != nil {
-		t.Fatal(err)
-	}
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvScionServerStart) }); n != 1 {
-		t.Fatalf("server start calls = %d, want 1", n)
-	}
-	if hub.count("POST /api/v1/admin/roles") != 0 || hub.count("POST /api/v1/admin/role-bindings") != 0 {
-		t.Fatalf("the role or binding was written again: %v", hub.calls)
-	}
-	if len(hub.constraints) != 1 || hub.count("POST /api/v1/admin/access-constraints") != 1 {
-		t.Fatalf("constraints = %+v, want one created", hub.constraints)
-	}
-	rec, found, _ = st.LoadRemoteRoleRecord()
-	if reason := remoteRoleReason(rec, found, ra.Emails, nil, remoteRolePermissions(false)); reason != "" {
-		t.Fatalf("reason = %q, want complete", reason)
-	}
-}
-
-// Idempotent: a matching ceiling is read and kept, never re-created, and no
-// preview is asked for.
-func TestRemoteCeilingIdempotent(t *testing.T) {
-	hub := newFakeAdminHub("you@github")
-	hc := &hubapi.Client{T: hub}
-	_, warn := collectWarnings()
-	if _, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, nil, false, time.Now(), warn); err != nil {
-		t.Fatal(err)
-	}
-	first := hub.constraints[0].id
-	before := len(hub.calls)
-	rec, err := ensureRemoteWebRole(context.Background(), hc, "lever", []string{"you@github"}, nil, false, time.Now(), warn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range hub.calls[before:] {
-		if strings.HasPrefix(c, "POST /api/v1/admin/access-constraint") || strings.HasPrefix(c, "DELETE ") {
-			t.Fatalf("second run wrote a constraint: %v", hub.calls[before:])
-		}
-	}
-	if len(hub.constraints) != 1 || rec.Ceilings["you@github"] != first {
-		t.Fatalf("constraints = %+v, record = %v; want the first one kept", hub.constraints, rec.Ceilings)
-	}
-}
-
-// A ceiling that drifted (it allows project.create, or names a re-created hub
-// user) is replaced through a preview-bound delete and create, with a warning.
-func TestRemoteCeilingDriftIsReplaced(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		subject string
-		perms   []string
-	}{
-		{"allows project.create", "user-1", append(slices.Clone(remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))), "project.create")},
-		{"another hub user", "user-old", remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			hub := newFakeAdminHub("you@github")
-			hub.constraints = []*fakeConstraint{{id: "ac-old", revision: 3, ConstraintDraft: hubapi.ConstraintDraft{
-				Name: remoteCeilingName("you@github"), Purpose: "x",
-				Subject:            hubapi.ConstraintSubject{Kind: "principal", PrincipalType: "user", PrincipalID: tc.subject},
-				Scope:              hubapi.ConstraintScope{Type: "system"},
-				MaximumPermissions: tc.perms,
-			}}}
-			warned, warn := collectWarnings()
-			rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, nil, false, time.Now(), warn)
+// A matching ceiling under either of the user's names is read and kept: no
+// preview, create or delete.
+func TestRemoteCeilingMatchingIsKept(t *testing.T) {
+	for i, name := range remoteCeilingNames("you@github") {
+		t.Run(name, func(t *testing.T) {
+			hub := newFakeAdminHub()
+			hub.constraints = []*fakeConstraint{ceilingFor("ac-keep", name, "user-1", webCeiling())}
+			_, warn := collectWarnings()
+			id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("name %d: %v", i, err)
 			}
-			if hub.count("DELETE /api/v1/admin/access-constraints/ac-old") != 1 {
-				t.Fatalf("calls = %v, want the old constraint deleted", hub.calls)
-			}
-			if len(hub.constraints) != 1 || hub.constraints[0].id == "ac-old" || hub.constraints[0].Subject.PrincipalID != "user-1" ||
-				slices.Contains(hub.constraints[0].MaximumPermissions, "project.create") {
-				t.Fatalf("constraints = %+v", hub.constraints)
-			}
-			if rec.Ceilings["you@github"] != hub.constraints[0].id {
-				t.Fatalf("record ceilings = %v", rec.Ceilings)
-			}
-			if len(*warned) != 1 || !strings.Contains((*warned)[0], "ac-old") {
-				t.Fatalf("warnings = %q", *warned)
+			if id != "ac-keep" || len(hub.constraints) != 1 || hub.count("POST ")+hub.count("DELETE ") != 0 {
+				t.Fatalf("id %q, constraints %+v, calls %v; want ac-keep kept untouched", id, hub.constraints, hub.calls)
 			}
 		})
 	}
 }
 
-// A preview the hub blocks fails the grant: no record, so the next apply
-// retries, and apply itself carries on with a warning.
-func TestRemoteCeilingBlockedPreviewLeavesNoRecord(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	hub := newFakeAdminHub("you@github")
-	hub.blockPreview = true
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	warned, warn := collectWarnings()
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever",
-		remoteAccess{Enabled: true, Emails: []string{"you@github"}}, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
-		t.Fatalf("a blocked ceiling must not fail apply: %v", err)
-	}
-	if len(*warned) != 1 || !strings.Contains((*warned)[0], "preview is incomplete") {
-		t.Fatalf("warnings = %q", *warned)
-	}
-	if _, found, _ := st.LoadRemoteRoleRecord(); found {
-		t.Fatal("a failed ceiling must not leave a record")
+// A ceiling that does not match (it allows project.create, or names another
+// hub user) is replaced: the new one is created under the free name before the
+// old one is deleted, so the user is never uncapped. Run twice, the names
+// alternate.
+func TestRemoteCeilingReplacementCreatesBeforeDelete(t *testing.T) {
+	names := remoteCeilingNames("you@github")
+	for _, tc := range []struct {
+		name    string
+		subject string
+		perms   []string
+	}{
+		{"allows project.create", "user-1", append(webCeiling(), projectCreatePermission)},
+		{"another hub user", "user-old", webCeiling()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := newFakeAdminHub()
+			hub.constraints = []*fakeConstraint{ceilingFor("ac-old", names[0], tc.subject, tc.perms)}
+			warned, warn := collectWarnings()
+			id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			iCreate, iDelete := hub.callAt("POST /api/v1/admin/access-constraints"), hub.callAt("DELETE /api/v1/admin/access-constraints/ac-old")
+			if iCreate < 0 || iDelete < 0 || iCreate > iDelete {
+				t.Fatalf("create at %d, delete at %d; want the create first: %v", iCreate, iDelete, hub.calls)
+			}
+			if len(hub.constraints) != 1 || hub.constraints[0].id != id || hub.constraints[0].Name != names[1] ||
+				hub.constraints[0].Subject.PrincipalID != "user-1" || slices.Contains(hub.constraints[0].MaximumPermissions, projectCreatePermission) {
+				t.Fatalf("constraints = %+v, id %q", hub.constraints, id)
+			}
+			if len(*warned) != 1 || !strings.Contains((*warned)[0], "ac-old") {
+				t.Fatalf("warnings = %q", *warned)
+			}
+
+			// The replacement now holds the second name; the next one goes back
+			// under the first.
+			hub.constraints[0].MaximumPermissions = append(webCeiling(), projectCreatePermission)
+			old := hub.constraints[0].id
+			hub.calls = nil
+			id2, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			iCreate, iDelete = hub.callAt("POST /api/v1/admin/access-constraints"), hub.callAt("DELETE /api/v1/admin/access-constraints/"+old)
+			if iCreate < 0 || iDelete < 0 || iCreate > iDelete {
+				t.Fatalf("second replacement: create at %d, delete at %d: %v", iCreate, iDelete, hub.calls)
+			}
+			if len(hub.constraints) != 1 || hub.constraints[0].id != id2 || hub.constraints[0].Name != names[0] {
+				t.Fatalf("second replacement: constraints = %+v", hub.constraints)
+			}
+		})
 	}
 }
 
-// Without the hub-member role lever cannot compute a ceiling that keeps the
-// user's reads, so it refuses rather than guess.
-func TestRemoteCeilingNeedsTheHubMemberRole(t *testing.T) {
-	hub := newFakeAdminHub("you@github")
-	hub.systemRoles = nil
-	_, warn := collectWarnings()
-	_, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: hub}, "lever", []string{"you@github"}, nil, false, time.Now(), warn)
-	if err == nil || !strings.Contains(err.Error(), "hub-member") {
-		t.Fatalf("err = %v, want the missing hub-member role named", err)
+// A matching ceiling under one name and a stale one under the other: the
+// match is kept, the stale one deleted, nothing created.
+func TestRemoteCeilingStaleBesideAMatchIsDeleted(t *testing.T) {
+	names := remoteCeilingNames("you@github")
+	hub := newFakeAdminHub()
+	hub.constraints = []*fakeConstraint{
+		ceilingFor("ac-stale", names[0], "user-1", append(webCeiling(), projectCreatePermission)),
+		ceilingFor("ac-keep", names[1], "user-1", webCeiling()),
 	}
-	if len(hub.constraints) != 0 || len(hub.bindings) != 0 {
-		t.Fatalf("wrote %d constraints and %d bindings before failing", len(hub.constraints), len(hub.bindings))
+	_, warn := collectWarnings()
+	id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "ac-keep" || hub.count("POST /api/v1/admin/access-constraints") != 0 ||
+		len(hub.constraints) != 1 || hub.constraints[0].id != "ac-keep" {
+		t.Fatalf("id %q, constraints %+v, calls %v", id, hub.constraints, hub.calls)
+	}
+}
+
+// Both names held by constraints that do not match leaves no free name: an
+// error, and nothing is deleted, so the existing caps stay in force.
+func TestRemoteCeilingBothNamesTakenFails(t *testing.T) {
+	names := remoteCeilingNames("you@github")
+	hub := newFakeAdminHub()
+	hub.constraints = []*fakeConstraint{
+		ceilingFor("ac-1", names[0], "user-1", append(webCeiling(), projectCreatePermission)),
+		ceilingFor("ac-2", names[1], "user-old", webCeiling()),
+	}
+	_, warn := collectWarnings()
+	_, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+	if err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("err = %v, want both names reported taken", err)
+	}
+	if hub.count("POST ")+hub.count("DELETE ") != 0 || len(hub.constraints) != 2 {
+		t.Fatalf("wrote with no free name: %v", hub.calls)
+	}
+}
+
+// A recovery-disabled constraint is scion's offline-recovery state: refused,
+// untouched.
+func TestRemoteCeilingRecoveryDisabledIsRefused(t *testing.T) {
+	hub := newFakeAdminHub()
+	c := ceilingFor("ac-rec", remoteCeilingName("you@github"), "user-1", webCeiling())
+	c.status = "recovery_disabled"
+	hub.constraints = []*fakeConstraint{c}
+	_, warn := collectWarnings()
+	_, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+	if err == nil || !strings.Contains(err.Error(), "recovery-disabled") {
+		t.Fatalf("err = %v", err)
+	}
+	if hub.count("POST ")+hub.count("DELETE ") != 0 {
+		t.Fatalf("wrote: %v", hub.calls)
+	}
+}
+
+// A create the hub refuses (a blocked preview) fails before any delete: the
+// stale ceiling stays.
+func TestRemoteCeilingFailedCreateDeletesNothing(t *testing.T) {
+	hub := newFakeAdminHub()
+	hub.constraints = []*fakeConstraint{ceilingFor("ac-old", remoteCeilingName("you@github"), "user-1", append(webCeiling(), projectCreatePermission))}
+	hub.blockPreview = true
+	_, warn := collectWarnings()
+	_, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+	if err == nil || !strings.Contains(err.Error(), "preview is incomplete") {
+		t.Fatalf("err = %v", err)
+	}
+	if hub.count("DELETE ") != 0 || len(hub.constraints) != 1 || hub.constraints[0].id != "ac-old" {
+		t.Fatalf("the stale ceiling was deleted without a replacement: %v", hub.calls)
+	}
+}
+
+// A hub that refuses the constraint read fails the ceiling: lever never
+// writes a ceiling it could not compare with what is there.
+func TestRemoteCeilingHubRefusalFails(t *testing.T) {
+	_, warn := collectWarnings()
+	if _, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: failingDoer{}}, "you@github", "user-1", webCeiling(), warn); err == nil {
+		t.Fatal("a 403 on the constraint list must fail the ceiling")
 	}
 }
 
@@ -690,61 +610,6 @@ func (failingDoer) Do(context.Context, string, string) (int, []byte, error) {
 
 func (failingDoer) DoBody(ctx context.Context, m, p string, _ []byte) (int, []byte, error) {
 	return failingDoer{}.Do(ctx, m, p)
-}
-
-// Remote disabled: the role record is never consulted and nothing opens.
-func TestRemoteWebRoleDisabledDoesNothing(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedPAT(t, st, "controller", "pat-controller")
-	f := proc.NewFakeRunner()
-	hub := newFakeAdminHub("you@github")
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{AdminHub: hub}); err != nil {
-		t.Fatal(err)
-	}
-	if len(f.Calls) != 0 || len(hub.calls) != 0 {
-		t.Fatalf("calls: jail %d hub %d, want none", len(f.Calls), len(hub.calls))
-	}
-}
-
-func TestCheckRemoteWebRole(t *testing.T) {
-	perms := remoteRolePermissions(false)
-	complete := state.RemoteRoleRecord{RoleID: "r", Permissions: perms, Bound: map[string]string{"you@github": "u1"},
-		Ceilings: map[string]string{"you@github": "ac-1"}, CeilingPermissions: perms, GrantedAt: time.Now()}
-	uncapped := complete
-	uncapped.Ceilings, uncapped.CeilingPermissions = nil, nil
-	loose := complete
-	loose.CeilingPermissions = append(slices.Clone(perms), "project.create")
-	for _, tc := range []struct {
-		name    string
-		enabled bool
-		rec     *state.RemoteRoleRecord
-		emails  []string
-		ok      bool
-		detail  string
-		fix     string
-	}{
-		{"disabled", false, nil, nil, true, "disabled", ""},
-		{"no record", true, nil, []string{"you@github"}, false, "no grant recorded", "no container runs in the jail, the manager included"},
-		{"complete", true, &complete, []string{"you@github"}, true, "you@github", ""},
-		{"new user", true, &complete, []string{"you@github", "partner@github"}, false, "partner@github", "lever apply"},
-		{"pending user", true, &state.RemoteRoleRecord{Permissions: perms, Bound: map[string]string{}, Pending: []string{"you@github"}}, []string{"you@github"}, false, "no hub user at the last grant (not signed in then): you@github", "no container runs in the jail (the manager included); otherwise run `lever stop`, then `lever up`"},
-		{"drift", true, &state.RemoteRoleRecord{Permissions: []string{"agent.read"}, Bound: complete.Bound}, []string{"you@github"}, false, "agent.read", "lever apply"},
-		{"no ceiling (pre-ceiling record)", true, &uncapped, []string{"you@github"}, false, "can create projects: you@github", "lever apply"},
-		{"ceiling allows project.create", true, &loose, []string{"you@github"}, false, "project-create ceiling was written with", "lever apply"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			st := state.ForConfig(t.TempDir())
-			if tc.rec != nil {
-				if err := st.SaveRemoteRoleRecord(*tc.rec); err != nil {
-					t.Fatal(err)
-				}
-			}
-			got := checkRemoteWebRole(context.Background(), st, remoteAccess{Enabled: tc.enabled, Emails: tc.emails}, nil)
-			if got.ok != tc.ok || !strings.Contains(got.detail, tc.detail) || !strings.Contains(got.fix, tc.fix) {
-				t.Fatalf("got %+v, want ok=%v detail~%q fix~%q", got, tc.ok, tc.detail, tc.fix)
-			}
-		})
-	}
 }
 
 // roleIDNamed is the id of the lever role called name on the fake hub.
@@ -772,108 +637,4 @@ func (h *fakeAdminHub) boundTo(userID string) []string {
 	}
 	slices.Sort(out)
 	return out
-}
-
-// A contact gets the contact role (agent.message only), never the web role,
-// and a ceiling that holds the contact role; an operator gets the web role.
-func TestEnsureRemoteWebRoleContactTier(t *testing.T) {
-	h := newFakeAdminHub("op@x", "c@x")
-	rec, err := ensureRemoteWebRole(context.Background(), &hubapi.Client{T: h}, "lever",
-		[]string{"op@x", "c@x"}, []string{"c@x"}, true, time.Now(), t.Logf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := h.boundTo("user-1"); !slices.Equal(got, []string{remoteWebRoleName}) {
-		t.Fatalf("operator bound to %v", got)
-	}
-	if got := h.boundTo("user-2"); !slices.Equal(got, []string{contactRoleName}) {
-		t.Fatalf("contact bound to %v", got)
-	}
-	for _, r := range h.roles {
-		if r.Name == contactRoleName && !slices.Equal(r.Permissions, []string{"agent.message"}) {
-			t.Fatalf("contact role permissions %v", r.Permissions)
-		}
-	}
-	if !slices.Equal(rec.Contacts, []string{"c@x"}) || rec.ContactRoleID == "" ||
-		slices.Contains(rec.ContactCeilingPermissions, "agent.attach") || slices.Contains(rec.ContactCeilingPermissions, projectCreatePermission) {
-		t.Fatalf("record %+v", rec)
-	}
-	if r := remoteRoleReason(rec, true, []string{"op@x", "c@x"}, []string{"c@x"}, remoteRolePermissions(true)); r != "" {
-		t.Fatalf("a fresh grant is stale: %s", r)
-	}
-}
-
-// Moving a login from operator to contact removes its web-role binding
-// (terminal and start/stop), and the reverse removes the contact binding.
-func TestEnsureRemoteWebRoleTierMove(t *testing.T) {
-	h := newFakeAdminHub("p@x")
-	ctx := context.Background()
-	rec, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: h}, "lever", []string{"p@x"}, nil, true, time.Now(), t.Logf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r := remoteRoleReason(rec, true, []string{"p@x"}, []string{"p@x"}, remoteRolePermissions(true)); !strings.Contains(r, "tier") {
-		t.Fatalf("a tier change is not a reason to re-grant: %q", r)
-	}
-	if _, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: h}, "lever", []string{"p@x"}, []string{"p@x"}, true, time.Now(), t.Logf); err != nil {
-		t.Fatal(err)
-	}
-	if got := h.boundTo("user-1"); !slices.Equal(got, []string{contactRoleName}) {
-		t.Fatalf("after the move to contact, bound to %v", got)
-	}
-	if _, err := ensureRemoteWebRole(ctx, &hubapi.Client{T: h}, "lever", []string{"p@x"}, nil, true, time.Now(), t.Logf); err != nil {
-		t.Fatal(err)
-	}
-	if got := h.boundTo("user-1"); !slices.Equal(got, []string{remoteWebRoleName}) {
-		t.Fatalf("after the move back to operator, bound to %v", got)
-	}
-}
-
-// A contact ceiling wider than the contact role is a reason to grant again.
-func TestContactCeilingMustBeExact(t *testing.T) {
-	rec := state.RemoteRoleRecord{Permissions: remoteRolePermissions(true), Bound: map[string]string{"c@x": "u1"},
-		Ceilings: map[string]string{"c@x": "k1"}, CeilingPermissions: remoteCeilingPermissions(nil, remoteRolePermissions(true)),
-		Contacts: []string{"c@x"}, ContactPermissions: contactRolePermissions(),
-		ContactCeilingPermissions: []string{"agent.message", "user.list"}}
-	if r := remoteRoleReason(rec, true, []string{"c@x"}, []string{"c@x"}, remoteRolePermissions(true)); !strings.Contains(r, "ceiling") {
-		t.Fatalf("reason %q, want the wide contact ceiling reported", r)
-	}
-	rec.ContactCeilingPermissions = contactRolePermissions()
-	if r := remoteRoleReason(rec, true, []string{"c@x"}, []string{"c@x"}, remoteRolePermissions(true)); r != "" {
-		t.Fatalf("reason %q for an exact ceiling", r)
-	}
-}
-
-// An agent renamed scion's dev super-admin row to an allowed login's email
-// before that person's first sign-in: apply must not bind, cap or record it.
-func TestRemoteWebRoleRefusesTheDevRow(t *testing.T) {
-	st := state.ForConfig(t.TempDir())
-	seedAllPATs(t, st)
-	hub := newFakeAdminHub()
-	hub.users = append(hub.users, hubapi.User{ID: config.ScionDevUserID, Email: "you@github"})
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	warned, warn := collectWarnings()
-
-	ra := remoteAccess{Enabled: true, Emails: []string{"you@github"}}
-	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	if n := hub.count("POST /api/v1/admin/role-bindings"); n != 0 {
-		t.Fatalf("posted %d role bindings for the dev row, want 0", n)
-	}
-	rec, found, _ := st.LoadRemoteRoleRecord()
-	if !found || rec.Bound["you@github"] != "" || !slices.Contains(rec.Pending, "you@github") {
-		t.Fatalf("record = %+v, want you@github pending and unbound", rec)
-	}
-	if _, ok := rec.Ceilings["you@github"]; ok {
-		t.Fatalf("a ceiling was written for the dev row: %+v", rec.Ceilings)
-	}
-	hit := false
-	for _, w := range *warned {
-		hit = hit || strings.Contains(w, "dev super-admin row")
-	}
-	if !hit {
-		t.Fatalf("warnings = %q, want one naming the dev row", *warned)
-	}
 }

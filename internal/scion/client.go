@@ -136,7 +136,20 @@ func (c *Client) runValue(ctx context.Context, dir string, args ...string) (stri
 }
 
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
-	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
+	return c.runEnv(ctx, dir, nil, args...)
+}
+
+// runEnv is run with extra env on top of the client's; extra never sets the
+// hub token, endpoint or switch, which only the client's own options decide.
+func (c *Client) runEnv(ctx context.Context, dir string, extra map[string]string, args ...string) (string, error) {
+	env := c.env()
+	for k, v := range extra {
+		if _, own := env[k]; own || k == "SCION_HUB_TOKEN" || k == "SCION_HUB_ENDPOINT" || k == "SCION_HUB_ENABLED" {
+			continue
+		}
+		env[k] = v
+	}
+	res, err := c.r.RunIn(ctx, dir, env, c.bin, args...)
 	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
@@ -161,8 +174,12 @@ func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) 
 // the literal value from the whole error, which position-based redaction
 // cannot do: a value starting with "-" parses as a flag, and cobra echoes an
 // unknown flag back. Callers that pass a credential must use this.
-func (c *Client) runSecret(ctx context.Context, dir, secret string, args ...string) (string, error) {
-	out, err := c.run(ctx, dir, args...)
+func (c *Client) runSecret(ctx context.Context, secret string, args ...string) (string, error) {
+	return c.runSecretEnv(ctx, nil, secret, args...)
+}
+
+func (c *Client) runSecretEnv(ctx context.Context, extra map[string]string, secret string, args ...string) (string, error) {
+	out, err := c.runEnv(ctx, "", extra, args...)
 	// Short values would scrub unrelated text; nothing lever treats as a
 	// credential is that short.
 	if err != nil && len(secret) >= 8 {

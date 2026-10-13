@@ -26,8 +26,13 @@ func (s *scriptedRunner) Run(ctx context.Context, env map[string]string, name st
 	return s.RunIn(ctx, "", env, name, args...)
 }
 
-func (s *scriptedRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
-	return s.RunIn(ctx, "", env, name, args...)
+func (s *scriptedRunner) RunStdin(ctx context.Context, in io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	res, err := s.RunIn(ctx, "", env, name, args...)
+	if in != nil {
+		b, _ := io.ReadAll(in)
+		s.call.Stdin = string(b)
+	}
+	return res, err
 }
 
 func jailCurl(r proc.Runner, token string) *JailCurl {

@@ -1045,13 +1045,15 @@ func TestClientIdentityHeadersStrippedFromForward(t *testing.T) {
 		"X-Scion-Timestamp", "X-Scion-Nonce", "X-Scion-Signed-Headers", "X-Scion-On-Behalf-Of",
 		"X-Scion-Federation-Token", "X-Scion-Plugin-Name",
 		"X-Forwarded-User-Id", "X-Forwarded-User-Email", "X-Forwarded-User-Name", "X-Forwarded-User-Role",
-		"X-Goog-IAP-JWT-Assertion", "X-API-Key",
+		"X-Goog-IAP-JWT-Assertion", "X-API-Key", "X-Lever-Hub-Assertion",
 	}
 	req := proxyRequest("GET", "/api/v1/agents", nil)
 	for _, k := range stripped {
 		req.Header.Set(k, "forged")
 	}
 	req.Header.Set("x-scion-agent-token", "forged-lowercase")
+	// A non-canonical key bypasses Header.Set's canonicalization.
+	req.Header["x-lever-hub-assertion"] = []string{"forged-lowercase"}
 	req.Header.Set("X-Preview-Token", "kept")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
@@ -1073,6 +1075,7 @@ func TestClientIdentityHeader(t *testing.T) {
 	for k, want := range map[string]bool{
 		"Tailscale-User-Login": true, "X-Scion-Agent-Token": true, "x-scion-anything": true,
 		"X-Forwarded-User-Email": true, "X-Goog-Iap-Jwt-Assertion": true, "X-Api-Key": true,
+		"X-Lever-Hub-Assertion": true, "x-lever-hub-assertion": true, "X-LEVER-HUB-ASSERTION": true,
 		"X-Forwarded-For": false, "X-Forwarded-Proto": false, "Accept": false, "X-Preview-Token": false,
 	} {
 		if got := clientIdentityHeader(k); got != want {

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/hubauth"
 )
 
 type stubSession struct {
@@ -136,7 +138,7 @@ func answerUnauthenticatedOnce(status int, location string) (func(http.ResponseW
 }
 
 // When the hub no longer knows the session, the operator must get the page,
-// not scion's login screen, whose sign-in leads to a dead endpoint.
+// not scion's login screen.
 func TestStaleSessionIsRenewedAndTheRequestRetried(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -307,9 +309,8 @@ func TestLoginFailureIs502NotAPage(t *testing.T) {
 // An API request rides the SAME session as the shell, so the hub sees one
 // user for both.
 func TestSessionAndProxyEndToEnd(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
-	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p})
+	hub := newFakeScionHub(t)
+	d := newLoginDriverFor(t, hub, &testSigner{})
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", AllowedUsers: []string{"op@example.test"}, Session: d})
 
 	get := func(path string) *httptest.ResponseRecorder {
@@ -343,10 +344,59 @@ func TestSessionAndProxyEndToEnd(t *testing.T) {
 	}
 }
 
+func newLoginDriverFor(t *testing.T, hub *fakeScionHub, s *testSigner) *LoginDriver {
+	t.Helper()
+	return NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Sign: s.sign, HubUserID: (&recordedUsers{}).lookup})
+}
+
+// A phone that sends its own assertion must not reach the hub with it on any
+// path, the session retry included: the hub would take it as the caller's
+// identity. Only the driver's own assertion, on its login request, arrives.
+func TestAClientAssertionNeverReachesTheHub(t *testing.T) {
+	hub := newFakeScionHub(t)
+	signer := &testSigner{}
+	d := newLoginDriverFor(t, hub, signer)
+	h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", AllowedUsers: []string{"op@example.test"}, Session: d})
+
+	forged := assertionPrefix + "admin@example.test.forged"
+	send := func(method, path string) *httptest.ResponseRecorder {
+		req := proxyRequest(method, path, nil)
+		req.Header.Set("Tailscale-User-Login", "op@example.test")
+		req.Header.Set(hubauth.Header, forged)
+		req.Header.Add("x-lever-hub-assertion", forged+"2")
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, req)
+		return rw
+	}
+	for _, path := range []string{"/", "/api/v1/agents", "/auth/me", "/auth/login"} {
+		send(http.MethodGet, path)
+	}
+	// A stale session sends the GET through the retry path.
+	hub.mu.Lock()
+	hub.rejectSessions = true
+	hub.mu.Unlock()
+	send(http.MethodGet, "/api/v1/agents")
+	send(http.MethodPost, "/api/v1/agents")
+
+	_, issued := signer.all()
+	ours := map[string]bool{}
+	for _, a := range issued {
+		ours[a] = true
+	}
+	seen := hub.seen()
+	if len(seen) == 0 {
+		t.Fatal("test bug: the driver never logged in")
+	}
+	for _, s := range seen {
+		if !ours[s.value] || s.path != hubLoginPath || s.method != http.MethodGet {
+			t.Fatalf("the hub saw an assertion that is not the driver's own login: %+v", s)
+		}
+	}
+}
+
 func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
-	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p})
+	hub := newFakeScionHub(t)
+	d := newLoginDriverFor(t, hub, &testSigner{})
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", Session: d})
 
 	rw := httptest.NewRecorder()
@@ -365,14 +415,13 @@ func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 	if rw2.Code != http.StatusOK {
 		t.Fatalf("after the hub forgot the session = %d, want 200 via a fresh login", rw2.Code)
 	}
-	if logins, _ := hub.counts(); logins != 2 {
+	if logins := hub.loginCount(); logins != 2 {
 		t.Fatalf("%d logins, want 2 (one per session)", logins)
 	}
 }
 
-// The hub's answer to /auth/login/<provider> is a 302 to the dead
-// authorization endpoint, so the proxy answers the navigation itself: one
-// driver run, a 302 back into the app, and nothing forwarded.
+// The proxy answers a sign-in navigation itself: one driver run, a 302 back
+// into the app, and nothing forwarded.
 func TestSignInNavigationIsDrivenNotForwarded(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
@@ -508,12 +557,11 @@ func TestSignInNavigationLoginFailureIs502(t *testing.T) {
 	}
 }
 
-// The driver's step-1 GET reaches the hub directly, so the navigation makes
-// exactly one handshake, and no response carries the dead endpoint.
-func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
-	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p})
+// The driver's login reaches the hub directly, so the navigation makes
+// exactly one login, and the browser lands back in the app.
+func TestSignInEndToEndLogsInOnce(t *testing.T) {
+	hub := newFakeScionHub(t)
+	d := newLoginDriverFor(t, hub, &testSigner{})
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", Session: d})
 
 	rw := httptest.NewRecorder()
@@ -521,11 +569,8 @@ func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 	if rw.Code != http.StatusFound || rw.Header().Get("Location") != "/" {
 		t.Fatalf("status = %d Location = %q, want 302 to /", rw.Code, rw.Header().Get("Location"))
 	}
-	if strings.Contains(rw.Header().Get("Location"), "lever.invalid") {
-		t.Fatal("the dead authorization endpoint reached the browser")
-	}
-	if logins, _ := hub.counts(); logins != 1 {
-		t.Fatalf("%d login handshake(s), want exactly 1", logins)
+	if logins := hub.loginCount(); logins != 1 {
+		t.Fatalf("%d login(s), want exactly 1", logins)
 	}
 
 	rw2 := httptest.NewRecorder()
@@ -533,8 +578,8 @@ func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 	if rw2.Code != http.StatusOK {
 		t.Fatalf("shell after sign-in = %d, want 200", rw2.Code)
 	}
-	if logins, _ := hub.counts(); logins != 1 {
-		t.Fatalf("shell request logged in again (%d handshakes) — the session was not reused", logins)
+	if logins := hub.loginCount(); logins != 1 {
+		t.Fatalf("shell request logged in again (%d logins) — the session was not reused", logins)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
@@ -1374,36 +1375,40 @@ func TestRemoteDefaults(t *testing.T) {
 	if got := app.EffectiveRemotePort(); got != 8445 {
 		t.Fatalf("EffectiveRemotePort() = %d, want 8445", got)
 	}
-	if got := app.EffectiveRemoteLoginPort(); got != 8447 {
-		t.Fatalf("EffectiveRemoteLoginPort() = %d, want 8447", got)
+	if w := app.Warnings(); len(w) != 0 {
+		t.Fatalf("Warnings() = %v", w)
 	}
 }
 
-// The login port must not collide with the proxy's, either broker listener,
-// or the host mirror of the guest issuer port, where the runtime publishes
-// the jail's forwarder.
-func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
+// remote.login_port still loads, whatever its value and whether remote is
+// on, but binds and grants nothing, and is named in Warnings.
+func TestRemoteLoginPortIsIgnoredWithAWarning(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-	for name, port := range map[string]int{
-		"jail port":                  8443,
-		"admin port":                 8444,
-		"proxy port":                 8445,
-		"mirrored guest issuer port": GuestLoginIssuerPort,
+	for _, body := range []string{
+		base + "  login_port: 8444\n",
+		base + "  login_port: 8445\n",
+		base + "  login_port: 8446\n",
+		base + "  login_port: 9500\n",
+		"name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  login_port: 9500\n",
 	} {
-		t.Run(name, func(t *testing.T) {
-			rejectNoHost(t, base+fmt.Sprintf("  login_port: %d\n", port), "login_port")
-		})
+		app, err := LoadNoHostChecks(writeConfig(t, body))
+		if err != nil {
+			t.Fatalf("%q must load: %v", body, err)
+		}
+		if slices.Contains(app.EffectiveAllowedPorts(), app.Remote.LoginPort) {
+			t.Errorf("login_port %d granted to the jail", app.Remote.LoginPort)
+		}
+		w := app.Warnings()
+		if len(w) != 1 || w[0] != "remote.login_port is no longer used (the hub login needs no port); remove it" {
+			t.Errorf("Warnings() = %v", w)
+		}
+		if slices.ContainsFunc(app.RemoteWarnings(), func(s string) bool { return strings.Contains(s, "login_port") }) {
+			t.Errorf("RemoteWarnings() names login_port: %v", app.RemoteWarnings())
+		}
 	}
-	// The same guard applies to the proxy's own port.
-	rejectNoHost(t, base+fmt.Sprintf("  port: %d\n", GuestLoginIssuerPort), "mirrored")
-
-	body := base + "  login_port: 9500\n"
-	app, err := LoadNoHostChecks(writeConfig(t, body))
-	if err != nil {
-		t.Fatalf("a free login_port must load: %v", err)
-	}
-	if got := app.EffectiveRemoteLoginPort(); got != 9500 {
-		t.Fatalf("EffectiveRemoteLoginPort() = %d, want 9500", got)
+	// 8446 was the guest login forwarder's port; nothing reserves it now.
+	if _, err := LoadNoHostChecks(writeConfig(t, base+"  port: 8446\n")); err != nil {
+		t.Fatalf("remote.port 8446 must load now that no forwarder is mirrored onto it: %v", err)
 	}
 }
 
@@ -1431,15 +1436,13 @@ func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 		})
 	}
 
-	// The login port is granted by EffectiveAllowedPorts anyway, so listing
-	// it by hand must still load.
-	ok := base + "  login_port: 8447\nmanager:\n  allow_ports: [8447]\n"
+	ok := base + "manager:\n  allow_ports: [8447]\n"
 	app, err := LoadNoHostChecks(writeConfig(t, ok))
 	if err != nil {
-		t.Fatalf("the login port in manager.allow_ports must still load: %v", err)
+		t.Fatalf("another port in manager.allow_ports must load: %v", err)
 	}
 	if !slices.Contains(app.EffectiveAllowedPorts(), 8447) {
-		t.Error("the login port must still be granted to the jail")
+		t.Error("manager.allow_ports must be granted to the jail")
 	}
 	if slices.Contains(app.EffectiveAllowedPorts(), app.EffectiveRemotePort()) {
 		t.Error("no loadable config may grant the jail the proxy's port")
@@ -1499,8 +1502,7 @@ func TestRemoteExplicitPortHonoured(t *testing.T) {
 }
 
 // Both backends load with remote on: the proxy dials the hub through the
-// jail, and the login forwarder's dial to the host is the same hop every
-// agent's broker connection makes.
+// jail.
 func TestRemoteAcceptedOnBothBackends(t *testing.T) {
 	for _, backend := range KnownBackends {
 		t.Run(backend, func(t *testing.T) {
@@ -1509,10 +1511,8 @@ func TestRemoteAcceptedOnBothBackends(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s + remote.enabled should load cleanly: %v", backend, err)
 			}
-			// The login port is granted on both, or the forwarder's dial is
-			// dropped by the jail's egress chain.
-			if !slices.Contains(app.EffectiveAllowedPorts(), app.EffectiveRemoteLoginPort()) {
-				t.Fatalf("%s: the login port must be in the egress allowlist", backend)
+			if got, want := app.EffectiveAllowedPorts(), []int{app.EffectiveJailPort()}; !slices.Equal(got, want) {
+				t.Fatalf("%s: EffectiveAllowedPorts() = %v, want %v", backend, got, want)
 			}
 		})
 	}
@@ -1552,45 +1552,8 @@ func TestScionWebAssets(t *testing.T) {
 	}
 }
 
-func withForwarderPrebuilt(t *testing.T, ok bool) {
-	t.Helper()
-	old := remoteForwarderPrebuilt
-	remoteForwarderPrebuilt = func() bool { return ok }
-	t.Cleanup(func() { remoteForwarderPrebuilt = old })
-}
-
-// A lever without the prebuilt login forwarder needs Go at apply time;
-// `scion.binary:` is the only mode where that is the sole reason for one.
-func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "scion-linux")
-	if err := os.WriteFile(bin, []byte("not really a binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: " + bin +
-		"\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-
-	t.Setenv("PATH", "")
-	withForwarderPrebuilt(t, false)
-	_, err := Load(writeConfig(t, body))
-	testutil.WantErrContaining(t, err, "Go toolchain", "make install")
-
-	// A lever that embeds the forwarder for every guest arch needs no Go.
-	withForwarderPrebuilt(t, true)
-	if _, err := Load(writeConfig(t, body)); err != nil {
-		t.Fatalf("with a prebuilt forwarder embedded, no toolchain is needed: %v", err)
-	}
-	withForwarderPrebuilt(t, false)
-
-	// With remote off, the same config is fine: nothing cross-compiles.
-	off := strings.Replace(body, "enabled: true", "enabled: false", 1)
-	if _, err := Load(writeConfig(t, off)); err != nil {
-		t.Fatalf("remote off must not need a toolchain: %v", err)
-	}
-}
-
-// The login port is allowlisted while remote access is on and gone again
-// when it is off, so a grant never outlives the forwarder it exists for.
-func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T) {
+// Turning remote access on grants the jail no extra host port.
+func TestEffectiveAllowedPortsIgnoresRemote(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager:\n  allow_ports: [3305]\n"
 	off, err := LoadNoHostChecks(writeConfig(t, base))
 	if err != nil {
@@ -1604,9 +1567,9 @@ func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := []int{on.EffectiveJailPort(), 3305, on.EffectiveRemoteLoginPort()}
+	want := []int{on.EffectiveJailPort(), 3305}
 	if got := on.EffectiveAllowedPorts(); !slices.Equal(got, want) {
-		t.Fatalf("remote on: EffectiveAllowedPorts() = %v, want %v (the forwarder cannot reach the host without it)", got, want)
+		t.Fatalf("remote on: EffectiveAllowedPorts() = %v, want %v", got, want)
 	}
 }
 
@@ -1756,12 +1719,32 @@ func TestRemoteAllowedUsersShape(t *testing.T) {
 	for _, bad := range []string{
 		"a@x.com, b@x.com", "a@x.com,b@x.com", "me @example.com", "tab\there", "usr/1", "usr:1",
 		"alice@id.lever.local", "lever-operator@lever.local",
-		// The hub user lever sends every message as.
-		"dev@localhost", "Dev@LocalHost",
 	} {
 		t.Run(bad, func(t *testing.T) {
 			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users: [%q]\n", bad), "allowed_users")
 		})
+	}
+}
+
+// Lever's own hub identities and scion's dev user (<os-user>@localhost) are
+// never a remote login, in any case and in either allowed_users form.
+func TestRemoteAllowedUsersRefusesReservedAddresses(t *testing.T) {
+	for _, bad := range []string{
+		"lever-admin@lever.local", "LEVER-ADMIN@lever.local", "Lever-Controller@Lever.Local",
+		"lever-controller@lever.local", "dev@localhost", "Dev@LocalHost", "scion@localhost", "X@LOCALHOST",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			if !hubauth.IsReserved(HubEmailFor(bad)) {
+				t.Fatalf("hubauth.IsReserved(%q) = false", bad)
+			}
+			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users: [%q]\n", bad), "allowed_users", "reserved")
+			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users:\n    - login: %q\n      tier: contact\n      agents: [manager]\n", bad), "reserved")
+		})
+	}
+	// Logins with no "@" become @id.lever.local addresses, never reserved.
+	ok := []string{"lever-admin", "localhost", "scion", "me@localhost.example.com"}
+	if _, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  allowed_users: [\""+strings.Join(ok, "\", \"")+"\"]\n")); err != nil {
+		t.Fatalf("%v must load: %v", ok, err)
 	}
 }
 

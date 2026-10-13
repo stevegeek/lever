@@ -11,19 +11,23 @@ import "github.com/stevegeek/lever/internal/config"
 type StepKind string
 
 const (
-	KindBrokerUp             StepKind = "broker-up"
-	KindLoadImage            StepKind = "load-image"
-	KindInitMachine          StepKind = "init-machine"
-	KindConfigRegistry       StepKind = "config-registry"
-	KindBootstrapToken       StepKind = "bootstrap-token"
-	KindScionServer          StepKind = "scion-server"
+	KindBrokerUp       StepKind = "broker-up"
+	KindLoadImage      StepKind = "load-image"
+	KindInitMachine    StepKind = "init-machine"
+	KindConfigRegistry StepKind = "config-registry"
+	KindScionServer    StepKind = "scion-server"
+	// KindHubIdentity converges lever's hub identities on the live hub: the
+	// admin, the controller, the project, the controller PAT and the remote
+	// logins (see Deps.EnsureHubIdentity).
+	KindHubIdentity          StepKind = "hub-identity"
 	KindCredential           StepKind = "credential"
 	KindRegisterProject      StepKind = "register-project"
 	KindAgentTemplate        StepKind = "agent-template"
 	KindMintManagerBootstrap StepKind = "mint-manager-bootstrap"
 	KindStartManager         StepKind = "start-manager"
 	// KindRemoteProxy daemonizes `lever remote serve` (see Deps.StartRemoteProxy).
-	// Plan emits it only when remote is enabled. Stopping a stale proxy when
+	// Plan emits it only when remote is enabled, last: it signs in only logins
+	// hub-identity has already invited and bound. Stopping a stale proxy when
 	// remote is disabled is Run's job, not this step's.
 	KindRemoteProxy StepKind = "remote-proxy"
 )
@@ -97,16 +101,10 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	steps = append(steps,
 		Step{Kind: KindInitMachine},
 		Step{Kind: KindConfigRegistry},
-		// Must precede scion-server, which locks the hub down. See
-		// Deps.EnsureControllerPAT.
-		Step{Kind: KindBootstrapToken, Target: a.Tree},
 		Step{Kind: KindScionServer},
+		// Needs the live hub, and mints the PAT every later hub call uses.
+		Step{Kind: KindHubIdentity, Target: a.Tree},
 	)
-	if a.RemoteEnabled() {
-		// The proxy reverse-proxies the hub's web API, so it follows
-		// scion-server; nothing later is a dependency of it.
-		steps = append(steps, Step{Kind: KindRemoteProxy})
-	}
 	if a.Manager.CredentialFile != "" {
 		steps = append(steps, Step{Kind: KindCredential, Target: a.Manager.CredentialFile})
 	}
@@ -118,6 +116,9 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	// The enrol ticket is minted just before spawn so its TTL cannot run out.
 	steps = append(steps, Step{Kind: KindMintManagerBootstrap, Target: a.Tree})
 	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name})
+	if a.RemoteEnabled() {
+		steps = append(steps, Step{Kind: KindRemoteProxy})
+	}
 	if opts.BrokerOnly {
 		filtered := steps[:0:0]
 		for _, s := range steps {

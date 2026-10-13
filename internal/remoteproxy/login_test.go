@@ -7,11 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,91 +16,45 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubauth"
 )
 
-// startProvider serves a Provider on a real loopback listener whose port it
-// knows, so discovery advertises endpoints that resolve.
-func startProvider(t *testing.T) (*Provider, *auditSink, *httptest.Server) {
+type auditSink struct {
+	mu    sync.Mutex
+	lines []AuditLine
+}
+
+func (s *auditSink) add(l AuditLine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lines = append(s.lines, l)
+}
+
+func (s *auditSink) all() []AuditLine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AuditLine(nil), s.lines...)
+}
+
+func assertNoSecretsInAudit(t *testing.T, lines []AuditLine, secrets map[string]string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	if len(lines) == 0 {
+		t.Fatal("no audit lines were emitted")
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	sink := &auditSink{}
-	p := NewProvider(ProviderConfig{Port: port, Audit: sink.add})
-	srv := &httptest.Server{Listener: ln, Config: &http.Server{Handler: p.Handler()}}
-	srv.Start()
-	t.Cleanup(srv.Close)
-	if srv.URL != p.IssuerURL() {
-		t.Fatalf("provider serves %s but advertises issuer %s", srv.URL, p.IssuerURL())
+	for _, l := range lines {
+		b, err := json.Marshal(l)
+		if err != nil {
+			t.Fatalf("marshal audit line: %v", err)
+		}
+		for name, secret := range secrets {
+			if secret == "" {
+				t.Fatalf("test bug: empty %s", name)
+			}
+			if strings.Contains(string(b), secret) {
+				t.Fatalf("audit line leaks the %s: %s", name, b)
+			}
+		}
 	}
-	return p, sink, srv
-}
-
-// fakeScionHub models the parts of scion's web layer the handshake touches:
-// one scion_sess cookie carrying state then session; a redirect_uri built
-// from the hub's own unreachable base_url; a callback that compares state and
-// calls /token and /userinfo itself; and a shell/API that need a session
-// unless the request carries an Authorization header.
-type fakeScionHub struct {
-	*httptest.Server
-	issuer   string // the configured oidc_login.issuer_url
-	clientID string
-
-	// baseURL mirrors scion's default http://localhost:<web-port>, which the
-	// proxy cannot reach.
-	baseURL string
-
-	mu        sync.Mutex
-	states    map[string]string // state cookie value -> state
-	sessions  map[string]string // session cookie value -> email
-	logins    int
-	callbacks int
-	apiCalls  []http.Header // headers of every /api/v1 request
-
-	dropState        bool   // "forget" the state, as a lost cookie jar would
-	authzOverride    string // redirect somewhere other than our provider
-	clientIDOverride string // ask for a client_id lever did not configure
-	rejectSessions   bool   // treat every session as unknown (a restarted hub)
-	whoAmIID         string // hub user id /api/v1/auth/me reports (default testHubUserID)
-	whoAmIStatus     int    // non-zero: /api/v1/auth/me answers this status instead
-	beforeCallback   func() // runs at the top of the callback, to hold a handshake open
-	callbackFails    bool   // answer the callback 500, leaving the state cookie in place
-}
-
-func newFakeScionHub(t *testing.T, issuer string) *fakeScionHub {
-	t.Helper()
-	h := &fakeScionHub{
-		issuer:   issuer,
-		clientID: LoginClientID,
-		baseURL:  "http://localhost:8080",
-		states:   map[string]string{},
-		sessions: map[string]string{},
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/login/oidc", h.handleLogin)
-	mux.HandleFunc("/auth/callback/oidc", h.handleCallback)
-	// A dedicated handler so the login driver's post-login whoAmI resolves a
-	// valid, non-dev hub user id. Longest-match wins over /api/v1/, and it is
-	// not counted in apiCalls (the gate never forwards this path).
-	mux.HandleFunc("/api/v1/auth/me", h.handleWhoAmI)
-	mux.HandleFunc("/api/v1/", h.handleAPI)
-	mux.HandleFunc("/auth/me", h.handleShell)
-	mux.HandleFunc("/", h.handleShell)
-	h.Server = httptest.NewServer(mux)
-	t.Cleanup(h.Server.Close)
-	return h
-}
-
-func (h *fakeScionHub) discover() (map[string]any, error) {
-	resp, err := http.Get(h.issuer + "/.well-known/openid-configuration")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var doc map[string]any
-	return doc, json.NewDecoder(resp.Body).Decode(&doc)
 }
 
 func randHex() string {
@@ -112,151 +63,155 @@ func randHex() string {
 	return hex.EncodeToString(b)
 }
 
-func (h *fakeScionHub) handleLogin(w http.ResponseWriter, r *http.Request) {
-	doc, err := h.discover()
-	if err != nil {
-		http.Error(w, "failed to generate auth URL", http.StatusInternalServerError)
-		return
-	}
-	authz, _ := doc["authorization_endpoint"].(string)
-	if h.authzOverride != "" {
-		authz = h.authzOverride
-	}
-	clientID := h.clientID
-	if h.clientIDOverride != "" {
-		clientID = h.clientIDOverride
-	}
-	state, cookie := randHex(), randHex()
-	h.mu.Lock()
-	h.logins++
-	if !h.dropState {
-		h.states[cookie] = state
-	}
-	h.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: cookie, Path: "/"})
-	q := url.Values{
-		"client_id":     {clientID},
-		"redirect_uri":  {h.baseURL + "/auth/callback/oidc"},
-		"response_type": {"code"},
-		"scope":         {"openid email profile"},
-		"state":         {state},
-	}
-	http.Redirect(w, r, authz+"?"+q.Encode(), http.StatusFound)
+// assertionPrefix marks what testSigner signs; the fake hub accepts nothing
+// else as an assertion.
+const assertionPrefix = "signed."
+
+// testSigner stands in for hubauth.RemoteSigner. Each assertion is unique,
+// as a real one is (jti).
+type testSigner struct {
+	mu     sync.Mutex
+	signed []string // emails, in order
+	issued []string // assertions, in order
+	fail   error
 }
 
-func (h *fakeScionHub) handleCallback(w http.ResponseWriter, r *http.Request) {
-	if h.beforeCallback != nil {
-		h.beforeCallback()
+func (s *testSigner) sign(email string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.fail != nil {
+		return "", s.fail
+	}
+	a := assertionPrefix + email + "." + randHex()
+	s.signed = append(s.signed, email)
+	s.issued = append(s.issued, a)
+	return a, nil
+}
+
+func (s *testSigner) all() (emails, assertions []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.signed...), append([]string(nil), s.issued...)
+}
+
+// hubUserIDFor is the id the fake hub gives an email, and the id the tests
+// record unless they say otherwise.
+func hubUserIDFor(email string) string { return "uid-" + email }
+
+// fakeScionHub models the parts of scion's proxy auth mode the login and the
+// proxy touch: GET / with an assertion creates a session cookie; a
+// cookie-less request without one gets a fresh cookie that is not a session;
+// /api/v1/auth/me answers the session's user id; the shell and the API need
+// a session.
+type fakeScionHub struct {
+	*httptest.Server
+
+	mu         sync.Mutex
+	sessions   map[string]string // session cookie value -> email
+	logins     int               // GET / requests carrying an assertion
+	assertions []seenAssertion   // every request that carried the header
+	meCalls    []http.Header     // headers of every /api/v1/auth/me request
+	apiCalls   []http.Header     // headers of every other /api/v1 request
+	elsewhere  int               // requests to /elsewhere (a followed redirect)
+
+	loginStatus     int               // non-zero: answer the login with this status
+	loginLocation   string            // with loginStatus 3xx: the Location
+	noCookie        bool              // answer the login 200 without a cookie
+	anonymousCookie bool              // answer the login with a cookie that is no session
+	meOverride      map[string]string // email -> the id auth/me answers instead
+	rejectSessions  bool              // treat every session as unknown (a restarted hub)
+	beforeLogin     func()            // runs at the top of the login, to hold it open
+}
+
+type seenAssertion struct {
+	method, path, value string
+}
+
+func newFakeScionHub(t *testing.T) *fakeScionHub {
+	t.Helper()
+	h := &fakeScionHub{sessions: map[string]string{}, meOverride: map[string]string{}}
+	h.Server = httptest.NewServer(http.HandlerFunc(h.serve))
+	t.Cleanup(h.Server.Close)
+	return h
+}
+
+func (h *fakeScionHub) serve(w http.ResponseWriter, r *http.Request) {
+	if v := r.Header.Values(hubauth.Header); len(v) > 0 {
+		h.mu.Lock()
+		h.assertions = append(h.assertions, seenAssertion{r.Method, r.URL.Path, strings.Join(v, ",")})
+		h.mu.Unlock()
+		if r.URL.Path == "/" && r.Method == http.MethodGet {
+			h.handleLogin(w, r, v[0])
+			return
+		}
+	}
+	switch {
+	case r.URL.Path == "/elsewhere":
+		h.mu.Lock()
+		h.elsewhere++
+		h.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	case r.URL.Path == authMePath:
+		h.handleMe(w, r)
+	case strings.HasPrefix(r.URL.Path, "/api/v1/"):
+		h.handleAPI(w, r)
+	default:
+		h.handleShell(w, r)
+	}
+}
+
+func (h *fakeScionHub) handleLogin(w http.ResponseWriter, r *http.Request, assertion string) {
+	if h.beforeLogin != nil {
+		h.beforeLogin()
 	}
 	h.mu.Lock()
-	h.callbacks++
+	h.logins++
 	h.mu.Unlock()
-	if h.callbackFails {
-		// Neither redirect nor session: the jar keeps the login STATE cookie.
-		http.Error(w, "boom", http.StatusInternalServerError)
+	if h.loginStatus != 0 {
+		if h.loginLocation != "" {
+			w.Header().Set("Location", h.loginLocation)
+		}
+		http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: randHex(), Path: "/"})
+		w.WriteHeader(h.loginStatus)
 		return
 	}
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
-		http.Redirect(w, r, "/login?error=session_error", http.StatusFound)
+	email, ok := strings.CutPrefix(assertion, assertionPrefix)
+	if !ok {
+		http.Error(w, "invalid assertion", http.StatusUnauthorized)
 		return
 	}
-	h.mu.Lock()
-	want := h.states[c.Value]
-	h.mu.Unlock()
-	if want == "" || want != r.URL.Query().Get("state") {
-		http.Redirect(w, r, "/login?error=state_mismatch", http.StatusFound)
-		return
-	}
-	email, err := h.exchange(r.URL.Query().Get("code"))
-	if err != nil {
-		http.Redirect(w, r, "/login?error=exchange_failed", http.StatusFound)
+	email = email[:strings.LastIndex(email, ".")]
+	if h.noCookie {
+		_, _ = fmt.Fprint(w, "<!doctype html>")
 		return
 	}
 	sess := randHex()
-	h.mu.Lock()
-	h.sessions[sess] = email
-	h.mu.Unlock()
+	if !h.anonymousCookie {
+		h.mu.Lock()
+		h.sessions[sess] = email
+		h.mu.Unlock()
+	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: sess, Path: "/"})
-	http.Redirect(w, r, "/", http.StatusFound)
+	_, _ = fmt.Fprint(w, "<!doctype html>")
 }
 
-// exchange re-sends the SAME redirect_uri it issued, which binds the code.
-func (h *fakeScionHub) exchange(code string) (string, error) {
-	doc, err := h.discover()
-	if err != nil {
-		return "", err
-	}
-	tokenEP, _ := doc["token_endpoint"].(string)
-	userinfoEP, _ := doc["userinfo_endpoint"].(string)
-	form := url.Values{
-		"grant_type":   {"authorization_code"},
-		"code":         {code},
-		"redirect_uri": {h.baseURL + "/auth/callback/oidc"},
-		"client_id":    {h.clientID},
-	}
-	resp, err := http.PostForm(tokenEP, form)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("token exchange failed: %s %s", resp.Status, body)
-	}
-	var tok struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
-		return "", err
-	}
-	req, err := http.NewRequest(http.MethodGet, userinfoEP, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	uresp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = uresp.Body.Close() }()
-	if uresp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("userinfo returned %s", uresp.Status)
-	}
-	var info struct {
-		Sub           string `json:"sub"`
-		Email         string `json:"email"`
-		EmailVerified bool   `json:"email_verified"`
-	}
-	if err := json.NewDecoder(uresp.Body).Decode(&info); err != nil {
-		return "", err
-	}
-	if info.Sub == "" || info.Email == "" || !info.EmailVerified {
-		return "", fmt.Errorf("provider returned an unusable identity")
-	}
-	return info.Email, nil
-}
-
-// testHubUserID is the non-dev hub user id the fake hub reports for every
-// signed-in session; the login driver's dev-user rule must let it through.
-const testHubUserID = "11111111-2222-4333-8444-555555555555"
-
-func (h *fakeScionHub) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+func (h *fakeScionHub) handleMe(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	h.meCalls = append(h.meCalls, r.Header.Clone())
+	h.mu.Unlock()
 	email, ok := h.sessionEmail(r)
 	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	if h.whoAmIStatus != 0 {
-		w.WriteHeader(h.whoAmIStatus)
-		return
+	h.mu.Lock()
+	id, over := h.meOverride[email]
+	h.mu.Unlock()
+	if !over {
+		id = hubUserIDFor(email)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	id := h.whoAmIID
-	if id == "" {
-		id = testHubUserID
-	}
-	_, _ = fmt.Fprintf(w, `{"id":%q,"email":%q}`, id, email)
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": id, "email": email})
 }
 
 func (h *fakeScionHub) handleShell(w http.ResponseWriter, r *http.Request) {
@@ -305,206 +260,260 @@ func (h *fakeScionHub) handleAPI(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusUnauthorized)
 }
 
-func (h *fakeScionHub) counts() (logins, callbacks int) {
+func (h *fakeScionHub) loginCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.logins, h.callbacks
+	return h.logins
 }
 
-func newTestDriver(t *testing.T) (*LoginDriver, *fakeScionHub, *Provider, *auditSink) {
+func (h *fakeScionHub) seen() []seenAssertion {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]seenAssertion(nil), h.assertions...)
+}
+
+// recordedUsers is the HubUserID lookup: every email maps to the fake hub's
+// id unless it is in missing or overridden.
+type recordedUsers struct {
+	mu       sync.Mutex
+	missing  map[string]bool
+	override map[string]string
+}
+
+func (u *recordedUsers) lookup(email string) (string, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.missing[email] {
+		return "", false
+	}
+	if id, ok := u.override[email]; ok {
+		return id, true
+	}
+	return hubUserIDFor(email), true
+}
+
+type testDriver struct {
+	*LoginDriver
+	hub    *fakeScionHub
+	signer *testSigner
+	users  *recordedUsers
+	sink   *auditSink
+}
+
+func newTestDriver(t *testing.T) *testDriver {
 	t.Helper()
-	p, psink, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
-	sink := &auditSink{}
-	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p, Audit: sink.add})
-	return d, hub, p, psink
+	hub := newFakeScionHub(t)
+	td := &testDriver{hub: hub, signer: &testSigner{}, users: &recordedUsers{missing: map[string]bool{}, override: map[string]string{}}, sink: &auditSink{}}
+	td.LoginDriver = NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Sign: td.signer.sign, HubUserID: td.users.lookup, Audit: td.sink.add})
+	return td
 }
 
-func TestHandshakeCompletesWithNoAuthorizeRouteRegistered(t *testing.T) {
-	d, hub, p, psink := newTestDriver(t)
-
-	cookie, err := d.Cookie(context.Background(), "op@example.test")
-	if err != nil {
-		t.Fatalf("Cookie: %v", err)
+func (td *testDriver) decisions() []Decision {
+	var out []Decision
+	for _, l := range td.sink.all() {
+		out = append(out, l.Decision)
 	}
-	if cookie == "" {
-		t.Fatal("handshake returned an empty session")
-	}
-
-	req, _ := http.NewRequest(http.MethodGet, hub.URL+"/auth/me", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookie})
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /auth/me: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("/auth/me = %d, want 200", resp.StatusCode)
-	}
-	if !strings.Contains(string(body), "op@example.test") {
-		t.Fatalf("/auth/me = %q, want the operator the proxy verified", body)
-	}
-
-	// The provider answered only the three hub endpoints. /authorize here
-	// means a code-minting endpoint reachable from the jail.
-	var paths []string
-	for _, l := range psink.all() {
-		paths = append(paths, l.Path)
-	}
-	want := []string{"/.well-known/openid-configuration", "/.well-known/openid-configuration", "/token", "/userinfo"}
-	if strings.Join(paths, ",") != strings.Join(want, ",") {
-		t.Fatalf("provider served %v, want %v", paths, want)
-	}
-	resp2, err := http.Get(p.IssuerURL() + "/authorize")
-	if err != nil {
-		t.Fatalf("GET /authorize: %v", err)
-	}
-	_ = resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Fatalf("GET /authorize = %d, want 404. %s", resp2.StatusCode, authorizeIsPermanently404)
-	}
-	if logins, callbacks := hub.counts(); logins != 1 || callbacks != 1 {
-		t.Fatalf("hub saw %d logins / %d callbacks, want 1/1", logins, callbacks)
-	}
+	return out
 }
 
-// The hub builds redirect_uri from its unreachable base_url: only the origin
-// may change, since the code is bound to the redirect_uri as issued.
-func TestLoginRewritesTheHubIssuedRedirectOrigin(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
-	if strings.Contains(hub.URL, "8080") {
-		t.Fatalf("test hub happens to serve the base_url address; the rewrite would not be exercised")
+// Under /auth/ and /api/v1/ scion checks the assertion but creates no
+// session, so a login there would never yield a cookie.
+func TestHubLoginPathIsASessionRoute(t *testing.T) {
+	if !strings.HasPrefix(hubLoginPath, "/") {
+		t.Fatalf("hubLoginPath %q is not an absolute path", hubLoginPath)
 	}
-	if _, err := d.Cookie(context.Background(), "op@example.test"); err != nil {
-		t.Fatalf("Cookie: %v", err)
-	}
-	if _, callbacks := hub.counts(); callbacks != 1 {
-		t.Fatalf("hub saw %d callbacks, want 1 — the callback must reach the hub as dialled", callbacks)
-	}
-}
-
-func TestLoginRefusesAHubConfiguredAgainstAnotherProvider(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
-	hub.authzOverride = "https://accounts.google.example/o/oauth2/auth"
-	_, err := d.Cookie(context.Background(), "op@example.test")
-	if err == nil {
-		t.Fatal("logged in against a provider that is not ours")
-	}
-	if !errors.Is(err, errForeignProvider) {
-		t.Fatalf("error = %v, want errForeignProvider", err)
-	}
-}
-
-func TestLoginRefusesAnUnexpectedClientID(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
-	hub.clientIDOverride = "someone-elses-client"
-	_, err := d.Cookie(context.Background(), "op@example.test")
-	if err == nil {
-		t.Fatal("minted a code for another relying party's client_id")
-	}
-	if !errors.Is(err, errForeignClientID) {
-		t.Fatalf("error = %v, want errForeignClientID", err)
-	}
-}
-
-// TestLoginRefusesASessionThatResolvesToTheDevUser is the core mitigation: an
-// agent renamed scion's dev super-admin row to this login's email, so the
-// session lands on the super-admin row. The driver must refuse it.
-func TestLoginRefusesASessionThatResolvesToTheDevUser(t *testing.T) {
-	for _, login := range []string{"op@example.test", "contact-id", ""} {
-		t.Run("login="+login, func(t *testing.T) {
-			d, hub, _, _ := newTestDriver(t)
-			clock := time.Date(2026, 10, 13, 8, 0, 0, 0, time.UTC)
-			d.now = func() time.Time { return clock }
-			hub.whoAmIID = config.ScionDevUserID
-			if _, err := d.Cookie(context.Background(), login); !errors.Is(err, errForeignHubUser) {
-				t.Fatalf("error = %v, want errForeignHubUser", err)
-			}
-			// Within the backoff the refusal is answered without another sign-in,
-			// even once the hub would now resolve a different user.
-			hub.whoAmIID = ""
-			logins, _ := hub.counts()
-			if _, err := d.Cookie(context.Background(), login); !errors.Is(err, errForeignHubUser) {
-				t.Fatalf("within the backoff: %v, want the cached refusal", err)
-			}
-			if again, _ := hub.counts(); again != logins {
-				t.Fatalf("a refused login signed in again within the backoff (%d -> %d)", logins, again)
-			}
-			clock = clock.Add(refusalBackoff)
-			if _, err := d.Cookie(context.Background(), login); err != nil {
-				t.Fatalf("after the backoff: %v", err)
-			}
-		})
-	}
-}
-
-// TestLoginFailsClosedWhenTheUserCannotBeRead: no answer from /auth/me is
-// never read as "allowed".
-func TestLoginFailsClosedWhenTheUserCannotBeRead(t *testing.T) {
-	for _, status := range []int{http.StatusInternalServerError, http.StatusFound, http.StatusUnauthorized} {
-		d, hub, _, _ := newTestDriver(t)
-		hub.whoAmIStatus = status
-		if _, err := d.Cookie(context.Background(), "op@example.test"); err == nil {
-			t.Fatalf("/auth/me %d: login succeeded", status)
+	for _, public := range []string{"/auth/", "/api/v1/"} {
+		if strings.HasPrefix(hubLoginPath, public) || hubLoginPath+"/" == public {
+			t.Fatalf("hubLoginPath %q is under %s, where scion creates no session", hubLoginPath, public)
 		}
 	}
 }
 
-// TestLoginRefusesTheDevUserEvenWhenRecorded: a record that names the dev id
-// (written before apply refused it) does not make the dev row acceptable.
-func TestLoginRefusesTheDevUserEvenWhenRecorded(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
-	hub.whoAmIID = config.ScionDevUserID
-	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p,
-		BoundUser: func(string) (string, bool) { return config.ScionDevUserID, true }})
-	if _, err := d.Cookie(context.Background(), "op@example.test"); !errors.Is(err, errForeignHubUser) {
-		t.Fatalf("error = %v, want errForeignHubUser", err)
+func TestLoginSendsTheAssertionOnlyOnTheLoginRequest(t *testing.T) {
+	td := newTestDriver(t)
+	cookie, err := td.Cookie(context.Background(), "op@example.test")
+	if err != nil {
+		t.Fatalf("Cookie: %v", err)
+	}
+	if cookie == "" {
+		t.Fatal("login returned an empty session")
+	}
+	emails, issued := td.signer.all()
+	if len(emails) != 1 || emails[0] != "op@example.test" {
+		t.Fatalf("signed for %v, want exactly the login's hub email", emails)
+	}
+	seen := td.hub.seen()
+	if len(seen) != 1 || seen[0] != (seenAssertion{http.MethodGet, hubLoginPath, issued[0]}) {
+		t.Fatalf("the hub saw the assertion on %+v, want only GET %s with the signed value", seen, hubLoginPath)
+	}
+	td.hub.mu.Lock()
+	me := td.hub.meCalls
+	sessEmail := td.hub.sessions[cookie]
+	td.hub.mu.Unlock()
+	if sessEmail != "op@example.test" {
+		t.Fatalf("the returned cookie is the hub session of %q", sessEmail)
+	}
+	if len(me) != 1 {
+		t.Fatalf("%d auth/me calls, want 1", len(me))
+	}
+	if me[0].Get("Cookie") != sessionCookieName+"="+cookie || me[0].Get("Authorization") != "" || me[0].Get(hubauth.Header) != "" {
+		t.Fatalf("auth/me carried Cookie %q Authorization %q assertion %q, want the new session alone",
+			me[0].Get("Cookie"), me[0].Get("Authorization"), me[0].Get(hubauth.Header))
+	}
+	if d := td.decisions(); len(d) != 1 || d[0] != DecisionHubSession {
+		t.Fatalf("audit = %v, want one %s line", d, DecisionHubSession)
 	}
 }
 
-// TestLoginRefusesASessionWhoseIDIsNotTheBoundOne: lever recorded a hub user
-// id for the login, and the session resolves to a different one (a swapped or
-// re-provisioned row).
-func TestLoginRefusesASessionWhoseIDIsNotTheBoundOne(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
-	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p,
-		BoundUser: func(string) (string, bool) { return "a-different-id", true }})
-	if _, err := d.Cookie(context.Background(), "op@example.test"); !errors.Is(err, errForeignHubUser) {
-		t.Fatalf("error = %v, want errForeignHubUser", err)
+func TestLoginSignsTheLowercasedHubEmail(t *testing.T) {
+	td := newTestDriver(t)
+	if _, err := td.Cookie(context.Background(), "Op@Example.Test"); err != nil {
+		t.Fatalf("Cookie: %v", err)
+	}
+	if emails, _ := td.signer.all(); len(emails) != 1 || emails[0] != "op@example.test" {
+		t.Fatalf("signed for %v, want the lowercased email", emails)
 	}
 }
 
-// TestLoginAcceptsTheBoundID: the session resolves to exactly the id lever
-// recorded.
-func TestLoginAcceptsTheBoundID(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
-	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p,
-		BoundUser: func(string) (string, bool) { return testHubUserID, true }})
-	if _, err := d.Cookie(context.Background(), "op@example.test"); err != nil {
-		t.Fatalf("a session matching the bound id was refused: %v", err)
+func TestLoginOfTheUnnamedOperatorUsesItsPlaceholderEmail(t *testing.T) {
+	td := newTestDriver(t)
+	if _, err := td.Cookie(context.Background(), ""); err != nil {
+		t.Fatalf("Cookie: %v", err)
+	}
+	if emails, _ := td.signer.all(); len(emails) != 1 || emails[0] != unnamedOperatorEmail {
+		t.Fatalf("signed for %v, want %s", emails, unnamedOperatorEmail)
 	}
 }
 
-// TestLoginReportsAStateMismatch models a jar dropped between login and
-// callback: scion keeps the state in the cookie that becomes the session.
-func TestLoginReportsAStateMismatch(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
-	hub.dropState = true
-	_, err := d.Cookie(context.Background(), "op@example.test")
-	if err == nil {
-		t.Fatal("login succeeded with no state on the hub side")
+// A hub session for another user (a renamed or swapped row) must never be
+// handed to this login, and other logins keep working.
+func TestLoginRefusesASessionForAnotherHubUser(t *testing.T) {
+	td := newTestDriver(t)
+	td.hub.meOverride["alice@example.test"] = hubUserIDFor("mallory@example.test")
+	ctx := context.Background()
+
+	_, err := td.Cookie(ctx, "alice@example.test")
+	if !errors.Is(err, errUserMismatch) {
+		t.Fatalf("alice: error = %v, want errUserMismatch", err)
 	}
-	if !strings.Contains(err.Error(), "state_mismatch") {
-		t.Fatalf("error = %v, want the hub's own reason", err)
+	if _, err := td.Cookie(ctx, "bob@example.test"); err != nil {
+		t.Fatalf("bob was refused with alice: %v", err)
+	}
+	if _, err := td.Cookie(ctx, "alice@example.test"); !errors.Is(err, errUserMismatch) {
+		t.Fatalf("alice again: error = %v, want errUserMismatch", err)
+	}
+	if n := td.hub.loginCount(); n != 3 {
+		t.Fatalf("hub saw %d logins, want 3: a refused login must not be cached", n)
+	}
+	var refused []AuditLine
+	for _, l := range td.sink.all() {
+		if l.Decision == DecisionHubSessionRefused {
+			refused = append(refused, l)
+		}
+	}
+	if len(refused) != 2 || refused[0].TSLogin != "alice@example.test" || refused[0].Path != authMePath {
+		t.Fatalf("refusal audit = %+v, want two lines for alice at %s", refused, authMePath)
+	}
+}
+
+// Without a recorded id there is nothing to check the session against, and
+// scion's dev user is never one a login may ride, so the hub is not even
+// asked: a first sign-in would create or activate a user.
+func TestLoginRefusesALoginWithNoRecordedHubUser(t *testing.T) {
+	td := newTestDriver(t)
+	td.users.missing["alice@example.test"] = true
+	td.users.override["carol@example.test"] = ""
+	td.users.override["dave@example.test"] = config.ScionDevUserID
+	ctx := context.Background()
+
+	for _, login := range []string{"alice@example.test", "carol@example.test", "dave@example.test"} {
+		if _, err := td.Cookie(ctx, login); !errors.Is(err, errNoRecordedUser) {
+			t.Fatalf("%s: error = %v, want errNoRecordedUser", login, err)
+		}
+	}
+	if n := td.hub.loginCount(); n != 0 {
+		t.Fatalf("hub saw %d logins for unrecorded users, want 0", n)
+	}
+	if emails, _ := td.signer.all(); len(emails) != 0 {
+		t.Fatalf("signed for %v, want nothing signed for an unrecorded login", emails)
+	}
+	if _, err := td.Cookie(ctx, "bob@example.test"); err != nil {
+		t.Fatalf("bob was refused with alice: %v", err)
+	}
+	if d := td.decisions(); len(d) != 4 || d[0] != DecisionHubSessionRefused || d[1] != DecisionHubSessionRefused ||
+		d[2] != DecisionHubSessionRefused || d[3] != DecisionHubSession {
+		t.Fatalf("audit = %v, want three refusals then a session", d)
+	}
+}
+
+func TestLoginFailsOnAnythingButA200(t *testing.T) {
+	for _, tc := range []struct {
+		status   int
+		location string
+	}{
+		{http.StatusFound, "/elsewhere"},
+		{http.StatusUnauthorized, ""},
+		{http.StatusForbidden, ""},
+		{http.StatusInternalServerError, ""},
+		{http.StatusNoContent, ""},
+	} {
+		td := newTestDriver(t)
+		td.hub.loginStatus, td.hub.loginLocation = tc.status, tc.location
+		_, err := td.Cookie(context.Background(), "op@example.test")
+		if !errors.Is(err, errLoginStatus) {
+			t.Fatalf("status %d: error = %v, want errLoginStatus", tc.status, err)
+		}
+		_, issued := td.signer.all()
+		if strings.Contains(err.Error(), issued[0]) {
+			t.Fatalf("status %d: the error quotes the assertion: %v", tc.status, err)
+		}
+		td.hub.mu.Lock()
+		elsewhere, me := td.hub.elsewhere, len(td.hub.meCalls)
+		td.hub.mu.Unlock()
+		if elsewhere != 0 {
+			t.Fatalf("status %d: the login followed the hub's redirect, carrying the assertion", tc.status)
+		}
+		if me != 0 {
+			t.Fatalf("status %d: auth/me was asked with a cookie from a failed login", tc.status)
+		}
+		if d := td.decisions(); len(d) != 1 || d[0] != DecisionHubSessionFailed {
+			t.Fatalf("status %d: audit = %v, want one %s line", tc.status, d, DecisionHubSessionFailed)
+		}
+	}
+}
+
+func TestLoginFailsWithoutASessionCookie(t *testing.T) {
+	td := newTestDriver(t)
+	td.hub.noCookie = true
+	if _, err := td.Cookie(context.Background(), "op@example.test"); !errors.Is(err, errNoSession) {
+		t.Fatalf("error = %v, want errNoSession", err)
+	}
+}
+
+// scion sets a fresh scion_sess on a request that has none, session or not:
+// the cookie alone proves nothing until auth/me accepts it.
+func TestACookieThatIsNoSessionFails(t *testing.T) {
+	td := newTestDriver(t)
+	td.hub.anonymousCookie = true
+	_, err := td.Cookie(context.Background(), "op@example.test")
+	if !errors.Is(err, errLoginStatus) || !strings.Contains(err.Error(), authMePath) {
+		t.Fatalf("error = %v, want auth/me's refusal", err)
+	}
+}
+
+func TestASigningFailureNeverReachesTheHub(t *testing.T) {
+	td := newTestDriver(t)
+	td.signer.fail = errors.New("hubauth: \"op@example.test\" is not an allowed remote login")
+	if _, err := td.Cookie(context.Background(), "op@example.test"); err == nil {
+		t.Fatal("logged in without an assertion")
+	}
+	if n := td.hub.loginCount(); n != 0 || len(td.hub.seen()) != 0 {
+		t.Fatalf("hub saw %d logins after a signing failure", n)
 	}
 }
 
 func TestConcurrentCallersShareOneLogin(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
+	td := newTestDriver(t)
 	const callers = 12
 	var wg sync.WaitGroup
 	cookies := make([]string, callers)
@@ -513,7 +522,7 @@ func TestConcurrentCallersShareOneLogin(t *testing.T) {
 	for i := range callers {
 		go func() {
 			defer wg.Done()
-			cookies[i], errs[i] = d.Cookie(context.Background(), "op@example.test")
+			cookies[i], errs[i] = td.Cookie(context.Background(), "op@example.test")
 		}()
 	}
 	wg.Wait()
@@ -525,19 +534,19 @@ func TestConcurrentCallersShareOneLogin(t *testing.T) {
 			t.Fatalf("caller %d got a different session", i)
 		}
 	}
-	if logins, _ := hub.counts(); logins != 1 {
-		t.Fatalf("hub saw %d logins for one page load, want 1", logins)
+	if n := td.hub.loginCount(); n != 1 {
+		t.Fatalf("hub saw %d logins for one page load, want 1", n)
 	}
 }
 
 func TestFailedLoginIsNotCached(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
-	hub.dropState = true
-	if _, err := d.Cookie(context.Background(), "op@example.test"); err == nil {
+	td := newTestDriver(t)
+	td.hub.loginStatus = http.StatusServiceUnavailable
+	if _, err := td.Cookie(context.Background(), "op@example.test"); err == nil {
 		t.Fatal("want an error")
 	}
-	hub.dropState = false
-	if _, err := d.Cookie(context.Background(), "op@example.test"); err != nil {
+	td.hub.loginStatus = 0
+	if _, err := td.Cookie(context.Background(), "op@example.test"); err != nil {
 		t.Fatalf("second attempt after a transient failure: %v", err)
 	}
 }
@@ -545,84 +554,87 @@ func TestFailedLoginIsNotCached(t *testing.T) {
 // scion refuses a scion_sess older than 24 hours and a refused POST cannot be
 // retried, so the driver renews at sessionMaxAge.
 func TestSessionIsRenewedBeforeTheHubRefusesIt(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
+	td := newTestDriver(t)
 	clock := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
-	d.now = func() time.Time { return clock }
+	td.now = func() time.Time { return clock }
 	ctx := context.Background()
-	first, err := d.Cookie(ctx, "op@example.test")
+	first, err := td.Cookie(ctx, "op@example.test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(sessionMaxAge - time.Minute)
-	if c, _ := d.Cookie(ctx, "op@example.test"); c != first {
+	if c, _ := td.Cookie(ctx, "op@example.test"); c != first {
 		t.Fatal("a session younger than sessionMaxAge was replaced")
 	}
 	clock = clock.Add(time.Minute)
-	renewed, err := d.Cookie(ctx, "op@example.test")
+	renewed, err := td.Cookie(ctx, "op@example.test")
 	if err != nil || renewed == first {
 		t.Fatalf("at sessionMaxAge: %q/%v, want a fresh session", renewed, err)
 	}
-	if logins, _ := hub.counts(); logins != 2 {
-		t.Fatalf("hub saw %d logins, want 2", logins)
+	if n := td.hub.loginCount(); n != 2 {
+		t.Fatalf("hub saw %d logins, want 2", n)
 	}
-	if sessionMaxAge >= 24*time.Hour {
-		t.Fatalf("sessionMaxAge %v must stay under scion's 24h cookie MaxAge", sessionMaxAge)
+	if _, issued := td.signer.all(); len(issued) != 2 || issued[0] == issued[1] {
+		t.Fatalf("assertions %v, want a fresh one per login", issued)
+	}
+	if sessionMaxAge != 12*time.Hour {
+		t.Fatalf("sessionMaxAge = %v, want 12h: under scion's 24h cookie MaxAge", sessionMaxAge)
 	}
 }
 
 func TestInvalidateForcesAFreshLogin(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
+	td := newTestDriver(t)
 	ctx := context.Background()
-	first, err := d.Cookie(ctx, "op@example.test")
+	first, err := td.Cookie(ctx, "op@example.test")
 	if err != nil {
 		t.Fatalf("Cookie: %v", err)
 	}
-	again, err := d.Cookie(ctx, "op@example.test")
+	again, err := td.Cookie(ctx, "op@example.test")
 	if err != nil || again != first {
 		t.Fatalf("second call = %q/%v, want the cached session", again, err)
 	}
-	if logins, _ := hub.counts(); logins != 1 {
-		t.Fatalf("hub saw %d logins, want 1 (the session must be cached)", logins)
+	if n := td.hub.loginCount(); n != 1 {
+		t.Fatalf("hub saw %d logins, want 1 (the session must be cached)", n)
 	}
 
 	// A stale cookie value must not discard a session someone else renewed.
-	d.Invalidate("op@example.test", "some-older-cookie")
-	if c, _ := d.Cookie(ctx, "op@example.test"); c != first {
+	td.Invalidate("op@example.test", "some-older-cookie")
+	if c, _ := td.Cookie(ctx, "op@example.test"); c != first {
 		t.Fatal("invalidating a stale cookie value dropped the live session")
 	}
 
-	d.Invalidate("op@example.test", first)
-	third, err := d.Cookie(ctx, "op@example.test")
+	td.Invalidate("op@example.test", first)
+	third, err := td.Cookie(ctx, "op@example.test")
 	if err != nil {
 		t.Fatalf("Cookie after invalidate: %v", err)
 	}
 	if third == first {
 		t.Fatal("invalidate did not force a new session")
 	}
-	if logins, _ := hub.counts(); logins != 2 {
-		t.Fatalf("hub saw %d logins, want 2", logins)
+	if n := td.hub.loginCount(); n != 2 {
+		t.Fatalf("hub saw %d logins, want 2", n)
 	}
 }
 
 // Two operators must become two hub users, not share one.
 func TestDistinctOperatorsGetDistinctSessions(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
+	td := newTestDriver(t)
 	ctx := context.Background()
-	a, err := d.Cookie(ctx, "alice@example.test")
+	a, err := td.Cookie(ctx, "alice@example.test")
 	if err != nil {
 		t.Fatalf("alice: %v", err)
 	}
-	b, err := d.Cookie(ctx, "bob@example.test")
+	b, err := td.Cookie(ctx, "bob@example.test")
 	if err != nil {
 		t.Fatalf("bob: %v", err)
 	}
 	if a == b {
 		t.Fatal("two operators shared one hub session")
 	}
-	hub.mu.Lock()
-	defer hub.mu.Unlock()
-	if hub.sessions[a] != "alice@example.test" || hub.sessions[b] != "bob@example.test" {
-		t.Fatalf("hub recorded %q and %q", hub.sessions[a], hub.sessions[b])
+	td.hub.mu.Lock()
+	defer td.hub.mu.Unlock()
+	if td.hub.sessions[a] != "alice@example.test" || td.hub.sessions[b] != "bob@example.test" {
+		t.Fatalf("hub recorded %q and %q", td.hub.sessions[a], td.hub.sessions[b])
 	}
 }
 
@@ -648,45 +660,39 @@ func TestHubUserEmailsMatchIdentityFor(t *testing.T) {
 	}
 }
 
-func TestLoginAuditNeverCarriesTheSession(t *testing.T) {
-	d, hub, _, psink := newTestDriver(t)
-	sink := &auditSink{}
-	d.audit = sink.add
-	cookie, err := d.Cookie(context.Background(), "op@example.test")
+func TestLoginAuditNeverCarriesTheSessionOrTheAssertion(t *testing.T) {
+	td := newTestDriver(t)
+	cookie, err := td.Cookie(context.Background(), "op@example.test")
 	if err != nil {
 		t.Fatalf("Cookie: %v", err)
 	}
-	hub.mu.Lock()
-	stateCount := len(hub.states)
-	hub.mu.Unlock()
-	if stateCount == 0 {
-		t.Fatal("test bug: the hub recorded no state")
-	}
-	assertNoSecretsInAudit(t, sink.all(), map[string]string{"session cookie": cookie})
-	assertNoSecretsInAudit(t, psink.all(), map[string]string{"session cookie": cookie})
-
-	hub.dropState = true
-	d.Invalidate("op@example.test", cookie)
-	if _, err := d.Cookie(context.Background(), "op@example.test"); err == nil {
+	td.hub.anonymousCookie = true
+	td.Invalidate("op@example.test", cookie)
+	if _, err := td.Cookie(context.Background(), "op@example.test"); err == nil {
 		t.Fatal("want a failure to audit")
 	}
-	var failures int
-	for _, l := range sink.all() {
-		if l.Decision == "oidc-session-failed" {
-			failures++
-		}
+	td.hub.anonymousCookie = false
+	td.hub.meOverride["op@example.test"] = "someone-else"
+	if _, err := td.Cookie(context.Background(), "op@example.test"); err == nil {
+		t.Fatal("want a refusal to audit")
 	}
-	if failures != 1 {
-		t.Fatalf("%d failure lines, want 1", failures)
+	_, issued := td.signer.all()
+	secrets := map[string]string{"session cookie": cookie}
+	for i, a := range issued {
+		secrets[fmt.Sprintf("assertion %d", i)] = a
+	}
+	assertNoSecretsInAudit(t, td.sink.all(), secrets)
+	if d := td.decisions(); len(d) != 3 || d[0] != DecisionHubSession || d[1] != DecisionHubSessionFailed || d[2] != DecisionHubSessionRefused {
+		t.Fatalf("audit = %v", d)
 	}
 }
 
-// A client that navigates away mid-handshake must not cancel the login others
+// A client that navigates away mid-login must not cancel the login others
 // are waiting on.
 func TestALoginSurvivesTheRequestThatStartedIt(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
+	td := newTestDriver(t)
 	release := make(chan struct{})
-	hub.beforeCallback = func() { <-release }
+	td.hub.beforeLogin = func() { <-release }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	type result struct {
@@ -695,7 +701,7 @@ func TestALoginSurvivesTheRequestThatStartedIt(t *testing.T) {
 	}
 	first := make(chan result, 1)
 	go func() {
-		c, err := d.Cookie(ctx, "op@example.test")
+		c, err := td.Cookie(ctx, "op@example.test")
 		first <- result{c, err}
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -705,79 +711,43 @@ func TestALoginSurvivesTheRequestThatStartedIt(t *testing.T) {
 	if r := <-first; r.err != nil || r.cookie == "" {
 		t.Fatalf("the login was abandoned with its request: %+v", r)
 	}
-	if c, err := d.Cookie(context.Background(), "op@example.test"); err != nil || c == "" {
+	if c, err := td.Cookie(context.Background(), "op@example.test"); err != nil || c == "" {
 		t.Fatalf("no usable session afterwards: %q %v", c, err)
 	}
-	if logins, _ := hub.counts(); logins != 1 {
-		t.Fatalf("hub saw %d logins, want 1", logins)
+	if n := td.hub.loginCount(); n != 1 {
+		t.Fatalf("hub saw %d logins, want 1", n)
 	}
 }
 
-// mintedCodes reads the provider's codes: the secret the audit log must never
-// contain.
-func mintedCodes(p *Provider) []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([]string, 0, len(p.codes))
-	for code := range p.codes {
-		out = append(out, code)
-	}
-	return out
-}
-
-// A *url.Error quotes the whole URL, and the callback's query carries the
-// code: a failed callback must not put it in the audit log.
-func TestAFailedCallbackNeverAuditsTheCode(t *testing.T) {
-	d, hub, p, _ := newTestDriver(t)
-	sink := &auditSink{}
-	d.audit = sink.add
-	// Die at the callback like a dropped jail transport: a closed connection.
-	hub.beforeCallback = func() { panic(http.ErrAbortHandler) }
-
-	_, err := d.Cookie(context.Background(), "op@example.test")
+// A dropped jail transport mid-login must not put the assertion in the error
+// or the audit log.
+func TestATransportFailureNeverQuotesTheAssertion(t *testing.T) {
+	td := newTestDriver(t)
+	td.hub.beforeLogin = func() { panic(http.ErrAbortHandler) }
+	_, err := td.Cookie(context.Background(), "op@example.test")
 	if err == nil {
-		t.Fatal("want the callback to fail")
+		t.Fatal("want the login to fail")
 	}
-	codes := mintedCodes(p)
-	if len(codes) != 1 {
-		t.Fatalf("%d codes held by the provider, want the 1 that was minted for this attempt", len(codes))
+	_, issued := td.signer.all()
+	if len(issued) != 1 {
+		t.Fatalf("%d assertions signed, want 1", len(issued))
 	}
-	code := codes[0]
-	if strings.Contains(err.Error(), code) {
-		t.Fatalf("the returned error quotes the authorization code: %v", err)
+	if strings.Contains(err.Error(), issued[0]) {
+		t.Fatalf("the returned error quotes the assertion: %v", err)
 	}
-	assertNoSecretsInAudit(t, sink.all(), map[string]string{"authorization code": code})
-	// The operator still has to be able to tell WHICH leg failed.
-	if !strings.Contains(err.Error(), callbackPathPrefix) {
-		t.Fatalf("error names no path, so the failing leg is unidentifiable: %v", err)
-	}
-}
-
-// scion_sess holds the login state before the session, so a hub that answers
-// without replacing it must not look like success.
-func TestALoginNeedsANewCookieNotTheStateOne(t *testing.T) {
-	d, hub, _, _ := newTestDriver(t)
-	hub.callbackFails = true
-
-	_, err := d.Cookie(context.Background(), "op@example.test")
-	if err == nil {
-		t.Fatal("the login-state cookie was accepted as a session")
-	}
-	if !errors.Is(err, errNoSessionMinted) {
-		t.Fatalf("error = %v, want errNoSessionMinted", err)
-	}
+	assertNoSecretsInAudit(t, td.sink.all(), map[string]string{"assertion": issued[0]})
 }
 
 // net/http recovers a handler panic, so the single-flight entry must still be
 // released or every later request for that login waits forever. The panic is
 // injected through the audit sink.
 func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
+	hub := newFakeScionHub(t)
 	var attempts atomic.Int32
 	d := NewLoginDriver(LoginConfig{
-		Hub:      mustURL(t, hub.URL),
-		Provider: p,
+		Hub:       mustURL(t, hub.URL),
+		Sign:      (&testSigner{}).sign,
+		HubUserID: (&recordedUsers{}).lookup,
 		Audit: func(AuditLine) {
 			if attempts.Add(1) == 1 {
 				panic("audit sink exploded")
@@ -814,22 +784,22 @@ func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("a second login for the same operator never returned: the panicked attempt left its single-flight entry unreleased")
 	}
-	if logins, _ := hub.counts(); logins != 2 {
-		t.Fatalf("hub saw %d logins, want 2 (the panicked attempt, then a real retry)", logins)
+	if n := hub.loginCount(); n != 2 {
+		t.Fatalf("hub saw %d logins, want 2 (the panicked attempt, then a real retry)", n)
 	}
 }
 
 // Waiters on a panicked attempt must get an error: the zero cookie a panic
 // leaves would otherwise read as an empty session.
 func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
-	p, _, _ := startProvider(t)
-	hub := newFakeScionHub(t, p.IssuerURL())
+	hub := newFakeScionHub(t)
 	reached, release := make(chan struct{}), make(chan struct{})
-	hub.beforeCallback = func() { close(reached); <-release }
+	hub.beforeLogin = func() { close(reached); <-release }
 	d := NewLoginDriver(LoginConfig{
-		Hub:      mustURL(t, hub.URL),
-		Provider: p,
-		Audit:    func(AuditLine) { panic("audit sink exploded") },
+		Hub:       mustURL(t, hub.URL),
+		Sign:      (&testSigner{}).sign,
+		HubUserID: (&recordedUsers{}).lookup,
+		Audit:     func(AuditLine) { panic("audit sink exploded") },
 	})
 
 	const operator = "op@example.test"
@@ -844,7 +814,7 @@ func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
 	e := d.sessions[operator]
 	d.mu.Unlock()
 	if e == nil {
-		t.Fatal("test bug: no in-flight entry while the handshake is held open")
+		t.Fatal("test bug: no in-flight entry while the login is held open")
 	}
 	close(release)
 	if r := <-panicked; r == nil {

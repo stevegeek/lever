@@ -122,7 +122,7 @@ func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project 
 }
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
-	var fresh, noAttach, detachOthers, noBackup, keepConv bool
+	var fresh, noAttach, detachOthers, noBackup, keepConv, resetHubIdentity bool
 	var progressMode string
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
@@ -145,6 +145,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			defer run.finishOnReturn(&err)
 			rep := run.rep
 			printRemoteWarnings(cmd, app)
+			if err := fenceNow(app, stateFor(path)); err != nil {
+				return err
+			}
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
 			}
@@ -156,7 +159,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// buildApplyDeps brings the jail up through EnsureUp on every path, so on Lima
 			// the guest hardening converges whether up applies, resumes or attaches.
 			rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep, ResetHubIdentity: resetHubIdentity})
 			if err != nil {
 				return err
 			}
@@ -296,6 +299,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&fresh, "fresh", false, "start a fresh manager thread (the old conversation is backed up first)")
+	c.Flags().BoolVar(&resetHubIdentity, "reset-hub-identity", false, resetHubIdentityUsage)
 	c.Flags().BoolVar(&noBackup, "no-backup", false, "with --fresh: discard the old conversation without backing it up")
 	c.Flags().BoolVar(&keepConv, "keep-conversation", false, "with --fresh: recreate the manager and resume it on the old conversation")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")

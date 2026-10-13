@@ -31,7 +31,7 @@ func TestStopSuspendsManager(t *testing.T) {
 	t.Chdir(dir)
 
 	// The suspend client must keep its HubTokenSource: without it the call goes
-	// anonymously to the dev-auth-off hub.
+	// anonymously, and the hub refuses it.
 	if err := state.ForConfig(dir).SaveControllerPAT("pat-stop-suspend"); err != nil {
 		t.Fatal(err)
 	}

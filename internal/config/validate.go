@@ -16,6 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/chatfiles"
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/voice"
@@ -474,8 +475,6 @@ func (a *App) validateOperator() error {
 
 // validateRemote rejects a remote block that could not serve safely. It is
 // skipped while remote is disabled, so stale settings do not block loading.
-// The GuestLoginIssuerPort checks matter on OrbStack only (lever's Lima
-// template mirrors no guest port onto the host) and are harmless on Lima.
 func (a *App) validateRemote() error {
 	if !a.Remote.Enabled {
 		return nil
@@ -484,37 +483,16 @@ func (a *App) validateRemote() error {
 	if rp == a.EffectiveJailPort() || rp == a.EffectiveAdminPort() {
 		return fmt.Errorf("config: remote: port %d collides with a broker listener", rp)
 	}
-	if rp == GuestLoginIssuerPort {
-		// OrbStack mirrors the jail's login forwarder onto this host port.
-		return fmt.Errorf("config: remote: port %d is the port the jail's login forwarder is mirrored onto "+
-			"by the container runtime, so the proxy cannot bind it — pick another", rp)
-	}
 	if slices.Contains(a.Manager.AllowPorts, rp) {
 		// A trust boundary, not a bind collision: the proxy believes the
 		// identity header only because just the authenticating front reaches
 		// it. A port in manager.allow_ports gets an egress ACCEPT from the
 		// jail, so any agent could set the header itself and ride the
 		// operator's hub session (agent.attach on every agent).
-		//
-		// remote.login_port is not rejected: the guest's login forwarder must
-		// reach it, and the OIDC provider there mints nothing without an
-		// in-process call.
 		return fmt.Errorf("config: remote: manager.allow_ports lists %d, which is the remote proxy's own port — "+
 			"that grant lets any jailed agent reach the proxy directly and forge the %s header "+
 			"it trusts, riding the operator's hub session (agent.attach on every agent in the project); remove %d from "+
 			"manager.allow_ports, or move the proxy with remote.port", rp, a.EffectiveRemoteIdentityHeader(), rp)
-	}
-	lp := a.EffectiveRemoteLoginPort()
-	if lp == a.EffectiveJailPort() || lp == a.EffectiveAdminPort() {
-		return fmt.Errorf("config: remote: login_port %d collides with a broker listener", lp)
-	}
-	if lp == rp {
-		return fmt.Errorf("config: remote: login_port %d collides with the proxy port", lp)
-	}
-	if lp == GuestLoginIssuerPort {
-		// OrbStack mirrors the guest forwarder onto the host at this number.
-		return fmt.Errorf("config: remote: login_port %d is the port the jail's login forwarder is mirrored onto "+
-			"by the container runtime, so the provider cannot bind it — pick another", lp)
 	}
 	if a.Remote.BaseURL == "" {
 		return fmt.Errorf("config: remote: base_url is required when remote is enabled (without it the proxy refuses all requests)")
@@ -951,10 +929,6 @@ func isHeaderTokenChar(c byte) bool {
 const (
 	remoteIDEmailDomain      = "id.lever.local"
 	remoteUnnamedOperatorKey = "lever-operator@lever.local"
-	// scionDevUserEmail is the scion dev user's default address, which lever
-	// mints its controller token as: a remote login with that address would
-	// post as lever. The broker also refuses the collision at run time.
-	scionDevUserEmail = "dev@localhost"
 )
 
 // userIDChars are what a login without "@" may carry: it becomes the local
@@ -983,8 +957,12 @@ func validRemoteLogin(l string) error {
 		// Listing one of lever's synthesized addresses would make two
 		// different logins the same hub user.
 		return fmt.Errorf("config: remote: allowed_users entry %q is an address lever synthesizes for other logins; list the login itself", l)
-	case strings.EqualFold(HubEmailFor(l), scionDevUserEmail):
-		return fmt.Errorf("config: remote: allowed_users entry %q is the hub user lever itself sends every message as; a login with it would post as lever", l)
+	case hubauth.IsReserved(HubEmailFor(l)):
+		// A login that became one of these hub users would act as lever
+		// itself (admin, or the controller every message is sent as) or as
+		// scion's dev user.
+		return fmt.Errorf("config: remote: allowed_users entry %q is reserved for lever's own hub identities "+
+			"(%s, %s) or scion's dev user (any @localhost address); list another login", l, hubauth.AdminEmail, hubauth.ControllerEmail)
 	}
 	return nil
 }

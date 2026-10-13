@@ -233,6 +233,9 @@ func (p *Push) takeSlot(login, agent string) (wait time.Duration, release func()
 // bounded by SendTimeout, so a slow push service holds the login's checks for
 // one send time. After Run stops the sends get shutdownGrace more.
 func (p *Push) notify(ctx context.Context, login, agent string) {
+	if p.g != nil && !p.g.loginCurrent(login) {
+		return
+	}
 	payload, _ := json.Marshal(struct {
 		V     int    `json:"v"`
 		Agent string `json:"agent"`

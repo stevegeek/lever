@@ -7,16 +7,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/hubapi"
-	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
 )
 
 // pinnedExperiment is a scion hub experiment lever keeps off, with a read-only
 // route the hub answers 404 exactly while the experiment is off. An older scion
 // lacks the route and answers 404 too, which is also "off". The controller PAT
-// can read both routes; the admin view cannot be read without hub-admin.
+// and lever-admin can read both routes; only lever-admin reads the admin view.
 type pinnedExperiment struct {
 	name  string
 	probe string
@@ -86,70 +84,6 @@ func liveExperiments(ctx context.Context, hc *hubapi.Client) ([]string, error) {
 	return live, nil
 }
 
-// experimentsCheck is the bootstrap-token step's view of the pin. has: every
-// window pins. reason: a window is wanted. urgent: a pinned-off experiment is
-// live, so apply must not go on without the window.
-type experimentsCheck struct {
-	has    bool
-	reason string
-	urgent bool
-}
-
-// checkHubExperimentsForApply probes the live hub with the controller PAT. A
-// hub that is down or refuses the PAT tells nothing here: the check after the
-// hub starts asks again (ensureHubExperimentsOff).
-func checkHubExperimentsForApply(ctx context.Context, live *hubapi.Client, st state.State, known scopeKnownFunc) (experimentsCheck, error) {
-	rec, found, err := st.LoadHubExperimentsRecord()
-	if err != nil {
-		return experimentsCheck{}, err
-	}
-	if !hubHasExperiments(ctx, known, rec, found) {
-		return experimentsCheck{}, nil
-	}
-	c := experimentsCheck{has: true}
-	if on, err := liveExperiments(ctx, live); err == nil && len(on) > 0 {
-		c.reason = fmt.Sprintf("scion experiment %s is on at the hub", strings.Join(on, " and "))
-		c.urgent = true
-		return c, nil
-	}
-	if !found || rec.NotApplicable {
-		c.reason = "scion's " + strings.Join(pinnedOffNames(), " and ") + " experiments are not pinned off on this hub yet"
-	}
-	return c, nil
-}
-
-// experimentsWindowBlocked is the apply failure for a live pinned-off
-// experiment beside running containers.
-func experimentsWindowBlocked(reason, blocked string) error {
-	return fmt.Errorf("bootstrap-token: %s and lever must pin it off, but the dev-auth window cannot open: %s. "+
-		"Agents can reach the jail loopback, and the window's dev-auth hub would hand them admin-grade tokens. "+
-		"Run `lever stop`, then `lever up` (the manager conversation is kept): the window then pins it off before the hub starts", reason, blocked)
-}
-
-// pinHubExperimentsOff runs in the dev-auth window as the dev identity. A
-// failure fails the window: lever does not run beside an experiment it could
-// not pin. A malformed store only warns, since scion then resolves every
-// server-layer experiment off and refuses writes until an admin resets it.
-func pinHubExperimentsOff(ctx context.Context, jr proc.Runner, st state.State, now time.Time, o patMintOpts) error {
-	hub, err := windowAdminHub(ctx, jr, o)
-	if err != nil {
-		return fmt.Errorf("bootstrap-token: pinning scion experiments off: %w", err)
-	}
-	rec, err := pinExperimentsOff(ctx, &hubapi.Client{T: hub}, now)
-	if errors.Is(err, errExperimentsMalformed) {
-		o.warn("bootstrap-token: %v, so scion keeps %s off but lever cannot pin them; "+
-			"reset them to the defaults in the hub's admin experiments page, then run `lever apply`", err, strings.Join(pinnedOffNames(), " and "))
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("bootstrap-token: pinning scion experiments off: %w", err)
-	}
-	if err := st.SaveHubExperimentsRecord(rec); err != nil {
-		return fmt.Errorf("bootstrap-token: persisting hub-experiments.json: %w", err)
-	}
-	return nil
-}
-
 // pinConflictRetries bounds re-reads after a concurrent write to the
 // experiments row.
 const pinConflictRetries = 3
@@ -202,80 +136,73 @@ func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (s
 	}
 }
 
-// experimentsRepair is ensureHubExperimentsOff's seams.
-type experimentsRepair struct {
-	live  *hubapi.Client
+// experimentsPin is ensureHubExperimentsOff's seams.
+type experimentsPin struct {
+	// admin is the hub as lever-admin: the experiments admin route is
+	// hub-admin only, and the probes need no token, so this also works on a
+	// fresh hub before the controller PAT exists.
+	admin *hubapi.Client
 	st    state.State
 	known scopeKnownFunc
-	// window runs the bootstrap-token step, which opens the dev-auth window for
-	// a live pinned-off experiment or fails with the repair.
-	window func(ctx context.Context) error
-	// startHub starts the live hub with its normal options.
-	startHub func(ctx context.Context) error
-	log      func(format string, args ...any)
+	now   func() time.Time
+	// restartHub stops and starts the live hub and waits for its broker.
+	restartHub func(ctx context.Context) error
+	log, warn  func(format string, args ...any)
 }
 
-// ensureHubExperimentsOff runs right after the scion-server step starts the
-// hub. The bootstrap-token step cannot probe a hub that was down when it ran
-// (after `lever stop`, a reboot), and conduit's relay starts only with the hub,
-// so a hub that came up with a pinned-off experiment on is caught here: the
-// window pins it off and the hub starts again without it, or apply fails.
-//
-// The hub is up and the controller PAT is fresh here, so a probe that gets no
-// answer fails the apply rather than pass as off. A scion that could not say
-// whether it has hub experiments is probed too: a hub without them answers
-// 404 to both probes, and the window could not pin one that answers otherwise.
-func ensureHubExperimentsOff(ctx context.Context, r experimentsRepair) error {
-	rec, found, err := r.st.LoadHubExperimentsRecord()
+// ensureHubExperimentsOff pins scion's conduit and artifacts experiments off
+// as lever-admin on every apply of a scion that has them, then proves both
+// probe routes answer 404. An experiment that was on before the pin restarts
+// the hub, since conduit's relay starts only with the hub and a pin alone
+// would leave a running relay. A probe that gets no answer fails the apply
+// rather than pass as off. A scion that cannot say whether it has hub
+// experiments is probed too: a hub without them answers 404 to both probes.
+func ensureHubExperimentsOff(ctx context.Context, p experimentsPin) error {
+	rec, found, err := p.st.LoadHubExperimentsRecord()
 	if err != nil {
 		return fmt.Errorf("hub experiments: %w", err)
 	}
-	has, sure := hubExperimentsSupport(ctx, r.known, rec, found)
+	has, sure := hubExperimentsSupport(ctx, p.known, rec, found)
 	if !has && sure {
 		return nil
 	}
-	on, err := liveExperiments(ctx, r.live)
+	names := strings.Join(pinnedOffNames(), " and ")
+	on, err := liveExperiments(ctx, p.admin)
 	if err != nil {
-		return fmt.Errorf("hub experiments: could not tell whether %s are off: %w", strings.Join(pinnedOffNames(), " and "), err)
-	}
-	if len(on) == 0 {
-		return nil
+		return fmt.Errorf("hub experiments: could not tell whether %s are off: %w", names, err)
 	}
 	if !has {
+		if len(on) == 0 {
+			return nil
+		}
 		return fmt.Errorf("hub experiments: %s is on at the hub, and lever cannot pin it off because the jail's scion did not say whether it has hub experiments (`scion hub token create --help`); "+
 			"run `lever stop` and check the hub's admin experiments page before `lever up`", strings.Join(on, " and "))
 	}
-	r.log("lever: scion experiment %s is on at the hub; pinning it off in the dev-auth window and restarting the hub", strings.Join(on, " and "))
-	if err := r.window(ctx); err != nil {
-		return err
+	pinned, err := pinExperimentsOff(ctx, p.admin, p.now())
+	switch {
+	case errors.Is(err, errExperimentsMalformed) && len(on) == 0:
+		p.warn("hub experiments: %v, so scion keeps %s off but lever cannot pin them; "+
+			"reset them to the defaults in the hub's admin experiments page, then run `lever apply`", err, names)
+	case err != nil:
+		return fmt.Errorf("hub experiments: pinning %s off as lever-admin: %w", names, err)
+	default:
+		if err := p.st.SaveHubExperimentsRecord(pinned); err != nil {
+			return fmt.Errorf("hub experiments: persisting hub-experiments.json: %w", err)
+		}
 	}
-	// The window leaves the live hub stopped when it succeeds.
-	if err := r.startHub(ctx); err != nil {
-		return fmt.Errorf("hub experiments: starting the hub after pinning experiments off: %w", err)
+	if len(on) > 0 {
+		p.log("lever: scion experiment %s was on at the hub; lever pinned it off and restarts the hub", strings.Join(on, " and "))
+		if err := p.restartHub(ctx); err != nil {
+			return fmt.Errorf("hub experiments: restarting the hub after pinning experiments off: %w", err)
+		}
 	}
-	on, err = liveExperiments(ctx, r.live)
+	on, err = liveExperiments(ctx, p.admin)
 	if err != nil {
-		return fmt.Errorf("hub experiments: could not confirm %s are off after the restart: %w", strings.Join(pinnedOffNames(), " and "), err)
+		return fmt.Errorf("hub experiments: could not confirm %s are off: %w", names, err)
 	}
 	if len(on) > 0 {
 		return fmt.Errorf("hub experiments: %s is still on at the hub after lever pinned it off; "+
 			"run `lever stop` and check the hub's admin experiments page before `lever up`", strings.Join(on, " and "))
 	}
 	return nil
-}
-
-// ensureHubExperimentsOff backs Deps.EnsureHubExperimentsOff.
-func (w *applyWiring) ensureHubExperimentsOff(ctx context.Context) error {
-	return ensureHubExperimentsOff(ctx, experimentsRepair{
-		live:   w.hub(),
-		st:     w.state,
-		known:  w.sc.KnowsUATScope,
-		window: w.ensureControllerPAT,
-		startHub: func(ctx context.Context) error {
-			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret)
-			opts.Progress = w.deps.Log
-			return w.sc.ServerStart(ctx, opts)
-		},
-		log: w.log,
-	})
 }

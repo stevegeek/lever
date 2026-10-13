@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -41,7 +42,7 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 		}
 	}
 	// The fresh machine has no scion binary, so init-machine would fail.
-	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-project", "write-manifest", "start-manager", "config-registry", "credential", "bootstrap-token"} {
+	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-project", "write-manifest", "start-manager", "config-registry", "credential", "bootstrap-token", "hub-identity", "remote-proxy"} {
 		if contains(got, banned) {
 			t.Fatalf("broker-only plan must omit %q: %v", banned, got)
 		}
@@ -70,7 +71,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, string(s.Kind))
 	}
-	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "scion-server", "hub-identity", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -85,69 +86,45 @@ func TestPlanOrder(t *testing.T) {
 	}
 }
 
-// The controller PAT must exist before scion-server locks the hub down.
-func TestPlanIncludesBootstrapTokenOnceBeforeScionServer(t *testing.T) {
-	app := &config.App{
-		Name: "demo", Backend: "orbstack", Tree: "/t",
-		Manager: config.Manager{Image: "img"},
-	}
-	kinds := planStepNames(Plan(app, PlanOpts{}))
-	btIdx, scionIdx, count := -1, -1, 0
-	for i, k := range kinds {
-		if k == "bootstrap-token" {
-			count++
-			btIdx = i
-		}
-		if k == "scion-server" {
-			scionIdx = i
-		}
-	}
-	if count != 1 {
-		t.Fatalf("bootstrap-token appears %d times, want exactly 1 (kinds=%v)", count, kinds)
-	}
-	if scionIdx < 0 {
-		t.Fatalf("no scion-server step; kinds=%v", kinds)
-	}
-	if !(btIdx < scionIdx) {
-		t.Fatalf("bootstrap-token (idx %d) must come before scion-server (idx %d); kinds=%v", btIdx, scionIdx, kinds)
-	}
-}
-
-func TestPlanRemoteProxyAbsentWhenDisabled(t *testing.T) {
-	app := &config.App{
-		Name: "demo", Backend: "orbstack", Tree: "/t",
-		Manager: config.Manager{Image: "img"},
-	}
-	kinds := planStepNames(Plan(app, PlanOpts{}))
-	if contains(kinds, "remote-proxy") {
-		t.Fatalf("plan must omit remote-proxy when remote is disabled: %v", kinds)
-	}
-}
-
-func TestPlanRemoteProxyPresentAndOrderedAfterScionServer(t *testing.T) {
+// hub-identity needs the live hub and mints the PAT every later hub call
+// uses; remote-proxy signs in only logins hub-identity already invited and
+// bound, so it runs last.
+func TestPlanOrderWithRemote(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img"},
 		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
 	}
+	steps := Plan(app, PlanOpts{})
+	got := planStepNames(steps)
+	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "scion-server", "hub-identity", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager", "remote-proxy"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("plan = %v\nwant   %v", got, want)
+	}
+	if steps[5].Target != "/t" {
+		t.Fatalf("hub-identity target = %q, want the tree", steps[5].Target)
+	}
+}
+
+func TestPlanRemoteOffHasNoProxyAndNoBootstrapToken(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+	}
 	kinds := planStepNames(Plan(app, PlanOpts{}))
-	rpIdx, scionIdx := -1, -1
-	for i, k := range kinds {
-		if k == "remote-proxy" {
-			rpIdx = i
-		}
-		if k == "scion-server" {
-			scionIdx = i
+	for _, banned := range []string{"remote-proxy", "bootstrap-token"} {
+		if contains(kinds, banned) {
+			t.Fatalf("plan must omit %s with remote off: %v", banned, kinds)
 		}
 	}
-	if rpIdx < 0 {
-		t.Fatalf("plan must include remote-proxy when remote is enabled: %v", kinds)
+	n := 0
+	for _, k := range kinds {
+		if k == "hub-identity" {
+			n++
+		}
 	}
-	if scionIdx < 0 {
-		t.Fatalf("no scion-server step; kinds=%v", kinds)
-	}
-	if !(scionIdx < rpIdx) {
-		t.Fatalf("remote-proxy (idx %d) must come after scion-server (idx %d); kinds=%v", rpIdx, scionIdx, kinds)
+	if n != 1 {
+		t.Fatalf("hub-identity appears %d times, want 1: %v", n, kinds)
 	}
 }
 

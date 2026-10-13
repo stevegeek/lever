@@ -103,9 +103,7 @@ func instancePorts(app *config.App, brokerAlive, remoteAlive bool) []instancePor
 		}
 	}
 	if app.RemoteEnabled() {
-		ports = append(ports,
-			instancePort{app.EffectiveRemotePort(), "remote.port", remoteAlive},
-			instancePort{app.EffectiveRemoteLoginPort(), "remote.login_port", remoteAlive})
+		ports = append(ports, instancePort{app.EffectiveRemotePort(), "remote.port", remoteAlive})
 	}
 	return ports
 }
@@ -157,7 +155,7 @@ func checkInstancePorts(app *config.App, st state.State, p instancePortsProbes) 
 	}
 	if len(held) > 0 {
 		return warnResult(name, "held by a process that is not this instance's: "+strings.Join(held, "; "),
-			"stop that process, or give this instance its own ports (broker.jail_port, broker.admin_port, remote.port, remote.login_port, tool backends); see the operations guide on running two instances on one host")
+			"stop that process, or give this instance its own ports (broker.jail_port, broker.admin_port, remote.port, tool backends); see the operations guide on running two instances on one host")
 	}
 	return checkResult{name, true, "no configured port is held by another process", ""}
 }

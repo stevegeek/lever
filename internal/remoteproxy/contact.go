@@ -444,8 +444,8 @@ func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, err
 }
 
 // HubDoer is a hubapi.Doer over the proxy's route to the hub with the remote
-// PAT. That token can also attach and message, so only GET is ever sent with
-// it (Do has no body).
+// PAT, the controller's read-only token: it sends GET only, so even a wider
+// token could not act through it.
 type HubDoer struct {
 	Target      *url.URL
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -455,6 +455,9 @@ type HubDoer struct {
 }
 
 func (d *HubDoer) Do(ctx context.Context, method, p string) (int, []byte, error) {
+	if method != http.MethodGet {
+		return 0, nil, fmt.Errorf("remoteproxy: the remote PAT is sent with GET only, not %s", method)
+	}
 	d.once.Do(func() {
 		d.client = &http.Client{Timeout: 15 * time.Second}
 		if d.DialContext != nil {

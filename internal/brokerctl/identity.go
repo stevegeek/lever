@@ -95,15 +95,37 @@ func filesStampOf(app *config.App) *filesStamp {
 }
 
 // RemoteConfigHash digests the config a `lever remote serve` process captures
-// at startup (see state.RemoteConfigHash). It is the only mapping of
-// config.App onto state.RemoteIdentity, so state stays free of config types.
-func RemoteConfigHash(app *config.App) string {
+// at startup (see state.RemoteConfigHash): the config and the hub-identity
+// record it signs in with. It is the only mapping of config.App onto
+// state.RemoteIdentity, so state stays free of config types.
+func RemoteConfigHash(app *config.App, st state.State) string {
+	hub, _, _ := st.LoadHubIdentity()
+	return state.RemoteConfigHash(remoteIdentity(app, hub))
+}
+
+// RemoteGlobalHash digests what RemoteConfigHash covers apart from the logins
+// themselves (the allowed users, their hub users and the per-login file and
+// voice exclusions): the settings every login shares.
+func RemoteGlobalHash(app *config.App) string {
+	id := remoteIdentity(app, state.HubIdentity{})
+	id.AllowedUsers = nil
+	if id.Files != nil {
+		id.Files.Excluded = nil
+	}
+	if id.Voice != nil {
+		id.Voice.Excluded = nil
+	}
+	return state.RemoteConfigHash(id)
+}
+
+func remoteIdentity(app *config.App, hub state.HubIdentity) state.RemoteIdentity {
 	id := state.RemoteIdentity{
 		Enabled:      app.Remote.Enabled,
 		Port:         app.Remote.Port,
 		BaseURL:      app.Remote.BaseURL,
 		AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
-		LoginPort:    app.Remote.LoginPort,
+		HubUsers:     hub.Users,
+		HubKey:       hub.KeyFingerprint,
 		// Effective values, so spelling out the default (or changing the
 		// header's case) does not bounce the proxy.
 		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
@@ -148,7 +170,7 @@ func RemoteConfigHash(app *config.App) string {
 			id.Push += "\ntest_hosts=" + strings.Join(th, ",")
 		}
 	}
-	return state.RemoteConfigHash(id)
+	return id
 }
 
 // remoteUserKeys is each allowed user as one string for the proxy's config

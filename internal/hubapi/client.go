@@ -3,10 +3,26 @@
 // It covers only hub operations the scion CLI does not expose; prefer the
 // CLI.
 //
-// Requests run inside the jail (see JailCurl), never from the host: the hub
-// binds the jail's loopback, and the Lima template suppresses every
-// guest-to-host port forward as a containment guarantee. Going through the
-// jail also picks the right hub when two instances are up.
+// Requests run inside the jail, never from the host: the hub binds the
+// jail's loopback, and the Lima template suppresses every guest-to-host port
+// forward as a containment guarantee. Going through the jail also picks the
+// right hub when two instances are up.
+//
+// There are two transports, and a Client acts as whichever identity its Doer
+// authenticates:
+//
+//   - JailCurl sends the controller PAT as a bearer token. It is the
+//     transport for project-scoped work (projects, agents, shared dirs,
+//     settings).
+//   - AssertCurl sends a fresh lever-signed assertion in the
+//     X-Lever-Hub-Assertion header and never an Authorization header. It is
+//     the transport for identity and governance (users, invites, roles,
+//     bindings, constraints, token mint and revoke, system identity), as
+//     the admin or controller identity, and only for the routes
+//     AssertionPathAllowed accepts.
+//
+// Neither secret reaches a command line: the jail runner carries both on
+// the child's stdin.
 package hubapi
 
 import (
@@ -33,8 +49,8 @@ type BodyDoer interface {
 	DoBody(ctx context.Context, method, path string, body []byte) (status int, respBody []byte, err error)
 }
 
-// Client talks to the hub as the controller PAT. It is safe for concurrent use
-// when its Doer is.
+// Client talks to the hub as the identity its Doer authenticates. It is safe
+// for concurrent use when its Doer is.
 type Client struct {
 	T Doer
 }

@@ -88,7 +88,7 @@ func foreignBrokerError(adminPort int, got broker.EpochAnswer, ours string) erro
 			got.Version, adminPort)
 	}
 	return fmt.Errorf("the broker on 127.0.0.1:%d belongs to another lever instance (its instance id %s, this instance's %s); lever leaves it running. "+
-		"Give this instance its own broker.jail_port and broker.admin_port (and remote.port, remote.login_port and tool backend ports, see the operations guide). "+
+		"Give this instance its own broker.jail_port and broker.admin_port (and remote.port and tool backend ports, see the operations guide). "+
 		"If it is this instance's own broker from before its directory was moved or copied, stop that broker process first",
 		adminPort, shortID(got.InstanceID), shortID(ours))
 }

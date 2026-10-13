@@ -74,7 +74,8 @@ const WebAssetsDir = "/usr/local/share/scion/web"
 const (
 	// KeyServer is the top-level block holding the hub's server configuration.
 	KeyServer = "server"
-	// KeyOIDCLogin is the OIDC login block under KeyServer (V1OIDCLoginConfig).
+	// KeyOIDCLogin is the OIDC login block under KeyServer (V1OIDCLoginConfig);
+	// lever removes it, since scion offers OAuth whenever it is present.
 	KeyOIDCLogin = "oidc_login"
 	// KeyAuth is the dev-user/identity block under KeyServer (hub.DevUserConfig).
 	KeyAuth = "auth"
@@ -92,28 +93,6 @@ const (
 	// (pkg/config/telemetry_convert.go).
 	KeyTelemetry = "telemetry"
 )
-
-// OIDCLogin is scion's oidc_login block as it appears under `server:` in
-// settings.yaml (pkg/config/settings_v1.go V1OIDCLoginConfig).
-//
-// client_secret is omitted because lever's provider is a public client and
-// scion sends it only when non-empty; scopes is omitted because scion's
-// default is already "openid email profile".
-type OIDCLogin struct {
-	Enabled     bool   `yaml:"enabled"`
-	DisplayName string `yaml:"display_name"`
-	IssuerURL   string `yaml:"issuer_url"`
-	ClientID    string `yaml:"client_id"`
-}
-
-// Node encodes the block as a YAML mapping node, ready for MapSet.
-func (o OIDCLogin) Node() (*yaml.Node, error) {
-	var n yaml.Node
-	if err := n.Encode(o); err != nil {
-		return nil, fmt.Errorf("encode the %s block: %w", KeyOIDCLogin, err)
-	}
-	return &n, nil
-}
 
 // ParseSettings parses a settings file into a document node. Empty content
 // parses to a zero node, which DocumentRoot turns into an empty mapping.

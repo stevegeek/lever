@@ -130,6 +130,9 @@ func (p *Push) streamClient() *http.Client {
 
 func (p *Push) streamOnce(ctx context.Context, login string) error {
 	g := p.g
+	if !g.loginCurrent(login) {
+		return errPushSession
+	}
 	cookie, err := g.cfg.Session.Cookie(ctx, login)
 	if err != nil {
 		return errPushSession
@@ -140,6 +143,7 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	}
 	sctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	defer g.track(login, func() { cancel(errPushSession) })()
 	u := g.cfg.Target.JoinPath("/events")
 	u.RawQuery = url.Values{"sub": {"user." + uid + ".chat.>"}}.Encode()
 	req, err := http.NewRequestWithContext(sctx, http.MethodGet, u.String(), nil)

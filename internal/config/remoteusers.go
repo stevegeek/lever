@@ -90,15 +90,11 @@ func (r Remote) LoginsWithTier(tier string) []string {
 	return out
 }
 
-// ScionDevUserID is scion's fixed well-known UUID for the development
-// pseudo-user (scion pkg/hub/devauth.go). On every lever instance this row is
-// seeded super-admin and nothing removes it; lever uses it only as its
-// host-side controller identity, never for a remote human. scion's workstation
-// PUT /api/v1/system/identity route accepts any authenticated loopback caller
-// with no permission check, so any jailed agent can rename this row to the
-// email of an operator or contact who has no hub user yet; that email's first
-// sign-in would then resolve to the super-admin row. So no remote sign-in may
-// resolve to this id.
+// ScionDevUserID is scion's fixed ID for its dev-auth user (scion
+// pkg/hub/devauth.go). On a hub that once ran with dev auth it owns the
+// project and every agent, so it stays lever's controller; any agent can
+// rename it through scion's workstation identity route, so no remote login may
+// ever resolve to it.
 const ScionDevUserID = "be67fbc9-c869-5d43-b15d-c28ca3e8d355"
 
 // HubEmailFor is the hub user email a remote sign-in as login becomes; it

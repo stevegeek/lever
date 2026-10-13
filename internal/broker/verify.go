@@ -79,9 +79,16 @@ type controllerSender struct {
 	inflight chan struct{} // closed when the running resolution ends
 	lastErr  error
 	failedAt time.Time
+	// resolvedAt is the start of the last successful resolution or of the
+	// last re-resolution attempt; refresh is rate-limited from it.
+	resolvedAt time.Time
 }
 
 const controllerRetryAfter = 5 * time.Second
+
+// controllerRefreshEvery bounds re-resolutions across all callers: any agent
+// can send an unknown user: label, and each one must not cost a hub call.
+const controllerRefreshEvery = 30 * time.Second
 
 var errNoControllerResolver = errors.New("no controller sender resolver")
 
@@ -135,6 +142,7 @@ func (c *controllerSender) get(ctx context.Context) (string, error) {
 		}
 		ch := make(chan struct{})
 		c.inflight = ch
+		started := c.now()
 		c.mu.Unlock()
 
 		l, err := c.resolve(ctx)
@@ -145,7 +153,7 @@ func (c *controllerSender) get(ctx context.Context) (string, error) {
 		c.inflight = nil
 		switch {
 		case err == nil:
-			c.label, c.lastErr = strings.ToLower(l), nil
+			c.label, c.lastErr, c.resolvedAt = strings.ToLower(l), nil, started
 		case ctx.Err() == nil:
 			// This caller's own cancellation is not the hub's answer.
 			c.lastErr, c.failedAt = err, c.now()
@@ -157,6 +165,54 @@ func (c *controllerSender) get(ctx context.Context) (string, error) {
 		}
 		return strings.ToLower(l), nil
 	}
+}
+
+// refresh re-resolves a known label, at most once per controllerRefreshEvery
+// across callers, and reports the label now held and whether it changed. A
+// failed re-resolution keeps the old label: it is the hub's last answer, and
+// an unknown sender is answered "none" either way.
+func (c *controllerSender) refresh(ctx context.Context) (string, bool) {
+	c.mu.Lock()
+	old := c.label
+	if old == "" || c.resolve == nil {
+		c.mu.Unlock()
+		return old, false
+	}
+	if ch := c.inflight; ch != nil {
+		c.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+		}
+		l, _ := c.cached()
+		return l, l != old
+	}
+	if c.now().Sub(c.resolvedAt) < controllerRefreshEvery {
+		c.mu.Unlock()
+		return old, false
+	}
+	ch := make(chan struct{})
+	c.inflight = ch
+	prev := c.resolvedAt
+	c.resolvedAt = c.now()
+	c.mu.Unlock()
+
+	l, err := c.resolve(ctx)
+	if err == nil && (!strings.HasPrefix(l, "user:") || len(l) <= len("user:")) {
+		err = errors.New("the controller's hub user has no sender label")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inflight = nil
+	close(ch)
+	switch {
+	case err == nil:
+		c.label = strings.ToLower(l)
+	case ctx.Err() != nil:
+		// This caller's own cancellation must not spend the shared slot.
+		c.resolvedAt = prev
+	}
+	return c.label, c.label != old
 }
 
 type verifyAnswer struct {
@@ -283,6 +339,17 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, n
 			"resolving the controller sender: "+cerr.Error())
 	case label == controller:
 		return b.verifyLever(caller, from, req.Ref, ts, now, legacy)
+	}
+	// The controller's hub email can be renamed under a running broker. Only
+	// the current label is ever accepted: an envelope carrying an earlier one
+	// stays unknown.
+	if fresh, changed := b.controller.refresh(r.Context()); changed {
+		if b.webSenders[fresh] {
+			return collision(fresh)
+		}
+		if label == fresh {
+			return b.verifyLever(caller, from, req.Ref, ts, now, legacy)
+		}
 	}
 	return b.verifyNone("", reasonUnknownSender,
 		"no host record covers messages from "+from+": it is not lever and not a remote login", "unknown sender "+from)

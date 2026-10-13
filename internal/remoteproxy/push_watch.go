@@ -130,6 +130,9 @@ func (p *Push) streamClient() *http.Client {
 
 func (p *Push) streamOnce(ctx context.Context, login string) error {
 	g := p.g
+	if !g.loginCurrent(login) {
+		return errPushSession
+	}
 	cookie, err := g.cfg.Session.Cookie(ctx, login)
 	if err != nil {
 		return errPushSession

@@ -351,6 +351,9 @@ func TestBuildApplyDepsWiresRemoteProxy(t *testing.T) {
 	if deps.StopRemoteProxy == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.StopRemoteProxy")
 	}
+	if deps.FenceRemoteLogins == nil {
+		t.Fatal("buildApplyDeps did not wire Deps.FenceRemoteLogins")
+	}
 }
 
 func TestApplyDryRunDiscoversConfig(t *testing.T) {

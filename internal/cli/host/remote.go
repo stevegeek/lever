@@ -71,8 +71,8 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			// hub traffic and must reach this instance's jail.
 			prefix := jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr())
 			dial := remoteproxy.JailDial(prefix)
-			hubLogin, err := loadRemoteHubLogin(app, st, func() hubauth.Clock {
-				return guestClock(cmd.Context(), prefix, proc.RealRunner{}, time.Now, cmd.ErrOrStderr())
+			hubLogin, err := loadRemoteHubLogin(app, st, func() (hubauth.Clock, error) {
+				return guestClock(cmd.Context(), prefix, proc.RealRunner{}, time.Now)
 			})
 			if err != nil {
 				return err
@@ -136,8 +136,11 @@ type remoteHubLogin struct {
 
 // loadRemoteHubLogin reads the assertion key, the instance id and the
 // recorded hub users once: apply restarts the proxy after changing any of
-// them. clock is read only once those are in place.
-func loadRemoteHubLogin(app *config.App, st state.State, clock func() hubauth.Clock) (remoteHubLogin, error) {
+// them. clock is read for every sign-in, after the login passed the signer's
+// allowlist: the proxy lives across VM suspends and clock steps, and one
+// reading at start would leave every later sign-in failing until a restart.
+// A failed read refuses the sign-in.
+func loadRemoteHubLogin(app *config.App, st state.State, clock func() (hubauth.Clock, error)) (remoteHubLogin, error) {
 	key, err := hubauth.LoadKey(st.HubAuthKey())
 	if err != nil {
 		return remoteHubLogin{}, fmt.Errorf("remote proxy: no usable hub assertion key (%v); run `lever apply`", err)
@@ -157,13 +160,22 @@ func loadRemoteHubLogin(app *config.App, st state.State, clock func() hubauth.Cl
 	for i, e := range emails {
 		emails[i] = strings.ToLower(e)
 	}
-	signer := hubauth.NewRemoteSigner(hubauth.NewSigner(key, id, clock()), emails)
+	signer := hubauth.NewRemoteSigner(hubauth.NewSigner(key, id, hubauth.Clock{}), emails)
 	users := make(map[string]string, len(rec.Users))
 	for email, uid := range rec.Users {
 		users[strings.ToLower(email)] = uid
 	}
 	return remoteHubLogin{
-		sign: signer.Sign,
+		sign: func(email string) (string, error) {
+			if err := signer.Allowed(email); err != nil {
+				return "", err
+			}
+			c, err := clock()
+			if err != nil {
+				return "", fmt.Errorf("remote proxy: %w; refusing the sign-in rather than sign on the host clock", err)
+			}
+			return signer.WithClock(c).Sign(email)
+		},
 		hubUserID: func(email string) (string, bool) {
 			uid, ok := users[strings.ToLower(email)]
 			return uid, ok && uid != ""
@@ -171,22 +183,17 @@ func loadRemoteHubLogin(app *config.App, st state.State, clock func() hubauth.Cl
 	}, nil
 }
 
-// guestClockTimeout bounds the startup clock read, so a wedged jail delays
-// the proxy by at most this.
+// guestClockTimeout bounds one clock read, so a wedged jail delays a sign-in
+// by at most this.
 const guestClockTimeout = 15 * time.Second
 
-// guestClock reads the guest's clock once. The hub checks an assertion's iat
-// and exp against its own clock; when the read fails the proxy signs on the
-// host clock, which the assertion's backdate and lifetime absorb for a small
-// skew.
-func guestClock(ctx context.Context, prefixFn func() []string, run proc.Runner, now func() time.Time, warn io.Writer) hubauth.Clock {
-	fallback := func(why string) hubauth.Clock {
-		fmt.Fprintf(warn, "lever: warning: remote proxy could not read the guest clock (%s): signing hub assertions on the host clock\n", why)
-		return hubauth.Clock{}
-	}
+// guestClock reads the guest's clock: the hub checks an assertion's iat and
+// exp against its own clock, and the assertion lifetime is too short to
+// absorb an unknown skew.
+func guestClock(ctx context.Context, prefixFn func() []string, run proc.Runner, now func() time.Time) (hubauth.Clock, error) {
 	prefix := prefixFn()
 	if len(prefix) == 0 {
-		return fallback("the jail is not reachable")
+		return hubauth.Clock{}, errors.New("could not read the guest clock: the jail is not reachable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, guestClockTimeout)
 	defer cancel()
@@ -195,13 +202,13 @@ func guestClock(ctx context.Context, prefixFn func() []string, run proc.Runner, 
 	res, err := run.Run(ctx, nil, prefix[0], append(slices.Clone(prefix[1:]), "date", "-u", "+%s")...)
 	after := now()
 	if err != nil {
-		return fallback(firstLine(err.Error()))
+		return hubauth.Clock{}, fmt.Errorf("could not read the guest clock: %s", firstLine(err.Error()))
 	}
 	epoch, err := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
 	if err != nil {
-		return fallback("unexpected `date` output")
+		return hubauth.Clock{}, errors.New("could not read the guest clock: unexpected `date` output")
 	}
-	return hubauth.ClockFromGuestEpoch(epoch, before.Add(after.Sub(before)/2))
+	return hubauth.ClockFromGuestEpoch(epoch, before.Add(after.Sub(before)/2)), nil
 }
 
 func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), hubLogin remoteHubLogin, auditFn func(remoteproxy.AuditLine), warn io.Writer) (http.Handler, *remoteproxy.Push, error) {
@@ -234,6 +241,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		// one port.
 		ListenPort:         app.EffectiveRemotePort(),
 		AllowedUsers:       app.Remote.Logins(),
+		LoginCurrent:       remoteLoginCurrent(app, st),
 		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
 		TrustForwardedHost: app.Remote.TrustForwardedHost,
 		BindHost:           remoteBindHost(app),

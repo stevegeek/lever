@@ -915,6 +915,9 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// StopRemoteProxy needs no controller: teardown is by pid file.
 		StartRemoteProxy: rc.Start,
 		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
+		FenceRemoteLogins: func(context.Context) error {
+			return fenceRemoteLogins(w.app, st, func() error { return brokerctl.StopRemoteProxy(st) })
+		},
 		// BeginSession records the manager's fresh starts for the contact gate (see
 		// sessionrec and remoteContactSession).
 		BeginSession: func(agent string) func() error {

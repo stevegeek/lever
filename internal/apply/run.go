@@ -336,6 +336,13 @@ type Deps struct {
 	// stale one. Run calls it whenever remote access is off, so a proxy left by a
 	// prior apply stops serving traffic the config no longer authorizes.
 	StopRemoteProxy func(ctx context.Context) error
+	// FenceRemoteLogins runs before every step: it records what each remote
+	// login may now do, which a running proxy checks on every request, and
+	// stops the proxy when remote access is off. A removed or narrowed login
+	// so loses the proxy at once, whatever a later step does: nothing an
+	// agent can disturb (the hub, the controller's address) stands between
+	// the operator's edit and the revocation.
+	FenceRemoteLogins func(ctx context.Context) error
 	// RemoveJailFile removes a regular file at a jail-absolute path through the
 	// jail's own view, so removing the stale .scion marker cannot race the in-jail
 	// scion init across VirtioFS (a host-side unlink is not promptly visible in the
@@ -431,6 +438,7 @@ func (d Deps) check() error {
 		{"EnsureAgentTemplate", d.EnsureAgentTemplate == nil},
 		{"StartRemoteProxy", d.StartRemoteProxy == nil},
 		{"StopRemoteProxy", d.StopRemoteProxy == nil},
+		{"FenceRemoteLogins", d.FenceRemoteLogins == nil},
 		{"RemoveJailFile", d.RemoveJailFile == nil},
 		{"RemoveScionProjectConfigs", d.RemoveScionProjectConfigs == nil},
 		{"ScionProjectRegistered", d.ScionProjectRegistered == nil},
@@ -474,6 +482,9 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		fresh:       opts.Fresh,
 		attach:      opts.Attach,
 		freshNoConv: opts.FreshWithoutConversation,
+	}
+	if err := d.FenceRemoteLogins(ctx); err != nil {
+		return fmt.Errorf("remote-proxy: %w", err)
 	}
 	steps := Plan(app, opts)
 	rep := progress.From(ctx)

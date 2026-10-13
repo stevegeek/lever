@@ -58,6 +58,14 @@ type Config struct {
 	ListenPort int
 	// AllowedUsers, when non-empty, pins IdentityHeader values.
 	AllowedUsers []string
+	// LoginCurrent reports why a login this proxy was started with is no
+	// longer admitted by the access `lever apply` last wrote, or nil; the
+	// login is "" when AllowedUsers is empty. It is asked on every request
+	// and before every push, so a removal or narrowing takes effect without
+	// the hub and before the proxy restarts: the proxy answers the chat page,
+	// files, wake and voice from its cached session without asking the hub.
+	// Nil admits every login AllowedUsers admits.
+	LoginCurrent func(login string) error
 	// IdentityHeader carries the front's verified login ("" =
 	// DefaultIdentityHeader). It is stripped from every forwarded request. The
 	// front must OVERWRITE it; a repeated or comma-joined value is refused.
@@ -260,10 +268,13 @@ func loginReturnTarget(v string) string {
 type Decision string
 
 const (
-	DecisionAllow            Decision = "allow"
-	DecisionDenyHost         Decision = "deny-host"
-	DecisionDenyOrigin       Decision = "deny-origin"
-	DecisionDenyUser         Decision = "deny-user"
+	DecisionAllow      Decision = "allow"
+	DecisionDenyHost   Decision = "deny-host"
+	DecisionDenyOrigin Decision = "deny-origin"
+	DecisionDenyUser   Decision = "deny-user"
+	// DecisionDenyRevoked: the login's access changed since the proxy started
+	// (Config.LoginCurrent).
+	DecisionDenyRevoked      Decision = "deny-revoked"
 	DecisionDenyMint         Decision = "deny-credential-mint"
 	DecisionDenyRoute        Decision = "deny-route"
 	DecisionDenyNoSession    Decision = "deny-no-session"
@@ -729,6 +740,11 @@ func (g *gate) operatorFor(login string) string {
 	return login
 }
 
+// loginCurrent fails closed on any error from Config.LoginCurrent.
+func (g *gate) loginCurrent(login string) bool {
+	return g.cfg.LoginCurrent == nil || g.cfg.LoginCurrent(login) == nil
+}
+
 // authorize runs every check that decides whether a request may reach the
 // hub, denying and auditing on the first failure.
 func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine, login string) bool {
@@ -775,6 +791,10 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "identity not allowed")
 			return false
 		}
+	}
+	if !g.loginCurrent(g.operatorFor(login)) {
+		g.deny(w, line, http.StatusForbidden, DecisionDenyRevoked, "this login's access changed; it is refused until `lever apply` completes")
+		return false
 	}
 	if cfg.Session == nil {
 		g.deny(w, line, http.StatusServiceUnavailable, DecisionDenyNoSession, "remote login not configured")

@@ -94,6 +94,9 @@ func fillDeps(d Deps) Deps {
 	if d.StopRemoteProxy == nil {
 		d.StopRemoteProxy = func(context.Context) error { return nil }
 	}
+	if d.FenceRemoteLogins == nil {
+		d.FenceRemoteLogins = func(context.Context) error { return nil }
+	}
 	if d.RemoveJailFile == nil {
 		d.RemoveJailFile = func(context.Context, string) error { return nil }
 	}
@@ -1853,6 +1856,35 @@ func TestRunConvergesRemoteProxyOffWhenDisabled(t *testing.T) {
 	}
 	if stops != 1 {
 		t.Fatalf("StopRemoteProxy calls = %d, want 1", stops)
+	}
+}
+
+// The fence runs before every step, so a removed login loses the proxy even
+// when an early step fails; its failure stops the apply before any step.
+func TestRunFencesRemoteLoginsFirst(t *testing.T) {
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	app.Remote = config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}
+	var order []string
+	deps := Deps{
+		Scion:             hubScion(f, app),
+		FenceRemoteLogins: func(context.Context) error { order = append(order, "fence"); return nil },
+		EnsureHubIdentity: func(context.Context) error { order = append(order, "hub-identity"); return errors.New("wedged") },
+	}
+	if err := runApply(app, deps); err == nil {
+		t.Fatal("want the hub-identity failure")
+	}
+	if len(order) != 2 || order[0] != "fence" {
+		t.Fatalf("order %v: the fence must run before every step", order)
+	}
+	ran := false
+	deps = Deps{
+		Scion:             hubScion(f, app),
+		FenceRemoteLogins: func(context.Context) error { return errors.New("disk full") },
+		EnsureHubIdentity: func(context.Context) error { ran = true; return nil },
+	}
+	if err := runApply(app, deps); err == nil || !strings.Contains(err.Error(), "disk full") || ran {
+		t.Fatalf("err %v, hub-identity ran %v", err, ran)
 	}
 }
 

@@ -14,9 +14,9 @@ import (
 	"time"
 )
 
-// certTTL bounds a leaf cert's lifetime. Short by design; kept fresh by
-// rotation — the broker's serving cert self-rotates (ServerCertSource) and
-// agent leafs renew via the 12h lever-renew sidecar hitting /renew.
+// certTTL bounds a leaf cert's lifetime. Rotation keeps it fresh: the
+// broker's serving cert self-rotates (ServerCertSource) and agent leafs renew
+// via the lever-renew sidecar hitting /renew.
 const certTTL = 24 * time.Hour
 
 // leafTemplate is the single place the leaf-cert security policy lives:
@@ -59,11 +59,9 @@ func (c *CA) SignCSR(csrPEM []byte) ([]byte, error) {
 	return c.SignPublicKey(csr.PublicKey, csr.Subject.CommonName)
 }
 
-// SignPublicKey signs an externally-provided public key into a short-lived
-// ClientAuth cert with the given CommonName. Unlike SignCSR, the CN is chosen by
-// the caller — used by /renew to stamp the authenticated identity, never a
-// CSR-supplied CN (SignCSR itself calls this only after validating the CSR and
-// passing along its CN).
+// SignPublicKey signs pub into a short-lived ClientAuth cert with the given
+// CommonName. /renew uses it to stamp the authenticated identity, never a
+// CSR-supplied CN.
 func (c *CA) SignPublicKey(pub crypto.PublicKey, cn string) ([]byte, error) {
 	if cn == "" {
 		return nil, fmt.Errorf("ca: empty common name")
@@ -79,12 +77,10 @@ func (c *CA) SignPublicKey(pub crypto.PublicKey, cn string) ([]byte, error) {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
-// IssueServerCertSANs mints a server cert carrying BOTH the given DNS names and
-// IP-address SANs, with cn as the Subject CommonName. The broker uses this so an
-// agent can reach it by hostname (host.orb.internal) OR by its resolved alias IP
-// — the latter is required under closed-internet egress, where DNS/53 is dropped
-// so the agent must dial the already-allowlisted IP directly while TLS still
-// validates against the IP SAN. Any "" entries are ignored.
+// IssueServerCertSANs mints a server cert with the given DNS and IP SANs and
+// cn as CommonName. The IP SAN is needed under closed-internet egress, where
+// DNS is dropped and the agent dials the allowlisted IP directly. ""
+// entries are ignored.
 func (c *CA) IssueServerCertSANs(cn string, dnsNames []string, ips []string) (certPEM, keyPEM []byte, err error) {
 	var dns []string
 	for _, d := range dnsNames {

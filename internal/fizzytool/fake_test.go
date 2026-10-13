@@ -12,7 +12,9 @@ const testBoard = "0testboard00000000000001"
 // fakeFizzy writes a shell script that records argv, cwd, HOME and the
 // token to a log (the path is baked in: the tool passes no other env), copies
 // any --body_file/--description_file content into the log, and answers with
-// canned JSON. Card 99 is on another board; column list has one column.
+// canned JSON. Card 99 is on another board, card 98 is closed, card 97 has
+// no closed state, a comment on card 96 fails, and closing card 95 fails;
+// column list has one column.
 func fakeFizzy(t *testing.T) (bin, logPath string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -25,8 +27,15 @@ LOG='` + logPath + `'
 } >> "$LOG"
 case "$1 $2" in
 "card show")
-  if [ "$3" = "99" ]; then b=otherboard0000000000000; else b=` + testBoard + `; fi
-  printf '{"ok":true,"data":{"number":%s,"board":{"id":"%s"},"title":"t"}}\n' "$3" "$b" ;;
+  b=` + testBoard + `; c=',"closed":false'
+  case "$3" in 99) b=otherboard0000000000000 ;; 98) c=',"closed":true' ;; 97) c= ;; esac
+  printf '{"ok":true,"data":{"number":%s,"board":{"id":"%s"},"title":"t"%s}}\n' "$3" "$b" "$c" ;;
+"comment create")
+  case " $* " in *" --card=96 "*) printf '{"ok":false,"error":"comment refused"}\n'; exit 1 ;; esac
+  printf '{"ok":true,"data":{}}\n' ;;
+"card close")
+  if [ "$3" = "95" ]; then printf '{"ok":false,"error":"close refused"}\n'; exit 1; fi
+  printf '{"ok":true,"data":{}}\n' ;;
 "column list") printf '{"ok":true,"data":[{"id":"col00000000001","name":"In progress"}]}\n' ;;
 "card list")
   case "$*" in

@@ -27,13 +27,14 @@ func TestBoardCheckRefusesOtherBoard(t *testing.T) {
 		"comments": func() error { _, err := tl.ListComments(ctx, "m", "99"); return err },
 		"comment":  func() error { _, err := tl.Comment(ctx, "m", "99", "hi"); return err },
 		"move":     func() error { _, err := tl.MoveCard(ctx, "m", "99", "col00000000001"); return err },
+		"close":    func() error { _, err := tl.CloseCard(ctx, "m", "99", "done"); return err },
 	} {
 		if err := call(); !errors.Is(err, ErrOtherBoard) {
 			t.Errorf("%s: want ErrOtherBoard, got %v", name, err)
 		}
 	}
 	log := readLog(t, logPath)
-	for _, w := range []string{"[comment] [create]", "[card] [column]", "[comment] [list]"} {
+	for _, w := range []string{"[comment] [create]", "[card] [column]", "[comment] [list]", "[card] [close]"} {
 		if strings.Contains(log, w) {
 			t.Errorf("a write/read ran for a card on another board: %s", w)
 		}
@@ -215,5 +216,133 @@ func TestWriteRateLimitDefault(t *testing.T) {
 	}
 	if err := tl.takeWrite(); err == nil {
 		t.Fatalf("write %d must be refused", DefaultWriteLimit+1)
+	}
+}
+
+func TestCloseCardClosesOpenCard(t *testing.T) {
+	tl, logPath := newTool(t)
+	res, err := tl.CloseCard(context.Background(), "m", "17", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := res.(map[string]any); !ok || m["closed"] != true || m["commented"] != false {
+		t.Fatalf("result: %v", res)
+	}
+	log := readLog(t, logPath)
+	if !strings.Contains(log, "ARGV [card] [close] [17] [--agent] [--json]") {
+		t.Fatalf("close argv wrong:\n%s", log)
+	}
+	if strings.Contains(log, "[comment] [create]") {
+		t.Fatalf("no comment was asked for:\n%s", log)
+	}
+}
+
+// TestCloseCardCommentsFirst: the comment carries the prefix, goes through a
+// file, and is posted before the close.
+func TestCloseCardCommentsFirst(t *testing.T) {
+	tl, logPath := newTool(t)
+	res, err := tl.CloseCard(context.Background(), "m", "17", "released in v1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := res.(map[string]any); m["commented"] != true {
+		t.Fatalf("result: %v", res)
+	}
+	log := readLog(t, logPath)
+	ci, xi := strings.Index(log, "[comment] [create] [--card=17]"), strings.Index(log, "[card] [close] [17]")
+	if ci < 0 || xi < 0 || ci > xi {
+		t.Fatalf("want the comment then the close:\n%s", log)
+	}
+	if !strings.Contains(log, "FILE [lever-dev agent] released in v1.2.3") {
+		t.Fatalf("comment not prefixed or not sent via file:\n%s", log)
+	}
+	if entries, _ := os.ReadDir(tl.TmpDir); len(entries) != 0 {
+		t.Fatalf("temp body file left behind: %v", entries)
+	}
+}
+
+// TestCloseCardBlankComment: a blank comment is no comment.
+func TestCloseCardBlankComment(t *testing.T) {
+	tl, logPath := newTool(t)
+	res, err := tl.CloseCard(context.Background(), "m", "17", " \n\t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := res.(map[string]any); m["commented"] != false {
+		t.Fatalf("result: %v", res)
+	}
+	log := readLog(t, logPath)
+	if strings.Contains(log, "[comment] [create]") || !strings.Contains(log, "[card] [close] [17]") {
+		t.Fatalf("want a close and no comment:\n%s", log)
+	}
+}
+
+// TestCloseCardCloseFailsAfterComment: the error says the comment was
+// posted.
+func TestCloseCardCloseFailsAfterComment(t *testing.T) {
+	tl, logPath := newTool(t)
+	_, err := tl.CloseCard(context.Background(), "m", "95", "bye")
+	if err == nil || !strings.Contains(err.Error(), "comment was posted") {
+		t.Fatalf("want the posted-comment error, got %v", err)
+	}
+	if !strings.Contains(readLog(t, logPath), "[comment] [create] [--card=95]") {
+		t.Fatal("the comment was not sent")
+	}
+}
+
+// TestCloseCardRefusals: a closed card, a card with no readable closed
+// state, a failed comment and invalid input post nothing and close nothing.
+func TestCloseCardRefusals(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct{ name, number, comment, want string }{
+		{"closed", "98", "again", "already closed"},
+		{"no state", "97", "", "no closed state"},
+		{"comment fails", "96", "hi", "not closed"},
+		{"number flag", "--help", "", "invalid"},
+		{"number empty", "", "", "invalid"},
+		{"number too long", "12345678", "", "invalid"},
+		{"number sign", "-1", "", "invalid"},
+		{"markup", "17", `<action-text-attachment sgid="x">`, "action-text-attachment"},
+		{"control", "17", "a\x00b", "control"},
+	} {
+		tl, logPath := newTool(t)
+		_, err := tl.CloseCard(ctx, "m", c.number, c.comment)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want a refusal containing %q, got %v", c.name, c.want, err)
+		}
+		log := readLog(t, logPath)
+		if strings.Contains(log, "[card] [close]") {
+			t.Errorf("%s: the card was closed:\n%s", c.name, log)
+		}
+		if c.name != "comment fails" && strings.Contains(log, "[comment] [create]") {
+			t.Errorf("%s: a comment was posted:\n%s", c.name, log)
+		}
+	}
+	tl, _ := newTool(t)
+	if _, err := tl.CloseCard(ctx, "m", "98", ""); !errors.Is(err, ErrClosed) {
+		t.Fatalf("want ErrClosed, got %v", err)
+	}
+}
+
+// TestCloseCardRateLimit: a close counts as a write, and a close with a
+// comment needs room for both or sends neither.
+func TestCloseCardRateLimit(t *testing.T) {
+	tl, logPath := newTool(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	tl.Now = func() time.Time { return now }
+	tl.WriteLimit = 2
+	if _, err := tl.CloseCard(ctx, "m", "17", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tl.CloseCard(ctx, "m", "18", "bye"); err == nil || !strings.HasPrefix(err.Error(), "rate") {
+		t.Fatalf("a comment and close over the cap: want a rate refusal, got %v", err)
+	}
+	log := readLog(t, logPath)
+	if strings.Contains(log, "[comment] [create]") || strings.Contains(log, "[close] [18]") {
+		t.Fatalf("a refused call sent a write:\n%s", log)
+	}
+	if _, err := tl.CloseCard(ctx, "m", "18", ""); err != nil {
+		t.Fatalf("a bare close fits the cap: %v", err)
 	}
 }

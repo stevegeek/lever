@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stevegeek/lever/captool"
+	"github.com/stevegeek/lever/internal/fizzytool"
 )
 
 func TestLoadTokenMode(t *testing.T) {
@@ -53,5 +58,39 @@ func TestAsResultFizzy(t *testing.T) {
 	m, ok := v.(map[string]any)
 	if err != nil || !ok || m["ok"] != false || !strings.Contains(m["error"].(string), "Lever board") {
 		t.Fatalf("got %v %v", v, err)
+	}
+}
+
+func opNames(ops []captool.Operation) []string {
+	var n []string
+	for _, o := range ops {
+		n = append(n, o.Name)
+	}
+	return n
+}
+
+// TestOpsFlag: unset -ops keeps the six operations and no close_card;
+// close_card is registered only when -ops lists it.
+func TestOpsFlag(t *testing.T) {
+	base := []string{"-fizzy", "/f", "-token-file", "/t", "-account", "1", "-board", "0testboard00000000000001", "-state", "/s"}
+	o, err := parseFlags(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := opNames(operations(context.Background(), o, &fizzytool.Tool{}))
+	if want := []string{"list_cards", "show_card", "list_comments", "comment", "move_card", "create_card"}; !slices.Equal(got, want) {
+		t.Fatalf("default ops: got %v, want %v", got, want)
+	}
+	o, err = parseFlags(append(slices.Clone(base), "-ops", " close_card,show_card,close_card"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := opNames(operations(context.Background(), o, &fizzytool.Tool{})); !slices.Equal(got, []string{"show_card", "close_card"}) {
+		t.Fatalf("listed ops: got %v", got)
+	}
+	for _, bad := range []string{"close", "delete_card", "", "show_card,"} {
+		if _, err := parseFlags(append(slices.Clone(base), "-ops", bad)); err == nil || !strings.Contains(err.Error(), "-ops") {
+			t.Errorf("-ops %q: want a refusal, got %v", bad, err)
+		}
 	}
 }

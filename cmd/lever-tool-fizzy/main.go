@@ -2,6 +2,8 @@
 // board: six operations (list, show, comments, comment, move, create) on ONE
 // board, through the official fizzy CLI with the token in its environment.
 // Spec: docs/superpowers/specs/2026-10-07-lever-dev-on-desktop-design.md §4b.
+//
+// With -ops it also offers close_card (not by default), its own capability.
 package main
 
 import (
@@ -14,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -30,10 +33,21 @@ var (
 	accountRE = regexp.MustCompile(`^[0-9]{1,12}$`)
 )
 
-type opts struct{ name, backend, admin, fizzy, tokenFile, account, board, state, prefix string }
+// The operations: defaultOps are offered when -ops is unset; close_card
+// exists only when -ops lists it.
+var (
+	defaultOps = []string{"list_cards", "show_card", "list_comments", "comment", "move_card", "create_card"}
+	allOps     = append(slices.Clone(defaultOps), "close_card")
+)
+
+type opts struct {
+	name, backend, admin, fizzy, tokenFile, account, board, state, prefix string
+	ops                                                                   []string // offered operations, in allOps order
+}
 
 func parseFlags(args []string) (opts, error) {
 	var o opts
+	var ops string
 	fs := flag.NewFlagSet("lever-tool-fizzy", flag.ContinueOnError)
 	fs.StringVar(&o.name, "name", "fizzy", "tool/registry name")
 	fs.StringVar(&o.backend, "backend", "127.0.0.1:3211", "MCP listen address (set by the broker)")
@@ -44,6 +58,7 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&o.board, "board", "", "the only board id this tool may touch")
 	fs.StringVar(&o.state, "state", "", "absolute private state dir")
 	fs.StringVar(&o.prefix, "prefix", "[lever-dev agent] ", "text prepended to every comment and description")
+	fs.StringVar(&ops, "ops", strings.Join(defaultOps, ","), "comma list of operations to offer: "+strings.Join(allOps, ", "))
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -66,6 +81,15 @@ func parseFlags(args []string) (opts, error) {
 	if strings.TrimSpace(o.prefix) == "" {
 		return o, fmt.Errorf("-prefix must not be empty: every comment and description is marked as written by the agent")
 	}
+	var listed []string
+	for _, e := range strings.Split(ops, ",") {
+		e = strings.TrimSpace(e)
+		if !slices.Contains(allOps, e) {
+			return o, fmt.Errorf("-ops: unknown entry %q; want a comma list of %s", e, strings.Join(allOps, ", "))
+		}
+		listed = append(listed, e)
+	}
+	o.ops = slices.DeleteFunc(slices.Clone(allOps), func(op string) bool { return !slices.Contains(listed, op) })
 	return o, nil
 }
 
@@ -107,6 +131,51 @@ func op(name, desc string, params []captool.ParamSpec, h func(captool.ValidatedC
 		Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) { return asResult(h(c, a)) }}
 }
 
+// An operation -ops does not list is not registered at all.
+func operations(ctx context.Context, o opts, t *fizzytool.Tool) []captool.Operation {
+	num := captool.ParamSpec{Name: "number", Type: "string", Description: "card number"}
+	prefix := strings.TrimSpace(o.prefix)
+	all := map[string]captool.Operation{
+		"list_cards": op("list_cards", "list cards on the Lever board, optionally by column id (or not-now/maybe/done) and search text",
+			[]captool.ParamSpec{{Name: "column", Type: "string"}, {Name: "search", Type: "string"}, {Name: "page", Type: "string", Description: "page number (digits), default 1"}},
+			func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return t.ListCards(ctx, c.Caller, a["column"], a["search"], a["page"])
+			}),
+		"show_card": op("show_card", "show one card on the Lever board", []captool.ParamSpec{num},
+			func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return t.ShowCard(ctx, c.Caller, a["number"])
+			}),
+		"list_comments": op("list_comments", "list a card's comments", []captool.ParamSpec{num},
+			func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return t.ListComments(ctx, c.Caller, a["number"])
+			}),
+		"comment": op("comment", "add a comment (markdown) to a card; it is shown with the "+prefix+" prefix",
+			[]captool.ParamSpec{num, {Name: "body", Type: "string"}},
+			func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return t.Comment(ctx, c.Caller, a["number"], a["body"])
+			}),
+		"move_card": op("move_card", "move a card to a column of the Lever board (column id)", []captool.ParamSpec{num, {Name: "column", Type: "string"}},
+			func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return t.MoveCard(ctx, c.Caller, a["number"], a["column"])
+			}),
+		"create_card": op("create_card", "create a card on the Lever board", []captool.ParamSpec{{Name: "title", Type: "string"}, {Name: "description", Type: "string"}},
+			func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return t.CreateCard(ctx, c.Caller, a["title"], a["description"])
+			}),
+		"close_card": op("close_card", "close an open card on the Lever board (Fizzy's Done); an optional comment (markdown) is posted first with the "+prefix+
+			" prefix. A closed card is refused; it never reopens or deletes a card",
+			[]captool.ParamSpec{num, {Name: "comment", Type: "string", Description: "optional comment posted before the close"}},
+			func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return t.CloseCard(ctx, c.Caller, a["number"], a["comment"])
+			}),
+	}
+	var out []captool.Operation
+	for _, name := range o.ops {
+		out = append(out, all[name])
+	}
+	return out
+}
+
 func main() {
 	logger := logging.Install(os.Stderr, "lever-tool-fizzy")
 	// Installed first, so a fatal startup error takes the same line shape.
@@ -142,37 +211,9 @@ func main() {
 	if err := fizzytool.CheckVersion(ctx, t.CLI); err != nil {
 		log.Fatal(err)
 	}
-	num := captool.ParamSpec{Name: "number", Type: "string", Description: "card number"}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,
-		Operations: []captool.Operation{
-			op("list_cards", "list cards on the Lever board, optionally by column id (or not-now/maybe/done) and search text",
-				[]captool.ParamSpec{{Name: "column", Type: "string"}, {Name: "search", Type: "string"}, {Name: "page", Type: "string", Description: "page number (digits), default 1"}},
-				func(c captool.ValidatedContext, a map[string]string) (any, error) {
-					return t.ListCards(ctx, c.Caller, a["column"], a["search"], a["page"])
-				}),
-			op("show_card", "show one card on the Lever board", []captool.ParamSpec{num},
-				func(c captool.ValidatedContext, a map[string]string) (any, error) {
-					return t.ShowCard(ctx, c.Caller, a["number"])
-				}),
-			op("list_comments", "list a card's comments", []captool.ParamSpec{num},
-				func(c captool.ValidatedContext, a map[string]string) (any, error) {
-					return t.ListComments(ctx, c.Caller, a["number"])
-				}),
-			op("comment", "add a comment (markdown) to a card; it is shown with the "+strings.TrimSpace(o.prefix)+" prefix",
-				[]captool.ParamSpec{num, {Name: "body", Type: "string"}},
-				func(c captool.ValidatedContext, a map[string]string) (any, error) {
-					return t.Comment(ctx, c.Caller, a["number"], a["body"])
-				}),
-			op("move_card", "move a card to a column of the Lever board (column id)", []captool.ParamSpec{num, {Name: "column", Type: "string"}},
-				func(c captool.ValidatedContext, a map[string]string) (any, error) {
-					return t.MoveCard(ctx, c.Caller, a["number"], a["column"])
-				}),
-			op("create_card", "create a card on the Lever board", []captool.ParamSpec{{Name: "title", Type: "string"}, {Name: "description", Type: "string"}},
-				func(c captool.ValidatedContext, a map[string]string) (any, error) {
-					return t.CreateCard(ctx, c.Caller, a["title"], a["description"])
-				}),
-		},
+		Operations: operations(ctx, o, t),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -180,6 +221,6 @@ func main() {
 	if err := srv.Register(ctx); err != nil {
 		log.Fatalf("register with broker: %v", err)
 	}
-	log.Printf("lever-tool-fizzy %q serving MCP on %s (board %s)", o.name, o.backend, o.board)
+	log.Printf("lever-tool-fizzy %q serving MCP on %s (board %s, ops %s)", o.name, o.backend, o.board, strings.Join(o.ops, ","))
 	log.Fatal(http.ListenAndServe(o.backend, srv.Handler()))
 }

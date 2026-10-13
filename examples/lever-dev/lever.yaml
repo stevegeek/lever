@@ -35,6 +35,9 @@ broker:
                 -account, "ACCOUNT_ID",
                 -board, BOARD_ID,   # your Fizzy board id
                 -state, /home/YOU/.local/state/lever-dev-fizzy]
+                # To let the manager close cards (Fizzy's Done), add before the ]:
+                #   -ops, "list_cards,show_card,list_comments,comment,move_card,create_card,close_card"
+                # and uncomment close_card below and its grant under manager.obtain.
       backend: 127.0.0.1:3211
       operations:
         - {name: list_cards, params: [column, search, page]}
@@ -43,6 +46,7 @@ broker:
         - {name: comment, params: [number, body]}
         - {name: move_card, params: [number, column]}
         - {name: create_card, params: [title, description]}
+        # - {name: close_card, params: [number, comment]}
 manager:
   image: scionlocal/lever-dev-claude:amd64
   credential_file: secrets/claude-oauth-token
@@ -55,6 +59,7 @@ manager:
     - {tool: fizzy, op: comment}
     - {tool: fizzy, op: move_card}
     - {tool: fizzy, op: create_card}
+    # - {tool: fizzy, op: close_card}
 remote:
   enabled: true
   base_url: https://YOUR-HOST.YOUR-TAILNET.ts.net:8445

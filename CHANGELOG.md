@@ -7,6 +7,21 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-10-13
+
+### Added
+
+- **fizzy tool: close cards (`close_card`, opt-in through `-ops`).** In Fizzy, Done is a card's
+  closed state, not a column, so `move_card` could not finish a card. `lever-tool-fizzy` takes a
+  new `-ops` flag, a comma list of the operations to offer; unset, it offers the six operations as
+  before, and `close_card` exists only when listed. `close_card` is its own fine-gated capability
+  and acts only on a card of `-board`. It refuses a card that is already closed (or whose closed
+  state it cannot read) and then posts nothing; it posts the optional `comment` first, with the
+  prefix and checks of `comment`, and does not close the card when the comment fails. It runs
+  `fizzy card close`, writes a `fizzy.close_card` audit line, and never reopens or deletes a card.
+  Closes count against the per-minute write limit, with comments and created cards; a close with
+  a comment takes both slots or none.
+
 ## [0.36.0] - 2026-10-13
 
 ### Added

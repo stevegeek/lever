@@ -3,11 +3,15 @@ package host
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/apply"
@@ -56,15 +60,50 @@ func (d doctorHubAuth) client(sign func() (string, error)) *hubapi.Client {
 const hubAuthFix = "run `lever apply`; it installs the key, pins the hub's auth settings and restarts the hub when they differ"
 
 // hubAuthState is the jail-side evidence the authentication row reads besides
-// the hub's answers: the public key file and scion's dev token.
+// the hub's answers: scion's dev token, the owner, mode and type of the key's
+// directory and file (stat without -L, so a symlink shows as one), and the
+// public key file.
 const hubAuthStateScript = `[ -e "$HOME/$1" ] && echo devtoken
+printf 'stat %s|%s\n' "$(stat -c '%u:%a:%F' "$3" 2>/dev/null)" "$(stat -c '%u:%a:%F' "$2" 2>/dev/null)"
 [ -f "$2" ] && cat "$2"`
 
+// keyOwnershipProblem reads one `uid:octal-mode:type` stat line: root-owned,
+// of the wanted type, and writable by nobody else.
+func keyOwnershipProblem(path, line, wantType string) string {
+	parts := strings.SplitN(line, ":", 3)
+	if len(parts) != 3 {
+		return path + " could not be read in the jail"
+	}
+	mode, err := strconv.ParseUint(parts[1], 8, 32)
+	switch {
+	case err != nil:
+		return path + " has an unreadable mode " + parts[1]
+	case parts[2] != wantType:
+		return path + " is a " + parts[2] + ", not a " + wantType
+	case parts[0] != "0":
+		return path + " is owned by uid " + parts[0] + ", not root"
+	case mode&0o022 != 0:
+		return path + " is writable by group or others (mode " + parts[1] + ")"
+	}
+	return ""
+}
+
+// uninvitedProbeEmail is an address no hub can have invited, for proving
+// invite_only by behaviour: a random local part under lever's own domain.
+func uninvitedProbeEmail() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return "doctor-probe-" + hex.EncodeToString(b[:]) + "@lever.local", nil
+}
+
 // checkHubAuthentication tests the hub's effective configuration by
-// behaviour, which file contents cannot prove: an assertion from another key
-// and one for another hub are refused, lever-admin is the admin, no OAuth
-// login is offered, the running hub was started with lever's auth env and
-// without dev auth, and no dev token lies on disk.
+// behaviour, which file contents cannot prove: an assertion from another key,
+// one for another hub and one for an uninvited address are refused,
+// lever-admin is the admin, no OAuth login is offered, the running hub was
+// started with lever's auth env and without dev auth, no dev token lies on
+// disk, and the public key is root's.
 func checkHubAuthentication(ctx context.Context, d doctorHubAuth, running func(context.Context) (scionpkg.RunningHub, error)) checkResult {
 	const name = "hub authentication"
 	if d.err != nil {
@@ -91,6 +130,20 @@ func checkHubAuthentication(ctx context.Context, d doctorHubAuth, running func(c
 			return checkResult{name, false, "could not reach the hub from the jail: " + err.Error(), "is the machine up? `lever apply`"}
 		case status != http.StatusUnauthorized:
 			problems = append(problems, fmt.Sprintf("the hub answered %d to %s, want 401", status, c.what))
+		}
+	}
+	// A mis-set access mode admits any address the key signs for; the hub's
+	// configuration file cannot prove which mode is in force.
+	if email, err := uninvitedProbeEmail(); err != nil {
+		problems = append(problems, err.Error())
+	} else {
+		status, _, err := d.client(func() (string, error) { return d.signer.Sign(email, "lever-doctor") }).T.Do(ctx, http.MethodGet, "/api/v1/auth/me")
+		switch {
+		case err != nil:
+			problems = append(problems, "could not probe the hub's access mode: "+err.Error())
+		case status != http.StatusForbidden:
+			problems = append(problems, fmt.Sprintf("the hub answered %d to a signed assertion for an uninvited address, want 403: it is not invite_only "+
+				"(it may now hold a user row for %s)", status, email))
 		}
 	}
 	me, err := d.client(d.signer.Admin).Me(ctx)
@@ -120,7 +173,7 @@ func checkHubAuthentication(ctx context.Context, d doctorHubAuth, running func(c
 			}
 		}
 	}
-	res, err := d.jr.Run(ctx, nil, "sh", "-c", hubAuthStateScript, "_", layout.DevTokenRel, hubauth.GuestPublicKeyPath)
+	res, err := d.jr.Run(ctx, nil, "sh", "-c", hubAuthStateScript, "_", layout.DevTokenRel, hubauth.GuestPublicKeyPath, path.Dir(hubauth.GuestPublicKeyPath))
 	if err != nil {
 		problems = append(problems, "could not read the jail: "+firstLine(err.Error()))
 	} else {
@@ -129,6 +182,20 @@ func checkHubAuthentication(ctx context.Context, d doctorHubAuth, running func(c
 			problems = append(problems, "scion's dev token ~/"+layout.DevTokenRel+" exists in the jail: a hub admin credential")
 			out = strings.TrimPrefix(out, "devtoken\n")
 		}
+		statLine, rest, _ := strings.Cut(out, "\n")
+		if dir, file, ok := strings.Cut(strings.TrimPrefix(statLine, "stat "), "|"); !ok || !strings.HasPrefix(statLine, "stat ") {
+			problems = append(problems, "could not read the owner of "+hubauth.GuestPublicKeyPath)
+		} else {
+			for _, p := range []string{
+				keyOwnershipProblem(path.Dir(hubauth.GuestPublicKeyPath), dir, "directory"),
+				keyOwnershipProblem(hubauth.GuestPublicKeyPath, file, "regular file"),
+			} {
+				if p != "" {
+					problems = append(problems, p)
+				}
+			}
+			out = rest
+		}
 		if !bytes.Equal(bytes.TrimSpace([]byte(out)), bytes.TrimSpace(d.key.PublicPEM())) {
 			problems = append(problems, hubauth.GuestPublicKeyPath+" in the jail is not the public half of "+stateRel(d.st, d.st.HubAuthKey()))
 		}
@@ -136,7 +203,7 @@ func checkHubAuthentication(ctx context.Context, d doctorHubAuth, running func(c
 	if len(problems) > 0 {
 		return checkResult{name, false, strings.Join(problems, "; "), hubAuthFix}
 	}
-	return checkResult{name, true, "forged and foreign assertions refused, lever-admin is admin, no login provider, hub runs lever's auth env, no dev token, key " + d.key.Fingerprint(), ""}
+	return checkResult{name, true, "forged, foreign and uninvited assertions refused, lever-admin is admin, no login provider, hub runs lever's auth env, no dev token, root-owned key " + d.key.Fingerprint(), ""}
 }
 
 func flagValueOf(argv []string, name string) string {

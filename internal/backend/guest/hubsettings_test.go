@@ -3,6 +3,7 @@ package guest
 import (
 	"context"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -154,11 +155,15 @@ func TestEnsureHubAuthRemovesTheForwarderInstallsTheKeyAndReportsARestart(t *tes
 	f.Script(strings.TrimSpace("orb -u root -m lever-x bash -c "+removeLoginForwardScript), proc.Result{})
 	f.Script(strings.TrimSpace("orb -u root -m lever-x bash -c "+installHubAuthKeyScript), proc.Result{Stdout: "CHANGED\n"})
 	f.Script(strings.TrimSpace("orb -m lever-x /bin/bash -c "+readScionSettingsScript), proc.Result{Stdout: "LEGACY 0\n"})
+	f.Script("orb -m lever-x /bin/bash -c "+removeDevTokenScript, proc.Result{})
 	f.Script("orb -m lever-x bash -c", proc.Result{})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-x"}}
 	restart, err := g.EnsureHubAuth(context.Background(), testHubAuth(false))
 	if err != nil || !restart {
 		t.Fatalf("restart=%v err=%v", restart, err)
+	}
+	if !slices.ContainsFunc(f.Calls, func(c proc.Call) bool { return c.Argv() == "orb -m lever-x /bin/bash -c "+removeDevTokenScript }) {
+		t.Fatalf("the dev token was not removed: %+v", f.Calls)
 	}
 	var keyCall *proc.Call
 	for i, c := range f.Calls {

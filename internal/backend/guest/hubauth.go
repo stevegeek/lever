@@ -59,6 +59,11 @@ trap - EXIT
 echo CHANGED
 `
 
+// removeDevTokenScript removes scion's dev-auth admin token, which a hub
+// that once ran with dev auth left behind; a hub with dev auth off never
+// reads it, but it stays an admin credential for any later dev-auth start.
+var removeDevTokenScript = `rm -f -- "$HOME/` + layout.DevTokenRel + `"`
+
 // EnsureHubAuth: see backend.Backend.EnsureHubAuth.
 func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error) {
 	if len(bytes.TrimSpace(spec.PublicKeyPEM)) == 0 || spec.Issuer == "" || spec.Audience == "" || spec.AdminEmail == "" || spec.Header == "" {
@@ -73,6 +78,9 @@ func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, err
 		return false, fmt.Errorf("guest: install %s: %w: %s", HubAuthKeyPath, err, strings.TrimSpace(res.Stderr))
 	}
 	keyChanged := strings.TrimSpace(res.Stdout) == "CHANGED"
+	if _, err := g.UserRun(ctx, "/bin/bash", "-c", removeDevTokenScript); err != nil {
+		return false, fmt.Errorf("guest: remove scion's dev token ~/%s: %w", layout.DevTokenRel, err)
+	}
 
 	read, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {

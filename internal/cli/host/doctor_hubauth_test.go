@@ -51,9 +51,12 @@ func TestDoctorHubAuthWithoutAKeyFailsEveryRow(t *testing.T) {
 // the way the hub's JWT provider does.
 type hiDoctor struct {
 	*hiEnv
-	key        *hubauth.Key
-	acceptAny  bool
-	devToken   bool
+	key       *hubauth.Key
+	acceptAny bool
+	devToken  bool
+	// keyStat is the stat line the jail reports for the key's directory and
+	// file; "" is root-owned and read-only to others.
+	keyStat    string
 	providers  string
 	assertions int
 }
@@ -109,8 +112,12 @@ func newHIDoctor(t *testing.T, app *config.App) *hiDoctor {
 			return proc.Result{Stdout: string(b) + "\n" + strconv.Itoa(st)}, true
 		case name == "curl" && len(args) > 0 && strings.Contains(args[len(args)-1], "/auth/providers?clientType="):
 			return proc.Result{Stdout: d.providers}, true
-		case name == "sh" && len(args) == 5 && args[1] == hubAuthStateScript:
-			out := string(key.PublicPEM())
+		case name == "sh" && len(args) == 6 && args[1] == hubAuthStateScript:
+			stat := d.keyStat
+			if stat == "" {
+				stat = "0:755:directory|0:644:regular file"
+			}
+			out := "stat " + stat + "\n" + string(key.PublicPEM())
 			if d.devToken {
 				out = "devtoken\n" + out
 			}
@@ -200,6 +207,25 @@ func TestDoctorHubAuthRowsOverTheJail(t *testing.T) {
 		d.devToken, d.providers = true, `{"providers":[{"id":"github"}]}`
 		defer func() { d.devToken, d.providers = false, `{"providers":null,"authMode":"proxy"}` }()
 		hiWantRow(t, checkHubAuthentication(ctx, d.auth(), nil), false, "dev token", "login provider")
+	})
+	t.Run("hub admits an uninvited address", func(t *testing.T) {
+		d.hub.openAccess = true
+		defer func() { d.hub.openAccess = false }()
+		hiWantRow(t, checkHubAuthentication(ctx, d.auth(), nil), false, "uninvited address, want 403", "not invite_only")
+	})
+	t.Run("key not root's", func(t *testing.T) {
+		for stat, want := range map[string]string{
+			"1000:755:directory|0:644:regular file":  "/etc/lever is owned by uid 1000",
+			"0:777:directory|0:644:regular file":     "/etc/lever is writable by group or others",
+			"0:755:symbolic link|0:644:regular file": "/etc/lever is a symbolic link",
+			"0:755:directory|1000:644:regular file":  hubauth.GuestPublicKeyPath + " is owned by uid 1000",
+			"0:755:directory|0:666:regular file":     hubauth.GuestPublicKeyPath + " is writable by group or others",
+			"0:755:directory|":                       hubauth.GuestPublicKeyPath + " could not be read",
+		} {
+			d.keyStat = stat
+			hiWantRow(t, checkHubAuthentication(ctx, d.auth(), nil), false, want)
+		}
+		d.keyStat = ""
 	})
 	t.Run("extra admin, unrecorded token, dev user", func(t *testing.T) {
 		h := d.hub

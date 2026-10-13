@@ -50,9 +50,7 @@ This token will not be shown again. Store it securely.`
 	if tok.Token != "scion_pat_tRAqms-gZDFpO6" {
 		t.Errorf("token = %q, want %q", tok.Token, "scion_pat_tRAqms-gZDFpO6")
 	}
-	// The record lever keeps beside the token comes from the same block: the
-	// hub's id for the token (what `hub token revoke` takes), the scopes AS
-	// THE HUB EXPANDED them, and the expiry.
+	// Scopes are as the hub expanded them.
 	if tok.ID != "a8bf56c4-383e-4e6a-ac2c-db7fe509c688" {
 		t.Errorf("id = %q", tok.ID)
 	}

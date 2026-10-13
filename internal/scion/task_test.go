@@ -7,11 +7,9 @@ import (
 	"testing"
 )
 
-// shellQuote replicates scion's pkg/runtime/common.go shellQuote — the ONE
-// quoting pass that reaches tmux (scion's second pass is consumed by the
-// container's own `sh -c` before tmux parses the command). TaskArgvBytes must
-// equal that quoted word minus its two wrapping quotes, which the fixed part
-// of TaskArgvBudget already accounts for.
+// shellQuote replicates scion's pkg/runtime/common.go shellQuote, the one
+// quoting pass that reaches tmux. TaskArgvBytes must equal the quoted word
+// minus its two wrapping quotes.
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 
 func TestTaskArgvBytesMatchesScionsQuotingPass(t *testing.T) {
@@ -21,9 +19,8 @@ func TestTaskArgvBytesMatchesScionsQuotingPass(t *testing.T) {
 			t.Fatalf("TaskArgvBytes(%q) = %d, want %d (scion's quoted word minus its two quotes)", task, got, want)
 		}
 	}
-	// Golden from a measured run of scion's construction through a real shell
-	// (review of lever#30): ten apostrophes add 40 bytes to the argv sum tmux
-	// receives, ten plain characters add 10.
+	// Measured through a real shell: ten apostrophes add 40 bytes to the argv
+	// sum tmux receives, ten plain characters add 10.
 	if d := TaskArgvBytes(strings.Repeat("'", 10)) - TaskArgvBytes(strings.Repeat("a", 10)); d != 30 {
 		t.Fatalf("ten apostrophes must cost 30 bytes more than ten plain chars, got %d", d)
 	}
@@ -69,9 +66,8 @@ func TestCheckInstructions(t *testing.T) {
 	if err := CheckInstructions(strings.Repeat("m", MaxInstructionsBytes+1)); err == nil || !strings.Contains(err.Error(), strconv.Itoa(MaxInstructionsBytes)) {
 		t.Fatalf("one byte over the cap must fail naming the cap, got %v", err)
 	}
-	// scion resolves a leading file:// as a file reference before provisioning
-	// (pkg/api/content.go ResolveContent): refuse rather than stage some other
-	// file — or nothing — as the agent's standing instructions.
+	// scion resolves a leading file:// as a file reference, so refuse rather
+	// than stage some other file as the instructions.
 	for _, bad := range []string{"file:///etc/passwd", "file://relative.md"} {
 		if err := CheckInstructions(bad); err == nil || !strings.Contains(err.Error(), "file://") {
 			t.Fatalf("%q must be refused by name, got %v", bad, err)
@@ -82,10 +78,8 @@ func TestCheckInstructions(t *testing.T) {
 	}
 }
 
-// A task is never a flag. scion's start parses flags interspersed with
-// positionals, so a task beginning with "-" is refused by name (lever's argv
-// puts it behind `--` anyway — this is the second layer). Leading whitespace
-// or a dash later in the text is not a flag to cobra and passes.
+// A flag-shaped task is refused by name. Leading whitespace or a dash later in
+// the text is not a flag to cobra and passes.
 func TestCheckTaskRefusesLeadingDash(t *testing.T) {
 	for _, task := range []string{"-", "--", "-b", "--config=/lever/x.json", "--no-auth"} {
 		err := CheckTask(task)

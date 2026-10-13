@@ -57,7 +57,7 @@ Their bursts are builds and tests; scion limits each container to 2 CPUs unless 
   more when podman first prepares it for the rootless user. Budget about 15 GB for it, and more
   while an old and a new image coexist after a rebuild.
 - **The Lima VM disk** is sparse and grows up to `disk` (default `24GiB`). The Ubuntu cloud image
-  Lima caches on the host is about 0.6 GB.
+  Lima caches on the host is about 0.9 GB.
 - **On the host:** the Go module cache for scion (0.5-1 GB) unless you use `scion.binary`, and the
   instance's `.lever-state` (logs and ledgers, small).
 
@@ -66,11 +66,11 @@ its start as it grows. An SSD is the single biggest help on an older machine.
 
 ## What the first boot downloads
 
-- **Lima:** the Ubuntu 24.04 cloud image (about 0.6 GB), once per host. **OrbStack:** OrbStack's
-  Ubuntu machine image.
+- **Lima:** the Ubuntu 26.04 LTS cloud image (about 0.9 GB), once per host. **OrbStack:**
+  OrbStack's Ubuntu 26.04 (`ubuntu:resolute`) machine image.
 - **In the guest, with apt:** `podman`, `uidmap`, `passt`, `fuse-overlayfs`, `slirp4netns`,
   `dbus-user-session`, `iptables`, `curl` and `netcat-openbsd` when any is missing, and the
-  `linux-generic-hwe-24.04` kernel with `guest_kernel: hwe`.
+  guest release's HWE kernel (`linux-generic-hwe-26.04`) with `guest_kernel: hwe`.
 - **On the host:** the Go modules of the pinned scion (skipped with `scion.binary`); with
   `remote.enabled` and a `version:` or `source:` scion, the npm packages of scion's web UI.
 - **The agent image** is never pulled from inside the jail: `make lever-image` builds it on the host

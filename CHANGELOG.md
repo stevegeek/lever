@@ -7,6 +7,28 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **New Lima jail VMs run Ubuntu 26.04 LTS (lever#203).** The Lima template boots the 26.04 cloud
+  image from a dated release directory, pinned by URL and sha256 for each architecture, so Lima
+  refuses an image that does not match; before, it named the moving 24.04 `release/` alias with no
+  digest. The guest gets podman 5.7, passt with `--map-host-loopback`, iptables 1.8.11 (nf_tables)
+  and the 7.0 kernel; provisioning, the pasta drop-in, the egress chains and the warm path's
+  `iptables -S` comparison, the crash recovery, the tmux core capture and `guest_profile: small`
+  need no change there and were checked on a 26.04 guest. Lima reads the image only when it
+  creates a VM: an existing VM stays on 24.04 and lever keeps supporting it. To move one, recreate
+  it (`lever conversation backup`, `lever destroy`, `lever up`, `lever conversation restore`);
+  lever never runs `do-release-upgrade`, and the operations guide says why. OrbStack machines are
+  now created as `ubuntu:resolute` (26.04) rather than OrbStack's latest Ubuntu; existing machines
+  keep their release.
+- **`guest_kernel: hwe` installs the guest release's HWE kernel (lever#203, lever#179).**
+  `linux-generic-hwe-26.04` on a 26.04 guest, `linux-generic-hwe-24.04` on a VM created on 24.04,
+  and nothing (with a warning) on another release. On 26.04 it names the same 7.0 series as the
+  release kernel until Ubuntu moves it. The default is unchanged: `hwe` with `nested_virt`.
+  Doctor's *guest kernel* row now names the guest's Ubuntu release, checks that release's package,
+  and notes when an older VM is not on the release new VMs get. The operations guide records two
+  26.04 kernels that ran nested KVM guests under load without a fault, in short runs.
+
 ## [0.36.1] - 2026-10-13
 
 ### Added

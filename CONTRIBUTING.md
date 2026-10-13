@@ -112,7 +112,7 @@ time, and never on a VM whose agents you need.
 1. **A fresh `nested_virt` VM.** After the first apply: the three files
    (`/etc/sysctl.d/99-lever-crash-recovery.conf`, `/etc/modprobe.d/lever-no-efi-pstore.conf`,
    `/etc/default/grub.d/99-lever-crash-recovery.cfg`), the four sysctls live, `efi_pstore` not
-   loaded, apply's `jail: reboot pending:` lines, and `linux-generic-hwe-24.04` installed. Then
+   loaded, apply's `jail: reboot pending:` lines, and `linux-generic-hwe-26.04` installed. Then
    `lever stop`, `lever up`: doctor's *guest crash recovery* and *guest kernel* rows are green and
    `/proc/cmdline` has `efi_pstore.pstore_disable=1`.
 2. **Re-apply.** No `update-grub` and no apt run; record the time the hardening adds to apply.

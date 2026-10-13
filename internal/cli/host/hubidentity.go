@@ -274,7 +274,8 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		return errHubIdentity("%w", err)
 	}
 	if mode == state.HubModeMigrated && rec.ProbePending {
-		if err := probeControllerAuthority(ctx, h.pat, h.sc, rec.ProjectID, jp, lifecycle); err != nil {
+		patRec, _, _ := h.st.LoadControllerPATRecord()
+		if err := probeControllerAuthority(ctx, h.pat, h.sc, rec.ProjectID, jp, lifecycle, patRec); err != nil {
 			// Never re-promoted: an admin role granted through the API outlives
 			// scion's config reconcile, and the controller's PAT is the broker's
 			// credential. The controller stays a member, the probe stays owed,
@@ -771,6 +772,14 @@ func (h *hubIdentity) mintPATs(ctx context.Context, mode, projectID string, ctlS
 		if err != nil {
 			return errHubIdentity("minting %s: %w", name, err)
 		}
+		if miss := ungrantedScopes(scopes, t.Scopes); len(miss) > 0 {
+			if err := h.ctl.RevokeToken(ctx, t.ID); err != nil && !errors.Is(err, hubapi.ErrNotFound) {
+				h.warn("hub-identity: could not revoke the unusable %s token %s: %v", name, t.ID, err)
+			}
+			return errHubIdentity("the hub minted %s without %s, which the controller needs to start agents and read its inbox; "+
+				"it checks each scope against the controller's role bindings on the project, so check the %s role and the project ownership",
+				name, strings.Join(miss, ","), controllerRoleName)
+		}
 		if err := save(secret); err != nil {
 			return errHubIdentity("persisting %s: %w", name, err)
 		}
@@ -833,6 +842,23 @@ func controllerActions(lifecycle bool) []string {
 	return a
 }
 
+// ungrantedScopes returns the requested scopes a mint must come back with
+// and did not: the skill, template and harness_config reads and inbox:read.
+// No alias expands to them, and scion drops or refuses a scope its issuer is
+// not eligible for, so a token without them could start no baseline agent or
+// read no notification. The other requested scopes are aliases the hub
+// expands, so they are not compared.
+func ungrantedScopes(requested, granted []string) []string {
+	var out []string
+	for _, s := range requested {
+		literal := s == inboxReadScope || strings.HasPrefix(s, "skill:") || strings.HasPrefix(s, "template:") || strings.HasPrefix(s, "harness_config:")
+		if literal && !slices.Contains(granted, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // errAuthorityMissing marks a probe that read the hub's answer and found an
 // authority missing, as opposed to one that could not read it.
 var errAuthorityMissing = errors.New("missing authority")
@@ -840,9 +866,26 @@ var errAuthorityMissing = errors.New("missing authority")
 // probeControllerAuthority checks, without changing anything, that the
 // controller PAT still does everything lever does with it: the hub's own
 // capability read for every agent action, plus the project reads and writes'
-// read halves and the CLI list.
-func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identityScion, projectID, jp string, lifecycle bool) error {
+// read halves, the CLI list, the notification list when the token carries
+// inbox:read, and the scopes rec says the hub granted (ungrantedScopes).
+func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identityScion, projectID, jp string, lifecycle bool, rec state.PATRecord) error {
 	var missing, failed []string
+	// A record without a granted set (an older lever's mint) proves nothing
+	// either way; the live reads below still run.
+	if len(rec.Granted) > 0 {
+		for _, s := range ungrantedScopes(rec.Requested, rec.Granted) {
+			missing = append(missing, "scope "+s+" was not granted at mint")
+		}
+	}
+	if slices.Contains(rec.Requested, inboxReadScope) {
+		if err := pat.ReadNotifications(ctx); err != nil {
+			if forbidden(err) {
+				missing = append(missing, "notifications: "+err.Error())
+			} else {
+				failed = append(failed, "notifications: "+err.Error())
+			}
+		}
+	}
 	note := func(what string, err error) {
 		if forbidden(err) {
 			missing = append(missing, what+": "+err.Error())

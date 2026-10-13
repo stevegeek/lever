@@ -57,6 +57,9 @@ type hiHub struct {
 	keepRole map[string]bool
 	// down answers "METHOD /path" with the status, before any routing.
 	down map[string]int
+	// dropScopes are left out of every minted token, as a hub that finds the
+	// issuer not eligible for them does.
+	dropScopes []string
 
 	events []string
 }
@@ -115,6 +118,16 @@ func newHIHub(t *testing.T, now func() time.Time) *hiHub {
 		down:      map[string]int{},
 		scopeActs: []string{"create", "list"},
 	}
+}
+
+// tokenFor is the owner's newest live token.
+func (h *hiHub) tokenFor(owner string) *hiToken {
+	for i := len(h.tokens) - 1; i >= 0; i-- {
+		if t := h.tokens[i]; t.Owner == owner && !t.Revoked {
+			return t
+		}
+	}
+	return &hiToken{}
 }
 
 func (h *hiHub) id(prefix string) string {
@@ -479,12 +492,18 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		}
 		_ = json.Unmarshal(body, &req)
 		exp, _ := time.Parse(time.RFC3339, req.ExpiresAt)
-		t := &hiToken{ID: h.id("tok"), Owner: me.ID, Name: req.Name, ProjectID: req.ProjectID, Scopes: req.Scopes, Expires: exp}
+		scopes := slices.DeleteFunc(slices.Clone(req.Scopes), func(s string) bool { return slices.Contains(h.dropScopes, s) })
+		t := &hiToken{ID: h.id("tok"), Owner: me.ID, Name: req.Name, ProjectID: req.ProjectID, Scopes: scopes, Expires: exp}
 		t.Secret = "scion_pat_" + t.ID
 		h.tokens = append(h.tokens, t)
 		h.event("mint %s by %s", req.Name, me.ID)
 		return hiJSON(201, map[string]any{"token": t.Secret, "accessToken": hubapi.Token{ID: t.ID, Name: t.Name,
 			ProjectID: t.ProjectID, Scopes: t.Scopes, ExpiresAt: t.Expires}})
+	case method == http.MethodGet && p == "/api/v1/notifications":
+		if pat && !slices.Contains(h.tokenFor(me.ID).Scopes, inboxReadScope) {
+			return hiErr(403, "token lacks inbox:read")
+		}
+		return hiJSON(200, []any{})
 	case method == http.MethodGet && p == "/api/v1/auth/tokens":
 		if pat {
 			return hiErr(403, "access tokens cannot manage other access tokens")
@@ -669,6 +688,7 @@ type hiScion struct {
 	h         *hiHub
 	st        state.State
 	lifecycle bool
+	inbox     bool
 	listErr   error
 }
 
@@ -686,7 +706,7 @@ func (s *hiScion) HubLink(_ context.Context, dir string) error {
 }
 
 func (s *hiScion) KnowsUATScope(_ context.Context, scope string) (bool, error) {
-	return scope == lifecycleScope && s.lifecycle, nil
+	return scope == lifecycleScope && s.lifecycle || scope == inboxReadScope && s.inbox, nil
 }
 
 func (s *hiScion) List(context.Context, string) ([]scion.Agent, error) {
@@ -1645,5 +1665,109 @@ func TestHubIdentityRemoteOffRevokesTheRemotePAT(t *testing.T) {
 		if tk.ID == rrec.ID && !tk.Revoked {
 			t.Fatal("the remote PAT was not revoked")
 		}
+	}
+}
+
+// The controller token carries the baseline reads and, when the jail's scion
+// knows it, inbox:read; a hub that leaves any of them out of the mint fails
+// the step, and the token it minted is revoked, not kept.
+func TestHubIdentityControllerScopes(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.sc.inbox = true
+	e.mustRun()
+	tok := hiTokenNamed(e.hub, "lever-controller", e.hub.byEmail(hubauth.ControllerEmail).ID)
+	for _, s := range []string{"skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list", inboxReadScope} {
+		if tok == nil || !slices.Contains(tok.Scopes, s) {
+			t.Fatalf("controller token %+v lacks %s", tok, s)
+		}
+	}
+
+	e = newHIEnv(t, hiRemoteApp(false))
+	e.hub.dropScopes = []string{"template:list"}
+	err := e.run()
+	if err == nil || !strings.Contains(err.Error(), "without template:list") {
+		t.Fatalf("err = %v, want the dropped scope named", err)
+	}
+	if tok, _ := e.st.LoadControllerPAT(); tok != "" {
+		t.Fatal("a token without the scopes was kept")
+	}
+	for _, tk := range e.hub.tokens {
+		if !tk.Revoked {
+			t.Fatalf("token %s left live", tk.ID)
+		}
+	}
+}
+
+// On a migrated hub the probe also needs the notification list when the
+// token carries inbox:read, and a recorded mint without a needed scope.
+func TestHubIdentityProbeChecksInboxAndGrants(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setup   func(e *hiEnv)
+		wantErr string
+	}{
+		{name: "inbox readable", setup: func(e *hiEnv) { e.sc.inbox = true }},
+		{name: "inbox refused", setup: func(e *hiEnv) {
+			e.sc.inbox = true
+			e.hub.down = map[string]int{"GET /api/v1/notifications": 403}
+		}, wantErr: "notifications"},
+		{name: "a recorded mint without a read", setup: func(e *hiEnv) {
+			rec, _, _ := e.st.LoadControllerPATRecord()
+			rec.Granted = []string{"agent:attach", "skill:read"}
+			if err := e.st.SaveControllerPATRecord(rec); err != nil {
+				e.t.Fatal(err)
+			}
+		}, wantErr: "scope template:read was not granted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newHIEnv(t, hiRemoteApp(false))
+			e.seedMigrated("dev@localhost", false)
+			tc.setup(e)
+			err := e.run()
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("run: %v\nevents: %q", err, e.hub.events)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), "missing authority") || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want missing authority %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestUngrantedScopes(t *testing.T) {
+	req := controllerPATScopes(true, true)
+	if got := ungrantedScopes(req, []string{"agent:create", "agent:attach", "project:read", "skill:read", "skill:list",
+		"template:read", "template:list", "harness_config:read", "harness_config:list", inboxReadScope}); len(got) != 0 {
+		t.Fatalf("aliases or lifecycle counted as ungranted: %v", got)
+	}
+	if got := ungrantedScopes(req, []string{"skill:read"}); strings.Join(got, ",") != "skill:list,template:read,template:list,harness_config:read,harness_config:list,inbox:read" {
+		t.Fatalf("ungranted = %v", got)
+	}
+}
+
+// A record that names lever's own hub user for a removed login never gets
+// that user suspended or unbound: every agent hangs off the controller.
+func TestHubIdentityNeverSuspendsLeversOwnUsers(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.seedMigrated("dev@localhost", false)
+	e.mustRun()
+	rec := e.record()
+	rec.Users = map[string]string{"gone@example.com": devUserID, "admin@example.com": rec.AdminID}
+	if err := e.st.SaveHubIdentity(rec); err != nil {
+		t.Fatal(err)
+	}
+	before := slices.Clone(e.hub.boundTo(devUserID))
+	e.mustRun()
+	if u := e.hub.user(devUserID); u.Status != "active" {
+		t.Fatalf("the controller is %q", u.Status)
+	}
+	if u := e.hub.user(rec.AdminID); u.Status != "active" {
+		t.Fatalf("lever-admin is %q", u.Status)
+	}
+	if after := e.hub.boundTo(devUserID); !slices.Equal(before, after) {
+		t.Fatalf("controller bindings %v became %v", before, after)
+	}
+	if !hiAnyContains(e.warns, "lever's own hub user", "gone@example.com") {
+		t.Fatalf("no warning: %q", e.warns)
 	}
 }

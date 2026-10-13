@@ -231,3 +231,11 @@ func (c *Client) StripSharedDir(ctx context.Context, projectNameOrSlug, endpoint
 	}
 	return nil
 }
+
+// ReadNotifications lists the caller's notifications (GET
+// /api/v1/notifications) and discards them: a token without inbox:read gets
+// 403.
+func (c *Client) ReadNotifications(ctx context.Context) error {
+	var raw json.RawMessage
+	return c.get(ctx, "/api/v1/notifications", &raw)
+}

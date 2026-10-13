@@ -220,7 +220,7 @@ func (h *hubIdentity) ensureRemoteUsers(ctx context.Context, rec *state.HubIdent
 		if configured[email] {
 			continue
 		}
-		if err := h.suspendRemoteUser(ctx, email, id, rec.ProjectID, role.ID, contactRole.ID); err != nil {
+		if err := h.suspendRemoteUser(ctx, rec, email, id, role.ID, contactRole.ID); err != nil {
 			return err
 		}
 	}
@@ -251,7 +251,7 @@ func (h *hubIdentity) suspendRemovedLogins(ctx context.Context, rec *state.HubId
 		if configured[email] || id == "" {
 			continue
 		}
-		if err := h.suspendRemoteUser(ctx, email, id, rec.ProjectID, roles...); err != nil {
+		if err := h.suspendRemoteUser(ctx, rec, email, id, roles...); err != nil {
 			return err
 		}
 	}
@@ -301,7 +301,16 @@ func (h *hubIdentity) remoteUserID(ctx context.Context, email string, rec *state
 }
 
 // suspendRemoteUser suspends first: it fails closed sooner than the unbind.
-func (h *hubIdentity) suspendRemoteUser(ctx context.Context, email, id, projectID string, roleIDs ...string) error {
+//
+// It never touches lever's own hub users, whatever the record says: every
+// agent hangs off the controller (scion's dev user on a migrated hub), and a
+// suspended controller, or one unbound from the project, holds them all.
+func (h *hubIdentity) suspendRemoteUser(ctx context.Context, rec *state.HubIdentity, email, id string, roleIDs ...string) error {
+	if id == devUserID || id == rec.AdminID || id == rec.ControllerID {
+		h.warn("hub-identity: the record names lever's own hub user %s for removed login %s; lever leaves that user as it is (the proxy refuses the login)", id, email)
+		return nil
+	}
+	projectID := rec.ProjectID
 	u, ok, err := h.admin.GetUser(ctx, id)
 	if err != nil {
 		return errHubIdentity("reading removed login %s: %w", email, err)

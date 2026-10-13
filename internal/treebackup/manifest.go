@@ -142,6 +142,7 @@ func EncodeHeader(buf []byte, h *Header) []byte {
 	buf = append(buf, `{"file":`...)
 	buf = strconv.AppendInt(buf, l.File, 10)
 	buf = appendIntField(buf, "read", l.Read)
+	buf = appendIntField(buf, "new", l.New)
 	buf = appendIntField(buf, "entries", l.Entries)
 	buf = appendIntField(buf, "manifest", l.Manifest)
 	buf = appendIntField(buf, "dir_entries", l.DirEntries)
@@ -1209,7 +1210,7 @@ var headerKeys = []string{"version", "id", "seq", "created", "finished", "trigge
 
 var (
 	rootKeys    = []string{"mode", "mtime", "state", "reason", "listing"}
-	limitKeys   = []string{"file", "read", "entries", "manifest", "dir_entries", "depth", "path", "time"}
+	limitKeys   = []string{"file", "read", "entries", "manifest", "dir_entries", "depth", "path", "time", "new"}
 	partialKeys = []string{"state", "reason", "count", "at", "at_b64"}
 	floodKeys   = []string{"count", "at", "at_b64"}
 	countKeys   = []string{"by_type", "by_state", "unreadable_new", "badname"}
@@ -1398,6 +1399,8 @@ func (s *scanner) limits(l *Limits) error {
 			l.Path = v
 		case 7:
 			l.Time = time.Duration(v)
+		case 8:
+			l.New = v
 		}
 		return err
 	})
@@ -1546,7 +1549,7 @@ func checkHeader(h *Header) error {
 		return fmt.Errorf("unknown quiescent %q", h.Quiescent)
 	}
 	l := h.Limits
-	if l.File <= 0 || l.Read <= 0 || l.Entries <= 0 || l.Entries > MaxEntriesCap || l.Manifest <= 0 ||
+	if l.File <= 0 || l.Read <= 0 || l.New <= 0 || l.Entries <= 0 || l.Entries > MaxEntriesCap || l.Manifest <= 0 ||
 		l.Manifest > MaxManifestCap || l.DirEntries <= 0 || l.Depth <= 0 || l.Path <= 0 || l.Path > MaxPathCap || l.Time < 0 {
 		return errors.New("limits out of range")
 	}

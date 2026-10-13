@@ -65,7 +65,7 @@ func (w *memWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
-func (w *memWriter) Commit() (BlobResult, error) {
+func (w *memWriter) Commit(maxNew int64) (BlobResult, error) {
 	if w.done {
 		panic("blob committed twice")
 	}
@@ -74,10 +74,13 @@ func (w *memWriter) Commit() (BlobResult, error) {
 	h := hex.EncodeToString(sum[:])
 	w.s.mu.Lock()
 	defer w.s.mu.Unlock()
-	w.s.writes++
 	_, had := w.s.blobs[h]
+	if !had && int64(w.buf.Len()) > maxNew {
+		return BlobResult{}, ErrNewBudget
+	}
+	w.s.writes++
 	w.s.blobs[h] = bytes.Clone(w.buf.Bytes())
-	return BlobResult{Sum: h, Size: int64(w.buf.Len()), New: !had}, nil
+	return BlobResult{Sum: h, Size: int64(w.buf.Len()), New: !had, Stored: int64(w.buf.Len())}, nil
 }
 
 func (w *memWriter) Abort() {

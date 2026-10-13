@@ -578,6 +578,7 @@ load error. Sizes take a number of bytes or a unit (`KiB`, `MiB`, `GiB`, `TiB`, 
 | `min_free` | size | no | `2GiB` | Free space (plus 1% of the inodes) below which no new content is stored; the snapshot then commits as incomplete. It is also the room the manifest may count on beyond its reserve (see [a full disk](/operations/#retention-and-garbage-collection)). |
 | `limits.file` | size | no | `256MiB` | A larger file is recorded without content (`too-big`). |
 | `limits.read` | size | no | `8GiB` | Bytes read from the tree per snapshot, retries included. |
+| `limits.new` | size | no | `2GiB` | Disk that new content may take in the store per snapshot, once a complete snapshot exists (the first one is bounded by `read` only). Past it, new files are `skipped(new)` and the snapshot is incomplete; changed files the last complete snapshot held are stored first. |
 | `limits.entries` | int | no | `1000000` | New names listed per snapshot (at most 10 000 000). |
 | `limits.manifest` | size | no | `256MiB` | Encoded size of one snapshot's entries (at most 4 GiB), each charged at its widest encoding: about 550 000 entries at the default. A snapshot holds about twice this in memory, plus 64 MiB. |
 | `limits.dir_entries` | int | no | `100000` | Names read from one directory. |

@@ -70,11 +70,12 @@ const (
 	ReasonDirEntries  Reason = "dir-entries"
 	ReasonDepth       Reason = "depth"
 	ReasonPath        Reason = "path"
+	ReasonNew         Reason = "new"
 )
 
 // SkippedReasons and TruncatedReasons are the reasons each state allows.
 var (
-	SkippedReasons   = []Reason{ReasonRead, ReasonTime, ReasonDisk, ReasonInterrupted}
+	SkippedReasons   = []Reason{ReasonRead, ReasonTime, ReasonDisk, ReasonInterrupted, ReasonNew}
 	TruncatedReasons = []Reason{ReasonEntries, ReasonManifest, ReasonDirEntries, ReasonDepth, ReasonPath, ReasonTime, ReasonInterrupted, ReasonDisk}
 )
 
@@ -144,6 +145,7 @@ type RootInfo struct {
 type Limits struct {
 	File       int64         // bytes of one file; larger files are too-big
 	Read       int64         // bytes read from files, retries included
+	New        int64         // bytes new content may add to the store, once a complete snapshot exists
 	Entries    int64         // names listed in phase B
 	Manifest   int64         // JSON-encoded bytes of the entry lines
 	DirEntries int64         // names read from one directory
@@ -179,6 +181,7 @@ func DefaultLimits() Limits {
 	return Limits{
 		File:       256 << 20,
 		Read:       8 << 30,
+		New:        2 << 30,
 		Entries:    1_000_000,
 		Manifest:   256 << 20,
 		DirEntries: 100_000,
@@ -291,8 +294,10 @@ type BlobSink interface {
 // BlobWriter receives one blob's bytes.
 type BlobWriter interface {
 	io.Writer
-	// Commit stores the blob under the digest of the bytes written.
-	Commit() (BlobResult, error)
+	// Commit stores the blob under the digest of the bytes written. A blob
+	// that is new and would take more than maxNew bytes of disk is not
+	// stored: Commit returns ErrNewBudget.
+	Commit(maxNew int64) (BlobResult, error)
 	Abort()
 }
 
@@ -304,7 +309,12 @@ type BlobResult struct {
 	Size     int64
 	New      bool
 	Repaired bool
+	// Stored is the disk a new or repaired blob took (holes left out).
+	Stored int64
 }
+
+// NoNewLimit is a maxNew for Commit that never refuses.
+const NoNewLimit = 1<<63 - 1
 
 var (
 	// ErrDiskLow means the store's filesystem is below min_free.
@@ -314,6 +324,9 @@ var (
 	ErrUnsafe = errors.New("tree backups: the store is not safe to use")
 	// ErrBusy means a lock was not obtained in time.
 	ErrBusy = errors.New("tree backups: the store is busy")
+	// ErrNewBudget means a new blob did not fit the snapshot's budget for
+	// new content (Limits.New).
+	ErrNewBudget = errors.New("tree backups: no budget left for new content")
 	// ErrInvalid wraps every manifest validation failure.
 	ErrInvalid = errors.New("invalid tree backup manifest")
 )

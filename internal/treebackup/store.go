@@ -822,7 +822,7 @@ func (w *blobWriter) Abort() {
 	_ = w.k.s.root.Remove(w.name)
 }
 
-func (w *blobWriter) Commit() (BlobResult, error) {
+func (w *blobWriter) Commit(maxNew int64) (BlobResult, error) {
 	if w.done {
 		return BlobResult{}, errors.New("tree backups: blob already finished")
 	}
@@ -862,6 +862,12 @@ func (w *blobWriter) Commit() (BlobResult, error) {
 		_ = s.root.Remove(w.name)
 		return res, nil
 	}
+	if res.New && w.stored > maxNew {
+		w.f.Close()
+		_ = s.root.Remove(w.name)
+		return BlobResult{}, ErrNewBudget
+	}
+	res.Stored = w.stored
 	if err := w.f.Truncate(w.n); err != nil {
 		return fail(err)
 	}

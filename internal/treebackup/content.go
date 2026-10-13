@@ -30,8 +30,14 @@ type readResult struct {
 	opened bool
 }
 
-// pass2Content gives each writer root an equal part of the read budget left
-// after class 0, so a root's unused share flows on to the later ones.
+// budgets are what a read may still spend: bytes read from the tree, and
+// disk that new blobs may take in the store.
+type budgets struct{ read, new int64 }
+
+// pass2Content gives each writer root an equal part of the read and new
+// budgets left after class 0, so a root's unused share flows on to the
+// later ones. The new budget applies once a complete snapshot exists: the
+// first one stores the whole tree, within the read budget.
 func (w *walker) pass2Content() error {
 	w.pass2 = true
 	class0, class1, reverify := w.selectContent()
@@ -39,24 +45,29 @@ func (w *walker) pass2Content() error {
 		return nil
 	}
 	w.readBuf = make([]byte, readChunk)
-	budget := max(w.o.Limits.Read, 0)
+	b := budgets{read: max(w.o.Limits.Read, 0), new: NoNewLimit}
+	if w.o.Known != nil {
+		b.new = max(w.o.Limits.New, 0)
+	}
 	for _, g := range class0 {
-		if err := w.readGroup(g, &budget, false); err != nil {
+		if err := w.readGroup(g, &b, false); err != nil {
 			return err
 		}
 	}
 	for i, r := range w.roots {
-		share := budget / int64(len(w.roots)-i)
+		left := int64(len(w.roots) - i)
+		share := budgets{read: b.read / left, new: b.new / left}
 		start := share
 		for _, g := range class1[r] {
 			if err := w.readGroup(g, &share, false); err != nil {
 				return err
 			}
 		}
-		budget -= start - share
+		b.read -= start.read - share.read
+		b.new -= start.new - share.new
 	}
 	for _, g := range reverify {
-		if err := w.readGroup(g, &budget, true); err != nil {
+		if err := w.readGroup(g, &b, true); err != nil {
 			return err
 		}
 	}
@@ -65,7 +76,7 @@ func (w *walker) pass2Content() error {
 
 // readGroup: a re-verification never sets a state; it only replaces a hash
 // the stat cache got wrong, or advances verified.
-func (w *walker) readGroup(g *group, budget *int64, reverify bool) error {
+func (w *walker) readGroup(g *group, b *budgets, reverify bool) error {
 	skip := func(r Reason) {
 		if reverify {
 			return
@@ -84,7 +95,7 @@ func (w *walker) readGroup(g *group, budget *int64, reverify bool) error {
 		skip(ReasonDisk)
 		return nil
 	}
-	if g.size >= *budget {
+	if g.size >= b.read {
 		skip(ReasonRead)
 		return nil
 	}
@@ -92,7 +103,7 @@ func (w *walker) readGroup(g *group, budget *int64, reverify bool) error {
 	i := 0
 	for ; i < len(g.members); i++ {
 		var err error
-		res, err = w.readOne(g.members[i], budget, g.secret)
+		res, err = w.readOne(g.members[i], b, g.secret)
 		if err != nil {
 			return err
 		}
@@ -149,7 +160,7 @@ func (a *attempt) abort() {
 // readOne: reads are bounded by st_size, never by EOF, so a file that never ends
 // costs nothing; a file changing during the copy is retried and, failing
 // that, kept as read and marked unstable.
-func (w *walker) readOne(n *node, budget *int64, secret bool) (readResult, error) {
+func (w *walker) readOne(n *node, b *budgets, secret bool) (readResult, error) {
 	rel := n.e.Path
 	dfd, ok := w.dirs.get(ParentOf(rel))
 	if !ok {
@@ -194,14 +205,14 @@ func (w *walker) readOne(n *node, budget *int64, secret bool) (readResult, error
 			return res, nil
 		}
 		// One byte more than st_size: the probe for content past the end.
-		if fst.Size >= *budget {
+		if fst.Size >= b.read {
 			if last != nil {
 				break
 			}
 			res.state, res.reason = StateSkipped, ReasonRead
 			return res, nil
 		}
-		a, stop, err := w.copyOnce(fd, rel, fst, budget, secret, try)
+		a, stop, err := w.copyOnce(fd, rel, fst, &b.read, secret, try)
 		if err != nil {
 			last.abort()
 			return res, err
@@ -228,9 +239,12 @@ func (w *walker) readOne(n *node, budget *int64, secret bool) (readResult, error
 		res.sum = hex.EncodeToString(last.h.Sum(nil))
 		return res, nil
 	}
-	br, err := last.bw.Commit()
+	br, err := last.bw.Commit(b.new)
 	last.bw = nil
 	if err != nil {
+		if errors.Is(err, ErrNewBudget) {
+			return readResult{state: StateSkipped, reason: ReasonNew, opened: true}, nil
+		}
 		if errors.Is(err, ErrDiskLow) || isNoSpace(err) {
 			w.diskLow = true
 			return readResult{state: StateSkipped, reason: ReasonDisk, opened: true}, nil
@@ -241,6 +255,7 @@ func (w *walker) readOne(n *node, budget *int64, secret bool) (readResult, error
 		w.blobs.New++
 		w.bytes.New += br.Size
 	}
+	b.new -= br.Stored
 	if br.Repaired {
 		w.blobs.Repaired++
 	}

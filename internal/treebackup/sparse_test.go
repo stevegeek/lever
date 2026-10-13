@@ -3,10 +3,13 @@
 package treebackup
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -61,5 +64,49 @@ func TestSparseFilesCostTheStoreNothing(t *testing.T) {
 	rep, err := s.Verify(false, 0)
 	if err != nil || len(rep.BadBlobs) != 0 {
 		t.Fatalf("verify: %v %+v", err, rep)
+	}
+}
+
+// Once a complete snapshot exists, a snapshot adds at most limits.new of
+// disk to the store; past it, new files are skipped(new) and the snapshot
+// is incomplete. Damage to files the last complete snapshot held is read
+// and stored first.
+func TestNewContentBudgetBoundsStoreGrowth(t *testing.T) {
+	e := newSnapEnv(t)
+	writeFile(t, filepath.Join(e.tree, "known.txt"), "good\n")
+	first := e.snap(t)
+	if !first.Complete {
+		t.Fatal("first snapshot incomplete")
+	}
+	blobs := filepath.Join(e.state, StoreDirName, "blobs")
+	before := diskUsage(t, blobs)
+	const per = 1 << 20
+	writeFile(t, filepath.Join(e.tree, "known.txt"), strings.Repeat("D", per))
+	for i := 0; i < 4; i++ {
+		writeFile(t, filepath.Join(e.tree, fmt.Sprintf("new%d", i)), strings.Repeat(string(rune('a'+i)), per))
+	}
+	o := e.opts(TriggerStop)
+	o.Limits.New = 2*per + per/2
+	res, err := Snapshot(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := res.Header
+	if h.Complete || h.Counts.ByState[StateSkipped] != 3 {
+		t.Fatalf("complete %v, skipped %d; partial %+v", h.Complete, h.Counts.ByState[StateSkipped], h.Partial)
+	}
+	if p := h.Partial[0]; p.State != StateSkipped || p.Reason != ReasonNew {
+		t.Fatalf("partial %+v", h.Partial)
+	}
+	if grew := diskUsage(t, blobs) - before; grew > o.Limits.New+64<<10 {
+		t.Fatalf("the store grew %d bytes, the budget is %d", grew, o.Limits.New)
+	}
+	s := e.store(t)
+	var ls bytes.Buffer
+	if err := Ls(&ls, s.Open(h.ID), []byte("known.txt"), false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ls.String(), "skipped") {
+		t.Fatalf("the damaged known file was not stored first: %s", ls.String())
 	}
 }

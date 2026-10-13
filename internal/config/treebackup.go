@@ -39,6 +39,7 @@ type TreeBackupKeep struct {
 type TreeLimits struct {
 	File       *ByteSize `yaml:"file"`
 	Read       *ByteSize `yaml:"read"`
+	New        *ByteSize `yaml:"new"`
 	Entries    *int64    `yaml:"entries"`
 	Manifest   *ByteSize `yaml:"manifest"`
 	DirEntries *int64    `yaml:"dir_entries"`
@@ -50,7 +51,7 @@ type TreeLimits struct {
 var (
 	treeBackupKeys = []string{"enabled", "at_stop", "keep", "reverify", "lock_wait", "min_free", "limits", "exclude"}
 	treeKeepKeys   = []string{"last", "daily", "weekly"}
-	treeLimitKeys  = []string{"file", "read", "entries", "manifest", "dir_entries", "depth", "path", "time"}
+	treeLimitKeys  = []string{"file", "read", "new", "entries", "manifest", "dir_entries", "depth", "path", "time"}
 )
 
 func strictKeys(n *yaml.Node, block string, keys []string) error {
@@ -218,6 +219,7 @@ func (t TreeBackup) EffectiveLimits() treebackup.Limits {
 	}
 	set(&l.File, t.Limits.File)
 	set(&l.Read, t.Limits.Read)
+	set(&l.New, t.Limits.New)
 	set(&l.Manifest, t.Limits.Manifest)
 	setN(&l.Entries, t.Limits.Entries)
 	setN(&l.DirEntries, t.Limits.DirEntries)
@@ -255,6 +257,7 @@ func (t TreeBackup) validate() error {
 	}{
 		{"file", l.File, 1 << 50},
 		{"read", l.Read, 1 << 50},
+		{"new", l.New, 1 << 50},
 		{"entries", l.Entries, treebackup.MaxEntriesCap},
 		{"manifest", l.Manifest, treebackup.MaxManifestCap},
 		{"dir_entries", l.DirEntries, treebackup.MaxEntriesCap},

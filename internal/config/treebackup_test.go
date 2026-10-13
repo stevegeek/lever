@@ -43,6 +43,7 @@ func TestTreeBackupLoad(t *testing.T) {
   limits:
     file: 1GiB
     read: 100MB
+    new: 50MB
     entries: 2000
     manifest: 64MiB
     dir_entries: 50
@@ -65,7 +66,7 @@ func TestTreeBackupLoad(t *testing.T) {
 	if tb.EffectiveReverify() != 24*time.Hour || tb.EffectiveLockWait() != 30*time.Second || tb.EffectiveMinFree() != 512<<20 {
 		t.Fatalf("reverify %v lock_wait %v min_free %d", tb.EffectiveReverify(), tb.EffectiveLockWait(), tb.EffectiveMinFree())
 	}
-	want := treebackup.Limits{File: 1 << 30, Read: 100e6, Entries: 2000, Manifest: 64 << 20, DirEntries: 50, Depth: 16, Path: 1024, Time: 0}
+	want := treebackup.Limits{File: 1 << 30, Read: 100e6, New: 50e6, Entries: 2000, Manifest: 64 << 20, DirEntries: 50, Depth: 16, Path: 1024, Time: 0}
 	if got := tb.EffectiveLimits(); got != want {
 		t.Fatalf("limits = %+v, want %+v", got, want)
 	}
@@ -89,6 +90,7 @@ func TestTreeBackupRejected(t *testing.T) {
 		"manifest over cap":    {"tree_backup:\n  limits: {manifest: 5GiB}\n", "limits.manifest must be positive"},
 		"entries over cap":     {"tree_backup:\n  limits: {entries: 10000001}\n", "limits.entries must be positive"},
 		"zero file":            {"tree_backup:\n  limits: {file: 0}\n", "limits.file must be positive"},
+		"zero new":             {"tree_backup:\n  limits: {new: 0}\n", "limits.new must be positive"},
 		"absolute exclude":     {"tree_backup:\n  exclude: [/etc]\n", "must be relative"},
 		"dotdot exclude":       {"tree_backup:\n  exclude: [a/../b]\n", `".." component`},
 		"empty component":      {"tree_backup:\n  exclude: [a//b]\n", "empty component"},

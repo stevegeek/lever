@@ -76,7 +76,7 @@ func snap(t *testing.T, s *Store, o snapOpts) snapResult {
 		if _, err := io.WriteString(w, o.files[n]); err != nil {
 			t.Fatal(err)
 		}
-		br, err := w.Commit()
+		br, err := w.Commit(NoNewLimit)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -269,7 +269,7 @@ func TestCrashLeavesNoSnapshotAndGCCleansTmp(t *testing.T) {
 	sink := s.Sink(SinkOptions{})
 	w, _ := sink.NewBlob()
 	io.WriteString(w, "committed blob")
-	br, err := w.Commit()
+	br, err := w.Commit(NoNewLimit)
 	if err != nil {
 		t.Fatal(err)
 	}

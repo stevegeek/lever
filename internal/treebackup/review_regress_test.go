@@ -289,7 +289,7 @@ func TestCrashMarkerStaysUntilGCRehashes(t *testing.T) {
 	}
 	w, _ := s.Sink(SinkOptions{}).NewBlob()
 	io.WriteString(w, "hello")
-	br, err := w.Commit()
+	br, err := w.Commit(NoNewLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestCrashMarkerStaysUntilGCRehashes(t *testing.T) {
 	}
 	w, _ = s.Sink(SinkOptions{}).NewBlob()
 	io.WriteString(w, "orphan")
-	ob, _ := w.Commit()
+	ob, _ := w.Commit(NoNewLimit)
 	op := blobPath(s, ob.Sum)
 	os.Chmod(op, 0o600)
 	os.WriteFile(op, []byte("ORPHAN"), 0o400)

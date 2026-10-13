@@ -104,7 +104,7 @@ backend: orbstack                    # containment backend
 tree: workspace                      # bind-mounted SUBDIR (the root is not mounted)
 egress: closed                       # seal the jail to the broker only (api-key instances only)
 scion:
-  version: e0f61f2d                  # pin a scion commit; a lever release ships this one prebuilt
+  version: b41cd6fe                  # pin a scion commit; a lever release ships this one prebuilt
 manager:
   image: scionlocal/lever-claude
   # image_tar: images/lever-claude.tar   # optional; ship the image as a docker archive, no host docker needed
@@ -199,7 +199,7 @@ Whichever mode you use, lever records the installed binary's sha256 in the jail 
 #### Prebuilt scion
 
 Each lever release ships scion prebuilt for linux/amd64 and linux/arm64, built from the commit the
-examples pin (`e0f61f2d`). When `scion.version` names that commit (as written in the examples, as
+examples pin (`b41cd6fe`). When `scion.version` names that commit (as written in the examples, as
 its full hash or a prefix of at least 7 hex digits, or as its module version), a release build of
 lever downloads the binary for the guest's architecture from its own GitHub release instead of
 building it. The host then needs no Go toolchain and skips the scion compile (about 4 CPU-minutes).

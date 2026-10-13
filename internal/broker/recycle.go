@@ -162,7 +162,7 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			b.recycleRate.refund(spec.Name, counted)
 			b.audit("worker", b.manager, "error", verb+": purge (phase "+phase+"): "+err.Error())
-			http.Error(w, "runtime error: the record of worker "+spec.Name+" was not deleted; check `lever-manager agent list` and try again. "+
+			http.Error(w, "runtime error: the record of worker "+spec.Name+" was not deleted, or its delete was not confirmed; nothing was started. Check `lever-manager agent list` and try again. "+
 				"If it persists, the operator should run `lever doctor`.", http.StatusBadGateway)
 			return
 		}

@@ -23,7 +23,7 @@ func seedPAT(t *testing.T, st state.State, which, token string) {
 		if err := st.SaveControllerPAT(token); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-" + token, Requested: controllerPATScopes(false), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
+		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-" + token, Requested: controllerPATScopes(false, false), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
 			t.Fatal(err)
 		}
 	case "remote":
@@ -89,8 +89,8 @@ func TestEnsureControllerPATWritesTheRecord(t *testing.T) {
 	if rec.ID != "a8bf56c4-383e-4e6a-ac2c-db7fe509c688" {
 		t.Errorf("record id = %q", rec.ID)
 	}
-	if strings.Join(rec.Requested, ",") != strings.Join(controllerPATScopes(false), ",") {
-		t.Errorf("requested = %v, want %v", rec.Requested, controllerPATScopes(false))
+	if strings.Join(rec.Requested, ",") != strings.Join(controllerPATScopes(false, false), ",") {
+		t.Errorf("requested = %v, want %v", rec.Requested, controllerPATScopes(false, false))
 	}
 	if strings.Join(rec.Granted, ",") != "agent:create,agent:attach,project:read" {
 		t.Errorf("granted = %v", rec.Granted)
@@ -150,7 +150,7 @@ func TestEnsureControllerPATRemintsNearExpiry(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "pat-old")
 	now := time.Now()
-	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false), ExpiresAt: now.Add(5 * 24 * time.Hour)}); err != nil {
+	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false, false), ExpiresAt: now.Add(5 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	f := patMintRunner("pat-new")
@@ -276,7 +276,7 @@ func TestEnsurePATsRegrantsRemoteRoleAfterScionUpgrade(t *testing.T) {
 		seedPAT(t, st, "controller", "pat-c")
 		// The controller token already carries what the probe asks for; only the
 		// remote role is stale.
-		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-pat-c", Requested: controllerPATScopes(probe),
+		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-pat-c", Requested: controllerPATScopes(probe, false),
 			MintedAt: time.Now(), ExpiresAt: time.Now().Add(300 * 24 * time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
@@ -378,8 +378,8 @@ func TestEnsurePATsKeepsControllerWithoutLifecycle(t *testing.T) {
 // agent:lifecycle is not re-minted without it, nor the reverse.
 func TestControllerLifecycleFallsBackToTheRecord(t *testing.T) {
 	failing := func(context.Context, string) (bool, error) { return false, errors.New("no scion") }
-	with := state.PATRecord{Requested: controllerPATScopes(true)}
-	without := state.PATRecord{Requested: controllerPATScopes(false)}
+	with := state.PATRecord{Requested: controllerPATScopes(true, false)}
+	without := state.PATRecord{Requested: controllerPATScopes(false, false)}
 	if !controllerLifecycle(context.Background(), failing, with) || controllerLifecycle(context.Background(), failing, without) {
 		t.Fatal("controllerLifecycle ignores the record when the probe fails")
 	}
@@ -392,11 +392,93 @@ func TestControllerLifecycleFallsBackToTheRecord(t *testing.T) {
 // expands to it) is not re-minted.
 func TestControllerLifecycleHonorsTheGrantedSet(t *testing.T) {
 	known := func(context.Context, string) (bool, error) { return true, nil }
-	rec := state.PATRecord{Requested: controllerPATScopes(false), Granted: []string{"agent:attach", lifecycleScope}}
+	rec := state.PATRecord{Requested: controllerPATScopes(false, true), Granted: []string{"agent:attach", lifecycleScope, inboxReadScope}}
 	if controllerLifecycle(context.Background(), known, rec) {
 		t.Fatal("controllerLifecycle asks for agent:lifecycle although the token was granted it")
 	}
-	if patMintReason("tok", rec, true, controllerPATScopes(controllerLifecycle(context.Background(), known, rec)), time.Now()) != "" {
+	want := controllerPATScopes(controllerLifecycle(context.Background(), known, rec), controllerInbox(context.Background(), known, rec))
+	if patMintReason("tok", rec, true, want, time.Now()) != "" {
 		t.Fatal("a token granted agent:lifecycle is re-minted")
+	}
+}
+
+// inbox:read follows the jail's scion like agent:lifecycle: asked for when
+// scion knows it, never when it does not, and the record decides when the
+// probe cannot answer.
+func TestControllerInbox(t *testing.T) {
+	failing := func(context.Context, string) (bool, error) { return false, errors.New("no scion") }
+	knows := func(_ context.Context, scope string) (bool, error) { return scope == inboxReadScope, nil }
+	knowsNothing := func(context.Context, string) (bool, error) { return false, nil }
+	with := state.PATRecord{Requested: controllerPATScopes(false, true)}
+	without := state.PATRecord{Requested: controllerPATScopes(false, false)}
+	for _, tc := range []struct {
+		name  string
+		known scopeKnownFunc
+		rec   state.PATRecord
+		want  bool
+	}{
+		{"scion knows it", knows, without, true},
+		{"scion does not know it", knowsNothing, with, false},
+		{"probe fails, record has it", failing, with, true},
+		{"probe fails, record lacks it", failing, without, false},
+		{"no probe, record has it", nil, with, true},
+		{"no probe, no record", nil, state.PATRecord{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := controllerInbox(context.Background(), tc.known, tc.rec); got != tc.want {
+				t.Fatalf("controllerInbox = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The scope set: the baseline-ceiling reads always, lifecycle and inbox only
+// when asked for.
+func TestControllerPATScopes(t *testing.T) {
+	reads := []string{"skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list"}
+	for _, tc := range []struct {
+		lifecycle, inbox bool
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		got := controllerPATScopes(tc.lifecycle, tc.inbox)
+		for _, s := range append([]string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update"}, reads...) {
+			if !slices.Contains(got, s) {
+				t.Errorf("(%v, %v): %v lacks %s", tc.lifecycle, tc.inbox, got, s)
+			}
+		}
+		if slices.Contains(got, lifecycleScope) != tc.lifecycle || slices.Contains(got, inboxReadScope) != tc.inbox {
+			t.Errorf("(%v, %v): got %v", tc.lifecycle, tc.inbox, got)
+		}
+	}
+}
+
+// A pin bump that teaches the jail's scion inbox:read re-mints a controller
+// token minted without it, says why, and mints with the scope.
+func TestEnsureControllerPATReMintsForInboxRead(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedPAT(t, st, "controller", "pat-old")
+	f := patMintRunner("scion_pat_new")
+	var warned []string
+	o := patMintOpts{
+		ScopeKnown: func(_ context.Context, scope string) (bool, error) { return scope == inboxReadScope, nil },
+		Warn:       func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) },
+	}
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", remoteAccess{}, o); err != nil {
+		t.Fatal(err)
+	}
+	i := f.CallIndex(proc.ArgvPrefix("scion", "hub", "token", "create"))
+	if i < 0 {
+		t.Fatal("no token was minted")
+	}
+	if argv := f.Calls[i].Argv(); !strings.Contains(argv, inboxReadScope) {
+		t.Fatalf("mint argv %q lacks %s", argv, inboxReadScope)
+	}
+	if !slices.ContainsFunc(warned, func(w string) bool {
+		return strings.Contains(w, "re-minting lever-controller") && strings.Contains(w, inboxReadScope)
+	}) {
+		t.Fatalf("no re-mint warning naming %s: %q", inboxReadScope, warned)
+	}
+	rec, _, _ := st.LoadControllerPATRecord()
+	if !slices.Contains(rec.Requested, inboxReadScope) {
+		t.Fatalf("record requested %v lacks %s", rec.Requested, inboxReadScope)
 	}
 }

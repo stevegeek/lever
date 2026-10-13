@@ -477,11 +477,10 @@ type StartOpts struct {
 	APIKey bool
 }
 
-// List lists the agents in project. --non-interactive so the lazy hub-sync
-// prompt can never wedge a non-tty run. Empty stdout is an empty slice.
+// List lists the agents in project. Empty stdout is an empty slice.
 func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	args := append([]string{"list", "--format", "json"}, projectFlag(project)...)
-	args = append(args, "--non-interactive")
+	args = append(args, nonInteractive)
 	// runValue: stderr warnings after the JSON would break the parse.
 	out, err := c.runValue(ctx, "", args...)
 	if err != nil {
@@ -494,12 +493,29 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	return agents, nil
 }
 
-// Delete removes an agent's record entirely, with its containers and files.
+// ErrDeleteUnconfirmed is wrapped by Delete when scion exits 0 for a delete the
+// hub accepted (202) but whose completion scion's own wait (about three
+// minutes) never saw: the record may still be there, or still be deleting.
+var ErrDeleteUnconfirmed = errors.New("the hub accepted the delete but scion could not confirm the record is gone")
+
+// deleteAcceptedNotice is scion delete's line for that case
+// (cmd/hub_delete_wait.go hubDeletePendingMessage).
+const deleteAcceptedNotice = "delete accepted; cannot observe completion"
+
+// Delete removes an agent's record entirely, with its containers and files. It
+// fails with ErrDeleteUnconfirmed rather than report a delete nobody saw
+// finish; a caller that must know re-lists either way.
 func (c *Client) Delete(ctx context.Context, worker, project string) error {
-	args := append([]string{"delete", worker}, projectFlag(project)...)
-	args = append(args, "--non-interactive")
-	_, err := c.run(ctx, "", args...)
-	return err
+	out, err := c.run(ctx, "", agentVerb("delete", worker, project)...)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, deleteAcceptedNotice) {
+			return fmt.Errorf("scion delete %s: %w: %s", worker, ErrDeleteUnconfirmed, boundSummary(strings.TrimSpace(line), 300))
+		}
+	}
+	return nil
 }
 
 func (c *Client) Start(ctx context.Context, o StartOpts) error {
@@ -581,7 +597,7 @@ func startArgs(o StartOpts, role string) []string {
 	if o.hasInlineConfig() {
 		args = append(args, "--config", "-")
 	}
-	return append(args, "--", o.Worker, o.Task)
+	return append(args, nonInteractive, "--", o.Worker, o.Task)
 }
 
 func (o StartOpts) hasInlineConfig() bool {
@@ -636,24 +652,31 @@ type inlineAgentConfig struct {
 }
 
 func (c *Client) Resume(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"resume", worker}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("resume", worker, project)...)
 	return err
+}
+
+// agentVerb is the argv of a scion verb on one agent, with extra flags.
+func agentVerb(verb, agent, project string, flags ...string) []string {
+	args := append([]string{verb, agent}, flags...)
+	args = append(args, projectFlag(project)...)
+	return append(args, nonInteractive)
 }
 
 // ResumeForce is Resume with scion's --force (scion >= 68507153), the only
 // verb that recovers a record from phase "error"; it refuses phase
 // "running".
 func (c *Client) ResumeForce(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"resume", worker, "--force"}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("resume", worker, project, "--force")...)
 	return err
 }
 
 func (c *Client) Stop(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"stop", worker}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("stop", worker, project)...)
 	return err
 }
 func (c *Client) Suspend(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"suspend", worker}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("suspend", worker, project)...)
 	return err
 }
 
@@ -662,8 +685,7 @@ func (c *Client) Suspend(ctx context.Context, worker, project string) error {
 // no user or controller authority moves into the container. It is the one
 // recovery for an expired agent token, which cannot refresh itself.
 func (c *Client) ResetAuth(ctx context.Context, agent, project string) error {
-	args := append([]string{"reset-auth", agent}, projectFlag(project)...)
-	_, err := c.run(ctx, "", append(args, "--non-interactive")...)
+	_, err := c.run(ctx, "", agentVerb("reset-auth", agent, project)...)
 	return err
 }
 

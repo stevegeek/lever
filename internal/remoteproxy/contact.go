@@ -155,6 +155,9 @@ var contactCanned = map[string]string{
 	"/api/v1/chat/spaces": `{"spaces":[]}`,
 	"/api/v1/agents":      `{"agents":[],"totalCount":0}`,
 	"/api/v1/users":       `{"users":[],"totalCount":0}`,
+	// The hub's count covers every DM of the user, also those with agents the
+	// contact may not see.
+	"/api/v1/chat/unread-count": `{"conversations":0,"threads":0,"dms":0}`,
 }
 
 var contactForwardGET = []string{
@@ -291,14 +294,29 @@ func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line 
 	if err != nil || len(body) > maxContactMessage {
 		return deny("message too large or unreadable")
 	}
-	// Only content and idempotency_key: every other field changes routing or
-	// what the agent sees beside the verified text (reply_context, attachments).
+	// Only content, idempotency_key and offer_wake: every other field changes
+	// routing or what the agent sees beside the verified text (reply_context,
+	// attachments). offer_wake only asks the hub to answer instead of storing
+	// a failed row, and only for a caller allowed to wake the agent. wake is
+	// refused: a contact wakes a worker only through lever's wake route, which
+	// checks the session is fresh and limits the rate.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return deny("message is not valid JSON")
 	}
-	for k := range fields {
-		if k != "content" && k != "idempotency_key" {
+	for k, v := range fields {
+		switch k {
+		case "content", "idempotency_key":
+			if !jsonString(v) {
+				return deny("a contact's message field " + strconv.Quote(k) + " must be a string")
+			}
+		case "offer_wake":
+			if v := string(bytes.TrimSpace(v)); v != "true" && v != "false" {
+				return deny(`a contact's message field "offer_wake" must be true or false`)
+			}
+		case "wake":
+			return deny("a contact's message may not wake the agent; use the chat page's wake")
+		default:
 			return deny("a contact's message may carry only content (field " + strconv.Quote(k) + " refused)")
 		}
 	}
@@ -321,6 +339,13 @@ func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line 
 	return r2
 }
 
+// jsonString is false for null: the hub would read it as an empty value.
+func jsonString(raw json.RawMessage) bool {
+	var s string
+	raw = bytes.TrimSpace(raw)
+	return len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &s) == nil
+}
+
 // hasMention matches the tokens scion's mention extraction looks at.
 func hasMention(s string) bool {
 	for _, w := range strings.FieldsFunc(s, unicode.IsSpace) {
@@ -333,7 +358,10 @@ func hasMention(s string) bool {
 
 // contactRootFiles are the web UI's own root files; any other root path would
 // get the SPA shell.
-var contactRootFiles = []string{"/favicon.svg", "/scion-notification-icon.png"}
+var contactRootFiles = []string{
+	"/favicon.svg", "/scion-notification-icon.png", "/favicon.ico", "/manifest.webmanifest",
+	"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",
+}
 
 func isStaticAsset(p string) bool {
 	return strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/shoelace/") || slices.Contains(contactRootFiles, p)

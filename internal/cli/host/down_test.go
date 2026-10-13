@@ -168,7 +168,8 @@ func wantTeardownVia(t *testing.T, verb string) {
 
 // The records go with the tokens: a stale record would describe the wrong
 // token. The remote web role record goes too, or the fresh hub would never
-// get the role.
+// get the role, and so does the experiments pin record, or the fresh hub
+// would read as pinned.
 func TestRemovePATsClearsTokensAndRecords(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "c")
@@ -176,10 +177,13 @@ func TestRemovePATsClearsTokensAndRecords(t *testing.T) {
 	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{RoleID: "role"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.SaveHubExperimentsRecord(state.HubExperimentsRecord{Off: []string{"hub.conduit"}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := removePATs(st); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole()} {
+	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole(), st.HubExperiments()} {
 		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s should be removed, stat err = %v", p, err)
 		}

@@ -82,16 +82,17 @@ func (c *Client) Message(ctx context.Context, o MsgOpts) error {
 		args = append(args, "--interrupt")
 	}
 	args = append(args, projectFlag(o.Project)...)
-	args = append(args, "--", o.To, o.Body)
+	args = append(args, nonInteractive, "--", o.To, o.Body)
 	_, err := c.run(ctx, "", args...)
 	return err
 }
 
 // Inbox reads the caller's event inbox via scion notifications, which exists
 // in agent CLI mode where messages does not. unread=false adds --all. project
-// scopes to a worker ("" is the caller's own inbox).
+// scopes to a worker ("" is the caller's own inbox). Listing is a read: a user
+// token needs inbox:read on a hub that has that scope, and nothing more.
 func (c *Client) Inbox(ctx context.Context, unread bool, project string) ([]Event, error) {
-	args := []string{"notifications", "--json"}
+	args := []string{"notifications", "--json", nonInteractive}
 	if !unread {
 		args = append(args, "--all")
 	}

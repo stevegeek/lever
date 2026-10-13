@@ -121,8 +121,9 @@ func (e *eventReducer) readLine() (string, bool, error) {
 	}
 }
 
-// reduce passes heartbeats and the reconnect hint as fixed text, and keeps
-// an update's numeric id and subject with empty data; it drops the rest.
+// reduce passes heartbeats (the comment and the named event) and the
+// reconnect hint as fixed text, and keeps an update's numeric id and subject
+// with empty data; it drops the rest.
 func (e *eventReducer) reduce(lines []string) string {
 	var id, event, data string
 	for _, l := range lines {
@@ -145,8 +146,17 @@ func (e *eventReducer) reduce(lines []string) string {
 			return ""
 		}
 	}
-	if event == "reconnect" {
+	switch event {
+	case "reconnect":
 		return "event: reconnect\ndata: {}\n\n"
+	case "heartbeat":
+		// The hub's web client counts a stream silent for over a minute as
+		// dead, and only a named event reaches it. Its data is a millisecond
+		// time, the same digits as an id.
+		if id == "" && eventIDRE.MatchString(data) {
+			return "event: heartbeat\ndata: " + data + "\n\n"
+		}
+		return ""
 	}
 	if event != "update" {
 		return ""

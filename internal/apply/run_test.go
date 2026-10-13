@@ -68,6 +68,12 @@ func fillDeps(d Deps) Deps {
 	if d.EnsureControllerPAT == nil {
 		d.EnsureControllerPAT = func(context.Context) error { return nil }
 	}
+	if d.EnsureHubExperimentsOff == nil {
+		d.EnsureHubExperimentsOff = func(context.Context) error { return nil }
+	}
+	if d.EnsureProjectProvider == nil {
+		d.EnsureProjectProvider = func(context.Context, string) (bool, error) { return false, nil }
+	}
 	if d.WaitBrokerReady == nil {
 		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
 	}
@@ -138,20 +144,12 @@ func spentLatchMint(t *testing.T, tree string) func(context.Context) (BootstrapM
 	}
 }
 
-// isObserveList tells scion.Client.List (which passes --non-interactive)
-// apart from waitHubReady's `list --all --format json` liveness probe. The
-// probe runs before start-manager's observe List and must fall through to the
-// blanket "ok" script, not consume or corrupt the observe-first fakes' state.
+// isObserveList tells scion.Client.List (one project, no --all) apart from
+// waitHubReady's `list --all` liveness probe. The probe runs before
+// start-manager's observe List and must fall through to the blanket "ok"
+// script, not consume or corrupt the observe-first fakes' state.
 func isObserveList(args []string) bool {
-	if len(args) == 0 || args[0] != "list" {
-		return false
-	}
-	for _, a := range args {
-		if a == "--non-interactive" {
-			return true
-		}
-	}
-	return false
+	return len(args) > 0 && args[0] == "list" && !slices.Contains(args, "--all")
 }
 
 // flakyStartRunner fails the first startFails `scion start` calls with the
@@ -1436,7 +1434,7 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 		t.Fatal("host step load-image not called")
 	}
 	j := joinedCalls(f)
-	for _, want := range []string{"init --machine", "config set --global image_registry scionlocal", "server start", "init --non-interactive", "hub link", "-- hello"} {
+	for _, want := range []string{"init --machine", "config set --global --non-interactive image_registry scionlocal", "server start", "init --non-interactive", "hub link", "-- hello"} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing scion call %q in: %q", want, j)
 		}
@@ -1513,6 +1511,38 @@ func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
 	}
 }
 
+// TestRunPinsHubExperimentsAfterTheHubStarts: the experiments check needs a
+// serving hub, and its failure stops the apply before any agent starts.
+func TestRunPinsHubExperimentsAfterTheHubStarts(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		f := scionOKRunner()
+		app := helloApp(t.TempDir())
+		var order []string
+		alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
+		sr := &serverStartOrderRunner{agentLifecycleRunner: alr, order: &order}
+		deps := Deps{
+			Scion: scion.New(sr, scion.Options{}),
+			EnsureHubExperimentsOff: func(context.Context) error {
+				order = append(order, "experiments")
+				if fail {
+					return errors.New("conduit is on")
+				}
+				return nil
+			},
+		}
+		err := runApply(app, deps)
+		if fail != (err != nil) || (fail && !strings.Contains(err.Error(), "conduit is on")) {
+			t.Fatalf("fail=%v: Run = %v", fail, err)
+		}
+		if got := strings.Join(order, ","); !strings.HasPrefix(got, "server-start,experiments") {
+			t.Fatalf("fail=%v: order = %v, want the check right after the hub starts", fail, order)
+		}
+		if fail && alr.startCalls+alr.resumeCalls > 0 {
+			t.Fatal("an agent started after the experiments check failed")
+		}
+	}
+}
+
 // TestRunBootstrapTokenSkipsCleanlyWhenNil: a nil EnsureControllerPAT does not
 // error or block the scion-server step.
 func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
@@ -1561,7 +1591,7 @@ func TestRunCredentialStep(t *testing.T) {
 	}
 	j := joinedCalls(f)
 	// plaintext: scion stores the argument verbatim.
-	if want := "hub env set --secret --always CLAUDE_CODE_OAUTH_TOKEN sk-ant-raw"; !strings.Contains(j, want) {
+	if want := "hub env set --secret --always --non-interactive CLAUDE_CODE_OAUTH_TOKEN sk-ant-raw"; !strings.Contains(j, want) {
 		t.Fatalf("missing scion call %q in: %q", want, j)
 	}
 }
@@ -1943,11 +1973,11 @@ func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 		argv := strings.Join(c.Args, " ")
 		// --always on both: without it scion stores the value as_needed and
 		// never projects it into the container, so the harness auth gate fails.
-		if argv == "hub env set --project --always LEVER_LLM_AUTH=api-key" {
+		if argv == "hub env set --project --always --non-interactive LEVER_LLM_AUTH=api-key" {
 			sawEnvSet = true
 		}
 		// SecretSet base64-encodes the value, so match on the verb + key, not value.
-		if strings.HasPrefix(argv, "hub env set --secret --always ANTHROPIC_API_KEY ") {
+		if strings.HasPrefix(argv, "hub env set --secret --always --non-interactive ANTHROPIC_API_KEY ") {
 			sawPlaceholder = true
 		}
 		if c.Name == "scion" && strings.Contains(argv, " start ") {
@@ -2774,6 +2804,63 @@ func TestRegisterRepairsHubEndpointOnTheSkipPath(t *testing.T) {
 	}
 	if len(repaired) != 1 || repaired[0] != "/lever" {
 		t.Fatalf("RepairScionHubEndpoint calls = %+v, want [/lever]", repaired)
+	}
+}
+
+// The provider repair runs on the register paths; its hub link against the
+// window's throwaway hub needs the endpoint repaired again, and its failure
+// stops the bring-up before any agent starts.
+func TestRegisterLinksAProviderBeforeSettling(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		linked  bool
+		err     error
+		repairs int
+	}{
+		{"linked already", false, nil, 1},
+		{"linked now", true, nil, 2},
+		{"refused", false, errors.New("containers are running"), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f := scionOKRunner()
+			app := helloApp(tree)
+			repairs, stripped, waits := 0, 0, 0
+			var asked []string
+			alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
+			deps := Deps{
+				JailMount:              "/lever",
+				Scion:                  scion.New(alr, scion.Options{HubEndpoint: testHubEndpoint}),
+				ScionProjectRegistered: func(context.Context, string) (bool, error) { return true, nil },
+				RepairScionHubEndpoint: func(context.Context, string) error { repairs++; return nil },
+				EnsureProjectProvider: func(_ context.Context, name string) (bool, error) {
+					asked = append(asked, name)
+					return tc.linked, tc.err
+				},
+				StripProjectSharedDirs: func(context.Context, string) error { stripped++; return nil },
+				WaitBrokerReady:        func(context.Context, string) (bool, error) { waits++; return true, nil },
+			}
+			err := runApply(app, deps)
+			if (err != nil) != (tc.err != nil) {
+				t.Fatalf("Run = %v, want error %v", err, tc.err)
+			}
+			if len(asked) != 1 || asked[0] != "lever" {
+				t.Fatalf("EnsureProjectProvider asked for %v, want [lever]", asked)
+			}
+			if repairs != tc.repairs {
+				t.Fatalf("RepairScionHubEndpoint calls = %d, want %d", repairs, tc.repairs)
+			}
+			// A window restarted the hub: start-manager waits for its broker again.
+			if tc.err == nil && waits != tc.repairs {
+				t.Fatalf("WaitBrokerReady calls = %d, want %d", waits, tc.repairs)
+			}
+			if tc.err != nil && (stripped != 0 || alr.startCalls+alr.resumeCalls != 0) {
+				t.Fatalf("after a failed provider repair: strip=%d start=%d resume=%d", stripped, alr.startCalls, alr.resumeCalls)
+			}
+		})
 	}
 }
 
@@ -4156,5 +4243,101 @@ func TestManagerVolumesSharedFolders(t *testing.T) {
 	}
 	if got := managerVolumes("/lever", app); !reflect.DeepEqual(got, want) {
 		t.Fatalf("volumes = %+v\nwant %+v", got, want)
+	}
+}
+
+// TestRegisterPinsTheHubProjectBeforeTheLink: the re-init generates a new
+// local project ID, and a hub link under the controller PAT refuses an ID the
+// hub does not know (it cannot register a project), so the hub's record of the
+// project is pinned in the tree's settings first. A name two hub projects
+// share fails before the link rather than guess.
+func TestRegisterPinsTheHubProjectBeforeTheLink(t *testing.T) {
+	for _, tc := range []struct {
+		name, projects string
+		wantPin        string
+		wantErr        bool
+	}{
+		{"hub knows the project", `[{"id": "hub-id-1", "name": "lever"}, {"id": "x", "name": "other"}]`, "hub-id-1", false},
+		{"hub has no record yet", `[{"id": "x", "name": "other"}]`, "", false},
+		{"two projects of that name", `[{"id": "a", "name": "lever"}, {"id": "b", "name": "lever"}]`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := scionOKRunner()
+			f.Script("scion hub projects", proc.Result{Stdout: tc.projects})
+			app := helloApp(t.TempDir())
+			err := runApply(app, Deps{JailMount: "/lever", Scion: hubScion(f, app)})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Run err = %v, wantErr %v", err, tc.wantErr)
+			}
+			pin := f.CallIndex(proc.ArgvPrefix("scion", "config", "set", "--non-interactive", "hub.projectId"))
+			link := f.CallIndex(proc.ArgvPrefix("scion", "hub", "link"))
+			switch {
+			case tc.wantErr:
+				testutil.WantErrContaining(t, err, "will not guess")
+				if pin >= 0 || link >= 0 {
+					t.Fatalf("pin at %d, link at %d; want neither after a failed lookup", pin, link)
+				}
+			case tc.wantPin == "":
+				if pin >= 0 || link < 0 {
+					t.Fatalf("pin at %d, link at %d; want no pin and the link", pin, link)
+				}
+			default:
+				if pin < 0 || link < 0 || pin > link {
+					t.Fatalf("pin at %d, link at %d; want the pin before the link", pin, link)
+				}
+				c := f.Calls[pin]
+				if c.Args[len(c.Args)-1] != tc.wantPin || c.Dir != "/lever" {
+					t.Fatalf("pin call %+v, want hub.projectId %s set in /lever", c, tc.wantPin)
+				}
+			}
+		})
+	}
+}
+
+// unconfirmedDeleteRunner answers `scion delete` the way scion does for a
+// delete the hub accepted but its wait never saw finish: exit 0 and a notice.
+// gone decides whether the record has in fact gone by the next list.
+type unconfirmedDeleteRunner struct {
+	*agentLifecycleRunner
+	gone bool
+}
+
+func (r *unconfirmedDeleteRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "scion" && len(args) > 0 && args[0] == "delete" {
+		r.deleteCalls++
+		r.record(dir, env, name, args)
+		if r.gone {
+			r.phase, r.containerStatus = "", ""
+		}
+		return proc.Result{Stdout: "Agent 'hello': delete accepted; cannot observe completion; local worktree kept (still running when the wait ended).\n"}, nil
+	}
+	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+func (r *unconfirmedDeleteRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// TestStartManagerFreshAfterAnUnconfirmedDelete: scion exits 0 for a delete
+// it could not confirm. The record decides: gone, the fresh manager is
+// created; still there, nothing is created and the error says the hub may
+// still be deleting it.
+func TestStartManagerFreshAfterAnUnconfirmedDelete(t *testing.T) {
+	for _, gone := range []bool{true, false} {
+		app, f := newObserveFirstApp(t)
+		r := &unconfirmedDeleteRunner{agentLifecycleRunner: &agentLifecycleRunner{FakeRunner: f, slug: "hello",
+			initPhase: "suspended", initContainerStatus: "stopped"}, gone: gone}
+		err := runApplyFresh(app, Deps{Scion: scion.New(r, scion.Options{})})
+		if gone {
+			if err != nil || r.startCalls != 1 {
+				t.Fatalf("gone: err = %v, starts = %d; want the create", err, r.startCalls)
+			}
+			continue
+		}
+		testutil.WantErrContaining(t, err, "the hub accepted the delete but the manager record is still there")
+		testutil.WantErrContaining(t, err, "lever up --fresh")
+		if r.startCalls != 0 {
+			t.Fatalf("still there: %d start(s); nothing may be created over the record", r.startCalls)
+		}
 	}
 }

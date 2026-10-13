@@ -105,7 +105,7 @@ framework-image-stage:
 # scion cross-compiled here from the scion source the jail runs: set
 # SCION_VERSION to lever.yaml's scion.version, or SCION_SRC to the checkout
 # scion.source names. The default is the pin the shipped examples use.
-SCION_VERSION ?= e0f61f2d
+SCION_VERSION ?= b41cd6fe
 SCION_SRC ?=
 # What the slim base records as its scion version: the pin, or the commit of
 # the SCION_SRC checkout with -dirty for uncommitted changes (never its path,
@@ -185,3 +185,9 @@ test-apikey-e2e: install lever-image-bins
 .PHONY: test-lima-e2e
 test-lima-e2e: install
 	bash tools/test/lima-e2e.sh
+
+# The whole stack on the pinned scion (agent image, manager, worker, remote
+# access, the experiment fence); see the script's header for what it needs.
+.PHONY: test-lima-stack-e2e
+test-lima-stack-e2e: install
+	bash tools/test/lima-stack-e2e.sh

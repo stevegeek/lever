@@ -26,11 +26,17 @@ func TestRunInjectsEnvAndBin(t *testing.T) {
 	}
 }
 
-func TestEnvAlwaysEnablesHub(t *testing.T) {
+// TestEnvSelectsHubByEndpointOnly: SCION_HUB_ENDPOINT is what puts scion in
+// hub context; the client sets no other hub switch.
+func TestEnvSelectsHubByEndpointOnly(t *testing.T) {
 	f := proc.NewFakeRunner()
 	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
-	if got := c.env()["SCION_HUB_ENABLED"]; got != "true" {
-		t.Fatalf("expected SCION_HUB_ENABLED=true, got %q", got)
+	env := c.env()
+	if env["SCION_HUB_ENDPOINT"] != "http://127.0.0.1:8080" {
+		t.Fatalf("SCION_HUB_ENDPOINT = %q", env["SCION_HUB_ENDPOINT"])
+	}
+	if len(env) != 1 {
+		t.Fatalf("env = %v, want SCION_HUB_ENDPOINT alone", env)
 	}
 }
 

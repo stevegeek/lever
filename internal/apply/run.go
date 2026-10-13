@@ -125,7 +125,8 @@ type run struct {
 	// manager.read_only mounts; any other is probed (warnManagerTreeMounts).
 	managerCreated bool
 	// brokerOnline records that the scion-server step already saw the runtime
-	// broker online, so start-manager need not wait for it again.
+	// broker online, so start-manager need not wait for it again. A step that
+	// starts the hub again clears it.
 	brokerOnline bool
 	// subject prefixes the resume checks' messages; empty means "start-manager".
 	subject string
@@ -193,6 +194,18 @@ type Deps struct {
 	// mint window as one op (see plan.go's bootstrap-token Step). It must be
 	// idempotent: a no-op when a valid PAT is already persisted.
 	EnsureControllerPAT func(ctx context.Context) error
+	// EnsureHubExperimentsOff runs right after the scion-server step starts the
+	// hub: when scion's conduit or artifacts experiment is on there, it pins it
+	// off through the dev-auth window and starts the hub again, or fails with
+	// the repair while containers run. A no-op on a scion without hub
+	// experiments.
+	EnsureHubExperimentsOff func(ctx context.Context) error
+	// EnsureProjectProvider runs after the hub's runtime broker registered:
+	// when the instance's hub project (by name) lists no runtime broker, it
+	// links the jail's broker through the dev-auth window and starts the hub
+	// again, or fails with the repair. A project the hub does not list is
+	// left alone. linked reports that the window ran.
+	EnsureProjectProvider func(ctx context.Context, projectName string) (linked bool, err error)
 	// WaitBrokerReady blocks until the scion runtime broker is registered and
 	// online. The workstation daemon brings up its Hub API and its runtime broker
 	// separately, so without it the first create or resume races the broker's
@@ -421,6 +434,8 @@ func (d Deps) check() error {
 		{"StartBroker", d.StartBroker == nil},
 		{"BrokerHealthy", d.BrokerHealthy == nil},
 		{"EnsureControllerPAT", d.EnsureControllerPAT == nil},
+		{"EnsureHubExperimentsOff", d.EnsureHubExperimentsOff == nil},
+		{"EnsureProjectProvider", d.EnsureProjectProvider == nil},
 		{"WaitBrokerReady", d.WaitBrokerReady == nil},
 		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
 		{"RearmBootstrap", d.RearmBootstrap == nil},
@@ -630,6 +645,9 @@ func (r *run) scionServer(ctx context.Context) error {
 	if err := r.d.Scion.ServerStart(ctx, r.hubServerOpts()); err != nil {
 		return err
 	}
+	if err := r.d.EnsureHubExperimentsOff(ctx); err != nil {
+		return err
+	}
 	// A just-started hub registers its runtime broker only after it serves, and
 	// register-project's hub link would race that and fail with a 422
 	// no_runtime_broker, so wait on every apply (one hub brokers call when the
@@ -787,7 +805,7 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
 		}
-		return r.settleProject(ctx, path.Base(jp))
+		return r.settleProject(ctx, jp)
 	}
 
 	// Remove a stale .scion marker file left in the tree by a previous bring-up:
@@ -808,10 +826,33 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 	if err := r.d.Scion.InitProject(ctx, jp); err != nil {
 		return err
 	}
+	if err := r.pinHubProject(ctx, jp); err != nil {
+		return err
+	}
 	if err := r.hubLink(ctx, jp); err != nil {
 		return err
 	}
-	return r.settleProject(ctx, path.Base(jp))
+	return r.settleProject(ctx, jp)
+}
+
+// pinHubProject points the fresh registration at the hub's existing record of
+// this project before the link. The re-init generated a new local ID, and a
+// hub link under the controller PAT refuses an ID the hub does not know (a
+// user token cannot register a project) instead of matching by name. With no
+// record on the hub yet, the link decides as before.
+func (r *run) pinHubProject(ctx context.Context, jp string) error {
+	name := path.Base(jp)
+	id, err := r.d.Scion.HubProjectID(ctx, name)
+	if err != nil {
+		return fmt.Errorf("looking up the hub's record of project %q: %w", name, err)
+	}
+	if id == "" {
+		return nil
+	}
+	if err := r.d.Scion.PinHubProject(ctx, jp, id); err != nil {
+		return fmt.Errorf("pointing %s at hub project %s: %w", jp, id, err)
+	}
+	return nil
 }
 
 // hubLinkRetryDelays are the waits before each retry of a hub link that failed
@@ -842,9 +883,23 @@ func (r *run) hubLink(ctx context.Context, jp string) error {
 }
 
 // settleProject is the hub-side project state both register paths converge on:
-// no cross-agent shared dir, and a role ceiling. Both must hold whether the
-// registration was just made or found sound.
-func (r *run) settleProject(ctx context.Context, projectName string) error {
+// a runtime broker to start agents on, no cross-agent shared dir, and a role
+// ceiling. All three must hold whether the registration was just made or found
+// sound.
+func (r *run) settleProject(ctx context.Context, jp string) error {
+	projectName := path.Base(jp)
+	linked, err := r.d.EnsureProjectProvider(ctx, projectName)
+	if err != nil {
+		return err
+	}
+	// The repair ran a hub link against the window's throwaway hub, and started
+	// the hub again: start-manager must not trust scion-server's broker wait.
+	if linked {
+		r.brokerOnline = false
+		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
+			return err
+		}
+	}
 	if err := r.d.StripProjectSharedDirs(ctx, projectName); err != nil {
 		return err
 	}
@@ -901,8 +956,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// Wait for runtime-broker readiness before any create or resume: the daemon
 	// registers its broker asynchronously after its Hub API is up. Fail-soft; the
 	// broker-unavailable retry backstops it. Skipped when the scion-server step of
-	// this run saw the broker online, since nothing between the two restarts the
-	// hub.
+	// this run saw the broker online and no later step started the hub again.
 	if !r.brokerOnline {
 		if _, err := r.d.WaitBrokerReady(ctx, jp); err != nil {
 			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
@@ -2107,6 +2161,10 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 		return fmt.Errorf("start-manager: %s: the delete was sent, but lever could not confirm the manager record is gone (%v); nothing was created. Run `lever up --fresh` again", deleteFailReason, lerr)
 	}
 	if rec := scion.FindAgent(agents, r.app.Name); rec != nil {
+		if errors.Is(derr, scion.ErrDeleteUnconfirmed) {
+			return fmt.Errorf("start-manager: %s: the hub accepted the delete but the manager record is still there (phase %s), so nothing was created. "+
+				"The hub may still be deleting it: check `lever doctor`, then run `lever up --fresh` again", deleteFailReason, scion.BoundedQuote(rec.Phase))
+		}
 		if derr != nil {
 			return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 		}

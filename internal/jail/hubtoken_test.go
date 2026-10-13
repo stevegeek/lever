@@ -35,7 +35,7 @@ func TestRunKeepsHubTokenOffHostArgv(t *testing.T) {
 		t.Fatalf("host env must stay empty (the prefix binary is not the consumer), got %v", call.Env)
 	}
 	want := []string{"orb", "-m", "lever-jail", "-u", "leveruser", "env",
-		"XDG_RUNTIME_DIR=/run/user/501", "PATH=/usr/local/bin:/usr/bin:/bin", "SCION_HUB_ENABLED=true",
+		"XDG_RUNTIME_DIR=/run/user/501", "PATH=/usr/local/bin:/usr/bin:/bin",
 		"sh", "-c", hubTokenStdinScript, "_",
 		"env", "SCION_HUB_ENDPOINT=http://127.0.0.1:8080", "scion", "list", "--format", "json"}
 	if !reflect.DeepEqual(argv, want) {

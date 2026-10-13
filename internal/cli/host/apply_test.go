@@ -632,7 +632,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	if !strings.Contains(tokenArgs, "--name lever-controller") {
 		t.Fatalf("hub token create args = %q, want --name lever-controller", tokenArgs)
 	}
-	if got, want := scopesArg(t, f.Calls[iToken]), "agent:manage,agent:attach,agent:message,project:read,project:update"; got != want {
+	if got, want := scopesArg(t, f.Calls[iToken]), strings.Join(controllerPATScopes(false, false), ","); got != want {
 		t.Fatalf("hub token create --scopes = %q, want %q", got, want)
 	}
 	// Never scion's 90-day default: an expiring token takes the instance down.
@@ -744,7 +744,7 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	// Exact match: an extra scope such as agent:manage must never reach the
 	// remote token.
 	controllerCall := tokenCreateCallFor(t, f.Calls, "lever-controller")
-	if got, want := scopesArg(t, controllerCall), "agent:manage,agent:attach,agent:message,project:read,project:update"; got != want {
+	if got, want := scopesArg(t, controllerCall), strings.Join(controllerPATScopes(false, false), ","); got != want {
 		t.Fatalf("controller mint --scopes = %q, want %q", got, want)
 	}
 	remoteCall := tokenCreateCallFor(t, f.Calls, "lever-remote")

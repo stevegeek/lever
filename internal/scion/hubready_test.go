@@ -323,7 +323,7 @@ func TestRuntimeBrokerReadyWaitsInTheGuest(t *testing.T) {
 	// 30 s at 200 ms, then the scion command the loop runs.
 	_, tail, _ := strings.Cut(args, " _ ")
 	n, rest, _ := strings.Cut(tail, " ")
-	if k, err := strconv.Atoi(n); err != nil || k < 140 || k > 150 || rest != "scion hub brokers --format json -g global" {
+	if k, err := strconv.Atoi(n); err != nil || k < 140 || k > 150 || rest != "scion hub brokers --format json --non-interactive -g global" {
 		t.Fatalf("in-guest argv: %s", args)
 	}
 	// The hub token rides the env (the jail runner keeps it off the argv).

@@ -932,6 +932,34 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 		{"GET", "/api/v1/projects/cloned-thing/settings", false},
 		{"GET", "/api/v1/groves/p1", false},
 		{"GET", "/api/v1/systems", false},
+
+		{"GET", "/api/v1/conduit", true},
+		{"GET", "/api/v1/conduit/grant-keys", true},
+		{"POST", "/api/v1/admin/conduit/grant-keys/rotate", true},
+		{"GET", "/api/v1/artifacts", true},
+		{"POST", "/api/v1/artifacts", true},
+		{"GET", "/api/v1/artifacts/a1", true},
+		{"GET", "/api/v1/artifacts/shared/tok", true},
+		{"GET", "/api/v1/artifacts/view/cap/index.html", true},
+		{"PUT", "/api/v1/admin/experiments", true},
+		{"POST", "/api/v1/admin/experiments", true},
+		{"DELETE", "/api/v1/admin/experiments", true},
+		{"PATCH", "/api/v1/admin/experiments", true},
+		{"GET", "/api/v1/admin/experiments", false},
+		{"HEAD", "/api/v1/admin/experiments", false},
+		{"GET", "/api/v1/experiments", false},
+		{"GET", "/api/v1/agents/a1/ports/tunnel", true},
+		{"POST", "/api/v1/agents/a1/delegations", true},
+		{"GET", "/api/v1/agents/a1/delegations", true},
+		{"POST", "/api/v1/agents/a1/delegations/g1/exchange", true},
+		{"GET", "/api/v1/agents/a1/ports", false},
+		{"GET", "/api/v1/agents/a1/pty", false},
+		{"GET", "/api/v1/users/me/delegations", false},
+		{"POST", "/api/v1/test-identities", true},
+		{"POST", "/api/v1/test-identities/t1/web-login-code", true},
+		{"POST", "/api/v1/test-identity-delegations", true},
+		{"POST", "/auth/test-identity/redeem", true},
+		{"GET", "/api/v1/test-infra/status", false},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)
@@ -948,6 +976,60 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 			}
 			if rw.Code != 200 || hub.hits() != 1 {
 				t.Fatalf("status %d, hub hits %d; want it forwarded", rw.Code, hub.hits())
+			}
+		})
+	}
+}
+
+// TestFencedRouteSpellings: no spelling of a fenced route reaches the hub,
+// whichever check refuses it.
+func TestFencedRouteSpellings(t *testing.T) {
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/api/v1/conduit/"},
+		{"GET", "/api/v1/conduit."},
+		{"GET", "/api/v1/conduit;x"},
+		{"GET", "/api/v1/conduit%20"},
+		{"GET", "/api/v1/Conduit"},
+		{"GET", "/API/V1/CONDUIT"},
+		{"GET", "/api/v1/%63onduit"},
+		{"GET", "/api/v1/%43onduit"},
+		{"GET", "/api/v1//conduit"},
+		{"GET", "/api/v1/./conduit"},
+		{"GET", "/api/v1/x/../conduit"},
+		{"GET", "/api/v1/x/%2e%2e/conduit"},
+		{"GET", "/api/v1%2fconduit"},
+		{"GET", "/api/v1/conduit/grant-keys/"},
+		{"GET", "/api/v1/conduit/Grant-Keys"},
+		{"POST", "/api/v1/admin/conduit/grant-keys/rotate/"},
+		{"POST", "/api/v1/Admin/Conduit/grant-keys/rotate"},
+		{"GET", "/api/v1/artifacts/"},
+		{"GET", "/api/v1/Artifacts/shared/tok"},
+		{"GET", "/api/v1/artifacts/%73hared/tok"},
+		{"GET", "/api/v1/artifacts.json"},
+		{"GET", "/api/v1/artifacts/view/cap/../../a1"},
+		{"PUT", "/api/v1/admin/experiments/"},
+		{"PUT", "/api/v1/admin/Experiments"},
+		{"PUT", "/api/v1/admin/%65xperiments"},
+		{"DELETE", "/api/v1/admin/experiments."},
+		{"put", "/api/v1/admin/experiments"},
+		{"GET", "/api/v1/agents/a1/ports/tunnel/"},
+		{"GET", "/api/v1/agents/a1/Ports/Tunnel"},
+		{"GET", "/api/v1/agents/a1/ports/%74unnel"},
+		{"POST", "/api/v1/agents/a1/Delegations"},
+		{"POST", "/Auth/Test-Identity/redeem"},
+		{"POST", "/auth/test-identity/redeem/"},
+		{"POST", "/api/v1/Test-Identities"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			hub := newRecordingHub(t)
+			var lines []AuditLine
+			h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
+				ServeHost: "mac.ts.net", Audit: func(l AuditLine) { lines = append(lines, l) }})
+			rw := httptest.NewRecorder()
+			h.ServeHTTP(rw, proxyRequest(tc.method, tc.path, nil))
+			if hub.hits() != 0 || rw.Code < 400 || rw.Code > 499 || len(lines) != 1 ||
+				(lines[0].Decision != DecisionDenyRoute && lines[0].Decision != DecisionDenyPath) {
+				t.Fatalf("status %d, hub hits %d, audit %+v; want refused before the hub", rw.Code, hub.hits(), lines)
 			}
 		})
 	}

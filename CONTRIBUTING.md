@@ -94,7 +94,12 @@ embeds no manifest and builds scion as before. Do not run `genrelease` in a chec
 
 Change `ReleasePin` in `internal/provision/scionbin/release.go` and the `version:` of every
 `examples/*/lever.yaml` together (`TestExamplesPinTheReleaseScion` fails otherwise), then the pin
-in the docs (`grep -rn <old pin> docs-site`). The next release ships the new pin prebuilt.
+in the docs (`grep -rn <old pin> docs-site`), the Makefile's `SCION_VERSION` default and the
+tests that name it (`grep -rn <old pin> .`). The next release ships the new pin prebuilt.
+
+The agent image carries sciontool (and, in the slim image, scion) built from the pin, so a bump
+needs a new image: bump `JailABI` (see below) so `lever doctor` asks for the rebuild. Run
+`make test-lima-stack-e2e` on the new pin: `make test-lima-e2e` does not start scion.
 
 ## Build
 
@@ -122,6 +127,7 @@ go test ./...          # unit and acceptance-fixture tests
 make test-integration  # `-tags integration` tests; each skips unless its env/tooling is present
 make test-apikey-e2e   # live api-key /llm path with a fake upstream; needs OrbStack + podman
 make test-lima-e2e     # live lima backend gate; needs Lima >= 2.0
+make test-lima-stack-e2e # live whole stack on the pinned scion (agent image, remote access); needs Lima >= 2.0
 lever acceptance       # six-check live gate against a running instance
 ```
 

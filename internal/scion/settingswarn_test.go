@@ -64,7 +64,7 @@ func TestSettingsWarningHiddenAndLogged(t *testing.T) {
 		Code:   1,
 	})
 	f.Script("scion stop m", proc.Result{Stderr: settingsWarn + "\n"})
-	f.Script("scion config get default_template", proc.Result{Stdout: "default\n", Stderr: strings.Replace(settingsWarn, "15:25:35", "15:25:36", 1) + "\n"})
+	f.Script("scion config get --non-interactive default_template", proc.Result{Stdout: "default\n", Stderr: strings.Replace(settingsWarn, "15:25:35", "15:25:36", 1) + "\n"})
 
 	resetWarnSeen()
 	var logged []string

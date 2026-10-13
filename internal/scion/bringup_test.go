@@ -45,7 +45,7 @@ func TestEnvSetArgvAndProjectScope(t *testing.T) {
 	got := strings.Join(f.Calls[0].Args, " ")
 	// --always is required: an as_needed var no harness declares is never
 	// projected into the container.
-	if got != "hub env set --project --always LEVER_LLM_AUTH=api-key" {
+	if got != "hub env set --project --always --non-interactive LEVER_LLM_AUTH=api-key" {
 		t.Errorf("args = %q", got)
 	}
 	// Bare --project infers the project from the working directory.
@@ -62,7 +62,7 @@ func TestSecretSetIsAlwaysInjected(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	want := "hub env set --secret --always ANTHROPIC_API_KEY sk-ant-placeholder"
+	want := "hub env set --secret --always --non-interactive ANTHROPIC_API_KEY sk-ant-placeholder"
 	if got != want {
 		t.Errorf("args = %q, want %q", got, want)
 	}
@@ -106,11 +106,11 @@ func TestBringupArgv(t *testing.T) {
 	j := strings.Join(all, "|")
 	for _, want := range []string{
 		"init --machine --non-interactive",
-		"config set --global image_registry scionlocal",
+		"config set --global --non-interactive image_registry scionlocal",
 		"server start --web-port 8080 --dev-auth=false",
 		// plaintext: scion stamps encoding=raw since ce96122c, so an encoded
 		// value would be stored verbatim.
-		"hub env set --secret --always CLAUDE_CODE_OAUTH_TOKEN sk-ant-rawtoken",
+		"hub env set --secret --always --non-interactive CLAUDE_CODE_OAUTH_TOKEN sk-ant-rawtoken",
 	} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing %q in %q", want, j)
@@ -574,5 +574,72 @@ func TestErrSummary(t *testing.T) {
 	}
 	if ErrSummary(nil) != "" {
 		t.Error("nil error has a summary")
+	}
+}
+
+// startOutputRunner fails every `scion server start` with out, as scion
+// exits 1 after printing it.
+type startOutputRunner struct {
+	*proc.FakeRunner
+	out string
+}
+
+func (r *startOutputRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "start" {
+		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Code: 1, Stdout: "Starting server as daemon (workstation mode)...\n", Stderr: r.out}, fmt.Errorf("exit status 1")
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// scion's own readiness wait gives up after about 30 s and leaves the daemon
+// running (cmd/server_start_ready.go). That start happened, also for an
+// exclusive start, and lever's longer wait decides; a daemon that exited
+// during the wait is still a failure.
+func TestServerStartToleratesScionReadinessGiveUp(t *testing.T) {
+	const gaveUp = "Error: server did not become ready within 30s: hub API at http://127.0.0.1:48080/healthz did not answer " +
+		"(last error: Get \"http://127.0.0.1:48080/healthz\": dial tcp 127.0.0.1:48080: connect: connection refused)\n\n" +
+		"The server process is still running. Check the log at /home/u/.scion/server.log and 'scion server status'; use 'scion server stop' to stop it\n"
+	const exited = "Error: server did not become ready within 30s: hub API at http://127.0.0.1:48080/healthz did not answer\n\n" +
+		"The server process has exited. Check the log at /home/u/.scion/server.log and 'scion server status'; use 'scion server stop' to stop it\n"
+	const exitedEarly = "Error: the server exited during startup before it became ready. Check log at: /home/u/.scion/server.log\n"
+	for _, tc := range []struct {
+		name      string
+		out       string
+		exclusive bool
+		wantErr   bool
+	}{
+		{"gave up, still running", gaveUp, false, false},
+		{"gave up, still running, exclusive", gaveUp, true, false},
+		{"gave up, process exited", exited, false, true},
+		{"exited during startup", exitedEarly, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := proc.NewFakeRunner()
+			f.Script("scion list", proc.Result{Stdout: "[]"})
+			c := New(&startOutputRunner{FakeRunner: f, out: tc.out}, Options{})
+			err := c.ServerStart(context.Background(), ServerOpts{HubPort: 48080, DisableWeb: true, DevAuth: true, Exclusive: tc.exclusive})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ServerStart err = %v, wantErr %v", err, tc.wantErr)
+			}
+			waited := f.Called(proc.ArgvPrefix("scion", "list", "--all"))
+			if waited == tc.wantErr {
+				t.Fatalf("hub readiness wait ran = %v; want it exactly when the start counts as done", waited)
+			}
+			if err != nil && AlreadyRunning(err) {
+				t.Fatalf("a failed start reads as already running (the window would not stop it): %v", err)
+			}
+		})
+	}
+}
+
+// The hub-down answer of every agent verb on b41cd6fe, verbatim, still reads
+// as absent.
+func TestIsAgentAbsentMatchesTheNewPinsHubDownWording(t *testing.T) {
+	err := errors.New("scion list --format json -g /lever --non-interactive: Error: hub at http://127.0.0.1:8080 is not responding: " +
+		"request failed: Get \"http://127.0.0.1:8080/healthz\": dial tcp 127.0.0.1:8080: connect: connection refused\n" +
+		"Check the hub with 'scion hub status'.")
+	if !IsAgentAbsent(err) {
+		t.Fatalf("IsAgentAbsent(%q) = false", err)
 	}
 }

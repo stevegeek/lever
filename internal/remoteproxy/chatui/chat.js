@@ -1466,6 +1466,14 @@ function reason(res) {
   return okButNoMessage(res) ? `unexpected answer (HTTP ${res.status})` : errorText(res.status, res.body);
 }
 
+// The hub answers a key whose earlier send is still running (a wake can take
+// minutes) with 409 send_in_progress. That attempt may yet be stored; this
+// one stored nothing.
+function inProgress(res) {
+  const err = res.body && typeof res.body === 'object' ? res.body.error : null;
+  return res.status === 409 && !!err && typeof err === 'object' && err.code === 'send_in_progress';
+}
+
 // The hub answers a key it has seen with 200 and the message stored then.
 function replayed(res) {
   return res.status === 200 && !!res.body && typeof res.body === 'object' && typeof res.body.id === 'string';
@@ -1523,7 +1531,9 @@ async function send() {
     say(earlier > 1 ? `${NOTE_REPLAY} ${NOTE_TWICE}` : NOTE_REPLAY);
     hold();
     refreshSoon();
-  } else if (unclear(res) || okButNoMessage(res)) {
+  } else if (unclear(res) || okButNoMessage(res) || inProgress(res)) {
+    // The running attempt is the one already counted, not this one.
+    if (inProgress(res)) setUnsent(c, { ...c.unsent, tries: Math.max(earlier, 1) });
     say(`No clear answer (${reason(res)}). The message may have arrived: look at the conversation first. A repeat within a few minutes is stored only once.`);
     refreshSoon();
     listSoon();

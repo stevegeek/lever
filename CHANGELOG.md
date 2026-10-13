@@ -11,15 +11,16 @@ version bump moves the block under the new version heading.
 
 - **The Lima e2e checks the read-only guard against real containers (lever#162).**
   `make test-lima-e2e` now runs the guard's guest-side live check against rootless keep-id
-  containers in its guest, with nothing pulled: the container's PID and mount namespaces are
-  owned by its user namespace and the guest's `lsns` output parses; the tree mount and its pins
-  pass with matching devices, mount roots and inode numbers, also after a guest cache drop; a first
-  process in a user and mount namespace made inside the container is refused; and a directory
-  moved in the guest is reported. Lima under QEMU mounts the tree over 9p, which reaches a
+  containers in its guest, mounted as the manager's create and checked as the guard plans them,
+  with nothing pulled: in Lima's guest the container's PID and mount namespaces are owned by its
+  user namespace and the guest's `lsns` output parses; the tree mount and its pins pass with
+  matching devices, mount roots and inode numbers, also after a guest cache drop; a first process
+  in a user and mount namespace made inside the container is refused; and a directory moved in the
+  guest is reported. On a Linux host Lima runs QEMU and mounts the tree over 9p, which reaches a
   directory by its path: after a rename-based replace of an entry, and after an entry's parent was
   removed and recreated on the host, the container read the new directories and the entry stayed
-  read-only, so the check rightly reports nothing. The guard itself is unchanged. Lima's virtiofs
-  mount under vz (macOS) is still unverified live.
+  read-only, so the check rightly reports nothing. The guard itself is unchanged. The step has not
+  yet run under vz/virtiofs (Lima on macOS).
 
 ## [0.36.1] - 2026-10-13
 

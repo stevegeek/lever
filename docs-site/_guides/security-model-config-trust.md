@@ -88,13 +88,13 @@ closes that for the directories it names:
   bound to the directory that existed at the manager's create. If the host replaces it (`rm -rf` and
   recreate, a rename-based deploy, a `git checkout` that removes and re-adds it), podman still lists
   the read-only mount but it covers the old directory, and a write from the manager lands in the new
-  one (verified on OrbStack). The protection is gone until the next fresh create. Lima under QEMU
-  (a Linux host) behaved differently in `make test-lima-e2e`: its 9p tree mount reaches a directory
-  by its path, so after a rename-based replace of an entry, and after an entry's parent was removed
-  and recreated with the entry, the manager read the new directories and the entry was still
-  read-only; the live check then reports nothing, rightly. Other ways of replacing, and Lima's
-  virtiofs mount under vz (macOS), were not checked; treat the rule below as holding there too.
-  `lever doctor` and
+  one (verified on OrbStack). The protection is gone until the next fresh create. Lima on a Linux
+  host (QEMU, 9p) behaved differently in `make test-lima-e2e`: its 9p tree mount reaches a
+  directory by its path, so after a rename-based replace of an entry, and after an entry's parent
+  was removed and recreated with the entry, a container with the manager's mounts read the new
+  directories and the entry was still read-only; the live check then reports nothing, rightly.
+  Other ways of replacing were not checked, and the e2e has not yet run under vz/virtiofs (Lima on
+  macOS): assume a host-side replace loses the protection there. `lever doctor` and
   `lever apply` check every entry and pin live from the guest side, as the tool guard below does,
   and fail or warn when a mount covers another directory than the host has there now; a check that
   cannot run is reported as unconfirmed, never as protected. The same holds for a worker dir (or an
@@ -281,34 +281,33 @@ planned directory as a mount point, the entries read-only, each coming from the 
 place (the parent mount's device, at the parent's root joined with the path below it: a symbolic
 link the runtime followed, or a directory renamed away, shows as another place; a directory renamed
 in the guest, where it is no mount point, takes the container's mount with it, so the target is
-reported as no mount point or from another place), and `stat` must find
-the same device and inode at the guest path and at `/proc/<pid>/root/<target>`, so a protected
-directory replaced on the host (the mount stays on the old one) is caught; on Lima under QEMU the 9p mount was seen to follow to the new directory instead, still read-only (§5.1.1). That process must also be
-in the mount and user namespaces the container runtime created: a root agent that could ptrace it
-could otherwise move it into namespaces made inside the container and show a staged view. The
-reference is the owner of its PID namespace, which a process can never leave; `lsns` (util-linux
-2.38 or later in the guest) reads the owners. Under rootless podman with scion's keep-id mapping the
-container's PID and mount namespaces are owned by its user namespace, as the check requires.
-`make test-lima-e2e` runs the whole check against real keep-id containers in a Lima guest on every
-run: the guest's `lsns` output parses, the tree mounts and their pins pass with matching devices,
-mount roots and inode numbers (also after the guest drops its caches), a first process moved into a
-user and mount namespace of its own is refused, a directory moved in the guest is reported, and a
-directory replaced on the host is either reported or followed by its mount (new content read,
-read-only kept). That run uses Lima under QEMU, whose tree mount is 9p (where the mount follows);
-Lima's virtiofs mount under vz (macOS) has not been checked live. The paths reach `stat` on stdin, never as words of
-the guest command line, and every read runs under the guest's own deadline. It fails closed: no
-container yet, a stopped manager, a foreign namespace, or anything it cannot read or parse holds the
-tool back. The reasons it logs are fixed text, never
-container output. It asks again every 30 seconds (apply starts the broker
-before the manager, so a fresh create gains the mounts after the first ask), and writes the reason
-into the tool's log once per reason. `lever apply` names the held tools when it keeps or resumes a
-manager that lacks the mounts. The fix is the one for the mounts themselves:
-`lever up --fresh` (with `--keep-conversation` to keep the conversation, which you then trust as
-much as the manager). A manager that lacked the mounts before could already have
-rewritten the program; check it before you trust it again. `lever-tool-github` refuses its `-app-key`
-and `-state` inside its `-tree` on its own as well, `lever-tool-whisper` its `-server`,
-`-models` and `-dictate-socket`, and `lever-tool-tts` its `-server`, `-models` and
-`-speak-socket`.
+reported as no mount point or from another place), and `stat` must find the same device and inode at
+the guest path and at `/proc/<pid>/root/<target>`, so a protected directory replaced on the host
+(the mount stays on the old one) is caught; on Lima's 9p tree mount the mount was seen to follow to
+the new directory instead, still read-only (§5.1.1). That process must also be in the mount and user
+namespaces the container runtime created: a root agent that could ptrace it could otherwise move it
+into namespaces made inside the container and show a staged view. The reference is the owner of its
+PID namespace, which a process can never leave; `lsns` (util-linux 2.38 or later in the guest) reads
+the owners. In Lima's guest, under rootless podman with scion's keep-id mapping, the container's PID
+and mount namespaces are owned by its user namespace, as the check requires; OrbStack's guest has
+not been checked. `make test-lima-e2e` runs the whole check against real keep-id containers in a
+Lima guest on every run: the guest's `lsns` output parses, the tree mounts and their pins pass with
+matching devices, mount roots and inode numbers (also after the guest drops its caches), a first
+process moved into a user and mount namespace of its own is refused, a directory moved in the guest
+is reported, and a directory replaced on the host is either reported or followed by its mount (new
+content read, read-only kept). It has run on a Linux host (QEMU, 9p, where the mount follows) so
+far; not yet under vz/virtiofs. The paths reach `stat` on stdin, never as words of the guest command
+line, and every read runs under the guest's own deadline. It fails closed: no container yet, a
+stopped manager, a foreign namespace, or anything it cannot read or parse holds the tool back. The
+reasons it logs are fixed text, never container output. It asks again every 30 seconds (apply starts
+the broker before the manager, so a fresh create gains the mounts after the first ask), and writes
+the reason into the tool's log once per reason. `lever apply` names the held tools when it keeps or
+resumes a manager that lacks the mounts. The fix is the one for the mounts themselves:
+`lever up --fresh` (with `--keep-conversation` to keep the conversation, which you then trust as much as the
+manager). A manager that lacked the mounts before could already have rewritten the program; check it
+before you trust it again. `lever-tool-github` refuses its `-app-key` and `-state` inside its
+`-tree` on its own as well, `lever-tool-whisper` its `-server`, `-models` and `-dictate-socket`, and
+`lever-tool-tts` its `-server`, `-models` and `-speak-socket`.
 
 ### 5.6 Residual
 

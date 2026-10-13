@@ -30,8 +30,8 @@ Validated (by hand or by an automated gate):
   and the manager read-only guard's guest-side live check against rootless keep-id containers
   (namespace ownership as `lsns` reports it, a nested first process refused, the tree mount's pins
   matched by mount root and inode, a directory moved in the guest reported, one replaced on the
-  host followed read-only by the mount) over Lima's QEMU 9p tree mount
-  ([§5.5](/security-model/config-trust/)). Lima's vz/virtiofs mount (macOS) is not covered.
+  host reported or followed by its mount (followed on 9p, read-only kept)), on a Linux host (QEMU,
+  9p) so far; not yet run under vz/virtiofs ([§5.5](/security-model/config-trust/)).
 
 Not validated:
 

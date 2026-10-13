@@ -355,23 +355,26 @@ else
   bad "guest tmux core capture: $(printf '%s' "$core_out" | tr '\n' ' ')"
 fi
 
-# The read-only guard's live check against real rootless keep-id containers in
-# this guest: the guest's lsns output parses and shows the runtime's namespace
-# ownership, a first process in a namespace made inside the container is
-# refused, the tree mount's device and inode numbers match (and survive a guest
-# cache drop), a directory moved in the guest is reported, and a directory
-# replaced on the host is reported or, where the tree mount follows the path
-# (9p), followed with its read-only mount. The test builds its image from the guest's own binaries and removes
-# its containers, image and scratch directory.
+# What it proves: internal/apply/guardlive_vm_test.go (TestReadOnlyGuardLiveInRealGuest).
 say "read-only guard live check (keep-id containers over the tree mount)"
 guardout="$WORK/guard.out"
 ( cd "$REPO_ROOT" && LEVER_GUARD_VM_PREFIX="limactl,shell,$MACHINE" \
     LEVER_GUARD_TREE_HOST="$INST/workspace" LEVER_GUARD_TREE_GUEST=/lever \
     go test -tags integration -count=1 -timeout 10m -v \
-      -run '^TestContainerLiveMountsInRealGuest$' ./internal/jail/ ) > "$guardout" 2>&1
+      -run '^TestReadOnlyGuardLiveInRealGuest$' ./internal/apply/ ) > "$guardout" 2>&1
 sed 's/^/      | /' "$guardout"
-if grep -q '^--- PASS: TestContainerLiveMountsInRealGuest' "$guardout"; then
-  ok "read-only guard: namespaces parsed and owned as required, real mounts held, nested namespace refused, moved directory reported, host-replaced directories $(grep -q 'followed by the mount' "$guardout" && echo 'followed read-only by the mount' || echo reported)"
+# A test killed before its own cleanup leaves these behind, and later steps
+# mount the same workspace.
+rm -rf "$INST"/workspace/guard-e2e-*
+limactl shell "$MACHINE" -- sh -s <<'SH' 2>&1 | sed 's/^/      | leftover removed: /'
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+podman ps -a --format '{{.Names}}' | grep '^lever-guard-e2e-' | xargs -r podman rm -f -t 0
+podman images --format '{{.Repository}}' | grep '^localhost/lever-guard-e2e-' | xargs -r podman rmi -f
+SH
+guard_stages=$(sed -nE 's/^ *[A-Za-z0-9_]+_test\.go:[0-9]+: (.* on the host): (followed by the mount|reported) \(tree mount ([^)]*)\).*/\1: \2 (\3)/p' "$guardout" |
+  awk 'NR>1{printf "; "}{printf "%s",$0}')
+if grep -q '^--- PASS: TestReadOnlyGuardLiveInRealGuest' "$guardout"; then
+  ok "read-only guard: namespaces as required, real mounts held, nested namespace refused, moved directory reported; ${guard_stages:-no host-replace stage seen}"
 else
   bad "read-only guard live check (output above)"
 fi

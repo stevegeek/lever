@@ -1,6 +1,6 @@
 //go:build integration
 
-package jail
+package apply
 
 import (
 	"context"
@@ -10,32 +10,42 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
-// TestContainerLiveMountsInRealGuest runs the read-only guard's live check
-// (ContainerLiveMounts: the lsns namespace check, the kernel's mount table
-// and the device and inode match) through a real jail runner against real
-// rootless keep-id containers in a lever-provisioned guest. Unit tests stub
-// every guest answer; this is where the guest's own lsns, mountinfo and the
-// tree mount's inode numbers meet the parser.
+// TestReadOnlyGuardLiveInRealGuest runs the read-only guard's live check
+// (jail.ContainerLiveMounts: the lsns namespace check, the kernel's mount
+// table and the device and inode match) through a real jail runner against
+// real rootless keep-id containers in a lever-provisioned guest. Unit tests
+// stub every guest answer; this is where the guest's own lsns, mountinfo and
+// the tree mount's inode numbers meet the parser.
+//
+// The container's tree mounts come from managerVolumes and the checked plan
+// from ManagerLivePlan over ReadOnlyEntryMounts, as the manager's create and
+// the broker's guard build them. What stands in for scion's container
+// creation: the workspace mount (the in-jail directory at /workspace), the
+// keep-id mapping (jail.ScionKeepIDUserns), and a podman run with no
+// network, no other mounts and an image of the guest's own binaries.
 //
 // Gated behind the integration tag and skipped unless LEVER_GUARD_VM_PREFIX
 // is set. tools/test/lima-e2e.sh runs it against its VM; by hand:
 //
 //	LEVER_GUARD_VM_PREFIX='limactl,shell,<vm>' \
 //	LEVER_GUARD_TREE_HOST=<host tree dir> LEVER_GUARD_TREE_GUEST=/lever \
-//	  go test -tags integration ./internal/jail/ -run TestContainerLiveMountsInRealGuest -v
+//	  go test -tags integration ./internal/apply/ -run TestReadOnlyGuardLiveInRealGuest -v
 //
-// It creates a scratch directory in the tree, an image built from the
-// guest's own sleep and unshare (nothing is pulled) and two containers, and
-// removes all of them.
-func TestContainerLiveMountsInRealGuest(t *testing.T) {
+// It creates a guard-e2e-* scratch directory in the tree, an image and two
+// containers named lever-guard-e2e-*, and removes all of them. A run killed
+// before its cleanup leaves them behind; lima-e2e.sh removes them after the
+// step either way.
+func TestReadOnlyGuardLiveInRealGuest(t *testing.T) {
 	prefix := os.Getenv("LEVER_GUARD_VM_PREFIX")
 	if prefix == "" {
 		t.Skip("set LEVER_GUARD_VM_PREFIX (e.g. 'limactl,shell,<vm>'), LEVER_GUARD_TREE_HOST and LEVER_GUARD_TREE_GUEST")
@@ -45,14 +55,17 @@ func TestContainerLiveMountsInRealGuest(t *testing.T) {
 		t.Fatal("LEVER_GUARD_TREE_HOST must be set, and LEVER_GUARD_TREE_GUEST an absolute path of [A-Za-z0-9/._-]")
 	}
 	pre := strings.Split(prefix, ",")
-	ctx := context.Background()
 
 	// guest runs a script in the guest as the run user, over stdin: a
 	// transport that re-joins the argv leaves stdin alone. Every path put
-	// into a script matches safeGuestPath, so none needs quoting.
+	// into a script matches safeGuestPath, so none needs quoting. The
+	// deadline is per call: a hung limactl must fail the test while its
+	// cleanup can still run, not end in go test's timeout panic.
 	guest := func(script string) (proc.Result, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), guestCallTimeout)
+		defer cancel()
 		argv := append(append([]string{}, pre...), "sh", "-s")
-		return proc.RealRunner{}.RunStdin(context.Background(), strings.NewReader("set -eu\nexport XDG_RUNTIME_DIR=/run/user/$(id -u)\n"+script), nil, argv[0], argv[1:]...)
+		return proc.RealRunner{}.RunStdin(ctx, strings.NewReader("set -eu\nexport XDG_RUNTIME_DIR=/run/user/$(id -u)\n"+script), nil, argv[0], argv[1:]...)
 	}
 	sh := func(script string) string {
 		t.Helper()
@@ -63,7 +76,7 @@ func TestContainerLiveMountsInRealGuest(t *testing.T) {
 		return strings.TrimSpace(res.Stdout)
 	}
 	uid := sh("id -u")
-	jr := New(Config{Host: proc.RealRunner{}, Prefix: pre, UID: uid})
+	jr := jail.New(jail.Config{Host: proc.RealRunner{}, Prefix: pre, UID: uid})
 
 	hostJP, err := os.MkdirTemp(hostTree, "guard-e2e-")
 	if err != nil {
@@ -76,14 +89,17 @@ func TestContainerLiveMountsInRealGuest(t *testing.T) {
 		t.Fatalf("scratch path %q", jp)
 	}
 	t.Cleanup(func() {
-		if res, err := guest("podman rm -f -t 0 " + held + " " + nested + " >/dev/null\npodman rmi -f " + image + " >/dev/null\n"); err != nil {
-			t.Logf("cleanup in the guest: %v: %s", err, res.Stderr)
+		for _, step := range []string{"podman rm -f -t 0 " + held + " " + nested, "podman rmi -f " + image} {
+			if res, err := guest(step + " >/dev/null"); err != nil {
+				t.Logf("cleanup in the guest (%s): %v: %s", step, err, res.Stderr)
+			}
 		}
 		if err := os.RemoveAll(hostJP); err != nil {
 			t.Logf("cleanup: %v", err)
 		}
 	})
-	for _, d := range []string{"parent/entry", "tools", "kb"} {
+	app := &config.App{Manager: config.Manager{ReadOnly: []string{"parent/entry", "tools", "kb"}}}
+	for _, d := range app.Manager.ReadOnly {
 		if err := os.MkdirAll(filepath.Join(hostJP, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -102,16 +118,19 @@ for b in /usr/bin/sleep /usr/bin/unshare; do
 done
 tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 
-	// The mounts the manager gets for the read_only entries parent/entry,
-	// tools and kb: the workspace from the tree, each parent pinned
-	// read-write over itself, each entry read-only over itself. The keep-id
-	// mapping is scion's.
-	run := "podman run -d --pull=never --network=none " + ScionKeepIDUserns +
-		" -v " + jp + ":/workspace" +
-		" -v " + jp + "/parent:/workspace/parent" +
-		" -v " + jp + "/parent/entry:/workspace/parent/entry:ro" +
-		" -v " + jp + "/tools:/workspace/tools:ro" +
-		" -v " + jp + "/kb:/workspace/kb:ro"
+	// The manager's mounts for the read_only entries parent/entry, tools
+	// and kb as its create sends them to scion, over the workspace mount
+	// scion makes.
+	run := "podman run -d --pull=never --network=none " + jail.ScionKeepIDUserns + " -v " + jp + ":" + scion.ContainerWorkspace
+	for _, v := range managerVolumes(jp, app) {
+		if !safeGuestPath.MatchString(v.Source) || !safeGuestPath.MatchString(v.Target) {
+			t.Fatalf("volume %+v", v)
+		}
+		run += " -v " + v.Source + ":" + v.Target
+		if v.ReadOnly {
+			run += ":ro"
+		}
+	}
 	sh(run + " --name " + held + " " + image + " /usr/bin/sleep infinity >/dev/null")
 	// The first process itself in a user and mount namespace made inside
 	// the container: what a root agent that ptraces it and calls setns
@@ -132,36 +151,37 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 	heldPID, nestedPID := pidOf(held), pidOf(nested)
 	root := "/proc/" + heldPID + "/root"
 
-	// Under rootless keep-id the pid, mnt and user namespaces of the first
-	// process are as checkRuntimeNamespaces requires, and the real lsns
-	// output parses.
+	// Under rootless keep-id the pid namespace's owner is the user
+	// namespace, which also owns the mnt namespace (what
+	// checkRuntimeNamespaces requires; ContainerLiveMounts passing below
+	// proves it parses), and that user namespace is not the guest shell's.
 	nsOut := sh("lsns --raw --noheadings --output NS,TYPE,ONS --task " + heldPID)
 	t.Logf("lsns (held container, pid %s):\n%s", heldPID, nsOut)
-	ns, err := parseNamespaces(nsOut)
-	if err != nil {
-		t.Fatalf("parseNamespaces(real lsns output): %v", err)
+	ns := map[string][]string{}
+	for _, line := range strings.Split(nsOut, "\n") {
+		if f := strings.Fields(line); len(f) == 3 {
+			ns[f[1]] = f
+		}
 	}
-	if o := ns["pid"].owner; o == 0 || ns["mnt"].owner != o || ns["user"].id != o {
-		t.Fatalf("held container's namespaces = %+v: the mnt namespace's owner and the user namespace must be the pid namespace's owner", ns)
+	if ns["pid"] == nil || ns["mnt"] == nil || ns["user"] == nil || ns["pid"][2] == "0" || ns["mnt"][2] != ns["pid"][2] || ns["user"][0] != ns["pid"][2] {
+		t.Fatalf("held container's namespaces = %v: the mnt namespace's owner and the user namespace must be the pid namespace's owner", ns)
 	}
-	if own := sh("lsns --raw --noheadings --output NS --type user --task $$"); own == "" || own == strconv.FormatUint(ns["user"].id, 10) {
+	if own := sh("lsns --raw --noheadings --output NS --type user --task $$"); own == "" || own == ns["user"][0] {
 		t.Fatalf("held container in the guest shell's user namespace %q", own)
 	}
 	nestedOut := sh("lsns --raw --noheadings --output NS,TYPE,ONS --task " + nestedPID)
 	t.Logf("lsns (nested container, pid %s):\n%s", nestedPID, nestedOut)
 
-	want := []LiveMount{
-		{Target: "/workspace/kb", Source: jp + "/kb", ReadOnly: true, SelfMount: true},
-		{Target: "/workspace/parent", Source: jp + "/parent", SelfMount: true},
-		{Target: "/workspace/parent/entry", Source: jp + "/parent/entry", ReadOnly: true, SelfMount: true},
-		{Target: "/workspace/tools", Source: jp + "/tools", ReadOnly: true, SelfMount: true},
+	want := ManagerLivePlan(jp, app.ReadOnlyEntryMounts())
+	if len(want) != 4 {
+		t.Fatalf("plan = %+v, want the three entries and the pin parent", want)
 	}
-	live := func(stage string) []LiveMountProblem {
+	live := func(stage string) []jail.LiveMountProblem {
 		t.Helper()
 		t.Logf("%s: mountinfo /workspace lines:\n%s", stage, sh("grep ' /workspace' /proc/"+heldPID+"/mountinfo || true"))
 		t.Logf("%s: stat dev:ino (guest path, then container path):\n%s", stage, sh(
 			"for d in kb parent parent/entry tools; do stat -c '%d:%i %n' "+jp+"/$d "+root+"/workspace/$d || true; done"))
-		got, err := ContainerLiveMounts(ctx, jr, held, want)
+		got, err := jail.ContainerLiveMounts(context.Background(), jr, held, want)
 		if err != nil {
 			t.Fatalf("%s: ContainerLiveMounts: %v", stage, err)
 		}
@@ -180,7 +200,7 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 	}
 
 	// The nested first process is refused before any mount is read.
-	if _, err := ContainerLiveMounts(ctx, jr, nested, []LiveMount{{Target: "/workspace", Source: jp}}); !errors.Is(err, ErrForeignNamespace) {
+	if _, err := jail.ContainerLiveMounts(context.Background(), jr, nested, want); !errors.Is(err, jail.ErrForeignNamespace) {
 		t.Fatalf("nested container: err = %v, want ErrForeignNamespace", err)
 	}
 	t.Logf("nested container: ErrForeignNamespace")
@@ -269,16 +289,18 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 	// longer a mount point, or is one from another place.
 	sh("mv " + jp + "/kb " + jp + "/kb.moved && mkdir " + jp + "/kb")
 	got := live("kb moved in the guest")
-	var kb []LiveMountProblem
+	var kb []jail.LiveMountProblem
 	for _, p := range got {
 		if !reported[p.Target] {
 			kb = append(kb, p)
 		}
 	}
-	if len(kb) != 1 || kb[0].Target != "/workspace/kb" || (kb[0].Reason != LiveMountMissing && kb[0].Reason != LiveMountElsewhere) {
+	if len(kb) != 1 || kb[0].Target != "/workspace/kb" || (kb[0].Reason != jail.LiveMountMissing && kb[0].Reason != jail.LiveMountElsewhere) {
 		t.Fatalf("kb moved in the guest: newly reported %+v, want /workspace/kb missing or from elsewhere", kb)
 	}
 }
 
 // safeGuestPath is a guest path the test may put into a shell script as is.
 var safeGuestPath = regexp.MustCompile(`^/[A-Za-z0-9/._-]+$`)
+
+const guestCallTimeout = 2 * time.Minute

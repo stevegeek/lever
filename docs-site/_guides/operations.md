@@ -597,6 +597,49 @@ When a view freezes:
 To check whether the agent itself is working without attaching: `lever doctor` (the *manager
 agent* row), or `lever msg send` and watch for the reply.
 
+## tmux server crashes
+
+scion runs each agent's harness (claude) in a tmux session inside the agent's container. The tmux
+server holds claude's pane, so when the server crashes the harness and the container go with it.
+The agent image installs a pinned tmux from trixie-backports, replacing the base image's 3.5a (see
+[the tmux version](/getting-started/install/#1a-build-the-agent-image)).
+
+**What lever reports.** sciontool logs the reaped server in the container log (`Reaped zombie
+process … (tmux: server) (reason: killed by signal segmentation fault …)`). When the manager died,
+`lever up` (after your attach ends, or at the start gate) reads the last such line and names the cause: a
+crash (a fault signal: segmentation fault, abort, bus error) or a kill (SIGKILL, usually the guest's
+out-of-memory killer; the guest's `sudo dmesg` names the victim). lever matches the fixed line only
+and repeats nothing of the log. `lever up` starts the manager again; the conversation is kept when
+it had one.
+
+**The core.** In a Lima jail, lever sets the guest's `kernel.core_pattern` to a handler,
+`/usr/local/libexec/lever-core-handler` (with `/etc/sysctl.d/99-lever-core.conf`, converged on every
+apply and up). It keeps the core dump of a process named `tmux: server` (or `tmux`) and drops every
+other dump. The cores stay in the guest, in `/var/lib/lever/cores` (root only, mode 0700, files 0600,
+named `core.tmux.<time>.<pid>`); lever never copies one to the host or into a container. A tmux
+server core holds the terminal contents of the agent's panes, so treat it as you would the
+agent's conversation. The agent can crash its own processes, so the handler bounds what it keeps:
+one dump at a time, each cut at 256 MiB, and the newest two. The same freedom lets the agent drop
+a real core or push it out with fakes, and print a fake reaper line: the hint and a kept core are
+leads, not proof. A piped dump does not depend on the
+container's core size limit, so nothing in the agent image or its container changes. The handler
+replaces the guest's own core handler: Ubuntu's apport is stopped and masked, and other processes' dumps are
+dropped. An OrbStack machine shares one kernel with every other machine on the host and lever
+does not change its `core_pattern`, so there no core is kept.
+
+To read a core, copy it out of the guest by hand (`limactl shell <vm> sudo cat
+/var/lib/lever/cores/<file> > core`) and open it with gdb against the same tmux build: the image's
+`tmux_version` label names the Debian package version; its debug symbols are that version's
+`tmux-dbgsym` package from Debian's debug archive.
+
+**Several attached terminals.** Each attach is a tmux client of its own size, and scion's sessions
+use `window-size latest`, so a client that gets input resizes the window, and claude redraws its
+whole screen. The one 3.5a crash seen in a manager was a read past the end of a pane's grid in
+code that copy mode uses (the mouse wheel enters copy mode when claude does not take the mouse),
+and an upstream report ties that code to a size change while in copy mode. Several terminals
+attached at once (with `--shared`, or scion's web terminal) make size changes more frequent, so they
+plausibly make it more likely; it has not been reproduced. The container's own tmux client is always attached too.
+
 ## Background sessions and /login
 
 **Do not use `/login` or background mode in an agent tmux.** lever supplies the agent's login
@@ -709,6 +752,7 @@ off as usual.
 | Doctor's `manager agent` row: "claude has exited (phase stopped)", or `lever up` logs that a stopped record resumes in a new claude session | the session really ended (or the record was stopped while the machine was down); scion's hub resumes a stopped record without `--continue` | `lever up`, then `lever attach` and `/resume` to pick the old conversation (it stays in the agent home) |
 | `lever-manager agent resume <w>` returns 502 after `lever stop && lever up`; the audit detail ends in `statfs …/lever/tickets/<w>: no such file or directory` | the worker's ticket directory is a tmpfs under the run user's `XDG_RUNTIME_DIR` and the jail restart emptied it; before 0.22.4 the resume verb never re-staged a ticket (lever#36) | upgrade lever; on an older version, stage one through the admin route (`curl -X POST 127.0.0.1:8444/worker-ticket -d '{"worker":"<w>"}'`) and resume again |
 | `lever apply`/`up` fails at `load-image`: "payload does not match any of the supported image formats … trying to reuse blob … readlink …/overlay/l/: no such file or directory", maybe after podman's "storage corruption might have occurred" | the jail's podman store holds a damaged layer left by an earlier failed or interrupted load, and podman picked it to reuse; the image archive is fine. Doctor's *podman storage* row counts the layers no image uses | back up the guest's `~/.scion`, then as the jail user `podman system reset --force`, then `lever up` without `--fresh`: see [recovering the jail's podman store](#recovering-the-jails-podman-store) |
+| `lever up` reports the manager died and names a tmux server crash | the tmux server in the manager's container crashed (sciontool reaped it after a fault signal), taking claude's pane with it | `lever up` starts it again (the conversation is kept); in a Lima jail the guest keeps the core in `/var/lib/lever/cores` (see [tmux server crashes](#tmux-server-crashes)) |
 | The attach view is frozen (or keeps an old terminal's size) while the agent works | a stale tmux client: an earlier attach whose terminal went away is still attached | `Ctrl-L`; else `Ctrl-b d` and `lever attach` again, which detaches the stale client (see [a frozen attach view](#a-frozen-attach-view)); `Esc` leaves Claude Code's background-agent view if a stray key opened it |
 | Manager boots into a stale/odd state | suspect the tree, not the thread | see [security-model §5.1](/security-model/config-trust/) — `--fresh` resets the conversation, not the tree |
 | Doctor nags `skipped-modified` about a SKILL.md / CLAUDE.md you customized on purpose | your edits aren't recorded as accepted | `lever init --adopt` — records them as your baseline (host-side); doctor then passes, and any change *past* that baseline still fails as "modified since adoption" (tamper signal preserved) |
@@ -916,6 +960,9 @@ running one. They are on by default and have no switch:
   honoured by the module and by a built-in backend, also when the initramfs loads it. The cost:
   an oops is no longer saved in EFI variables for the next boot; read it on the serial console
   log instead (below).
+
+The same step sets up the guest's capture of tmux server cores (see [tmux server
+crashes](#tmux-server-crashes)); a failure there is a warning and does not stop the bring-up.
 
 Each file is written only when its content differs, and `update-grub` runs only when the drop-in
 changed or `grub.cfg` lacks the parameter. lever never reboots the guest.

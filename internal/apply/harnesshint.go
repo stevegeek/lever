@@ -95,7 +95,8 @@ func harnessCauseOf(logTail string) harnessCause {
 
 // HarnessDeathHint classifies the log tail of an agent container whose
 // harness died (harnessCauseOf) and returns the hint to print, or "" when it
-// knows no cause. Nothing of the tail is returned.
+// knows no cause. A tmux server crash that sciontool logged (lever#201) is
+// named when no other cause is. Nothing of the tail is returned.
 func HarnessDeathHint(logTail string) string {
 	switch harnessCauseOf(logTail) {
 	case causeStaleBackground:
@@ -103,7 +104,7 @@ func HarnessDeathHint(logTail string) string {
 	case causeNoConversation:
 		return NoConversationHint
 	}
-	return ""
+	return tmuxServerDeathHint(squashForMatch(logTail))
 }
 
 // NoConversationInLog reports whether the log tail of an agent container
@@ -228,6 +229,9 @@ func withHarnessDeathHint(ctx context.Context, d Deps, err error, project, name 
 		return fmt.Errorf("%w — %s", err, StaleBackgroundHint)
 	case causeNoConversation:
 		return fmt.Errorf("%w — %w", err, ErrNoConversation)
+	}
+	if h := tmuxServerDeathHint(squashForMatch(tail)); h != "" {
+		return fmt.Errorf("%w — %s", err, h)
 	}
 	return err
 }

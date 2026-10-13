@@ -55,6 +55,15 @@ new conversation after backing up the old one; add `--keep-conversation` to keep
 base image's copy: it installs claude unpinned, so it's whatever was current when that base was
 last rebuilt.
 
+**tmux version:** scion runs each agent's harness in a tmux session, and the scion base installs
+Debian trixie's tmux 3.5a, whose server can crash and take the agent with it (see [tmux server
+crashes](/operations/#tmux-server-crashes)). The image replaces it with a pinned tmux from
+trixie-backports (`ARG TMUX_VERSION` in the Dockerfile, recorded in the `tmux_version` label),
+installed through apt, which checks the Debian archive signatures. When backports moves on, the old
+version leaves the archive and the build fails at that step: bump the ARG to the version
+`https://packages.debian.org/trixie-backports/tmux` shows and rebuild. An instance Dockerfile that
+copies the binaries in itself (below) does not get this step; copy it.
+
 **lever version:** the image tag names only the arch, so a rebuild from another lever checkout
 replaces `scionlocal/lever-claude:<arch>` for every instance on the host. `make lever-image` records
 the lever version the in-jail binaries were built from in a second label, `lever_version` (the

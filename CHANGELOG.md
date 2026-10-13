@@ -304,6 +304,22 @@ version bump moves the block under the new version heading.
   and most other commands printed the usage after any error, so a manager that did not come up
   read as a flag problem. The usage now follows only flag and argument errors (an unknown or
   missing flag, a wrong flag combination, the wrong number of arguments).
+- **A tmux server crash no longer goes unexplained, and the agent image takes a newer tmux
+  (lever#201).** A manager's tmux 3.5a server (Debian trixie's) segfaulted about 2.5 minutes after
+  a fresh start, taking claude and the container with it. The fault was a read past the end of a
+  pane's grid in grid_line_length, the function an upstream 3.5a crash report names for copy mode
+  after a size change. The agent image now installs a pinned tmux from trixie-backports
+  (`ARG TMUX_VERSION`, 3.6b-1~bpo13+1, label `tmux_version`) through apt, so the Debian archive
+  signatures cover it; its dependencies stay trixie's. When sciontool logged that it reaped the tmux server after a fault signal,
+  `lever up` names it as the cause (after the attach ends and at the start gate), or names a
+  SIGKILL as a likely out-of-memory kill. In a Lima jail the guest now keeps the core of a crashed
+  tmux server: `kernel.core_pattern` pipes dumps to a lever handler that keeps only `tmux: server`
+  dumps, root only in `/var/lib/lever/cores`, one at a time, 256 MiB each and the newest two. Cores
+  never leave the guest. The handler replaces apport (masked) and drops other processes' dumps. The
+  log line and a kept core come from the agent's side, so lever words them as leads, not proof. OrbStack
+  is unchanged, because its kernel is shared. Rebuild the image (`make lever-image`), then
+  `lever up --fresh --keep-conversation` puts the manager on it.
+
 - **`lever acceptance` waits for its tools to listen** (up to 30 s) before it runs the checks, and
   fails naming the tool, its address and its log when one never does. A first check could reach
   the gateway before the tool bound its port and fail with a 502 unrelated to the capability under

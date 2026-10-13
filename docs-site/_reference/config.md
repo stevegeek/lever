@@ -104,7 +104,7 @@ backend: orbstack                    # containment backend
 tree: workspace                      # bind-mounted SUBDIR (the root is not mounted)
 egress: closed                       # seal the jail to the broker only (api-key instances only)
 scion:
-  version: e0f61f2d                  # pin a scion commit; fetched + cross-compiled into the jail
+  version: e0f61f2d                  # pin a scion commit; a lever release ships this one prebuilt
 manager:
   image: scionlocal/lever-claude
   # image_tar: images/lever-claude.tar   # optional; ship the image as a docker archive, no host docker needed
@@ -188,13 +188,37 @@ base64-encoded` error by encoding the credential yourself; upgrade the pin.
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `version` | string | no | - | A scion module version/commit (a commit hash like `63d5d65d`, or a `vX.Y.Z` tag) fetched via the Go module system and cross-compiled into the jail at provision time. **No vendored source tree**, this is the recommended way to pin Scion. Requires a Go toolchain on the host — plus node >= 20 + npm when [`remote.enabled`](#remote), which builds the hub's web UI from the same fetched module (see below). |
+| `version` | string | no | - | A scion module version/commit (a commit hash like `63d5d65d`, or a `vX.Y.Z` tag) fetched via the Go module system and cross-compiled into the jail at provision time. **No vendored source tree**, this is the recommended way to pin Scion. Requires a Go toolchain on the host — plus node >= 20 + npm when [`remote.enabled`](#remote), which builds the hub's web UI from the same fetched module (see below). **The pin of your lever release needs no Go toolchain** (see [prebuilt scion](#prebuilt-scion) below). |
 | `source` | path | no | - | Path to a local scion source checkout, cross-compiled into the jail at provision time (for local Scion development). Relative paths resolve against the config file's directory. Requires a Go toolchain on the host, but no module fetch. Also needs node >= 20 + npm when [`remote.enabled`](#remote); the web UI is rebuilt whenever you edit `web/`. |
 | `binary` | path | no | - | Path to an **already-built linux scion binary**, installed into the jail as-is. Unlike the two above it needs **no Go toolchain, no module cache and no egress** on the machine hosting the jail — and no node, since lever builds no web UI for it: with [`remote.enabled`](#remote) the hub serves whatever assets that binary embeds (upstream's `make all` embeds them), or its "Web UI Not Available" page if it embeds none — build it on a workstation and ship it. Relative paths resolve against the config file's directory. lever checks the ELF header against the guest's architecture before installing, so a wrong-arch build fails immediately instead of as `exec format error` at manager start. **Its integrity is yours to guarantee**: unlike `version`, no module-proxy checksum stands behind it. |
 | `agent_role` | string | no | - | Overrides the role lever stamps on every `scion start`: `none`, `readonly`, `baseline` or `full`. **You do not need to set it.** Empty means lever picks `baseline` whenever the installed scion supports `--role` (lever probes the binary for the flag); scion's own default for an unspecified role is `full` (agent create, lifecycle and project-secret-read). `readonly` cannot heartbeat, so a live agent cannot run on it. `full` grants exactly the hub authority the jail model exists to withhold. Naming a role on a scion that has no `--role` flag is a hard error, never a silent downgrade. The same role is written as the project's maximum and default agent role on the hub, so the hub refuses a create above it whoever asks (see [security model §4.4](/security-model/worker-isolation/)). |
 | `telemetry` | enum | no | `off` | Agent telemetry posture (`off` \| `scion-default`), written into the jail's `~/.scion/settings.yaml`. `off` writes `telemetry.enabled: false`, so every agent starts with `SCION_TELEMETRY_ENABLED=false`. `scion-default` leaves the key to scion and to you. See [agent telemetry](#agent-telemetry-sciontelemetry) below. |
 
 Whichever mode you use, lever records the installed binary's sha256 in the jail and skips the copy when it already matches, so an unchanged scion is not re-streamed on every `lever up`.
+
+#### Prebuilt scion
+
+Each lever release ships scion prebuilt for linux/amd64 and linux/arm64, built from the commit the
+examples pin (`e0f61f2d`). When `scion.version` names that commit (as written in the examples, as
+its full hash or a prefix of at least 7 hex digits, or as its module version), a release build of
+lever downloads the binary for the guest's architecture from its own GitHub release instead of
+building it. The host then needs no Go toolchain and skips the scion compile (about 4 CPU-minutes).
+`remote.enabled` still needs Go and node, to build the web UI from the module source.
+
+- The download is https only, from `github.com` and GitHub's release asset hosts. The sha256 and
+  size of every asset are embedded in the lever binary when the release is built. lever checks
+  the download against them, and checks the ELF architecture, before it installs anything.
+  It does not use `checksums.txt` or any other file from the server.
+- A download whose bytes do not match is refused, and `lever apply` stops with an error that names
+  both digests. lever does not fall back to a build then.
+- When the download cannot happen (no network, the asset or release missing, a redirect to a host
+  lever does not allow), lever builds scion from source as it does for any other pin, and the step
+  notes *prebuilt scion not downloaded, built from source*. That build needs Go.
+- The verified binary stays in `~/.cache/lever/scion-bin/`. lever hashes it on each apply and
+  downloads it again if it changed.
+- Set `LEVER_SCION_DOWNLOAD=off` in lever's environment to always build from source.
+- A lever built from a checkout (`make install`, `go build`, `go install`) embeds no digests and
+  always builds scion.
 
 #### Agent telemetry (`scion.telemetry`)
 

@@ -197,7 +197,8 @@ steps scroll above it with their time and a note (*reused*, *already loaded*, *a
 The run ends with its total and its slowest steps.
 
 Some steps run alongside others. The host's scion build (*build scion on the host*) starts before
-the VM and runs while it boots. `broker-up` and every `load-image` (the load and the keep-id
+the VM and runs while it boots; for the scion pin of a release it downloads that release's prebuilt
+scion instead. `broker-up` and every `load-image` (the load and the keep-id
 warm-up, one image at a time) start with apply and run while `init-machine`, `scion-server` and the
 registration steps run; `mint-manager-bootstrap` and the remote proxy wait for the broker, and
 `start-manager` waits for the broker and every image. The live line shows the step in front and

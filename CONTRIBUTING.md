@@ -77,6 +77,23 @@ where `go:embed` carries it in `lever`; such a `lever` needs no Go toolchain for
 embedded source on the operator host during `lever apply` of an instance with `remote.enabled`,
 which needs a Go toolchain.
 
+scion itself is too large to embed (about 40 MB per arch compressed). The release build runs
+`go run ./internal/provision/scionbin/genrelease -version <v>` first: it builds scion at
+`scionbin.ReleasePin` for linux/amd64 and linux/arm64 with the same flags as the apply-time build
+(plus `CGO_ENABLED=0`), writes the gzip-compressed binaries to `build/scion-release/`, which
+goreleaser uploads as release assets, and writes their sha256 and sizes to
+`internal/provision/scionbin/release/manifest.json`, which `go:embed` carries in `lever`. Such a
+`lever` downloads the asset for a matching `scion.version` from its own release and installs it
+only if it matches the embedded digests. Without that step (`make install`, `go build`) lever
+embeds no manifest and builds scion as before. Do not run `genrelease` in a checkout you build
+`lever` from for use: its manifest would name assets that are not on any release.
+
+### Bumping the scion pin
+
+Change `ReleasePin` in `internal/provision/scionbin/release.go` and the `version:` of every
+`examples/*/lever.yaml` together (`TestExamplesPinTheReleaseScion` fails otherwise), then the pin
+in the docs (`grep -rn <old pin> docs-site`). The next release ships the new pin prebuilt.
+
 ## Build
 
 ```bash

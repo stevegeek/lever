@@ -19,7 +19,7 @@ backend: orbstack
 tree: workspace              # only workspace/ is mounted; this file + manager.md stay host-side
 
 scion:
-  version: e0f61f2d          # pin a scion commit; fetched + cross-compiled into the jail
+  version: e0f61f2d          # pin a scion commit; a lever release ships this one prebuilt
 
 broker:
   llm_auth: subscription     # personal setup: your Claude OAuth token (see manager.credential_file)

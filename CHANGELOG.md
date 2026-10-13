@@ -7,6 +7,21 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **A release ships scion prebuilt, so its pin needs no Go toolchain (lever#191).** The release
+  build compiles scion at the pin the examples use (`e0f61f2d`) for linux/amd64 and linux/arm64,
+  uploads the two gzip-compressed binaries (about 40 MB each) with the release, and embeds their
+  sha256 and sizes in `lever`. When `scion.version` names that pin, `lever apply` downloads the
+  binary for the guest's architecture from that release instead of building it, so the host skips
+  the scion compile (about 4 CPU-minutes) and needs no Go. The download is https only, from
+  `github.com` and GitHub's release asset hosts; lever checks it against the embedded digests and
+  the ELF architecture before it installs anything, and reads no checksum from the server. A
+  download that does not match stops the apply. A download that cannot happen (offline, no such
+  asset) falls back to the source build. `LEVER_SCION_DOWNLOAD=off` always builds. `lever doctor`'s
+  *go toolchain* row passes without Go when the download applies. `remote.enabled` still needs Go
+  and node for the web UI, and a lever built from a checkout builds scion as before.
+
 ## [0.37.0] - 2026-10-13
 
 ### Changed

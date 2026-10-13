@@ -165,6 +165,15 @@ the Go module proxy and is **checksum-verified** against `sum.golang.org`, where
 artifact carries no integrity guarantee lever can check. The architecture check catches an honest
 mistake, not a substituted file. Choosing `binary:` makes its provenance yours to guarantee.
 
+**The prebuilt scion of a release.** For the scion pin of its release, a release build of lever
+downloads that release's prebuilt scion instead of building it
+([prebuilt scion](/reference/config/#prebuilt-scion)). The release build compiles it from the
+module-proxy source of the pin and embeds the sha256 and size of each asset in the `lever` binary.
+lever installs a download only when it matches those embedded digests. It never reads a digest
+from the server, so a substituted asset, a compromised CDN or a hostile redirect cannot change
+what runs in the jail. The trust root is the `lever` release binary itself, the same as for every
+other part of lever.
+
 **Execution plumbing:** argv-clean, no shell injection in the hot paths; the `bash -c` scripts in
 internal/backend/guest (scion install, scion settings write, web-assets staging) single-quote every
 dynamic value via `shellSingleQuote`; the others interpolate only compile-time constants, plus

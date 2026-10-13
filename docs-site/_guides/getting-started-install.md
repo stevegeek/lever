@@ -8,6 +8,14 @@ Part of [getting started](/getting-started/). Steps keep their original numberin
 
 ## 1. Install the binaries
 
+A release archive from GitHub holds the same host binaries, ready to run. Its `lever` needs **no Go
+toolchain** for the scion pin of its release (`e0f61f2d`, the pin in the examples): `lever apply`
+downloads that release's prebuilt scion, checks it against the sha256 built into `lever`, and skips
+the scion compile. Any other pin, a failed download, and `remote.enabled` (which builds scion's web
+UI from source) still need Go. See [prebuilt scion](/reference/config/#prebuilt-scion).
+
+To build from a checkout instead:
+
 ```sh
 cd /path/to/lever_to
 make all

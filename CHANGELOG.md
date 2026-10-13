@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **A slim agent image, opt-in (lever#192).** `make lever-image-slim` builds
+  `scionlocal/lever-claude-slim:<arch>` from a Debian trixie base with only what scion and lever
+  need in an agent container (sciontool and scion cross-compiled from the scion source the jail
+  runs, the `scion` user, python3, git, zsh, tzdata), then the same lever layer as the full image,
+  so Claude Code is installed once, at its pin. It needs no scion image build and should come to
+  about 1 GB instead of about 5 GB, which shortens the image load and podman's rootless
+  preparation and saves about 12 GB of disk across the image's three copies. It leaves out sudo,
+  gh, chromium, gcloud, gcsfuse, Go, kubectl, golangci-lint and bun; an instance that needs one
+  adds it in its own Dockerfile. Point `manager.image` at it to opt in: the full image stays the
+  default, and an instance that does not opt in is unchanged.
+- **An agent-image contract check (lever#192).** `make image-contract IMAGE=<ref>` checks a built
+  image, of either flavor, against what lever and scion rely on: the entrypoint, the `scion` user,
+  the labels doctor reads, sciontool, scion, the pinned tmux, python3, git, lever's binaries for
+  the right arch, the boot hook, `/etc/claude-code`, Claude Code at the labelled version (read from
+  its `package.json`, never run), lever's environment variables and the commands lever's probes
+  use, and that `lever-agent claude-ready` writes the ready marker in a scion-shaped tmux session.
+  It runs the image without network. `LEVER_IMAGE_MAX_MB` also fails an oversized image.
+
 ## [0.37.0] - 2026-10-13
 
 ### Changed

@@ -58,7 +58,9 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/voice` | Speech on the host. Speech to text: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. Text to speech: the pinned speech model archives (unpacked with a manifest of every file), the sherpa-onnx adapter, the per-text runner and the speech socket of `lever-tool-tts`. |
 | `internal/webpush` | Web Push (RFC 8030/8291/8292) sender for the chat page's notifications, stdlib only. |
 | `internal/wire` | Leaf package: agent⇄broker request/response types, route paths and bootstrap material. Imports no other lever package. |
-| `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |
+| `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`), and the lever layer of the slim one. |
+| `image/scion-slim` | The slim image's base (`make lever-image-slim`): what scion needs in an agent container, in place of `scion-claude`. |
+| `image/contract` | The agent-image contract check (`make image-contract IMAGE=...`) and its tests. |
 | `examples/` | Runnable instances used by docs and tests. |
 | `docs-site/` | Jekyll site for lever.to (`_guides`, `_reference`). |
 | `tools/test` | Live end-to-end test scripts and the fake LLM upstream. |
@@ -83,6 +85,8 @@ which needs a Go toolchain.
 make install          # host `lever`, `lever-tool-github`, `lever-tool-fizzy`, `lever-tool-whisper`, `lever-tool-tts` → $PREFIX (default ~/.local/bin)
 make lever-image      # cross-compile in-jail binaries + docker build the agent image (LEVER_IMAGE_ARCH, default: host Go arch)
 make lever-image-bins # cross-compile in-jail binaries into an instance's image build context only
+make lever-image-slim # the slim agent image (SCION_VERSION or SCION_SRC: the scion the jail runs)
+make image-contract   # check a built image (IMAGE=..., default the slim one) against what lever and scion need
 ```
 
 Never build a binary into the tree: `go build ./cmd/x` writes `./x` into the current directory.

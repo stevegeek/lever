@@ -2,6 +2,7 @@ package remoteproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,10 @@ const (
 	// The hub refreshes the 15-minute access token inside the cookie itself.
 	sessionMaxAge = 12 * time.Hour
 
+	// refusalBackoff is how long a login whose session resolved to a hub user
+	// lever will not serve stays refused before it is tried again.
+	refusalBackoff = time.Minute
+
 	// maxLoginBody only drains for keep-alive: the handshake has no body.
 	maxLoginBody = 8 << 10
 )
@@ -58,6 +63,12 @@ type LoginConfig struct {
 	// Audit receives one line per login outcome; nil disables. It never
 	// carries the cookie or the code.
 	Audit func(line AuditLine)
+	// BoundUser reports the hub user id `lever apply` recorded for a login
+	// (remote-role.json), or false when none is recorded yet. The driver
+	// refuses a session that resolves to a different id, so a renamed or
+	// swapped hub row cannot inherit a login's access. Nil disables that
+	// second rule; the dev-user rule below always holds.
+	BoundUser func(login string) (string, bool)
 }
 
 // LoginDriver obtains and caches hub sessions, one per verified operator.
@@ -66,6 +77,7 @@ type LoginDriver struct {
 	client   *http.Client
 	provider *Provider
 	audit    func(AuditLine)
+	bound    func(login string) (string, bool)
 
 	now func() time.Time
 
@@ -96,6 +108,7 @@ func NewLoginDriver(cfg LoginConfig) *LoginDriver {
 		client:   &http.Client{Transport: t, CheckRedirect: noRedirect},
 		provider: cfg.Provider,
 		audit:    cfg.Audit,
+		bound:    cfg.BoundUser,
 		now:      time.Now,
 		sessions: map[string]*sessionEntry{},
 	}
@@ -136,7 +149,9 @@ func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) 
 			e.err = errLoginPanicked
 		}
 		close(e.done)
-		if e.err != nil {
+		// A refused hub user is kept for refusalBackoff: every retry is a full
+		// sign-in that scion's callback applies to the row it lands on.
+		if e.err != nil && !errors.Is(e.err, errForeignHubUser) {
 			d.mu.Lock()
 			if d.sessions[login] == e {
 				delete(d.sessions, login)
@@ -156,6 +171,9 @@ func (d *LoginDriver) Cookie(ctx context.Context, login string) (string, error) 
 func (d *LoginDriver) expired(e *sessionEntry) bool {
 	select {
 	case <-e.done:
+		if errors.Is(e.err, errForeignHubUser) {
+			return d.now().Sub(e.at) >= refusalBackoff
+		}
 		return e.err == nil && d.now().Sub(e.at) >= sessionMaxAge
 	default:
 		return false
@@ -232,8 +250,68 @@ func (d *LoginDriver) login(ctx context.Context, operator string) (string, error
 		d.recordLogin(operator, 0, err)
 		return "", err
 	}
+	// The session now names a hub user. Refuse it before any request rides it
+	// if it is not the user lever expects for this login: never scion's dev
+	// super-admin row (which any jailed agent can rename to this login's email
+	// through scion's workstation identity route), and, when lever recorded an
+	// id for the login, exactly that id.
+	if err := d.verifyUser(ctx, &client, operator, cookie); err != nil {
+		d.recordLogin(operator, 0, err)
+		return "", err
+	}
 	d.recordLogin(operator, http.StatusOK, nil)
 	return cookie, nil
+}
+
+// errForeignHubUser is a session that resolved to a hub user lever will not
+// serve for this login.
+var errForeignHubUser = errors.New("remoteproxy: login: the session resolved to a hub user lever did not bind to this login")
+
+// verifyUser reads the freshly minted session's hub user id and applies the
+// two rules. A hub it cannot reach, or an unreadable answer, fails the login
+// closed.
+func (d *LoginDriver) verifyUser(ctx context.Context, client *http.Client, operator, cookie string) error {
+	id, err := d.whoAmI(ctx, client, cookie)
+	if err != nil {
+		return fmt.Errorf("remoteproxy: login: verifying the session's hub user: %w", err)
+	}
+	if id == "" || !validHubID(id) || id == config.ScionDevUserID {
+		return errForeignHubUser
+	}
+	if d.bound != nil {
+		if want, ok := d.bound(operator); ok && want != id {
+			return errForeignHubUser
+		}
+	}
+	return nil
+}
+
+// whoAmI reads GET /api/v1/auth/me with the session cookie and returns the
+// hub user id.
+func (d *LoginDriver) whoAmI(ctx context.Context, client *http.Client, cookie string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.hubURL("/api/v1/auth/me"), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Cookie", sessionCookieName+"="+cookie)
+	// The handshake jar holds the same cookie; send only the explicit one.
+	plain := *client
+	plain.Jar = nil
+	resp, err := plain.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer drain(resp)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET /api/v1/auth/me: HTTP %d", resp.StatusCode)
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxLoginBody)).Decode(&body); err != nil {
+		return "", fmt.Errorf("GET /api/v1/auth/me: %w", err)
+	}
+	return body.ID, nil
 }
 
 type loginStart struct {

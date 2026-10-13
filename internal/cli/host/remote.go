@@ -146,6 +146,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		DialContext: dial,
 		Provider:    provider,
 		Audit:       auditFn,
+		BoundUser:   remoteBoundUser(st),
 	})
 
 	records, resolve := remoteHubAgents(st, target, dial)
@@ -773,6 +774,22 @@ func newRemoteStatusCmd() *cobra.Command {
 			}
 			return nil
 		},
+	}
+}
+
+// remoteBoundUser returns the hub user id apply recorded for any login,
+// operator or contact (remote-role.json), read per call because apply rewrites
+// it while the proxy runs. A login apply has not bound yet (no hub user at
+// grant time) has none, and the login driver then enforces only the dev-user
+// rule.
+func remoteBoundUser(st state.State) func(login string) (string, bool) {
+	return func(login string) (string, bool) {
+		rec, found, err := st.LoadRemoteRoleRecord()
+		if err != nil || !found {
+			return "", false
+		}
+		id := rec.Bound[config.HubEmailFor(login)]
+		return id, id != ""
 	}
 }
 

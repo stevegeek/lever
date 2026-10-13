@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stevegeek/lever/internal/config"
 )
 
 // startProvider serves a Provider on a real loopback listener whose port it
@@ -64,6 +66,8 @@ type fakeScionHub struct {
 	authzOverride    string // redirect somewhere other than our provider
 	clientIDOverride string // ask for a client_id lever did not configure
 	rejectSessions   bool   // treat every session as unknown (a restarted hub)
+	whoAmIID         string // hub user id /api/v1/auth/me reports (default testHubUserID)
+	whoAmIStatus     int    // non-zero: /api/v1/auth/me answers this status instead
 	beforeCallback   func() // runs at the top of the callback, to hold a handshake open
 	callbackFails    bool   // answer the callback 500, leaving the state cookie in place
 }
@@ -80,6 +84,10 @@ func newFakeScionHub(t *testing.T, issuer string) *fakeScionHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/login/oidc", h.handleLogin)
 	mux.HandleFunc("/auth/callback/oidc", h.handleCallback)
+	// A dedicated handler so the login driver's post-login whoAmI resolves a
+	// valid, non-dev hub user id. Longest-match wins over /api/v1/, and it is
+	// not counted in apiCalls (the gate never forwards this path).
+	mux.HandleFunc("/api/v1/auth/me", h.handleWhoAmI)
 	mux.HandleFunc("/api/v1/", h.handleAPI)
 	mux.HandleFunc("/auth/me", h.handleShell)
 	mux.HandleFunc("/", h.handleShell)
@@ -229,6 +237,28 @@ func (h *fakeScionHub) exchange(code string) (string, error) {
 	return info.Email, nil
 }
 
+// testHubUserID is the non-dev hub user id the fake hub reports for every
+// signed-in session; the login driver's dev-user rule must let it through.
+const testHubUserID = "11111111-2222-4333-8444-555555555555"
+
+func (h *fakeScionHub) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
+	email, ok := h.sessionEmail(r)
+	if !ok {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if h.whoAmIStatus != 0 {
+		w.WriteHeader(h.whoAmIStatus)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	id := h.whoAmIID
+	if id == "" {
+		id = testHubUserID
+	}
+	_, _ = fmt.Fprintf(w, `{"id":%q,"email":%q}`, id, email)
+}
+
 func (h *fakeScionHub) handleShell(w http.ResponseWriter, r *http.Request) {
 	if email, ok := h.sessionEmail(r); ok {
 		w.Header().Set("Content-Type", "text/plain")
@@ -375,6 +405,87 @@ func TestLoginRefusesAnUnexpectedClientID(t *testing.T) {
 	}
 	if !errors.Is(err, errForeignClientID) {
 		t.Fatalf("error = %v, want errForeignClientID", err)
+	}
+}
+
+// TestLoginRefusesASessionThatResolvesToTheDevUser is the core mitigation: an
+// agent renamed scion's dev super-admin row to this login's email, so the
+// session lands on the super-admin row. The driver must refuse it.
+func TestLoginRefusesASessionThatResolvesToTheDevUser(t *testing.T) {
+	for _, login := range []string{"op@example.test", "contact-id", ""} {
+		t.Run("login="+login, func(t *testing.T) {
+			d, hub, _, _ := newTestDriver(t)
+			clock := time.Date(2026, 10, 13, 8, 0, 0, 0, time.UTC)
+			d.now = func() time.Time { return clock }
+			hub.whoAmIID = config.ScionDevUserID
+			if _, err := d.Cookie(context.Background(), login); !errors.Is(err, errForeignHubUser) {
+				t.Fatalf("error = %v, want errForeignHubUser", err)
+			}
+			// Within the backoff the refusal is answered without another sign-in,
+			// even once the hub would now resolve a different user.
+			hub.whoAmIID = ""
+			logins, _ := hub.counts()
+			if _, err := d.Cookie(context.Background(), login); !errors.Is(err, errForeignHubUser) {
+				t.Fatalf("within the backoff: %v, want the cached refusal", err)
+			}
+			if again, _ := hub.counts(); again != logins {
+				t.Fatalf("a refused login signed in again within the backoff (%d -> %d)", logins, again)
+			}
+			clock = clock.Add(refusalBackoff)
+			if _, err := d.Cookie(context.Background(), login); err != nil {
+				t.Fatalf("after the backoff: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoginFailsClosedWhenTheUserCannotBeRead: no answer from /auth/me is
+// never read as "allowed".
+func TestLoginFailsClosedWhenTheUserCannotBeRead(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusFound, http.StatusUnauthorized} {
+		d, hub, _, _ := newTestDriver(t)
+		hub.whoAmIStatus = status
+		if _, err := d.Cookie(context.Background(), "op@example.test"); err == nil {
+			t.Fatalf("/auth/me %d: login succeeded", status)
+		}
+	}
+}
+
+// TestLoginRefusesTheDevUserEvenWhenRecorded: a record that names the dev id
+// (written before apply refused it) does not make the dev row acceptable.
+func TestLoginRefusesTheDevUserEvenWhenRecorded(t *testing.T) {
+	p, _, _ := startProvider(t)
+	hub := newFakeScionHub(t, p.IssuerURL())
+	hub.whoAmIID = config.ScionDevUserID
+	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p,
+		BoundUser: func(string) (string, bool) { return config.ScionDevUserID, true }})
+	if _, err := d.Cookie(context.Background(), "op@example.test"); !errors.Is(err, errForeignHubUser) {
+		t.Fatalf("error = %v, want errForeignHubUser", err)
+	}
+}
+
+// TestLoginRefusesASessionWhoseIDIsNotTheBoundOne: lever recorded a hub user
+// id for the login, and the session resolves to a different one (a swapped or
+// re-provisioned row).
+func TestLoginRefusesASessionWhoseIDIsNotTheBoundOne(t *testing.T) {
+	p, _, _ := startProvider(t)
+	hub := newFakeScionHub(t, p.IssuerURL())
+	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p,
+		BoundUser: func(string) (string, bool) { return "a-different-id", true }})
+	if _, err := d.Cookie(context.Background(), "op@example.test"); !errors.Is(err, errForeignHubUser) {
+		t.Fatalf("error = %v, want errForeignHubUser", err)
+	}
+}
+
+// TestLoginAcceptsTheBoundID: the session resolves to exactly the id lever
+// recorded.
+func TestLoginAcceptsTheBoundID(t *testing.T) {
+	p, _, _ := startProvider(t)
+	hub := newFakeScionHub(t, p.IssuerURL())
+	d := NewLoginDriver(LoginConfig{Hub: mustURL(t, hub.URL), Provider: p,
+		BoundUser: func(string) (string, bool) { return testHubUserID, true }})
+	if _, err := d.Cookie(context.Background(), "op@example.test"); err != nil {
+		t.Fatalf("a session matching the bound id was refused: %v", err)
 	}
 }
 

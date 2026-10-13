@@ -50,7 +50,7 @@ func HarnessDeathHint(logTail string) string {
 			return StaleBackgroundHint
 		}
 	}
-	return ""
+	return tmuxServerDeathHint(norm)
 }
 
 // squashForMatch removes terminal control sequences and every whitespace

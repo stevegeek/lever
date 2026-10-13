@@ -172,3 +172,33 @@ func TestGuestKernelProbeScriptRuns(t *testing.T) {
 		}
 	}
 }
+
+// dash exits on a "." it cannot open; the probe must still print every key
+// on a guest without /etc/os-release.
+func TestGuestKernelProbeScriptWithoutOSRelease(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads Linux /proc")
+	}
+	sh, err := exec.LookPath("dash")
+	if err != nil {
+		sh = "sh"
+	}
+	script := strings.ReplaceAll(guestKernelProbeScript(), "/etc/os-release", t.TempDir()+"/missing")
+	out, err := exec.Command(sh, "-c", script).Output()
+	if err != nil {
+		t.Fatalf("probe failed: %v\n%s", err, out)
+	}
+	for _, k := range []string{"\nrelease=\n", "\nhwepkg=\n", "\nhwe=0\n"} {
+		if !strings.Contains(string(out), k) {
+			t.Errorf("no %q in:\n%s", k, out)
+		}
+	}
+}
+
+func TestParseGuestKernelProbeRejectsOddRelease(t *testing.T) {
+	for _, v := range []string{"26.04\x1b[2J", "26.04 LTS", "../x", "2604"} {
+		if p := probeWith("release=26.04", "release="+v); p.release != "" {
+			t.Errorf("release %q accepted as %q", v, p.release)
+		}
+	}
+}

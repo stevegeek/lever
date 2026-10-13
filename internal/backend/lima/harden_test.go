@@ -195,3 +195,12 @@ func TestHWEStampIgnoredUnderOpenEgress(t *testing.T) {
 		t.Errorf("a successful install must remove the stamp: %v", err)
 	}
 }
+
+// A skip without the package line still names what is missing.
+func TestHWEStampSkipWithoutPackageName(t *testing.T) {
+	stamp := writeStamp(t)
+	_, lines := hardenWithKernelOut(t, "machine-id: "+stampMID+"\nhwe: skipped-stamp\n", backend.Config{HWEFailStamp: stamp, ClosedInternet: true})
+	if all := strings.Join(lines, "\n"); !strings.Contains(all, "the HWE kernel package is not installed") {
+		t.Errorf("want the generic package name, got:\n%s", all)
+	}
+}

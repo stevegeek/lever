@@ -104,13 +104,13 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// Ubuntu >= 23.10 (the Lima jail guest is 26.04, or 24.04 on an older
 	// VM) ships kernel.apparmor_restrict_unprivileged_userns=1, which blocks
 	// the rootless runtimes' rootlesskit/pasta from creating the
-	// unprivileged user namespace they require — without this rootless podman fails with
-	// "fork/exec /proc/self/exe: permission denied". The jail is a dedicated VM
-	// whose OWN kernel is the containment boundary (backend Guarantee 0:
-	// separate-kernel), and its sole purpose is to run the agent's untrusted
-	// rootless containers, so relaxing this in-guest knob is the intended jail
-	// posture — it is scoped to the throwaway guest kernel and does not touch the
-	// host's. Persisted so it survives a guest reboot and applied live for this
+	// unprivileged user namespace they require — without this rootless
+	// podman fails with "fork/exec /proc/self/exe: permission denied". The
+	// jail is a dedicated VM whose OWN kernel is the containment boundary
+	// (backend Guarantee 0: separate-kernel), and its sole purpose is to run
+	// the agent's untrusted rootless containers, so relaxing this in-guest
+	// knob is the intended jail posture — it is scoped to the throwaway guest
+	// kernel and does not touch the host's. Persisted so it survives a guest reboot and applied live for this
 	// boot. Tolerant of guests without the knob (e.g. the OrbStack distro), where
 	// the sysctl key simply doesn't exist.
 	if err := root(`printf 'kernel.apparmor_restrict_unprivileged_userns=0\n' > /etc/sysctl.d/99-lever-userns.conf; sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true`); err != nil {

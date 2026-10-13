@@ -326,8 +326,9 @@ func parseKernelReport(out string) KernelReport {
 const AptLockWait = 120
 
 // guestKernelScript is the root script EnsureGuestKernel runs. Under hwe it
-// installs the HWE package of the guest's release (HWEPackageShell) unless dpkg-query says "install ok installed" (a
-// package in state rc, or a cut-off install, is installed again). It does
+// installs the HWE package of the guest's release (HWEPackageShell) unless
+// dpkg-query says "install ok installed" (a package in state rc, or a
+// cut-off install, is installed again). It does
 // not try apt when the host's stamp names this VM (opts.SkipIfMachineID)
 // or when lever's egress chain in the guest ends in the closed posture's
 // catch-all DROP: the mirrors are unreachable there, and apt would only
@@ -391,8 +392,8 @@ fi
 }
 
 // EnsureGuestKernel converges the guest kernel flavour: hwe installs the
-// release's HWE package (idempotent), ga changes nothing (switching back does not
-// remove an installed HWE kernel). Under either it reports a reboot when
+// release's HWE package (idempotent), ga changes nothing (switching back
+// does not remove an installed HWE kernel). Under either it reports a reboot when
 // the default kernel is not the running one. "" (lever provision, which
 // has no config) only reports.
 func (g Guest) EnsureGuestKernel(ctx context.Context, kernel string, opts KernelOpts) (KernelReport, error) {

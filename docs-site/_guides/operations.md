@@ -976,7 +976,8 @@ running one. They are on by default and have no switch:
   guest instead of passing (see [soft lockups the host causes](#soft-lockups-the-host-causes)).
 - **No EFI pstore.** The panic path runs `kmsg_dump` too, so with the EFI backend registered a
   panic could hang in the same EFI call. On Ubuntu's 6.8 (24.04) and 7.0 (26.04) kernels
-  `efi_pstore` is a loadable module, loaded at boot and registered as pstore's backend. lever unloads it now when it can, writes
+  `efi_pstore` is a loadable module, loaded at boot and registered as pstore's backend. lever
+  unloads it now when it can, writes
   `/etc/modprobe.d/lever-no-efi-pstore.conf` (`blacklist` plus `install efi_pstore /bin/true`) so
   nothing loads it again, and adds `efi_pstore.pstore_disable=1` to the kernel command line
   through `/etc/default/grub.d/99-lever-crash-recovery.cfg` and `update-grub`. The parameter is

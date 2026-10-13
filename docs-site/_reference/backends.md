@@ -54,8 +54,9 @@ not run OrbStack. It preserves the VM boundary, its own kernel, not shared with 
 other jails, so its guarantees match `orbstack`'s. The VM type is `vz` (with a `virtiofs` mount)
 on macOS and `qemu` on Linux, booting an Ubuntu 26.04 LTS cloud image pinned by URL and sha256 per
 architecture (a VM created by an earlier lever keeps its 24.04 guest until it is recreated; see
-[moving a Lima VM to Ubuntu 26.04](/operations/#moving-a-lima-vm-to-ubuntu-2604)). The containment surface is a
-**lever-owned template** (stock Lima templates are not used), built from three mechanisms:
+[moving a Lima VM to Ubuntu 26.04](/operations/#moving-a-lima-vm-to-ubuntu-2604)). The
+containment surface is a **lever-owned template** (stock Lima templates are not used), built from
+three mechanisms:
 
 - **Exactly one writable mount**: the project tree, at `/lever`. Nothing else, in particular not
   Lima's stock `~` read-only home mount.

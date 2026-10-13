@@ -592,8 +592,8 @@ type App struct {
 	Memory        string         `yaml:"memory"`      // Lima guest memory (e.g. "24GiB"); empty = Lima default. Lima-only.
 	// GuestKernel picks the Lima guest's Ubuntu kernel: "hwe" installs the
 	// guest release's hardware-enablement kernel, "ga" keeps the release
-	// kernel. Empty
-	// = "hwe" with nested_virt, else "ga" (EffectiveGuestKernel). Lima-only.
+	// kernel. Empty = "hwe" with nested_virt, else "ga"
+	// (EffectiveGuestKernel). Lima-only.
 	GuestKernel string `yaml:"guest_kernel"`
 	// GuestProfile trims the Lima guest for a small host: "small" disables
 	// the guest services a jail does not use (snapd, unattended upgrades and

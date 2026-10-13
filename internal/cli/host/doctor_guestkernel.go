@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend/guest"
@@ -41,13 +42,18 @@ func guestKernelProbeScript() string {
 	// readlink -f prints a missing path as it is: only a vmlinuz-<version>
 	// target names a default kernel.
 	b.WriteString("d=$(readlink -f /boot/vmlinuz 2>/dev/null); case \"$d\" in */vmlinuz-*) d=${d##*/vmlinuz-} ;; *) d= ;; esac; echo \"default=$d\"\n")
-	b.WriteString("VERSION_ID=; . /etc/os-release 2>/dev/null || true\n")
+	// dash exits on a "." whose file it cannot open, || or not.
+	b.WriteString("VERSION_ID=; if [ -r /etc/os-release ]; then . /etc/os-release; fi\n")
 	b.WriteString(guest.HWEPackageShell())
 	b.WriteString("echo \"release=$VERSION_ID\"\n")
 	b.WriteString("echo \"hwepkg=$pkg\"\n")
 	b.WriteString("if [ -n \"$pkg\" ] && [ \"$(dpkg-query -W -f='${Status}' \"$pkg\" 2>/dev/null)\" = \"install ok installed\" ]; then echo hwe=1; else echo hwe=0; fi\n")
 	return b.String()
 }
+
+// releaseRE is the shape of an Ubuntu VERSION_ID; anything else the guest
+// reports is not shown.
+var releaseRE = regexp.MustCompile(`^[0-9]{2}\.[0-9]{2}$`)
 
 func parseGuestKernelProbe(out string) guestKernelProbe {
 	p := guestKernelProbe{sysctl: map[string]string{}}
@@ -70,7 +76,9 @@ func parseGuestKernelProbe(out string) guestKernelProbe {
 		case k == "hwe":
 			p.hwe = v == "1"
 		case k == "release":
-			p.release = v
+			if releaseRE.MatchString(v) {
+				p.release = v
+			}
 		case k == "hwepkg":
 			for _, r := range guest.HWEReleases {
 				if v == guest.HWEPackage(r) {

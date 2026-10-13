@@ -957,6 +957,8 @@ written even on a full disk.
 
 After each snapshot lever starts `lever tree gc` in the background (log in
 `.lever-state/logs/tree-gc.log`). GC deletes expired snapshots and content no snapshot references.
+It reads every snapshot while other snapshots may still run, and holds the store to itself only
+for the deletions, so a `lever stop` during a long GC still takes its snapshot.
 It validates every snapshot first, and when one is invalid it deletes nothing (doctor shows *GC
 blocked*); `lever tree verify` names the problem and `lever tree delete <id>` removes that
 snapshot, pinned or invalid. `lever tree verify` re-hashes every stored file; `--fix` moves damaged

@@ -14,4 +14,7 @@ var (
 	// error it returns aborts the commit as a crash would, leaving every
 	// file where it is.
 	commitCrash func(stage string) error
+	// gcPhaseHook, when set, is called by GC at the named stage of its
+	// shared-lock phase.
+	gcPhaseHook func(stage string)
 )

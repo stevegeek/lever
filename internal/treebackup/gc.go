@@ -48,14 +48,35 @@ func (o *GCOptions) now() time.Time {
 // GC removes expired snapshots and the blobs no kept snapshot references.
 // It fails closed: one manifest that does not validate stops it before
 // anything is deleted, and the error names it (Blocked is set as well).
-// When the lock is busy it records skipped-busy and returns Busy.
+// When a lock is busy it records skipped-busy and returns Busy.
+//
+// The long part (validating and marking every kept manifest) runs under
+// the store lock shared, so a snapshot at lever stop can run meanwhile;
+// only the deletions and the sweep take it exclusive, after a look at what
+// was committed in between.
 func (s *Store) GC(o GCOptions) (*GCResult, error) {
 	if o.Keep.Last < 1 {
 		return nil, errors.New("tree backups: keep.last must be at least 1")
 	}
+	busy := func() (*GCResult, error) {
+		return &GCResult{Busy: true}, s.writeGC(o, GCStatus{Result: GCSkippedBusy}, true)
+	}
+	sh, err := s.LockShared(o.Wait)
+	if errors.Is(err, ErrBusy) {
+		return busy()
+	}
+	if err != nil {
+		return nil, err
+	}
+	res := &GCResult{}
+	p, err := s.plan(res, o)
+	sh.Release()
+	if err != nil {
+		return res, err
+	}
 	l, err := s.LockExclusive(o.Wait)
 	if errors.Is(err, ErrBusy) {
-		return &GCResult{Busy: true}, s.writeGC(o, GCStatus{Result: GCSkippedBusy}, true)
+		return busy()
 	}
 	if err != nil {
 		return nil, err
@@ -66,8 +87,7 @@ func (s *Store) GC(o GCOptions) (*GCResult, error) {
 	if err := s.cleanTmp(); err != nil {
 		return nil, err
 	}
-	res := &GCResult{}
-	return res, s.collect(res, o)
+	return res, s.apply(res, o, p)
 }
 
 // Delete removes the named manifests, pinned or corrupt ones included,
@@ -115,7 +135,11 @@ func (s *Store) Delete(ids []string, o GCOptions) (*GCResult, error) {
 	if err := s.syncSubdir(snapshotsDir); err != nil {
 		return res, fmt.Errorf("tree backups: %w", err)
 	}
-	return res, s.collect(res, o)
+	p, err := s.plan(res, o)
+	if err != nil {
+		return res, err
+	}
+	return res, s.apply(res, o, p)
 }
 
 func (s *Store) writeGC(o GCOptions, st GCStatus, keepSizes bool) error {
@@ -165,41 +189,100 @@ func (s *Store) cleanTmp() error {
 	}
 }
 
-// collect is GC from validation on: the caller holds the exclusive lock.
-func (s *Store) collect(res *GCResult, o GCOptions) error {
-	block := func(id string, cause error) error {
-		res.Blocked = id
-		if err := s.writeGC(o, GCStatus{Result: GCBlocked, Blocked: id}, true); err != nil {
-			return err
-		}
-		return fmt.Errorf("tree backups: GC blocked by %s: %w", id, cause)
+// gcPlan is what the shared phase of a GC found: the manifests it
+// validated, and a filter marking the blobs of every one it would keep.
+type gcPlan struct {
+	seen, marked map[string]bool
+	bf           *bloom
+}
+
+// block records that the manifest id stopped GC.
+func (s *Store) block(res *GCResult, o GCOptions, id string, cause error) error {
+	res.Blocked = id
+	if err := s.writeGC(o, GCStatus{Result: GCBlocked, Blocked: id}, true); err != nil {
+		return err
 	}
+	return fmt.Errorf("tree backups: GC blocked by %s: %w", id, cause)
+}
+
+// plan validates every manifest and marks the blobs of the ones retention
+// keeps. It needs the store lock, shared or exclusive.
+func (s *Store) plan(res *GCResult, o GCOptions) (*gcPlan, error) {
 	// Without snapshots/ every blob looks unreferenced.
 	if fi, err := s.root.Lstat(snapshotsDir); err != nil || !fi.IsDir() {
 		if err == nil {
 			err = errors.New("not a directory")
 		}
-		return block(snapshotsDir, err)
+		return nil, s.block(res, o, snapshotsDir, err)
 	}
+	infos, _, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	p := &gcPlan{seen: make(map[string]bool), marked: make(map[string]bool)}
+	for _, in := range infos {
+		if in.Header == nil {
+			return nil, s.block(res, o, in.ID, in.Err)
+		}
+		if _, err := ValidateAll(s.Open(in.ID)); err != nil {
+			return nil, s.block(res, o, in.ID, err)
+		}
+		p.seen[in.ID] = true
+	}
+	if gcPhaseHook != nil {
+		gcPhaseHook("validated")
+	}
+	keep := KeepSet(infos, o.Keep)
+	var refs int64
+	for _, in := range infos {
+		if keep[in.ID] {
+			refs += in.Header.Counts.ByType[TypeFile]
+		}
+	}
+	// Room for what a snapshot commits before the sweep.
+	p.bf = newBloom(refs + refs/4 + 1024)
+	for _, in := range infos {
+		if !keep[in.ID] {
+			continue
+		}
+		if err := s.markManifest(in.ID, p.bf, nil); err != nil {
+			return nil, s.block(res, o, in.ID, err)
+		}
+		p.marked[in.ID] = true
+	}
+	return p, nil
+}
+
+// apply deletes what retention no longer keeps and sweeps the blobs no kept
+// manifest references. The caller holds the store lock exclusive, and p
+// may be from before it did: a manifest committed since is validated and
+// marked here, and so is any older one that retention keeps now but did
+// not then.
+func (s *Store) apply(res *GCResult, o GCOptions, p *gcPlan) error {
 	infos, strays, err := s.List()
 	if err != nil {
 		return err
 	}
 	res.Strays = strays
 	for _, in := range infos {
+		if p.seen[in.ID] {
+			continue
+		}
 		if in.Header == nil {
-			return block(in.ID, in.Err)
+			return s.block(res, o, in.ID, in.Err)
 		}
 		if _, err := ValidateAll(s.Open(in.ID)); err != nil {
-			return block(in.ID, err)
+			return s.block(res, o, in.ID, err)
 		}
 	}
-
 	keep := KeepSet(infos, o.Keep)
-	var kept []ManifestInfo
 	for _, in := range infos {
 		if keep[in.ID] {
-			kept = append(kept, in)
+			if !p.marked[in.ID] {
+				if err := s.markManifest(in.ID, p.bf, nil); err != nil {
+					return s.block(res, o, in.ID, err)
+				}
+			}
 			continue
 		}
 		if err := s.root.Remove(manifestName(in.ID)); err != nil {
@@ -211,19 +294,8 @@ func (s *Store) collect(res *GCResult, o GCOptions) error {
 		return fmt.Errorf("tree backups: %w", err)
 	}
 
-	var refs int64
-	for _, in := range kept {
-		refs += in.Header.Counts.ByType[TypeFile]
-	}
-	bf := newBloom(refs)
-	for _, in := range kept {
-		if err := s.markManifest(in.ID, bf, nil); err != nil {
-			return block(in.ID, err)
-		}
-	}
-
 	err = s.walkBlobs(func(sum string, size int64) error {
-		if bf.has(sum) {
+		if p.bf.has(sum) {
 			res.StoreBytes += size
 			res.BlobCount++
 			return nil

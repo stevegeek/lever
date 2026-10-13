@@ -12,9 +12,8 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// readyGateProbe is a gateProbe that also waits for claude's session start
-// (jail.AgentProbe.AwaitClaudeReady): each call takes the next scripted
-// answer, and the last answer repeats.
+// readyGateProbe: each AwaitClaudeReady call takes the next scripted answer,
+// and the last answer repeats.
 type readyGateProbe struct {
 	*gateProbe
 	ready   []readyAnswer
@@ -175,8 +174,7 @@ func TestReadyMarkerNeverWrittenWindowPassesOnTheContainer(t *testing.T) {
 }
 
 // A ready wait whose last reading could not tell whether the pane is alive
-// is the handover's case at its end: the window decides, with the
-// handover's warning, not the one that claims a live pane.
+// gets the handover's warning, not the one that claims a live pane.
 func TestReadyMarkerTimeoutAfterAnUnknownReadingHandsOver(t *testing.T) {
 	shortHarnessSettle(t, time.Millisecond)
 	sink := &logSink{}
@@ -195,7 +193,6 @@ func TestReadyMarkerTimeoutAfterAnUnknownReadingHandsOver(t *testing.T) {
 	}
 }
 
-// A context that ends during the fallback window passes through unwrapped.
 func TestReadyMarkerNeverWrittenWindowEndsOnDeadline(t *testing.T) {
 	shortHarnessSettle(t, time.Hour)
 	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{pending}}
@@ -366,7 +363,6 @@ func TestReadyGateRunsOnHarnessOnce(t *testing.T) {
 	}
 }
 
-// A cancelled context ends the wait with the context's error.
 func TestReadyMarkerWaitEndsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &readyGateProbe{gateProbe: &gateProbe{alive: []harnessAnswer{{alive: true}}}, ready: []readyAnswer{pending}}

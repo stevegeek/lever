@@ -209,9 +209,9 @@ func TestWithHarnessDeathHintLeavesOtherErrorsAlone(t *testing.T) {
 	}
 }
 
-// lever#202: claude --continue with no conversation in the agent home is
-// named, with the fresh start as the way out, from a terminal stream too,
-// and the log is never repeated.
+// claude --continue with no conversation in the agent home is named, with
+// the fresh start as the way out, from a terminal stream too, and the log is
+// never repeated.
 func TestHarnessDeathHintNoConversation(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -241,8 +241,7 @@ func TestHarnessDeathHintNoConversation(t *testing.T) {
 		t.Fatalf("ErrNoConversation reads %q", ErrNoConversation)
 	}
 
-	// The gate's error wraps both the sentinel and the cause; the log is
-	// not repeated.
+	// The log is not repeated.
 	died := errors.Join(scion.ErrAgentDied)
 	d := Deps{HarnessLogTail: func(context.Context, string) (string, error) { return "SECRET-LINE\n" + noConvLog, nil }}
 	got := withHarnessDeathHint(context.Background(), d, died, "/lever", "hello")

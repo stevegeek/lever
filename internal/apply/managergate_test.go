@@ -14,9 +14,7 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// gateProbe scripts the in-container half of the manager gate: each
-// HarnessAlive / ContainerRunning call takes the next scripted answer, and
-// the last answer repeats.
+// gateProbe: each call takes the next scripted answer; the last repeats.
 type gateProbe struct {
 	alive    []harnessAnswer
 	running  []runningAnswer
@@ -62,9 +60,8 @@ func (p *gateProbe) ContainerRunning(_ context.Context, ref string) (bool, error
 	return a.up, a.err
 }
 
-// gateDeps is a create-path start-manager whose hub record goes running/Up
-// at the start and STAYS so — the hub's view in the lever#164 report, where
-// the heartbeat-refreshed column read "Up" over a container that had exited.
+// gateDeps' hub record goes running/Up at the start and stays so: the
+// heartbeat-refreshed column can read "Up" over a container that has exited.
 func gateDeps(p *gateProbe) (Deps, *agentLifecycleRunner) {
 	r := &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "hello", liveWhenContainer: "Up 2 seconds"}
 	return Deps{
@@ -76,10 +73,9 @@ func gateDeps(p *gateProbe) (Deps, *agentLifecycleRunner) {
 	}, r
 }
 
-// lever#164: the container is Up briefly — the hub record reads running/Up
-// for the whole settle window — and exits while the pre-start hook runs,
-// before claude's pane ever exists. The gate must not report up, and must
-// name it a death (the container log is worth reading).
+// The container exits while the pre-start hook runs, before claude's pane
+// exists, while the hub record reads running/Up throughout. The gate must
+// name it a death.
 func TestStartManagerContainerUpBrieflyThenExitedIsNotUp(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	p := &gateProbe{
@@ -119,11 +115,9 @@ func TestManagerGateContainerGoneIsADeath(t *testing.T) {
 	}
 }
 
-// Phase running over a live container, but claude's tmux pane is dead (or
-// its window gone) with tmux answering: claude exited before it came up
-// (a bad --continue, an auth failure). scion's shell window keeps tmux and
-// the container up, so only the pane says so — and it is a death within
-// notAliveDeath probes, not a "did not come up" after the whole wait.
+// claude's pane is dead with tmux answering over a live container: scion's
+// shell window keeps tmux up, so only the pane shows claude exited. It is a
+// death within notAliveDeath probes, not a timeout after the whole wait.
 func TestManagerGateClaudeDeadFromTheFirstProbeIsADeath(t *testing.T) {
 	p := &gateProbe{alive: []harnessAnswer{{alive: false}}, running: []runningAnswer{{up: true}}}
 	deps, r := gateDeps(p)
@@ -155,8 +149,8 @@ func TestManagerGateNotAliveRunMustBeConsecutive(t *testing.T) {
 	}
 }
 
-// The hub record leaving running while the gate waits for the pane (scion
-// marks it error) is a death at once, not a wait to the end of the budget.
+// The hub record leaving running while the gate waits for the pane is a
+// death at once, not a wait to the end of the budget.
 func TestManagerGateRecordLeavesRunningDuringHarnessWaitIsADeath(t *testing.T) {
 	p := &gateProbe{alive: []harnessAnswer{{err: jail.ErrNoTmuxServer}}, running: []runningAnswer{{up: true}}}
 	deps, r := gateDeps(p)
@@ -219,8 +213,6 @@ func TestManagerGatePaneDiesDuringSettleIsADeath(t *testing.T) {
 	}
 }
 
-// The healthy path: the pane is alive (after a boot that took a few polls)
-// and still alive after the window.
 func TestManagerGatePaneAliveIsUp(t *testing.T) {
 	p := &gateProbe{alive: []harnessAnswer{{alive: false}, {alive: false}, {alive: true}}, running: []runningAnswer{{up: true}}}
 	deps, r := gateDeps(p)
@@ -273,8 +265,7 @@ func TestManagerGateZeroSettleDoesNotProbeTheHarness(t *testing.T) {
 	}
 }
 
-// fakeTicks is an injected ticker and clock: each tick the test sends
-// advances the clock by the interval it was created with.
+// fakeTicks: each tick the test sends advances the clock by the interval.
 type fakeTicks struct {
 	ch       chan time.Time
 	interval atomic.Int64
@@ -300,7 +291,6 @@ func (f *fakeTicks) tick() {
 	f.ch <- f.now()
 }
 
-// lineSink collects log lines from any goroutine.
 type lineSink struct {
 	mu    sync.Mutex
 	lines []string
@@ -317,9 +307,8 @@ func (s *lineSink) logf(format string, args ...any) {
 	s.ch <- line
 }
 
-// lever#168: a progress line at each 15 s tick, naming the stage and the
-// elapsed time, and none after Stop. No real sleeps: the ticker and the clock
-// are injected.
+// A progress line at each tick names the stage and elapsed time; none
+// after Stop.
 func TestProgressPrintsAtTheIntervalWithStageAndElapsed(t *testing.T) {
 	ft := newFakeTicks()
 	sink := newLineSink()
@@ -394,9 +383,8 @@ func TestStartManagerPrintsProgressWhileWaitingForTheHarness(t *testing.T) {
 	}
 }
 
-// Before claude starts, scion has no tmux server in the container yet: the
-// probe answers "no tmux server" (an error, not a false). That is a boot in
-// progress, so the gate keeps waiting and passes once the pane is alive.
+// Before claude starts, the probe answers "no tmux server" (an error, not a
+// false). That is a boot in progress, so the gate keeps waiting.
 func TestManagerGateNoTmuxServerYetThenAliveIsUp(t *testing.T) {
 	noServer := harnessAnswer{err: jail.ErrNoTmuxServer}
 	p := &gateProbe{alive: []harnessAnswer{noServer, noServer, noServer, noServer, noServer, noServer, {alive: true}}, running: []runningAnswer{{up: true}}}

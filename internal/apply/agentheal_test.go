@@ -15,10 +15,9 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// fakeSessionProbe is an AgentSessionProbe with canned answers. HubToken
-// answers tok on its first call and afterReset (when set) on later ones;
-// ReportSessionRunning runs onReport, which a test uses to flip the fake
-// hub record the way sciontool's report would.
+// fakeSessionProbe: HubToken answers tok on its first call and afterReset
+// (when set) on later ones; onReport lets a test flip the fake hub record the
+// way sciontool's report would.
 type fakeSessionProbe struct {
 	tok, afterReset jail.HubTokenTimes
 	tokErr          error
@@ -90,9 +89,8 @@ func logged(sink *logSink, sub string) bool {
 	return false
 }
 
-// TestHealAgentSessionResetsAnExpiredToken: a running agent whose hub token
-// expired gets `scion reset-auth` for ITS slug, in its project — the
-// controller-PAT verb that mints a new token of the agent's own stored role.
+// TestHealAgentSessionResetsAnExpiredToken: the reset targets ITS slug, in
+// its project.
 func TestHealAgentSessionResetsAnExpiredToken(t *testing.T) {
 	f := scionOKRunner()
 	sc := scion.New(f, scion.Options{})
@@ -128,8 +126,6 @@ func TestHealAgentSessionLeavesAValidTokenAlone(t *testing.T) {
 	}
 }
 
-// TestHealAgentSessionResetFailureNamesTheManualFix: a failed reset is a
-// warning naming the command to run by hand, never fatal.
 func TestHealAgentSessionResetFailureNamesTheManualFix(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion reset-auth", proc.Result{Code: 1, Stderr: "hub unreachable"})
@@ -158,8 +154,6 @@ func (r failingScionRunner) Run(ctx context.Context, env map[string]string, name
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// TestHealAgentSessionSkips: no probe, no live container, or a phase other
-// than running/stopped — nothing is probed and nothing is called.
 func TestHealAgentSessionSkips(t *testing.T) {
 	for _, rec := range []*scion.Agent{
 		nil,
@@ -184,11 +178,9 @@ func TestHealAgentSessionSkips(t *testing.T) {
 	}
 }
 
-// TestStartManagerStoppedOverALiveHarnessContinues (the 2026-10-05 case): the
-// hub reads phase stopped because another claude process in the container
-// fired the SessionEnd hook, while the manager's claude still runs. apply has
-// the agent report its session running and keeps it — no resume, which would
-// have restarted claude in a new session.
+// TestStartManagerStoppedOverALiveHarnessContinues: another claude process
+// fired SessionEnd while the manager's claude still runs. The agent reports
+// its session running and is kept; a resume would start a new session.
 func TestStartManagerStoppedOverALiveHarnessContinues(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "stopped", initContainerStatus: "Up 2 hours"}
@@ -209,9 +201,6 @@ func TestStartManagerStoppedOverALiveHarnessContinues(t *testing.T) {
 	}
 }
 
-// TestStartManagerStoppedWithClaudeGoneResumes: a claude that really exited
-// leaves the old path — resume — and apply says it starts a new session and
-// how to get the old conversation back.
 func TestStartManagerStoppedWithClaudeGoneResumes(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "stopped", initContainerStatus: "Up 2 hours"}
@@ -228,9 +217,8 @@ func TestStartManagerStoppedWithClaudeGoneResumes(t *testing.T) {
 	}
 }
 
-// TestStartManagerStoppedReportThatDoesNotStickWarns: the report ran but the
-// hub still reads stopped (its token was refused, say): apply warns and falls
-// back to the resume, naming the way back to the old conversation.
+// TestStartManagerStoppedReportThatDoesNotStickWarns: the hub still reads
+// stopped after the report (its token was refused, say).
 func TestStartManagerStoppedReportThatDoesNotStickWarns(t *testing.T) {
 	old := sessionHealSettle
 	sessionHealSettle = RetryBudget{Attempts: 2, Interval: time.Millisecond}
@@ -247,8 +235,6 @@ func TestStartManagerStoppedReportThatDoesNotStickWarns(t *testing.T) {
 	}
 }
 
-// TestStartManagerHealsTokenOfARunningManager: a running manager is kept as
-// before, and its expired token reset on the way.
 func TestStartManagerHealsTokenOfARunningManager(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 9 hours"}
@@ -262,8 +248,6 @@ func TestStartManagerHealsTokenOfARunningManager(t *testing.T) {
 	}
 }
 
-// TestStartManagerFreshSkipsTheHeal: --fresh discards the record, so its
-// session is not worth a heal.
 func TestStartManagerFreshSkipsTheHeal(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "stopped", initContainerStatus: "Up 2 hours"}
@@ -276,9 +260,6 @@ func TestStartManagerFreshSkipsTheHeal(t *testing.T) {
 	}
 }
 
-// TestHealSessionsCoversWorkers: `lever up` on a running manager heals the
-// manager and every configured worker from one listing; an undeclared agent
-// is left alone.
 func TestHealSessionsCoversWorkers(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion list", proc.Result{Stdout: `[{"slug":"hello","phase":"running","containerStatus":"Up 1 hour"},` +
@@ -298,8 +279,6 @@ func TestHealSessionsCoversWorkers(t *testing.T) {
 	}
 }
 
-// TestHealAgentSessionTokenReadFailureIsAWarning: an unreadable token never
-// triggers a reset, only a warning.
 func TestHealAgentSessionTokenReadFailureIsAWarning(t *testing.T) {
 	f := scionOKRunner()
 	var sink logSink
@@ -310,16 +289,13 @@ func TestHealAgentSessionTokenReadFailureIsAWarning(t *testing.T) {
 	}
 }
 
-// testHealer is a SessionHealer whose role guard passes.
 func testHealer(sc *scion.Client, probe AgentSessionProbe, log func(string, ...any)) SessionHealer {
 	return SessionHealer{Scion: sc, Probe: probe, Log: log,
 		VerifyRole: func(context.Context, string, string) error { return nil }}
 }
 
-// TestHealAgentSessionRefusesAPreRoleRecord: the hub mints a reset token
-// from the record's stored role, and a pre-role record resolves to full
-// authority — so no reset runs when the guard refuses, and none without a
-// guard at all.
+// TestHealAgentSessionRefusesAPreRoleRecord: a pre-role record resolves to
+// full authority, so no reset runs when the guard refuses, nor without one.
 func TestHealAgentSessionRefusesAPreRoleRecord(t *testing.T) {
 	rec := &scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"}
 	f := scionOKRunner()
@@ -344,8 +320,6 @@ func TestHealAgentSessionRefusesAPreRoleRecord(t *testing.T) {
 	}
 }
 
-// TestStartManagerWorkerPreRoleRecordNotReset: apply's worker pass runs the
-// same guard as the manager's resume paths before any reset.
 func TestStartManagerWorkerPreRoleRecordNotReset(t *testing.T) {
 	app := helloApp(t.TempDir())
 	app.Workers = []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}
@@ -368,11 +342,10 @@ func TestStartManagerWorkerPreRoleRecordNotReset(t *testing.T) {
 	}
 }
 
-// TestStartManagerHealRunsBeforeTheStaleMountCheck: the session heal runs
-// first, so the stale-mount check reads the healed phase. A stopped record
-// whose claude still runs is reported running and kept, so a gone mount is
-// only a warning; with claude gone it stays stopped, would be resumed, and
-// the gone mount refuses the bring-up before any resume.
+// TestStartManagerHealRunsBeforeTheStaleMountCheck: the stale-mount check
+// reads the healed phase. A record healed to running is kept, so a gone mount
+// is only a warning; one still stopped would be resumed, so the gone mount
+// refuses the bring-up.
 func TestStartManagerHealRunsBeforeTheStaleMountCheck(t *testing.T) {
 	for _, alive := range []bool{true, false} {
 		_, app := readOnlyConfig(t, true)
@@ -404,9 +377,7 @@ func TestStartManagerHealRunsBeforeTheStaleMountCheck(t *testing.T) {
 	}
 }
 
-// TestHealAgentSessionSkipsARevokedAgent: `lever revoke` stays the
-// kill-switch for the apply and up heals too — no reset, and the guard is
-// not even asked.
+// TestHealAgentSessionSkipsARevokedAgent: the role guard is not even asked.
 func TestHealAgentSessionSkipsARevokedAgent(t *testing.T) {
 	f := scionOKRunner()
 	var sink logSink
@@ -425,8 +396,7 @@ func TestHealAgentSessionSkipsARevokedAgent(t *testing.T) {
 }
 
 // TestHealAgentSessionRevokedSkipsEverything: a revoked agent's container is
-// not probed at all — no token read, no harness probe, no session report —
-// even when its phase reads stopped over a live harness.
+// not probed at all, even when it reads stopped over a live harness.
 func TestHealAgentSessionRevokedSkipsEverything(t *testing.T) {
 	f := scionOKRunner()
 	probe := &fakeSessionProbe{tok: expiredToken(), alive: true}
@@ -439,9 +409,6 @@ func TestHealAgentSessionRevokedSkipsEverything(t *testing.T) {
 	}
 }
 
-// TestHealAgentSessionLogsAResetOnlyWhenOneRuns: "resetting it" is logged
-// only once the guards passed; a refused or missing guard logs the expiry
-// with the reason it is not reset.
 func TestHealAgentSessionLogsAResetOnlyWhenOneRuns(t *testing.T) {
 	rec := &scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours"}
 	for _, tc := range []struct {

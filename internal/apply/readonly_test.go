@@ -38,9 +38,8 @@ func TestManagerTreeVolumes(t *testing.T) {
 	}
 }
 
-// readOnlyConfig writes an instance whose manager protects assistant/tools,
-// creating that directory under the tree unless the caller wants to shape
-// the tree itself.
+// readOnlyConfig protects assistant/tools; makeDir=false lets the caller
+// shape the tree itself.
 func readOnlyConfig(t *testing.T, makeDir bool) (dir string, app *config.App) {
 	t.Helper()
 	dir = t.TempDir()
@@ -394,7 +393,7 @@ func TestLiveTreeMountGaps(t *testing.T) {
 	}
 }
 
-// card #157: a manager record keeps the mounts of its create. A directory it
+// A manager record keeps the mounts of its create. A directory it
 // mounts that is gone on the host refuses the resume up front, naming the
 // directory and both fixes; an entry the config dropped is a warning; the
 // mounts of the current plan, the workspace and scion's own say nothing.
@@ -549,11 +548,10 @@ func TestManagerStaleTreeMounts(t *testing.T) {
 	}
 }
 
-// TestManagerStaleTreeMountsDoesNotFollowLinks: a symbolic link anywhere on
-// a mounted path counts as gone without being followed on the host — even
-// one to an existing directory, which an agent could aim at a path whose
-// stat blocks (macOS autofs /net/<host>/x) or at anything a resume would
-// then mount into the manager.
+// A symbolic link anywhere on a mounted path counts as gone without being
+// followed on the host, even one to an existing directory, which an agent
+// could aim at a path whose stat blocks (macOS autofs /net/<host>/x) or at
+// anything a resume would then mount into the manager.
 func TestManagerStaleTreeMountsDoesNotFollowLinks(t *testing.T) {
 	tree := t.TempDir()
 	outside := t.TempDir()

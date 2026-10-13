@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/fsutil"
 )
 
 const testMtime = int64(1_600_000_000_123_456_000)
@@ -59,34 +61,7 @@ func (t *rtree) manifest() OpenManifest {
 }
 
 func (t *rtree) opts(target string) RestoreOptions {
-	return RestoreOptions{Target: target, Manifest: t.manifest(), Blobs: t.blobs, Inside: insideByStat}
-}
-
-// insideByStat is a test stand-in for the identity check: it walks up from
-// inner with os.Stat and compares with os.SameFile.
-func insideByStat(inner, outer string) (bool, error) {
-	o, err := os.Stat(outer)
-	if err != nil {
-		return false, err
-	}
-	p, err := filepath.EvalSymlinks(inner)
-	if err != nil {
-		return false, err
-	}
-	for {
-		st, err := os.Stat(p)
-		if err != nil {
-			return false, err
-		}
-		if os.SameFile(st, o) {
-			return true, nil
-		}
-		up := filepath.Dir(p)
-		if up == p {
-			return false, nil
-		}
-		p = up
-	}
+	return RestoreOptions{Target: target, Manifest: t.manifest(), Blobs: t.blobs, InsideFD: fsutil.InsideByIdentityFD}
 }
 
 func withFS(t *testing.T, wrap func(restoreFS) restoreFS) {
@@ -252,11 +227,11 @@ func TestRestoreRefusesTargetInsideTreeStoreOrStateByIdentity(t *testing.T) {
 	}
 	o := tr.opts(filepath.Join(base, "out"))
 	o.Forbidden = []string{tree}
-	o.Inside = func(string, string) (bool, error) { return false, errors.New("no proof") }
+	o.InsideFD = func(int, string, string) (bool, error) { return false, errors.New("no proof") }
 	if _, err := Restore(context.Background(), o); err == nil || !strings.Contains(err.Error(), "cannot prove") {
 		t.Fatalf("an identity error must refuse: %v", err)
 	}
-	o.Inside = nil
+	o.InsideFD = nil
 	if _, err := Restore(context.Background(), o); err == nil {
 		t.Fatal("no identity check must refuse")
 	}

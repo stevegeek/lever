@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stevegeek/lever/internal/fsutil"
 )
 
 type snapEnv struct {
@@ -113,7 +115,7 @@ func TestSnapshotEndToEnd(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "restored")
 	rep, err := Restore(context.Background(), RestoreOptions{
 		Target: target, Manifest: s.Open(h1.ID), Blobs: s,
-		Forbidden: []string{e.tree, e.state}, Inside: insideByIdentity,
+		Forbidden: []string{e.tree, e.state}, InsideFD: fsutil.InsideByIdentityFD,
 	})
 	if err != nil {
 		t.Fatalf("Restore: %v", err)

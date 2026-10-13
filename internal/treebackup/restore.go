@@ -45,10 +45,11 @@ type RestoreOptions struct {
 	// Forbidden are directories (the tree, the store, the state dir) the
 	// target's parent must not be inside.
 	Forbidden []string
-	// Inside reports whether inner is inside (or is) outer by identity. An
-	// error refuses the restore.
-	Inside  func(inner, outer string) (bool, error)
-	MinFree int64
+	// InsideFD reports whether the directory open as dirfd is inside (or
+	// is) outer by identity; name is for messages. An error refuses the
+	// restore.
+	InsideFD func(dirfd int, name, outer string) (bool, error)
+	MinFree  int64
 }
 
 // RestoreReport lists what a restore did not restore as recorded. Every
@@ -333,11 +334,13 @@ func (r *restorer) checkParent(parent string, pfd int) error {
 	if !pst.dir {
 		return fmt.Errorf("tree restore: %s is not a directory", Q([]byte(parent)))
 	}
+	// Asked of the fd, never of the path: a --to that runs through a link
+	// in the tree can be re-pointed between any path check and the open.
 	for _, f := range r.o.Forbidden {
-		if r.o.Inside == nil {
+		if r.o.InsideFD == nil {
 			return errors.New("tree restore: no identity check for the target")
 		}
-		in, err := r.o.Inside(parent, f)
+		in, err := r.o.InsideFD(pfd, parent, f)
 		if err != nil {
 			return fmt.Errorf("tree restore: cannot prove %s is outside %s: %w", Q([]byte(parent)), Q([]byte(f)), err)
 		}

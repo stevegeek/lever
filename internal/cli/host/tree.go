@@ -569,7 +569,7 @@ func newTreeRestoreCmd() *cobra.Command {
 					KeepModes: keepModes,
 					KeepGit:   keepGit,
 					Forbidden: []string{e.app.Tree, e.place.Store, e.st.Dir},
-					Inside:    fsutil.InsideByIdentity,
+					InsideFD:  fsutil.InsideByIdentityFD,
 					MinFree:   e.app.TreeBackup.EffectiveMinFree(),
 				})
 				return err

@@ -675,3 +675,17 @@ func TestRestoreReportRendersHostileNamesQuoted(t *testing.T) {
 		t.Fatalf("unescaped name in:\n%q", out.String())
 	}
 }
+
+func TestGitKeyMatchesFoldedSpellings(t *testing.T) {
+	for name, want := range map[string]string{
+		"HEAD": "head", "HE­AD": "head", "conﬁg": "config", ".gi‍t": ".git",
+		"hooKs": "hooks", "ｃommondir": "commondir", "cönfig": "config", "Config.Worktree": "config.worktree",
+	} {
+		if got := gitKey(name); got != want {
+			t.Errorf("gitKey(%q) = %q, want %q", name, got, want)
+		}
+	}
+	if gitKey("x\xffconfig") != "xconfig" || isGitControl("configs") {
+		t.Error("gitKey matches too much")
+	}
+}

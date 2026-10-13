@@ -96,6 +96,15 @@ func (s *Store) Delete(ids []string, o GCOptions) (*GCResult, error) {
 			return nil, fmt.Errorf("tree backups: snapshot %s is not a regular file", id)
 		}
 	}
+	// The manifests about to go may hold the only record of the highest
+	// seq (its RecordSeq can have failed after the commit).
+	next, err := s.NextSeq()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.RecordSeq(next - 1); err != nil {
+		return nil, fmt.Errorf("tree backups: recording the sequence number before a delete: %w", err)
+	}
 	res := &GCResult{}
 	for _, id := range slices.Compact(slices.Sorted(slices.Values(ids))) {
 		if err := s.root.Remove(manifestName(id)); err != nil {
@@ -241,11 +250,26 @@ func (s *Store) collect(res *GCResult, o GCOptions) error {
 // never synced can be garbage of the right size that a later dedup would
 // trust. No snapshot can be writing: GC holds the store lock exclusive.
 func (s *Store) clearCrash(res *GCResult) error {
-	if _, err := s.root.Lstat(dirtyName); errors.Is(err, fs.ErrNotExist) {
+	marker, err := s.root.Lstat(dirtyName)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("tree backups: %w", err)
+	}
+	// A blob older than the marker was synced by a committed snapshot
+	// before the crashed one began; only newer ones can be garbage. The
+	// slack covers coarse filesystem timestamps.
+	since := marker.ModTime().Add(-2 * time.Second)
 	var bad []string
-	err := s.walkBlobs(func(sum string, size int64) error {
+	err = s.walkBlobs(func(sum string, size int64) error {
+		fi, err := s.root.Lstat(blobName(sum))
+		if err != nil {
+			return err
+		}
+		if fi.ModTime().Before(since) {
+			return nil
+		}
 		got, err := s.hashFile(blobName(sum))
 		if err != nil {
 			return err

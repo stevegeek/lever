@@ -638,3 +638,20 @@ func TestStatusRoundTrip(t *testing.T) {
 		t.Fatalf("tmp/ = %v", got)
 	}
 }
+
+// A seq that only the newest manifest records (its RecordSeq failed) is
+// not handed out again after that manifest is deleted.
+func TestDeleteKeepsTheSeqOfTheManifestsItRemoves(t *testing.T) {
+	s := newStore(t)
+	snap(t, s, snapOpts{files: map[string]string{"a": "x"}})
+	last := snap(t, s, snapOpts{files: map[string]string{"a": "x"}})
+	if err := os.Remove(filepath.Join(s.Dir(), seqName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Delete([]string{last.id}, keepAll()); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.NextSeq(); err != nil || n != 3 {
+		t.Fatalf("next seq = %d, %v; want 3", n, err)
+	}
+}

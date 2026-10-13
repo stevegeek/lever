@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unicode"
 	"unicode/utf8"
@@ -883,27 +884,77 @@ func (r *restorer) diskName(e *Entry) string {
 		return name + neutralSuffix
 	}
 	// A .git link is a gitlink too, through whatever file it points at.
-	if e.Type != TypeDir && foldEqual(name, ".git") {
+	if e.Type != TypeDir && isGitLink(name) {
 		return name + neutralSuffix
 	}
 	return name
 }
 
-// The git names are compared as a case-insensitive target would fold
-// them, not by ASCII alone: "hoo\u212As" (a Kelvin sign) is "hooks" on such
-// a filesystem.
-func isHEAD(name []byte) bool { return foldEqual(string(name), "HEAD") }
+// The git names are compared through gitKey, not byte for byte: a
+// case-insensitive target opens "hoo\u212As" (Kelvin sign) as "hooks", and
+// Linux casefold also applies full case folding and ignores default
+// ignorable code points ("con\uFB01g", "HE\u00ADAD", ".gi\u200Dt").
+func isHEAD(name []byte) bool { return gitKey(string(name)) == "head" }
 
 func isGitControl(name string) bool {
-	for _, n := range []string{"config", "config.worktree", "commondir", "hooks"} {
-		if foldEqual(name, n) {
-			return true
+	k := gitKey(name)
+	return k == "config" || k == "config.worktree" || k == "commondir" || k == "hooks"
+}
+
+func isGitLink(name string) bool { return gitKey(name) == ".git" }
+
+// gitKey reduces a name to the ASCII a folding filesystem might read it
+// as, erring towards a match: renaming one file too many is cheap, and one
+// too few lets git run the agent's command. Invisible and format characters
+// are dropped, ligatures and other characters that fold to ASCII letters
+// are expanded, fullwidth ASCII is mapped down, and any other non-ASCII
+// rune is dropped.
+func gitKey(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r < utf8.RuneSelf:
+			if 'A' <= r && r <= 'Z' {
+				r += 'a' - 'A'
+			}
+			b.WriteRune(r)
+		case gitIgnorable(r):
+		case gitExpand[r] != "":
+			b.WriteString(gitExpand[r])
+		case r >= 0xFF01 && r <= 0xFF5E:
+			b.WriteString(strings.ToLower(string(r - 0xFEE0)))
+		default:
+			for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+				if f < utf8.RuneSelf {
+					b.WriteString(strings.ToLower(string(f)))
+					break
+				}
+			}
 		}
+	}
+	return b.String()
+}
+
+func gitIgnorable(r rune) bool {
+	switch {
+	case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Mn, r), unicode.Is(unicode.Me, r):
+		return true
+	case r >= 0xFE00 && r <= 0xFE0F, r >= 0xE0100 && r <= 0xE01EF, r >= 0x180B && r <= 0x180F:
+		return true
+	}
+	switch r {
+	case 0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x3164, 0xFFA0:
+		return true
 	}
 	return false
 }
 
-func foldEqual(a, b string) bool { return foldKey(a) == foldKey(b) }
+// gitExpand: characters whose full case folding or compatibility form is
+// ASCII letters.
+var gitExpand = map[rune]string{
+	0x00DF: "ss", 0x1E9E: "ss", 0x017F: "s", 0x212A: "k", 0x0130: "i", 0x0131: "i",
+	0xFB00: "ff", 0xFB01: "fi", 0xFB02: "fl", 0xFB03: "ffi", 0xFB04: "ffl", 0xFB05: "st", 0xFB06: "st",
+}
 
 // foldKey maps names a case-insensitive filesystem treats as one to the
 // same key: each valid rune becomes the smallest rune of its Unicode

@@ -252,6 +252,9 @@ func (a *App) Validate() error {
 	if a.Tree == "" {
 		return fmt.Errorf("config: tree is required")
 	}
+	if err := a.TreeBackup.validate(); err != nil {
+		return err
+	}
 	if a.Manager.Image != "" {
 		if err := a.Security.validateImage("manager.image", a.Manager.Image); err != nil {
 			return err

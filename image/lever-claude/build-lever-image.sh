@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the generic lever-claude agent image from the local scion-claude base,
+# Build the generic lever-claude agent image from the local scion-claude base
+# (or, with LEVER_IMAGE_FLAVOR=slim, lever-claude-slim from lever's slim base),
 # tagged for the local image registry (scionlocal) so scion uses it with no pull.
 #
 # Prerequisite: the bin/ and scionhook/ build-context dirs must be staged first
@@ -25,6 +26,14 @@
 #                         (internal/jailabi), baked as the lever_jail_abi label
 #                         (`make lever-image` sets it; unset leaves it empty and
 #                         `lever doctor` compares lever_version instead)
+#   LEVER_IMAGE_FLAVOR    full (default): FROM scion-claude:<arch>, output
+#                         lever-claude:<arch>. slim: first build lever's slim
+#                         base (image/scion-slim, its bin/ staged by
+#                         `make lever-image-slim`) as lever-scion-slim:<arch>,
+#                         then the same lever layer FROM it, output
+#                         lever-claude-slim:<arch>
+#   SCION_VERSION         slim only: the scion source the staged sciontool and
+#                         scion were built from, baked as the scion_version label
 set -euo pipefail
 
 CTX="$(cd "$(dirname "$0")" && pwd)"
@@ -39,8 +48,56 @@ case "${ARCH}" in
     exit 1
     ;;
 esac
-BASE="scion-claude:${ARCH}"
-TARGET="${REGISTRY}/lever-claude:${ARCH}"
+FLAVOR="${LEVER_IMAGE_FLAVOR:-full}"
+case "${FLAVOR}" in
+  full)
+    BASE="scion-claude:${ARCH}"
+    NAME="lever-claude"
+    ;;
+  slim)
+    BASE="lever-scion-slim:${ARCH}"
+    NAME="lever-claude-slim"
+    ;;
+  *)
+    echo "LEVER_IMAGE_FLAVOR must be 'full' or 'slim', got '${FLAVOR}'." >&2
+    exit 1
+    ;;
+esac
+TARGET="${REGISTRY}/${NAME}:${ARCH}"
+
+for d in bin scionhook; do
+  [ -d "${CTX}/${d}" ] || {
+    echo "build context ${CTX}/${d} is missing — run \`make lever-image\` (it stages the binaries + hook)." >&2
+    exit 1
+  }
+done
+
+# Clobber guard: this tag is also what a real (possibly customized) instance
+# image uses. Refuse to silently overwrite one — a Ruby-less generic image
+# replacing a customized one boots a manager missing that instance's tooling.
+if [ "${LEVER_IMAGE_FORCE:-}" != "1" ] && docker image inspect "${TARGET}" >/dev/null 2>&1; then
+  cat >&2 <<EOF
+${TARGET} already exists. Building would overwrite it with the generic image.
+If that tag belongs to a customized instance image, DON'T — point manager.image at a
+different name, or extend the generic image (FROM ${NAME}:${ARCH}). To overwrite anyway,
+re-run with LEVER_IMAGE_FORCE=1.
+EOF
+  exit 1
+fi
+
+if [ "${FLAVOR}" = slim ]; then
+  SLIM_CTX="$(cd "${CTX}/../scion-slim" && pwd)"
+  for b in sciontool scion; do
+    [ -x "${SLIM_CTX}/bin/${b}" ] || {
+      echo "${SLIM_CTX}/bin/${b} is missing — run \`make lever-image-slim\` (it stages sciontool and scion)." >&2
+      exit 1
+    }
+  done
+  # --platform: the slim base starts from a multi-arch node image, so the
+  # arch is chosen here rather than by an arch-tagged local base.
+  docker build --platform "linux/${ARCH}" --build-arg "SCION_VERSION=${SCION_VERSION:-}" \
+    -t "${BASE}" -f "${SLIM_CTX}/Dockerfile" "${SLIM_CTX}"
+fi
 
 docker image inspect "${BASE}" >/dev/null 2>&1 || {
   cat >&2 <<EOF
@@ -56,13 +113,6 @@ EOF
   exit 1
 }
 
-for d in bin scionhook; do
-  [ -d "${CTX}/${d}" ] || {
-    echo "build context ${CTX}/${d} is missing — run \`make lever-image\` (it stages the binaries + hook)." >&2
-    exit 1
-  }
-done
-
 # Arch guard: docker build won't validate the ELF arch of the COPYed binaries, so
 # a base/binary mismatch builds fine and then dies at container boot with a
 # cryptic `exec format error` on the pre-start hook. The base is arch-tagged, but
@@ -77,19 +127,6 @@ EOF
   exit 1
 fi
 
-# Clobber guard: this tag is also what a real (possibly customized) instance
-# image uses. Refuse to silently overwrite one — a Ruby-less generic image
-# replacing a customized one boots a manager missing that instance's tooling.
-if [ "${LEVER_IMAGE_FORCE:-}" != "1" ] && docker image inspect "${TARGET}" >/dev/null 2>&1; then
-  cat >&2 <<EOF
-${TARGET} already exists. Building would overwrite it with the generic image.
-If that tag belongs to a customized instance image, DON'T — point manager.image at a
-different name, or extend the generic image (FROM lever-claude:${ARCH}). To overwrite anyway,
-re-run with LEVER_IMAGE_FORCE=1.
-EOF
-  exit 1
-fi
+docker build --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" --build-arg "LEVER_JAIL_ABI=${LEVER_JAIL_ABI:-}" -t "${NAME}:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
 
-docker build --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" --build-arg "LEVER_JAIL_ABI=${LEVER_JAIL_ABI:-}" -t "lever-claude:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
-
-echo "Built lever-claude:${ARCH} (+ ${TARGET})."
+echo "Built ${NAME}:${ARCH} (+ ${TARGET})."

@@ -100,7 +100,13 @@ lever-image-bins:
 # Requires scion-claude:<arch> in the local Docker store (see the build script).
 FRAMEWORK_IMAGE_CTX := image/lever-claude
 .PHONY: lever-image
-lever-image:
+lever-image: framework-image-stage
+	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+
+# Stage the in-jail binaries and the pre-start hook into image/lever-claude, the
+# build context of the lever layer both image flavors share.
+.PHONY: framework-image-stage
+framework-image-stage:
 	@mkdir -p $(FRAMEWORK_IMAGE_CTX)/bin $(FRAMEWORK_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
@@ -110,7 +116,54 @@ lever-image:
 		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
-	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+
+# The slim agent image, scionlocal/lever-claude-slim:<arch>: the same lever
+# layer as lever-image, FROM lever's slim base (image/scion-slim) instead of
+# scion-claude, so it needs no scion image build. The base gets sciontool and
+# scion cross-compiled here from the scion source the jail runs: set
+# SCION_VERSION to lever.yaml's scion.version, or SCION_SRC to the checkout
+# scion.source names. The default is the pin the shipped examples use.
+SCION_VERSION ?= e0f61f2d
+SCION_SRC ?=
+# What the slim base records as its scion version: the pin, or the commit of
+# the SCION_SRC checkout (never its path, which is the host's).
+SCION_IMAGE_VERSION = $(if $(SCION_SRC),$(shell git -C "$(SCION_SRC)" rev-parse --short=12 HEAD 2>/dev/null),$(SCION_VERSION))
+SLIM_BASE_CTX := image/scion-slim
+SCION_MODULE := github.com/GoogleCloudPlatform/scion
+.PHONY: lever-image-slim
+lever-image-slim: framework-image-stage slim-base-bins
+	LEVER_IMAGE_FLAVOR=slim LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" SCION_VERSION="$(SCION_IMAGE_VERSION)" bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+
+# Cross-compile sciontool and scion for the slim base. go mod download runs
+# outside this module so it cannot touch lever's go.mod or go.sum. Static
+# (CGO_ENABLED=0) binaries need nothing from the image's libc; no_embed_web is
+# how scion's own base builds them.
+.PHONY: slim-base-bins
+slim-base-bins:
+	@mkdir -p $(SLIM_BASE_CTX)/bin
+	@set -e; out="$(abspath $(SLIM_BASE_CTX))/bin"; src="$(SCION_SRC)"; \
+	if [ -z "$$src" ]; then \
+		src=$$(cd / && go mod download -json $(SCION_MODULE)@$(SCION_VERSION) | sed -n 's/.*"Dir": "\(.*\)".*/\1/p'); \
+	fi; \
+	[ -n "$$src" ] && [ -f "$$src/go.mod" ] || { echo "no scion source for $(SCION_MODULE)@$(SCION_VERSION) (set SCION_VERSION or SCION_SRC)" >&2; exit 1; }; \
+	echo "building sciontool and scion from $$src"; \
+	cd "$$src" && \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 go build -trimpath -tags no_embed_web \
+		-ldflags "-s -w -X $(SCION_MODULE)/cmd/sciontool/commands.Version=$(SCION_IMAGE_VERSION)" \
+		-o "$$out/sciontool" ./cmd/sciontool && \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 go build -trimpath -tags no_embed_web \
+		-ldflags "-s -w -X $(SCION_MODULE)/pkg/version.Version=$(SCION_IMAGE_VERSION)" \
+		-o "$$out/scion" ./cmd/scion
+	@file $(SLIM_BASE_CTX)/bin/sciontool $(SLIM_BASE_CTX)/bin/scion
+
+# Check a built agent image against what lever and scion need in it
+# (image/contract). IMAGE defaults to the slim image for LEVER_IMAGE_ARCH;
+# LEVER_IMAGE_MAX_MB fails an image above that size. Needs docker (or
+# CONTAINER_CLI=podman); runs the image with no network.
+IMAGE ?= scionlocal/lever-claude-slim:$(LEVER_IMAGE_ARCH)
+.PHONY: image-contract
+image-contract:
+	LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) bash image/contract/check-image.sh "$(IMAGE)"
 
 # Print the lever_version label value for this source, for an instance image
 # build that stages the binaries itself (`make lever-image-bins`) and so sets

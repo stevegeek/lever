@@ -11,6 +11,8 @@
 #
 # SCION_BASE selects the arch-tagged base (scion-claude:arm64 / :amd64) so the
 # two arches never clobber a shared :latest; build-lever-image.sh passes it.
+# The slim image (`make lever-image-slim`) builds this same layer FROM lever's
+# slim base instead, lever-scion-slim:<arch> (image/scion-slim/Dockerfile).
 ARG SCION_BASE=scion-claude:arm64
 FROM ${SCION_BASE}
 

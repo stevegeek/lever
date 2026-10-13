@@ -360,6 +360,30 @@ else
   bad "guest tmux core capture: $(printf '%s' "$core_out" | tr '\n' ' ')"
 fi
 
+# What it proves: internal/apply/guardlive_vm_test.go (TestReadOnlyGuardLiveInRealGuest).
+say "read-only guard live check (keep-id containers over the tree mount)"
+guardout="$WORK/guard.out"
+( cd "$REPO_ROOT" && LEVER_GUARD_VM_PREFIX="limactl,shell,$MACHINE" \
+    LEVER_GUARD_TREE_HOST="$INST/workspace" LEVER_GUARD_TREE_GUEST=/lever \
+    go test -tags integration -count=1 -timeout 10m -v \
+      -run '^TestReadOnlyGuardLiveInRealGuest$' ./internal/apply/ ) > "$guardout" 2>&1
+sed 's/^/      | /' "$guardout"
+# A test killed before its own cleanup leaves these behind, and later steps
+# mount the same workspace.
+rm -rf "$INST"/workspace/guard-e2e-*
+limactl shell "$MACHINE" -- sh -s <<'SH' 2>&1 | sed 's/^/      | leftover removed: /'
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+podman ps -a --format '{{.Names}}' | grep '^lever-guard-e2e-' | xargs -r podman rm -f -t 0
+podman images --format '{{.Repository}}' | grep '^localhost/lever-guard-e2e-' | xargs -r podman rmi -f
+SH
+guard_stages=$(sed -nE 's/^ *[A-Za-z0-9_]+_test\.go:[0-9]+: (.* on the host): (followed by the mount|reported) \(tree mount ([^)]*)\).*/\1: \2 (\3)/p' "$guardout" |
+  awk 'NR>1{printf "; "}{printf "%s",$0}')
+if grep -q '^--- PASS: TestReadOnlyGuardLiveInRealGuest' "$guardout"; then
+  ok "read-only guard: namespaces as required, real mounts held, nested namespace refused, moved directory reported; ${guard_stages:-no host-replace stage seen}"
+else
+  bad "read-only guard live check (output above)"
+fi
+
 # ================================================================================
 # 2. Guest port-forward suppression — the template hazard. A guest 0.0.0.0
 #    listener must NOT be reachable on the host loopback (stock lima would forward

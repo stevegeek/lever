@@ -1,8 +1,8 @@
 // Package skills holds the framework-authored SKILL.md files scaffolded into
-// instance trees by `lever init`. Content is embedded; the only templating is
-// the {{LEVER_VERSION}} frontmatter stamp (the version is passed IN by the
-// caller — this package must not import internal/cli) and both skills'
-// {{VERIFIED_CHAT}} on/off.
+// instance trees by `lever init`. The only templating is the
+// {{LEVER_VERSION}} frontmatter stamp, {{VERIFIED_CHAT}} and the on/off
+// blocks. The version is passed in: this package must not import
+// internal/cli.
 package skills
 
 import (
@@ -20,12 +20,12 @@ var operatorSrc string
 var agentSrc string
 
 // Operator returns the rendered manager skill (lever-operator).
-// verifiedChat is whether the instance has verified web chat on; it fills
-// {{VERIFIED_CHAT}}, so an agent image with no verify tool reads every user:
-// message as data only where verified chat (and so a contact) can exist.
-// agentMessages (remote.agent_messages) keeps the "agent-messages on" blocks,
-// else the "off" ones; files (remote.files) does the same for the "files"
-// blocks. Off renders the text as it was before those blocks.
+// verifiedChat fills {{VERIFIED_CHAT}}, so an agent image with no verify tool
+// reads every user: message as data only where verified chat (and so a
+// contact) can exist. agentMessages (remote.agent_messages) and files
+// (remote.files) keep their "on" or "off" blocks; with all off the render
+// carries no trace of those blocks, so no skill changes for an instance that
+// does not use them.
 func Operator(version string, verifiedChat, agentMessages, files bool) []byte {
 	return OperatorWith(version, verifiedChat, agentMessages, Files{On: files}, false)
 }
@@ -44,8 +44,8 @@ type Files struct {
 }
 
 // OperatorWith is Operator with the file directions. recycle (some worker
-// has workers[].recyclable) keeps the "recycle on" blocks, which teach
-// `lever-manager agent recycle`; off renders the text as it was before them.
+// has workers[].recyclable) keeps the "recycle on" blocks; off renders no
+// trace of them.
 func OperatorWith(version string, verifiedChat, agentMessages bool, f Files, recycle bool) []byte {
 	src := pickBlocks(pickFiles(pick(operatorSrc, agentMessages), f), recycle, recycleOn, recycleOff)
 	return renderChat(src, version, verifiedChat)
@@ -70,7 +70,7 @@ var (
 	filesOn  = block("files", "on")
 	filesOff = block("files", "off")
 	// One variant each: the "on" blocks do not exist, so on drops the "off"
-	// ones and leaves the text as it was.
+	// ones and leaves the rest unchanged.
 	uploadsOn  = block("uploads", "on")
 	uploadsOff = block("uploads", "off")
 	sharesOn   = block("shares", "on")
@@ -84,7 +84,6 @@ func block(name, state string) *regexp.Regexp {
 	return regexp.MustCompile(`(?ms)^<!-- lever:` + name + ` ` + state + ` -->\n(.*?)^<!-- /lever:` + name + ` ` + state + ` -->\n`)
 }
 
-// pick keeps the agent-messages variant on (or off).
 func pick(src string, on bool) string { return pickBlocks(src, on, amOn, amOff) }
 
 // pickBlocks keeps one variant of each block pair and drops the other
@@ -146,10 +145,9 @@ func ContentHash(b []byte) string {
 }
 
 // LeverVersion extracts the `lever-version:` frontmatter stamp from a
-// scaffolded (or adopted) SKILL.md. Empty when the stamp is absent — a
-// pre-frontmatter or hand-built file, which callers treat as an unknown
-// (stale) baseline. Only the frontmatter block (up to the second `---`) is
-// scanned, so body text mentioning the key cannot spoof it.
+// SKILL.md. Empty when absent (a hand-built file), which callers treat as a
+// stale baseline. Only the frontmatter block is scanned, so body text
+// mentioning the key cannot spoof it.
 func LeverVersion(b []byte) string {
 	inFrontmatter := false
 	for _, line := range strings.Split(string(b), "\n") {

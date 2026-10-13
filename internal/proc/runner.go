@@ -1,6 +1,5 @@
 // Package proc is the single seam to external commands (orb, docker, scion,
-// iptables). Real execution uses os/exec; tests inject FakeRunner so backend
-// logic is verifiable offline. Mirrors the Ruby ScionClient runner pattern.
+// iptables). Real execution uses os/exec; tests inject FakeRunner.
 package proc
 
 import (
@@ -28,11 +27,9 @@ type Runner interface {
 	// RunIn is like Run but executes in the given working directory. An empty dir
 	// uses the process cwd.
 	RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (Result, error)
-	// RunStdin is like Run but feeds stdin to the command. It is the argv-only
-	// way to stream host bytes into a command (a file into `<prefix> bash -c
-	// 'cat > …'`, an archive into `podman load`) — no host shell, no
-	// string-built pipeline, no quoting of the prefix. A nil stdin behaves
-	// like Run.
+	// RunStdin is like Run but feeds stdin to the command: the argv-only way
+	// to stream host bytes into a command, with no host shell or quoting of
+	// the prefix. A nil stdin behaves like Run.
 	RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error)
 }
 
@@ -49,12 +46,11 @@ type outputLimitKey struct{}
 const commandWaitDelay = 2 * time.Second
 
 // WithOutputLimit returns ctx carrying a cap of n bytes on each of a
-// command's stdout and stderr. RealRunner kills a command that writes more
-// and returns ErrOutputLimit with what it read up to the cap. It is for a
-// command whose output another party controls — an exec into an agent
-// container, where the agent can replace the program with one that streams
-// forever — so that output cannot grow the host process without bound. The
-// context travels through wrapping runners (the jail runner) unchanged.
+// command's stdout and stderr; RealRunner kills a command that writes more
+// and returns ErrOutputLimit. Use it for any command whose output another
+// party controls (an exec into an agent container, where the agent can
+// stream forever), so that output cannot grow the host process without
+// bound. The context passes through wrapping runners unchanged.
 func WithOutputLimit(ctx context.Context, n int) context.Context {
 	return context.WithValue(ctx, outputLimitKey{}, n)
 }
@@ -124,9 +120,8 @@ func (r RealRunner) run(ctx context.Context, dir string, stdin io.Reader, env ma
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
-		// The command itself succeeded; only a background child it left
-		// kept the pipes open past the delay. That is how it behaved before
-		// the delay existed (minus the wait), so it stays a success.
+		// The command itself succeeded; only a background child it left held
+		// the pipes past the delay, so it stays a success.
 		err = nil
 	}
 	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
@@ -186,8 +181,6 @@ func (r RealRunner) Run(ctx context.Context, env map[string]string, name string,
 func (r RealRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (Result, error) {
 	return r.run(ctx, "", stdin, env, name, args...)
 }
-
-// --- test double ---
 
 type Call struct {
 	Name  string

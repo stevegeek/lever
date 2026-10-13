@@ -37,8 +37,6 @@ type Tool struct {
 	writes []time.Time // send times within the last minute, oldest first
 }
 
-// takeWrite counts one comment, card create or card close against the
-// per-minute cap, or refuses it.
 func (t *Tool) takeWrite() error { return t.takeWrites(1) }
 
 // takeWrites counts n writes of one call against the cap together, or

@@ -1,7 +1,6 @@
-// Package chatfiles is the file exchange between a login of the chat page
-// and an agent (remote.files): where the files live in the agent's own
-// workspace, what their names may be, and the three host operations on
-// them — store an upload, hash a share, copy a recorded file for a download.
+// Package chatfiles is the file exchange between a chat-page login and an
+// agent: where the files live in the agent's workspace, which names are
+// allowed, and storing uploads, hashing shares and copying downloads.
 //
 // Everything here runs as the operator on the host, in a directory the
 // agent can write. So every path goes through fsutil's no-link walk, a new
@@ -37,8 +36,7 @@ const (
 	// ContainerWorkspace is where an agent's workspace is mounted in its
 	// container (scion.ContainerWorkspace; a test pins the two together).
 	ContainerWorkspace = "/workspace"
-	// maxTries bounds the names Store tries in one second.
-	maxTries = 10
+	maxTries           = 10
 )
 
 // DefaultExtensions are the file types remote.files accepts when the
@@ -58,9 +56,9 @@ var (
 	ErrBusy     = errors.New("busy")
 )
 
-// Key names one login in paths: a fixed hash, so no login text (an email)
-// appears in the agent's tree. Case-folded like every lever login record
-// (the hub lowercases emails).
+// Key names one login in paths as a hash, so no login text (an email)
+// appears in the agent's tree. It is case-folded because the hub lowercases
+// emails.
 func Key(login string) string {
 	h := sha256.Sum256([]byte("lever-files\x00" + strings.ToLower(login)))
 	return "k" + hex.EncodeToString(h[:12])
@@ -71,13 +69,10 @@ func Key(login string) string {
 func InDir(ws, login string) string  { return path.Join(ws, Dir, "in", Key(login)) }
 func OutDir(ws, login string) string { return path.Join(ws, Dir, "out", Key(login)) }
 
-// SanitizeName reduces a client- or agent-given name to a plain file name:
-// the part after the last / or \, every byte outside [A-Za-z0-9._ -] as
-// "_", no leading or trailing space, no trailing dot, a leading "." or "-"
-// as "_" (no hidden file, no "." or "..", nothing a shell reads as an
-// option), a "_" before a Windows device name (CON, NUL, COM1, …: the
-// operator may save the file on Windows), "file" when nothing is left, and
-// at most MaxNameLen bytes with the extension kept.
+// SanitizeName reduces a client- or agent-given name to a plain file name of
+// at most MaxNameLen bytes from [A-Za-z0-9._ -]: no directory, no hidden
+// file, no "." or "..", no leading "-" a shell reads as an option, and no
+// Windows device name (the operator may save the file on Windows).
 func SanitizeName(raw string) string {
 	if i := strings.LastIndexAny(raw, `/\`); i >= 0 {
 		raw = raw[i+1:]
@@ -139,12 +134,10 @@ type Stored struct {
 }
 
 // Store writes src, at most max bytes, as a new file in dirRel (0600;
-// missing directories 0700). The agent's container user is the host
-// owner (rootless podman keep-id, as for .lever/bootstrap.json), so it reads
-// them; no other user of the guest or the host does. A name
-// already taken (by an earlier upload, or by anything the agent put there,
-// a link included) is skipped for the next try. More than max bytes is
-// ErrTooLarge, and nothing is left behind.
+// missing directories 0700). Rootless podman keep-id makes the agent's
+// container user the host owner, so the agent reads it and no other user
+// does. A taken name, a link the agent planted included, is skipped, never
+// opened. More than max bytes is ErrTooLarge and leaves nothing behind.
 func Store(tree, dirRel, name string, src io.Reader, max int64, now time.Time) (Stored, error) {
 	var f *os.File
 	var rel string
@@ -196,7 +189,6 @@ func Hash(ctx context.Context, tree, rel string, max int64) (string, int64, erro
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
-// ctxReader reads r until ctx is done, then answers ctx's error.
 type ctxReader struct {
 	ctx context.Context
 	r   io.Reader
@@ -209,11 +201,10 @@ func (c ctxReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-// Stage copies src, at most max bytes, into a private temp file outside the
-// tree (0600, in os.TempDir, unlinked at once) while hashing it, and
-// returns it at offset 0 with its sha256 and size. An upload is staged
-// first, so nothing reaches the agent's tree before the whole body was read
-// and every limit checked. More than max bytes is ErrTooLarge.
+// Stage copies src, at most max bytes, into an unlinked 0600 temp file
+// outside the tree and returns it at offset 0 with its sha256 and size.
+// Uploads are staged so nothing reaches the agent's tree before the whole
+// body was read and every limit checked.
 func Stage(src io.Reader, max int64) (*os.File, string, int64, error) {
 	tmp, err := os.CreateTemp("", "lever-upload-*")
 	if err != nil {
@@ -259,12 +250,10 @@ func (h *hostWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// CopyVerified copies the file at rel into a private temp file (0600,
-// unlinked at once, so only the returned handle reaches it) while hashing
-// it, and returns the copy at offset 0 only when its sha256 is want. The
-// copy, not the tree file, is what a download sends: the agent can rewrite
-// the tree file at any moment, the copy it cannot reach. Bytes that hash
-// otherwise, or more than max, are ErrChanged.
+// CopyVerified copies the file at rel into an unlinked 0600 temp file and
+// returns it at offset 0 only when its sha256 is want, else ErrChanged.
+// A download sends the copy, never the tree file: the agent can rewrite the
+// tree file at any moment but cannot reach the copy.
 func CopyVerified(tree, rel, want string, max int64) (*os.File, int64, error) {
 	src, _, err := fsutil.OpenInTreeNoLinks(tree, rel, max)
 	if errors.Is(err, fsutil.ErrFileTooLarge) {
@@ -294,11 +283,11 @@ func CopyVerified(tree, rel, want string, max int64) (*os.File, int64, error) {
 	return tmp, n, nil
 }
 
-// ShareRel checks the path an agent names in share_file: its container
-// path (/workspace/…) or workspace-relative, and exactly
-// <Dir>/out/<Key(to)>/<name> with a name SanitizeName leaves as it is (no
-// subdirectory, no hidden file, no unclean path). It returns the
-// tree-relative path and the name, or ErrBadPath.
+// ShareRel checks the path an agent names in share_file (container path or
+// workspace-relative): it must be exactly <Dir>/out/<Key(to)>/<name> with a
+// name SanitizeName leaves unchanged. It returns the tree-relative path and
+// the name, or ErrBadPath.
+
 func ShareRel(ws, to, p string) (string, string, error) {
 	p = strings.TrimPrefix(p, ContainerWorkspace+"/")
 	if p == "" || strings.ContainsAny(p, "\\\x00") || path.Clean(p) != p || !filepath.IsLocal(filepath.FromSlash(p)) {

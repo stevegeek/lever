@@ -10,8 +10,7 @@ import (
 )
 
 // Tracer receives one record per external command run through a Traced
-// runner (LEVER_TRACE, lever#184). head is TraceHead(name, args): never the
-// whole argv.
+// runner (LEVER_TRACE). head is TraceHead(name, args): never the whole argv.
 type Tracer interface {
 	Command(head string, d time.Duration, code int, err error)
 }
@@ -85,7 +84,6 @@ func exitCode(res Result, err error) int {
 // `-e KEY=VALUE`, a bash -c script).
 var traceWord = regexp.MustCompile(`^[A-Za-z0-9._/:@+-]{1,64}$`)
 
-// traceMaxWords bounds a head.
 const traceMaxWords = 5
 
 // secretish names a word that is never shown even when it looks plain.

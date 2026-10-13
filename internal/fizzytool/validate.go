@@ -63,13 +63,11 @@ func ValidTitle(s string) error {
 	return nil
 }
 
-// attachmentMarkers are the Action Text markup a body could use to make an
-// attachment: the CLI turns markdown into HTML but passes raw HTML through,
-// and the server turns an <action-text-attachment sgid=...> (or a Trix
-// <figure data-trix-attachment=...>) into a real attachment — a mention
-// notifies an account user as the token owner, and a seen sgid re-embeds
-// an attachment. Other raw HTML gives nothing markdown does not, so it is
-// left alone.
+// attachmentMarkers are the Action Text markup that makes an attachment: the
+// CLI passes raw HTML through, and the server turns an
+// <action-text-attachment sgid=...> or a Trix <figure data-trix-attachment=...>
+// into a real attachment (a mention notifies a user as the token owner; a
+// seen sgid re-embeds an attachment). Other raw HTML is left alone.
 var attachmentMarkers = []string{"action-text-attachment", "trix-attachment"}
 
 func ValidText(s string) error {

@@ -1,8 +1,7 @@
 // Package mcp holds the JSON-RPC / MCP plumbing shared by the broker gateway,
-// the agent's capability MCP server and the captool SDK: message parsing, the
-// initialize / tools/list / tools/call dispatch skeleton, result and error
-// framing, and the security-relevant tools/call projection that the broker
-// and captool must agree on byte-for-byte.
+// the agent's capability MCP server and the captool SDK, including the
+// tools/call projection that the broker and captool must agree on
+// byte-for-byte.
 package mcp
 
 import (
@@ -13,9 +12,8 @@ import (
 	"net/http"
 )
 
-// MaxBodyBytes caps a JSON-RPC request body at 1 MiB. MCP handlers are driven
-// by a potentially-malicious LLM, so reads are bounded to prevent memory
-// exhaustion while leaving headroom for tool arguments.
+// MaxBodyBytes caps a JSON-RPC request body: the caller is a possibly
+// hostile LLM.
 const MaxBodyBytes = 1 << 20
 
 // ProtocolVersion is the MCP protocol version every lever server advertises.
@@ -24,7 +22,7 @@ const ProtocolVersion = "2024-11-05"
 // CapabilityArg is the tools/call argument that carries the capability token.
 const CapabilityArg = "_capability"
 
-// Standard JSON-RPC error codes used across lever's MCP servers.
+// JSON-RPC error codes.
 const (
 	CodeParseError     = -32700
 	CodeMethodNotFound = -32601
@@ -66,21 +64,17 @@ func CapabilityProperty() map[string]any {
 	return map[string]any{"type": "string", "description": "lever capability token authorizing this call"}
 }
 
-// Service is what a server plugs into Dispatch: its advertised name, its
-// tools/list schemas, and its tools/call implementation. Call receives the
-// request id and the whole decoded message and returns a framed reply.
+// Service is what a server plugs into Dispatch. Call returns a framed reply.
 type Service struct {
 	Name string
-	// Version is reported in the initialize reply's serverInfo; empty
-	// falls back to "dev".
+	// Version is reported in serverInfo; empty means "dev".
 	Version string
 	Tools   func() []any
 	Call    func(ctx context.Context, id any, msg map[string]any) []byte
 }
 
-// Dispatch runs one JSON-RPC message through the standard MCP skeleton:
-// initialize and tools/list are answered here; tools/call goes to svc.Call;
-// anything else is "method not found". It always returns a framed reply.
+// Dispatch answers initialize and tools/list, hands tools/call to svc.Call,
+// and always returns a framed reply.
 func Dispatch(ctx context.Context, body []byte, svc Service) []byte {
 	method, msg, ok := Parse(body)
 	if !ok {
@@ -103,9 +97,7 @@ func Dispatch(ctx context.Context, body []byte, svc Service) []byte {
 	}
 }
 
-// ServeHTTP is the HTTP adapter over a transport-free handler: it reads a body
-// bounded by MaxBodyBytes, runs handle with the request context, and writes
-// the framed reply as application/json.
+// ServeHTTP runs handle on a request body bounded by MaxBodyBytes.
 func ServeHTTP(w http.ResponseWriter, r *http.Request, handle func(ctx context.Context, body []byte) []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
@@ -116,15 +108,14 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request, handle func(ctx context.C
 	_, _ = w.Write(handle(r.Context(), body))
 }
 
-// ToolsCall extracts a tools/call's tool name, canonical string arguments
-// (excluding _capability), and the _capability token. ok is false if the shape
-// is wrong or any argument value cannot be JSON-encoded.
+// ToolsCall extracts a tools/call's tool name, string arguments (without
+// _capability) and the _capability token. ok is false if the shape is wrong
+// or any argument value cannot be JSON-encoded.
 //
-// String values are passed through raw. Non-string values are canonical-JSON-
-// encoded so the checked projection is faithful to the forwarded value. This
-// closes the bypass where `{"$ne":null}` was silently coerced to "" and could
-// satisfy a constraint of table="". The broker gateway and captool both verify
-// against this one projection, so they cannot drift apart.
+// Non-string values are JSON-encoded, never coerced to "", so the checked
+// projection is faithful to the forwarded value: `{"$ne":null}` must not
+// satisfy a constraint of table="". The broker gateway and captool both
+// verify against this one projection so they cannot drift apart.
 func ToolsCall(msg map[string]any) (name string, args map[string]string, capability string, ok bool) {
 	params, ok := msg["params"].(map[string]any)
 	if !ok {
@@ -135,7 +126,7 @@ func ToolsCall(msg map[string]any) (name string, args map[string]string, capabil
 	args = map[string]string{}
 	for k, v := range rawArgs {
 		if k == CapabilityArg {
-			capability, _ = v.(string) // non-string _capability -> "" -> denied downstream
+			capability, _ = v.(string) // a non-string token becomes "" and is denied
 			continue
 		}
 		if s, ok := v.(string); ok {
@@ -143,8 +134,6 @@ func ToolsCall(msg map[string]any) (name string, args map[string]string, capabil
 		} else {
 			b, err := json.Marshal(v)
 			if err != nil {
-				// unencodable value: project to something that cannot
-				// masquerade as another value; fail closed at verify.
 				return "", nil, "", false
 			}
 			args[k] = string(b)
@@ -156,18 +145,16 @@ func ToolsCall(msg map[string]any) (name string, args map[string]string, capabil
 	return name, args, capability, true
 }
 
-// MapConstraintParams builds the constraint-keyed parameter set the token
-// layer verifies against, from the request's projected arguments. Arguments
-// are identity-mapped (constraint key == arg name); caveatParam entries add
-// renamed bindings (constraint key -> the value of a differently-named arg). A
-// renamed arg that is absent produces no binding, so a token constraint on that
-// key then fails closed at verification.
+// MapConstraintParams builds the constraint-keyed parameters the token layer
+// verifies: each argument under its own name, plus caveatParam's renamed
+// bindings (constraint key -> argument name). An absent renamed argument
+// produces no binding, so a constraint on that key fails closed.
 func MapConstraintParams(caveatParam, args map[string]string) map[string]string {
 	out := make(map[string]string, len(args)+len(caveatParam))
-	for k, v := range args { // identity mapping (constraint key == arg name)
+	for k, v := range args {
 		out[k] = v
 	}
-	for ck, argName := range caveatParam { // renamed bindings
+	for ck, argName := range caveatParam {
 		if v, ok := args[argName]; ok {
 			out[ck] = v
 		}
@@ -187,13 +174,13 @@ func StripCapability(msg map[string]any) []byte {
 	return out
 }
 
-// AugmentToolsListSchema injects a `_capability` string property into every
-// advertised tool's inputSchema.properties, so the MCP client includes the
-// token on calls.
+// AugmentToolsListSchema adds the _capability property to every advertised
+// tool's inputSchema, so the MCP client includes the token on calls.
 func AugmentToolsListSchema(respBody []byte) []byte {
 	var msg map[string]any
 	if err := json.Unmarshal(respBody, &msg); err != nil {
-		return respBody // pass through unparseable bodies unchanged
+		return respBody
+
 	}
 	result, ok := msg["result"].(map[string]any)
 	if !ok {

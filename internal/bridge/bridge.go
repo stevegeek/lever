@@ -1,8 +1,7 @@
-// Package bridge is the poll-based notification bridge: it consumes Scion agent
-// events via an Inboxer and appends each NEW event (by id) as one JSON line to
-// an events file. The Lever manager arms a Monitor on that file, so it learns of
-// agent events without polling itself. The watched file is the fixed interface;
-// poll-vs-SSE is an internal detail (v1 polls — simplest, proven).
+// Package bridge is the poll-based notification bridge: it appends each new
+// Scion agent event (by id) as one JSON line to an events file, which the Lever
+// manager watches with a Monitor. The file is the fixed interface; polling is
+// an internal detail.
 package bridge
 
 import (
@@ -16,8 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// Inboxer is the slice of an inbox source the bridge needs (so it's testable
-// with a fake).
+// Inboxer is the slice of an inbox source the bridge needs.
 type Inboxer interface {
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
@@ -32,8 +30,8 @@ func New(in Inboxer, eventsFile string) *Bridge {
 	return &Bridge{in: in, file: eventsFile, seen: map[string]bool{}}
 }
 
-// PollOnce fetches the full inbox, appends every event whose id is unseen as one
-// JSON line, marks them seen, and returns the new events.
+// PollOnce appends every event with an unseen id to the events file and
+// returns the new events.
 func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 	events, err := b.in.Inbox(ctx, false, "")
 	if err != nil {
@@ -48,8 +46,7 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 	if len(fresh) == 0 {
 		return nil, nil
 	}
-	// Owner-only, like every other state file: the events carry message
-	// content.
+	// Owner-only: the events carry message content.
 	if err := os.MkdirAll(filepath.Dir(b.file), 0o700); err != nil {
 		return nil, err
 	}
@@ -59,8 +56,8 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 	}
 	defer f.Close()
 	for _, e := range fresh {
-		// The manager Monitors this file: each line's message is marked as the
-		// worker's own text (idempotent over what the broker already marked).
+		// Each line's message is marked as the worker's own text (idempotent over
+		// what the broker already marked).
 		line, err := json.Marshal(scion.WorkerReported(e))
 		if err != nil {
 			return nil, err
@@ -73,7 +70,7 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 	return fresh, nil
 }
 
-// Run polls forever at the given interval (thin loop, not unit-tested).
+// Run polls forever at the given interval.
 func (b *Bridge) Run(ctx context.Context, interval time.Duration) error {
 	return retry.Until(ctx, 0, interval, func() (bool, error) {
 		_, err := b.PollOnce(ctx)

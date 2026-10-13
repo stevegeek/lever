@@ -67,6 +67,12 @@ func (sysFS) write(fd int, b []byte) (int, error) {
 	return retryEINTR(func() (int, error) { return unix.Write(fd, b) })
 }
 
+func (sysFS) writeAt(fd int, b []byte, off int64) (int, error) {
+	return retryEINTR(func() (int, error) { return unix.Pwrite(fd, b, off) })
+}
+
+func (sysFS) truncate(fd int, size int64) error { return unix.Ftruncate(fd, size) }
+
 func (sysFS) unlinkat(dirfd int, name string) error { return unix.Unlinkat(dirfd, name, 0) }
 
 func (sysFS) symlinkat(target string, dirfd int, name string) error {

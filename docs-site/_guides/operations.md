@@ -889,7 +889,8 @@ directory or the store. `--path` restores those subtrees (and their parent direc
   0700. The report lists every mode bit it did not apply.
 - Names that were hard links of one file in the snapshot are restored as hard links of one file,
   written once, so a file with a thousand names takes its size once on your disk, not a thousand
-  times.
+  times. Where the target refuses a hard link, the name gets its own copy. Runs of zeros are
+  written as holes, as the store keeps them.
 - **Links** (`--links`, default `inside`): only links whose target cannot leave the restored
   tree are created: a relative target of some leading `..` (no more than the link's depth below
   `<dir>`) followed by plain names. `all` creates every link as recorded (lever never follows

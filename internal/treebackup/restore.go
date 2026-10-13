@@ -160,6 +160,8 @@ type restoreFS interface {
 	openDir(dirfd int, name string) (int, error)
 	createFile(dirfd int, name string) (int, error)
 	write(fd int, b []byte) (int, error)
+	writeAt(fd int, b []byte, off int64) (int, error)
+	truncate(fd int, size int64) error
 	unlinkat(dirfd int, name string) error
 	symlinkat(target string, dirfd int, name string) error
 	linkat(olddirfd int, oldpath string, newdirfd int, newname string) error
@@ -433,7 +435,7 @@ func (r *restorer) preflight(ctx context.Context) (int64, error) {
 				}
 				counted[k] = true
 			}
-			need = satAdd(need, max(e.Size, 0))
+			need = satAdd(need, r.diskOf(e))
 		}
 	}
 	for i, ok := range found {
@@ -442,6 +444,23 @@ func (r *restorer) preflight(ctx context.Context) (int64, error) {
 		}
 	}
 	return need, nil
+}
+
+// blobDisk is what a BlobSource that knows how much disk a blob takes
+// implements: a restore writes the same holes, so the pre-flight counts
+// that rather than the apparent size.
+type blobDisk interface {
+	BlobDisk(sum string) (int64, bool)
+}
+
+func (r *restorer) diskOf(e *Entry) int64 {
+	size := max(e.Size, 0)
+	if bd, ok := r.o.Blobs.(blobDisk); ok {
+		if d, ok := bd.BlobDisk(e.SHA256); ok {
+			return min(size, d)
+		}
+	}
+	return size
 }
 
 func (r *restorer) selected(p []byte) bool {
@@ -605,7 +624,10 @@ func (r *restorer) restoreFile(ctx context.Context, top *frame, e *Entry) error 
 	disk := r.diskName(e)
 	key, linked := hardLinkKey(e)
 	if first, ok := r.written[key]; linked && ok {
-		return r.restoreHardLink(top, e, disk, first)
+		done, err := r.restoreHardLink(top, e, disk, first)
+		if done || err != nil {
+			return err
+		}
 	}
 	fd, err := r.fs.createFile(top.fd, disk)
 	if err != nil {
@@ -652,21 +674,27 @@ func (r *restorer) restoreFile(ctx context.Context, top *frame, e *Entry) error 
 
 // restoreHardLink gives a file already written another name. The mode and
 // times were set through the first name: they are the inode's.
-func (r *restorer) restoreHardLink(top *frame, e *Entry, disk string, first writtenFile) error {
+// A target that refuses the link (no hard links, too many, a path too
+// long) gets a copy instead: done is false and nothing was created.
+func (r *restorer) restoreHardLink(top *frame, e *Entry, disk string, first writtenFile) (done bool, err error) {
 	if err := r.fs.linkat(r.rootfd, first.rel, top.fd, disk); err != nil {
-		return r.createFailed(top, e, disk, err)
+		switch classifyRestore(err) {
+		case errClassExist, errClassFatal:
+			return true, r.createFailed(top, e, disk, err)
+		}
+		return false, nil
 	}
 	addName(top, disk, e.Path)
 	st, err := r.fs.lstatat(top.fd, disk)
 	if err != nil {
-		return fmt.Errorf("the new link %s: %w", Q(e.Path), err)
+		return true, fmt.Errorf("the new link %s: %w", Q(e.Path), err)
 	}
 	if st.id != first.id {
-		return fmt.Errorf("the new link %s: %s was replaced during the restore", Q(e.Path), Q([]byte(first.rel)))
+		return true, fmt.Errorf("the new link %s: %s was replaced during the restore", Q(e.Path), Q([]byte(first.rel)))
 	}
 	r.noteNeutralised(e, disk)
 	r.rep.Files++
-	return nil
+	return true, nil
 }
 
 // diskRel is the on-disk path, from the restore root, of the entry at p
@@ -696,13 +724,16 @@ func (r *restorer) fill(ctx context.Context, fd int, e *Entry) (string, error) {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		k, rerr := in.Read(buf)
+		k, rerr := io.ReadFull(in, buf)
 		if k > 0 {
 			h.Write(buf[:k])
-			n += int64(k)
-			if err := r.writeAll(fd, buf[:k]); err != nil {
+			if err := r.writeSparse(fd, buf[:k], n); err != nil {
 				return "", err
 			}
+			n += int64(k)
+		}
+		if rerr == io.ErrUnexpectedEOF {
+			rerr = io.EOF
 		}
 		if rerr == io.EOF {
 			break
@@ -714,22 +745,35 @@ func (r *restorer) fill(ctx context.Context, fd int, e *Entry) (string, error) {
 	if n != e.Size {
 		return fmt.Sprintf("blob %s holds %d bytes, the snapshot recorded %d", e.SHA256, n, e.Size), nil
 	}
+	if err := r.fs.truncate(fd, n); err != nil {
+		return "", err
+	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != e.SHA256 {
 		return fmt.Sprintf("blob %s hashes to %s", e.SHA256, got), nil
 	}
 	return "", nil
 }
 
-func (r *restorer) writeAll(fd int, b []byte) error {
+// writeSparse writes b at off, leaving every aligned 4 KiB block of zeros
+// as a hole, as the store does: a sparse file the agent made for nothing
+// must not take its full size on the operator's disk. fill sets the final
+// size.
+func (r *restorer) writeSparse(fd int, b []byte, off int64) error {
 	for len(b) > 0 {
-		n, err := r.fs.write(fd, b)
-		if err != nil {
-			return err
+		k := min(len(b), holeBlock-int(off%holeBlock))
+		if k < holeBlock || !bytes.Equal(b[:k], zeroBlock[:]) {
+			for p := b[:k]; len(p) > 0; {
+				n, err := r.fs.writeAt(fd, p, off+int64(k-len(p)))
+				if err != nil {
+					return err
+				}
+				if n <= 0 {
+					return io.ErrShortWrite
+				}
+				p = p[n:]
+			}
 		}
-		if n <= 0 {
-			return io.ErrShortWrite
-		}
-		b = b[n:]
+		b, off = b[k:], off+int64(k)
 	}
 	return nil
 }

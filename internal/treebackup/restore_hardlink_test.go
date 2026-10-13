@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/stevegeek/lever/internal/fsutil"
 )
 
 // countFS counts the bytes a restore writes and reports a small target
@@ -19,8 +21,8 @@ type countFS struct {
 	free    int64
 }
 
-func (c countFS) write(fd int, b []byte) (int, error) {
-	n, err := c.restoreFS.write(fd, b)
+func (c countFS) writeAt(fd int, b []byte, off int64) (int, error) {
+	n, err := c.restoreFS.writeAt(fd, b, off)
 	*c.written += int64(n)
 	return n, err
 }
@@ -71,5 +73,55 @@ func TestRestoreHardLinksAreWrittenOnce(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(target, "d/link199")); got != content {
 		t.Fatal("content")
+	}
+}
+
+// A sparse file comes back sparse, and the pre-flight counts the disk its
+// blob takes, not its apparent size.
+func TestRestoreSparseFileStaysSparse(t *testing.T) {
+	e := newSnapEnv(t)
+	const size = 64 << 20
+	f, err := os.Create(filepath.Join(e.tree, "sparse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Truncate(size)
+	f.WriteAt([]byte("x"), size/2)
+	f.Close()
+	h := e.snap(t)
+	s := e.store(t)
+	var written int64
+	restoreFSWrap = func(fs restoreFS) restoreFS { return countFS{restoreFS: fs, written: &written, free: 1 << 20} }
+	t.Cleanup(func() { restoreFSWrap = nil })
+	target := filepath.Join(t.TempDir(), "out")
+	o := RestoreOptions{Target: target, Manifest: s.Open(h.ID), Blobs: s, InsideFD: fsutil.InsideByIdentityFD}
+	rep := restore(t, o)
+	if !rep.OK() || written > 64<<10 {
+		t.Fatalf("wrote %d bytes; report %+v", written, rep)
+	}
+	fi, err := os.Stat(filepath.Join(target, "sparse"))
+	if err != nil || fi.Size() != size || fi.Sys().(*syscall.Stat_t).Blocks*512 > 1<<20 {
+		t.Fatalf("restored %v, %v", fi, err)
+	}
+}
+
+// noLinkFS is a target that refuses hard links.
+type noLinkFS struct{ restoreFS }
+
+func (noLinkFS) linkat(int, string, int, string) error { return syscall.EPERM }
+
+func TestRestoreHardLinksBecomeCopiesWhereLinksFail(t *testing.T) {
+	tr := newRTree()
+	for _, p := range []string{"a", "b"} {
+		tr.file(p, "same", 0o644)
+		e := &tr.entries[len(tr.entries)-1]
+		e.Dev, e.Ino, e.Nlink = 7, 42, 2
+	}
+	restoreFSWrap = func(fs restoreFS) restoreFS { return noLinkFS{fs} }
+	t.Cleanup(func() { restoreFSWrap = nil })
+	target := filepath.Join(t.TempDir(), "out")
+	rep := restore(t, tr.opts(target))
+	if !rep.OK() || rep.Files != 2 || readFile(t, filepath.Join(target, "b")) != "same" {
+		t.Fatalf("report %+v", rep)
 	}
 }

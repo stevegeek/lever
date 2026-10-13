@@ -315,7 +315,9 @@ if limactl shell "$MACHINE" pgrep -x dockerd >/dev/null 2>&1; then bad "a docker
 # lever#201: the guest keeps the core of a crashed process named "tmux: server"
 # (and drops other dumps), root only, even with the crashing process's core
 # size limit at 0. Two python processes stand in: one renames itself and
-# segfaults, a decoy segfaults under its own name.
+# segfaults, a decoy segfaults under its own name. A second "tmux: server"
+# crash right after is dropped (one kept core a minute), and the kernel runs
+# one core handler at a time (core_pipe_limit=1).
 core_capture_in_guest() {
   limactl shell "$MACHINE" -- sh -s <<'SH'
 set -u
@@ -330,8 +332,12 @@ while [ "$i" -lt 20 ]; do
   [ "$n" -ge 1 ] && break
   sleep 0.5; i=$((i+1))
 done
+python3 -c 'import ctypes, os, signal; ctypes.CDLL(None).prctl(15, b"tmux: server", 0, 0, 0); os.kill(os.getpid(), signal.SIGSEGV)' 2>/dev/null
+sleep 1
 echo "pattern=$(cat /proc/sys/kernel/core_pattern)"
+echo "pipelimit=$(cat /proc/sys/kernel/core_pipe_limit)"
 echo "cores=$n"
+echo "after=$(sudo sh -c "ls $d" 2>/dev/null | grep -c '^core\.tmux\.[0-9]*\.[0-9]*$')"
 echo "dir=$(sudo stat -c '%a %U' $d)"
 echo "file=$(sudo sh -c "stat -c '%a %U %s' $d/core.tmux.*" 2>/dev/null | head -1)"
 sudo sh -c "rm -f $d/core.tmux.*"
@@ -339,10 +345,12 @@ SH
 }
 core_out=$(core_capture_in_guest 2>&1)
 if printf '%s\n' "$core_out" | grep -q '^pattern=|/usr/local/libexec/lever-core-handler %P %t %e$' &&
+  printf '%s\n' "$core_out" | grep -q '^pipelimit=1$' &&
   printf '%s\n' "$core_out" | grep -q '^cores=1$' &&
+  printf '%s\n' "$core_out" | grep -q '^after=1$' &&
   printf '%s\n' "$core_out" | grep -q '^dir=700 root$' &&
   printf '%s\n' "$core_out" | grep -Eq '^file=600 root [1-9][0-9]*$'; then
-  ok "the guest keeps a crashed tmux server's core, root only, and drops the decoy's"
+  ok "the guest keeps a crashed tmux server's core, root only, drops the decoy's and a second within the minute"
 else
   bad "guest tmux core capture: $(printf '%s' "$core_out" | tr '\n' ' ')"
 fi

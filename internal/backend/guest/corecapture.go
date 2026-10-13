@@ -31,8 +31,16 @@ import (
 // compared, never put in a path; the pid and time must be digits. An agent
 // can crash its own processes named "tmux: server" at will, so the handler
 // bounds the disk it can fill: one dump at a time (a non-blocking lock; a
-// dump that finds it held is dropped), each cut at CoreMaxBytes, and at
-// most CoreKeep cores (the oldest is removed first). The same freedom lets
+// dump that finds it held is dropped), each cut at CoreMaxBytes, at most
+// CoreKeep cores (the oldest is removed first), and none while the newest
+// kept core is younger than CoreMinGap (a crash loop keeps one core a
+// minute, not one per crash). It also bounds what the dumps cost: the
+// kernel runs the handler as root in the guest's root cgroup, outside the
+// container's limits, so kernel.core_pipe_limit (CorePipeLimit) caps how
+// many handlers run at once; the kernel skips a dump past it. With a
+// non-zero limit the kernel also waits for the handler before it reaps the
+// crashed process, which the handler's bounded read keeps short. The same
+// freedom lets
 // it drop or push out a real core with fakes: a kept core is untrusted
 // diagnostic material, not proof. The handler writes only into a real,
 // root-owned directory (no symlink).
@@ -53,9 +61,14 @@ const (
 )
 
 // CoreMaxBytes caps one kept core; CoreKeep is how many are kept.
+// CoreMinGap is the least time between two kept cores, in seconds: a dump
+// while the newest kept core is younger is dropped. CorePipeLimit is
+// kernel.core_pipe_limit, how many piped dumps the kernel runs at once.
 const (
-	CoreMaxBytes = 256 << 20
-	CoreKeep     = 2
+	CoreMaxBytes  = 256 << 20
+	CoreKeep      = 2
+	CoreMinGap    = 60
+	CorePipeLimit = 1
 )
 
 // corePaths are the paths the core-capture script writes; a test points
@@ -78,7 +91,7 @@ func corePattern(handler string) string {
 // dump in the guest, with the core on its standard input. dir holds the
 // kept cores and must be a real directory owned by ownerUID (root, 0, in
 // the guest).
-func coreHandlerScript(dir string, ownerUID, maxBytes, keep int) string {
+func coreHandlerScript(dir string, ownerUID, maxBytes, keep, minGap int) string {
 	q := shellSingleQuote
 	return `#!/bin/sh
 # Written by lever (tmux server cores, lever#201). Do not edit: lever apply rewrites it.
@@ -89,6 +102,7 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 dir=` + q(dir) + `
 max=` + strconv.Itoa(maxBytes) + `
 keep=` + strconv.Itoa(keep) + `
+gap=` + strconv.Itoa(minGap) + `
 [ $# -ge 3 ] || exit 0
 pid=$1
 t=$2
@@ -106,6 +120,14 @@ chmod 0700 "$dir" || exit 0
 exec 9>>"$dir/.lock" || exit 0
 flock -n 9 || exit 0
 rm -f "$dir"/*.part
+# At most one kept core per $gap seconds: an agent that crashes its tmux server in a loop keeps
+# one core a minute. A core dated in the future (the clock went back) does not hold dumps off.
+now=$(date +%s) || exit 0
+for f in $(ls -1 "$dir" | grep -E '^core\.tmux\.[0-9]+\.[0-9]+$'); do
+  m=$(stat -c %Y "$dir/$f") || exit 0
+  age=$((now - m))
+  [ "$age" -lt 0 ] || [ "$age" -ge "$gap" ] || exit 0
+done
 ls -1 "$dir" | grep -E '^core\.tmux\.[0-9]+\.[0-9]+$' | sort -t . -k 3,3nr -k 4,4nr | tail -n +"$keep" | while read -r f; do
   rm -f "$dir/$f"
 done
@@ -130,7 +152,7 @@ func coreCaptureScript(p corePaths) string {
 	b.WriteString(convergeShell)
 	// The handler is written executable before it is moved into place: the
 	// live core_pattern may already name it.
-	fmt.Fprintf(&b, "h=%s\nc=%s\n", q(p.Handler), q(strings.TrimSuffix(coreHandlerScript(p.Dir, p.OwnerUID, CoreMaxBytes, CoreKeep), "\n")))
+	fmt.Fprintf(&b, "h=%s\nc=%s\n", q(p.Handler), q(strings.TrimSuffix(coreHandlerScript(p.Dir, p.OwnerUID, CoreMaxBytes, CoreKeep, CoreMinGap), "\n")))
 	b.WriteString(`if ! [ -f "$h" ] || [ "$(cat "$h")" != "$c" ]; then
   mkdir -p "$(dirname "$h")" || exit 1
   printf '%s\n' "$c" > "$h.lever-tmp" || exit 1
@@ -146,6 +168,10 @@ fi
   systemctl mask apport.service >/dev/null 2>&1 || echo %s
 fi
 `, q("warn: could not disable apport; it sets its own core_pattern at boot, until lever apply or up sets lever's again"))
+	// The pipe limit first: core_pattern then pipes dumps with the bound
+	// already in place.
+	lim := "kernel.core_pipe_limit=" + strconv.Itoa(CorePipeLimit)
+	fmt.Fprintf(&b, "sysctl -q -w %s >/dev/null 2>&1 || echo %s\n", q(lim), q("warn: could not set kernel.core_pipe_limit in the running guest kernel; crashing processes can run any number of core handlers at once"))
 	kv := "kernel.core_pattern=" + corePattern(p.Handler)
 	fmt.Fprintf(&b, "sysctl -q -w %s >/dev/null 2>&1 || echo %s\n", q(kv), q("warn: could not set kernel.core_pattern in the running guest kernel; a tmux server crash leaves no core"))
 	return b.String()
@@ -154,5 +180,7 @@ fi
 func coreSysctlFile(handler string) string {
 	return "# Written by lever (tmux server cores, lever#201). Do not edit: lever apply rewrites it.\n" +
 		"# Pipe core dumps to lever's handler, which keeps a crashed tmux server's core in " + CoreDir + ".\n" +
+		"# Run at most " + strconv.Itoa(CorePipeLimit) + " handler at a time; the kernel skips a dump past it.\n" +
+		"kernel.core_pipe_limit = " + strconv.Itoa(CorePipeLimit) + "\n" +
 		"kernel.core_pattern = " + corePattern(handler)
 }

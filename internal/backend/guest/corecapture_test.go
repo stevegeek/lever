@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newCoreSandbox(t *testing.T) (corePaths, string, string) {
@@ -83,6 +84,14 @@ func TestCoreCaptureScriptWritesHandlerAndPattern(t *testing.T) {
 	if !strings.Contains(calls, "sysctl -q -w kernel.core_pattern=|"+p.Handler+" %P %t %e") {
 		t.Fatalf("core_pattern not set live: %s", calls)
 	}
+	// One handler at a time, set before the pattern pipes to it.
+	if !strings.Contains(string(sys), "kernel.core_pipe_limit = 1\n") {
+		t.Fatalf("sysctl file lacks the pipe limit:\n%s", sys)
+	}
+	lim := strings.Index(calls, "sysctl -q -w kernel.core_pipe_limit=1")
+	if lim < 0 || lim > strings.Index(calls, "kernel.core_pattern=") {
+		t.Fatalf("core_pipe_limit not set live before core_pattern: %s", calls)
+	}
 	if !strings.Contains(calls, "systemctl stop apport.service") || !strings.Contains(calls, "systemctl mask apport.service") {
 		t.Fatalf("apport not stopped and masked: %s", calls)
 	}
@@ -98,11 +107,17 @@ func TestCoreCaptureScriptWritesHandlerAndPattern(t *testing.T) {
 // runHandler runs the handler as the kernel would, with core on stdin.
 func runHandler(t *testing.T, dir string, maxBytes, keep int, core []byte, args ...string) {
 	t.Helper()
+	runHandlerGap(t, dir, maxBytes, keep, 0, core, args...)
+}
+
+// runHandlerGap is runHandler with the least time between kept cores.
+func runHandlerGap(t *testing.T, dir string, maxBytes, keep, gap int, core []byte, args ...string) {
+	t.Helper()
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("flock not available")
 	}
 	h := filepath.Join(t.TempDir(), "handler")
-	if err := os.WriteFile(h, []byte(coreHandlerScript(dir, os.Getuid(), maxBytes, keep)), 0o755); err != nil {
+	if err := os.WriteFile(h, []byte(coreHandlerScript(dir, os.Getuid(), maxBytes, keep, gap)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(h, args...)
@@ -269,8 +284,42 @@ func TestCrashRecoveryConvergesCoreCapture(t *testing.T) {
 
 // In the guest the core directory must be root's.
 func TestCoreHandlerInTheGuestWantsRoot(t *testing.T) {
-	h := coreHandlerScript(realCorePaths.Dir, realCorePaths.OwnerUID, CoreMaxBytes, CoreKeep)
+	h := coreHandlerScript(realCorePaths.Dir, realCorePaths.OwnerUID, CoreMaxBytes, CoreKeep, CoreMinGap)
 	if !strings.Contains(h, `[ "$(stat -c %u "$dir")" = 0 ]`) || !strings.Contains(h, "dir='"+CoreDir+"'") {
 		t.Fatalf("guest handler does not require a root-owned %s:\n%s", CoreDir, h)
+	}
+}
+
+// A crash loop keeps one core per gap: a dump while the newest kept core is
+// younger is dropped, and nothing is pruned for it; once the newest is
+// older (or dated in the future) the next dump is kept.
+func TestCoreHandlerRateLimits(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "cores")
+	runHandlerGap(t, dir, 1<<20, 2, 60, []byte("first"), "1", "100", "tmux: server")
+	runHandlerGap(t, dir, 1<<20, 2, 60, []byte("second"), "2", "101", "tmux: server")
+	if got := coreFiles(t, dir); len(got) != 1 || got[0] != "core.tmux.100.1" {
+		t.Fatalf("kept %v, want the first core alone", got)
+	}
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, "core.tmux.100.1"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	runHandlerGap(t, dir, 1<<20, 2, 60, []byte("third"), "3", "102", "tmux: server")
+	if got := coreFiles(t, dir); len(got) != 2 {
+		t.Fatalf("kept %v, want the first and the third", got)
+	}
+	// A core dated in the future does not hold dumps off for good.
+	future := time.Now().Add(24 * time.Hour)
+	for _, n := range coreFiles(t, dir) {
+		if err := os.Chtimes(filepath.Join(dir, n), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(filepath.Join(dir, "core.tmux.102.3"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	runHandlerGap(t, dir, 1<<20, 2, 60, []byte("fourth"), "4", "103", "tmux: server")
+	if _, err := os.Stat(filepath.Join(dir, "core.tmux.103.4")); err != nil {
+		t.Fatalf("a future-dated core held the dump off: %v", err)
 	}
 }

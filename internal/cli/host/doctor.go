@@ -206,6 +206,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		},
 		func() checkResult { return checkCredentialFile(app.Manager.CredentialFile) },
 		func() checkResult { return checkMcpJsonInTree(app.Tree) },
+		func() checkResult { return checkTreeBackup(app, state, time.Now()) },
 		func() checkResult { return checkGoToolchain(app.Scion, scionPrebuilt(app), probes) },
 		func() checkResult { return checkNodeToolchain(app, probes) },
 		func() checkResult { return checkOperatorSkills(app, state) },

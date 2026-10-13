@@ -1,14 +1,12 @@
-// Command fakeupstream is a deterministic stand-in for api.anthropic.com used by
-// the api-key live test suite. Point the broker's /llm proxy at it
-// (broker.llm_upstream: http://127.0.0.1:<port>) and it records, for every
-// request it receives, the method/path and the auth headers — so a test can
-// assert that the real Console key arrived (injected by the proxy) and the
-// inbound capability token did NOT (stripped by the proxy). It returns a minimal
-// non-streaming Messages response so `claude` completes its turn.
+// Command fakeupstream is a deterministic stand-in for api.anthropic.com for
+// the api-key live tests. Point broker.llm_upstream at it and it records the
+// method, path and auth headers of every request, so a test can assert the
+// real Console key arrived and the inbound capability token did not. It
+// returns a minimal non-streaming Messages response so `claude` completes its
+// turn.
 //
-// It NEVER prints secrets it wasn't given: it records exactly the header values
-// the broker forwarded, which is the point of the test (the real key is supplied
-// by the operator running the suite, not embedded here).
+// It records only the header values the broker forwarded; no key is embedded
+// here.
 //
 // Usage: fakeupstream -addr 127.0.0.1:8098 -log /path/to/requests.log
 package main

@@ -1,27 +1,21 @@
 #!/usr/bin/env bash
-# Live lima-backend e2e: bring a jail VM up, pass the §19 `lever acceptance`
-# six-check capability gate under BOTH egress postures, assert the guest
-# port-forward suppression our template depends on, prove the closed-egress
-# re-bring-up never reopens egress (I2), then tear down. Non-interactive; needs
-# Lima >= 2.0 (`brew install lima`).
+# Live lima-backend e2e: bring a jail VM up, pass the `lever acceptance`
+# capability checks under both egress postures, assert the guest port-forward
+# suppression the template depends on, prove a closed-egress re-bring-up
+# never reopens egress, then tear down. Non-interactive; needs Lima >= 2.0.
 #
-# This is the lima arc's merge gate. It deliberately does NOT run a full `lever
-# apply` (manager image + worker dispatch) — that is instance-specific and out of
-# scope here; `lever acceptance` does its own broker-only bring-up (jail up +
-# egress + host broker + tools + manager/worker enrol) with no container image.
+# It does not run a full `lever apply` (manager image, worker dispatch): `lever
+# acceptance` does its own broker-only bring-up with no container image. It
+# covers the live-only lima paths unit tests cannot: `limactl create/start
+# --tty=false`, flag and stdin forwarding through `limactl shell`,
+# host.lima.internal resolution, passwordless sudo and header-free
+# `limactl list --format`.
 #
-# The gate exercises the live-only lima paths the unit tests can't: `limactl
-# create/start --tty=false`, flag-forwarding through `limactl shell <vm> <cmd>`,
-# host.lima.internal in-VM resolution, passwordless sudo, stdin forwarding
-# through `limactl shell` (the scion + lever-agent install pipes), and
-# header-free `limactl list --format`.
-#
-# Host ports: the broker's jail and admin ports, the db tool's backend and the
-# port the suppression check listens on in the guest (which must be free on
-# the host too, or the check would reach the host's listener). Each is picked
-# free on 127.0.0.1 unless set, so a run never lands on another lever
-# instance's ports (lever#181). A port set explicitly that is in use stops the
-# run before anything starts, naming the process holding it.
+# Host ports (the broker's jail and admin ports, the db tool's backend, and the
+# suppression check's port, which must be free on the host too) are picked
+# free on 127.0.0.1 unless set, so a run never lands on another instance's
+# ports. An explicitly set port that is in use stops the run before anything
+# starts.
 #
 # Env overrides: NAME, JAIL_PORT, ADMIN_PORT, TOOL_PORT, SUPPRESS_PORT,
 # SCION_VERSION, KEEP=1 (skip teardown for inspection). On failure the end of
@@ -33,9 +27,8 @@ NAME="${NAME:-limae2e}"
 MACHINE="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 
-# --- host ports ------------------------------------------------------------------
-# Chosen before anything is created, so a refusal leaves nothing to clean up.
-# port_busy <port>: something accepts connections on 127.0.0.1:<port>.
+# Ports are chosen before anything is created, so a refusal leaves nothing to
+# clean up.
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 # port_holder <port>: the process listening on <port>, as best the host can tell.
@@ -53,8 +46,8 @@ port_holder() {
 }
 
 # pick_port <var>: keep <var> when set (refusing to start if it is in use),
-# else set it to a free port at or above $next_port, not one already taken by
-# this run.
+# else set it to a free port at or above $next_port not already taken by this
+# run.
 picked=" "
 next_port=$((20000 + RANDOM % 9000))
 pick_port() {
@@ -81,13 +74,8 @@ if [ "$(printf '%s\n' "$JAIL_PORT" "$ADMIN_PORT" "$TOOL_PORT" "$SUPPRESS_PORT" |
 fi
 
 
-# Ensure the REAL Go toolchain is on PATH regardless of CWD. lever shells out to
-# `go` (the host-side scion cross-compile) from the instance dir; under an
-# asdf-style shim that resolves the toolchain by walking up from CWD for a
-# .tool-versions, a temp instance dir has none, so the shim fails (exit 126).
-# Prepending the resolved GOROOT/bin — as GitHub's CI runners already have `go`
-# directly on PATH — makes `go` resolve from any CWD. No-op when `go` is already
-# a real binary on PATH.
+# Put the real Go toolchain first on PATH: lever runs `go` from the instance
+# dir, where an asdf-style shim finds no .tool-versions and exits 126.
 export PATH="$(cd "$REPO_ROOT" && go env GOROOT)/bin:$PATH"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/lima-e2e.XXXXXX")"
@@ -95,10 +83,9 @@ INST="$WORK/instance"
 BIN="$WORK/bin"
 fail=0
 
-# Every line carries the time, and each phase its duration, so a slow run
-# shows where the time went (lever#184). lever itself prints its bring-up
-# steps as plain timestamped lines (LEVER_PROGRESS=plain) and records them in
-# the instance's .lever-state/logs/.
+# Every line carries the time and each phase its duration, so a slow run
+# shows where the time went. lever prints its bring-up steps as plain
+# timestamped lines (LEVER_PROGRESS=plain).
 export LEVER_PROGRESS="${LEVER_PROGRESS:-plain}"
 # UTC, like lever's log lines, so a line here and one in a log tail compare.
 ts()   { date -u +%H:%M:%SZ; }
@@ -115,11 +102,11 @@ ok()   { printf '%s   PASS: %s\n' "$(ts)" "$*"; }
 bad()  { printf '%s   FAIL: %s\n' "$(ts)" "$*"; fail=1; }
 
 # mask_secrets hides anything shaped like a credential, on top of lever's own
-# masking in these logs: every shape lever's redaction masks (a Go test,
-# tools/test, holds the two together), plus PEM private keys, URL user
-# info and the value of any secret/token/password/key field. perl, because
-# BSD sed has no case-insensitive substitution; without perl nothing is
-# printed rather than something unmasked.
+# masking: every shape lever's redaction masks (tools/test/mask_test.go keeps
+# the two in step), plus PEM private keys, URL user info and the value of any
+# secret/token/password/key field. perl, because BSD sed has no
+# case-insensitive substitution; without perl nothing is printed rather than
+# something unmasked.
 mask_secrets() {
   if ! command -v perl >/dev/null 2>&1; then
     echo "      | (perl not found: log not shown unmasked)"
@@ -141,10 +128,9 @@ mask_secrets() {
   '
 }
 
-# show_logs prints the end of the instance's broker and tool logs, masked, so a
-# failed run explains itself without KEEP=1. lever masks credentials in
-# these files; they hold no keys. The exit trap prints them on a failed run
-# unless a failed acceptance already did.
+# show_logs prints the end of the broker and tool logs, masked, so a failed
+# run explains itself without KEEP=1. The exit trap prints them on a failed
+# run unless a failed acceptance already did.
 logs_shown=""
 show_logs() {
   logs_shown=1
@@ -171,7 +157,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- preflight -------------------------------------------------------------------
 command -v limactl >/dev/null 2>&1 || { echo "limactl not found (brew install lima)"; exit 1; }
 say "lima $(limactl --version 2>&1 | head -1)"
 echo "host ports: jail $JAIL_PORT, admin $ADMIN_PORT, db tool $TOOL_PORT, suppression check $SUPPRESS_PORT"
@@ -183,10 +168,9 @@ case "$(uname -m)" in
   *) echo "unsupported host arch $(uname -m)"; exit 1 ;;
 esac
 
-# --- build binaries --------------------------------------------------------------
-# lever-tool-db runs as a HOST subprocess of the broker (native), addressed by an
-# absolute path in the config so the broker's minimal PATH is irrelevant.
-# lever-agent is copied INTO the guest by the acceptance setup (linux/<guestarch>).
+# lever-tool-db runs as a host subprocess of the broker, addressed by an
+# absolute path so the broker's minimal PATH is irrelevant. lever-agent is
+# copied into the guest by the acceptance setup.
 say "build lever-tool-db (host) + lever-agent (linux/$GUESTARCH)"
 mkdir -p "$BIN"
 # Stamp the versions the Makefile stamps (LEVER_AGENT_LDFLAGS /
@@ -196,23 +180,21 @@ LEVER_VERSION="$(sed -n 's/^const Version = "\(.*\)"/\1/p' "$REPO_ROOT/internal/
 ( cd "$REPO_ROOT" && GOOS=linux GOARCH="$GUESTARCH" CGO_ENABLED=0 go build -ldflags "-X github.com/stevegeek/lever/internal/agent.Version=$LEVER_VERSION" -o "$BIN/lever-agent" ./cmd/lever-agent ) || { echo "build lever-agent failed"; exit 1; }
 export LEVER_AGENT_BIN="$BIN/lever-agent"
 
-# --- instance fixtures -----------------------------------------------------------
-# Mirror the acceptance fixture (manager + executor worker `worker` + `db` tool)
-# but on backend: lima, with an absolute tool path and a dummy 0600 api-key file
-# for the closed (api-key) posture. The db tool auto-seeds ref.db (tables A/B/C).
+# The acceptance fixture (manager, executor worker `worker`, `db` tool) on
+# backend: lima, with an absolute tool path and a dummy 0600 api-key file for
+# the closed (api-key) posture.
 say "build instance $INST"
 mkdir -p "$INST/workspace" "$INST/workers/worker"
 touch "$INST/workspace/.gitkeep" "$INST/workers/worker/.gitkeep"
 cat > "$INST/manager.md" <<'EOF'
 Manager: bring up the worker and delegate db.read to it for the acceptance run.
 EOF
-# Dummy key (never used — acceptance routes no LLM); satisfies api-key validation.
+# Dummy key: acceptance routes no LLM; it satisfies api-key validation.
 printf 'sk-ant-FAKE-lima-e2e-%s' "$$" > "$INST/console-api-key"
 chmod 600 "$INST/console-api-key"
 
-# write_config <open|closed> — regenerates $INST/lever.yaml for the given posture.
-# open   → subscription broker, egress open (default).
-# closed → api-key broker (dummy key file), egress closed (catch-all DROP).
+# write_config <open|closed>: open is a subscription broker with open
+# egress; closed is an api-key broker with closed egress (catch-all DROP).
 write_config() {
   local posture="$1" authblock egressline
   if [ "$posture" = closed ]; then
@@ -261,18 +243,16 @@ $authblock
 EOF
 }
 
-# --- clean slate -----------------------------------------------------------------
 say "clean slate"
 pkill -f "lever broker serve.*$INST" 2>/dev/null
 limactl delete --force "$MACHINE" >/dev/null 2>&1 && echo "deleted stale $MACHINE"
 
-# egress_closed_in_guest — true iff the LEVER_EGRESS chain has the catch-all DROP.
 egress_closed_in_guest() {
   limactl shell "$MACHINE" sudo iptables -S LEVER_EGRESS 2>/dev/null | grep -qE '^-A LEVER_EGRESS -j DROP'
 }
 
-# egress_one_reject_in_guest — true iff the chain's only REJECT, in either
-# family, is the metadata /32 (lever#182); everything else it refuses is a DROP.
+# egress_one_reject_in_guest: the chain's only REJECT, in either family, is
+# the metadata /32; everything else it refuses is a DROP.
 egress_one_reject_in_guest() {
   local v4 v6
   v4=$(limactl shell "$MACHINE" sudo iptables -S LEVER_EGRESS 2>/dev/null | grep -e '-j REJECT')
@@ -280,12 +260,9 @@ egress_one_reject_in_guest() {
   [ "$v4" = "-A LEVER_EGRESS -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited" ] && [ -z "$v6" ]
 }
 
-# stop_broker — stop the host-side broker via its PID file (fallback: pattern),
-# leaving the VM and its egress chain intact. Used before the idempotent re-apply
-# so the re-run gets a fresh broker: `lever acceptance`'s broker is a one-shot
-# process tied to that invocation and is not meant to be reused across a second
-# full gate. Stopping it does NOT touch the guest egress, so ApplyEgress on the
-# re-run still takes the I2 skip path (the property under test).
+# stop_broker stops the host-side broker via its PID file (fallback: pattern)
+# before the idempotent re-run, leaving the VM and its egress chain intact,
+# so ApplyEgress on the re-run still takes the no-reopen skip path.
 stop_broker() {
   local pidf="$INST/.lever-state/broker.pid"
   [ -f "$pidf" ] && kill "$(cat "$pidf")" 2>/dev/null || true
@@ -293,12 +270,10 @@ stop_broker() {
   sleep 1
 }
 
-# run_acceptance — bring up the current-posture instance and run the six checks.
-# `lever acceptance` does its own broker-only bring-up (jail up + egress + host
-# broker + tools + manager/worker enrol) and leaves the broker running. Nothing
-# is cleared between calls: a re-run against the still-running broker exercises the
-# idempotent bootstrap-latch path (§4), and a posture switch is done with an
-# explicit `lever down` first (§3), which stops the broker via its PID file.
+# run_acceptance brings up the current-posture instance and runs the checks,
+# leaving the broker running. A re-run against that broker exercises the
+# idempotent bootstrap latch; a posture switch uses an explicit `lever down`
+# first.
 run_acceptance() {
   if ( cd "$INST" && "$LEVER" acceptance ); then
     return 0
@@ -307,22 +282,20 @@ run_acceptance() {
   return 1
 }
 
-# ================================================================================
-# 1. OPEN posture — full VM bring-up (slow: apt + podman + scion) then the
-#    six §19 checks.
-# ================================================================================
+# 1. Open posture: full VM bring-up (slow: apt, podman, scion), then the
+#    acceptance checks.
 say "OPEN posture: lever acceptance (first bring-up — several minutes)"
 write_config open
 if run_acceptance; then ok "acceptance PASSED (open egress)"; else bad "acceptance FAILED (open egress)"; fi
 if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (open egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (open egress)"; fi
-# lever#183: provisioning installs and starts no dockerd (scion runs podman).
+# Provisioning installs and starts no dockerd (scion runs podman).
 if limactl shell "$MACHINE" pgrep -x dockerd >/dev/null 2>&1; then bad "a dockerd runs in the guest"; else ok "no dockerd in the guest"; fi
-# lever#201: the guest keeps the core of a crashed process named "tmux: server"
-# (and drops other dumps), root only, even with the crashing process's core
-# size limit at 0. Two python processes stand in: one renames itself and
-# segfaults, a decoy segfaults under its own name. A second "tmux: server"
-# crash right after is dropped (one kept core a minute), and the kernel runs
-# one core handler at a time (core_pipe_limit=1).
+# The guest keeps the core of a crashed process named "tmux: server" (and
+# drops other dumps), root only, even with the process's core size limit at
+# 0. Two python processes stand in: one renames itself and segfaults, a decoy
+# segfaults under its own name. A second "tmux: server" crash right after is
+# dropped (one kept core a minute), and the kernel runs one core handler at a
+# time (core_pipe_limit=1).
 core_capture_in_guest() {
   limactl shell "$MACHINE" -- sh -s <<'SH'
 set -u
@@ -384,22 +357,16 @@ else
   bad "read-only guard live check (output above)"
 fi
 
-# ================================================================================
-# 2. Guest port-forward suppression — the template hazard. A guest 0.0.0.0
-#    listener must NOT be reachable on the host loopback (stock lima would forward
-#    it; our template's ignore rules suppress that). Poll until the listener binds
-#    in the guest so the check is never vacuous (a slow first python import must
-#    not race a fixed sleep).
-# ================================================================================
+# 2. Guest port-forward suppression: a guest 0.0.0.0 listener must not be
+#    reachable on the host loopback (stock lima would forward it; the
+#    template's ignore rules suppress that).
 say "guest port-forward suppression (host loopback must NOT see a guest listener)"
-# One backgrounded `limactl shell` runs an inline python (fed over stdin) that
-# binds a raw 0.0.0.0 socket, SELF-VERIFIES it is listening (connects to itself),
-# prints GUEST_BOUND, then holds the port open for the probe window. Readiness is
-# detected host-locally by grepping that output — no rapid-fire `limactl shell`
-# polling (which contends on the shared SSH ControlMaster and returns spurious
-# 255s) and no fragile in-guest daemonization or slow http.server bind. A raw
-# accept-and-close socket gives a crisp host signal: curl exit 7 = connection
-# refused (suppressed, PASS); any connect (exit 0/52/28) = reachable (FAIL).
+# One backgrounded `limactl shell` runs an inline python that binds a raw
+# 0.0.0.0 socket, verifies it is listening, prints GUEST_BOUND and holds the
+# port for the probe window, so the check is never vacuous. Readiness is read
+# from that output on the host: rapid `limactl shell` polling contends on
+# the shared SSH ControlMaster and returns spurious 255s. curl exit 7
+# (refused) is a pass; any connect (exit 0/52/28) is a failure.
 suppout="$WORK/supp.out"; : > "$suppout"
 ( limactl shell "$MACHINE" -- python3 - "$SUPPRESS_PORT" <<'PY' > "$suppout" 2>&1
 import socket, sys, threading, time
@@ -434,14 +401,10 @@ fi
 kill "$supp_pid" 2>/dev/null || true
 limactl shell "$MACHINE" -- sh -c "pkill -f 'python3 -' 2>/dev/null" 2>/dev/null || true
 
-# ================================================================================
-# 3. Switch to CLOSED posture. Changing egress on a live instance is deliberately
-#    unsupported (it would briefly reopen egress); the supported path is `lever
-#    down` then a fresh bring-up. `lever down` stops the broker (via its PID file)
-#    and tears the VM down; the persisted broker CA is reused. The closed bring-up
-#    then re-provisions a fresh VM and runs the six checks under closed egress (the
-#    dial-by-IP path: guest DNS is dropped, agents reach the broker by alias IP).
-# ================================================================================
+# 3. Switch to closed posture. Changing egress on a live instance is
+#    unsupported (it would briefly reopen egress), so `lever down` then a
+#    fresh bring-up; the persisted broker CA is reused. Under closed egress
+#    guest DNS is dropped and agents reach the broker by alias IP.
 say "switch posture: lever down (open) then bring up CLOSED"
 ( cd "$INST" && "$LEVER" down ) || bad "lever down (open) failed"
 write_config closed
@@ -449,25 +412,18 @@ if run_acceptance; then ok "acceptance PASSED (closed egress)"; else bad "accept
 if egress_closed_in_guest; then ok "LEVER_EGRESS chain is closed (catch-all DROP present)"; else bad "closed posture did not install the catch-all DROP"; fi
 if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (closed egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (closed egress)"; fi
 
-# ================================================================================
-# 4. Idempotent closed re-apply (I2: never briefly reopen egress). Re-run the gate
-#    WITHOUT tearing down — against the still-running broker (idempotent bootstrap
-#    latch) and the live closed egress chain (ApplyEgress takes the I2 skip path,
-#    no flush/rebuild). The chain must stay closed throughout and the six checks
-#    must still pass. (A full `lever apply` re-run is out of scope — no image;
-#    `lever acceptance` drives the same EnsureUp/ApplyEgress I2 path.)
-# ================================================================================
+# 4. Idempotent closed re-apply: re-run the gate without tearing down,
+#    against the running broker and the live closed chain. ApplyEgress must
+#    skip the flush/rebuild, the chain must stay closed throughout, and the
+#    checks must still pass.
 say "idempotent closed re-apply (egress must stay closed; I2)"
 egress_closed_in_guest && echo "  pre: chain closed" || bad "pre-condition: chain not closed before re-apply"
 stop_broker
 if run_acceptance; then ok "acceptance PASSED on closed re-apply (idempotent)"; else bad "acceptance FAILED on closed re-apply"; fi
 if egress_closed_in_guest; then ok "LEVER_EGRESS still closed after re-apply (egress never reopened)"; else bad "egress chain not closed after re-apply"; fi
 
-# ================================================================================
-# 5. Log lines. Every line the broker and its tool wrote, across all three
-#    bring-ups, has lever's one shape (UTC time, level, msg, component), and
-#    the dummy API key appears in none of them.
-# ================================================================================
+# 5. Log lines: every line the broker and its tool wrote, across all three
+#    bring-ups, has lever's one shape, and the dummy API key appears in none.
 say "log lines: one shape, no credential"
 logline_re='^time=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z level=(DEBUG|INFO|WARN|ERROR) msg=.* component=[a-z0-9-]+( |$)'
 st="$INST/.lever-state"
@@ -484,9 +440,6 @@ for f in "$st/broker.out.log" "$st/broker.log" "$st"/tool-logs/*.log; do
   if grep -qF "$key" "$f"; then bad "the API key appears in ${f#$WORK/}"; fi
 done
 
-# ================================================================================
-# 6. Teardown.
-# ================================================================================
 say "teardown"
 pkill -f "lever broker serve.*$INST" 2>/dev/null
 if ( cd "$INST" && "$LEVER" down ); then
@@ -499,7 +452,6 @@ else
   bad "lever down failed"
 fi
 
-# --- verdict ---------------------------------------------------------------------
 end_phase; phase_name=""
 say "result"
 printf 'phase times:\n%s' "$phase_times"

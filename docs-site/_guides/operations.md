@@ -569,8 +569,8 @@ so a second terminal (or a terminal in scion's web UI) can watch alongside the f
 `--detach-others` detaches them before the attach, as `tmux attach -d` does, and prints how many
 it detached. It never detaches the container's own tmux client: scion starts the agent's tmux
 session with a client attached in the container's main process, and detaching it would stop the
-agent. Only clients a `podman exec` started (an attach) are detached; one lever cannot place is
-left alone.
+agent. Only clients a `podman exec` started (an attach) are detached, and a terminal in scion's web UI
+is one of them, so `--detach-others` drops it too; a client lever cannot place is left alone.
 
 When a view freezes:
 

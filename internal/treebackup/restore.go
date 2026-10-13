@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"unicode"
@@ -131,7 +132,8 @@ func Restore(ctx context.Context, o RestoreOptions) (*RestoreReport, error) {
 	if restoreFSWrap != nil {
 		fsys = restoreFSWrap(fsys)
 	}
-	r := &restorer{o: o, fs: fsys, rep: rep, dirIndex: map[string]int{}, headDirs: map[string]bool{}}
+	r := &restorer{o: o, fs: fsys, rep: rep, dirIndex: map[string]int{}, headDirs: map[string]bool{},
+		written: map[linkKey]writtenFile{}}
 	return rep, r.run(ctx)
 }
 
@@ -155,6 +157,7 @@ type restoreFS interface {
 	write(fd int, b []byte) (int, error)
 	unlinkat(dirfd int, name string) error
 	symlinkat(target string, dirfd int, name string) error
+	linkat(olddirfd int, oldpath string, newdirfd int, newname string) error
 	setTimes(fd int, mtime int64) error
 	setLinkTimes(dirfd int, name string, mtime int64) error
 	chmod(fd int, mode uint32) error
@@ -222,6 +225,31 @@ type restorer struct {
 	dirs     []dirRec
 	dirIndex map[string]int
 	root     RootInfo
+	// written holds the first restored name of each hard-linked file: the
+	// later names become hard links to it, never copies.
+	written map[linkKey]writtenFile
+	rootfd  int
+}
+
+// linkKey identifies one file of the snapshot that had several names. The
+// digest and size are in the key so that only identical content is ever
+// linked, whatever the recorded numbers say.
+type linkKey struct {
+	dev, ino uint64
+	sum      string
+	size     int64
+}
+
+type writtenFile struct {
+	rel string // on-disk path from the restore root
+	id  fsID
+}
+
+func hardLinkKey(e *Entry) (linkKey, bool) {
+	if !e.HasMeta || e.Nlink < 2 || !fileContent(e) {
+		return linkKey{}, false
+	}
+	return linkKey{e.Dev, e.Ino, e.SHA256, e.Size}, true
 }
 
 func (r *restorer) run(ctx context.Context) error {
@@ -295,6 +323,7 @@ func (r *restorer) run(ctx context.Context) error {
 		return fail(err)
 	}
 	defer r.fs.close(rootfd)
+	r.rootfd = rootfd
 	st, err := r.fs.fstat(rootfd)
 	if err != nil {
 		return fail(err)
@@ -371,6 +400,7 @@ func (r *restorer) preflight(ctx context.Context) (int64, error) {
 		r.root = h.Root
 	}
 	found := make([]bool, len(r.paths))
+	counted := map[linkKey]bool{}
 	var need int64
 	for {
 		if err := ctx.Err(); err != nil {
@@ -392,6 +422,12 @@ func (r *restorer) preflight(ctx context.Context) (int64, error) {
 			}
 		}
 		if r.selected(e.Path) && fileContent(e) {
+			if k, ok := hardLinkKey(e); ok {
+				if counted[k] {
+					continue
+				}
+				counted[k] = true
+			}
 			need = satAdd(need, max(e.Size, 0))
 		}
 	}
@@ -562,6 +598,10 @@ func (r *restorer) phaseFiles(ctx context.Context, rootfd int) error {
 
 func (r *restorer) restoreFile(ctx context.Context, top *frame, e *Entry) error {
 	disk := r.diskName(e)
+	key, linked := hardLinkKey(e)
+	if first, ok := r.written[key]; linked && ok {
+		return r.restoreHardLink(top, e, disk, first)
+	}
 	fd, err := r.fs.createFile(top.fd, disk)
 	if err != nil {
 		return r.createFailed(top, e, disk, err)
@@ -594,8 +634,45 @@ func (r *restorer) restoreFile(ctx context.Context, top *frame, e *Entry) error 
 	if e.State == StateUnstable {
 		r.rep.Unstable = append(r.rep.Unstable, Q(e.Path)+": the file changed while it was read")
 	}
+	if linked {
+		st, err := r.fs.fstat(fd)
+		if err != nil {
+			return fmt.Errorf("%s: %w", Q(e.Path), err)
+		}
+		r.written[key] = writtenFile{rel: r.diskRel(e.Path, disk), id: st.id}
+	}
 	r.rep.Files++
 	return nil
+}
+
+// restoreHardLink gives a file already written another name. The mode and
+// times were set through the first name: they are the inode's.
+func (r *restorer) restoreHardLink(top *frame, e *Entry, disk string, first writtenFile) error {
+	if err := r.fs.linkat(r.rootfd, first.rel, top.fd, disk); err != nil {
+		return r.createFailed(top, e, disk, err)
+	}
+	addName(top, disk, e.Path)
+	st, err := r.fs.lstatat(top.fd, disk)
+	if err != nil {
+		return fmt.Errorf("the new link %s: %w", Q(e.Path), err)
+	}
+	if st.id != first.id {
+		return fmt.Errorf("the new link %s: %s was replaced during the restore", Q(e.Path), Q([]byte(first.rel)))
+	}
+	r.noteNeutralised(e, disk)
+	r.rep.Files++
+	return nil
+}
+
+// diskRel is the on-disk path, from the restore root, of the entry at p
+// written under the name disk: its directories as phase 1 created them.
+func (r *restorer) diskRel(p []byte, disk string) string {
+	var parts []string
+	for d := ParentOf(p); len(d) > 0; d = ParentOf(d) {
+		parts = append(parts, r.dirs[r.dirIndex[string(d)]].disk)
+	}
+	slices.Reverse(parts)
+	return strings.Join(append(parts, disk), "/")
 }
 
 // fill copies the blob into fd, hashing what it writes. A non-empty reason

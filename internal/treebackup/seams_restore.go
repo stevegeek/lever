@@ -56,6 +56,13 @@ func (f foldingFS) symlinkat(target string, dirfd int, name string) error {
 	return f.restoreFS.symlinkat(target, dirfd, name)
 }
 
+func (f foldingFS) linkat(olddirfd int, oldpath string, newdirfd int, newname string) error {
+	if t, err := f.taken(newdirfd, newname); err != nil || t {
+		return firstErr(err, fs.ErrExist)
+	}
+	return f.restoreFS.linkat(olddirfd, oldpath, newdirfd, newname)
+}
+
 // utf8OnlyFS refuses names that are not valid UTF-8 with EILSEQ, as APFS
 // does.
 type utf8OnlyFS struct{ restoreFS }
@@ -79,6 +86,13 @@ func (f utf8OnlyFS) symlinkat(target string, dirfd int, name string) error {
 		return syscall.EILSEQ
 	}
 	return f.restoreFS.symlinkat(target, dirfd, name)
+}
+
+func (f utf8OnlyFS) linkat(olddirfd int, oldpath string, newdirfd int, newname string) error {
+	if !utf8.ValidString(newname) {
+		return syscall.EILSEQ
+	}
+	return f.restoreFS.linkat(olddirfd, oldpath, newdirfd, newname)
 }
 
 func firstErr(a, b error) error {

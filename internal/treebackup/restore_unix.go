@@ -73,6 +73,10 @@ func (sysFS) symlinkat(target string, dirfd int, name string) error {
 	return unix.Symlinkat(target, dirfd, name)
 }
 
+func (sysFS) linkat(olddirfd int, oldpath string, newdirfd int, newname string) error {
+	return unix.Linkat(olddirfd, oldpath, newdirfd, newname, 0)
+}
+
 func (sysFS) setLinkTimes(dirfd int, name string, mtime int64) error {
 	ts := unix.NsecToTimespec(mtime)
 	return unix.UtimesNanoAt(dirfd, name, []unix.Timespec{ts, ts}, unix.AT_SYMLINK_NOFOLLOW)

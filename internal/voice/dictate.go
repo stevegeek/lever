@@ -2,20 +2,18 @@ package voice
 
 // The dictation socket: how the remote proxy reaches lever-tool-whisper.
 //
-// The tool listens on a Unix socket (-dictate-socket, remote.voice.socket)
-// in a private directory (0700, the operator's), the socket itself 0600:
-// only processes of the operator's user reach it, and the jail never does
-// (it reaches no host Unix socket, and config load refuses the path inside
-// the tree). Dictation deliberately does not travel the broker gateway or
-// the tool's TCP backend: the gateway forwards every path under
-// /mcp/<tool>/ to the backend, so a host-only route there would be one step
-// from agents.
+// The tool listens on a Unix socket in a private 0700 directory, the socket
+// itself 0600: only the operator's processes reach it, and the jail never
+// does (it reaches no host Unix socket, and config load refuses a path
+// inside the tree). Dictation deliberately avoids the broker gateway and the
+// tool's TCP backend: the gateway forwards every path under /mcp/<tool>/, so
+// a host-only route there would be one step from agents.
 //
 // Routes:
 //
-//	POST /dictate  body: one WAV clip (CheckWAV). 200 {"text": "..."} (the
-//	               transcript as whisper-server gave it), or an error status
-//	               with {"error": word}, word one of the Word* constants.
+//	POST /dictate  body: one WAV clip (CheckWAV). 200 {"text": "..."}, or an
+//	               error status with {"error": word}, one of the Word*
+//	               constants.
 //	GET  /health   200 {"ready": bool, "model": name, "maxSeconds": n}.
 
 import (
@@ -43,24 +41,22 @@ const (
 	// the wait ended while it worked).
 	WordFailed = "failed"
 	// WordCanceled: the caller went away while the clip waited in the
-	// queue. The clip counts (the tool took it), though whisper-server
-	// never saw it.
+	// queue. The clip counts, though whisper-server never saw it.
 	WordCanceled = "canceled"
 	// WordInterrupted: the caller went away while whisper-server worked on
-	// the clip (sent: its transcription had started).
+	// the clip.
 	WordInterrupted = "interrupted"
 )
 
-// MaxSocketPath bounds the socket path: sun_path holds 104 bytes on macOS
-// and 108 on Linux, the terminating NUL included.
+// MaxSocketPath: sun_path holds 104 bytes on macOS and 108 on Linux, the
+// NUL included.
 const MaxSocketPath = 103
 
 // ErrTool: lever-tool-whisper answered, but not with a transcript.
 var ErrTool = errors.New("lever-tool-whisper")
 
 // CheckSocketPath accepts a clean absolute path short enough for a Unix
-// socket. Whether it lies outside the tree is config load's check (and the
-// tool's own, for -dictate-socket).
+// socket. Staying outside the tree is config load's check.
 func CheckSocketPath(p string) error {
 	switch {
 	case !filepath.IsAbs(p) || filepath.Clean(p) != p:
@@ -71,18 +67,14 @@ func CheckSocketPath(p string) error {
 	return nil
 }
 
-// ListenDictate creates the dictation socket at path: its directory is
-// created 0700 when missing and must be a private directory of the caller's
-// (PrivateDir: not a symbolic link, not reachable by other users); a stale
-// socket left by a killed tool is removed, but only a socket of the
-// caller's that nothing answers on; anything else at path is refused. The
-// socket is 0600.
+// ListenDictate creates the dictation socket (0600) at path. Its directory
+// is created 0700 when missing and must be a private directory of the
+// caller's (PrivateDir). A stale socket is removed only when it is the
+// caller's and nothing answers on it; anything else at path is refused.
 func ListenDictate(path string) (net.Listener, error) {
 	return listenPrivate(path, "dictation socket", "lever-tool-whisper")
 }
 
-// listenPrivate is ListenDictate for a socket described as what, served by
-// the tool named tool (for the messages).
 func listenPrivate(path, what, tool string) (net.Listener, error) {
 	if err := CheckSocketPath(path); err != nil {
 		return nil, err
@@ -120,33 +112,29 @@ func listenPrivate(path, what, tool string) (net.Listener, error) {
 	return ln, nil
 }
 
-// Transcriber is what the socket and the agent operation need of Service.
 type Transcriber interface {
 	Ready() bool
 	Transcribe(ctx context.Context, wav []byte) (string, error)
 }
 
-// Health is the answer of GET /health.
 type Health struct {
 	Ready      bool   `json:"ready"`
 	Model      string `json:"model"`
 	MaxSeconds int    `json:"maxSeconds"`
 }
 
-// DictateHandler serves the dictation socket.
 type DictateHandler struct {
 	Svc        Transcriber
 	Queue      *Queue
 	Model      string
 	MaxSeconds int
-	// Log receives one line per clip: its length, the outcome and the
-	// latency; never the audio, never the text. nil drops them.
+	// Log receives one line per clip: length, outcome and latency; never the
+	// audio, never the text. nil drops them.
 	Log func(format string, a ...any)
 }
 
-// NewDictateServer is the http.Server for the socket: header and body
-// deadlines, no write deadline (a transcription takes what it takes;
-// Service bounds it).
+// NewDictateServer sets header and body deadlines but no write deadline: a
+// transcription takes what it takes, and Service bounds it.
 func NewDictateServer(h http.Handler) *http.Server {
 	return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 2 * time.Minute, IdleTimeout: time.Minute}
 }
@@ -234,15 +222,13 @@ func (h *DictateHandler) dictate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// drainClip reads and drops the rest of a refused clip, at most the largest
-// clip any tool takes: the server closes the connection after the answer
-// (the client asks for that), and a client still writing the body would
-// otherwise get a broken pipe instead of the refusal's word.
+// drainClip reads and drops the rest of a refused clip (bounded): the server
+// closes the connection after the answer, and a client still writing the body
+// would get a broken pipe instead of the refusal's word.
 func drainClip(r *http.Request) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, MaxClipBytes(MaxMaxSeconds)))
 }
 
-// DictateClient is the remote proxy's side of the socket.
 type DictateClient struct {
 	Socket string
 	// HealthTTL is how long a health answer is reused; zero = 5 s.
@@ -259,11 +245,10 @@ type DictateClient struct {
 	probing chan struct{} // closed when the health probe running now ends
 }
 
-// dictateBase is the URL base of every request on the socket (the host part
-// is never resolved: the dialer always opens the socket).
+// dictateBase's host part is never resolved: the dialer always opens the
+// socket.
 const dictateBase = "http://lever-tool-whisper"
 
-// maxDictateAnswer bounds an answer the client reads.
 const maxDictateAnswer = 2 << 20
 
 func (c *DictateClient) http() *http.Client {
@@ -278,16 +263,14 @@ func (c *DictateClient) http() *http.Client {
 				var d net.Dialer
 				return d.DialContext(ctx, "unix", c.Socket)
 			},
-			// A fresh connection per request: a pooled one could be dead
-			// after a tool restart, and a clip sent on it would fail
-			// without being given back.
+			// A fresh connection per request: a pooled one could be dead after a
+			// tool restart, and a clip sent on it would fail without a refund.
 			DisableKeepAlives: true,
 		}}
 	})
 	return c.client
 }
 
-// Health asks the tool for its state.
 func (c *DictateClient) Health(ctx context.Context) (Health, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -310,11 +293,10 @@ func (c *DictateClient) Health(ctx context.Context) (Health, error) {
 	return h, nil
 }
 
-// Available reports whether the tool answers its health route ready. The
-// answer is reused for HealthTTL, so the chat roster does not ask the tool
-// on every refresh. Once it is stale, one caller asks (a probe takes up to
-// 2 s) while the others keep the previous answer; before any answer, they
-// wait for that one probe. Probes never pile up.
+// Available reports whether the tool's health route answers ready. The
+// answer is reused for HealthTTL; once stale, one caller probes while the
+// others keep the previous answer (before any answer, they wait for that
+// probe). Probes never pile up.
 func (c *DictateClient) Available() bool {
 	ttl := c.HealthTTL
 	if ttl <= 0 {
@@ -355,12 +337,9 @@ func (c *DictateClient) Available() bool {
 }
 
 // Transcribe sends one checked clip to the tool. An error wraps ErrNotSent
-// when the clip never reached whisper-server: the socket did not answer,
-// or the tool refused it before whisper-server (not ready, or the clip
-// failed the tool's own check). A clip whose caller gave up (the browser
-// went away, or MaxWait ran out) counts, wherever it was: in the tool's
-// queue it only waited, and a refund there is not worth the bookkeeping.
-// The error never carries the transcript.
+// when the clip never reached whisper-server (the socket did not answer, or
+// the tool refused it first). A clip whose caller gave up counts wherever it
+// was. The error never carries the transcript.
 func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, error) {
 	wait := c.MaxWait
 	if wait <= 0 {
@@ -406,10 +385,9 @@ func (c *DictateClient) Transcribe(ctx context.Context, wav []byte) (string, err
 	return "", fmt.Errorf("%w: HTTP %d, %s", ErrTool, resp.StatusCode, word)
 }
 
-// checkSocketOwner refuses a socket the proxy should not send audio to: one
-// whose directory is not a private directory of the caller's (another user
-// could have made it and listen there), or that is not the caller's own
-// socket. The clip is then not sent (ErrNotSent).
+// checkSocketOwner refuses a socket whose directory is not a private
+// directory of the caller's (another user could listen there) or that is not
+// the caller's own socket. The clip is then not sent (ErrNotSent).
 func checkSocketOwner(p string) error {
 	if err := socketOwnerErr(p, "dictation socket"); err != nil {
 		return fmt.Errorf("%w: %w", ErrNotSent, err)
@@ -417,8 +395,6 @@ func checkSocketOwner(p string) error {
 	return nil
 }
 
-// socketOwnerErr is checkSocketOwner's test for the socket p, described as
-// what, with no error of its own wrapped.
 func socketOwnerErr(p, what string) error {
 	dir := filepath.Dir(p)
 	di, err := os.Lstat(dir)
@@ -444,8 +420,8 @@ func socketOwnerErr(p, what string) error {
 	return nil
 }
 
-// plainErr drops the URL from a client error, and marks a failed dial (the
-// socket missing, or nothing listening) as ErrNotSent.
+// plainErr drops the URL from a client error, and marks a failed dial as
+// ErrNotSent.
 func plainErr(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {

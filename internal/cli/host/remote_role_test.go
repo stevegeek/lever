@@ -17,29 +17,26 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// fakeAdminHub is an in-memory stand-in for the throwaway hub's admin API:
-// the project list, role definitions, the user directory and role bindings,
-// answering with scion's shapes (see internal/hubapi/roles.go).
+// fakeAdminHub is an in-memory throwaway-hub admin API answering with scion's
+// shapes (see internal/hubapi/roles.go).
 type fakeAdminHub struct {
 	projectID string
 	roles     []hubapi.RoleDefinition
-	// systemRoles are listed with roles but are scion's seeded ones; kept
-	// apart so tests can count the roles lever created.
+	// systemRoles are scion's seeded roles, kept apart so tests can count the
+	// roles lever created.
 	systemRoles []hubapi.RoleDefinition
 	users       []hubapi.User
 	bindings    []hubapi.RoleBinding
 	constraints []*fakeConstraint
-	// previews maps an issued preview token to what it was issued for; a
-	// commit consumes it, as scion's single-use tokens are.
-	previews map[string]fakePreview
-	// blockPreview makes every preview answer with commitBlocked.
-	blockPreview bool
-	// failCreateConstraint makes every constraint create answer 500.
+	// previews maps an issued preview token to its subject; a commit consumes it,
+	// as scion's single-use tokens are.
+	previews             map[string]fakePreview
+	blockPreview         bool
 	failCreateConstraint bool
 	calls                []string // "METHOD path", in order
 	next                 int
-	// me is the user id GET /api/v1/auth/me answers (the dev user); scopes
-	// is what GET /api/v1/auth/scopes lists.
+	// me is the user id /api/v1/auth/me answers (the dev user); scopes is what
+	// /api/v1/auth/scopes lists.
 	me     string
 	scopes []string
 }
@@ -56,8 +53,8 @@ type fakePreview struct {
 	id    string // the constraint a delete targets
 }
 
-// fakeHubMemberPermissions is scion's seeded hub-member set
-// (pkg/hub/seed.go hubMemberPermissionIDs), project.create included.
+// fakeHubMemberPermissions is scion's seeded hub-member set, project.create
+// included.
 var fakeHubMemberPermissions = []string{"user.read", "user.list", "group.read", "group.list",
 	"template.read", "template.list", "hub.settings.read", "role.read", "project.create"}
 
@@ -174,9 +171,8 @@ func (h *fakeAdminHub) DoBody(_ context.Context, method, path string, body []byt
 	return reply(404, map[string]string{"error": "no route " + method + " " + path})
 }
 
-// constraintRoute answers scion's access-constraint admin routes, with its
-// preview-bound commits: a create or delete needs an unused token issued for
-// exactly that draft or that constraint.
+// constraintRoute answers scion's access-constraint routes: a create or delete
+// needs an unused preview token issued for exactly that draft or constraint.
 func (h *fakeAdminHub) constraintRoute(method string, u *url.URL, body []byte) (int, any, bool) {
 	const base = "/api/v1/admin/access-constraints"
 	wire := func(c *fakeConstraint, detail bool) map[string]any {
@@ -313,9 +309,8 @@ func TestRemoteRolePermissionsMirrorTheRemotePAT(t *testing.T) {
 	}
 }
 
-// First grant: the PATs exist, so the window opens for the role alone. It
-// creates the project role with exactly the five permissions, binds the
-// allowed user on the instance project, and records it.
+// First grant: the window opens for the role alone, creates it with exactly
+// the expected permissions, binds the allowed user and records it.
 func TestRemoteWebRoleFirstGrant(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
@@ -352,8 +347,8 @@ func TestRemoteWebRoleFirstGrant(t *testing.T) {
 	if rec.RoleID != r.ID || rec.ProjectID != "proj-uuid" || rec.Bound["you@github"] != "user-1" || len(rec.Pending) != 0 {
 		t.Fatalf("record = %+v", rec)
 	}
-	// The ceiling: one system-scope constraint on exactly that user, holding
-	// hub-member minus project.create plus the role's permissions.
+	// One system-scope constraint on that user: hub-member minus project.create
+	// plus the role's permissions.
 	wantCeiling := remoteCeilingPermissions(fakeHubMemberPermissions, remoteRolePermissions(false))
 	if len(hub.constraints) != 1 {
 		t.Fatalf("constraints = %+v, want one", hub.constraints)
@@ -406,9 +401,8 @@ func TestRemoteWebRoleCompleteRecordOpensNoWindow(t *testing.T) {
 	}
 }
 
-// A user who has never signed in has no hub user to bind. That is not an
-// error: it is warned once with the fix, recorded as pending, and the
-// record stays incomplete so the next apply retries.
+// A user who never signed in has no hub user: warned once, recorded as
+// pending, and the record stays incomplete so the next apply retries.
 func TestRemoteWebRoleMissingUserWarnsAndStaysPending(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
@@ -432,8 +426,8 @@ func TestRemoteWebRoleMissingUserWarnsAndStaysPending(t *testing.T) {
 		t.Fatalf("reason = %q, want the record incomplete for partner@github", reason)
 	}
 
-	// The partner signs in; the next apply binds them and does not bind the
-	// first user twice.
+	// Once the partner signs in, the next apply binds them and not the first user
+	// again.
 	hub.users = append(hub.users, hubapi.User{ID: "user-2", Email: "partner@github"})
 	f2 := proc.NewFakeRunner()
 	scriptPATMintChain(f2)
@@ -483,9 +477,8 @@ func TestRemoteWebRoleAllowedUsersChangeRetriggers(t *testing.T) {
 	}
 }
 
-// A role that exists with a different permission set (edited by hand, or
-// granted by an older lever) is rewritten to the current set, with a warning.
-// A record written with an older permission set re-triggers the window too.
+// A role with a drifted permission set is rewritten with a warning; a record
+// with an older set re-triggers the window too.
 func TestRemoteWebRolePermissionDriftConverges(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
@@ -544,15 +537,15 @@ func TestRemoteWebRoleHubFailureIsAWarning(t *testing.T) {
 	}
 }
 
-// A record written before the ceiling existed re-opens the window. The role
-// and binding are reused; only the ceiling is added.
+// A record without ceilings re-opens the window; role and binding are reused
+// and only the ceiling is added.
 func TestRemoteCeilingPreCeilingRecordRetriggers(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
 	hub := newFakeAdminHub("you@github")
 	hub.roles = []hubapi.RoleDefinition{{ID: "role-1", Name: remoteWebRoleName, ScopeType: "project", Permissions: remoteRolePermissions(false)}}
 	hub.bindings = []hubapi.RoleBinding{{ID: "b-1", RoleDefinitionID: "role-1", PrincipalType: "user", PrincipalID: "user-1", ScopeType: "project", ScopeID: "proj-uuid"}}
-	// Exactly what 2b160af wrote: no ceilings, no ceiling_permissions.
+	// A record with no ceilings and no ceiling_permissions.
 	if err := os.WriteFile(st.RemoteRole(), []byte(`{"role_id":"role-1","permissions":["agent.read","agent.list","project.read","agent.attach","agent.message","project.list"],"project_id":"proj-uuid","bound":{"you@github":"user-1"},"granted_at":"2026-09-23T20:00:00Z"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -835,8 +828,7 @@ func TestEnsureRemoteWebRoleTierMove(t *testing.T) {
 	}
 }
 
-// A contact ceiling wider than the contact role (an earlier lever wrote
-// hub-member's reads into it) is a reason to grant again.
+// A contact ceiling wider than the contact role is a reason to grant again.
 func TestContactCeilingMustBeExact(t *testing.T) {
 	rec := state.RemoteRoleRecord{Permissions: remoteRolePermissions(true), Bound: map[string]string{"c@x": "u1"},
 		Ceilings: map[string]string{"c@x": "k1"}, CeilingPermissions: remoteCeilingPermissions(nil, remoteRolePermissions(true)),

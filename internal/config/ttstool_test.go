@@ -14,15 +14,12 @@ import (
 
 const testSpeakSocket = "/run/lever/tts.sock"
 
-// ttsTool is a broker tools entry running lever-tool-tts with the given
-// extra flags.
 func ttsTool(extra ...string) Tool {
 	cmd := append([]string{"/opt/lever/lever-tool-tts", "-tree", "/t", "-models", "/s/voice-models",
 		"-server", "/opt/sherpa/bin/sherpa-onnx-offline-tts", "-speak-socket", testSpeakSocket}, extra...)
 	return Tool{Name: "tts", Command: cmd, Backend: "127.0.0.1:3213", Operations: []Op{{Name: "voices"}}}
 }
 
-// speechApp is voiceApp with read_aloud: server and a tts tool.
 func speechApp() *App {
 	a := voiceApp()
 	a.Remote.Voice.ReadAloud = ReadAloudServer

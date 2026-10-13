@@ -13,15 +13,12 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// Which instance a broker belongs to (lever#181). A broker's ports say
-// nothing about that: two instances on one host can be configured with the
-// same ports, and then whichever broker bound them first answers both. Every
-// host-side caller of the admin port therefore reads the broker's instance
-// id from /epoch and compares it with this instance's (state.InstanceIDFile)
-// before it trusts, reuses, or acts on that broker.
+// A broker's ports do not say which instance it belongs to: two instances on
+// one host can share ports, and whichever broker bound them first answers
+// both. Every host-side caller of the admin port therefore compares the
+// broker's /epoch instance id with this instance's (state.InstanceIDFile)
+// before it trusts, reuses or acts on that broker.
 
-// brokerAction is what apply's broker start does with a broker already
-// answering on the admin port.
 type brokerAction int
 
 const (
@@ -31,19 +28,15 @@ const (
 )
 
 // judgeRunningBroker decides what to do with a broker that answered /epoch.
-// ours is this instance's id. ownPIDAlive is whether this instance's
-// broker.pid names a live process that is this instance's `lever broker
-// serve` (state.State.BrokerStatus; a pid the OS gave to another process
-// does not count).
+// ownPIDAlive is whether broker.pid names a live `lever broker serve` of this
+// instance (state.State.BrokerStatus; a reused pid does not count).
 //
 //   - Same id: reuse it when version and config hash match, else restart it.
-//   - Another id: it is another instance's broker. Refuse, and stop nothing.
-//   - No id: a broker started by a lever that predates instance ids. Its version
-//     differs from this binary's, so it would be restarted anyway. Restart
-//     it only when this instance's pid file names a live process, which is
-//     what StopBroker stops; the caller then checks the port fell silent,
-//     so a broker that was not the one stopped is never adopted. Without a
-//     live pid nothing ties that broker to this instance, so refuse.
+//   - Another id: another instance's broker. Refuse and stop nothing.
+//   - No id: a broker from before instance ids. Restart it only when this
+//     instance's pid file names a live process, which is what StopBroker
+//     stops; the caller then checks the port fell silent, so a broker that
+//     was not the one stopped is never adopted. Otherwise refuse.
 func judgeRunningBroker(got broker.EpochAnswer, ours, wantVersion, wantHash string, ownPIDAlive bool) brokerAction {
 	switch {
 	case ours != "" && got.InstanceID == ours:
@@ -61,10 +54,9 @@ func judgeRunningBroker(got broker.EpochAnswer, ours, wantVersion, wantHash stri
 }
 
 // heldBrokerErr is nil only when got is the broker this apply runs: this
-// instance's id, this binary's version and this broker config's hash.
-// Healthy holds every answer to it, so the reuse decision and the health
-// check share judgeRunningBroker. ownPIDAlive is false here on purpose: a
-// broker without an id is never the one this binary started.
+// instance's id, version and config hash. It shares judgeRunningBroker with
+// the reuse decision; ownPIDAlive is false on purpose, since a broker without
+// an id is never the one this binary started.
 func heldBrokerErr(got broker.EpochAnswer, ours, wantVersion, wantHash string, adminPort int) error {
 	switch judgeRunningBroker(got, ours, wantVersion, wantHash, false) {
 	case brokerReuse:
@@ -78,7 +70,6 @@ func heldBrokerErr(got broker.EpochAnswer, ours, wantVersion, wantHash string, a
 	}
 }
 
-// shortID shortens an instance id for messages. Not a secret; just long.
 func shortID(id string) string {
 	if id == "" {
 		return "none"
@@ -89,8 +80,6 @@ func shortID(id string) string {
 	return id
 }
 
-// foreignBrokerError explains a broker on this instance's admin port that
-// is not this instance's.
 func foreignBrokerError(adminPort int, got broker.EpochAnswer, ours string) error {
 	if got.InstanceID == "" {
 		return fmt.Errorf("a lever broker that reports no instance id (version %q, an older lever) is serving on 127.0.0.1:%d, "+
@@ -107,8 +96,8 @@ func foreignBrokerError(adminPort int, got broker.EpochAnswer, ours string) erro
 // errNoBroker means nothing answered /epoch as a lever broker.
 var errNoBroker = errors.New("no lever broker answers on the admin port")
 
-// readBrokerIdentity GETs /epoch on adminURL. errNoBroker when nothing
-// answers with a decodable 200.
+// readBrokerIdentity returns errNoBroker when nothing answers with a decodable
+// 200.
 func readBrokerIdentity(ctx context.Context, client *http.Client, adminURL string) (broker.EpochAnswer, error) {
 	var got broker.EpochAnswer
 	if err := httpjson.Get(ctx, client, adminURL+wire.PathEpoch, &got); err != nil {
@@ -117,11 +106,10 @@ func readBrokerIdentity(ctx context.Context, client *http.Client, adminURL strin
 	return got, nil
 }
 
-// requireOwnBroker fails unless the broker answering on adminPort is this
-// instance's: it reports an id, and the id is the one in st. For the
-// operator commands that act on a running broker (revoke, bump-epoch):
-// sent to another instance's broker they would revoke that instance's
-// agents. A broker predating instance ids is refused too, with the way out.
+// requireOwnBroker fails unless the broker on adminPort reports this
+// instance's id. Operator commands that act on a broker (revoke, bump-epoch)
+// would otherwise revoke another instance's agents. A broker without an id is
+// refused too, with the way out.
 func requireOwnBroker(ctx context.Context, client *http.Client, adminPort int, st state.State) error {
 	got, err := readBrokerIdentity(ctx, client, fmt.Sprintf("http://127.0.0.1:%d", adminPort))
 	if err != nil {
@@ -143,12 +131,10 @@ func requireOwnBroker(ctx context.Context, client *http.Client, adminPort int, s
 	return nil
 }
 
-// brokerQuietWait bounds how long Start waits for the admin port to fall
-// silent after stopping this instance's broker. A var so tests can shorten it.
+// brokerQuietWait bounds Start's wait for the admin port to fall silent after
+// the stop. A var so tests can shorten it.
 var brokerQuietWait = 3 * time.Second
 
-// stillAnswering polls the admin /epoch until it stops answering or wait
-// elapses; it returns the last answer and whether a broker still answers.
 func (bc *brokerController) stillAnswering(ctx context.Context, wait time.Duration) (broker.EpochAnswer, bool) {
 	deadline := time.Now().Add(wait)
 	for {

@@ -34,7 +34,6 @@ func startOrphan(t *testing.T, bin string, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// gone reports whether the process has exited and been reaped.
 func gone(cmd *exec.Cmd) bool {
 	// The test's Wait goroutine reaps it, after which signal 0 fails.
 	return syscall.Kill(cmd.Process.Pid, 0) != nil

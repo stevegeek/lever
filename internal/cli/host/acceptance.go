@@ -22,9 +22,8 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// acceptanceCheckNames returns the six acceptance checks in a fixed, documented order. The
-// order is load-bearing: formatNote iterates this slice (NOT map order) so the
-// emitted note is deterministic.
+// acceptanceCheckNames is the fixed order of the six checks; formatNote
+// iterates it, not map order, so the note is deterministic.
 func acceptanceCheckNames() []string {
 	return []string{
 		"delegated-read", // worker CAN read its delegated, filtered rows
@@ -36,8 +35,8 @@ func acceptanceCheckNames() []string {
 	}
 }
 
-// overallPass is true iff every named acceptance check passed. A missing entry counts
-// as a failure (a check that never ran cannot pass the gate).
+// overallPass is true iff every named check passed; a check that never ran
+// fails the gate.
 func overallPass(results map[string]bool) bool {
 	for _, name := range acceptanceCheckNames() {
 		if !results[name] {
@@ -47,10 +46,8 @@ func overallPass(results map[string]bool) bool {
 	return true
 }
 
-// formatNote renders a dated markdown acceptance note. It iterates
-// acceptanceCheckNames() (NOT map order) so output is byte-stable for a given
-// results map, and declares an overall PASS/FAIL verdict that fails if ANY check
-// fails or is missing.
+// formatNote renders a dated markdown acceptance note with an overall verdict
+// that fails if any check fails or is missing.
 func formatNote(results map[string]bool, date string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# acceptance — %s\n\n", date)
@@ -81,8 +78,8 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// The bring-up is listed and timed like apply's (lever#184,
-			// #185): the e2e reads the phase times from its record.
+			// The bring-up is listed and timed like apply's: the e2e reads the phase times
+			// from its record.
 			run, ctx, err := startBringup(cmd, app, stateFor(path), "acceptance", progressMode)
 			if err != nil {
 				return err
@@ -95,25 +92,19 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 	return c
 }
 
-// runAcceptance is the live acceptance gate. It brings a REAL jail up (manager +
-// executor worker `worker` + the `db` tool; manager delegate db.read → worker;
-// worker empty obtain), drives the six checks inside the running jail, writes a
-// dated note to docs/acceptance/<date>-acceptance.md, and returns a non-nil error if
-// ANY check fails (so the command exits non-zero — the gate).
+// runAcceptance is the live acceptance gate. It brings a real jail up (manager,
+// executor worker `worker`, the `db` tool; manager delegate db.read to worker;
+// worker empty obtain), runs the six checks inside it, writes a dated note to
+// docs/acceptance/, and fails if any check fails.
 //
-// LIVE/INTERFACE-LEVEL: the per-check closures are validated by running this on
-// a machine with OrbStack, not in CI (CI covers acceptanceCheckNames + formatNote
-// + the wiring). Each closure ACTUALLY attempts its operation against the live
-// broker via the in-jail `lever-agent` CLI; a check that cannot yet be driven
+// The check closures are validated live, not in CI. Each actually attempts its
+// operation through the in-jail `lever-agent`; a check that cannot be driven
 // records a failure, never a vacuous pass.
 func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, configPath string, bf BackendFactory) error {
-	// 1. Bring the real jail up BROKER-ONLY: the jail itself (machine + egress
-	//    allowlist, inside buildApplyDeps), then broker-up (host broker +
-	//    tools) and mint-manager-bootstrap. The VM-level gate
-	//    drives lever-agent directly and never invokes scion, so all the
-	//    scion/container/registration steps (incl. init-machine, which needs a
-	//    scion binary the fresh machine lacks) are omitted. The bootstrap step
-	//    still deposits the manager bootstrap at <mount>/.lever/bootstrap.json.
+	// Bring the jail up broker-only: the gate drives lever-agent directly and never
+	// invokes scion, so the scion, container and registration steps are omitted
+	// (init-machine would need a scion binary the fresh machine lacks). The
+	// bootstrap step still deposits <mount>/.lever/bootstrap.json.
 	rep := progress.From(ctx)
 	rep.Group("jail", 0)
 	w, err := buildApplyDeps(ctx, app, configPath, bf, applyOpts{Cmd: cmd, Rep: rep})
@@ -125,12 +116,9 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 		return fmt.Errorf("acceptance: apply: %w", err)
 	}
 
-	// 2. A jail Runner execs `lever-agent` INSIDE the jail machine (where the
-	//    agent identities live). The worker's delegated token is minted by the
-	//    manager (delegate db.read → worker) and exercised here from the worker's
-	//    identity directory. Identity dirs are VM-writable (vmIDDir), not the old
-	//    hardcoded /home/{manager,worker}/.lever-id (those users don't exist in
-	//    the broker-only VM — no agent containers were started).
+	// lever-agent runs inside the jail machine. The manager mints the worker's
+	// delegated token, exercised from the worker's identity directory. Identity
+	// dirs are VM-writable (vmIDDir): the broker-only VM has no agent users.
 	jr := b.JailRunner()
 	h := &acceptanceHarness{
 		app:       app,
@@ -143,9 +131,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 		admin:     &http.Client{Timeout: brokerAdminTimeout},
 	}
 
-	// 2b. Setup phase: install lever-agent in the VM, then enrol the manager and
-	//     mint+enrol the worker. FAIL-CLOSED — any setup error aborts the
-	//     gate with a clear message (never a vacuous check pass).
+	// Setup fails closed: any error aborts the gate, never a vacuous pass.
 	rep.Group("acceptance", 0)
 	setup := rep.Start("enrol test agents")
 	err = h.setup(ctx, b)
@@ -153,11 +139,9 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	if err != nil {
 		return fmt.Errorf("acceptance: setup: %w", err)
 	}
-	// 2c. Wait until every supervised tool listens: the broker starts them
-	//     with itself, and a first check that reaches the gateway before the
-	//     tool binds its backend gets a 502 that says nothing about the
-	//     capability under test. A tool that never listens fails the gate
-	//     here, naming its log.
+	// Wait until every supervised tool listens: a check that reaches the gateway
+	// before its tool binds gets a 502 that says nothing about the capability
+	// under test.
 	tools := rep.Start("wait for tools to listen")
 	err = waitToolsListening(ctx, app, defaultToolDial, toolListenWait)
 	tools.Done(err)
@@ -185,11 +169,9 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 		checks.Done(errors.New("a capability check failed"))
 	}
 
-	// 3. Write the dated note.
 	date := time.Now().Format("2006-01-02")
 	note := formatNote(results, date)
-	// Record the note beside the instance root (the config file's directory), so
-	// it lives with the instance rather than inside the agent-writable tree.
+	// The note lives beside the instance root, not inside the agent-writable tree.
 	noteDir := filepath.Join(filepath.Dir(configPath), "docs", "acceptance")
 	if err := os.MkdirAll(noteDir, 0o755); err != nil {
 		return fmt.Errorf("acceptance: mkdir note dir: %w", err)
@@ -200,7 +182,6 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	}
 	cmd.Printf("acceptance note: %s\n", notePath)
 
-	// 4. The gate: any failing/missing check fails the command.
 	if !overallPass(results) {
 		return fmt.Errorf("acceptance: acceptance gate FAILED — see %s", notePath)
 	}
@@ -208,8 +189,6 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	return nil
 }
 
-// acceptanceLine prints a check result above the progress list's live line,
-// or on the command's output when there is no list.
 func acceptanceLine(cmd *cobra.Command, rep *progress.Reporter, line string) {
 	if rep != nil {
 		rep.Log(line)
@@ -218,10 +197,9 @@ func acceptanceLine(cmd *cobra.Command, rep *progress.Reporter, line string) {
 	cmd.Println(line)
 }
 
-// bootstrapDirInJail returns the in-jail directory holding the manager's
-// bootstrap.json (mint-manager-bootstrap writes <tree>/.lever/bootstrap.json,
-// bind-mounted at <mount>/.lever inside the jail). lever-agent reads the broker
-// URL + CA from it.
+// bootstrapDirInJail is the in-jail directory of the manager's bootstrap.json
+// (<tree>/.lever, mounted at <mount>/.lever), from which lever-agent reads the
+// broker URL and CA.
 func bootstrapDirInJail(app *config.App, mount string) string {
 	if mount == "" {
 		return filepath.Join(app.Tree, ".lever")
@@ -229,8 +207,6 @@ func bootstrapDirInJail(app *config.App, mount string) string {
 	return mount + "/.lever"
 }
 
-// acceptanceHarness drives the acceptance checks against the live jail. jr execs
-// `lever-agent` inside the jail machine.
 type acceptanceHarness struct {
 	app       *config.App
 	jr        proc.Runner
@@ -238,26 +214,22 @@ type acceptanceHarness struct {
 	bootDir   string // in-jail dir containing bootstrap.json (broker URL + CA)
 	managerID string // in-jail dir holding the manager's mTLS identity (the delegator)
 	workerID  string // in-jail dir holding the worker's mTLS identity (the executor)
-	// adminURL/admin reach the broker's loopback admin API from the host: the
-	// worker's ticket is minted there (/worker-ticket) and staged into the
-	// guest by the broker, the way a real dispatch does it.
+	// The worker's ticket is minted host-side on the admin API (/worker-ticket)
+	// and staged into the guest by the broker, as a real dispatch does.
 	adminURL string
 	admin    *http.Client
 }
 
-// vmIDDir returns a distinct, non-empty, VM-writable identity directory per role.
-// The broker-only VM has no agent containers (so no /home/manager|worker users);
-// these dirs live under /tmp, writable by the run user the JailRunner execs as.
-// Pure (no I/O) so it is unit-testable without a live jail.
+// vmIDDir returns a distinct VM-writable identity directory per role, under
+// /tmp: the broker-only VM has no agent users.
 func vmIDDir(role string) string {
 	return "/tmp/lever-acceptance/" + role + "/.lever-id"
 }
 
-// hostAgentBinPath resolves the HOST path of the linux/arm64 lever-agent binary
-// to copy into the VM: $LEVER_AGENT_BIN if set, else $LEVER_INSTANCE/vendor/bin/
-// lever-agent (the `make lever-agent-linux` output; $LEVER_INSTANCE defaults to
-// $HOME/lever-instance). It errors with a build hint if the resolved path does not
-// exist, so the gate FAILS CLOSED rather than silently skipping the install.
+// hostAgentBinPath resolves the host's linux lever-agent binary:
+// $LEVER_AGENT_BIN, else $LEVER_INSTANCE/vendor/bin/lever-agent ($LEVER_INSTANCE
+// defaults to $HOME/lever-instance). A missing file is an error with a build
+// hint, so the gate fails closed.
 func hostAgentBinPath() (string, error) {
 	p := os.Getenv("LEVER_AGENT_BIN")
 	if p == "" {
@@ -277,13 +249,9 @@ func hostAgentBinPath() (string, error) {
 	return p, nil
 }
 
-// installLeverAgent copies the host-built lever-agent into the jail guest at
-// /usr/local/bin/lever-agent AS ROOT, so the existing
-// jr.Run(ctx, nil, "lever-agent", ...) finds it on PATH. Isolated jail guests
-// (OrbStack machines, Lima VMs) do NOT mount the host filesystem, so the binary
-// is streamed in over the backend's root transport. Delegating to the backend
-// keeps this backend-agnostic — the "how do I reach the guest as root" knowledge
-// lives only in each backend's RootPrefix, not here.
+// installLeverAgent copies lever-agent into the guest at
+// /usr/local/bin/lever-agent as root, streamed over the backend's root
+// transport: isolated guests do not mount the host filesystem.
 func installLeverAgent(ctx context.Context, b backend.Backend) error {
 	src, err := hostAgentBinPath()
 	if err != nil {
@@ -295,33 +263,26 @@ func installLeverAgent(ctx context.Context, b backend.Backend) error {
 	return nil
 }
 
-// setup makes the VM gate runnable: install lever-agent, create the VM-writable
-// identity-dir parents, enrol the manager from the deposited bootstrap, then
-// mint+stage a worker ticket host-side (broker admin API) and enrol the worker
-// from where the broker staged it. Every step is fail-closed — a setup error
-// aborts the gate (never a vacuous check pass).
+// setup installs lever-agent, creates the identity-dir parents, enrols the
+// manager from the deposited bootstrap, then mints a worker ticket host-side
+// and enrols the worker from where the broker staged it. Every step fails
+// closed.
 func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error {
-	// 1) Install lever-agent into the VM (copied in as root; isolated machines
-	//    have no host-fs mount, so a shared-mount exec is impossible).
 	if err := installLeverAgent(ctx, b); err != nil {
 		return err
 	}
-	// 2) Ensure the per-role identity-dir parents exist and are run-user-writable.
 	for _, dir := range []string{h.managerID, h.workerID} {
 		if out, err := h.jr.Run(ctx, nil, "mkdir", "-p", dir); err != nil {
 			return fmt.Errorf("mkdir -p %s in jail: %w: %s", dir, err, out.Stdout+out.Stderr)
 		}
 	}
-	// 3) Enrol the manager from the deposited bootstrap.json.
 	bootstrap := h.bootDir + "/bootstrap.json"
 	if res, err := h.jr.Run(ctx, nil, "lever-agent", "boot", "-enrol-only", "-id-dir", h.managerID, "-bootstrap", bootstrap); err != nil {
 		return fmt.Errorf("enrol manager (lever-agent boot): %w: %s", err, res.Stdout+res.Stderr)
 	}
-	// 4) Mint the worker's ticket HOST-SIDE through the broker's admin API. The
-	//    broker stages it in the guest runtime dir (the same channel a dispatch
-	//    uses; nothing an agent can reach mints a worker ticket), and answers
-	//    with the guest path. Then enrol the worker from that file, as the run
-	//    user, which is who the jail runner runs as.
+	// The worker's ticket is minted host-side through the admin API and staged by
+	// the broker in the guest runtime dir, the channel a dispatch uses; nothing an
+	// agent can reach mints a worker ticket.
 	// TODO(hardening): the vmIDDir parents would collide across concurrent
 	// `lever acceptance` runs; fine for the single-run merge gate.
 	var wt wire.WorkerTicketResponse
@@ -334,9 +295,8 @@ func (h *acceptanceHarness) setup(ctx context.Context, b backend.Backend) error 
 	return nil
 }
 
-// agentAs runs `lever-agent <verb> <args...>` inside the jail using the given
-// identity dir, returning combined stdout/stderr + error. The bootstrap path
-// points lever-agent at the broker (URL + CA).
+// agentAs runs `lever-agent <verb> <args...>` in the jail with the given
+// identity dir and returns combined output.
 func (h *acceptanceHarness) agentAs(ctx context.Context, idDir, verb string, args ...string) (string, error) {
 	bootstrap := h.bootDir + "/bootstrap.json"
 	full := append([]string{verb, "-id-dir", idDir, "-bootstrap", bootstrap}, args...)
@@ -344,13 +304,12 @@ func (h *acceptanceHarness) agentAs(ctx context.Context, idDir, verb string, arg
 	return res.Stdout + res.Stderr, err
 }
 
-// agent runs as the worker (the default subject of the executor-side checks).
 func (h *acceptanceHarness) agent(ctx context.Context, verb string, args ...string) (string, error) {
 	return h.agentAs(ctx, h.workerID, verb, args...)
 }
 
-// run dispatches one acceptance check. Each closure ACTUALLY attempts its operation;
-// pass/fail is derived from the live outcome (allowed vs denied), never hard-coded.
+// run dispatches one check. Pass or fail comes from the live outcome, never
+// hard-coded.
 func (h *acceptanceHarness) run(ctx context.Context, name string) (bool, error) {
 	switch name {
 	case "delegated-read":
@@ -371,12 +330,9 @@ func (h *acceptanceHarness) run(ctx context.Context, name string) (bool, error) 
 }
 
 // workerToken obtains the worker's delegated db.read token. The worker has an
-// EMPTY obtain (no ambient authority), so it cannot self-mint — the MANAGER mints
-// the token via its `delegate db.read → worker` grant (bound_to=worker). The
-// narrowing caveats (table, and the owner filter when withFilter) are baked into
-// the delegated envelope at mint time: delegation is online-only and there is no
-// offline holder-side attenuation, so the worker can only ever exercise a token
-// that already carries these caveats (which it then cannot drop at call time).
+// empty obtain, so the manager mints it (bound_to=worker) with the narrowing
+// caveats baked in at mint: delegation is online-only, so the worker can only
+// use a token that already carries caveats it cannot drop.
 func (h *acceptanceHarness) workerToken(ctx context.Context, withFilter bool) (string, error) {
 	extra := []string{"-tool", "db", "-op", "read", "-to", "worker", "table=A"}
 	if withFilter {
@@ -389,8 +345,8 @@ func (h *acceptanceHarness) workerToken(ctx context.Context, withFilter bool) (s
 	return strings.TrimSpace(lastLine(out)), nil
 }
 
-// checkDelegatedRead — PASS = the worker's delegated token (carrying the owner
-// filter caveat) reads its filtered rows (the call is ALLOWED and returns them).
+// checkDelegatedRead passes when the worker's delegated, filtered token is
+// allowed to read its rows.
 func (h *acceptanceHarness) checkDelegatedRead(ctx context.Context) (bool, error) {
 	tok, err := h.workerToken(ctx, true)
 	if err != nil {
@@ -403,8 +359,7 @@ func (h *acceptanceHarness) checkDelegatedRead(ctx context.Context) (bool, error
 	return true, nil
 }
 
-// checkNoTableC — PASS = worker CANNOT read a table/scope outside the delegated
-// envelope (table C). The call MUST be denied.
+// checkNoTableC passes when a read outside the delegated envelope is denied.
 func (h *acceptanceHarness) checkNoTableC(ctx context.Context) (bool, error) {
 	tok, err := h.workerToken(ctx, true)
 	if err != nil {
@@ -417,14 +372,13 @@ func (h *acceptanceHarness) checkNoTableC(ctx context.Context) (bool, error) {
 	return false, fmt.Errorf("table C read was ALLOWED (must be denied): %s", out)
 }
 
-// checkNoDropFilter — PASS = worker CANNOT widen by dropping the delegated
-// narrowing filter caveat. Calling with the filter omitted MUST be denied.
+// checkNoDropFilter passes when a call omitting the delegated filter caveat
+// is denied.
 func (h *acceptanceHarness) checkNoDropFilter(ctx context.Context) (bool, error) {
 	tok, err := h.workerToken(ctx, true) // token carries the delegated filter caveat
 	if err != nil {
 		return false, err
 	}
-	// Omit the filter argument: the delegated caveat is not satisfied.
 	out, err := h.agent(ctx, "call", "-tool", "db", "-op", "read", "-token", tok, "table=A")
 	if err != nil {
 		return true, nil // denied — the dropped filter is caught
@@ -432,36 +386,23 @@ func (h *acceptanceHarness) checkNoDropFilter(ctx context.Context) (bool, error)
 	return false, fmt.Errorf("read with the narrowing filter dropped was ALLOWED (must be denied): %s", out)
 }
 
-// checkNoSelfPath — PASS = worker CANNOT self-mint a capability it was never
-// delegated (no ambient authority). A /request for an un-granted cap MUST be
-// refused by the broker.
+// checkNoSelfPath passes when the broker refuses the worker's /request for a
+// capability it was never delegated.
 func (h *acceptanceHarness) checkNoSelfPath(ctx context.Context) (bool, error) {
-	// The worker self-mints db.read bound to ITSELF. It has an empty obtain, so
-	// MayObtain("worker","worker","db","read") is false — the broker's /request
-	// MUST refuse it. (The worker may only exercise a token the MANAGER delegated;
-	// it has no ambient authority of its own.)
-	//
-	// Assumption: if lever-agent is absent entirely, workerToken() (called by other
-	// checks before this one) already fails hard, so we don't need to guard that
-	// case here separately.
+	// The worker has an empty obtain, so the broker's /request must refuse a
+	// self-mint. A missing lever-agent already fails the earlier checks.
 	out, err := h.agent(ctx, "request", "-tool", "db", "-op", "read", "table=A")
 	if err != nil {
-		// Non-zero exit = broker refused (or lever-agent signalled denial). This
-		// is the expected outcome — the broker's /request MUST deny a worker with
-		// no ambient authority. PASS.
 		return true, nil
 	}
-	// Exit 0 with empty output is AMBIGUOUS: we cannot confirm denial occurred.
-	// Treat as FAIL-CLOSED rather than recording a vacuous PASS.
+	// Exit 0 with empty output cannot confirm a denial: fail closed.
 	if strings.TrimSpace(out) == "" {
 		return false, fmt.Errorf("no-self-path: ambiguous result — request exited 0 with empty output (expected broker denial / non-zero exit)")
 	}
-	// Exit 0 with any output means the broker ALLOWED the request — escalation.
+	// Exit 0 with output means the broker allowed it: an escalation.
 	return false, fmt.Errorf("worker self-minted an un-granted cap (must be refused): %s", out)
 }
 
-// probeState is the classified outcome of a single egress probe
-// (classifyEgressProbe), consumed by egressVerdict / checkEgressRefused.
 type probeState string
 
 const (
@@ -470,25 +411,18 @@ const (
 	stateUncertain probeState = "uncertain" // cannot classify — FAIL-CLOSED
 )
 
-// classifyEgressProbe maps a curl probe of a host:port to reachable/blocked/
-// uncertain. A TLS-handshake-level failure counts as
-// REACHABLE: the egress allowlist works at the TCP layer, so if the packet got
-// far enough to start a TLS handshake (curl exit 35 SSL connect error / 60 cert
-// verify failure), the TCP connection SUCCEEDED — connecting is the point. Exit 0
-// is reachable; exit 7 (refused) / 28 (timeout/dropped) is blocked; exit 127
-// (curl absent) or anything else is uncertain (FAIL-CLOSED).
+// classifyEgressProbe maps a curl probe to reachable, blocked or uncertain.
+// The allowlist works at the TCP layer, so a TLS-layer failure (curl 35, 60)
+// means the connection succeeded: reachable. 0 is reachable; 7 (refused) and
+// 28 (dropped) are blocked; anything else is uncertain (fail closed).
 func classifyEgressProbe(res proc.Result, err error) (probeState, error) {
 	if err == nil {
 		return stateReachable, nil
 	}
 	switch res.Code {
 	case 35, 60:
-		// TLS-layer failure: the TCP connection was established, so the port is
-		// reachable through the allowlist (the contrast we want to prove).
 		return stateReachable, nil
 	case 7, 28:
-		// CURLE_COULDNT_CONNECT (refused / net-unreachable) or
-		// CURLE_OPERATION_TIMEDOUT (packet dropped by the policy) = blocked.
 		return stateBlocked, nil
 	case 127:
 		return stateUncertain, fmt.Errorf("egress-refused: curl not found in the jail (exit 127): %s", res.Stderr)
@@ -501,11 +435,9 @@ func classifyEgressProbe(res proc.Result, err error) (probeState, error) {
 	}
 }
 
-// egressVerdict is the PURE decision for the egress check: PASS iff the
-// allowlisted broker jail port is REACHABLE and the non-allowlisted admin port is
-// BLOCKED — a non-vacuous contrast that directly proves the allowlist. Any other
-// combination FAILS (and an "uncertain"/unreachable jail port or a reachable
-// admin port FAILS CLOSED). Unit-testable without a live jail.
+// egressVerdict passes iff the allowlisted broker jail port is reachable and
+// the non-allowlisted admin port is blocked: a non-vacuous contrast that
+// proves the allowlist. Anything else fails closed.
 func egressVerdict(jailState, adminState probeState) (bool, error) {
 	if jailState != stateReachable {
 		return false, fmt.Errorf("egress-refused: broker jail port not reachable (got %q) — allowlist or broker down; FAIL-CLOSED", jailState)
@@ -516,23 +448,18 @@ func egressVerdict(jailState, adminState probeState) (bool, error) {
 	return true, nil
 }
 
-// probeReachable curls host:port from inside the jail and classifies the result
-// as reachable/blocked/uncertain (TLS-handshake errors count as reachable).
 func (h *acceptanceHarness) probeReachable(ctx context.Context, port int) (probeState, error) {
 	url := fmt.Sprintf("https://%s:%d/", h.hostAlias, port)
 	res, err := h.jr.Run(ctx, nil, "curl", "-sS", "--connect-timeout", "4", "--max-time", "5", url)
 	return classifyEgressProbe(res, err)
 }
 
-// checkEgressRefused — PASS = the jail CAN reach the allowlisted broker JAIL port
-// AND CANNOT reach the non-allowlisted broker ADMIN port. Both listen on the host
-// behind host.orb.internal, so the contrast is non-vacuous and directly proves
-// the egress allowlist. FAIL-CLOSED on any ambiguous result. (The public internet
-// is intentionally left OPEN by the allowlist, so curling example.com would NOT
-// test containment — the broker port contrast does.) It then checks the
-// chain's one REJECT (metadataVerdict): the metadata address answers
-// "No route to host" at once, and a neighbouring link-local address is
-// still dropped, so the REJECT neither opens nor widens anything.
+// checkEgressRefused passes when the jail reaches the allowlisted broker jail
+// port but not the admin port; both listen behind the host alias, so the
+// contrast proves the allowlist (the public internet is open by design, so a
+// public URL would prove nothing). It then checks the chain's one REJECT
+// (metadataVerdict): the metadata address is refused at once and a
+// neighbouring link-local address is still dropped.
 func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error) {
 	jailState, jerr := h.probeReachable(ctx, h.app.EffectiveJailPort())
 	if jailState == stateUncertain {
@@ -545,9 +472,7 @@ func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error
 	if ok, err := egressVerdict(jailState, adminState); !ok {
 		return false, err
 	}
-	// The chain's one REJECT (lever#182): the metadata address is refused at
-	// once, and a neighbouring link-local address is still silently dropped,
-	// so the REJECT is exactly that /32 and opens nothing.
+	// The REJECT must be exactly the metadata /32 and open nothing.
 	meta, merr := h.probeLinkLocal(ctx, egress.MetadataV4)
 	if meta == linkUncertain {
 		return false, merr
@@ -560,11 +485,9 @@ func (h *acceptanceHarness) checkEgressRefused(ctx context.Context) (bool, error
 }
 
 // linkLocalControl is a link-local address next to egress.MetadataV4 that the
-// chain must DROP (169.254/16) and not REJECT: the control for the one REJECT.
+// chain must drop, not reject: the control for the REJECT.
 const linkLocalControl = "169.254.169.253"
 
-// linkState is the outcome of a raw TCP dial from the jail to a link-local
-// address (probeLinkLocal), consumed by metadataVerdict.
 type linkState string
 
 const (
@@ -578,20 +501,17 @@ const (
 // long, a REJECT returns at once.
 const linkLocalTimeout = "3"
 
-// probeLinkLocal dials ip:80 from the jail with bash's /dev/tcp, which, unlike
-// curl, reports the connect errno ("No route to host" for the REJECT,
-// "Connection refused" for a reset) so the two can be told apart. ip is one of
+// probeLinkLocal dials ip:80 with bash's /dev/tcp, which unlike curl reports
+// the connect errno, so a REJECT and a reset can be told apart. ip is one of
 // two constants, never input.
 func (h *acceptanceHarness) probeLinkLocal(ctx context.Context, ip string) (linkState, error) {
 	res, err := h.jr.Run(ctx, nil, "timeout", linkLocalTimeout, "bash", "-c", "exec 3<>/dev/tcp/"+ip+"/80")
 	return classifyLinkLocalProbe(ip, res, err)
 }
 
-// classifyLinkLocalProbe maps a probeLinkLocal result to a linkState: exit 0
-// is open; "Connection refused" is open too (a reset came back, so packets
-// reached a host); "No route to host" is rejected; timeout's exit 124 is
-// dropped; anything else (bash or timeout missing, another errno) is
-// uncertain.
+// classifyLinkLocalProbe: exit 0 and "Connection refused" (a reset reached a
+// host) are open; "No route to host" is rejected; timeout's exit 124 is
+// dropped; anything else is uncertain.
 func classifyLinkLocalProbe(ip string, res proc.Result, err error) (linkState, error) {
 	if err == nil {
 		return linkOpen, nil
@@ -609,12 +529,10 @@ func classifyLinkLocalProbe(ip string, res proc.Result, err error) (linkState, e
 	}
 }
 
-// metadataVerdict is the PURE decision for the metadata REJECT: PASS iff the
-// metadata address is rejected and the control address is dropped. A dropped
-// metadata address is contained but means the REJECT is not in force, or its
-// ICMP answer is dropped on the way back (a closed chain from before lever#182
-// that a re-apply left alone, or a chain without the lo ACCEPT); a rejected
-// control means the REJECT is wider than its /32; an open address is a hole.
+// metadataVerdict passes iff the metadata address is rejected and the control
+// is dropped. A dropped metadata address is contained but means the REJECT is
+// not in force or its ICMP answer is lost (no lo ACCEPT); a rejected control
+// means the REJECT is wider than its /32; an open address is a hole.
 func metadataVerdict(meta, control linkState) (bool, error) {
 	if meta != linkRejected {
 		return false, fmt.Errorf("egress-refused: metadata address %s was %q, want %q (the chain's icmp-host-prohibited REJECT and the lo ACCEPT for its answer; a closed chain from before them needs lever down and up)", egress.MetadataV4, meta, linkRejected)
@@ -625,23 +543,18 @@ func metadataVerdict(meta, control linkState) (bool, error) {
 	return true, nil
 }
 
-// checkRevocation — PASS = after /bump-epoch the worker's previously-working
-// capability call is denied (403). We mint+exercise a token, bump the epoch,
-// then re-exercise: the second call MUST fail.
+// checkRevocation passes when a working token is denied after /bump-epoch.
 func (h *acceptanceHarness) checkRevocation(ctx context.Context) (bool, error) {
 	tok, err := h.workerToken(ctx, true)
 	if err != nil {
 		return false, err
 	}
-	// Prove it works first.
 	if out, err := h.agent(ctx, "call", "-tool", "db", "-op", "read", "-token", tok, "table=A", "filter=owner=worker"); err != nil {
 		return false, fmt.Errorf("pre-revocation call should succeed: %w: %s", err, out)
 	}
-	// Revoke by raising the epoch floor (admin endpoint on the host loopback).
 	if err := adminPost(ctx, h.app, "/bump-epoch", nil); err != nil {
 		return false, fmt.Errorf("bump-epoch: %w", err)
 	}
-	// The same token must now be denied.
 	out, err := h.agent(ctx, "call", "-tool", "db", "-op", "read", "-token", tok, "table=A", "filter=owner=worker")
 	if err != nil {
 		return true, nil // denied post-revocation — correct
@@ -649,11 +562,8 @@ func (h *acceptanceHarness) checkRevocation(ctx context.Context) (bool, error) {
 	return false, fmt.Errorf("token still accepted after bump-epoch (must be 403): %s", out)
 }
 
-// toolListenWait bounds how long acceptance waits for the supervised tools
-// to listen before it runs the checks.
 const toolListenWait = 30 * time.Second
 
-// defaultToolDial reports whether addr accepts a TCP connection now.
 func defaultToolDial(ctx context.Context, addr string) error {
 	d := net.Dialer{Timeout: 2 * time.Second}
 	c, err := d.DialContext(ctx, "tcp", addr)
@@ -663,15 +573,14 @@ func defaultToolDial(ctx context.Context, addr string) error {
 	return c.Close()
 }
 
-// waitToolsListening polls each supervised (not external) tool's backend
-// until it accepts a TCP connection, for at most wait in all. A tool that
-// does not listen in time is an error that names the tool, its address and
-// its log, so the gate fails on the real cause instead of a 502 in a check.
+// waitToolsListening polls each supervised tool's backend until it accepts a
+// connection, for at most wait in all. A tool that does not listen is an error
+// naming the tool, its address and its log, so the gate fails on the real
+// cause instead of a 502 in a check.
 func waitToolsListening(ctx context.Context, app *config.App, dial func(context.Context, string) error, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
-	// A tool whose program lies under manager.read_only is held back until
-	// the manager holds those mounts, which a broker-only run never starts:
-	// it is not expected to listen.
+	// A tool whose program lies under manager.read_only waits for the manager's
+	// mounts, which a broker-only run never starts.
 	held, err := app.ToolsOnReadOnly()
 	if err != nil {
 		return fmt.Errorf("which tools manager.read_only holds back: %w", err)

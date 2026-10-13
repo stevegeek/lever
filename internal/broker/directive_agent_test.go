@@ -1,13 +1,9 @@
 package broker
 
-// directive_agent_test.go exercises the agent-facing /directive/consume and
-// /directive/check mTLS jail routes: happy-path consume, the opaque-404
-// failure surface (unknown id, wrong target, replay, expiry, stale
-// generation — all byte-identical), revoked-caller and certless denial, and
-// the per-CN rate limit. Directives are seeded directly via the store
-// (b.directives.Submit), bypassing the signed /directive/send admin
-// channel — these routes never verify signatures
-// themselves.
+// Tests for the agent-facing /directive/consume and /directive/check routes.
+// Every failure is the same byte-identical opaque 404. Directives are seeded
+// through b.directives.Submit, bypassing the signed admin channel: these
+// routes never verify signatures themselves.
 
 import (
 	"bytes"
@@ -21,8 +17,6 @@ import (
 	"github.com/stevegeek/lever/internal/opsig"
 )
 
-// toolCallAction builds a bound tool_call action satisfying opsig's
-// validateAction (arg_binding "exact", uses 1).
 func toolCallAction(tool, op, args string) opsig.Action {
 	return opsig.Action{
 		Kind: "tool_call", Tool: tool, Op: op,
@@ -30,10 +24,8 @@ func toolCallAction(tool, op, args string) opsig.Action {
 	}
 }
 
-// submitDirective stores st as an active directive directly through the
-// store (Submit), bypassing the signed admin channel. Returns the exact
-// marshaled statement bytes so callers can compare against the consumed
-// action.
+// submitDirective returns the exact marshaled statement bytes for comparison
+// with the consumed action.
 func submitDirective(t *testing.T, b *Broker, st opsig.Statement) []byte {
 	t.Helper()
 	raw, err := json.Marshal(st)
@@ -59,10 +51,9 @@ func submitDirective(t *testing.T, b *Broker, st opsig.Statement) []byte {
 	return raw
 }
 
-// expiredStatement builds a statement whose expiry is already in the past —
-// Submit doesn't itself validate NotBefore/ExpiresAt (only opsig.ParseStatement
-// does, and these routes never call it), so this is valid input to Submit but
-// must be rejected by Consume/Check's own time check.
+// expiredStatement is accepted by Submit, which does not check NotBefore or
+// ExpiresAt (only opsig.ParseStatement does), so Consume/Check's own time
+// check must reject it.
 func expiredStatement(id, cn string, gen int, action opsig.Action) opsig.Statement {
 	now := time.Now()
 	return opsig.Statement{
@@ -75,8 +66,6 @@ func expiredStatement(id, cn string, gen int, action opsig.Action) opsig.Stateme
 	}
 }
 
-// postDirectiveID POSTs {"id": id} to path on url and returns the response
-// status and raw body bytes.
 func postDirectiveID(t *testing.T, client *http.Client, url, path, id string) (int, []byte) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"id": id})
@@ -91,10 +80,8 @@ func postDirectiveID(t *testing.T, client *http.Client, url, path, id string) (i
 
 const opaque404Body = `{"error":"not found"}`
 
-// wantDirectiveRateLimit mirrors directive_agent.go's directiveRateLimit
-// (30 calls/CN/minute). Declared independently — not a reference to that
-// constant — so this test file compiles and runs against the
-// unregistered-route mux during the RED phase, before directive_agent.go exists.
+// wantDirectiveRateLimit is directiveRateLimit (30 calls/CN/minute), declared
+// independently so a change to the constant fails the test.
 const wantDirectiveRateLimit = 30
 
 func TestConsumeHappyPathToolCall(t *testing.T) {
@@ -149,14 +136,10 @@ func TestConsumeHappyPathToolCall(t *testing.T) {
 	}
 }
 
-// TestConsumeRevalidatesStoredStatementRejectsInvalid proves consume
-// re-runs opsig.ParseStatement over the stored statement bytes rather than
-// trusting a plain json.Unmarshal: a record whose bytes decode cleanly as
-// JSON but fail the full validator (here, a wrong instance) must never leak
-// its action — even though the store-level CAS (TargetCN/TargetGen/time
-// bounds) is otherwise satisfied. Submits the record directly (bypassing
-// submitDirective's use of the real instance) so the stored bytes disagree
-// with b.instanceID.
+// TestConsumeRevalidatesStoredStatementRejectsInvalid: consume re-runs
+// opsig.ParseStatement over the stored bytes, so a record that decodes as
+// JSON but fails the validator (here, a wrong instance) never leaks its
+// action, even when the store-level target/generation/time checks pass.
 func TestConsumeRevalidatesStoredStatementRejectsInvalid(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
 	b.directives.BumpGeneration("manager")
@@ -326,7 +309,6 @@ func TestConsumeOpaque404ForWrongAgentUnknownIDConsumedExpiredStaleGen(t *testin
 
 func TestConsumeDirectivesDisabledOpaque404(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
-	// Leave DirectiveVerifier as nil (disabled)
 	b.directiveVerifier = nil
 
 	srv := jailServer(t, b)

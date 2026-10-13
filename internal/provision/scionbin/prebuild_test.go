@@ -31,9 +31,8 @@ func TestStartPrebuildSkipsWhatNeedsNoBuild(t *testing.T) {
 	p.Stop()
 }
 
-// TestPrebuildResultIsTakenForTheSameArch (lever#189): the scion step takes
-// the early build when the guest's architecture, the spec and the machine
-// match, and so builds once.
+// TestPrebuildResultIsTakenForTheSameArch: the scion step takes the early
+// build when the guest's architecture, the spec and the machine match.
 func TestPrebuildResultIsTakenForTheSameArch(t *testing.T) {
 	backendtest.IsolateCache(t)
 	f := proc.NewFakeRunner()
@@ -85,7 +84,6 @@ func TestPrebuildErrorReachesTheScionStep(t *testing.T) {
 	}
 }
 
-// blockingRunner blocks every command until its context ends.
 type blockingRunner struct{ started chan struct{} }
 
 func (b blockingRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {

@@ -59,8 +59,6 @@ func dialJail(t *testing.T, b *Broker, srv *httptest.Server, cn string) *tls.Con
 	return conn
 }
 
-// readLineContaining consumes lines from br until one contains want; a read
-// error first (the connection deadline included) fails the test with why.
 func readLineContaining(t *testing.T, br *bufio.Reader, want, why string) {
 	t.Helper()
 	for {

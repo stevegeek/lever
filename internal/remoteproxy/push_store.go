@@ -14,11 +14,10 @@ import (
 	"github.com/stevegeek/lever/internal/webpush"
 )
 
-// The push store: each login's push subscriptions and, per (login, agent),
-// the newest message a push was sent (or decided not to be sent) for. One
-// 0600 file the proxy alone writes. A subscription is a way to put a
-// notification on a device, so the file is private like the VAPID key, and
-// an endpoint belongs to one login only.
+// The push store: subscriptions per login and, per (login, agent), the
+// newest message a push decision covered. A 0600 file only the proxy writes:
+// a subscription can put a notification on a device, and an endpoint belongs
+// to one login only.
 
 const (
 	pushKeyFile     = "vapid.key"
@@ -57,14 +56,12 @@ type PushStore struct {
 }
 
 var (
-	// ErrBadPushStore reports a store file that is not one (empty after a
-	// power loss, or edited).
+	// ErrBadPushStore reports a store file that is not one (truncated or edited).
 	ErrBadPushStore      = errors.New("the push store is not a lever push store")
 	errPushEndpointTaken = errors.New("another login holds this endpoint with other keys")
 )
 
-// checkPrivateDir: the push directory is this user's alone (owner, mode,
-// and not a link).
+// checkPrivateDir: dir must be this user's, private, and not a link.
 func checkPrivateDir(dir string) error {
 	fi, err := os.Lstat(dir)
 	if err != nil {
@@ -120,8 +117,8 @@ func (s *PushStore) save(f pushFile) error {
 	return webpush.WritePrivateFile(s.path, b)
 }
 
-// update applies change to a copy, writes it, and only then keeps it: a
-// failed write (or change) leaves memory as the file is.
+// update writes a changed copy first: a failed write leaves memory matching
+// the file.
 func (s *PushStore) update(change func(f *pushFile) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -155,12 +152,10 @@ func entry(f *pushFile, login string) *pushLogin {
 	return e
 }
 
-// Add stores sub for login: replaces the same endpoint, and keeps the
-// newest maxSubsPerLogin. An endpoint another login holds moves to login
-// only with the same keys: that is the same browser subscription (a log
-// out and in as another login). A caller who knows the endpoint alone
-// supplies its own keys and gets errPushEndpointTaken, so it cannot take
-// another login's notifications away.
+// Add stores sub for login, replacing the same endpoint and keeping the
+// newest maxSubsPerLogin. Another login's endpoint moves only with the same
+// keys (the same browser subscription); otherwise errPushEndpointTaken, so
+// knowing an endpoint cannot take another login's notifications.
 func (s *PushStore) Add(login string, sub webpush.Subscription) error {
 	now := s.now().UTC()
 	return s.update(func(f *pushFile) error {

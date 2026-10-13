@@ -1,9 +1,8 @@
-// Command pushrecv is a TEST-ONLY fake push service for lever's e2e: it
-// listens on a loopback address, hands out one subscription per id, and
-// decrypts and logs every push it gets. A lever remote proxy reaches it
-// only with remote.push.test_hosts: [<that address>] in lever.yaml AND
-// LEVER_PUSH_TEST_HOSTS=<that address> in its environment. Never
-// part of a release (.goreleaser.yaml builds ./cmd/lever only).
+// Command pushrecv is a TEST-ONLY fake push service for lever's e2e: it hands
+// out one subscription per id and decrypts and logs every push. A lever remote
+// proxy reaches it only with remote.push.test_hosts: [<address>] in lever.yaml
+// AND LEVER_PUSH_TEST_HOSTS=<address> in its environment. Never part of a
+// release (.goreleaser.yaml builds ./cmd/lever only).
 package main
 
 import (

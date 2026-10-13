@@ -1,13 +1,13 @@
 // Command lever-tool-github is the host-side broker tool that pushes an
-// agent's branch to GitHub. The agent writes a git bundle into the tree
-// (/workspace/.lever-files/github/<name>.bundle) and calls push; this tool
-// checks the request, imports the bundle into its own bare mirror and pushes
-// one agent/* branch with a short-lived GitHub App token. The jail never
-// holds a GitHub credential. Spec: docs/superpowers/specs/2026-10-07-lever-dev-on-desktop-design.md §4.
+// agent's branch to GitHub. The agent writes a git bundle into
+// /workspace/.lever-files/github/ and calls push; this tool checks the
+// request, imports the bundle into its own bare mirror and pushes one agent/*
+// branch with a short-lived GitHub App token. The jail never holds a GitHub
+// credential.
 //
-// With -ops it also offers pr_open, pr_status, pr_merge and release (none by
-// default), each its own capability and each call with a token narrowed to
-// the repository and the permissions that operation needs.
+// With -ops it also offers pr_open, pr_status, pr_merge and release, each its
+// own capability and each call with a token narrowed to the repository and
+// the permissions that operation needs.
 package main
 
 import (
@@ -46,7 +46,7 @@ type opts struct {
 	textMax                                                          int
 }
 
-// errNotes: release used to take notes; a stale caller learns why it fails.
+// errNotes tells a caller that passes notes why release refuses them.
 var errNotes = errors.New("release takes no notes: it creates only the tag, and the repository's release workflow writes the release")
 
 var appSlugRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,99}$`)
@@ -152,8 +152,8 @@ func parseFlags(args []string) (opts, error) {
 	return o, nil
 }
 
-// parseList reads a comma list whose entries must be in allowed. Order is
-// kept and duplicates dropped.
+// parseList reads a comma list whose entries must be in allowed, keeping
+// order and dropping duplicates.
 func parseList(flag, v string, allowed []string) ([]string, error) {
 	var out []string
 	for _, e := range strings.Split(v, ",") {
@@ -298,9 +298,8 @@ func releaseBackstop(o opts) func(captool.ValidatedContext, map[string]string) e
 	})
 }
 
-// operations lists the captool operations this instance offers: push
-// unless -ops leaves it out, and each opt-in operation -ops names. An
-// operation not listed is not registered at all.
+// operations lists the operations this instance offers; one not listed is
+// not registered at all.
 func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 	repoParam := captool.ParamSpec{Name: "repo", Type: "string", Description: "owner/name, e.g. stevegeek/lever"}
 	caveat := map[string]string{"repo": "repo"}
@@ -482,10 +481,9 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 }
 
 // asResult turns a refusal into a result the agent can read: captool maps a
-// Handler error to a bare "tool error" (captool/verify.go:72), which would
-// hide "branch moved; push to a new branch name" and every named refusal.
-// The messages are already token-scrubbed. The tool's own audit line still
-// records decision=deny.
+// Handler error to a bare "tool error", which would hide every named refusal.
+// The messages are already token-scrubbed; the audit line still records
+// decision=deny.
 func asResult(v any, err error) (any, error) {
 	if err != nil {
 		return map[string]any{"ok": false, "error": err.Error()}, nil

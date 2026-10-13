@@ -13,10 +13,9 @@ import (
 
 func TestHostRootHasProvisioningOnly(t *testing.T) {
 	n := clitest.Names(NewRoot())
-	// msg is deliberately on BOTH roots: the host's is operator-authority,
-	// fire-and-forget, no-broker-hop (attachTarget + scion.Client.Message
-	// directly); the manager's is broker-routed send+list. Different trust
-	// models, same verb name.
+	// msg is on both roots with different trust models: the host's is
+	// operator-authority and goes straight to scion; the manager's is
+	// broker-routed.
 	for _, want := range []string{"up", "apply", "destroy", "stop", "doctor", "provision", "attach", "msg", "version"} {
 		if !n[want] {
 			t.Errorf("host root missing %q", want)
@@ -37,10 +36,9 @@ func TestHostRootHasProvisioningOnly(t *testing.T) {
 	}
 }
 
-// TestHostRootLeavesErrorPrintingToExecute: cobra's own `Error: <err>` line
-// would relay guest-supplied text raw (scion stderr wrapped into an error,
-// a hub slug), so the host root silences it; cli.Execute prints the
-// sanitized line instead.
+// TestHostRootLeavesErrorPrintingToExecute: cobra's `Error: <err>` would relay
+// guest-supplied text raw, so the root silences it and cli.Execute prints the
+// sanitized line.
 func TestHostRootLeavesErrorPrintingToExecute(t *testing.T) {
 	guest := "scion: \x1b]0;pwned\x07all good"
 	newRoot := func() *cobra.Command {
@@ -86,9 +84,8 @@ func TestRootVersionFlag(t *testing.T) {
 	}
 }
 
-// TestUsageOnlyForUsageErrors (lever#202): a command that fails at run time
-// prints its error and no usage text, which read as a flag problem; cobra's
-// own flag and argument errors, and a RunE's usageError, keep it.
+// TestUsageOnlyForUsageErrors: a run-time failure prints no usage text;
+// cobra's own flag and argument errors, and a usageError, keep it.
 func TestUsageOnlyForUsageErrors(t *testing.T) {
 	const usage = "Usage:\n  lever up [CONFIG] [flags]"
 	missing := t.TempDir() + "/nope/lever.yaml"
@@ -143,7 +140,6 @@ func TestSilenceUsageOnRunErrors(t *testing.T) {
 	if err == nil || err.Error() != "--a goes with --b" || !strings.Contains(out, "Usage:") {
 		t.Fatalf("usage error: err=%v out=%q", err, out)
 	}
-	// A command that silences usage itself keeps it silenced.
 	leaf.SilenceUsage = true
 	fail = nil
 	if _, err := clitest.Exec(t, root, "group", "leaf"); err != nil || !leaf.SilenceUsage {

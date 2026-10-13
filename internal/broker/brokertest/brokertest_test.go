@@ -14,8 +14,8 @@ func TestNewTestBrokerMintsWorkerTicketsHostSide(t *testing.T) {
 	if ticket := env.WorkerTicket(t, "worker"); ticket == "" {
 		t.Fatal("empty ticket")
 	}
-	// No agent-facing route mints a worker ticket: /provision is gone from the
-	// jail listener, whoever asks.
+	// No agent-facing route mints a worker ticket: the jail listener does not
+	// serve /provision, whoever asks.
 	body := []byte(`{"worker":"worker"}`)
 	resp, err := env.ClientFor(t, "manager").Post(env.Server.URL+"/provision", "application/json", bytes.NewReader(body))
 	if err != nil {

@@ -2,11 +2,9 @@ package termsafe
 
 import "testing"
 
-// TestSanitize pins the choke point for guest-supplied strings (scion
-// stderr, hub slugs, container status, the record's image, error text)
-// before they reach the operator's terminal: escape sequences are stripped
-// whole, control bytes, format characters and blank glyphs are replaced, and
-// ordinary UTF-8 passes unchanged.
+// TestSanitize pins the choke point for guest-supplied strings: escape
+// sequences are stripped whole, control bytes, format characters and blank
+// glyphs are replaced, and ordinary UTF-8 passes unchanged.
 func TestSanitize(t *testing.T) {
 	cases := []struct {
 		name, in, want string

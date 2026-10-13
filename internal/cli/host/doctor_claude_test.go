@@ -74,8 +74,8 @@ func TestCheckClaudeSettings(t *testing.T) {
 		t.Fatalf("leftover: %+v", r)
 	}
 
-	// Config removed: nothing configured, but a running agent still holds
-	// what lever wrote at its last start.
+	// Config removed: a running agent still holds what lever wrote at its last
+	// start.
 	none := claudeAgents("assistant", nil, []string{"scratch"}, nil)
 	r = checkClaudeSettings(context.Background(), "/lever", none, fleet, delivered(map[string]jail.ClaudeDelivered{
 		"lever--assistant": {AutoCompactWindow: 400000, AgentViewOff: true}, "lever--scratch": off}))
@@ -88,8 +88,8 @@ func TestCheckClaudeSettings(t *testing.T) {
 		t.Fatalf("nothing configured, nothing delivered: %+v", r)
 	}
 
-	// No switch in an agent's file (an image without a writable
-	// /etc/claude-code): a warning naming the agent, with its own fix.
+	// No switch in an agent's file (no writable /etc/claude-code): a warning
+	// naming the agent, with its own fix.
 	r = checkClaudeSettings(context.Background(), "/lever", none, fleet, delivered(map[string]jail.ClaudeDelivered{
 		"lever--assistant": off, "lever--scratch": {}}))
 	if r.fix == "" || !strings.Contains(r.detail, "agent view: not set (background sessions possible): scratch") ||

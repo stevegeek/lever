@@ -10,9 +10,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// sidecarSpec mirrors the subset of scion's api.ServiceSpec we emit (scion
-// unmarshals scion-services.yaml into []api.ServiceSpec). Local copy to avoid a
-// dependency on the vendored scion module; the yaml keys must match.
+// sidecarSpec mirrors the subset of scion's api.ServiceSpec lever emits; the
+// yaml keys must match.
 type sidecarSpec struct {
 	Name    string   `yaml:"name"`
 	Command []string `yaml:"command"`
@@ -30,35 +29,22 @@ type SidecarConfig struct {
 	LLMAuth       string // LLM-auth mode handed to the renew sidecar
 }
 
-// WriteSidecarSpecs emits $HOME/.scion/scion-services.yaml describing the two
-// long-lived agent sidecars — lever-gateway (the loopback mTLS proxy Claude talks
-// to) and lever-renew (auto-refresh of the agent cert and, in api-key mode, the
-// LLM capability token) — so scion launches them right after the pre-start hooks.
-// scion reads this file as []api.ServiceSpec and launches each entry as the agent
-// user with the container env inherited (so the projected LEVER_LLM_AUTH still
-// flows), but it does NOT set the sidecar's working directory — so every path here
-// is made absolute and the broker URL is resolved from an explicit --bootstrap
-// rather than a CWD-relative default.
+// WriteSidecarSpecs emits $HOME/.scion/scion-services.yaml describing the
+// lever-gateway and lever-renew sidecars, which scion launches after the
+// pre-start hooks as the agent user with the container env. scion does not
+// set the sidecar's working directory, so every path is absolute.
 //
-// The broker URL is resolved here from the bootstrap and baked into BOTH sidecars
-// as --broker-url, so neither reads the bootstrap file at all: it avoids
-// re-touching the one-time enrolment ticket the bootstrap also carries, and
-// removes any dependency on the sidecar's uid/CWD matching the bootstrap's perms
-// (the sidecars run as the agent user; the bootstrap is 0600). No-op when the
-// bootstrap is absent or carries no broker URL: a non-brokered agent has no broker
-// to proxy to or renew against. The renew loop self-heals transient errors
-// (logged, loop continues); the gateway is fail-fast — restart:on-failure
-// relaunches it on a crash. The gateway is emitted first so it is up before renew.
+// The broker URL is baked into both sidecars so neither reads the bootstrap,
+// which carries the one-time enrolment ticket. No-op when the bootstrap is
+// absent or has no broker URL. The gateway is emitted first so it is up
+// before renew.
 //
-// Tamper window: this file sits at $HOME/.scion/ under the agent-writable
-// /home/scion bind-mount, so a compromised agent could rewrite it. That grants
-// no escalation — scion launches the sidecar at the agent's OWN uid (nothing it
-// couldn't already exec), and boot runs inside the pre-start hook, which scion
-// runs BEFORE it reads scion-services.yaml, so this write always wins over any
-// pre-seeded value before the spec is consumed. What the agent must NOT get is
-// this write redirected: boot may run as root (see errRefusedPath: under
-// rootless podman it runs as the agent user), so the write is confined to
-// c.HomeDir and a symlink at .scion or at the yaml is refused (errRefusedPath).
+// The file is agent-writable, but rewriting it grants nothing: scion launches
+// the sidecars at the agent's own uid, and reads the file only after the
+// pre-start hook, so this write wins. What the agent must not get is this
+// write redirected: boot may run as root, so the write is confined to
+// c.HomeDir and a symlink at .scion or at the yaml is refused
+// (errRefusedPath).
 func WriteSidecarSpecs(c SidecarConfig) error {
 	bs, err := LoadBootstrap(c.BootstrapPath)
 	if err != nil {

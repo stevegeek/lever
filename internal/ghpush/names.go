@@ -32,7 +32,6 @@ func ValidateRepo(repo string, allowed map[string]bool) error {
 	return nil
 }
 
-// ValidatePrefix checks the configured branch prefix at startup.
 func ValidatePrefix(p string) error {
 	if !strings.HasSuffix(p, "/") || len(p) < 2 || strings.HasPrefix(p, "-") || strings.HasPrefix(p, "/") ||
 		strings.Contains(p, "//") || !branchRE.MatchString(p) || p == "main/" || p == "master/" {
@@ -41,10 +40,10 @@ func ValidatePrefix(p string) error {
 	return nil
 }
 
-// ValidateBranch is the whole branch check, in Go, before any git call: a
-// conservative charset (so no @{, ~, ^, :, ?, *, [, \, space or control
-// character can reach git), the required prefix, git's component rules, and
-// no protected name after the prefix.
+// ValidateBranch is the whole branch check, before any git call: a
+// conservative charset (no @{, ~, ^, :, ?, *, [, \, space or control
+// character reaches git), the required prefix, git's component rules, and no
+// protected name after the prefix.
 func ValidateBranch(b, prefix string) error {
 	switch {
 	case len(b) == 0 || len(b) > 200:
@@ -85,7 +84,6 @@ var (
 // TitleMax is the longest PR title, in characters.
 const TitleMax = 256
 
-// ValidateNumber accepts a PR number: a positive decimal integer.
 func ValidateNumber(n string) error {
 	if !numberRE.MatchString(n) {
 		return fmt.Errorf("number %q: want a positive PR number such as 12", n)
@@ -110,10 +108,9 @@ func ValidateTitle(s string) error {
 	return nil
 }
 
-// ValidateText accepts a PR body: at most max bytes of
-// valid UTF-8, no control character except newline and tab, and no
-// bidirectional or invisible formatting character (it could make the
-// published text read differently from what was reviewed).
+// ValidateText accepts a PR body: at most max bytes of valid UTF-8, no
+// control character but newline and tab, and no bidirectional or invisible
+// formatting character (published text must read as it was reviewed).
 func ValidateText(what, s string, max int) error {
 	if len(s) > max {
 		return fmt.Errorf("%s: %d bytes, max %d", what, len(s), max)
@@ -136,9 +133,7 @@ func badTextRune(r rune, multiline bool) bool {
 	if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
 		return true
 	}
-	// Format characters (bidirectional controls, zero-width and other
-	// invisible characters) except the zero-width joiner that emoji
-	// sequences use.
+	// Format characters, except the zero-width joiner emoji sequences use.
 	return unicode.Is(unicode.Cf, r) && r != 0x200d
 }
 
@@ -156,7 +151,6 @@ func ValidateTagName(t string) error {
 // @mention together.
 const MaxMentions = 5
 
-// The named refusals of outward PR text.
 var (
 	ErrTeamMention     = errors.New("team mention refused")
 	ErrClosingKeyword  = errors.New("issue-closing keyword refused")

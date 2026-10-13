@@ -19,24 +19,20 @@ import (
 // run that is not concurrent fails instead of hanging.
 const overlapTimeout = 5 * time.Second
 
-// testImage is helloApp's manager image as the plan names it.
 var testImage = helloApp("").ManagerImage()
 
-// idleTicker never ticks; its stop closes the channel, as a real one does.
+// idleTicker's stop closes the channel, as a real one does.
 func idleTicker(time.Duration) (<-chan time.Time, func()) {
 	ch := make(chan time.Time)
 	var once sync.Once
 	return ch, func() { once.Do(func() { close(ch) }) }
 }
 
-// runWithProgress runs the full plan with a plain progress list and returns
-// the list's text.
 func runWithProgress(t *testing.T, deps Deps) (string, error) {
 	t.Helper()
 	return runWithProgressCtx(context.Background(), t, deps, &syncOut{})
 }
 
-// syncOut is a progress output a test may read while the run writes it.
 type syncOut struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -45,7 +41,6 @@ type syncOut struct {
 func (o *syncOut) Write(p []byte) (int, error) { o.mu.Lock(); defer o.mu.Unlock(); return o.b.Write(p) }
 func (o *syncOut) String() string              { o.mu.Lock(); defer o.mu.Unlock(); return o.b.String() }
 
-// waitFor waits until out shows want.
 func (o *syncOut) waitFor(want string) bool {
 	deadline := time.Now().Add(overlapTimeout)
 	for time.Now().Before(deadline) {
@@ -69,8 +64,6 @@ func runWithProgressCtx(ctx context.Context, t *testing.T, deps Deps, out *syncO
 	return out.String(), err
 }
 
-// TestLoadImageRunsAlongsideTheHubSteps (lever#189): the image load is
-// still running when bootstrap-token (a later, independent step) runs.
 func TestLoadImageRunsAlongsideTheHubSteps(t *testing.T) {
 	patRan := make(chan struct{})
 	var loadSawPAT atomic.Bool
@@ -97,10 +90,8 @@ func TestLoadImageRunsAlongsideTheHubSteps(t *testing.T) {
 	}
 }
 
-// TestStartManagerWaitsForTheImagesAndTheBroker: start-manager begins only
-// once every image is loaded and warm and the broker is healthy. The fake
-// runtime broker never reports online, so start-manager makes its own
-// runtime-broker wait (lever#190) and that call shows when it began.
+// The fake runtime broker never reports online, so start-manager makes its
+// own runtime-broker wait and that call shows when it began.
 func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
 	var warmed, healthy atomic.Bool
 	var mu sync.Mutex
@@ -131,10 +122,9 @@ func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
 	}
 }
 
-// TestRuntimeBrokerSeenOnlineSkipsStartManagersWait: with the lanes running
-// in the background, the scion-server step's online answer still carries to
-// start-manager (both are foreground steps of the same run, and no lane step
-// restarts the hub), so the runtime broker is asked about only once.
+// With the lanes running, the scion-server step's online answer still
+// carries to start-manager (no lane step restarts the hub), so the runtime
+// broker is asked about only once.
 func TestRuntimeBrokerSeenOnlineSkipsStartManagersWait(t *testing.T) {
 	var mu sync.Mutex
 	var projects []string
@@ -158,8 +148,6 @@ func TestRuntimeBrokerSeenOnlineSkipsStartManagersWait(t *testing.T) {
 	}
 }
 
-// TestMintWaitsForTheBroker: the enrol ticket is minted only from a healthy
-// broker.
 func TestMintWaitsForTheBroker(t *testing.T) {
 	var healthy, ok atomic.Bool
 	_, err := runWithProgress(t, Deps{
@@ -181,9 +169,6 @@ func TestMintWaitsForTheBroker(t *testing.T) {
 	}
 }
 
-// TestBackgroundFailureStopsTheRunAfterTheRunningStep: a failed image load
-// lets the foreground step that is running finish, starts no further step,
-// and is the error Run returns.
 func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
 	patStarted := make(chan struct{})
 	var patDone, serverRan atomic.Bool
@@ -224,8 +209,8 @@ func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
 	}
 }
 
-// TestLaneFailureStopsAStepWaitingForAnotherLane: mint waits for the broker
-// lane; the image lane failing during that wait stops the run before mint.
+// Mint waits for the broker lane; the image lane failing during that wait
+// stops the run before mint.
 func TestLaneFailureStopsAStepWaitingForAnotherLane(t *testing.T) {
 	brokerRelease, templateDone := make(chan struct{}), make(chan struct{})
 	var minted atomic.Bool
@@ -261,9 +246,6 @@ func TestLaneFailureStopsAStepWaitingForAnotherLane(t *testing.T) {
 	}
 }
 
-// TestInterruptListsLaneStepsAsStopped: Ctrl-C (the run's context ends)
-// stops a lane step; it is listed as stopped, and the error is the
-// interruption, not a failure of the step.
 func TestInterruptListsLaneStepsAsStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -288,9 +270,6 @@ func TestInterruptListsLaneStepsAsStopped(t *testing.T) {
 	}
 }
 
-// TestForegroundFailureStopsTheLanes: a failed foreground step cancels the
-// image load still running; the load is listed as stopped, not failed, and
-// only the real failure is returned.
 func TestForegroundFailureStopsTheLanes(t *testing.T) {
 	var cancelled atomic.Bool
 	out, err := runWithProgress(t, Deps{
@@ -320,8 +299,6 @@ func TestForegroundFailureStopsTheLanes(t *testing.T) {
 	}
 }
 
-// TestBothFailuresAreReported: a lane step and the foreground step that
-// both fail on their own are both in the error.
 func TestBothFailuresAreReported(t *testing.T) {
 	patStarted, brokerFailed := make(chan struct{}), make(chan struct{})
 	errBroker := errors.New("broker did not become healthy")
@@ -344,8 +321,6 @@ func TestBothFailuresAreReported(t *testing.T) {
 	}
 }
 
-// TestBrokerOnlyPlanMintsAfterTheBroker: the acceptance plan (broker-up,
-// mint) still mints only from a started broker.
 func TestBrokerOnlyPlanMintsAfterTheBroker(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	var started, ok atomic.Bool

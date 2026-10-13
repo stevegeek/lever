@@ -18,14 +18,11 @@ import (
 	"github.com/stevegeek/lever/internal/httpjson"
 )
 
-// allowDelegate adds a delegation rule to the broker's policy: agent may delegate
-// (tool, op) to recipient.
 func allowDelegate(t *testing.T, env *brokertest.Env, agent, tool, op, recipient string) {
 	t.Helper()
 	env.Rules.AllowDelegate(agent, tool, op, recipient)
 }
 
-// regDB registers the "db" tool with a "read" operation in the broker's registry.
 func regDB(t *testing.T, env *brokertest.Env) {
 	t.Helper()
 	if err := env.Registry.Register(registry.Tool{
@@ -39,9 +36,7 @@ func regDB(t *testing.T, env *brokertest.Env) {
 	}
 }
 
-// enrolManager signs a manager CSR directly with the CA (bypassing /provision
-// since the manager identity needs a cert to call /provision in the first place),
-// then builds an Identity from the signed cert, key, and CA PEM.
+// enrolManager signs a manager CSR directly with the CA, bypassing enrolment.
 func enrolManager(t *testing.T, caInst *ca.CA) Identity {
 	t.Helper()
 	csrPEM, keyPEM, err := GenerateCSR("manager")
@@ -55,7 +50,6 @@ func enrolManager(t *testing.T, caInst *ca.CA) Identity {
 	return Identity{CertPEM: certPEM, KeyPEM: keyPEM, CAPEM: caInst.CertPEM()}
 }
 
-// decodeB64 decodes a base64url (no-padding) string; fatals on error.
 func decodeB64(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := base64.RawURLEncoding.DecodeString(s)
@@ -65,12 +59,8 @@ func decodeB64(t *testing.T, s string) []byte {
 	return b
 }
 
-// TestBuildToolCallBody verifies that the JSON-RPC body produced for the gateway
-// satisfies the contract expected by internal/mcp.ToolsCall:
-//   - jsonrpc == "2.0", method == "tools/call"
-//   - params.name == op
-//   - params.arguments._capability == token
-//   - extra kv args appear in params.arguments
+// TestBuildToolCallBody pins the body to the contract internal/mcp.ToolsCall
+// expects.
 func TestBuildToolCallBody(t *testing.T) {
 	const op = "query"
 	const tok = "tok_abc123"
@@ -113,7 +103,6 @@ func TestBuildToolCallBody(t *testing.T) {
 	}
 }
 
-// TestBuildToolCallBodyEmptyArgs verifies token-only calls (no extra kv pairs).
 func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
 	body := buildToolCallBody("op", "mytoken", nil)
 	var msg map[string]any
@@ -125,17 +114,13 @@ func TestBuildToolCallBodyEmptyArgs(t *testing.T) {
 	if got := args["_capability"]; got != "mytoken" {
 		t.Errorf("arguments._capability: got %v, want mytoken", got)
 	}
-	// Only _capability should be present
 	if len(args) != 1 {
 		t.Errorf("expected 1 argument (only _capability), got %d: %v", len(args), args)
 	}
 }
 
-// TestCallWireContract pins agent.Call's HTTP contract against an httptest stub:
-// it POSTs to /mcp/<tool>/ with Content-Type application/json and the token in
-// arguments._capability, and — critically, unlike Request — returns the raw
-// response body EVEN on a non-200 (the caller prints it before surfacing the
-// error), with a non-200 mapped to a call:-wrapped *httpjson.StatusError.
+// TestCallWireContract pins agent.Call's HTTP contract, including that it
+// returns the response body even on a non-200.
 func TestCallWireContract(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -196,8 +181,6 @@ func TestCallWireContract(t *testing.T) {
 	}
 }
 
-// TestCallTransportError verifies a dial failure yields an empty body, no
-// status, and a `call:`-wrapped error (no body was ever received to print).
 func TestCallTransportError(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := stub.URL
@@ -217,7 +200,6 @@ func TestCallTransportError(t *testing.T) {
 
 func TestRequestMintsDelegatedToken(t *testing.T) {
 	env := testBroker(t)
-	// Allow manager to delegate db.read to worker; register the db tool envelope.
 	allowDelegate(t, env, "manager", "db", "read", "worker")
 	regDB(t, env)
 	managerID := enrolManager(t, env.CA)

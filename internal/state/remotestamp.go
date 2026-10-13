@@ -9,64 +9,58 @@ import (
 	"github.com/stevegeek/lever/internal/fsutil"
 )
 
-// RemoteIdentity is everything a `lever remote serve` process reads at
-// startup and never re-reads: the `remote:` block plus the instance name and
-// backend. brokerctl.RemoteConfigHash builds one from config.App; state
-// deliberately does not import config.
+// RemoteIdentity is everything a `lever remote serve` process reads once at
+// startup: the `remote:` block plus the instance name and backend.
+// brokerctl.RemoteConfigHash builds one from config.App; state does not
+// import config.
 type RemoteIdentity struct {
 	Enabled      bool
 	Port         int
 	BaseURL      string
 	AllowedUsers []string
 	LoginPort    int
-	// The front's contract (issue #38): which header carries the login, where
-	// the proxy listens, and whether the Host check reads X-Forwarded-Host.
-	// Each is captured once, at startup, like the fields above.
+	// The front's contract: which header carries the login, where the proxy
+	// listens, and whether the Host check reads X-Forwarded-Host.
 	IdentityHeader     string
 	Bind               string
 	AllowWildcardBind  bool
 	TrustForwardedHost bool
 	// Landing decides whether the proxy serves lever's chat page and where
-	// "/" goes; captured at startup like the rest.
+	// "/" goes.
 	Landing string
-	// Name selects the JAIL the proxy dials and Backend gates which
-	// transport it uses. Renaming the instance would otherwise leave a
-	// running proxy fronting the OLD machine's hub while apply happily
-	// reused it.
+	// Name selects the jail the proxy dials and Backend its transport: a
+	// rename must not leave a running proxy fronting the old machine's hub.
 	Name    string
 	Backend string
 	// The chat page's agent list (landing chat only, so a worker change does
-	// not bounce a console-landing proxy): the workers an operator sees, the
-	// tree and the labels file read through it.
+	// not bounce a console-landing proxy).
 	Workers    []string `json:",omitempty"`
 	Tree       string   `json:",omitempty"`
 	LabelsFile string   `json:",omitempty"`
 	// AgentMessages: the proxy filters a contact's history, events and
-	// previews (remote.agent_messages). Omitted when off, so an instance that
-	// never turns it on keeps its stamp.
+	// previews. Omitted when off, so the stamp is unchanged.
 	AgentMessages bool `json:",omitempty"`
-	// Push is the VAPID subject while remote.push is on ("" off, omitted,
-	// so an instance that never turns it on keeps its stamp).
+	// Push is the VAPID subject while remote.push is on; omitted when off so
+	// the stamp is unchanged.
 	Push string `json:",omitempty"`
-	// Files (remote.files, landing chat only): the limits and every agent's
-	// workspace the proxy writes uploads into. Omitted when off.
+	// Files (landing chat only): the limits and every agent's workspace the
+	// proxy writes uploads into. Omitted when off.
 	Files *FilesIdentity `json:",omitempty"`
-	// Voice (remote.voice, landing chat only): the tool's socket the proxy
-	// posts clips to and the route's limits. Omitted when off.
+	// Voice (landing chat only): the tool's socket the proxy posts clips to
+	// and the route's limits. Omitted when off.
 	Voice *VoiceIdentity `json:",omitempty"`
 }
 
 // VoiceIdentity is the part of remote.voice a running proxy captured. The
-// transcription settings are lever-tool-whisper's flags: a change there
-// restarts the tool (the broker's stamp), not the proxy.
+// transcription settings are the tool's flags: a change there restarts the
+// tool (the broker's stamp), not the proxy.
 type VoiceIdentity struct {
 	Socket      string
 	MaxSeconds  int
 	Excluded    []string `json:",omitempty"` // allowed_users voice: false
 	NoReadAloud bool     `json:",omitempty"` // remote.voice.read_aloud: off (or false)
-	// SpeakSocket is lever-tool-tts's socket while read_aloud is server
-	// (omitted otherwise, so a stamp without it is unchanged). The speech
-	// settings are the tool's flags.
+	// SpeakSocket is the TTS tool's socket while read_aloud is server
+	// (omitted otherwise, so the stamp is unchanged).
 	SpeakSocket string `json:",omitempty"`
 }
 
@@ -75,50 +69,36 @@ type FilesIdentity struct {
 	MaxBytes   int64
 	Extensions []string
 	Workspaces []string // "name=dir", config order, manager first
-	// Set only when not the default (remote.files.uploads/shares false,
-	// allowed_users files: false), so the stamp is unchanged without them.
+	// Set only when not the default, so the stamp is unchanged without them.
 	NoUploads bool     `json:",omitempty"`
 	NoShares  bool     `json:",omitempty"`
 	Excluded  []string `json:",omitempty"`
 }
 
 // RemoteConfigHash identifies the configuration a `lever remote serve` process
-// is running WITH.
+// is running with. The proxy captures all of it once (ServeHost, the
+// allowed-user set by value, bound ports), so a lever.yaml change has no
+// effect on a running proxy; apply compares this hash so a security-relevant
+// change such as enabling allowed_users is never silently ignored.
 //
-// It exists because the proxy caches all of it in the handler it builds once:
-// ServeHost comes from base_url, the allowed-user set is captured by value, and
-// the ports are bound. Changing any of them in lever.yaml therefore has NO
-// effect on a running proxy, and apply's "already serving" shortcut cannot see
-// the difference. That was a real defect, not a theoretical one: enabling
-// `allowed_users` on the live instance left the old process serving, so an
-// identity-free request kept returning 200 long after the config said it must
-// be refused. Silently ignoring a security-relevant config change is the worst
-// available behaviour.
-//
-// Deliberately NOT brokerctl.ConfigHash: that covers Broker/Workers/Scion, none
-// of which the proxy reads, and a broker-only change must not bounce the proxy.
-//
-// Like brokerctl.ConfigHash, a marshal failure yields "" — a guaranteed mismatch, so the
-// proxy restarts. Failing toward a restart is right for a component whose whole
-// job is refusing unauthorized requests.
+// Not brokerctl.ConfigHash: a broker-only change must not bounce the proxy.
+// A marshal failure yields "", a guaranteed mismatch, so the proxy restarts:
+// failing toward a restart is right for a component whose job is refusing
+// unauthorized requests.
 func RemoteConfigHash(id RemoteIdentity) string {
 	return HashJSON(id)
 }
 
-// remoteStampContent is the stamp's on-disk form: the lever version, the
-// remote config hash, and the pid of the proxy the stamp describes, one per
-// line. Plain text rather than JSON because a corrupt or truncated file must
-// read as "not what we want" and trigger a restart, which any parse of this
-// shape does for free.
+// remoteStampContent is the stamp's on-disk form: version, remote config hash
+// and the proxy's pid, one per line. Plain text so a corrupt or truncated
+// file reads as a mismatch and triggers a restart.
 func remoteStampContent(version, hash string, pid int) string {
 	return version + "\n" + hash + "\n" + strconv.Itoa(pid) + "\n"
 }
 
-// remoteProxyPID reads the pid recorded in remote.pid — the file the proxy
-// process writes for itself once its listeners are bound
-// (daemon.WritePIDFile). Both stamp operations key off THIS number rather
-// than os.Getpid(), so the stamp is only ever a statement about the process
-// that currently owns the pid file, whoever wrote it.
+// remoteProxyPID reads remote.pid, which the proxy writes for itself once
+// bound. Both stamp operations key off this pid rather than os.Getpid(), so
+// the stamp only ever describes the process that owns the pid file.
 func (s State) remoteProxyPID() (int, error) {
 	pid, err := ReadPID(s.RemotePID())
 	if err != nil {
@@ -129,30 +109,19 @@ func (s State) remoteProxyPID() (int, error) {
 
 // WriteRemoteStamp records what the proxy that owns remote.pid is running.
 //
-// Two properties make the stamp trustworthy, and both were once missing:
+//   - The running proxy writes it (remoteproxy.Serve via ServeConfig.Stamp,
+//     once bound), so every `lever remote serve`, hand-started ones
+//     included, stamps the config it loaded. The state dir is keyed on the
+//     config file's directory, so a second config beside lever.yaml shares
+//     both files; a stamp written by anyone else could vouch for a proxy
+//     enforcing another config's allowed_users.
+//   - It names its pid, compared against remote.pid: a proxy that takes
+//     over the pid file without stamping invalidates the match instead of
+//     inheriting it, and a stamp left after the proxy exits is inert.
 //
-//   - The RUNNING PROXY writes it. remoteproxy.Serve calls this through
-//     ServeConfig.Stamp as soon as its listeners are bound, so every
-//     `lever remote serve` — apply's detached child and an operator's
-//     hand-started one alike — leaves a stamp for the config IT loaded.
-//     Before that, only apply wrote the stamp while ANY serve wrote
-//     remote.pid. The state dir is keyed on the config file's DIRECTORY
-//     (StateDir), so a second config file beside lever.yaml shares both files:
-//     a proxy started by hand against it inherited the stamp a previous apply
-//     had left, satisfying all three reuse conditions — alive, listening,
-//     stamp matching — while the live process went on enforcing the other
-//     config's allowed_users, and apply reported success.
-//   - It names its pid. A stamp is compared against remote.pid, so a proxy
-//     that takes over the pid file WITHOUT stamping — an older lever that
-//     never learned to, a future starter that forgets — invalidates the match
-//     instead of inheriting it. The two files describe one process, or the
-//     stamp does not match. It also means a stamp left behind after the proxy
-//     exits is inert: removePIDFile takes remote.pid with it.
-//
-// Any failure removes the stamp rather than leaving one that describes a
-// process that is not there. Callers treat a write failure as a warning (see
-// remoteproxy.Serve), and no stamp is the only safe residue: an absent stamp
-// costs the next apply a redundant restart, a stale one costs it the check.
+// Any failure removes the stamp. Callers treat a write failure as a warning,
+// so no stamp is the only safe residue: an absent stamp costs a redundant
+// restart, a stale one would skip the check.
 func (s State) WriteRemoteStamp(version, hash string) error {
 	pid, err := s.remoteProxyPID()
 	if err != nil {
@@ -167,9 +136,8 @@ func (s State) WriteRemoteStamp(version, hash string) error {
 }
 
 // RemoteStampMatches reports whether the proxy that owns remote.pid was
-// started by this binary version with this remote config. Any doubt — no pid
-// file, a garbage pid, an absent, unreadable, truncated or differing stamp —
-// is false, so apply restarts the proxy.
+// started by this version with this remote config. Any doubt is false, so
+// apply restarts the proxy.
 func (s State) RemoteStampMatches(version, hash string) bool {
 	pid, err := s.remoteProxyPID()
 	if err != nil {
@@ -179,7 +147,5 @@ func (s State) RemoteStampMatches(version, hash string) bool {
 	if err != nil {
 		return false
 	}
-	// Compare trimmed so a trailing-newline difference is not a spurious
-	// mismatch, while any real difference still is.
 	return strings.TrimSpace(string(b)) == strings.TrimSpace(remoteStampContent(version, hash, pid))
 }

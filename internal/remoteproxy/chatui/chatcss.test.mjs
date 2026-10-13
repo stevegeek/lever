@@ -1,17 +1,14 @@
-// The layout of the two panes is the cascade of chat.css, which no fake
-// browser runs. This test applies chat.css's display rules the way a
-// browser does (media query, specificity, order, !important) to the three
-// elements whose display decides the layout, for a phone and a wide screen,
-// with a chat open and without. It caught a wide screen with a chat open
-// that hid the list, Back included: no way back without a reload.
+// The two-pane layout is chat.css's cascade, which no fake browser runs. This
+// applies its display rules the way a browser does (media query,
+// specificity, order, !important): a wide screen with a chat open must not
+// hide the list, Back included.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const css = readFileSync(new URL('./chat.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
 
-// rules is every `selector { ... display: x ... }` with its media condition
-// (one level of @media nesting, as chat.css has) and its source order.
+// One level of @media nesting, as chat.css has.
 function rules(text) {
   const out = [];
   let order = 0;
@@ -41,8 +38,7 @@ function rules(text) {
   return out;
 }
 
-// mediaMatches knows the conditions chat.css uses: min-width, max-width and
-// the colour scheme (which never sets display).
+// Only the conditions chat.css uses.
 function mediaMatches(media, width) {
   if (!media) return true;
   return media.split(/\band\b/).every((part) => {
@@ -53,7 +49,6 @@ function mediaMatches(media, width) {
   });
 }
 
-// A compound selector: a tag, #id, .class, :not(.class) and [attr] parts.
 function compound(s) {
   const c = { tag: '', id: '', classes: [], not: [], attrs: [], other: false };
   const re = /(#[\w-]+)|(\.[\w-]+)|(:not\(\.([\w-]+)\))|(\[([\w-]+)\])|([a-z][\w-]*)|(\*)|(::?[\w-]+)/g;
@@ -84,14 +79,12 @@ function matchesEl(c, el) {
   return true;
 }
 
-// later reports whether cascade key a beats b: compared left to right
-// (importance, specificity, then source order).
+// Importance, then specificity, then source order.
 function later(a, b) {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] > b[i];
   return false;
 }
 
-// display of el (with its ancestors, nearest first) under the cascade.
 function display(all, el, ancestors, width) {
   let best = null;
   for (const r of all) {

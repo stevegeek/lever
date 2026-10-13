@@ -19,37 +19,30 @@ import (
 
 const defaultEpochTTL = 5 * time.Second
 
-// The broker-to-tool shared secret. The broker's tool supervisor mints one
-// random secret per boot, hands it to every supervised first-party tool via
-// ToolSecretEnv (environment, never argv), and the broker's gateway presents
-// it in ToolSecretHeader on every request it proxies to such a tool. A
-// request without the exact value is refused before any MCP dispatch, so a
-// jail agent that reaches the tool's loopback port directly (a
-// manager.allow_ports hole; config load rejects the obvious case) cannot
-// self-assert X-Lever-Caller — the header is only trusted behind the secret.
-// The broker side spells the same header literal (internal/broker/gateway.go,
-// toolSecretHeader); the broker's captool e2e test pins the two together.
+// The broker-to-tool shared secret: minted per broker boot, passed to each
+// supervised tool in ToolSecretEnv (environment, never argv), and presented
+// by the gateway in ToolSecretHeader. A request without it is refused before
+// any MCP dispatch, so a jail agent that reaches the tool's loopback port
+// directly cannot self-assert X-Lever-Caller. The broker spells the header
+// separately (toolSecretHeader); a broker test pins the two together.
 const (
 	ToolSecretHeader = "X-Lever-Tool-Secret"
 	ToolSecretEnv    = "LEVER_TOOL_SECRET"
 )
 
-// NewLogger returns a logger that writes lever's log line shape to w, with
-// component naming the tool (lever's own tools use "lever-tool-<name>") and
-// lever's credential masking on every line. Pass it as Config.Log and, to
-// give the tool's other lines (the standard log package's included) the same
-// shape, make it the default with slog.SetDefault. The broker's supervisor
-// writes a tool's stderr to tool-logs/<tool>.log.
+// NewLogger returns a logger in lever's log line shape, with credential
+// masking, for Config.Log. The broker's supervisor writes a tool's stderr to
+// tool-logs/<tool>.log.
 func NewLogger(w io.Writer, component string) *slog.Logger {
 	return logging.New(w, component)
 }
 
-// ParamSpec is one declared argument of an Operation (drives the MCP schema).
+// ParamSpec is one declared argument of an Operation.
 type ParamSpec struct{ Name, Type, Description string }
 
-// ValidatedContext is the verified call context handed to Backstop/Handler.
-// Constraints are the verified, constraint-keyed parameters (every token caveat
-// was satisfied by the corresponding value).
+// ValidatedContext is the verified call context handed to Backstop and
+// Handler. Constraints are the constraint-keyed parameters every token caveat
+// was checked against.
 type ValidatedContext struct {
 	Caller      string
 	Tool        string
@@ -62,14 +55,12 @@ type Operation struct {
 	Name        string
 	Description string
 	Params      []ParamSpec
-	// CaveatParam maps a token constraint key to the request argument it binds
-	// (scalar args only). Identity (key == arg) is the common case.
+	// CaveatParam maps a token constraint key to a differently-named request
+	// argument (scalar args only).
 	CaveatParam map[string]string
-	// Backstop enforces the tool's hard invariants AFTER token verification,
-	// independent of the token; a non-nil error denies the call.
-	// It receives the RAW execution args — the same map[string]string the Handler
-	// will run on — not the constraint-keyed params. Use ValidatedContext.Constraints
-	// for the verified constraint-keyed view extracted from the token caveats.
+	// Backstop enforces the tool's hard invariants after token verification,
+	// independent of the token; a non-nil error denies the call. It receives
+	// the raw args the Handler will run on, not the constraint-keyed params.
 	Backstop func(ValidatedContext, map[string]string) error
 	// Handler performs the action with clean args (_capability removed).
 	Handler func(ValidatedContext, map[string]string) (any, error)
@@ -77,18 +68,16 @@ type Operation struct {
 
 // Config assembles a Server.
 type Config struct {
-	Name       string // tool/registry name; the capability tool this verifies (e.g. "db")
-	Version    string // reported as the MCP serverInfo version (default "dev")
+	Name       string // the capability tool this verifies (e.g. "db")
+	Version    string // default "dev"
 	Backend    string // listen address (host loopback)
-	AdminURL   string // broker admin base URL (loopback) for /register and /epoch
+	AdminURL   string // broker admin base URL (loopback)
 	Operations []Operation
-	EpochTTL   time.Duration // freshness cache TTL (default 5s)
+	EpochTTL   time.Duration // epoch cache TTL (default 5s)
 	Log        *slog.Logger
-	// Secret is the broker-to-tool shared secret (see ToolSecretHeader).
-	// Empty ⇒ read from the ToolSecretEnv environment variable, which is how
-	// the broker's supervisor delivers it. With neither set the server fails
-	// closed: every request is refused (401) — it cannot tell a brokered
-	// request from a direct dial.
+	// Secret is the broker-to-tool shared secret; empty means ToolSecretEnv.
+	// With neither set every request is refused: the server cannot tell a
+	// brokered request from a direct dial.
 	Secret string
 }
 
@@ -101,7 +90,7 @@ type Server struct {
 	ops      map[string]Operation
 	log      *slog.Logger
 	epochTTL time.Duration
-	secret   []byte // broker-to-tool shared secret; empty ⇒ refuse every request
+	secret   []byte // empty refuses every request
 
 	mu      sync.Mutex
 	pubKey  ed25519.PublicKey
@@ -121,9 +110,6 @@ func New(c Config) (*Server, error) {
 		c.EpochTTL = defaultEpochTTL
 	}
 	if c.Log == nil {
-		// Silent unless the tool asks: lever's own tools pass their
-		// logger (internal/logging's shape), which is what
-		// tool-logs/<name>.log holds.
 		c.Log = slog.New(slog.DiscardHandler)
 	}
 	ops := make(map[string]Operation, len(c.Operations))
@@ -147,18 +133,16 @@ func New(c Config) (*Server, error) {
 	}, nil
 }
 
-// secretOK reports whether presented is exactly the configured tool secret.
-// Constant-time on the bytes; an unconfigured (empty) secret matches nothing.
+// secretOK compares in constant time; an empty secret matches nothing.
 func (s *Server) secretOK(presented string) bool {
 	return len(s.secret) > 0 && subtle.ConstantTimeCompare([]byte(presented), s.secret) == 1
 }
 
-// Handler returns the MCP-over-HTTP handler (mount on Config.Backend).
+// Handler returns the MCP-over-HTTP handler to serve on Config.Backend.
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 
-// audit writes the tool's decision line. Its message and fields are a stable
-// record that operators grep; the detail is masked here because Config.Log
-// may be any handler.
+// audit's message and fields are a stable record operators grep. The detail
+// is masked here because Config.Log may be any handler.
 func (s *Server) audit(op, caller, decision, detail string) {
 	s.log.Info("captool.decision", "tool", s.name, "op", op, "caller", caller, "decision", decision, "detail", logging.Redact(detail))
 }

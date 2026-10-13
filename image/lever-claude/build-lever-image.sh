@@ -125,10 +125,9 @@ EOF
   exit 1
 }
 
-# Arch guard: docker build won't validate the ELF arch of the COPYed binaries, so
-# a base/binary mismatch builds fine and then dies at container boot with a
-# cryptic `exec format error` on the pre-start hook. The base is arch-tagged, but
-# verify its actual architecture matches in case the tag lies.
+# docker build does not check the ELF arch of the COPYed binaries, so a
+# base/binary mismatch would only die at boot with `exec format error` on the
+# pre-start hook. Verify the base's real architecture in case the tag lies.
 BASE_ARCH="$(docker image inspect "${BASE}" --format '{{.Architecture}}' 2>/dev/null || true)"
 if [ -n "${BASE_ARCH}" ] && [ "${BASE_ARCH}" != "${ARCH}" ]; then
   cat >&2 <<EOF

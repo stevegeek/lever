@@ -7,13 +7,11 @@ import (
 	"time"
 )
 
-// HubToken is what `scion hub token create` hands back. Token is the opaque
-// bearer value and the one field that MUST be present; the rest is what lever
-// records beside it so a later apply can judge the token without a hub call
-// (a UAT cannot list or revoke tokens on newer scions — only the dev identity
-// in the mint window can): ID is what `hub token revoke` takes, Scopes are the
-// scopes AS THE HUB EXPANDED THEM (an alias like agent:manage comes back as
-// its members), ExpiresAt is zero when scion printed none.
+// HubToken is what scion hub token create hands back. Token is the one field
+// that must be present; the rest lets a later apply judge the token without a
+// hub call, since a UAT cannot list or revoke tokens. Scopes are as the hub
+// expanded them (an alias comes back as its members). ExpiresAt is zero when
+// scion printed none.
 type HubToken struct {
 	Token     string
 	ID        string
@@ -22,13 +20,10 @@ type HubToken struct {
 }
 
 // HubTokenCreate mints a user access token against the current hub endpoint
-// (dev-auth admin). scion's `hub token create` requires a target project
-// (--project, resolved by name or ID) and a label (--name), so both are passed
-// explicitly; projectDir is the registered project's dir, supplied as cwd so
-// scion resolves the current project context. expires is scion's --expires
-// value ("360d", "1y", an RFC 3339 date); empty leaves scion's default, which
-// is 90 days — lever always passes one, because a token that silently expires
-// takes the whole instance down with it.
+// (dev-auth admin). projectDir is the cwd scion resolves the project context
+// from. expires is scion's --expires value; empty leaves scion's 90-day
+// default, so callers should always pass one: a token that silently expires
+// takes the instance down.
 func (c *Client) HubTokenCreate(ctx context.Context, projectDir, project, name string, scopes []string, expires string) (HubToken, error) {
 	args := []string{"hub", "token", "create",
 		"--project", project, "--name", name, "--scopes", strings.Join(scopes, ",")}
@@ -50,9 +45,8 @@ func (c *Client) HubTokenRevoke(ctx context.Context, projectDir, id string) erro
 	return err
 }
 
-// parseHubToken reads `scion hub token create` output. scion prints a
-// human-readable block (verified live: --format json is NOT honored for this
-// command):
+// parseHubToken reads scion hub token create output, a human-readable block
+// (--format json is not honored for this command):
 //
 //	Created access token: lever-controller
 //	  ID:      <uuid>
@@ -63,8 +57,7 @@ func (c *Client) HubTokenRevoke(ctx context.Context, projectDir, id string) erro
 //	Token: scion_pat_...
 //
 // The token line is required; a bare scion_pat_ token anywhere in the output
-// is the fallback. ID, Scopes and Expires are best-effort: a scion that prints
-// less still mints, and the record lever keeps just says less.
+// is the fallback. ID, Scopes and Expires are best-effort.
 func parseHubToken(out string) (HubToken, error) {
 	var tok HubToken
 	for _, ln := range strings.Split(out, "\n") {
@@ -96,9 +89,6 @@ func parseHubToken(out string) (HubToken, error) {
 	return HubToken{}, fmt.Errorf("no token found in `hub token create` output")
 }
 
-// cutLabel stores the value after label in *dst when ln starts with label and
-// the value is non-empty. It reports whether the label matched, so a switch
-// can fall through to the next label otherwise.
 func cutLabel(ln, label string, dst *string) bool {
 	rest, ok := strings.CutPrefix(ln, label)
 	if !ok {

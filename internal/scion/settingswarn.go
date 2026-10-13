@@ -7,21 +7,14 @@ import (
 )
 
 // settingsKeysWarnRE matches, as a whole line, the warning scion's settings
-// loader prints on every CLI call against a v1 (schema_version "1") settings
-// file (lever#169):
+// loader prints on every CLI call against a v1 settings file:
 //
 //	2026/09/22 21:39:27 WARN settings file contains unrecognized keys (these will be ignored) keys="[hub.project_id runtimes[*].type]" path=...
 //
-// It is harmless. scion's legacy-format probe decodes the file into the
-// legacy Settings struct before the versioned loader runs; the versioned
-// loader reads every key the probe lists, and hub.project_id is written by
-// scion itself. The line is scion's default slog logger: an optional
-// log.LstdFlags timestamp, the level, the message, then key=value attributes.
-//
-// Only this one message is matched — the "settings" label, the exact text and
-// nothing but attributes after it — so any other scion warning, including the
-// same message for a different file (the hub or server config), still
-// reaches the operator.
+// It is harmless: scion's legacy-format probe complains about keys the
+// versioned loader then reads. Only this exact message with the "settings"
+// label is matched, so any other scion warning, including the same message
+// for a different file, still reaches the operator.
 var settingsKeysWarnRE = regexp.MustCompile(
 	`^(?:\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} )?WARN settings file contains unrecognized keys \(these will be ignored\)(?: [a-z_]+=.*)?$`)
 
@@ -32,9 +25,6 @@ func IsSettingsKeysWarning(line string) bool {
 	return settingsKeysWarnRE.MatchString(strings.TrimSpace(ansiRE.ReplaceAllString(line, "")))
 }
 
-// splitSettingsWarnings removes every settings-keys warning line from scion
-// output and returns the rest, with the removed lines in order. Text without
-// a match comes back unchanged.
 func splitSettingsWarnings(output string) (kept string, dropped []string) {
 	if !strings.Contains(output, "settings file contains unrecognized keys") {
 		return output, nil
@@ -51,15 +41,12 @@ func splitSettingsWarnings(output string) (kept string, dropped []string) {
 	return strings.Join(keep, "\n"), dropped
 }
 
-// warnLog records the settings warnings the client filtered out of what it
-// shows the operator, so they stay in the log file. scion prints the same
-// warning on every call, so a line already recorded in this process (by any
-// client, compared without its timestamp) is not recorded again.
+// warnLog records filtered settings warnings once per process, compared
+// without their timestamp: scion prints the same warning on every call.
 type warnLog struct {
 	sink func(line string)
 }
 
-// warnSeen is the process-wide record of warnings already logged.
 var warnSeen = struct {
 	mu   sync.Mutex
 	seen map[string]bool
@@ -84,8 +71,7 @@ func (w *warnLog) record(lines []string) {
 }
 
 // filterOutput drops the settings warnings from raw scion output and hands
-// them to the log sink. Every path that turns scion output into text lever
-// shows (a value, a success result, an error) goes through it.
+// them to the log sink. Every path that shows scion output must go through it.
 func (c *Client) filterOutput(output string) string {
 	kept, dropped := splitSettingsWarnings(output)
 	c.warnLog.record(dropped)

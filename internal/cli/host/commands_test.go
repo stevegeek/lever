@@ -156,8 +156,8 @@ func TestFactoryReceivesConfiguredBackendName(t *testing.T) {
 	}
 }
 
-// TestBringUpBackendPassesWarn: apply hands EnsureUp its log, so the
-// backend's sizing-drift advice reaches the operator.
+// TestBringUpBackendPassesWarn: the backend's sizing-drift advice reaches the
+// operator.
 func TestBringUpBackendPassesWarn(t *testing.T) {
 	sb := &stubBackend{}
 	app := &config.App{Name: "x", Backend: config.BackendLima, CPUs: 8, Memory: "24GiB", NestedVirt: true}
@@ -178,9 +178,9 @@ func TestBringUpBackendPassesWarn(t *testing.T) {
 	}
 }
 
-// Doctor reads the run user before it builds the jail runner: the runner's
-// XDG_RUNTIME_DIR comes from that uid, and on Lima (guest uid 1000, not the
-// default 501) rootless podman found no agent container without it.
+// Doctor reads the run user before building the jail runner: XDG_RUNTIME_DIR
+// comes from that uid, and on Lima (1000, not the default 501) rootless podman
+// finds no agent container otherwise.
 func TestDoctorResolvesTheRunUserBeforeTheJailRunner(t *testing.T) {
 	sb := &stubBackend{runner: proc.NewFakeRunner()}
 	app := &config.App{Name: "assistant"}

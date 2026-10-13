@@ -34,7 +34,6 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("GitHub API: HTTP %d: %s", e.Status, e.Message)
 }
 
-// isStatus reports whether err is a GitHub answer with HTTP status code.
 func isStatus(err error, code int) bool {
 	var ae *apiError
 	return errors.As(err, &ae) && ae.Status == code
@@ -51,8 +50,8 @@ func NewAPIClient(c *http.Client) *http.Client {
 	return &cp
 }
 
-// do sends one request. in (when non-nil) is the JSON body; out (when
-// non-nil) receives a 2xx JSON answer.
+// do sends one request. in, when non-nil, is the JSON body; out, when
+// non-nil, receives a 2xx JSON answer.
 func (a *API) do(ctx context.Context, token, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
@@ -106,7 +105,7 @@ func (a *API) do(ctx context.Context, token, method, path string, in, out any) e
 				msg += "; " + d
 			}
 		}
-		// Scrub BEFORE truncating (see Git.Run).
+		// Scrub before truncating (see Git.Run).
 		msg = Scrub(strings.Map(dropControl, msg), token)
 		if r := []rune(msg); len(r) > 300 {
 			msg = string(r[:300]) + "…"

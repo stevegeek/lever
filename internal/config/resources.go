@@ -7,34 +7,22 @@ import (
 	"strings"
 )
 
-// Resources is manager.resources and workers[].resources: the memory and CPU
-// LIMITS of one agent container. lever passes them to scion as the agent's
-// resources.limits (scion ResourceSpec), which the runtime emits as podman's
-// --memory and --cpus. Unset fields stay unset: scion then applies its own
-// defaults (a CPU limit of 2 since the pin lever ships; no memory limit).
-//
-// Create-time only, like Model: scion stores the resolved resources in the
-// agent record, and a resume reuses them. A changed value reaches an agent
-// only on a fresh create (`lever up --fresh` for the manager, a purge or a
-// recycle for a worker).
+// Resources is the memory and CPU limits of one agent container, passed to
+// scion as resources.limits (podman's --memory and --cpus). Unset fields get
+// scion's defaults. Create-time only: scion stores them in the agent record
+// and a resume reuses them.
 type Resources struct {
-	// Memory is the hard memory limit, e.g. 1536MiB or 2GiB (Mi and Gi are
-	// accepted too). At least MinAgentMemory; at most the VM's memory when
-	// memory: is set. The container's processes are OOM-killed past it,
-	// which keeps one agent from taking the VM (and the manager) down.
+	// Memory is the hard limit past which the container is OOM-killed, which
+	// keeps one agent from taking the VM down.
 	Memory string `yaml:"memory" json:",omitempty"`
-	// CPU is the CPU limit in cores: a decimal ("1", "1.5") or millicores
-	// ("500m"). Write a decimal in quotes or not; YAML's number reads the
-	// same. At most the VM's cpus: when that is set.
+	// CPU is in cores ("1.5") or millicores ("500m").
 	CPU string `yaml:"cpu" json:",omitempty"`
 }
 
-// IsZero reports whether neither limit is set.
 func (r Resources) IsZero() bool { return r.Memory == "" && r.CPU == "" }
 
-// MinAgentMemory is the smallest memory limit lever accepts for an agent:
-// Claude Code alone idles at 250-500 MB, so a lower cap only produces an
-// agent the OOM killer takes at its first turn.
+// MinAgentMemory: Claude Code alone idles at 250-500 MB, so a lower cap only
+// produces an agent the OOM killer takes at its first turn.
 const MinAgentMemory = 512 << 20
 
 var (
@@ -42,7 +30,6 @@ var (
 	agentCPURE    = regexp.MustCompile(`^([0-9]{1,4}(\.[0-9]{1,3})?|[0-9]{1,7}m)$`)
 )
 
-// agentMemoryBytes parses a Resources.Memory value.
 func agentMemoryBytes(s string) (int64, bool) {
 	m := agentMemoryRE.FindStringSubmatch(s)
 	if m == nil {
@@ -58,7 +45,6 @@ func agentMemoryBytes(s string) (int64, bool) {
 	return n << 20, true
 }
 
-// agentCPUMillis parses a Resources.CPU value into millicores.
 func agentCPUMillis(s string) (int64, bool) {
 	if !agentCPURE.MatchString(s) {
 		return 0, false
@@ -83,8 +69,7 @@ func agentCPUMillis(s string) (int64, bool) {
 }
 
 // ScionLimits returns the limits in the form scion's ResourceList takes:
-// memory with a Kubernetes binary suffix (scion's parser reads "Gi", not
-// "GiB"), CPU as written. Empty for an unset field.
+// scion's parser reads "Gi", not "GiB".
 func (r Resources) ScionLimits() (memory, cpu string) {
 	memory = r.Memory
 	if strings.HasSuffix(memory, "iB") {
@@ -93,9 +78,8 @@ func (r Resources) ScionLimits() (memory, cpu string) {
 	return memory, r.CPU
 }
 
-// validateResources checks one agent's resources against their own shape
-// and, when the instance sizes its Lima VM, against the VM: a limit larger
-// than the VM is no limit, and almost always a unit mistake.
+// validateResources: a limit larger than the VM is no limit, and almost
+// always a unit mistake.
 func (a *App) validateResources(who string, r Resources) error {
 	if r.Memory != "" {
 		n, ok := agentMemoryBytes(r.Memory)
@@ -126,10 +110,8 @@ func (a *App) validateResources(who string, r Resources) error {
 	return nil
 }
 
-// MaxRunningWorkersLimit bounds broker.max_running_workers.
 const MaxRunningWorkersLimit = 1000
 
-// validateWorkerCap checks broker.max_running_workers.
 func (a *App) validateWorkerCap() error {
 	n := a.Broker.MaxRunningWorkers
 	if n < 0 || n > MaxRunningWorkersLimit {
@@ -144,8 +126,7 @@ const (
 	GuestProfileSmall    = "small"    // trimmed services and zram swap
 )
 
-// EffectiveGuestProfile is the guest profile apply converges a Lima guest
-// on: guest_profile when set, else standard. "" off Lima.
+// EffectiveGuestProfile is "" off Lima.
 func (a *App) EffectiveGuestProfile() string {
 	if a.Backend != BackendLima {
 		return ""

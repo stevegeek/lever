@@ -1,17 +1,12 @@
 package remoteproxy
 
-// Dictation on the chat page (remote.voice): POST /lever/api/voice/transcribe
-// takes one recorded clip and answers its text, which the page puts into the
-// message box for the login to review and send itself. Nothing is sent to an
-// agent here, and nothing is stored: the clip is read into memory, checked,
-// handed to the transcriber (the broker tool lever-tool-whisper, over its
-// dictation socket: package voice) and dropped; the text goes back only to
-// the login that sent the clip. The audit line has the login, the clip's length, the outcome and the
-// latency; never the audio, never the text.
-//
-// The shape follows the upload route (files.go): the login gate, a custom
-// header no other site can send, per-login rates, slots of which a contact
-// never takes the last, and a body deadline that scales with the size.
+// Dictation (remote.voice): POST /lever/api/voice/transcribe turns one clip
+// into text for the page's message box; nothing is sent to an agent or stored.
+// The clip stays in memory and goes to lever-tool-whisper (package voice);
+// the text returns only to the login that sent it. The audit line never
+// carries audio or text. Guards match the upload route (files.go): a custom
+// header, per-login rates, slots of which a contact never takes the last, and
+// a size-scaled body deadline.
 
 import (
 	"bytes"
@@ -28,26 +23,19 @@ import (
 
 // VoiceConfig is remote.voice as the proxy needs it.
 type VoiceConfig struct {
-	// MaxSeconds bounds one clip.
 	MaxSeconds int
 	// Excluded are the logins with voice: false: no mic, and the route
 	// answers voice-off.
 	Excluded []string
-	// Available reports whether dictation can run: lever-tool-whisper
-	// answers its health route ready (voice.DictateClient, cached briefly).
-	// False: the roster carries no voice and the route answers unavailable.
+	// Available reports whether lever-tool-whisper answers ready (cached briefly).
 	Available func() bool
-	// NotSent reports whether a Transcribe error means the clip never
-	// reached the tool's queue (voice.ErrNotSent: the socket did not
-	// answer, or the tool refused the clip before whisper-server): only
-	// then is its use of the limits given back. nil = never.
+	// NotSent reports whether a Transcribe error means the clip never reached
+	// the tool's queue (voice.ErrNotSent); only then are the limits given back.
+	// nil = never.
 	NotSent func(error) bool
-	// ReadAloud: the roster tells the page to offer read-aloud to every
-	// login with voice on (remote.voice.read_aloud device or server).
+	// ReadAloud offers read-aloud to logins with voice on (device or server).
 	ReadAloud bool
-	// Speech is read-aloud with a server voice (read_aloud: server,
-	// lever-tool-tts): the speak route, and the roster's voices while the
-	// tool answers ready. nil = the device's voices only.
+	// Speech is the server voice (read_aloud: server); nil = device voices only.
 	Speech *SpeechConfig
 	// Transcribe turns one checked clip (WAV, PCM s16le, 16 kHz, mono) into
 	// text. Its error goes to the audit line, so it must never carry the
@@ -83,7 +71,6 @@ const (
 	voiceBodyMax  = 30 * time.Minute
 )
 
-// voiceState holds the route's slots and per-login counts.
 type voiceState struct {
 	cfg      VoiceConfig
 	now      func() time.Time // tests
@@ -107,8 +94,6 @@ func newVoiceState(cfg VoiceConfig) *voiceState {
 		gpu: make(chan struct{}, 1), tries: newLoginRate(voiceTriesPerHour, time.Hour)}
 }
 
-// voiceOnFor reports whether login may dictate: voice on and the login not
-// excluded.
 func (g *gate) voiceOnFor(login string) bool {
 	if g.voice == nil {
 		return false
@@ -121,16 +106,12 @@ func (g *gate) voiceOnFor(login string) bool {
 	return true
 }
 
-// voiceInfo is the roster's voice entry: shown only when the login may
-// dictate and the transcriber is up.
 type voiceInfo struct {
 	MaxSeconds int `json:"maxSeconds"`
 }
 
-// readAloudFor reports whether the page offers read-aloud to login: voice
-// on for it and remote.voice.read_aloud not turned off. Independent of the
-// transcriber: read-aloud runs on the device, or with lever-tool-tts
-// (speechInfoFor), falling back to the device.
+// readAloudFor does not depend on the transcriber: read-aloud runs on the
+// device or lever-tool-tts.
 func (g *gate) readAloudFor(login string) bool {
 	return g.voiceOnFor(login) && g.voice.cfg.ReadAloud
 }
@@ -142,7 +123,6 @@ func (g *gate) voiceInfoFor(login string) *voiceInfo {
 	return &voiceInfo{MaxSeconds: g.voice.cfg.MaxSeconds}
 }
 
-// maxBody is the largest body a clip of MaxSeconds can be.
 func (s *voiceState) maxBody() int64 {
 	return int64(voice.BytesPerSecond)*int64(s.cfg.MaxSeconds) + 1024
 }
@@ -151,8 +131,8 @@ func (s *voiceState) bodyDeadline() time.Duration {
 	return min(voiceBodyBase+time.Duration(s.maxBody()/fileBodyMinRate)*time.Second, voiceBodyMax)
 }
 
-// begin takes a slot for login, or reports false: a login holds at most
-// voicePerLogin, and only an operator takes the last of voiceSlots.
+// begin: a login holds at most voicePerLogin slots, and only an operator
+// takes the last of voiceSlots.
 func (s *voiceState) begin(login string, operator bool) (func(), bool) {
 	key := strings.ToLower(login)
 	s.mu.Lock()
@@ -173,14 +153,12 @@ func (s *voiceState) begin(login string, operator bool) (func(), bool) {
 	}, true
 }
 
-// limit is the refusal word for one more clip of seconds by login ("" =
-// allowed), and with take it also counts the clip. Uses older than a day
-// are forgotten.
+// limit returns the refusal word for one more clip ("" = allowed); with take
+// it also counts the clip.
 func (s *voiceState) limit(login string, seconds float64, take bool) string {
 	return s.check(login, seconds, s.now(), take)
 }
 
-// limitAt is limit with take, recording the use at now (refund finds it).
 func (s *voiceState) limitAt(login string, seconds float64, now time.Time) string {
 	return s.check(login, seconds, now, true)
 }
@@ -221,13 +199,9 @@ func (s *voiceState) check(login string, seconds float64, now time.Time, take bo
 	return ""
 }
 
-// refund gives back a use limit took (take true) at the same moment for the
-// same length, for a clip the tool never took: the browser gave up while it
-// waited for the proxy's GPU token, or Transcribe's error is NotSent (the
-// socket did not answer, or the tool refused the clip before
-// whisper-server). A clip the tool took counts, even when the browser gave
-// up while it waited in the tool's queue, or it failed or timed out. The
-// attempt cap (voiceTriesPerHour) still counts every clip.
+// refund gives back a use for a clip the tool never took (the browser gave up
+// waiting for the GPU token, or NotSent). A clip the tool took counts however
+// it ended; voiceTriesPerHour counts every clip.
 func (s *voiceState) refund(login string, seconds float64, at time.Time) {
 	key := strings.ToLower(login)
 	s.mu.Lock()
@@ -241,19 +215,16 @@ func (s *voiceState) refund(login string, seconds float64, at time.Time) {
 	}
 }
 
-// voiceAudio reports whether a Content-Type names a WAV body.
 func voiceAudio(ct string) bool {
 	mt, _, err := mime.ParseMediaType(ct)
 	return err == nil && (mt == "audio/wav" || mt == "audio/wave" || mt == "audio/x-wav")
 }
 
-// refuseVoice answers the route with one fixed error word.
 func (g *gate) refuseVoice(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, word string) {
 	line.Reason = word
 	g.answerFileJSON(w, r, line, DecisionDenyVoice, status, map[string]any{"error": word})
 }
 
-// serveVoice answers POST /lever/api/voice/transcribe for v.
 func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer) {
 	s := g.voice
 	if r.Method != http.MethodPost {
@@ -313,9 +284,8 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		buf.Grow(int(r.ContentLength))
 	}
 	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, limit))
-	// The body is in: the deadline is for the upload, not for the wait for
-	// the GPU or the transcription. net/http lifts it itself when the body
-	// hits EOF; lifting it here too keeps that true for a body cut short.
+	// The deadline is for the upload, not the GPU wait. net/http lifts it at EOF;
+	// lifting it here also covers a body cut short.
 	_ = rc.SetReadDeadline(time.Time{})
 	switch {
 	case tooLarge(err):
@@ -356,17 +326,13 @@ func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLin
 		return
 	}
 	start := time.Now()
-	// A browser that gives up ends the request to the tool: a clip still in
-	// the tool's queue leaves it, and one being transcribed ends the tool's
-	// request to whisper-server, which stops work on it; the GPU token is
-	// freed with it.
+	// A browser that gives up cancels the tool request, which dequeues the clip
+	// or stops whisper-server on it, freeing the GPU token.
 	text, err := s.cfg.Transcribe(r.Context(), clip)
 	<-s.gpu
 	line.LatencyMS = max(time.Since(start).Milliseconds(), 1)
 	if err != nil {
-		// Only a clip the tool never took is given back (NotSent); one it
-		// took counts, whether it waited, failed, timed out or was
-		// canceled.
+		// Only a clip the tool never took (NotSent) is given back.
 		if s.cfg.NotSent != nil && s.cfg.NotSent(err) {
 			s.refund(v.login, seconds, takenAt)
 		}

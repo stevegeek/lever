@@ -55,7 +55,7 @@ func TestIsSettingsKeysWarning(t *testing.T) {
 
 // TestSettingsWarningHiddenAndLogged: the warning never reaches an error, a
 // success result or a value, and each distinct line reaches the log sink
-// once however many calls print it (lever#169). Other stderr text survives.
+// once however many calls print it. Other stderr text survives.
 func TestSettingsWarningHiddenAndLogged(t *testing.T) {
 	other := "2026/10/02 15:25:35 WARN hub file contains unrecognized keys (these will be ignored) keys=\"[x]\""
 	f := proc.NewFakeRunner()

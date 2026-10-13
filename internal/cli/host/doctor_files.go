@@ -19,10 +19,9 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// checkFiles reports remote.files: off; on but without a record (state
-// inside the tree); the files ledger unsafe; an agent's exchange directory
-// behind a symbolic link (every upload to it is refused); or on, with the
-// limits.
+// checkFiles reports remote.files: off; on without a record (state inside the
+// tree); an unsafe files ledger; an agent's exchange directory behind a
+// symbolic link (every upload to it is refused); or on, with the limits.
 func checkFiles(app *config.App, st state.State) checkResult {
 	const name = "files"
 	if !app.FilesOn() {
@@ -113,10 +112,9 @@ func linkEffect(app *config.App, agent, ws, link string) string {
 }
 
 // exchangeUsage is the bytes of the regular files in ws's
-// .lever-files/in/<key>/ directories, and the tree-relative path of the
-// first symbolic link it meets at .lever-files, in, out or an in/<key>
-// ("" for none). Every directory is opened through fsutil's no-link walk
-// (os.Root, each component checked), so nothing is followed.
+// .lever-files/in/<key>/ directories, and the tree-relative path of the first
+// symbolic link at .lever-files, in, out or in/<key> ("" for none). Every
+// directory is opened through fsutil's no-link walk, so nothing is followed.
 func exchangeUsage(tree, ws string) (int64, string) {
 	dir := path.Join(ws, chatfiles.Dir)
 	for _, rel := range []string{dir, path.Join(dir, "in"), path.Join(dir, "out")} {
@@ -155,8 +153,6 @@ func exchangeUsage(tree, ws string) (int64, string) {
 	return total, ""
 }
 
-// readRootDir is the entry names of the directory rel below tree, read
-// through the no-link walk.
 func readRootDir(tree, rel string) ([]string, error) {
 	r, err := fsutil.OpenDirInTreeNoLinks(tree, rel)
 	if err != nil {
@@ -171,7 +167,6 @@ func readRootDir(tree, rel string) ([]string, error) {
 	return d.Readdirnames(-1)
 }
 
-// byteText is n bytes for people.
 func byteText(n int64) string {
 	switch {
 	case n < 1<<10:
@@ -185,8 +180,8 @@ func byteText(n int64) string {
 }
 
 // unsafeFilesLedgerFile is the first agent file in dir (or its .1), or the
-// .lock both writers share, that is not a regular file, is writable by
-// others, or belongs to another user.
+// shared .lock, that is not a regular file, is writable by others, or belongs
+// to another user.
 func unsafeFilesLedgerFile(dir string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

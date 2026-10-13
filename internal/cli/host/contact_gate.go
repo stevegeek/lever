@@ -22,33 +22,27 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-// checkContactGate refuses a bring-up that would let a contact (a remote
-// login with tier contact) reach agents that cannot tell the contact's words
-// from lever's.
+// checkContactGate refuses a bring-up that would let a contact (a remote login
+// with tier contact) reach agents that cannot tell the contact's words from
+// lever's.
 //
 // Who wrote a message is decided only by host records (message_verify); the
-// remote proxy no longer filters what a contact types. That is safe only
-// while both hold:
+// proxy does not filter what a contact types. That is safe only while both
+// hold:
 //
 //   - the host records exist: with the state directory inside the tree there
-//     is no chat ledger and no sent ledger, and an agent could not verify a
-//     contact's post as a contact's;
-//   - every agent's skill is this version's: an older skill trusts a lever
-//     marker on a message that fails to verify, and a contact can type one
-//     (and make its verify fail by making the agent read it late).
+//     is no chat or sent ledger, and an agent could not verify a contact's
+//     post as a contact's;
+//   - every agent's skill is this version's (an adopted skill only if adopted
+//     at this version): an older skill trusts a lever marker on a message that
+//     fails to verify, and a contact can type one.
 //
-// An adopted (owner-customized) skill counts as current only when it was
-// adopted at this version.
+// With remote.agent_messages on, it also refuses a scion.source checkout older
+// than config.AgentMessagesScionFloor: the contact filter trusts the sender
+// the hub sets, and an older hub lets an agent post as its contact.
 //
-// With remote.agent_messages on, it also refuses a scion.source checkout
-// that predates config.AgentMessagesScionFloor: the contact filter trusts
-// the sender the hub sets, and an older hub lets an agent post as its
-// contact (doctor's agent messages row says the same).
-//
-// The disk is not the whole story: a resumed session keeps the skill text it
-// loaded before. That part is checked per agent, per post, by the remote
-// proxy (contactSession), because only then is it known which agents exist
-// and whether this bring-up started them fresh.
+// A resumed session keeps the skill text it loaded before; the proxy checks
+// that per agent, per post (contactSession).
 func checkContactGate(app *config.App, st state.State) error {
 	if !app.RemoteEnabled() || len(app.Remote.LoginsWithTier(config.TierContact)) == 0 {
 		return nil
@@ -66,12 +60,10 @@ func checkContactGate(app *config.App, st state.State) error {
 			"these are not: %s. Run `lever init` (or `lever init --force` over an edited skill), then apply again",
 			cli.Version, strings.Join(stale, ", "))
 	}
-	// Config load refuses agent messages on a scion.version pseudo-version
-	// older than the floor; a scion.source checkout needs git, so it is
-	// checked here. A checkout without the floor commit (older and never
-	// fetched, or a fork) is refused, and so is a shallow clone that does
-	// not show it; a path git cannot answer for (not a repository, git not
-	// runnable, the timeout) is doctor's warning, as a scion.binary is.
+	// A scion.source checkout needs git, so it is checked here (config load checks
+	// a scion.version). A checkout or shallow clone without the floor commit is
+	// refused; a path git cannot answer for is doctor's warning, as a
+	// scion.binary is.
 	if app.AgentMessagesOn() && app.Scion.Version == "" && app.Scion.Source != "" {
 		if bad, note := agentMessagesScion(app, scionSourceHasCommit); bad {
 			return fmt.Errorf("remote: agent_messages needs scion %s (2026-08-28) or later, where the hub sets a message's sender itself; %s. "+
@@ -81,8 +73,6 @@ func checkContactGate(app *config.App, st state.State) error {
 	return nil
 }
 
-// scionSourceHasCommit is how checkContactGate asks whether the scion.source
-// checkout holds a commit (a test replaces it).
 var scionSourceHasCommit = func(source, commit string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -108,29 +98,26 @@ func staleSkillList(app *config.App, st state.State) ([]string, error) {
 	return stale, nil
 }
 
-// staleSkills is staleSkillList for a warning: a check that fails names
-// nothing (doctor reports the skills in full).
+// staleSkills is staleSkillList for a warning: a failed check names nothing
+// (doctor reports the skills in full).
 func staleSkills(app *config.App, st state.State) []string {
 	stale, _ := staleSkillList(app, st)
 	return stale
 }
 
-// contactSession is the remote proxy's check before a contact's post reaches
-// agent (remoteproxy.Config.ContactSession). It allows the post only when
-// all of these hold:
+// contactSession is the proxy's check before a contact's post reaches agent
+// (remoteproxy.Config.ContactSession). It allows the post only when all hold:
 //
 //   - the state directory is outside the tree (the session record is a host
 //     record agents cannot write);
-//   - agent's lever skill on disk is this version's (or adopted at this
-//     version), the same test as checkContactGate;
+//   - agent's skill on disk is this version's, as for checkContactGate;
 //   - the record of agent's last fresh session start (package sessionrec)
 //     names that same skill text.
 //
-// The last is what checkContactGate cannot see from the disk: a resumed
-// session keeps the skill text it loaded before, and an older skill trusts a
-// lever marker a contact can type. A session that started before the skill
-// changed, or one lever has no record of starting (created by an older
-// lever), is refused until it starts fresh.
+// The last is what the disk cannot show: a resumed session keeps the skill it
+// loaded, and an older skill trusts a lever marker a contact can type. A
+// session started before the skill changed, or with no record, is refused
+// until it starts fresh.
 func contactSession(app *config.App, st state.State, agent string) error {
 	if brokerctl.StateInsideTree(app, st) {
 		return errors.New("the state directory is inside the tree")
@@ -169,29 +156,23 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	case r.SkillHash == brokerctl.UncheckedSkill:
 		return errors.New("lever started it fresh on its own while its skill differed from its last session's")
 	case r.SkillHash != skills.ContentHash(onDisk) && r.SkillHash != hash:
-		// ContentHash leaves out the release stamp, so a release that
-		// renders the same skill text keeps the session fresh; the full
-		// hash is what records written before 0.33.1 hold.
+		// ContentHash leaves out the release stamp, so a release that renders the same
+		// skill text keeps the session fresh; older records hold the full hash.
 		return staleSessionError{fmt.Sprintf("at %s, lever %s", r.Started.UTC().Format(time.RFC3339), r.Version)}
 	}
 	return nil
 }
 
-// errNoSessionRecord is contactSession's refusal of an agent lever has no
-// session record of.
 var errNoSessionRecord = errors.New("lever has no record of its session starting fresh")
 
-// staleSessionError is contactSession's refusal of a session that started
-// before the current skill. Its text carries the start time and version;
-// reason is the part shared by every such agent, which the bring-up
-// warning groups on (after an upgrade every agent has its own start time).
+// staleSessionError's text carries the start time and version; reason is the
+// part shared by every such agent, which the bring-up warning groups on.
 type staleSessionError struct{ detail string }
 
 const staleSessionReason = "its session started before its current skill was written"
 
 func (e staleSessionError) Error() string { return staleSessionReason + " (" + e.detail + ")" }
 
-// contactRefusalReason is err's text with any per-agent detail dropped.
 func contactRefusalReason(err error) string {
 	var stale staleSessionError
 	if errors.As(err, &stale) {
@@ -200,7 +181,6 @@ func contactRefusalReason(err error) string {
 	return err.Error()
 }
 
-// contactAgents is every agent some contact login lists, in config order.
 func contactAgents(app *config.App) []string {
 	var out []string
 	for _, u := range app.Remote.AllowedUsers {
@@ -217,14 +197,12 @@ func contactAgents(app *config.App) []string {
 }
 
 // printContactSessionWarnings names, at every bring-up, each agent a contact
-// lists whose session contactSession would refuse, and how to fix it. It is
-// a warning, not a refusal: an agent that does not exist yet (a worker not
-// dispatched, a manager this bring-up creates) has no record either, and
-// the proxy refuses the posts anyway.
+// lists whose session contactSession would refuse, and the fix. A warning, not
+// a refusal: an agent not created yet has no record either, and the proxy
+// refuses the posts anyway.
 //
-// With verified chat on and no contact (checkContactGate refuses stale
-// skills when there is one), it also warns about stale skills: a 0.27
-// manager skill reads the manager's notes to itself, now marked and
+// With verified chat on and no contact, it also warns about stale skills: an
+// older manager skill reads the manager's notes to itself, marked and
 // verifying as lever, as data.
 func printContactSessionWarnings(cmd *cobra.Command, app *config.App, st state.State) {
 	if !app.RemoteEnabled() {
@@ -247,19 +225,14 @@ func printContactSessionWarnings(cmd *cobra.Command, app *config.App, st state.S
 	}
 }
 
-// blockedContactAgent is one agent contactSession refuses, with its reason.
 type blockedContactAgent struct{ name, reason string }
 
-// maxWarnedContactAgents bounds the agent names one warning lists.
 const maxWarnedContactAgents = 8
 
-// contactSessionWarning words every refused agent as ONE warning line: a
-// production box lists many contact agents, and a line per agent at every
-// bring-up buried the rest of the output. The agents are grouped by reason,
-// at most maxWarnedContactAgents names are listed, and the line ends with
-// the fix for each kind present (a worker heals at its next fresh create;
-// the manager needs a fresh start). Empty when nothing is blocked. The
-// names come from the config and are sanitized anyway: the line reaches
+// contactSessionWarning words every refused agent as one line, grouped by
+// reason, with at most maxWarnedContactAgents names and the fix for each kind
+// present (a worker heals at its next fresh create; the manager needs a fresh
+// start). Empty when nothing is blocked. Names are sanitized: the line reaches
 // the terminal raw.
 func contactSessionWarning(manager string, blocked []blockedContactAgent) string {
 	if len(blocked) == 0 {

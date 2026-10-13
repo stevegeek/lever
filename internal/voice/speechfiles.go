@@ -23,30 +23,27 @@ import (
 	"time"
 )
 
-// SpeechDir is where m's files live in the models directory dir: one
-// private directory per model, laid out as below the archive's top
-// directory.
+// SpeechDir is m's private directory in the models directory dir, laid out
+// as below the archive's top directory.
 func SpeechDir(dir string, m SpeechModel) string { return filepath.Join(dir, m.Name) }
 
-// SpeechPath is where file rel (a path below m's directory) lives in dir.
 func SpeechPath(dir string, m SpeechModel, rel string) string {
 	return filepath.Join(SpeechDir(dir, m), filepath.FromSlash(rel))
 }
 
 // The bounds of one model's archive, against a damaged one (its sha256 is
-// pinned, so not against a hostile one): entries, and bytes unpacked.
+// pinned, so not against a hostile one).
 const (
 	maxSpeechEntries = 20000
 	maxSpeechBytes   = 4 << 30
 )
 
-// speechManifest is the file lever writes into a model's directory once it
-// has unpacked the model's verified archive there: the archive's sha256
-// and the path, size and sha256 of every file unpacked. No archive entry
-// can have its name (it starts with a dot).
+// speechManifest is the file lever writes into a model's directory after
+// unpacking its verified archive: the archive's sha256 and the path, size
+// and sha256 of every file. No archive entry can have its name (it starts
+// with a dot).
 const speechManifest = ".lever-manifest"
 
-// maxSpeechManifest bounds the manifest lever reads.
 const maxSpeechManifest = 4 << 20
 
 type speechManifestJSON struct {
@@ -54,20 +51,15 @@ type speechManifestJSON struct {
 	Files         []SpeechFile `json:"files"`
 }
 
-// FetchSpeech makes SpeechDir(dir, m) hold m's files, unpacked from its
-// pinned archive, unless they are there verified already (VerifySpeech),
-// and returns that directory. The archive is downloaded from GitHub to a
-// private temp file in dir and used only at its pinned size and sha256
-// (Fetcher.download); it is unpacked into a private temp directory
-// (unpackSpeech: regular files 0600 and directories 0700 only), its
-// manifest written, and that directory renamed into place, replacing the
-// old one. The archive is deleted.
+// FetchSpeech makes SpeechDir(dir, m) hold m's files unless they verify
+// already, and returns that directory. The archive is downloaded to a
+// private temp file and used only at its pinned size and sha256, unpacked
+// into a private temp directory (regular files 0600 and directories 0700
+// only), its manifest written, and the directory renamed into place.
 func (f Fetcher) FetchSpeech(ctx context.Context, m SpeechModel, dir string) (string, error) {
 	return f.FetchSpeechFrom(ctx, m, dir, m.ArchiveURL)
 }
 
-// FetchSpeechFrom is FetchSpeech from src instead of the table's URL
-// (tests).
 func (f Fetcher) FetchSpeechFrom(ctx context.Context, m SpeechModel, dir, src string) (string, error) {
 	if why := m.Pinned(); why != "" {
 		return "", fmt.Errorf("%w: %s", ErrUnpinned, why)
@@ -106,8 +98,8 @@ func (f Fetcher) FetchSpeechFrom(ctx context.Context, m SpeechModel, dir, src st
 	if err := writeSpeechManifest(tmp, m, files); err != nil {
 		return "", err
 	}
-	// The old copy, if any, moves aside (a name removeStaleFetches knows)
-	// and goes once the new one is in place.
+	// The old copy moves aside (a name removeStaleFetches knows) and goes
+	// once the new one is in place.
 	old := ""
 	if _, err := os.Lstat(root); err == nil {
 		old = filepath.Join(dir, ".fetch-old-"+m.Name+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
@@ -133,8 +125,6 @@ func (f Fetcher) FetchSpeechFrom(ctx context.Context, m SpeechModel, dir, src st
 	return root, nil
 }
 
-// unpackSpeech unpacks m's archive (bzip2-compressed tar) at p into the
-// private directory into (unpackSpeechTar).
 func unpackSpeech(p, into string, m SpeechModel) ([]SpeechFile, error) {
 	file, err := os.Open(p)
 	if err != nil {
@@ -144,14 +134,13 @@ func unpackSpeech(p, into string, m SpeechModel) ([]SpeechFile, error) {
 	return unpackSpeechTar(tar.NewReader(bzip2.NewReader(bufio.NewReader(file))), into, m)
 }
 
-// unpackSpeechTar unpacks the entries below the archive's top directory
-// m.ArchiveRoot into the private directory into, and returns the files
-// unpacked, in path order. Only directories (made 0700) and regular files
-// (written 0600, each once) are unpacked; an entry with a name component
-// that starts with a dot (such as macOS's ._ files) is skipped. Anything
-// else refuses the archive: an entry outside the top directory, a name
-// that is not a plain relative path, a link or device, too many entries
-// or bytes, and an archive without one of m's RequiredFiles.
+// unpackSpeechTar unpacks the entries below m.ArchiveRoot into the private
+// directory into and returns the files in path order. Only directories
+// (0700) and regular files (0600, each once) are unpacked; an entry with a
+// dot-prefixed component (such as macOS's ._ files) is skipped. Anything else
+// refuses the archive: an entry outside the top directory, a name that is
+// not a plain relative path, a link or device, too many entries or bytes,
+// or a missing RequiredFiles entry.
 func unpackSpeechTar(tr *tar.Reader, into string, m SpeechModel) ([]SpeechFile, error) {
 	bad := func(format string, a ...any) error {
 		return fmt.Errorf("%w: %s's archive: %s", ErrModel, m.Name, fmt.Sprintf(format, a...))
@@ -210,9 +199,8 @@ func unpackSpeechTar(tr *tar.Reader, into string, m SpeechModel) ([]SpeechFile, 
 	return files, nil
 }
 
-// unpackSpeechFile writes the next size bytes of tr to rel below into, a
-// new file (an existing one, a second entry of the same name, is refused)
-// of mode 0600, and returns their sha256.
+// unpackSpeechFile writes the next size bytes of tr to a new 0600 file (a
+// second entry of the same name is refused) and returns their sha256.
 func unpackSpeechFile(tr io.Reader, into, rel string, size int64) (string, error) {
 	sub, err := privateDirs(into, path.Dir(rel), true)
 	if err != nil {
@@ -236,8 +224,6 @@ func unpackSpeechFile(tr io.Reader, into, rel string, size int64) (string, error
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// speechMissingRole names a file of m's RequiredFiles that files lacks
-// ("" = none).
 func speechMissingRole(m SpeechModel, files []SpeechFile) string {
 	for _, p := range m.RequiredFiles() {
 		if !slices.ContainsFunc(files, func(f SpeechFile) bool { return f.Path == p }) {
@@ -247,17 +233,15 @@ func speechMissingRole(m SpeechModel, files []SpeechFile) string {
 	return ""
 }
 
-// hiddenSpeechPath reports whether a component of rel starts with a dot
-// and none is "." or ".." (such a path is refused, not skipped).
+// hiddenSpeechPath: such a path is skipped; "." or ".." is refused instead.
 func hiddenSpeechPath(rel string) bool {
 	cs := strings.Split(rel, "/")
 	return !slices.Contains(cs, ".") && !slices.Contains(cs, "..") &&
 		slices.ContainsFunc(cs, func(c string) bool { return strings.HasPrefix(c, ".") })
 }
 
-// archivePathOK accepts a relative slash path of plain components, as
-// cleanSpeechPath, except that a space may be inside a component
-// (espeak-ng's data has a voice file named "Mr serious").
+// archivePathOK is cleanSpeechPath except that a space may be inside a
+// component (espeak-ng's data has a voice file named "Mr serious").
 func archivePathOK(rel string) bool {
 	if rel == "" || path.Clean(rel) != rel || path.IsAbs(rel) || strings.Contains(rel, `\`) {
 		return false
@@ -275,8 +259,6 @@ func archivePathOK(rel string) bool {
 	return true
 }
 
-// writeSpeechManifest writes the manifest of files, unpacked from m's
-// archive, into dir: a new file, mode 0600.
 func writeSpeechManifest(dir string, m SpeechModel, files []SpeechFile) error {
 	b, err := json.Marshal(speechManifestJSON{ArchiveSHA256: m.ArchiveSHA256, Files: files})
 	if err != nil {
@@ -296,10 +278,9 @@ func writeSpeechManifest(dir string, m SpeechModel, files []SpeechFile) error {
 	return err
 }
 
-// readSpeechManifest reads the manifest in m's directory root: a regular
-// file of the caller's that no one else can write, written for m's pinned
-// archive, listing plain paths once each with a size and sha256, among
-// them m's RequiredFiles.
+// readSpeechManifest requires a regular file of the caller's that no one
+// else can write, written for m's pinned archive, listing plain paths once
+// each with a size and sha256, m's RequiredFiles among them.
 func readSpeechManifest(root string, m SpeechModel) ([]SpeechFile, error) {
 	p := filepath.Join(root, speechManifest)
 	file, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
@@ -358,8 +339,7 @@ func readSpeechManifest(root string, m SpeechModel) ([]SpeechFile, error) {
 }
 
 // privateDirs checks (and with create, makes) each directory of rel below
-// root, every one a private directory of the caller's, and returns the
-// last. rel "." is root itself.
+// root as a private directory of the caller's, and returns the last.
 func privateDirs(root, rel string, create bool) (string, error) {
 	p := root
 	if err := checkPrivateDir(p, create); err != nil {
@@ -397,17 +377,14 @@ func checkPrivateDir(p string, create bool) error {
 	return nil
 }
 
-// VerifySpeech checks m's directory in dir and returns its files: the
-// directory and every one below it a private directory of the caller's (no
-// symbolic link), its manifest one lever wrote for m's pinned archive
-// (readSpeechManifest), nothing else in it but the files the manifest
-// lists, and each of them a regular file of the caller's of the size and
-// sha256 the manifest records (verifyFile). So every file the engine can
-// load is as lever unpacked it from the verified archive. The manifest
-// itself is trusted as lever wrote it, in a private directory: it is not
-// pinned. A missing directory is fs.ErrNotExist; a listed file missing is
-// ErrModel. The files are hashed whole, which takes a moment
-// for a large model.
+// VerifySpeech checks m's directory in dir and returns its files: every
+// directory private to the caller (no symbolic link), a manifest lever wrote
+// for m's pinned archive, nothing else but the files it lists, and each a
+// regular file of the caller's with the recorded size and sha256. So every
+// file the engine can load is as lever unpacked it from the verified
+// archive. The manifest is trusted because lever wrote it in a private
+// directory. A missing directory is fs.ErrNotExist; a listed file missing
+// is ErrModel.
 func VerifySpeech(dir string, m SpeechModel) ([]SpeechFile, error) {
 	if why := m.Pinned(); why != "" {
 		return nil, fmt.Errorf("%w: %s", ErrUnpinned, why)
@@ -427,8 +404,7 @@ func VerifySpeech(dir string, m SpeechModel) ([]SpeechFile, error) {
 	for _, f := range files {
 		listed[f.Path] = true
 	}
-	// Every file is looked for first, so a missing one is found before any
-	// file is hashed.
+	// Every file is looked for before any is hashed.
 	for _, f := range files {
 		if _, err := os.Lstat(SpeechPath(dir, m, f.Path)); errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s is missing from %s", ErrModel, f.Path, root)
@@ -469,18 +445,17 @@ func VerifySpeech(dir string, m SpeechModel) ([]SpeechFile, error) {
 	return files, nil
 }
 
-// speechStamp is a fingerprint of m's directory in dir and everything in
-// it, as the file system describes them (device, inode, size, times,
-// owner, mode, links), without reading a file: a file replaced, written,
-// added or removed changes it (the ctime of a file or of its directory at
-// least), and so does a missing directory appearing. "" when the platform
-// has no such description: then only a full VerifySpeech will do.
+// speechStamp fingerprints m's directory and everything in it from file
+// system metadata (device, inode, size, times, owner, mode, links) without
+// reading a file: a file replaced, written, added or removed changes it,
+// and so does a missing directory appearing. "" when the platform has no
+// such metadata: then only a full VerifySpeech will do.
 func speechStamp(dir string, m SpeechModel) string {
 	root := SpeechDir(dir, m)
 	var b strings.Builder
 	if _, err := os.Lstat(root); errors.Is(err, fs.ErrNotExist) {
-		// Recorded as missing, so a failed check of a model not fetched
-		// yet is remembered rather than run again.
+		// Recorded as missing, so a failed check of a model not fetched yet
+		// is remembered rather than rerun.
 		return root + "\x00missing\n"
 	}
 	err := filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error {
@@ -507,5 +482,4 @@ func speechStamp(dir string, m SpeechModel) string {
 	return b.String()
 }
 
-// speechMissing reports whether err is a missing model file or directory.
 func speechMissing(err error) bool { return errors.Is(err, fs.ErrNotExist) }

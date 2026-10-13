@@ -1,15 +1,11 @@
 package broker
 
-// Files in the chat (remote.files): an agent lists its exchange and
-// records a file it shares with a login.
-//
-// The files live in the agent's own workspace (.lever-files/in|out/<key>/,
-// package chatfiles); the record of what lever stored or the agent shared
-// is the host ledger (package fileledger), which nothing in the jail can
-// write. The caller is the mTLS identity; its workspace comes from config,
-// never from the request. A share is accepted only from the caller's own
-// out/<key-of-to>/, with no link on the path, and only to a login that may
-// message the caller (or an operator). File content is never logged.
+// Files in the chat (remote.files). The files live in the agent's own
+// workspace; the record of them is the host ledger, which nothing in the jail
+// can write. The workspace comes from config, never the request. A share is
+// accepted only from the caller's own out/<key-of-to>/, with no link on the
+// path, and only to a login that may message the caller (or an operator).
+// File content is never logged.
 
 import (
 	"errors"
@@ -30,18 +26,16 @@ import (
 // FilesConfig is remote.files as the broker needs it.
 type FilesConfig struct {
 	Enabled bool
-	// Tree is the host path of the instance tree; Workspaces maps each
-	// agent slug to its tree-relative workspace ("." for the manager).
+	// Workspaces maps each agent slug to its tree-relative workspace.
 	Tree       string
 	Workspaces map[string]string
 	MaxBytes   int64
 	Extensions []string
-	// LedgerDir is the files ledger; "" = the state directory is inside
-	// the tree, so nothing can be recorded (every call: unavailable).
+	// LedgerDir "" means the state directory is inside the tree: every call
+	// answers unavailable.
 	LedgerDir string
 	Contacts  []FileContactEntry
 	Operators []string
-	// NoShares (remote.files.shares false): share_file answers shares-off.
 	// A login with files: false is in neither list, so it is no target.
 	NoShares bool
 }
@@ -60,7 +54,6 @@ const (
 )
 
 const (
-	// filesContactRequired: a list call that names no contact.
 	filesContactRequired = "contact-required"
 	refuseBadPath        = "bad-path"
 	refuseNotFound       = "not-found"
@@ -72,7 +65,6 @@ const (
 	refuseExtension      = "extension"
 )
 
-// fileRecord opens the files ledger on first use and again after a failure.
 type fileRecord struct {
 	dir    string
 	mu     sync.Mutex
@@ -95,12 +87,10 @@ func (f *fileRecord) get() (*fileledger.Ledger, error) {
 	return f.ledger, nil
 }
 
-// fileTarget is login as a file target of the agent slug: the configured
-// spelling of the login and its tier — operator, or contact when its agents
-// list slug — or ok false. Logins compare lowercased, the one fold of the
-// config's duplicate check, the hub's emails and chatfiles.Key (a Unicode
-// case fold would also match U+017F to "s"), so the record always carries
-// the config's spelling.
+// fileTarget returns the configured spelling and tier of login as a file
+// target of slug. Logins compare lowercased, never Unicode case-folded (that
+// would match U+017F to "s"), the same fold as config, the hub and
+// chatfiles.Key.
 func (b *Broker) fileTarget(login, slug string) (canon, tier string, ok bool) {
 	for _, op := range b.files.Operators {
 		if sameLogin(op, login) {
@@ -115,11 +105,8 @@ func (b *Broker) fileTarget(login, slug string) (canon, tier string, ok bool) {
 	return "", "", false
 }
 
-// sameLogin compares two logins as lever does everywhere: lowercased.
 func sameLogin(a, b string) bool { return strings.ToLower(a) == strings.ToLower(b) }
 
-// fileTargets is the entry of login (a target of slug, as fileTarget
-// spells it) with its directories as slug's container sees them.
 func (b *Broker) fileTargets(slug, ws, login string) []wire.FileContact {
 	_, tier, ok := b.fileTarget(login, slug)
 	if !ok {
@@ -141,7 +128,7 @@ func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req wire.FilesListRequest
-	_ = decodeBody(w, r, filesBodyLimit, &req) // an empty or bad body names no contact
+	_ = decodeBody(w, r, filesBodyLimit, &req)
 	empty := wire.FilesListResponse{Contacts: []wire.FileContact{}, Uploads: []wire.FileInfo{}, Shares: []wire.FileInfo{}}
 	if !b.files.Enabled {
 		empty.Note = "files are off on this instance"
@@ -149,9 +136,7 @@ func (b *Broker) handleFilesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, slug, _, _ := b.identity(caller)
-	// One login per call, never every login's files at once: the agent asks
-	// for the login whose verified message it is answering, and gets only
-	// that login's records and directories.
+	// One login per call, never every login's files at once.
 	if req.Contact == "" {
 		empty.Enabled, empty.Note = true, filesContactRequired
 		b.audit("files", caller, "deny", "list: no contact", "reason", filesContactRequired)
@@ -212,15 +197,11 @@ func lastN[T any](s []T, n int) []T {
 
 var errShareRate = errors.New(refuseRate)
 
-// errShareTimedOut aborts a share's record whose call context ended while
-// it waited for the ledger lock.
 var errShareTimedOut = errors.New("timed out")
 
-// afterShareHash, when set, runs between a share's hash and its record: a
-// test seam for a call that times out in that window.
+// afterShareHash is a test seam between a share's hash and its record.
 var afterShareHash func()
 
-// shareRate is the hourly share limit over an agent's records.
 func shareRate(now time.Time) func([]fileledger.Record) error {
 	return func(prior []fileledger.Record) error {
 		n := 0
@@ -288,9 +269,8 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 		refuse(refuseUnavailable, "the host record is unavailable", "ledger: "+err.Error())
 		return
 	}
-	// A cheap look at the hourly count first, so an agent past it cannot
-	// make the host hash max_bytes on every call; Add checks again under
-	// the lock, and that check decides.
+	// A cheap pre-check so an agent past the limit cannot make the host hash
+	// max_bytes on every call; Add's check under the lock decides.
 	if prior, err := led.List(slug); err != nil {
 		refuse(refuseUnavailable, "the host record is unavailable", "ledger: "+err.Error())
 		return
@@ -298,9 +278,8 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 		refuse(refuseRate, "too many shares this hour", "hourly rate")
 		return
 	}
-	// The route runs under a TimeoutHandler: past its bound the agent got
-	// 503 and may retry, so a call whose context is done records nothing
-	// (a duplicate share would count toward the hourly rate).
+	// Past the TimeoutHandler bound the agent got 503 and may retry, so a
+	// call whose context is done records nothing.
 	sha, size, err := chatfiles.Hash(r.Context(), b.files.Tree, rel, b.files.MaxBytes)
 	if afterShareHash != nil {
 		afterShareHash()
@@ -320,8 +299,7 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := fileledger.Record{V: 1, Op: fileledger.OpShare, ID: id, Agent: slug, Login: to, Name: name, Rel: rel,
 		SHA256: sha, Size: size, At: now}
-	// The wait for the ledger lock can pass the bound too: check the
-	// context again under the lock, where nothing can be recorded after.
+	// The lock wait can pass the bound too: check again under the lock.
 	rate := shareRate(now)
 	err = led.Add(rec, func(prior []fileledger.Record) error {
 		if r.Context().Err() != nil {
@@ -344,10 +322,7 @@ func (b *Broker) handleFilesShare(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.FileShareResponse{OK: true, ID: id, Name: name, SHA256: sha, Size: size})
 }
 
-// shareFault maps a Hash error to its refusal word ("" for none). A
-// component that exists but is not a directory (out is a file) is a plain
-// error from the walk and so unavailable: the agent broke its own exchange.
-// A hard link has its own word; a path that leaves the tree is bad-path.
+// shareFault maps a Hash error to its refusal word ("" for none).
 func shareFault(err error) string {
 	switch {
 	case err == nil:
@@ -368,8 +343,6 @@ func shareFault(err error) string {
 	return refuseUnavailable
 }
 
-// withDefaults fills a zero MaxBytes or empty Extensions (brokerctl always
-// passes the effective values; this keeps a test config usable).
 func (c FilesConfig) withDefaults() FilesConfig {
 	if c.MaxBytes <= 0 {
 		c.MaxBytes = 25 << 20

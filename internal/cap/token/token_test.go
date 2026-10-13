@@ -296,16 +296,15 @@ func TestIDRejectsMalformedIDShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Rebuild the envelope with a junk id in the payload (signature invalid —
-	// irrelevant, ID never checks signatures).
+	// Junk id in the payload; the stale signature is irrelevant to ID.
 	forged := forgeTokenWithID(t, tok, "x\nid=evil decision=allow")
 	if got := ID(forged); got != "" {
 		t.Fatalf("ID(forged junk id) = %q, want empty (shape-checked)", got)
 	}
 }
 
-// forgeTokenWithID re-wraps tok's payload with the given id, leaving the (now
-// stale) signature in place — ID() must not care.
+// forgeTokenWithID re-wraps tok's payload with id, keeping the stale
+// signature.
 func forgeTokenWithID(t *testing.T, tok []byte, id string) []byte {
 	t.Helper()
 	var env envelope

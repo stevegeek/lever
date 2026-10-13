@@ -11,38 +11,32 @@ import (
 	"path/filepath"
 )
 
-// InstanceIDFile records this instance's identity (lever#181): a random id,
-// and the state directory it was made for. The broker reports the id on
-// /epoch, and every host-side caller of the broker's admin port compares it
-// with this file before it trusts the answer. Ports alone cannot say which
-// instance a broker belongs to: two instances on one host can be configured
-// with the same ports, and then the same version and an identical broker
-// config hash would pass for one another.
+// InstanceIDFile records this instance's identity: a random id and the state
+// directory it was made for. The broker reports the id on /epoch, and every
+// host-side caller of the admin port compares it with this file before
+// trusting the answer: two instances on one host can share ports, version
+// and broker config hash.
 func (s State) InstanceIDFile() string { return filepath.Join(s.Dir, "instance-id.json") }
 
-// instanceIDRecord is the file's content.
 type instanceIDRecord struct {
 	ID string `json:"id"`
-	// Dir is the absolute state directory the id was made for. A copied
-	// instance directory carries the file with it; the copy sees another
-	// directory here (compared by identity, sameDir) and makes its own id,
-	// so the copy and the original never pass for one another. A moved
-	// instance makes a new id too.
+	// Dir is the absolute state directory the id was made for. A copied or
+	// moved instance sees another directory here (compared by identity,
+	// sameDir) and makes its own id, so a copy and its original never pass
+	// for one another.
 	Dir string `json:"dir"`
 }
 
-// instanceIDBytes is the id's size before hex encoding.
 const instanceIDBytes = 16
 
 // ErrNoInstanceID means the state directory has no instance id of its own
-// yet (absent, or made for another directory). No broker of this instance
-// can be running: the broker makes the id before it binds a port.
+// (absent, or made for another directory). No broker of this instance can be
+// running: the broker makes the id before it binds a port.
 var ErrNoInstanceID = errors.New("state: no instance id for this state directory")
 
-// ReadInstanceID returns this state directory's instance id. It never
-// writes. ErrNoInstanceID when the file is absent or was made for another
-// directory; any other error (unreadable, malformed) is returned as is, so
-// a caller fails closed.
+// ReadInstanceID returns this state directory's instance id and never
+// writes. Errors other than ErrNoInstanceID (unreadable, malformed) are
+// returned as is, so a caller fails closed.
 func (s State) ReadInstanceID() (string, error) {
 	dir, err := filepath.Abs(s.Dir)
 	if err != nil {
@@ -61,9 +55,8 @@ func (s State) ReadInstanceID() (string, error) {
 	return rec.ID, nil
 }
 
-// sameDir reports whether a and b name the same directory, by identity
-// rather than by spelling: a path through a symlink still matches, a copy
-// or a directory now at the old path does not.
+// sameDir compares by identity, not spelling: a path through a symlink
+// matches, a copy or a directory now at the old path does not.
 func sameDir(a, b string) bool {
 	ai, err := os.Stat(a)
 	if err != nil {
@@ -76,12 +69,11 @@ func sameDir(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
-// EnsureInstanceID returns this state directory's instance id, making it
-// on first use. Two concurrent first uses agree: the file is published with
-// a hard link, which fails when the name exists, and the loser reads the
-// winner's id. A file made for another directory (a copied instance) is
-// replaced with a fresh id. A malformed file is an error, never silently
-// replaced: the running broker may have read it.
+// EnsureInstanceID returns this state directory's instance id, making it on
+// first use. Concurrent first uses agree: the file is published with a hard
+// link, which fails when the name exists, and the loser reads the winner's
+// id. A file made for another directory is replaced. A malformed file is an
+// error, never silently replaced: the running broker may have read it.
 func (s State) EnsureInstanceID() (string, error) {
 	id, err := s.ReadInstanceID()
 	if err == nil {
@@ -124,12 +116,10 @@ func (s State) EnsureInstanceID() (string, error) {
 	}
 	path := s.InstanceIDFile()
 	if s.FromAnotherDir() {
-		// Made for another directory (ReadInstanceID above). The pid
-		// files came with it and name that directory's processes: drop
-		// them first, so nothing here ever signals them. Then remove the
-		// id file and publish ours like a first use. Removing only a file
-		// that still names another directory keeps a concurrent first
-		// use's id.
+		// Made for another directory: its pid files name that directory's
+		// processes, so drop them first and nothing here ever signals them.
+		// Removing only a file that still names another directory keeps a
+		// concurrent first use's id.
 		for _, p := range []string{s.PID(), s.RemotePID()} {
 			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return "", fmt.Errorf("state: drop a copied pid file: %w", err)
@@ -150,10 +140,9 @@ func (s State) EnsureInstanceID() (string, error) {
 	return rec.ID, nil
 }
 
-// FromAnotherDir reports whether the state directory holds an instance id
-// file made for another directory: the instance directory was copied or
-// moved. Its pid files then name the other directory's processes (a copy's
-// original still runs them), so the stop paths leave them alone.
+// FromAnotherDir reports whether the instance id file was made for another
+// directory (the instance was copied or moved). Its pid files then name the
+// other directory's processes, so the stop paths leave them alone.
 func (s State) FromAnotherDir() bool {
 	dir, err := filepath.Abs(s.Dir)
 	if err != nil {
@@ -163,8 +152,7 @@ func (s State) FromAnotherDir() bool {
 	return err == nil && !sameDir(rec.Dir, dir)
 }
 
-// readInstanceID reads and checks the file: a 32-hex-digit id and an
-// absolute directory.
+// readInstanceID requires a 32-hex-digit id and an absolute directory.
 func readInstanceID(path string) (instanceIDRecord, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -180,8 +168,7 @@ func readInstanceID(path string) (instanceIDRecord, error) {
 	return rec, nil
 }
 
-// ValidInstanceID reports whether id has the shape EnsureInstanceID makes:
-// 32 lower-case hex digits.
+// ValidInstanceID reports whether id is 32 lower-case hex digits.
 func ValidInstanceID(id string) bool {
 	if len(id) != 2*instanceIDBytes {
 		return false

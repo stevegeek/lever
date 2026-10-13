@@ -47,7 +47,6 @@ func newPusher(t *testing.T, r *testRemote) (*Pusher, string, *[][]string) {
 	return p, tree, &argvs
 }
 
-// bundle builds a bundle in the agent tree from work.
 func bundle(t *testing.T, work, tree, name string, refs ...string) {
 	t.Helper()
 	gitT(t, work, append([]string{"bundle", "create", filepath.Join(tree, BundleDir, name)}, refs...)...)
@@ -567,7 +566,6 @@ func TestPushOverallDeadline(t *testing.T) {
 	if d := time.Since(start); d > 10*time.Second {
 		t.Fatalf("push took %v past a %v deadline", d, p.Deadline)
 	}
-	// The lock is free again.
 	unlock, err := p.lock(context.Background(), repo)
 	if err != nil {
 		t.Fatal(err)

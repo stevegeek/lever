@@ -7,7 +7,6 @@ import (
 	"unicode"
 )
 
-// flagRole is what an interpreter does with a flag's value.
 type flagRole int
 
 const (
@@ -40,15 +39,10 @@ var interpreterFlags = map[string]map[string]flagRole{
 		"--env-file": takesValue},
 }
 
-// shLongValueFlags are the long options of the sh family that take a value.
 var shLongValueFlags = map[string]bool{"--rcfile": true, "--init-file": true}
 
-// interpreterRE matches an interpreter command name, a version suffix
-// allowed (python3.12, ruby3.3, perl5.36): group 1 is the family.
 var interpreterRE = regexp.MustCompile(`^(python|pypy|ruby|node|nodejs|perl|sh|bash|dash|zsh|deno|bun)[0-9][0-9.]*$|^(python|pypy|ruby|node|nodejs|perl|sh|bash|dash|zsh|deno|bun)$`)
 
-// interpreterFamily is the interpreterFlags key for a command name, or ""
-// when it is no interpreter lever knows.
 func interpreterFamily(name string) string {
 	m := interpreterRE.FindStringSubmatch(name)
 	if m == nil {
@@ -66,11 +60,8 @@ func interpreterFamily(name string) string {
 	return fam
 }
 
-// unwrapEnv skips an env(1) prefix, and the command wrappers lever reads
-// (parseEnvPrefix), and returns the argv they run and the directory env
-// -C/--chdir (or uv run --directory) makes it run in ("" = unchanged). Anything that does not start with env is returned unchanged;
-// a prefix lever cannot read as env does gives nil (config load refuses it,
-// envFormUnread).
+// unwrapEnv returns nil for a prefix lever cannot read as env does; config
+// load refuses those (envFormUnread).
 func unwrapEnv(argv []string) ([]string, string) {
 	p := parseEnvPrefix(argv)
 	if p.unread != "" {
@@ -79,23 +70,18 @@ func unwrapEnv(argv []string) ([]string, string) {
 	return p.argv, p.chdir
 }
 
-// envFormUnread names an env(1) prefix form whose words lever cannot read
-// the way env does, or "" (parseEnvPrefix). A flag hidden in such a form
-// would escape the host-path checks, so config load refuses the command
-// instead of guessing.
+// envFormUnread names an env(1) prefix form lever cannot read the way env
+// does. A flag hidden in such a form would escape the host-path checks, so
+// config load refuses the command instead of guessing.
 func envFormUnread(argv []string) string { return parseEnvPrefix(argv).unread }
 
-// envPrefix is what env(1) and the command wrappers lever reads
-// (wrapperSpecs, `uv run`) make of a command line that starts with them.
 type envPrefix struct {
-	argv   []string // the command env (or the wrapper) runs
-	chdir  string   // -C/--chdir (uv run --directory), joined across nested prefixes ("" = unchanged)
-	unread string   // a form lever cannot read as env or the wrapper does ("" = none)
-	// wrapped is set when at least one prefix was read off.
+	argv    []string
+	chdir   string // joined across nested prefixes
+	unread  string // a form lever cannot read as env or the wrapper does
 	wrapped bool
 	// paths are values of a wrapper's options that name code (uv run
-	// --with, --project and the like), each relative to the chdir in force
-	// where it stood.
+	// --with, --project), each relative to the chdir in force where it stood.
 	paths []interpPath
 }
 
@@ -106,39 +92,16 @@ var envLongOpts = []string{
 	"ignore-signal", "list-signal-handling", "null", "split-string", "unset", "version",
 }
 
-// envSplitSpace is what GNU env -S splits on.
 const envSplitSpace = " \t\n\v\f\r"
 
-// parseEnvPrefix walks an env(1) prefix exactly as GNU and BSD env do (their
-// getopt: options first, stopping at the first operand; then NAME=value
-// words; then the command), nested envs included, and is the one reader
-// behind unwrapEnv and envFormUnread:
-//
-//   - -i, -0, -v, alone or grouped (-iv), and "-" (= -i, which ends the
-//     options; an option word right after it is unread);
-//   - -u NAME, -uNAME, --unset NAME, --unset=NAME (the value is never an
-//     option, so -uSSH_AUTH_SOCK unsets SSH_AUTH_SOCK);
-//   - -C dir, -Cdir, --chdir dir, --chdir=dir;
-//   - -S str, -Sstr, --split-string str, --split-string=str: str is split on
-//     blanks as GNU does and its words parsed again as options, assignments
-//     and the command. A string with quotes, a backslash, $ or a word
-//     starting with # is unread (env unquotes, unescapes, expands and
-//     comments those; lever does not);
-//   - -S after other letters in one group (-iS, -vS) is unread: precise
-//     getopt would take it, but such a group is refused rather than read;
-//   - --block-signal, --default-signal, --ignore-signal (optional =SIG),
-//     --debug, --ignore-environment, --null, --list-signal-handling;
-//   - "--" ends the options; one "-" may follow (-i), then NAME=value
-//     words (any word with "=", as env reads it), then the command.
-//
-// Any other option (BSD -P altpath, which changes where the program is
-// looked up, -L, -U; --help and --version, which run nothing; an unknown or
-// ambiguous long option), a missing option value and an env with no
-// command are unread.
-//
-// The command wrappers in wrapperSpecs (nice, nohup, setsid, timeout,
-// stdbuf, ionice, taskset) and `uv run` (parseUvRun) are read off the same
-// way, nested in any order with env.
+// parseEnvPrefix walks an env(1) prefix exactly as GNU and BSD env's getopt
+// do, nested envs and the wrappers in wrapperSpecs and `uv run` included,
+// in any order. Whatever it cannot read exactly is reported as unread rather
+// than guessed: an -S string with quotes, a backslash, $ or a # word (env
+// unquotes, expands and comments those), -S grouped after other letters, BSD
+// -P (which changes where the program is looked up), -L, -U, --help,
+// --version, an unknown or ambiguous long option, a missing value, and an
+// env with no command.
 func parseEnvPrefix(argv []string) envPrefix {
 	var p envPrefix
 	for len(argv) > 0 {
@@ -176,8 +139,6 @@ func parseEnvPrefix(argv []string) envPrefix {
 	return p
 }
 
-// parseOneEnv is one env's words (after its argv[0]): the command it runs,
-// its -C directory (several join), and an unread form or "".
 func parseOneEnv(args []string) (cmd []string, chdir string, unread string) {
 	setDir := func(d string) { chdir = joinRaw(chdir, d) }
 	// value takes an option's value: glued, else the next word.
@@ -317,8 +278,7 @@ options:
 	return args[i:], chdir, ""
 }
 
-// joinRaw is base/p without cleaning (so a ".." stays for the caller's
-// refusal), p itself when it is absolute or base is empty.
+// joinRaw does not clean, so a ".." stays for the caller's refusal.
 func joinRaw(base, p string) string {
 	if base == "" || strings.HasPrefix(p, "/") || p == "" {
 		return p
@@ -326,24 +286,16 @@ func joinRaw(base, p string) string {
 	return strings.TrimSuffix(base, "/") + "/" + p
 }
 
-// baseName is the last element of a slash-separated command name.
 func baseName(cmd string) string { return cmd[strings.LastIndexByte(cmd, '/')+1:] }
 
-// interpPath is one path an interpreter command line names.
 type interpPath struct {
 	what, path string
 }
 
-// interpreterPaths lists the code an interpreter command line runs, argv[0]
-// being the interpreter and family its interpreterFlags key (or "sh",
-// shPaths). Leading flags are read: a code-path flag's value is code; an
-// inline-code flag's value is scanned for paths (codePaths) and ends the
-// walk; otherwise the first non-flag argument is the script (after deno's
-// or bun's "run"). A value-taking flag's value is checked too, so a value
-// read as the script cannot hide the real one. A flag missing from the
-// table that takes a value makes that value read as the script and hides
-// the real one: the table is the limit of this best-effort reading. What
-// follows the script is the script's own business and is not read.
+// interpreterPaths lists the code an interpreter command line runs. A
+// value-taking flag's value is checked too, so a value read as the script
+// cannot hide the real one. A value-taking flag missing from the table hides
+// the real script: the table is the limit of this best-effort reading.
 func interpreterPaths(family string, argv []string) []interpPath {
 	if family == "sh" {
 		return shPaths(argv)
@@ -411,14 +363,10 @@ func interpreterPaths(family string, argv []string) []interpPath {
 	return out
 }
 
-// shPaths reads a sh-family command line as the shell does: options are
-// short groups after "-" or "+" (-euo, +e, -ec), long options, and
-// "-o name"/"+o name" (an 'o' or 'O' in a group takes the next word); a
-// 'c' anywhere in a "-" group makes the first operand the command string
-// (never a glued value: -ce is -c -e). The first operand is otherwise the
-// script. As a fallback, every word after a "-c" or a "-" group with a
-// 'c' anywhere in argv is scanned as inline code, and every option value
-// is checked as a path.
+// shPaths reads a sh-family command line as the shell does: a 'c' anywhere
+// in a "-" group makes the first operand the command string (-ce is -c -e).
+// As a fallback, every word after any "-" group with a 'c' is scanned as
+// inline code, and every option value is checked as a path.
 func shPaths(argv []string) []interpPath {
 	var out []interpPath
 	add := func(what, p string) {
@@ -491,11 +439,9 @@ func shPaths(argv []string) []interpPath {
 	return out
 }
 
-// codePaths are the paths in a line of inline code: it is split on
-// whitespace, quotes and shell punctuation, '=', ':' and ','. A piece that
-// starts with "/" counts, a relative one with a "/" in it counts (it
-// resolves against the tool's working directory, the instance root), and a
-// flag with a path glued on counts from its first "/" (-I/x).
+// codePaths: a relative piece with a "/" counts, since it resolves against
+// the tool's working directory, and a flag with a path glued on counts from
+// its first "/" (-I/x).
 func codePaths(line string) []string {
 	var out []string
 	sep := func(r rune) bool {

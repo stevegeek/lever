@@ -1,12 +1,8 @@
 // Package scionbin produces a host-local scion binary for a guest's
 // architecture: an operator-supplied prebuilt binary verified as-is, a host
-// source checkout cross-compiled, or a pinned module version fetched through
-// the Go module system and cross-compiled. It is the ONLY place in lever that
-// knows how scion is built.
-//
-// The build runs on the HOST: the guest carries no toolchain, and Go's build
-// cache makes re-runs incremental. Installing the result into the guest is
-// internal/backend/guest's job.
+// source checkout cross-compiled, or a pinned module version fetched and
+// cross-compiled. It is the only place in lever that knows how scion is
+// built. The build runs on the host: the guest carries no toolchain.
 package scionbin
 
 import (
@@ -29,10 +25,7 @@ import (
 const ModulePath = "github.com/GoogleCloudPlatform/scion"
 
 // Spec names the one place lever should get scion from. At most one of
-// Binary/Source/Version is set; config validation enforces that
-// (internal/config). A struct rather than positional strings because three
-// same-typed parameters across two call sites is a mis-ordering waiting to
-// happen.
+// Binary/Source/Version is set (internal/config enforces it).
 type Spec struct {
 	// Binary is a host-local, already-built linux binary, installed as-is. No
 	// Go toolchain, module cache or egress is needed on this host.
@@ -41,37 +34,26 @@ type Spec struct {
 	Source string
 	// Version pins a scion module version/commit to fetch and cross-compile.
 	Version string
-	// WebUI additionally builds scion's SPA on the host and stages it into the
-	// guest, so the hub can serve the web UI (internal/provision/webassets).
-	// A field on the spec rather than a parameter on EnsureScion so the two
-	// backends' copies of the provisioning block stay one struct literal: that
-	// block has drifted before — Binary was added to both literals while the
-	// guard around them was updated in neither (see backend.Config.HasScion).
+	// WebUI also builds scion's SPA on the host and stages it into the guest
+	// (internal/provision/webassets). A field rather than an EnsureScion
+	// parameter so both backends' provisioning blocks stay one struct literal
+	// (see backend.Config.HasScion).
 	WebUI bool
-	// Prebuilt, when set, is this spec's build already started on the host
-	// while the guest came up (StartPrebuild). It is not configuration: the
-	// guest's scion step takes its result (Prebuild.Result) instead of
-	// building again, when the guest's architecture matches.
+	// Prebuilt, when set, is this spec's build already started while the
+	// guest came up (StartPrebuild); not configuration.
 	Prebuilt *Prebuild
 }
 
-// BuildsWebAssets reports whether lever both WANTS and CAN build scion's SPA
-// for this spec.
-//
-// Binary mode is the exempt case, and deliberately not an error: with a
-// prebuilt binary lever has no scion SOURCE to build the SPA from, and the
-// operator who produced that binary may well have embedded the assets already
-// (upstream's `make all` does). Skipping leaves those embedded assets serving;
-// failing would break a working setup. config.App.ScionWebAssets is the
-// user-facing form of this predicate and must agree with it — it decides both
-// WebUI here and whether --web-assets-dir reaches the hub.
+// BuildsWebAssets reports whether lever both wants and can build scion's SPA
+// for this spec. Binary mode is exempt, not an error: there is no source to
+// build from, and the binary may embed its own assets. config.App.ScionWebAssets
+// is the user-facing form of this predicate and must agree with it.
 func (s Spec) BuildsWebAssets() bool {
 	return s.WebUI && s.Binary == "" && (s.Source != "" || s.Version != "")
 }
 
 // Validate fails on a plainly wrong spec without touching a toolchain or a
-// guest, so a bad config fails without a round-trip and without depending on
-// the guest being up.
+// guest.
 func (s Spec) Validate() error {
 	if s.Binary == "" && s.Source == "" && s.Version == "" {
 		return fmt.Errorf("no scion configured: set one of scion.binary, scion.source or scion.version")
@@ -105,21 +87,15 @@ func (e *SourceError) Error() string {
 
 func (e *SourceError) Unwrap() error { return e.Err }
 
-// buildFlags strip the symbol table and DWARF (-s -w) and the host's file
-// paths (-trimpath) from the cross-compiled scion: about 173 MB to 121 MB
-// (lever#191), less to stream into the guest and to page in at each hub
-// start. Go's panic stack traces keep their function names and lines
-// (pclntab stays); only debugger and symbolizer data goes.
+// buildFlags strip the symbol table, DWARF and the host's file paths, so
+// there is less to stream into the guest and page in at each hub start.
+// Panic stack traces keep function names and lines (pclntab stays).
 var buildFlags = []string{"-trimpath", "-ldflags=-s -w"}
 
-// Resolve produces a host-local scion binary for goarch ("arm64"/"amd64").
-// machine names the output file under OutputDir so two jails on one host never
-// share a build output.
-//
-// The Binary branch returns before any toolchain is touched, which is what
-// lets the machine hosting the jail carry no Go, no module cache and no
-// egress at all (issue #27). Callers run Validate first; Resolve does it
-// again so it is safe on its own.
+// Resolve produces a host-local scion binary for goarch. machine names the
+// output file under OutputDir so two jails on one host never share one. The
+// Binary branch returns before any toolchain is touched, so a jail host needs
+// no Go, module cache or egress. Resolve validates spec itself.
 func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine string) (string, error) {
 	if err := spec.Validate(); err != nil {
 		return "", err
@@ -153,10 +129,9 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 			}
 			return "", fmt.Errorf("%v; building scion instead needs a Go toolchain: %w", fetchErr, err)
 		}
-		// A pinned module's source never changes, so the last output is
-		// this build's when the stamp beside it says so (lever#187). Only
-		// for a version that names one source for good: a branch name or
-		// "latest" moves, and must be fetched every time.
+		// A pinned module's source never changes, so the last output is this
+		// build's when the stamp beside it says so. A branch name or "latest"
+		// moves and must be fetched every time.
 		if immutableVersion(spec.Version) {
 			stampKey = buildKey(spec.Version, goarch, gb)
 		}
@@ -198,7 +173,6 @@ var immutableRe = regexp.MustCompile(`^(?:[0-9a-f]{7,40}|v[0-9]+\.[0-9]+\.[0-9]+
 // unambiguous; the module proxy and go.sum keep a version's content fixed.
 func immutableVersion(v string) bool { return immutableRe.MatchString(v) }
 
-// buildArgs is the go command line that builds scion into out.
 func buildArgs(out string) []string {
 	return append(append([]string{"build"}, buildFlags...), "-o", out, "./cmd/scion")
 }
@@ -209,9 +183,9 @@ func buildArgs(out string) []string {
 var buildEnvKeys = []string{"GOFLAGS", "GOTOOLCHAIN", "GOEXPERIMENT", "GOAMD64", "GOARM64", "CGO_ENABLED", "GODEBUG"}
 
 // buildKey names a Version-mode build: the pin, the arch, the toolchain
-// (its GOROOT and the version in GOROOT/VERSION), the build command line and
-// buildEnvKeys. "" when the toolchain version cannot be read: the build then
-// runs every time, as it did before the stamp.
+// (its GOROOT and GOROOT/VERSION), the build command line and buildEnvKeys.
+// "" when the toolchain version cannot be read: the build then runs every
+// time.
 func buildKey(version, goarch, goBin string) string {
 	root := filepath.Dir(filepath.Dir(goBin))
 	v, err := os.ReadFile(filepath.Join(root, "VERSION"))
@@ -274,16 +248,12 @@ func writeStamp(out, key string) {
 }
 
 // OutputDir is the host directory Resolve writes cross-compiled scion
-// binaries into: the operator's own cache directory, beside the web-asset
-// builds (internal/provision/webassets.CacheRoot), created 0700 by Resolve.
+// binaries into: the operator's own cache directory, created 0700.
 //
-// Not os.TempDir. On a Linux host /tmp is shared by every local user, and a
-// fixed name there is a path anyone can pre-create — and then swap out
-// between the host-side hash and the root install into the jail
-// (internal/backend/guest). Under the user's cache dir nobody else can write
-// the path. There is no build cache to protect: Go's own build cache makes
-// the cross-compile incremental whatever the output path, so the only thing
-// that lives here is the last output for each machine.
+// Never os.TempDir: on a Linux host /tmp is shared by every local user, and a
+// fixed name there can be pre-created and swapped between the host-side hash
+// and the root install into the jail. Go's own build cache keeps the
+// cross-compile incremental whatever the output path.
 func OutputDir() (string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
@@ -292,7 +262,6 @@ func OutputDir() (string, error) {
 	return filepath.Join(cache, "lever", "scion-bin"), nil
 }
 
-// OutputPath is where Resolve writes a cross-compiled scion for machine.
 func OutputPath(machine string) (string, error) {
 	dir, err := OutputDir()
 	if err != nil {
@@ -301,12 +270,10 @@ func OutputPath(machine string) (string, error) {
 	return filepath.Join(dir, "lever-scion-"+machine), nil
 }
 
-// FetchModule downloads the pinned scion module via the Go module system and
-// returns (goBinary, moduleSourceDir) for the cross-compile. It uses the REAL
-// go binary (provision.GoBinary) for the build because the module cache lives
-// outside any toolchain-manager project dir — a version manager that resolves
-// `go` by walking up for a project file (asdf) cannot resolve it from the
-// read-only module cache, whereas the absolute binary always works.
+// FetchModule downloads the pinned scion module and returns (goBinary,
+// moduleSourceDir) for the cross-compile, using the real go binary
+// (provision.GoBinary): a version manager cannot resolve `go` from the
+// read-only module cache.
 func FetchModule(ctx context.Context, r proc.Runner, version string) (goBin, dir string, err error) {
 	goBin, err = provision.GoBinary(ctx, r)
 	if err != nil {
@@ -319,7 +286,6 @@ func FetchModule(ctx context.Context, r proc.Runner, version string) (goBin, dir
 	return goBin, dir, nil
 }
 
-// fetchModule is FetchModule with the go binary already resolved.
 func fetchModule(ctx context.Context, r proc.Runner, goBin, version string) (string, error) {
 	out, err := r.Run(ctx, nil, goBin, "mod", "download", "-json", ModulePath+"@"+version)
 	if err != nil {
@@ -339,26 +305,22 @@ func fetchModule(ctx context.Context, r proc.Runner, goBin, version string) (str
 }
 
 // ErrShallowSource is SourceHasCommit's error for a shallow clone that does
-// not show the commit: its history is cut off, so a missing commit says
-// nothing either way. Unlike SourceHasCommit's other errors it is not "cannot
-// tell, carry on": a caller gating on the commit refuses it, since the commit
-// cannot be shown and a clone can be deepened (git fetch --unshallow).
+// not show the commit, so a missing commit says nothing either way. Unlike
+// its other errors it is not "cannot tell, carry on": a caller gating on the
+// commit refuses it, since a clone can be deepened.
 var ErrShallowSource = errors.New("the checkout is a shallow clone that does not show the commit (run git fetch --unshallow)")
 
 // SourceHasCommit reports whether the source checkout's HEAD holds commit
 // (git merge-base --is-ancestor).
 //
-//   - true: commit is an ancestor of HEAD (also trustworthy in a shallow
-//     clone: git found the path).
-//   - false, nil: the checkout is a full repository and either commit is not
-//     an ancestor of HEAD or git has no such object at all (a checkout that
-//     predates it and was never fetched, or a fork that never had it).
+//   - true: commit is an ancestor of HEAD (trustworthy in a shallow clone too).
+//   - false, nil: a full repository where commit is not an ancestor or git
+//     has no such object.
 //   - false, ErrShallowSource: a shallow clone that does not show it.
 //   - any other error: git cannot tell (not a repository, git not runnable,
 //     the deadline). Callers treat that as a warning, not a refusal.
 //
-// source is passed as git's -C value and commit as a revision argument;
-// nothing goes through a shell.
+// Nothing goes through a shell.
 func SourceHasCommit(ctx context.Context, r proc.Runner, source, commit string) (bool, error) {
 	res, err := r.Run(ctx, nil, "git", "-C", source, "merge-base", "--is-ancestor", commit, "HEAD")
 	if err == nil {

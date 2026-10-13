@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// ticket is a single-use enrolment grant bound to a worker.
 type ticket struct {
 	worker  string
 	expires time.Time
@@ -21,7 +20,6 @@ type TicketStore struct {
 	tickets map[string]ticket
 }
 
-// NewTicketStore returns an empty store.
 func NewTicketStore() *TicketStore {
 	return &TicketStore{tickets: map[string]ticket{}}
 }
@@ -48,9 +46,9 @@ func (s *TicketStore) Issue(worker string, ttl time.Duration) (string, error) {
 	return tk, nil
 }
 
-// Redeem consumes a ticket: it must exist, be unexpired, and match worker. On
-// success the ticket is burned. A worker or expiry mismatch leaves it intact so
-// a legitimate holder can still redeem; only a successful match burns it.
+// Redeem consumes a ticket: it must exist, be unexpired, and match worker.
+// Only a successful match burns it, so a mismatched attempt cannot burn a
+// legitimate holder's ticket.
 func (s *TicketStore) Redeem(tk, worker string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

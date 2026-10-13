@@ -14,8 +14,8 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// startOperatorUDS serves canned answers on <dir>/.lever-state/operator.sock,
-// the socket `lever msg send` dials, and records every request.
+// startOperatorUDS serves canned answers on the operator socket `lever msg
+// send` dials, recording every request.
 func startOperatorUDS(t *testing.T, dir string, resp canned) *reqRecorder {
 	t.Helper()
 	stateDir := filepath.Join(dir, ".lever-state")
@@ -33,9 +33,8 @@ func msgDir(t *testing.T) string {
 	return dir
 }
 
-// TestHostMsgSendPostsToTheOperatorSocket: the note goes to the broker's
-// operator socket with the recipient, the joined body and the interrupt flag,
-// and never to scion directly.
+// The note goes to the operator socket with the recipient, joined body and
+// interrupt flag, never to scion directly.
 func TestHostMsgSendPostsToTheOperatorSocket(t *testing.T) {
 	for _, tc := range []struct {
 		args      []string

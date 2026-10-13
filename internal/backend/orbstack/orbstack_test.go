@@ -27,7 +27,6 @@ func TestProfileIsSingleSourced(t *testing.T) {
 	}
 }
 
-// The machine every test drives, and its guest transport prefixes.
 const machine = "lever-jail"
 
 var orbGuest = backendtest.Guest{
@@ -44,7 +43,6 @@ const (
 	listAbsent  = "\n"
 )
 
-// scriptList scripts the machine listing EnsureUp/Stop/Teardown consult first.
 func scriptList(f *proc.FakeRunner, out string) {
 	f.Script("orb list", proc.Result{Stdout: out})
 }
@@ -76,13 +74,10 @@ func TestApplyEgressCommitsAtomicallyAfterResolving(t *testing.T) {
 	backendtest.AssertAtomicCommit(t, f, orbGuest.Alias)
 }
 
-// orbVersionScript scripts a successful `orb version` response for >= 2.1.1.
 func orbVersionScript(f *proc.FakeRunner) {
 	f.Script("orb version", proc.Result{Stdout: "Version: 2.2.1 (2020100)\n"})
 }
 
-// scriptedMachine scripts a fully up (running) machine: version, list,
-// whoami/id -u, runtimes, arch probe (EnsureScion) and egress.
 func scriptedMachine(f *proc.FakeRunner) {
 	orbVersionScript(f)
 	scriptList(f, listRunning) // machine already exists
@@ -100,7 +95,6 @@ func TestEnsureUpIsIdempotentWhenMachineExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	// Must NOT call `orb create` when the machine already exists.
 	backendtest.AssertNoSubcommand(t, f, "orb", "create")
 }
 
@@ -120,8 +114,6 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 		t.Fatalf("expected `%s`; calls=%+v", want, f.Calls)
 	}
 }
-
-// --- ResolveRunUser: passive attach must resolve without provisioning. ---
 
 func TestResolveRunUserResolvesWhenMachineRunning(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -220,8 +212,6 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	backendtest.AssertEgressRules(t, f, "3305")
 }
 
-// --- Stop: power off, keep disk (distinct from Teardown). ---
-
 func TestStopStopsMachineWhenListed(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptList(f, listRunning)
@@ -250,8 +240,7 @@ func TestStopOnAlreadyStoppedMachineIsHarmless(t *testing.T) {
 	}
 }
 
-// --- ensureMachine: a stopped machine is STARTED (so `up` resumes it), not
-// treated as a no-op. ---
+// A stopped machine is STARTED (so `up` resumes it), not treated as a no-op.
 
 func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -266,7 +255,6 @@ func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
 	if !f.Called(proc.Subcommand("orb", "start")) {
 		t.Fatal("expected `orb start` for a stopped machine")
 	}
-	// create must NOT be called for an already-existing (stopped) machine.
 	backendtest.AssertNoSubcommand(t, f, "orb", "create")
 }
 
@@ -318,8 +306,6 @@ func TestTeardownIsNoopWhenAbsent(t *testing.T) {
 	}
 	backendtest.AssertNoSubcommand(t, f, "orb", "delete")
 }
-
-// --- OrbStack version preflight tests ---
 
 func TestOrbVersionAtLeast(t *testing.T) {
 	backendtest.RunVersionCases(t, []backendtest.VersionCase{
@@ -374,7 +360,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	scriptedMachine(f)
 	f.Script("go build", proc.Result{})
 	f.Script("bash -c", proc.Result{})
-	// The install now reads a digest marker first and records one after.
+	// The install reads a digest marker first and records one after.
 	f.Script(orbGuest.User+" sh -c", proc.Result{Code: 1})
 	f.Script(orbGuest.Root+" sh -c", proc.Result{})
 	src := t.TempDir() // must exist for the stat check
@@ -388,7 +374,6 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	}
 
 	backendtest.AssertScionBuild(t, f, src, machine)
-	// The install: root prefix, guest-side atomic script, binary on stdin.
 	sawInstall := f.Called(func(c proc.Call) bool {
 		if !c.HasPrefix("orb", "-u", "root", "-m", machine, "bash", "-c") {
 			return false
@@ -414,7 +399,6 @@ func TestEnsureScionSkippedWhenEmpty(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	// go build must NOT be called when ScionSource is empty.
 	backendtest.AssertNoSubcommand(t, f, "go", "build")
 	if i := f.CallIndex(func(c proc.Call) bool {
 		return c.Name == "bash" && len(c.Args) >= 2 && strings.Contains(c.Args[1], "/usr/local/bin/scion")
@@ -436,7 +420,6 @@ func TestEnsureScionSourceMissing(t *testing.T) {
 	if !errors.As(err, &srcErr) || srcErr.Path != missing {
 		t.Fatalf("error should be a scion source error for %q; got: %v", missing, err)
 	}
-	// go build must NOT be called when the source is missing (stat short-circuits).
 	backendtest.AssertNoSubcommand(t, f, "go", "build")
 }
 
@@ -485,14 +468,10 @@ func TestJailTransportMethods(t *testing.T) {
 	}
 }
 
-// --- F1 guard: per-backend exact-argv assertions for the image-op / jail-
-// transport forwarders. Before F1 these forwarders had no per-backend argv
-// assertion (TestJailTransportMethods only checked non-nil), so a prefix mis-
-// wiring in the shared base — the orbstack jail prefix is run-user-dependent —
-// would only fail at runtime. LoadImage/ImageLoaded/PruneJailImages exec docker
-// directly (unobservable offline) but share jailPrefix() with JailRunner and
-// AttachArgv, so pinning those two transitively guards them; InstallGuestBinary
-// is pinned directly through the root transport. ---
+// Exact-argv assertions for the jail-transport forwarders, so a prefix
+// mis-wiring in the shared base fails here rather than at runtime.
+// LoadImage/ImageLoaded/PruneJailImages share jailPrefix() with JailRunner
+// and AttachArgv, so pinning those two guards them too.
 
 func TestInstallGuestBinaryArgv(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -569,11 +548,8 @@ func TestRunUserUIDAfterEnsureUp(t *testing.T) {
 	}
 }
 
-// Binary mode must reach the guest THROUGH EnsureUp. It did not: ScionBinary
-// was plumbed into the ScionSpec literal while the guard around it still asked
-// only about ScionSource/ScionVersion, so `lever up` installed nothing and
-// reported success. Every other binary-mode test calls EnsureScion directly and
-// so cannot see it — this one drives the real entry point.
+// Binary mode must reach the guest THROUGH EnsureUp: other binary-mode tests
+// call EnsureScion directly and cannot see a guard in EnsureUp that skips it.
 func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
 	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 
@@ -600,10 +576,8 @@ func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
 	}
 }
 
-// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. The
-// literal now lives once in common.Base.Provision, but each backend still pins
-// it end to end (and asserts the negative) so a backend that stops calling
-// Provision, or calls it with the wrong config, is caught here.
+// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec; pinned
+// per backend so one that stops calling Provision correctly is caught.
 func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -1,12 +1,7 @@
 //go:build ignore
 
-// chaticons_gen draws the chat page's app icons (chatui/*.png): a white chat
-// bubble on the page's own blue (--mine in chat.css). The PNGs are committed
-// and embedded; this only redraws them. Run from internal/remoteproxy:
-//
-//	go generate ./internal/remoteproxy   (or: go run chaticons_gen.go)
-//
-// The build tag keeps it out of every normal build and test run.
+// chaticons_gen draws the chat page's app icons (chatui/*.png), which are
+// committed and embedded. Run with go generate ./internal/remoteproxy.
 package main
 
 import (
@@ -22,10 +17,8 @@ var (
 	white = color.NRGBA{0xff, 0xff, 0xff, 0xff}
 )
 
-// icon is one file: its size, whether the background fills the square (a
-// maskable or Apple icon, which the platform crops) or is a rounded square
-// with clear corners, and how large the glyph is (a maskable icon keeps it
-// inside the central safe circle, 80% of the square).
+// icon: a full background is for maskable or Apple icons, which the platform
+// crops; a maskable glyph stays inside the central 80% safe circle.
 type icon struct {
 	name  string
 	size  int
@@ -60,7 +53,6 @@ func write(ic icon) error {
 						continue
 					}
 					bg++
-					// The glyph, scaled about the centre.
 					gx, gy := 0.5+(x-0.5)/ic.scale, 0.5+(y-0.5)/ic.scale
 					if glyph(gx, gy) {
 						fg++

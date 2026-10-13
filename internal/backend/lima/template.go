@@ -1,11 +1,10 @@
-// Package lima implements the Backend contract via a Lima VM (vz on macOS,
-// QEMU/KVM on Linux). The rendered template below is the CONTAINMENT SURFACE:
-// exactly one writable mount (the project tree at /lever), all automatic
-// guest→host port-forwarding suppressed (lima's default forwards every guest
-// listener to host 127.0.0.1 — a jailed agent could squat host-loopback ports
-// and impersonate local services), and lima's bundled containerd disabled
-// (lever provisions rootless podman itself, mirroring orbstack).
-// Do not add mounts or forwards without a security review (zone Z1).
+// The rendered template below is the CONTAINMENT SURFACE: exactly one writable
+// mount (the project tree at /lever), all automatic guest→host port-forwarding
+// suppressed (lima forwards every guest listener to host 127.0.0.1 by default,
+// so a jailed agent could squat host-loopback ports and impersonate local
+// services), and lima's bundled containerd disabled. Do not add mounts or
+// forwards without a security review.
+
 package lima
 
 import (
@@ -64,11 +63,10 @@ portForwards:
 
 var tpl = template.Must(template.New("lima").Parse(templateText))
 
-// GuestImage is one architecture's jail guest image: a dated Ubuntu cloud
-// image release, so the URL keeps naming the bytes the digest pins (the
-// "release/" alias moves with every refresh and would then fail Lima's
-// digest check). Lima verifies the download against SHA256 before it boots
-// the VM and refuses a mismatch.
+// GuestImage is one architecture's jail guest image. The URL must name a
+// dated release so it keeps naming the bytes the digest pins: the "release/"
+// alias moves with every refresh. Lima refuses a download that does not
+// match SHA256.
 type GuestImage struct {
 	Arch, URL, SHA256 string
 }
@@ -76,9 +74,8 @@ type GuestImage struct {
 // GuestRelease is the Ubuntu release of the jail guest image.
 const GuestRelease = "26.04"
 
-// GuestImages are the pinned jail guest images, one per Lima arch. The
-// digests are the SHA256SUMS of that release directory. Moving to a newer
-// serial changes only new VMs: Lima reads the image at create time.
+// GuestImages are the pinned jail guest images, one per Lima arch. A newer
+// serial affects only new VMs: Lima reads the image at create time.
 var GuestImages = []GuestImage{
 	{
 		Arch:   "aarch64",
@@ -92,15 +89,13 @@ var GuestImages = []GuestImage{
 	},
 }
 
-// defaultDisk caps the Lima guest disk. Lima's own omitted-disk default is
-// 100GiB (grow-only qcow2 on the host) — a silent host-wedge on smaller
-// hosts. Applied only at VM creation; resizing an existing jail needs
-// `limactl disk resize` or a recreate.
+// defaultDisk caps the Lima guest disk: Lima's own default is a grow-only
+// 100GiB, which can silently fill a smaller host. Applied only at VM
+// creation.
 const defaultDisk = "24GiB"
 
 // TemplateOpts are the per-instance values the template renders. Zero values
-// select the defaults (defaultDisk; Lima's own CPU/memory defaults; no
-// explicit cpuType).
+// select the defaults.
 type TemplateOpts struct {
 	Disk       string
 	CPUs       int

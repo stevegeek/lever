@@ -45,8 +45,7 @@ func TestWaitRuntimeBrokerReadyReturnsWhenOnline(t *testing.T) {
 	assertBrokerGateStopsAtOnline(t, `[{"status":"online","connectionState":"connected"}]`)
 }
 
-// cliCalls counts the scion CLI calls made from the host (the fallback
-// path, taken here because the fake runner has no in-guest wait scripted).
+// cliCalls counts the scion CLI calls made from the host.
 func cliCalls(f *proc.FakeRunner) int {
 	n := 0
 	for _, c := range f.Calls {
@@ -57,8 +56,6 @@ func cliCalls(f *proc.FakeRunner) int {
 	return n
 }
 
-// assertBrokerGateStopsAtOnline scripts `scion hub brokers` with out and
-// checks the gate returns nil after exactly one call.
 func assertBrokerGateStopsAtOnline(t *testing.T, out string) {
 	t.Helper()
 	f := proc.NewFakeRunner()
@@ -73,19 +70,15 @@ func assertBrokerGateStopsAtOnline(t *testing.T, out string) {
 	}
 }
 
-// TestWaitRuntimeBrokerReadyStripsDevAuthBanner: under dev-auth-ON scion prints
-// the WARNING banner into the same stream as the JSON; the gate must strip it
-// (via parseJSON, like List/messaging) and still see the online broker, rather
-// than failing the parse and silently no-opping.
+// TestWaitRuntimeBrokerReadyStripsDevAuthBanner: the dev-auth banner in the
+// same stream must not make the parse fail and the gate silently no-op.
 func TestWaitRuntimeBrokerReadyStripsDevAuthBanner(t *testing.T) {
 	assertBrokerGateStopsAtOnline(t,
 		"WARNING: development auth is enabled — do not use in production\n[{\"status\":\"online\",\"connectionState\":\"connected\"}]")
 }
 
-// TestWaitRuntimeBrokerReadyOfflineIsNotReadyThenFailSoft: a broker that is
-// registered but NOT online must not satisfy the gate — it keeps polling the
-// whole budget — and on exhaustion the gate is fail-soft (returns nil, never an
-// error, so it can't fail the bring-up; the start-path retry backstops).
+// TestWaitRuntimeBrokerReadyOfflineIsNotReadyThenFailSoft: a registered but
+// offline broker does not satisfy the gate, and exhaustion returns nil.
 func TestWaitRuntimeBrokerReadyOfflineIsNotReadyThenFailSoft(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion hub brokers", proc.Result{Stdout: `[{"status":"offline","connectionState":"disconnected"}]`})
@@ -158,8 +151,7 @@ func TestWaitHubReadyOtherErrorsNotReady(t *testing.T) {
 }
 
 // A cold hub that answers only after many failed probes is waited on: the
-// budget is a time, not the old 30 attempts, and a slow start prints that
-// it is waiting.
+// budget is a time, not an attempt count.
 func TestWaitHubReadyOutlastsAColdStart(t *testing.T) {
 	r := &coldHubRunner{failures: 40}
 	c := New(r, Options{})
@@ -250,8 +242,6 @@ func TestServerStartProbesThePidFileFirst(t *testing.T) {
 	}
 }
 
-// coldHubRunner fails the hub probe failures times (connection refused),
-// then answers.
 type coldHubRunner struct {
 	failures, probes int
 	slow             time.Duration
@@ -317,8 +307,8 @@ func (r *inGuestRunner) Run(ctx context.Context, env map[string]string, name str
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// lever#190: the broker wait is one in-guest loop; an online broker it
-// prints ends the wait with no host-side scion call at all.
+// The broker wait is one in-guest loop; an online broker it prints ends the
+// wait with no host-side scion call.
 func TestRuntimeBrokerReadyWaitsInTheGuest(t *testing.T) {
 	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{{Stdout: `[{"status":"online"}]`}}}
 	c := New(r, Options{HubTokenSource: func() string { return "tok" }})
@@ -372,7 +362,7 @@ func TestRuntimeBrokerReadyInGuestTimeoutIsFailSoft(t *testing.T) {
 }
 
 // When the in-guest wait cannot run (a transport error), it polls from the
-// host as before.
+// host.
 func TestRuntimeBrokerReadyFallsBackToHostPolling(t *testing.T) {
 	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{{Code: 255}}}
 	r.Script("scion hub brokers", proc.Result{Stdout: `[{"status":"online"}]`})
@@ -383,8 +373,8 @@ func TestRuntimeBrokerReadyFallsBackToHostPolling(t *testing.T) {
 	}
 }
 
-// lever#190: with an endpoint the hub wait polls /healthz in the guest, and
-// one CLI probe after it decides.
+// With an endpoint the hub wait polls /healthz in the guest, and one CLI probe
+// after it decides.
 func TestWaitHubReadyPollsHealthzInTheGuest(t *testing.T) {
 	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{{Code: waitedExit}, {}},
 		lists: []proc.Result{{Code: 1, Stderr: "Error: hub at http://127.0.0.1:8080 is not responding"}}}
@@ -407,7 +397,7 @@ func TestWaitHubReadyPollsHealthzInTheGuest(t *testing.T) {
 	}
 }
 
-// Without curl in the jail the wait polls with the CLI, as before.
+// Without curl in the jail the wait polls with the CLI.
 func TestWaitHubReadyWithoutCurlPollsTheCLI(t *testing.T) {
 	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{{Code: 127}}}
 	c := New(r, Options{HubEndpoint: "http://127.0.0.1:8080"})

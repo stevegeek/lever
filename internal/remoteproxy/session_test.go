@@ -12,8 +12,6 @@ import (
 	"testing"
 )
 
-// stubSession is a SessionSource with no hub behind it, so the proxy's own
-// rules can be exercised on their own.
 type stubSession struct {
 	mu          sync.Mutex
 	cookie      string
@@ -46,12 +44,9 @@ func (s *stubSession) state() (handedOut int, invalidated []string, logins []str
 	return s.handedOut, append([]string(nil), s.invalidated...), append([]string(nil), s.logins...)
 }
 
-// TestAPIRequestRidesTheSession: /api/v1 carries the operator's own hub
-// session and NO Authorization header. scion's sessionToBearerMiddleware
-// turns the cookie into a bearer only when the request has none, so any
-// Authorization at all — the remote PAT the proxy used to inject, or one the
-// phone sent — would decide the identity instead, and the chat's DM
-// participant check would see a second user.
+// scion turns the cookie into a bearer only when the request has no
+// Authorization header, so any Authorization would decide the identity and
+// the DM participant check would see a second user.
 func TestAPIRequestRidesTheSession(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
@@ -82,8 +77,6 @@ func TestAPIRequestRidesTheSession(t *testing.T) {
 	}
 }
 
-// TestShellRequestCarriesOnlyTheSession: the shell is unchanged — the cookie
-// is what scion's web layer reads — and no longer carries a PAT beside it.
 func TestShellRequestCarriesOnlyTheSession(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
@@ -106,16 +99,12 @@ func TestShellRequestCarriesOnlyTheSession(t *testing.T) {
 			t.Fatalf("%s carried Authorization %q", r.URL.Path, a)
 		}
 	}
-	// The session is obtained for the identity the proxy verified, not for
-	// whoever the hub might think is connected.
 	if _, _, logins := sess.state(); len(logins) == 0 || logins[0] != "op@example.test" {
 		t.Fatalf("session obtained for %v, want the verified tailnet login", logins)
 	}
 }
 
-// TestClientSuppliedCookieIsReplacedNotMerged: the client's own Cookie header
-// is stripped before ours is attached, so a browser holding a scion_sess of
-// its own cannot present it to the hub.
+// A browser holding its own scion_sess must not present it to the hub.
 func TestClientSuppliedCookieIsReplacedNotMerged(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
@@ -130,8 +119,6 @@ func TestClientSuppliedCookieIsReplacedNotMerged(t *testing.T) {
 	}
 }
 
-// answerUnauthenticatedOnce answers the first request the way scion answers an
-// unknown session, and normally thereafter.
 func answerUnauthenticatedOnce(status int, location string) (func(http.ResponseWriter, *http.Request), *atomic.Int32) {
 	var n atomic.Int32
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -148,10 +135,8 @@ func answerUnauthenticatedOnce(status int, location string) (func(http.ResponseW
 	}, &n
 }
 
-// TestStaleSessionIsRenewedAndTheRequestRetried: when the hub no longer knows
-// the session (it restarted, or the session lapsed), the operator must get
-// their page — not scion's login screen, whose "sign in" button leads to an
-// authorization endpoint that does not resolve, by design.
+// When the hub no longer knows the session, the operator must get the page,
+// not scion's login screen, whose sign-in leads to a dead endpoint.
 func TestStaleSessionIsRenewedAndTheRequestRetried(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -197,8 +182,7 @@ func TestStaleSessionIsRenewedAndTheRequestRetried(t *testing.T) {
 	}
 }
 
-// TestRetryHappensOnlyOnce stops a hub that rejects every session from turning
-// one request into a login loop.
+// A hub that rejects every session must not turn one request into a loop.
 func TestRetryHappensOnlyOnce(t *testing.T) {
 	hub := newRecordingHub(t)
 	var calls atomic.Int32
@@ -218,8 +202,8 @@ func TestRetryHappensOnlyOnce(t *testing.T) {
 	}
 }
 
-// TestOnlyBodilessMethodsAreRetried: a POST cannot be replayed (its body is
-// spent), so the session is dropped for next time and the hub's answer stands.
+// A POST body is spent, so the session is dropped for next time and the hub's
+// answer stands.
 func TestOnlyBodilessMethodsAreRetried(t *testing.T) {
 	hub := newRecordingHub(t)
 	var calls atomic.Int32
@@ -239,15 +223,12 @@ func TestOnlyBodilessMethodsAreRetried(t *testing.T) {
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("hub saw %d requests, want 2 — a POST must not be replayed", n)
 	}
-	// ...but the rejected session is dropped, so the next request logs in
-	// again rather than failing the same way.
+	// ...but the rejected session is dropped for the next request.
 	if _, invalidated, _ := sess.state(); len(invalidated) != 2 || invalidated[0] != "sess-value" {
 		t.Fatalf("invalidated = %v, want the rejected session dropped each time", invalidated)
 	}
 }
 
-// TestAPIGetIsRetriedLikeTheShell: an API read is as bodiless as a shell GET,
-// and now rides the same session, so a lapsed session heals the same way.
 func TestAPIGetIsRetriedLikeTheShell(t *testing.T) {
 	hub := newRecordingHub(t)
 	answer, calls := answerUnauthenticatedOnce(http.StatusUnauthorized, "")
@@ -267,8 +248,7 @@ func TestAPIGetIsRetriedLikeTheShell(t *testing.T) {
 	}
 }
 
-// TestNonSessionFailuresArePassedThrough: a 403 is the hub refusing an action.
-// A new session would not change it, and retrying would hide it.
+// A 403 refuses an action; a new session would not change it.
 func TestNonSessionFailuresArePassedThrough(t *testing.T) {
 	hub := newRecordingHub(t)
 	var calls atomic.Int32
@@ -291,8 +271,6 @@ func TestNonSessionFailuresArePassedThrough(t *testing.T) {
 	}
 }
 
-// TestRedirectsThatAreNotLoginPagesPassThrough: the SPA's own redirects must
-// reach the browser untouched.
 func TestRedirectsThatAreNotLoginPagesPassThrough(t *testing.T) {
 	hub := newRecordingHub(t)
 	hub.answer = func(w http.ResponseWriter, r *http.Request) {
@@ -307,9 +285,7 @@ func TestRedirectsThatAreNotLoginPagesPassThrough(t *testing.T) {
 	}
 }
 
-// TestLoginFailureIs502NotAPage: an operator who cannot be logged in must get
-// a clear failure, and the reason must land in the audit log rather than in
-// the response.
+// The login failure reason goes to the audit log, not the response.
 func TestLoginFailureIs502NotAPage(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{err: errors.New("hub refused the callback (state_mismatch)")}
@@ -328,9 +304,8 @@ func TestLoginFailureIs502NotAPage(t *testing.T) {
 	}
 }
 
-// TestSessionAndProxyEndToEnd runs the real driver and provider behind the
-// real handler against the fake hub: a browser request opens the shell, and
-// an API request rides the SAME session, so the hub sees one user for both.
+// An API request rides the SAME session as the shell, so the hub sees one
+// user for both.
 func TestSessionAndProxyEndToEnd(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())
@@ -368,8 +343,6 @@ func TestSessionAndProxyEndToEnd(t *testing.T) {
 	}
 }
 
-// TestEndToEndSessionSurvivesAHubRestart drives the real driver through the
-// renewal path: the hub forgets every session, then accepts logins again.
 func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())
@@ -382,8 +355,7 @@ func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 		t.Fatalf("first request = %d", rw.Code)
 	}
 
-	// Everything the hub knew is gone, exactly as after `scion server` is
-	// restarted for a config change.
+	// As after scion server restarts for a config change.
 	hub.mu.Lock()
 	hub.sessions = map[string]string{}
 	hub.mu.Unlock()
@@ -398,11 +370,9 @@ func TestEndToEndSessionSurvivesAHubRestart(t *testing.T) {
 	}
 }
 
-// TestSignInNavigationIsDrivenNotForwarded: the SPA's Sign-in button
-// navigates to /auth/login/<provider>, and the hub's answer to that is a 302
-// to the OIDC authorization endpoint — which deliberately does not resolve.
-// The proxy must answer the navigation itself: one driver run, then a 302
-// back into the app, and the hub never sees the request.
+// The hub's answer to /auth/login/<provider> is a 302 to the dead
+// authorization endpoint, so the proxy answers the navigation itself: one
+// driver run, a 302 back into the app, and nothing forwarded.
 func TestSignInNavigationIsDrivenNotForwarded(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
@@ -435,9 +405,8 @@ func TestSignInNavigationIsDrivenNotForwarded(t *testing.T) {
 	}
 }
 
-// TestSignInNavigationPreservesReturnTarget: the SPA's login page forwards
-// its own target as ?returnTo=<path>; the proxy honours an in-app path and
-// falls back to "/" for anything that could redirect off-origin.
+// An in-app returnTo is honoured; anything that could leave the origin falls
+// back to "/".
 func TestSignInNavigationPreservesReturnTarget(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
@@ -466,10 +435,8 @@ func TestSignInNavigationPreservesReturnTarget(t *testing.T) {
 	}
 }
 
-// TestCallbackIsRefused: /auth/callback/ is the hub's to receive from the
-// login driver, which dials the hub directly. A client that reaches it through
-// the proxy could only force login churn (a state_mismatch redirect), so the
-// proxy refuses it for every method.
+// The callback is the driver's to call directly; through the proxy it could
+// only force login churn, so it is refused for every method.
 func TestCallbackIsRefused(t *testing.T) {
 	for _, target := range []string{"/auth/callback/oidc?code=x&state=y", "/auth/callback/x", "/auth/callback", "/auth/%63allback/oidc"} {
 		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
@@ -493,10 +460,8 @@ func TestCallbackIsRefused(t *testing.T) {
 	}
 }
 
-// TestLoginRedirectWithErrorIsNotASessionRejection: scion sends
-// /login?error=<reason> only from its OAuth callback. Reading one as "the hub
-// does not know this session" would let a client force a new login per
-// request, so it passes through and the session stays.
+// scion sends /login?error= only from its OAuth callback. Treating it as an
+// unknown session would let a client force a login per request.
 func TestLoginRedirectWithErrorIsNotASessionRejection(t *testing.T) {
 	for _, loc := range []string{"/login?error=state_mismatch", "/login?error=session_error", "/auth/login?error=x", "https://evil.example/login", "/loginx"} {
 		hub := newRecordingHub(t)
@@ -524,8 +489,7 @@ func TestLoginRedirectWithErrorIsNotASessionRejection(t *testing.T) {
 	}
 }
 
-// TestSignInNavigationLoginFailureIs502: when the driver cannot log in, the
-// browser gets a clear failure — never the hub's outward redirect.
+// The browser gets a clear failure, never the hub's outward redirect.
 func TestSignInNavigationLoginFailureIs502(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{err: errors.New("hub refused the callback (state_mismatch)")}
@@ -544,11 +508,8 @@ func TestSignInNavigationLoginFailureIs502(t *testing.T) {
 	}
 }
 
-// TestSignInEndToEndNeverLeaksTheDeadEndpoint drives the REAL login driver
-// against the scripted hub: the intercepted navigation triggers exactly one
-// handshake (the driver's own step-1 GET reaches the hub directly, not
-// through the handler — no recursion), the browser is sent to "/", and no
-// response ever carries the dead authorization endpoint.
+// The driver's step-1 GET reaches the hub directly, so the navigation makes
+// exactly one handshake, and no response carries the dead endpoint.
 func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())
@@ -567,7 +528,6 @@ func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 		t.Fatalf("%d login handshake(s), want exactly 1", logins)
 	}
 
-	// The session the sign-in obtained is the one the shell now rides.
 	rw2 := httptest.NewRecorder()
 	h.ServeHTTP(rw2, proxyRequest(http.MethodGet, "/", nil))
 	if rw2.Code != http.StatusOK {
@@ -578,9 +538,7 @@ func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 	}
 }
 
-// TestLoginFailureNamesTheConfiguredLog pins the denial text the operator
-// reads when the hub login fails: it points at the proxy's log, taken from
-// Config.LogPath, with DefaultLogPath when the caller set none.
+// The denial text points at Config.LogPath, or DefaultLogPath when unset.
 func TestLoginFailureNamesTheConfiguredLog(t *testing.T) {
 	hub := newRecordingHub(t)
 	for _, tc := range []struct{ logPath, want string }{
@@ -600,13 +558,9 @@ func TestLoginFailureNamesTheConfiguredLog(t *testing.T) {
 	}
 }
 
-// TestUnpinnedIdentityIsNeverAssertedToTheHub: with allowed_users empty the
-// gate verifies NOTHING about Tailscale-User-Login (the header is not even
-// required), so the hub login must be driven for the unnamed operator, not
-// for whatever the header happens to say — otherwise the hub's user row names
-// an identity nothing checked. With allowed_users set, the login that passed
-// the gate is exactly what the hub records (the guide's "Who the hub thinks
-// you are"), and that path must keep working unchanged.
+// With allowed_users empty the gate verifies nothing about
+// Tailscale-User-Login, so the hub login is for the unnamed operator, never
+// the header's claim. With it set, the gated login is what the hub records.
 func TestUnpinnedIdentityIsNeverAssertedToTheHub(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -623,8 +577,6 @@ func TestUnpinnedIdentityIsNeverAssertedToTheHub(t *testing.T) {
 			hub := newRecordingHub(t)
 			sess := &stubSession{cookie: "sess-value"}
 			h := NewHandler(Config{Target: mustURL(t, hub.URL), ServeHost: "mac.ts.net", Session: sess, AllowedUsers: tc.allowed})
-			// Both places a login is driven from: a shell request and an
-			// intercepted sign-in navigation.
 			for _, path := range []string{"/", loginPathPrefix} {
 				req := proxyRequest(http.MethodGet, path, nil)
 				if tc.header != "" {

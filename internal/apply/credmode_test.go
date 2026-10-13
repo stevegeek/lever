@@ -8,10 +8,9 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// The manager's OAuth token is the longest-lived, highest-value secret lever
-// handles, and every other credential (api_key_file, the controller PAT, the
-// staged bootstrap) must be exactly 0600. `lever doctor` already fails a
-// group-readable one; apply must not accept what doctor calls broken.
+// The manager's OAuth token is the highest-value secret lever handles and,
+// like every other credential, must be exactly 0600: apply must not accept
+// what `lever doctor` calls broken.
 func TestDefaultReadCredRejectsGroupAndWorldAccess(t *testing.T) {
 	for _, mode := range []os.FileMode{0o640, 0o660, 0o604, 0o644, 0o666, 0o601} {
 		p := filepath.Join(t.TempDir(), "oauth-token")

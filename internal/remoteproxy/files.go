@@ -1,18 +1,14 @@
 package remoteproxy
 
-// Files in the chat (remote.files): /lever/api/files/<agent> lists the
-// login's exchange with the agent (GET) and takes one upload (POST);
-// /lever/api/files/<agent>/<id> downloads one recorded file (GET).
+// Files in the chat (remote.files): list, upload and download of a login's
+// file exchange with an agent.
 //
-// Uploads are written host-side into the agent's own workspace
-// (.lever-files/in/<key>/, package chatfiles) through the no-link walk,
-// O_EXCL, and recorded in the files ledger (package fileledger) with the
-// sha256 lever computed while writing. A download is served only from a
-// private copy whose sha256 equals its record (CopyVerified), as an
-// attachment that no browser renders. A login sees and fetches only its
-// own uploads and the shares recorded for it; an operator may also fetch
-// any record of an agent it may message (spec 5's view links here). The
-// hub is never asked; nothing here reaches /api/.
+// Uploads are written host-side into the agent's workspace through the
+// no-link walk, O_EXCL, and recorded with the sha256 lever computed while
+// writing. A download is served only from a private copy whose sha256 equals
+// its record, as an attachment no browser renders. A login fetches only its
+// own uploads and the shares recorded for it; an operator may also fetch any
+// record of an agent it may message. Nothing here reaches the hub.
 
 import (
 	"encoding/json"
@@ -45,20 +41,16 @@ type FilesConfig struct {
 	Workspaces map[string]string // agent name → tree-relative workspace ("." = the manager)
 	MaxBytes   int64
 	Extensions []string
-	// LedgerDir: "" = the state directory is inside the tree; every route
+	// LedgerDir "" (the state directory is inside the tree): every route
 	// answers unavailable.
 	LedgerDir string
-	// NoUploads (remote.files.uploads false): the upload route answers
-	// uploads-off. NoShares (remote.files.shares false): a share already
-	// made is listed but its download answers shares-off.
+	// NoShares: a share already made is listed but its download is refused.
 	NoUploads, NoShares bool
-	// Excluded are the logins with files: false: for them every file route
-	// is the 404 files off gives, and the page shows no files.
+	// Excluded logins (files: false) get the files-off 404 on every route.
 	Excluded []string
 }
 
-// filesOnFor reports whether login has a file exchange: files on and the
-// login not excluded (compared lowercased, like every lever login).
+// filesOnFor compares logins lowercased, like every lever login.
 func (g *gate) filesOnFor(login string) bool {
 	if g.files == nil {
 		return false
@@ -85,37 +77,28 @@ const (
 	uploadsAtOnce     = 4
 	uploadsPerLogin   = 2
 	downloadsAtOnce   = 4
-	// downloadsPerLogin bounds one login's downloads in flight, and a
-	// contact never takes the last slot: one slow reader (a download may
-	// take bodyDeadline) cannot hold every slot, and the operator can
-	// always fetch.
+	// A contact never takes the last download slot: a slow reader cannot hold
+	// every slot, and the operator can always fetch.
 	downloadsPerLogin = 2
-	// Per login, counted in memory, refused attempts included: each list
-	// reads the ledger, each download copies and hashes up to max_bytes,
-	// each upload attempt reads a body.
+	// Refused attempts count too: each one still reads the ledger or a body.
 	listsPerMinute     = 60
 	downloadsPerMinute = 20
 	uploadTriesPerHour = 2 * uploadsPerHour
-	// uploadHeader must be on every upload. The page sets it; a browser
-	// sends a custom header across origins only after a CORS preflight,
-	// which the proxy never grants, so a form on another site, or a
-	// redirect (307/308) that resends the body elsewhere, cannot carry it.
+	// uploadHeader must be on every upload: a browser sends a custom header
+	// across origins only after a CORS preflight, which the proxy never grants,
+	// so a cross-site form or a 307/308 resend cannot carry it.
 	uploadHeader = "X-Lever-Upload"
-	// An upload body or a download gets fileBodyBase plus max_bytes at
-	// fileBodyMinRate (64 KiB/s, about 0.5 Mbit/s), at most fileBodyMax:
-	// about 37 min at the 100 MiB maximum, 17 min at the 25 MiB default.
+	// Upload and download bodies get fileBodyBase plus max_bytes at
+	// fileBodyMinRate, at most fileBodyMax.
 	fileBodyBase    = 10 * time.Minute
 	fileBodyMinRate = 64 << 10
 	fileBodyMax     = time.Hour
-	// formOverhead is what a one-file form adds around the file: boundary
-	// lines and part headers, far below this.
-	formOverhead = 64 << 10
+	formOverhead    = 64 << 10
 )
 
 var fileIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-// filesTarget reports whether p is under /lever/api/files: agent (and id,
-// for a download) of a well-formed path, or "" for any other path there.
+// filesTarget returns "" for any malformed path under /lever/api/files.
 func filesTarget(p string) (agent, id string, under bool) {
 	rest, ok := strings.CutPrefix(p, filesPrefix)
 	if !ok {
@@ -128,9 +111,6 @@ func filesTarget(p string) (agent, id string, under bool) {
 	return a, i, true
 }
 
-// filesState is the proxy's side of the exchange: the config, the ledger
-// (opened on first use and again after a failure) and the slots that bound
-// uploads and downloads in flight.
 type filesState struct {
 	cfg         FilesConfig
 	now         func() time.Time // tests
@@ -149,7 +129,6 @@ type filesState struct {
 	lists, downloads, uploadTries *loginRate
 }
 
-// newFilesState is the file exchange for cfg, its ledger not yet opened.
 func newFilesState(cfg FilesConfig) *filesState {
 	return &filesState{cfg: cfg, now: time.Now, bytesPerDay: uploadBytesPerDay,
 		uploading: map[string]int{}, downloading: map[string]int{}, pending: map[string][]int64{},
@@ -157,19 +136,15 @@ func newFilesState(cfg FilesConfig) *filesState {
 		uploadTries: newLoginRate(uploadTriesPerHour, time.Hour)}
 }
 
-// bodyDeadline is how long an upload body or a download of up to max_bytes
-// may take.
 func (s *filesState) bodyDeadline() time.Duration {
 	return min(fileBodyBase+time.Duration(s.cfg.MaxBytes/fileBodyMinRate)*time.Second, fileBodyMax)
 }
 
-// timedOut reports whether err is the upload body's read deadline passing:
-// a slow connection, answered 408 "timeout", not a malformed form.
+// timedOut is a slow connection (408 "timeout"), not a malformed form.
 func timedOut(err error) bool {
 	return errors.Is(err, os.ErrDeadlineExceeded)
 }
 
-// led is the files ledger, opened on first use and again after a failure.
 func (s *filesState) led() (*fileledger.Ledger, error) {
 	if s.cfg.LedgerDir == "" {
 		return nil, errors.New("the files ledger is off: the state directory is inside the tree")
@@ -186,9 +161,7 @@ func (s *filesState) led() (*fileledger.Ledger, error) {
 	return s.ledger, nil
 }
 
-// beginUpload takes an upload slot for login, or reports false: a login
-// holds at most uploadsPerLogin, and only an operator takes the last of
-// uploadsAtOnce (as beginDownload). done gives it back.
+// beginUpload: only an operator takes the last of uploadsAtOnce.
 func (s *filesState) beginUpload(login string, operator bool) (func(), bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -208,12 +181,9 @@ func (s *filesState) beginUpload(login string, operator bool) (func(), bool) {
 	}, true
 }
 
-// reserve checks one more upload of size bytes by login to agent against
-// the ledger and the uploads already reserved but not yet recorded, and
-// reserves it; release gives the reservation back. The check and the
-// reservation are one step (reserveMu), so the copy into the tree can run
-// outside the ledger lock: two uploads at once cannot both pass the last
-// slot. reserveMu is taken before the ledger lock, never inside it.
+// reserve checks and reserves in one step under reserveMu, so the copy into
+// the tree can run outside the ledger lock and two uploads cannot both pass
+// the last slot. reserveMu is taken before the ledger lock, never inside it.
 func (s *filesState) reserve(led *fileledger.Ledger, agent, login string, now time.Time, size int64) (release func(), word string, err error) {
 	s.reserveMu.Lock()
 	defer s.reserveMu.Unlock()
@@ -241,9 +211,7 @@ func (s *filesState) reserve(led *fileledger.Ledger, agent, login string, now ti
 	}, "", nil
 }
 
-// beginDownload takes a download slot for login, or reports false: a login
-// holds at most downloadsPerLogin, and only an operator takes the last of
-// downloadsAtOnce. done gives it back.
+// beginDownload: only an operator takes the last of downloadsAtOnce.
 func (s *filesState) beginDownload(login string, operator bool) (func(), bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -263,7 +231,6 @@ func (s *filesState) beginDownload(login string, operator bool) (func(), bool) {
 	}, true
 }
 
-// loginRate allows each login limit calls per window (sliding), in memory.
 type loginRate struct {
 	limit  int
 	window time.Duration
@@ -275,9 +242,6 @@ func newLoginRate(limit int, window time.Duration) *loginRate {
 	return &loginRate{limit: limit, window: window, hits: map[string][]time.Time{}}
 }
 
-// take counts one call of login at now, or reports false (not counted)
-// when the login is at its limit. Logins with no call in the window are
-// forgotten, so the map stays as small as the logins in use.
 func (l *loginRate) take(login string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -302,9 +266,7 @@ func (l *loginRate) take(login string, now time.Time) bool {
 	return true
 }
 
-// uploadLimit is the refusal word for one more upload of size bytes by
-// login, from the agent's records and the sizes of login's uploads to it
-// reserved but not yet recorded ("" = allowed).
+// uploadLimit counts reserved but not yet recorded uploads too ("" = allowed).
 func (s *filesState) uploadLimit(prior []fileledger.Record, login string, now time.Time, size int64, pending []int64) string {
 	n, total := len(pending), size
 	for _, p := range pending {
@@ -330,7 +292,6 @@ func (s *filesState) uploadLimit(prior []fileledger.Record, login string, now ti
 	return ""
 }
 
-// fileEntry is one row of a login's exchange with an agent.
 type fileEntry struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -339,9 +300,7 @@ type fileEntry struct {
 	Direction string `json:"direction"` // "sent": the login's upload; "received": a share to it
 }
 
-// filesFor is login's exchange with agent, newest first, at most
-// maxFileList rows: its uploads and the agent's shares to it. Spec 5's
-// operator view lists a contact's files with this.
+// filesFor is newest first, at most maxFileList rows.
 func (g *gate) filesFor(agent, login string) ([]fileEntry, error) {
 	led, err := g.files.led()
 	if err != nil {
@@ -366,24 +325,20 @@ func (g *gate) filesFor(agent, login string) ([]fileEntry, error) {
 	return out, nil
 }
 
-// mayDownload: a login fetches its own uploads and the shares recorded for
-// it; an operator also fetches any record of an agent it may message (the
-// caller checked that), which spec 5's operator view links to.
+// mayDownload: an operator also fetches any record of an agent it may
+// message; the caller checked that.
 func mayDownload(v viewer, rec fileledger.Record) bool {
 	return sameLogin(rec.Login, v.login) || v.tier == chatledger.TierOperator
 }
 
-// sameLogin compares two logins as lever does everywhere: lowercased (the
-// config's duplicate check, the hub's emails, chatfiles.Key, the broker).
+// sameLogin compares lowercased, as lever does everywhere (config,
+// hub emails, chatfiles.Key, the broker).
 func sameLogin(a, b string) bool { return strings.ToLower(a) == strings.ToLower(b) }
 
-// serveFiles answers every well-formed /lever/api/files/ path: only for an
-// agent v may message, so a see-only agent, a hidden one and an unknown
-// name get one answer.
+// serveFiles answers only for an agent v may message.
 func (g *gate) serveFiles(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent, id string) {
 	if !slices.Contains(v.message, agent) {
-		// One answer for a see-only agent, a hidden one and a name that
-		// does not exist.
+		// One answer for a see-only agent, a hidden one and an unknown name.
 		g.refuseFile(w, r, line, http.StatusForbidden, "not-allowed")
 		return
 	}
@@ -404,14 +359,12 @@ func (g *gate) serveFiles(w http.ResponseWriter, r *http.Request, line *AuditLin
 	}
 }
 
-// refuseFile answers a file route with one fixed error word.
 func (g *gate) refuseFile(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, word string) {
 	line.Reason = word
 	g.answerFileJSON(w, r, line, DecisionDenyFile, status, map[string]any{"error": word})
 }
 
-// answerFileJSON writes a JSON answer of the file routes: inert as a
-// document, not stored.
+// answerFileJSON's answers are inert as a document and not stored.
 func (g *gate) answerFileJSON(w http.ResponseWriter, r *http.Request, line *AuditLine, decision Decision, status int, body any) {
 	b, _ := json.Marshal(body)
 	g.answerChat(w, line, decision, status, func() {
@@ -420,7 +373,6 @@ func (g *gate) answerFileJSON(w http.ResponseWriter, r *http.Request, line *Audi
 	}, append(b, '\n'), r)
 }
 
-// serveFileList answers GET /lever/api/files/<agent>: v's own exchange.
 func (g *gate) serveFileList(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent string) {
 	if !g.files.lists.take(v.login, g.files.now()) {
 		w.Header().Set("Retry-After", "60")
@@ -436,9 +388,8 @@ func (g *gate) serveFileList(w http.ResponseWriter, r *http.Request, line *Audit
 	g.answerFileJSON(w, r, line, DecisionAllow, http.StatusOK, map[string]any{"files": files})
 }
 
-// serveUpload answers POST /lever/api/files/<agent>: one multipart file,
-// streamed into the agent's in/<key of v>/ and recorded. The key comes from
-// v.login, the configured spelling the allowlist matched.
+// serveUpload: the key comes from v.login, the configured spelling the
+// allowlist matched.
 func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent string) {
 	s := g.files
 	if s.cfg.NoUploads {
@@ -456,11 +407,8 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		return
 	}
 	if v.tier == chatledger.TierContact {
-		// The same rule as a contact's post: only to an agent whose session
-		// started fresh on the current skill (the follow-up chat note would
-		// be refused anyway). Unlike the agent list, an unknown state or no
-		// record is no pass: with the hub's records unreadable the upload
-		// waits, and the session is checked either way.
+		// Only to an agent whose session started fresh on the current skill, like
+		// a contact's post. An unknown state or no record is no pass here.
 		recs, err := g.records(r.Context())
 		rec, found := recs[agent]
 		if found && !validHubID(rec.ID) {
@@ -510,7 +458,7 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		return
 	}
 	defer done()
-	// The server has no ReadTimeout (serve.go): the body gets its own.
+	// The server has no ReadTimeout: the body gets its own.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(s.bodyDeadline()))
 	mr := multipart.NewReader(http.MaxBytesReader(w, r.Body, limit), params["boundary"])
 	part, err := mr.NextPart()
@@ -531,9 +479,8 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusUnsupportedMediaType, "extension")
 		return
 	}
-	// The body goes to a private file outside the tree first: nothing
-	// reaches the agent's workspace until the whole form was read and every
-	// limit checked.
+	// Staged outside the tree first: nothing reaches the agent's workspace
+	// until the whole form was read and every limit checked.
 	staged, sha, size, err := chatfiles.Stage(part, s.cfg.MaxBytes)
 	if errors.Is(err, chatfiles.ErrTooLarge) || tooLarge(err) {
 		g.refuseFile(w, r, line, http.StatusRequestEntityTooLarge, "too-large")
@@ -574,10 +521,10 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	// Reserve against the limits with the real size, copy into in/<key>/
-	// (no link, O_EXCL) outside the ledger lock and compare the hash, then
-	// record under the lock with the limits checked once more. Any refusal
-	// after the copy removes it.
+	// Reserve, copy into in/<key>/ (no link, O_EXCL) outside the ledger lock,
+	// require the copy's hash and size to match the staged file, then record
+	// under the lock with the limits checked again. Any refusal after the copy
+	// removes it.
 	release, limitWord, err := s.reserve(led, agent, v.login, now, size)
 	if err != nil {
 		line.Error = err.Error()
@@ -607,8 +554,8 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	if err != nil && st.Rel != "" {
 		if rmErr := fsutil.RemoveInTreeNoLinks(s.cfg.Tree, st.Rel); rmErr != nil {
-			// The audit line names the copy left in the agent's tree (its
-			// path, never its content), so the operator can remove it.
+			// Name the copy left in the tree (path, never content) so the operator
+			// can remove it.
 			err = fmt.Errorf("%w; the copy %s was not removed: %v", err, st.Rel, rmErr)
 			line.Error = err.Error()
 		}
@@ -631,7 +578,6 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		g.refuseFile(w, r, line, http.StatusInternalServerError, "failed")
 		return
 	default:
-		// The ledger (unsafe, unwritable) or the disk: a host fault.
 		line.Error = err.Error()
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
@@ -640,21 +586,16 @@ func (g *gate) serveUpload(w http.ResponseWriter, r *http.Request, line *AuditLi
 		map[string]any{"id": id, "name": name, "size": size, "sha256": sha})
 }
 
-// afterStage, when set, runs on the staged file before it is copied into
-// the tree: a test seam for a staged file that changes. Tests set it only
-// through setAfterStage, never in parallel.
+// afterStage is a test seam (set only via setAfterStage, never in parallel).
 var afterStage func(*os.File)
 
-// errStagedChanged: the copy into the tree did not hash to the staged file.
 var errStagedChanged = errors.New("the copy into the tree differs from the staged upload")
 
-// tooLarge reports whether err is the body limit (http.MaxBytesReader).
 func tooLarge(err error) bool {
 	var mbe *http.MaxBytesError
 	return errors.As(err, &mbe)
 }
 
-// filesErrText is the audit text of a failed workspace or ledger lookup.
 func filesErrText(err error) string {
 	if err == nil {
 		return "no workspace for this agent"
@@ -662,10 +603,7 @@ func filesErrText(err error) string {
 	return err.Error()
 }
 
-// serveDownload answers GET /lever/api/files/<agent>/<id>: the recorded
-// file, from a private copy whose sha256 equals the record, as an
-// attachment no browser renders. Another login's id answers like an
-// unknown one.
+// serveDownload: another login's id answers like an unknown one.
 func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent, id string) {
 	s := g.files
 	if !s.downloads.take(v.login, s.now()) {
@@ -685,11 +623,10 @@ func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *Audit
 		g.refuseFile(w, r, line, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	// One answer for an unknown id, another login's record, and a record
-	// whose path is not where lever puts that login's files for this agent
-	// (a ledger line written by anything but lever).
-	// A record of a login with files: false is not served to anyone, the
-	// operator included: that login has no file exchange.
+	// One answer for an unknown id, another login's record, and a record not
+	// where lever puts that login's files (a ledger line lever did not write).
+	// A record of a files: false login is served to no one, the operator
+	// included.
 	if !found || !mayDownload(v, rec) || !g.filesOnFor(rec.Login) || !recordedWhereExpected(s.cfg.Workspaces[agent], rec) {
 		g.refuseFile(w, r, line, http.StatusNotFound, "not-found")
 		return
@@ -739,9 +676,6 @@ func (g *gate) serveDownload(w http.ResponseWriter, r *http.Request, line *Audit
 	_, _ = io.Copy(w, f)
 }
 
-// recordedWhereExpected reports whether rec's file is directly in the
-// directory lever uses for its login and kind in workspace ws: in/<key>/
-// for an upload, out/<key>/ for a share.
 func recordedWhereExpected(ws string, rec fileledger.Record) bool {
 	dir := chatfiles.OutDir(ws, rec.Login)
 	if rec.Op == fileledger.OpUpload {
@@ -750,10 +684,8 @@ func recordedWhereExpected(ws string, rec fileledger.Record) bool {
 	return ws != "" && path.Dir(rec.Rel) == dir
 }
 
-// contentDisposition is the attachment header for a recorded name. Names
-// are SanitizeName's ASCII ([A-Za-z0-9._ -]), so the quoted form needs no
-// escape (anything else is sent as "file"); filename* is the RFC 6266/5987
-// form browsers prefer.
+// Names are SanitizeName's ASCII, so the quoted filename needs no escape
+// (anything else is sent as "file").
 func contentDisposition(name string) string {
 	if chatfiles.SanitizeName(name) != name {
 		name = "file" // never a quote or a byte the header cannot carry

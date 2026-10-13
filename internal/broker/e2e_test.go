@@ -20,9 +20,8 @@ import (
 
 const e2eServerName = "broker.test"
 
-// jailServer starts an httptest server using the broker's JailHandler() over
-// real mTLS (broker CA ServerTLSConfigSource). Tools must be registered before this
-// call because JailHandler() binds gateway routes at call time.
+// jailServer: tools must be registered before this call because
+// JailHandler() binds gateway routes at call time.
 func jailServer(t *testing.T, b *Broker) *httptest.Server {
 	t.Helper()
 	src, err := b.ca.NewServerCertSource(e2eServerName, []string{e2eServerName}, nil)
@@ -36,9 +35,8 @@ func jailServer(t *testing.T, b *Broker) *httptest.Server {
 	return srv
 }
 
-// agentClient builds an HTTP client that pins the broker CA and presents the
-// supplied TLS certificate as its client cert. Pass a zero tls.Certificate for
-// a certless client (e.g. the worker before it has enrolled).
+// agentClient pins the broker CA. Pass a zero tls.Certificate for a certless
+// client (e.g. the worker before it has enrolled).
 func agentClient(t *testing.T, b *Broker, cert tls.Certificate) *http.Client {
 	t.Helper()
 	pool := x509.NewCertPool()
@@ -53,16 +51,12 @@ func agentClient(t *testing.T, b *Broker, cert tls.Certificate) *http.Client {
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
 }
 
-// TestE2EMintEnrolRequestExercise exercises the full four-step flow over
-// real mTLS and a fake upstream MCP backend.
 func TestE2EMintEnrolRequestExercise(t *testing.T) {
-	// ── Setup: fake upstream backend ──────────────────────────────────────────
 	var backendReached bool
 	var backendBody string
 	upstream := upstreamMCP(t, &backendReached, &backendBody)
 	defer upstream.Close()
 
-	// ── Setup: broker + rules ─────────────────────────────────────────────────
 	cfg := testConfig(t) // includes AllowDelegate("manager","db","read","worker")
 	b := New(cfg)
 
@@ -71,31 +65,23 @@ func TestE2EMintEnrolRequestExercise(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ── Setup: live mTLS server ───────────────────────────────────────────────
 	srv := jailServer(t, b)
 	defer srv.Close()
 
-	// ── Manager cert (real TLS cert for the manager identity) ─────────────────
 	managerCert := signedCert(t, b, "manager")
 	managerClient := agentClient(t, b, managerCert)
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Step 1: mint — the HOST (broker process) mints the worker's ticket; a
-	// dispatch stages it in the guest for that worker's container alone. No
-	// agent-facing route mints one (the manager could redeem it first).
-	// ─────────────────────────────────────────────────────────────────────────
+	// Step 1: mint. The host mints the worker's ticket and a dispatch stages it
+	// for that worker's container alone. No agent-facing route mints one (the
+	// manager could redeem it first).
 	ticket := mintWorkerTicket(t, b, "worker")
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Step 2: enrol — worker self-generates a keypair, POSTs /enrol {ticket,csr}
-	// with NO client cert → gets a signed cert.
-	// ─────────────────────────────────────────────────────────────────────────
+	// Step 2: enrol with no client cert.
 	workerCSRPEM, workerKeyPEM := csrWithKey(t, "worker")
 	enrolReqBody, _ := json.Marshal(wire.EnrolRequest{
 		Ticket: ticket,
 		CSR:    string(workerCSRPEM),
 	})
-	// certless client: pins broker CA, no client cert.
 	certlessClient := agentClient(t, b, tls.Certificate{})
 	enrolResp, err := certlessClient.Post(srv.URL+"/enrol", "application/json", bytes.NewReader(enrolReqBody))
 	if err != nil {
@@ -114,17 +100,13 @@ func TestE2EMintEnrolRequestExercise(t *testing.T) {
 		t.Fatal("enrol: empty cert")
 	}
 
-	// Build a real tls.Certificate from the enrolled cert + worker's own key.
 	workerTLSCert, err := tls.X509KeyPair([]byte(enrolResult.Cert), workerKeyPEM)
 	if err != nil {
 		t.Fatalf("enrol: parse tls.Certificate: %v", err)
 	}
 	workerClient := agentClient(t, b, workerTLSCert)
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Step 3: request (delegation) — manager POSTs /request {tool:"db",
-	// op:"read", bound_to:"worker"} → capability token bound to worker.
-	// ─────────────────────────────────────────────────────────────────────────
+	// Step 3: the manager requests a token bound to the worker.
 	capReqBody, _ := json.Marshal(wire.CapRequest{Tool: "db", Op: "read", BoundTo: "worker"})
 	capResp, err := managerClient.Post(srv.URL+"/request", "application/json", bytes.NewReader(capReqBody))
 	if err != nil {
@@ -144,11 +126,8 @@ func TestE2EMintEnrolRequestExercise(t *testing.T) {
 	}
 	capToken := capResult.Token
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Step 4: exercise (allowed) — worker presents its enrolled cert + token
-	// in _capability, POSTs tools/call to /mcp/db/ → backend reached, token
-	// stripped from the upstream body, gateway returns 200.
-	// ─────────────────────────────────────────────────────────────────────────
+	// Step 4: an allowed call reaches the backend with the token stripped from
+	// the upstream body.
 	allowedBody := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"` + capToken + `"}}}`
 	mcpResp, err := workerClient.Post(srv.URL+"/mcp/db/", "application/json", strings.NewReader(allowedBody))
 	if err != nil {
@@ -166,12 +145,8 @@ func TestE2EMintEnrolRequestExercise(t *testing.T) {
 		t.Fatalf("exercise allowed: token leaked upstream: %s", backendBody)
 	}
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Step 5: exercise (denied) — second call with a constraint-violating
-	// token (constrained to table=A, request asks for table=B) → 403, backend
-	// NOT reached again.
-	// ─────────────────────────────────────────────────────────────────────────
-	// Mint a token constrained to table=A; the request sends table=B.
+	// Step 5: a token constrained to table=A used for table=B is 403 and the
+	// backend is not reached.
 	constrainedToken := mintFor(t, b, "worker", map[string]string{"table": "A"})
 	backendReached = false // reset the reached flag
 

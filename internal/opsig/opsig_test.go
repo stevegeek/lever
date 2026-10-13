@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// genKey creates a fresh ed25519 SSH keypair in dir and returns
-// (privPath, allowedSignersPath) with principal "operator@testinst".
+// genKey returns (privPath, allowedSignersPath) for principal
+// "operator@testinst".
 func genKey(t *testing.T, dir string) (string, string) {
 	t.Helper()
 	priv := filepath.Join(dir, "opkey")
@@ -132,11 +132,8 @@ func TestParseStatementRejections(t *testing.T) {
 	}
 }
 
-// TestValidateActionApproval pins the "approval" kind: a well-formed approval
-// action (tool+op, exact binding, uses==1, no free text) is accepted, and the
-// same tool-shape rejections apply as for tool_call. No other test exercises
-// kind "approval" — it guards the validateAction "approval" case-label and,
-// once the literal becomes a constant, that KindApproval keeps the wire value.
+// TestValidateActionApproval is the only test of kind "approval": it pins the
+// wire value and that the tool_call shape rules apply to it.
 func TestValidateActionApproval(t *testing.T) {
 	now := time.Now()
 	base := validStatement(now)
@@ -185,9 +182,8 @@ func TestRejectDuplicateKeys(t *testing.T) {
 	}
 }
 
-// TestRejectDuplicateKeysDepthCapped feeds pathologically deep (but small,
-// well under maxStatementBytes) nesting to prove walkDupes fails closed on
-// an explicit depth bound rather than relying solely on the 64KiB size cap.
+// TestRejectDuplicateKeysDepthCapped proves walkDupes fails closed on its
+// depth bound for nesting well under the size cap.
 func TestRejectDuplicateKeysDepthCapped(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 5000; i++ {
@@ -201,19 +197,15 @@ func TestRejectDuplicateKeysDepthCapped(t *testing.T) {
 	}
 }
 
-// The next four tests exercise the size cap and duplicate-key rejection
-// *through* the parsers (ParseStatement/ParseEnvelope), not via a direct
-// RejectDuplicateKeys call. Each input is otherwise valid — it would decode
-// and pass field/temporal validation — so ONLY the strict-decode prologue
-// step under test can reject it. This pins that the C6 decodeStrict extraction
-// keeps both the size cap and the dup-key walk on both parse paths; dropping
-// either step would let these inputs through.
+// The next four tests reach the size cap and duplicate-key rejection through
+// both parsers. Each input is otherwise valid, so only the step under test
+// can reject it.
 
 func TestParseStatementRejectsOversized(t *testing.T) {
 	now := time.Now()
 	s := validStatement(now)
-	// tool_call carries an arbitrary-size Args (json.RawMessage) — the only
-	// field that can make an otherwise-valid statement exceed the cap.
+	// Args is the only field that can make an otherwise-valid statement
+	// exceed the cap.
 	big := strings.Repeat("a", maxStatementBytes+1)
 	s.Action = Action{Kind: "tool_call", Tool: "x", Op: "y", ArgBinding: "exact", Uses: 1,
 		Args: json.RawMessage(`"` + big + `"`)}
@@ -229,8 +221,9 @@ func TestParseStatementRejectsOversized(t *testing.T) {
 func TestParseStatementRejectsDuplicateKey(t *testing.T) {
 	now := time.Now()
 	raw, _ := json.Marshal(validStatement(now)) // begins {"v":1,...
-	// Inject a duplicate top-level "v" key. encoding/json keeps last-wins, so
-	// without RejectDuplicateKeys this decodes to the identical valid statement.
+	// encoding/json keeps the last value, so without RejectDuplicateKeys
+	// this decodes to the same valid statement.
+
 	dup := append([]byte(`{"v":1,`), raw[1:]...)
 	if _, err := ParseStatement(dup, "testinst", now); err == nil {
 		t.Fatal("duplicate-key statement accepted")

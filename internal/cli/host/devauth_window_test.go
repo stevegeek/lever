@@ -30,8 +30,8 @@ func TestDevAuthWindowRefusesBesideRunningContainers(t *testing.T) {
 	}
 }
 
-// A container list that fails is treated as containers running: the window
-// cannot prove it runs agent-free.
+// A failed container list counts as containers running: the window cannot
+// prove it runs agent-free.
 func TestDevAuthWindowRefusesWhenTheContainerListFails(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	f := proc.NewFakeRunner() // podman ps unscripted: the fake fails it
@@ -101,8 +101,6 @@ func TestDevAuthWindowFailureRestartsTheLiveHub(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	f2 := proc.NewFakeRunner()
 	scriptPATMintChain(f2)
-	// FakeRunner fails only unscripted commands; a failing hub link needs a
-	// wrapper.
 	r := &failingRunner{FakeRunner: f2, fail: "scion hub link"}
 	restarted := 0
 	err := ensureControllerPAT(context.Background(), r, st, t.TempDir(), "/lever", remoteAccess{}, patMintOpts{
@@ -159,8 +157,8 @@ func TestDevAuthWindowThrowawayThatWillNotStopFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "did not stop") || !strings.Contains(err.Error(), "scion server stop") {
 		t.Fatalf("err = %v, want the throwaway stop failure with its stop command", err)
 	}
-	// With the throwaway still holding the pid file, a restart would be
-	// answered "already running" about it and wrongly reported as done.
+	// With the throwaway holding the pid file, a restart would be answered
+	// "already running" and wrongly reported as done.
 	if restarted != 0 || strings.Contains(err.Error(), "started again") {
 		t.Fatalf("RestartHub called %d times (err %v); want none while the throwaway is still up", restarted, err)
 	}
@@ -180,8 +178,6 @@ func TestDevAuthWindowFailsWhenAContainerStartsDuringIt(t *testing.T) {
 	}
 }
 
-// psSequenceRunner answers successive `podman ps` calls from outputs (the last
-// one repeats) and passes everything else to the FakeRunner.
 type psSequenceRunner struct {
 	*proc.FakeRunner
 	outputs []string
@@ -205,8 +201,8 @@ func (r *psSequenceRunner) Run(ctx context.Context, env map[string]string, name 
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// An apply cancelled mid-window (SIGINT/SIGTERM cancel the apply context)
-// still closes the window: the cleanup runs on a context of its own.
+// An apply cancelled mid-window still closes it: the cleanup runs on its own
+// context.
 func TestDevAuthWindowCleanupSurvivesACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -235,9 +231,9 @@ func TestDevAuthWindowCleanupSurvivesACancelledContext(t *testing.T) {
 	}
 }
 
-// W4: a window that opens for another reason re-runs the role grant even
-// when remote-role.json says the grant is complete, so a hub whose database
-// was reset gets its role and ceiling back.
+// A window opened for another reason re-runs the role grant even when the
+// record says it is complete, so a reset hub database gets its role and
+// ceiling back.
 func TestDevAuthWindowAlwaysRunsTheRoleGrant(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
@@ -249,8 +245,6 @@ func TestDevAuthWindowAlwaysRunsTheRoleGrant(t *testing.T) {
 	if rec, found, _ := st.LoadRemoteRoleRecord(); !found || remoteRoleReason(rec, found, ra.Emails, nil, remoteRolePermissions(false)) != "" {
 		t.Fatal("setup: want a complete grant record")
 	}
-	// The hub database is reset (a fresh hub), and the controller token has
-	// to be minted again.
 	if err := os.Remove(st.ControllerPAT()); err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +259,8 @@ func TestDevAuthWindowAlwaysRunsTheRoleGrant(t *testing.T) {
 	}
 }
 
-// W5: a ceiling replacement that deleted the old constraint and then failed
-// to write the new one fails the apply: the user has no ceiling now.
+// A ceiling replacement that deleted the old constraint and failed to write
+// the new one fails the apply: the user has no ceiling now.
 func TestRemoteCeilingDeletedButNotRecreatedFailsApply(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedAllPATs(t, st)
@@ -336,8 +330,6 @@ func TestCheckDevAuthWindow(t *testing.T) {
 	}
 }
 
-// applySignalContext cancels on SIGINT, so an interrupted apply runs its
-// deferred cleanup instead of dying at once.
 func TestApplySignalContextCancelsOnSIGINT(t *testing.T) {
 	ctx, stop := applySignalContext(context.Background())
 	defer stop()
@@ -351,8 +343,8 @@ func TestApplySignalContextCancelsOnSIGINT(t *testing.T) {
 	}
 }
 
-// failingRunner fails the calls whose argv starts with fail, from the
-// (after+1)th such call on; everything else goes to the FakeRunner.
+// failingRunner fails calls whose argv starts with fail, from the (after+1)th
+// such call on.
 type failingRunner struct {
 	*proc.FakeRunner
 	fail  string
@@ -375,8 +367,8 @@ func (r *failingRunner) Run(ctx context.Context, env map[string]string, name str
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// cancellingRunner cancels the apply context when it sees the call at, and
-// fails every call made on a cancelled context, as exec.CommandContext does.
+// cancellingRunner cancels the apply context at the call at, and fails every
+// call on a cancelled context, as exec.CommandContext does.
 type cancellingRunner struct {
 	*proc.FakeRunner
 	at     string

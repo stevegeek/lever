@@ -18,10 +18,9 @@ import (
 
 // CLI runs the fizzy CLI: argv only, an empty cwd and HOME, the token in
 // FIZZY_TOKEN (never --token, which /proc would show), the account in
-// FIZZY_PROFILE, the API URL pinned in
-// FIZZY_API_URL (the CLI walks UP from cwd for a .fizzy.yaml, which could
-// otherwise redirect the token to another host — CheckNoLocalConfig refuses
-// that at startup too), JSON output, a timeout and an output cap.
+// FIZZY_PROFILE, the API URL pinned in FIZZY_API_URL, JSON output, a timeout
+// and an output cap. The CLI walks up from cwd for a .fizzy.yaml that could
+// redirect the token to another host; CheckNoLocalConfig refuses that.
 type CLI struct {
 	Bin, Account, Token, Home, Work, APIURL string
 	Timeout                                 time.Duration

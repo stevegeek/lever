@@ -14,16 +14,14 @@ var nestedParamPaths = []string{
 	"/sys/module/kvm_intel/parameters/nested",
 }
 
-// readHostFile is os.ReadFile; a test seam.
+// readHostFile and hostArch are test seams.
 var readHostFile = os.ReadFile
 
-// hostArch is runtime.GOARCH; a test seam.
 var hostArch = runtime.GOARCH
 
-// checkHostNested refuses nested_virt on a host whose KVM module has nested
-// virtualization off: the jail VM would boot without /dev/kvm and the guest
-// step would fail later with a less direct message. lever reads only the
-// Intel/AMD module parameters, so any other host arch is refused outright.
+// checkHostNested refuses early so the guest step does not fail later with a
+// less direct message. Only the Intel/AMD module parameters are read, so any
+// other host arch is refused outright.
 func checkHostNested(arch string, read func(string) ([]byte, error)) error {
 	if arch != "amd64" {
 		return fmt.Errorf("nested_virt: lever supports nested virtualization only on x86_64 (Intel/AMD) Linux hosts; this host is %s", arch)

@@ -1,6 +1,5 @@
 // Package backendtest holds the proc.Runner doubles and fixtures the backend
-// packages' tests share (orbstack, lima, guest). Test-only consumers; nothing
-// in production imports it.
+// packages' tests share. Nothing in production imports it.
 package backendtest
 
 import (
@@ -19,14 +18,10 @@ import (
 )
 
 // ClosedChainRunner answers `iptables -S LEVER_EGRESS` through Host (the
-// prefix binary, "orb" or "limactl") with an ACTIVE closed chain, and records
-// whether the chain was flushed or the host alias re-resolved. It intercepts
-// those substrings in a fixed switch order BEFORE falling through to the
-// embedded FakeRunner, so results are deterministic — FakeRunner.Script matches
-// by HasPrefix over its (randomized-iteration-order) map, so two overlapping
-// keys like "...iptables -S LEVER_EGRESS" and the shorter generic "...iptables"
-// are both valid prefixes of the same call, and which one "wins" is
-// nondeterministic.
+// prefix binary) with an ACTIVE closed chain, and records whether the chain
+// was flushed or the host alias re-resolved. It intercepts before the
+// embedded FakeRunner because FakeRunner.Script matches by prefix over a map,
+// so with overlapping keys like "...iptables" the winner is nondeterministic.
 //
 // With Open set the chain probe falls through to the FakeRunner instead (no
 // active chain), so a test can drive one full rebuild before flipping to the
@@ -42,14 +37,12 @@ type ClosedChainRunner struct {
 }
 
 // ClosedChain6 is the `ip6tables -S LEVER_EGRESS` output of the same closed
-// posture (every closed ruleset ends each family with the catch-all DROP):
-// exactly what the closed ruleset for HostAliasV6 and port 8443 lists, as
-// the re-apply skip requires (guest.existingClosedAlias).
+// posture: exactly what the closed ruleset for HostAliasV6 and port 8443
+// lists, as the re-apply skip requires (guest.existingClosedAlias).
 var ClosedChain6 = closedListing(egress.IPv6)
 
 // ClosedChain is the `iptables -S LEVER_EGRESS` output of a live closed
-// posture for HostAliasV4 and port 8443: loopback accepted, the port to the
-// alias, the alias and the private ranges dropped, everything else dropped.
+// posture for HostAliasV4 and port 8443.
 var ClosedChain = closedListing(egress.IPv4)
 
 // JumpListing is `iptables -S OUTPUT` (or ip6tables) of a converged guest:
@@ -97,10 +90,8 @@ func (r *ClosedChainRunner) Run(ctx context.Context, env map[string]string, name
 }
 
 // NATChainRunner answers `iptables -t nat -S <Chain>` through Host with Out
-// (a canned nat chain, e.g. LimaDNSChain) and records that the read happened,
-// falling through to the embedded FakeRunner for everything else. Same reason
-// as ClosedChainRunner: the generic "...sudo iptables" Script key is a prefix
-// of this call too, and which key wins is nondeterministic.
+// and records that the read happened. It intercepts for the same reason as
+// ClosedChainRunner.
 type NATChainRunner struct {
 	*proc.FakeRunner
 	Host  string
@@ -206,56 +197,45 @@ func (g Guest) ScriptRunUser(f *proc.FakeRunner, user, uid string) {
 	f.Script(g.User+" id -u", proc.Result{Stdout: uid + "\n"})
 }
 
-// ScriptRuntimes scripts the guest-side runtime install scripts (the user and
-// root `bash` calls) as succeeding.
+// ScriptRuntimes scripts the guest-side runtime install scripts as succeeding.
 func (g Guest) ScriptRuntimes(f *proc.FakeRunner) {
 	f.Script(g.User+" bash", proc.Result{Stdout: "ok\n"})
 	f.Script(g.Root+" bash", proc.Result{Stdout: "ok\n"})
 }
 
-// ScriptArch scripts the guest arch probe (`uname -m`).
 func (g Guest) ScriptArch(f *proc.FakeRunner, arch string) {
 	f.Script(g.User+" uname -m", proc.Result{Stdout: arch + "\n"})
 }
 
-// ScriptEgress scripts what ApplyEgress needs: the alias resolve (answered
-// with ahosts, usually AhostsDual or AhostsV4) and the root iptables/ip6tables
-// calls.
+// ScriptEgress scripts what ApplyEgress needs, answering the alias resolve
+// with ahosts.
 func (g Guest) ScriptEgress(f *proc.FakeRunner, ahosts string) {
 	f.Script(g.User+" getent ahosts "+g.Alias, proc.Result{Stdout: ahosts})
 	g.scriptFirewall(f)
 }
 
-// scriptFirewall scripts only the root iptables/ip6tables calls, for a runner
-// that answers the resolve itself (ClosedChainRunner) or a test that scripts
-// a specific ahosts answer.
 func (g Guest) scriptFirewall(f *proc.FakeRunner) {
 	f.Script(g.Root+" iptables", proc.Result{})
 	f.Script(g.Root+" ip6tables", proc.Result{})
-	// A converged OUTPUT: the jump is first, so no jump repair is made
-	// (the longer key wins over the two above).
+	// A converged OUTPUT, so no jump repair is made.
 	f.Script(g.Root+" iptables -S OUTPUT", proc.Result{Stdout: JumpListing})
 	f.Script(g.Root+" ip6tables -S OUTPUT", proc.Result{Stdout: JumpListing})
-	// The atomic commit: `<root> bash -c 'exec ip[6]tables-restore --noflush'`
-	// with the ruleset on stdin (guest.commitEgressChain).
+	// The atomic commit (guest.commitEgressChain).
 	f.Script(g.Root+" bash -c exec ip", proc.Result{})
 }
 
-// RestoreCommits returns the stdin of every chain commit ApplyEgress made
-// (an iptables-restore / ip6tables-restore that declares LEVER_EGRESS), in
-// order, keyed by the restore binary. The commits that only place the
-// OUTPUT jump are JumpCommits.
+// RestoreCommits returns the stdin of every chain commit that declares
+// LEVER_EGRESS, in order, keyed by the restore binary.
 func RestoreCommits(f *proc.FakeRunner) (bins []string, inputs []string) {
 	return restoreCalls(f, true)
 }
 
 // JumpCommits returns the restore commits that only (re)place the OUTPUT
-// jump (egress.JumpRestoreInput), in order, keyed by the restore binary.
+// jump, in order, keyed by the restore binary.
 func JumpCommits(f *proc.FakeRunner) (bins []string, inputs []string) {
 	return restoreCalls(f, false)
 }
 
-// chainDecl is how a chain commit declares the lever chain.
 const chainDecl = "\n:" + egress.Chain + " "
 
 func restoreCalls(f *proc.FakeRunner, chain bool) (bins []string, inputs []string) {
@@ -271,17 +251,14 @@ func restoreCalls(f *proc.FakeRunner, chain bool) (bins []string, inputs []strin
 	return bins, inputs
 }
 
-// firstChainCommit is the index of the first IPv6 chain commit, or -1.
 func firstChainCommit(f *proc.FakeRunner) int {
 	return f.CallIndex(func(c proc.Call) bool {
 		return strings.Contains(c.Argv(), "exec ip6tables-restore --noflush") && strings.Contains(c.Stdin, chainDecl)
 	})
 }
 
-// ScriptProvision scripts everything EnsureUp does AFTER the machine is up:
-// run user (leveruser/uid), runtimes, arch probe and egress. Machine lifecycle
-// (version preflight, list, create, start) stays with the backend's own
-// fixture because its argv is backend-specific.
+// ScriptProvision scripts everything EnsureUp does AFTER the machine is up.
+// Machine lifecycle stays with the backend's own fixture.
 func (g Guest) ScriptProvision(f *proc.FakeRunner, uid, ahosts string) {
 	g.ScriptRunUser(f, "leveruser", uid)
 	g.ScriptRuntimes(f)
@@ -289,8 +266,8 @@ func (g Guest) ScriptProvision(f *proc.FakeRunner, uid, ahosts string) {
 	g.ScriptEgress(f, ahosts)
 }
 
-// ScriptScionInstall scripts the host build + guest install of the scion
-// binary so a test can reach whatever runs AFTER it.
+// ScriptScionInstall scripts the host build and guest install of the scion
+// binary.
 func (g Guest) ScriptScionInstall(t *testing.T, f *proc.FakeRunner) {
 	t.Helper()
 	f.Script("go build", proc.Result{})
@@ -314,8 +291,7 @@ func hostBinary(prefix string) string {
 	return prefix
 }
 
-// AssertNoSubcommand fails when any recorded call is `host sub ...` — the
-// negative half of "a Running machine is not created/started again".
+// AssertNoSubcommand fails when any recorded call is `host sub ...`.
 func AssertNoSubcommand(t *testing.T, f *proc.FakeRunner, host string, subs ...string) {
 	t.Helper()
 	for _, sub := range subs {
@@ -325,8 +301,8 @@ func AssertNoSubcommand(t *testing.T, f *proc.FakeRunner, host string, subs ...s
 	}
 }
 
-// AssertEgressRules checks the ruleset ApplyEgress committed (the IPv4
-// iptables-restore input): an ACCEPT for port and the DROP to HostAliasV4.
+// AssertEgressRules checks the committed IPv4 ruleset has an ACCEPT for port
+// and the DROP to HostAliasV4.
 func AssertEgressRules(t *testing.T, f *proc.FakeRunner, port string) {
 	t.Helper()
 	bins, inputs := RestoreCommits(f)
@@ -351,10 +327,9 @@ func AssertAtomicCommitOrder(t *testing.T, f *proc.FakeRunner) {
 	}
 }
 
-// AssertAtomicCommit pins how ApplyEgress replaces the chain: never a flush,
-// the alias resolved first (under the live chain), then ONE
-// iptables-restore --noflush commit per family that declares the chain (which
-// empties it inside the transaction) and ends with COMMIT.
+// AssertAtomicCommit pins how ApplyEgress replaces the chain: never a flush
+// (that would open egress), the alias resolved first under the live chain,
+// then ONE chain-replacing restore commit per family.
 func AssertAtomicCommit(t *testing.T, f *proc.FakeRunner, alias string) {
 	t.Helper()
 	if i := f.CallIndex(proc.ArgvContains("-F LEVER_EGRESS")); i >= 0 {
@@ -399,9 +374,7 @@ const (
 
 // WriteELF64 writes a minimal but structurally valid 64-bit little-endian ELF
 // header for the given machine and object type to dir/scion and returns its
-// path. Program and section header counts are zero, so debug/elf parses the
-// header and stops — enough to exercise scionbin.VerifyELFArch (and the
-// binary-mode install flows built on it) without a real binary as test data.
+// path: enough for scionbin.VerifyELFArch without a real binary.
 func WriteELF64(t *testing.T, dir string, machine uint16, etype uint16) string {
 	t.Helper()
 	h := make([]byte, 64)
@@ -465,9 +438,8 @@ func AssertLastSubcommand(t *testing.T, f *proc.FakeRunner, host, sub string) {
 }
 
 // AssertClosedChainKept pins the I2 invariant after a re-apply against an
-// already-closed chain: the chain was neither flushed nor re-resolved (either
-// would briefly open egress for a running agent), and the alias was read from
-// the live chain.
+// already-closed chain: neither flushed nor re-resolved (either would briefly
+// open egress for a running agent), and the alias read from the live chain.
 func AssertClosedChainKept(t *testing.T, r *ClosedChainRunner, gotV4 string) {
 	t.Helper()
 	if r.Flushed {
@@ -526,11 +498,9 @@ type ProbeItem struct {
 	Code int
 }
 
-// ProbeRunner answers the warm-path probe (the `/bin/bash -c <script>
-// lever-probe <nonce>` calls through Host) from Items, keyed by the section
-// names the script emits; a section with no item answers exit 1 and no
-// output. It records each probe and each provisioning-stamp write, and falls
-// through to the embedded FakeRunner for everything else.
+// ProbeRunner answers the warm-path probe through Host from Items, keyed by
+// the section names the script emits; a section with no item answers exit 1
+// and no output. It records each probe and each provisioning-stamp write.
 type ProbeRunner struct {
 	*proc.FakeRunner
 	Host   string
@@ -575,9 +545,8 @@ func (r *ProbeRunner) Run(ctx context.Context, env map[string]string, name strin
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// PastaDropIn is the drop-in the provisioning writes for a pasta with
-// --map-host-loopback (guest.pastaDropInModern; this package cannot import
-// guest). TestWarmFixturePastaDropIn in guest pins the two together.
+// PastaDropIn mirrors guest.pastaDropInModern, which this package cannot
+// import; TestWarmFixturePastaDropIn in guest pins the two together.
 const PastaDropIn = `[containers]
 host_containers_internal_ip = "169.254.1.2"
 
@@ -590,11 +559,9 @@ pasta_options = ["--map-host-loopback", "169.254.1.2"]
 const ProbeBoot = "4c1d7a64-0b1e-4c55-9d2e-d0e1f2a3b4c5\n42\n"
 
 // WarmItems is the probe of a converged guest for an open-posture, nested
-// virt off EnsureUp with allowedPorts, resolving to AhostsDual, provisioned
-// in this boot with stampKey (guest.ProvisionStampKey("leveruser"); this
-// package cannot import guest, whose tests import it). forwards are the DNS targets the chain already
-// accepts (Lima's LIMADNS ones); nat, when not empty, is the LIMADNS listing
-// they come from.
+// virt off EnsureUp with allowedPorts, provisioned in this boot with stampKey
+// (guest.ProvisionStampKey("leveruser")). forwards are the DNS targets the
+// chain already accepts; nat, when not empty, is the listing they come from.
 func WarmItems(stampKey string, allowedPorts []int, forwards []egress.DNSForward, nat string) map[string]ProbeItem {
 	rules := egress.BuildRulesDNS(HostAliasV4, HostAliasV6, allowedPorts, false, forwards)
 	jump := JumpListing

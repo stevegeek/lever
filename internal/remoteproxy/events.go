@@ -12,16 +12,12 @@ import (
 	"strings"
 )
 
-// The events stream of a contact, with agent messages on.
-//
-// The hub's chat events carry the message text and the sender's name. The
-// page uses an event only as "read the list and the history again"
-// (chat.js openStream) and reads only its subject, so a contact gets each
-// event reduced to its subject (and the stream's numeric event id): whatever
-// the hub sends, no text, no sender and no message id reaches the contact
-// this way. The reducer works one event at a time and returns each as soon
-// as it is complete, so the stream stays live (ReverseProxy flushes every
-// write of a text/event-stream answer). Anything it cannot read is dropped.
+// A contact's events stream. The hub's chat events carry message text and
+// sender names, but the page uses an event only as "reload" and reads only
+// its subject. So each event is reduced to its subject and numeric id: no
+// text, sender or message id reaches the contact. Anything unreadable is
+// dropped. Each event is returned as soon as it is complete: ReverseProxy
+// flushes every write of a text/event-stream answer.
 
 const (
 	maxEventLine  = 1 << 20
@@ -34,8 +30,7 @@ var (
 	subjectRE   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
 )
 
-// reduceEvents is the rewrite of a contact's /events answer. An answer that
-// is not a plain event stream becomes an empty body.
+// reduceEvents: an answer that is not a plain event stream becomes empty.
 func reduceEvents(uid string) func(*http.Response) {
 	return func(resp *http.Response) {
 		if resp.StatusCode != http.StatusOK {
@@ -53,7 +48,6 @@ func reduceEvents(uid string) func(*http.Response) {
 	}
 }
 
-// eventReducer reads the hub's stream and hands out reduced events.
 type eventReducer struct {
 	src    *bufio.Reader
 	body   io.Closer
@@ -78,8 +72,7 @@ func (e *eventReducer) Read(p []byte) (int, error) {
 	return 0, e.err
 }
 
-// nextEvent reads lines up to a blank line. An event whose line or total
-// size is over the bounds is consumed and returned as nil (dropped).
+// nextEvent drops (returns nil for) an event over the line or size bounds.
 func (e *eventReducer) nextEvent() ([]string, error) {
 	var lines []string
 	size, drop := 0, false
@@ -105,8 +98,7 @@ func (e *eventReducer) nextEvent() ([]string, error) {
 	}
 }
 
-// readLine reads one line without its end. A line over maxEventLine is
-// consumed to its end and reported tooLong, with no content kept.
+// readLine keeps no content of a line over maxEventLine.
 func (e *eventReducer) readLine() (string, bool, error) {
 	var buf []byte
 	tooLong := false
@@ -129,9 +121,8 @@ func (e *eventReducer) readLine() (string, bool, error) {
 	}
 }
 
-// reduce rewrites one event: a heartbeat and the reconnect hint pass as
-// fixed text; an update keeps its numeric id and its subject (one of this
-// contact's) with empty data; everything else is dropped.
+// reduce passes heartbeats and the reconnect hint as fixed text, and keeps
+// an update's numeric id and subject with empty data; it drops the rest.
 func (e *eventReducer) reduce(lines []string) string {
 	var id, event, data string
 	for _, l := range lines {
@@ -166,7 +157,6 @@ func (e *eventReducer) reduce(lines []string) string {
 	if json.Unmarshal([]byte(data), &in) != nil || !subjectRE.MatchString(in.Subject) || !strings.HasPrefix(in.Subject, e.prefix) {
 		return ""
 	}
-	// The page reads only the subject: the data is always empty.
 	b, _ := json.Marshal(map[string]any{"subject": in.Subject, "data": struct{}{}})
 	var sb strings.Builder
 	if eventIDRE.MatchString(id) {

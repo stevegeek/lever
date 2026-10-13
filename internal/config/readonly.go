@@ -14,62 +14,44 @@ import (
 	"github.com/stevegeek/lever/internal/fsutil"
 )
 
-// TreeMount is one bind mount of a tree directory over itself in the
-// manager container, as manager.read_only asks for it. Rel is relative to
-// the tree with forward slashes; the caller joins it onto its own root (the
-// in-jail tree for the mount source, the container workspace for the
-// target). ReadOnly marks a read_only entry; a false one is a PIN — a
-// directory mounted read-write over itself so the agent cannot rename or
-// remove it (a mount point answers EBUSY). Pins are every strict ancestor of
-// an entry (so the protected directory cannot be moved away from its host
-// path) and, while read_only or shared_folders is set, every worker dir and its ancestors (so
-// the manager cannot swap a worker dir for a link to a protected one before
-// dispatching that worker, which mounts its dir read-write).
+// TreeMount is one bind mount of a tree directory over itself in the manager
+// container. Rel is tree-relative with forward slashes. A mount that is not
+// ReadOnly is a pin: mounted read-write over itself so the agent cannot
+// rename or remove it (a mount point answers EBUSY). Every strict ancestor of
+// an entry is pinned, so the protected directory cannot be moved away, and
+// so is every worker dir with its ancestors, so the manager cannot swap a
+// worker dir for a link to a protected one before dispatching that worker.
 type TreeMount struct {
 	Rel      string
 	ReadOnly bool
-	// WorkerPin marks a pin that exists only for a worker dir (the dir or
-	// one of its ancestors), not as an entry's ancestor: its absence lets
-	// the manager redirect a worker, not move an entry. For wording.
+	// WorkerPin marks a pin that exists only for a worker dir, for wording.
 	WorkerPin bool
 }
 
-// readOnlyForbiddenChars are characters a read_only entry (and, while
-// read_only is set, a worker dir, which becomes a pin) must not contain.
-// scion expands `$VAR` and `~` in a volume's source and target, so either
-// would mount a path other than the one the config names; `:` and `,`
-// separate fields in the runtime's own mount syntax.
+// readOnlyForbiddenChars may not appear in a mounted path: scion expands
+// `$VAR` and `~` in a volume's source and target, and `:` and `,` separate
+// fields in the runtime's mount syntax.
 const readOnlyForbiddenChars = "$~:,"
 
-// ManagerTreeMounts returns the manager's read_only plan: every entry
-// read-only; every strict ancestor of an entry, every worker dir and every
-// strict ancestor of a worker dir (all below the tree root) as a read-write
-// pin; each spelling once (entries first, so an entry is never demoted to
-// a pin). The order is deterministic — by depth, then by path — so a parent
-// is listed before its children. podman sorts mounts by destination depth
-// itself; the order here is for a stable inline config and stable tests.
-// Validate has already rejected nested entries and worker dirs that overlap
-// an entry, so no directory is both an entry and a pin. Empty when nothing
-// is configured: worker dirs are pinned only to protect read_only entries.
+// ManagerTreeMounts returns the manager's mount plan (see TreeMount), parents
+// first. Entries are added before pins so an entry is never demoted to a pin.
+// Empty when nothing is configured: worker dirs are pinned only to protect
+// something.
 //
-// Shared folders join the plan: one the manager does not write is an entry
-// like a read_only one; one it writes is pinned (mounted read-write over
-// itself, with its ancestors), so the manager cannot swap it for a link
-// that a worker would then mount in its place.
+// A shared folder the manager does not write is an entry; one it writes is
+// pinned, so the manager cannot swap it for a link that a worker would then
+// mount in its place.
 func (a *App) ManagerTreeMounts() []TreeMount {
 	return a.treeMountPlan(a.managerReadOnlyDirs(), a.managerWrittenShared())
 }
 
-// ReadOnlyEntryMounts is the manager.read_only part of the plan alone:
-// what the broker's tool guard requires before it starts a tool whose
-// program lies under a read_only entry. A shared folder does not change
-// what protects such a tool, so adding one does not hold the tool back.
+// ReadOnlyEntryMounts is the manager.read_only part of the plan alone, which
+// the broker's tool guard requires before it starts a tool whose program
+// lies under a read_only entry.
 func (a *App) ReadOnlyEntryMounts() []TreeMount {
 	return a.treeMountPlan(a.Manager.ReadOnly, nil)
 }
 
-// treeMountPlan is ManagerTreeMounts for the given read-only entries and
-// read-write pinned directories (each with its ancestors).
 func (a *App) treeMountPlan(dirs, pinned []string) []TreeMount {
 	if len(dirs) == 0 && len(pinned) == 0 {
 		return nil
@@ -77,10 +59,8 @@ func (a *App) treeMountPlan(dirs, pinned []string) []TreeMount {
 	seen := make(map[string]bool)
 	var out []TreeMount
 	add := func(rel string, readOnly, workerPin bool) {
-		// Keyed on the exact spelling, NOT case-folded: on a case-sensitive
-		// guest filesystem (Lima on a Linux host) `KB` and `kb` are two
-		// directories and each needs its own pin. On a case-insensitive host
-		// the second spelling is a harmless extra mount of the same one.
+		// Not case-folded: on a case-sensitive guest filesystem `KB` and `kb`
+		// are two directories and each needs its own pin.
 		if seen[rel] {
 			return
 		}
@@ -113,8 +93,6 @@ func (a *App) treeMountPlan(dirs, pinned []string) []TreeMount {
 	return out
 }
 
-// isASCII reports whether s is plain ASCII (no Unicode normalisation
-// aliases are possible).
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= 0x80 {
@@ -124,13 +102,10 @@ func isASCII(s string) bool {
 	return true
 }
 
-// cleanRel is a tree-relative path in the one spelling a mount uses:
-// cleaned, forward slashes.
 func cleanRel(p string) string { return filepath.ToSlash(filepath.Clean(p)) }
 
-// parentRel is the parent of a forward-slash relative path, or "" for a
-// top-level one (whose parent is the tree root, which is the workspace
-// mount itself and needs no pin).
+// parentRel is "" for a top-level path: the tree root is the workspace mount
+// itself and needs no pin.
 func parentRel(rel string) string {
 	i := strings.LastIndexByte(rel, '/')
 	if i < 0 {
@@ -139,18 +114,12 @@ func parentRel(rel string) string {
 	return rel[:i]
 }
 
-// validateManagerReadOnly checks manager.read_only's shape (no host reads;
-// PrepareManagerReadOnlyHost does those). Each entry must be a clean
-// relative path strictly inside the tree, spelt the one way a mount target
-// will be (no "./", no trailing slash, no ".." anywhere), and free of the
-// characters scion or the runtime would interpret (readOnlyForbiddenChars).
-// Entries must be disjoint: a nested pair would make one directory both a
-// read-only entry and the other entry's read-write pin. And no worker dir
-// may overlap an entry — a worker mounts its own subtree read-write at
-// /workspace and never sees the manager's volumes, so a worker over (or
-// under) a read_only path writes it freely, and the manager can ask a
-// worker to. Every comparison folds case: on a case-insensitive host
-// `Assistant/tools` and `assistant/tools` are one directory.
+// validateManagerReadOnly checks manager.read_only's shape; host reads are
+// PrepareManagerReadOnlyHost's. Entries must be disjoint, since a nested pair
+// would make one directory the other's read-write pin. No worker dir may
+// overlap an entry: a worker mounts its subtree read-write and never sees the
+// manager's volumes, and the manager can ask a worker to write. Every
+// comparison folds case for case-insensitive hosts.
 func (a *App) validateManagerReadOnly() error {
 	if len(a.ManagerTreeMounts()) == 0 {
 		return nil
@@ -182,8 +151,7 @@ func (a *App) validateManagerReadOnly() error {
 			}
 		}
 	}
-	// With read_only set, every worker dir becomes a pin in the manager, so
-	// it is subject to the same character rule as an entry.
+	// Every worker dir becomes a pin, so the same character rules apply.
 	for _, g := range a.Workers {
 		if strings.ContainsAny(g.Dir, readOnlyForbiddenChars) {
 			return fmt.Errorf("config: worker %q dir %q must not contain any of %q while manager.read_only or shared_folders is set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", g.Name, g.Dir, readOnlyForbiddenChars)
@@ -196,33 +164,24 @@ func (a *App) validateManagerReadOnly() error {
 }
 
 // PrepareManagerReadOnlyHost readies the host tree for the manager's
-// read_only mounts and refuses a tree that would defeat them. Nothing
-// happens when read_only is unset. Otherwise, as the operator:
+// read_only mounts and refuses a tree that would defeat them:
 //
-//   - every entry must be a real directory reached through no symlink: each
-//     component from the tree root down is Lstat'ed. The guest resolves a
-//     mount source through symlinks and the tree is agent-writable, so a
-//     link planted at an entry or an ancestor would mount something else
-//     while the config still reads as protected;
-//   - no symlink INSIDE an entry may resolve outside it: host code loading
-//     through such a link would read content the agent can write;
-//   - every worker dir must be reached through no symlink (a worker dir
-//     swapped for a link to an entry would mount the entry read-write in
-//     that worker), and a missing one is created — through an os.Root at
-//     the tree, which refuses to follow a link out — so the manager's pin
-//     for it has a target. The walk runs again after the mkdir, so a swap
-//     in between is caught.
+//   - every entry must be a real directory reached through no symlink: the
+//     guest resolves a mount source through symlinks and the tree is
+//     agent-writable, so a planted link would mount something else while
+//     the config still reads as protected;
+//   - no symlink inside an entry may resolve outside it: host code loading
+//     through it would read content the agent can write;
+//   - every worker dir must be reached through no symlink, or a worker dir
+//     swapped for a link to an entry would mount the entry read-write in that
+//     worker. A missing one is created through an os.Root, which refuses to
+//     follow a link out, and walked again after the mkdir to catch a swap.
 //
-// Not part of CheckHost on purpose: that runs at every config load (doctor,
-// the broker), and only a manager CREATE needs it — apply calls it before
-// it acts on the manager record and again right before the create. The
-// check and the create are not atomic; the window is the moments before one
-// create, against an agent that can only act in it if it already holds the
-// paths writable (a manager from before read_only was set — and the second
-// call runs after a --fresh delete has removed that one).
+// Not part of CheckHost: only a manager create needs it, and apply calls it
+// before acting on the manager record and again right before the create.
+// The check and the create are not atomic; only an agent that already holds
+// the paths writable could act in that window.
 func (a *App) PrepareManagerReadOnlyHost() error {
-	// Shared folders the manager mounts: no link on the path, but their
-	// contents are the writers' (PrepareSharedFoldersHost).
 	if err := a.PrepareSharedFoldersHost(); err != nil {
 		return err
 	}
@@ -263,14 +222,12 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 	return nil
 }
 
-// afterWorkerDirMkdir is a test seam: called between a worker dir's mkdir
-// and the walk that follows it, so a test can make the swap that walk
-// exists to catch. nil outside tests.
+// afterWorkerDirMkdir is a test seam between a worker dir's mkdir and the
+// walk that follows it.
 var afterWorkerDirMkdir func(rel string)
 
-// walkNoSymlink Lstats each component of rel below tree and fails on a
-// symbolic link or a non-directory. A missing component is an error unless
-// allowMissing, which ends the walk there (the caller creates the rest).
+// walkNoSymlink fails on a symbolic link or a non-directory at any
+// component of rel. allowMissing ends the walk at a missing component.
 func walkNoSymlink(tree, rel string, allowMissing bool) error {
 	p := tree
 	for _, c := range strings.Split(filepath.ToSlash(rel), "/") {
@@ -292,21 +249,16 @@ func walkNoSymlink(tree, rel string, allowMissing bool) error {
 	return nil
 }
 
-// refuseEscapingLinks walks dir (never following a link) and fails closed
-// on what would let code loaded from dir read agent-writable content:
+// refuseEscapingLinks fails closed on what would let code loaded from dir
+// read agent-writable content: read-only mounting protects the names under
+// dir, not what a link there points at nor another name of the same inode.
 //
-//   - a symbolic link whose target lies outside dir, lexically (the target
-//     read relative to the link's own directory) or by its real path; a
-//     link whose real path cannot be resolved (dangling, a loop) is refused
-//     too — the lexical reading of `s/../x` is not the kernel's when `s` is
-//     itself a link, and a dangling target is one the agent may create
-//     later outside the entry;
-//   - a file with more than one hard link: a name for it made before the
-//     protection (anywhere in the tree) lets the manager edit the
-//     protected file through a writable name.
-//
-// Read-only mounting protects the names under dir, not what a link there
-// points at nor another name of the same inode.
+//   - a symbolic link whose target lies outside dir, lexically or by its
+//     real path; an unresolvable link is refused too, since the lexical
+//     reading of `s/../x` is not the kernel's when `s` is a link, and the
+//     agent may create a dangling target later;
+//   - a file with more than one hard link: another name for it in the tree
+//     lets the manager edit the protected file.
 func refuseEscapingLinks(dir string) error {
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {

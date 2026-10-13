@@ -7,11 +7,9 @@ import (
 	"testing"
 )
 
-// managerBootstrapPath MUST be rooted under the container /workspace mount, not
-// the jail-level /lever path. Inside the manager container, scion mounts the
-// tree at /workspace; /lever does not exist. A wrong root causes LoadBootstrap
-// to silently return an empty Bootstrap (file absent → nil error), leaving
-// every dispatched worker unable to enrol — with no error surfaced to the operator.
+// managerBootstrapPath must be under the container's /workspace mount: /lever
+// does not exist in the manager container, and LoadBootstrap returns an empty
+// Bootstrap for an absent file, so every worker would silently fail to enrol.
 func TestManagerBootstrapPathIsContainerWorkspace(t *testing.T) {
 	if !strings.HasPrefix(managerBootstrapPath, "/workspace/") {
 		t.Fatalf("managerBootstrapPath = %q; must be under the container /workspace mount, not the jail-level /lever", managerBootstrapPath)
@@ -19,7 +17,6 @@ func TestManagerBootstrapPathIsContainerWorkspace(t *testing.T) {
 }
 
 func TestAgentStart_callsBroker(t *testing.T) {
-	// Point the manager client at a fake broker.
 	var gotPath string
 	c := fakeBroker(t, func(w http.ResponseWriter, path string, _ map[string]any) {
 		gotPath = path

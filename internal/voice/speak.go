@@ -1,17 +1,15 @@
 package voice
 
-// The speech socket: how the remote proxy reaches lever-tool-tts.
-//
-// Like the dictation socket (dictate.go): a Unix socket (-speak-socket,
-// remote.voice.speak_socket) in a private directory (0700, the
-// operator's), the socket itself 0600, never on the broker gateway or a TCP
-// port, so neither the jail nor another local user reaches it.
+// The speech socket: how the remote proxy reaches lever-tool-tts. Like the
+// dictation socket (dictate.go): a 0600 Unix socket in a private 0700
+// directory, never on the broker gateway or a TCP port, so neither the jail
+// nor another local user reaches it.
 //
 // Routes:
 //
-//	POST /speak   body: {"text": "...", "voice": "name"} (JSON, voice ""
-//	              = the tool's -voice). 200 audio/wav (16-bit PCM, mono),
-//	              or an error status with {"error": word}.
+//	POST /speak   body: {"text": "...", "voice": "name"} (voice "" = the
+//	              tool's -voice). 200 audio/wav (16-bit PCM, mono), or an
+//	              error status with {"error": word}.
 //	GET  /health  200 SpeakHealth.
 
 import (
@@ -37,23 +35,20 @@ const (
 	WordBadVoice = "bad-voice"
 )
 
-// maxSpeakBody bounds a /speak request: MaxSpeakMaxChars characters of
-// four bytes each, escaped, with room to spare.
+// maxSpeakBody: MaxSpeakMaxChars characters of four bytes each, escaped,
+// with room to spare.
 const maxSpeakBody = 64 << 10
 
-// ListenSpeak creates the speech socket at path, as ListenDictate does the
-// dictation socket.
+// ListenSpeak creates the speech socket at path, as ListenDictate does.
 func ListenSpeak(path string) (net.Listener, error) {
 	return listenPrivate(path, "speech socket", "lever-tool-tts")
 }
 
-// SpeakVoice is one voice as the health answer lists it.
 type SpeakVoice struct {
 	Name string `json:"name"`
 	Lang string `json:"lang"`
 }
 
-// SpeakHealth is the answer of GET /health.
 type SpeakHealth struct {
 	Ready    bool         `json:"ready"`
 	Model    string       `json:"model"`
@@ -62,27 +57,23 @@ type SpeakHealth struct {
 	MaxChars int          `json:"maxChars"`
 }
 
-// SpeakRequest is the body of POST /speak.
 type SpeakRequest struct {
 	Text  string `json:"text"`
 	Voice string `json:"voice,omitempty"`
 }
 
-// SpeechEngine is what the socket needs of Speaker.
 type SpeechEngine interface {
 	Ready() bool
 	Speak(ctx context.Context, text, voice string) ([]byte, error)
 }
 
-// SpeakHandler serves the speech socket.
 type SpeakHandler struct {
 	Engine   SpeechEngine
 	Model    SpeechModel
 	Voice    string // the default
 	MaxChars int
-	// Log receives one line per request: its length, the voice, the
-	// outcome and the latency; never the text, never the audio. nil drops
-	// them.
+	// Log receives one line per request: length, voice, outcome and
+	// latency; never the text, never the audio. nil drops them.
 	Log func(format string, a ...any)
 }
 
@@ -92,7 +83,6 @@ func (h *SpeakHandler) logf(format string, a ...any) {
 	}
 }
 
-// Health is the handler's health answer.
 func (h *SpeakHandler) Health() SpeakHealth {
 	vs := make([]SpeakVoice, len(h.Model.Voices))
 	for i, v := range h.Model.Voices {
@@ -171,12 +161,10 @@ func oneWord(s string) string {
 	return s
 }
 
-// NewSpeakServer is the http.Server for the speech socket.
 func NewSpeakServer(h http.Handler) *http.Server {
 	return &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute}
 }
 
-// SpeakClient is the remote proxy's side of the speech socket.
 type SpeakClient struct {
 	Socket string
 	// HealthTTL is how long a health answer is reused; zero = 5 s.
@@ -194,7 +182,6 @@ type SpeakClient struct {
 	probing chan struct{}
 }
 
-// speakBase is the URL base of every request on the socket.
 const speakBase = "http://lever-tool-tts"
 
 func (c *SpeakClient) http() *http.Client {
@@ -214,7 +201,6 @@ func (c *SpeakClient) http() *http.Client {
 	return c.client
 }
 
-// Health asks the tool for its state.
 func (c *SpeakClient) Health(ctx context.Context) (SpeakHealth, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -237,9 +223,9 @@ func (c *SpeakClient) Health(ctx context.Context) (SpeakHealth, error) {
 	return h, nil
 }
 
-// Available is the tool's health answer when it answers ready (ok false
-// otherwise), reused for HealthTTL; one caller probes at a time, the
-// others keep the previous answer (or, before any, wait for that probe).
+// Available is the tool's health answer when it answers ready, reused for
+// HealthTTL; one caller probes at a time while the others keep the previous
+// answer (or, before any, wait for that probe).
 func (c *SpeakClient) Available() (SpeakHealth, bool) {
 	ttl := c.HealthTTL
 	if ttl <= 0 {
@@ -276,9 +262,8 @@ func (c *SpeakClient) Available() (SpeakHealth, bool) {
 	return h, ok
 }
 
-// Speak sends one text to the tool and returns the WAV it answers. An
-// error wraps ErrSpeakNotSent when the text never reached the engine: the
-// socket did not answer, or the tool refused it first. It never carries
+// Speak sends one text to the tool and returns the WAV. An error wraps
+// ErrSpeakNotSent when the text never reached the engine. It never carries
 // the text.
 func (c *SpeakClient) Speak(ctx context.Context, text, voice string) ([]byte, error) {
 	wait := c.MaxWait
@@ -324,8 +309,6 @@ func (c *SpeakClient) Speak(ctx context.Context, text, voice string) ([]byte, er
 	return nil, fmt.Errorf("lever-tool-tts: HTTP %d, an unknown answer", resp.StatusCode)
 }
 
-// speakPlainErr drops the URL from a client error, and marks a failed dial
-// as ErrSpeakNotSent.
 func speakPlainErr(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {

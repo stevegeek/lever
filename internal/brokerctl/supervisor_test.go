@@ -15,15 +15,12 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// Uses /bin/sh indirectly? No — no shell. We launch a real, simple command that
-// exits 0 quickly to prove argv assembly + lifecycle, then a long-running one.
 // testToolSecret stands in for the per-boot secret Serve mints.
 const testToolSecret = "test-tool-secret"
 
 // logLineRE is one line of lever's log shape (internal/logging).
 var logLineRE = regexp.MustCompile(`^time=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z level=(INFO|WARN|ERROR) msg=.* component=[a-z-]+( |$)`)
 
-// trackedCount returns the number of currently-tracked child processes.
 func trackedCount(s *Supervisor) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -31,9 +28,7 @@ func trackedCount(s *Supervisor) int {
 }
 
 func TestSupervisorStartsConfiguredToolsWithFlags(t *testing.T) {
-	// `true` ignores args and exits 0; we only assert Start doesn't error and the
-	// process is launched with our injected flags appended (argv inspection via a
-	// recording fake is overkill here — assert no error + clean Stop).
+	// `true` ignores args and exits 0: assert no error and a clean Stop.
 	tools := []ToolSpec{{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:3201"}}
 	s := NewSupervisor(tools, "http://127.0.0.1:8444", filepath.Join(t.TempDir(), "tool-logs"), testToolSecret)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -53,8 +48,8 @@ func TestSupervisorRejectsEmptyCommand(t *testing.T) {
 }
 
 func TestSupervisorStartCleansUpOnPartialFailure(t *testing.T) {
-	// First tool starts fine (`true`); second has an empty command → Start errors.
-	// The supervisor must reap the first tool, leaving nothing tracked/running.
+	// The second tool has an empty command, so Start errors and must reap
+	// the first.
 	tools := []ToolSpec{
 		{Name: "ok", Command: []string{"true"}, Backend: "127.0.0.1:1"},
 		{Name: "bad", Command: nil, Backend: "127.0.0.1:2"},
@@ -63,7 +58,6 @@ func TestSupervisorStartCleansUpOnPartialFailure(t *testing.T) {
 	if err := s.Start(context.Background()); err == nil {
 		t.Fatal("Start must error when a tool has no command")
 	}
-	// After a failed Start, no processes remain tracked (cleaned up).
 	if n := trackedCount(s); n != 0 {
 		t.Fatalf("Start left %d processes tracked after partial-failure cleanup", n)
 	}
@@ -109,7 +103,6 @@ func TestSupervisorPerToolLogs(t *testing.T) {
 	if err := s.Start(context.Background()); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	// give the short-lived echoes a moment, then stop (closes files)
 	time.Sleep(200 * time.Millisecond)
 	s.Stop()
 
@@ -151,9 +144,8 @@ func TestToolSpecsCarriesWhatTheSupervisorNeeds(t *testing.T) {
 	}
 }
 
-// A tool runs in its spec's Dir, and a relative command resolves there:
-// config load's tree check resolves the same paths against the instance dir,
-// so the two agree whatever directory the broker was started from.
+// A tool runs in its spec's Dir, and a relative command resolves there, as
+// config load's tree check resolves it, whatever the broker's cwd.
 func TestSupervisorRunsToolInItsDir(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "tool.sh"), []byte("#!/bin/sh\npwd\n"), 0o755); err != nil {
@@ -195,10 +187,8 @@ func TestSupervisorResolvesBareCommandOnSupervisorPATH(t *testing.T) {
 	}
 }
 
-// The supervisor hands every supervised tool the per-boot shared secret through
-// LEVER_TOOL_SECRET (the only inherited variable besides PATH); captool requires
-// it on every request so a jail agent that reaches the tool port directly is
-// refused. It travels via the environment, never argv (ps-visible).
+// Every supervised tool gets the per-boot secret through LEVER_TOOL_SECRET
+// (the only inherited variable besides PATH), never argv (ps-visible).
 func TestSupervisorPassesToolSecretInEnv(t *testing.T) {
 	dir := t.TempDir()
 	tools := []ToolSpec{{Name: "db", Command: []string{"sh", "-c", "echo SECRET=$LEVER_TOOL_SECRET; echo HOME=$HOME"}}}
@@ -311,7 +301,6 @@ func TestSupervisorWithoutGuardNeverStartsReadOnlyTool(t *testing.T) {
 	s.Stop()
 }
 
-// waitFor polls cond for up to two seconds.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

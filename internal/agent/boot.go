@@ -11,32 +11,23 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// Bootstrap is the material the host/manager deposits for an agent to enrol. It
-// aliases wire.Bootstrap — the single, cross-package declaration of the
-// enrolment envelope (the host stages it via wire.Stage; agent reads it via
-// LoadBootstrap). The alias keeps agent.Bootstrap as the name agent-side code
-// uses while the fields/tags live in exactly one place.
+// Bootstrap is the material the host or broker deposits for an agent to enrol.
 type Bootstrap = wire.Bootstrap
 
 // Claude is the envelope's per-agent Claude Code config (wire.Claude).
 type Claude = wire.Claude
 
-// NormalizeBrokerURL strips trailing slashes so callers can append "/enrol",
-// "/request", ... without producing "//enrol".
+// NormalizeBrokerURL strips trailing slashes so callers can append a route.
 func NormalizeBrokerURL(u string) string {
 	return strings.TrimRight(u, "/")
 }
 
-// LoadBootstrap reads the deposited bootstrap.json. BrokerURL is normalized via
-// NormalizeBrokerURL. For the manager, path is <tree>/.lever/bootstrap.json,
-// staged by the host (wire.Stage, which never stages through a link) in the
-// agent-writable tree; for a worker it is /run/lever/bootstrap.json, the
-// broker's guest ticket directory mounted read-only into that container alone
-// (LEVER_BOOTSTRAP). boot may read it as root (rootful runtime, or a failed
-// privilege drop; see errRefusedPath — under rootless podman it runs as the
-// agent user), so the read is confined two levels up (<tree>, or /run) and a symlink (or any non-regular file) at the
-// directory or at bootstrap.json is refused (errRefusedPath). An absent file
-// still reports fs.ErrNotExist.
+// LoadBootstrap reads the deposited bootstrap.json and normalizes BrokerURL.
+// For the manager it sits in the agent-writable tree; for a worker it is
+// /run/lever/bootstrap.json, mounted read-only into that container alone. boot
+// may read it as root (see errRefusedPath), so the read is confined two levels
+// up and a symlink or non-regular file at the directory or at bootstrap.json
+// is refused. An absent file still reports fs.ErrNotExist.
 func LoadBootstrap(path string) (Bootstrap, error) {
 	root, rel := splitAbove(path, 2)
 	r, err := os.OpenRoot(root)
@@ -59,57 +50,46 @@ func LoadBootstrap(path string) (Bootstrap, error) {
 	return bs, nil
 }
 
-// BootConfig drives Boot. MCPAdd is the one injected seam: it execs `claude mcp
-// add` in production and is recorded by tests, which otherwise run Boot against
-// a real (test) broker.
+// BootConfig drives Boot.
 type BootConfig struct {
 	BootstrapPath string
 	IDDir         string
-	// BrokerTools are the broker tool names to register with claude (each via
-	// `claude mcp add --transport http <gateway>/mcp/<name>/`). When empty and
-	// DiscoverTools is set, the list is fetched from the broker's /tools
-	// endpoint after enrolment (fail-closed: a booting agent that cannot learn
-	// its tools is a real failure, not a tolerable degraded state).
+	// BrokerTools are the broker tool names to register with claude. When
+	// empty and DiscoverTools is set, the list is fetched from the broker
+	// after enrolment, failing closed.
 	BrokerTools   []string
 	DiscoverTools bool
 	// SettingsPath is the claude settings.json whose env block receives the
 	// harness overlay (WriteSettingsEnv). Empty skips the write (enrol-only).
 	SettingsPath string
-	// ManagedSettingsPath is Claude Code's managed-settings file
-	// (ManagedSettingsPath in production), which receives the envelope's
-	// claude block (WriteManagedSettings). Empty skips the write.
+	// ManagedSettingsPath receives the envelope's claude block
+	// (WriteManagedSettings). Empty skips the write.
 	ManagedSettingsPath string
 	// Log reports a boot decision the operator should see in the agent's
 	// pre-start output. nil discards it.
 	Log func(format string, args ...any)
 	// LLMAuth selects the LLM-auth mode ("api-key" | "subscription" | "").
-	// When "api-key", Boot obtains a capability(llm) token and writes
-	// ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL into the overlay. Any other
-	// value leaves those keys absent.
+	// Only "api-key" writes ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL into
+	// the overlay.
 	LLMAuth string
-	// MCPAdd registers one MCP server with claude. nil skips registration (the
-	// enrol-only acceptance gate has no `claude` binary).
+	// MCPAdd registers one MCP server with claude. nil skips registration.
 	MCPAdd func(name string, argv ...string) error
 }
 
-// Boot enrols the agent (idempotently) and configures the harness: writes the
-// identity, the claude settings.json env overlay, and registers the capability
-// MCP server + each broker /mcp/<tool>/ (via the loopback gateway) with MCPAdd.
+// Boot enrols the agent (idempotently) and configures the harness: identity,
+// settings overlays and MCP server registrations.
 func Boot(ctx context.Context, c BootConfig) error {
-	// Load bootstrap early so BrokerURL is available on both the enrol AND
-	// skip-enrol (resume/restart) paths. Reading the file is cheap and idempotent;
-	// the ticket inside is only redeemed during enrol. If bootstrap is absent
-	// (no broker configured) we tolerate it by leaving brokerURL empty — the
-	// broker-tool registration loop will simply register nothing.
+	// Load bootstrap before the enrol check so BrokerURL is known on resume
+	// too. An absent bootstrap leaves brokerURL empty and no broker tools are
+	// registered.
 	var brokerURL string
 	var claude *Claude
 	bs, bsErr := LoadBootstrap(c.BootstrapPath)
 	if bsErr == nil {
 		brokerURL = bs.BrokerURL
-		// The host validated it, but the manager's envelope is in the tree
-		// the manager writes. An invalid block is dropped (lever's settings
-		// are then removed) and logged: the settings are optional and must
-		// not stop the agent.
+		// The manager's envelope is in a tree the manager writes, so validate
+		// again. An invalid block is dropped and logged: the settings are
+		// optional and must not stop the agent.
 		if err := bs.Claude.Validate(); err != nil {
 			if c.Log != nil {
 				c.Log("bootstrap claude block refused, not delivered: %v", err)
@@ -119,11 +99,10 @@ func Boot(ctx context.Context, c BootConfig) error {
 		}
 	}
 
-	// Idempotent: a valid existing cert means we already enrolled (resume/restart).
+	// A valid existing cert means already enrolled.
 	id, ok := LoadIdentity(c.IDDir)
 	if !ok || !ValidCert(id.CertPEM, time.Now()) {
 		if bsErr != nil {
-			// Bootstrap required for first enrol; surface the error.
 			return bsErr
 		}
 		var err error
@@ -136,9 +115,8 @@ func Boot(ctx context.Context, c BootConfig) error {
 		}
 	}
 
-	// Boot-time broker calls (discovery, llm token) use the direct mTLS client:
-	// the gateway sidecar is not up yet during pre-start. Only the values written
-	// into Claude's config point at the loopback gateway.
+	// Boot-time broker calls use the direct mTLS client: the gateway sidecar is
+	// not up yet during pre-start.
 	client, err := id.Client()
 	if err != nil {
 		return fmt.Errorf("agent: boot: build mTLS client: %w", err)
@@ -153,8 +131,8 @@ func Boot(ctx context.Context, c BootConfig) error {
 	}
 
 	overlay := HarnessEnvOverlay()
-	// api-key mode: obtain a capability(llm) token and inject the Anthropic env vars.
-	// Fail closed: a partial overlay without a valid token is worse than a failed boot.
+	// Fail closed: a partial overlay without a valid token is worse than a
+	// failed boot.
 	if c.LLMAuth == LLMAuthAPIKey {
 		if err := RefreshLLMToken(ctx, brokerURL, id, overlay); err != nil {
 			return fmt.Errorf("agent boot: %w", err)
@@ -167,12 +145,9 @@ func Boot(ctx context.Context, c BootConfig) error {
 		// No envelope means no claude block: say why lever's values go.
 		c.Log("no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any (the agent-view switch is still written)", bsErr, c.ManagedSettingsPath)
 	}
-	// The Claude settings are optional: a failed write must not stop the
-	// agent (on rootless podman the pre-start hook runs as the agent user, and
-	// an image without lever's /etc/claude-code cannot take the file). It is
-	// logged, and doctor's claude settings row shows what the agent got.
-	// With no claude config the file carries only the agent-view switch, so
-	// the log names that, not a claude config that was never there.
+	// A failed write must not stop the agent: under rootless podman the hook
+	// runs as the agent user, and an image without a writable
+	// /etc/claude-code cannot take the file. It is logged instead.
 	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil && c.Log != nil {
 		if claude.IsZero() {
 			c.Log("agent-view switch not written (%v); background sessions stay possible", err)
@@ -183,13 +158,11 @@ func Boot(ctx context.Context, c BootConfig) error {
 	if c.MCPAdd == nil {
 		return nil
 	}
-	// Capability server stays as stdio (lever-agent subprocess).
 	if err := c.MCPAdd("lever-capability", "lever-agent", "serve-capability"); err != nil {
 		return err
 	}
-	// Broker tools are HTTP MCP servers reached through the loopback gateway,
-	// which presents the rotating agent leaf on Claude's behalf. If brokerURL is
-	// empty (no bootstrap configured) there are no broker tools to route.
+	// Broker tools are reached through the loopback gateway, which presents
+	// the rotating agent leaf on Claude's behalf.
 	if brokerURL == "" {
 		return nil
 	}

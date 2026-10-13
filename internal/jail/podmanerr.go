@@ -8,19 +8,16 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-// The bounds on the podman output an error carries (lever#173). podman load
-// writes its progress ("Copying blob …") to stderr before it fails, and the
-// cause comes last, so an error that relays the whole stream leads with the
-// progress and buries the cause. podmanErrTail keeps the last lines instead.
+// podman load writes its progress to stderr before it fails and the cause
+// comes last, so an error keeps only the tail of the output.
 const (
 	podmanErrTailLines = 12   // lines kept from the end
 	podmanErrLineMax   = 600  // bytes kept of one line: its head and its tail
 	podmanErrTailMax   = 4096 // bytes kept in all; earlier lines go first
 )
 
-// podmanProgressPrefixes are the progress lines podman (containers/image)
-// writes while it copies an image. They say nothing about a failure and are
-// dropped before the tail is taken.
+// podmanProgressPrefixes are the progress lines podman writes while it
+// copies an image.
 var podmanProgressPrefixes = []string{
 	"Getting image source signatures",
 	"Copying blob ",
@@ -29,16 +26,12 @@ var podmanProgressPrefixes = []string{
 	"Storing signatures",
 }
 
-// StorageCorruptionHint is what lever adds to a podman error that names
-// damage in the jail's container store.
+// StorageCorruptionHint is added to a podman error that names damage in the
+// jail's container store.
 const StorageCorruptionHint = "the jail's podman store looks damaged: run `lever doctor` (podman storage row) " +
 	"and follow \"Recovering the jail's podman store\" in the operations guide (back up first, then " +
 	"`podman system reset --force` as the jail user, then `lever up` without --fresh)"
 
-// podmanStorageDamaged reports whether podman output names damage in the
-// container store: podman's own corruption warning, a layer whose overlay
-// link is gone (the readlink of .../overlay/l/…), or a layer the store no
-// longer knows.
 func podmanStorageDamaged(out string) bool {
 	low := strings.ToLower(out)
 	return strings.Contains(low, "storage corruption") ||
@@ -47,14 +40,9 @@ func podmanStorageDamaged(out string) bool {
 		strings.Contains(low, "layer not known")
 }
 
-// podmanErrTail returns the end of podman's output, fit for an error: split
-// into lines (on \n and on the \r a progress bar redraws with), progress lines
-// dropped, each line sanitized for the terminal (termsafe.Sanitize) and
-// trimmed, the last podmanErrTailLines kept, each clipped to podmanErrLineMax
-// bytes and the whole to podmanErrTailMax. The lines are joined with " | "
-// because a returned error is printed on one line. A line that names storage
-// corruption is kept even when it falls before the tail, since it is the line
-// that says what to do. Omitted lines are counted at the front.
+// podmanErrTail returns the end of podman's output, sanitized and bounded,
+// on one line. A line that names storage corruption is kept even when it
+// falls before the tail, since it says what to do.
 func podmanErrTail(out string) string {
 	var lines []string
 	for _, l := range strings.FieldsFunc(out, func(r rune) bool { return r == '\n' || r == '\r' }) {
@@ -66,7 +54,6 @@ func podmanErrTail(out string) string {
 	}
 	start := max(0, len(lines)-podmanErrTailLines)
 	kept := lines[start:]
-	// The corruption warning podman prints ahead of the error.
 	var warn string
 	for i := start - 1; i >= 0; i-- {
 		if podmanStorageDamaged(lines[i]) {
@@ -113,10 +100,8 @@ func isPodmanProgress(l string) bool {
 	return false
 }
 
-// clipMiddle shortens s to at most n bytes by cutting its middle, keeping a
-// third at the front and the rest at the end: an error line's cause (the
-// readlink path, "no such file or directory") is at its end. Cuts fall on
-// rune boundaries.
+// clipMiddle keeps more of the end of s than its front because an error
+// line's cause is at its end.
 func clipMiddle(s string, n int) string {
 	const sep = " … "
 	if len(s) <= n {
@@ -134,9 +119,6 @@ func clipMiddle(s string, n int) string {
 	return s[:head] + sep + s[t:]
 }
 
-// podmanFailure composes the detail of a failed podman command for an error:
-// the tail of stderr then stdout, and the corruption hint when the output
-// names store damage.
 func podmanFailure(stderr, stdout string) string {
 	out := stderr
 	if strings.TrimSpace(stdout) != "" {

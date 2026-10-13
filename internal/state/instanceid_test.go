@@ -31,7 +31,6 @@ func TestInstanceIDMadeOnceAndKept(t *testing.T) {
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("file mode %v, %v; want 0600", fi.Mode().Perm(), err)
 	}
-	// No temp file is left behind.
 	entries, _ := os.ReadDir(s.Dir)
 	if len(entries) != 1 {
 		t.Fatalf("state dir holds %d entries, want only the id file", len(entries))

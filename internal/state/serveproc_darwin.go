@@ -9,10 +9,9 @@ import (
 // sZomb is p_stat for a zombie (SZOMB in <sys/proc.h>).
 const sZomb = 5
 
-// processArgs is pid's argv, from the kern.procargs2 sysctl: exact
-// arguments, where ps(1) would join them with spaces. The sysctl fails for
-// a zombie: kern.proc.pid tells that case (errNotAProcess) from a live
-// process whose argv cannot be read (Identify says Unknown).
+// processArgs reads the kern.procargs2 sysctl: exact arguments, where ps(1)
+// would join them with spaces. The sysctl fails for a zombie: kern.proc.pid
+// tells that case (errNotAProcess) from an unreadable argv (Unknown).
 func processArgs(pid int) ([]string, error) {
 	b, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {

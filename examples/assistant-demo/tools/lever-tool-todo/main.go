@@ -1,10 +1,9 @@
-// Command lever-tool-todo is the demo's FIRST-PARTY capability tool: a tiny
-// read-only MCP server, built with the captool SDK, that lists todos from a CSV.
-// It shows the internal capability path end to end — the broker spawns it as a
-// supervised subprocess, registers it, and an agent reaches it only with a
-// broker-minted `todo/list` capability token (verified here, independently of
-// the gateway, by captool). Contrast tools/weather-stub, which is fronted as an
-// EXTERNAL tool the broker only proxies. See the example README.
+// Command lever-tool-todo is the demo's first-party capability tool: a
+// read-only MCP server, built with the captool SDK, that lists todos from a
+// CSV. The broker spawns and supervises it, and an agent reaches it only with
+// a broker-minted `todo/list` capability token, which captool verifies here
+// independently of the gateway. Contrast tools/weather-stub, an external tool
+// the broker only proxies.
 package main
 
 import (
@@ -33,8 +32,8 @@ func buildServer(store *Store, name, backend, adminURL string) (*captool.Server,
 			Params: []captool.ParamSpec{
 				{Name: "pending", Type: "string", Description: `"true" to list only not-done items`},
 			},
-			// Backstop: read-only tool, the only operation is list — reject anything else
-			// regardless of what a token might claim.
+			// Backstop: the only operation is list; reject anything else whatever a
+			// token claims.
 			Backstop: func(ctx captool.ValidatedContext, _ map[string]string) error {
 				if ctx.Operation != "list" {
 					return fmt.Errorf("todo: only list is permitted")
@@ -54,7 +53,7 @@ func main() {
 	admin := flag.String("admin", "http://127.0.0.1:3401", "broker admin base URL")
 	csvPath := flag.String("csv", "data/todos.csv", "path to the todos CSV")
 	flag.Parse()
-	// Also the default logger, so the standard log package's lines take lever's log shape.
+	// Also the default logger, so standard log lines take lever's log shape.
 	slog.SetDefault(captool.NewLogger(os.Stderr, "lever-tool-todo"))
 
 	srv, err := buildServer(OpenStore(*csvPath), *name, *backend, *admin)

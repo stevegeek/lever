@@ -22,7 +22,6 @@ func TestRealOrbStack(t *testing.T) {
 	ctx := context.Background()
 	t.Cleanup(func() { _ = b.Teardown(ctx) })
 
-	// Create a temp dir with a sentinel file to verify the project-tree mount.
 	projectTree := t.TempDir()
 	sentinelName := "SENTINEL"
 	sentinelPath := filepath.Join(projectTree, sentinelName)
@@ -57,7 +56,7 @@ func TestRealOrbStack(t *testing.T) {
 	}
 	t.Logf("/Users inside jail: %q (expected ABSENT)", strings.TrimSpace(res.Stdout))
 
-	// 3. ~/.ssh must NOT be accessible (belt-and-suspenders check).
+	// 3. ~/.ssh must NOT be accessible.
 	res, _ = r.Run(ctx, nil, "orb", "-m", machine, "bash", "-lc",
 		`ls ~/.ssh 2>/dev/null && echo VISIBLE || echo ABSENT`)
 	if !strings.Contains(res.Stdout, "ABSENT") {

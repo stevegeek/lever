@@ -26,18 +26,16 @@ import (
 // progressFlagUsage documents --progress on apply and up.
 const progressFlagUsage = "progress output: auto (a live line on a terminal, else plain), tty, plain, json or quiet; default from LEVER_PROGRESS"
 
-// bringup is one `lever apply` / `lever up` run's progress list and record.
 type bringup struct {
 	rep   *progress.Reporter
 	state state.State
 	done  bool
 }
 
-// startBringup builds the run's progress list (lever#185): the renderer
-// from --progress, else LEVER_PROGRESS, else the terminal; a record of the
-// run in the state directory; command tracing when LEVER_TRACE is set
-// (lever#184). It prints the header: what runs, on which backend — the first
-// line of every bring-up, before the jail is touched (lever#195).
+// startBringup builds the run's progress list (renderer from --progress, else
+// LEVER_PROGRESS, else the terminal), records the run in the state directory,
+// traces commands when LEVER_TRACE is set, and prints the header: what runs,
+// on which backend, before the jail is touched.
 func startBringup(cmd *cobra.Command, app *config.App, st state.State, command, flag string) (*bringup, context.Context, error) {
 	mode, set, err := progress.ParseMode(flag)
 	if err != nil {
@@ -67,8 +65,6 @@ func startBringup(cmd *cobra.Command, app *config.App, st state.State, command, 
 	return &bringup{rep: rep, state: st}, ctx, nil
 }
 
-// bringupHeader is the first line: the command, the application and the
-// backend's containment posture.
 func bringupHeader(command string, app *config.App) string {
 	h := fmt.Sprintf("lever %s: application %q", command, app.Name)
 	if p, ok := registry.ProfileFor(app.Backend); ok {
@@ -78,7 +74,7 @@ func bringupHeader(command string, app *config.App) string {
 }
 
 // finish ends the run and saves its summary for doctor. Call it before an
-// attach: the terminal must be the manager's from then on.
+// attach: the terminal is the manager's from then on.
 func (b *bringup) finish(err error) {
 	if b == nil || b.done {
 		return
@@ -90,8 +86,7 @@ func (b *bringup) finish(err error) {
 	}
 }
 
-// finishOnReturn is finish for a defer: it ends the run with the command's
-// returned error, and a panic as a failure (then panics on), so a crashed
+// finishOnReturn records a panic as a failure (then panics on), so a crashed
 // run is never recorded as a success.
 func (b *bringup) finishOnReturn(errp *error) {
 	if r := recover(); r != nil {
@@ -110,7 +105,6 @@ func traceOn() bool {
 	return true
 }
 
-// isTerminal reports whether w is a terminal.
 func isTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	if !ok {
@@ -120,7 +114,6 @@ func isTerminal(w io.Writer) bool {
 	return err == nil
 }
 
-// termWidth is w's width in columns, or 0 when unknown.
 func termWidth(w io.Writer) int {
 	f, ok := w.(*os.File)
 	if !ok {
@@ -133,19 +126,14 @@ func termWidth(w io.Writer) int {
 	return int(ws.Col)
 }
 
-// tailLines is how many lines a failed step's tail shows.
 const tailLines = 15
 
-// tailTimeout bounds reading a tail from the guest.
 const tailTimeout = 10 * time.Second
 
-// stepTail names, per apply step, the log that explains its failure
-// (lever#186): the host broker and proxy logs, and for the steps that talk
-// to the hub, the hub's own log in the guest.
-//
-// The manager container's log is deliberately not shown: it is the
-// agent's word (jail.AgentProbe.LogTail), matched for fixed phrases but
-// never printed.
+// stepTail names, per apply step, the log that explains its failure: the host
+// broker and proxy logs, and the guest hub log for hub steps. The manager
+// container's log is the agent's word (jail.AgentProbe.LogTail): matched for
+// fixed phrases, never printed.
 func (w *applyWiring) stepTail(kind apply.StepKind) func() (string, []string) {
 	switch kind {
 	case apply.KindBrokerUp:
@@ -211,10 +199,8 @@ func redactLines(lines []string) []string {
 	return out
 }
 
-// checkLastBringup is doctor's row for the last `lever apply` / `lever up`:
-// how long it took and its slowest steps (lever#185), read from the summary
-// the run saved. It is information, never a failure: a failed run already
-// said why on the terminal, and its record is in the logs directory.
+// checkLastBringup reports the last bring-up's duration and slowest steps. It
+// is information only: a failed run already said why.
 func checkLastBringup(st state.State, now time.Time) checkResult {
 	const name = "last bring-up"
 	sum, err := progress.ReadLast(st.LastBringup())
@@ -227,10 +213,8 @@ func checkLastBringup(st state.State, now time.Time) checkResult {
 	return checkResult{name, true, sum.Describe(now) + "; records in " + st.BringupLogDir(), ""}
 }
 
-// daemonLogging makes a foreground daemon (`lever broker serve`, `lever
-// remote serve`) write lever's daemon log lines (internal/logging): its
-// slog and standard-log output, and its cobra prints, which take the
-// operator prose form and are logged at that form's level.
+// daemonLogging makes a foreground daemon write lever's daemon log lines
+// (internal/logging) for its slog, standard-log and cobra output.
 func daemonLogging(cmd *cobra.Command, component string) {
 	// Once per process: a second call would wrap the line writer in itself.
 	if logging.Installed() {

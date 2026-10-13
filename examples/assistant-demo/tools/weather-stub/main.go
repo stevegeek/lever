@@ -1,11 +1,9 @@
-// Command weather-stub is a stand-in for an EXTERNAL MCP server the broker
-// FRONTS (proxies) rather than owns — the same shape as a real host service like
-// a calendar or a weather API you already run. It speaks plain MCP over HTTP and
-// returns deterministic demo data, so the example runs with no API key and no
-// internet. In the config it is registered `external: true`: the broker does not
-// spawn it (you start it yourself), it only capability-gates and proxies it, and
-// strips the token before forwarding. Contrast tools/lever-tool-todo, a
-// first-party tool the broker supervises. See the example README.
+// Command weather-stub is a stand-in for an external MCP server the broker
+// fronts rather than owns. It speaks plain MCP over HTTP and returns
+// deterministic demo data, so the example needs no API key or internet. It is
+// registered `external: true`: the broker does not spawn it, only
+// capability-gates and proxies it, stripping the token before forwarding.
+// Contrast tools/lever-tool-todo, a first-party tool the broker supervises.
 package main
 
 import (
@@ -15,7 +13,6 @@ import (
 	"net/http"
 )
 
-// one canned forecast — deterministic so the demo is reproducible.
 var forecast = map[string]any{
 	"location":     "Pisa",
 	"conditions":   "clear sky",
@@ -31,10 +28,8 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:3211", "listen address")
 	flag.Parse()
 
-	// Serve on "/" (any path), NOT the exact "/mcp": the broker gateway strips
-	// its /mcp/<tool> prefix and forwards a TRAILING-SLASH path (e.g. "/mcp/"),
-	// which an exact "/mcp" mux pattern would 404. A root handler matches any
-	// path the proxy forwards — the same path-agnostic shape captool uses.
+	// Serve on "/", not "/mcp": the gateway strips its /mcp/<tool> prefix and
+	// forwards a trailing-slash path, which an exact "/mcp" pattern would 404.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var msg map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&msg)

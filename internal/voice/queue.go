@@ -5,18 +5,17 @@ import (
 	"sync"
 )
 
-// Queue lets one transcription at a time reach whisper-server (which works
-// on one clip at a time anyway, whisper.go assumption 4). A waiting
-// dictation clip (the operator's, from the remote proxy) always goes before
-// a waiting agent clip; within each kind, first come first served.
+// Queue lets one transcription at a time reach whisper-server. A waiting
+// dictation clip (the operator's) always goes before a waiting agent clip;
+// within each kind, first come first served.
 type Queue struct {
 	mu        sync.Mutex
 	busy      bool
 	high, low []chan struct{}
 }
 
-// Acquire waits for the GPU. high is a dictation clip. It returns ctx's
-// error when ctx ends first; otherwise the caller must Release.
+// Acquire waits for the GPU; high is a dictation clip. Unless it returns
+// ctx's error, the caller must Release.
 func (q *Queue) Acquire(ctx context.Context, high bool) error {
 	q.mu.Lock()
 	if !q.busy && len(q.high) == 0 && (high || len(q.low) == 0) {
@@ -47,7 +46,6 @@ func (q *Queue) Acquire(ctx context.Context, high bool) error {
 	}
 }
 
-// Release frees the GPU for the next waiter, dictation first.
 func (q *Queue) Release() {
 	q.mu.Lock()
 	defer q.mu.Unlock()

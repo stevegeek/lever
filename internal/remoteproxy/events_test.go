@@ -21,7 +21,6 @@ func reduce(t *testing.T, in string) string {
 	return string(out)
 }
 
-// reducedDM is dmEvent as a contact gets it.
 const reducedDM = "id: 7\nevent: update\ndata: {\"data\":{},\"subject\":\"user.u-contact.chat.dm\"}\n\n"
 
 func TestEventReducerKeepsOnlyTheSubject(t *testing.T) {

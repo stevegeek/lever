@@ -1,11 +1,6 @@
 // Package lima implements the Backend contract via a Lima VM (own kernel) +
-// rootless podman + iptables egress.
-//
-// The prefix/guest-delegating half of the contract (the jail
-// transport + image ops, the guest scion/egress delegations, run-user caching)
-// lives once in internal/backend/common.Base, which this embeds; only the
-// Lima-specific verbs (version preflight, VM create/start/stop, realized-config
-// verification) and the two prefix/guest hooks are here.
+// rootless podman + iptables egress. The shared half lives in
+// internal/backend/common.Base, which this embeds.
 package lima
 
 import (
@@ -28,10 +23,8 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// hostAlias is the DNS name Lima resolves to the host from inside the VM.
 const hostAlias = "host.lima.internal"
 
-// limaVersionRe matches "limactl version 2.1.3" lines from `limactl --version`.
 var limaVersionRe = regexp.MustCompile(`limactl version (\d+)\.(\d+)\.(\d+)`)
 
 type Lima struct {
@@ -46,7 +39,6 @@ func New(r proc.Runner, vm string, opts common.Options) *Lima {
 		HostAlias: hostAlias,
 		Options:   opts,
 		Hooks: common.Hooks{
-			// Lima's jail prefix is static — it does not depend on the run user.
 			JailPrefix: func(machine, _ string) []string { return JailPrefix(machine) },
 			Guest: func(r proc.Runner, machine string) guest.Guest {
 				return guest.Guest{
@@ -69,12 +61,9 @@ func New(r proc.Runner, vm string, opts common.Options) *Lima {
 }
 
 // JailPrefix is the argv prefix that executes inside this backend's VM.
-// Exported for registry.JailRunner (broker-side re-derivation).
 func JailPrefix(vm string) []string { return []string{"limactl", "shell", vm} }
 
-// Profile is lima's declared guarantees — the one value the runtime Profile()
-// method, the registry's guarantee matrix and `lever backends` all report, so
-// they cannot disagree.
+// Profile is lima's declared guarantees, the single value every report uses.
 var Profile = backend.Profile{
 	Name:             "lima",
 	SeparateKernel:   true, // own Lima VM kernel, not shared with the host or other jails
@@ -89,10 +78,8 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	if cfg.ProjectTree == "" {
 		return fmt.Errorf("EnsureUp: ProjectTree is required")
 	}
-	// Preflight: require Lima >= 2.0.0. Lima 2.0 changed portForwards ignore
-	// semantics — explicit guestIPMustBeZero is required from 2.0 on (see
-	// template.go) — so an older limactl would silently forward guest ports to
-	// the host loopback despite the rendered ignore rules.
+	// Lima < 2.0 lacks guestIPMustBeZero ignore semantics and would silently
+	// forward guest ports to the host loopback despite the ignore rules.
 	ok, got, err := common.VersionAtLeast(ctx, l.Runner(), []string{"limactl", "--version"}, limaVersionRe, 2, 0, 0)
 	if err != nil {
 		return fmt.Errorf("EnsureUp: limactl version check: %w", err)
@@ -109,8 +96,7 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 		return err
 	}
 	// Before Provision: on a fresh VM no egress chain exists yet, so the
-	// HWE kernel install reaches the mirrors (a re-apply under the closed
-	// posture may not, which the kernel step reports as a warning).
+	// HWE kernel install can reach the mirrors.
 	rep := progress.From(ctx)
 	s := rep.Start("guest hardening")
 	err = l.hardenGuest(ctx, cfg)
@@ -140,10 +126,8 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	return err
 }
 
-// ensureVM creates the jail VM from the rendered template (template.go) if it
-// doesn't yet exist, then starts it unless already running. The project tree
-// mount is set only at `limactl create` time; changing it on an existing VM
-// requires Teardown+EnsureUp — the same documented limitation as orbstack.
+// ensureVM: the project tree mount is set only at `limactl create` time;
+// changing it on an existing VM requires Teardown+EnsureUp.
 func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	rep := progress.From(ctx)
 	status, err := l.vmStatus(ctx)
@@ -161,13 +145,9 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 		status = "Stopped" // freshly created, not yet started
 	}
 	// Verify the REALIZED containment config on every path that reaches a
-	// live VM — a fresh create (belt-and-braces: a global lima config could
-	// still widen it) AND, critically, an ADOPTED pre-existing VM (one from a
-	// prior run, one booted before a template fix, or one an operator's
-	// global ~/.lima/_config/override.yaml has widened). mounts/portForwards/
-	// containerd are `limactl create`-time only, so without this check an
-	// adopted VM is used wholesale with no drift check even though the
-	// template IS the containment surface (template.go).
+	// live VM, created or adopted: a global ~/.lima/_config/override.yaml or
+	// an older template can widen it, and mounts/portForwards/containerd are
+	// fixed at `limactl create` time.
 	inst, err := l.verifyRealizedConfig(ctx, cfg.ProjectTree)
 	if err != nil {
 		return err
@@ -179,13 +159,11 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	}
 	s := rep.Start("start VM")
 	if status == "Running" {
-		// Idempotent: already up (and just verified un-drifted).
 		s.Skip("already running")
 		return nil
 	}
 	// Lima's own log says what the boot waits for ("Waiting for the
-	// essential requirement 1 of 4: ssh"); show it on the step, and its
-	// tail if the start fails.
+	// essential requirement 1 of 4: ssh").
 	haLog := filepath.Join(l.instanceDir(inst), "ha.stderr.log")
 	s.TailFrom(func() (string, []string) { return haLog, lastLines(haLog, 15) })
 	stopWatch := watchLimaStage(ctx, haLog, s.Detail)
@@ -199,17 +177,13 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 }
 
 // realizedInstance is the subset of `limactl list --json <vm>` needed to
-// verify the containment surface. Deliberately NOT read from the raw
-// ~/.lima/<vm>/lima.yaml lima persists at `limactl create` time: that file
-// holds the pre-merge template bytes only. `limactl list --json` goes through
-// lima's store.Inspect, which re-loads and re-merges the instance config with
-// any ~/.lima/_config/{default,override}.yaml on EVERY call — that merged
-// result is what lima actually applies the next time the VM starts, so it is
-// the only read-back that can catch a global override widening the surface
-// (see security-model-jail.md §2.4's lima operational notes).
+// verify the containment surface. Deliberately NOT read from
+// ~/.lima/<vm>/lima.yaml, which holds the pre-merge template only: `limactl
+// list --json` re-merges ~/.lima/_config/{default,override}.yaml on every
+// call, so it is the only read-back that catches a global override widening
+// the surface.
 type realizedInstance struct {
-	// Dir is the instance's directory (its logs live there); progress
-	// output only, never the containment check.
+	// Dir is for progress output only, never the containment check.
 	Dir    string `json:"dir"`
 	Config struct {
 		Mounts []struct {
@@ -235,10 +209,8 @@ type realizedInstance struct {
 	} `json:"config"`
 }
 
-// sizingDrift describes each configured size (cpus, memory; 0 and "" mean
-// unset) that differs from the realized VM's. A value lever cannot read or
-// parse is not reported: the warning is advice, and a wrong one is worse
-// than none.
+// sizingDrift skips a value it cannot read or parse: the warning is advice,
+// and a wrong one is worse than none.
 func (inst realizedInstance) sizingDrift(cpus int, memory string) []string {
 	var out []string
 	if c := inst.Config.CPUs; cpus != 0 && c != nil && *c != cpus {
@@ -256,8 +228,7 @@ func (inst realizedInstance) sizingDrift(cpus int, memory string) []string {
 
 var memRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*(B|KiB|MiB|GiB|TiB|KB|MB|GB|TB)$`)
 
-// memBytes parses a size as lever's config and Lima write it ("24GiB",
-// "4096MiB", Lima's fractional "3.906GiB"), to whole bytes.
+// memBytes accepts Lima's fractional form ("3.906GiB") too.
 func memBytes(s string) (int64, bool) {
 	m := memRE.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
@@ -273,8 +244,8 @@ func memBytes(s string) (int64, bool) {
 
 // matchesContainment reports whether the realized config is exactly the
 // containment surface template.go renders for projectTree: one writable
-// mount at mountDest, exactly the two full-range proto:any ignore rules (see
-// FIX 1), and containerd fully disabled.
+// mount at MountDest, exactly the two full-range proto:any ignore rules, and
+// containerd fully disabled.
 func (inst realizedInstance) matchesContainment(projectTree string) bool {
 	c := inst.Config
 	if len(c.Mounts) != 1 {
@@ -310,9 +281,8 @@ func (inst realizedInstance) matchesContainment(projectTree string) bool {
 	return sawZero && sawLoopback
 }
 
-// verifyRealizedConfig reads back the VM's realized config (see
-// realizedInstance) and fails closed unless it matches the containment
-// template's intent for projectTree. It returns the config it read.
+// verifyRealizedConfig fails closed unless the realized config matches the
+// containment template for projectTree.
 func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) (realizedInstance, error) {
 	var inst realizedInstance
 	res, err := l.Runner().Run(ctx, nil, "limactl", "list", "--json", l.Machine())
@@ -328,8 +298,7 @@ func (l *Lima) verifyRealizedConfig(ctx context.Context, projectTree string) (re
 	return inst, nil
 }
 
-// vmStatus returns this VM's status field from `limactl list`, or "" if the
-// VM is not listed at all.
+// vmStatus returns "" if the VM is not listed at all.
 func (l *Lima) vmStatus(ctx context.Context) (string, error) {
 	res, err := l.Runner().Run(ctx, nil, "limactl", "list", "--format", "{{.Name}} {{.Status}}")
 	if err != nil {
@@ -344,9 +313,6 @@ func (l *Lima) vmStatus(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// createVM renders the containment template to a temp file and creates the VM
-// from it. `limactl create` reads the config file path as a positional arg;
-// the temp file is removed afterward since lima reads it once at create time.
 func (l *Lima) createVM(ctx context.Context, cfg backend.Config) error {
 	out, err := RenderTemplate(cfg.ProjectTree, TemplateOpts{Disk: cfg.Disk, CPUs: cfg.CPUs, Memory: cfg.Memory, NestedVirt: cfg.NestedVirt})
 	if err != nil {
@@ -371,11 +337,8 @@ func (l *Lima) createVM(ctx context.Context, cfg backend.Config) error {
 	return nil
 }
 
-// ResolveRunUser resolves the in-VM run user/uid WITHOUT provisioning: it
-// probes the VM's status via the same read-only `limactl list` check ensureVM
-// uses, and errors if the VM is absent or not running, rather than creating,
-// starting, or reconfiguring it. For passive verbs (attach) that need the
-// jail transport but must never bring the VM up.
+// ResolveRunUser errors if the VM is absent or not running, rather than
+// creating, starting or reconfiguring it.
 func (l *Lima) ResolveRunUser(ctx context.Context) error {
 	status, err := l.vmStatus(ctx)
 	if err != nil {
@@ -390,8 +353,7 @@ func (l *Lima) ResolveRunUser(ctx context.Context) error {
 	return l.ReadRunUser(ctx)
 }
 
-// Teardown deletes the jail VM. Idempotent: a no-op if the VM is already
-// absent.
+// Teardown deletes the jail VM. Idempotent.
 func (l *Lima) Teardown(ctx context.Context) error {
 	status, err := l.vmStatus(ctx)
 	if err != nil {
@@ -406,10 +368,8 @@ func (l *Lima) Teardown(ctx context.Context) error {
 	return nil
 }
 
-// Stop powers the VM off but keeps its disk intact — a strictly less
-// destructive operation than Teardown (which deletes the VM). Idempotent: a
-// no-op if the VM is already absent; limactl tolerates stopping an
-// already-stopped VM, so no separate guard is needed for that case.
+// Stop powers the VM off but keeps its disk. Idempotent: limactl tolerates
+// stopping an already-stopped VM.
 func (l *Lima) Stop(ctx context.Context) error {
 	status, err := l.vmStatus(ctx)
 	if err != nil {
@@ -424,9 +384,8 @@ func (l *Lima) Stop(ctx context.Context) error {
 	return nil
 }
 
-// resolveHostAlias returns the IPv4 and IPv6 addresses host.lima.internal
-// resolves to FROM INSIDE the VM (both forward to the host's 127.0.0.1). It is
-// the Base ResolveHostAlias hook (and is exercised directly by lima_test.go).
+// resolveHostAlias resolves the alias FROM INSIDE the VM; both addresses
+// forward to the host's 127.0.0.1.
 func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) {
 	res, err := l.Runner().Run(ctx, nil, "limactl", "shell", l.Machine(), "getent", "ahosts", hostAlias)
 	if err != nil {
@@ -439,25 +398,20 @@ func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) 
 	return v4, v6, nil
 }
 
-// limaDNSChain is the nat-table chain Lima's guest boot script
-// (cidata boot.Linux/09-host-dns-setup.sh) fills with the DNAT that routes the
-// guest resolver address (192.168.5.3:53) to the host agent's DNS server on
-// <host alias>:<per-boot port>. It is inserted first in nat OUTPUT, so the
-// filter OUTPUT chain (LEVER_EGRESS) sees the rewritten destination.
+// limaDNSChain is the nat-table chain Lima's guest boot script fills with the
+// DNAT that routes the guest resolver (192.168.5.3:53) to the host agent's DNS
+// server on <host alias>:<per-boot port>. It is first in nat OUTPUT, so
+// LEVER_EGRESS sees the rewritten destination.
 const limaDNSChain = "LIMADNS"
 
-// resolverForward is the Base DNSForward hook (lever#34): it reads the live
-// LIMADNS chain and returns its DNAT targets on the alias, so ApplyEgress can
-// ACCEPT them ahead of the alias DROP in the open posture. The ports change on
-// every VM boot and lever re-applies egress on every `up`, so reading them at
-// apply time is exact. A missing chain (hostResolver disabled, or a Lima that
-// routes DNS differently) yields no targets rather than an error: the alias
-// DROP then stays as it was, and doctor's guest-DNS row reports the outcome.
+// resolverForward returns the DNS targets on the alias that ApplyEgress
+// ACCEPTs ahead of the alias DROP in the open posture. The LIMADNS ports
+// change on every VM boot, and egress is re-applied on every `up`, so reading
+// them at apply time is exact. A missing chain yields no targets rather than
+// an error: the alias DROP then stays as it was.
 //
-// With vmType vz (lever's default on macOS) LIMADNS is empty: the guest's
-// systemd-resolved talks to <alias>:53 directly. So when the chain yields no
-// targets, the resolver's upstream file is read, and an alias nameserver
-// gives the port-53 targets (egress.ParseResolverUpstreams).
+// With vmType vz LIMADNS is empty and systemd-resolved talks to <alias>:53
+// directly, so the resolver's upstream file is read instead.
 func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error) {
 	nat, natErr := l.Guest().RootRun(ctx, "iptables", "-t", "nat", "-S", limaDNSChain)
 	if natErr == nil {
@@ -469,13 +423,10 @@ func (l *Lima) resolverForward(ctx context.Context, aliasV4 string) ([]egress.DN
 	return limaDNSForwards(nat.Stdout, natErr == nil, res.Stdout, err == nil, aliasV4), nil
 }
 
-// limaResolvConf is systemd-resolved's upstream file, read when LIMADNS
-// yields no targets.
 const limaResolvConf = "/run/systemd/resolve/resolv.conf"
 
-// limaDNSForwards is resolverForward's decision on what it read, shared with
-// the warm-path probe (guest.DNSProbe): the LIMADNS targets when the chain
-// was read and has any, else the resolver upstream's, else none.
+// limaDNSForwards is shared with the warm-path probe (guest.DNSProbe) so both
+// decide identically.
 func limaDNSForwards(nat string, natOK bool, resolv string, resolvOK bool, aliasV4 string) []egress.DNSForward {
 	if natOK {
 		if targets := egress.ParseDNATTargets(nat, aliasV4); len(targets) > 0 {
@@ -498,10 +449,8 @@ const RebootAdvice = "`lever stop`, then `lever up`, reboots the VM and keeps th
 // create-time setting) and keeps the manager conversation.
 const RecreateAdvice = "`lever conversation backup`, then `lever destroy` (deletes the VM and the conversation) and `lever up`, then `lever conversation restore`"
 
-// ensureGuestProfile converges the guest on cfg.GuestProfile (lever#193):
-// the small profile's trimmed services and zram swap, or standard, which
-// undoes them. "" (no config) skips the step. What systemd refuses is a
-// warning; a failed write of lever's own files fails the bring-up.
+// ensureGuestProfile: what systemd refuses is a warning; a failed write of
+// lever's own files fails the bring-up.
 func (l *Lima) ensureGuestProfile(ctx context.Context, cfg backend.Config) error {
 	if cfg.GuestProfile == "" {
 		return nil
@@ -525,13 +474,10 @@ func (l *Lima) ensureGuestProfile(ctx context.Context, cfg backend.Config) error
 	return nil
 }
 
-// hardenGuest converges the guest's crash recovery (always) and its kernel
-// flavour (cfg.GuestKernel) on every bring-up, so an existing VM gets them
-// on its next apply or up (lever#179). `lever up` runs it too, whatever
-// the manager's state, because up builds its dependencies through EnsureUp
-// before it decides to resume or attach. A failed crash-recovery write
-// fails the bring-up; what only a reboot applies, and a kernel install
-// that could not run, are warnings: lever never reboots the guest itself.
+// hardenGuest converges the guest's crash recovery and kernel flavour on every
+// bring-up. A failed crash-recovery write fails the bring-up; what only a
+// reboot applies, and a kernel install that could not run, are warnings:
+// lever never reboots the guest itself.
 func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
 	warn := cfg.Warn
 	if warn == nil {
@@ -551,8 +497,7 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
 	}
 	kernel, err := l.Guest().EnsureGuestKernel(ctx, cfg.GuestKernel, opts)
 	if err != nil {
-		// The kernel step only installs a package and reads two paths; a
-		// failure to run it must not keep the jail down.
+		// A failure to run the kernel step must not keep the jail down.
 		warn("jail: warning: %v", err)
 	}
 	if cfg.GuestKernel == guest.GuestKernelHWE {
@@ -567,16 +512,15 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
 	return nil
 }
 
-// hweStamp is the host-side record of a guest_kernel hwe install that
-// failed (backend.Config.HWEFailStamp): the VM it failed in, by
-// /etc/machine-id (stable for the VM's life, new when it is recreated),
-// and when.
+// hweStamp records a failed guest_kernel hwe install. MachineID is the
+// guest's /etc/machine-id: stable for the VM's life, new when it is
+// recreated.
 type hweStamp struct {
 	MachineID string    `json:"machine_id"`
 	FailedAt  time.Time `json:"failed_at"`
 }
 
-// loadHWEStamp reads the stamp; a missing path or file is the zero stamp.
+// loadHWEStamp: a missing path or file is the zero stamp.
 func loadHWEStamp(path string) (hweStamp, error) {
 	if path == "" {
 		return hweStamp{}, nil
@@ -588,10 +532,7 @@ func loadHWEStamp(path string) (hweStamp, error) {
 	return s, nil
 }
 
-// keepHWEStamp converges the stamp on what the kernel step reported: a
-// failed install stamps the VM, an installed package removes the stamp,
-// and a skip on the stamp says what to do. Writes are best-effort
-// (warned): the stamp only saves time.
+// keepHWEStamp writes are best-effort (warned): the stamp only saves time.
 func (l *Lima) keepHWEStamp(path string, was hweStamp, k guest.KernelReport, warn func(string, ...any)) {
 	if path == "" {
 		return

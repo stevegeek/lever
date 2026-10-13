@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// tombstoneMargin: consumed/expired/revoked records are retained as replay
-// tombstones until this long PAST their expiry — never pruned on any other
-// clock condition, so a replay window cannot reopen under skew.
+// tombstoneMargin: finished records are kept as replay tombstones until this
+// long PAST their expiry, and pruned on no other condition, so a replay
+// window cannot reopen under clock skew.
 const tombstoneMargin = 48 * time.Hour
 
 // DirectiveStatus is a directive record's lifecycle state. The persisted and
@@ -52,8 +52,7 @@ type DirectiveState struct {
 }
 
 // DirectiveStore owns directive state under one mutex; every mutation is
-// written through to persist (the directives.json hook) before returning,
-// mirroring the broker's revocation persistence.
+// written through to persist before returning.
 type DirectiveStore struct {
 	mu      sync.Mutex
 	gens    map[string]int
@@ -78,11 +77,9 @@ func newDirectiveStore(st DirectiveState, persist func(DirectiveState) error, lo
 	return &DirectiveStore{gens: gens, recs: recs, persist: persist, log: log}
 }
 
-// persistLocked snapshots and writes through, returning any write-through
-// error. Caller holds s.mu. Callers that hand out a durability-sensitive
-// outcome (Submit, Consume) MUST roll back their in-memory mutation and
-// propagate this error rather than report success on an un-persisted state —
-// see the fail-closed rationale on each caller. Always logged regardless.
+// persistLocked requires s.mu held. Callers that hand out a
+// durability-sensitive outcome MUST roll back their in-memory mutation on
+// error rather than report success on an un-persisted state.
 func (s *DirectiveStore) persistLocked() error {
 	if s.persist == nil {
 		return nil
@@ -107,7 +104,6 @@ func (s *DirectiveStore) snapshotLocked() DirectiveState {
 	return DirectiveState{Generations: gens, Directives: recs}
 }
 
-// pruneLocked drops records past ExpiresAt+tombstoneMargin. Caller holds s.mu.
 func (s *DirectiveStore) pruneLocked(now time.Time) {
 	kept := s.recs[:0]
 	for _, r := range s.recs {
@@ -141,9 +137,8 @@ func (s *DirectiveStore) Submit(rec DirectiveRecord, now time.Time) error {
 	cp := rec
 	s.recs = append(s.recs, &cp)
 	if err := s.persistLocked(); err != nil {
-		// Fail closed: an un-persisted submission must not exist in memory
-		// either, or a restart before the next successful persist would
-		// silently drop it while callers believe it was accepted.
+		// Fail closed: a restart would silently drop an un-persisted
+		// submission the caller believes was accepted.
 		s.recs = s.recs[:len(s.recs)-1]
 		return fmt.Errorf("persist directive %q: %w", rec.ID, err)
 	}
@@ -152,8 +147,8 @@ func (s *DirectiveStore) Submit(rec DirectiveRecord, now time.Time) error {
 
 // Consume is the atomic compare-and-swap: exactly one caller can flip an
 // active, in-window directive targeted at (callerCN, current generation) to
-// consumed. EVERY failure mode returns (zero, false) — callers must emit an
-// identical opaque error for all of them; detail goes to the audit log only.
+// consumed. EVERY failure returns (zero, false); callers must emit one
+// identical opaque error for all of them, with detail in the audit log only.
 func (s *DirectiveStore) Consume(id, callerCN string, now time.Time) (DirectiveRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -166,10 +161,8 @@ func (s *DirectiveStore) Consume(id, callerCN string, now time.Time) (DirectiveR
 	r.State = DirectiveConsumed
 	r.ConsumedAt = now
 	if err := s.persistLocked(); err != nil {
-		// Fail closed: never hand out an action whose consumed-ness isn't
-		// durable — a restart before the next successful persist would
-		// replay it. Roll back to active so the operator can re-send and a
-		// later retry can still succeed.
+		// Fail closed: a restart would replay a consume that is not
+		// durable. Roll back so a later retry can still succeed.
 		r.State = DirectiveActive
 		r.ConsumedAt = time.Time{}
 		return DirectiveRecord{}, false
@@ -192,14 +185,10 @@ const (
 	PreviewCapped
 )
 
-// Preview is the non-consuming read of a pending directive (#17). Its gate is
-// EXACTLY Consume's — active, target CN, current generation, inside the time
-// window — so a preview can never show a directive that a consume at the same
-// instant would refuse, and it is no wider an oracle than consume is. It does
-// not flip State: the single-use compare-and-swap stays with Consume alone,
-// and a previewed directive is still consumable exactly once. The one mutation
-// is the persisted Previews count, capped at limit so the route cannot be
-// polled without bound.
+// Preview is the non-consuming read of a pending directive. Its gate is
+// EXACTLY Consume's, so it is no wider an oracle than consume. It never flips
+// State; its one mutation is the persisted Previews count, capped at limit so
+// the route cannot be polled without bound.
 func (s *DirectiveStore) Preview(id, callerCN string, now time.Time, limit int) (DirectiveRecord, PreviewOutcome) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,8 +203,8 @@ func (s *DirectiveStore) Preview(id, callerCN string, now time.Time, limit int) 
 	}
 	r.Previews++
 	if err := s.persistLocked(); err != nil {
-		// Fail closed, like Consume: content must not leave the broker on a
-		// count that is not durable, or a restart would reset the cap.
+		// Fail closed: a count that is not durable would reset the cap on
+		// restart.
 		r.Previews--
 		return DirectiveRecord{}, PreviewMiss
 	}
@@ -234,33 +223,28 @@ func (s *DirectiveStore) Check(id, callerCN string, now time.Time) (DirectiveSta
 	return effectiveStatus(r, now), true
 }
 
-// RevokeDirective marks an active directive revoked (tombstone retained).
-// persistErr is non-nil when the revocation could not be written to disk: it
-// then holds only in memory, and a broker restart inside the directive's
-// lifetime would bring the directive back active. The caller must say so.
+// RevokeDirective marks an active directive revoked. A non-nil persistErr
+// means the revocation holds only in memory and a restart would bring the
+// directive back; the caller must say so.
 func (s *DirectiveStore) RevokeDirective(id string) (revoked bool, persistErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := s.findLocked(id)
 	if r != nil && r.State == DirectiveRevoked {
-		// Revoked already, perhaps only in memory (an earlier write failed).
-		// Write it again: "revoke it again" is the remedy the operator is
-		// given for that case, and it must reach the disk.
+		// Perhaps revoked only in memory: "revoke it again" is the operator's
+		// remedy, so write it again.
 		return true, s.persistLocked()
 	}
 	if r == nil || r.State != DirectiveActive {
 		return false, nil
 	}
 	r.State = DirectiveRevoked
-	// Apply in memory regardless of persist outcome: refusing to revoke on a
-	// disk error would fail OPEN — an operator trying to invalidate a
-	// directive must not be told "still active" because the write-through
-	// failed.
+	// Applied in memory regardless of the write: refusing on a disk error
+	// would fail OPEN.
 	return true, s.persistLocked()
 }
 
-// List returns operator-facing copies with the statement/signature bytes
-// omitted and active-but-expired reported as "expired".
+// List returns operator-facing copies without statement and signature bytes.
 func (s *DirectiveStore) List(now time.Time) []DirectiveRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -281,9 +265,9 @@ func effectiveStatus(r *DirectiveRecord, now time.Time) DirectiveStatus {
 	return r.State
 }
 
-// BumpGeneration advances cn's enrolment generation (called on every
-// successful /enrol) and invalidates cn's still-active directives — a
-// recycled slug can never receive a predecessor's directive.
+// BumpGeneration advances cn's enrolment generation on every /enrol and
+// invalidates cn's active directives, so a recycled slug never receives a
+// predecessor's directive.
 func (s *DirectiveStore) BumpGeneration(cn string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -293,10 +277,8 @@ func (s *DirectiveStore) BumpGeneration(cn string) {
 			r.State = DirectiveInvalidated
 		}
 	}
-	// Apply in memory regardless of persist outcome (error already logged by
-	// persistLocked): refusing to bump/invalidate on a disk error would fail
-	// OPEN — a recycled slug re-enrolling must not retain a predecessor's
-	// still-active directive because the write-through failed.
+	// Applied in memory regardless of the write: refusing on a disk error
+	// would fail OPEN.
 	_ = s.persistLocked()
 }
 
@@ -307,14 +289,10 @@ func (s *DirectiveStore) Generation(cn string) int {
 	return s.gens[cn]
 }
 
-// EnsureGeneration establishes cn's generation at 1 if it has none yet (0),
-// WITHOUT bumping an existing one. Called on /renew: an agent that restarts
-// with a persisted cert (or whose cert predates this feature) refreshes via
-// /renew and never re-hits /enrol, so without this its generation stays 0 and
-// no operator directive can ever target it. Bumping is reserved for genuine
-// re-enrolment (BumpGeneration) — renew is the same identity at the same
-// enrolment epoch, so bumping here would invalidate the agent's own active
-// directives on every 12h refresh.
+// EnsureGeneration sets cn's generation to 1 if it is 0, without bumping. It
+// runs on /renew: an agent restarting with a persisted cert never re-hits
+// /enrol, and bumping on renew would invalidate its own directives every
+// refresh.
 func (s *DirectiveStore) EnsureGeneration(cn string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -322,7 +300,6 @@ func (s *DirectiveStore) EnsureGeneration(cn string) {
 		return
 	}
 	s.gens[cn] = 1
-	// Apply in memory regardless of persist outcome (error already logged): a
-	// transient disk error must not leave the agent unable to receive directives.
+	// A disk error must not leave the agent unable to receive directives.
 	_ = s.persistLocked()
 }

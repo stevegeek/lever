@@ -23,8 +23,8 @@ const (
 	// within the window.
 	ClaudeReadyPending
 	// ClaudeReadyNoHook: the pane is alive, but the managed settings carry
-	// no claude-ready hook (an image whose lever-agent predates it, or a
-	// boot that could not write the file): no marker will come.
+	// no claude-ready hook (an older image, or a boot that could not write
+	// the file): no marker will come.
 	ClaudeReadyNoHook
 	// ClaudeReadyPaneGone: tmux did not list a live pane in scion's agent
 	// window. The caller reads the pane again (HarnessAlive) to tell a dead
@@ -35,26 +35,19 @@ const (
 // ErrReadyShape is AwaitClaudeReady's answer for output it does not know.
 var ErrReadyShape = errors.New("waiting for claude's start: unexpected output")
 
-// readyStep is the poll interval of readyScript.
 const readyStep = 200 * time.Millisecond
 
-// readyScript waits in the container, for up to $2 polls readyStep apart,
-// until claude's tmux pane (scion:agent) is alive and the claude-ready
-// marker $1 equals wire.ReadyMarker for this container run and that pane.
-// It prints one word: ready, pending, nohook (the managed settings $4 do not
-// name the hook command $3) or gone (no live pane). $5 is the /proc root
-// (a test seam). It builds the run identity exactly as
-// agent.RunIdentity does: the first line of the boot id, and field 22 of
-// PID 1's stat, counted after the last ')'.
+// readyScript polls until claude's tmux pane is alive and the marker $1
+// equals wire.ReadyMarker for this container run and that pane, and prints
+// ready, pending, nohook or gone. $5 is the /proc root (a test seam). It must
+// build the run identity exactly as agent.RunIdentity does.
 //
-// Globbing stays off (set -f) to the end: the pane ids tmux prints are
-// split, never expanded.
+// Globbing stays off (set -f): the pane ids tmux prints are split, never
+// expanded.
 //
 // Everything it reads is the agent's: the marker is compared for equality,
-// never parsed; a symbolic link at the marker counts as no marker (a link
-// swapped in between the test and the read is the agent racing itself);
-// every read is bounded, and a FIFO that blocks one ends at the exec's
-// deadline.
+// never parsed; a symbolic link at the marker counts as no marker; every
+// read is bounded, and a FIFO that blocks one ends at the exec's deadline.
 const readyScript = `m=$1 n=$2 hook=$3 settings=$4 proc=$5
 read -r boot < "$proc/sys/kernel/random/boot_id" || exit 4
 st=$(head -c 1024 "$proc/1/stat") || exit 4
@@ -83,19 +76,14 @@ while :; do
   sleep 0.2
 done`
 
-// AwaitClaudeReady waits in the container, for up to window, until claude
-// has started a session in its tmux pane: the pane is alive and lever's
-// claude-ready hook (lever-agent claude-ready, a SessionStart hook in the
-// managed settings) has written the marker for this container run and that
-// pane (lever#188). One exec polls every readyStep, so the wait costs one
-// guest call per window. window must leave the exec its margin under
-// agentExecTimeout.
+// AwaitClaudeReady waits in the container, for up to window, until claude's
+// pane is alive and lever's claude-ready SessionStart hook has written the
+// marker for this container run and that pane. window must leave the exec
+// its margin under agentExecTimeout.
 //
-// The answer is the agent's word, like every AgentProbe answer: an agent
-// that writes the marker itself claims only that claude started, which a
-// live pane already claims. Only one of four fixed words leaves the
-// container; anything else is ErrReadyShape. ErrNoContainer when podman
-// knows no such container.
+// The answer is the agent's word: an agent that writes the marker itself
+// claims only that claude started, which a live pane already claims. Only
+// one of four fixed words leaves the container.
 func (p AgentProbe) AwaitClaudeReady(ctx context.Context, ref string, window time.Duration) (ClaudeReady, error) {
 	if err := checkRef(ref); err != nil {
 		return 0, fmt.Errorf("waiting for claude's start: %w", err)

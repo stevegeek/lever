@@ -1,11 +1,9 @@
 // Package registry constructs the selected containment backend and its jail
-// transport. It is the ONE place that names a concrete backend: the backends
-// table below maps a name to its declared guarantees, constructor and
-// jail-prefix function, and Candidates/ProfileFor/Names are views of that
-// table. Roadmap and rejected backends are documentation, not code — see
-// docs-site/_reference/backends.md, which also states the contract's
-// guarantee 0: a hypervisor boundary between the agent workload and the host
-// kernel is mandatory; no backend without it may be added here.
+// transport. It is the one place that names a concrete backend.
+//
+// A hypervisor boundary between the agent workload and the host kernel is
+// mandatory: no backend without it may be added here (see
+// docs-site/_reference/backends.md).
 package registry
 
 import (
@@ -22,23 +20,18 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// Default is the backend used when a caller supplies no name (e.g. the low-level
-// `lever provision`, which is flag-driven and has no config).
+// Default is the backend used when a caller supplies no name.
 const Default = "orbstack"
 
-// entry is what the registry knows about one backend.
 type entry struct {
 	// Profile is the guarantees the backend declares; its Name is the key.
 	Profile backend.Profile
-	// New builds the backend for a jail machine.
-	New func(r proc.Runner, machine string, opts common.Options) backend.Backend
-	// JailPrefix is the argv prefix that runs a command INSIDE the jail for an
-	// already-resolved identity — no EnsureUp state, no I/O.
+	New     func(r proc.Runner, machine string, opts common.Options) backend.Backend
+	// JailPrefix must need no EnsureUp state and do no I/O.
 	JailPrefix func(machine, user string) []string
 }
 
-// backends is the single table, in the order `lever backends` lists them;
-// adding a backend means one entry here.
+// backends is in the order `lever backends` lists them.
 var backends = []entry{
 	{
 		Profile: orbstack.Profile,
@@ -58,9 +51,8 @@ var backends = []entry{
 // registered; the message lists the valid names.
 var ErrUnknownBackend = errors.New("unknown backend")
 
-// lookup resolves a name (empty → Default) to its entry, or an error listing
-// the valid set so a config can never silently run a different backend than it
-// asked for.
+// lookup errors on an unknown name so a config can never silently run a
+// different backend than it asked for.
 func lookup(name string) (entry, error) {
 	if name == "" {
 		name = Default
@@ -90,9 +82,7 @@ func Names() []string {
 	return out
 }
 
-// Candidates lists every backend Lever can run with the guarantees it
-// declares, in table order: the substrate guarantee matrix `lever backends`
-// prints and config validation pins.
+// Candidates lists every backend's declared guarantees, in table order.
 func Candidates() []backend.Profile {
 	out := make([]backend.Profile, 0, len(backends))
 	for _, e := range backends {
@@ -109,8 +99,8 @@ func ProfileFor(name string) (backend.Profile, bool) {
 
 // Select builds the named backend for a jail machine. An empty name uses
 // Default. The host-network escape hatch is read from the environment here
-// (and in JailRunner) — the only two construction sites — so backends and
-// transports stay pure.
+// and in JailRunner, the only construction sites, so backends and transports
+// stay pure.
 func Select(name string, r proc.Runner, machine string) (backend.Backend, error) {
 	e, err := lookup(name)
 	if err != nil {
@@ -120,10 +110,9 @@ func Select(name string, r proc.Runner, machine string) (backend.Backend, error)
 }
 
 // JailArgv returns the argv prefix that runs a command INSIDE the jail for the
-// named backend, from an already-resolved identity. The remote proxy's
-// jail-dial transport needs the bare prefix rather than a JailRunner: it execs
-// `<prefix> nc host port` and adapts the child's pipes to a net.Conn, which
-// proc.Runner's run-to-completion, capture-the-output contract cannot express.
+// named backend, from an already-resolved identity. For callers that need a
+// streaming child (e.g. `<prefix> nc host port` as a net.Conn), which
+// proc.Runner's run-to-completion contract cannot express.
 func JailArgv(name, machine, user string) ([]string, error) {
 	e, err := lookup(name)
 	if err != nil {
@@ -134,10 +123,6 @@ func JailArgv(name, machine, user string) ([]string, error) {
 
 // JailRunner rebuilds the command transport into a jail from its already-
 // resolved identity (machine, run user, uid) WITHOUT needing EnsureUp state.
-// The broker uses this for host-side worker dispatch: `lever apply` resolved the
-// identity and passed it via env; the broker process reconstructs the transport
-// here. The host-network escape hatch is read here, at construction, so the
-// transport itself stays pure.
 func JailRunner(name string, host proc.Runner, machine, user, uid string) (proc.Runner, error) {
 	argv, err := JailArgv(name, machine, user)
 	if err != nil {

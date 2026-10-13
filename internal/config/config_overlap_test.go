@@ -7,7 +7,6 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// testApp builds a minimal valid two-worker App whose dirs the caller chooses.
 func testApp(t *testing.T, dirA, dirB string) *App {
 	t.Helper()
 	a := &App{Name: "demo", Backend: "orbstack", Tree: t.TempDir()}
@@ -16,12 +15,9 @@ func testApp(t *testing.T, dirA, dirB string) *App {
 	return a
 }
 
-// Sibling isolation rests on each worker mounting only its own subtree. Two
-// workers sharing a subtree, or one mounting an ancestor of another, silently
-// voids that for the pair: the outer worker reads and writes the inner one's
-// whole workspace — including the fresh, unspent enrolment ticket the broker
-// stages at <dir>/.lever/bootstrap.json on every resume, which it can redeem
-// first and so enrol as the inner worker's CN.
+// Sibling isolation rests on each worker mounting only its own subtree: with
+// overlapping dirs the outer worker reads and writes the inner one's whole
+// workspace.
 func TestValidateRejectsOverlappingWorkerDirs(t *testing.T) {
 	for _, tc := range []struct{ name, a, b string }{
 		{"identical dirs", "workers/x", "workers/x"},
@@ -59,9 +55,8 @@ func TestValidateAllowsDisjointWorkerDirs(t *testing.T) {
 }
 
 // "manager" is the alias the directive channel resolves to the manager
-// (broker.resolveDirectiveAgent), whatever broker.manager_identity is set to. A
-// worker allowed to take that name is silently shadowed: an operator directive
-// aimed at the worker is delivered to the most privileged agent instead.
+// whatever broker.manager_identity is, so a directive aimed at a worker of
+// that name would reach the manager.
 func TestValidateRejectsAWorkerNamedManager(t *testing.T) {
 	app := testApp(t, "workers/x", "workers/y")
 	app.Broker.ManagerIdentity = "mgr"

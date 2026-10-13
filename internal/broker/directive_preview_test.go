@@ -1,10 +1,8 @@
 package broker
 
-// directive_preview_test.go exercises /directive/preview (#17): the
-// non-consuming read of a pending directive by its target. It pins that the
-// gate is consume's gate (byte-identical opaque 404 for every miss), that a
-// preview never consumes and never looks like a consume, the per-directive
-// cap, and the audit lines.
+// Tests for /directive/preview, the non-consuming read of a pending directive
+// by its target: its gate is consume's gate (byte-identical opaque 404 for
+// every miss), and a preview never consumes and never looks like a consume.
 
 import (
 	"bytes"
@@ -22,8 +20,6 @@ import (
 
 const previewPath = "/directive/preview"
 
-// previewBroker is directiveTestBroker plus a captured broker audit and a
-// directive audit log on disk.
 func previewBroker(t *testing.T) (*Broker, *bytes.Buffer, string) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -42,7 +38,6 @@ func previewBroker(t *testing.T) (*Broker, *bytes.Buffer, string) {
 	return New(cfg), &buf, logPath
 }
 
-// dirAuditEvents returns the directive audit log's lines, decoded.
 func dirAuditEvents(t *testing.T, path string) []map[string]any {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -423,8 +418,6 @@ func TestPreviewSharesDirectiveRateLimit(t *testing.T) {
 		t.Fatalf("call over the limit = %d %s, want 429", status, body)
 	}
 }
-
-// ---- store ----
 
 func TestStorePreviewGateMatchesConsumeAndNeverChangesState(t *testing.T) {
 	now := time.Now()

@@ -270,8 +270,6 @@ func TestConcurrentWritersDuringRotation(t *testing.T) {
 		}(l)
 	}
 	wg.Wait()
-	// The last ~RotateCap of appends must all be present: count the newest
-	// ones found, in append order is not known, so check totals instead.
 	c, err := Open(dir, t0)
 	if err != nil {
 		t.Fatal(err)

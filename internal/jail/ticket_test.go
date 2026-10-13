@@ -155,8 +155,7 @@ func TestRemoveWorkerTicketScriptWithRealShell(t *testing.T) {
 	}
 }
 
-// RemoveWorkerTicket runs the fixed script through the jail runner with the
-// worker as its positional, and refuses a name that is not a valid worker.
+// RemoveWorkerTicket refuses a name that is not a valid worker.
 func TestRemoveWorkerTicketArgv(t *testing.T) {
 	host := proc.NewFakeRunner()
 	host.Script("orb", proc.Result{})

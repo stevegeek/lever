@@ -16,8 +16,6 @@ import (
 	"time"
 )
 
-// serverTLSConfig builds a serving config for "example.test" over the
-// production path (rotating cert source + ServerTLSConfigSource).
 func serverTLSConfig(t *testing.T, c *CA, onLapse LapseFunc) *tls.Config {
 	t.Helper()
 	src, err := c.NewServerCertSource("example.test", []string{"example.test"}, nil)
@@ -36,9 +34,8 @@ func serverFor(t *testing.T, c *CA, h http.Handler) *httptest.Server {
 	return srv
 }
 
-// TestVerifyIfGivenAllowsCertlessAndProvesIdentityWhenGiven exercises both
-// paths against one server: certless requests reach the handler (RequireAgent
-// returns an error -> 401), and cert-bearing requests recover the CN.
+// One server: certless requests reach the handler (RequireAgent -> 401) and
+// cert-bearing requests recover the CN.
 func TestVerifyIfGivenAllowsCertlessAndProvesIdentityWhenGiven(t *testing.T) {
 	c, err := Generate()
 	if err != nil {
@@ -169,7 +166,6 @@ func caSignedCert(t *testing.T, c *CA, cn string, notBefore, notAfter time.Time,
 	return pair
 }
 
-// lapseServerFor is serverFor with a lapse hook wired.
 func lapseServerFor(t *testing.T, c *CA, onLapse LapseFunc) *httptest.Server {
 	t.Helper()
 	cfg := serverTLSConfig(t, c, onLapse)
@@ -179,10 +175,8 @@ func lapseServerFor(t *testing.T, c *CA, onLapse LapseFunc) *httptest.Server {
 	return srv
 }
 
-// TestLapseHookFiresOnlyForOurExpiredCert: the handshake must REJECT an
-// expired leaf in every case; the hook must fire only when the leaf is OUR
-// CA's, otherwise-valid, merely expired — never for a foreign CA's cert
-// (expired or not) and never for a valid cert.
+// The handshake rejects every expired leaf; the hook fires only for our
+// CA's otherwise-valid, merely expired cert.
 func TestLapseHookFiresOnlyForOurExpiredCert(t *testing.T) {
 	c, err := Generate()
 	if err != nil {

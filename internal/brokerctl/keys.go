@@ -10,9 +10,9 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// EnsureKeys loads the CA + capability-signing root keypair from the state dir,
-// generating and persisting them (0600 secrets) on first use. Reused across
-// restarts so issued agent certs survive a broker restart.
+// EnsureKeys loads the CA and capability-signing keypair from the state dir,
+// generating them (0600) on first use, so issued agent certs survive a
+// broker restart.
 func EnsureKeys(st state.State) (token.KeyPair, *ca.CA, error) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return token.KeyPair{}, nil, fmt.Errorf("brokerctl: state dir: %w", err)
@@ -50,8 +50,7 @@ func EnsureKeys(st state.State) (token.KeyPair, *ca.CA, error) {
 	return kp, caInst, nil
 }
 
-// loadOrGenerate returns load() when keyPath exists, else generate() — which
-// is expected to persist what it makes so the next call loads it.
+// loadOrGenerate expects generate to persist what it makes.
 func loadOrGenerate[T any](keyPath string, load, generate func() (T, error)) (T, error) {
 	if _, err := os.Stat(keyPath); errors.Is(err, os.ErrNotExist) {
 		return generate()

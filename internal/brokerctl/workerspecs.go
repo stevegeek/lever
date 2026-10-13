@@ -10,13 +10,10 @@ import (
 	"github.com/stevegeek/lever/internal/jail"
 )
 
-// WorkerSpecs derives the path-authoritative worker descriptions the broker needs
-// from config. jailMount is the in-jail mount dest (e.g. /lever); jailUID the
-// run user's uid in the jail, which places each worker's ticket directory
-// under that user's runtime dir (jail.WorkerTicketDir) — "" leaves TicketDir
-// empty and the worker undispatchable, which is the fail-closed shape for a
-// broker with no jail wired. The manager never supplies any of these; they
-// are config-authoritative.
+// WorkerSpecs derives the config-authoritative worker descriptions the broker
+// needs; the manager never supplies any of them. jailUID places each
+// worker's ticket directory under the run user's runtime dir; "" leaves it
+// empty and the worker undispatchable (fail closed with no jail wired).
 func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec {
 	specs := make([]broker.WorkerSpec, 0, len(app.Workers))
 	for _, g := range app.Workers {
@@ -31,8 +28,7 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 			TicketDir:       ticketDir,
 			Image:           app.WorkerImage(g),
 			Model:           app.WorkerModel(g), // own model:, else the manager's; empty ⇒ scion decides
-			// Own instructions_file only — never the manager's (see
-			// config.WorkerInstructionsPath). Content is read at dispatch.
+			// Own instructions_file only, never the manager's. Read at dispatch.
 			InstructionsPath: app.WorkerInstructionsPath(g),
 			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 			Recyclable:       g.Recyclable,
@@ -49,8 +45,8 @@ func workerBrokerURL(host string, port int) string {
 	return fmt.Sprintf("https://%s:%d", host, port)
 }
 
-// sharedMounts is worker's shared_folders plan as the broker mounts it,
-// built with the same function as the manager's (apply.SharedVolumes).
+// sharedMounts uses the same function as the manager's
+// (apply.SharedVolumes).
 func sharedMounts(app *config.App, jailMount, worker string) []broker.SharedMount {
 	plan := app.SharedMountsFor(worker)
 	if len(plan) == 0 {

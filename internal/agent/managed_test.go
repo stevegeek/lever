@@ -14,7 +14,6 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// managedPath is a managed-settings path under a fresh temp "/etc".
 func managedPath(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(t.TempDir(), "claude-code", "managed-settings.json")
@@ -33,7 +32,6 @@ func readManaged(t *testing.T, path string) map[string]any {
 	return m
 }
 
-// sessionStartCommands lists every SessionStart hook command with its matcher.
 func sessionStartCommands(t *testing.T, m map[string]any) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -232,7 +230,6 @@ func TestAfterCompactOutput(t *testing.T) {
 	}
 }
 
-// writeBootstrapClaude rewrites c's bootstrap with a claude block.
 func writeBootstrapClaude(t *testing.T, path string, claude *wire.Claude) {
 	t.Helper()
 	bs, err := LoadBootstrap(path)
@@ -267,8 +264,8 @@ func TestBootWritesManagedSettingsFromBootstrap(t *testing.T) {
 	assertOnlyAgentViewOff(t, c.ManagedSettingsPath)
 }
 
-// The manager's envelope is in the tree it writes: boot drops a block the
-// host would never have staged, logs it, and still boots the agent.
+// The manager's envelope is in a tree it writes: boot drops an invalid block,
+// logs it, and still boots the agent.
 func TestBootDropsInvalidClaudeBlock(t *testing.T) {
 	env := testBroker(t)
 	c := baseBootConfig(t, env)

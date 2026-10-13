@@ -7,25 +7,19 @@ import (
 	"unicode"
 )
 
-// The limits of one clip, for dictation (remote.voice.max_seconds) and for
-// lever-tool-whisper (-max-seconds) alike.
+// The limits of one clip, for dictation and lever-tool-whisper alike.
 const (
 	DefaultMaxSeconds = 300
 	MaxMaxSeconds     = 600
-	// DefaultAgentMaxSeconds is lever-tool-whisper's -agent-max-seconds
-	// when unset (and -max-seconds is not smaller): the longest clip of the
-	// agent operation transcribe, which bounds how long one agent clip can
-	// hold the GPU ahead of a waiting dictation clip.
+	// DefaultAgentMaxSeconds is -agent-max-seconds when unset: it bounds how
+	// long one agent clip can hold the GPU ahead of a waiting dictation clip.
 	DefaultAgentMaxSeconds = 120
-	// MaxVocabulary bounds the vocabulary as a prompt, in bytes (Whisper
-	// reads a short prompt; the rest would be cut anyway).
+	// MaxVocabulary bounds the vocabulary prompt in bytes; Whisper reads a
+	// short prompt and would cut the rest anyway.
 	MaxVocabulary = 800
-	// maxWord bounds one vocabulary entry, in bytes.
-	maxWord = 64
+	maxWord       = 64
 )
 
-// languageRE is a Whisper language code: two or three lowercase letters
-// ("en", "de", "haw").
 var languageRE = regexp.MustCompile(`^[a-z]{2,3}$`)
 
 // CheckLanguage accepts "" (detect the language per clip) or a Whisper
@@ -38,9 +32,8 @@ func CheckLanguage(lang string) error {
 }
 
 // ParseVocabulary turns a comma list of words Whisper should expect (names,
-// jargon) into its prompt: the words, trimmed, joined with ", ". Each entry
-// is one word or short phrase of 1 to 64 bytes with no control character,
-// and the prompt stays within MaxVocabulary bytes. "" is no prompt.
+// jargon) into its prompt. Each entry is 1 to 64 bytes with no control
+// character, and the prompt stays within MaxVocabulary. "" is no prompt.
 func ParseVocabulary(list string) (string, error) {
 	if strings.TrimSpace(list) == "" {
 		return "", nil
@@ -60,7 +53,6 @@ func ParseVocabulary(list string) (string, error) {
 	return prompt, nil
 }
 
-// CheckMaxSeconds accepts 1 to MaxMaxSeconds.
 func CheckMaxSeconds(n int) error {
 	if n < 1 || n > MaxMaxSeconds {
 		return fmt.Errorf("max seconds %d; use 1 to %d", n, MaxMaxSeconds)
@@ -76,8 +68,8 @@ func CheckAgentMaxSeconds(n, maxSeconds int) error {
 	return nil
 }
 
-// AgentMaxSeconds is -agent-max-seconds as the tool runs it: n when set
-// (n > 0), else DefaultAgentMaxSeconds, never more than maxSeconds.
+// AgentMaxSeconds is n when set, else DefaultAgentMaxSeconds, never more than
+// maxSeconds.
 func AgentMaxSeconds(n, maxSeconds int) int {
 	if n <= 0 {
 		n = DefaultAgentMaxSeconds
@@ -85,7 +77,6 @@ func AgentMaxSeconds(n, maxSeconds int) int {
 	return min(n, maxSeconds)
 }
 
-// CheckSpeed accepts a speaking rate of MinSpeed to MaxSpeed.
 func CheckSpeed(s float64) error {
 	if !(s >= MinSpeed && s <= MaxSpeed) {
 		return fmt.Errorf("speed %v; use %.1f to %.1f (1 = the model's own pace)", s, MinSpeed, MaxSpeed)
@@ -93,7 +84,6 @@ func CheckSpeed(s float64) error {
 	return nil
 }
 
-// CheckThreads accepts 1 to MaxThreads.
 func CheckThreads(n int) error {
 	if n < 1 || n > MaxThreads {
 		return fmt.Errorf("threads %d; use 1 to %d", n, MaxThreads)
@@ -101,7 +91,6 @@ func CheckThreads(n int) error {
 	return nil
 }
 
-// CheckSpeakMaxChars accepts MinSpeakMaxChars to MaxSpeakMaxChars.
 func CheckSpeakMaxChars(n int) error {
 	if n < MinSpeakMaxChars || n > MaxSpeakMaxChars {
 		return fmt.Errorf("max chars %d; use %d to %d", n, MinSpeakMaxChars, MaxSpeakMaxChars)

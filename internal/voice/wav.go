@@ -9,37 +9,32 @@ import (
 
 // The one audio format lever hands whisper-server: PCM s16le, 16 kHz, mono,
 // in the canonical 44-byte WAV header (what the chat page encodes). The
-// remote proxy checks a dictation clip with CheckWAV, and lever-tool-whisper
-// checks it again on its socket, and checks an agent's file the same way.
+// proxy and the tool both check clips with CheckWAV.
 const (
 	SampleRate     = 16000
 	BytesPerSecond = 2 * SampleRate // s16le mono
 	WAVHeaderLen   = 44
-	// MinClipBytes is a tenth of a second of samples: anything shorter holds
-	// no word.
+	// MinClipBytes is a tenth of a second: anything shorter holds no word.
 	MinClipBytes = BytesPerSecond / 10
-	// MaxText is the chat message limit (scion's messages.MaxMessageLength,
-	// chatcore.js MAX_MESSAGE), in characters: CleanText cuts to it.
+	// MaxText is the chat message limit (scion's
+	// messages.MaxMessageLength, chatcore.js MAX_MESSAGE): CleanText cuts to
+	// it.
 	MaxText = 16000
 )
 
-// Refusal words of CheckWAV.
 const (
 	WordBadAudio = "bad-audio"
 	WordTooLong  = "too-long"
 )
 
-// MaxClipBytes is the largest canonical clip of maxSeconds: the header and
-// the samples.
 func MaxClipBytes(maxSeconds int) int64 {
 	return WAVHeaderLen + int64(BytesPerSecond)*int64(maxSeconds)
 }
 
-// CheckWAV checks a clip: the canonical 44-byte header of PCM s16le, 16 kHz,
-// mono, every header field exact, the sizes matching the body, at least
-// MinClipBytes of samples and at most maxSeconds. whisper.cpp then parses
-// only a header lever has checked byte for byte. It answers the clip's
-// length in seconds, or a refusal word (WordBadAudio, WordTooLong).
+// CheckWAV checks a clip: the canonical 44-byte header with every field
+// exact, sizes matching the body, at least MinClipBytes and at most
+// maxSeconds, so whisper.cpp parses only a header lever has checked byte for
+// byte. It returns the length in seconds, or a refusal word.
 func CheckWAV(b []byte, maxSeconds int) (float64, string) {
 	if len(b) < WAVHeaderLen+MinClipBytes {
 		return 0, WordBadAudio
@@ -64,8 +59,8 @@ func CheckWAV(b []byte, maxSeconds int) (float64, string) {
 	return float64(data) / BytesPerSecond, ""
 }
 
-// CanonicalWAV is a silent canonical clip of n samples: the format CheckWAV
-// accepts (tests in several packages build their clips with it).
+// CanonicalWAV is a silent clip of n samples in the format CheckWAV accepts
+// (tests in several packages use it).
 func CanonicalWAV(n int) []byte {
 	b := make([]byte, WAVHeaderLen+2*n)
 	le := binary.LittleEndian
@@ -84,13 +79,12 @@ func CanonicalWAV(n int) []byte {
 	return b
 }
 
-// CleanText is a transcript as a person or an agent gets it: valid UTF-8,
-// Whisper's non-speech markers removed, trimmed, and cut to MaxText.
+// CleanText is a transcript as a person or agent gets it: valid UTF-8,
+// Whisper's non-speech markers removed, trimmed, cut to MaxText.
 func CleanText(s string) string {
 	s = strings.ToValidUTF8(s, "�")
-	// Whisper writes non-speech as markers ([BLANK_AUDIO], [MUSIC],
-	// (silence)); they are not words anyone said. Only known ones are
-	// removed, so dictated code such as a[i] or [TODO] stays.
+	// Only known non-speech markers are removed, so dictated code such as
+	// a[i] or [TODO] stays.
 	if whisperMarker.MatchString(s) {
 		s = strings.TrimSpace(spaceRun.ReplaceAllString(whisperMarker.ReplaceAllString(s, " "), " "))
 	}
@@ -102,9 +96,7 @@ func CleanText(s string) string {
 	return strings.TrimSpace(string(r[:MaxText]))
 }
 
-// whisperMarker is one of Whisper's known non-speech markers, in square
-// brackets or parentheses, with the spaces around it.
 var whisperMarker = regexp.MustCompile(`(?i)[ \t]*[\[(]\s*(blank_audio|music|silence|noise|inaudible|applause|laughter|sound effect|sound-effect|no speech)\s*[\])][ \t]*`)
 
-// spaceRun is a run of spaces or tabs (line breaks are kept).
+// spaceRun: line breaks are kept.
 var spaceRun = regexp.MustCompile(`[ \t]{2,}`)

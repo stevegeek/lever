@@ -1,21 +1,18 @@
 // Package state is the host-side instance state directory: the .lever-state
-// layout beside lever.yaml and the file helpers every host-side component
-// (brokerctl, remoteproxy, the cli) reads and writes it with — JSON state,
-// 0600 secrets, pid files and the remote-proxy stamp. It holds no daemon
-// logic of its own.
+// layout beside lever.yaml and the file helpers host components use on it
+// (JSON state, 0600 secrets, pid files, the remote-proxy stamp). It holds no
+// daemon logic.
 package state
 
 import "path/filepath"
 
-// State is the host-side instance state directory (keys, revocation, pids,
-// logs, secrets).
+// State is the host-side instance state directory.
 type State struct{ Dir string }
 
 // DirName is the state directory's name beside lever.yaml. User-facing text
-// that names the directory should use it rather than a literal.
+// should use it rather than a literal.
 const DirName = ".lever-state"
 
-// ForConfig returns the DirName directory beside the config.
 func ForConfig(configDir string) State {
 	return State{Dir: filepath.Join(configDir, DirName)}
 }
@@ -37,9 +34,9 @@ func (s State) RemotePID() string     { return filepath.Join(s.Dir, "remote.pid"
 func (s State) RemoteLog() string     { return filepath.Join(s.Dir, "remote.log") }
 func (s State) RemoteAudit() string   { return filepath.Join(s.Dir, "remote-audit.jsonl") }
 
-// ChatLedger is the remote proxy's record of verified web chat posts (package
-// chatledger), a directory with one file per login: written by the proxy
-// only, read by the broker only.
+// ChatLedger is the remote proxy's record of verified web chat posts
+// (chatledger), one file per login: written by the proxy only, read by the
+// broker only.
 func (s State) ChatLedger() string { return filepath.Join(s.Dir, "chat-ledger") }
 
 // ChatVerified is the broker's record of chat messages already verified (one
@@ -47,13 +44,11 @@ func (s State) ChatLedger() string { return filepath.Join(s.Dir, "chat-ledger") 
 func (s State) ChatVerified() string { return filepath.Join(s.Dir, "chat-verified.jsonl") }
 
 // SentLedger is the broker's record of every message lever sends to an agent
-// (package sentledger), a directory with one file per recipient and kind:
-// written and read by the broker only.
+// (sentledger): written and read by the broker only.
 func (s State) SentLedger() string { return filepath.Join(s.Dir, "sent-ledger") }
 
 // AgentLedger is the broker's record of messages agents were authorized to
-// send to contacts, and of the hub message each was shown as (package
-// agentledger): written and read by the broker only.
+// send to contacts (agentledger): written and read by the broker only.
 func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger") }
 
 // FilesLedger is the record of the chat page's file exchange (package
@@ -61,15 +56,13 @@ func (s State) AgentLedger() string { return filepath.Join(s.Dir, "agent-ledger"
 func (s State) FilesLedger() string { return filepath.Join(s.Dir, "files-ledger") }
 
 // VoiceModels holds the pinned Whisper models `lever voice fetch` downloads
-// when no lever-tool-whisper entry names its own -models (0700, each file
-// 0600); a tool whose -models points here checks the model before each
-// start of its whisper-server child. Never audio or a transcript.
+// (0700, each file 0600); a tool whose -models points here checks the model
+// before each whisper-server start. Never audio or a transcript.
 func (s State) VoiceModels() string { return filepath.Join(s.Dir, "voice-models") }
 
-// Sessions is the record of each agent's last fresh session start and the
-// skill text on disk for it then (package sessionrec): written by apply (the
-// manager) and the broker (workers), read by the remote proxy before it lets
-// a contact post to an agent.
+// Sessions records each agent's last fresh session start and the skill text
+// then (sessionrec): written by apply (manager) and the broker (workers),
+// read by the remote proxy before it lets a contact post to an agent.
 func (s State) Sessions() string { return filepath.Join(s.Dir, "sessions.jsonl") }
 
 // OperatorSock is the broker's UNIX socket for `lever msg send` (0600,
@@ -84,34 +77,31 @@ func (s State) DirectiveAudit() string { return filepath.Join(s.Dir, "directives
 func (s State) Skills() string        { return filepath.Join(s.Dir, "skills.json") }
 func (s State) SkillsAdopted() string { return filepath.Join(s.Dir, "skills-adopted.json") }
 
-// RemoteStamp records the binary version + remote config a RUNNING proxy was
+// RemoteStamp records the version and remote config a running proxy was
 // started with, so apply can tell "already serving" from "serving something
-// else". The broker answers that question over HTTP (/epoch); the proxy has no
-// such endpoint and must not grow one — it fronts the hub, so any listener of
-// its own would be reachable by whatever reaches the proxy. A file beside
-// remote.pid keeps the answer host-side, where only lever writes it.
+// else". The proxy must not grow an HTTP endpoint for this (unlike the
+// broker's /epoch): it fronts the hub, so any listener of its own would be
+// reachable by whatever reaches the proxy. A host-side file only lever
+// writes keeps the answer private.
 func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
 
 // GuestBoot records the jail guest boot id in which lever last saw the
-// manager live (apply.GuestBoot), so a VM restart under a "running" record
-// can be recognised (lever#179).
+// manager live, so a VM restart under a "running" record is recognised.
 func (s State) GuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json") }
 
-// HWEFailStamp records that the guest_kernel hwe install failed in the
-// jail VM, keyed by the guest's /etc/machine-id (lever#179): while it names
-// the VM and the egress posture is closed, apply and up warn instead of
-// running apt again. Deleting it makes the next bring-up try again.
+// HWEFailStamp records that the guest_kernel hwe install failed in the jail
+// VM, keyed by its /etc/machine-id: while it names the VM and egress is
+// closed, apply and up warn instead of running apt again. Deleting it
+// retries.
 func (s State) HWEFailStamp() string { return filepath.Join(s.Dir, "hwe-install-failed.json") }
 
 // PushDir holds the remote proxy's Web Push key, subscriptions and last
 // send result (remote.push), each 0600.
 func (s State) PushDir() string { return filepath.Join(s.Dir, "push") }
 
-// ToolLogDir is the directory holding per-supervised-tool logs.
 func (s State) ToolLogDir() string { return filepath.Join(s.Dir, "tool-logs") }
 
-// BringupLogDir holds the records of the last bring-ups (`lever apply`,
-// `lever up`): one JSON-lines file per run, and LastBringup (lever#185).
+// BringupLogDir holds one JSON-lines record per bring-up, and LastBringup.
 func (s State) BringupLogDir() string { return filepath.Join(s.Dir, "logs") }
 
 // LastBringup is the summary of the last bring-up, which doctor shows.

@@ -20,60 +20,53 @@ type DelegateGrant struct {
 	To   []string `yaml:"to"`
 }
 
-// Op declares one operation of a first-party tool. CaveatParam, when set, is a
-// DECLARED GUARD: the broker validates the tool-shipped map equals it at
-// registration (the stored value remains the tool's). Empty ⇒ accept whatever
-// the tool ships.
+// Op declares one operation of a first-party tool. CaveatParam, when set, is
+// a guard: the broker checks at registration that the tool-shipped map
+// equals it. Empty accepts whatever the tool ships.
 type Op struct {
 	Name        string            `yaml:"name"`
 	CaveatParam map[string]string `yaml:"caveat_param"`
 	// Params optionally declares the operation's argument names. When set,
-	// the broker rejects capability-mint constraints on any other key AT MINT
-	// TIME (#21) — a mistyped constraint key otherwise mints a strictly
-	// over-narrowed token that fails closed only at call time, far from the
-	// mistake. Empty keeps the permissive behavior (any key is a constraint).
+	// the broker rejects mint constraints on any other key at mint time; a
+	// mistyped key would otherwise mint a token that fails closed only at
+	// call time, far from the mistake.
 	Params []string `yaml:"params"`
 }
 
-// Tool declares a tool the broker gates behind its mTLS tool routes (/mcp/<name>/): either a
-// first-party (capability-aware) subprocess the broker supervises, or — with
-// External — an already-running host MCP server the broker fronts.
+// Tool declares a tool the broker gates behind its mTLS tool routes
+// (/mcp/<name>/): a first-party subprocess the broker supervises, or, with
+// External, an already-running host MCP server the broker fronts.
 type Tool struct {
 	Name          string              `yaml:"name"`
 	Command       []string            `yaml:"command"`
 	Backend       string              `yaml:"backend"`
 	Operations    []Op                `yaml:"operations"`
 	AllowedValues map[string][]string `yaml:"allowed_values"`
-	// External marks an already-running host MCP server the broker fronts but
-	// does NOT spawn (its lifecycle — and any TCC/Automation grant — stays with
-	// the user session). It is registered from config with FirstParty=false, so
-	// the broker enforces the rules and strips the capability token. Command
-	// must be empty; Backend is the server's own listen address,
-	// host:port[/path], loopback unless AllowNonLoopback.
+	// External marks a host MCP server the broker fronts but does not spawn
+	// (its lifecycle and any TCC grant stay with the user session). The broker
+	// enforces the rules and strips the capability token. Command must be
+	// empty; Backend is host:port[/path], loopback unless AllowNonLoopback.
 	External bool `yaml:"external"`
-	// Gate selects the capability grain (fine|coarse, default fine). Only
-	// valid on an external tool.
+	// Gate is only valid on an external tool.
 	Gate Gate `yaml:"gate"`
 	// AllowNonLoopback permits an external Backend beyond a literal loopback
-	// IP. The broker proxies HOST-side, so a non-loopback backend hands the
-	// jailed agent a path to another host THROUGH the broker, bypassing the
-	// jail's LAN-drop egress — leave this off unless that is exactly intended.
+	// IP. The broker proxies host-side, so a non-loopback backend gives the
+	// jailed agent a path to another host through the broker, bypassing the
+	// jail's LAN-drop egress.
 	AllowNonLoopback bool `yaml:"allow_non_loopback"`
 }
 
-// EffectiveGate resolves a tool's capability grain: the declared gate, or
-// GateFine when unset.
+// EffectiveGate is the declared gate, or GateFine when unset.
 func (t Tool) EffectiveGate() Gate {
 	return cmp.Or(t.Gate, GateFine)
 }
 
 // LLMAuthMode selects how an agent authenticates to the Anthropic API.
-//   - api-key (the default): the container holds only a capability(llm) token
-//     and reaches the model through the broker /llm proxy, which injects the
-//     real Console key host-side — the real key never enters the container.
+//   - api-key (the default): the container holds only a capability token and
+//     reaches the model through the broker /llm proxy, which injects the real
+//     key host-side; the real key never enters the container.
 //   - subscription: the container reaches api.anthropic.com directly with the
-//     owner's OAuth credential (a dev/personal opt-in — the real token is
-//     projected into the container).
+//     owner's OAuth credential, which is projected into the container.
 type LLMAuthMode string
 
 const (
@@ -81,18 +74,15 @@ const (
 	LLMAuthAPIKey       LLMAuthMode = "api-key"
 )
 
-// valid reports whether m is a declared mode or unset (unset resolves to a
-// default at the Effective* layer).
 func (m LLMAuthMode) valid() bool {
 	return m == "" || m == LLMAuthSubscription || m == LLMAuthAPIKey
 }
 
-// Gate selects the capability grain the broker enforces on an EXTERNAL tool.
+// Gate selects the capability grain the broker enforces on an external tool.
 //   - fine (the default): only the declared operations are callable; a token
-//     must name the specific MCP tool being invoked (op == params.name).
+//     must name the MCP tool being invoked.
 //   - coarse: one wildcard capability ({tool, "*"}) admits every MCP call the
-//     server exposes — wholesale trust of its whole surface. Use for tools
-//     where per-operation gating adds nothing; keep sensitive servers fine.
+//     server exposes, trusting its whole surface.
 type Gate string
 
 const (
@@ -100,21 +90,16 @@ const (
 	GateCoarse Gate = "coarse"
 )
 
-// valid reports whether g is a declared grain or unset (unset resolves to
-// GateFine via EffectiveGate).
 func (g Gate) valid() bool {
 	return g == "" || g == GateFine || g == GateCoarse
 }
 
-// EgressMode selects the jail's outbound network posture. It is independent of
-// LLMAuthMode: api-key isolates the credential; egress controls what the agent
-// can reach on the network.
-//   - open (the default): the allowlist drops the LAN and non-allowlisted
-//     host-alias ports but leaves the public internet reachable (so agents can
-//     fetch dependencies).
-//   - closed: a catch-all DROP so the jail reaches ONLY the broker port — the
-//     most locked-down posture. Requires a uniformly api-key instance (a
-//     subscription agent needs direct internet to reach Anthropic).
+// EgressMode selects the jail's outbound network posture.
+//   - open (the default): the LAN and non-allowlisted host-alias ports are
+//     dropped, the public internet stays reachable.
+//   - closed: a catch-all DROP, so the jail reaches only the broker port.
+//     Requires a uniformly api-key instance (a subscription agent needs
+//     direct internet to reach Anthropic).
 type EgressMode string
 
 const (
@@ -122,22 +107,17 @@ const (
 	EgressClosed EgressMode = "closed"
 )
 
-// valid reports whether m is a declared posture or unset (unset resolves to
-// open via ClosedInternetEgress).
 func (m EgressMode) valid() bool {
 	return m == "" || m == EgressOpen || m == EgressClosed
 }
 
-// Messaging is the broker's message-routing policy knobs. Routing policy, not
-// capability grants: identities come from mTLS; recipients from config.
+// Messaging is the broker's message-routing policy, not capability grants:
+// identities come from mTLS, recipients from config.
 type Messaging struct {
-	// WorkerToWorker permits worker→worker sends. nil/unset ⇒ true (allowed);
-	// pointer-bool so an explicit `false` is distinguishable for stricter
-	// hub-and-spoke models.
+	// WorkerToWorker permits worker-to-worker sends; unset means allowed.
 	WorkerToWorker *bool `yaml:"worker_to_worker"`
 }
 
-// Broker holds broker settings + first-party tool declarations.
 type Broker struct {
 	JailPort        int           `yaml:"jail_port"`
 	AdminPort       int           `yaml:"admin_port"`
@@ -146,26 +126,22 @@ type Broker struct {
 	ManagerIdentity string        `yaml:"manager_identity"`
 	APIKeyFile      string        `yaml:"api_key_file"` // api-key mode
 	LLMAuth         LLMAuthMode   `yaml:"llm_auth"`
-	// LLMUpstream overrides the /llm proxy target (default https://api.anthropic.com).
-	// Set to a fake upstream for testing; never client-controlled. Empty = default.
+	// LLMUpstream overrides the /llm proxy target, for tests; never
+	// client-controlled.
 	LLMUpstream string    `yaml:"llm_upstream"`
 	Tools       []Tool    `yaml:"tools"`
 	Messaging   Messaging `yaml:"messaging"`
-	// AutoReenrol gates the broker's natural-lapse auto-re-enrol healer: which
-	// agents it heals after an mTLS leaf ages out naturally (our CA's cert,
-	// valid in every way but time — never a revoked or epoch-stale identity).
-	// all (default) | manager | off. See #22.
+	// AutoReenrol selects which agents the broker re-enrols after an mTLS
+	// leaf merely expires (never a revoked or epoch-stale identity).
 	AutoReenrol AutoReenrolMode `yaml:"auto_reenrol"`
-	// MaxRunningWorkers caps how many workers may run at once: the broker
-	// refuses a start, resume or wake that would take the count of running
-	// or starting workers past it (see broker.admitWorker). 0, the default,
-	// is no cap. The manager does not count. The json tag keeps it out of
-	// brokerctl.ConfigHash while unset (no broker restart on upgrade).
+	// MaxRunningWorkers caps how many workers may run or start at once (see
+	// broker.admitWorker); 0 is no cap, and the manager does not count. The
+	// json tag keeps it out of brokerctl.ConfigHash while unset.
 	MaxRunningWorkers int `yaml:"max_running_workers" json:",omitempty"`
 }
 
 // AutoReenrolMode selects which agents the broker's natural-lapse healer
-// covers. Empty resolves to AutoReenrolAll (EffectiveAutoReenrol).
+// covers.
 type AutoReenrolMode string
 
 const (
@@ -174,62 +150,43 @@ const (
 	AutoReenrolOff     AutoReenrolMode = "off"
 )
 
-// valid reports whether m is a declared mode or unset (unset resolves to
-// AutoReenrolAll via EffectiveAutoReenrol).
 func (m AutoReenrolMode) valid() bool {
 	return m == "" || m == AutoReenrolAll || m == AutoReenrolManager || m == AutoReenrolOff
 }
 
 type Manager struct {
 	Image string `yaml:"image"`
-	// ImageTar is an optional docker archive (`docker save` output) that
-	// carries Image. When set, `lever apply` streams this file into the jail
-	// and never touches the host docker store, so a deploy host needs no
-	// docker at all (lever#32). The archive must be tagged with Image (a
-	// mismatch is a named error). Host-only and root-confined like
-	// PromptFile: the tar decides what code runs as the agent, so an agent
-	// in the mounted tree must not be able to author it.
+	// ImageTar is an optional `docker save` archive carrying Image, streamed
+	// into the jail so a deploy host needs no docker. Host-only and
+	// root-confined like PromptFile: the tar decides what code runs as the
+	// agent, so an agent in the mounted tree must not be able to author it.
 	ImageTar string `yaml:"image_tar"`
-	// Model pins the LLM the agent runs on, passed through verbatim as
-	// `scion start --model` (a scion alias like `large`, or an explicit model
-	// ID). Empty ⇒ lever emits no flag and scion resolves the model itself,
-	// which since scion#908 means the alias "opus" — a default that belongs to
-	// the pin, not to this config, and can move under you when the pin moves.
-	// Set it to make the model a property of the instance you can review.
+	// Model is passed verbatim as `scion start --model`. Empty leaves the
+	// choice to scion, whose default can move with the pin.
 	Model      string `yaml:"model"`
 	PromptFile string `yaml:"prompt_file"`
-	// InstructionsFile is the agent's STANDING instructions (who it is, how it
-	// must operate), delivered through scion's `agent_instructions` channel —
-	// a staged file the harness projects into the agent's user-level
-	// ~/.claude/CLAUDE.md — and never through argv. PromptFile stays the boot
-	// TASK, the first user turn. Both must resolve OUTSIDE the mounted tree.
-	// The split exists because the task rides scion's argv into a single tmux
-	// word capped at 16 KiB (lever#30); a manual belongs in a file. Host-only
-	// and root-confined like PromptFile. Create-time only, like Model.
+	// InstructionsFile is the agent's standing instructions, delivered through
+	// scion's `agent_instructions` channel into the agent's user-level
+	// ~/.claude/CLAUDE.md, never through argv: PromptFile, the boot task,
+	// rides scion's argv into a single tmux word capped at 16 KiB. Host-only
+	// and root-confined like PromptFile. Create-time only.
 	InstructionsFile string `yaml:"instructions_file"`
-	// ReadOnly lists tree directories (relative to the tree, forward
-	// slashes) the MANAGER container sees read-only. The manager otherwise
-	// mounts the whole tree read-write, and a tree can hold code the HOST
-	// also runs (an operator CLI kept beside the notes it works on): a
-	// jailed agent that rewrites it gets code execution on the host the next
-	// time the operator runs it. Each entry is bind-mounted read-only over
-	// itself; each strict ancestor between the tree root and an entry is
-	// bind-mounted read-write over itself, because a mount point cannot be
-	// renamed or removed — without that pin the agent renames the parent
-	// away and creates a fresh, writable directory at the protected host
-	// path (verified with podman 2026-10-04). Workers never see these
-	// mounts, so no worker dir may overlap an entry (enforced). Every entry
-	// must exist on the host as a real directory, reached through no
-	// symlink (checked when the manager is started). Create-time only, like
-	// Model: scion stores a record's volumes for life, so the mounts reach a
-	// manager created from now on (`lever up --fresh` for an existing one).
+	// ReadOnly lists tree directories (tree-relative, forward slashes) the
+	// manager container sees read-only: a tree can hold code the host also
+	// runs, and an agent that rewrites it gets code execution on the host.
+	// Each entry is bind-mounted read-only over itself, and each strict
+	// ancestor up to the tree root read-write over itself, because a mount
+	// point cannot be renamed or removed: without that pin the agent renames
+	// the parent away and creates a writable directory at the protected path.
+	// Workers never see these mounts, so no worker dir may overlap an entry.
+	// Every entry must be a real directory reached through no symlink.
+	// Create-time only: scion stores a record's volumes for life.
 	ReadOnly []string `yaml:"read_only"`
-	// ClaudeSettings and AfterCompactNote configure the agent's Claude Code
-	// (see ClaudeSettings). Applied at every start, a resume included.
+	// ClaudeSettings and AfterCompactNote are applied at every start, a
+	// resume included.
 	ClaudeSettings   ClaudeSettings `yaml:"claude_settings"`
 	AfterCompactNote string         `yaml:"after_compact_note"`
-	// Resources caps the manager container's memory and CPU (see
-	// Resources). Create-time only, like Model.
+	// Resources is create-time only.
 	Resources      Resources       `yaml:"resources"`
 	AllowPorts     []int           `yaml:"allow_ports"`
 	CredentialFile string          `yaml:"credential_file"`
@@ -241,98 +198,69 @@ type Manager struct {
 type Worker struct {
 	Name  string `yaml:"name"`
 	Dir   string `yaml:"dir"`
-	Image string `yaml:"image"` // optional; empty ⇒ inherit Manager.Image
-	// ImageTar: the archive carrying this worker's own Image (see
-	// Manager.ImageTar). Requires Image; a worker with no Image inherits the
-	// manager's image AND its tar, since that is where the image ships.
+	Image string `yaml:"image"` // empty inherits Manager.Image
+	// ImageTar requires Image; a worker with no Image inherits the manager's
+	// image and its tar.
 	ImageTar string `yaml:"image_tar"`
-	Model    string `yaml:"model"` // optional; empty ⇒ inherit Manager.Model
-	// InstructionsFile: this worker's standing instructions (see
-	// Manager.InstructionsFile). Deliberately NOT inherited from the manager —
-	// the manager's manual describes orchestration authority a worker must not
-	// hold — so an unset value means the worker gets no lever instructions.
+	Model    string `yaml:"model"` // empty inherits Manager.Model
+	// InstructionsFile is not inherited from the manager: the manager's
+	// manual describes orchestration authority a worker must not hold.
 	InstructionsFile string `yaml:"instructions_file"`
-	// ClaudeSettings and AfterCompactNote: this worker's own (see
-	// Manager.ClaudeSettings). Not inherited from the manager. The json
-	// tags keep them out of brokerctl.ConfigHash while unset, so an
-	// instance that sets neither keeps the hash it had before they existed
-	// (no broker restart on upgrade).
+	// ClaudeSettings and AfterCompactNote are not inherited from the manager.
+	// The json tags keep them out of brokerctl.ConfigHash while unset.
 	ClaudeSettings   ClaudeSettings  `yaml:"claude_settings" json:",omitzero"`
 	AfterCompactNote string          `yaml:"after_compact_note" json:",omitempty"`
 	LLMAuth          LLMAuthMode     `yaml:"llm_auth"`
 	Obtain           []Grant         `yaml:"obtain"`
 	Delegate         []DelegateGrant `yaml:"delegate"`
 	// Recyclable lets the manager discard this worker's record and start it
-	// fresh with a new task (`lever-manager agent recycle`): the slot's old
-	// conversation is lost, its workspace is kept. Off by default; without
-	// it only the operator's `lever worker purge` discards a record. The
-	// json tag keeps it out of brokerctl.ConfigHash while false (see
-	// ClaudeSettings).
+	// fresh with a new task; its workspace is kept. Without it only the
+	// operator's `lever worker purge` discards a record. The json tag keeps
+	// it out of brokerctl.ConfigHash while false.
 	Recyclable bool `yaml:"recyclable" json:",omitempty"`
-	// Resources caps this worker's container memory and CPU (see
-	// Resources). Not inherited from the manager. Create-time only, like
-	// Model. The json tag keeps it out of brokerctl.ConfigHash while unset.
+	// Resources is not inherited from the manager and is create-time only.
+	// The json tag keeps it out of brokerctl.ConfigHash while unset.
 	Resources Resources `yaml:"resources" json:",omitzero"`
 }
 
 type ScionConfig struct {
 	// Binary is a host path to an already-built linux scion binary, installed
-	// into the jail as-is. Unlike Source and Version it needs no Go toolchain,
-	// module cache or egress on the machine hosting the jail — that host need
-	// not be a build host (issue #27). Mutually exclusive with both.
+	// as-is, so the jail host needs no Go toolchain or egress. Mutually
+	// exclusive with Source and Version.
 	Binary string `yaml:"binary"`
-	// Source is a host path to a scion source checkout to cross-compile into the
-	// jail (local development). Mutually exclusive with Version.
+	// Source is a host path to a scion source checkout to cross-compile.
+	// Mutually exclusive with Version.
 	Source string `yaml:"source"`
-	// Version pins a scion module version/commit (e.g. a commit hash or a
-	// vX.Y.Z tag) that lever fetches via the Go module system and cross-compiles
-	// into the jail — no vendored source tree. Mutually exclusive with Source.
+	// Version pins a scion module version or commit that lever fetches and
+	// cross-compiles.
 	Version string `yaml:"version"`
-	// AgentRole OVERRIDES the role lever stamps on `scion start` (scion#1089).
-	// You do not need to set it: empty means lever picks `baseline` itself
-	// whenever the installed scion understands roles at all.
+	// AgentRole overrides the role lever passes to `scion start`. Empty means
+	// `baseline` whenever the installed scion has a --role flag. lever probes
+	// the binary for the flag rather than guessing from the pin, because
+	// scion's default for an unspecified role is full, which would give an
+	// agent hub authority (agent create, lifecycle, project-secret-read).
 	//
-	// Leaving it empty is safe by construction, because lever probes the scion
-	// BINARY for the --role flag rather than guessing from the pin. That
-	// matters: scion#1090 flipped the default for an unspecified role from
-	// baseline to FULL — agent create, lifecycle AND project-secret-read — so
-	// staying silent on a recent pin would break lever's core invariant that no
-	// agent holds hub authority. A commit hash cannot tell lever which side of
-	// that change a pin sits on; the binary can.
-	//
-	// Values are the scion#1089 bundles. `baseline` is what lever wants:
-	// heartbeat and self-token-refresh, no agent create/lifecycle/secret scope.
-	// `readonly` cannot heartbeat, so a live agent cannot run on it. `full`
-	// grants exactly the authority the jail model exists to withhold — set it
-	// only if you know why. Naming any role on a scion that has no --role flag
-	// is a hard error, never a silent downgrade.
+	// `baseline` is heartbeat and self-token-refresh only. `readonly` cannot
+	// heartbeat, so a live agent cannot run on it. `full` grants exactly the
+	// authority the jail model exists to withhold. Naming any role on a scion
+	// with no --role flag is a hard error, never a silent downgrade.
 	AgentRole string `yaml:"agent_role"`
-	// Telemetry selects what lever writes into the jail's ~/.scion/settings.yaml
-	// `telemetry:` block, which scion turns into the SCION_TELEMETRY_* env of
-	// every agent it starts. off (the default) | scion-default. See
-	// ScionTelemetryMode.
+	// Telemetry selects the jail's ~/.scion/settings.yaml `telemetry:` block,
+	// which scion turns into every agent's SCION_TELEMETRY_* env.
 	Telemetry ScionTelemetryMode `yaml:"telemetry"`
 }
 
 // ScionTelemetryMode selects the agents' sciontool telemetry posture.
 //
-//   - off (the default): lever writes `telemetry.enabled: false`. Since
-//     scion#1792 sciontool telemetry defaults ON, but with no cloud destination
-//     configured the in-container OTLP receiver refuses to start, so every
-//     Claude hook (8 events, including Pre/PostToolUse on EVERY tool call) dials
-//     127.0.0.1:4317, is refused, and waits out a ~10 s export and a 5 s
-//     shutdown timeout. A trivial turn took minutes. There is no local sink to
-//     lose: without a cloud exporter the receiver drops everything it accepts.
-//   - scion-default: lever leaves the key to scion (and to the operator). It
-//     removes only the exact block `off` wrote. Use it when you configure
-//     scion telemetry yourself — e.g. a cloud destination, which is new egress
-//     and a credential in the jail, so lever does not manage it.
-//
-// A "local" mode (receiver up, cloud export off) was considered and not built:
-// the receiver then drops every span and log it accepts (there is no local
-// file/console sink in sciontool), so it would be pure overhead, and scion's
-// claude provisioner refuses an enabled telemetry block that names no cloud
-// provider or endpoint.
+//   - off (the default): lever writes `telemetry.enabled: false`. sciontool
+//     telemetry defaults on, but with no cloud destination the in-container
+//     OTLP receiver does not start, so every Claude hook (every tool call
+//     included) dials 127.0.0.1:4317, is refused, and waits out a ~10 s export
+//     and a 5 s shutdown timeout. Without a cloud exporter nothing is kept
+//     anyway.
+//   - scion-default: lever leaves the key to scion and the operator, removing
+//     only the exact block `off` wrote. A cloud destination is new egress and
+//     a credential in the jail, so lever does not manage it.
 type ScionTelemetryMode string
 
 const (
@@ -340,172 +268,115 @@ const (
 	ScionTelemetryScionDefault ScionTelemetryMode = "scion-default"
 )
 
-// valid reports whether m is a declared mode or unset (unset resolves to
-// ScionTelemetryOff via EffectiveScionTelemetry).
 func (m ScionTelemetryMode) valid() bool {
 	return m == "" || m == ScionTelemetryOff || m == ScionTelemetryScionDefault
 }
 
-// scionAgentRoles is the set of roles scion#1089 defines. Validated so a typo
-// fails at config load rather than as an opaque scion start error at bring-up.
+// scionAgentRoles are scion's roles, checked so a typo fails at config load
+// rather than as an opaque scion start error.
 var scionAgentRoles = []string{"none", "readonly", "baseline", "full"}
 
-// Security holds opt-in image policy. Both default off (empty/false) for
-// backward compatibility; when set they apply to manager.image and every worker
-// image. See docs-site/_guides/security-model-config-trust.md §5.
+// Security holds opt-in image policy, applied to the manager's and every
+// worker's image.
 type Security struct {
-	// AllowedImageRegistries restricts where images may come from: an image is
-	// allowed iff it equals, or is prefixed by "<entry>/", one of these entries
-	// (a registry host and/or namespace prefix, e.g. "scionlocal" or
-	// "ghcr.io/myorg"). Empty ⇒ no restriction.
+	// AllowedImageRegistries allows an image that equals an entry or is
+	// prefixed by "<entry>/". Empty is no restriction.
 	AllowedImageRegistries []string `yaml:"allowed_image_registries"`
-	// RequireImageDigest requires every image to be pinned by digest
-	// (`…@sha256:<hex>`) rather than a mutable tag. False ⇒ tags allowed.
+	// RequireImageDigest requires every image to be pinned by digest rather
+	// than a mutable tag.
 	RequireImageDigest bool `yaml:"require_image_digest"`
 }
 
-// Operator configures the authenticated operator-directive channel. The
-// zero value disables directives entirely (no allowed_signers = no channel).
+// Operator configures the authenticated operator-directive channel. With no
+// AllowedSigners there is no channel.
 type Operator struct {
 	// AllowedSigners is the ssh-keygen allowed_signers file holding the
-	// operator public keys (principal operator@<name>). Confined to the
-	// instance directory.
+	// operator public keys. Confined to the instance directory.
 	AllowedSigners string `yaml:"allowed_signers"`
-	// SigningKey is the default private-key path used by `lever directive
-	// send` on the host. Not confined (the key should live OUTSIDE the tree).
-	SigningKey string `yaml:"signing_key"`
-	// DirectiveExpiry / DirectiveExpiryMax follow Broker.GrantTTL's pattern.
+	// SigningKey is the default private key for `lever directive send`. Not
+	// confined; the key should live outside the tree.
+	SigningKey         string        `yaml:"signing_key"`
 	DirectiveExpiry    time.Duration `yaml:"directive_expiry"`
 	DirectiveExpiryMax time.Duration `yaml:"directive_expiry_max"`
 }
 
-// Remote configures the opt-in remote-access proxy (`lever remote`): a
-// host-side reverse proxy that injects the operator's hub session and is
-// fronted by an authenticating front (`tailscale serve`, or another that sets
-// a verified identity header — see IdentityHeader). Disabled by default; the hub web UI is only
-// enabled (--enable-web) when this is on. See
-// docs/superpowers/specs/2026-08-16-remote-agent-access-design.md.
+// Remote configures the opt-in remote-access proxy: a host-side reverse
+// proxy that injects the operator's hub session behind an authenticating
+// front that sets a verified identity header. The hub web UI is enabled only
+// when this is on.
 type Remote struct {
 	Enabled bool `yaml:"enabled"`
-	// Port is the host loopback port the proxy binds. Zero = DefaultRemotePort
-	// (EffectiveRemotePort). Must not collide with the broker's jail/admin
-	// ports — validated.
+	// Port is the host loopback port the proxy binds.
 	Port int `yaml:"port"`
-	// BaseURL is the public tailnet origin the operator reaches this
-	// instance on. It configures the PROXY, not the hub: its host becomes
-	// the proxy's ServeHost, which every Origin-bearing request must match
-	// (remoteproxy.Config.ServeHost). It is deliberately NOT forwarded to
-	// the hub as --base-url — that flag would also become the agents'
-	// SCION_HUB_ENDPOINT, which no jail agent can reach (see
-	// scion.ServerOpts.EnableWeb). Required while remote is enabled; must
-	// be an absolute https URL.
+	// BaseURL is the public origin the operator reaches this instance on. Its
+	// host becomes the proxy's ServeHost, which every Origin-bearing request
+	// must match. It is not passed to the hub as --base-url, which would also
+	// become the agents' SCION_HUB_ENDPOINT, unreachable from the jail.
 	BaseURL string `yaml:"base_url"`
 	// AllowedUsers, when non-empty, pins requests to these logins, matched
-	// exactly against the IdentityHeader value the front sets
-	// (Tailscale-User-Login from `tailscale serve` by default). The same list
-	// names the hub users the login path creates (remoteproxy.HubUserEmails).
-	//
-	// Each entry is a login (tier operator) or a {login, tier, agents} map:
-	// see RemoteUser. Logins() lists the logins alone.
+	// exactly against the IdentityHeader value. The same list names the hub
+	// users the login path creates. See RemoteUser.
 	AllowedUsers []RemoteUser `yaml:"allowed_users"`
-	// IdentityHeader is the request header the authenticating front puts the
-	// verified login in. Empty = DefaultRemoteIdentityHeader
-	// (Tailscale-User-Login). Another front sets its own, e.g. exe.dev's
-	// X-ExeDev-Email. The proxy trusts it only because only the front can
-	// reach the listener, and it strips it before forwarding to the hub.
-	// Validated (validRemoteIdentityHeader): a token, and not a header that
-	// carries a browser credential, routing, or an identity scion reads.
+	// IdentityHeader is the header the authenticating front puts the
+	// verified login in. The proxy trusts it only because only the front can
+	// reach the listener, and strips it before forwarding to the hub. It may
+	// not name a header that carries a browser credential, routing, or an
+	// identity scion reads.
 	IdentityHeader string `yaml:"identity_header"`
-	// Bind is the address the proxy listens on. Empty = DefaultRemoteBind
-	// (127.0.0.1). A front that dials the host's external interface rather
-	// than its loopback needs a non-loopback address; whatever can reach it
-	// can then assert any identity header, so validateRemote accepts only an
-	// address the jail's egress rules drop (egress.DroppedForJail), or the
-	// wildcard with AllowWildcardBind, and RemoteWarnings names it. The login
-	// provider always stays on loopback.
+	// Bind is the address the proxy listens on. Whatever can reach it can
+	// assert any identity header, so a non-loopback address must be one the
+	// jail's egress rules drop, or the wildcard with AllowWildcardBind. The
+	// login provider always stays on loopback.
 	Bind string `yaml:"bind"`
-	// AllowWildcardBind acknowledges Bind: 0.0.0.0 or "::", which listens on
-	// every host address — any public one included, which the jail can reach
-	// under open egress. Refused without it.
+	// AllowWildcardBind acknowledges a wildcard Bind, which listens on every
+	// host address, including public ones the jail can reach under open
+	// egress.
 	AllowWildcardBind bool `yaml:"allow_wildcard_bind"`
-	// TrustForwardedHost makes the proxy's Host check (the DNS-rebinding
-	// defence, remoteproxy.hostAllowed) read X-Forwarded-Host instead of Host
-	// on a request whose Host is an IP address — for a front that rewrites
-	// Host to an IP and passes the browser's in X-Forwarded-Host. A rebind
-	// sends a name in Host, so it stays refused (remoteproxy.hostToCheck).
-	// Off by default: anything that reaches the listener directly can set
-	// that header. RemoteWarnings names it.
+	// TrustForwardedHost makes the proxy's DNS-rebinding Host check read
+	// X-Forwarded-Host on a request whose Host is an IP address, for a front
+	// that rewrites Host to an IP. A rebind sends a name in Host, so it stays
+	// refused. Off by default: anything that reaches the listener directly
+	// can set that header.
 	TrustForwardedHost bool `yaml:"trust_forwarded_host"`
-	// LoginPort is the HOST loopback port the local OIDC provider binds.
-	//
-	// It is deliberately NOT the port the hub dials. The hub dials a guest
-	// loopback port (GuestLoginIssuerPort), which a forwarder carries
-	// to this one — two numbers, because OrbStack mirrors a guest listener
-	// onto the host at the same number and one number for both halves left
-	// the provider unable to bind its own port. The guest half has no config
-	// key at all, so no configuration can make the two halves collide.
-	//
-	// Zero = DefaultRemoteLoginPort (EffectiveRemoteLoginPort). Validated against the proxy
-	// port, the broker's listeners, and the guest port's host mirror.
+	// LoginPort is the host loopback port the local OIDC provider binds. The
+	// hub dials a different guest port (GuestLoginIssuerPort) that a
+	// forwarder carries here, because OrbStack mirrors a guest listener onto
+	// the host at the same number, so one number for both would collide.
 	LoginPort int `yaml:"login_port"`
-	// Landing is what the remote origin opens on. Empty or
-	// RemoteLandingConsole: the hub's own web UI, as before. RemoteLandingChat:
-	// lever's chat page with the manager (remoteproxy/chatpage.go), which the
-	// proxy then serves under /lever/ to operator logins and redirects "/"
-	// to; the hub's UI stays reachable from it. Chat needs an operator-tier
-	// allowed_users entry (validateRemote): with no verified login, nothing
-	// the page sends would verify.
+	// Landing is what the remote origin opens on: the hub's web UI
+	// (RemoteLandingConsole, the default) or lever's chat page
+	// (RemoteLandingChat). Chat needs an operator-tier allowed_users entry:
+	// with no verified login, nothing the page sends would verify.
 	Landing string `yaml:"landing"`
 	// LabelsFile is a tree-relative JSON file the manager writes, mapping
-	// agent names to short labels the chat page shows beside each name
-	// (remoteproxy.ReadLabels). Optional. It is jail-written data: read
-	// host-side with no symlink on the path, bounded, and only ever shown
-	// as text.
+	// agent names to labels for the chat page. It is jail-written data: read
+	// with no symlink on the path, bounded, and only ever shown as text.
 	LabelsFile string `yaml:"labels_file"`
-	// AgentMessages lets an agent start a message to a contact that lists it
-	// (broker contact_message) and makes the proxy show a contact only the
-	// agent messages lever recorded. Off by default; see AgentMessages.
+	// AgentMessages lets an agent start a message to a contact that lists it,
+	// and makes the proxy show a contact only the agent messages lever
+	// recorded.
 	AgentMessages AgentMessages `yaml:"agent_messages"`
-	// Push turns on Web Push notifications for the chat page: a login's
-	// devices show "New message from <agent>" when the page is closed.
-	// Off by default; needs landing: chat. See Push.
-	Push Push `yaml:"push"`
-	// Files lets a login upload files to an agent it may message and
-	// download the files that agent shares with it, through the chat page
-	// (remoteproxy/files.go, broker share_file). Off by default; needs
-	// landing: chat. See Files.
+	// Push, Files and Voice need landing: chat.
+	Push  Push  `yaml:"push"`
 	Files Files `yaml:"files"`
-	// Voice turns on dictation on the chat page: a login records a clip,
-	// the broker tool lever-tool-whisper transcribes it, and the text lands
-	// in the message box for review (never sent by itself). Off by default;
-	// needs landing: chat. See Voice.
 	Voice Voice `yaml:"voice"`
 }
 
-// Voice is remote.voice: dictation on the chat page. The transcription
-// itself runs in the broker tool lever-tool-whisper (whisper-server is its
-// child); the proxy posts each checked clip to the tool's dictation socket
-// and returns the text to the login that sent it. Audio and transcripts are
-// never stored.
+// Voice is remote.voice: dictation on the chat page, transcribed by the
+// broker tool lever-tool-whisper. The text lands in the message box for
+// review, never sent by itself. Audio and transcripts are never stored.
 type Voice struct {
 	Enabled bool `yaml:"enabled"`
-	// Socket is the tool's dictation socket: an absolute host path outside
-	// the tree, equal to the -dictate-socket of the lever-tool-whisper entry
-	// in broker.tools. Required when enabled.
+	// Socket must equal the -dictate-socket of the lever-tool-whisper entry
+	// in broker.tools, an absolute host path outside the tree.
 	Socket string `yaml:"socket"`
-	// MaxSeconds bounds one clip. Zero = DefaultVoiceMaxSeconds; at most
-	// MaxVoiceMaxSeconds, and at most the tool's -max-seconds.
+	// MaxSeconds bounds one clip; at most the tool's -max-seconds.
 	MaxSeconds int `yaml:"max_seconds"`
-	// ReadAloud is how the read-aloud button on agent messages speaks:
-	// ReadAloudDevice (the browser's on-device voices; nothing leaves the
-	// device), ReadAloudServer (lever-tool-tts on the operator's host, the
-	// device's voices when it is down) or ReadAloudOff. YAML true and false
-	// read as device and off. "" = device while voice is enabled; never
-	// shown while it is off.
+	// ReadAloud is how the read-aloud button on agent messages speaks. YAML
+	// true and false read as device and off.
 	ReadAloud ReadAloud `yaml:"read_aloud"`
-	// SpeakSocket is lever-tool-tts's speech socket: an absolute host path
-	// outside the tree, equal to the -speak-socket of the lever-tool-tts
-	// entry in broker.tools. Required with read_aloud: server.
+	// SpeakSocket must equal the -speak-socket of the lever-tool-tts entry in
+	// broker.tools, an absolute host path outside the tree.
 	SpeakSocket string `yaml:"speak_socket"`
 }
 
@@ -517,14 +388,11 @@ const (
 // Push is remote.push.
 type Push struct {
 	Enabled bool `yaml:"enabled"`
-	// Subject is the VAPID contact the push services see (RFC 8292 §2.1):
-	// mailto:<address> or an https URL. Required when enabled.
+	// Subject is the VAPID contact the push services see (RFC 8292).
 	Subject string `yaml:"subject"`
-	// TestHosts is TEST ONLY: loopback "127.0.0.1:<port>" addresses of a
-	// fake push service (tools/test/pushrecv). The proxy admits them only
-	// when LEVER_PUSH_TEST_HOSTS in its environment names the same
-	// addresses; either one alone stops it. Never set it for a real
-	// instance (`lever doctor` fails while it is set).
+	// TestHosts is test only: loopback addresses of a fake push service. The
+	// proxy admits them only when LEVER_PUSH_TEST_HOSTS in its environment
+	// names the same addresses. `lever doctor` fails while it is set.
 	TestHosts []string `yaml:"test_hosts"`
 }
 
@@ -532,11 +400,9 @@ type Push struct {
 type AgentMessages struct {
 	Enabled bool `yaml:"enabled"`
 	// FollowUpAfter is how long after an unanswered message an agent started
-	// it may send one reminder. Zero = DefaultAgentFollowUpAfter.
+	// it may send one reminder.
 	FollowUpAfter time.Duration `yaml:"follow_up_after"`
-	// MaxChars bounds one message to a contact, in characters. Zero =
-	// DefaultAgentMaxChars.
-	MaxChars int `yaml:"max_chars"`
+	MaxChars      int           `yaml:"max_chars"`
 }
 
 const (
@@ -549,16 +415,12 @@ const (
 
 // Files is remote.files.
 type Files struct {
-	Enabled bool `yaml:"enabled"`
-	// MaxBytes bounds one file. Zero = DefaultFilesMaxBytes.
+	Enabled  bool  `yaml:"enabled"`
 	MaxBytes int64 `yaml:"max_bytes"`
-	// Extensions are the accepted file types, lowercase, without the dot.
-	// Empty = chatfiles.DefaultExtensions.
+	// Extensions are lowercase, without the dot.
 	Extensions []string `yaml:"extensions"`
-	// Uploads and Shares turn one direction off (nil = on): no new upload
-	// from a login, or no new share from an agent. Records already made
-	// stay listed; a share already made is no longer downloadable while
-	// Shares is off.
+	// Uploads and Shares turn one direction off (nil is on). A share already
+	// made is not downloadable while Shares is off.
 	Uploads *bool `yaml:"uploads"`
 	Shares  *bool `yaml:"shares"`
 }
@@ -582,24 +444,16 @@ type App struct {
 	Broker   Broker      `yaml:"broker"`
 	Operator Operator    `yaml:"operator"`
 	Remote   Remote      `yaml:"remote"`
-	// SharedFolders are tree directories some agents mount at
-	// /shared/<name>, read-write for writers and read-only for readers.
-	// Off unless listed; see SharedFolder.
+	// SharedFolders are tree directories some agents mount at /shared/<name>.
 	SharedFolders []SharedFolder `yaml:"shared_folders"`
 	Disk          string         `yaml:"disk"`        // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.
 	NestedVirt    bool           `yaml:"nested_virt"` // Lima-only: the manager container gets /dev/kvm (nested KVM guests). Linux hosts only.
 	CPUs          int            `yaml:"cpus"`        // Lima guest vCPUs; 0 = Lima default. Lima-only.
 	Memory        string         `yaml:"memory"`      // Lima guest memory (e.g. "24GiB"); empty = Lima default. Lima-only.
-	// GuestKernel picks the Lima guest's Ubuntu kernel: "hwe" installs the
-	// guest release's hardware-enablement kernel, "ga" keeps the release
-	// kernel. Empty = "hwe" with nested_virt, else "ga"
-	// (EffectiveGuestKernel). Lima-only.
+	// GuestKernel picks the Lima guest's Ubuntu kernel, "hwe" or "ga".
 	GuestKernel string `yaml:"guest_kernel"`
-	// GuestProfile trims the Lima guest for a small host: "small" disables
-	// the guest services a jail does not use (snapd, unattended upgrades and
-	// the apt timers, multipathd, ModemManager) and adds zram swap.
-	// "standard" or empty leaves the stock Ubuntu guest (and undoes what
-	// "small" did). Lima-only. See EffectiveGuestProfile.
+	// GuestProfile "small" trims the Lima guest for a small host; see
+	// EffectiveGuestProfile.
 	GuestProfile string `yaml:"guest_profile"`
 
 	dir string // instance root (the config file's directory)

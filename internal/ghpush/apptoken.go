@@ -32,7 +32,6 @@ type TokenSource interface {
 // A minted token carries exactly these (GitHub adds metadata: read).
 type Permissions map[string]string
 
-// PushPermissions is what push needs.
 var PushPermissions = Permissions{"contents": "write"}
 
 // key is a canonical form of p for the token cache.
@@ -140,12 +139,10 @@ func (m *Minter) jwt() (string, error) {
 	return signing + "." + enc.EncodeToString(sig), nil
 }
 
-// Token returns a contents:write token for repo ("owner/name").
 func (m *Minter) Token(ctx context.Context, repo string) (string, error) {
 	return m.TokenFor(ctx, repo, PushPermissions)
 }
 
-// TokenFor returns a token for repo ("owner/name") with exactly perms.
 func (m *Minter) TokenFor(ctx context.Context, repo string, perms Permissions) (string, error) {
 	if err := perms.validate(); err != nil {
 		return "", err

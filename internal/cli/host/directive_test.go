@@ -19,10 +19,8 @@ import (
 	"github.com/stevegeek/lever/internal/opsig"
 )
 
-// directiveTestDir creates a short-path scratch dir under /tmp (not
-// t.TempDir(), whose macOS path can already eat most of sockaddr_un's
-// ~104-byte sun_path budget) to hold both the instance config and the
-// .lever-state/directive.sock the CLI dials.
+// directiveTestDir is a short path under /tmp: a macOS t.TempDir() can eat
+// most of sockaddr_un's ~104-byte sun_path.
 func directiveTestDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "levdir-")
@@ -33,10 +31,8 @@ func directiveTestDir(t *testing.T) string {
 	return dir
 }
 
-// genDirectiveKey creates a fresh ed25519 SSH keypair in dir and returns
-// (privPath, allowedSignersPath) with principal "operator@<instance>".
-// Duplicated from opsig_test.go's genKey — test helpers are not exported
-// across packages.
+// genDirectiveKey creates an ed25519 key in dir and returns (privPath,
+// allowedSignersPath) for principal "operator@<instance>".
 func genDirectiveKey(t *testing.T, dir, instance string) (string, string) {
 	t.Helper()
 	priv := filepath.Join(dir, "opkey")
@@ -61,8 +57,6 @@ type capturedReq struct {
 	method, path, body string
 }
 
-// reqRecorder is a race-safe append/read log of requests hitting the fake
-// directive UDS server.
 type reqRecorder struct {
 	mu   sync.Mutex
 	reqs []capturedReq
@@ -94,9 +88,8 @@ type canned struct {
 	body   string
 }
 
-// startDirectiveUDS binds a real UNIX socket at <dir>/.lever-state/directive.sock
-// (the exact path stateFor/DirectiveSock computes for a config living in dir)
-// and serves canned responses per route, recording every request.
+// startDirectiveUDS serves canned routes on a real socket at the path
+// DirectiveSock computes for a config in dir, recording every request.
 func startDirectiveUDS(t *testing.T, dir string, routes map[string]canned) *reqRecorder {
 	t.Helper()
 	stateDir := filepath.Join(dir, ".lever-state")
@@ -106,8 +99,6 @@ func startDirectiveUDS(t *testing.T, dir string, routes map[string]canned) *reqR
 	return startUDSAt(t, filepath.Join(stateDir, "directive.sock"), routes)
 }
 
-// startUDSAt serves canned responses per route on a real UNIX socket at
-// sock, recording every request.
 func startUDSAt(t *testing.T, sock string, routes map[string]canned) *reqRecorder {
 	t.Helper()
 	ln, err := net.Listen("unix", sock)
@@ -314,7 +305,7 @@ func TestDirectiveSendActionAndInstructionMutuallyExclusive(t *testing.T) {
 	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
-	// No server started at all — this must fail before any network call.
+	// No server: this must fail before any network call.
 	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi", "--action", `{"kind":"instruction","text":"hi"}`)
 	if err == nil {
 		t.Fatal("--instruction + --action together should error")
@@ -339,18 +330,16 @@ func TestDirectiveSendInvalidActionRejectedClientSide(t *testing.T) {
 	writeInstanceInto(t, dir, instanceYAML("testinst", "operator:\n  signing_key: "+priv+"\n"))
 	t.Chdir(dir)
 
-	// No server started — an invalid action must be rejected before any
-	// resolve/send round-trip.
+	// No server: an invalid action is rejected before any round-trip.
 	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--action", `{"kind":"sudo"}`)
 	if err == nil {
 		t.Fatal("invalid action kind should be rejected client-side")
 	}
 }
 
-// sendOverExpiryCap runs `directive send --expires 2h` against an instance
-// whose directive_expiry_max is 1h, with a broker recording every call, and
-// requires the client-side rejection. The recorder is returned so the test
-// can pin which broker calls never happened.
+// sendOverExpiryCap sends --expires 2h with directive_expiry_max 1h and
+// requires the client-side rejection; the recorder shows which broker calls
+// never happened.
 func sendOverExpiryCap(t *testing.T) *reqRecorder {
 	t.Helper()
 	dir := directiveTestDir(t)
@@ -386,11 +375,10 @@ func TestDirectiveSendOverCapErrorsBeforeResolve(t *testing.T) {
 
 func TestDirectiveSendMissingKeyErrors(t *testing.T) {
 	dir := directiveTestDir(t)
-	// No operator.signing_key in config, no --key flag.
 	writeInstanceInto(t, dir, instanceYAML("testinst", ""))
 	t.Chdir(dir)
 
-	// No server started — a missing key must be caught before any dial.
+	// No server: a missing key must be caught before any dial.
 	_, err := clitest.Exec(t, newRootWith(defaultFactory), "directive", "send", "worker1", "--instruction", "hi")
 	if err == nil {
 		t.Fatal("missing signing key should error")
@@ -533,9 +521,8 @@ func TestDirectiveSelftestFailureExitsNonZero(t *testing.T) {
 }
 
 // TestDirectiveSendUndeliveredIsAnError: a directive whose notice did not
-// reach the agent is not a success (lever#25). The broker refuses or revokes
-// it (a non-200 answer whose text the command shows); an older broker stores
-// it and answers delivered=false, which is an error too.
+// reach the agent is not a success, whether the broker refuses it or an older
+// broker answers delivered=false.
 func TestDirectiveSendUndeliveredIsAnError(t *testing.T) {
 	for name, send := range map[string]canned{
 		"refused, not stored": {status: http.StatusConflict, body: "worker worker1 is not running (phase suspended). The directive was not stored"},

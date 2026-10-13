@@ -18,7 +18,6 @@ func testHubLogin() types.HubLogin {
 		HostAddress: "host.orb.internal", ClientID: "lever-remote"}
 }
 
-// unmarshalSettings decodes a rendered settings file for assertions.
 func unmarshalSettings(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	var m map[string]any
@@ -28,7 +27,6 @@ func unmarshalSettings(t *testing.T, b []byte) map[string]any {
 	return m
 }
 
-// oidcBlock digs out server.oidc_login.
 func oidcBlock(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	m := unmarshalSettings(t, b)
@@ -53,7 +51,7 @@ func TestHubLoginSettingsCreatesTheBlockInAnEmptyFile(t *testing.T) {
 	}
 	block := oidcBlock(t, out)
 	// The issuer MUST be loopback: scion validates it at hub startup and
-	// refuses to start on anything else (pkg/hub/oauth.go).
+	// refuses to start on anything else.
 	if block["issuer_url"] != "http://127.0.0.1:8446" {
 		t.Fatalf("issuer_url = %v", block["issuer_url"])
 	}
@@ -146,8 +144,7 @@ func TestHubLoginSettingsDetectsADifferentPort(t *testing.T) {
 }
 
 // TestHubLoginSettingsRefusesToStealFromLegacyServerYAML: once settings.yaml
-// carries a `server:` key, scion reads the hub's WHOLE server configuration
-// from it and ignores server.yaml (pkg/config/hub_config.go). Adding the key
+// carries a `server:` key, scion ignores server.yaml, so adding the key
 // beside an unmigrated server.yaml would silently drop that file's contents.
 func TestHubLoginSettingsRefusesToStealFromLegacyServerYAML(t *testing.T) {
 	_, _, err := hubSettingsConverged([]byte("version: 1\n"), testHubLogin(), true)
@@ -204,9 +201,7 @@ func TestParseScionSettingsRead(t *testing.T) {
 func TestLoginForwardScriptUsesAbsolutePathsAndTheRightArgv(t *testing.T) {
 	script := loginForwardScript(testHubLogin(), false)
 	// Two DIFFERENT ports: the guest listener is mirrored onto the host at its
-	// own number, so a forwarder that listened and dialled on one number left
-	// the host provider unable to bind (live failure — see
-	// config.GuestLoginIssuerPort).
+	// own number (see config.GuestLoginIssuerPort).
 	want := LoginForwardPath + " -listen 127.0.0.1:8446 -target host.orb.internal:8447"
 	if !strings.Contains(script, want) {
 		t.Fatalf("script does not start the forwarder as %q:\n%s", want, script)
@@ -267,10 +262,9 @@ func TestWriteScionSettingsIsAtomicAndUserOwned(t *testing.T) {
 	}
 }
 
-// TestDisableLoginForwardScriptStopsTheBridgeBeforeRemovingIt pins the
-// converge-off script. The forwarder is an unauthenticated TCP bridge from
-// guest loopback — reachable from every agent netns — to a host loopback port
-// beside lever's own broker listeners, so it must not outlive the feature.
+// TestDisableLoginForwardScriptStopsTheBridgeBeforeRemovingIt: the forwarder
+// is an unauthenticated TCP bridge from guest loopback, reachable from every
+// agent netns, to a host loopback port, so it must not outlive the feature.
 func TestDisableLoginForwardScriptStopsTheBridgeBeforeRemovingIt(t *testing.T) {
 	script := disableLoginForwardScript
 	kill := strings.Index(script, "pkill -f '^"+LoginForwardPath)
@@ -284,8 +278,8 @@ func TestDisableLoginForwardScriptStopsTheBridgeBeforeRemovingIt(t *testing.T) {
 		t.Fatalf("the binary is removed before the process is stopped, leaving the bridge up:\n%s", script)
 	}
 	// A pkill that is not there at all exits 127. Swallowing that would remove
-	// the binary while its process kept bridging — the exact state this exists
-	// to prevent — so only "nothing matched" (1) may pass.
+	// the binary while its process kept bridging, so only "nothing matched"
+	// (1) may pass.
 	if !strings.Contains(script, "if [ $rc -gt 1 ]") {
 		t.Fatalf("the script does not check that the kill actually happened:\n%s", script)
 	}
@@ -336,16 +330,10 @@ func TestHubLoginSettingsWithoutRemovesOnlyTheBlock(t *testing.T) {
 	}
 }
 
-// TestDisableHubLoginReportsOnlyWhatTheHubWasServing pins the OFF path's
-// restart signal, which is the whole reason DisableHubLogin returns a bool at
-// all: internal/apply.Run restarts the hub — dropping every agent's connection
-// to it — when this says true.
-//
-// So the answer has to track ONE thing: did this call remove configuration the
-// running hub was started from? The `oidc_login` block is that; the forwarder
-// is not, since no hub ever reads it. Getting the second case wrong is not a
-// theoretical cost — it is a hub bounce, and every agent reconnecting, on an
-// apply that changed nothing the hub can see.
+// TestDisableHubLoginReportsOnlyWhatTheHubWasServing: true restarts the hub
+// and drops every agent's connection, so it must mean only that this call
+// removed configuration the running hub was started from. The forwarder is
+// not that: no hub reads it.
 func TestDisableHubLoginReportsOnlyWhatTheHubWasServing(t *testing.T) {
 	withBlock, _, err := hubSettingsConverged([]byte("version: 1\nserver:\n  user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil {
@@ -386,11 +374,8 @@ func TestDisableHubLoginReportsOnlyWhatTheHubWasServing(t *testing.T) {
 }
 
 // TestDisableHubLoginReportsNoChangeWhenItCannotRead: the read paths are
-// fail-soft (an apply told only to turn remote access off should not die on an
-// unreadable settings file), and "no change" is the honest answer for them —
-// nothing was removed, so nothing the hub is serving changed. Reporting true
-// here would restart the hub every apply on any guest whose settings lever
-// cannot parse.
+// fail-soft and report "no change"; true would restart the hub on every
+// apply for a guest whose settings lever cannot parse.
 func TestDisableHubLoginReportsNoChangeWhenItCannotRead(t *testing.T) {
 	for name, read := range map[string]proc.Result{
 		"unparseable output": {Stdout: "not the LEGACY header at all\n"},
@@ -415,9 +400,8 @@ func TestDisableHubLoginReportsNoChangeWhenItCannotRead(t *testing.T) {
 
 // TestEnsureHubLoginRefusesOnePortForBothHalves: the guest listener is
 // mirrored onto the host at the same number, so one number for both halves
-// means the host provider cannot bind its own port — the live failure
-// config.GuestLoginIssuerPort exists to prevent. Config keeps the two apart,
-// and this is the backstop for any other caller.
+// means the host provider cannot bind its own port. This is the backstop for
+// callers other than config.
 func TestEnsureHubLoginRefusesOnePortForBothHalves(t *testing.T) {
 	spec := testHubLogin()
 	spec.HostPort = spec.IssuerPort
@@ -427,14 +411,10 @@ func TestEnsureHubLoginRefusesOnePortForBothHalves(t *testing.T) {
 	}
 }
 
-// TestLoginForwardScriptReplacesAForwarderWithStaleArguments is the regression
-// test for a live failure: after `remote.login_port` changed, the guest kept
-// running a forwarder whose `-target` named the OLD host port, so the hub's
-// discovery fetch went guest 8446 -> host 8446, which is the container
-// runtime's MIRROR of guest 8446 — the forwarder looping back to itself. The
-// browser got a 502 while the apply reported success.
-//
-// Two decisions were wrong, and this pins both.
+// TestLoginForwardScriptReplacesAForwarderWithStaleArguments: a forwarder
+// whose `-target` names an old host port must be replaced. Left running, it
+// loops back to itself through the host's mirror of the guest port while the
+// apply reports success.
 func TestLoginForwardScriptReplacesAForwarderWithStaleArguments(t *testing.T) {
 	spec := testHubLogin()
 	script := loginForwardScript(spec, false)
@@ -447,9 +427,8 @@ func TestLoginForwardScriptReplacesAForwarderWithStaleArguments(t *testing.T) {
 		t.Fatal("a changed host port produced an identical script")
 	}
 
-	// 2. The stop must match ANY forwarder, whatever argv it carries. Killing
-	//    only the exact desired argv left the stale process alive, holding the
-	//    listen port, so the replacement could never bind.
+	// 2. The stop must match ANY forwarder, whatever argv it carries, or the
+	//    stale process keeps the listen port and the replacement cannot bind.
 	if !strings.Contains(script, "/usr/bin/pkill -f '"+loginForwardMatch+"'") {
 		t.Fatalf("the script does not stop a forwarder whose arguments differ:\n%s", script)
 	}
@@ -461,18 +440,15 @@ func TestLoginForwardScriptReplacesAForwarderWithStaleArguments(t *testing.T) {
 	if stop < 0 || start < 0 || stop > start {
 		t.Fatalf("the replacement is started before the old one is stopped:\n%s", script)
 	}
-	// pkill only SIGNALS. A forwarder that has been SIGTERMed still holds the
-	// listen port until it exits, so starting the replacement immediately
-	// races it for the bind — the same lost bind that made this a silent
-	// failure. The script must wait for the old process to be gone.
+	// pkill only SIGNALS. A SIGTERMed forwarder still holds the listen port
+	// until it exits, so the script must wait for it to be gone.
 	between := script[stop:start]
 	if !strings.Contains(between, "/usr/bin/pgrep -f '"+loginForwardMatch+"'") {
 		t.Fatalf("the script starts the replacement without waiting for the old process to exit:\n%s", between)
 	}
 
 	// 3. Success must mean "a forwarder with THESE arguments is running", not
-	//    "something answers on the port" — the stale process answered, which is
-	//    what made the failure silent.
+	//    "something answers on the port": a stale process can answer.
 	final := script[start:]
 	if !strings.Contains(final, `/usr/bin/pgrep -f -x "$want"`) {
 		t.Fatalf("the script accepts any listener as success, so a stale forwarder reads as a working one:\n%s", final)
@@ -482,7 +458,6 @@ func TestLoginForwardScriptReplacesAForwarderWithStaleArguments(t *testing.T) {
 	}
 }
 
-// authBlock digs out server.auth.
 func authBlock(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	m := unmarshalSettings(t, b)
@@ -494,9 +469,8 @@ func authBlock(t *testing.T, b []byte) map[string]any {
 	return auth
 }
 
-// TestHubLoginSettingsNamesAnOperator: without a name in `server.auth`, scion's
-// system status never reports complete and the SPA bounces every fresh load to
-// /onboarding — a setup wizard for a machine lever has already set up.
+// TestHubLoginSettingsNamesAnOperator: without a name in `server.auth`, the
+// SPA bounces every fresh load to /onboarding.
 func TestHubLoginSettingsNamesAnOperator(t *testing.T) {
 	out, changed, err := hubSettingsConverged(nil, testHubLogin(), false)
 	if err != nil || !changed {

@@ -9,8 +9,8 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// The line sciontool logged when the agent's tmux 3.5a server segfaulted
-// (lever#201), and around it what the container's own tmux client printed.
+// A real log: the line sciontool logged when the agent's tmux 3.5a server
+// segfaulted, among what the container's own tmux client printed.
 const tmuxSegfaultLog = "\x1b[?2026h\x1b[2J\x1b[3J\x1b[H Opus 5.5 · Claude API\r\n[lost server]\r\n" +
 	"2026-10-12 17:15:22 [sciontool] INFO Reaped zombie process 82 (tmux: server) (reason: killed by signal segmentation fault, exit code: -1)\n" +
 	"2026-10-12 17:15:22 [sciontool] INFO Reported final status to Hub (exitCode=1, crash=true)\n"

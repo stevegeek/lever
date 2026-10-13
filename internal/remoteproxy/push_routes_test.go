@@ -14,7 +14,6 @@ import (
 	"github.com/stevegeek/lever/internal/webpush"
 )
 
-// fakeSender records pushes instead of sending them.
 type fakeSender struct {
 	mu   sync.Mutex
 	sent []string // "<endpoint> <payload>"
@@ -161,9 +160,8 @@ func TestPushRoutesEndpointMovesBetweenLogins(t *testing.T) {
 	}
 }
 
-// TestPushWritesAreRateLimited: a login may change its subscriptions
-// pushWritesPerMinute times a minute (each one rewrites the store file);
-// another login keeps its own budget, and the window frees up.
+// TestPushWritesAreRateLimited: each login has its own pushWritesPerMinute
+// budget, and the window frees up.
 func TestPushWritesAreRateLimited(t *testing.T) {
 	hub := newPageHub(t)
 	var lines lockedLines
@@ -284,8 +282,6 @@ func TestChatCSPAllowsTheWorkerFromLeverOnly(t *testing.T) {
 	}
 }
 
-// TestChatPageCSPFollowsPush: the page itself carries the push policy only
-// when push is on.
 func TestChatPageCSPFollowsPush(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, _ := pushConfig(t, hub, &fakeSender{}, nil)

@@ -11,24 +11,21 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// msgCall is brokerCall specialized to the raw msg-endpoint response body,
-// returning the undecoded response so msg/watch can decode {"events":[...]}
-// themselves.
+// msgCall returns the undecoded body so msg and watch can decode it themselves.
 func msgCall(ctx context.Context, c brokerCaller, endpoint string, body any) (json.RawMessage, error) {
 	return brokerCall[json.RawMessage](ctx, c, endpoint, body)
 }
 
-// decodeMsgEvents unmarshals a /msg/list response body ({"events":[...]}) into
-// its events. A malformed body is an error — swallowing it would make msg list
-// print "Inbox empty." and the watch bridge drop events forever, silently. An
-// absent/empty "events" key stays benign: it decodes to a nil slice (empty inbox).
+// decodeMsgEvents fails on a malformed body: swallowing it would make msg list
+// print "Inbox empty." and the watch bridge drop events silently. An absent
+// "events" key is an empty inbox.
 func decodeMsgEvents(raw json.RawMessage) ([]scion.Event, error) {
 	var res wire.MsgListResponse[scion.Event]
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("decode /msg/list response: %w", err)
 	}
-	// The broker already marks each event (scion.WorkerReported); applying
-	// it again here is a no-op on its answer and covers an older broker.
+	// The broker already marks each event; marking again is a no-op and covers an
+	// older broker.
 	for i, e := range res.Events {
 		res.Events[i] = scion.WorkerReported(e)
 	}

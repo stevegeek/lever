@@ -18,23 +18,16 @@ import (
 	"github.com/stevegeek/lever/internal/mcp"
 )
 
-// toolSecretHeader carries the per-boot broker-to-tool shared secret
-// (Config.ToolSecret) on every request proxied to a first-party tool. The
-// same literal is captool.ToolSecretHeader; the two are pinned together by
-// the captool e2e test (this package cannot import captool: its tests import
-// brokertest, which imports this package).
+// toolSecretHeader must equal captool.ToolSecretHeader; the captool e2e test
+// pins the two (an import would cycle through brokertest).
 const toolSecretHeader = "X-Lever-Tool-Secret"
 
-// rewriteUpstream is the shared ProxyRequest rewrite for the broker-side
-// reverse proxies (MCP gateway and llm-proxy): route to target, pin the
-// outbound Host, and drop client-supplied forwarding/identity headers.
-// ReverseProxy.Rewrite hands us an Out request that already lacks the inbound
-// X-Forwarded-* headers, so only Cookie needs scrubbing; X-Forwarded-For is
-// re-set to the immediate client IP (the pre-Rewrite behaviour) without the
-// inbound chain. Forwarding/identity headers ONLY — never credential headers
-// (Authorization/x-api-key): the llm proxy injects the real Console key after
-// this runs. The agent-side loopback gateway (internal/agent/gateway.go) is a
-// different trust context and intentionally does not scrub.
+// rewriteUpstream routes to target, pins the outbound Host and drops
+// client-supplied forwarding/identity headers. Rewrite's Out request already
+// lacks inbound X-Forwarded-*, so only Cookie is scrubbed, and X-Forwarded-For
+// is set to the immediate client IP without the inbound chain. Credential
+// headers are not touched here: the llm proxy injects the real key after this
+// runs.
 func rewriteUpstream(pr *httputil.ProxyRequest, target *url.URL) {
 	pr.SetURL(target)
 	pr.Out.Host = target.Host
@@ -44,10 +37,6 @@ func rewriteUpstream(pr *httputil.ProxyRequest, target *url.URL) {
 	}
 }
 
-// gatewayHandler returns the gated MCP reverse-proxy for one registered tool
-// (mounted at /mcp/<name>/ on the jail listener): authenticate the caller,
-// scrub forged broker-internal headers, run the per-request authorization
-// (authorizeToolCall), then hand the rewritten request to the tool proxy.
 func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	t, ok := b.reg.Lookup(toolName)
 	if !ok {
@@ -65,8 +54,8 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		// Scrub every inbound X-Lever-* header to prevent jail agents from forging
-		// broker-internal context (e.g. X-Lever-Caller).
+		// Scrub inbound X-Lever-* so an agent cannot forge broker-internal
+		// context such as X-Lever-Caller.
 		for name := range r.Header {
 			if strings.HasPrefix(http.CanonicalHeaderKey(name), "X-Lever-") {
 				r.Header.Del(name)
@@ -81,11 +70,9 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		if !b.authorizeToolCall(w, r, t, caller, body) {
 			return
 		}
-		// A first-party tool refuses any request without the per-boot secret
-		// — the proof that the request came through this gateway and that
-		// X-Lever-Caller above is the broker's word, not the agent's. Never
-		// sent to a third-party backend (set AFTER the X-Lever-* scrub, so an
-		// inbound forgery is already gone).
+		// The secret proves to a first-party tool that X-Lever-Caller is the
+		// broker's word. Never sent to a third-party backend; set AFTER the
+		// scrub so an inbound forgery is already gone.
 		if t.FirstParty && b.toolSecret != "" {
 			r.Header.Set(toolSecretHeader, b.toolSecret)
 		}
@@ -93,12 +80,8 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	}), nil
 }
 
-// backendURL parses a registry backend into a proxy target. The config
-// backend is a bare host:port listen address (config: `backend:
-// 127.0.0.1:3201`), which url.Parse treats as scheme:opaque and can't proxy.
-// Normalize a scheme-less authority to http:// (loopback tool traffic is
-// plain HTTP); a backend that already carries a scheme (e.g. an httptest
-// server URL) is left untouched.
+// backendURL adds http:// to a bare host:port backend, which url.Parse would
+// read as scheme:opaque.
 func backendURL(backend string) (*url.URL, error) {
 	if !strings.Contains(backend, "://") {
 		backend = "http://" + backend
@@ -106,20 +89,14 @@ func backendURL(backend string) (*url.URL, error) {
 	return url.Parse(backend)
 }
 
-// newToolProxy builds the reverse proxy for one tool backend: route +
-// forwarding-header scrub (rewriteUpstream), the backend-path collapse for
-// a bare-root request, and the tools/list schema rewrite that advertises
-// _capability.
 func newToolProxy(target *url.URL) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		remainder := pr.In.URL.Path // post-StripPrefix, before the backend-path join
+		remainder := pr.In.URL.Path
 		rewriteUpstream(pr, target)
-		// A backend that carries its own path (e.g. qmd's "[::1]:3901/mcp") must
-		// receive that path EXACTLY when the MCP client hits the tool root: the
-		// default join turns "/mcp"+"/" into "/mcp/", which a strict streamable-
-		// HTTP endpoint 404s. Collapse a bare-root remainder to the backend path.
-		// Path-less backends (the common case) are untouched.
+		// The default join turns "/mcp"+"/" into "/mcp/", which a strict
+		// streamable-HTTP endpoint 404s: send a bare-root request to the
+		// backend path exactly.
 		if (remainder == "" || remainder == "/") && target.Path != "" && target.Path != "/" {
 			pr.Out.URL.Path = target.Path
 			pr.Out.URL.RawPath = ""
@@ -143,12 +120,9 @@ func newToolProxy(target *url.URL) *httputil.ReverseProxy {
 	return rp
 }
 
-// answerNotFound answers an MCP discovery probe the gateway does not carry
-// (it relays tools only) with JSON-RPC "method not found", the reply the MCP
-// spec gives for an unsupported method, so a client moves on without an
-// audit deny per tool at every start. It is never forwarded: the backend's
-// resources and prompts stay out of reach. A notification (no id) gets no
-// reply, only the 202 Streamable HTTP gives an accepted notification.
+// answerNotFound answers an MCP discovery probe with JSON-RPC "method not
+// found" so a client moves on quietly. It is never forwarded: the backend's
+// resources and prompts stay out of reach. A notification gets only a 202.
 func answerNotFound(w http.ResponseWriter, msg map[string]any) {
 	id, ok := msg["id"]
 	if !ok {
@@ -159,21 +133,15 @@ func answerNotFound(w http.ResponseWriter, msg map[string]any) {
 	_, _ = w.Write(mcp.Error(id, mcp.CodeMethodNotFound, "method not found"))
 }
 
-// setBody replaces r's body with b for the proxy hop.
 func setBody(r *http.Request, b []byte) {
 	r.Body = io.NopCloser(bytes.NewReader(b))
 	r.ContentLength = int64(len(b))
 }
 
-// authorizeToolCall is the per-request authorization state machine for one
-// MCP message on tool t. It parses body, and for tools/call it requires a
-// capability token, maps the params under the tool's grain, denies a revoked
-// caller, verifies the token, and rewrites r's body for the backend (the
-// verified token is forwarded to a first-party tool, stripped otherwise).
-// The allowlisted non-capability methods are forwarded unchanged; the
-// discovery probes are answered "method not found" here (answerNotFound);
-// anything else is denied. On every deny it audits, writes the response and returns
-// false; on true the caller forwards r.
+// authorizeToolCall authorizes one MCP message on tool t. tools/call needs a
+// verified capability token; the token is forwarded only to a first-party
+// tool. Allowlisted methods pass unchanged, discovery probes are answered
+// here, and anything else is denied. On false the response is written.
 func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t registry.Tool, caller string, body []byte) bool {
 	toolName := t.Name
 	method, msg, ok := mcp.Parse(body)
@@ -195,20 +163,16 @@ func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t reg
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return false
 		}
-		// A coarse tool's whole surface rides one wildcard capability:
-		// require {tool, "*"} regardless of which MCP tool is invoked. The
-		// broker CHOOSES the required op, so a "*" token can never satisfy
-		// a fine tool (whose required op is the real params.name) — the
-		// wildcard cannot cross grains.
+		// A coarse tool requires {tool, "*"} whatever MCP tool is invoked.
+		// The broker CHOOSES the required op, so a "*" token can never
+		// satisfy a fine tool: the wildcard cannot cross grains.
 		requiredOp := op
 		if t.Coarse {
 			requiredOp = registry.WildcardOp
 		}
-		// The token id (best-effort parse; shape-checked) correlates this
-		// use with the /request mint line — logged on every post-decode
-		// deny too, so a denied attempt (revoked replay included) still
-		// ties back to its mint. On deny paths it is the token's CLAIMED
-		// id: the signature has not been checked yet.
+		// The token id ties this use, denials included, to its /request mint
+		// line. On deny paths it is the CLAIMED id: the signature is not
+		// checked yet.
 		tokID := token.ID(rawTok)
 		params, err := b.reg.MapParams(toolName, requiredOp, args)
 		if err != nil {
@@ -230,25 +194,22 @@ func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t reg
 			return false
 		}
 		if t.FirstParty {
-			// Forward the verified token to the host-side first-party tool so it
-			// can re-verify independently; assert the caller it must trust.
-			// unconstrained args are intentionally forwarded;
-			// pinning every dangerous arg is the minter's job.
+			// The first-party tool re-verifies the token independently.
+			// Unconstrained args are forwarded: pinning every dangerous arg
+			// is the minter's job.
 			setBody(r, body)
 			r.Header.Set("X-Lever-Caller", caller)
 		} else {
 			setBody(r, mcp.StripCapability(msg))
 		}
 		r.Header.Set("X-Lever-Method", "tools/call")
-		// audit the real MCP tool name, even on the coarse path
+		// The real MCP tool name, even on the coarse path.
 		b.audit(toolName, caller, "allow", op, "id", tokID)
 	case "initialize", "tools/list", "notifications/initialized", "ping":
-		// Allowlisted non-capability methods — forward unchanged.
 		setBody(r, body)
 		r.Header.Set("X-Lever-Method", method)
 	case "server/discover", "resources/list", "resources/templates/list", "prompts/list":
-		// The answer is the same either way, but a revoked caller's probe is
-		// audited: revocation must leave a trace of every later attempt.
+		// Revocation must leave a trace of every later attempt.
 		if b.isRevoked(caller) {
 			b.audit(toolName, caller, "deny", "revoked: "+method)
 		} else {
@@ -257,7 +218,7 @@ func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t reg
 		answerNotFound(w, msg)
 		return false
 	default:
-		// Any method not in the explicit allowlist is denied. Fail closed.
+		// Fail closed.
 		b.audit(toolName, caller, "deny", "method not allowlisted: "+method)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false

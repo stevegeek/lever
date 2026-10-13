@@ -29,9 +29,8 @@ func TestSecretSetErrorRedactsToken(t *testing.T) {
 	}
 }
 
-// TestSecretSetScrubsFlagLookingValue covers what position-based masking cannot:
-// a value starting with "-" is indistinguishable from a flag, so redactArgs
-// masks the key instead and cobra echoes the value back in its own error.
+// TestSecretSetScrubsFlagLookingValue: a value starting with "-" looks like a
+// flag, which redactArgs cannot mask and cobra echoes back.
 func TestSecretSetScrubsFlagLookingValue(t *testing.T) {
 	const secret = "-leading-dash-secret-value"
 	f := proc.NewFakeRunner()

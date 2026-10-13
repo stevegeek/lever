@@ -36,8 +36,8 @@ func parseSemver(s string) (semver, error) {
 	return v, nil
 }
 
-// compareSemver orders a and b by Semantic Versioning precedence (build
-// metadata ignored): -1, 0 or 1.
+// compareSemver orders by Semantic Versioning precedence (build metadata
+// ignored): -1, 0 or 1.
 func compareSemver(a, b semver) int {
 	for i := 0; i < 3; i++ {
 		if c := a.core[i].Cmp(b.core[i]); c != 0 {
@@ -80,8 +80,6 @@ func compareSemver(a, b semver) int {
 	return 0
 }
 
-// numericID reads a pre-release identifier as a number when it is made only
-// of digits.
 func numericID(s string) (*big.Int, bool) {
 	if !numericIDRE.MatchString(s) {
 		return nil, false

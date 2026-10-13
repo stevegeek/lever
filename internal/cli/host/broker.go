@@ -32,7 +32,7 @@ func loadAppArg(args []string) (*config.App, error) {
 	return config.Load(path)
 }
 
-// stateFor returns the broker state dir for an app (beside the config file).
+// stateFor returns the state dir beside the config file.
 func stateFor(path string) state.State {
 	return state.ForConfig(filepath.Dir(path))
 }
@@ -43,8 +43,6 @@ func newBrokerServeCmd() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Run the capability broker + first-party tools (foreground)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// A daemon: every line it writes (broker.out.log when apply
-			// spawned it) takes lever's log shape.
 			daemonLogging(cmd, "broker")
 			path, err := resolveConfigPath(argOrEmpty(args))
 			if err != nil {
@@ -93,14 +91,13 @@ func newRevokeCmd() *cobra.Command {
 	}
 }
 
-// adminClient talks to the broker's loopback admin port. The port is local, so
-// a short timeout bounds a wedged broker instead of hanging the CLI.
+// adminClient's short timeout bounds a wedged broker on the loopback admin
+// port.
 var adminClient = &http.Client{Timeout: 10 * time.Second}
 
-// adminPost POSTs body as JSON to the running broker's loopback admin port
-// (from config), discarding the response body. It first checks the broker
-// there is this instance's (requireOwnBroker): another instance's broker on
-// the same port would take the revoke for its own agents.
+// adminPost POSTs body as JSON to the running broker's admin port, after
+// requireOwnBroker: another instance's broker on the same port would take the
+// revoke for its own agents.
 func adminPost(ctx context.Context, app *config.App, path string, body any) error {
 	if err := requireOwnBroker(ctx, adminClient, app.EffectiveAdminPort(), state.ForConfig(app.InstanceDir())); err != nil {
 		return err

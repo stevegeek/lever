@@ -9,9 +9,9 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// TestRemoteConfigHashTracksRemoteOnly: the hash must move when anything the
-// PROXY reads changes, and must NOT move for config the proxy never reads —
-// otherwise every unrelated edit would bounce the proxy and drop live sessions.
+// TestRemoteConfigHashTracksRemoteOnly: the hash moves when anything the
+// proxy reads changes, and not for config it never reads (every unrelated
+// edit would bounce the proxy and drop live sessions).
 func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	base := &config.App{Remote: config.Remote{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net"}}
 	h := RemoteConfigHash(base)
@@ -56,11 +56,9 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	}
 }
 
-// TestRemoteConfigHashCoversWhatTheProxyCaptures: the proxy reads more than the
-// `remote:` block at startup — app.Name picks the JAIL it dials and app.Backend
-// gates the transport. An independent review caught that hashing app.Remote
-// alone let a rename leave a running proxy fronting the old machine's hub while
-// apply reused it.
+// TestRemoteConfigHashCoversWhatTheProxyCaptures: app.Name picks the jail the
+// proxy dials and app.Backend the transport, so a rename must not leave a
+// running proxy fronting the old machine's hub.
 func TestRemoteConfigHashCoversWhatTheProxyCaptures(t *testing.T) {
 	base := &config.App{Name: "assistant", Backend: "orbstack",
 		Remote: config.Remote{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net"}}
@@ -78,11 +76,9 @@ func TestRemoteConfigHashCoversWhatTheProxyCaptures(t *testing.T) {
 	}
 }
 
-// TestRemoteIdentityMirrorsConfigRemote: RemoteConfigHash copies config.Remote
-// onto state.RemoteIdentity field by field. A field added to config.Remote
-// without a counterpart here would silently escape the hash, and a running
-// proxy would keep the old value across apply. Name and Backend are the two
-// App-level extras the proxy also captures.
+// TestRemoteIdentityMirrorsConfigRemote: a field added to config.Remote
+// without a counterpart in state.RemoteIdentity would silently escape the
+// hash, and a running proxy would keep the old value across apply.
 func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 	remote := reflect.TypeFor[config.Remote]()
 	identity := reflect.TypeFor[state.RemoteIdentity]()
@@ -128,9 +124,8 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 	}
 }
 
-// TestRemoteConfigHashCoversTiers: an operator entry hashes as its bare
-// login (a pre-tier config keeps its hash), and a contact's tier or agents
-// change the hash.
+// TestRemoteConfigHashCoversTiers: an operator entry hashes as its bare login
+// and a contact's tier or agents change the hash.
 func TestRemoteConfigHashCoversTiers(t *testing.T) {
 	if got := remoteUserKeys([]config.RemoteUser{{Login: "op@x"}}); got[0] != "op@x" {
 		t.Fatalf("operator key %q, want the bare login", got[0])

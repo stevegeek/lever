@@ -5,20 +5,14 @@ import (
 	"strings"
 )
 
-// Listing renders the rules of family f the way `iptables -S Chain` (or
-// ip6tables) prints the chain once RestoreInput has loaded them: the `-N`
-// line, then one `-A` line per rule, in order. iptables prints a bare
-// destination address with its full prefix length (`-d 192.168.5.2/32`,
-// `-d fd07::fe/128`) and adds the implicit protocol match before a port
-// (`-p tcp -m tcp --dport 8443`), and likewise before an ICMP type, which it
-// prints as type/code (`-p icmp -m icmp --icmp-type 3/10` for
-// host-prohibited); everything else prints as written.
+// Listing renders the rules of family f the way `iptables -S Chain` prints
+// them once loaded: iptables adds the full prefix length to a bare address,
+// the implicit protocol match before a port or ICMP type, and prints an ICMP
+// type as type/code.
 //
-// It exists so a re-apply can VERIFY the live chain against the ruleset it
-// would commit (ListingMatches) instead of assuming it. The comparison is
-// exact, and only the expected side is transformed, so a rule shape this
-// rendering does not know can only make the comparison fail, which costs a
-// rebuild. It can never make a different live chain compare equal.
+// A re-apply verifies the live chain against it (ListingMatches). Only the
+// expected side is transformed, so a rule shape this rendering does not know
+// can only cause a mismatch (a rebuild), never a false match.
 func Listing(rules []Rule, f Family) []string {
 	out := []string{"-N " + Chain}
 	for _, r := range rules {
@@ -29,7 +23,6 @@ func Listing(rules []Rule, f Family) []string {
 	return out
 }
 
-// listingLine is one rule's args in iptables -S form.
 func listingLine(args []string, f Family) string {
 	var b []string
 	for i := 0; i < len(args); i++ {
@@ -54,9 +47,8 @@ func listingLine(args []string, f Family) string {
 	return strings.Join(b, " ")
 }
 
-// listingAddr is an address as iptables prints it: a CIDR as its network,
-// a bare address with the family's full prefix. Anything that is not an
-// address is left as it is (and will then not match a live listing).
+// listingAddr renders a CIDR as its network and a bare address with the
+// family's full prefix. A non-address is left as is and will not match.
 func listingAddr(s string, f Family) string {
 	if _, n, err := net.ParseCIDR(s); err == nil {
 		return n.String()
@@ -71,14 +63,12 @@ func listingAddr(s string, f Family) string {
 	return ip.String() + "/128"
 }
 
-// icmpTypeCodes are the ICMP type names the ruleset uses, as iptables -S
-// prints them (type/code). A name missing here is left as written, which
-// cannot match a live listing: it costs a rebuild, never a false match.
+// icmpTypeCodes maps the ICMP type names the ruleset uses to iptables -S
+// type/code form. A missing name cannot match: a rebuild, never a false match.
 var icmpTypeCodes = map[string]string{
 	"host-prohibited": "3/10",
 }
 
-// listingICMPType is an ICMP type as iptables prints it.
 func listingICMPType(s string) string {
 	if tc, ok := icmpTypeCodes[s]; ok {
 		return tc
@@ -86,10 +76,9 @@ func listingICMPType(s string) string {
 	return s
 }
 
-// ListingMatches reports whether live, the output of `iptables -S Chain` (or
-// ip6tables) for family f, is exactly the chain RestoreInput(rules, f) would
-// commit: the same rules in the same order, and nothing else. Blank lines are
-// ignored; any other extra, missing or different line is a mismatch.
+// ListingMatches reports whether live (`iptables -S Chain` for family f) is
+// exactly the chain RestoreInput(rules, f) would commit. Blank lines are
+// ignored; any other difference is a mismatch.
 func ListingMatches(rules []Rule, f Family, live string) bool {
 	var got []string
 	for _, line := range strings.Split(live, "\n") {

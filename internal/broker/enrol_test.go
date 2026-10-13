@@ -33,9 +33,8 @@ func TestEnrolSignsCertForMatchingWorker(t *testing.T) {
 	}
 }
 
-// THE load-bearing test: a ticket for "worker" + a CSR claiming CN "manager"
-// must be rejected, AND the ticket must survive (not be burned) so the real
-// worker can still enrol.
+// A ticket for "worker" with a CSR claiming CN "manager" must be rejected,
+// and the ticket must survive so the real worker can still enrol.
 func TestEnrolRejectsCNMismatchAndPreservesTicket(t *testing.T) {
 	b := New(testConfig(t))
 	tk, _ := b.tickets.Issue("worker", b.ticketTTL)

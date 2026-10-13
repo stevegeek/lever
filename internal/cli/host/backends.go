@@ -8,10 +8,9 @@ import (
 	"github.com/stevegeek/lever/internal/backend/registry"
 )
 
-// newBackendsCmd lists every containment backend Lever can run and the
-// guarantees it declares, straight from registry.Candidates (the same source the
-// docs and config validation use). Roadmap and rejected backends are
-// documentation: docs-site/_reference/backends.md. Read-only; no jail required.
+// newBackendsCmd lists every containment backend and its declared guarantees
+// from registry.Candidates, the source docs and config validation use.
+// Read-only; no jail required.
 func newBackendsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "backends",

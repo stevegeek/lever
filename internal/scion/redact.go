@@ -2,19 +2,15 @@ package scion
 
 import "github.com/stevegeek/lever/internal/logging"
 
-// RedactSecrets masks credentials in text scion produced (lever#37). scion's
-// runtime error repeats the whole `podman run` argv it executed, `-e
-// KEY=VALUE` pairs included, and in subscription mode one of those is the
-// operator's OAuth token; run folds that stderr into its error, and the
-// broker audits the error verbatim. Every env VALUE is elided (the key
-// stays, which is what an operator reads), and any Anthropic-shaped token
-// is masked on its own — belt and braces, since the argv shape is scion's
-// choice and may change. Applied by clean, so every scion error and output
-// lever hands on is covered; the broker's audit applies it again as a
-// backstop for text that never went through the client.
+// RedactSecrets masks credentials in text scion produced. scion's runtime
+// error repeats the whole podman run argv, -e KEY=VALUE pairs included, and in
+// subscription mode one is the operator's OAuth token. Every env value is
+// elided (the key stays), and any Anthropic-shaped token is masked on its own
+// in case the argv shape changes. cleanErr applies it to every scion error;
+// the broker's audit applies it again as a backstop.
 //
-// The rules are lever's one redaction rule set, logging.Redact, which every
-// daemon log line also goes through.
+// The rules are logging.Redact's, which every daemon log line also goes
+// through.
 func RedactSecrets(s string) string {
 	return logging.Redact(s)
 }

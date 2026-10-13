@@ -10,13 +10,10 @@ import (
 
 // ChatLedgerPath is the verified-chat ledger both the remote proxy (writer)
 // and the broker (reader) use, or "" when verified chat is off. One function
-// decides for both, so the two can never disagree.
-//
-// It is on only when all of these hold:
-//   - remote access is on (the web chat exists only behind the proxy);
-//   - allowed_users is set (otherwise the proxy verifies no login);
-//   - the state directory is outside the tree. Agents mount the tree, so a
-//     ledger inside it could be written from a jail and would prove nothing.
+// decides for both, so they can never disagree. It is on only when remote
+// access is on, allowed_users is set (otherwise no login is verified), and
+// the state directory is outside the tree (a ledger inside it could be
+// written from a jail and would prove nothing).
 func ChatLedgerPath(app *config.App, st state.State) string {
 	if !ChatConfigured(app) || StateInsideTree(app, st) {
 		return ""
@@ -24,18 +21,16 @@ func ChatLedgerPath(app *config.App, st state.State) string {
 	return st.ChatLedger()
 }
 
-// ChatConfigured is the config half of ChatLedgerPath, for ConfigHash (which
-// has no state.State). The other half, the state directory's place relative
-// to the tree, does not change for an instance.
+// ChatConfigured is the config half of ChatLedgerPath, for ConfigHash. The
+// other half, the state directory's place, does not change for an instance.
 func ChatConfigured(app *config.App) bool {
 	return app.RemoteEnabled() && len(app.Remote.AllowedUsers) > 0
 }
 
-// WebSenders is the envelope sender of every remote sign-in (see
-// config.Remote.WebSenders), or none when remote access is off. The broker
-// looks a message from one of them up in the chat ledger only. With remote
-// access on and no allowed_users it is the unnamed operator, who can post too
-// (and whose posts then cannot be verified).
+// WebSenders is the envelope sender of every remote sign-in, or none when
+// remote access is off. The broker looks their messages up in the chat
+// ledger only. With no allowed_users it is the unnamed operator, whose posts
+// cannot be verified.
 func WebSenders(app *config.App) []string {
 	if !app.RemoteEnabled() {
 		return nil

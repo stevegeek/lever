@@ -12,28 +12,15 @@ import (
 )
 
 // webDigestFile records, INSIDE the staged guest directory, the digest of the
-// asset tree lever put there. Unlike the scion binary — which is verified by
-// hashing the installed file itself (see InstallRootBinaryIfChanged) — a tree
-// of ~700 files cannot be re-hashed over the transport cheaply, and a
-// host/guest hash agreement would be a brittle second implementation of the
-// same walk. So this one is a marker, with the marker's honest limitation:
-// it attests what lever installed, not what is there now.
-//
-// The limitation is bounded deliberately. The skip ALSO requires
-// layout.WebAssetsSentinel to exist, so a wiped or half-wiped directory
-// re-stages; what a marker misses is an out-of-band edit of an individual
-// asset, in a root-owned directory inside the VM, whose worst outcome is a
-// stale UI. No security boundary rests on it — that is the proxy's PAT and
-// origin gate.
+// asset tree lever put there. Unlike the scion binary it is a marker: it
+// attests what lever installed, not what is there now. The skip also requires
+// layout.WebAssetsSentinel, so a wiped directory re-stages; an out-of-band
+// edit of one asset in the root-owned directory goes unnoticed, at worst a
+// stale UI. No security boundary rests on it.
 const webDigestFile = ".lever-web-digest"
 
-// EnsureScionWebAssets builds scion's SPA on the HOST (webassets.Build) and
-// stages it into the guest at layout.WebAssetsDir.
-//
-// The work is skipped at two levels, so a re-apply on an unchanged pin costs
-// two cheap probes and no npm: the host build cache is keyed by a digest of
-// the scion web sources, and the guest staging is skipped when the guest
-// already holds that same digest.
+// EnsureScionWebAssets builds scion's SPA on the HOST and stages it into the
+// guest at layout.WebAssetsDir.
 func (g Guest) EnsureScionWebAssets(ctx context.Context, spec ScionSpec) error {
 	if !spec.BuildsWebAssets() {
 		return nil
@@ -49,10 +36,6 @@ func (g Guest) EnsureScionWebAssets(ctx context.Context, spec ScionSpec) error {
 	return g.stageWebAssets(ctx, dist, digest)
 }
 
-// stageWebAssets streams the built dist/client into the guest, unless the guest
-// already holds this digest. The tree travels as a tar archive written by
-// lever itself (webassets.WriteTar) on the stdin of a guest-side extract
-// script — argv only, through the Runner's stdin seam, like InstallRootBinary.
 func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 	if g.stagedWebDigest(ctx) == digest {
 		return nil
@@ -75,21 +58,16 @@ func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 	return nil
 }
 
-// stagedWebDigest reads the digest the guest currently holds, or "" when there
-// is none. `test -f` on the sentinel guards the marker's blind spot: a
-// directory whose contents were removed but whose marker survived would
-// otherwise be accepted forever. Fail-closed by returning "" — an unreadable
-// guest re-stages, which costs 12MB of transport rather than an unusable UI.
+// stagedWebDigest returns "" when unreadable, so the guest re-stages. `test
+// -f` on the sentinel catches a directory whose contents were removed but
+// whose marker survived.
 func (g Guest) stagedWebDigest(ctx context.Context) string {
 	script := fmt.Sprintf("test -f %s && cat %s",
 		shellSingleQuote(filepath.Join(layout.WebAssetsDir, filepath.FromSlash(layout.WebAssetsSentinel))),
 		shellSingleQuote(filepath.Join(layout.WebAssetsDir, webDigestFile)))
-	// Absolute path, not a bare name: UserRun passes no env, so a bare name
-	// resolves on the guest run-user's PATH, which precedes /usr/bin with
-	// run-user-writable directories (the same reasoning as
-	// InstallRootBinaryIfChanged's /usr/bin/sha256sum). A shim planted there
-	// could echo the current digest for a tree it had replaced and pin the
-	// staged UI stale forever, with no guest root needed.
+	// Absolute path: a bare name resolves on the run user's PATH, which has
+	// run-user-writable directories ahead of /usr/bin, and a shim there
+	// could pin a replaced tree forever without guest root.
 	res, err := g.UserRun(ctx, "/bin/bash", "-c", script)
 	if err != nil {
 		return ""
@@ -97,24 +75,15 @@ func (g Guest) stagedWebDigest(ctx context.Context) string {
 	return strings.TrimSpace(res.Stdout)
 }
 
-// stageWebAssetsScript is the guest-side half of stageWebAssets: extract the
-// archive on stdin into a temp directory, record the digest inside it, then
-// swap it in. Split out so a test can assert it without a guest.
+// stageWebAssetsScript: the rm+mv pair leaves a brief window with no assets;
+// a failure inside it leaves the destination absent rather than half-written,
+// which the next apply re-stages.
 //
-// A directory swap cannot be a single atomic mv the way a file replace can, so
-// the rm+mv pair leaves a brief window with no assets; a failure inside it
-// leaves the destination absent rather than half-written, which the next apply
-// re-stages because stagedWebDigest reads "".
+// --no-same-owner: extraction runs as guest root, and GNU tar as root
+// restores the archive's ownership by default.
 //
-// --no-same-owner: extraction runs as guest root, and GNU tar as root restores
-// the ARCHIVE's ownership by default; lever's archive carries none, and the
-// flag makes that explicit.
-//
-// `bash` and `tar` stay bare names, unlike the run-user probe in
-// stagedWebDigest: they resolve on guest ROOT's PATH, which no run-user can
-// write to, so planting a shim there already requires the root this command
-// runs as. Paths and the digest are shell-quoted because they are interpolated
-// into the script.
+// `bash` and `tar` are bare names because they resolve on root's PATH, which
+// no run user can write to.
 func stageWebAssetsScript(digest string) string {
 	tmp := layout.WebAssetsDir + ".tmp"
 	return fmt.Sprintf("rm -rf %s && mkdir -p %s && tar -xf - --no-same-owner -C %s && printf %%s %s > %s && rm -rf %s && mv %s %s",

@@ -21,27 +21,22 @@ const (
 	NamespaceAdmin     = "lever-operator-admin@lever.dev"
 	// MaxExpiry is the hard cap on directive lifetime, enforced at parse
 	// time on both the CLI and broker sides.
-	MaxExpiry = 24 * time.Hour
-	// maxStatementBytes bounds submitted statements (defence vs log/memory bloat).
+	MaxExpiry         = 24 * time.Hour
 	maxStatementBytes = 64 << 10
 	maxInstructionLen = 4 << 10
 	// ClockLeeway absorbs operator-host vs broker-host skew on the
-	// not_before bound only. Expiry stays strict (fail closed). It is also
-	// the furthest ahead a not_before may be: the CLI refuses more locally.
+	// not_before bound only; expiry stays strict (fail closed). The CLI also
+	// refuses a not_before further ahead than this.
 	ClockLeeway = 2 * time.Minute
-	// maxJSONDepth bounds walkDupes' recursion. In practice maxStatementBytes
-	// (64KiB) already limits how deep a document can nest, but an explicit
-	// cap is cheap defence-in-depth against a huge-fanout-free, pure-nesting
-	// document (e.g. thousands of "[").
+	// maxJSONDepth bounds walkDupes' recursion as defence in depth against a
+	// small, deeply nested document that the size cap alone allows.
 	maxJSONDepth = 200
 )
 
 var ErrInvalid = errors.New("opsig: invalid")
 
-// Directive action kinds. These are the exact wire values carried in
-// Action.Kind (byte-identical to the historical string literals); production
-// code references these constants, while tests keep raw literals as an
-// independent pin of the wire vocabulary.
+// Directive action kinds, as carried on the wire in Action.Kind. Tests use
+// raw literals on purpose, to pin the wire values independently.
 const (
 	KindToolCall    = "tool_call"
 	KindApproval    = "approval"
@@ -117,7 +112,7 @@ func walkDupes(dec *json.Decoder, depth int) error {
 					return err
 				}
 			}
-			_, err = dec.Token() // consume '}'
+			_, err = dec.Token()
 			return err
 		case '[':
 			for dec.More() {
@@ -125,14 +120,14 @@ func walkDupes(dec *json.Decoder, depth int) error {
 					return err
 				}
 			}
-			_, err = dec.Token() // consume ']'
+			_, err = dec.Token()
+
 			return err
 		}
 	}
 	return nil
 }
 
-// parseTime parses an RFC3339 timestamp, failing closed on any malformation.
 func parseTime(field, v string) (time.Time, error) {
 	ts, err := time.Parse(time.RFC3339, v)
 	if err != nil {
@@ -141,10 +136,8 @@ func parseTime(field, v string) (time.Time, error) {
 	return ts, nil
 }
 
-// decodeStrict runs the shared parse prologue for signed documents: enforce the
-// size cap, reject duplicate object keys, then strict-decode (no unknown fields)
-// into dst. raw MUST be the exact bytes the signature was verified over. what
-// names the document ("statement"/"envelope"), used only in the size-cap error.
+// decodeStrict is the shared parse step for signed documents. raw MUST be the
+// exact bytes the signature was verified over.
 func decodeStrict(raw []byte, what string, dst any) error {
 	if len(raw) > maxStatementBytes {
 		return fmt.Errorf("%w: %s too large", ErrInvalid, what)
@@ -206,10 +199,8 @@ func ParseStatement(raw []byte, instance string, now time.Time) (Statement, erro
 	return st, nil
 }
 
-// ValidateAction exports validateAction's action-shape rules for callers
-// outside this package (the CLI) that construct an Action client-side and
-// want to fail fast — before building/signing a Statement around it — rather
-// than discover a malformed action only after the broker rejects the send.
+// ValidateAction checks an action's shape with the broker's rules, so the
+// CLI can fail before signing.
 func ValidateAction(a Action) error { return validateAction(a) }
 
 func validateAction(a Action) error {
@@ -266,10 +257,8 @@ func ParseEnvelope(raw []byte, instance string, now time.Time, maxSkew time.Dura
 	return e, nil
 }
 
-// Sign signs msg with the SSH private key at keyPath under namespace
-// using the system ssh-keygen. msg goes to stdin; the armored signature
-// comes back on stdout. Fixed argv — no caller-controlled flags. ctx bounds
-// the subprocess.
+// Sign signs msg with the SSH private key at keyPath under namespace using
+// the system ssh-keygen, with a fixed argv (no caller-controlled flags).
 func Sign(ctx context.Context, keyPath, namespace string, msg []byte) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "ssh-keygen", "-Y", "sign", "-f", keyPath, "-n", namespace, "-q", "-")
 	cmd.Stdin = bytes.NewReader(msg)
@@ -288,10 +277,10 @@ type Verifier struct {
 	Principal      string
 }
 
-// Verify checks sig over msg under namespace. The signature is
-// written to a private temp file (ssh-keygen requires -s to be a file); msg
-// goes to stdin. ctx bounds the subprocess — this runs on the broker's
-// request path.
+// Verify checks sig over msg under namespace. ssh-keygen requires -s to be a
+// file, so sig goes to a private temp file. ctx must bound the subprocess:
+// this runs on the broker's request path.
+
 func (v Verifier) Verify(ctx context.Context, namespace string, msg, sig []byte) error {
 	dir, err := os.MkdirTemp("", "lever-opsig-*")
 	if err != nil {

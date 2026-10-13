@@ -51,11 +51,9 @@ type checkResult struct {
 	fix    string
 }
 
-// dialFunc probes a TCP address, returning nil if something is listening. It is
-// injected so the checks are unit-testable without real listeners.
+// dialFunc returns nil if something listens on addr.
 type dialFunc func(addr string) error
 
-// tcpDial is the production dialFunc: a short-timeout TCP connect, closed at once.
 func tcpDial(addr string) error {
 	c, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
@@ -65,44 +63,31 @@ func tcpDial(addr string) error {
 }
 
 // doctorProbes is every host-side observation doctor makes that reaches
-// outside the process: TCP dials, HTTP requests to the remote proxy, and
-// subprocesses. Checks take the struct rather than a package variable so a
-// test builds its own value and never races another test's override.
-// productionProbes builds the real one.
+// outside the process. Checks take it as a value so tests never race on a
+// package variable.
 type doctorProbes struct {
-	// dial reports whether something listens on a TCP address.
-	dial dialFunc
-	// goVersion runs `go version` on the host PATH.
+	dial      dialFunc
 	goVersion func() (string, error)
-	// nodeToolchain validates node+npm for the scion web-asset build and
-	// returns the node version.
+	// nodeToolchain validates node and npm for the scion web-asset build.
 	nodeToolchain func() (string, error)
-	// claudeVersion reads the baked Claude Code version label of an image
-	// from the host docker store; claudeVersionTar reads it from the docker
-	// archive the image ships in (image_tar), for a host with no docker.
+	// claudeVersion reads an image's baked Claude Code version label from the host
+	// docker store; claudeVersionTar reads it from the image_tar archive, for a
+	// host with no docker.
 	claudeVersion    func(imageRef string) (string, error)
 	claudeVersionTar func(tarPath, imageRef string) (string, error)
-	// leverVersion and leverVersionTar read the image's lever_version label
-	// the same two ways.
-	leverVersion    func(imageRef string) (string, error)
-	leverVersionTar func(tarPath, imageRef string) (string, error)
-	// jailABI and jailABITar read the image's lever_jail_abi label (the
-	// in-jail compatibility version, internal/jailabi) the same two ways.
-	jailABI    func(imageRef string) (string, error)
-	jailABITar func(tarPath, imageRef string) (string, error)
-	// remoteHealthz issues GET /healthz through the remote-access proxy.
-	remoteHealthz func(healthzProbe) (int, error)
-	// remoteLogin inspects the local OIDC provider on its loopback port.
-	remoteLogin func(port int) (loginProbeResult, error)
-	// remoteJailLogin asks the hub, from inside the jail, to start a login.
+	leverVersion     func(imageRef string) (string, error)
+	leverVersionTar  func(tarPath, imageRef string) (string, error)
+	// jailABI and jailABITar read the lever_jail_abi label (internal/jailabi).
+	jailABI         func(imageRef string) (string, error)
+	jailABITar      func(tarPath, imageRef string) (string, error)
+	remoteHealthz   func(healthzProbe) (int, error)
+	remoteLogin     func(port int) (loginProbeResult, error)
 	remoteJailLogin func(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error)
-	// portHolder names the process listening on a host loopback port
-	// ("pid 123, python3"), or "" when it cannot tell.
+	// portHolder names the process on a host loopback port ("pid 123, python3"),
+	// or "" when it cannot tell.
 	portHolder func(ctx context.Context, port int) string
 }
 
-// productionProbes wires the real probes. Host subprocesses (go, node,
-// docker) run through r.
 func productionProbes(r proc.Runner) doctorProbes {
 	return doctorProbes{
 		dial:          tcpDial,
@@ -127,28 +112,19 @@ func productionProbes(r proc.Runner) doctorProbes {
 	}
 }
 
-// doctorHTTPClient is the client every loopback HTTP probe shares: the proxy
-// and its login provider answer on 127.0.0.1, so a short timeout is enough to
-// tell "down" from "up".
 var doctorHTTPClient = &http.Client{Timeout: 3 * time.Second}
 
-// stateRel renders a state-dir file the way doctor's fix text names it:
-// relative to the instance root (".lever-state/remote.log"), never the
-// absolute path.
+// stateRel renders a state-dir file relative to the instance root, as fix
+// text names it.
 func stateRel(st state.State, path string) string {
 	return filepath.Join(filepath.Base(st.Dir), filepath.Base(path))
 }
 
-// stateDirName is the instance-relative name of the state directory, so
-// user-facing text never hardcodes it.
 func stateDirName() string { return state.DirName }
 
 // checkListeningProcess is the pid-then-port ladder shared by the broker and
-// remote-proxy checks: a recorded process must exist, be alive, and actually
-// listen on addr. It distinguishes three failure modes so the fix is
-// unambiguous — never started, died (stale pid), and alive-but-not-serving.
-// On success the returned result is the pass line; the caller may keep
-// probing and replace it.
+// remote-proxy checks. It tells apart never started, died (stale pid), and
+// alive but not serving.
 func checkListeningProcess(name, pidFile, what, logFile, startFix string, status func() (pid int, found, alive bool), addr string, dial dialFunc) checkResult {
 	pid, found, alive := status()
 	switch {
@@ -163,39 +139,26 @@ func checkListeningProcess(name, pidFile, what, logFile, startFix string, status
 	return checkResult{name, true, fmt.Sprintf("pid %d, serving on %s", pid, addr), ""}
 }
 
-// checkBrokerAlive verifies the recorded broker process is alive AND actually
-// listening on the jail port.
 func checkBrokerAlive(st state.State, jailPort int, p doctorProbes) checkResult {
 	return checkListeningProcess("broker running", "broker.pid", "the broker", stateRel(st, st.Log()),
 		"run `lever apply` or `lever up`", func() (int, bool, bool) { return state.PIDStatus(st.PID()) }, fmt.Sprintf("127.0.0.1:%d", jailPort), p.dial)
 }
 
-// healthzProbe is what remoteHealthzProbe sends: where to dial, and the
-// identity to carry.
 type healthzProbe struct {
-	// Addr is the host:port to dial (config.App.RemoteProbeAddr): loopback
-	// by default, the bind address when the proxy listens elsewhere.
+	// Addr is config.App.RemoteProbeAddr.
 	Addr string
-	// Port is the proxy's port. The request's Host is always
-	// 127.0.0.1:<Port>, whatever Addr is: that is the name the proxy's Host
-	// gate admits for host-side probes (remoteproxy.hostAllowed).
+	// Port is the proxy's port. Host is always 127.0.0.1:<Port>, whatever Addr
+	// is: the name the proxy's Host gate admits for host-side probes
+	// (remoteproxy.hostAllowed).
 	Port int
-	// Header and Login: when Login is non-empty it is sent in Header, the
-	// configured identity header.
+	// Login, when non-empty, is sent in Header.
 	Header, Login string
 }
 
-// remoteHealthzProbe issues GET /healthz against the local remote-access
-// proxy and returns the response status code.
-//
-// Login, when non-empty, is sent in the configured identity header. The
-// proxy's own allowed_users gate (remoteproxy.Handler) trusts that header
-// exactly as the front would set it for a real request; doctor runs
-// host-side, already as trusted as the remote.pat file it just read, so it
-// sets this to the first configured allowed user rather than let a pinned
-// instance 403 its own liveness probe. An unpinned instance (allowed_users
-// empty) sends no header at all, matching an ordinary curl/native-client
-// request.
+// remoteHealthzProbe issues GET /healthz against the local proxy. Doctor runs
+// host-side, as trusted as the remote.pat it reads, so it sends the first
+// allowed user in the identity header rather than let a pinned instance 403
+// its own probe; an unpinned instance sends no header.
 func remoteHealthzProbe(p healthzProbe) (int, error) {
 	req, err := http.NewRequest(http.MethodGet, "http://"+p.Addr+"/healthz", nil)
 	if err != nil {
@@ -213,22 +176,16 @@ func remoteHealthzProbe(p healthzProbe) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// loginProbeResult is what remoteLoginProbe observes about the local OIDC
-// provider the proxy serves for the hub's login path.
 type loginProbeResult struct {
 	discovery int    // status of GET /.well-known/openid-configuration
 	authorize int    // status of GET /authorize — 404 is the ONLY healthy answer
 	authzURL  string // the authorization_endpoint discovery advertises
 }
 
-// remoteLoginProbe inspects the local OIDC provider on its loopback port.
-//
-// It checks the two things that can silently break the login path — discovery
-// not being served at all, and the security property the whole design rests
-// on: that there is no authorization endpoint. Nothing legitimate ever calls
-// /authorize (the proxy drives the login server-side and mints codes
-// in-process), so anything but a 404 means this build can mint an
-// authorization code over HTTP, on a port every jailed agent can reach.
+// remoteLoginProbe checks that the local OIDC provider serves discovery and
+// has no authorization endpoint. Nothing legitimate calls /authorize (the
+// proxy mints codes in-process), so anything but a 404 means this build can
+// mint an authorization code over HTTP on a port every jailed agent can reach.
 func remoteLoginProbe(port int) (loginProbeResult, error) {
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
 	var out loginProbeResult
@@ -255,22 +212,16 @@ func remoteLoginProbe(port int) (loginProbeResult, error) {
 	return out, nil
 }
 
-// remoteJailLoginScript asks the hub, FROM INSIDE THE JAIL, to start an OIDC
-// login, and prints "<status> <redirect-url>".
+// remoteJailLoginScript asks the hub, from inside the jail, to start an OIDC
+// login and prints "<status> <redirect-url>". curl reports %{redirect_url}
+// for a 3xx without following it. No Authorization header: doctor asks what
+// an unauthenticated browser would get.
 //
-// -o /dev/null because nothing in the answer's body matters; curl computes
-// %{redirect_url} for a 3xx without following it, which is what lets one
-// request report both the status and where the hub is sending the browser.
-// No Authorization header: the login route is public, and doctor is asking
-// what an unauthenticated browser would get.
-//
-// Absolute path for curl. This runs as the jail's RUN USER, whose PATH has
-// run-user-writable directories ahead of /usr/bin — a shim there could answer
-// for a login path that does not work.
+// curl's path is absolute: the jail run user's PATH has user-writable
+// directories ahead of /usr/bin, and a shim there could fake the answer.
 const remoteJailLoginScript = `exec /usr/bin/curl -sS --connect-timeout 5 --max-time 20 ` +
 	`-o /dev/null -w '%{http_code} %{redirect_url}' "$1"`
 
-// remoteJailLoginProbe runs that request and parses its answer.
 func remoteJailLoginProbe(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error) {
 	res, err := jr.Run(ctx, nil, "sh", "-c", remoteJailLoginScript, "_", hubURL+"/auth/login/oidc")
 	if err != nil {
@@ -290,9 +241,8 @@ func remoteJailLoginProbe(ctx context.Context, jr proc.Runner, hubURL string) (s
 	return status, redirect, nil
 }
 
-// isLoopbackURL reports whether raw addresses the local machine — the test
-// that matters for an authorization endpoint, since loopback is what the jail
-// is given a route to.
+// isLoopbackURL reports whether raw addresses the local machine, which is
+// what the jail has a route to.
 func isLoopbackURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -306,23 +256,15 @@ func isLoopbackURL(raw string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// checkRemoteLoginPath asks the hub to start a login and reads what comes
-// back. It is the ONLY check here that exercises the guest half.
-//
-// One request proves the whole chain, because of what the hub has to do to
-// answer it: getOIDCAuthURL fetches the provider's discovery document before
-// it can build a redirect (pkg/hub/oauth.go), and that fetch goes to
-// http://127.0.0.1:<login_port> in the GUEST — through the forwarder lever
-// installed, to the provider in the proxy process on the host. So a 302 to
-// lever's dead authorization endpoint means: the hub read the oidc_login
-// block, the forwarder is running, and the provider answered. A host-side
-// probe of the provider proves none of that, and would stay green while the
+// checkRemoteLoginPath asks the hub to start a login; it is the only check
+// that exercises the guest half. To build the redirect the hub fetches the
+// provider's discovery through lever's guest forwarder to the host provider,
+// so a 302 to lever's dead authorization endpoint proves the oidc_login block,
+// the forwarder and the provider. A host-side probe would stay green while the
 // browser got a 502.
 //
-// Honest limit: the hub caches discovery for an hour, so a 302 proves the
-// chain worked at the time of the FIRST login since the hub started — not
-// that it is reachable this second. The forwarder dying after that (a guest
-// reboot, say) surfaces on the next cold login, not here.
+// Limit: the hub caches discovery for an hour, so a 302 proves only that the
+// chain worked at the first login since the hub started.
 func checkRemoteLoginPath(ctx context.Context, jr proc.Runner, st state.State, p doctorProbes) (detail string, fix string, ok bool) {
 	if jr == nil {
 		return "", "", true // no jail transport wired (tests)
@@ -350,33 +292,18 @@ func checkRemoteLoginPath(ctx context.Context, jr proc.Runner, st state.State, p
 	return "login path reaches the provider through the jail", "", true
 }
 
-// checkRemote verifies the remote-access proxy (`lever remote`) when
-// configured on: the recorded process is alive and actually listening on
-// EffectiveRemotePort (the same pid/dial split as checkBrokerAlive), the
-// remote PAT `lever apply` mints is present and not group/other-accessible
-// (the proxy no longer sends it — every request rides the operator's hub
-// session — but apply still mints it, and a world-readable token is still a
-// leak), the login path the proxy depends on is intact, and — last — an
-// end-to-end GET /healthz THROUGH the proxy returns 200, proving the whole
-// chain (loopback listener -> origin/identity gates -> hub web session ->
-// hub) actually works, not just that a process happens to be running.
+// checkRemote verifies the remote-access proxy when configured: the process is
+// alive and listening on EffectiveRemotePort, the remote PAT apply mints is not
+// group/other-accessible (a world-readable token is a leak even unsent), the
+// login path is intact, and finally GET /healthz through the proxy returns 200.
 //
-// /healthz is deliberately the LAST probe. The proxy opens a hub web session
-// before forwarding any request: the probe therefore drives a
-// full server-side OIDC handshake, and fails 502 whenever the login path is
-// broken. Running it ahead of the login checks reported that 502 instead of
-// the specific, actionable failure. Side effect worth knowing: `lever doctor`
-// performs a REAL login, so the hub creates (or reuses) a user row for the
-// identity the probe carries — allowed_users[0], or lever's unnamed operator
-// when the list is empty (remoteproxy.identityFor) — exactly as that
-// operator's first browser visit would.
+// /healthz must be last: the proxy opens a hub web session before forwarding,
+// so a broken login path makes it 502 and would shadow the specific failure.
+// The probe performs a real login, so the hub creates or reuses a user row for
+// its identity (allowed_users[0], or the unnamed operator).
 //
-// Disabled is a pass, not a warning: remote access is opt-in and most
-// instances never turn it on. PAT EXPIRY is deliberately not checked here —
-// the hub stores it and lever has no cheap read for it in v1; the repair
-// (delete remote.pat, then `lever apply`) is the same shape as the
-// documented controller-PAT re-mint, default expiry 90d (see the
-// remote-access guide).
+// Disabled is a pass: remote access is opt-in. PAT expiry is not checked:
+// lever has no cheap read for it.
 func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorProbes, jr proc.Runner) checkResult {
 	const name = "remote access"
 	if !app.RemoteEnabled() {
@@ -398,13 +325,8 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 	case fi.Mode().Perm()&0o077 != 0:
 		return checkResult{name, false, fmt.Sprintf("remote.pat has mode %04o (group/other-accessible, want 0600)", fi.Mode().Perm()), "chmod 600 " + st.RemotePAT()}
 	}
-	// The login checks run BEFORE the end-to-end /healthz probe, and that
-	// order is load-bearing. The proxy opens a hub web session for every
-	// request it forwards, /healthz included — a broken login chain therefore
-	// makes healthz answer 502 too. Probing healthz first SHADOWED the precise diagnosis: the
-	// operator was told "GET /healthz returned 502 — inspect remote.log" when
-	// the one actionable message ("a login port granted since the instance came
-	// up needs `lever down` + `lever up`") was the very next check.
+	// The login checks must run before /healthz: a broken login chain makes
+	// healthz answer 502 and would hide the actionable diagnosis.
 	loginPort := app.EffectiveRemoteLoginPort()
 	login, err := p.remoteLogin(loginPort)
 	switch {
@@ -415,17 +337,15 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 		return checkResult{name, false, fmt.Sprintf("the login provider answered %d to OIDC discovery, want 200", login.discovery),
 			"inspect " + remoteLog}
 	case login.authorize != http.StatusNotFound:
-		// Loud on purpose: a provider that answers /authorize can mint an
-		// authorization code over HTTP, and every jailed agent can reach that
-		// port through the guest forwarder (lever maps guest loopback into
-		// each agent's netns). See remoteproxy.Provider.handleAuthorize.
+		// A provider that answers /authorize can mint an authorization code over
+		// HTTP, and every jailed agent reaches that port through the guest forwarder.
+		// See remoteproxy.Provider.handleAuthorize.
 		return checkResult{name, false, fmt.Sprintf("the login provider answered %d to GET /authorize, want 404 — it must have NO authorization endpoint", login.authorize),
 			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
 	case isLoopbackURL(login.authzURL):
-		// The property, not one port: an authorization endpoint anywhere on
-		// loopback is one the JAIL can reach (guest loopback is mapped into
-		// every agent netns), and reaching one means minting a code. lever's
-		// advertised endpoint names a host that does not resolve.
+		// Any authorization endpoint on loopback is one the jail can reach (guest
+		// loopback is mapped into every agent netns). lever's advertised endpoint
+		// names a host that does not resolve.
 		return checkResult{name, false, fmt.Sprintf("OIDC discovery advertises an authorization endpoint on loopback (%s), which the jail can reach", login.authzURL),
 			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
 	}
@@ -433,8 +353,6 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 		return checkResult{name, false, detail, fix}
 	}
 
-	// Last, because it depends on everything above: this is the only probe
-	// that goes end to end through the proxy to the hub.
 	status, err := p.remoteHealthz(healthzProbe{Addr: addr, Port: port,
 		Header: app.EffectiveRemoteIdentityHeader(), Login: firstOrEmpty(app.Remote.Logins())})
 	if err != nil {
@@ -446,12 +364,9 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 	return checkResult{name, true, alive.detail + fmt.Sprintf(", PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", loginPort), ""}
 }
 
-// checkRemoteExposure is a warning row per remote setting that loads but
-// weakens a default protection (config.App.RemoteWarnings): a non-loopback
-// bind, and trust_forwarded_host. Neither is a fault, and lever cannot see the
-// host firewall they rest on, so the row neither passes silently nor fails
-// the run — it restates what the operator must keep true. Nothing to say is a
-// plain pass.
+// checkRemoteExposure warns per remote setting that weakens a default
+// protection (config.App.RemoteWarnings). lever cannot see the host firewall
+// these rest on, so the row restates what the operator must keep true.
 func checkRemoteExposure(app *config.App) checkResult {
 	const name = "remote exposure"
 	if !app.RemoteEnabled() {
@@ -467,8 +382,8 @@ func checkRemoteExposure(app *config.App) checkResult {
 }
 
 // checkVerifiedChat reports whether agents can verify web chat (package
-// chatledger): the proxy records only for verified logins, and the ledger
-// proves something only while no jail can write it.
+// chatledger): the proxy records only verified logins, and the ledger proves
+// something only while no jail can write it.
 func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	const name = "verified chat"
 	switch {
@@ -484,8 +399,7 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 			"list the operator's login in remote.allowed_users, then run `lever apply` and `lever init`")
 	}
 	p := brokerctl.ChatLedgerPath(app, st)
-	// Every allowed login speaks with operator authority once verified: say
-	// who, so a login added only to look at the web UI is not a surprise.
+	// Every allowed login speaks with operator authority once verified: name them.
 	var tiers []string
 	for _, u := range app.Remote.AllowedUsers {
 		if u.EffectiveTier() == config.TierContact {
@@ -520,24 +434,15 @@ func checkVerifiedChat(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, fmt.Sprintf("on (%s); ledger %s/ (%d files, 0700)", tier, stateRel(st, p), len(files)), ""}
 }
 
-// agentMsgsLive is what the running processes were started with, for the
-// agent messages row: the running broker's config hash (ok false when no
-// broker answers) and whether a running remote proxy's stamp differs from
-// this config.
+// agentMsgsLive is what the running broker and remote proxy were started with.
+// brokerHash's ok is false when no broker answers.
 type agentMsgsLive struct {
-	brokerHash func() (string, bool)
-	// proxyMatches reports whether a remote proxy runs, and whether it was
-	// started by this lever version with the remote config whose hash is
-	// given.
+	brokerHash   func() (string, bool)
 	proxyMatches func(hash string) (running, matches bool)
-	// scionHasCommit reports whether the scion.source checkout holds a
-	// commit (an error: git cannot tell).
+	// scionHasCommit reports whether the scion.source checkout holds commit.
 	scionHasCommit func(source, commit string) (bool, error)
 }
 
-// liveAgentMessages reads what the running broker and remote proxy were
-// started with: the broker's /epoch config hash on its admin port, and the
-// proxy's stamp file against this config.
 func liveAgentMessages(ctx context.Context, app *config.App, st state.State) agentMsgsLive {
 	return agentMsgsLive{
 		brokerHash: func() (string, bool) {
@@ -550,8 +455,7 @@ func liveAgentMessages(ctx context.Context, app *config.App, st state.State) age
 			if err != nil {
 				return "", false
 			}
-			// Another instance's broker on these ports says nothing about
-			// this instance's (the instance ports row reports it).
+			// Another instance's broker says nothing about this one's.
 			if ours, err := st.ReadInstanceID(); err != nil || er.InstanceID != ours {
 				return "", false
 			}
@@ -572,20 +476,16 @@ func liveAgentMessages(ctx context.Context, app *config.App, st state.State) age
 	}
 }
 
-// checkAgentMessages reports remote.agent_messages: off, or on with the
-// limits, the contacts and their agents, and the agent ledger's safety. The
-// broker and the proxy read the config only when they start. So while the
-// setting is on, the row says when either runs with another config (or
-// lever version); while it is off, it says so only when a process runs
-// with this config plus agent messages on, the one case where the setting
-// itself differs. Other config changes are other rows' business.
+// checkAgentMessages reports remote.agent_messages. The broker and proxy read
+// the config only at start, so while on, the row says when either runs with
+// another config or version; while off, only when a process runs with this
+// config plus agent messages on.
 func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) checkResult {
 	r := agentMessagesRow(app, st)
 	if !r.ok {
 		return r
 	}
 	on := app.AgentMessagesOn()
-	// scionNote: lever cannot tell whether the scion holds the sender fix.
 	var scionNote string
 	if on {
 		bad, note := agentMessagesScion(app, live.scionHasCommit)
@@ -597,12 +497,10 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 			scionNote = "; " + note
 		}
 	}
-	// The hashes a process started with agent messages on would carry.
 	onApp := *app
 	onApp.Remote.AgentMessages.Enabled = true
 	var stale []string
-	// The broker probe (up to 2 s) only answers something while the setting
-	// is on or could be (remote access on): otherwise skip it.
+	// The broker probe (up to 2 s) runs only when the setting is or could be on.
 	if live.brokerHash != nil && (on || onApp.AgentMessagesOn()) {
 		if h, ok := live.brokerHash(); ok && (on && h != brokerctl.ConfigHash(app) || !on && onApp.AgentMessagesOn() && h == brokerctl.ConfigHash(&onApp)) {
 			stale = append(stale, "broker")
@@ -633,10 +531,8 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 
 // agentMessagesScion checks the configured scion against
 // config.AgentMessagesScionFloor, the first hub that sets a message's sender
-// itself (the filter trusts it). bad: known to be older, a checkout without
-// the floor commit, or a shallow clone that does not show it (note says
-// why); otherwise note is set when lever cannot tell (a prebuilt binary, a
-// bare commit hash or tag, a path git cannot answer for).
+// itself (the filter trusts it). bad: known older, or a checkout or shallow
+// clone without the floor commit. note is set when lever cannot tell.
 func agentMessagesScion(app *config.App, hasCommit func(source, commit string) (bool, error)) (bad bool, note string) {
 	floor := config.AgentMessagesScionFloor[:8]
 	sc := app.Scion
@@ -700,8 +596,8 @@ func agentMessagesRow(app *config.App, st state.State) checkResult {
 	if owner, ok := fileOwner(fi); ok && owner != os.Getuid() {
 		return checkResult{name, false, fmt.Sprintf("the agent ledger %s belongs to uid %d, not to you (uid %d)", stateRel(st, p), owner, os.Getuid()), "remove " + p}
 	}
-	// Every authorization counts the hourly rate over all contact files,
-	// so one unsafe file refuses every authorization (failing closed).
+	// The hourly rate counts over all contact files, so one unsafe file refuses
+	// every authorization (fail closed).
 	if bad := unsafeLedgerFile(p); bad != "" {
 		return checkResult{name, false, "the agent ledger file " + stateRel(st, bad) + " is not a private regular file of yours: " +
 			"every agent's contact_message is refused (unavailable) and contacts are shown no agent message until it is fixed",
@@ -710,9 +606,8 @@ func agentMessagesRow(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, detail + "; ledger " + stateRel(st, p) + "/ (0700)", ""}
 }
 
-// unsafeLedgerFile is the first contact file in dir (or its .1) that is not
-// a regular file, is writable by others, or belongs to another user; "" if
-// none.
+// unsafeLedgerFile is the first contact file in dir (or its .1) that is not a
+// regular file, is writable by others, or belongs to another user; "" if none.
 func unsafeLedgerFile(dir string) string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -737,7 +632,6 @@ func unsafeLedgerFile(dir string) string {
 	return ""
 }
 
-// shortDuration prints whole hours as "24h" (time.Duration prints 24h0m0s).
 func shortDuration(d time.Duration) string {
 	if d > 0 && d%time.Hour == 0 {
 		return fmt.Sprintf("%dh", d/time.Hour)
@@ -745,9 +639,8 @@ func shortDuration(d time.Duration) string {
 	return d.String()
 }
 
-// checkChatLabels reads remote.labels_file the way the proxy does. A bad
-// file is a warning, not a failure: it is agent-written, and its only
-// effect is that the chat page shows no labels. The row names the fault.
+// checkChatLabels reads remote.labels_file as the proxy does. A bad file only
+// warns: it is agent-written and only costs the chat page its labels.
 func checkChatLabels(app *config.App) checkResult {
 	const name = "chat labels"
 	rel := app.Remote.LabelsFile
@@ -771,8 +664,7 @@ func checkChatLabels(app *config.App) checkResult {
 	return checkResult{name, true, fmt.Sprintf("%d label(s) for known agents in %s (%d other name(s) ignored)", known, rel, len(labels)-known), ""}
 }
 
-// labelFault names a labels-file fault in fixed words: those are what the
-// operator acts on.
+// labelFault names a labels-file fault in fixed words.
 func labelFault(err error) string {
 	switch {
 	case errors.Is(err, fsutil.ErrSymlink):
@@ -789,9 +681,8 @@ func labelFault(err error) string {
 	return "cannot be read: " + firstLine(err.Error())
 }
 
-// checkPush reports remote.push the way the proxy reads it. The proxy
-// writes push/status.json at start and after each send, so this row shows
-// the last outcome and whether the running proxy pushes to test hosts.
+// checkPush reports remote.push. The proxy writes push/status.json at start and
+// after each send, so the row shows the last outcome.
 func checkPush(app *config.App, st state.State) checkResult {
 	const name = "push"
 	if !app.PushOn() {
@@ -848,15 +739,12 @@ func checkPush(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, detail, ""}
 }
 
-// warnResult is a warning row: not a failure (doctor's exit status ignores
-// it), but printed with its fix. It is a passing checkResult that carries a
-// fix — no passing check sets one otherwise — which printDoctorReport renders
-// with "!" instead of "✓".
+// warnResult is a passing checkResult that carries a fix, which
+// printDoctorReport renders with "!". Doctor's exit status ignores it.
 func warnResult(name, detail, fix string) checkResult {
 	return checkResult{name, true, detail, fix}
 }
 
-// firstOrEmpty returns the first element of ss, or "" when ss is empty.
 func firstOrEmpty(ss []string) string {
 	if len(ss) == 0 {
 		return ""
@@ -864,16 +752,11 @@ func firstOrEmpty(ss []string) string {
 	return ss[0]
 }
 
-// checkToolBackends verifies every broker tool is reachable/spawnable up
-// front: external tools must be listening on their loopback backend, and
-// supervised tools must have their command resolvable on the supervisor PATH
-// (a not-on-PATH supervised tool fails silently at spawn otherwise). Config
-// validation already rejects an unresolvable supervised command, so a config
-// that loaded is expected to pass the resolution half here — this check is the
-// operator-facing confirmation and the external-liveness probe.
-//
-// dir is the instance dir: the supervisor runs every tool there, so a
-// relative command resolves against it, not against doctor's own cwd.
+// checkToolBackends verifies every broker tool up front: an external tool must
+// listen on its loopback backend, and a supervised tool's command must resolve
+// on the supervisor PATH (it would otherwise fail silently at spawn). dir is
+// the instance dir, where the supervisor runs every tool, so a relative
+// command resolves against it.
 func checkToolBackends(tools []config.Tool, dir string, p doctorProbes) checkResult {
 	const name = "tool backends"
 	var down []string
@@ -906,12 +789,10 @@ func checkToolBackends(tools []config.Tool, dir string, p doctorProbes) checkRes
 	}
 }
 
-// checkScionProject flags the bad-teardown corruption: scion has registered the
-// tree (a ~/.scion/project-configs entry whose workspace_path is the mount dest)
-// but the in-tree marker is gone, or there are duplicate registrations for it.
-// Either state makes `scion init` fail with "existing project marker is invalid",
-// blocking the manager from coming up. A pure function over the state the backend
-// read, so it is testable without a jail.
+// checkScionProject flags bad-teardown corruption: scion has registered the
+// tree but the in-tree marker is gone, or the tree is registered twice. Either
+// makes `scion init` fail with "existing project marker is invalid", blocking
+// the manager.
 func checkScionProject(st types.ScionProjectState, mountDest string) checkResult {
 	const name = "scion project registration"
 	var reg []string
@@ -936,33 +817,25 @@ func checkScionProject(st types.ScionProjectState, mountDest string) checkResult
 	}
 }
 
-// sharedDirLister returns the shared directories the hub records for a project.
-// Injected so the check is unit-testable without a hub.
 type sharedDirLister func(ctx context.Context, project string) ([]hubapi.SharedDir, error)
 
-// hubAnswered reports whether the hub replied and lever could not use the
-// reply, as opposed to lever never reaching the hub at all.
+// hubAnswered reports whether the hub replied with something lever could not
+// use, as opposed to never being reached.
 func hubAnswered(err error) bool {
 	var apiErr *hubapi.APIError
 	return errors.As(err, &apiErr)
 }
 
 // checkProjectSharedDirs reports any directory the hub mounts into every agent
-// of the project. scion stamps a writable `scratchpad` on every new project
-// (scion#925), which is a read/write channel between the manager and every
-// worker — the opposite of lever's subtree isolation — so apply strips it. An
-// entry here means the strip did not run, or something re-added one.
+// of the project. scion stamps a writable `scratchpad` on new projects, a
+// read/write channel between the manager and every worker that defeats subtree
+// isolation, so apply strips it; an entry here means the strip did not run or
+// something re-added one.
 //
-// An unreachable hub is NOT a finding: a stopped instance already shows up in
-// the broker check, and a second red line would only add noise. Anything the
-// hub actually ANSWERED is different — a 403, a 401, or a project the hub does
-// not list means the check cannot do its job for a reason the operator must
-// fix, so that fails. The detail always states which case it was, so a pass is
-// never mistaken for a clean verdict.
-//
-// The check reads the hub's project record. An agent that started before the
-// directory was removed keeps its bind mount until it restarts, so a clean line
-// here is a statement about new agents.
+// An unreachable hub is not a finding (the broker check covers a stopped
+// instance), but anything the hub answered unusably (401, 403, an unlisted
+// project) fails; the detail says which. An agent started before the removal
+// keeps its bind mount until it restarts, so a pass speaks for new agents.
 func checkProjectSharedDirs(ctx context.Context, project string, list sharedDirLister) checkResult {
 	const name = "project shared directories"
 	if list == nil {
@@ -997,27 +870,18 @@ func checkProjectSharedDirs(ctx context.Context, project string, list sharedDirL
 			"`DELETE /api/v1/projects/<project-uuid>/shared-dirs/<name>` against the hub"}
 }
 
-// agentRoleLister returns the hub's agent records for a project. Injected so
-// the check is unit-testable without a hub.
 type agentRoleLister func(ctx context.Context, project string) ([]hubapi.Agent, error)
 
 // checkAgentRoles reports agent records that store no authorization role.
 //
-// The role is written when an agent is CREATED (scion#1089) and is immutable
-// after, so a record made by an older scion carries none — and scion#1102
-// resolves an unset stored role to FULL, at dispatch and on every token
-// refresh. `scion resume` takes no --role flag, so nothing repairs such a
-// record: the only route is to delete the agent and lose its conversation.
+// The role is written at create and immutable after, and scion resolves an
+// unset stored role to full at dispatch and on every token refresh. `scion
+// resume` takes no --role, so the only repair is deleting the agent.
 //
-// That makes the verdict depend on the installed scion, not just the records.
 // On a roles-aware scion an unrolled record is a live promotion and fails. On
-// an older one the same record is harmless — failing there would cry wolf on
-// every pre-#1089 instance — but this is the one place an operator can learn,
-// BEFORE bumping the pin, that the bump will promote them.
-//
-// An unreachable hub is not a finding (the broker check already covers a
-// stopped instance); a hub that ANSWERED unusably is, exactly as for shared
-// directories.
+// an older one it is harmless, but the row warns, since it is where an
+// operator learns before a pin bump that the bump will promote them. An
+// unreachable hub is not a finding; one that answered unusably is.
 func checkAgentRoles(ctx context.Context, project string, rolesSupported func(context.Context) (bool, error), list agentRoleLister) checkResult {
 	const name = "agent authorization roles"
 	if list == nil || rolesSupported == nil {
@@ -1037,9 +901,8 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 		return checkResult{name, true, "no agent records yet", ""}
 	}
 
-	// A grandfathered role is scion's migration writing `full` where nothing
-	// was stored: the same hazard as an unrolled record, and named as such
-	// rather than listed among the healthy ones.
+	// A grandfathered role is scion's migration writing `full` where nothing was
+	// stored: the same hazard as an unrolled record.
 	var unrolled, held []string
 	for _, a := range agents {
 		switch {
@@ -1056,8 +919,8 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 			fmt.Sprintf("%d record(s), all carry a stored role: %s", len(agents), strings.Join(held, ", ")), ""}
 	}
 
-	// Only now does the installed scion matter, so only now is it probed — a
-	// scion that cannot answer must not turn a clean instance into a finding.
+	// The scion is probed only now, so one that cannot answer does not turn a
+	// clean instance into a finding.
 	roles, perr := rolesSupported(ctx)
 	if perr != nil {
 		return checkResult{name, true,
@@ -1077,51 +940,37 @@ func checkAgentRoles(ctx context.Context, project string, rolesSupported func(co
 			"--role baseline (its conversation is LOST), or pin a scion older than scion#1089"}
 }
 
-// agentSessionReader reads an agent's session from inside its container
-// (jail.AgentProbe in production): its hub token expiry and whether its
-// harness still runs. Both answers are the agent's own word; doctor turns
-// them into a verdict and a time, and never prints what the container said.
+// agentSessionReader reads an agent's hub token expiry and whether its harness
+// runs, from inside its container. Both are the agent's own word: doctor turns
+// them into a verdict and a time and never prints what the container said.
 type agentSessionReader interface {
 	HubToken(ctx context.Context, ref string) (jail.HubTokenTimes, error)
 	HarnessAlive(ctx context.Context, ref string) (bool, error)
 }
 
-// agentLister reads scion's agent records for the in-jail project: phase and
-// container status, which the hub's own record lacks (hubapi.Agent).
+// agentLister reads scion's agent records: phase and container status, which
+// the hub's record (hubapi.Agent) lacks.
 type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, error)
 
-// checkManagerLive reports whether the manager agent is actually up: a record
-// exists, its phase is running, its container is live, and — since lever#34 —
-// its harness is still turning. Before lever#31 none of doctor's checks read
-// the manager at all, so fourteen green rows could sit over an instance with
-// no manager container — "doctor passes" meant "the plumbing is fine", never
-// "the agent works". This is the one row that says the second thing.
+// checkManagerLive reports whether the manager is actually up: a record, a
+// running phase, a live container, and a harness still turning. It is the one
+// row that says the agent works, not just the plumbing.
 //
-// The activity is the hub-side state scion's Claude Code hooks report
-// (scion.Activity*), shown with the age of its last change. A harness that
-// cannot complete a turn — no guest DNS (lever#34), an expired credential, an
-// API outage — keeps a live container and a running phase. Crashed and
-// offline fail the row. Stalled does not: the hub's stall sweeper marks a
-// stuck harness stalled after its threshold (default 5 min), but it marks an
-// idle manager the same way, so the row passes and names both readings (the
-// `guest DNS` row is the one that fails on the lever#34 cause). A long
-// working stays green: real work looks the same from here, and `lever
-// attach` is the way to tell. A list error is "not checked" (a down jail or hub is another
-// check's finding), never a pass.
+// Activity is what scion's Claude Code hooks report (scion.Activity*), with
+// its age. Crashed and offline fail. Stalled passes: the hub's stall sweeper
+// marks an idle manager the same way as a stuck one, so the row names both
+// readings (the guest DNS row fails on the common cause). A list error is "not
+// checked", never a pass.
 //
-// Two faults hide behind a live container, and the session reader (nil = not
-// probed) exposes both. An expired agent hub token fails the row whatever
-// the activity: sciontool's refresh timer stands still while the host
-// sleeps, an expired token cannot refresh itself, and the hub's stall
-// sweeper then marks the manager stalled — the very reading that passes
-// above. A phase stopped over a container that is still up is told apart by
-// whether claude still runs: another claude process in the container firing
-// the shared SessionEnd hook leaves the harness running (apply reports it
-// running again), a claude that exited does not.
+// The session reader (nil = not probed) exposes two faults behind a live
+// container. An expired hub token fails the row whatever the activity:
+// sciontool's refresh timer stands still while the host sleeps and an expired
+// token cannot refresh itself. A stopped phase over a running container is
+// told apart by whether claude still runs (another claude firing the shared
+// SessionEnd hook leaves it running).
 //
-// A manager whose forced resume died because claude --continue found no
-// conversation (lever#202) is named as such: logTail (nil = not read) reads
-// its container log, which is matched for a fixed phrase only
+// A forced resume that died because claude --continue found no conversation
+// is named as such: logTail (nil = not read) is matched for a fixed phrase only
 // (apply.NoConversationInLog) and never printed.
 func checkManagerLive(ctx context.Context, project, name string, list agentLister, session agentSessionReader, logTail containerLogReader, now time.Time) checkResult {
 	const check = "manager agent"
@@ -1148,13 +997,9 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 			}
 		}
 		if a.Activity == scionpkg.ActivityStalled {
-			// The hub's stall sweeper also marks a manager that sits idle at
-			// its prompt: after a turn that ended without a waiting-for-input
-			// report, the record reads working, then stalled. That is the
-			// normal state of an instance nobody talked to for a while, so it
-			// cannot fail the row (it failed scripted deploy gates on idle
-			// instances). A turn that never finishes looks the same from
-			// here; the detail says how to tell them apart.
+			// The stall sweeper also marks a manager idle at its prompt as stalled, the
+			// normal state of an instance nobody talked to, so it cannot fail the row. The
+			// detail says how to tell a stuck turn apart.
 			return checkResult{check, true,
 				fmt.Sprintf("%q is running (container %s; %s) — idle at its prompt, or a turn that never finished: `lever attach` shows which (a stuck LLM call ends in `Request timed out`; then check the `guest DNS` and credential rows)",
 					name, scionpkg.ContainerLabel(a.ContainerStatus), activityAge(a, now)), ""}
@@ -1167,10 +1012,8 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		return checkResult{check, true, fmt.Sprintf("%q is running (container %s; %s)", name, scionpkg.ContainerLabel(a.ContainerStatus), activityAge(a, now)), ""}
 	}
 	if a.Phase == "running" && a.ContainerStatus == "" {
-		// The container column is refreshed by the runtime broker's heartbeat,
-		// not computed at read time; a blank is "cannot tell", which is what
-		// `lever up` reads it as too (apply.ObserveManagerLive), never a
-		// death and never a pass with a claim attached.
+		// The container column comes from the runtime broker's heartbeat; a blank is
+		// "cannot tell" (as for apply.ObserveManagerLive), never a death or a pass.
 		return checkResult{check, true, fmt.Sprintf("%q is running; not checked further (no container status reported yet)", name), ""}
 	}
 	if a.Phase == scionpkg.PhaseStopped && scionpkg.ContainerLive(a.ContainerStatus) && session != nil {
@@ -1195,9 +1038,8 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
 	}
 	detail := fmt.Sprintf("manager %q is not live: phase %s, container %s", name, scionpkg.BoundedQuote(a.Phase), scionpkg.BoundedQuote(a.ContainerStatus))
-	// Only an error-phase record: `lever up` resumes it with --force (and
-	// --continue), and starts it fresh when that finds no conversation. A
-	// stopped record resumes in a new session anyway.
+	// Only an error-phase record: `lever up` resumes it with --force and
+	// --continue. A stopped record resumes in a new session anyway.
 	if a.Phase == scionpkg.PhaseError && logTail != nil {
 		if tail, err := logTail(ctx, ref); (err == nil || tail != "") && apply.NoConversationInLog(tail) {
 			return checkResult{check, false, detail + " — its claude found no conversation to continue, so the manager was most likely never used", noConversationFix}
@@ -1206,43 +1048,32 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	return checkResult{check, false, detail, fix}
 }
 
-// containerLogReader reads the tail of an agent container's log
-// (jail.AgentProbe.LogTail in production): the agent's word, matched for
-// fixed phrases and never printed.
+// containerLogReader reads the tail of an agent container's log: the agent's
+// word, matched for fixed phrases and never printed.
 type containerLogReader func(ctx context.Context, ref string) (string, error)
 
-// noConversationFix is the manager row's fix for a manager whose claude
-// found no conversation to continue (lever#202).
+// noConversationFix is the fix for a manager whose claude found no
+// conversation to continue.
 const noConversationFix = "run `lever up`: it starts the manager fresh on its own once it has checked from the guest that the agent home holds no transcript. " +
 	"`lever up --fresh` starts it fresh in any case, and loses nothing: it backs up any transcript first"
 
-// stoppedResumeFix is the fix for a manager whose session really ended:
-// scion's hub resumes a stopped record with a fresh harness session (only a
-// suspended one gets --continue), so the operator hears how to get the old
-// conversation back.
+// stoppedResumeFix: scion's hub resumes a stopped record with a fresh harness
+// session (only a suspended one gets --continue).
 const stoppedResumeFix = "run `lever up` — scion resumes a stopped record in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
 
-// hubTokenFix names the heal for an agent whose hub token expired.
 func hubTokenFix(name, project string) string {
 	return "run `lever apply` — it runs `scion reset-auth` for each running agent whose hub token expired (no restart; the conversation is kept). By hand, in the guest: `scion reset-auth " + name + " -g " + project + "` with the controller PAT"
 }
 
-// checkAgentHubTokens reads the hub token of the manager and of every
-// configured worker whose container is live, and fails on any that expired:
-// replies, status updates and heartbeats from that agent all fail with 401,
-// while its container, phase and (for the manager) activity row stay green
-// or merely "stalled". A token past its refresh point (2 h before expiry) is
-// a warning: sciontool's refresh timer counts the guest's monotonic clock,
-// which stands still while the host sleeps, so an overdue refresh turns into
-// an expiry unless it fires in time. An agent whose token cannot be read is
-// "not checked" for that agent, never a pass with a claim.
+// checkAgentHubTokens fails on an expired hub token of the manager or any live
+// configured worker: everything that agent sends fails with 401 while its other
+// rows stay green. A token past its refresh point (2 h before expiry) warns:
+// sciontool's refresh timer counts the guest's monotonic clock, which stands
+// still while the host sleeps. An unreadable token is "not checked".
 //
-// Only a running or stopped agent fails the row: those are the phases
-// `lever apply` heals. An expired token under another phase (error,
-// starting, …) is a warning, since the resume or restart that phase needs
-// issues a new token anyway. A running manager's expired token is the
-// manager row's failure already, so here it is a warning pointing there:
-// one fault, one failed row.
+// Only a running or stopped agent fails, the phases `lever apply` heals; under
+// other phases the needed resume issues a new token. A running manager's
+// expired token is already the manager row's failure, so here it only warns.
 func checkAgentHubTokens(ctx context.Context, project, manager string, agents []string, list agentLister, session agentSessionReader) checkResult {
 	const check = "agent hub tokens"
 	if list == nil || session == nil {
@@ -1314,19 +1145,15 @@ func checkAgentHubTokens(ctx context.Context, project, manager string, agents []
 	return checkResult{check, true, strings.Join(good, ", ") + notChecked, ""}
 }
 
-// guestDNSProbeName is the name doctor resolves from inside the guest: the
-// one every subscription-mode agent must reach on its first turn.
+// guestDNSProbeName is the name every subscription-mode agent must resolve on
+// its first turn.
 const guestDNSProbeName = "api.anthropic.com"
 
 // checkGuestDNS resolves a public name from inside the guest, through the
-// same resolver path the agent containers use. Before lever#34 a guest with
-// no DNS looked exactly like a healthy idle one — `lever up` succeeded and
-// every doctor row was green, because they prove the containers are up, not
-// that a lookup completes — while the agent's every LLM call timed out (on
-// lima, LEVER_EGRESS dropped the LIMADNS DNAT to the host alias). Closed
-// egress drops DNS by design (agents dial the broker by IP), so the row is
-// informational there. The probe is bounded: a dead resolver path makes
-// getent wait on systemd-resolved's own retries.
+// agents' resolver path: a guest without DNS otherwise looks healthy and idle
+// while every LLM call times out. Closed egress drops DNS by design, so the row
+// is informational there. The probe is bounded because a dead resolver makes
+// getent wait on systemd-resolved's retries.
 func checkGuestDNS(ctx context.Context, closedEgress bool, jr proc.Runner) checkResult {
 	const check = "guest DNS"
 	if closedEgress {
@@ -1348,16 +1175,15 @@ func checkGuestDNS(ctx context.Context, closedEgress bool, jr proc.Runner) check
 		"in the guest, `sudo iptables -L LEVER_EGRESS -v -n` shows which DROP the lookups hit; on lima the resolver path is the LIMADNS DNAT to the host alias, which `lever apply` ACCEPTs in the open posture (lever#34) — re-run `lever apply`, then `lever up`"}
 }
 
-// legacyKVMDropInTest is true in the guest while the podman drop-in that
-// earlier builds wrote (/dev/kvm in every container) is still there.
+// legacyKVMDropInTest is true while a legacy podman drop-in that put /dev/kvm
+// in every container is still in the guest.
 const legacyKVMDropInTest = `test -e "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"`
 
 // checkNestedVirt reports whether nested_virt reached the jail and only the
 // manager: on, /dev/kvm in the guest with mode 0666 and in the manager's
-// container (a bounded `test -c` exec; only the exit code is read); on or
-// off, no legacy drop-in that gave every container the device. Off, a Lima
-// manager created while it was on still holds the device. Not applicable
-// off Lima, which cannot turn it on.
+// container (only the exit code of `test -c` is read); on or off, no legacy
+// drop-in giving every container the device. Off, a Lima manager created while
+// it was on still holds the device. Not applicable off Lima.
 func checkNestedVirt(ctx context.Context, on, lima bool, jr proc.Runner, managerRef string, probe func(context.Context, string, string) (bool, error)) checkResult {
 	const check = "nested virt"
 	if !on && !lima {
@@ -1402,9 +1228,6 @@ func checkNestedVirt(ctx context.Context, on, lima bool, jr proc.Runner, manager
 	return checkResult{check, true, "guest /dev/kvm 0666, manager has /dev/kvm, no legacy drop-in", ""}
 }
 
-// activityAge renders an agent's activity with the age of its last change:
-// "activity completed, 3m0s ago", or without the age when the hub reported
-// no event time, or "no activity reported" when the field is empty.
 func activityAge(a *scionpkg.Agent, now time.Time) string {
 	if a.Activity == "" {
 		return "no activity reported"
@@ -1418,14 +1241,10 @@ func activityAge(a *scionpkg.Agent, now time.Time) string {
 }
 
 // checkManagerImage compares the image the manager record was created with
-// against manager.image. A record keeps its image for life — `lever up`
-// resumes it unchanged, and only a create reads the config — so after a
-// manager.image edit the version row (which inspects the CONFIGURED image)
-// reads green while the manager runs something else (lever#33). Podman may
-// report the record's image qualified (docker.io/, or the localhost/ alias
-// the load step adds), so refs are compared normalised. Informational when
-// there is nothing to compare: no record (the manager row already fails),
-// a record without an image field, or no listing at all.
+// against manager.image. A record keeps its image for life, so after an edit
+// the version row (which inspects the configured image) reads green while the
+// manager runs something else. Podman may qualify the ref (docker.io/,
+// localhost/), so refs are compared normalised.
 func checkManagerImage(ctx context.Context, project, name, want string, list agentLister) checkResult {
 	const check = "manager image"
 	if list == nil || want == "" {
@@ -1450,26 +1269,19 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 		"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
 }
 
-// networkCheckedAgents is every agent the agent-network row inspects: the
-// manager (whose scion slug is the instance name) and each declared worker.
+// networkCheckedAgents is the manager (whose scion slug is the instance name)
+// and each declared worker.
 func networkCheckedAgents(manager string, workers []string) []string {
 	return append([]string{manager}, workers...)
 }
 
-// netModeLister returns the network mode of a jail container by id or name
-// (jail.ContainerNetworkMode in production); jail.ErrNoContainer when there
-// is none.
 type netModeLister func(ctx context.Context, ref string) (string, error)
 
-// checkAgentNetwork finds agent containers that do not run in their own
-// pasta netns (lever#35). On podman 4.9 (a Lima guest created on Ubuntu
-// 24.04) a container created without lever's drop-in runs slirp4netns, where
-// host.containers.internal resolves to the guest's own address, which
-// LEVER_EGRESS drops: the agent cannot reach the hub (heartbeats, `scion
-// message`, token refresh all fail). The mode is fixed at create; scion
-// deletes and recreates a stopped agent's container on start, so a stop and
-// an up fix it and keep the conversation. The container is found by the id
-// scion reports or else by scion's container name, as for the ticket mounts.
+// checkAgentNetwork finds agent containers not in their own pasta netns. On
+// podman 4.9 a container created without lever's drop-in runs slirp4netns,
+// where host.containers.internal resolves to the guest's own address, which
+// LEVER_EGRESS drops, so the agent cannot reach the hub. The mode is fixed at
+// create; a stop and an up recreate the container and keep the conversation.
 func checkAgentNetwork(ctx context.Context, project string, agents []string, forceHost bool, list agentLister, modes netModeLister) checkResult {
 	const check = "agent network"
 	if forceHost {
@@ -1521,24 +1333,18 @@ func checkAgentNetwork(ctx context.Context, project string, agents []string, for
 	return checkResult{check, true, fmt.Sprintf("%d agent container(s) run pasta", checked), ""}
 }
 
-// mountLister returns the in-container mount points of a jail container by
-// id or name (jail.ContainerMountTargets in production); jail.ErrNoContainer
-// when there is none.
 type mountLister func(ctx context.Context, ref string) ([]string, error)
 
-// workerTicketMount is where a worker's container sees its enrolment ticket
-// directory (the broker's read-only volume; see broker.WorkerSpec.TicketDir).
+// workerTicketMount is the worker's read-only enrolment ticket directory (see
+// broker.WorkerSpec.TicketDir).
 const workerTicketMount = "/run/lever"
 
-// checkWorkerTicketMounts finds worker records created BEFORE the guest
-// ticket channel (0.22): scion keeps a record's volumes for life, so such a
-// worker has no /run/lever mount, and its next re-enrolment (a resume after
-// its leaf lapsed, the healer's bounce) cannot find a ticket — the broker no
-// longer stages one in the tree. The fix is a purge and a re-dispatch, which
-// creates the container with the mount. The container is found by the id
-// scion reports or, when the pin reports none (89ed0fe8 does not), by
-// scion's container name. Workers with no record or no container are
-// skipped; a listing or inspect failure is "not checked", never a pass.
+// checkWorkerTicketMounts finds worker records without the /run/lever mount:
+// scion keeps a record's volumes for life, so such a worker's next re-enrolment
+// cannot find a ticket (the broker stages none in the tree). The fix is a
+// purge and a re-dispatch. The container is found by the id scion reports or
+// else by scion's container name. A listing or inspect failure is "not
+// checked", never a pass.
 func checkWorkerTicketMounts(ctx context.Context, project string, workers []string, list agentLister, mounts mountLister) checkResult {
 	const check = "worker ticket mounts"
 	if len(workers) == 0 {
@@ -1590,50 +1396,31 @@ func checkWorkerTicketMounts(ctx context.Context, project string, workers []stri
 	return checkResult{check, true, fmt.Sprintf("%d worker container(s) mount %s", checked, workerTicketMount), ""}
 }
 
-// recordVolumeReader returns the extra mounts an agent's hub record was
-// created with (hubRecordVolumes in production).
 type recordVolumeReader func(ctx context.Context, project, agent string) ([]jail.Mount, error)
 
-// mountInspector returns a jail container's mounts with their writability by
-// id or name (jail.ContainerMounts in production); jail.ErrNoContainer when
-// there is none.
 type mountInspector func(ctx context.Context, ref string) ([]jail.Mount, error)
 
-// checkManagerReadOnly verifies that the manager container holds every
-// mount of its manager.read_only plan (apply.ManagerTreeMountGaps, shared
-// with apply's keep/resume warning): each entry mounted read-only at its
-// place in the workspace; each pin — an entry's ancestors, and every worker
-// dir with its ancestors — mounted (its writability is not the point; that
-// it is a mount point, which cannot be renamed away, is); each from the
-// same directory of the in-jail tree (project). scion keeps a record's
-// volumes for life, so a manager created before an entry was added has no
-// such mount; only a fresh create gives it the mounts.
+// checkManagerReadOnly verifies that the manager container holds every mount
+// of its manager.read_only plan (apply.ManagerTreeMountGaps): each entry
+// read-only in place; each pin (an entry's ancestors, every worker dir and its
+// ancestors) a mount point, which cannot be renamed away; each from the same
+// directory of the in-jail tree. scion keeps a record's volumes for life, so
+// only a fresh create adds a new entry's mount.
 //
-// The inspect is not enough on its own: when the host replaces a protected
-// directory after the create, podman still lists the read-only mount while
-// a write from the container lands in the new directory (verified on
-// OrbStack 2026-10-04). So for a RUNNING container the whole plan is also
-// checked live from the guest side (apply.LiveTreeMountGaps through
-// jail.ContainerLiveMounts: the kernel's mountinfo and the device and inode
-// behind each mount, never a program inside the container, which the agent
-// controls); a check that cannot run, or a container that is not running,
-// is a warning that says so — never a pass. A first process found in a
-// namespace made inside the container fails the row.
-// The container is found by the id scion reports or else by scion's
-// container name, as for the worker ticket mounts. No manager record or
-// container, a listing or an inspect failure, is "not checked".
+// The inspect is not enough: when the host replaces a protected directory
+// after the create, podman still lists the read-only mount while container
+// writes land in the new directory. So a running container's plan is also
+// checked live from the guest side (apply.LiveTreeMountGaps: the kernel's
+// mountinfo and each mount's device and inode, never a program inside the
+// container, which the agent controls). A check that cannot run, or a stopped
+// container, warns, never passes. A first process in a namespace made inside
+// the container fails the row.
 //
-// The row also reports the other direction (apply.ManagerStaleTreeMounts):
-// a mount the record still holds for a directory the config dropped, or
-// whose directory is gone from the host tree — the latter fails, because
-// the next resume cannot recreate the container (card #157). That half
-// runs even with read_only unset, since removing the whole list is how a
-// record ends up with mounts the config no longer names; only then is a
-// failed listing or inspect still "none configured".
-//
-// With no container to inspect (or an inspect that fails), that half reads
-// the hub record's volumes instead (record; nil skips it), which a resume
-// recreates the container from; the plan half then stays "not checked".
+// The row also reports stale mounts (apply.ManagerStaleTreeMounts): one the
+// config dropped, or whose host directory is gone, which fails because the
+// next resume cannot recreate the container. That half runs even with
+// read_only unset, and with no container it reads the hub record's volumes
+// (record; nil skips it).
 func checkManagerReadOnly(ctx context.Context, project, tree, name string, want []config.TreeMount, list agentLister, inspect mountInspector, record recordVolumeReader, live liveMountChecker) checkResult {
 	const check = "manager read-only paths"
 	notChecked := func(detail string) checkResult {
@@ -1692,9 +1479,7 @@ func checkManagerReadOnly(ctx context.Context, project, tree, name string, want 
 	return checkResult{check, r.ok && sr.ok, r.detail + "; also " + stale.String(), r.fix + "; and " + sr.fix}
 }
 
-// managerReadOnlyGaps is checkManagerReadOnly's half for the current plan:
-// every planned mount present, and (on a running container) the whole plan
-// held live, as the guest sees it.
+// managerReadOnlyGaps is checkManagerReadOnly's half for the current plan.
 func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, containerStatus string, want []config.TreeMount, mounts []jail.Mount, live liveMountChecker) checkResult {
 	gaps := apply.ManagerTreeMountGaps(project, want, mounts)
 	if gaps.Empty() {
@@ -1703,7 +1488,7 @@ func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, contain
 				"bring the manager up (`lever up`) and re-run doctor")
 		}
 		if live == nil {
-			// A warning row needs a fix to print as one ("!"), never as "✓".
+			// A warning row needs a fix to print as "!", never as a pass.
 			return warnResult(check, "the mounts are listed, but the live check is not wired, so a protected directory replaced on the host would go unnoticed",
 				"this is a lever wiring gap; report it")
 		}
@@ -1732,9 +1517,8 @@ func managerReadOnlyGaps(ctx context.Context, check, project, name, ref, contain
 	return checkResult{check, true, fmt.Sprintf("%d path(s) read-only in %q, %d pin(s) mounted (checked live from the guest: each a mount point over the host's directory)", entries, name, pins), ""}
 }
 
-// staleTreeMountsResult is checkManagerReadOnly's row for mounts the
-// record holds beyond the config: a gone directory fails (the next resume
-// fails), a dropped mount warns.
+// staleTreeMountsResult: a gone directory fails (the next resume fails), a
+// dropped mount warns.
 func staleTreeMountsResult(check, name string, stale apply.StaleTreeMounts) checkResult {
 	detail := fmt.Sprintf("manager %q: %s", name, stale)
 	if len(stale.Gone) > 0 {
@@ -1743,14 +1527,12 @@ func staleTreeMountsResult(check, name string, stale apply.StaleTreeMounts) chec
 	return warnResult(check, detail, stale.Fix())
 }
 
-// checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own
-// tree (<tree>/<worker dir>/.lever/bootstrap.json). Since the guest ticket
-// channel (0.22) lever stages a worker's ticket only in the guest runtime
-// directory, mounted read-only at /run/lever in that worker alone; a copy in
-// the tree is one an older lever left or an agent wrote, readable by the
-// manager, and it hid a worker-side `lever-manager` that read the wrong path
-// (it worked only where such a copy sat). dirs maps a worker to its host
-// directory.
+// checkWorkerTreeBootstraps finds a bootstrap.json under a worker's own tree.
+// lever stages a worker's ticket only in the guest runtime directory, mounted
+// read-only at /run/lever in that worker alone; a copy in the tree was left
+// behind or written by an agent, is readable by the manager, and can mislead a
+// worker-side `lever-manager` that reads the wrong path. dirs maps a worker to
+// its host directory.
 func checkWorkerTreeBootstraps(tree string, dirs map[string]string) checkResult {
 	const check = "worker tree bootstraps"
 	if len(dirs) == 0 {
@@ -1763,11 +1545,9 @@ func checkWorkerTreeBootstraps(tree string, dirs map[string]string) checkResult 
 			continue
 		}
 		found = append(found, name)
-		// The tree is agent-writable. A path that goes through a symlink
-		// (a `.lever` link planted in a worker tree, or a worker directory
-		// the manager replaced with a link) names a file somewhere else, so
-		// no `rm` line is printed for it: pasting one would delete the
-		// link's target, which can be the manager's own bootstrap.
+		// The tree is agent-writable. A path through a symlink names a file elsewhere,
+		// so no `rm` line is printed for it: pasting one could delete the link's
+		// target, which can be the manager's own bootstrap.
 		if real, err := filepath.EvalSymlinks(p); err != nil || real != underRealTree(tree, p) {
 			linked = append(linked, name)
 			continue
@@ -1800,12 +1580,10 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// underRealTree is where p is when nothing below the instance tree is a
-// symlink: the tree's own real location plus p's path inside it. The tree
-// root is the mount point and not an agent's to replace; everything below it
-// is agent-writable. Comparing this with EvalSymlinks(p) tells whether any
-// component below the tree (or the file itself) is a link, while a tree that
-// sits behind a link on the host (/tmp or /var on macOS) does not count.
+// underRealTree is where p would be if nothing below the tree were a symlink.
+// The tree root is the mount point and not an agent's to replace; everything
+// below it is agent-writable. A tree behind a host link (/tmp on macOS) does
+// not count.
 func underRealTree(tree, p string) string {
 	real, err := filepath.EvalSymlinks(tree)
 	if err != nil {
@@ -1818,10 +1596,9 @@ func underRealTree(tree, p string) string {
 	return filepath.Join(real, rest)
 }
 
-// checkRecyclableWorkers names the workers the config marks recyclable:
-// the manager may discard their records (and so their conversations) and
-// start them fresh with `lever-manager agent recycle`. Informational, never a
-// failure: it shows the operator a power the config hands the manager.
+// checkRecyclableWorkers names the workers the manager may discard and start
+// fresh (`lever-manager agent recycle`). Informational: it shows a power the
+// config hands the manager.
 func checkRecyclableWorkers(workers []config.Worker) checkResult {
 	const check = "worker recycle"
 	if len(workers) == 0 {
@@ -1840,8 +1617,6 @@ func checkRecyclableWorkers(workers []config.Worker) checkResult {
 	return checkResult{check, true, fmt.Sprintf("worker %s recyclable: the manager may discard the record (its conversation, never its workspace) and start it fresh with `lever-manager agent recycle`", braceList(names)), ""}
 }
 
-// braceList renders names as a shell brace-expansion hint ({a,b}) for the fix
-// text, or the bare name for a single entry.
 func braceList(names []string) string {
 	if len(names) == 1 {
 		return names[0]
@@ -1849,10 +1624,8 @@ func braceList(names []string) string {
 	return "{" + strings.Join(names, ",") + "}"
 }
 
-// backendHostPort strips an optional scheme and path from a
-// "[scheme://]host:port[/path]" backend, leaving the "host:port" a TCP dial
-// needs. External backends are validated scheme-less; a supervised tool's
-// may carry a scheme (as config's backendPort accepts).
+// backendHostPort reduces "[scheme://]host:port[/path]" to host:port. A
+// supervised tool's backend may carry a scheme.
 func backendHostPort(backend string) string {
 	if i := strings.Index(backend, "://"); i >= 0 {
 		backend = backend[i+3:]
@@ -1863,10 +1636,9 @@ func backendHostPort(backend string) string {
 	return backend
 }
 
-// checkCredentialFile verifies the subscription credential apply's credential
-// step will read: present, non-empty, and not group/other-accessible. The
-// detail reports size and mode ONLY — never file contents. An unset path is a
-// pass: api-key instances have no credential_file.
+// checkCredentialFile verifies the subscription credential is present,
+// non-empty and not group/other-accessible. The detail reports size and mode
+// only, never contents. An unset path passes (api-key instances).
 func checkCredentialFile(path string) checkResult {
 	const name = "manager credential"
 	const mint = "mint one with `claude setup-token`, save it to the configured path, then chmod 600 it"
@@ -1886,18 +1658,15 @@ func checkCredentialFile(path string) checkResult {
 	}
 }
 
-// checkMcpJsonInTree flags any .mcp.json anywhere under the host tree.
-// Claude auto-loads a .mcp.json as PROJECT scope inside every jailed agent,
-// which collides with the brokered USER-scope tools lever-agent registers
-// (duplicate localhost:PORT endpoints vs the broker's) — a real bug hit in
-// production. Walks the whole tree (not just the top level); unreadable
-// directories are skipped rather than failing the check outright.
+// checkMcpJsonInTree flags any .mcp.json under the host tree: Claude loads it
+// as project scope in every jailed agent, where its endpoints collide with the
+// brokered user-scope tools lever-agent registers. Unreadable directories are
+// skipped.
 func checkMcpJsonInTree(tree string) checkResult {
 	const name = "no stray .mcp.json in tree"
 	var found []string
 	_ = filepath.WalkDir(tree, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			// Unreadable entry (permissions, race): skip it, don't abort the walk.
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -1915,10 +1684,8 @@ func checkMcpJsonInTree(tree string) checkResult {
 	return checkResult{name, true, "none in tree", ""}
 }
 
-// goVersionProbe resolves and runs `go version` on the host PATH. It
-// distinguishes "not on PATH at all" from "on PATH but broken" (e.g. a dead
-// asdf/mise shim, which typically fails with exit status 126) by resolving via
-// exec.LookPath first.
+// goVersionProbe tells "not on PATH" from "on PATH but broken" (a dead
+// asdf/mise shim, typically exit status 126).
 func goVersionProbe(r proc.Runner) (string, error) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
@@ -1933,15 +1700,10 @@ func goVersionProbe(r proc.Runner) (string, error) {
 	return res.Stdout, nil
 }
 
-// checkGoToolchain verifies a real, working Go toolchain is resolvable on
-// PATH when scion needs to be cross-compiled (source checkout or a pinned
-// module version) — `lever up`/`apply` shell out to `go` for that build. A
-// broken shim (e.g. asdf/mise without the version installed) fails with an
-// opaque "exit status 126" deep inside apply; this turns it into an
-// up-front, actionable diagnosis. No build requested => no go needed => pass.
-// prebuilt (scionPrebuilt) means lever downloads this release's scion
-// instead of building it, so a missing Go passes: only a failed download
-// falls back to the build.
+// checkGoToolchain verifies a working Go toolchain when scion must be built
+// from source or a module version. A broken shim otherwise fails with an
+// opaque "exit status 126" deep inside apply. With prebuilt, a missing Go
+// passes: only a failed download falls back to the build.
 func checkGoToolchain(scion config.ScionConfig, prebuilt bool, p doctorProbes) checkResult {
 	const name = "go toolchain"
 	if scion.Source == "" && scion.Version == "" {
@@ -1960,23 +1722,15 @@ func checkGoToolchain(scion config.ScionConfig, prebuilt bool, p doctorProbes) c
 }
 
 // scionPrebuilt reports whether apply downloads the release's prebuilt scion
-// for app instead of building it: scion.version names this release's pin,
-// and no web UI build needs the module source (that build fetches it with
-// Go). The guest is assumed to run the host's architecture, as the early
-// host build of scion assumes.
+// instead of building it. A web UI build still needs the module source, which
+// is fetched with Go. The guest is assumed to run the host's architecture.
 func scionPrebuilt(app *config.App) bool {
 	return app.Scion.Version != "" && !app.ScionWebAssets() && scionbin.DownloadsRelease(app.Scion.Version, runtime.GOARCH)
 }
 
-// nodeToolchainProbe resolves and validates node+npm for the scion web-asset
-// build, returning the node version.
-//
-// It probes inside the build's own cache directory, and creates that directory
-// to do so. A version manager that resolves node by walking UP for a project
-// file (asdf, mise) gives different answers in different directories, so a
-// probe run in the user's project — which may have its own .tool-versions —
-// would not be evidence about the build, which runs elsewhere. Same reason
-// scionbin.FetchModule resolves the real go binary rather than trusting a shim.
+// nodeToolchainProbe validates node and npm for the scion web-asset build. It
+// probes inside the build's cache directory (creating it): a version manager
+// that walks up for a project file (asdf, mise) answers differently elsewhere.
 func nodeToolchainProbe(r proc.Runner) (string, error) {
 	root, err := webassets.CacheRoot()
 	if err != nil {
@@ -1990,12 +1744,9 @@ func nodeToolchainProbe(r proc.Runner) (string, error) {
 	return webassets.CheckNodeToolchain(ctx, r, root)
 }
 
-// checkNodeToolchain verifies node+npm can build scion's web UI when the
-// instance serves it (`remote.enabled` on a source/version scion). Without
-// this, a missing or broken toolchain surfaces either as a failed `lever apply`
-// deep in npm or — worse, before the build existed — as scion's bare "Web UI
-// Not Available" page in the browser, long after the cause. No UI to build =>
-// no node needed => pass.
+// checkNodeToolchain verifies node and npm can build scion's web UI when the
+// instance serves it; otherwise a broken toolchain shows up deep in a failed
+// apply. No UI to build passes.
 func checkNodeToolchain(app *config.App, p doctorProbes) checkResult {
 	const name = "node toolchain"
 	if !app.ScionWebAssets() {
@@ -2012,13 +1763,11 @@ func checkNodeToolchain(app *config.App, p doctorProbes) checkResult {
 	return checkResult{name, true, "node " + strings.TrimSpace(version), ""}
 }
 
-// checkOperatorSkills verifies the framework skills scaffolded by `lever init`
-// are present, current for this lever version, and unmodified — or adopted as
-// an accepted baseline via `lever init --adopt` — and referenced from the
-// tree-root CLAUDE.md. Runs the scaffold engine in check (read-only) mode.
-// Drift PAST an adopted baseline is called out separately: the scaffolds live
-// inside the agent-writable tree, so unexplained change there is the tamper
-// signal this check exists for.
+// checkOperatorSkills verifies the framework skills from `lever init` are
+// present, current and unmodified (or adopted via `lever init --adopt`) and
+// referenced from the tree-root CLAUDE.md, in read-only check mode. The
+// scaffolds live in the agent-writable tree, so drift past an adopted baseline
+// is the tamper signal and is called out separately.
 func checkOperatorSkills(app *config.App, stateDir state.State) checkResult {
 	const name = "operator skills"
 	results, err := syncSkills(app, stateDir, false, true)
@@ -2030,12 +1779,10 @@ func checkOperatorSkills(app *config.App, stateDir state.State) checkResult {
 		return checkResult{name, false, "could not inspect CLAUDE.md: " + err.Error(), "run `lever init`"}
 	}
 	if skillsUpToDate(results, blockAct) {
-		// An adoption is an owner choice, but it silently pins the file to the
-		// framework baseline it was adopted AT — an instance can upgrade many
-		// versions past a (possibly security-relevant) skill change while
-		// doctor reports healthy (#16, reproduced live: a 0.3.1 adoption
-		// surviving to 0.8.1). cli.Version drift on an adopted file is therefore a
-		// FAILING check: visibility only, never an auto-overwrite.
+		// An adoption pins the file to the baseline it was adopted at, so an instance
+		// could upgrade past a security-relevant skill change while doctor reports
+		// healthy. Version drift on an adopted file therefore fails: visibility only,
+		// never an auto-overwrite.
 		var lagging []string
 		for _, r := range results {
 			if r.Action == skillAdopted && r.AdoptedVersion != cli.Version {
@@ -2105,16 +1852,10 @@ func checkOperatorSkills(app *config.App, stateDir state.State) checkResult {
 	return checkResult{name, false, strings.Join(bad, "; "), fix}
 }
 
-// checkDirectives verifies the operator-directive channel is usable when
-// configured. Directives are opt-in (gated solely by operator.allowed_signers,
-// see config.App.DirectivesEnabled), so an unset config is a pass, not a
-// warning: most instances never touch this feature. Once configured, three
-// things can silently break the channel without any config-load error —
-// allowed_signers missing/empty (nothing to verify a signature against),
-// ssh-keygen absent from PATH (opsig shells out to it for both signing and
-// verification), and — when the broker is actually up — a missing directive
-// socket (serve.go creates it at startup; its absence means directives can't
-// reach the broker even though everything else looks configured).
+// checkDirectives verifies the operator-directive channel when configured
+// (operator.allowed_signers; unset passes). Three things break it without a
+// config error: no usable allowed_signers key, ssh-keygen missing from PATH
+// (opsig uses it), and, with the broker up, a missing directive socket.
 func checkDirectives(app *config.App, st state.State) checkResult {
 	const name = "operator directives"
 	if !app.DirectivesEnabled() {
@@ -2145,12 +1886,9 @@ func checkDirectives(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, fmt.Sprintf("allowed_signers: %d key(s); socket present", n), ""}
 }
 
-// countKeyLines counts substantive lines in an allowed_signers file: each
-// holds "principal keytype keydata"; blank lines and #-comments don't count.
-// Not a full ssh-keygen(1) allowed_signers parser (which also supports
-// per-line options like cert-authority/namespaces) — doctor only needs a
-// "is there at least one usable key" signal, not full validation (ssh-keygen
-// itself is the source of truth when directives are actually verified).
+// countKeyLines counts "principal keytype keydata" lines, ignoring blanks and
+// #-comments. It is only an "at least one key" signal; ssh-keygen is the source
+// of truth when verifying.
 func countKeyLines(data []byte) int {
 	n := 0
 	for _, line := range strings.Split(string(data), "\n") {
@@ -2163,39 +1901,29 @@ func countKeyLines(data []byte) int {
 	return n
 }
 
-// certRejectWindow bounds how recently the broker must have rejected an expired
-// leaf for checkAgentCert to treat it as an ACTIVE failure. Wider than the
-// agent's handshake-retry cadence (seconds) so an ongoing outage always lands a
-// match inside it, yet narrow enough that once a re-enrol heals the leaf the
-// old log lines age out and the check self-clears.
+// certRejectWindow is how recent a broker rejection of an expired leaf must be
+// to count as active: wider than the agent's handshake-retry cadence, narrow
+// enough that the row clears once a re-enrol heals the leaf.
 const certRejectWindow = 15 * time.Minute
 
-// brokerLogTailBytes caps how much of broker.out.log checkAgentCert reads (from
-// the end): enough to cover a current outage, bounded so a long-lived log never
-// costs a full read.
+// brokerLogTailBytes caps how much of broker.out.log is read, from the end.
 const brokerLogTailBytes = 64 << 10
 
-// checkAgentCert reports whether the broker is CURRENTLY rejecting an agent's
-// mTLS leaf as expired. The failure that motivates it — a short-lived agent leaf
-// that lapses while the instance is down (the in-container renew sidecar can't
-// run while stopped) — shows up ONLY as a TLS handshake error in the broker's
-// own log; a host-side CA check reads green throughout it (the CA is long-lived,
-// it's the leaf that died). So this scans broker.out.log for the exact
-// fingerprint rather than inspecting any cert file.
+// checkAgentCert reports whether the broker is currently rejecting an agent's
+// mTLS leaf as expired. A leaf that lapsed while the instance was down shows
+// only as a TLS handshake error in the broker's log (the CA stays valid), so
+// this scans the log rather than any cert file.
 func checkAgentCert(st state.State, now time.Time) checkResult {
 	const name = "agent certificate"
 	latest, found, err := scanBrokerLogCertExpiry(st.OutLog())
 	switch {
 	case err != nil:
-		// No readable broker log (never started, or cleanly removed). A missing
-		// broker is checkBrokerAlive's job; here there's nothing to diagnose.
 		return checkResult{name, true, "no broker log to scan", ""}
 	case !found:
 		return checkResult{name, true, "no expired-leaf rejections in the broker log", ""}
 	case now.Sub(latest) <= certRejectWindow:
-		// A rejection logged before the CURRENT broker started (pid-file mtime)
-		// describes the pre-restart outage, not this broker — the restart is
-		// exactly the remedy, so don't cry wolf right after it heals.
+		// A rejection logged before the current broker started describes the outage
+		// the restart remedied.
 		if start, ok := brokerStartTime(st.PID()); ok && latest.Before(start) {
 			return checkResult{name, true,
 				fmt.Sprintf("last expired-leaf rejection at %s predates the current broker (started %s) — healed by restart",
@@ -2210,9 +1938,8 @@ func checkAgentCert(st state.State, now time.Time) checkResult {
 	}
 }
 
-// brokerStartTime reports when the current broker started, via the pid file's
-// mtime (written once, after the listeners bind). ok=false if there is no pid
-// file (broker not running — checkBrokerAlive's job).
+// brokerStartTime is the pid file's mtime (written once, after the listeners
+// bind); ok=false without a pid file.
 func brokerStartTime(pidPath string) (time.Time, bool) {
 	fi, err := os.Stat(pidPath)
 	if err != nil {
@@ -2221,12 +1948,10 @@ func brokerStartTime(pidPath string) (time.Time, bool) {
 	return fi.ModTime(), true
 }
 
-// scanBrokerLogCertExpiry returns the timestamp of the most recent expired- /
-// bad-certificate TLS handshake error in the tail of the broker log at path.
-// Two line shapes are read: lever's daemon log line ("time=<RFC3339, UTC>
-// level=… msg=…", from 0.36.0) and the Go-stdlog prefix a broker before
-// it wrote ("2006/01/02 15:04:05 …", local time), which an older file still
-// holds. Lines without the fingerprint or a parseable timestamp are ignored.
+// scanBrokerLogCertExpiry returns the time of the latest expired or bad
+// certificate handshake error in the broker log's tail. It reads lever's
+// daemon log line ("time=<RFC3339, UTC> ...") and the Go-stdlog prefix ("2006/01/02
+// 15:04:05 ...", local time) an older log file may hold.
 func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 	data, err := readFileTail(path, brokerLogTailBytes)
 	if err != nil {
@@ -2249,8 +1974,6 @@ func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 	return latest, found, nil
 }
 
-// brokerLogLineTime is a broker log line's time, in either shape
-// scanBrokerLogCertExpiry reads.
 func brokerLogLineTime(line string) (time.Time, bool) {
 	if rest, ok := strings.CutPrefix(line, "time="); ok {
 		if i := strings.IndexByte(rest, ' '); i > 0 {
@@ -2266,18 +1989,14 @@ func brokerLogLineTime(line string) (time.Time, bool) {
 	return ts, err == nil
 }
 
-// The labels image/lever-claude/Dockerfile bakes from build args: the pinned
-// Claude Code version, and the lever version the in-jail binaries were built
-// from.
+// Labels image/lever-claude/Dockerfile bakes from build args: the pinned Claude
+// Code version and the lever version the in-jail binaries were built from.
 const (
 	claudeVersionLabel = "claude_code_version"
 	leverVersionLabel  = "lever_version"
 )
 
-// imageLabelProbe reads one label of an image in the host docker store via
-// `docker image inspect`; "" when the image has no such label. The image ID
-// inspect in internal/jail (hostImageID) reads a different field and is not
-// exported, so this is its own invocation.
+// imageLabelProbe reads one label via `docker image inspect`; "" when absent.
 func imageLabelProbe(r proc.Runner, imageRef, label string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2296,12 +2015,10 @@ func imageLabelProbe(r proc.Runner, imageRef, label string) (string, error) {
 	return v, nil
 }
 
-// checkClaudeVersion reports the Claude Code version baked into the manager
-// image. It reads a label (no container run) — from the archive when the
-// image ships as one (tarPath, from image_tar), else from host docker. A
-// missing label means a pre-label image and is reported informationally, not
-// as a failure; an inspect error (image not built/loaded, tar unreadable or
-// mistagged) is a real fault.
+// checkClaudeVersion reports the Claude Code version label of the manager
+// image, from the image_tar archive or host docker. A missing label is
+// informational; an inspect error (image not loaded, tar unreadable or
+// mistagged) is a fault.
 func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 	const name = "agent claude version"
 	source := imageRef
@@ -2323,25 +2040,16 @@ func checkClaudeVersion(imageRef, tarPath string, p doctorProbes) checkResult {
 	return checkResult{name, true, "baked " + v + " in " + source + " (a manager keeps the image it was created on until recreated: `lever up --fresh`; the manager image row compares the two)", ""}
 }
 
-// checkLeverVersion compares the in-jail code baked into the manager image
-// with this binary's. The image tag names only the arch, so a build from
-// another lever source replaces it with nothing else to show for it
-// (lever#18).
+// checkLeverVersion compares the in-jail code baked into the manager image with
+// this binary's; the image tag names only the arch.
 //
-// The image's lever_jail_abi label (the in-jail compatibility version,
-// internal/jailabi) decides when it is there (lever#171): equal to hostABI
-// passes, with any release difference shown as information, since a release
-// that changed no in-jail code needs no rebuild; different fails. An image
-// without that label (built before it existed, or by an instance Dockerfile
-// that does not set it) falls back to the release comparison: the
-// lever_version label against host, the release (cli.Version); hostFull is
-// what `lever version` prints, the form the label holds. Releases are
-// compared, not commits: a host built from a later commit of the same release
-// is not a finding, and the detail names both commits.
-//
-// A missing lever_version label (an image older than the label, or one not
-// built by `make lever-image`) and an image that cannot be read are
-// informational: the claude-version row already fails on an unreadable image.
+// The lever_jail_abi label (internal/jailabi) decides when present: equal to
+// hostABI passes (a release difference is shown, since a release that changed
+// no in-jail code needs no rebuild); different fails. Without it the
+// lever_version label is compared to host, the release; hostFull is what
+// `lever version` prints. Releases are compared, not commits. A missing
+// lever_version label or an unreadable image is informational: the
+// claude-version row already fails on the latter.
 func checkLeverVersion(imageRef, tarPath, host, hostFull string, hostABI int, p doctorProbes) checkResult {
 	const name = "agent lever version"
 	const rebuildFix = "rebuild the agent image from this lever's source (`make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built FROM it), " +
@@ -2401,13 +2109,10 @@ func checkLeverVersion(imageRef, tarPath, host, hostFull string, hostABI int, p 
 		fmt.Sprintf("%s carries lever %s, host lever is %s — same release %s (the release is compared, not the commit)", source, v, hostFull, host), ""}
 }
 
-// checkPATTokens judges the hub tokens on disk by the records lever kept at
-// mint (state.PATRecord): the scope set must be the one this lever mints
-// with, and the expiry must be outside apply's renew window. The hub itself
-// cannot be asked — a UAT may not list tokens — so a token without a record
-// is a finding: it was minted by a lever that recorded nothing, which also
-// means scion's 90-day default expiry and no agent:message. The fix is always
-// the same re-apply, which re-mints inside the throwaway dev-auth window.
+// checkPATTokens judges the hub tokens on disk by their mint records
+// (state.PATRecord): the scope set this lever mints, an expiry outside the
+// renew window. A UAT cannot list tokens, so a token without a record is a
+// finding (scion's 90-day default, no agent:message). The fix is a re-apply.
 func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, known scopeKnownFunc, now time.Time) checkResult {
 	const name = "hub tokens"
 	const fix = "run `lever apply` (it re-mints the token in the bootstrap dev-auth window and revokes the old one); " +
@@ -2447,12 +2152,10 @@ func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, kno
 	return checkResult{name, true, strings.Join(details, "; "), ""}
 }
 
-// checkRemoteWebRole reports whether the remote web UI's hub users hold the
-// lever-remote project role (see remoteWebRoleName) and the project-create
-// ceiling (ensureRemoteCeiling): remote-role.json must cover every allowed
-// user with the current permission set and a ceiling. It reads that
-// record only — the grant needs hub-admin, which doctor never has — so it
-// says what lever last granted, not what the hub holds now.
+// checkRemoteWebRole reports whether remote-role.json covers every allowed user
+// with the current permission set and the project-create ceiling. Granting
+// needs hub-admin, which doctor never has, so it reads only the record: what
+// lever last granted, not what the hub holds now.
 func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess, known scopeKnownFunc) checkResult {
 	const name = "remote web role"
 	if !remote.Enabled {
@@ -2492,29 +2195,20 @@ func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess
 		}
 	}
 	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, perms) {
-		// Not "will answer 403": a pending user may have signed in since
-		// the grant, and the hub's default role may let it use some of the
-		// web UI. What is certain is that lever's role is not bound.
+		// Not "will answer 403": a pending user may have signed in since and the hub's
+		// default role may allow some of the UI. Only lever's role is known unbound.
 		return checkResult{name, false, "the role is not bound yet: " + reason, remoteRoleFix}
 	}
 	return checkResult{name, false, detail, fix}
 }
 
-// roleCeilingReader reads the project's hub-side role ceiling. Injected so
-// the check is unit-testable without a hub.
 type roleCeilingReader func(ctx context.Context, project string) (hubapi.RoleCeiling, error)
 
 // checkAgentRoleCeiling reports whether the hub caps agent creates in the
-// project at the role lever stamps (apply.Deps.EnsureAgentRoleCeiling). An
-// unset ceiling means the hub reads `full`, and lever's own --role stamp is
-// then the only bound.
-//
-// The setting exists only on a scion with roles (both landed in scion#1089),
-// so the installed binary is probed first, as checkAgentRoles does: a scion
-// that predates roles has no ceiling to read and that is not a finding.
-//
-// An unreachable hub is not a finding; a hub that ANSWERED unusably is, as for
-// shared directories.
+// project at the role lever stamps. An unset ceiling reads as `full`, leaving
+// lever's --role stamp the only bound. The setting exists only on a scion with
+// roles, so the binary is probed first; an older scion is not a finding. An
+// unreachable hub is not a finding; one that answered unusably is.
 func checkAgentRoleCeiling(ctx context.Context, project, want string, rolesSupported func(context.Context) (bool, error), read roleCeilingReader) checkResult {
 	const name = "agent role ceiling"
 	if read == nil || rolesSupported == nil {
@@ -2552,19 +2246,17 @@ func checkAgentRoleCeiling(ctx context.Context, project, want string, rolesSuppo
 		"run `lever apply` (register-project writes the ceiling through the project settings route)"}
 }
 
-// scionTelemetryEnv is the variable scion turns the settings' telemetry.enabled
-// into for every agent it starts (pkg/config/telemetry_convert.go).
+// scionTelemetryEnv is what scion turns settings telemetry.enabled into for
+// every agent it starts.
 const scionTelemetryEnv = "SCION_TELEMETRY_ENABLED"
 
 // settingsReader returns the jail's ~/.scion/settings.yaml ("" when absent).
 type settingsReader func(ctx context.Context) ([]byte, error)
 
-// envReader reads one variable from a jail container's creation env
-// (jail.ContainerEnvValue in production).
 type envReader func(ctx context.Context, ref, key string) (value string, set bool, err error)
 
-// readJailScionSettings is the production settingsReader, as the run user
-// (the same file the hub and runtime broker read).
+// readJailScionSettings reads as the run user: the file the hub and runtime
+// broker read.
 func readJailScionSettings(jr proc.Runner) settingsReader {
 	return func(ctx context.Context) ([]byte, error) {
 		res, err := jr.Run(ctx, nil, "sh", "-c", `f="$HOME/`+layout.SettingsRel+`"; if [ -f "$f" ]; then cat "$f"; fi`)
@@ -2575,14 +2267,11 @@ func readJailScionSettings(jr proc.Runner) settingsReader {
 	}
 }
 
-// checkScionTelemetry reports the agents' sciontool telemetry posture: what
-// the jail's settings say (config scion.telemetry, written by apply), and
-// whether the running manager was started with it. scion#1792 turned
-// telemetry on by default; with no cloud destination every Claude hook waits
-// out OTLP timeouts against a receiver that never started, so a trivial turn
-// takes minutes while every other row is green. The settings reach an agent
-// only at START, so a settings file that is right beside a manager created
-// before it is the case this row exists to name.
+// checkScionTelemetry reports the agents' sciontool telemetry posture: the
+// jail settings (config scion.telemetry) and the running manager's env. scion
+// enables telemetry by default, and with no destination every Claude hook waits
+// out OTLP timeouts, so a trivial turn takes minutes. Settings reach an agent
+// only at start, so a manager created before them is what this row names.
 func checkScionTelemetry(ctx context.Context, mode config.ScionTelemetryMode, read settingsReader, project, name string, list agentLister, env envReader) checkResult {
 	const check = "scion telemetry"
 	if read == nil {
@@ -2612,8 +2301,7 @@ func checkScionTelemetry(ctx context.Context, mode config.ScionTelemetryMode, re
 	}
 	detail := fmt.Sprintf("scion.telemetry %s; jail settings: %s", mode, describe)
 	if !settingOff || list == nil || env == nil {
-		// scion-default with scion's own telemetry: the operator's choice, and
-		// nothing lever promised to compare the manager against.
+		// scion-default: the operator's choice, nothing to compare the manager against.
 		return checkResult{check, true, detail, ""}
 	}
 	agents, err := list(ctx, project)
@@ -2647,22 +2335,20 @@ func checkScionTelemetry(ctx context.Context, mode config.ScionTelemetryMode, re
 		"run `lever stop && lever up` (the conversation is kept) so the manager starts with the current settings"}
 }
 
-// devAuthWindowProbeScript prints "token" when the jail user's scion dev token
-// exists and "listening" when something answers HTTP on the throwaway hub's
-// port. $1 is the dev-token path relative to $HOME, $2 the port.
+// devAuthWindowProbeScript prints "token" when the jail user's dev token
+// exists and "listening" when something answers HTTP on the throwaway port. $1
+// is the token path relative to $HOME, $2 the port.
 const devAuthWindowProbeScript = `out=""
 [ -e "$HOME/$1" ] && out="token"
 curl -s -o /dev/null -m 3 "http://127.0.0.1:$2/healthz" && out="$out listening"
 printf '%s' "$out"`
 
-// checkDevAuthWindow reports a bootstrap dev-auth window that was left open:
-// the throwaway dev-auth hub still listening on the jail's
-// 127.0.0.1:throwawayHubPort, or scion's dev token still on disk. Either is an
-// admin credential surface: the hub answers its dev token with super-admin
-// authority, and scion reuses a token file it finds on the next dev-auth
-// start. The window closes both itself, on success, failure and SIGINT/
-// SIGTERM alike (closeDevAuthWindow); what is left here survived a SIGKILL, a
-// crash, or a cleanup that failed.
+// checkDevAuthWindow reports a dev-auth window left open: the throwaway hub
+// listening on the jail's 127.0.0.1:throwawayHubPort, or scion's dev token on
+// disk. Either is an admin credential surface: the hub honours the dev token as
+// super-admin, and scion reuses the file on the next dev-auth start. The window
+// closes both itself, even on SIGINT/SIGTERM; what is left survived a SIGKILL,
+// a crash, or a failed cleanup.
 func checkDevAuthWindow(ctx context.Context, jr proc.Runner) checkResult {
 	const check = "dev-auth window"
 	res, err := jr.Run(ctx, nil, "sh", "-c", devAuthWindowProbeScript, "_", layout.DevTokenRel, strconv.Itoa(throwawayHubPort))

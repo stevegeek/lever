@@ -23,12 +23,8 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// validate checks one broker.tools entry's shape, failing closed. External
-// tools are fronted, not spawned: backend required, command forbidden,
-// backend a literal loopback IP unless explicitly opted out. gate applies to
-// external tools only; coarse replaces the operations list with the wildcard.
-// Whether a supervised command is actually spawnable is a host probe
-// (Tool.checkHost).
+// validate checks one broker.tools entry's shape, failing closed. Whether a
+// supervised command is spawnable is a host probe (Tool.checkHost).
 func (t Tool) validate() error {
 	if !t.Gate.valid() {
 		return fmt.Errorf("config: broker tool %q gate %q invalid (want fine|coarse)", t.Name, t.Gate)
@@ -78,10 +74,9 @@ func (t Tool) validate() error {
 }
 
 // validateExternalBackend confines an external backend to a literal loopback
-// IP (127.0.0.1 / [::1]) unless allow_non_loopback is set. The broker proxies
-// host-side, so a non-loopback backend would let the jailed agent reach other
-// hosts through the broker, circumventing the jail's LAN-drop egress.
-// Hostnames (even "localhost") are rejected: only a literal IP can be
+// IP unless allow_non_loopback is set: the broker proxies host-side, so a
+// non-loopback backend would let the jailed agent reach other hosts through
+// it. Hostnames (even "localhost") are rejected: only a literal IP can be
 // loopback-checked without trusting a resolver.
 func (t Tool) validateExternalBackend() error {
 	b := t.Backend
@@ -106,9 +101,8 @@ func (t Tool) validateExternalBackend() error {
 	return nil
 }
 
-// validateBackend rejects a config's backend unless lever can run it
-// (KnownBackends, held in lockstep with registry.Candidates), so nothing is
-// ever silently swapped for the default.
+// validateBackend refuses an unknown backend so nothing is ever silently
+// swapped for the default.
 func validateBackend(name string) error {
 	if name == "" {
 		return fmt.Errorf("config: backend is required (valid: %s)", strings.Join(backendNames(), ", "))
@@ -119,14 +113,13 @@ func validateBackend(name string) error {
 	return nil
 }
 
-// nameRE constrains an instance/worker name: it becomes a jail machine name
-// (`lever-<name>`) and a shell token in the scion-install path.
+// nameRE: an instance or worker name becomes a jail machine name and a shell
+// token in the scion-install path.
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 var diskRE = regexp.MustCompile(`^[0-9]+(MiB|GiB|MB|GB)$`)
 var sizeRE = regexp.MustCompile(`^([0-9]+)(MiB|GiB|MB|GB)$`)
 
-// validateDisk checks the optional Lima disk size. Empty is valid (default).
 func validateDisk(d string) error {
 	if d == "" {
 		return nil
@@ -137,7 +130,6 @@ func validateDisk(d string) error {
 	return nil
 }
 
-// sizeBytes parses a disk/memory size accepted by sizeRE.
 func sizeBytes(s string) (int64, bool) {
 	m := sizeRE.FindStringSubmatch(s)
 	if m == nil {
@@ -151,9 +143,8 @@ func sizeBytes(s string) (int64, bool) {
 	return n * unit, true
 }
 
-// validateLimaKeys checks the Lima-only sizing and nested_virt keys. goos is
-// the host OS (runtime.GOOS in production): nested_virt needs the qemu driver,
-// which lever uses on Linux hosts only (vz on darwin).
+// validateLimaKeys: nested_virt needs the qemu driver, which lever uses on
+// Linux hosts only (vz on darwin).
 func validateLimaKeys(a *App, goos string) error {
 	if a.Backend != BackendLima {
 		for _, k := range []struct {
@@ -196,23 +187,17 @@ func validateLimaKeys(a *App, goos string) error {
 	return nil
 }
 
-// toolNameRE constrains a broker tool name: it becomes the /mcp/<name>/ tool
-// route and a `claude mcp add <name>` token. Underscores are admitted (real MCP
-// server names use them, e.g. `apple_notes`), unlike a jail machine name; but
-// whitespace, `/`, `*`, and uppercase are still excluded so the name is safe in
-// a URL path and can never collide with the reserved wildcard op.
+// toolNameRE: a tool name becomes the /mcp/<name>/ route and a `claude mcp
+// add` token, so it must be safe in a URL path and never collide with the
+// reserved wildcard op. Underscores are admitted because MCP server names use
+// them.
 var toolNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
-// imageRE constrains a container image reference to safe OCI-ref characters
-// (no whitespace or shell metacharacters).
+// imageRE admits no whitespace or shell metacharacters.
 var imageRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*$`)
 
-// digestRE matches an image pinned by content digest (e.g. `…@sha256:<hex>`).
 var digestRE = regexp.MustCompile(`@[a-z0-9]+:[0-9a-fA-F]{32,}$`)
 
-// validateImage checks an image ref against the charset, the optional registry
-// allowlist, and the optional digest-pin requirement. field names the source
-// for error messages (e.g. "manager.image").
 func (s Security) validateImage(field, ref string) error {
 	if !imageRE.MatchString(ref) {
 		return fmt.Errorf("config: %s %q has invalid characters", field, ref)
@@ -226,9 +211,8 @@ func (s Security) validateImage(field, ref string) error {
 	return nil
 }
 
-// registryAllowed reports whether ref starts with one of the allowed prefixes,
-// matched on whole path components (so "scionlocal" allows "scionlocal/x" but
-// not "scionlocalevil/x").
+// registryAllowed matches whole path components, so "scionlocal" does not
+// allow "scionlocalevil/x".
 func registryAllowed(ref string, prefixes []string) bool {
 	for _, p := range prefixes {
 		if ref == p || strings.HasPrefix(ref, p+"/") {
@@ -238,8 +222,8 @@ func registryAllowed(ref string, prefixes []string) bool {
 	return false
 }
 
-// Validate checks the config's shape. It is pure: nothing on the host is
-// read or probed — that is CheckHost, which Load runs right after.
+// Validate checks the config's shape without touching the host; CheckHost
+// does the host probes.
 func (a *App) Validate() error {
 	if a.Name == "" {
 		return fmt.Errorf("config: name is required")
@@ -273,25 +257,20 @@ func (a *App) Validate() error {
 			return err
 		}
 	}
-	// manager.allow_ports opens a host-loopback port to the jailed agent (via
-	// the egress allowlist's per-port ACCEPT on the host alias); the broker's
-	// admin port (/bootstrap, /revoke, /bump-epoch — unauthenticated, meant to
-	// be reachable only from the host loopback) must never be listed there,
-	// or the allowlist — the ONLY thing isolating that API from the guest —
-	// would hand the jail a direct path to it.
+	// manager.allow_ports opens a host-loopback port to the jailed agent. The
+	// broker's admin port is unauthenticated and the egress allowlist is the
+	// only thing isolating it from the guest, so it must never be listed.
 	adminPort := a.EffectiveAdminPort()
 	for _, p := range a.Manager.AllowPorts {
 		if p == adminPort {
 			return fmt.Errorf("config: manager.allow_ports must not include the broker admin port (%d) — this would hand the jailed agent a direct, unauthenticated path to /bootstrap, /revoke, /bump-epoch (the egress allowlist is the only thing isolating the host-loopback admin API from the guest)", adminPort)
 		}
 	}
-	// A first-party (supervised) tool's backend port must not be opened to the
-	// jail either. The tool trusts the X-Lever-Caller header the broker sets on
-	// every proxied request, so an agent dialling the port directly would name
-	// any caller it likes and skip the broker's mTLS CN binding, per-agent
-	// revocation and audit (the per-boot tool secret is defence in depth, not a
-	// reason to open the port). External tools are the operator's own servers
-	// and are not checked here.
+	// Nor a first-party tool's backend port: the tool trusts the
+	// X-Lever-Caller header the broker sets, so an agent dialling the port
+	// directly could name any caller and skip mTLS binding, revocation and
+	// audit. The per-boot tool secret is defence in depth, not a reason to
+	// open the port.
 	for _, t := range a.Broker.Tools {
 		if t.External {
 			continue
@@ -304,13 +283,9 @@ func (a *App) Validate() error {
 			return fmt.Errorf("config: manager.allow_ports must not include %d, the backend port of first-party broker tool %q — the jailed agent could dial the tool directly and bypass the broker (mTLS caller binding, per-agent revocation, audit); agents reach a first-party tool only through the broker's /mcp/%s/ route", port, t.Name, t.Name)
 		}
 	}
-	// prompt_file is host-only (read at the root, NOT in the mount) and must stay
-	// inside the instance root.
 	if a.Manager.PromptFile != "" && !confinedRel(a.Manager.PromptFile) {
 		return fmt.Errorf("config: manager.prompt_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.PromptFile)
 	}
-	// instructions_file is the same kind of boot material as prompt_file — it
-	// becomes the agent's standing CLAUDE.md — so it gets the same confinement.
 	if a.Manager.InstructionsFile != "" && !confinedRel(a.Manager.InstructionsFile) {
 		return fmt.Errorf("config: manager.instructions_file %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Manager.InstructionsFile)
 	}
@@ -364,10 +339,8 @@ func (a *App) Validate() error {
 	return nil
 }
 
-// backendPort extracts the TCP port from a tool backend — a bare host:port,
-// host:port/path, or scheme://host:port/path (the same shapes broker.backendURL
-// accepts). ok is false when no numeric port can be read; the shape rules for
-// backends live elsewhere, so an unparsable value is simply not port-checked.
+// backendPort accepts the shapes broker.backendURL accepts. An unparsable
+// value is not port-checked; the shape rules live elsewhere.
 func backendPort(backend string) (int, bool) {
 	if i := strings.Index(backend, "://"); i >= 0 {
 		backend = backend[i+3:]
@@ -386,26 +359,17 @@ func backendPort(backend string) (int, bool) {
 	return port, true
 }
 
-// managerAlias is the literal name the broker's operator-directive channel
-// resolves to the manager, independent of broker.manager_identity (see
-// broker.resolveDirectiveAgent). Reserved for that reason.
+// managerAlias is reserved: the operator-directive channel resolves it to the
+// manager whatever broker.manager_identity says (broker.resolveDirectiveAgent).
 const managerAlias = "manager"
 
-// operatorName is the actor the broker's audit log gives the host operator's
-// own actions (the operator socket, the directive channel), and the name the
-// broker words its answers for (broker.operatorActor). No agent may carry
-// it: an agent's audit lines would read as the operator's.
+// operatorName is the actor the broker's audit log gives the host operator.
+// No agent may carry it: its audit lines would read as the operator's.
 const operatorName = "operator"
 
-// validateWorkerDirsDisjoint rejects two workers whose dirs overlap — the same
-// subtree, or one an ancestor of the other.
-//
-// Sibling isolation rests on each worker mounting only its own subtree: a
-// sibling's directory is "simply not a mount source". An overlap voids that for
-// the pair. The outer worker reads and writes the inner one's whole workspace
-// — its work product, its notes, anything it is asked to keep to itself.
-// (Enrolment tickets are no longer at stake here: since 0.22 they are staged
-// in the guest runtime dir and mounted into one container each.)
+// validateWorkerDirsDisjoint: sibling isolation rests on each worker
+// mounting only its own subtree, so an overlap would let the outer worker
+// read and write the inner one's whole workspace.
 func (a *App) validateWorkerDirsDisjoint() error {
 	for i, outer := range a.Workers {
 		for j, inner := range a.Workers {
@@ -422,9 +386,8 @@ func (a *App) validateWorkerDirsDisjoint() error {
 	return nil
 }
 
-// pathOverlaps reports whether two relative paths name the same directory or one
-// contains the other. Comparison is component-wise on cleaned paths, so
-// "workers/x" does not "contain" the unrelated "workers/xy".
+// pathOverlaps compares components, so "workers/x" does not contain
+// "workers/xy".
 func pathOverlaps(a, b string) bool {
 	ca, cb := filepath.Clean(a), filepath.Clean(b)
 	if ca == cb {
@@ -434,8 +397,6 @@ func pathOverlaps(a, b string) bool {
 	return strings.HasPrefix(ca, cb+sep) || strings.HasPrefix(cb, ca+sep)
 }
 
-// validateWorker validates a single worker declaration: name shape, collisions
-// with the manager's identities, dir confinement, and image policy.
 func (a *App) validateWorker(g Worker) error {
 	if g.Name == "" || g.Dir == "" {
 		return fmt.Errorf("config: worker needs name + dir (got %+v)", g)
@@ -450,11 +411,8 @@ func (a *App) validateWorker(g Worker) error {
 		return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
 	}
 	if g.Name == managerAlias {
-		// The directive channel resolves the literal "manager" to the manager
-		// whatever broker.manager_identity says (broker.resolveDirectiveAgent),
-		// so a worker holding that name is silently shadowed: an operator
-		// directive aimed at the worker is delivered to the most privileged
-		// agent instead. The ManagerCN check above does not cover it, because a
+		// An operator directive aimed at such a worker would reach the
+		// manager instead. The ManagerCN check does not cover it when a
 		// custom manager_identity moves the CN off this word.
 		return fmt.Errorf("config: worker name %q is reserved — it is the alias the operator-directive channel resolves to the manager, so a worker of that name could never be addressed", g.Name)
 	}
@@ -462,21 +420,17 @@ func (a *App) validateWorker(g Worker) error {
 		return fmt.Errorf("config: worker name %q is reserved — it is the name the broker's audit log gives the host operator", g.Name)
 	}
 	if g.Name == a.Name {
-		// The manager's scion agent slug IS the app name (apply dispatches
-		// it as Worker: app.Name), and the broker routes manager-recipient
-		// matches by slug — a worker named like the app would be shadowed
-		// (messages to it silently route to the manager).
+		// The manager's scion agent slug is the app name and the broker
+		// routes by slug, so messages to such a worker would reach the
+		// manager.
 		return fmt.Errorf("config: worker name %q collides with the manager agent (the app name) — rename the worker or the app", g.Name)
 	}
 	if filepath.IsAbs(g.Dir) || strings.HasPrefix(filepath.Clean(g.Dir), "..") {
 		return fmt.Errorf("config: worker dir %q must be relative and inside the tree", g.Dir)
 	}
 	if filepath.Clean(g.Dir) == "." {
-		// A "." dir makes WorkerDir(g) == a.Tree, so the worker's workspace would
-		// be the whole tree — mounting root defeats R4 sibling isolation (the
-		// worker could read every sibling's subdir). Workers must occupy a strict
-		// subdir of the shared instance project. (confinedRel rejects "." for
-		// `tree` for the analogous root-is-the-mount reason.)
+		// A "." dir would mount the whole tree into the worker, defeating
+		// sibling isolation.
 		return fmt.Errorf("config: worker %q dir must be a subdir of the tree, not %q (which collides with the manager's mount root)", g.Name, g.Dir)
 	}
 	if g.Image != "" {
@@ -493,13 +447,9 @@ func (a *App) validateWorker(g Worker) error {
 	return a.validateResources(fmt.Sprintf("worker %q", g.Name), g.Resources)
 }
 
-// validateOperator fails closed on operator-directive-channel config
-// mistakes: allowed_signers, if set, must be a path confined inside the
-// instance root (like manager.prompt_file); the expiry pair must be sane —
-// directive_expiry <= directive_expiry_max <= opsig.MaxExpiry, the hard
-// ceiling the directive-signing protocol assumes. Checked unconditionally (even with the
-// channel disabled) so a nonsensical expiry pair is caught at config-load
-// time rather than silently ignored until allowed_signers is later set.
+// validateOperator checks the expiry pair even with the channel disabled, so
+// a bad pair is caught at load rather than when allowed_signers is later set.
+// opsig.MaxExpiry is the ceiling the directive-signing protocol assumes.
 func (a *App) validateOperator() error {
 	if a.Operator.AllowedSigners != "" && !confinedRel(a.Operator.AllowedSigners) {
 		return fmt.Errorf("config: operator: allowed_signers %q must be a relative path inside the instance root (no \"..\", not absolute)", a.Operator.AllowedSigners)
@@ -519,23 +469,10 @@ func (a *App) validateOperator() error {
 	return nil
 }
 
-// validateRemote rejects a remote block that could not serve safely: a port
-// colliding with the broker's listeners, a proxy port the jail is allowed to
-// dial, a missing or malformed base_url, an identity header the proxy must
-// not trust, a bind address the jail could reach, or an allowed_users entry
-// that is blank or could not be a single login. Skipped entirely while
-// disabled, so a stale port/base_url left from a previous config doesn't
-// block loading until remote is re-enabled.
-//
-// Both backends are accepted. The proxy dials the hub THROUGH the jail
-// (remoteproxy.JailDial), which needs no guest→host forwarding, and the login
-// path's one guest→host hop — the forwarder's dial to the provider on
-// host loopback — is the same hop every agent's broker connection makes, over
-// the same host alias and the same LEVER_EGRESS grant, on both. What differs
-// on Lima is only that nothing is mirrored: lever's Lima template ignores
-// every guest→host port forward, so the guest issuer port never appears on
-// the host at all (see GuestLoginIssuerPort). The 8446 checks below are
-// therefore needed on OrbStack only, and harmless on Lima.
+// validateRemote rejects a remote block that could not serve safely. It is
+// skipped while remote is disabled, so stale settings do not block loading.
+// The GuestLoginIssuerPort checks matter on OrbStack only (lever's Lima
+// template mirrors no guest port onto the host) and are harmless on Lima.
 func (a *App) validateRemote() error {
 	if !a.Remote.Enabled {
 		return nil
@@ -545,32 +482,20 @@ func (a *App) validateRemote() error {
 		return fmt.Errorf("config: remote: port %d collides with a broker listener", rp)
 	}
 	if rp == GuestLoginIssuerPort {
-		// Same reason as login_port below: OrbStack mirrors the jail's login
-		// forwarder onto this host port, so whichever of lever's two host
-		// listeners names it cannot bind. The proxy's failure is loud now
-		// (apply waits for it to bind), but the guard belongs on both
-		// listeners, not just the one that met the failure first.
+		// OrbStack mirrors the jail's login forwarder onto this host port.
 		return fmt.Errorf("config: remote: port %d is the port the jail's login forwarder is mirrored onto "+
 			"by the container runtime, so the proxy cannot bind it — pick another", rp)
 	}
 	if slices.Contains(a.Manager.AllowPorts, rp) {
-		// Not a bind collision like the checks above — a trust-boundary one.
-		// The proxy's gate rests on "only the authenticating front reaches
-		// this listener", which is what makes it safe for the proxy to
-		// believe the identity header it is handed (see listenProxy and the
-		// package doc's stated precondition in internal/remoteproxy). A port
-		// listed in manager.allow_ports gets an egress ACCEPT for jail→host
-		// on exactly that number (EffectiveAllowedPorts → internal/egress),
-		// so naming the proxy's port there hands every jailed agent a direct
-		// route to the gate: it sets the header itself and rides the
-		// operator's injected hub session, which carries agent.attach on
-		// every agent in the project. That is the cross-agent escalation the
-		// per-agent netns closed in v0.7.0, re-opened by one line of config.
+		// A trust boundary, not a bind collision: the proxy believes the
+		// identity header only because just the authenticating front reaches
+		// it. A port in manager.allow_ports gets an egress ACCEPT from the
+		// jail, so any agent could set the header itself and ride the
+		// operator's hub session (agent.attach on every agent).
 		//
-		// remote.login_port is deliberately NOT rejected: the guest's login
-		// forwarder exists to reach it, EffectiveAllowedPorts grants it on
-		// purpose, and what answers there is the OIDC provider, which mints
-		// nothing without an in-process call (internal/remoteproxy/oidc.go).
+		// remote.login_port is not rejected: the guest's login forwarder must
+		// reach it, and the OIDC provider there mints nothing without an
+		// in-process call.
 		return fmt.Errorf("config: remote: manager.allow_ports lists %d, which is the remote proxy's own port — "+
 			"that grant lets any jailed agent reach the proxy directly and forge the %s header "+
 			"it trusts, riding the operator's hub session (agent.attach on every agent in the project); remove %d from "+
@@ -581,26 +506,14 @@ func (a *App) validateRemote() error {
 		return fmt.Errorf("config: remote: login_port %d collides with a broker listener", lp)
 	}
 	if lp == rp {
-		// Two listeners, deliberately: the proxy answers the operator's
-		// browser through the front, the provider answers the hub's back
-		// channel from inside the jail. One port cannot be both.
 		return fmt.Errorf("config: remote: login_port %d collides with the proxy port", lp)
 	}
 	if lp == GuestLoginIssuerPort {
-		// Not a host listener lever owns, but one it causes: OrbStack mirrors
-		// the guest forwarder onto the host at this number, so the provider
-		// could not bind here even though nothing in lever's own config says
-		// so. This was a live failure, not a theoretical one.
+		// OrbStack mirrors the guest forwarder onto the host at this number.
 		return fmt.Errorf("config: remote: login_port %d is the port the jail's login forwarder is mirrored onto "+
 			"by the container runtime, so the provider cannot bind it — pick another", lp)
 	}
 	if a.Remote.BaseURL == "" {
-		// base_url sets the proxy's ServeHost (remoteServeHost, internal/cli/
-		// remote.go); an empty ServeHost fails every request closed — the
-		// proxy would start and serve nothing at all. Reject that state at
-		// load time rather than let it "succeed" into a proxy that 403s
-		// 100% of traffic, which otherwise only surfaced later as a
-		// confusing doctor healthz failure pointing at remote.log.
 		return fmt.Errorf("config: remote: base_url is required when remote is enabled (without it the proxy refuses all requests)")
 	}
 	u, err := url.Parse(a.Remote.BaseURL)
@@ -623,8 +536,7 @@ func (a *App) validateRemote() error {
 			return err
 		}
 		// scion lowercases emails, so two entries that differ only in case
-		// would be one hub user — and one ceiling, one role binding —
-		// while the proxy treats them as two logins.
+		// would be one hub user while the proxy treats them as two logins.
 		key := strings.ToLower(au)
 		if prev, dup := seen[key]; dup {
 			return fmt.Errorf("config: remote: allowed_users lists %q and %q, which the hub treats as the same user (it lowercases emails); keep one", prev, au)
@@ -653,9 +565,6 @@ func (a *App) validateRemote() error {
 	if am.Enabled && a.ScionVersionPredatesAgentMessages() {
 		return fmt.Errorf("config: remote: agent_messages needs scion %s (2026-08-28) or later, where the hub sets a message's sender itself; scion.version %s is older, so an agent could post as its contact", AgentMessagesScionFloor[:8], a.Scion.Version)
 	}
-	// filepath.IsLocal refuses absolute paths and any ".." that leaves the
-	// base; path.Clean(lf) != lf refuses "a/../b", "a//b" and "./a". A
-	// relative, local path is under tree by construction.
 	if lf := a.Remote.LabelsFile; lf != "" {
 		if strings.Contains(lf, `\`) || path.Clean(lf) != lf || lf == "." || !filepath.IsLocal(filepath.FromSlash(lf)) {
 			return fmt.Errorf("config: remote: labels_file %q must be a clean path relative to tree (no leading /, no ..)", lf)
@@ -701,10 +610,9 @@ func (a *App) validateRemote() error {
 		if a.Remote.Landing != RemoteLandingChat {
 			return fmt.Errorf("config: remote: files needs landing: chat (the upload and download routes are the chat page's)")
 		}
-		// The manager's exchange is <tree>/.lever-files. A worker mounted
-		// inside it would read and write the manager's files; a read-only
-		// mount over it would stop the manager sharing. Case-folded: the
-		// tree may be on a case-insensitive filesystem.
+		// A worker mounted inside the manager's exchange would read and write
+		// the manager's files. Case-folded: the tree may be on a
+		// case-insensitive filesystem.
 		for _, w := range a.Workers {
 			if fsutil.RelOverlapFold(w.Dir, chatfiles.Dir) {
 				return fmt.Errorf("config: remote: files is on, and worker %q dir %q overlaps %s, the manager's file exchange; move the worker", w.Name, w.Dir, chatfiles.Dir)
@@ -719,12 +627,8 @@ func (a *App) validateRemote() error {
 	return a.validateVoice()
 }
 
-// validateVoice checks remote.voice (with remote access on: validateRemote
-// returns early otherwise). Its shape is checked even while voice is off;
-// the rest only when it is on. The transcription runs in the broker tool
-// lever-tool-whisper; remote.voice names its dictation socket, which must be
-// the -dictate-socket of a whisper tool in broker.tools when there is one
-// (the tool may also be run by hand, outside the broker).
+// validateVoice: the socket must match a whisper tool in broker.tools only
+// when there is one, since the tool may also be run by hand.
 func (a *App) validateVoice() error {
 	v := a.Remote.Voice
 	if v.MaxSeconds < 0 || v.MaxSeconds > MaxVoiceMaxSeconds {
@@ -768,9 +672,8 @@ func (a *App) validateVoice() error {
 	return nil
 }
 
-// validateSpeech checks read_aloud: server (voice on): the speech socket of
-// lever-tool-tts, which must be the -speak-socket of a tts tool in
-// broker.tools when there is one (the tool may also be run by hand).
+// validateSpeech: the socket must match a tts tool in broker.tools only when
+// there is one, since the tool may also be run by hand.
 func (a *App) validateSpeech() error {
 	v := a.Remote.Voice
 	if a.EffectiveReadAloud() != ReadAloudServer {
@@ -800,8 +703,6 @@ func (a *App) validateSpeech() error {
 	return nil
 }
 
-// validPushSubject accepts mailto:<local>@<domain> or an absolute https URL,
-// in printable ASCII: the push services read it as the sender's contact.
 func validPushSubject(s string) error {
 	bad := fmt.Errorf("config: remote: push.subject %q must be mailto:<address> or an https URL (push services use it to contact this sender)", s)
 	if s == "" || len(s) > 200 {
@@ -826,7 +727,6 @@ func validPushSubject(s string) error {
 	return nil
 }
 
-// filesExtRE is one remote.files extension: lowercase, no dot.
 var filesExtRE = regexp.MustCompile(`^[a-z0-9]{1,10}$`)
 
 // filesActiveExts are types a browser renders or runs. Downloads are
@@ -834,9 +734,6 @@ var filesExtRE = regexp.MustCompile(`^[a-z0-9]{1,10}$`)
 // mistake in those headers from serving a page on lever's origin.
 var filesActiveExts = []string{"html", "htm", "xhtml", "shtml", "svg", "js", "mjs", "xml"}
 
-// validRemoteUserTier checks an entry's tier and agent list: a contact must
-// list the agents it may reach (declared workers or the manager, each once);
-// an operator reaches every agent and lists none.
 func (a *App) validRemoteUserTier(u RemoteUser) error {
 	switch u.EffectiveTier() {
 	case TierOperator:
@@ -881,16 +778,12 @@ func (a *App) validRemoteUserTier(u RemoteUser) error {
 }
 
 // validLabelsFileOwner refuses a labels file someone other than the manager
-// would write. Whoever writes it sets the text contacts see beside every
-// agent's name (the manager's row included), so it must not be inside a
-// worker's directory (that worker would author it), nor inside the host's
-// own directories (.lever, which holds the manager's bootstrap ticket, or
-// the state directory): those are host-written secrets, never labels.
-// Compared without case, since the tree may sit on a case-insensitive
-// filesystem. Not Unicode-normalised (NFC/NFD, as macOS folds): both sides
-// are operator-written config, not agent input, and the stdlib has no
-// normaliser; a worker dir and a labels_file spelled in different
-// normalisation forms would pass here.
+// would write: whoever writes it sets the text contacts see beside every
+// agent's name. It must not be inside a worker's directory or the host's own
+// directories (.lever, the state directory), which hold host-written secrets.
+// Compared without case for case-insensitive filesystems. Not
+// Unicode-normalised: both sides are operator-written config, not agent
+// input.
 func (a *App) validLabelsFileOwner(lf string) error {
 	inside := func(p, dir string) bool {
 		p, dir = strings.ToLower(p), strings.ToLower(dir)
@@ -915,35 +808,24 @@ func (a *App) validLabelsFileOwner(lf string) error {
 	return nil
 }
 
-// knownAgent reports whether name is the manager or a declared worker.
 func (a *App) knownAgent(name string) bool {
 	return name == a.Name || slices.ContainsFunc(a.Workers, func(w Worker) bool { return w.Name == name })
 }
 
 // validateRemoteBind accepts the proxy's listen address only where the jail
-// cannot reach it.
+// cannot reach it: the proxy believes whatever identity header arrives, so
+// anything that can connect is, to the proxy, the front.
 //
-// The proxy believes whatever identity header arrives, so everything that
-// can open a connection to the listener is, to the proxy, the front. Two
-// audiences matter and the rules below keep both out:
+// Loopback is reached from the jail only through the host alias, and
+// validateRemote refuses the proxy port in manager.allow_ports. A
+// non-loopback address must be one the jail's egress chain drops in every
+// posture (egress.DroppedForJail); under open egress any agent could dial a
+// public one and forge the header. The egress chain is not persisted in the
+// guest, but apply and up apply it before starting any agent. Everyone else
+// is the operator's host firewall, which lever cannot see.
 //
-//   - The jail. Loopback is reached from the jail only through the host
-//     alias, and validateRemote already refuses the proxy port in
-//     manager.allow_ports. A non-loopback address is reached directly, so it
-//     must be one the jail's egress chain DROPs in every posture
-//     (egress.DroppedForJail: RFC 1918, link-local, CGNAT/tailnet, ULA). A
-//     public address is refused: under open egress (the subscription
-//     posture) any agent could dial it and forge the header.
-//     guest.ApplyEgress replaces the chain in one commit per family, so a
-//     re-apply opens no window. The chain is not persisted in the guest:
-//     after a guest reboot it is absent until the next apply/up, which
-//     applies egress before starting any agent (pre-existing).
-//   - Everyone else. That is the operator's host firewall, which lever cannot
-//     see; RemoteWarnings and a doctor row say so.
-//
-// The wildcard listens on every host address, public ones included, so it is
-// refused unless allow_wildcard_bind acknowledges exactly that. A hostname is
-// refused: which address it names can change after the check.
+// The wildcard is refused unless allow_wildcard_bind acknowledges it. A
+// hostname is refused: the address it names can change after the check.
 func (a *App) validateRemoteBind() error {
 	if a.Remote.AllowWildcardBind && !a.RemoteBindWildcard() {
 		return fmt.Errorf("config: remote: allow_wildcard_bind is set, but bind is %q, not 0.0.0.0 or \"::\" — drop it", a.EffectiveRemoteBind())
@@ -957,10 +839,8 @@ func (a *App) validateRemoteBind() error {
 		return nil
 	case ip.IsUnspecified():
 		if a.EffectiveRemoteIdentityHeader() == DefaultRemoteIdentityHeader {
-			// The wildcard listens on the tailnet address too, so this is
-			// the tailnet-bind refusal below, reached by another spelling —
-			// and no acknowledgement can make a forgeable
-			// Tailscale-User-Login safe.
+			// The wildcard listens on the tailnet address too, and no
+			// acknowledgement can make a forgeable Tailscale-User-Login safe.
 			return fmt.Errorf("config: remote: bind %q listens on every host address, this host's tailnet address included, and "+
 				"identity_header is %s: any tailnet peer could connect directly, bypassing `tailscale serve`, and set that header "+
 				"to any login. allow_wildcard_bind cannot accept that; keep the loopback bind and use `tailscale serve`", b, DefaultRemoteIdentityHeader)
@@ -981,10 +861,8 @@ func (a *App) validateRemoteBind() error {
 		return fmt.Errorf("config: remote: bind %s is an IPv6 link-local address, which cannot be listened on without an "+
 			"interface zone; bind a ULA, RFC 1918 or CGNAT address instead", b)
 	case a.EffectiveRemoteIdentityHeader() == DefaultRemoteIdentityHeader && inTailnetRange(ip):
-		// The tailnet address itself, with Tailscale's header trusted: any
-		// tailnet peer could connect to it directly — not through
-		// `tailscale serve`, which is what sets and overwrites the header —
-		// and send Tailscale-User-Login with any login it likes.
+		// Any tailnet peer could connect directly, not through `tailscale
+		// serve`, which is what sets and overwrites the header.
 		return fmt.Errorf("config: remote: bind %s is a tailnet address, and identity_header is %s: any tailnet peer could connect "+
 			"to it directly and set that header to any login. Keep the default loopback bind and publish it with "+
 			"`tailscale serve`, which sets the header", b, DefaultRemoteIdentityHeader)
@@ -992,11 +870,9 @@ func (a *App) validateRemoteBind() error {
 	return nil
 }
 
-// tailnetRanges are the address ranges Tailscale assigns node addresses in:
-// CGNAT 100.64.0.0/10 and its IPv6 ULA prefix fd7a:115c:a1e0::/48.
+// tailnetRanges are the ranges Tailscale assigns node addresses in.
 var tailnetRanges = []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"}
 
-// inTailnetRange reports whether ip is in a Tailscale node-address range.
 func inTailnetRange(ip net.IP) bool {
 	for _, c := range tailnetRanges {
 		if _, n, err := net.ParseCIDR(c); err == nil && n.Contains(ip) {
@@ -1006,14 +882,10 @@ func inTailnetRange(ip net.IP) bool {
 	return false
 }
 
-// refusedIdentityHeaders are headers the proxy must never take a login from.
-// Each is set by the BROWSER or by any hop on the way rather than overwritten
-// by the front alone: credentials (Authorization, Cookie), routing and
-// provenance the proxy or the hub already reads (Host, Origin, Forwarded,
-// X-Forwarded-*), hop-by-hop headers, and the headers scion's own auth reads,
-// which the proxy strips before forwarding (remoteproxy.clientIdentityHeader).
-// Trusting one of those would let a browser, or a hop that appends instead of
-// overwriting, choose the identity.
+// refusedIdentityHeaders are headers the proxy must never take a login from:
+// each is set by the browser or by any hop rather than overwritten by the
+// front alone, or is one scion's own auth reads, so trusting it would let a
+// browser or an appending hop choose the identity.
 var refusedIdentityHeaders = []string{
 	// Tailscale's display name and avatar: set by `tailscale serve`, but
 	// chosen by the user and not unique, so never an identity.
@@ -1026,14 +898,11 @@ var refusedIdentityHeaders = []string{
 	"X-Api-Key", "X-Goog-Iap-Jwt-Assertion",
 }
 
-// refusedIdentityHeaderPrefixes are refused header families: Sec-* (browser
-// fetch metadata the proxy reads), X-Scion-* and X-Forwarded-User-* (scion's
-// agent, broker and trusted-proxy identity headers), and Access-Control-*.
+// refusedIdentityHeaderPrefixes: Sec-* is browser fetch metadata; X-Scion-*
+// and X-Forwarded-User-* are scion's identity headers.
 var refusedIdentityHeaderPrefixes = []string{"Sec-", "X-Scion-", "X-Forwarded-User-", "Access-Control-"}
 
-// validRemoteIdentityHeader checks remote.identity_header (given in canonical
-// form): an HTTP token, and not a header the proxy must not trust.
-// Tailscale-* is allowed — Tailscale-User-Login is the default.
+// validRemoteIdentityHeader takes h in canonical form.
 func validRemoteIdentityHeader(h string) error {
 	if h == "" {
 		return fmt.Errorf("config: remote: identity_header is empty")
@@ -1044,9 +913,8 @@ func validRemoteIdentityHeader(h string) error {
 		}
 	}
 	if strings.Contains(h, "_") {
-		// Legal, but proxies disagree about it: some drop such headers,
-		// some map "_" to "-", so a client could send X_Login and have a
-		// hop deliver it as X-Login next to — or instead of — the front's.
+		// Some proxies map "_" to "-", so a client could send X_Login and
+		// have a hop deliver it as X-Login next to the front's.
 		return fmt.Errorf("config: remote: identity_header %q contains \"_\"; proxies drop or rewrite such headers inconsistently, "+
 			"so a client-sent variant could reach the proxy as the front's header — use \"-\"", h)
 	}
@@ -1065,7 +933,7 @@ func validRemoteIdentityHeader(h string) error {
 	return nil
 }
 
-// isHeaderTokenChar reports whether c is an RFC 9110 tchar.
+// isHeaderTokenChar: RFC 9110 tchar.
 func isHeaderTokenChar(c byte) bool {
 	switch {
 	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
@@ -1075,17 +943,14 @@ func isHeaderTokenChar(c byte) bool {
 }
 
 // remoteIDEmailDomain is the domain remoteproxy.identityFor gives a login
-// with no "@" (a front's user id, say X-ExeDev-UserID) so that it becomes a
-// hub email; remoteproxy_test pins that the two constants agree. The unnamed
-// operator's own address is lever-operator@lever.local.
+// with no "@" so that it becomes a hub email; remoteproxy_test pins that the
+// constants agree.
 const (
 	remoteIDEmailDomain      = "id.lever.local"
 	remoteUnnamedOperatorKey = "lever-operator@lever.local"
-	// scionDevUserEmail is the scion dev user's default address. lever mints
-	// its controller token as that user, so every message lever sends wears
-	// "user:dev@localhost"; a remote login with that address would post as
-	// lever. The broker also refuses the collision at run time, against the
-	// address the hub actually reports.
+	// scionDevUserEmail is the scion dev user's default address, which lever
+	// mints its controller token as: a remote login with that address would
+	// post as lever. The broker also refuses the collision at run time.
 	scionDevUserEmail = "dev@localhost"
 )
 
@@ -1093,11 +958,10 @@ const (
 // part of a synthesized hub email, and must stay one without quoting.
 var userIDChars = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 
-// validRemoteLogin checks one remote.allowed_users entry: it is compared
-// exactly with the front's header value and becomes a hub user's email, so it
-// must be ONE login. The proxy refuses a comma-joined header value outright
-// (remoteproxy.gate.authorize), and an entry with a comma, whitespace or a
-// control character could never match a value that passes that check.
+// validRemoteLogin: an entry is compared exactly with the front's header
+// value and becomes a hub user's email, so it must be one login. The proxy
+// refuses a comma-joined header value outright, so such an entry could never
+// match.
 func validRemoteLogin(l string) error {
 	if strings.TrimSpace(l) == "" {
 		return fmt.Errorf("config: remote: allowed_users contains an empty entry")
@@ -1113,9 +977,8 @@ func validRemoteLogin(l string) error {
 		return fmt.Errorf("config: remote: allowed_users entry %q has no \"@\", so it becomes the hub email %q; "+
 			"use only letters, digits and . _ + - in it", l, l+"@"+remoteIDEmailDomain)
 	case hasAt && (strings.EqualFold(domain, remoteIDEmailDomain) || strings.EqualFold(l, remoteUnnamedOperatorKey)):
-		// Those addresses are lever's own: a user id's synthesized email,
-		// and the unnamed operator's. Listing one would make two different
-		// logins the same hub user.
+		// Listing one of lever's synthesized addresses would make two
+		// different logins the same hub user.
 		return fmt.Errorf("config: remote: allowed_users entry %q is an address lever synthesizes for other logins; list the login itself", l)
 	case strings.EqualFold(HubEmailFor(l), scionDevUserEmail):
 		return fmt.Errorf("config: remote: allowed_users entry %q is the hub user lever itself sends every message as; a login with it would post as lever", l)
@@ -1123,12 +986,9 @@ func validRemoteLogin(l string) error {
 	return nil
 }
 
-// validateBroker fails closed on capability-config mistakes: duplicate tool
-// names, grants referencing an undeclared tool/op, and delegate.to naming an
-// undeclared agent. A worker with no grants is fine (default-deny ⇒ no path).
+// validateBroker fails closed on capability-config mistakes. A worker with no
+// grants is fine: default deny.
 func (a *App) validateBroker() error {
-	// LLM-auth: validate the enum and, when any agent is api-key, require an
-	// api_key_file (that it exists at 0600 is a host probe: CheckHost).
 	if !a.Broker.LLMAuth.valid() {
 		return fmt.Errorf("config: broker.llm_auth %q invalid (want subscription|api-key)", a.Broker.LLMAuth)
 	}
@@ -1140,19 +1000,14 @@ func (a *App) validateBroker() error {
 			return fmt.Errorf("config: worker %s llm_auth %q invalid (want subscription|api-key)", g.Name, g.LLMAuth)
 		}
 	}
-	// Mixed instances are UNSUPPORTED: the OAuth credential is a single jail-wide
-	// Hub secret and egress is applied jail-wide, so a subscription agent forces
-	// the real token into — and open internet egress for — the api-key agents'
-	// containers, defeating their key isolation. An instance must be uniformly
-	// api-key OR uniformly subscription. See security-model-credentials.md §6.1. (Resolved
-	// modes, so a broker/manager default that disagrees with a worker override is
-	// caught too.)
+	// Mixed instances are unsupported: the OAuth credential is one jail-wide
+	// hub secret and egress is jail-wide, so a subscription agent would put
+	// the real token and open egress into the api-key agents' containers.
+	// Resolved modes are compared, so a default that disagrees with a worker
+	// override is caught too.
 	if a.mixedLLMAuth() {
 		return fmt.Errorf("config: llm_auth is mixed across the instance (both api-key and subscription agents) — this is unsupported; an instance must be uniformly api-key or uniformly subscription (see security-model-credentials.md §6.1)")
 	}
-	// Egress is an independent posture (not derived from llm_auth). `closed`
-	// requires a uniformly api-key instance — a subscription agent needs direct
-	// internet to reach Anthropic, which a closed jail forbids.
 	if !a.Egress.valid() {
 		return fmt.Errorf("config: egress %q invalid (want open|closed)", a.Egress)
 	}
@@ -1169,12 +1024,9 @@ func (a *App) validateBroker() error {
 	return a.validateBrokerGrants()
 }
 
-// validateBrokerGrants validates tool declarations, grant references, and
-// delegate targets. Called by validateBroker after the LLM-auth block.
 func (a *App) validateBrokerGrants() error {
-	// Known tools + their op sets.
 	toolOps := map[string]map[string]bool{}
-	// Built-in reserved pseudo-tool: llm (broker /llm proxy, no backend subprocess).
+	// llm is a reserved pseudo-tool: the broker's /llm proxy.
 	toolOps[wire.ReservedLLMTool] = map[string]bool{wire.ReservedLLMOp: true}
 	for _, t := range a.Broker.Tools {
 		if t.Name == "" {
@@ -1198,7 +1050,6 @@ func (a *App) validateBrokerGrants() error {
 		}
 		toolOps[t.Name] = ops
 	}
-	// Known agent identities: the manager CN + every worker name.
 	agents := map[string]bool{a.ManagerCN(): true}
 	for _, g := range a.Workers {
 		agents[g.Name] = true
@@ -1245,11 +1096,9 @@ func (a *App) validateBrokerGrants() error {
 	return nil
 }
 
-// validateImageTar checks one `image_tar` against its `image`: the archive
-// is host-only boot material and stays root-confined like prompt_file; it
-// needs a tag-bearing ref to match against, so a missing `image:` (a worker
-// inheriting the manager's inherits the manager's tar with it) or a
-// digest-pinned ref (a tar carries tags, not manifest digests) is an error.
+// validateImageTar: the archive is host-only boot material, root-confined
+// like prompt_file, and is matched by tag, so it needs an image that is not
+// digest-pinned.
 func validateImageTar(who, image, tar string) error {
 	if tar == "" {
 		return nil
@@ -1266,9 +1115,8 @@ func validateImageTar(who, image, tar string) error {
 	return nil
 }
 
-// validateImageTarsDistinct rejects one image ref shipped from two different
-// archives: the bring-up loads each distinct ref exactly once, so a second
-// source for the same ref would be silently ignored.
+// validateImageTarsDistinct: bring-up loads each distinct ref once, so a
+// second archive for the same ref would be silently ignored.
 func (a *App) validateImageTarsDistinct() error {
 	src := map[string]string{}
 	check := func(ref, tar string) error {

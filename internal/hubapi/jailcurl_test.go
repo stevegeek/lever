@@ -10,9 +10,7 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// scriptedRunner returns a fixed Result and error for every call, and records
-// the call. proc.FakeRunner cannot model a non-zero exit (its scriptedResult
-// returns a nil error on a match), which is exactly the curl-failure case here.
+// scriptedRunner exists because proc.FakeRunner cannot model a non-zero exit.
 type scriptedRunner struct {
 	res  proc.Result
 	err  error
@@ -56,11 +54,9 @@ func TestJailCurlRunsInTheJailAndPassesTheTokenAsEnv(t *testing.T) {
 	if r.call.Args[3] != "GET" || r.call.Args[4] != "http://127.0.0.1:8080/api/v1/projects" {
 		t.Errorf("method/url = %q %q", r.call.Args[3], r.call.Args[4])
 	}
-	// The PAT travels in the environment, and the script references it by name.
-	// This is the same channel every scion CLI call already uses (the jail
-	// runner keeps SCION_HUB_TOKEN off the host argv and exports it in the
-	// guest, and sh expands the value into curl's own in-guest argv): it must
-	// never be baked into the script text lever constructs.
+	// The PAT travels in the environment and the script references it by
+	// name: it must never be baked into the script text, which the host argv
+	// carries.
 	if r.call.Env["SCION_HUB_TOKEN"] != "pat-secret" {
 		t.Errorf("token must be passed as env, got env=%v", r.call.Env)
 	}
@@ -91,8 +87,8 @@ func TestJailCurlRequiresAToken(t *testing.T) {
 }
 
 func TestJailCurlNamesMissingCurl(t *testing.T) {
-	// lever's guest provisioning installs curl, so exit 127 means the jail is
-	// not provisioned — a different problem from an unreachable hub.
+	// Exit 127 means the jail is not provisioned, not that the hub is
+	// unreachable.
 	r := &scriptedRunner{
 		res: proc.Result{Code: curlNotFound, Stderr: "sh: curl: not found"},
 		err: errors.New("exit status 127"),
@@ -132,8 +128,8 @@ func TestJailCurlRejectsOutputWithoutAStatusLine(t *testing.T) {
 }
 
 func TestJailCurlRejectsAnOversizedBody(t *testing.T) {
-	// Truncating would surface as "unexpected end of JSON input", which blames
-	// the hub's answer instead of the size. Say what actually happened.
+	// Truncating would surface as a JSON decode error that blames the wrong
+	// cause.
 	r := &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", maxBody+1) + "\n200"}}
 	_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
@@ -142,9 +138,8 @@ func TestJailCurlRejectsAnOversizedBody(t *testing.T) {
 }
 
 func TestJailCurlClassifiesUnparseableOutputAsAnswered(t *testing.T) {
-	// curl exited 0, so something answered. A plain error would make lever
-	// doctor print "hub not reachable" AND pass, hiding a wrong service on the
-	// hub port behind a green line.
+	// curl exited 0, so something answered: a plain error would make doctor
+	// pass while a wrong service holds the hub port.
 	for _, out := range []string{"body\nnot-a-code", strings.Repeat("x", maxBody+1) + "\n200"} {
 		r := &scriptedRunner{res: proc.Result{Stdout: out}}
 		_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
@@ -156,9 +151,8 @@ func TestJailCurlClassifiesUnparseableOutputAsAnswered(t *testing.T) {
 }
 
 func TestJailCurlClassifiesTransportFailureAsUnreachable(t *testing.T) {
-	// The complement: a refused connection, a missing curl and an absent PAT are
-	// NOT answers, so they must stay plain errors or doctor would turn a stopped
-	// instance into a finding.
+	// A refused connection, a missing curl and an absent PAT are not answers,
+	// so they must stay plain errors.
 	for _, r := range []*scriptedRunner{
 		{res: proc.Result{Code: 7, Stderr: "curl: (7) Failed to connect"}, err: errors.New("exit status 7")},
 		{res: proc.Result{Code: curlNotFound, Stderr: "sh: curl: not found"}, err: errors.New("exit status 127")},
@@ -188,9 +182,8 @@ func TestJailCurlTrimsTrailingSlashOnBaseURL(t *testing.T) {
 	}
 }
 
-// A write carries its body through the environment, like the token: sh
-// expands it into curl's in-guest argv, so the JSON is never quoted into the
-// script text lever builds.
+// A write carries its body through the environment, so the JSON is never
+// quoted into the script text.
 func TestJailCurlDoBodySendsJSONFromEnv(t *testing.T) {
 	r := &scriptedRunner{res: proc.Result{Stdout: "{}\n200"}}
 	status, _, err := jailCurl(r, "pat").DoBody(context.Background(), "PUT", "/api/v1/x", []byte(`{"a":1}`))

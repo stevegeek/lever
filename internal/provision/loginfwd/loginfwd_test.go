@@ -20,11 +20,9 @@ import (
 func fakeRunner() *lexec.FakeRunner         { return lexec.NewFakeRunner() }
 func fakeResult(stdout string) lexec.Result { return lexec.Result{Stdout: stdout} }
 
-// buildForwarderForHost compiles the EMBEDDED forwarder source for the machine
-// running the test, exactly the way Build compiles it for the
-// guest (same source, same module file, same offline build). It is what proves
-// the embedded program is real Go and does what it claims — a string constant
-// that no longer compiles would otherwise only surface on a live apply.
+// buildForwarderForHost compiles the embedded forwarder source for the test
+// host the way Build compiles it for the guest, proving the embedded program
+// compiles before a live apply would find out.
 func buildForwarderForHost(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -46,7 +44,6 @@ func buildForwarderForHost(t *testing.T) string {
 	return bin
 }
 
-// freePort returns a loopback port nothing is listening on.
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -130,9 +127,8 @@ func TestLoginForwarderRefusesANonLoopbackListen(t *testing.T) {
 	}
 }
 
-// isolateCache points os.UserCacheDir at a fresh directory — HOME for the
-// darwin resolution, XDG_CACHE_HOME for the Linux one — so no test touches
-// the real per-user cache.
+// isolateCache points os.UserCacheDir at a fresh directory (HOME on darwin,
+// XDG_CACHE_HOME on Linux) so no test touches the real per-user cache.
 func isolateCache(t *testing.T) {
 	t.Helper()
 	home := t.TempDir()
@@ -141,10 +137,10 @@ func isolateCache(t *testing.T) {
 }
 
 // TestBuildCrossCompilesWithTheResolvedGo pins the argv: the absolute go
-// binary, an offline module build, and -trimpath for a reproducible hash.
-// The build directory is the operator's own: under the user cache dir and
-// 0700, never a predictable name in the shared os.TempDir where another local
-// user could pre-create it and swap the binary before the root install.
+// binary, an offline module build, and -trimpath for a reproducible hash. The
+// build directory is under the user cache dir and 0700, never a predictable
+// name in the shared os.TempDir where another local user could pre-create it
+// and swap the binary before the root install.
 func TestBuildCrossCompilesWithTheResolvedGo(t *testing.T) {
 	isolateCache(t)
 	f := fakeRunner()

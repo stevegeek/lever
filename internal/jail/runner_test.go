@@ -10,9 +10,8 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// orbPrefix is a test-only helper mirroring the OrbStack backend's JailPrefix
-// (["orb","-m",machine,"-u",user]); the jail package itself is backend-agnostic
-// and no longer exports it.
+// orbPrefix mirrors the OrbStack backend's JailPrefix; the jail package
+// itself is backend-agnostic.
 func orbPrefix(machine, user string) []string {
 	return []string{"orb", "-m", machine, "-u", user}
 }
@@ -71,10 +70,9 @@ func TestPrefixIsBackendShaped(t *testing.T) {
 }
 
 func TestForceHostNetworkEscapeHatch(t *testing.T) {
-	// The escape hatch parses a bool: truthy re-emits scion's
-	// SCION_FORCE_HOST_NETWORK (fall back to --network=host); everything else —
-	// crucially =0/=false and unparseable values — stays OFF (own netns), so a
-	// surprising value on this security knob never silently re-opens the gap.
+	// Only a truthy value re-emits SCION_FORCE_HOST_NETWORK; =0, =false and
+	// unparseable values stay off, so a surprising value on this security
+	// knob never re-opens host networking.
 	cases := []struct {
 		val  string
 		want bool

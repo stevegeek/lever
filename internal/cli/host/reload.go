@@ -6,32 +6,25 @@ import (
 	"github.com/stevegeek/lever/internal/brokerctl"
 )
 
-// newReloadCmd applies config changes to an ALREADY-RUNNING instance without a
-// full VM power cycle. The broker reads lever.yaml once, at its own startup, and
-// a plain re-apply deliberately keeps a healthy broker alive — so an edited
-// config (new worker, tool, or grant) otherwise takes no effect until the broker
-// restarts. reload forces exactly that: it stops the broker, then runs the same
-// idempotent apply plan, which re-reads the config, re-registers workers,
-// re-applies egress, and spawns a fresh broker. The VM stays up and apply's
-// observe-first start-manager sees the manager still running (no-op), so the
-// manager's conversation is preserved — this is the broker half of a
-// `lever stop` + `lever up` without the power cycle or the re-attach.
+// newReloadCmd applies config changes to a running instance without a VM power
+// cycle. The broker reads lever.yaml only at startup and a re-apply keeps a
+// healthy broker, so reload stops the broker and runs the same idempotent
+// apply plan. The VM stays up and the running manager is kept, so its
+// conversation is preserved.
 func newReloadCmd(bf BackendFactory) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "reload [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Apply config changes to a running instance (restart the broker, keep the manager)",
-		// A config/bring-up failure is a diagnosis, not a usage error.
+		// A config or bring-up failure is a diagnosis, not a usage error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, app, err := loadAppPath(args)
 			if err != nil {
 				return err
 			}
-			// Stop the running broker FIRST so the apply's start-broker probe
-			// finds nothing serving and spawns a fresh process on the new config
-			// (its keep-existing branch would otherwise leave the stale broker,
-			// and the config change, in place). Idempotent: a no-op if none runs.
+			// Stop the broker first, or apply's start-broker would keep the stale one and
+			// the old config. A no-op if none runs.
 			if err := brokerctl.StopBroker(stateFor(path)); err != nil {
 				return err
 			}

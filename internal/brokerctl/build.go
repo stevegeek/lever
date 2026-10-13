@@ -1,8 +1,7 @@
-// Package brokerctl is the host-side controller for the lever capability broker:
-// it translates a lever config into a broker.Config, ensures the CA + capability
-// signing root key, supervises first-party tool subprocesses, runs the broker,
-// and stops the host-side daemons. The state directory it reads and writes is
-// package state's.
+// Package brokerctl is the host-side controller for the lever capability
+// broker: it turns a lever config into a broker.Config, ensures the CA and
+// capability signing key, supervises first-party tool subprocesses, runs the
+// broker, and stops the host-side daemons.
 package brokerctl
 
 import (
@@ -20,21 +19,19 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// llmSentinelBackend is the Backend value of the reserved llm pseudo-tool. It
-// satisfies registry.Register's non-empty-Backend invariant but is NEVER dialed:
-// the llm capability is exercised by the broker /llm proxy, not an /mcp/<name>/ tool route.
+// llmSentinelBackend is the Backend of the reserved llm pseudo-tool. It
+// satisfies registry.Register's non-empty-Backend invariant but is never
+// dialed: the broker's /llm proxy serves the llm capability.
 const llmSentinelBackend = "lever:llm-proxy"
 
 // errEmptyAPIKeyFile means api_key_file exists but holds only whitespace. An
 // absent file is a different error (fs.ErrNotExist from package state).
 var errEmptyAPIKeyFile = errors.New("is empty")
 
-// BuildBroker assembles the config-derived groups of a broker.Config from the
-// parsed app config — Identity (the request/delegation policy from
-// manager+worker grants, the pre-loaded tool registry whose config-authoritative
-// envelopes the tool re-supplies at /register, the manager identity and TTLs)
-// and LLM (the api_key_file contents and upstream). The caller supplies the
-// keys/CA/tickets (EnsureKeys); decorateConfig fills the host-side groups.
+// BuildBroker assembles the config-derived groups of a broker.Config:
+// Identity (request/delegation policy, the tool registry whose
+// config-authoritative envelopes a tool re-supplies at /register, manager
+// identity and TTLs) and LLM. decorateConfig fills the host-side groups.
 func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca.TicketStore) (broker.Config, error) {
 	pol := rules.NewPolicy()
 	addGrants := func(cn string, obtain []config.Grant, delegate []config.DelegateGrant) {
@@ -54,7 +51,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 	for _, t := range app.Broker.Tools {
 		ops := make(map[string]registry.Operation, len(t.Operations)+1)
 		for _, o := range t.Operations {
-			// Cloned so the registry (which takes ownership) never aliases the parsed config.
+			// Cloned so the registry, which takes ownership, never aliases the config.
 			ops[o.Name] = registry.Operation{Name: o.Name, CaveatParam: maps.Clone(o.CaveatParam),
 				Params: slices.Clone(o.Params)}
 		}
@@ -62,8 +59,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		if coarse {
 			// A coarse external tool's whole surface rides one wildcard
 			// capability; the synthetic op satisfies the registry's
-			// at-least-one-operation invariant and lets /request mint
-			// {tool, "*"} through the standard HasOperation gate.
+			// at-least-one-operation invariant.
 			ops[registry.WildcardOp] = registry.Operation{Name: registry.WildcardOp}
 		}
 		if err := reg.Register(registry.Tool{
@@ -71,8 +67,8 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			Backend:       t.Backend,
 			Operations:    ops,
 			AllowedValues: registry.CloneAllowedValues(t.AllowedValues),
-			// External servers are third-party: the broker holds + enforces
-			// the rules and strips the token (they never see a capability).
+			// External servers are third-party: the broker enforces the rules
+			// and strips the token (they never see a capability).
 			FirstParty: !t.External,
 			External:   t.External,
 			Coarse:     coarse,
@@ -100,8 +96,7 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			Rules:           pol,
 			Registry:        reg,
 			ManagerIdentity: app.ManagerCN(),
-			// The manager's scion agent slug is the APP NAME (apply's start-manager
-			// dispatches the manager as Worker: app.Name), not the manager cert CN.
+			// The manager's scion slug is the app name, not the manager cert CN.
 			ManagerSlug:   app.Name,
 			ManagerClaude: app.ManagerClaude(),
 			GrantTTL:      app.Broker.GrantTTL,
@@ -112,11 +107,9 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 		},
 	}
 
-	// Load the api_key_file into the broker config so the /llm proxy has the
-	// key. This is host-side only; the key never enters a container.
-	// Defense-in-depth: ReadRequiredSecret re-checks 0600 here even though
-	// config.Validate also checks it — brokerctl may be invoked outside the
-	// apply/validate path. An absent file is its own error (not "is empty").
+	// The api key is host-side only and never enters a container.
+	// ReadRequiredSecret re-checks 0600 because brokerctl may run outside
+	// the validate path.
 	if app.AnyAPIKeyAgent() {
 		key, err := state.ReadRequiredSecret(app.Broker.APIKeyFile, "api_key_file")
 		if err != nil {

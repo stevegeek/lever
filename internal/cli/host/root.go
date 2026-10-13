@@ -14,25 +14,20 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// BackendFactory builds a named backend for a given machine name.
 type BackendFactory func(name, machine string) (backend.Backend, error)
 
-// defaultFactory builds the named backend via the registry. Config validation
-// guarantees a config's name is valid; flag-driven commands (provision, down,
-// doctor with explicit --backend) surface registry errors directly.
+// defaultFactory builds the named backend via the registry; a flag-supplied
+// name surfaces registry errors directly.
 func defaultFactory(name, machine string) (backend.Backend, error) {
 	return registry.Select(name, proc.Traced(proc.RealRunner{}), machine)
 }
 
-// NewRoot builds the host control-plane CLI (`lever`): provisioning only.
+// NewRoot builds the host control-plane CLI (`lever`).
 func NewRoot() *cobra.Command { return newRootWith(defaultFactory) }
 
 func newRootWith(bf BackendFactory) *cobra.Command {
-	// SilenceErrors: the binary prints a returned error itself, sanitized —
-	// see cli.Execute. Usage is printed for flag and argument errors only
-	// (silenceUsageOnRunErrors).
-	// Version gives the root a --version flag that prints what `lever
-	// version` prints.
+	// SilenceErrors: the binary prints a returned error itself, sanitized (see
+	// cli.Execute). Usage is printed for flag and argument errors only.
 	root := &cobra.Command{Use: "lever", Short: "Jailed multi-agent orchestration (host control plane)", SilenceErrors: true,
 		Version: cli.VersionString()}
 	root.SetVersionTemplate("{{.Version}}\n")
@@ -42,21 +37,16 @@ func newRootWith(bf BackendFactory) *cobra.Command {
 	return root
 }
 
-// usageError marks an error a command's RunE returns for a wrong use of its
-// flags or arguments, which cobra cannot check itself (a combination of
-// flags, say): the usage text follows it, as it follows cobra's own flag and
-// argument errors.
+// usageError marks a RunE error for a misuse cobra cannot check itself (a flag
+// combination); the usage text follows it.
 type usageError struct{ error }
 
 func (e usageError) Unwrap() error { return e.error }
 
-// silenceUsageOnRunErrors keeps cobra's usage text for the errors it is
-// for. Cobra prints it after any error a command returns unless the command
-// sets SilenceUsage, so a runtime failure (a manager that did not come up,
-// lever#202) used to read as a flag problem. Every RunE under c is wrapped:
-// an error it returns silences the usage text, unless it is a usageError.
-// Cobra's own checks (an unknown flag, a missing or mutually exclusive
-// flag, the wrong number of arguments) run before RunE and keep it.
+// silenceUsageOnRunErrors wraps every RunE under c so a returned error
+// silences cobra's usage text unless it is a usageError; otherwise a runtime
+// failure reads as a flag problem. Cobra's own flag and argument checks run
+// before RunE and keep it.
 func silenceUsageOnRunErrors(c *cobra.Command) {
 	if run := c.RunE; run != nil {
 		c.RunE = func(cmd *cobra.Command, args []string) error {

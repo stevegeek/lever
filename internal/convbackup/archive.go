@@ -1,25 +1,19 @@
 // Package convbackup keeps the manager's Claude conversation across a fresh
-// create (`lever up --fresh`), which deletes the manager's scion record and,
-// with it, the record's home in the guest, where Claude Code keeps its
-// transcripts (~/.claude/projects/<cwd>/<session>.jsonl).
+// create (`lever up --fresh`), which deletes the manager's scion record and
+// with it the guest home where Claude Code keeps its transcripts
+// (~/.claude/projects). A backup is a host copy of that directory (Store); a
+// restore puts it back into a suspended manager's home, so the next resume
+// (`claude --continue`, which picks the newest transcript) continues it.
 //
-// A backup is a copy of that projects directory on the host, in the state
-// directory (Store). A restore puts it back into the home of a suspended
-// manager, so the next resume (`claude --continue`, which picks the newest
-// transcript) continues the old conversation.
-//
-// The agent wrote every byte of what is copied, and is assumed hostile, so
-// nothing it wrote is trusted: the guest side never follows a symbolic link
-// it planted (Guest), and the host rewrites the archive it reads from the
-// guest into one that holds only directories and regular files with clean
-// relative names, within size limits (Copy). Only that rewritten archive is
-// stored, and only it is ever sent back into the guest.
+// The agent wrote every byte copied and is assumed hostile: the guest side
+// never follows a symbolic link it planted (Guest), and the host rewrites
+// the archive into one holding only directories and regular files with
+// clean relative names, within size limits (Copy). Only that rewritten
+// archive is stored or sent back into the guest.
 //
 // ~/.claude.json is deliberately not carried over: it holds the account
-// identity, onboarding state and the MCP server configuration lever writes
-// when the agent boots, and with an API key a copy of the key. The fresh
-// record's own file is the right one, and `claude --continue` needs only
-// the transcripts.
+// identity, the MCP configuration lever writes at boot, and possibly an API
+// key. `claude --continue` needs only the transcripts.
 package convbackup
 
 import (
@@ -37,20 +31,15 @@ import (
 // Limits bound what lever accepts from the guest. Each is a hard limit: an
 // archive past one is refused whole, never cut short.
 type Limits struct {
-	// MaxFile is the largest single file.
-	MaxFile int64
-	// MaxTotal is the sum of all file sizes.
-	MaxTotal int64
-	// MaxEntries is the number of files and directories.
+	MaxFile    int64
+	MaxTotal   int64
 	MaxEntries int
 }
 
-// DefaultLimits are the limits a backup and a restore apply. A long-lived
-// manager's transcripts run to tens of megabytes; these leave a wide margin
+// DefaultLimits leave a wide margin over a long-lived manager's transcripts
 // and still stop an agent from filling the host's disk.
 var DefaultLimits = Limits{MaxFile: 1 << 30, MaxTotal: 4 << 30, MaxEntries: 200_000}
 
-// Stats describes an archive Copy wrote.
 type Stats struct {
 	Files int   `json:"files"`
 	Dirs  int   `json:"dirs"`
@@ -81,18 +70,16 @@ func refused(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRefused, fmt.Sprintf(format, args...))
 }
 
-// Copy reads the gzip-compressed tar archive src and writes to dst a
-// gzip-compressed tar archive of its directories and regular files only.
+// Copy reads the gzip tar archive src and writes to dst a gzip tar of its
+// directories and regular files only.
 //
-// When prefix is not empty, every entry must be prefix itself or lie beneath
-// it, and the prefix is removed from the names written (the guest archives
-// "projects"; the stored archive is relative to it). Each name must be a
-// clean relative path (no "..", no leading "/", no empty or "." component,
-// printable UTF-8), appear once, and not lie beneath a regular file. The
-// archive written carries modes 0700 and 0600, no owner, and the entries'
-// modification times, which decide the transcript `claude --continue` picks.
-// Any violation, or a limit passed, refuses the whole archive (ErrRefused);
-// a link or a special file is skipped and counted.
+// When prefix is not empty, every entry must be prefix or lie beneath it,
+// and prefix is stripped from the names written. Each name must be a clean
+// relative path of printable UTF-8, appear once, and not lie beneath a
+// regular file. The output carries modes 0700 and 0600, no owner, and the
+// entries' modification times, which decide the transcript `claude
+// --continue` picks. Any violation or passed limit refuses the whole archive
+// (ErrRefused); a link or special file is skipped and counted.
 func Copy(dst io.Writer, src io.Reader, prefix string, lim Limits) (Stats, error) {
 	var st Stats
 	zr, err := gzip.NewReader(src)
@@ -131,8 +118,8 @@ func Copy(dst io.Writer, src io.Reader, prefix string, lim Limits) (Stats, error
 		case tar.TypeDir:
 		case tar.TypeReg, tar.TypeRegA: //nolint:staticcheck // TypeRegA is what old tars write
 		default:
-			// Skipped, but whatever data it carries still passes through
-			// the decompressor: it counts against the total.
+			// Skipped, but its data still passes through the decompressor: it
+			// counts against the total.
 			if h.Size > 0 {
 				if h.Size > lim.MaxTotal || skippedBytes+h.Size > lim.MaxTotal {
 					return st, refused("more than %d bytes in all", lim.MaxTotal)
@@ -194,8 +181,8 @@ func Copy(dst io.Writer, src io.Reader, prefix string, lim Limits) (Stats, error
 	return st, nil
 }
 
-// stripPrefix removes prefix from an archive name. keep is false for the
-// prefix directory itself, which the restore creates on its own.
+// stripPrefix: keep is false for the prefix directory itself, which the
+// restore creates on its own.
 func stripPrefix(name, prefix string) (string, bool, error) {
 	name = strings.TrimSuffix(name, "/")
 	name = strings.TrimPrefix(name, "./")
@@ -212,8 +199,6 @@ func stripPrefix(name, prefix string) (string, bool, error) {
 	return rest, true, nil
 }
 
-// checkName refuses a name that is not a clean relative path of printable
-// UTF-8 within the length and depth limits.
 func checkName(name string) error {
 	switch {
 	case name == "" || len(name) > maxNameLen:

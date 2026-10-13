@@ -8,8 +8,7 @@ import (
 )
 
 // TestStageRoundTrips pins that Stage deposits bootstrap.json at 0600 with every
-// envelope field intact and decodable against the same tags — the single staging
-// path shared by the host (manager enrolment) and the broker (worker dispatch).
+// envelope field intact.
 func TestStageRoundTrips(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, ".lever")
@@ -43,10 +42,9 @@ func TestStageRoundTrips(t *testing.T) {
 	}
 }
 
-// TestStageReChmodsOnOverwrite pins the load-bearing explicit Chmod: os.WriteFile
-// applies its perm only when it CREATES the file, so re-staging over a
-// wider-mode bootstrap.json must still land at 0600. (The broker re-stages a
-// fresh ticket on every resume/re-enrol over the existing file.)
+// TestStageReChmodsOnOverwrite pins the explicit Chmod: os.WriteFile applies
+// perm only on create, so re-staging over a wider-mode file must still land at
+// 0600.
 func TestStageReChmodsOnOverwrite(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, ".lever")

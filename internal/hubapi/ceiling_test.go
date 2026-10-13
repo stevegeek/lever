@@ -60,8 +60,7 @@ func TestEnsureAgentRoleCeilingIsIdempotent(t *testing.T) {
 	}
 }
 
-// The verify read is the point, as for the shared-dir strip: a hub that
-// answered 200 and stored nothing must not read as done.
+// A hub that answered 200 and stored nothing must not read as done.
 func TestEnsureAgentRoleCeilingFailsWhenTheHubDidNotKeepIt(t *testing.T) {
 	f := &fakeDoer{
 		replies: map[string]reply{
@@ -89,9 +88,8 @@ func TestEnsureAgentRoleCeilingSurfacesForbidden(t *testing.T) {
 	assertAPIStatus(t, err, 403)
 }
 
-// A Doer that cannot carry a body (a transport that predates the settings
-// write) must fail loud rather than send an empty PUT — an empty body would
-// wipe every project setting.
+// A Doer that cannot carry a body must fail loud rather than send an empty
+// PUT, which would wipe every project setting.
 type bodilessDoer struct{ f *fakeDoer }
 
 func (b bodilessDoer) Do(ctx context.Context, m, p string) (int, []byte, error) {

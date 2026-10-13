@@ -69,9 +69,8 @@ func TestResolveSourceCrossCompiles(t *testing.T) {
 	}
 }
 
-// Version mode must resolve the real go binary, `go mod download` the pinned
-// module, and cross-compile FROM the module's source dir using that absolute
-// binary (so the toolchain resolves outside any project dir).
+// Version mode resolves the real go binary, downloads the pinned module, and
+// cross-compiles from the module's source dir with that absolute binary.
 func TestResolveVersionBuildsFromPinnedModule(t *testing.T) {
 	backendtest.IsolateCache(t)
 	const pin = "666333f9"
@@ -119,8 +118,7 @@ func TestFetchModuleErrors(t *testing.T) {
 	}
 }
 
-// "No Go toolchain on the jail host" (issue #27) means exactly this: in binary
-// mode nothing ever invokes `go`.
+// In binary mode nothing ever invokes `go`: the jail host needs no toolchain.
 func TestResolveBinaryModeNeverInvokesGo(t *testing.T) {
 	bin := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	f := proc.NewFakeRunner()
@@ -166,11 +164,11 @@ func TestBuildsWebAssets(t *testing.T) {
 	}
 }
 
-// TestResolveBuildsUnderThePerUserCacheDir: the build output must not be a
-// predictable name directly under the shared os.TempDir, where any local user
-// on a Linux host can pre-create the path and swap the binary between the
-// host-side hash and the root install into the jail. It goes under the
-// operator's own cache directory, in a directory lever creates 0700.
+// TestResolveBuildsUnderThePerUserCacheDir: the output must not be a
+// predictable name under the shared os.TempDir, where another local user can
+// pre-create the path and swap the binary between the host-side hash and the
+// root install into the jail. It goes in a 0700 directory under the
+// operator's cache directory.
 func TestResolveBuildsUnderThePerUserCacheDir(t *testing.T) {
 	backendtest.IsolateCache(t)
 	f := proc.NewFakeRunner()
@@ -217,7 +215,6 @@ func TestResolveFailsWithoutAUserCacheDir(t *testing.T) {
 	}
 }
 
-// gitRepo runs git in dir with a fixed identity and returns its trimmed output.
 func gitRepo(t *testing.T, dir string) func(args ...string) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -261,9 +258,8 @@ func TestSourceHasCommit(t *testing.T) {
 	if ok, err := has(dir, second); ok || err != nil {
 		t.Fatalf("a later commit: %v %v", ok, err)
 	}
-	// git has no such object (merge-base exits 128): a checkout that
-	// predates the floor and was never fetched, or a fork that never had it.
-	// Held to be "not held", never "cannot tell".
+	// git has no such object (merge-base exits 128): "not held", never
+	// "cannot tell".
 	if ok, err := has(dir, config.AgentMessagesScionFloor); ok || err != nil {
 		t.Fatalf("a commit git does not have: %v %v, want false, nil", ok, err)
 	}
@@ -379,9 +375,8 @@ func (x *buildStampFixture) resolve(pin string) bool {
 }
 
 // A Version-mode build leaves a stamp; the next Resolve of the same pin,
-// arch and toolchain returns the output without `go mod download` or `go
-// build` (lever#187). Anything in the key, or the output itself, changing
-// builds again.
+// arch and toolchain skips the download and build. Anything in the key, or
+// the output itself, changing builds again.
 func TestResolveVersionSkipsTheBuildOnAMatchingStamp(t *testing.T) {
 	x := newBuildStampFixture(t)
 	if !x.resolve("aaaaaaaa") {

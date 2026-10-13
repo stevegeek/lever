@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
-# Live end-to-end test for api-key LLM mode (headline path), using a fake upstream
-# so no real Anthropic key/cost is involved.
+# Live end-to-end test for api-key LLM mode, using a fake upstream so no real
+# Anthropic key is involved.
 #
-# Asserts the full chain works: a uniform api-key instance brings up; the manager
-# boots, enrols, mints a capability biscuit, and writes it into settings.json; the
-# manager's claude turn routes through the broker /llm proxy, which STRIPS the
-# biscuit and INJECTS the real (fake) Console key, reaching the fake upstream. Key
-# isolation is verified: the real key appears in NO container byte; the agent holds
-# only the biscuit + a placeholder. The G2 renew sidecar is confirmed running.
-# Finally it asserts closed-egress containment: from inside the jail the
-# allowlisted broker jail_port is reachable while the non-allowlisted admin_port and
-# the public internet are DROPped.
+# Asserts: the manager boots, enrols and writes a capability token into
+# settings.json; its claude turn goes through the broker /llm proxy, which
+# strips the token and injects the (fake) Console key before reaching the
+# fake upstream; the key appears in no container byte; the renew sidecar
+# runs; and under closed egress the allowlisted broker jail_port is reachable
+# from the jail while admin_port and the public internet are dropped.
 #
-# Prereqs: OrbStack + rootless podman; the lever-claude image built with the
-# current hook + lever-agent (the Makefile target rebuilds the host `lever` and the
-# image bins). Run via `make test-apikey-e2e` or directly.
+# Prereqs: OrbStack + rootless podman and a current lever-claude image. Run
+# via `make test-apikey-e2e` or directly.
 #
 # Env overrides: NAME (instance/machine name), JAIL_PORT, ADMIN_PORT, FAKE_PORT,
 # KEEP=1 (skip teardown for inspection).
@@ -42,9 +38,8 @@ bad()  { printf '  FAIL: %s\n' "$*"; fail=1; }
 inctr(){ orb -m "$MACHINE" bash -lc "podman exec $CONTAINER sh -lc '$*'" 2>/dev/null; }
 
 cleanup() {
-  # `go run` forks a child, so kill the fakeupstream by its listen address (the
-  # parent PID alone leaks the child); the broker is detached (Setpgid) so pkill
-  # by its instance config path.
+  # `go run` forks a child, so kill the fakeupstream by its listen address;
+  # the broker is detached (Setpgid), so pkill by its instance config path.
   pkill -f "fakeupstream -addr 127.0.0.1:$FAKE_PORT" 2>/dev/null
   [ -n "$FAKE_PID" ] && kill "$FAKE_PID" 2>/dev/null
   if [ "${KEEP:-0}" = "1" ]; then
@@ -57,7 +52,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- build the api-key test instance --------------------------------------------
 say "build instance $INST"
 mkdir -p "$INST/workspace"
 touch "$INST/workspace/.gitkeep"
@@ -87,24 +81,21 @@ broker:
   llm_upstream: http://127.0.0.1:$FAKE_PORT
 EOF
 
-# --- clean slate (a stale closed-egress machine can't be re-applied) -------------
+# A stale closed-egress machine cannot be re-applied.
 say "clean slate"
 pkill -f "lever broker serve.*$INST" 2>/dev/null
 orb delete -f "$MACHINE" >/dev/null 2>&1 && echo "deleted stale $MACHINE"
 
-# --- fake upstream ---------------------------------------------------------------
 say "start fake upstream on 127.0.0.1:$FAKE_PORT"
 ( cd "$REPO_ROOT" && go run ./tools/test/fakeupstream -addr "127.0.0.1:$FAKE_PORT" -log "$FAKE_LOG" ) >/dev/null 2>&1 &
 FAKE_PID=$!
 for _ in $(seq 1 20); do curl -s -o /dev/null "http://127.0.0.1:$FAKE_PORT/" && break; sleep 0.5; done
 : > "$FAKE_LOG"  # clear the readiness probe line
 
-# --- bring up --------------------------------------------------------------------
 say "lever apply"
 ( cd "$INST" && "$LEVER" apply ) || { bad "lever apply failed"; exit 1; }
 ok "apply succeeded"
 
-# --- wait for the manager's claude turn to hit /llm ------------------------------
 say "await broker /llm -> fake upstream (the injected real key)"
 hit=""
 for _ in $(seq 1 60); do
@@ -113,7 +104,6 @@ for _ in $(seq 1 60); do
 done
 if [ -n "$hit" ]; then ok "fake upstream received the injected key"; else bad "no /llm traffic with the injected key within 60s"; fi
 
-# --- assertions ------------------------------------------------------------------
 say "assert: biscuit stripped, real key injected"
 line="$(grep "x-api-key=\"$FAKEKEY\"" "$FAKE_LOG" | tail -1)"
 echo "  upstream: $line"
@@ -130,30 +120,27 @@ inctr 'printenv ANTHROPIC_API_KEY' | grep -q 'placeholder' && ok "container ANTH
 say "assert: G2 renew sidecar running"
 inctr 'ps aux | grep -q "[l]ever-agent renew --loop" && echo yes' | grep -q yes && ok "lever-renew sidecar is running" || bad "renew sidecar not running"
 
-# --- closed-egress containment (the headline property) ---------------------------------
-# Differential, host-internet-independent: on the broker's alias IP the allowlisted
-# jail_port must be reachable while the non-allowlisted admin_port is DROPped (the
-# catch-all/alias DROP makes a non-allowlisted port hang → curl timeout, exit 28).
-# This proves the egress allowlist does port-level filtering on the alias, not just
-# "the host happens to have no route".
+# Differential and independent of the host's internet: on the broker's alias
+# IP the allowlisted jail_port must connect while the non-allowlisted
+# admin_port is dropped (curl times out, exit 28). This proves port-level
+# filtering, not just "the host has no route".
 say "assert: closed-egress allowlist (jail_port reachable, admin_port + public internet DROPped)"
 aliasip="$(inctr 'cat /home/scion/.claude/settings.json' | grep -oE 'https://[0-9.]+:' | head -1 | sed -E 's#https://([0-9.]+):#\1#')"
 if [ -z "$aliasip" ]; then
   bad "could not resolve broker alias IP from settings.json"
 else
   echo "  broker alias IP: $aliasip (jail_port=$JAIL_PORT admin_port=$ADMIN_PORT)"
-  # jail_port: allowed → TCP connects (TLS may fail without a client cert, but NOT a timeout).
+  # Allowed: TCP connects (TLS may fail without a client cert, but no timeout).
   jx="$(inctr "curl -sS -k --max-time 6 -o /dev/null https://$aliasip:$JAIL_PORT/ ; echo \$?" | tail -1)"
   if [ "$jx" = "28" ] || [ "$jx" = "7" ]; then bad "jail_port unreachable (exit $jx) — allowlist too tight"; else ok "jail_port reachable (curl exit $jx, TCP allowed)"; fi
-  # admin_port on the alias: NOT allowlisted for the jail → DROP → timeout (exit 28).
+  # Not allowlisted for the jail: dropped, timeout (exit 28).
   ax="$(inctr "curl -sS --max-time 6 -o /dev/null http://$aliasip:$ADMIN_PORT/epoch ; echo \$?" | tail -1)"
   [ "$ax" = "28" ] && ok "admin_port DROPped from the jail (curl timeout)" || bad "admin_port reachable from the jail (exit $ax) — loopback admin surface exposed"
-  # arbitrary public internet (literal IP, bypasses the dropped DNS): catch-all DROP → timeout.
+  # A literal IP bypasses the dropped DNS: catch-all drop, timeout.
   px="$(inctr "curl -sS --max-time 6 -o /dev/null https://1.1.1.1/ ; echo \$?" | tail -1)"
   [ "$px" = "28" ] && ok "public internet DROPped (curl timeout to 1.1.1.1)" || bad "public internet reachable from the jail (exit $px) — egress not closed"
 fi
 
-# --- verdict ---------------------------------------------------------------------
 say "result"
 if [ "$fail" = "0" ]; then echo "  ✅ api-key e2e PASSED"; else echo "  ❌ api-key e2e FAILED"; fi
 exit "$fail"

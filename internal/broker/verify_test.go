@@ -89,7 +89,6 @@ func contactEntry(agentID, text, id string) chatledger.Entry {
 	return e
 }
 
-// verifyAt posts req to path as cn and decodes the answer.
 func (f *verifyFixture) verifyAt(t *testing.T, path, cn string, req wire.MessageVerifyRequest) (wire.MessageVerifyResponse, string) {
 	t.Helper()
 	raw, _ := json.Marshal(req)
@@ -138,8 +137,6 @@ func wantResult(t *testing.T, what string, resp wire.MessageVerifyResponse, raw,
 		t.Fatalf("%s: a %s answer carries messages or verified: %s", what, result, raw)
 	}
 }
-
-// ---- web branch ----
 
 // TestVerifyWebReturnsTheRecordedText: a post the proxy recorded for the
 // caller's own DM verifies with its text, login and tier; an operator's post
@@ -235,8 +232,6 @@ func TestVerifyWebOff(t *testing.T) {
 		t.Fatalf("enabled with verified chat off: %s", raw)
 	}
 }
-
-// ---- routing ----
 
 // TestVerifyNonUserSenderIsInformationOnly: agent: and system senders are
 // not verified.
@@ -444,8 +439,6 @@ func TestReplyRefIsAPlainEmailOnly(t *testing.T) {
 	}
 }
 
-// ---- lever branch ----
-
 // TestVerifyLeverEveryKind: each kind of lever send verifies for its
 // recipient, by ref, with the exact text scion got.
 func TestVerifyLeverEveryKind(t *testing.T) {
@@ -590,8 +583,6 @@ func TestVerifyLeverReadLate(t *testing.T) {
 	resp, raw = f.verify(t, "manager", wire.MessageVerifyRequest{Timestamp: chatTS, From: ctlSender, Ref: old})
 	wantResult(t, "expired", resp, raw, wire.VerifyNone, reasonExpired)
 }
-
-// ---- one use ----
 
 // TestVerifyOnceOnly: a message verifies once with its text, within
 // chatRepeatGrace again as a repeat without text, and after that answers
@@ -876,8 +867,6 @@ func TestUsesRefuseAnUnsafeRecord(t *testing.T) {
 		})
 	}
 }
-
-// ---- failures ----
 
 // TestVerifyFailuresAreUnavailableNeverNone: every way the broker can fail
 // to answer answers unavailable with a reason and a retry hint, never none.

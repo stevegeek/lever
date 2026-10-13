@@ -13,9 +13,8 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// stopTarget is one pid-file-backed daemon: which pid file it reads and
-// which stop function owns it. StopBroker and StopRemoteProxy share
-// stopProcessByPIDFile, so each test body below runs against both.
+// stopTarget is one pid-file-backed daemon. StopBroker and StopRemoteProxy
+// share stopProcessByPIDFile, so each test body runs against both.
 type stopTarget struct {
 	name    string
 	pidFile func(state.State) string
@@ -34,9 +33,8 @@ type sleeper struct {
 	done <-chan struct{} // closed once it has exited and been reaped
 }
 
-// startSleeper starts a stand-in for tgt's daemon of s (its argv is
-// `lever <broker|remote> serve <config beside s>`, what
-// state.ServeProcess recognises) and writes its pid to tgt's pid file.
+// startSleeper starts a stand-in whose argv state.ServeProcess recognises as
+// tgt's daemon of s, and writes its pid to tgt's pid file.
 func startSleeper(t *testing.T, s state.State, tgt stopTarget) sleeper {
 	t.Helper()
 	cmd, done := testutil.StartServeProcess(t, tgt.sub, filepath.Join(filepath.Dir(s.Dir), "lever.yaml"))
@@ -51,8 +49,6 @@ func writePID(t *testing.T, path string, pid int) {
 	}
 }
 
-// newStopState is the state dir of an instance whose config is in a temp
-// dir, as state.ForConfig makes it.
 func newStopState(t *testing.T) state.State {
 	t.Helper()
 	s := state.ForConfig(t.TempDir())
@@ -72,7 +68,6 @@ func assertKilled(t *testing.T, p sleeper, what string) {
 	}
 }
 
-// assertAlive fails unless p is still running.
 func assertAlive(t *testing.T, p sleeper, what string) {
 	t.Helper()
 	select {
@@ -89,9 +84,8 @@ func assertPidFileGone(t *testing.T, path, what string) {
 	}
 }
 
-// testStopNoPidFileIsNoop, testStopKillsProcessAndRemovesPidFile and
-// testStopGarbagePidFileCleared are the shared bodies; the named tests below
-// run each against one target.
+// The test* functions are shared bodies; the named tests run each against
+// one target.
 func testStopNoPidFileIsNoop(t *testing.T, tgt stopTarget) {
 	s := state.State{Dir: t.TempDir()}
 	if err := tgt.stop(s); err != nil {
@@ -133,10 +127,8 @@ func TestStopBrokerGarbagePidFileCleared(t *testing.T) {
 
 func TestStopRemoteProxyNoPidFileIsNoop(t *testing.T) { testStopNoPidFileIsNoop(t, remoteTarget) }
 
-// TestStopRemoteProxyKillsProcessAndRemovesPidFile mirrors
-// TestStopBrokerKillsProcessAndRemovesPidFile exactly, against remote.pid
-// instead of broker.pid — proving StopRemoteProxy shares stopProcessByPIDFile's
-// real kill mechanism, not just its no-op paths.
+// TestStopRemoteProxyKillsProcessAndRemovesPidFile proves StopRemoteProxy
+// shares the real kill mechanism, not just the no-op paths.
 func TestStopRemoteProxyKillsProcessAndRemovesPidFile(t *testing.T) {
 	testStopKillsProcessAndRemovesPidFile(t, remoteTarget)
 }
@@ -145,9 +137,7 @@ func TestStopRemoteProxyGarbagePidFileCleared(t *testing.T) {
 	testStopGarbagePidFileCleared(t, remoteTarget)
 }
 
-// TestStopBrokerAndStopRemoteProxyAreIndependent proves the two pid files
-// don't cross-contaminate: stopping one must not touch the other's process
-// or pid file.
+// Stopping one daemon must not touch the other's process or pid file.
 func TestStopBrokerAndStopRemoteProxyAreIndependent(t *testing.T) {
 	s := newStopState(t)
 
@@ -166,8 +156,8 @@ func TestStopBrokerAndStopRemoteProxyAreIndependent(t *testing.T) {
 	assertAlive(t, brokerCmd, "the broker process (by StopRemoteProxy)")
 }
 
-// copyIDFrom gives s the instance id file of another state dir, as a copy
-// of the instance directory would (lever#181).
+// copyIDFrom gives s another state dir's instance id file, as a copy of the
+// instance directory would.
 func copyIDFrom(t *testing.T, s state.State) {
 	t.Helper()
 	orig := state.State{Dir: t.TempDir()}
@@ -200,10 +190,9 @@ func TestStopLeavesACopiedPidFilesProcessAlone(t *testing.T) {
 	}
 }
 
-// A pid file whose pid the OS gave to another process (here, one that is
-// not a lever daemon, and one that is the other daemon, and one that is
-// another instance's daemon) is stale: the stop removes the file and
-// signals nothing.
+// A pid file whose pid now belongs to another process (not a lever daemon,
+// the other daemon, or another instance's daemon) is stale: the stop removes
+// the file and signals nothing.
 func TestStopLeavesAReusedPidAlone(t *testing.T) {
 	for _, tgt := range []stopTarget{brokerTarget, remoteTarget} {
 		t.Run(tgt.name, func(t *testing.T) {

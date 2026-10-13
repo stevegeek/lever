@@ -9,9 +9,8 @@ import (
 	"testing"
 )
 
-// writeTestPIDFile writes an arbitrary pid-file body directly (bypassing
-// daemon.WritePIDFile) so these tests can exercise PIDStatus against
-// live/stale/garbage contents without spawning a process.
+// writeTestPIDFile writes a pid-file body directly, bypassing
+// daemon.WritePIDFile.
 func writeTestPIDFile(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "x.pid")

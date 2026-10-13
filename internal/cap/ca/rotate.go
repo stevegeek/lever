@@ -7,15 +7,12 @@ import (
 	"time"
 )
 
-// rotateMargin is how much remaining validity triggers a re-mint. A quarter of
-// certTTL keeps rotation comfortably ahead of expiry while avoiding churn.
+// rotateMargin is how much remaining validity triggers a re-mint.
 const rotateMargin = certTTL / 4
 
 // ServerCertSource is a self-rotating source of the broker's serving cert for
-// tls.Config.GetCertificate. The broker process holds the CA key, so it can
-// re-mint its own leaf: without this, a broker running longer than certTTL
-// serves an expired cert and every gateway handshake fails (agents then cannot
-// even reach /renew to keep their own leafs fresh).
+// tls.Config.GetCertificate. Without it a broker running longer than certTTL
+// serves an expired cert, and agents cannot even reach /renew.
 type ServerCertSource struct {
 	ca  *CA
 	cn  string
@@ -27,9 +24,8 @@ type ServerCertSource struct {
 	cert *tls.Certificate
 }
 
-// NewServerCertSource builds a rotating serving-cert source with the same SAN
-// semantics as IssueServerCertSANs. It mints eagerly so bad inputs (e.g. an
-// invalid IP SAN) fail at startup, not on the first handshake.
+// NewServerCertSource mints eagerly so bad inputs (an invalid IP SAN) fail at
+// startup, not on the first handshake.
 func (c *CA) NewServerCertSource(cn string, dnsNames, ips []string) (*ServerCertSource, error) {
 	s := &ServerCertSource{ca: c, cn: cn, dns: dnsNames, ips: ips}
 	s.mu.Lock()
@@ -41,8 +37,7 @@ func (c *CA) NewServerCertSource(cn string, dnsNames, ips []string) (*ServerCert
 }
 
 // GetCertificate returns the current serving cert, re-minting when less than
-// rotateMargin of its validity remains. Shaped for tls.Config.GetCertificate;
-// the hello is unused (one cert covers all SANs).
+// rotateMargin of its validity remains.
 func (s *ServerCertSource) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -53,8 +48,8 @@ func (s *ServerCertSource) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certific
 	now := nowFn()
 	if now.After(s.cert.Leaf.NotAfter.Add(-rotateMargin)) {
 		if err := s.mintLocked(); err != nil {
-			// Fail soft: inside the margin the cached cert may still be valid —
-			// serve it rather than failing handshakes. Error only once expired.
+			// Fail soft: inside the margin the cached cert is still valid. Error
+			// only once it has expired.
 			if now.After(s.cert.Leaf.NotAfter) {
 				return nil, fmt.Errorf("ca: rotate server cert: %w", err)
 			}
@@ -63,7 +58,7 @@ func (s *ServerCertSource) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certific
 	return s.cert, nil
 }
 
-// mintLocked re-mints the leaf. Caller holds s.mu.
+// mintLocked: caller holds s.mu.
 func (s *ServerCertSource) mintLocked() error {
 	certPEM, keyPEM, err := s.ca.IssueServerCertSANs(s.cn, s.dns, s.ips)
 	if err != nil {

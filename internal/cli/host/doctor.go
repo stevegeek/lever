@@ -26,23 +26,18 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose the instance: backend profile, broker, tool backends, agent image version, credential, scion state",
-		// A failed health check is a diagnosis, not a usage error — exit non-zero
-		// (scriptable) without dumping the command's usage text.
+		// A failed check is a diagnosis: exit non-zero without the usage text.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Backend containment profile (informational header) — resolved from
-			// the flags/config exactly as before.
 			_, b, err := resolveJailBackend(factory, *machine, *backendFlag)
 			if err != nil {
 				return err
 			}
 			cmd.Println(b.Profile().Summary())
 
-			// Health checks need the parsed config (broker port, external tools)
-			// and the state dir (broker.pid). When there's no config here, doctor
-			// is being used away from an instance root (profile-only, via
-			// --machine/--backend) — print the profile and stop, don't error. An
-			// invalid config that IS present is a real fault and surfaces.
+			// Without a config here doctor runs away from an instance root
+			// (--machine/--backend): print the profile and stop. An invalid config that is
+			// present is a real fault.
 			path, err := resolveConfigPath("")
 			if err != nil {
 				cmd.Println("(no lever.yaml here — run doctor from an instance root for broker + external-tool checks)")
@@ -66,16 +61,15 @@ func newDoctorCmd(factory BackendFactory) *cobra.Command {
 	return cmd
 }
 
-// printDoctorReport prints one row per check and returns how many failed.
-// This is the single point where check text reaches the terminal, so it is
-// where guest-supplied content (a phase, a container status, a slug, scion's
-// stderr relayed into a detail) is sanitized — see termsafe.Sanitize.
+// printDoctorReport prints one row per check and returns how many failed. It
+// is the single point where check text reaches the terminal, so guest-supplied
+// content (phase, container status, slug, scion's stderr) is sanitized here.
 func printDoctorReport(cmd *cobra.Command, checks []checkResult) int {
 	failed := 0
 	for _, c := range checks {
 		name, detail := termsafe.Sanitize(c.name), termsafe.Sanitize(c.detail)
 		if c.ok && c.fix != "" {
-			// A warning row (warnResult): shown with its fix, not counted.
+			// A warning row: shown with its fix, not counted.
 			cmd.Printf("! %s — %s\n", name, detail)
 			cmd.Printf("    fix: %s\n", termsafe.Sanitize(c.fix))
 			continue
@@ -93,23 +87,19 @@ func printDoctorReport(cmd *cobra.Command, checks []checkResult) int {
 	return failed
 }
 
-// runDoctorChecks evaluates every health check in report order. The order is
-// the order an operator reads: process liveness first, then the pieces each
-// later check depends on. Tests pin it.
+// runDoctorChecks evaluates every check in the order an operator reads:
+// process liveness first, then each later check's prerequisites. Tests pin it.
 func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b backend.Backend, probes doctorProbes) []checkResult {
-	// The jail runner sets XDG_RUNTIME_DIR from the run user's uid, and
-	// rootless podman finds the agent containers only under the right one.
-	// Without this read the uid stays the default (501, the OrbStack host
-	// uid), so on Lima (guest uid 1000) every exec into an agent container
-	// missed it. A machine that is down keeps the default; the checks that
-	// need it then report it.
+	// The jail runner sets XDG_RUNTIME_DIR from the run user's uid, and rootless
+	// podman finds agent containers only under the right one; the default (501,
+	// the OrbStack host uid) is wrong on Lima (1000). A down machine keeps the
+	// default and the checks that need it report it.
 	_ = b.ResolveRunUser(ctx)
 	jr := b.JailRunner()
 	project := hubProjectKey(b.MountDest())
 
-	// Reads the hub through the jail, like apply's strip — a host-side call
-	// cannot reach the hub on the Lima backend. A down jail or hub is reported
-	// as "not checked", not as a finding; see checkProjectSharedDirs.
+	// The hub is read through the jail: a host-side call cannot reach it on Lima.
+	// A down jail or hub is "not checked", not a finding.
 	hc := &hubapi.Client{T: hubJailTransport(jr, state)}
 	listSharedDirs := func(ctx context.Context, project string) ([]hubapi.SharedDir, error) {
 		id, err := hc.ProjectID(ctx, project, scionpkg.DefaultHubEndpoint)
@@ -124,47 +114,41 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	readCeiling := func(ctx context.Context, project string) (hubapi.RoleCeiling, error) {
 		return hc.AgentRoleCeiling(ctx, project, scionpkg.DefaultHubEndpoint)
 	}
-	// The role check needs the scion IN THE JAIL, which is the binary that
-	// will actually resolve the stored role — not the host's.
+	// The role check needs the jail's scion: the binary that resolves the stored
+	// role.
 	jailScion := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole)
 	rolesSupported := jailScion.RolesSupported
-	// scion's own listing, not the hub's: it carries phase AND container
-	// status, and it names the project by its in-jail path.
+	// scion's own listing, not the hub's: it carries phase and container status
+	// and names the project by its in-jail path.
 	listAgents := func(ctx context.Context, project string) ([]scionpkg.Agent, error) {
 		return jailScion.List(ctx, project)
 	}
-	// A worker's ticket mount is read off its container, through the jail.
 	inspectMounts := func(ctx context.Context, containerID string) ([]string, error) {
 		return jail.ContainerMountTargets(ctx, jr, containerID)
 	}
-	// The manager's read_only mounts need writability too, not just targets.
 	inspectMountsRW := func(ctx context.Context, ref string) ([]jail.Mount, error) {
 		return jail.ContainerMounts(ctx, jr, ref)
 	}
-	// The hub record's volumes, when the manager has no container.
 	recordVolumes := func(ctx context.Context, project, agent string) ([]jail.Mount, error) {
 		return hubRecordVolumes(ctx, hc, project, agent)
 	}
-	// The live half, from the guest side (no program in the container).
+	// The live half reads from the guest side, never a program in the container.
 	liveMounts := func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
 		return jail.ContainerLiveMounts(ctx, jr, ref, want)
 	}
 	probeDevice := func(ctx context.Context, ref, path string) (bool, error) {
 		return jail.ContainerHasCharDevice(ctx, jr, ref, path)
 	}
-	// An agent container's network mode (lever#35), through the jail.
 	inspectNetMode := func(ctx context.Context, ref string) (string, error) {
 		return jail.ContainerNetworkMode(ctx, jr, ref)
 	}
-	// One variable of a container's env, filtered in the guest — see
-	// jail.ContainerEnvValue for why the rest never leaves it.
+	// One variable of a container's env, filtered in the guest (see
+	// jail.ContainerEnvValue).
 	readContainerEnv := func(ctx context.Context, ref, key string) (string, bool, error) {
 		return jail.ContainerEnvValue(ctx, jr, ref, key)
 	}
-	// An agent's hub token expiry and harness liveness, read in its
-	// container (jail.AgentProbe); only a time and a boolean come back.
+	// Only a time and a boolean come back from the agent's container.
 	agentSession := jail.AgentProbe{R: jr}
-	// The guest kernel probe backs two rows; read it once, on first use.
 	guestKernel := sync.OnceValues(func() (guestKernelProbe, error) { return readGuestKernelProbe(ctx, jr) })
 	workerNames := make([]string, 0, len(app.Workers))
 	workerDirs := make(map[string]string, len(app.Workers))
@@ -270,8 +254,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	}
 	out := make([]checkResult, 0, len(checks))
 	for _, run := range checks {
-		// A check with nothing to say (the voice rows while voice is off)
-		// answers no row at all.
+		// A check with nothing to say (voice rows while voice is off) adds no row.
 		if r := run(); r.name != "" {
 			out = append(out, r)
 		}
@@ -279,10 +262,8 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	return out
 }
 
-// checkScionProjectInJail reads scion's project state through the backend and
-// judges it with checkScionProject. A read error almost always means the jail
-// machine isn't up — report that plainly rather than a marker verdict doctor
-// cannot actually make.
+// checkScionProjectInJail reports a read error as the jail not being up
+// rather than a marker verdict doctor cannot make.
 func checkScionProjectInJail(ctx context.Context, b backend.Backend) checkResult {
 	st, err := b.ReadScionProjectState(ctx)
 	if err != nil {

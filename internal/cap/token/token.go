@@ -1,12 +1,8 @@
-// Package token is Mint/Verify for the capability token: a compact Ed25519-signed struct that
-// binds one (tool, operation) capability to a single agent identity, with
-// optional parameter constraints, a hard expiry, and a mint epoch (revocation
-// floor). It replaced a biscuit/Datalog token: the only biscuit-specific
-// feature — offline holder-side attenuation — was unused, because every
-// capability is minted online by the broker, which is always on the
-// verification path. A typed signed struct carries everything actually relied
-// upon (bound agent, capability match, equality constraints, expiry, epoch)
-// with one fewer dependency and no policy interpreter.
+// Package token mints and verifies capability tokens: a compact
+// Ed25519-signed struct that binds one (tool, operation) capability to a
+// single agent identity, with optional parameter constraints, a hard expiry,
+// and a mint epoch (revocation floor). Every token is minted online by the
+// broker, which is always on the verification path.
 package token
 
 import (
@@ -32,7 +28,6 @@ type Constraint struct {
 	Value string
 }
 
-// Grant is the capability the broker mints for one agent.
 type Grant struct {
 	Agent       string       // bound_agent: the only identity that may exercise it
 	Capability  Capability   // the single (tool, operation) granted
@@ -42,8 +37,7 @@ type Grant struct {
 }
 
 // payload is the signed body of a token. The exact serialized bytes are what
-// the signature covers and what Verify re-reads; field tags are short and
-// stable.
+// the signature covers and what Verify re-reads.
 type payload struct {
 	ID          string       `json:"i,omitempty"`
 	Agent       string       `json:"a"`
@@ -54,16 +48,14 @@ type payload struct {
 	Epoch       int          `json:"e"`
 }
 
-// envelope wraps the signed payload bytes and the detached Ed25519 signature.
-// encoding/json renders []byte as base64, so a serialized token is compact ASCII.
+// envelope holds the signed payload bytes and the detached signature;
+// encoding/json renders []byte as base64.
 type envelope struct {
 	Payload []byte `json:"p"`
 	Sig     []byte `json:"s"`
 }
 
-// Mint builds a token for g, signed with the broker's private key. The signature
-// covers the canonical payload bytes (bound agent, capability, constraints,
-// expiry, epoch); Verify checks the signature and then those fields.
+// Mint builds a token for g, signed with the broker's private key.
 func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	if g.Agent == "" {
 		return nil, fmt.Errorf("token: grant has empty agent")
@@ -99,9 +91,8 @@ func Mint(priv ed25519.PrivateKey, g Grant) ([]byte, error) {
 	return tok, nil
 }
 
-// parse splits a serialized token into its envelope and payload without any
-// signature or claim checks. Both ID and Verify go through it so the wire
-// shape has exactly one reader.
+// parse is the only reader of the wire shape; it checks no signature or
+// claim.
 func parse(tok []byte) (envelope, payload, error) {
 	var env envelope
 	if err := json.Unmarshal(tok, &env); err != nil {
@@ -114,11 +105,10 @@ func parse(tok []byte) (envelope, payload, error) {
 	return env, pl, nil
 }
 
-// ID returns the token's mint-time id for audit correlation, or "" if the
-// token cannot be parsed or the embedded id is not exactly 32 lowercase hex
-// chars. It deliberately does NOT verify the signature — audit code calls it
-// on deny paths too, where the id is a claimed (attacker-controlled) value;
-// the shape check keeps arbitrary bytes out of the audit log.
+// ID returns the token's mint-time id for audit correlation, or "" unless it
+// is exactly 32 lowercase hex chars. It does not verify the signature: on
+// deny paths the id is attacker-controlled, and the shape check keeps
+// arbitrary bytes out of the audit log.
 func ID(tok []byte) string {
 	_, pl, err := parse(tok)
 	if err != nil {

@@ -12,15 +12,6 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// loadImageArgs returns the full host argv (including the prefix binary) that
-// loads a docker-archive (read on stdin) into the jail's rootless podman,
-// e.g. for the OrbStack prefix:
-//
-//	orb -m <machine> -u <user> env XDG_RUNTIME_DIR=/run/user/<uid> podman load
-//
-// Fallback (if pipe proves unreliable): mount-staging — docker save -o
-// <tree>/.img.tar on the host, then in-jail: podman load -i <tree>/.img.tar.
-// Implement the pipe first.
 func loadImageArgs(prefix []string, uid string) []string {
 	return slices.Concat(prefix, []string{
 		"env",
@@ -29,9 +20,6 @@ func loadImageArgs(prefix []string, uid string) []string {
 	})
 }
 
-// imageInspectArgs returns the host argv that reads the jail podman image ID
-// (config digest) for imageRef. The command exits non-zero when the image is
-// absent, which the ID readers below treat as "not loaded".
 func imageInspectArgs(prefix []string, uid, imageRef string) []string {
 	return slices.Concat(prefix, []string{
 		"env",
@@ -40,11 +28,9 @@ func imageInspectArgs(prefix []string, uid, imageRef string) []string {
 	})
 }
 
-// pruneImagesArgs returns the host argv that prunes DANGLING (untagged,
-// unreferenced) images from the jail's rootless podman store. Plain `prune`
-// (no `-a`) never removes a tagged image or one still referenced by any
-// container, so the running manager — and any stopped worker's image — is
-// safe; it only reclaims the layers a rebuilt tag orphaned.
+// pruneImagesArgs: plain `prune` (no -a) never removes a tagged image or one
+// a container references, so the manager's and stopped workers' images are
+// safe.
 func pruneImagesArgs(prefix []string, uid string) []string {
 	return slices.Concat(prefix, []string{
 		"env",
@@ -54,16 +40,13 @@ func pruneImagesArgs(prefix []string, uid string) []string {
 }
 
 // ScionKeepIDUserns is the user-namespace flag scion's rootless podman runtime
-// starts every agent container with (pkg/runtime/podman.go, PodmanRuntime.Run,
-// at the pinned scion): the calling user maps to the image's scion user, uid
-// and gid 1000. A warm-up run must use exactly this flag, because podman
-// keeps one id-mapped layer copy per mapping.
+// starts every agent container with (pkg/runtime/podman.go at the pinned
+// scion). A warm-up run must use exactly this flag, because podman keeps one
+// id-mapped layer copy per mapping.
 const ScionKeepIDUserns = "--userns=keep-id:uid=1000,gid=1000"
 
-// warmImageArgs returns the host argv that starts imageRef once under scion's
-// user-namespace mapping and exits at once: the entrypoint is `true`, so
-// neither the image's entrypoint (sciontool, its pre-start hook) nor claude
-// runs. --pull=never and --network=none keep it from reaching out.
+// warmImageArgs: the entrypoint is `true` so neither sciontool's hook nor
+// claude runs.
 func warmImageArgs(prefix []string, uid, imageRef string) []string {
 	return slices.Concat(prefix, []string{
 		"env",
@@ -73,21 +56,15 @@ func warmImageArgs(prefix []string, uid, imageRef string) []string {
 	})
 }
 
-// normalizeImageID canonicalizes a docker/podman image ID for comparison. The
-// image ID is content-addressed over the image config and so IS identical on
-// both sides of a `docker save` | `podman load` (verified empirically) — EXCEPT
-// docker prints it with a "sha256:" algorithm prefix and (some) podman versions
-// print the bare hex. Stripping the prefix (and surrounding whitespace) on both
-// sides is what makes the host-vs-jail comparison actually match; without it the
-// guard would never fire.
+// normalizeImageID: the image ID is the same on both sides of docker save |
+// podman load, but docker prints a "sha256:" prefix and some podman versions
+// print the bare hex.
 func normalizeImageID(id string) string {
 	return strings.TrimPrefix(strings.TrimSpace(id), "sha256:")
 }
 
-// hostImageID returns the host docker image ID (config digest) for imageRef,
-// normalized (see normalizeImageID), or "" if docker cannot resolve it. Runs on
-// the host via the plain proc.Runner seam (not the in-jail JailRunner, which
-// would inject jail env and rewrite the argv).
+// hostImageID takes a plain host Runner, not a JailRunner, which would
+// rewrite the argv into the jail.
 func hostImageID(ctx context.Context, r proc.Runner, imageRef string) string {
 	res, err := r.Run(ctx, nil, "docker", "image", "inspect", "--format", "{{.Id}}", imageRef)
 	if err != nil {
@@ -96,10 +73,8 @@ func hostImageID(ctx context.Context, r proc.Runner, imageRef string) string {
 	return normalizeImageID(res.Stdout)
 }
 
-// jailImageID returns the jail podman image ID for imageRef, normalized, or ""
-// if it is not loaded (the inspect exits non-zero) or the command otherwise
-// fails. The prefix argv runs on the host too (the prefix binary reaches into
-// the jail), so it takes the same plain host Runner.
+// jailImageID takes a plain host Runner: the prefix binary reaches into the
+// jail itself.
 func jailImageID(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) string {
 	args := imageInspectArgs(prefix, uid, imageRef)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
@@ -109,14 +84,10 @@ func jailImageID(ctx context.Context, r proc.Runner, prefix []string, uid, image
 	return normalizeImageID(res.Stdout)
 }
 
-// ImageLoaded reports whether the jail's rootless podman already holds imageRef
-// at the SAME image ID as the host docker image — i.e. the exact bytes are
-// present and the multi-GB `docker save | podman load` re-stream can be skipped.
-// It is deliberately fail-open: it returns false whenever either ID is
-// unavailable (image not yet loaded, docker/podman inspect failure, a rebuilt
-// tag whose ID no longer matches), so an unreliable check at worst costs a
-// redundant load — never a wrongly-skipped one that would leave a stale image
-// in the jail.
+// ImageLoaded reports whether the jail's podman already holds imageRef at the
+// same image ID as the host docker image, so the load can be skipped. It
+// returns false whenever either ID is unavailable: a bad check costs a
+// redundant load, never a skipped one that leaves a stale image in the jail.
 func ImageLoaded(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) bool {
 	host := hostImageID(ctx, r, imageRef)
 	if host == "" {
@@ -125,10 +96,7 @@ func ImageLoaded(ctx context.Context, r proc.Runner, prefix []string, uid, image
 	return host == jailImageID(ctx, r, prefix, uid, imageRef)
 }
 
-// PruneImages removes dangling images from the jail (see pruneImagesArgs). Runs
-// on the host via the plain proc.Runner seam. Unlike the removed CombinedOutput
-// path, the Runner captures stdout and stderr separately, so the error detail is
-// composed from both (stderr first, where podman writes failures).
+// PruneImages removes dangling images from the jail (see pruneImagesArgs).
 func PruneImages(ctx context.Context, r proc.Runner, prefix []string, uid string) error {
 	args := pruneImagesArgs(prefix, uid)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
@@ -139,13 +107,11 @@ func PruneImages(ctx context.Context, r proc.Runner, prefix []string, uid string
 }
 
 // WarmImage makes rootless podman build the id-mapped layer copy of imageRef
-// for scion's keep-id mapping (lever#165). The first container of an image
-// under a mapping copies every layer with its ownership shifted, which takes
-// most of a minute for a multi-GB image; scion's start of an agent has about
-// 30 s before its control-channel request is cancelled, the partial work is
-// deleted, and the next start begins again from zero. Done here first, the
-// agent start finds the copy and takes well under a second. A run on an image
-// that is already warm is as fast, so there is nothing to detect first.
+// for scion's keep-id mapping. The first container under a mapping copies
+// every layer, which takes most of a minute for a multi-GB image, while
+// scion's agent start is cancelled after about 30 s and the partial work is
+// deleted. A run on an already warm image is fast, so nothing is detected
+// first.
 func WarmImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) error {
 	args := warmImageArgs(prefix, uid, imageRef)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
@@ -155,16 +121,9 @@ func WarmImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRe
 	return nil
 }
 
-// LoadImage streams a docker image from the host into the jail's rootless
-// podman: `docker save <imageRef>` on the host, piped into loadImageArgs
-// through the Runner's stdin seam. Nothing is buffered — the payload can be
-// multi-GB.
-//
-// The producer side (`docker save`) stays on os/exec: the proc.Runner
-// contract captures a command's stdout into memory, which is exactly what a
-// multi-GB archive must not do, so the one command whose OUTPUT is the stream
-// writes straight into the pipe. The consumer side (the jail's `podman load`)
-// goes through r.RunStdin like every other in-jail command.
+// LoadImage streams `docker save <imageRef>` from the host into the jail's
+// rootless podman. docker save stays on os/exec because proc.Runner captures
+// stdout into memory, which a multi-GB archive must not do.
 func LoadImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) error {
 	return loadImageAndAlias(ctx, r, prefix, uid, imageRef, func(w io.Writer) error {
 		save := exec.CommandContext(ctx, "docker", "save", imageRef)
@@ -176,9 +135,6 @@ func LoadImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRe
 	})
 }
 
-// loadImageAndAlias is the shared tail of both load paths: stream the
-// archive in (loadImage), then give the freshly loaded image its localhost/
-// name (aliasLocalhost) so an unqualified container spec resolves to it.
 func loadImageAndAlias(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string, save func(io.Writer) error) error {
 	if err := loadImage(ctx, r, prefix, uid, save); err != nil {
 		return err
@@ -186,9 +142,7 @@ func loadImageAndAlias(ctx context.Context, r proc.Runner, prefix []string, uid,
 	return aliasLocalhost(ctx, r, prefix, uid, imageRef)
 }
 
-// localhostAliasArgs returns the host argv that tags the docker.io/ name a
-// docker archive lands under in podman as the localhost/ name an unqualified
-// container spec resolves to. ref must be unqualified (see aliasLocalhost).
+// localhostAliasArgs: ref must be unqualified (see aliasLocalhost).
 func localhostAliasArgs(prefix []string, uid, ref string) []string {
 	tagged := ref
 	if !strings.ContainsAny(ref[strings.LastIndex(ref, "/")+1:], ":@") {
@@ -205,18 +159,14 @@ func localhostAliasArgs(prefix []string, uid, ref string) []string {
 	})
 }
 
-// aliasLocalhost closes lever#26. `podman load` of a docker archive names
-// the image docker.io/<RepoTag> (docker writes the tag unqualified), while
-// the container spec's unqualified <ref> resolves through podman's
-// short-name path to localhost/<ref> — a name a PREVIOUS load left behind,
-// so after a rebuild the recreated container silently runs the old image.
-// Tagging the fresh docker.io/ name as localhost/ makes both names one
-// image; the superseded copy goes dangling for the prune that follows. A
-// ref that names its registry (a '.' or ':' in its first component, or
-// localhost/) is loaded under that exact name and is left alone, as is a
-// digest-pinned ref: docker save writes one with no RepoTag and a digest is
-// not a legal tag target, so the container resolves it by ID anyway.
-// Failure is fatal: silently running the stale image is the bug being fixed.
+// aliasLocalhost: `podman load` of a docker archive names the image
+// docker.io/<RepoTag>, while the container spec's unqualified <ref> resolves
+// through podman's short-name path to localhost/<ref>, a name an earlier load
+// left behind, so after a rebuild the container would run the old image.
+// Tagging the fresh image as localhost/ makes both names one image. A ref
+// that names its registry is loaded under that exact name, and a
+// digest-pinned ref has no RepoTag and cannot be a tag target. Failure is
+// fatal so the stale image is never run silently.
 func aliasLocalhost(ctx context.Context, r proc.Runner, prefix []string, uid, ref string) error {
 	if strings.Contains(ref, "@") {
 		return nil
@@ -234,21 +184,10 @@ func aliasLocalhost(ctx context.Context, r proc.Runner, prefix []string, uid, re
 	return nil
 }
 
-// loadImage pipes whatever save writes into the jail's `podman load`. save
-// runs in its own goroutine so the two ends stream concurrently; its error
-// closes the pipe, which the load side observes as a short read. Both errors
-// are collected. A load failure is reported first, with podman's stderr: a
-// load that dies before draining stdin makes the producer's write fail too,
-// and that write error ("closed pipe") is the symptom, not the cause. The
-// producer's error is primary only when the load itself succeeded, or when
-// the load's own failure is the short read the dead producer caused — in
-// which case both are named.
-//
-// podman's stderr reaches the error through podmanFailure: its last lines,
-// sanitized and bounded, with podman's progress output dropped, plus the
-// recovery hint when it names store damage (lever#173). The whole stream once
-// led the error with "Getting image source signatures" and the copy progress,
-// and the cause at its end was lost.
+// loadImage pipes whatever save writes into the jail's `podman load`. A load
+// failure is reported first, with podman's stderr: a load that dies before
+// draining stdin makes the producer's write fail too ("closed pipe"), which
+// is the symptom, not the cause.
 func loadImage(ctx context.Context, r proc.Runner, prefix []string, uid string, save func(io.Writer) error) error {
 	pr, pw := io.Pipe()
 	saveErr := make(chan error, 1)
@@ -275,18 +214,13 @@ func loadImage(ctx context.Context, r proc.Runner, prefix []string, uid string, 
 
 // LoadImageTar streams a shipped docker archive from the host into the jail's
 // rootless podman, never touching the host docker store. The archive must
-// carry imageRef (FindTarImage; a mismatch is a config error naming both),
-// which is checked before a byte is streamed.
+// carry imageRef, checked before a byte is streamed.
 //
-// allowTag, when non-nil, is applied to EVERY RepoTag the archive carries —
-// not just imageRef — before the stream starts: `podman load` imports every
-// image in the archive, so an archive that also ships an image from a
-// registry the config does not allow would otherwise land it in the jail
-// store unchecked (R4; config.Security.ImageTagPolicy is what apply wires).
-// A refused tag fails the load by name with the policy's reason. An image
-// with no RepoTags at all cannot be judged by tag and is let through: it
-// loads untagged, and the dangling-image prune that follows a load removes
-// it.
+// allowTag, when non-nil, is applied to every RepoTag the archive carries,
+// not just imageRef: `podman load` imports every image in the archive, so an
+// image from a registry the config does not allow would otherwise land in the
+// jail store unchecked. An image with no RepoTags loads untagged, and the
+// dangling-image prune that follows a load removes it.
 func LoadImageTar(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef, tarPath string, allowTag func(ref string) error) error {
 	imgs, err := ReadImageTar(tarPath)
 	if err != nil {
@@ -317,11 +251,9 @@ func LoadImageTar(ctx context.Context, r proc.Runner, prefix []string, uid, imag
 	})
 }
 
-// ImageLoadedTar is ImageLoaded for a shipped archive: the jail's image ID
-// for imageRef is compared with the archive's config digest, which is the ID
-// `podman load` assigns, so the check is exact without a host docker store.
-// Fail-open like ImageLoaded: false when the tar is unreadable or lacks the
-// ref (LoadImageTar then reports the real error), or when the jail lacks it.
+// ImageLoadedTar is ImageLoaded for a shipped archive: the archive's config
+// digest is the ID `podman load` assigns. Like ImageLoaded it returns false
+// on any read failure.
 func ImageLoadedTar(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef, tarPath string) bool {
 	imgs, err := ReadImageTar(tarPath)
 	if err != nil {

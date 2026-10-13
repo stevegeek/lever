@@ -11,8 +11,6 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// workerInstanceDir writes a "demo" instance declaring the "scratch" worker
-// with a real tree/workers/scratch subdir, and returns the instance dir.
 func workerInstanceDir(t *testing.T) string {
 	t.Helper()
 	dir := writeInstance(t, managerYAML+scratchWorkerYAML)
@@ -22,23 +20,21 @@ func workerInstanceDir(t *testing.T) string {
 	return dir
 }
 
-// TestWorkerPurgeDeletesRecordNotWorkspace is the RISK-GATE test: purge deletes
-// the scion record and the worker's staged ticket in the guest, but NEVER the
-// HostWorkspace (the worker's work product) — and it writes nothing under it.
+// TestWorkerPurgeDeletesRecordNotWorkspace: purge deletes the scion record and
+// the staged ticket, never the HostWorkspace (the work product), and writes
+// nothing under it.
 func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	dir := workerInstanceDir(t)
 	t.Chdir(dir)
 
 	hostWorkspace := filepath.Join(dir, "workspace", "workers", "scratch")
-	// A work-product file that MUST survive the purge.
 	product := filepath.Join(hostWorkspace, "result.txt")
 	if err := os.WriteFile(product, []byte("keep me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Seed the controller PAT so purge's scion delete client authenticates with
-	// it via HubTokenSource: guards the source wiring (a dropped source would
-	// delete anonymously against the dev-auth-off hub).
+	// purge's scion client must keep its HubTokenSource, or it deletes
+	// anonymously against the dev-auth-off hub.
 	if err := state.ForConfig(dir).SaveControllerPAT("pat-worker-purge"); err != nil {
 		t.Fatal(err)
 	}
@@ -55,14 +51,13 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("purge: %v (%s)", err, out.String())
 	}
-	// The ticket dir and the runner's XDG_RUNTIME_DIR come from the run
-	// user's uid, so purge reads it before it builds the jail runner.
+	// The ticket dir and XDG_RUNTIME_DIR come from the run user's uid, so purge
+	// reads it before building the jail runner.
 	if !sb.resolvedRunUser || sb.runnerBeforeUser {
 		t.Fatalf("purge: resolved=%v, runner before the user=%v", sb.resolvedRunUser, sb.runnerBeforeUser)
 	}
 
-	// scion delete scratch -g /lever ... was called, then the guest ticket
-	// directory for scratch was removed — and nothing else.
+	// scion delete, then the guest ticket directory, and nothing else.
 	if len(f.Calls) != 2 {
 		t.Fatalf("expected two jail calls (delete, ticket removal), got %+v", f.Calls)
 	}
@@ -73,7 +68,6 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	if got := call.Env["SCION_HUB_TOKEN"]; got != "pat-worker-purge" {
 		t.Fatalf("delete env SCION_HUB_TOKEN = %q, want %q (HubTokenSource dropped)", got, "pat-worker-purge")
 	}
-	// project is the mount root, passed via -g.
 	if !containsArg(call.Args, "/lever") {
 		t.Fatalf("delete must target the instance project /lever, got args %v", call.Args)
 	}
@@ -81,7 +75,6 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 		t.Fatalf("expected the guest ticket removal for scratch, got %+v", rm)
 	}
 
-	// The HostWorkspace and its work product survive.
 	if _, err := os.Stat(hostWorkspace); err != nil {
 		t.Fatalf("HostWorkspace must survive purge, stat err = %v", err)
 	}
@@ -93,8 +86,8 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	}
 }
 
-// TestWorkerPurgeRequiresForce proves the destructive guard: without --force,
-// purge refuses and does NOT call scion or remove anything.
+// TestWorkerPurgeRequiresForce: without --force purge calls nothing and
+// removes nothing.
 func TestWorkerPurgeRequiresForce(t *testing.T) {
 	dir := workerInstanceDir(t)
 	t.Chdir(dir)
@@ -114,7 +107,6 @@ func TestWorkerPurgeRequiresForce(t *testing.T) {
 	}
 }
 
-// TestWorkerPurgeUnknownWorker rejects a name not declared in config.
 func TestWorkerPurgeUnknownWorker(t *testing.T) {
 	dir := workerInstanceDir(t)
 	t.Chdir(dir)
@@ -134,7 +126,6 @@ func TestWorkerPurgeUnknownWorker(t *testing.T) {
 	}
 }
 
-// containsArg reports whether want appears anywhere in args.
 func containsArg(args []string, want string) bool {
 	for _, a := range args {
 		if a == want {

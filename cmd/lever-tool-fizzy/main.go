@@ -1,9 +1,7 @@
 // Command lever-tool-fizzy is the host-side broker tool for the Lever Fizzy
-// board: six operations (list, show, comments, comment, move, create) on ONE
-// board, through the official fizzy CLI with the token in its environment.
-// Spec: docs/superpowers/specs/2026-10-07-lever-dev-on-desktop-design.md §4b.
-//
-// With -ops it also offers close_card (not by default), its own capability.
+// board: list, show, comments, comment, move and create on one board, through
+// the official fizzy CLI with the token in its environment. close_card is
+// offered only when -ops lists it, as its own capability.
 package main
 
 import (

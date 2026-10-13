@@ -38,9 +38,8 @@ func TestAgentRecordOf(t *testing.T) {
 	}
 }
 
-// The records are one hub list, cached for a few seconds (errors too, so a
-// down hub is not asked on every page poll); the fence's resolver reads the
-// same records.
+// The records are one cached hub list (errors too, so a down hub is not asked
+// on every poll); the fence's resolver reads the same records.
 func TestCachedAgentRecords(t *testing.T) {
 	calls := 0
 	var fail error
@@ -116,15 +115,14 @@ func TestRemoteWakeOverTheOperatorSocket(t *testing.T) {
 	if err := wake(context.Background(), "c@x", "contact", "w-busy"); !errors.As(err, &we) || we.Status != http.StatusConflict {
 		t.Fatalf("refusal: %v", err)
 	}
-	// No broker on the socket: an error with no status.
 	srv.Close()
 	if err := wake(context.Background(), "c@x", "contact", "w1"); !errors.As(err, &we) || we.Status != 0 {
 		t.Fatalf("no broker: %v", err)
 	}
 }
 
-// With the state inside the tree the broker binds no operator socket (the
-// jail could reach it), so there is no wake.
+// With the state inside the tree the broker binds no operator socket (the jail
+// could reach it), so there is no wake.
 func TestRemoteWakeOffWhenStateIsInsideTheTree(t *testing.T) {
 	tree := t.TempDir()
 	st := state.State{Dir: filepath.Join(tree, ".lever-state")}
@@ -328,15 +326,13 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 	if got.Contact != "c@x" || got.Agent != "w1" || len(got.Messages) != 2 || got.Messages[1] != (wire.AgentMessageRef{ID: "m2", SHA256: "bb", CreatedAt: at}) || got.Peek {
 		t.Fatalf("request %+v", got)
 	}
-	// The operator view's question is the same, as a peek.
-	// The broker names m1 kept and pending, and pending ids it did not keep
-	// or was not asked about: only m1 is pending.
+	// The operator view's peek: the broker names m1 kept and pending plus ids it
+	// did not keep or was not asked about; only m1 is pending.
 	pendingAnswer.Store(true)
 	keep, pending, err := remoteAgentMessagesPeek(app, st)(context.Background(), "c@x", "w1", msgs)
 	if err != nil || !keep["m1"] || !got.Peek || !pending["m1"] || len(pending) != 1 {
 		t.Fatalf("peek: %v %v %v request %+v", keep, pending, err, got)
 	}
-	// The binding question asks with no peek.
 	got = wire.AgentMessagesMatchRequest{}
 	if keep, err := m(context.Background(), "c@x", "w1", msgs); err != nil || !keep["m1"] || got.Peek {
 		t.Fatalf("match after peek: %v %v", keep, err)

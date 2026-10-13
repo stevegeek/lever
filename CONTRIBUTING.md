@@ -200,6 +200,20 @@ it conflict in `fingerprint.txt`: after the merge, bump once more and run the up
 `fingerprint.txt` and running the update re-records it without a bump, so only do that when no
 image has shipped with the current `JailABI`.
 
+## Comments
+
+A comment says what the code cannot: a non-obvious why, a constraint, a security assumption or
+invariant, a gotcha, or a contract a caller must keep. Keep it short.
+
+- Do not describe what the code does; name things so it reads on its own.
+- Do not reference tickets or card numbers, issue or PR links, other projects, people, or private
+  context.
+- Do not write history ("it used to", "before this change", "renamed from"). Design reasoning and
+  history go in the commit message, the PR text or the docs.
+- Keep license headers, package doc comments, short doc comments on exported identifiers, tool
+  directives (`//go:`, `//nolint`) and comments that state a security assumption.
+- In tests, a comment may say what a non-obvious test proves.
+
 ## Release checklist
 
 Before tagging, besides a green CI:

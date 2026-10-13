@@ -1,7 +1,6 @@
 // Package termsafe makes guest-supplied strings safe to print on the
-// operator's terminal. It is a leaf package (stdlib only) so every host-side
-// surface that relays text from the jail — doctor and up rows, apply's log
-// lines, the error a command returns — can share the one choke point.
+// operator's terminal. It is a stdlib-only leaf so every host-side surface
+// that relays text from the jail can share this one choke point.
 package termsafe
 
 import (
@@ -10,23 +9,15 @@ import (
 	"unicode/utf8"
 )
 
-// Sanitize makes a string safe to print raw on the operator's terminal.
-// Strings that reach doctor and up rows, apply's log lines and returned
-// errors come from the jail and the hub — scion's stderr, agent phase and
-// container status, the record's image, slugs and roles, shared-dir names —
-// and a compromised jail chooses them: an OSC title or clipboard write, a CSI clear or cursor move that
-// overdraws earlier rows with a fake verdict, a C1 byte that a Latin-1
-// terminal reads as an introducer. Every ESC/C1-introduced sequence (CSI,
-// OSC, DCS, SOS, PM, APC, two-byte and nF escapes) is stripped whole;
-// every other C0 byte, DEL, lone C1 code point and invalid UTF-8 byte is
-// replaced by U+FFFD. So is every format character (Unicode category Cf:
-// bidi overrides and isolates, zero-width spaces and joiners, the BOM, tag
-// characters), the line and paragraph separators, the glyphs that draw as
-// blank and the marks that draw nothing (variation selectors, U+034F,
-// U+17B4/U+17B5): text that renders reordered or hides between the
-// words around it could make a jail string read as lever's own. Other
-// printable UTF-8 passes unchanged. Go's %q quoting already escapes control
-// and format characters, but not the blank glyphs, which are printable.
+// Sanitize makes a string a compromised jail chose safe to print raw on the
+// operator's terminal, where it could otherwise write an OSC title or the
+// clipboard, overdraw earlier rows with a fake verdict, or use a C1 byte a
+// Latin-1 terminal reads as an introducer. Every ESC/C1-introduced sequence
+// is stripped whole. Other C0 bytes, DEL, lone C1 code points, invalid
+// UTF-8, format characters (Cf: bidi overrides, zero-width, tags), line and
+// paragraph separators, blank glyphs and marks that draw nothing become
+// U+FFFD: reordered or hidden text could make a jail string read as lever's
+// own. Go's %q does not escape the blank glyphs, which are printable.
 func Sanitize(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -55,11 +46,9 @@ func Sanitize(s string) string {
 	return b.String()
 }
 
-// invisible reports whether r is a format character (Cf), a line or
-// paragraph separator, a letter or symbol that renders as blank (the braille
-// blank and the Hangul fillers), or a mark that draws nothing of its own: the
-// variation selectors, the combining grapheme joiner and the Khmer inherent
-// vowels. Other combining marks pass; scripts need them.
+// invisible: the braille blank and Hangul fillers render as blank; the
+// variation selectors, U+034F and the Khmer inherent vowels draw nothing.
+// Other combining marks pass because scripts need them.
 func invisible(r rune) bool {
 	switch r {
 	case 0x2028, 0x2029, 0x2800, 0x3164, 0x115f, 0x1160, 0xffa0,
@@ -73,8 +62,8 @@ func invisible(r rune) bool {
 }
 
 // escapeTail returns how many bytes of s (the text after an ESC) belong to
-// the escape sequence the ESC introduces. Unterminated sequences run to the
-// end of s, as a terminal would swallow them.
+// the sequence the ESC introduces. Unterminated sequences run to the end of
+// s, as a terminal would swallow them.
 func escapeTail(s string) int {
 	if s == "" {
 		return 0
@@ -99,9 +88,8 @@ func escapeTail(s string) int {
 	return i
 }
 
-// c1Sequence handles the C1 code points that introduce a sequence (CSI, OSC,
-// DCS, SOS, PM, APC in their single-code-point form); ok is false for any
-// other C1, which the caller replaces.
+// c1Sequence handles the single-code-point CSI, OSC, DCS, SOS, PM and APC;
+// ok is false for any other C1.
 func c1Sequence(r rune, rest string) (int, bool) {
 	switch r {
 	case 0x9b:

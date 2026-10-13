@@ -13,10 +13,8 @@ const A = (name, over = {}) => ({ name, role: 'worker', label: '', access: 'mess
   conversation: `dm:agent:${name}id:user:u1`, terminal: `/agents/${name}id/terminal`, ...over });
 const BOSS = (over = {}) => A('boss', { role: 'manager', activity: 'working', id: 'a1', conversation: KEY, terminal: '/agents/a1/terminal', ...over });
 const defaultAgents = () => roster([BOSS(), A('w1')]);
-// readAloudAgents is the roster of a login offered read-aloud.
 const readAloudAgents = () => roster([BOSS(), A('w1')], { readAloud: true });
 
-// hubWith builds a scripted hub; each part can be replaced by a test.
 function hubWith(parts = {}) {
   const h = {
     agents: defaultAgents,
@@ -422,13 +420,11 @@ test('send: the same text sent again after an unclear answer keeps its key', asy
   const posts = sends(env);
   assert.equal(posts.length, 2);
   assert.equal(posts[0].body.idempotency_key, posts[1].body.idempotency_key, 'a resend of the same text must not be a second message');
-  // Once it is stored, the same words sent again are a new message.
   await type(env, 'once only');
   env.els.composer.dispatch('submit');
   await tick(10);
   const again = sends(env)[2];
   assert.notEqual(again.body.idempotency_key, posts[0].body.idempotency_key);
-  // Another message gets its own key.
   await type(env, 'a new one');
   env.els.composer.dispatch('submit');
   await tick(10);
@@ -806,8 +802,8 @@ test('send: not stored the first time: the retry stores it once and clears the d
 
 test('send: the history never settles a send: only the hub\'s answer to the key does', async () => {
   // Whatever the history shows after a failed send, the page concludes
-  // nothing: the error and the draft stay. Each of these once looked like
-  // "it arrived" to a rule that guessed, and none of them is the failed send.
+  // nothing: the error and the draft stay. Each of these could be guessed
+  // as "it arrived", and none of them is the failed send.
   const own = (over) => msg(1, { msg: 'yes', senderId: 'u1', ...over });
   for (const [name, firstRead, laterRead] of [
     ['an old message with the same words, first read failed', { status: 502, body: '' }, { status: 200, body: { messages: [own()] } }],
@@ -907,7 +903,6 @@ test('send: the hub forgot the key: the second copy is stored, and said', async 
   await tick(10);
   assert.equal(env.els.error.textContent, STORED_AGAIN);
   assert.equal(env.els.text.value, '');
-  // A first send that is simply stored says nothing.
   await type(env, 'next');
   env.els.composer.dispatch('submit');
   await tick(10);
@@ -1025,7 +1020,6 @@ test('a held Enter is one send', async () => {
   assert.equal(env.count('POST', HISTORY), 1, 'a repeat alone sends nothing');
 });
 
-// The agent list (multi-agent page).
 
 test('start shows the list in the server\'s order with chips and badges', async () => {
   const env = await load(hubWith({ agents: () => roster([BOSS({ activity: 'waiting', unread: 2 }), A('w1', { state: 'suspended', label: 'Via Roma 12' }), A('w2', { access: 'see', state: 'stopped' })]) }));
@@ -1268,7 +1262,6 @@ test('back returns to the list', async () => {
   assert.equal(env.store['lever-chat-open'], undefined);
   assert.equal(env.els.composer.hidden, true);
   assert.equal(env.rows().length, 0);
-  // Its draft waits for it.
   await type(env, 'ignored without a chat');
   env.els.agents.children[0].children[0].dispatch('click');
   await tick(5);
@@ -1332,7 +1325,6 @@ test('the one-agent page\'s draft and unsent record are adopted once', async () 
   assert.equal(sends(env)[0].body.idempotency_key, 'old-key', 'an unclear send keeps its key across the upgrade');
 });
 
-// The wake flow: a message to an asleep worker wakes it first.
 
 const W1_KEY = 'dm:agent:w1id:user:u1';
 const W1_SENDS = `/api/v1/chat/conversations/${encodeURIComponent(W1_KEY)}/messages`;
@@ -1667,7 +1659,6 @@ test('opening an agent chat leaves the transcript', async () => {
 });
 
 const VAPID = 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4';
-// pushHub: the default hub plus the push routes.
 function pushHub(parts = {}) {
   const h = hubWith(parts);
   const subs = [];
@@ -2010,7 +2001,6 @@ test('operator view: a contact with files off gets no files request', async () =
   assert.equal(env.els.filespanel.hidden, true);
 });
 
-// Dictation (remote.voice) and read-aloud.
 const withVoice = (agents, voice = { maxSeconds: 300 }) => () => roster(agents, { voice });
 const transcribes = (env) => env.calls.filter((c) => c.path === '/lever/api/voice/transcribe');
 const LOCAL = { name: 'Local', lang: 'en-GB', voiceURI: 'local-en', localService: true };
@@ -2170,12 +2160,10 @@ test('read-aloud: a speaker on each agent message, on-device voices only, cleane
   assert.equal(u.text, 'See this:\ncode block skipped.\nand docs');
   assert.equal(u.voice, LOCAL, 'never a network voice, even the default');
   assert.equal(first.textContent, '⏹');
-  // Tapping again stops.
   first.dispatch('click');
   assert.equal(env.speech.cancels, 1);
   assert.equal(env.speech.spoken.length, 1);
   assert.equal(first.textContent, '🔊');
-  // Another message: the first stops, the second reads.
   first.dispatch('click');
   third.dispatch('click');
   assert.equal(env.speech.spoken.length, 3);

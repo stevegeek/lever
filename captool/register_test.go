@@ -7,8 +7,7 @@ import (
 	"github.com/stevegeek/lever/internal/broker/brokertest"
 )
 
-// fakeBroker is brokertest.FakeAdminServer plus the captool-specific check
-// that every registration is first_party=true.
+// fakeBroker also checks that every registration is first_party=true.
 func fakeBroker(t *testing.T, epoch int64) *brokertest.FakeAdmin {
 	t.Helper()
 	f := brokertest.FakeAdminServer(t, epoch)

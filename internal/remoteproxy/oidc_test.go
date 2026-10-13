@@ -11,10 +11,8 @@ import (
 	"time"
 )
 
-// testIdentity is the operator the provider asserts in these tests.
 var testIdentity = Identity{Subject: "lever-remote:op@example.test", Email: "op@example.test", Name: "op@example.test"}
 
-// newTestProvider returns a provider plus the audit lines it emits.
 func newTestProvider(t *testing.T, now func() time.Time) (*Provider, *auditSink) {
 	t.Helper()
 	sink := &auditSink{}
@@ -25,8 +23,6 @@ func newTestProvider(t *testing.T, now func() time.Time) (*Provider, *auditSink)
 	return p, sink
 }
 
-// auditSink collects audit lines for the assertions that nothing secret ever
-// reaches one.
 type auditSink struct {
 	mu    sync.Mutex
 	lines []AuditLine
@@ -44,14 +40,12 @@ func (s *auditSink) all() []AuditLine {
 	return append([]AuditLine(nil), s.lines...)
 }
 
-// serveProvider runs a request against the provider's handler.
 func serveProvider(p *Provider, req *http.Request) *httptest.ResponseRecorder {
 	rw := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rw, req)
 	return rw
 }
 
-// postToken exchanges a code at /token with the parameters the hub sends.
 func postToken(p *Provider, code, grantType, redirectURI, clientID string) *httptest.ResponseRecorder {
 	form := url.Values{"grant_type": {grantType}, "code": {code}, "redirect_uri": {redirectURI}, "client_id": {clientID}}
 	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
@@ -64,7 +58,6 @@ const (
 	testState       = "0123456789abcdef0123456789abcdef"
 )
 
-// mintTestCode mints a code for the standard test login attempt.
 func mintTestCode(t *testing.T, p *Provider) string {
 	t.Helper()
 	code, err := p.Mint(testState, testRedirectURI, LoginClientID, testIdentity)
@@ -74,20 +67,12 @@ func mintTestCode(t *testing.T, p *Provider) string {
 	return code
 }
 
-// TestAuthorizeIsPermanently404 pins the decision recorded in
-// Provider.handleAuthorize. If this test fails because /authorize now answers,
-// the failure is not a broken test: an authorization endpoint is an HTTP
-// endpoint that MINTS AUTHORIZATION CODES, this provider is reachable from
-// inside the jail (lever maps guest loopback into every agent netns at
-// 169.254.1.2), and scion's OIDC login validates no signature — so any jailed
-// agent could mint a code, have the hub exchange it, and receive a hub web
-// session as any identity it asserts. Do not "finish" this route. The login is
-// driven server-side and mints codes by calling Provider.Mint directly.
-// authorizeIsPermanently404 names the decision handleAuthorize enforces, so
-// the grep that finds "/authorize" in this package also finds the reason it
-// 404s.
+// authorizeIsPermanently404 lets a grep for "/authorize" find why it 404s.
 const authorizeIsPermanently404 = "/authorize must never be implemented: it would be an HTTP code-minting endpoint reachable from inside the jail"
 
+// If this fails because /authorize answers, the code is wrong, not the test:
+// the provider is reachable from the jail and scion's OIDC login validates
+// nothing, so a code-minting endpoint gives any agent a hub web session.
 func TestAuthorizeIsPermanently404(t *testing.T) {
 	p, sink := newTestProvider(t, nil)
 	for _, target := range []string{
@@ -99,8 +84,6 @@ func TestAuthorizeIsPermanently404(t *testing.T) {
 			t.Fatalf("GET %s = %d, want 404. %s", target, rw.Code, authorizeIsPermanently404)
 		}
 	}
-	// The hit must be visible: nothing legitimate calls this route, so a hit
-	// is a misconfiguration or an in-jail probe.
 	var audited int
 	for _, l := range sink.all() {
 		if l.Decision == "deny-authorize" {
@@ -115,10 +98,8 @@ func TestAuthorizeIsPermanently404(t *testing.T) {
 	}
 }
 
-// TestDiscoveryAdvertisesAnEndpointThisProviderDoesNotServe covers the other
-// half of the same decision: scion refuses to start a login unless discovery
-// carries an authorization_endpoint, so one is advertised — but it must point
-// at a host that cannot resolve, never at this provider.
+// scion needs an authorization_endpoint in discovery; it must point at an
+// unresolvable host, never at this provider.
 func TestDiscoveryAdvertisesAnEndpointThisProviderDoesNotServe(t *testing.T) {
 	p, _ := newTestProvider(t, nil)
 	rw := serveProvider(p, httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil))
@@ -142,8 +123,6 @@ func TestDiscoveryAdvertisesAnEndpointThisProviderDoesNotServe(t *testing.T) {
 	if got := doc["userinfo_endpoint"]; got != p.IssuerURL()+"/userinfo" {
 		t.Fatalf("userinfo_endpoint = %v", got)
 	}
-	// jwks_uri is deliberately absent: no id_token is ever issued, so the hub
-	// never fetches keys, and advertising a URI nothing serves would be a lie.
 	if _, ok := doc["jwks_uri"]; ok {
 		t.Fatalf("discovery advertises jwks_uri, which nothing serves")
 	}
@@ -190,9 +169,8 @@ func TestTokenIsSingleUse(t *testing.T) {
 	}
 }
 
-// TestTokenConsumesTheCodeEvenWhenABindingFails: a code shown to /token is
-// spent whatever the outcome, so an attacker who somehow held one could not
-// probe the other parameters by retrying.
+// A code shown to /token is spent whatever the outcome, so its other
+// parameters cannot be probed by retrying.
 func TestTokenConsumesTheCodeEvenWhenABindingFails(t *testing.T) {
 	p, _ := newTestProvider(t, nil)
 	code := mintTestCode(t, p)
@@ -246,9 +224,8 @@ func TestTokenRefusesGET(t *testing.T) {
 	}
 }
 
-// TestCallbackQueryEnforcesTheStateBinding covers the third binding. The hub
-// never sends state to /token, so this is the only place a code paired with
-// the wrong login attempt can be caught.
+// The hub never sends state to /token, so this is the only place a code
+// paired with the wrong attempt is caught.
 func TestCallbackQueryEnforcesTheStateBinding(t *testing.T) {
 	p, _ := newTestProvider(t, nil)
 	code := mintTestCode(t, p)
@@ -305,8 +282,7 @@ func TestUserinfoNeedsTheAccessTokenAndAssertsTheVerifiedOperator(t *testing.T) 
 	if err := json.Unmarshal(rw.Body.Bytes(), &info); err != nil {
 		t.Fatalf("userinfo body: %v", err)
 	}
-	// scion refuses a login whose email is unverified, requires a sub, and
-	// keys its user row on the email.
+	// scion refuses an unverified email, requires a sub and keys users on email.
 	if info["sub"] != testIdentity.Subject || info["email"] != testIdentity.Email || info["name"] != testIdentity.Name {
 		t.Fatalf("userinfo = %v, want the verified operator", info)
 	}
@@ -333,8 +309,6 @@ func TestUserinfoRejectsAnExpiredToken(t *testing.T) {
 	}
 }
 
-// TestProviderSweepsSpentGrants keeps the two maps from growing with every
-// login for the life of a long-running proxy.
 func TestProviderSweepsSpentGrants(t *testing.T) {
 	now := time.Now()
 	p, _ := newTestProvider(t, func() time.Time { return now })
@@ -363,8 +337,8 @@ func TestUnknownPathsAre404AndAudited(t *testing.T) {
 	}
 }
 
-// TestAuditPathIsBounded: anything in the jail can probe this provider, and
-// the path is attacker-chosen text landing in the operator's log.
+// Anything in the jail can probe the provider, and the path lands in the
+// operator's log.
 func TestAuditPathIsBounded(t *testing.T) {
 	p, sink := newTestProvider(t, nil)
 	serveProvider(p, httptest.NewRequest(http.MethodGet, "/"+strings.Repeat("z", 4000), nil))
@@ -375,8 +349,6 @@ func TestAuditPathIsBounded(t *testing.T) {
 	}
 }
 
-// TestProviderAuditNeverCarriesASecret drives a whole exchange and checks that
-// no audit line quotes the code or the access token.
 func TestProviderAuditNeverCarriesASecret(t *testing.T) {
 	p, sink := newTestProvider(t, nil)
 	code := mintTestCode(t, p)
@@ -396,8 +368,6 @@ func TestProviderAuditNeverCarriesASecret(t *testing.T) {
 	assertNoSecretsInAudit(t, sink.all(), map[string]string{"code": code, "access token": tok.AccessToken})
 }
 
-// assertNoSecretsInAudit serialises every line the way the audit file does and
-// fails if any secret appears anywhere in it.
 func assertNoSecretsInAudit(t *testing.T, lines []AuditLine, secrets map[string]string) {
 	t.Helper()
 	if len(lines) == 0 {

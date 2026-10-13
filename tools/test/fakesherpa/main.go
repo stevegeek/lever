@@ -1,9 +1,7 @@
-// Command fakesherpa is a TEST-ONLY stand-in for sherpa-onnx's
-// sherpa-onnx-offline-tts: it reads its arguments as the real one does and
-// takes the flags lever passes
-// (internal/voice/sherpa.go) and writes a WAV to --output-filename, so a
-// test can run lever-tool-tts without a model. Never part of a release
-// (.goreleaser.yaml builds only binaries under ./cmd).
+// Command fakesherpa is a TEST-ONLY stand-in for sherpa-onnx-offline-tts: it
+// parses arguments as the real one does, takes the flags lever passes
+// (internal/voice/sherpa.go) and writes a WAV to --output-filename. Never part
+// of a release (.goreleaser.yaml builds only binaries under ./cmd).
 //
 // The text steers it: one containing FAIL exits 2 with no output, SLEEP
 // sleeps 30 s first, FLOAT writes a 32-bit float WAV, ARGV writes its

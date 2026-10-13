@@ -17,7 +17,6 @@ import (
 	"github.com/stevegeek/lever/internal/webpush"
 )
 
-// pushDMHub answers history and the DM list for the trigger tests.
 type pushDMHub struct {
 	mu      sync.Mutex
 	rows    map[string][]historyRow // conversation key → newest first
@@ -247,7 +246,6 @@ func TestCheckContactOnlyForRowsTheMatcherShows(t *testing.T) {
 	}
 }
 
-// TestCheckMatcherDownThenUp is Review Focus 4.
 func TestCheckMatcherDownThenUp(t *testing.T) {
 	down := true
 	e := newTriggerEnv(t, func(_ context.Context, _, _ string, msgs []AgentMessage) (map[string]bool, error) {
@@ -297,8 +295,7 @@ func TestCheckCoalescesPerLoginAndAgent(t *testing.T) {
 }
 
 // TestCheckFailedMarkFreesTheSlot: a mark that could not be stored sends
-// nothing and leaves the slot free, so the retry pushes at once instead of
-// waiting out the window.
+// nothing and frees the slot, so the retry pushes at once.
 func TestCheckFailedMarkFreesTheSlot(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))
@@ -367,7 +364,6 @@ func TestCheckCatchUpEmptyDMThenRow(t *testing.T) {
 	}
 }
 
-// TestCheckCatchUpSkipsOldRows is Review Focus 5.
 func TestCheckCatchUpSkipsOldRows(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))
@@ -455,8 +451,6 @@ func TestNotifySendsConcurrently(t *testing.T) {
 	}
 }
 
-// TestNotifyShutdownCapsTheSends: once Run stops, an outstanding send gets
-// shutdownGrace more, then its context ends.
 func TestNotifyShutdownCapsTheSends(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("slow"))
@@ -505,9 +499,8 @@ func TestCheckSkipsADuplicatedID(t *testing.T) {
 	}
 }
 
-// TestCheckSendOutlivesTheStream: the mark is stored before the send, so a
-// send cancelled with the stream (idle drop, hub restart) would be a lost
-// push. The send gets a context the stream's end does not cancel.
+// TestCheckSendOutlivesTheStream: the mark is stored before the send, so the
+// send's context must survive the stream's end (idle drop, hub restart).
 func TestCheckSendOutlivesTheStream(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))
@@ -580,9 +573,8 @@ func (l *pushLedger) peek(_ context.Context, _, _ string, msgs []AgentMessage) (
 	return keep, pending, nil
 }
 
-// TestCheckContactBindsNoRecord: a push check for a contact uses the peek,
-// so it binds no ledger record; the contact's own read binds later exactly
-// as it would have without the push.
+// TestCheckContactBindsNoRecord: a contact's push check uses the peek, so the
+// contact's own read binds later exactly as it would have without the push.
 func TestCheckContactBindsNoRecord(t *testing.T) {
 	led := &pushLedger{bound: map[string]bool{}}
 	page := newPageHub(t)

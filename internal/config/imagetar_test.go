@@ -114,9 +114,8 @@ func TestNoImageTarMeansNoPath(t *testing.T) {
 	}
 }
 
-// ImageTagPolicy is the archive-tag check apply hands jail.LoadImageTar (R4):
-// nil when no registry allowlist is configured, else the same prefix rule
-// validateImage applies to the config's own refs.
+// ImageTagPolicy is nil without a registry allowlist, else the same prefix
+// rule validateImage applies to the config's own refs.
 func TestImageTagPolicy(t *testing.T) {
 	var s Security
 	if s.ImageTagPolicy() != nil {

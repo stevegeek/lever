@@ -60,7 +60,6 @@ func (f *readyFixture) setStart(t *testing.T, start string) {
 	write(t, filepath.Join(f.proc, "1/stat"), "1 (init (x) y) S 0 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 "+start+" 1000 200\n", 0o644)
 }
 
-// writeMarker writes the marker as the hook does, for pane.
 func (f *readyFixture) writeMarker(t *testing.T, pane string) {
 	t.Helper()
 	if err := agent.WriteReadyMarker(f.marker, f.proc, pane); err != nil {

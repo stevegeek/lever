@@ -19,14 +19,13 @@ import (
 )
 
 // What Claude Code prints when claude --continue finds no conversation in
-// the agent home (lever#202).
+// the agent home.
 const noConvLog = "No conversation found to continue"
 
 // noConvRunner is agentLifecycleRunner whose resumed manager dies (claude
 // --continue finds nothing) and whose created manager stays up.
 type noConvRunner struct {
 	*agentLifecycleRunner
-	// order records the lifecycle verbs and the test's own hooks, in order.
 	order *[]string
 }
 
@@ -52,8 +51,6 @@ func (r *noConvRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[st
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// noConvCase is one start-manager run over a manager in phase whose
-// resume dies with log as its container log.
 type noConvCase struct {
 	phase      string
 	log        string
@@ -62,9 +59,7 @@ type noConvCase struct {
 	backup     func(context.Context, *scion.Agent) error
 	mounts     func(jp string) []jail.Mount
 	liveChecks []error // successive CheckLiveMounts answers: nil = the mount is elsewhere
-	// unattended is Deps.BeginUnattendedSession's answer: its error, its
-	// Refused, Begin's error and what its commit returns. noUnattended
-	// leaves it nil.
+	// noUnattended leaves Deps.BeginUnattendedSession nil.
 	unattendedErr, unattendedRefused, beginErr, unattendedCommitErr error
 	noUnattended                                                    bool
 }
@@ -92,9 +87,8 @@ func runNoConv(t *testing.T, c noConvCase) noConvResult {
 	}
 	d := Deps{
 		Scion: scion.New(res.r, scion.Options{}),
-		// A settle window far longer than the two lists the death takes (a
-		// short one races the scheduler), and short enough for the fresh
-		// manager, which holds it whole.
+		// Far longer than the two lists the death takes (a short one races
+		// the scheduler), short enough for the fresh manager to hold whole.
 		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: time.Second},
 		Log:              func(format string, a ...any) { res.logs = append(res.logs, fmt.Sprintf(format, a...)) },
 		HarnessLogTail: func(context.Context, string) (string, error) {
@@ -159,10 +153,10 @@ func runNoConv(t *testing.T, c noConvCase) noConvResult {
 func proven(context.Context) error                 { return nil }
 func backupOK(context.Context, *scion.Agent) error { return nil }
 
-// lever#202: under `lever up`, a resume whose claude found no conversation
-// to continue is replaced by a fresh start once the guest proved the home
-// holds no transcript: proof, backup, delete, create, in that order, out
-// loud, with a new enrolment ticket and a new session record.
+// Under `lever up`, a resume whose claude found no conversation is replaced
+// by a fresh start only once the guest proved the home holds no transcript:
+// proof, backup, delete, create, in that order, out loud, with a new
+// enrolment ticket and a new session record.
 func TestStartManagerStartsFreshWithoutConversation(t *testing.T) {
 	for _, phase := range []string{"error", "suspended"} {
 		t.Run(phase, func(t *testing.T) {
@@ -291,11 +285,9 @@ func TestStartManagerFreshWithoutConversationOnce(t *testing.T) {
 	}
 }
 
-// noConvProbe is the in-container view of a manager whose resumed claude
-// --continue finds no conversation: its pane comes up once and dies (the
-// container stays up, tmux's shell window holds it), and it never reports
-// its session start; once the manager is created anew, its pane is alive
-// and its session start reported. stage is set by noConvStageRunner.
+// noConvProbe: the resumed manager's pane comes up once and dies over a
+// running container, with no session start; the created manager's pane is
+// alive and reports it. stage is set by noConvStageRunner.
 type noConvProbe struct {
 	gateProbe
 	mu                               sync.Mutex
@@ -337,7 +329,6 @@ func (p *noConvProbe) AwaitClaudeReady(context.Context, string, time.Duration) (
 	return jail.ClaudeReadyPaneGone, nil
 }
 
-// noConvStageRunner tells the probe which manager runs.
 type noConvStageRunner struct {
 	*noConvRunner
 	p *noConvProbe
@@ -364,11 +355,9 @@ func (r *noConvStageRunner) RunStdin(ctx context.Context, stdin io.Reader, env m
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// lever#202 on a terminal: `lever up` attaches as soon as claude's pane is
-// alive only for a manager it created. A resume waits for claude's session
-// start, so a claude --continue whose pane is alive for a moment before it
-// exits for want of a conversation is caught before the attach, and the
-// manager is started fresh; the fresh manager is then attached at its pane.
+// On a terminal, `lever up` attaches at the pane only for a manager it
+// created. A resume waits for claude's session start, so a --continue whose
+// pane is briefly alive is caught before the attach and started fresh.
 func TestAttachResumeWithoutConversationStartsFresh(t *testing.T) {
 	for _, phase := range []string{"error", "suspended"} {
 		t.Run(phase, func(t *testing.T) {
@@ -456,9 +445,9 @@ func TestAttachResumeWithoutConversationReportsTheCause(t *testing.T) {
 	}
 }
 
-// lever#202 review: a fresh start lever made on its own whose skill check
-// failed is not recorded, and says so; the operator's --fresh is the way to
-// a recorded session.
+// A fresh start lever made on its own whose skill check failed is not
+// recorded, and says so; the operator's --fresh is the way to a recorded
+// session.
 func TestStartManagerFreshWithoutConversationUnrecordedSkill(t *testing.T) {
 	res := runNoConv(t, noConvCase{phase: "error", log: noConvLog,
 		opts: PlanOpts{FreshWithoutConversation: true}, empty: proven, backup: backupOK,

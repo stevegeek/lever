@@ -10,25 +10,20 @@ import (
 	"github.com/stevegeek/lever/internal/provision/loginfwd"
 )
 
-// ToolSupervisorPATH is the EXACT PATH the broker supervisor spawns command
-// tools with (brokerctl.Supervisor). Config validation resolves each
-// supervised tool's binary against this same string so a not-on-PATH command
-// is rejected loudly at config-load instead of failing opaquely (or silently)
-// at spawn time.
+// ToolSupervisorPATH is the exact PATH the broker supervisor spawns command
+// tools with; config validation resolves against the same string so a
+// missing command fails at config load, not at spawn time.
 const ToolSupervisorPATH = "/usr/local/bin:/usr/bin:/bin"
 
-// IsExecutableFile reports whether p is a regular file with at least one
-// executable bit set — the same shape check LookPathIn applies to each PATH
-// candidate, exported so a resolved/absolute supervised-tool command can be
-// re-verified (config validation, and doctor's spawnability probe) without
-// duplicating the stat logic.
+// IsExecutableFile reports whether p is a non-directory with an executable
+// bit set.
 func IsExecutableFile(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
-// LookPathIn resolves bin against an explicit colon-separated path list,
-// independent of the process environment (mirrors the supervisor's fixed PATH).
+// LookPathIn resolves bin against pathList, independent of the process
+// environment.
 func LookPathIn(bin, pathList string) (string, error) {
 	for _, dir := range filepath.SplitList(pathList) {
 		if dir == "" {
@@ -42,12 +37,7 @@ func LookPathIn(bin, pathList string) (string, error) {
 	return "", fmt.Errorf("%q not found in %q", bin, pathList)
 }
 
-// CheckHost runs the probes Validate deliberately leaves out because they
-// read the host: the tree's own .git, each supervised tool's binary, the
-// api_key_file's mode, and the Go toolchain remote access needs when this
-// lever carries no prebuilt login forwarder. Load runs it
-// after Validate; LoadNoHostChecks skips it for callers (tests, offline
-// inspection) that only need the shape.
+// CheckHost runs the probes Validate leaves out because they read the host.
 func (a *App) CheckHost() error {
 	if err := a.checkNonGitTree(); err != nil {
 		return err
@@ -66,10 +56,8 @@ func (a *App) CheckHost() error {
 }
 
 // ResolveToolCommand is the program a supervised tool's command names, as
-// the supervisor executes it: a bare name looked up on ToolSupervisorPATH
-// (never the caller's own PATH), a relative path joined onto dir (the
-// instance dir, which the supervisor also makes the tool's working
-// directory), an absolute path as is.
+// the supervisor executes it: a bare name is looked up on ToolSupervisorPATH,
+// never the caller's own PATH, and a relative path is joined onto dir.
 func ResolveToolCommand(bin, dir string) (string, error) {
 	switch {
 	case !strings.ContainsRune(bin, '/'):
@@ -82,9 +70,8 @@ func ResolveToolCommand(bin, dir string) (string, error) {
 }
 
 // InstanceDir is the instance root (the config file's directory), absolute.
-// Supervised tools run with it as their working directory, so a relative
-// path in a tool command means the same thing to the tree check
-// (checkHostPathsOutsideTree) as to the tool.
+// It is every supervised tool's working directory, so a relative path in a
+// tool command means the same to the tree check as to the tool.
 func (a *App) InstanceDir() string {
 	if abs, err := filepath.Abs(a.dir); err == nil {
 		return abs
@@ -92,9 +79,6 @@ func (a *App) InstanceDir() string {
 	return a.dir
 }
 
-// checkHost verifies a supervised tool's command is spawnable on the
-// supervisor's fixed PATH (or is an executable file when given as a path,
-// relative ones against dir).
 func (t Tool) checkHost(dir string) error {
 	if t.External || len(t.Command) == 0 {
 		return nil
@@ -110,8 +94,8 @@ func (t Tool) checkHost(dir string) error {
 	return nil
 }
 
-// checkAPIKeyFile requires the api-key file to exist at exactly 0600 (fail
-// closed on a world/group-readable key).
+// checkAPIKeyFile requires exactly 0600, failing closed on a group- or
+// world-readable key.
 func checkAPIKeyFile(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -123,13 +107,9 @@ func checkAPIKeyFile(path string) error {
 	return nil
 }
 
-// checkNonGitTree refuses a tree that is ITSELF a git repository (has its
-// own .git). R4's sibling isolation assumes a non-git tree; per-worker git
-// workflows are deferred (spec §13). It deliberately does not walk up to
-// ancestors: the pinned Scion's --workspace guard plain-mounts
-// the exact tree dir, so an ancestor .git elsewhere in the checkout is never
-// exposed and is harmless — a plain subdirectory inside a larger git repo is
-// fine.
+// checkNonGitTree refuses a tree that is itself a git repository: sibling
+// isolation assumes a non-git tree. Ancestors are not checked: scion mounts
+// the exact tree dir, so an ancestor .git is never exposed.
 func (a *App) checkNonGitTree() error {
 	if treeIsGitRepo(a.Tree) {
 		return fmt.Errorf("config: tree %q is itself a git repository; lever targets non-git trees "+
@@ -139,26 +119,15 @@ func (a *App) checkNonGitTree() error {
 	return nil
 }
 
-// remoteForwarderPrebuilt reports whether this lever carries the guest login
-// forwarder prebuilt for every guest architecture. A variable so tests can
-// answer both ways without depending on how the test binary was built.
+// remoteForwarderPrebuilt is a variable so tests do not depend on how the
+// test binary was built.
 var remoteForwarderPrebuilt = loginfwd.PrebuiltComplete
 
-// checkRemoteToolchain: remote access needs the guest-side login forwarder, a
-// small linux binary installed into the jail at apply time
-// (internal/backend/guest.EnsureHubLogin). A release or `make install` lever
-// embeds it for every guest architecture, and then no toolchain is needed. A
-// lever built without that step (`go build`, `go install`) cross-compiles it
-// at apply time and needs Go (loginfwd.Forwarder).
-//
-// Only `scion.binary:` is checked here, because that is the one mode that
-// needs no Go for scion itself — the other two do, and their
-// missing-toolchain diagnosis lives in `lever doctor` and in the build's own
-// failure. Checking at config load rather than during apply is deliberate:
-// EnsureHubLogin runs in the scion-server step, well after the
-// bootstrap-token step has opened a mint window and touched the hub, and
-// "your host has no compiler" is not something to discover half way through
-// that.
+// checkRemoteToolchain: a lever built without the embedded guest login
+// forwarder cross-compiles it at apply time and needs Go. Only
+// `scion.binary:` is checked, the one mode that needs no Go for scion
+// itself. It runs at config load because apply would only find out after it
+// has opened a mint window and touched the hub.
 func (a *App) checkRemoteToolchain() error {
 	if !a.Remote.Enabled || a.Scion.Binary == "" || remoteForwarderPrebuilt() {
 		return nil

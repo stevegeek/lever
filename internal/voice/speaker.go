@@ -15,19 +15,16 @@ import (
 	"time"
 )
 
-// ErrSpeakNotSent: the text never reached the speech engine (the program or
-// the model failed its check, or the text or voice was refused first). No
-// work was done, so its use of the limits is given back.
+// ErrSpeakNotSent: the text never reached the speech engine. No work was
+// done, so its use of the limits is given back.
 var ErrSpeakNotSent = errors.New("the text did not reach the speech engine")
 
 // ErrSpeakFailed: the engine ran and gave no usable audio.
 var ErrSpeakFailed = errors.New("the speech engine failed")
 
 // Speaker is the speech engine as lever-tool-tts runs it: one run of
-// sherpa-onnx-offline-tts per text (sherpa.go), as the tool's child, with
-// the program and the model checked before every run. There is no
-// long-running engine and no port: nothing listens but the tool's own
-// socket.
+// sherpa-onnx-offline-tts per text as the tool's child, with the program and
+// model checked before every run. No engine listens on any port.
 type Speaker struct {
 	Model    SpeechModel
 	ModelDir string // -models: the model's files are in SpeechDir(ModelDir, Model)
@@ -38,8 +35,7 @@ type Speaker struct {
 	MaxChars int
 	// MaxWait bounds one run; zero = 2 minutes.
 	MaxWait time.Duration
-	// Log receives lever's own lines; nil drops them.
-	Log func(format string, a ...any)
+	Log     func(format string, a ...any)
 
 	once sync.Once
 	run  chan struct{} // one run at a time
@@ -59,10 +55,10 @@ func (s *Speaker) logf(format string, a ...any) {
 }
 
 // Check runs before every run: the program must pass CheckServer and still
-// resolve to the real file it resolved to the first time, and the model's
-// files must verify. A full verify (every file hashed) runs only when the
-// files' stamp changed since the last one; a stamp that failed before
-// fails again without a hash. It returns the program's real path.
+// resolve to the file it resolved to the first time, and the model must
+// verify. Files are hashed only when their stamp changed; a stamp that
+// failed before fails again without a hash. It returns the program's real
+// path.
 func (s *Speaker) Check() (string, error) {
 	if why := s.Model.Pinned(); why != "" {
 		return "", fmt.Errorf("%w: %s", ErrUnpinned, why)
@@ -104,16 +100,14 @@ func (s *Speaker) Check() (string, error) {
 	return real, nil
 }
 
-// Ready reports whether a run could start now (Check passes).
 func (s *Speaker) Ready() bool {
 	_, err := s.Check()
 	return err == nil
 }
 
-// Speak turns text into a WAV (16-bit PCM, mono, at the model's rate) with
-// voice ("" = the default). The text is cleaned and bounded first
-// (SpeechInput). One run at a time; a caller waits for its turn until ctx
-// ends. The error never carries the text.
+// Speak turns text into a WAV with voice ("" = the default), after
+// SpeechInput. One run at a time; a caller waits until ctx ends. The error
+// never carries the text.
 func (s *Speaker) Speak(ctx context.Context, text, voice string) ([]byte, error) {
 	s.once.Do(func() { s.run = make(chan struct{}, 1) })
 	if voice == "" {
@@ -148,7 +142,7 @@ func (s *Speaker) Speak(ctx context.Context, text, voice string) ([]byte, error)
 		return nil, fmt.Errorf("%w: a private directory for the output: %v", ErrSpeakNotSent, err)
 	}
 	// The audio is on disk only while the engine writes it, in a 0700
-	// directory of the tool's: read, then removed.
+	// directory of the tool's.
 	defer os.RemoveAll(tmp)
 	out := filepath.Join(tmp, "speech.wav")
 	args := SherpaArgs(s.Model, s.ModelDir, v, s.Speed, s.Threads, out, in)
@@ -174,13 +168,11 @@ func (s *Speaker) Speak(ctx context.Context, text, voice string) ([]byte, error)
 	return wav, nil
 }
 
-// speakTempPrefix names the per-run output directories in -models.
 const speakTempPrefix = ".speak-"
 
-// RemoveStaleSpeech deletes the per-run output directories a killed tool
-// left in dir: those untouched for longer than any run may take (another
-// tool sharing the directory may be running one now). Best effort; the
-// tool runs it at start.
+// RemoveStaleSpeech deletes per-run output directories a killed tool left in
+// dir, once untouched for longer than any run may take (another tool sharing
+// the directory may be running one). Best effort.
 func RemoveStaleSpeech(dir string, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -196,13 +188,12 @@ func RemoveStaleSpeech(dir string, now time.Time) {
 	}
 }
 
-// staleSpeechAfter is well past the longest run (Speaker.MaxWait's default).
 const staleSpeechAfter = 10 * time.Minute
 
 // runEngine runs the program once: no stdin, stdout and stderr discarded
-// (the program prints the text, assumption 5), a reduced environment
-// (ChildEnv), dir as its working directory, its own process group, and
-// Pdeathsig on Linux. When ctx ends first the group is killed.
+// (the program prints the text, assumption 5), a reduced environment, its
+// own process group, and Pdeathsig on Linux. When ctx ends first the group
+// is killed.
 func runEngine(ctx context.Context, program, dir string, args []string) error {
 	cmd := exec.Command(program, args...)
 	cmd.Dir = dir

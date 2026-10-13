@@ -21,18 +21,13 @@ import (
 )
 
 // TestReadOnlyGuardLiveInRealGuest runs the read-only guard's live check
-// (jail.ContainerLiveMounts: the namespace ownership check, the kernel's
-// mount table and the device and inode match) through a real jail runner
-// against real rootless keep-id containers in a lever-provisioned guest.
-// Unit tests stub every guest answer; this is where the guest's own perl
-// and kernel, mountinfo and the tree mount's inode numbers meet the parser.
+// (jail.ContainerLiveMounts) against real rootless keep-id containers in a
+// lever-provisioned guest. Unit tests stub every guest answer; here the
+// guest's own perl, kernel mountinfo and inode numbers meet the parser.
 //
-// The container's tree mounts come from managerVolumes and the checked plan
-// from ManagerLivePlan over ReadOnlyEntryMounts, as the manager's create and
-// the broker's guard build them. What stands in for scion's container
-// creation: the workspace mount (the in-jail directory at /workspace), the
-// keep-id mapping (jail.ScionKeepIDUserns), and a podman run with no
-// network, no other mounts and an image of the guest's own binaries.
+// Mounts and plan are built as the manager's create and the broker's guard
+// build them. A podman run with the workspace mount, the keep-id mapping, no
+// network and an image of the guest's own binaries stands in for scion.
 //
 // Gated behind the integration tag and skipped unless LEVER_GUARD_VM_PREFIX
 // is set. tools/test/lima-e2e.sh runs it against its VM; by hand:
@@ -42,9 +37,8 @@ import (
 //	  go test -tags integration ./internal/apply/ -run TestReadOnlyGuardLiveInRealGuest -v
 //
 // It creates a guard-e2e-* scratch directory in the tree, an image and two
-// containers named lever-guard-e2e-*, and removes all of them. A run killed
-// before its cleanup leaves them behind; lima-e2e.sh removes them after the
-// step either way.
+// containers named lever-guard-e2e-*, and removes them; lima-e2e.sh also
+// removes them after the step in case the run was killed.
 func TestReadOnlyGuardLiveInRealGuest(t *testing.T) {
 	prefix := os.Getenv("LEVER_GUARD_VM_PREFIX")
 	if prefix == "" {
@@ -56,11 +50,10 @@ func TestReadOnlyGuardLiveInRealGuest(t *testing.T) {
 	}
 	pre := strings.Split(prefix, ",")
 
-	// guest runs a script in the guest as the run user, over stdin: a
-	// transport that re-joins the argv leaves stdin alone. Every path put
-	// into a script matches safeGuestPath, so none needs quoting. The
-	// deadline is per call: a hung limactl must fail the test while its
-	// cleanup can still run, not end in go test's timeout panic.
+	// The script goes over stdin because a transport that re-joins the argv
+	// leaves stdin alone. Every path put into a script matches
+	// safeGuestPath, so none needs quoting. The deadline is per call so a
+	// hung limactl fails the test while cleanup can still run.
 	guest := func(script string) (proc.Result, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), guestCallTimeout)
 		defer cancel()
@@ -118,9 +111,6 @@ for b in /usr/bin/sleep /usr/bin/unshare; do
 done
 tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 
-	// The manager's mounts for the read_only entries parent/entry, tools
-	// and kb as its create sends them to scion, over the workspace mount
-	// scion makes.
 	run := "podman run -d --pull=never --network=none " + jail.ScionKeepIDUserns + " -v " + jp + ":" + scion.ContainerWorkspace
 	for _, v := range managerVolumes(jp, app) {
 		if !safeGuestPath.MatchString(v.Source) || !safeGuestPath.MatchString(v.Target) {
@@ -132,9 +122,9 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 		}
 	}
 	sh(run + " --name " + held + " " + image + " /usr/bin/sleep infinity >/dev/null")
-	// The first process itself in a user and mount namespace made inside
-	// the container: what a root agent that ptraces it and calls setns
-	// would leave behind.
+	// The first process in a user and mount namespace made inside the
+	// container: what a root agent that ptraces it and calls setns would
+	// leave behind.
 	sh(run + " --name " + nested + " " + image + " /usr/bin/unshare --user --map-root-user --mount /usr/bin/sleep infinity >/dev/null")
 
 	pidOf := func(ref string) string {
@@ -151,13 +141,11 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 	heldPID, nestedPID := pidOf(held), pidOf(nested)
 	root := "/proc/" + heldPID + "/root"
 
-	// Under rootless keep-id the pid namespace's owner is the user
-	// namespace, which also owns the mnt namespace (what
-	// checkRuntimeNamespaces requires), and that user namespace is not the
-	// guest shell's. lsns is the independent witness, as root: as the run
-	// user it fails on Linux 7.0 guests (see jail.NamespaceReader). The
-	// guard's reader, run as the run user, must print the same ids and
-	// owners for both containers.
+	// Under rootless keep-id the pid namespace's owning user namespace also
+	// owns the mnt namespace (what checkRuntimeNamespaces requires) and is
+	// not the guest shell's. lsns, as root, is the independent witness: as
+	// the run user it fails on Linux 7.0 guests. The guard's reader, run as
+	// the run user, must print the same ids and owners.
 	namespaces := func(which, pid string) map[string][]string {
 		t.Helper()
 		out := sh("sudo -n lsns --raw --noheadings --output NS,TYPE,ONS --task " + pid)
@@ -231,11 +219,10 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 
 	// Directories replaced on the host. Where a mount stays on the
 	// directory it resolved, the check must report affected targets and no
-	// other. A tree mount that reaches a directory by its path (QEMU's
-	// 9p) moves the mount to the new directory instead: then nothing may
-	// be reported, the container must read the new content at each target,
-	// and a read-only target must still refuse a write. A mount on the old
-	// directory, unreported, fails the test.
+	// other. A tree mount that resolves by path (QEMU's 9p) follows the new
+	// directory instead: then nothing may be reported, the container must
+	// read the new content, and a read-only target must still refuse a
+	// write. A mount left on the old directory, unreported, fails the test.
 	reported := map[string]bool{}
 	hostReplace := func(stage string, affected, readOnly []string, replace func() error) {
 		t.Helper()
@@ -309,8 +296,7 @@ tar -C "$t" -cf - . | podman import - ` + image + ` >/dev/null`)
 
 	// kb moved away in the guest, whose mount namespace holds no mount
 	// there (the rename is refused only inside the container): the
-	// container's mount moves with the directory, so the target is no
-	// longer a mount point, or is one from another place.
+	// container's mount moves with the directory.
 	sh("mv " + jp + "/kb " + jp + "/kb.moved && mkdir " + jp + "/kb")
 	got := live("kb moved in the guest")
 	var kb []jail.LiveMountProblem

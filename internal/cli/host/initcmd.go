@@ -13,10 +13,8 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// newInitCmd scaffolds the framework operator skills into the instance tree
-// (idempotent; safe to re-run after every lever upgrade or worker addition).
-// Purely host-side file operations — never touches the jail, so it works
-// before the first `lever up`.
+// newInitCmd scaffolds the framework operator skills into the instance tree.
+// Idempotent and host-side only, so it works before the first `lever up`.
 func newInitCmd() *cobra.Command {
 	var force, check, adopt bool
 	cmd := &cobra.Command{
@@ -73,8 +71,7 @@ func newInitCmd() *cobra.Command {
 				case skillUnchanged:
 					cmd.Printf("• %s — unchanged\n", r.RelPath)
 				case skillAdopted:
-					// Version-lag warning applies to SKILL.md scaffolds only —
-					// the CLAUDE.md block entry carries no lever-version stamp.
+					// Only SKILL.md scaffolds carry a lever-version stamp.
 					if strings.HasSuffix(r.RelPath, "SKILL.md") && r.AdoptedVersion != cli.Version {
 						v := r.AdoptedVersion
 						if v == "" {
@@ -108,17 +105,11 @@ func newInitCmd() *cobra.Command {
 	return cmd
 }
 
-// ensureTreeDir creates the instance tree when it does not exist yet: the
-// documented order runs `lever init` before the first `lever up`, on a fresh
-// lever.yaml whose tree: directory the operator has not made. Only the tree
-// itself is created (0755), and only under a parent that already exists — a
-// missing parent means a typo'd tree:, not a fresh instance. A path that
-// exists is left alone, except a symlink that dangles: creating its target
-// would let a planted link choose where the scaffold lands, so it is
-// refused (an existing tree that is a link to a directory keeps working, as
-// the tree-confined writes resolve it). Mkdir does not follow a final
-// symlink, so a link planted between the Lstat and the Mkdir fails with
-// EEXIST rather than being followed.
+// ensureTreeDir creates the tree (0755) when missing, since `lever init` runs
+// before the first `lever up`; only under an existing parent, since a missing
+// parent means a typo. A dangling symlink is refused: creating its target
+// would let a planted link choose where the scaffold lands. Mkdir does not
+// follow a final symlink, so a link planted after the Lstat fails with EEXIST.
 func ensureTreeDir(tree string) error {
 	fi, err := os.Lstat(tree)
 	switch {

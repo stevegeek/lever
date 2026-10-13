@@ -2,15 +2,13 @@
 
 package apply_test
 
-// Live integration test for `lever apply`. This is the automated form of the
-// C6 hands-on validation: it brings up a real OrbStack jail, cross-compiles and
-// installs scion into it, loads the agent image, runs the full bring-up, starts
-// the manager agent with a prompt, and asserts the manager agent boots and
-// completes its task — then tears the jail down.
+// Live integration test for `lever apply`: it brings up a real OrbStack jail,
+// runs the full bring-up, and asserts the manager agent boots and completes
+// its task, then tears the jail down.
 //
-// It needs a real machine (OrbStack, a loaded agent image, a Claude credential),
-// so it is gated behind the `integration` build tag AND LEVER_IT=1, and skips
-// unless the three prerequisite paths are provided via env. Run with:
+// It needs OrbStack, a loaded agent image and a Claude credential, so it is
+// gated behind the `integration` build tag and LEVER_IT=1, and skips unless the
+// prerequisite paths are set. Run with:
 //
 //	LEVER_IT=1 \
 //	LEVER_IT_IMAGE=scionlocal/lever-claude:latest \
@@ -18,21 +16,14 @@ package apply_test
 //	LEVER_IT_CRED=$HOME/.scion/oauth-token \
 //	go test -tags integration -run TestApplyLiveHelloWorker -timeout 35m ./internal/apply/
 //
-// It proves the executor end-to-end. The success signal is the manager agent
-// reaching activity "completed" via `scion list` in the jail — NOT the HELLO
-// file landing in the host tree. scion mounts a project-config working COPY
-// (~/.scion/project-configs/<slug>__<id>) as /workspace in the agent container,
-// not the live host tree; the agent's writes reach the host only via a `scion
-// sync`, which is timing-dependent and out of the executor's control. Asserting
-// the host-tree file would make this test flaky (observed across C6 runs). See
-// the "agent workspace is a copy+sync" investigation task.
+// The success signal is the manager reaching activity "completed" via `scion
+// list`, not the HELLO file in the host tree: scion mounts a project-config
+// working copy as /workspace, and the agent's writes reach the host only via a
+// timing-dependent `scion sync`, so asserting the host file would be flaky.
 //
-// It does NOT exercise manager→worker dispatch: the stock agent image carries no
-// scion/lever tooling, so the manager cannot orchestrate the worker. The
-// prompt therefore has the manager do the task directly; a worker is still
-// configured (exercising load-image dedup + the worker dir's presence in the
-// tree) even though workers no longer get their own scion registration —
-// register-project registers only the instance tree once.
+// It does not exercise manager-to-worker dispatch: the stock agent image
+// carries no scion/lever tooling, so the manager does the task directly. A
+// worker is still configured to exercise load-image dedup.
 
 import (
 	"context"
@@ -94,7 +85,6 @@ workers:
 `, name, scionSrc, image, cred))
 
 	machine := "lever-" + name
-	// Always tear the jail down (atomically removes all in-jail agents/containers).
 	t.Cleanup(func() {
 		_ = exec.Command("orb", "delete", "-f", machine).Run()
 	})
@@ -102,7 +92,7 @@ workers:
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	// Drive the real CLI so the full buildApplyDeps wiring is exercised.
+	// The real CLI, so the full buildApplyDeps wiring is exercised.
 	apply := exec.CommandContext(ctx, "go", "run",
 		"github.com/stevegeek/lever/cmd/lever", "apply", filepath.Join(tree, "lever.yaml"))
 	apply.Env = append(os.Environ(), "DOCKER_HOST=") // don't leak a host docker socket into the run
@@ -110,9 +100,6 @@ workers:
 		t.Fatalf("lever apply failed: %v\n%s", err, out)
 	}
 
-	// The manager agent runs asynchronously inside the jail. Poll scion for its
-	// lifecycle state — the reliable, executor-controlled success signal. We want
-	// it to reach phase "running" and activity "completed" (task done).
 	runUser := strings.TrimSpace(orbOut(t, machine, "whoami"))
 	if runUser == "" {
 		t.Fatal("could not resolve jail run user")
@@ -133,8 +120,7 @@ workers:
 	}
 }
 
-// agentState returns the (phase, activity) of the named agent via `scion list`
-// run inside the jail. Missing agent or transient errors yield ("","").
+// agentState yields ("","") for a missing agent or a transient error.
 func agentState(t *testing.T, machine, runUser, name string) (string, string) {
 	t.Helper()
 	out := orbOut(t, machine, "-u", runUser, "env",
@@ -161,7 +147,6 @@ func agentState(t *testing.T, machine, runUser, name string) (string, string) {
 	return "", ""
 }
 
-// orbOut runs `orb -m <machine> <args...>` on the host and returns combined output.
 func orbOut(t *testing.T, machine string, args ...string) string {
 	t.Helper()
 	full := append([]string{"-m", machine}, args...)

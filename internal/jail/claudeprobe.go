@@ -15,9 +15,8 @@ import (
 )
 
 // ClaudeDelivered is what lever reads back of the Claude config boot wrote
-// into an agent's managed-settings file (wire.ManagedSettingsPath). It is
-// what the agent's claude got at its last start, unless the agent became
-// root and rewrote the file since.
+// into an agent's managed-settings file. The agent may have rewritten it
+// since.
 type ClaudeDelivered struct {
 	// AutoCompactWindow is the file's CLAUDE_CODE_AUTO_COMPACT_WINDOW; 0 when
 	// the file or the key is absent.
@@ -26,12 +25,9 @@ type ClaudeDelivered struct {
 	// zero when there is no such hook. Only the sum leaves the probe, never
 	// the text: compare it with NoteSum(the configured note).
 	NoteSum [32]byte
-	// AgentViewOff is set when the file turns Claude Code's background
-	// sessions and agent view off: disableAgentView true, or
-	// env.CLAUDE_CODE_DISABLE_AGENT_VIEW truthy (wire.DisableAgentViewEnv;
-	// Claude documents the two as equivalent). Boot writes both for every
-	// agent; unset means the write failed (an image without a writable
-	// /etc/claude-code) or the agent changed the file since.
+	// AgentViewOff is set when the file turns Claude Code's agent view off:
+	// disableAgentView true, or wire.DisableAgentViewEnv truthy (Claude
+	// documents the two as equivalent). Boot writes both for every agent.
 	AgentViewOff bool
 }
 
@@ -47,19 +43,14 @@ func NoteSum(note string) [32]byte {
 // a window that is not a decimal integer. It names no part of the file.
 var ErrClaudeShape = errors.New("reading agent claude settings: unexpected output (not JSON, or a window that is not an integer)")
 
-// claudeAbsentExit is the exit code of claudeSettingsScript when the file
-// does not exist (head would exit 1 for any failure).
+// claudeAbsentExit is not 1 because head exits 1 for any failure.
 const claudeAbsentExit = 3
 
-// claudeSettingsScript prints the managed-settings file named by $1,
-// bounded, or exits claudeAbsentExit when it does not exist.
 var claudeSettingsScript = `[ -e "$1" ] || exit ` + strconv.Itoa(claudeAbsentExit) + `; head -c 32768 "$1"`
 
 // ClaudeSettings reads back the Claude config in the agent's container. The
-// file is the agent's word like every probe's output: only an int and a sum
-// come back, and no error repeats the file. An absent file is a zero
-// ClaudeDelivered, not an error. ErrNoContainer when podman knows no such
-// container.
+// file is the agent's word: only an int, a sum and a flag come back, and no
+// error repeats the file. An absent file is a zero ClaudeDelivered.
 func (p AgentProbe) ClaudeSettings(ctx context.Context, ref string) (ClaudeDelivered, error) {
 	if err := checkRef(ref); err != nil {
 		return ClaudeDelivered{}, fmt.Errorf("reading agent claude settings: %w", err)
@@ -83,9 +74,8 @@ func (p AgentProbe) ClaudeSettings(ctx context.Context, ref string) (ClaudeDeliv
 	return parseClaudeDelivered(res.Stdout)
 }
 
-// parseClaudeDelivered reads the window, the sum of lever's note and the
-// agent-view switch out of a managed-settings file. A window outside wire's bounds still parses: the
-// caller compares it with the config, which is the finding.
+// parseClaudeDelivered: a window outside wire's bounds still parses; the
+// caller's comparison with the config is the finding.
 func parseClaudeDelivered(out string) (ClaudeDelivered, error) {
 	var f struct {
 		Env              map[string]any `json:"env"`
@@ -134,7 +124,6 @@ func parseClaudeDelivered(out string) (ClaudeDelivered, error) {
 	return d, nil
 }
 
-// envTruthy reports whether an env value turns a Claude Code switch on.
 func envTruthy(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes", "on":

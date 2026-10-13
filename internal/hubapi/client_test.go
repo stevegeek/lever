@@ -9,14 +9,12 @@ import (
 	"testing"
 )
 
-// reply is one canned response keyed by "METHOD /path".
 type reply struct {
 	status int
 	body   string
 	err    error
 }
 
-// fakeDoer answers from a script and records what was asked.
 type fakeDoer struct {
 	replies map[string]reply
 	// seq lets a key answer differently on successive calls (the DELETE then
@@ -141,9 +139,8 @@ func TestStripSharedDirIsIdempotent(t *testing.T) {
 }
 
 func TestStripSharedDirFailsWhen404ButDirStillThere(t *testing.T) {
-	// The bug the verify read exists to catch: the hub answers 404 for "no such
-	// route" and for "no such project" too, so a moved endpoint would otherwise
-	// read as a successful strip while every agent keeps the writable mount.
+	// The hub answers 404 for a missing route or project too, so a moved
+	// endpoint must not read as a successful strip.
 	f := stripScript()
 	f.replies["DELETE /api/v1/projects/"+leverUUID+"/shared-dirs/scratchpad"] = reply{status: 404}
 	f.replies["GET /api/v1/projects/"+leverUUID+"/shared-dirs"] =
@@ -159,7 +156,7 @@ func TestStripSharedDirFailsWhen404ButDirStillThere(t *testing.T) {
 }
 
 func TestStripSharedDirSurfacesForbidden(t *testing.T) {
-	// 403 means the PAT lacks project:update. It must fail loud — a silent pass
+	// 403 means the PAT lacks project:update. It must fail loud: a silent pass
 	// would leave the cross-agent mount in place.
 	f := stripScript()
 	f.replies["DELETE /api/v1/projects/"+leverUUID+"/shared-dirs/scratchpad"] =

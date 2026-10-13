@@ -5,47 +5,25 @@ import (
 	"strings"
 )
 
-// The agent TASK rides scion's argv: `scion start <agent> <task>` becomes a
-// harness command line that scion single-quotes and hands to `tmux
-// new-session` as ONE word, inside a `sh -c '…; echo $? > file'` wrapper.
-// tmux's client sends the whole command to its server in a single imsg
-// message capped at 16384 bytes (MAX_IMSGSIZE, a compile-time constant that
-// has held for years), so a task past roughly 16 KiB never starts its agent:
-// the container exits 1 and the only trace is "command too long" (or "failed
-// to send command") in its log (lever#30). Three layers pass the task along
-// and only the last one has a cap, which is why lever checks the size itself,
-// up front, by name.
+// TaskArgvBudget bounds the task on scion's tmux command line. scion start
+// hands the task to tmux new-session as one word, and tmux's client sends the
+// whole command in a single imsg capped at 16384 bytes (MAX_IMSGSIZE); a task
+// past that never starts its agent, and the only trace is "command too long"
+// in the container log.
 //
-// Budget derivation, MEASURED against the claude harness at the pinned scion
-// by replaying scion's exact construction through a real `sh -c` and summing
-// len(arg)+1 over the argv tmux receives — the sum tmux compares to the cap:
-// tmux 3.6b accepts 16362 and refuses 16365. The fixed part — the five-verb
-// tmux chain, the `sh -c` wrapper, claude's three base args, the task's own
-// two quotes and the exit-code redirection — costs 261 bytes, leaving 16101
-// for the task itself. TaskArgvBudget keeps 741 of those in reserve as slack
-// against harness-arg drift (a renamed flag, an extra base arg), so the check
-// stays on the safe side of the cliff rather than on it.
+// Measured against the claude harness at the pinned scion (tmux 3.6b), the
+// fixed part of the command costs 261 bytes, leaving 16101 for the task; the
+// budget keeps 741 in reserve against harness-arg drift.
 //
-// The check covers the TASK only. A scion template that sets `system_prompt`
-// puts its own text on the same command line, uncounted; lever's overlay
-// template keeps that empty (internal/backend/guest/template.go), so nothing
-// lever deploys today adds to the sum.
-//
-// Standing instructions do not belong here at all: StartOpts.Instructions
-// delivers them as a file through scion's agent_instructions channel, which
-// has no limit of this kind (CheckInstructions holds the one it does have).
+// It covers the task only: a template system_prompt would add uncounted text,
+// so lever's overlay template keeps it empty. Standing instructions travel as
+// a file instead (see CheckInstructions).
 const TaskArgvBudget = 15 * 1024
 
-// apostropheArgvCost is what one apostrophe adds beyond its own byte by the
-// time tmux sees it: scion's shellQuote rewrites each apostrophe as four
-// bytes — quote, backslash, quote, quote — spelled out in words here because
-// gofmt's doc-comment formatter turns an adjacent pair of single quotes into
-// a curly double quote, which is what a reader would otherwise see.
-// scion does quote the whole wrapper a second time when it builds the tmux
-// command STRING, but that string is run through the container's own `sh -c`
-// (pkg/runtime/common.go), which strips the outer pass before tmux parses a
-// single word — so only the first pass counts. Measured: ten apostrophes add
-// 40 bytes to the argv sum, ten plain characters add 10.
+// apostropheArgvCost is what one apostrophe adds beyond its own byte: scion's
+// shellQuote rewrites each as four bytes (quote, backslash, quote, quote).
+// scion's second quoting pass is stripped by the container's sh -c before
+// tmux sees it, so only the first counts.
 const apostropheArgvCost = 3
 
 // TaskArgvBytes is the size the task occupies on scion's tmux command line:
@@ -71,15 +49,11 @@ func (e *TaskTooLongError) Error() string {
 		e.Bytes, apostropheArgvCost, e.Budget)
 }
 
-// TaskFlagError reports a flag-shaped task (see flagShaped). A task is never a flag:
-// scion's start parses flags interspersed with positionals, so such a task
-// would bind as one of scion's own flags (`--config=<path>` authors the
-// agent's inline config; `--no-auth`, `--attach`, `--type`, `--thinking-level`
-// exist too) instead of being the first user turn. Client.Start already
-// places the task behind a `--` terminator; this is the second layer, so the
-// caller learns why by name rather than starting an agent on a task of `--`.
+// TaskFlagError reports a flag-shaped task (see flagShaped). scion start
+// parses interspersed flags, so such a task would bind as one of scion's own
+// flags (--config=<path> authors the agent's inline config). Client.Start
+// also places the task behind --; this is the second layer.
 type TaskFlagError struct {
-	// Prefix is the task's first token, for the message.
 	Prefix string
 }
 
@@ -88,10 +62,8 @@ func (e *TaskFlagError) Error() string {
 }
 
 // CheckTask returns a *TaskTooLongError when task cannot start an agent and a
-// *TaskFlagError when it begins with "-"; nil otherwise. Pure and cheap: call
-// it as early as the task is known (config load, request decode) so the
-// failure is a named error at the seam that owns the text, and Start calls it
-// again as the backstop for every path.
+// *TaskFlagError when it is flag-shaped; nil otherwise. Call it as early as
+// the task is known; Start calls it again as the backstop.
 func CheckTask(task string) error {
 	if n := TaskArgvBytes(task); n > TaskArgvBudget {
 		return &TaskTooLongError{Bytes: n, Budget: TaskArgvBudget}
@@ -104,10 +76,8 @@ func CheckTask(task string) error {
 }
 
 // flagShaped reports whether task's first token would parse as a flag: one or
-// two dashes followed by a letter ("-b", "--config=/x"), or a token made only
-// of dashes ("--", the terminator). A markdown list item ("- do x") or a
-// negative number ("-1") is a task, not a flag, and Client.Start's `--`
-// terminator keeps even those inert.
+// two dashes followed by a letter, or a token made only of dashes. A markdown
+// list item ("- do x") or a negative number is a task.
 func flagShaped(task string) bool {
 	tok, _, _ := strings.Cut(task, " ")
 	if tok == "" || tok[0] != '-' {
@@ -115,8 +85,6 @@ func flagShaped(task string) bool {
 	}
 	rest := strings.TrimLeft(tok, "-")
 	if rest == "" {
-		// Dashes alone: a task that IS the terminator ("--") is refused; a
-		// list item ("- do x") has text after its dash and is a task.
 		return tok == task
 	}
 	c := rest[0]
@@ -124,23 +92,19 @@ func flagShaped(task string) bool {
 }
 
 // MaxInstructionsBytes caps StartOpts.Instructions. The text travels inside
-// scion's hub create request, and the hub↔runtime-broker control channel
-// caps one message at 1 MiB (scion pkg/wsprotocol DefaultMaxMessageSize);
-// half of that leaves room for the rest of the request and is still far
-// beyond any operating manual. Named here because the alternative is an
-// opaque transport error several layers below the config key that caused it.
+// scion's hub create request, and the hub-to-runtime-broker channel caps one
+// message at 1 MiB (pkg/wsprotocol DefaultMaxMessageSize); exceeding it would
+// surface as an opaque transport error.
 const MaxInstructionsBytes = 512 * 1024
 
-// instructionsURIPrefix: scion resolves the agent_instructions value through
-// api.ResolveContent BEFORE provisioning, and a value that begins with this
-// prefix is read as a file reference (absolute for file:///, else relative to
-// the scion process's cwd in the jail) instead of being staged as text.
+// instructionsURIPrefix: scion resolves agent_instructions through
+// api.ResolveContent, which reads a value with this prefix as a file
+// reference in the jail instead of as text.
 const instructionsURIPrefix = "file://"
 
 // CheckInstructions returns a named error when text cannot be sent as an
 // agent's standing instructions: over MaxInstructionsBytes, or beginning with
-// file://, which scion would silently reinterpret as a path. Empty passes —
-// it means "send no config at all" (see StartOpts.Instructions).
+// file://, which scion would silently reinterpret as a path. Empty passes.
 func CheckInstructions(text string) error {
 	if n := len(text); n > MaxInstructionsBytes {
 		return fmt.Errorf("agent instructions are %d bytes, over lever's %d-byte cap (they travel inside a scion hub request capped at 1 MiB)", n, MaxInstructionsBytes)

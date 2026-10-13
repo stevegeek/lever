@@ -118,7 +118,6 @@ func (s *stubSvc) Transcribe(context.Context, []byte) (string, error) {
 	return s.text, s.err
 }
 
-// serveDictate serves h on a fresh socket until the test ends.
 func serveDictate(t *testing.T, h http.Handler) string {
 	t.Helper()
 	p := filepath.Join(shortDir(t), "s", "d.sock")

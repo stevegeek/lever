@@ -130,7 +130,6 @@ func TestParseFlagsOpsDefaultIsPushOnly(t *testing.T) {
 	if !slices.Equal(opNames(ops), []string{"push"}) {
 		t.Fatalf("default operations %v", opNames(ops))
 	}
-	// push is the same operation as before -ops existed.
 	push := ops[0]
 	if len(push.Params) != 3 || push.Params[0].Name != "repo" || push.Params[1].Name != "branch" || push.Params[2].Name != "bundle" ||
 		push.CaveatParam["repo"] != "repo" || len(push.CaveatParam) != 1 || push.Backstop == nil {
@@ -227,8 +226,8 @@ func TestReleaseOperationHasNoNotes(t *testing.T) {
 	if !strings.Contains(ops[0].Description, "no GitHub release") {
 		t.Fatalf("description %q", ops[0].Description)
 	}
-	// A stale caller that still sends notes gets a named refusal before any
-	// GitHub call (the Ops is nil: a call would panic).
+	// A caller that sends notes gets a named refusal before any GitHub call
+	// (the Ops is nil: a call would panic).
 	v, err := ops[0].Handler(captool.ValidatedContext{Operation: "release"}, map[string]string{"repo": "stevegeek/lever", "tag": "v1.2.3", "notes": ""})
 	m, _ := v.(map[string]any)
 	if err != nil || m["ok"] != false || !strings.Contains(m["error"].(string), "release takes no notes") {

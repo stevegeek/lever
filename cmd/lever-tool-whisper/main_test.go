@@ -20,9 +20,8 @@ func pinModel(t *testing.T) {
 	t.Cleanup(func() { voice.Models = old })
 }
 
-// shortTemp is a temporary directory under /tmp: a socket path in it stays
-// within the Unix socket limit however long TMPDIR is (macOS), so the tree
-// checks are what the tests reach.
+// shortTemp is a temporary directory under /tmp, so a socket path in it
+// stays within the Unix socket limit however long TMPDIR is (macOS).
 func shortTemp(t *testing.T) string {
 	t.Helper()
 	d, err := os.MkdirTemp("/tmp", "lv")

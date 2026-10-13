@@ -16,17 +16,14 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// tarImageSpec describes one image to write into a synthetic docker archive.
 type tarImageSpec struct {
 	repoTags []string
 	labels   map[string]string
 	legacy   bool // "<hex>.json" config path instead of "blobs/sha256/<hex>"
 }
 
-// writeDockerArchive writes a docker-save-shaped tar to dir: a (fake) layer
-// blob first, the config blobs, then manifest.json LAST — the order docker
-// 29 emits, which is what makes a stream-only reader pay for the whole
-// archive. Returns the path and the config digest of each image, in order.
+// writeDockerArchive writes manifest.json last, the order docker 29 emits,
+// which makes a stream-only reader pay for the whole archive.
 func writeDockerArchive(t *testing.T, dir string, specs ...tarImageSpec) (string, []string) {
 	t.Helper()
 	path := filepath.Join(dir, "images.tar")
@@ -177,8 +174,7 @@ func TestFindTarImageErrorListsAvailableTags(t *testing.T) {
 }
 
 // TestLoadImageTarStreamsFileIntoPodmanLoad: the archive's bytes reach the
-// jail's `podman load` on stdin, exactly as the docker-save path does, and
-// host docker is never invoked.
+// jail's `podman load` on stdin, and host docker is never invoked.
 func TestLoadImageTarStreamsFileIntoPodmanLoad(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
 	want, _ := os.ReadFile(path)
@@ -349,10 +345,10 @@ func TestSameImageRef(t *testing.T) {
 	}
 }
 
-// R4: a docker archive can carry several images and `podman load` imports
-// every one of them, so the policy (the registry allowlist, wired from
-// config) is applied to EVERY RepoTag before a byte is streamed. A refused
-// tag is named with its reason, and nothing reaches the jail.
+// A docker archive can carry several images and `podman load` imports every
+// one of them, so the registry policy applies to every RepoTag before a byte
+// is streamed. A refused tag is named with its reason, and nothing reaches
+// the jail.
 func TestLoadImageTarRefusesDisallowedTagBeforeLoad(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(),
 		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}},
@@ -374,7 +370,6 @@ func TestLoadImageTarRefusesDisallowedTagBeforeLoad(t *testing.T) {
 	}
 }
 
-// An archive whose every tag passes the policy loads as before.
 func TestLoadImageTarLoadsWhenEveryTagIsAllowed(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(),
 		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}},

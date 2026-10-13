@@ -6,53 +6,33 @@ import (
 	"strings"
 )
 
-// Tmux server cores (lever#201). The agent's tmux server holds claude's
-// pane, so a tmux crash takes the agent down; a 3.5a server segfaulted in a
-// manager and left nothing to debug it with. Every Lima guest therefore
-// keeps the core of a crashed tmux server:
+// Tmux server cores. The agent's tmux server holds claude's pane, so every
+// Lima guest keeps the core of a crashed tmux server:
 //
-//   - kernel.core_pattern pipes every core dump in the guest to a small
-//     handler lever installs. A piped dump ignores the crashing process's
-//     RLIMIT_CORE (the kernel sets no limit for a pipe; only a limit of
-//     exactly 1 byte stops it, a recursion guard), so the agent
-//     container's default soft limit of 0 does not stop it, and nothing in
-//     the agent image or the container's limits changes.
-//   - The handler keeps a dump only when the process is named "tmux:
-//     server" (tmux's server process) or "tmux", and drops every other one.
+//   - kernel.core_pattern pipes every core dump to a handler lever installs.
+//     A piped dump ignores RLIMIT_CORE (except a limit of exactly 1 byte), so
+//     the container's soft limit of 0 does not stop it.
+//   - The handler keeps a dump only for a process named "tmux: server" or
+//     "tmux", and drops every other one.
 //
-// Where the core lands, and why: in the guest, in a root-only directory
-// (CoreDir, mode 0700, files 0600), never in the agent's container and
-// never on the host. A tmux server core holds the terminal contents of the
-// agent's panes; the guest keeps it, and an operator copies one out by hand
-// to debug it.
+// Cores land in the guest in a root-only directory (CoreDir, 0700, files
+// 0600), never in the agent's container or on the host: a core holds the
+// terminal contents of the agent's panes.
 //
-// The agent is hostile, so the handler treats everything from the crash as
-// untrusted: the process name is the process's own choice and is only
-// compared, never put in a path; the pid and time must be digits. An agent
-// can crash its own processes named "tmux: server" at will, so the handler
-// bounds the disk it can fill: one dump at a time (a non-blocking lock; a
-// dump that finds it held is dropped), each cut at CoreMaxBytes, at most
-// CoreKeep cores (the oldest is removed first), and none while the newest
-// kept core is younger than CoreMinGap (a crash loop keeps one core a
-// minute, not one per crash). It also bounds what the dumps cost: the
-// kernel runs the handler as root in the guest's root cgroup, outside the
-// container's limits, so kernel.core_pipe_limit (CorePipeLimit) caps how
-// many handlers run at once; the kernel skips a dump past it. With a
-// non-zero limit the kernel also waits for the handler before it reaps the
-// crashed process, which the handler's bounded read keeps short. The same
-// freedom lets it drop or push out a real core with fakes: a kept core is
-// untrusted diagnostic material, not proof. The handler writes only into a real,
-// root-owned directory (no symlink).
+// The agent is hostile, so everything from the crash is untrusted: the
+// process name is only compared, never put in a path; the pid and time must
+// be digits. The agent can crash "tmux: server" processes at will, so the
+// handler bounds the disk it fills: one dump at a time (non-blocking lock),
+// each cut at CoreMaxBytes, at most CoreKeep cores, none while the newest is
+// younger than CoreMinGap. The kernel runs the handler as root outside the
+// container's limits, so kernel.core_pipe_limit caps concurrent handlers. A
+// kept core may be a fake: it is untrusted diagnostic material, not proof.
+// The handler writes only into a real, root-owned directory (no symlink).
 //
-// The guest's own core handler, if any, is replaced: Ubuntu's apport is
-// masked (its service rewrites core_pattern at boot) and other processes'
-// dumps are dropped. A lever guest runs nothing else to debug.
-//
-// EnsureCrashRecovery converges it on every apply and up. Lima only: an
-// OrbStack machine shares OrbStack's one kernel, and
-// kernel.core_pattern is not namespaced, so lever does not change it.
+// Ubuntu's apport is masked (its service rewrites core_pattern at boot).
+// Lima only: kernel.core_pattern is not namespaced, and an OrbStack machine
+// shares OrbStack's one kernel.
 
-// Guest paths of the core-capture files.
 const (
 	CoreHandlerPath = "/usr/local/libexec/lever-core-handler"
 	CoreSysctlPath  = "/etc/sysctl.d/99-lever-core.conf"
@@ -60,9 +40,8 @@ const (
 )
 
 // CoreMaxBytes caps one kept core; CoreKeep is how many are kept.
-// CoreMinGap is the least time between two kept cores, in seconds: a dump
-// while the newest kept core is younger is dropped. CorePipeLimit is
-// kernel.core_pipe_limit, how many piped dumps the kernel runs at once.
+// CoreMinGap is the least time between two kept cores, in seconds.
+// CorePipeLimit is kernel.core_pipe_limit.
 const (
 	CoreMaxBytes  = 256 << 20
 	CoreKeep      = 2
@@ -70,8 +49,7 @@ const (
 	CorePipeLimit = 1
 )
 
-// corePaths are the paths the core-capture script writes; a test points
-// them into a temp dir.
+// corePaths is a test seam.
 type corePaths struct {
 	Handler, Sysctl, Dir string
 	OwnerUID             int // the core directory's owner: root in the guest
@@ -79,17 +57,14 @@ type corePaths struct {
 
 var realCorePaths = corePaths{Handler: CoreHandlerPath, Sysctl: CoreSysctlPath, Dir: CoreDir, OwnerUID: 0}
 
-// corePattern is the kernel.core_pattern value: the handler with the global
-// pid, the dump time and the process name (last: it may hold spaces, and
-// older kernels split it into words).
+// corePattern puts the process name last: it may hold spaces, and older
+// kernels split it into words.
 func corePattern(handler string) string {
 	return "|" + handler + " %P %t %e"
 }
 
-// coreHandlerScript is the handler the kernel runs, as root, for every core
-// dump in the guest, with the core on its standard input. dir holds the
-// kept cores and must be a real directory owned by ownerUID (root, 0, in
-// the guest).
+// coreHandlerScript is run by the kernel as root for every core dump in the
+// guest. dir must be a real directory owned by ownerUID (root in the guest).
 func coreHandlerScript(dir string, ownerUID, maxBytes, keep, minGap int) string {
 	q := shellSingleQuote
 	return `#!/bin/sh
@@ -138,12 +113,9 @@ exit 0
 `
 }
 
-// coreCaptureScript is the root script that converges the capture (run by
-// EnsureCrashRecovery, in a subshell of its script): it writes
-// the handler and the sysctl file when their content differs, creates the
-// core directory, stops and masks apport (whose service sets its own
-// core_pattern at boot, and a package upgrade could re-enable), and sets core_pattern live on every run. A failed write exits
-// 1; a failed sysctl or apport disable is a warning.
+// coreCaptureScript sets core_pattern live on every run, since apport or a
+// package upgrade can change it. A failed write exits 1; a failed sysctl or
+// apport disable is a warning.
 func coreCaptureScript(p corePaths) string {
 	q := shellSingleQuote
 	var b strings.Builder

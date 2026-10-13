@@ -39,7 +39,6 @@ func prebuiltTree(t *testing.T, digest string, bins map[string][]byte) fstest.Ma
 	return fsys
 }
 
-// withEmbedded swaps the tree Prebuilt reads for the duration of a test.
 func withEmbedded(t *testing.T, fsys fstest.MapFS) {
 	t.Helper()
 	old := embedded
@@ -59,7 +58,7 @@ func TestPrebuiltSelection(t *testing.T) {
 		{"a plain checkout carries only the placeholder", prebuiltTree(t, "", nil), "arm64", "", false},
 		{"current digest, both arches", prebuiltTree(t, SourceDigest(), both), "arm64", "ARM", true},
 		{"current digest, amd64", prebuiltTree(t, SourceDigest(), both), "amd64", "AMD", true},
-		// Built from other source (main.go changed since): stale, never used.
+		// Built from other source: stale, never used.
 		{"stale digest", prebuiltTree(t, "0123abcd", both), "arm64", "", false},
 		// An interrupted generation writes no digest.
 		{"binaries without a digest", prebuiltTree(t, "", both), "arm64", "", false},
@@ -114,8 +113,7 @@ func TestSourceDigestCoversSourceModAndFlags(t *testing.T) {
 	}
 }
 
-// With a current prebuilt, Forwarder stages it and never asks for Go — the
-// whole point for a build-free scion.binary host.
+// With a current prebuilt, Forwarder stages it and never asks for Go.
 func TestForwarderUsesThePrebuiltWithoutGo(t *testing.T) {
 	isolateCache(t)
 	withEmbedded(t, prebuiltTree(t, SourceDigest(), map[string][]byte{"amd64": []byte("AMD"), "arm64": []byte("ARM")}))
@@ -140,8 +138,7 @@ func TestForwarderUsesThePrebuiltWithoutGo(t *testing.T) {
 	}
 }
 
-// Without one, Forwarder falls back to the host build — the dev and
-// `go install` path, unchanged from before.
+// Without one, Forwarder falls back to the host build.
 func TestForwarderFallsBackToABuild(t *testing.T) {
 	isolateCache(t)
 	withEmbedded(t, prebuiltTree(t, "stale", map[string][]byte{"arm64": []byte("ARM")}))
@@ -159,9 +156,8 @@ func TestForwarderFallsBackToABuild(t *testing.T) {
 
 // TestPrebuiltLoginForwarderEmbedded is the release gate: the goreleaser
 // before-hook runs it with LEVER_REQUIRE_PREBUILT_LOGINFWD=1 right after
-// genprebuilt, so a release can never ship without the embed (or with a stale
-// one) and quietly need Go on the host again. Skipped everywhere else — a
-// plain checkout legitimately carries only the placeholder.
+// genprebuilt, so a release never ships without a current embed. Skipped
+// elsewhere: a plain checkout carries only the placeholder.
 func TestPrebuiltLoginForwarderEmbedded(t *testing.T) {
 	if os.Getenv("LEVER_REQUIRE_PREBUILT_LOGINFWD") != "1" {
 		t.Skip("set LEVER_REQUIRE_PREBUILT_LOGINFWD=1 after running genprebuilt")

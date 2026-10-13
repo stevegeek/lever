@@ -11,19 +11,16 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// reload must stop the running broker BEFORE it does anything else, so the
-// subsequent apply spawns a fresh broker on the edited config (the whole point
-// of the verb). We prove the ordering: with a backend factory that errors
-// immediately, the command still clears the broker pid file (StopBroker ran)
-// before failing — StopBroker precedes buildApplyDeps.
+// reload must stop the broker before anything else so the apply spawns one on
+// the edited config. With a factory that errors at once, the pid file is still
+// cleared: StopBroker precedes buildApplyDeps.
 func TestReloadStopsBrokerBeforeApply(t *testing.T) {
 	p := writeTmpConfig(t)
 	stateDir := state.ForConfig(filepath.Dir(p))
 	if err := os.MkdirAll(stateDir.Dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// A garbage pid file: StopBroker parses it, finds it unusable, and removes
-	// it (idempotent path). Its removal is our proof StopBroker executed.
+	// A garbage pid file: StopBroker removes it, which proves it ran.
 	pidPath := stateDir.PID()
 	if err := os.WriteFile(pidPath, []byte("not-a-pid"), 0o644); err != nil {
 		t.Fatal(err)

@@ -1,9 +1,5 @@
 package wire
 
-// Route paths served by the broker. The broker registers each on its mux and
-// every client (agent, captool, cli) builds its URL from the same constant, so
-// a path can never drift between a producer and a consumer.
-
 // Jail (mTLS) listener routes.
 const (
 	PathEnrol            = "/enrol"
@@ -23,8 +19,8 @@ const (
 	PathDirectiveCheck   = "/directive/check"
 	PathDirectivePreview = "/directive/preview"
 	PathMessageVerify    = "/message/verify"
-	// PathChatVerify is the 0.27 route agent images of that release post
-	// to; it answers like PathMessageVerify.
+	// PathChatVerify is an alias of PathMessageVerify kept for older agent
+	// images.
 	PathChatVerify = "/chat/verify"
 	// PathContacts lists the contacts an agent may message (remote.agent_messages).
 	PathContacts = "/contacts"
@@ -43,8 +39,8 @@ const (
 	PathBumpEpoch = "/bump-epoch"
 	PathRevoke    = "/revoke"
 	PathBootstrap = "/bootstrap"
-	// PathWorkerTicket mints AND stages a worker's enrolment ticket through
-	// the broker's guest channel (the acceptance harness's host-side mint).
+	// PathWorkerTicket mints and stages a worker's enrolment ticket through
+	// the broker's guest channel.
 	PathWorkerTicket = "/worker-ticket"
 )
 
@@ -55,10 +51,9 @@ const PathOperatorNote = "/operator/note"
 // worker, on the same 0600 operator socket (never the admin listener).
 const PathOperatorWake = "/operator/wake"
 
-// PathOperatorAgentMessagesMatch is the remote proxy's question, on the same
-// 0600 operator socket, which agent rows of a contact's history the agent
-// ledger recorded (remote.agent_messages). Never on the jail or admin
-// listener: it binds ledger records.
+// PathOperatorAgentMessagesMatch asks which agent rows of a contact's history
+// the agent ledger recorded. It is served only on the 0600 operator socket,
+// never the jail or admin listener, because it binds ledger records.
 const PathOperatorAgentMessagesMatch = "/operator/agent-messages/match"
 
 // Operator-directive (UDS) admin channel routes.

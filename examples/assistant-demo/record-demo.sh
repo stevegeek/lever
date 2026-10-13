@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Record an asciinema cast of the assistant-demo. Produces demo.cast in this dir.
+# Record an asciinema cast of the assistant-demo into demo.cast in this dir.
 #
-# Requires: asciinema (https://asciinema.org) on PATH, plus the demo prerequisites
-# from README.md (lever + the agent image built, the two demo tools on PATH, an
-# OAuth token at ~/.scion/oauth-token, and weather-stub already running in
-# another terminal). Run it FROM this directory.
+# Requires asciinema on PATH plus the demo prerequisites from README.md
+# (weather-stub already running in another terminal). Run it from this
+# directory:
 #
 #   ./record-demo.sh
 #
-# The deterministic setup (version, dry-run, doctor) is captured automatically;
-# then the script hands you an interactive `lever up` so the morning standup —
-# the payoff — is a real recorded conversation, not a canned one. Type `morning`
-# at the manager, watch the standup, then Ctrl-b d to detach and stop the cast.
+# The setup (version, dry-run, doctor) is scripted; then you get an
+# interactive `lever up`. Type `morning` at the manager, watch the standup,
+# then Ctrl-b d to detach and stop the cast.
 set -euo pipefail
 
 command -v asciinema >/dev/null || { echo "install asciinema first: https://asciinema.org" >&2; exit 1; }
@@ -19,9 +17,6 @@ command -v lever     >/dev/null || { echo "lever not on PATH — run 'make all' 
 
 CAST="${1:-demo.cast}"
 
-# The recorded session: a short scripted intro over REAL commands, then the live
-# standup. `asciinema rec -c` records the given command; we drive the setup with
-# a heredoc and drop into `lever up` for the interactive part.
 asciinema rec --overwrite --title "lever assistant-demo" "$CAST" -c 'bash -lc "
   set -e
   echo \"\$ lever version\";           lever version;            sleep 1

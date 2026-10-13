@@ -181,8 +181,7 @@ func TestOpenTightensAnExistingDir(t *testing.T) {
 	}
 }
 
-// A valid record of another agent in this agent's file (copied there by
-// hand, or a bug) is not this agent's.
+// A valid record of another agent in this agent's file is not this agent's.
 func TestListSkipsAValidRecordOfAnotherAgent(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "fl")
 	l, _ := Open(dir)
@@ -223,8 +222,8 @@ func TestAddWithBuildsTheRecordUnderTheLock(t *testing.T) {
 	}
 }
 
-// Two uploads at once: the one that started first (its At, the time a list
-// shows) finishes, and is appended, last. List orders by At.
+// Two uploads at once: the one that started first is appended last. List
+// orders by At.
 func TestListOrdersByTheShownTime(t *testing.T) {
 	l, err := Open(filepath.Join(t.TempDir(), "files-ledger"))
 	if err != nil {

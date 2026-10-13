@@ -83,13 +83,11 @@ func newFakeGH(t *testing.T) *fakeGH {
 	return f
 }
 
-// review is one review as the reviews API returns it.
 func review(id int64, login, typ, state, commit string) map[string]any {
 	return map[string]any{"id": id * 1000, "state": state, "commit_id": commit, "author_association": "COLLABORATOR",
 		"user": map[string]any{"login": login, "id": id, "type": typ}}
 }
 
-// withAssoc sets a review's author_association.
 func withAssoc(r map[string]any, a string) map[string]any {
 	r["author_association"] = a
 	return r
@@ -671,7 +669,6 @@ func TestRelease(t *testing.T) {
 	if !strings.Contains(log, "github.release") || !strings.Contains(log, "tag=v0.36.0") || !strings.Contains(log, "target="+shaMain) {
 		t.Fatalf("audit %s", log)
 	}
-	// The default web base.
 	o.WebBase = ""
 	res, err = o.Release(context.Background(), "manager", repo, "v0.37.0")
 	if err != nil || res.URL != "https://github.com/"+repo+"/tree/v0.37.0" {

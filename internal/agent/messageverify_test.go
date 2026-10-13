@@ -53,7 +53,7 @@ func TestMCPMessageVerifyNeedsBothFields(t *testing.T) {
 
 // TestMCPToolsListAdvertisesMessageVerify: both names are listed, each with a
 // plain object schema (a top-level combinator makes Claude Code drop the
-// tool, #24) that offers ref.
+// tool) that offers ref.
 func TestMCPToolsListAdvertisesMessageVerify(t *testing.T) {
 	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
 	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)

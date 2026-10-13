@@ -75,8 +75,7 @@ func TestCheckAgentCert_NoLogFilePasses(t *testing.T) {
 	}
 }
 
-// stampBrokerPID writes a pid file whose mtime is the broker's start time
-// (reuses writeBrokerPID from doctor_checks_test.go, then backdates the mtime).
+// stampBrokerPID writes a pid file whose mtime is the broker's start time.
 func stampBrokerPID(t *testing.T, st state.State, started time.Time) {
 	t.Helper()
 	writeBrokerPID(t, st, 12345)
@@ -88,8 +87,8 @@ func stampBrokerPID(t *testing.T, st state.State, started time.Time) {
 func TestCheckAgentCert_RejectionBeforeBrokerRestartPasses(t *testing.T) {
 	now := time.Now()
 	st := state.State{Dir: t.TempDir()}
-	// Rejection is recent (inside the window) but the broker restarted AFTER it
-	// — the restart is the remedy, so the check must not cry wolf post-heal.
+	// A recent rejection, but the broker restarted after it: the restart is the
+	// remedy, so the check must not cry wolf.
 	writeBrokerLog(t, st, certExpiredLine(now.Add(-2*time.Minute))+"\n")
 	stampBrokerPID(t, st, now.Add(-1*time.Minute))
 	if r := checkAgentCert(st, now); !r.ok {
@@ -100,7 +99,7 @@ func TestCheckAgentCert_RejectionBeforeBrokerRestartPasses(t *testing.T) {
 func TestCheckAgentCert_RejectionAfterBrokerStartStillFails(t *testing.T) {
 	now := time.Now()
 	st := state.State{Dir: t.TempDir()}
-	// Broker started BEFORE the rejection: the current broker is failing.
+	// Broker started before the rejection: the current broker is failing.
 	writeBrokerLog(t, st, certExpiredLine(now.Add(-2*time.Minute))+"\n")
 	stampBrokerPID(t, st, now.Add(-10*time.Minute))
 	if r := checkAgentCert(st, now); r.ok {
@@ -124,9 +123,8 @@ func TestScanBrokerLogCertExpiry_PicksLatest(t *testing.T) {
 	}
 }
 
-// TestScanBrokerLogCertExpiry_ReadsBothShapes: a broker of this release logs
-// net/http's TLS errors as lever daemon lines; a file written by
-// an older broker holds the stdlog shape. The newest of either counts.
+// TestScanBrokerLogCertExpiry_ReadsBothShapes: lever's daemon line shape and
+// an older log's stdlog shape both count; the newest wins.
 func TestScanBrokerLogCertExpiry_ReadsBothShapes(t *testing.T) {
 	now := time.Now()
 	st := state.State{Dir: t.TempDir()}

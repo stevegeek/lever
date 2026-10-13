@@ -26,15 +26,14 @@ const (
 	chatMgrID = "id-mgr"
 )
 
-// pageHub is a hub for the chat page tests: /api/v1/auth/me names the
-// operator, everything else is recorded and answered 200 {}.
+// pageHub names the operator at /api/v1/auth/me and answers everything else
+// 200 {}.
 type pageHub struct {
 	*httptest.Server
 	mu   sync.Mutex
 	seen []string
 	me   func(w http.ResponseWriter, r *http.Request)
-	// route, when set, answers a request it reports true for (after it is
-	// recorded); the chat list's DM and history reads use it.
+	// route, when set, answers a request it reports true for.
 	route func(w http.ResponseWriter, r *http.Request) bool
 }
 
@@ -71,8 +70,6 @@ func (h *pageHub) reached() []string {
 	return append([]string(nil), h.seen...)
 }
 
-// chatConfig is a proxy with the chat page on for manager "boss", one
-// operator and one contact.
 func chatConfig(t *testing.T, hub *pageHub) Config {
 	t.Helper()
 	return Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,
@@ -103,8 +100,6 @@ func chatDo(h http.Handler, login, method, target string, hdr ...string) *httpte
 	return rw
 }
 
-// TestChatPageServesItsFiles: an operator gets the page and its files from
-// the binary, with the page's CSP, and the hub is never asked for them.
 func TestChatPageServesItsFiles(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
@@ -160,10 +155,8 @@ func TestChatPageServesItsFiles(t *testing.T) {
 	}
 }
 
-// TestChatPageCSPAllowsNoInlineCode: the policy is what keeps text that
-// slipped into the page from running, so its load-bearing parts are pinned.
 // Script and style come from /lever/ only: on this origin 'self' would also
-// admit a .js file an agent wrote, which the hub serves under /api/.
+// admit an agent-written .js the hub serves under /api/.
 func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	csp := chatCSPFor("mac.ts.net", false)
 	for _, bad := range []string{"unsafe-inline", "unsafe-eval", "*", "data:", "blob:", "http:", "https:", "script-src 'self'", "style-src 'self'"} {
@@ -181,8 +174,6 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	if strings.Contains(csp, "worker-src") {
 		t.Errorf("push off: the CSP names a worker source: %s", csp)
 	}
-	// The whole policy, pinned: a directive added or widened shows up here.
-	// With push off it is byte-identical to the policy before push existed.
 	if want := "default-src 'none'; script-src mac.ts.net/lever/; style-src mac.ts.net/lever/; connect-src 'self'; " +
 		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
 		"frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"; csp != want {
@@ -191,9 +182,8 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	if got := chatCSPFor("127.0.0.1:8445", false); !strings.Contains(got, "script-src 127.0.0.1:8445/lever/;") {
 		t.Errorf("an address with a port must be nameable: %s", got)
 	}
-	// A host the policy cannot name is never written into it. An IPv6
-	// literal is one: CSP has no bracket form, and a source the browser
-	// cannot parse would leave the page with no script.
+	// An IPv6 literal cannot be written into CSP, and an unparsable source
+	// would leave the page with no script.
 	for _, odd := range []string{"", "a b", "a;script-src *", "a,b", "a'b", "a/b", "*", "*.ts.net", "[::1]:8445", "[fd7a::1]", "fd7a::1",
 		"https:", "data:", "a:", ":80", "a:b", "a:80:90", strings.Repeat("a", 256)} {
 		got := chatCSPFor(odd, false)
@@ -204,8 +194,6 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 	}
 }
 
-// TestChatPageLanding: "/" goes to the page, with a fixed target whatever
-// the request carries, and only for a read.
 func TestChatPageLanding(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
@@ -215,7 +203,6 @@ func TestChatPageLanding(t *testing.T) {
 			if rw.Code != http.StatusFound || rw.Header().Get("Location") != chatPagePath {
 				t.Errorf("%s %s: %d Location %q, want 302 %s", method, target, rw.Code, rw.Header().Get("Location"), chatPagePath)
 			}
-			// An operator and a contact get different answers for "/".
 			if got := rw.Header().Get("Cache-Control"); got != "no-store" {
 				t.Errorf("%s %s: Cache-Control %q, want no-store", method, target, got)
 			}
@@ -224,7 +211,6 @@ func TestChatPageLanding(t *testing.T) {
 	if got := hub.reached(); len(got) != 0 {
 		t.Fatalf("a landing redirect reached the hub: %v", got)
 	}
-	// Not a read, or not exactly "/": the hub's, as before.
 	for _, c := range [][2]string{{"POST", "/"}, {"GET", "/agents"}, {"GET", "/chat"}, {"GET", "/leverage"}, {"GET", "/api/v1/agents"}} {
 		rw := chatDo(h, chatOp, c[0], c[1])
 		if rw.Code != http.StatusOK || rw.Header().Get("Location") != "" {
@@ -236,8 +222,6 @@ func TestChatPageLanding(t *testing.T) {
 	}
 }
 
-// TestChatPageOwnsItsPrefix: an unknown path under /lever/ is a 404 from the
-// proxy and a write is refused; neither reaches the hub.
 func TestChatPageOwnsItsPrefix(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
@@ -255,7 +239,6 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 			t.Errorf("HEAD %s: %d with %d bytes, want a bodiless 404", p, head.Code, head.Body.Len())
 		}
 	}
-	// A dot segment never reaches the page or the hub (unsafePath).
 	if rw := chatDo(h, chatOp, "GET", "/lever/../api/v1/agents"); rw.Code != http.StatusBadRequest {
 		t.Errorf("GET /lever/../api/v1/agents: %d, want 400", rw.Code)
 	}
@@ -271,7 +254,6 @@ func TestChatPageOwnsItsPrefix(t *testing.T) {
 	}
 }
 
-// TestChatPageOffLeavesEveryPathToTheHub: without ChatAgent nothing changes.
 func TestChatPageOffLeavesEveryPathToTheHub(t *testing.T) {
 	hub := newPageHub(t)
 	cfg := chatConfig(t, hub)
@@ -288,8 +270,6 @@ func TestChatPageOffLeavesEveryPathToTheHub(t *testing.T) {
 	}
 }
 
-// TestChatPageNeedsAVerifiedLogin: with no allowed_users nobody is verified,
-// so there is no page even when ChatAgent is set.
 func TestChatPageNeedsAVerifiedLogin(t *testing.T) {
 	hub := newPageHub(t)
 	cfg := chatConfig(t, hub)
@@ -302,8 +282,6 @@ func TestChatPageNeedsAVerifiedLogin(t *testing.T) {
 	}
 }
 
-// TestChatPageStaysBehindTheGate: the page is answered only after the same
-// checks as every forwarded request.
 func TestChatPageStaysBehindTheGate(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
@@ -324,7 +302,6 @@ func TestChatPageStaysBehindTheGate(t *testing.T) {
 			}
 		}
 	}
-	// No login header at all, and a foreign Host.
 	if rw := chatDo(h, "", "GET", chatAgentsPath); rw.Code != http.StatusForbidden {
 		t.Errorf("no login: %d, want 403", rw.Code)
 	}
@@ -336,7 +313,6 @@ func TestChatPageStaysBehindTheGate(t *testing.T) {
 	if rw.Code != http.StatusForbidden {
 		t.Errorf("foreign Host: %d, want 403", rw.Code)
 	}
-	// And no page without a hub session.
 	cfg := chatConfig(t, hub)
 	cfg.Session = &stubSession{err: errors.New("login failed")}
 	if rw := chatDo(NewHandler(cfg), chatOp, "GET", chatPagePath); rw.Code != http.StatusBadGateway {
@@ -357,7 +333,6 @@ func TestValidHubID(t *testing.T) {
 	}
 }
 
-// TestChatPageAuditsEveryAnswer: one line per request, as for a forwarded one.
 func TestChatPageAuditsEveryAnswer(t *testing.T) {
 	hub := newPageHub(t)
 	cfg := chatConfig(t, hub)
@@ -384,8 +359,6 @@ func TestChatPageAuditsEveryAnswer(t *testing.T) {
 	}
 }
 
-// TestChatPagePostIsStillRecorded: what the page sends goes through the
-// ordinary forward path, so the chat ledger records it as the operator's.
 func TestChatPagePostIsStillRecorded(t *testing.T) {
 	const key = "dm:agent:id-mgr:user:u-op"
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -412,7 +385,6 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 	if err := json.Unmarshal(chatDo(h, chatOp, "GET", chatAgentsPath).Body.Bytes(), &list); err != nil || len(list.Agents) == 0 || list.Agents[0].Conversation != key {
 		t.Fatalf("agent list %+v (%v), want the manager's conversation %s first", list, err, key)
 	}
-	// The conversation it names is one recordChat records.
 	if _, agent, ok := chatDMAgent("POST", chatConversationsPrefix+key+"/messages"); !ok || agent != chatMgrID {
 		t.Fatal("the list's conversation key is not a recorded DM route")
 	}
@@ -431,16 +403,11 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 	}
 }
 
-// chatSinkRE matches the ways a later edit could turn text into markup or
-// code. open( is a page-level or window.open call; a method named open of
-// another object (XMLHttpRequest.open, the file upload) is not one.
+// chatSinkRE matches ways an edit could turn text into markup or code. open(
+// is a page-level or window.open call; a method of another object
+// (XMLHttpRequest.open) is not.
 var chatSinkRE = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\blocation\s*\[|\bnavigat(e|ion)\b|Object\.assign\(\s*location|Reflect\.set\(\s*location|(?:^|[^.\w$])open\s*\(|\b(?:window|self|globalThis|top|parent|opener|frames)\s*\.\s*open\s*\(|\[\s*['"\x60]open['"\x60]\s*\]|setAttributeNS\(|createElementNS\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
 
-// TestChatPageHasNoMarkupSink: the page shows agent text on the operator's
-// origin, so its script may only ever write text. This fails on the ways a
-// later edit could turn text into markup or code.
-// The narrowed open( rule still catches a page-level open and window.open,
-// and lets a method of another object (XMLHttpRequest.open) through.
 func TestMarkupSinkRuleOpen(t *testing.T) {
 	for src, bad := range map[string]bool{"open('x')": true, "window.open('x')": true, " open (u)": true, "window . open(u)": true, "self.open(u)": true, "globalThis . open(u)": true, "top.open(u)": true, "parent.open(u)": true,
 		"opener.open(u)": true, "frames.open(u)": true, "window['open'](u)": true, "x[ \"open\" ](u)": true, "el.setAttributeNS(n, k, v)": true,
@@ -454,6 +421,8 @@ func TestMarkupSinkRuleOpen(t *testing.T) {
 	}
 }
 
+// The page shows agent text on the operator's origin, so its script may only
+// ever write text.
 func TestChatPageHasNoMarkupSink(t *testing.T) {
 	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js", "chatui/sw.js"} {
 		b, err := chatUI.ReadFile(name)
@@ -468,29 +437,22 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 			t.Errorf("%s contains %q: the chat page writes network text as text only", name, m)
 		}
 	}
-	// The service worker opens one window: the chat page, on a tap.
 	if sw, _ := chatUI.ReadFile("chatui/sw.js"); len(regexp.MustCompile(`openWindow\(`).FindAll(sw, -1)) != 1 {
 		t.Error("sw.js must call openWindow( exactly once")
 	}
-	// The one method named open is the upload's XMLHttpRequest, in chat.js
-	// (counted below); the other scripts have none.
+	// The one method named open is chat.js's upload XMLHttpRequest.
 	for _, name := range []string{"chatui/chatcore.js", "chatui/sw.js"} {
 		b, _ := chatUI.ReadFile(name)
 		if m := regexp.MustCompile(`\.\s*open\s*\(`).Find(b); m != nil {
 			t.Errorf("%s contains %q: no script but chat.js calls a method named open", name, m)
 		}
 	}
-	// What the script may build and where it may reach, counted: every
-	// element it makes is a div, li, ul, button, span, a (a file row's
-	// download link) or option (a read-aloud voice, its text set as text),
-	// the attributes it sets are the href of the two fixed links and of a
-	// file row (lever's own download route, built from a checked agent name
-	// and id) and that row's download name, the fetches are the api
-	// helper's (the dictation clip goes through it too, to lever's own
-	// route with its custom header) and read-aloud's (a part of a message,
-	// to lever's own speak route with the same header, answered as audio),
-	// and the one XMLHttpRequest is the upload. A new element kind, attribute or request shows up here, to be
-	// looked at.
+	// What the script may build and reach, counted: elements div, li, ul,
+	// button, span, a (file download) and option (voice name, set as text);
+	// href only on the two fixed links and lever's own download route; fetches
+	// only via the api helper and read-aloud's to lever's speak route; one
+	// XMLHttpRequest for upload. A new element, attribute or request shows up
+	// here to be reviewed.
 	js, err := chatUI.ReadFile("chatui/chat.js")
 	if err != nil {
 		t.Fatal(err)
@@ -520,9 +482,8 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`serviceWorker\.register\(`:                    1,
 		`pushManager\.subscribe\(`:                     1,
 		`new EventSource\(`:                            1,
-		// Dictation and read-aloud post only to lever's routes, with
-		// their header; speech is the browser's own synthesis or lever's
-		// server voice (played with Web Audio), never a network voice.
+		// Dictation and read-aloud post only to lever's routes; speech is the
+		// browser's synthesis or lever's server voice, never a network voice.
 		`'/lever/api/voice/transcribe'`: 1,
 		`'/lever/api/voice/speak'`:      1,
 		`'X-Lever-Voice': '1'`:          2,
@@ -557,8 +518,8 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 	}
 }
 
-// TestServiceWorkerIsPushOnly: the worker has a push and a click handler
-// and nothing that could sit between the page and its requests.
+// The worker has push and click handlers only: nothing between the page and
+// its requests.
 func TestServiceWorkerIsPushOnly(t *testing.T) {
 	js, err := chatUI.ReadFile("chatui/sw.js")
 	if err != nil {
@@ -582,8 +543,7 @@ func TestServiceWorkerIsPushOnly(t *testing.T) {
 	}
 }
 
-// TestChatPageJS runs the page's own tests (chatui/*.test.mjs: its logic, and
-// its script against a scripted hub in a fake browser) when node is installed.
+// TestChatPageJS runs chatui/*.test.mjs when node is installed.
 func TestChatPageJS(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -597,8 +557,6 @@ func TestChatPageJS(t *testing.T) {
 	}
 }
 
-// TestChatPageEmbedsOnlyThePage: the test support files beside the page are
-// not in the binary.
 func TestChatPageEmbedsOnlyThePage(t *testing.T) {
 	entries, err := chatUI.ReadDir("chatui")
 	if err != nil {
@@ -614,9 +572,6 @@ func TestChatPageEmbedsOnlyThePage(t *testing.T) {
 	}
 }
 
-// TestChatManifest: the page is installable as an app. The manifest names
-// the instance, opens the page in its own window, and lists icons the proxy
-// serves at the sizes it says.
 func TestChatManifest(t *testing.T) {
 	hub := newPageHub(t)
 	h := NewHandler(chatConfig(t, hub))
@@ -632,7 +587,6 @@ func TestChatManifest(t *testing.T) {
 		m.Scope != "/lever/" || m.Display != "standalone" || m.BackgroundColor != "#f6f6f4" || m.ThemeColor != "#ffffff" {
 		t.Errorf("manifest %+v", m)
 	}
-	// The colours are the page's own (chat.css, light scheme).
 	css, err := chatUI.ReadFile("chatui/chat.css")
 	if err != nil {
 		t.Fatal(err)
@@ -665,10 +619,8 @@ func TestChatManifest(t *testing.T) {
 			t.Errorf("%s: %d, %dx%d (%v), want a %dx%d PNG", src, rw.Code, cfg.Width, cfg.Height, err, size, size)
 		}
 	}
-	// The page links the manifest and the Apple icon at the routes served.
-	// The manifest link sends credentials: a front that authenticates by
-	// cookie would otherwise turn the fetch away and the page could not
-	// install.
+	// The manifest link sends credentials: a cookie-authenticating front
+	// would otherwise refuse the fetch and the page could not install.
 	page := chatDo(h, chatOp, "GET", chatPagePath).Body.String()
 	for _, link := range []string{`<link rel="manifest" href="` + chatManifestPath + `" crossorigin="use-credentials">`, `<link rel="apple-touch-icon" href="/lever/apple-touch-icon.png">`} {
 		if !strings.Contains(page, link) {
@@ -680,7 +632,6 @@ func TestChatManifest(t *testing.T) {
 	}
 }
 
-// TestChatManifestShortName: a launcher shows about twelve characters.
 func TestChatManifestShortName(t *testing.T) {
 	for in, want := range map[string]string{"assistant": "assistant", "a-very-long-instance-name": "a-very-long-", "ééééééééééééé": "éééééééééééé"} {
 		if got := chatManifestFor(in).ShortName; got != want {
@@ -689,8 +640,7 @@ func TestChatManifestShortName(t *testing.T) {
 	}
 }
 
-// TestChatPageForContacts: with landing chat, a contact lands on the page,
-// gets its files and its list, and never the hub's shell or console.
+// A contact lands on the page and never gets the hub's shell or console.
 func TestChatPageForContacts(t *testing.T) {
 	hub := newPageHub(t)
 	var lines []AuditLine
@@ -720,8 +670,7 @@ func TestChatPageForContacts(t *testing.T) {
 			t.Errorf("POST %s: %d, want 405", p, rw.Code)
 		}
 	}
-	// Only the list reaches the hub, and only for the contact's identity and
-	// DM read state, with its own session.
+	// Only the list reaches the hub, with the contact's own session.
 	for _, r := range hub.reached() {
 		if r != "GET /api/v1/chat/dms" {
 			t.Errorf("the hub saw a page request: %s", r)
@@ -751,8 +700,7 @@ func TestContactManifestIsGeneric(t *testing.T) {
 	}
 }
 
-// The fence's hub rules do not move: a contact's request for a hub route
-// it may not use is still refused, landing chat or not.
+// The fence's hub rules are unchanged under landing chat.
 func TestContactFenceUnchangedUnderChat(t *testing.T) {
 	hub := newPageHub(t)
 	hub.me = func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"id":"u-c"}`) }
@@ -763,7 +711,6 @@ func TestContactFenceUnchangedUnderChat(t *testing.T) {
 			t.Errorf("GET %s: %d, want 403", p, rw.Code)
 		}
 	}
-	// Its own conversation still works through the fence.
 	own := "/api/v1/chat/conversations/" + url.PathEscape("dm:agent:"+agentW1+":user:u-c") + "/messages"
 	if rw := chatDo(h, "c@x", "GET", own); rw.Code != http.StatusOK {
 		t.Errorf("GET %s: %d, want 200", own, rw.Code)
@@ -773,7 +720,6 @@ func TestContactFenceUnchangedUnderChat(t *testing.T) {
 	}
 }
 
-// landing unset: a contact still gets the old landing page.
 func TestContactLandingWithoutChat(t *testing.T) {
 	hub := newPageHub(t)
 	cfg := chatConfig(t, hub)

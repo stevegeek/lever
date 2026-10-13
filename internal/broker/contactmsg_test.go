@@ -312,7 +312,7 @@ func TestContactMessageOff(t *testing.T) {
 }
 
 // The initiate rule is read from the ledger, so a new broker on the same
-// state keeps it (spec security property 3).
+// state keeps it.
 func TestContactMessageInitiateRuleSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	f := verifyBroker(t, nil, agentMsgOpt(dir, time.Hour))

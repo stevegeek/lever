@@ -19,9 +19,8 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
-// writeLeaf mints a client leaf (CN=worker) signed by caInst and writes the
-// agent.crt/agent.key/ca.crt trio into dir, returning the leaf serial. mtimeAt,
-// when non-zero, is stamped on agent.crt so mtime-based reload is deterministic.
+// writeLeaf returns the leaf serial. mtimeAt, when non-zero, is stamped on
+// agent.crt so mtime-based reload is deterministic.
 func writeLeaf(t *testing.T, dir string, caInst *ca.CA, mtimeAt time.Time) *big.Int {
 	t.Helper()
 	csrPEM, keyPEM := csrWithKey(t, "worker")
@@ -70,7 +69,6 @@ func TestClientCertSourceReloadsOnMtimeChange(t *testing.T) {
 		t.Fatalf("first serial = %s, want %s", got.Leaf.SerialNumber, serial1)
 	}
 
-	// Rewrite the leaf with a newer mtime → next call must return the NEW serial.
 	serial2 := writeLeaf(t, dir, caInst, t0.Add(time.Minute))
 	if serial1.Cmp(serial2) == 0 {
 		t.Fatal("rewrite produced the same serial; test cannot distinguish rotation")
@@ -99,7 +97,7 @@ func TestClientCertSourceFailSoft(t *testing.T) {
 	}
 	src.now = func() time.Time { return time.Now() } // cached leaf is still valid
 
-	// Corrupt agent.key with a NEWER mtime on agent.crt so reload triggers and fails.
+	// A newer mtime with a corrupt key makes the reload trigger and fail.
 	if err := os.WriteFile(filepath.Join(dir, "agent.key"), []byte("garbage"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +125,6 @@ func TestNewClientCertSourceFailsOnMissingIDDir(t *testing.T) {
 	}
 }
 
-// TestCAPoolRejectsBadPEM covers the shared helper's bad-CA branch.
 func TestCAPoolRejectsBadPEM(t *testing.T) {
 	if _, err := caPool(nil); err == nil {
 		t.Fatal("caPool must reject an empty CA PEM")
@@ -138,9 +135,6 @@ func TestCAPoolRejectsBadPEM(t *testing.T) {
 	}
 }
 
-// TestReloadingTransportRejectsBadPEM proves the shared transport builder
-// propagates the bad-CA-PEM failure after a valid
-// id-dir mint.
 func TestReloadingTransportRejectsBadPEM(t *testing.T) {
 	caInst, err := ca.Generate()
 	if err != nil {
@@ -154,8 +148,8 @@ func TestReloadingTransportRejectsBadPEM(t *testing.T) {
 	}
 }
 
-// recordingBackend is a fake mTLS broker: it records each presented client-cert
-// serial and echoes the request path + body so the proxy round-trip is verifiable.
+// recordingBackend is a fake mTLS broker that records each presented
+// client-cert serial.
 type recordingBackend struct {
 	mu      sync.Mutex
 	serials []*big.Int
@@ -181,10 +175,9 @@ func (b *recordingBackend) lastSerial() *big.Int {
 	return b.serials[len(b.serials)-1]
 }
 
-// TestNewReloadingClientPresentsRotatingCert proves the serve-capability fix: a
-// client from NewReloadingClient presents the ROTATED leaf on a fresh handshake,
-// where a static Identity.Client() would keep presenting the boot leaf forever
-// (the recurring cert-expiry outage).
+// TestNewReloadingClientPresentsRotatingCert: a reloading client presents the
+// rotated leaf on a fresh handshake, where Identity.Client() would keep the
+// boot leaf.
 func TestNewReloadingClientPresentsRotatingCert(t *testing.T) {
 	caInst, err := ca.Generate()
 	if err != nil {
@@ -225,9 +218,7 @@ func TestNewReloadingClientPresentsRotatingCert(t *testing.T) {
 		t.Fatalf("first handshake serial = %v, want %s", s, serial1)
 	}
 
-	// Rotate the leaf (newer mtime) and force a fresh handshake — exactly what
-	// IdleConnTimeout does in production. The reloading client must present the NEW
-	// leaf; a static client would still send serial1.
+	// Closing idle connections stands in for IdleConnTimeout.
 	serial2 := writeLeaf(t, dir, caInst, t0.Add(time.Minute))
 	if serial1.Cmp(serial2) == 0 {
 		t.Fatal("rotation produced the same serial; test cannot distinguish")
@@ -244,8 +235,7 @@ func TestGatewayProxyPresentsRotatingCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Fake mTLS broker: RequireAnyClientCert records the presented leaf without
-	// needing it to chain (we assert on the serial, not on verification).
+	// RequireAnyClientCert: the test asserts on the serial, not on chaining.
 	backend := &recordingBackend{}
 	srvCertPEM, srvKeyPEM, err := caInst.IssueServerCertSANs("127.0.0.1", nil, []string{"127.0.0.1"})
 	if err != nil {
@@ -268,7 +258,6 @@ func TestGatewayProxyPresentsRotatingCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Plaintext loopback front — this is what Claude talks to.
 	front := httptest.NewServer(proxy)
 	defer front.Close()
 
@@ -288,9 +277,7 @@ func TestGatewayProxyPresentsRotatingCert(t *testing.T) {
 		t.Fatalf("backend saw serial %v, want %s", s, serial1)
 	}
 
-	// Rotate the leaf, then force a fresh handshake (IdleConnTimeout is 5m — too
-	// long for a test, so close idle conns directly; this is exactly the reuse
-	// hazard IdleConnTimeout guards against in production).
+	// Closing idle connections stands in for IdleConnTimeout.
 	serial2 := writeLeaf(t, dir, caInst, t0.Add(time.Minute))
 	proxy.Transport.(*http.Transport).CloseIdleConnections()
 
@@ -306,9 +293,8 @@ func TestGatewayProxyPresentsRotatingCert(t *testing.T) {
 }
 
 func TestGatewayProxyIdleConnTimeout(t *testing.T) {
-	// Pin the anti-staleness guard: per-handshake cert reads only help if pooled
-	// connections re-handshake regularly, so IdleConnTimeout must stay well under
-	// the 12h renew / 24h expiry.
+	// Per-handshake cert reads only help if pooled connections re-handshake
+	// regularly, so IdleConnTimeout must stay well under the renew interval.
 	caInst, err := ca.Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -331,9 +317,6 @@ func TestGatewayRejectsNonLoopbackListen(t *testing.T) {
 	}
 }
 
-// freeLoopbackAddr reserves and releases a loopback port so a test can hand
-// Gateway a concrete --listen it can then dial (a ":0" listen would hide the
-// chosen port inside Gateway).
 func freeLoopbackAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -345,11 +328,9 @@ func freeLoopbackAddr(t *testing.T) string {
 	return addr
 }
 
-// TestGatewayStopsOnContextCancel pins the R1 fix: main installs a
-// SIGINT/SIGTERM-bound ctx for every verb (which removes the default terminate
-// disposition), so Gateway MUST return promptly and cleanly (nil) when that ctx
-// is cancelled — otherwise the sidecar holding the agent leaf outlives a stop
-// until SIGKILL.
+// TestGatewayStopsOnContextCancel: main's signal-bound ctx replaces the default
+// terminate disposition, so Gateway must return nil promptly on cancel or the
+// sidecar holding the agent leaf outlives a stop.
 func TestGatewayStopsOnContextCancel(t *testing.T) {
 	caInst, err := ca.Generate()
 	if err != nil {
@@ -364,8 +345,7 @@ func TestGatewayStopsOnContextCancel(t *testing.T) {
 	go func() {
 		done <- Gateway(ctx, GatewayConfig{Listen: addr, BrokerURL: "https://broker.invalid", CAPEM: caInst.CertPEM(), IDDir: dir})
 	}()
-	// Wait until the listener is actually accepting, so the cancel exercises a
-	// SERVING gateway rather than one that never got as far as Serve.
+	// The cancel must hit a serving gateway.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)

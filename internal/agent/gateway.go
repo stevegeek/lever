@@ -18,30 +18,23 @@ import (
 )
 
 // LocalGatewayAddr is the loopback address the gateway sidecar listens on and
-// LocalGatewayURL is the same address as the base URL Claude's MCP/LLM config
-// points at. The gateway reverse-proxies that plaintext traffic to the real
-// broker over mTLS, presenting the always-current agent leaf — so Claude never
-// holds the rotating cert (which it would otherwise cache for its whole
-// lifetime). Both the sidecar's --listen argument and the gateway flag default
-// derive from LocalGatewayAddr; there is no second copy of the port.
+// LocalGatewayURL is the base URL Claude's MCP/LLM config points at. The
+// gateway proxies that plaintext traffic to the broker over mTLS with the
+// current agent leaf, so Claude never holds the rotating cert, which it would
+// cache for its whole lifetime.
 const (
 	LocalGatewayAddr = "127.0.0.1:8462"
 	LocalGatewayURL  = "http://" + LocalGatewayAddr
 )
 
-// idleConnTimeout caps how long a pooled broker connection lingers before the
-// proxy must re-handshake. GetClientCertificate runs per-HANDSHAKE, not
-// per-request, so a warm keep-alive connection keeps presenting the leaf it was
-// opened with — past the 12h renew and 24h expiry. Capping idle reuse well under
-// the renewal interval forces regular fresh handshakes (and fresh leaf reads), so
-// a rotated cert reaches the broker long before the old one expires.
+// idleConnTimeout forces regular fresh handshakes. GetClientCertificate runs
+// per handshake, not per request, so a warm keep-alive connection would keep
+// presenting its original leaf past renewal and expiry.
 const idleConnTimeout = 5 * time.Minute
 
-// clientCertSource re-reads the rotating agent leaf that lever-renew writes back
-// to <idDir>/agent.{crt,key}. It caches the parsed keypair and re-reads only when
-// agent.crt's mtime advances, keeping per-handshake calls cheap. Concurrency-safe:
-// GetClientCertificate is invoked from many handshake goroutines. Mirrors the
-// fail-soft + eager-mint shape of ca.ServerCertSource (the server side).
+// clientCertSource re-reads the rotating agent leaf when agent.crt's mtime
+// advances. It must be concurrency-safe: GetClientCertificate is invoked from
+// many handshake goroutines.
 type clientCertSource struct {
 	idDir string
 	now   func() time.Time // test seam; nil means time.Now
@@ -51,8 +44,8 @@ type clientCertSource struct {
 	mtime time.Time
 }
 
-// newClientCertSource mints eagerly so a broken id-dir fails at startup, not on
-// the first live handshake (matches ca.NewServerCertSource).
+// newClientCertSource loads eagerly so a broken id-dir fails at startup, not on
+// the first live handshake.
 func newClientCertSource(idDir string) (*clientCertSource, error) {
 	s := &clientCertSource{idDir: idDir}
 	s.mu.Lock()
@@ -63,10 +56,8 @@ func newClientCertSource(idDir string) (*clientCertSource, error) {
 	return s, nil
 }
 
-// GetClientCertificate returns the current leaf, re-reading it when agent.crt's
-// mtime has advanced since the cache. Fail-soft: if the re-read fails but the
-// cached leaf is still valid, log and serve it; error only when there is no
-// usable cert (mirrors ca.ServerCertSource.GetCertificate).
+// GetClientCertificate returns the current leaf. Fail-soft: if a re-read fails
+// but the cached leaf is still valid, it logs and serves it.
 func (s *clientCertSource) GetClientCertificate(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -85,11 +76,9 @@ func (s *clientCertSource) GetClientCertificate(_ *tls.CertificateRequestInfo) (
 	return s.cert, nil
 }
 
-// reloadLocked re-reads and parses <idDir>/agent.{crt,key}, updating the cached
-// cert and mtime on success only (a failed read leaves the prior cert intact for
-// fail-soft). Caller holds s.mu. Stats BEFORE reading so an interleaved write
-// during the read doesn't cache a newer mtime alongside older content (which would
-// silently skip the next rotation); a stale mtime just re-reads once more.
+// reloadLocked updates the cache on success only. Caller holds s.mu. It stats
+// before reading so an interleaved write cannot cache a newer mtime with older
+// content, which would skip the next rotation.
 func (s *clientCertSource) reloadLocked() error {
 	crt := filepath.Join(s.idDir, "agent.crt")
 	fi, err := os.Stat(crt)
@@ -112,13 +101,10 @@ func (s *clientCertSource) reloadLocked() error {
 	return nil
 }
 
-// errBadCAPEM means the CA bundle held no parsable certificate.
 var errBadCAPEM = errors.New("agent: bad CA PEM")
 
-// errNotLoopback means the gateway was asked to listen off-host.
 var errNotLoopback = errors.New("gateway: listen addr must be loopback")
 
-// caPool builds a RootCAs pool from a PEM bundle.
 func caPool(caPEM []byte) (*x509.CertPool, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
@@ -127,12 +113,9 @@ func caPool(caPEM []byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// reloadingTransport builds the mTLS http.Transport shared by both long-lived
-// broker clients (NewReloadingClient) and the gateway reverse-proxy: it trusts
-// caPEM and presents the rotating agent leaf from idDir via a per-handshake
-// clientCertSource, with IdleConnTimeout capping pooled-connection reuse so a
-// rotated leaf reaches the broker well within its TTL. Mints eagerly so a broken
-// id-dir fails now, not on the first live handshake.
+// reloadingTransport is shared by every long-lived broker client and the
+// gateway proxy: it presents the rotating leaf per handshake and caps idle
+// connection reuse (idleConnTimeout).
 func reloadingTransport(idDir string, caPEM []byte) (*http.Transport, error) {
 	src, err := newClientCertSource(idDir)
 	if err != nil {
@@ -151,18 +134,11 @@ func reloadingTransport(idDir string, caPEM []byte) (*http.Transport, error) {
 	}, nil
 }
 
-// NewReloadingClient builds an mTLS http.Client for a LONG-LIVED direct-to-broker
-// client (e.g. serve-capability) that re-reads the rotating agent leaf per TLS
-// handshake — the same fix the gateway applies to Claude's proxied traffic. A
-// plain Identity.Client() freezes the boot leaf as a static tls.Certificate, so a
-// daemon holding it keeps presenting an expired cert after the 24h leaf TTL even
-// though lever-renew has written a fresh one to disk; this closes that gap for
-// every remaining long-lived broker client. caPEM is the pinned CA (static — only
-// the leaf rotates). IdleConnTimeout recycles idle connections so a fresh dial
-// (and leaf re-read) happens well within the leaf TTL; a continuously-busy
-// connection isn't capped by it, but this sidecar's mints are bursty and idle
-// often (same reasoning as the gateway).
-// Mints eagerly so a broken id-dir fails now, not on the first live handshake.
+// NewReloadingClient builds an mTLS http.Client for a long-lived
+// direct-to-broker client that re-reads the rotating agent leaf per TLS
+// handshake. caPEM is the pinned CA; only the leaf rotates. A continuously
+// busy connection is not recycled by idleConnTimeout, which is acceptable for
+// bursty callers only.
 func NewReloadingClient(idDir string, caPEM []byte) (*http.Client, error) {
 	tr, err := reloadingTransport(idDir, caPEM)
 	if err != nil {
@@ -180,17 +156,14 @@ type GatewayConfig struct {
 }
 
 // gatewayShutdownGrace bounds how long a cancelled Gateway waits for in-flight
-// proxied requests before dropping them (mirrors broker.ServeListeners).
+// proxied requests before dropping them.
 const gatewayShutdownGrace = 5 * time.Second
 
 // Gateway runs the loopback reverse-proxy: it accepts plaintext HTTP from
 // in-container Claude on c.Listen and forwards to the real broker at c.BrokerURL
-// over mTLS, presenting the rotating agent leaf from c.IDDir. Blocks until ctx
-// is cancelled (the verb's SIGINT/SIGTERM-bound ctx) or the listener fails. A
-// cancel is a clean stop: in-flight requests get gatewayShutdownGrace to
-// finish, anything still open (a long SSE stream) is then closed, and the
-// return is nil so the sidecar exits 0. Without this the process — whose
-// signal disposition main replaced with the ctx — served until SIGKILL.
+// over mTLS. Blocks until ctx is cancelled or the listener fails. A cancel is
+// a clean stop returning nil: in-flight requests get gatewayShutdownGrace,
+// then anything still open (a long SSE stream) is closed.
 func Gateway(ctx context.Context, c GatewayConfig) error {
 	if err := requireLoopback(c.Listen); err != nil {
 		return err
@@ -221,8 +194,7 @@ func Gateway(ctx context.Context, c GatewayConfig) error {
 }
 
 // requireLoopback fails closed unless listenAddr binds a loopback IP. The proxy
-// presents the agent's private key, so it must never be reachable off-host
-// (mirrors the broker admin-listener guard in internal/broker/server.go).
+// presents the agent's private key, so it must never be reachable off-host.
 func requireLoopback(listenAddr string) error {
 	host, _, err := net.SplitHostPort(listenAddr)
 	if err != nil {
@@ -234,8 +206,8 @@ func requireLoopback(listenAddr string) error {
 	return nil
 }
 
-// newGatewayProxy builds the mTLS reverse-proxy to brokerURL. Split from Gateway
-// so tests can drive the proxy handler directly without binding a socket.
+// newGatewayProxy passes headers through unscrubbed: it is the agent's own
+// proxy, and the broker gateway scrubs forwarding and X-Lever-* headers.
 func newGatewayProxy(brokerURL string, caPEM []byte, idDir string) (*httputil.ReverseProxy, error) {
 	target, err := url.Parse(brokerURL)
 	if err != nil {
@@ -245,13 +217,11 @@ func newGatewayProxy(brokerURL string, caPEM []byte, idDir string) (*httputil.Re
 	if err != nil {
 		return nil, err
 	}
-	// target is the broker origin (no path), so SingleHostReverseProxy forwards the
-	// incoming path verbatim (/mcp/<tool>/…, /llm) with method, body, and headers.
+	// target has no path, so the incoming path is forwarded verbatim.
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = tr
-	// MCP tool responses stream over SSE; -1 flushes every write immediately so
-	// streamed chunks reach Claude without buffering (the default buffers and
-	// streaming tool calls stall).
+	// MCP tool responses stream over SSE; buffering stalls streaming tool
+	// calls.
 	proxy.FlushInterval = -1
 	return proxy, nil
 }

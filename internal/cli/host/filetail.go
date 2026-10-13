@@ -6,7 +6,6 @@ import (
 	"strings"
 )
 
-// readFileTail returns up to the last max bytes of the file at path.
 func readFileTail(path string, max int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -25,9 +24,7 @@ func readFileTail(path string, max int64) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// lastLine returns the last non-empty line of s, or "" when there is none.
-// Surrounding whitespace on that line is preserved; only blank lines are
-// skipped.
+// lastLine returns the last non-empty line of s, untrimmed, or "".
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -38,9 +35,8 @@ func lastLine(s string) string {
 	return ""
 }
 
-// lastFileLine returns the final non-empty line within the last tail bytes of
-// the file at path, trimmed, or "" when the file is unreadable or blank. Only
-// the tail is read so a long-lived log never costs a full read.
+// lastFileLine returns the trimmed last non-empty line in the file's final
+// tail bytes, or "" when unreadable or blank.
 func lastFileLine(path string, tail int64) string {
 	data, err := readFileTail(path, tail)
 	if err != nil {

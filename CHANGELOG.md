@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-13
+
 ### Changed
 
 - **The rest of lever logs in the one line shape (lever#197).** `lever-agent`'s unattended verbs

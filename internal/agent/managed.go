@@ -39,8 +39,9 @@ const AfterCompactMarker = "[after compaction: note from this instance's lever.y
 // Code's source for the session start that follows a compaction). It also
 // always turns off background agents and agent view
 // (env.CLAUDE_CODE_DISABLE_AGENT_VIEW=1 and disableAgentView: true; see
-// wire.DisableAgentViewEnv), whatever c holds, so the file is written for
-// every agent, nil c included. Keys and hooks lever does not own are kept;
+// wire.DisableAgentViewEnv) and always adds lever's claude-ready
+// SessionStart hook (wire.ReadyHookCommand), whatever c holds, so the file
+// is written for every agent, nil c included. Keys and hooks lever does not own are kept;
 // lever's are replaced, or removed when c no longer sets them. An empty path
 // is a no-op (enrol-only boot).
 //
@@ -130,10 +131,19 @@ func mergeManagedSettings(settings map[string]any, c *wire.Claude) {
 	groups, _ := hooks["SessionStart"].([]any)
 	kept := make([]any, 0, len(groups)+1)
 	for _, g := range groups {
-		if !isLeverAfterCompactGroup(g) {
+		if !isLeverAfterCompactGroup(g) && !isLeverReadyGroup(g) {
 			kept = append(kept, g)
 		}
 	}
+	// Always, for every agent: the claude-ready hook, with no matcher (every
+	// session start: a new session, a --continue, a /clear, a compaction).
+	// The manager gate waits for its marker after a start (lever#188).
+	kept = append(kept, map[string]any{
+		"hooks": []any{map[string]any{
+			"type":    "command",
+			"command": ReadyHookCommand,
+		}},
+	})
 	if note != "" {
 		kept = append(kept, map[string]any{
 			"matcher": "compact",
@@ -163,6 +173,20 @@ func isLeverAfterCompactGroup(g any) bool {
 	for _, h := range hs {
 		hm, _ := h.(map[string]any)
 		if cmd, _ := hm["command"].(string); strings.HasPrefix(cmd, afterCompactCommand) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLeverReadyGroup reports whether a SessionStart hook group holds lever's
+// claude-ready hook.
+func isLeverReadyGroup(g any) bool {
+	gm, _ := g.(map[string]any)
+	hs, _ := gm["hooks"].([]any)
+	for _, h := range hs {
+		hm, _ := h.(map[string]any)
+		if cmd, _ := hm["command"].(string); cmd == ReadyHookCommand {
 			return true
 		}
 	}

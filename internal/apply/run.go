@@ -404,6 +404,10 @@ type Deps struct {
 	// reads live, for claude's tmux pane to come alive (the pre-start hook
 	// runs first). Zero takes the production default (2 min).
 	HarnessWait time.Duration
+	// ReadyWait bounds how long the manager gate waits, once claude's pane
+	// is alive, for claude to report its session started (the claude-ready
+	// marker, lever#188). Zero takes the production default (2 min).
+	ReadyWait time.Duration
 	// clock and progressTicker drive the start progress line (Progress);
 	// nil ⇒ time.Now and a real ticker. Tests inject both.
 	clock          func() time.Time

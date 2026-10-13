@@ -21,24 +21,28 @@ import (
 // container that stays up with no harness waits this long.
 const defaultHarnessWait = 2 * time.Minute
 
-// harnessSettle is the settle window after claude's own signal (lever#188):
-// its tmux pane alive. The pane exists only once the pre-start hook has
-// passed and claude has started, and every harness death behind lever#31
-// (a task past the tmux cap, `claude --continue` with no conversation, an
-// auth failure) landed within three seconds of the record reading running,
-// which is before the pane exists; counted from the pane, a later and
-// stronger signal, three seconds covers them. It is still probabilistic for
-// a later death, as the 10 s window was; `lever doctor`'s manager row and
-// `lever up`'s look after a detach catch one. The long Settle of the budget
-// stays for a gate that never saw the pane (no probe, or a probe that could
-// not run), which counts from the hub record instead.
+// harnessSettle is the settle window after claude's tmux pane is seen
+// alive, kept for a manager whose claude does not report its session start
+// to lever (no claude-ready hook: an image built by an older lever, or a
+// probe that cannot wait for it); otherwise waitClaudeReady replaces it
+// (lever#188). The pane exists only once the pre-start hook has passed and
+// claude has started, and every harness death behind lever#31 (a task past
+// the tmux cap, `claude --continue` with no conversation, an auth failure)
+// landed within three seconds of the record reading running, which is
+// before the pane exists; counted from the pane, three seconds covers
+// them. It is probabilistic for a later death, as the 10 s window was;
+// `lever doctor`'s manager row and `lever up`'s look after a detach catch
+// one. The long Settle of the budget stays for a gate that never saw the
+// pane (no probe, or a probe that could not run), which counts from the
+// hub record instead.
 //
-// The hub record's activity is not that signal. claude's SessionStart hook
+// The hub record's activity is no start signal. claude's SessionStart hook
 // reports activity "working" ("Session started"), but sciontool's own start
 // report sets the same activity, and the same lastActivityEvent refresh,
 // 100 ms after it starts the harness and before claude runs a line; the
-// listing does not carry the message that tells the two apart. A variable
-// so tests can shorten it.
+// listing does not carry the message that tells the two apart. Hence
+// lever's own SessionStart hook and its marker. A variable so tests can
+// shorten it.
 var harnessSettle = 3 * time.Second
 
 // progressEvery is how often a manager start that is still in progress
@@ -380,10 +384,14 @@ func confirmHarness(ctx context.Context, h harnessCheck, settle time.Duration) e
 // start is inside it however long the pre-start hook took. Without a probe
 // or a window it is the hub-record gate alone. prog may be nil.
 //
-// The window is harnessSettle once the pane was seen (lever#188), b.Settle
+// Once the pane is alive the gate waits for claude's own report that its
+// session started (waitClaudeReady: lever's claude-ready marker, up to
+// defaultReadyWait) and ends as soon as it is there, with no settle window
+// (lever#188). Only when there is no marker to wait for (an older image)
+// does it hold a window: harnessSettle once the pane was seen, b.Settle
 // otherwise. With o.attach the gate ends once the pane is alive: the caller
 // attaches the operator's terminal at once and checks the manager after
-// the detach (CheckManagerAfterDetach) instead of holding the window.
+// the detach (CheckManagerAfterDetach) instead.
 func gateManagerLive(ctx context.Context, d Deps, b RetryBudget, name, project, subject string, prog *Progress, o gateOpts) error {
 	err := gateManagerLiveSteps(ctx, d, b, name, project, prog, o)
 	if err == nil {
@@ -403,9 +411,10 @@ type gateOpts struct {
 	// pane holds the window as usual.
 	attach bool
 	// onHarness, when set, runs once, when the gate has seen the harness
-	// (or the record, for a gate without a probe or a window) and the
-	// settle window starts: start-manager runs its post-live probes
-	// alongside the window (lever#188). Not run when the gate fails first.
+	// (or the record, for a gate without a probe or a window) and the wait
+	// for claude's session start (or the settle window) begins:
+	// start-manager runs its post-live probes alongside it (lever#188).
+	// Not run when the gate fails first.
 	onHarness func()
 }
 
@@ -457,6 +466,21 @@ func gateManagerLiveSteps(ctx context.Context, d Deps, b RetryBudget, name, proj
 			o.harnessSeen()
 			return nil
 		}
+		if rp, ok := h.probe.(claudeReadyProbe); ok {
+			o.harnessSeen()
+			prog.Stage("claude started; waiting for its session start (lever's claude-ready hook)")
+			readyWait := d.ReadyWait
+			if readyWait <= 0 {
+				readyWait = defaultReadyWait
+			}
+			ready, err := waitClaudeReady(ctx, h, rp, list, name, b.Interval, readyWait, settle, d.Log)
+			if err != nil || ready {
+				return err
+			}
+			// No marker to wait for: the settle window decides, as before.
+			prog.Stage(fmt.Sprintf("claude started; holding the %s settle window", settle))
+			return holdAndConfirm(ctx, h, list, name, b.Interval, settle)
+		}
 	}
 	o.harnessSeen()
 	if alive {
@@ -464,10 +488,170 @@ func gateManagerLiveSteps(ctx context.Context, d Deps, b RetryBudget, name, proj
 	} else {
 		prog.Stage(fmt.Sprintf("holding the %s settle window", settle))
 	}
-	if err := scion.HoldAgentLive(ctx, list, name, b.Interval, settle); err != nil {
+	return holdAndConfirm(ctx, h, list, name, b.Interval, settle)
+}
+
+// holdAndConfirm holds the record live for the settle window, then looks at
+// claude's pane (or the container) once more.
+func holdAndConfirm(ctx context.Context, h harnessCheck, list func(context.Context) ([]scion.Agent, error), name string, interval, settle time.Duration) error {
+	if err := scion.HoldAgentLive(ctx, list, name, interval, settle); err != nil {
 		return err
 	}
 	return confirmHarness(ctx, h, settle)
+}
+
+// defaultReadyWait bounds how long the manager gate waits, once claude's
+// tmux pane is alive, for claude to report its session started (lever's
+// claude-ready hook, lever#188). Claude runs its SessionStart hooks once it
+// has set up the session: for --continue, after it has loaded the
+// conversation, which for a long transcript takes seconds, not minutes. A
+// claude that has not got there in two minutes is stuck (a prompt that
+// waits for a key, a hang) and is reported as not up rather than up. The
+// same bound as the pane wait.
+const defaultReadyWait = 2 * time.Minute
+
+// readyPollWindow is how long one in-container wait for the marker polls
+// (jail.AgentProbe.AwaitClaudeReady, a reading every 200 ms): one guest call
+// per window instead of one per reading (cf. lever#190). It stays well under
+// the probe exec's 10 s deadline, with room for podman exec's own start. A
+// variable so tests can shorten it.
+var readyPollWindow = 4 * time.Second
+
+// claudeReadyProbe is the optional half of AgentSessionProbe that waits for
+// claude's own report that its session started (jail.AgentProbe in
+// production). A probe without it keeps the settle window.
+type claudeReadyProbe interface {
+	AwaitClaudeReady(ctx context.Context, ref string, window time.Duration) (jail.ClaudeReady, error)
+}
+
+// waitClaudeReady is the gate's wait after claude's pane came alive
+// (lever#188): it returns true as soon as claude's pane is alive AND
+// lever's claude-ready marker names this container run and that pane, which
+// claude writes from its SessionStart hook once its session has started
+// (a new one, or the conversation --continue resumed). There is no settle
+// window after it: a failed pre-start hook and a task past the tmux cap end
+// before claude runs, and "No conversation found to continue" exits before
+// a session starts, so all come before the marker; nothing seen so far dies
+// after SessionStart. A later death (if an auth failure exits after its
+// session start, it is one) is caught by `lever doctor`'s manager row and
+// by `lever up`'s look after a detach, as before.
+//
+// A death while it waits fails at once: the container stopped, the pane
+// died or the tmux server went away (read by the pane probe whenever the
+// in-container wait does not see a live pane), or the hub record left
+// running. A claude that never reports is not up after wait. It returns
+// false with a nil error when there is no marker to wait for — the managed
+// settings carry no claude-ready hook (an image built by an older lever, or
+// a boot that could not write the file), or the wait cannot run in the
+// container (unknownHandover failures in a row) — and the caller then holds
+// the settle window as before; a line says so.
+//
+// The marker is the agent's word: an agent that writes it itself claims
+// only that claude started, which a live pane already claims. lever acts on
+// nothing in it beyond its equality with what the probe computes.
+func waitClaudeReady(ctx context.Context, h harnessCheck, rp claudeReadyProbe, list func(context.Context) ([]scion.Agent, error), name string, interval, wait, settle time.Duration, log func(string, ...any)) (bool, error) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	start := time.Now()
+	since := func() time.Duration { return time.Since(start).Round(100 * time.Millisecond) }
+	unknownRun := 0
+	var lastErr error
+	for {
+		call := time.Now()
+		st, err := rp.AwaitClaudeReady(ctx, h.ref, readyPollWindow)
+		if cerr := ctx.Err(); cerr != nil {
+			return false, cerr
+		}
+		pace := true
+		switch {
+		case err == nil && st == jail.ClaudeReadyYes:
+			if reading, left := recordLeftRunning(ctx, list, name); left {
+				return false, fmt.Errorf("%w: claude reported its session started, but the hub record left running (%s); its container log in the guest holds the last output", scion.ErrAgentDied, reading)
+			}
+			return true, ctx.Err()
+		case err == nil && st == jail.ClaudeReadyNoHook:
+			if log != nil {
+				log("lever: note: the manager's claude does not report its session start to lever (no claude-ready hook in its managed settings: an image built by an older lever, or a boot that could not write the file); the %s settle window decides", settle)
+			}
+			return false, nil
+		case err == nil && st == jail.ClaudeReadyPending:
+			unknownRun = 0
+			// An in-container wait that came back early (its sleep could
+			// not run) must not turn into a busy loop.
+			pace = time.Since(call) < readyPollWindow/2
+		default:
+			// No live pane in the in-container wait, or the wait could not
+			// run: the pane probe decides.
+			if err != nil {
+				lastErr = err
+			}
+			switch r := h.read(ctx); r.state {
+			case harnessContainerDown:
+				return false, fmt.Errorf("%w: its container stopped after claude's tmux pane came up, before claude reported its session started, after %s; its container log in the guest holds the last output",
+					scion.ErrAgentDied, since())
+			case harnessNotAlive:
+				return false, fmt.Errorf("%w: claude's tmux pane (scion:agent) died before claude reported its session started, after %s, over a running container (a failed --continue exits so); `lever attach` shows the session, its container log in the guest the last output",
+					scion.ErrAgentDied, since())
+			case harnessNoServer:
+				return false, fmt.Errorf("%w: the tmux server in its container went away before claude reported its session started, after %s, over a running container; its container log in the guest holds the last output",
+					scion.ErrAgentDied, since())
+			case harnessAlive:
+				// The two readings disagree: neither is evidence.
+				unknownRun++
+			default:
+				unknownRun++
+				if lastErr == nil {
+					lastErr = r.err
+				}
+			}
+		}
+		if unknownRun >= unknownHandover {
+			if log != nil {
+				log("lever: warning: could not wait for the manager's claude to report its session start (%s); the %s settle window decides", jail.ProbeErrorClass(lastErr), settle)
+			}
+			return false, nil
+		}
+		if reading, left := recordLeftRunning(ctx, list, name); left {
+			return false, fmt.Errorf("%w: the hub record left running (%s) before claude reported its session started, after %s; its container log in the guest holds the last output",
+				scion.ErrAgentDied, reading, since())
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if time.Since(start) >= wait {
+			return false, fmt.Errorf("%w: claude's tmux pane is alive, but claude did not report its session started (lever's claude-ready hook) in %s — it may wait at a prompt, or hang; `lever attach` shows the session, `lever doctor` the manager row",
+				scion.ErrAgentNotLive, wait)
+		}
+		if !pace {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+}
+
+// recordLeftRunning re-reads the hub record and reports, with the reading,
+// whether it left running. A list error is not evidence either way.
+func recordLeftRunning(ctx context.Context, list func(context.Context) ([]scion.Agent, error), name string) (string, bool) {
+	if list == nil {
+		return "", false
+	}
+	agents, err := list(ctx)
+	if err != nil {
+		return "", false
+	}
+	a := scion.FindAgent(agents, name)
+	if a == nil {
+		return "record gone from the listing", true
+	}
+	if a.Phase != scion.PhaseRunning {
+		return fmt.Sprintf("phase %q, container %q", scion.PhaseLabel(a.Phase), scion.ContainerLabel(a.ContainerStatus)), true
+	}
+	return "", false
 }
 
 // CheckManagerAfterDetach is `lever up`'s look at the manager once the

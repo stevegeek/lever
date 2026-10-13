@@ -167,16 +167,28 @@ version bump moves the block under the new version heading.
   first apply after the upgrade rebuilds and reinstalls scion once. A `scion.binary` is installed
   as it is.
 - **A manager start is confirmed from claude itself, not after a fixed 10 s (lever#188).** After a
-  start or resume the settle window is now 3 s counted from claude's tmux pane seen alive (the
-  lever#164 probe), instead of 10 s; every harness death seen so far came within three seconds of
-  claude's start. A start whose pane cannot be probed keeps the 10 s window. The hub record's
-  activity is not used: scion's own start report sets the same activity and time as claude's
-  SessionStart, before claude runs. `start-manager`'s post-start checks (the workers' session heal
-  and the read-only, nested-virt and claude-settings warnings) run during the window; their lines
-  print once the start is confirmed, and the warnings are dropped when it is not. `lever up` on a
-  terminal attaches as soon as claude runs, with no window, and checks the manager again after you
-  detach: a manager that died is reported then, with the start's hints and a non-zero exit.
-  `--no-attach`, `lever apply` and a stdin that is not a terminal keep the window.
+  start or resume lever waits for claude's tmux pane to be alive (the lever#164 probe), then for
+  claude to report that its session started, and reports the manager up as soon as it has, with
+  no settle window. The report is a new `SessionStart` hook, `lever-agent claude-ready`, that
+  `lever-agent boot` writes into the managed settings of every agent: it writes
+  `/tmp/lever-claude-ready` in the container, naming the guest boot, the container's first process
+  and claude's pane, so a file left by an earlier run never counts. A failed pre-start hook, a task
+  past the tmux cap and a `--continue` with no conversation all end before claude starts a session.
+  lever polls for it inside the container (one guest call about every 4 s, a reading every 200 ms),
+  fails at once when the container stops, the pane dies or the hub record leaves running, and gives
+  up after 2 min (`did not come up`: a claude waiting at a prompt, or hung). The file only claims
+  that claude started, which a live pane already claims; lever compares it with what it reads
+  itself and acts on nothing in it. A manager image without the hook (built by an older lever)
+  keeps a 3 s settle window counted from the pane, with a note; a start whose pane cannot be
+  probed keeps the 10 s window. The hub record's activity is not used: scion's own start report
+  sets the same activity and time as claude's SessionStart, before claude runs. `start-manager`'s
+  post-start checks (the workers' session heal and the read-only, nested-virt and claude-settings
+  warnings) run during the wait; their lines print once the start is confirmed, and the warnings
+  are dropped when it is not. `lever up` on a terminal attaches as soon as claude runs, without
+  the wait, and checks the manager again after you detach: a manager that died is reported then,
+  with the start's hints and a non-zero exit. `--no-attach`, `lever apply` and a stdin that is not
+  a terminal wait. The hook is in-jail code (jail ABI 2, below): a manager gets it on an agent
+  image rebuilt from this release.
 - **Independent bring-up steps run alongside each other (lever#189).** The host's scion build starts
   before the VM and runs while it boots and is provisioned; the scion step uses it once the guest
   reports the same architecture, and builds again otherwise. `broker-up` and the image loads with

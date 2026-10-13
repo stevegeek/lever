@@ -27,7 +27,7 @@ version bump moves the block under the new version heading.
   (256 MiB) in memory; on a full disk its manifest is cut to the space lever reserved for it, so
   it still commits. Retention keeps the last 20, 7 daily and 8 weekly snapshots, plus the newest
   complete, the newest taken with the VM off and pinned ones. The store keeps runs of zeros as
-  holes, a snapshot adds at most `limits.new` (2 GiB) of new content once a complete one exists,
+  holes, a snapshot adds at most `limits.new` (2 GiB) of new content once one exists,
   and `max_store` (32 GiB) caps the store: past it, GC deletes the oldest snapshots that are not
   protected, and doctor warns. A restore creates only links that cannot leave the restored tree,
   restores hard links as links, never applies group or other write, and renames the git,

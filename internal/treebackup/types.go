@@ -145,7 +145,7 @@ type RootInfo struct {
 type Limits struct {
 	File       int64         // bytes of one file; larger files are too-big
 	Read       int64         // bytes read from files, retries included
-	New        int64         // bytes new content may add to the store, once a complete snapshot exists
+	New        int64         // disk new content may take in the store, once a snapshot of the tree exists
 	Entries    int64         // names listed in phase B
 	Manifest   int64         // JSON-encoded bytes of the entry lines
 	DirEntries int64         // names read from one directory
@@ -309,7 +309,8 @@ type BlobResult struct {
 	Size     int64
 	New      bool
 	Repaired bool
-	// Stored is the disk a new or repaired blob took (holes left out).
+	// Stored is what a new or repaired blob is charged to the new budget:
+	// its written 4 KiB blocks plus one (holes left out).
 	Stored int64
 }
 

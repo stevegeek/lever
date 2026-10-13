@@ -579,7 +579,7 @@ load error. Sizes take a number of bytes or a unit (`KiB`, `MiB`, `GiB`, `TiB`, 
 | `max_store` | size | no | `32GiB` | Disk the retained snapshots may take. Past it, GC deletes the oldest ones except the newest, the newest complete, the newest `vm-off` and pinned ones; doctor warns. `0`: no cap, history is never deleted for space. See [store size](/operations/#retention-and-garbage-collection). |
 | `limits.file` | size | no | `256MiB` | A larger file is recorded without content (`too-big`). |
 | `limits.read` | size | no | `8GiB` | Bytes read from the tree per snapshot, retries included. |
-| `limits.new` | size | no | `2GiB` | Disk that new content may take in the store per snapshot, once a complete snapshot exists (the first one is bounded by `read` only). Past it, new files are `skipped(new)` and the snapshot is incomplete; changed files the last complete snapshot held are stored first. |
+| `limits.new` | size | no | `2GiB` | Disk that new content may take in the store per snapshot, once any snapshot of the tree exists (the first one is bounded by `read` only); each new file is charged at least two 4 KiB blocks. Past it, new files are `skipped(new)` and the snapshot is incomplete; changed files the last complete snapshot held are stored first. |
 | `limits.entries` | int | no | `1000000` | New names listed per snapshot (at most 10 000 000). |
 | `limits.manifest` | size | no | `256MiB` | Encoded size of one snapshot's entries (at most 4 GiB), each charged at its widest encoding: about 550 000 entries at the default. A snapshot holds about twice this in memory, plus 64 MiB. |
 | `limits.dir_entries` | int | no | `100000` | Names read from one directory. |

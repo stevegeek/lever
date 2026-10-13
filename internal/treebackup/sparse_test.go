@@ -110,3 +110,37 @@ func TestNewContentBudgetBoundsStoreGrowth(t *testing.T) {
 		t.Fatalf("the damaged known file was not stored first: %s", ls.String())
 	}
 }
+
+// The new budget holds even when no snapshot of the tree was ever complete,
+// and tiny files are charged the blocks they take, not their bytes.
+func TestNewContentBudgetWithoutACompleteSnapshotAndForTinyFiles(t *testing.T) {
+	e := newSnapEnv(t)
+	o := e.opts(TriggerStop)
+	o.Limits.DirEntries = 1200
+	o.Limits.New = 1 << 20
+	flood := func(round int) {
+		for i := 0; i < 1300; i++ {
+			writeFile(t, filepath.Join(e.tree, "flood", fmt.Sprintf("%d-%d", round, i)), "")
+		}
+	}
+	flood(0)
+	if res, err := Snapshot(context.Background(), o); err != nil || res.Header.Complete {
+		t.Fatalf("first snapshot must be incomplete: %v", err)
+	}
+	blobs := filepath.Join(e.state, StoreDirName, "blobs")
+	before := diskUsage(t, blobs)
+	for i := 0; i < 1000; i++ {
+		writeFile(t, filepath.Join(e.tree, "tiny", fmt.Sprintf("%04d", i)), fmt.Sprintf("x%d", i))
+	}
+	flood(1)
+	res, err := Snapshot(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Header.KnownBase != "" || res.Header.Counts.ByState[StateSkipped] == 0 {
+		t.Fatalf("known %q, skipped %d", res.Header.KnownBase, res.Header.Counts.ByState[StateSkipped])
+	}
+	if grew := diskUsage(t, blobs) - before; grew > o.Limits.New+64<<10 {
+		t.Fatalf("1000 tiny files grew the blobs by %d bytes on a %d budget", grew, o.Limits.New)
+	}
+}

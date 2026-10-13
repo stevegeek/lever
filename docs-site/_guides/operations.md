@@ -951,14 +951,16 @@ every snapshot taken with `lever tree snapshot --pin`.
 Three limits keep it from taking over the host's disk:
 
 - Runs of zeros are stored as holes, so a sparse file costs the store what it costs the tree.
-- `limits.new` (2 GiB) bounds the disk new content may take per snapshot, once a complete snapshot
-  exists. Past it, new files are `skipped(new)` and the snapshot is incomplete; changed files the
-  last complete snapshot held are stored first.
+- `limits.new` (2 GiB) bounds the disk new content may take per snapshot, once any snapshot of
+  the tree exists (each file is charged at least one 4 KiB block for its content and one for the
+  file itself). Past it, new files are `skipped(new)` and the snapshot is incomplete; changed
+  files the last complete snapshot held are stored first.
 - `max_store` (32 GiB) caps the disk the retained snapshots take. Past it, GC deletes the oldest
   snapshots until the rest fit, except the newest, the newest complete, the newest `vm-off` and
   pinned ones, which stay even when they alone take more. This deletes history to make room: an
   agent that writes new content before every snapshot can push the oldest unpinned snapshots out
-  (at most `limits.new` per snapshot), and doctor warns for a week after each such deletion. Pin
+  (per snapshot, at most `limits.new` of content plus its manifest, up to `limits.manifest`), and
+  doctor warns for a week after each such deletion. Pin
   the snapshots you rely on. Without the cap (`max_store: 0`) nothing is deleted for space, and
   the same agent can instead hold your filesystem at `min_free` for weeks, with every snapshot in
   that time `incomplete(disk)`.

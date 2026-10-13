@@ -36,8 +36,10 @@ type budgets struct{ read, new int64 }
 
 // pass2Content gives each writer root an equal part of the read and new
 // budgets left after class 0, so a root's unused share flows on to the
-// later ones. The new budget applies once a complete snapshot exists: the
-// first one stores the whole tree, within the read budget.
+// later ones. The new budget applies once any snapshot of this tree exists:
+// the first one stores the whole tree, within the read budget. Waiting for
+// a complete one would let an agent that keeps every snapshot incomplete
+// escape it.
 func (w *walker) pass2Content() error {
 	w.pass2 = true
 	class0, class1, reverify := w.selectContent()
@@ -46,7 +48,7 @@ func (w *walker) pass2Content() error {
 	}
 	w.readBuf = make([]byte, readChunk)
 	b := budgets{read: max(w.o.Limits.Read, 0), new: NoNewLimit}
-	if w.o.Known != nil {
+	if w.o.Known != nil || w.o.Cache != nil {
 		b.new = max(w.o.Limits.New, 0)
 	}
 	for _, g := range class0 {

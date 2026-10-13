@@ -862,12 +862,16 @@ func (w *blobWriter) Commit(maxNew int64) (BlobResult, error) {
 		_ = s.root.Remove(w.name)
 		return res, nil
 	}
-	if res.New && w.stored > maxNew {
+	// Charged as the disk the blob takes at the least: its written blocks
+	// plus one for the inode and directory entry, so that many tiny blobs
+	// cost what they occupy.
+	charge := (w.stored+holeBlock-1)/holeBlock*holeBlock + holeBlock
+	if res.New && charge > maxNew {
 		w.f.Close()
 		_ = s.root.Remove(w.name)
 		return BlobResult{}, ErrNewBudget
 	}
-	res.Stored = w.stored
+	res.Stored = charge
 	if err := w.f.Truncate(w.n); err != nil {
 		return fail(err)
 	}

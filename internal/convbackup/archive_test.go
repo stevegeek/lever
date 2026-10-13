@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-// entry is one tar entry for mkTar.
 type entry struct {
 	name string
 	typ  byte
@@ -178,7 +177,6 @@ func TestCopyRefusesATruncatedFile(t *testing.T) {
 	_ = tw.WriteHeader(&tar.Header{Name: "projects/a", Typeflag: tar.TypeReg, Size: 100, Mode: 0o600})
 	_, _ = tw.Write([]byte("short"))
 	zw.Write(nil)
-	// Close the gzip stream without finishing the tar entry.
 	_ = zw.Close()
 	if _, err := Copy(io.Discard, bytes.NewReader(buf.Bytes()), "projects", DefaultLimits); !errors.Is(err, ErrRefused) {
 		t.Fatalf("err = %v", err)

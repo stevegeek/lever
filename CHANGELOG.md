@@ -237,15 +237,17 @@ version bump moves the block under the new version heading.
 - **Jail ABI 2.** The in-jail code changed (shared packages); rebuild the agent image
   (`make lever-image`) and recreate the manager on it when convenient. Doctor's *agent lever
   version* row says so.
-- **`lever attach` and `lever up` detach stale terminals before they attach (lever#170).** An
-  earlier attach whose terminal went away (a closed window, a dropped ssh, a host that slept)
-  stayed attached to the agent's tmux session and could freeze the next view while the agent
-  worked. Both now detach the terminals earlier attaches left on the agent first, as
-  `tmux attach -d` does, and print how many; `--shared` keeps them. The container's own tmux
-  client (scion's start command attaches one; detaching it would stop the agent) is never
-  detached: only clients a `podman exec` started are. Operations guide: "A frozen attach view", with
-  the recovery (`Ctrl-L`, else `Ctrl-b d` and `lever attach` again; `Esc` leaves Claude Code's
-  background-agent view).
+- **`lever attach --detach-others` and `lever up --detach-others` clear a stale terminal
+  (lever#170).** An earlier attach whose terminal went away (a closed window, a dropped ssh, a
+  host that slept) stays attached to the agent's tmux session and can freeze the next view while
+  the agent works. By default an attach still keeps the other terminals attached, so a second
+  terminal does not take the first one's view; with the new `--detach-others` flag, both verbs
+  first detach the terminals earlier attaches left on the agent, as `tmux attach -d` does, and
+  print how many. The container's own tmux client (scion's start command attaches one; detaching
+  it would stop the agent) is never detached: only clients a `podman exec` started are.
+  Operations guide: "A frozen attach view", with the recovery (`Ctrl-L`, else
+  `lever attach --detach-others` from another terminal, or `Ctrl-b d` and `lever attach` again;
+  `Esc` leaves Claude Code's background-agent view).
 - **The recovery after a hard VM kill also works without a recorded boot id (lever#179).** When
   `.lever-state/guest-boot.json` holds no boot id (an instance last brought up before 0.35.0, or a
   lost file), `lever up` and `lever apply` now take podman's word instead: a manager record that

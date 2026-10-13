@@ -562,19 +562,22 @@ manager:
 The view `lever attach` (or `lever up`) gives you can freeze, or keep an old terminal's size,
 while the agent and Claude Code run normally. The usual cause is a stale tmux client: an earlier
 attach whose terminal went away (a closed window, a dropped ssh session, a host that slept) is
-still attached to the agent's tmux session. `lever attach` and `lever up` therefore detach the
-terminals earlier attaches left on the agent before they attach, as `tmux attach -d` does, and
-print how many they detached. `--shared` keeps them, for two terminals that should both watch, or
-when a terminal in scion's web UI is open on the same agent (a default attach detaches it too).
-They never detach the container's own tmux client: scion starts the agent's tmux session with a
-client attached in the container's main process, and detaching it would stop the agent. Only
-clients a `podman exec` started (an attach) are detached; one lever cannot place is left alone.
+still attached to the agent's tmux session.
 
-When a view freezes anyway:
+By default `lever attach` and `lever up` leave the other terminals attached to the agent alone,
+so a second terminal (or a terminal in scion's web UI) can watch alongside the first.
+`--detach-others` detaches them before the attach, as `tmux attach -d` does, and prints how many
+it detached. It never detaches the container's own tmux client: scion starts the agent's tmux
+session with a client attached in the container's main process, and detaching it would stop the
+agent. Only clients a `podman exec` started (an attach) are detached; one lever cannot place is
+left alone.
+
+When a view freezes:
 
 1. Press `Ctrl-L`: Claude Code clears and redraws its screen and keeps the conversation.
-2. If it stays frozen, detach with `Ctrl-b d` (or close the terminal) and run `lever attach`
-   again: the new attach detaches the old client.
+2. If it stays frozen, open another terminal and run `lever attach --detach-others` there: it
+   detaches the frozen terminal's stale client and attaches in its place. Or detach the frozen
+   one with `Ctrl-b d` and run `lever attach` again.
 3. If a stray key opened Claude Code's background-agent view, `Esc` leaves it. Do not move the
    session into the background (see [background sessions and /login](#background-sessions-and-login)).
 

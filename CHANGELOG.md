@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-10-13
+
 ### Added
 
 - **fizzy tool: close cards (`close_card`, opt-in through `-ops`).** In Fizzy, Done is a card's

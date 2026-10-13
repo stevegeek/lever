@@ -89,13 +89,6 @@ Machine-specific paths (`LEVER_INSTANCE`, `LEVER_IMAGE_CTX`, `PREFIX`) go in an 
 `local.mk`; see `local.mk.example`. `make lever-image` refuses to overwrite an existing image tag
 unless `LEVER_IMAGE_FORCE=1`.
 
-The Makefile builds with the Go release named in `go.mod` (it sets `GOTOOLCHAIN`; the `go` command
-downloads that toolchain once if yours differs), the same Go CI uses. A newer local
-Go can break dependencies that rely on runtime internals: under Go 1.27, the SQLite driver
-`lever-tool-db` used before 0.36.0 (`modernc.org/libc` v1.73.4) hung on first use, and
-`make test-lima-e2e` then failed its tool calls with a 502. Offline, or to try a newer Go on
-purpose, run `make GOTOOLCHAIN=local <target>`.
-
 ## Test
 
 ```bash

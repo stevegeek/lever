@@ -263,12 +263,6 @@ version bump moves the block under the new version heading.
   queries both an in-memory and an on-disk database, and its tests pass. No shipped `lever` binary
   links SQLite; only the reference tool does. It is baked into the agent image, which this release
   rebuilds anyway (jail ABI 2).
-- **The Makefile builds with the Go release in `go.mod`.** It sets `GOTOOLCHAIN=go<go.mod>+auto`,
-  the Go CI uses (the `go` command downloads it once if the local one differs, and still switches
-  up when a dependency needs a newer Go). Under Go 1.27 the old SQLite pair in `lever-tool-db`
-  hung on first use and the e2e's tool calls failed with a 502; the upgrade above fixes that, and
-  the pin keeps the next such break out of local builds. `make GOTOOLCHAIN=local` builds with the
-  local Go, to try a newer one on purpose.
 
 ### Fixed
 

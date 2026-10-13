@@ -215,6 +215,45 @@ Two properties a shared namespace would give for free are preserved without it:
 Escape hatch: setting `LEVER_FORCE_HOST_NETWORK=1` on the host restores `--network=host` for
 debugging — this reopens the shared-loopback gap above and is not isolation-safe.
 
+### 4.3.1 The hub's workstation routes, and the dev super-admin row
+
+Because agents reach the jail-loopback hub (§4.3), they reach its **workstation** routes too.
+scion runs the hub non-hosted, so `/api/v1/system/*` is enabled, and that route group is gated
+only by workstation mode plus a loopback-origin check — it runs **no permission check**. A request
+still needs a valid hub identity, which every agent has (its own agent token), so any agent can
+call these routes. The one that matters here is `PUT /api/v1/system/identity`: it renames scion's
+**dev user**. That row is seeded super-admin on every instance and nothing removes it; lever uses
+it as its own host-side controller identity, never for a human. An agent can rename it to the
+email of an operator or contact who has **no hub user yet**; scion keys users on email, so that
+person's first sign-in would resolve to the renamed super-admin row and they would hold
+super-admin.
+
+What lever does about it, and what it does not:
+
+- **The sign-in is refused.** When lever mints a remote hub session it reads the session's hub
+  user id and refuses it unless it is the one lever expects for that login: never scion's fixed
+  dev-user id, and, when `lever apply` recorded an id for the login, exactly that id. Only the
+  targeted sign-in fails, and it fails closed; it is retried at most once a minute. This closes
+  the impersonation at the point of use, whenever the rename happened. The check runs after
+  scion's sign-in callback, so that callback still touches the dev row (its last-login time, and
+  an empty display name or avatar); it cannot change the row's role on lever, which sets no
+  `admin_emails`.
+- **`lever apply` binds nothing to it.** When the hub user for an allowed login turns out to be
+  the dev row, apply warns, leaves the login pending and grants no role, ceiling or record to it,
+  so lever's own controller identity is never reshaped by the remote-access grant.
+- **`lever doctor` reports it.** A *dev user identity* row flags a dev row whose email is one a
+  configured remote login signs in as, so tampering is visible even before anyone signs in.
+- **What still holds.** lever does not stop an agent from calling the route — it cannot, since the
+  route is plain loopback HTTP that agents must be able to reach for the rest of the hub API, and
+  an egress rule cannot single out one HTTP path. So between applies an agent can still rename the
+  dev row (a denial of the targeted sign-in until it is repaired) and change the controller's
+  message sender label. The same route group has other writers that run no permission check
+  either (the workstation settings, image registry, runtime, init, image pull and build, and
+  `fs/mkdir` routes); lever mitigates none of them, and the registry one is the one to watch,
+  since it changes where agent images come from. The durable fix is upstream: a permission check on scion's `/api/v1/system/*`
+  mutating routes, or running the hub in hosted mode (which removes `system/*` entirely). The
+  controller PAT and the broker are unaffected throughout: neither trusts the dev row's email.
+
 ### 4.4 The hub enforces the role ceiling too
 
 Every agent lever creates is stamped `--role baseline` ([config `agent_role`](/reference/config/)),

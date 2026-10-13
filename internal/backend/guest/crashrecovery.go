@@ -90,6 +90,9 @@ func parseGuestReport(out string) GuestReport {
 // temp dir.
 type crashPaths struct {
 	Sysctl, Modprobe, GrubDropIn, GrubCfg, Cmdline, SysModule string
+	// Core are the tmux-core capture paths (corecapture.go), converged in
+	// the same root call.
+	Core corePaths
 }
 
 var realCrashPaths = crashPaths{
@@ -99,6 +102,7 @@ var realCrashPaths = crashPaths{
 	GrubCfg:    "/boot/grub/grub.cfg",
 	Cmdline:    "/proc/cmdline",
 	SysModule:  "/sys/module",
+	Core:       realCorePaths,
 }
 
 func crashSysctlFile() string {
@@ -141,6 +145,20 @@ const EFIPstoreActiveShell = `efi_pstore_active() {
 }
 `
 
+// convergeShell defines converge PATH CONTENT for the guest scripts: it
+// writes CONTENT (plus a newline) to PATH, mode 0644, only when PATH does
+// not hold it already, and returns 0 when it wrote. A failed write exits the
+// script with 1 (set -e does not reach a function called from a || list).
+const convergeShell = `converge() {
+  if [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; then return 1; fi
+  mkdir -p "$(dirname "$1")" || exit 1
+  printf '%s\n' "$2" > "$1.lever-tmp" || exit 1
+  chmod 0644 "$1.lever-tmp" || exit 1
+  mv -f "$1.lever-tmp" "$1" || exit 1
+  return 0
+}
+`
+
 // crashRecoveryScript is the root script EnsureCrashRecovery runs. It
 // writes each file only when its content differs, applies the sysctls live
 // on every run, unloads a loaded efi_pstore module, runs update-grub only
@@ -152,15 +170,7 @@ func crashRecoveryScript(p crashPaths) string {
 	q := shellSingleQuote
 	var b strings.Builder
 	b.WriteString("set -eu\n")
-	b.WriteString(`converge() {
-  if [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; then return 1; fi
-  mkdir -p "$(dirname "$1")" || exit 1
-  printf '%s\n' "$2" > "$1.lever-tmp" || exit 1
-  chmod 0644 "$1.lever-tmp" || exit 1
-  mv -f "$1.lever-tmp" "$1" || exit 1
-  return 0
-}
-`)
+	b.WriteString(convergeShell)
 	b.WriteString(EFIPstoreActiveShell)
 	fmt.Fprintf(&b, "converge %s %s || true\n", q(p.Sysctl), q(crashSysctlFile()))
 	for _, s := range CrashSysctls {
@@ -184,11 +194,16 @@ fi
 		q("reboot: the kernel command line gets "+EFIPstoreCmdline+" at the next boot"))
 	fmt.Fprintf(&b, "if efi_pstore_active %s; then echo %s; fi\n", q(p.SysModule),
 		q("reboot: the EFI pstore backend is still registered (built in, or efi_pstore could not be unloaded); it is off from the next boot"))
+	// The tmux-core capture rides the same root call (one guest round trip
+	// on every up). It is diagnostics: run in a subshell, its failure is a
+	// warning and never fails the bring-up.
+	fmt.Fprintf(&b, "(\n%s) || echo %s\n", coreCaptureScript(p.Core), q("warn: could not set up the tmux server core capture ("+CoreDir+"); a tmux crash leaves no core"))
 	return b.String()
 }
 
 // EnsureCrashRecovery converges the guest's crash-recovery settings (see
-// the package notes above) and reports what waits for a reboot.
+// the package notes above) and its tmux-core capture (corecapture.go), and
+// reports what waits for a reboot.
 // Idempotent; run on every apply and up. Lima only: the caller gates it.
 func (g Guest) EnsureCrashRecovery(ctx context.Context) (GuestReport, error) {
 	res, err := g.RootRun(ctx, "bash", "-c", crashRecoveryScript(realCrashPaths))

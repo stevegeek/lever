@@ -312,6 +312,40 @@ if run_acceptance; then ok "acceptance PASSED (open egress)"; else bad "acceptan
 if egress_one_reject_in_guest; then ok "LEVER_EGRESS rejects only the metadata /32 (open egress)"; else bad "LEVER_EGRESS REJECT rules are not exactly the metadata /32 (open egress)"; fi
 # lever#183: provisioning installs and starts no dockerd (scion runs podman).
 if limactl shell "$MACHINE" pgrep -x dockerd >/dev/null 2>&1; then bad "a dockerd runs in the guest"; else ok "no dockerd in the guest"; fi
+# lever#201: the guest keeps the core of a crashed process named "tmux: server"
+# (and drops other dumps), root only, even with the crashing process's core
+# size limit at 0. Two python processes stand in: one renames itself and
+# segfaults, a decoy segfaults under its own name.
+core_capture_in_guest() {
+  limactl shell "$MACHINE" -- sh -s <<'SH'
+set -u
+d=/var/lib/lever/cores
+sudo sh -c "rm -f $d/core.tmux.*" || exit 1
+ulimit -c 0
+python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGSEGV)' 2>/dev/null
+python3 -c 'import ctypes, os, signal; ctypes.CDLL(None).prctl(15, b"tmux: server", 0, 0, 0); os.kill(os.getpid(), signal.SIGSEGV)' 2>/dev/null
+i=0
+while [ "$i" -lt 20 ]; do
+  n=$(sudo sh -c "ls $d" 2>/dev/null | grep -c '^core\.tmux\.[0-9]*\.[0-9]*$')
+  [ "$n" -ge 1 ] && break
+  sleep 0.5; i=$((i+1))
+done
+echo "pattern=$(cat /proc/sys/kernel/core_pattern)"
+echo "cores=$n"
+echo "dir=$(sudo stat -c '%a %U' $d)"
+echo "file=$(sudo sh -c "stat -c '%a %U %s' $d/core.tmux.*" 2>/dev/null | head -1)"
+sudo sh -c "rm -f $d/core.tmux.*"
+SH
+}
+core_out=$(core_capture_in_guest 2>&1)
+if printf '%s\n' "$core_out" | grep -q '^pattern=|/usr/local/libexec/lever-core-handler %P %t %e$' &&
+  printf '%s\n' "$core_out" | grep -q '^cores=1$' &&
+  printf '%s\n' "$core_out" | grep -q '^dir=700 root$' &&
+  printf '%s\n' "$core_out" | grep -Eq '^file=600 root [1-9][0-9]*$'; then
+  ok "the guest keeps a crashed tmux server's core, root only, and drops the decoy's"
+else
+  bad "guest tmux core capture: $(printf '%s' "$core_out" | tr '\n' ' ')"
+fi
 
 # ================================================================================
 # 2. Guest port-forward suppression — the template hazard. A guest 0.0.0.0

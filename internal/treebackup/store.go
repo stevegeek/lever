@@ -2,6 +2,7 @@ package treebackup
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -777,19 +778,39 @@ type blobWriter struct {
 	name string
 	h    hash.Hash
 	n    int64
-	done bool
+	// stored counts the bytes written to disk: blocks of zeros are left as
+	// holes.
+	stored int64
+	done   bool
 }
 
+// holeBlock is the unit blobWriter leaves unwritten when it is all zeros.
+const holeBlock = 4 << 10
+
+var zeroBlock [holeBlock]byte
+
 // Write copies and hashes in the same pass: a separate hash pass would let
-// the content change between the hash and the copy.
+// the content change between the hash and the copy. A block of zeros at a
+// block boundary is skipped, so a sparse file the agent made for free costs
+// the store nothing either; Commit sets the final size.
 func (w *blobWriter) Write(p []byte) (int, error) {
 	if w.done {
 		return 0, errors.New("tree backups: write after commit")
 	}
-	n, err := w.f.Write(p)
-	w.h.Write(p[:n])
-	w.n += int64(n)
-	return n, err
+	w.h.Write(p)
+	for done := 0; done < len(p); {
+		k := min(len(p)-done, holeBlock-int(w.n%holeBlock))
+		b := p[done : done+k]
+		if k < holeBlock || !bytes.Equal(b, zeroBlock[:]) {
+			if _, err := w.f.WriteAt(b, w.n); err != nil {
+				return done, err
+			}
+			w.stored += int64(k)
+		}
+		done += k
+		w.n += int64(k)
+	}
+	return len(p), nil
 }
 
 func (w *blobWriter) Abort() {
@@ -840,6 +861,9 @@ func (w *blobWriter) Commit() (BlobResult, error) {
 		w.f.Close()
 		_ = s.root.Remove(w.name)
 		return res, nil
+	}
+	if err := w.f.Truncate(w.n); err != nil {
+		return fail(err)
 	}
 	if err := syncNewBlob(w.f); err != nil {
 		return fail(err)

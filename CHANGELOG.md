@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-13
+
 ### Added
 
 - **A release ships scion prebuilt, so its pin needs no Go toolchain (lever#191).** The release

@@ -22,25 +22,19 @@ import (
 )
 
 const (
-	// defaultGrantTTL is the lifetime stamped on minted capability tokens when the
-	// operator sets no broker.grant_ttl. It is session-scale (matching the 24h
-	// agent cert TTL) by design: in api-key mode a long-running claude reads the
-	// LLM capability token (ANTHROPIC_AUTH_TOKEN) from its settings.json env block
-	// once at startup and holds it for the whole session, and the in-container
-	// lever-renew sidecar only refreshes every 12h — so a short TTL would strand a
-	// session between refreshes. Token TTL is a backstop only; the live
-	// epoch/revoke gate (checked per call on tool routes and the /llm proxy) is the
-	// real security cut, so a generous default is safe. Operators wanting tighter
-	// expiry can lower broker.grant_ttl, but should keep it above the renew interval.
+	// defaultGrantTTL is session-scale because claude reads the LLM token
+	// (ANTHROPIC_AUTH_TOKEN) once at startup and lever-renew refreshes only
+	// every 12h. Token TTL is a backstop: the per-call epoch/revoke gate is the
+	// real security cut. A lower broker.grant_ttl must stay above the renew
+	// interval.
 	defaultGrantTTL  = 24 * time.Hour
 	defaultTicketTTL = 10 * time.Minute
 )
 
 const (
-	// ReservedLLMTool is the built-in pseudo-tool name for the LLM proxy. It is
-	// registered (api-key mode) so /request can mint capability(llm) tokens, but
-	// it gets NO /mcp/llm/ tool route and is hidden from /tools — it is served
-	// only by the /llm proxy route.
+	// ReservedLLMTool is the pseudo-tool for the LLM proxy: /request can mint it,
+	// but it has no /mcp/llm/ route, is hidden from /tools, and is served only
+	// by /llm.
 	ReservedLLMTool = registry.ReservedLLMTool
 	ReservedLLMOp   = registry.ReservedLLMOp
 )
@@ -51,10 +45,7 @@ type RevocationState struct {
 	Revoked  []string `json:"revoked"`
 }
 
-// Config assembles a Broker. Its groups map onto who fills them: brokerctl's
-// BuildBroker fills Identity and LLM from the parsed app config, and its serve
-// path fills Persistence, Dispatch and Directives plus the top-level fields
-// from the state dir, the selected backend and the process environment.
+// Config assembles a Broker.
 type Config struct {
 	Identity    IdentityConfig
 	Persistence PersistenceConfig
@@ -63,33 +54,26 @@ type Config struct {
 	Directives  DirectiveConfig
 	Chat        ChatConfig
 	Timeouts    TimeoutConfig
-	// AgentMessages is remote.agent_messages (contactmsg.go): the contacts
-	// an agent may message and the limits. Zero = off.
+	// AgentMessages is remote.agent_messages. Zero = off.
 	AgentMessages AgentMessagesConfig
 	// Files is remote.files: the file exchange of the chat page.
 	Files FilesConfig
 
 	// Log receives the audit decisions; nil ⇒ a discard logger.
 	Log *slog.Logger
-	// Version and ConfigHash identify this broker process: the binary's
-	// version string and a digest of the broker-relevant configuration it was
-	// started with. Reported by /epoch so apply's broker-reuse shortcut can
-	// detect a stale broker (old binary or old tool set) and restart it
-	// instead of silently reusing it (#19). Both optional (empty = unreported).
+	// Version and ConfigHash (a digest of the broker-relevant config) are
+	// reported by /epoch so apply can restart a stale broker instead of
+	// reusing it. Empty = unreported.
 	Version    string
 	ConfigHash string
-	// InstanceID is this instance's id (state.EnsureInstanceID), reported
-	// by /epoch so a host-side caller can tell this instance's broker from
-	// another instance's on the same ports (lever#181). Optional (empty =
-	// unreported, which every caller treats as "not ours"). Not
-	// DirectiveConfig.InstanceID, the instance name signed directives carry.
+	// InstanceID (state.EnsureInstanceID) is reported by /epoch so a host
+	// caller can tell this instance's broker from another on the same ports.
+	// Empty is treated as "not ours". Not DirectiveConfig.InstanceID.
 	InstanceID string
-	// ToolSecret is the per-boot broker-to-tool shared secret (minted by
-	// brokerctl.Serve, delivered to each supervised first-party tool through
-	// its environment). The gateway presents it in X-Lever-Tool-Secret on
-	// every request it proxies to a FIRST-PARTY tool; captool refuses a
-	// request without it, so X-Lever-Caller is never trusted on a direct dial
-	// past the broker. Empty ⇒ no header is sent (tests, embedders).
+	// ToolSecret is the per-boot broker-to-tool secret. The gateway sends it
+	// in X-Lever-Tool-Secret to first-party tools, which refuse a request
+	// without it, so X-Lever-Caller is never trusted on a direct dial past the
+	// broker. Empty ⇒ no header is sent.
 	ToolSecret string
 }
 
@@ -104,16 +88,12 @@ type IdentityConfig struct {
 	// ManagerIdentity is the cert CN permitted to call the worker/msg
 	// routes.
 	ManagerIdentity string
-	// ManagerSlug is the manager's scion agent slug — the app name (apply's
-	// start-manager dispatches the manager as Worker: app.Name). It is DISTINCT
-	// from ManagerIdentity, the cert CN used for authn: scion knows the manager
-	// only by its slug, so a message routed to agent:<CN> fails with
-	// `Agent "<CN>" not found in project`. Empty defaults to ManagerIdentity
-	// (embedders/tests that never message the manager).
+	// ManagerSlug is the manager's scion agent slug (the app name), distinct
+	// from the cert CN: scion knows the manager only by its slug. Empty
+	// defaults to ManagerIdentity.
 	ManagerSlug string
-	// ManagerClaude is the manager's Claude Code config (config.ManagerClaude),
-	// carried in every envelope the broker stages for the manager (the
-	// auto-re-enrol healer). nil when none is configured.
+	// ManagerClaude is carried in every envelope the broker stages for the
+	// manager. nil when none is configured.
 	ManagerClaude *wire.Claude
 	GrantTTL      time.Duration
 	TicketTTL     time.Duration
@@ -123,33 +103,31 @@ type IdentityConfig struct {
 // writes it through on every change, so a restart never silently un-revokes
 // or drops a directive.
 type PersistenceConfig struct {
-	// Revocation seeds the epoch floor + revoke list (loaded from the state dir).
 	Revocation RevocationState
-	// PersistRevocation is called (under the broker lock) whenever revocation
-	// state changes, to write it through to the state dir. nil ⇒ no persistence.
+	// PersistRevocation is called under the broker lock on every revocation
+	// change. nil ⇒ no persistence.
 	PersistRevocation func(RevocationState) error
-	// Directives seeds the persistent operator-directive store; PersistDirectives
-	// writes it through on every mutation. Modeled on Revocation/PersistRevocation.
+	// PersistDirectives is called on every directive store mutation.
 	Directives        DirectiveState
 	PersistDirectives func(DirectiveState) error
 }
 
 // LLMConfig configures the /llm proxy.
 type LLMConfig struct {
-	// APIKey is the real Anthropic Console key bytes (loaded host-side from the
-	// 0600 api_key_file by brokerctl). nil ⇒ no /llm route is served.
+	// APIKey is the real Anthropic key, loaded host-side from the 0600
+	// api_key_file. nil ⇒ no /llm route is served.
 	APIKey []byte
 	// Upstream is the proxy target; empty defaults to https://api.anthropic.com.
-	// Set by tests to a fake upstream. NEVER derived from a client request.
+	// NEVER derived from a client request.
 	Upstream string
 }
 
 // ManagerResumeCheck is the half of DispatchConfig.ManagerResumeGuard that
 // runs after the bounce's resume (apply.ManagerResume in production).
 type ManagerResumeCheck interface {
-	// After reads back, from the guest, where each of the resumed
-	// manager's tree mounts comes from, until its container runs; a
-	// mismatch suspends the manager and is the error.
+	// After reads back from the guest where each of the resumed manager's
+	// tree mounts comes from; a mismatch suspends the manager and is the
+	// error.
 	After(ctx context.Context) error
 	// AfterFailure is After for a resume that failed with cause: a
 	// container it started anyway is checked, its error joined to cause.
@@ -160,153 +138,112 @@ type ManagerResumeCheck interface {
 
 // DispatchConfig is the host-side worker dispatch and messaging wiring.
 type DispatchConfig struct {
-	// Runtime is the scion client the broker drives; Workers are the
-	// config-derived, path-authoritative worker descriptions; BrokerCAPEM/
-	// BrokerURL are copied into each worker's staged bootstrap so it trusts
-	// the same CA and dials the same broker as the manager.
+	// BrokerCAPEM and BrokerURL are copied into each worker's staged
+	// bootstrap so it trusts the same CA and dials the same broker.
 	Runtime     WorkerRuntime
 	Workers     []WorkerSpec
 	BrokerCAPEM string
 	BrokerURL   string
-	// InstanceProject is the single Scion project (-g) that the manager and
-	// all workers are agents in; = the jail mount root. Used when a message
-	// is addressed to the manager's agent identity, and as the constant -g
-	// for every worker dispatch/lifecycle/list call.
+	// InstanceProject is the single scion project (-g) of the manager and
+	// all workers.
 	InstanceProject string
 	// WorkerToWorker enables worker→worker messaging; default false (deny).
 	WorkerToWorker bool
 	// VerifyAgentRole refuses to RESUME a worker whose hub record stores no
-	// authorization role while the installed scion resolves that to full hub
-	// authority (see hubapi.VerifyAgentRole). A worker created by a scion older
-	// than scion#1089 carries no role, the role is immutable after creation, and
-	// `scion resume` cannot set one — so resuming such a record grants it agent
-	// create, lifecycle and secret-read.
-	//
-	// Only the resume paths consult it: a freshly started worker is stamped
-	// `--role baseline` by the start itself. nil ⇒ no-op (tests, and a manual
-	// `broker serve` with no runtime wired).
+	// role while the installed scion resolves that to full hub authority
+	// (hubapi.VerifyAgentRole). The role is immutable and `scion resume`
+	// cannot set one, so resuming such a record would grant agent create,
+	// lifecycle and secret-read. A fresh start is stamped `--role baseline`
+	// itself. nil ⇒ no-op.
 	VerifyAgentRole func(ctx context.Context, agent string) error
-	// ResolveAgentID maps an agent slug to its hub agent id. /msg/list needs it
-	// to cut the notification feed down to one agent: lever reads notifications
-	// with the host controller PAT, and the hub scopes that query to the
-	// authenticated USER, so the raw answer carries every agent's events. The id
-	// is what attributes each event.
-	//
-	// nil ⇒ /msg/list fails closed. Falling back to the unfiltered feed would be
-	// the leak this exists to close.
+	// ResolveAgentID maps an agent slug to its hub agent id. /msg/list needs
+	// it because the hub scopes the notification query to the controller
+	// PAT's user, so the raw feed carries every agent's events. nil ⇒
+	// /msg/list fails closed; the unfiltered feed would be a leak.
 	ResolveAgentID func(ctx context.Context, agentSlug string) (string, error)
-	// ResolveControllerSender returns the envelope sender every message lever
-	// sends wears: "user:" + the email (or id) of the hub user the controller
-	// PAT belongs to. /message/verify looks a message from this sender up in
-	// the sent ledger only. nil ⇒ such a message answers unavailable.
+	// ResolveControllerSender returns the sender every lever message wears
+	// ("user:" + the controller PAT's user). /message/verify looks such a
+	// message up in the sent ledger only. nil ⇒ it answers unavailable.
 	ResolveControllerSender func(ctx context.Context) (string, error)
-	// BeginSession is called just before a worker is created fresh and
-	// returns what records that fresh start (brokerctl.BeginSession, package
-	// sessionrec) once scion created it. A resume records nothing: the
-	// remote proxy lets a contact post to an agent only while its last fresh
-	// start saw the skill on disk now. nil ⇒ nothing is recorded (tests).
+	// BeginSession is called just before a worker is created fresh; its
+	// commit records that start once scion created it. A resume records
+	// nothing: the remote proxy lets a contact post to an agent only while
+	// its last fresh start saw the skill on disk. nil ⇒ nothing is recorded.
 	BeginSession func(agent string) (commit func() error)
-	// AutoReenrol gates the natural-lapse healer (reenrol.go): "all" |
-	// "manager" | "off" (resolved by brokerctl from config; empty = all).
+	// AutoReenrol gates the natural-lapse healer: "all" | "manager" | "off"
+	// (empty = all).
 	AutoReenrol string
-	// MaxRunningWorkers is broker.max_running_workers: the broker refuses to
-	// bring up a worker while this many other workers are running or
-	// starting (workercap.go). 0 = no cap.
+	// MaxRunningWorkers is broker.max_running_workers. 0 = no cap.
 	MaxRunningWorkers int
-	// Tree is the host path to the instance tree: the confinement anchor for
-	// staging enrolment material. Everything below it is agent-writable and the
-	// broker writes there as the operator, so wire.Stage confines every write to
-	// this root and refuses agent-planted symlinks. Empty ⇒ the staging
-	// directory's parent is used instead (tests); see Broker.treePath.
+	// Tree is the instance tree, the confinement anchor for staging. It is
+	// agent-writable and the broker writes there as the operator, so
+	// wire.Stage confines every write to it and refuses agent-planted
+	// symlinks. Empty ⇒ the staging dir's parent (Broker.treePath).
 	Tree string
-	// LiveSettle is how long a freshly started or resumed worker must STAY
-	// live before its dispatch is reported as up (scion.LiveBudget.Settle,
-	// lever#31). brokerctl sets the production value; zero — the default a
-	// test gets — is the first-observation gate.
+	// LiveSettle is how long a started or resumed worker must STAY live
+	// before its dispatch is reported up (scion.LiveBudget.Settle). Zero is
+	// the first-observation gate.
 	LiveSettle time.Duration
-	// ManagerBootstrapDir is the host path to <tree>/.lever — where the
-	// MANAGER's bootstrap.json is staged (workers go through Tickets).
-	// Empty disables manager healing (audited as an error on lapse).
+	// ManagerBootstrapDir is <tree>/.lever, where the manager's
+	// bootstrap.json is staged. Empty disables manager healing.
 	ManagerBootstrapDir string
-	// ReadOnlyDirs is manager.read_only: tree-relative directories the
-	// manager sees read-only. Non-empty switches worker workspace creation
-	// to its strict form (ensureWorkspaceDir): no symlink anywhere on the
-	// worker's path, and no worker workspace that is, contains or lies in
-	// one of these — a worker mounts its dir read-write, so one placed over
-	// a protected directory would undo the protection. Empty ⇒ today's
-	// in-tree-symlinks-allowed behaviour.
+	// ReadOnlyDirs is manager.read_only. Non-empty makes worker workspace
+	// creation strict (ensureWorkspaceDir): no symlink on the path, and no
+	// workspace that is, contains or lies in one of these, since a worker
+	// mounts its dir read-write and would undo the protection.
 	ReadOnlyDirs []string
-	// RecordVolumes reads a worker's hub record volumes, for the check that
-	// refuses to resume a worker whose record holds a shared folder mount
-	// the config no longer grants (refuseStaleShares). Wired only while
-	// shared_folders lists a folder: a failed read then refuses the resume
-	// (fail closed, "retry"). nil skips it.
+	// RecordVolumes reads a worker's hub record volumes so a resume is
+	// refused when the record holds a shared folder mount the config no
+	// longer grants (refuseStaleShares). Wired only while shared_folders is
+	// set; a failed read refuses (fail closed). nil skips it.
 	RecordVolumes RecordVolumesFunc
-	// LeftoverShareVolumes is the same reader for an instance with NO
-	// shared folder (wired instead of RecordVolumes): a record made while
-	// folders were configured still refuses its resume when it holds a
-	// /shared mount, but only when the read succeeds. A failed read lets
-	// the resume go on, so an instance that never used shared folders is
-	// not held back by a hub hiccup. nil skips it.
+	// LeftoverShareVolumes is the same reader for an instance with no shared
+	// folder: a /shared mount still refuses the resume, but a failed read
+	// lets it go on. nil skips it.
 	LeftoverShareVolumes RecordVolumesFunc
 	// SharedGuard checks that the running manager holds its tree plan
-	// (config.App.ManagerTreeMounts: the pins over every shared folder and
-	// worker dir) before any worker starts or resumes. Wired only while
-	// shared folders are configured; nil skips the check. A refusal that
-	// wraps ErrSharedCheckUnavailable means the mounts could not be read.
+	// (config.App.ManagerTreeMounts) before any worker starts or resumes.
+	// nil skips it. ErrSharedCheckUnavailable means the mounts could not be
+	// read.
 	SharedGuard func(ctx context.Context) error
-	// ManagerResumeGuard runs the checks apply runs around a resume of the
-	// manager (lever#158) for the broker's own: the re-enrol bounce.
-	// Called before anything is staged, it refuses when the host tree or
-	// the manager record's mounts are not what lever planned; the check it
-	// returns runs after the resume (see ManagerResumeCheck). nil: the
-	// broker never resumes the manager (fail closed).
+	// ManagerResumeGuard runs apply's manager-resume checks for the re-enrol
+	// bounce: before staging it refuses when the host tree or the record's
+	// mounts are not as planned; the returned check runs after the resume.
+	// nil: the broker never resumes the manager (fail closed).
 	ManagerResumeGuard func(ctx context.Context) (ManagerResumeCheck, error)
-	// Tickets stages a WORKER's enrolment envelope in the guest, outside the
-	// instance tree (jail.StageWorkerTicket in production). The manager
-	// mounts the whole tree, so nothing a worker must redeem may be written
-	// there. nil ⇒ every worker dispatch fails closed at the staging step.
+	// Tickets stages a worker's enrolment envelope in the guest, outside the
+	// instance tree: the manager mounts the whole tree, so nothing a worker
+	// must redeem may be written there. nil ⇒ every dispatch fails closed.
 	Tickets TicketStager
-	// Purge deletes a worker's scion record and its staged guest ticket, the
-	// teardown of `lever worker purge` (brokerctl.PurgeWorker in production).
-	// Only the recycle route uses it. nil ⇒ every recycle fails closed.
+	// Purge deletes a worker's scion record and staged ticket (recycle
+	// only). nil ⇒ every recycle fails closed.
 	Purge WorkerPurger
-	// ContainerRunning reads, in the jail, whether the worker's container is
-	// running (or paused): podman's own state, which no agent can set, where
-	// the hub's phase and container status are both agent-settable text.
-	// A recycle refuses a running one. nil ⇒ only the hub's record is read
-	// (tests).
+	// ContainerRunning reads podman's own state for the worker's container,
+	// which no agent can set (the hub's phase and status are agent-settable
+	// text). A recycle refuses a running one. nil ⇒ only the hub record is
+	// read.
 	ContainerRunning func(ctx context.Context, worker string) (bool, error)
-	// HubTokens lets the broker heal an agent whose scion hub token expired
-	// (tokenwatch.go): a periodic read of each running agent's token, and
-	// `scion reset-auth` for one that lapsed. Governed by AutoReenrol like
-	// the certificate healer. nil ⇒ no watch.
+	// HubTokens heals an agent whose scion hub token expired, governed by
+	// AutoReenrol. nil ⇒ no watch.
 	HubTokens HubTokenHealer
 }
 
-// TimeoutConfig bounds request handling on the jail listener, per route
-// class. The listener itself sets only ReadHeaderTimeout and IdleTimeout — a
-// server-level ReadTimeout/WriteTimeout would cut a streamed /llm completion
-// — so these are applied per route (see JailHandler). Zero fields take the
-// defaults; tests shrink them. There is deliberately no handler bound for
-// the /mcp/<name>/ and /worker/* routes: a tool call may stream and a
-// dispatch may legitimately run long (JailHandler says why).
+// TimeoutConfig bounds request handling on the jail listener per route class.
+// They are per route because a server-level ReadTimeout/WriteTimeout would cut
+// a streamed /llm completion. /mcp/<name>/ and /worker/* deliberately have no
+// handler bound (see JailHandler). Zero fields take the defaults.
 type TimeoutConfig struct {
-	// Body bounds how long a client may take to deliver its request body, on
-	// EVERY jail route including /llm (a read deadline on the connection).
+	// Body bounds request body delivery on every jail route, /llm included.
 	Body time.Duration
-	// Control bounds the JSON control routes (worker list, msg, directive,
-	// enrol, renew, request, tools): handler start to response.
+	// Control bounds the JSON control routes, handler start to response.
 	Control time.Duration
 }
 
-// Default jail route deadlines (TimeoutConfig).
 const (
 	defaultJailBodyTimeout    = 30 * time.Second
 	defaultJailControlTimeout = 30 * time.Second
 )
 
-// withDefaults fills every zero field of tc.
 func (tc TimeoutConfig) withDefaults() TimeoutConfig {
 	return TimeoutConfig{
 		Body:    cmp.Or(tc.Body, defaultJailBodyTimeout),
@@ -319,16 +256,12 @@ type DirectiveConfig struct {
 	// Verifier gates the channel: nil means directives are disabled and every
 	// /directive/* route 404s.
 	Verifier *opsig.Verifier
-	// InstanceID is this instance's name, checked against Statement.Instance /
-	// Envelope.Instance on every signed directive op (opsig.ParseStatement /
-	// ParseEnvelope's instance-mismatch fail-closed check).
+	// InstanceID is this instance's name; every signed directive op fails
+	// closed when its Instance differs.
 	InstanceID string
-	// AuditPath is the bounded JSON-lines audit log for the directive channel.
-	// Empty ⇒ dirAudit.append is a no-op (still non-nil, so handlers never
-	// nil-check it).
+	// AuditPath is the bounded JSON-lines directive audit log. Empty ⇒ no-op.
 	AuditPath string
-	// ExpiryMax clamps how far in the future a submitted directive's
-	// expires_at may sit (on top of opsig's own 24h hard cap).
+	// ExpiryMax clamps a directive's expires_at, on top of opsig's 24h cap.
 	ExpiryMax time.Duration
 }
 
@@ -353,22 +286,18 @@ type Broker struct {
 	beginSession   func(agent string) (commit func() error)
 	tree           string
 	readOnlyDirs   []string
-	// shared_folders (refuseStaleShares).
-	recordVolumes RecordVolumesFunc
-	// leftoverShareVolumes: the best-effort reader while no folder is
-	// configured (refuseStaleShares).
+	recordVolumes  RecordVolumesFunc
+	// leftoverShareVolumes is best-effort (see DispatchConfig).
 	leftoverShareVolumes RecordVolumesFunc
 	sharedGuard          func(ctx context.Context) error
 	managerResumeGuard   func(ctx context.Context) (ManagerResumeCheck, error)
-	// afterWorkspaceMkdir is a test seam: called between a strict worker
-	// workspace mkdir and the walk that follows it. nil outside tests.
+	// afterWorkspaceMkdir is a test seam between a strict workspace mkdir
+	// and the walk that follows it.
 	afterWorkspaceMkdir func()
 	workers             map[string]WorkerSpec
 	brokerCAPEM         string
 	brokerURL           string
-	// liveAttempts/liveInterval bound waitWorkerLive's post-start poll; tests
-	// shrink them per instance (like reenrolNow). liveSettle is the hold that
-	// follows (DispatchConfig.LiveSettle).
+	// liveAttempts/liveInterval bound waitWorkerLive's poll (test seams).
 	liveAttempts int
 	liveInterval time.Duration
 	liveSettle   time.Duration
@@ -378,18 +307,14 @@ type Broker struct {
 	managerClaude   *wire.Claude
 	workerToWorker  bool
 
-	// workerLocks serialises the read-phase-then-act paths of one worker
-	// (start, the resume verb, the remote wake, stop and suspend, recycle,
-	// and the re-enrol healer's bounce): two of them at once would both read
-	// "suspended" and both resume, or a bounce undo a stop (lockWorker).
+	// workerLocks serialises the read-phase-then-act paths of one worker:
+	// two at once would both read "suspended" and both resume, or a bounce
+	// undo a stop (lockWorker).
 	workerLocksMu sync.Mutex
 	workerLocks   map[string]chan struct{}
-	// onWorkerLockWait, when set, runs when lockWorker finds the lock held
-	// and starts to wait (a test seam).
+	// onWorkerLockWait is a test seam run when lockWorker starts to wait.
 	onWorkerLockWait func(name string)
-	// maxRunningWorkers is broker.max_running_workers (0 = no cap);
-	// admitting holds the starts admitted and not yet returned, guarded by
-	// admitMu (workercap.go).
+	// admitting holds the starts admitted and not yet returned (admitMu).
 	maxRunningWorkers int
 	admitMu           sync.Mutex
 	admitting         map[string]int
@@ -402,24 +327,22 @@ type Broker struct {
 
 	directives *DirectiveStore
 
-	// Natural-lapse auto-re-enrol state (reenrol.go). reenrolNow is a test
-	// seam (time.Now in production). reenrolMu guards the two maps only.
+	// reenrolNow is a test seam. reenrolMu guards the reenrol maps only.
 	autoReenrol         string
 	managerBootstrapDir string
 	ticketStager        TicketStager
 	purger              WorkerPurger
 	containerRunning    func(ctx context.Context, worker string) (bool, error)
-	recycleRate         *rateWindow // recycles per worker (recycle.go)
+	recycleRate         *rateWindow // recycles per worker
 	reenrolEvents       chan string
 	reenrolNow          func() time.Time
-	// reenrolLockWait bounds how long a worker heal waits for the worker's
-	// lifecycle lock before it skips (reenrolLockWaitDefault when zero).
+	// reenrolLockWait bounds how long a heal waits for the worker lock
+	// before it skips (reenrolLockWaitDefault when zero).
 	reenrolLockWait time.Duration
 	reenrolMu       sync.Mutex
 	reenrolLast     map[string]time.Time
 	reenrolTries    map[string]int
-	// Hub-token watch state (tokenwatch.go); tokenHealLast is guarded by
-	// reenrolMu. tokenWatchEvery is tokenWatchInterval outside tests.
+	// tokenHealLast is guarded by reenrolMu.
 	hubTokens       HubTokenHealer
 	tokenWatchEvery time.Duration
 	tokenHealLast   map[string]time.Time
@@ -431,33 +354,30 @@ type Broker struct {
 	dirRate            *rateWindow
 
 	// msgPhaseTimeout bounds the phase read before a send
-	// (msgPhaseTimeoutDefault when zero; a test seam).
+	// (msgPhaseTimeoutDefault when zero).
 	msgPhaseTimeout time.Duration
 
-	// message verification (verify.go)
-	chatConfigured bool            // ChatConfig.Configured
-	chatLedger     string          // ChatConfig.LedgerPath; "" = no web post verifies
-	webSenders     map[string]bool // ChatConfig.WebSenders
-	verifyRate     *rateWindow     // every verify call
-	verifyMissRate *rateWindow     // verify calls that match no record
+	chatConfigured bool
+	chatLedger     string // "" = no web post verifies
+	webSenders     map[string]bool
+	verifyRate     *rateWindow // every verify call
+	verifyMissRate *rateWindow // verify calls that match no record
 	chatUses       *chatUses
-	sent           *sentRecord       // ChatConfig.SentLedgerDir
-	controller     *controllerSender // DispatchConfig.ResolveControllerSender
+	sent           *sentRecord
+	controller     *controllerSender
 
-	// messages to a contact (contactmsg.go, contactmatch.go)
 	agentMsgs   AgentMessagesConfig
-	agentLedger *agentRecord // AgentMessagesConfig.LedgerDir
-	contactRate *rateWindow  // contacts + contact_message calls
+	agentLedger *agentRecord
+	contactRate *rateWindow // contacts + contact_message calls
 
-	// files in the chat (files.go)
 	files      FilesConfig
-	fileLedger *fileRecord // FilesConfig.LedgerDir
+	fileLedger *fileRecord
 	filesRate  *rateWindow // list + share calls
 
-	version         string // reported by /epoch (see Config.Version)
-	configHash      string // reported by /epoch (see Config.ConfigHash)
-	epochInstanceID string // reported by /epoch (see Config.InstanceID)
-	toolSecret      string // presented to first-party tools (see Config.ToolSecret)
+	version         string
+	configHash      string
+	epochInstanceID string
+	toolSecret      string
 	timeouts        TimeoutConfig
 }
 
@@ -474,9 +394,6 @@ func New(c Config) *Broker {
 		id.ManagerSlug = id.ManagerIdentity
 	}
 	if c.Log == nil {
-		// Default to a no-op logger so audit() never nil-panics when a caller
-		// builds a Config without one. Every decision path audits, so a nil
-		// log would otherwise crash the first request.
 		c.Log = slog.New(slog.DiscardHandler)
 	}
 	revoked := make(map[string]bool, len(pe.Revocation.Revoked))
@@ -489,18 +406,14 @@ func New(c Config) *Broker {
 		workers[g.Name] = g
 	}
 	return &Broker{
-		// identity, keys and policy
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
 		log: c.Log, version: c.Version, configHash: c.ConfigHash, epochInstanceID: c.InstanceID, toolSecret: c.ToolSecret,
 		timeouts: c.Timeouts.withDefaults(),
-		// persisted state
 		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
 		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),
-		// llm proxy
-		apiKey: llm.APIKey, llmUpstream: up,
-		// worker dispatch and messaging
+		apiKey:     llm.APIKey, llmUpstream: up,
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
@@ -521,21 +434,17 @@ func New(c Config) *Broker {
 		hubTokens:           d.HubTokens,
 		tokenWatchEvery:     tokenWatchInterval,
 		tokenHealLast:       map[string]time.Time{},
-		// operator directives
-		directiveVerifier: dir.Verifier, instanceID: dir.InstanceID,
+		directiveVerifier:   dir.Verifier, instanceID: dir.InstanceID,
 		dirAudit: newDirectiveAudit(dir.AuditPath), directiveExpiryMax: dir.ExpiryMax,
-		dirRate: newRateWindow(directiveRateLimit),
-		// verified web chat
+		dirRate:        newRateWindow(directiveRateLimit),
 		chatConfigured: c.Chat.Configured, chatLedger: c.Chat.LedgerPath, webSenders: senderSet(c.Chat.WebSenders),
 		verifyRate: newRateWindow(verifyRateLimit), verifyMissRate: newRateWindow(verifyMissLimit),
 		chatUses:   newChatUses(c.Chat.UsedPath, time.Now()),
 		sent:       &sentRecord{dir: c.Chat.SentLedgerDir},
 		controller: &controllerSender{resolve: d.ResolveControllerSender},
-		// messages to a contact
-		agentMsgs: c.AgentMessages.withDefaults(), agentLedger: &agentRecord{dir: c.AgentMessages.LedgerDir},
+		agentMsgs:  c.AgentMessages.withDefaults(), agentLedger: &agentRecord{dir: c.AgentMessages.LedgerDir},
 		contactRate: newRateWindow(contactCallLimit),
-		// files in the chat
-		files: c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
+		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate: newRateWindow(filesCallLimit),
 	}
 }
@@ -563,8 +472,7 @@ func (b *Broker) Revoke(agent string) {
 	b.persistLocked()
 }
 
-// persistLocked writes the current revocation state through the persist hook.
-// Caller holds b.mu.
+// persistLocked requires b.mu held.
 func (b *Broker) persistLocked() {
 	if b.persist == nil {
 		return
@@ -584,14 +492,11 @@ func (b *Broker) isRevoked(agent string) bool {
 	return b.revoked[agent]
 }
 
-// audit logs a decision; detail is "" for plain allows. kvs are optional
-// extra slog key/value pairs (token id, matched rule, minted claims).
+// audit logs a decision; detail is "" for plain allows.
 func (b *Broker) audit(op, caller, decision, detail string, kvs ...any) {
-	// The audit log is the operator's record and outlives the incident
-	// (rotated broker.log-*). A runtime error's detail can echo a container
-	// env; the scion client already masks it, and this is the backstop for
-	// any detail that did not come through the client, whatever handler
-	// Config.Log has.
+	// The audit log outlives the incident and a runtime error's detail can
+	// echo a container env: redact here as the backstop for any detail that
+	// did not pass through the masking scion client.
 	detail = logging.Redact(detail)
 	args := append([]any{"op", op, "caller", caller, "decision", decision, "detail", detail}, kvs...)
 	b.log.Info("broker.decision", args...)

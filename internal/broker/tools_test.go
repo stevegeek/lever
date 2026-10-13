@@ -41,8 +41,6 @@ func TestToolsListsRegisteredToolsForAgent(t *testing.T) {
 	}
 }
 
-// TestToolsOmitsReservedLLMTool verifies that /tools never exposes the reserved
-// "llm" pseudo-tool even when it is present in the registry.
 func TestToolsOmitsReservedLLMTool(t *testing.T) {
 	b := toolsBroker(t)
 	if err := b.reg.Register(regTool("db", "http://127.0.0.1:3201", "read")); err != nil {

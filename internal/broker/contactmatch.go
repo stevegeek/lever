@@ -8,18 +8,15 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// maxMatchRows is the hub's own page cap (handlers_chat_v2.go limit ≤ 200).
+// maxMatchRows is the hub's own chat page cap.
 const maxMatchRows = 200
 
-// handleAgentMessagesMatch answers the remote proxy, on the 0600 operator
-// socket, which agent rows of one contact's history the agent ledger
-// recorded. The proxy sends hashes and times, never text, and drops every
-// row not in keep. A new binding is appended before the answer, so one
-// record never shows two messages. A peek (the operator's view) binds
-// nothing and writes nothing: it answers what the contact's read would
-// keep. Off: 503; a contact that does not list the agent: 403; a body over
-// 256 KiB or more than maxMatchRows rows: 400; a ledger that cannot be
-// opened or written: 503 (the proxy fails closed).
+// handleAgentMessagesMatch tells the remote proxy, on the 0600 operator
+// socket, which agent rows of a contact's history the agent ledger recorded;
+// the proxy drops every other row. It gets hashes and times, never text. A
+// binding is appended before the answer, so one record never shows two
+// messages. A peek binds and writes nothing. Any failure is a non-200, and
+// the proxy fails closed.
 func (b *Broker) handleAgentMessagesMatch(w http.ResponseWriter, r *http.Request) {
 	var req wire.AgentMessagesMatchRequest
 	if err := decodeBody(w, r, 256<<10, &req); err != nil || len(req.Messages) > maxMatchRows {

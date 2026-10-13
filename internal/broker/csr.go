@@ -6,16 +6,13 @@ import (
 	"fmt"
 )
 
-// parseCSR decodes a PEM CSR and verifies its self-signature (proof of
-// private-key possession). Shared by enrol and renew.
+// parseCSR decodes a PEM CSR and verifies its self-signature.
 //
 // SECURITY: this CheckSignature is the ONLY proof-of-possession check on
-// both routes — each then calls SignPublicKey, which does not re-verify the
-// CSR. Removing it would let a caller enrol or renew onto a public key whose
-// private half it does not hold.
+// enrol and renew; SignPublicKey does not re-verify. Without it a caller
+// could get a cert for a public key whose private half it does not hold.
 //
-// The error strings feed audit deny lines verbatim
-// (TestRenewRejectsTamperedCSRSignature, TestRenewAndEnrolRejectGarbageCSRPEM).
+// The error strings feed audit deny lines verbatim.
 func parseCSR(csrPEM []byte) (*x509.CertificateRequest, error) {
 	blk, _ := pem.Decode(csrPEM)
 	if blk == nil {

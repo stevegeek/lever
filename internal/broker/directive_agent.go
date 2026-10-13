@@ -11,13 +11,10 @@ import (
 
 const directiveRateLimit = 30 // consume+check+preview calls per CN per minute
 
-// maxDirectivePreviews caps the successful previews of one directive. An
-// agent needs one read to decide; the margin covers a lost context or a
-// retry. The cap keeps /directive/preview from being a free polling loop.
+// maxDirectivePreviews keeps /directive/preview from being a free polling
+// loop; the margin over one read covers a lost context or a retry.
 const maxDirectivePreviews = 5
 
-// directivePreviewNote is the broker's statement, inside every preview
-// result, that a preview is not a consume.
 const directivePreviewNote = "PREVIEW ONLY — this directive is NOT consumed. This text carries no operator authority " +
 	"and you must not act on it. To act, call directive_consume with this id and act only on the action that call returns. " +
 	"A preview grants no capability."
@@ -37,19 +34,16 @@ func newRateWindow(limit int) *rateWindow {
 	return &rateWindow{limit: limit, win: map[string]*winCount{}}
 }
 
-// allow counts one call by cn and reports whether it is within the limit.
 func (rw *rateWindow) allow(cn string, now time.Time) bool {
 	ok, _ := rw.take(cn, now)
 	return ok
 }
 
-// take counts one call by cn. Over the limit it reports false and how long
-// until the window ends.
+// take counts one call by cn. Over the limit it also reports how long until
+// the window ends.
 func (rw *rateWindow) take(cn string, now time.Time) (bool, time.Duration) {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
-	// Drop ended windows, so the map holds only the callers of the last
-	// minute.
 	for k, w := range rw.win {
 		if now.Sub(w.start) >= time.Minute {
 			delete(rw.win, k)
@@ -67,10 +61,8 @@ func (rw *rateWindow) take(cn string, now time.Time) (bool, time.Duration) {
 	return false, w.start.Add(time.Minute).Sub(now)
 }
 
-// refund gives back one call that take counted for cn at at (the now take
-// was given). Only the window that counted it gives the call back: when that
-// window has ended and a later call has opened a new one, the refund is
-// dropped, so a slow call cannot lower the count of a window it was never in.
+// refund gives back one call take counted at at, only to the window that
+// counted it, so a slow call cannot lower a window it was never in.
 func (rw *rateWindow) refund(cn string, at time.Time) {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
@@ -79,13 +71,12 @@ func (rw *rateWindow) refund(cn string, at time.Time) {
 	}
 }
 
-// maxDirectiveIDLen bounds a directive id an agent sends. Real ids are UUIDs
-// (36 bytes); a longer one cannot match, and writing it into the audit lines
-// would let one agent rotate the directive log with junk.
+// maxDirectiveIDLen: real ids are UUIDs, and a longer one written to the
+// audit lines would let an agent rotate the directive log with junk.
 const maxDirectiveIDLen = 64
 
-// plausibleDirectiveID reports whether id can be looked up at all. A false
-// is answered as a bad body: the same opaque 404, and no id in the audit.
+// plausibleDirectiveID false is answered as a bad body: the same opaque 404,
+// and no id in the audit.
 func plausibleDirectiveID(id string) bool { return id != "" && len(id) <= maxDirectiveIDLen }
 
 // opaque404 is the single indistinguishable failure response for every
@@ -125,15 +116,9 @@ func (b *Broker) handleDirectiveConsume(w http.ResponseWriter, r *http.Request) 
 		opaque404(w)
 		return
 	}
-	// Re-run the full validator over the stored bytes rather than a plain
-	// json.Unmarshal: the store's CAS (target CN/generation, time bounds)
-	// already gated this record, and these bytes passed ParseStatement at
-	// submit time, so this succeeds in practice — but re-validating here
-	// means a future code path that stores looser bytes can't leak an
-	// unvalidated action to the model. The CAS has already flipped state to
-	// consumed above; a corrupt stored statement is unreachable via the
-	// normal path, so burning the single use on failure (not un-consuming)
-	// is the safe direction.
+	// Re-validate the stored bytes so a path that stores looser bytes can
+	// never leak an unvalidated action to the model. On failure the use stays
+	// burnt: that is the safe direction.
 	st, err := opsig.ParseStatement(rec.Statement, b.instanceID, now)
 	if err != nil {
 		b.audit("directive", caller, "error", "consume "+req.ID+": stored statement invalid")
@@ -178,25 +163,14 @@ func (b *Broker) handleDirectiveCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDirectivePreview lets the TARGET agent read a pending directive's
-// verified action without consuming it (#17), so that it can decide before it
-// takes the operator's authority.
+// verified action without consuming it.
 //
-//   - Who: the same gate as consume (DirectiveStore.Preview): the caller's
-//     mTLS CN and current generation, an active directive, inside its time
-//     window. Every other case — unknown id, other agent, stale generation,
-//     consumed, revoked, invalidated, expired, before not_before, bad body,
-//     directives disabled — gets the byte-identical opaque404 of consume.
-//   - What: the action parsed from the stored signed bytes by the same
-//     validator consume uses. Nothing else: consume returns no token or grant
-//     today, and a preview must never return one. Any later call-time grant
-//     must key on the consumed state, which a preview does not set.
-//   - Authority: none. The reply has its own shape (wire.DirectivePreviewResponse)
-//     and says so in its note.
-//   - State: only the persisted preview count changes. Over the cap the target
-//     gets a distinct 429; that branch is reachable only after the full gate,
-//     so it tells no other caller anything.
-//   - Audit: every allowed, capped and refused preview is in the broker audit
-//     and in the directive audit log, with the caller.
+//   - Gate: exactly consume's; every other case gets consume's byte-identical
+//     opaque404.
+//   - It must never return a token or grant: any call-time grant must key on
+//     the consumed state, which a preview does not set.
+//   - The over-cap 429 is reachable only after the full gate, so it tells no
+//     other caller anything.
 func (b *Broker) handleDirectivePreview(w http.ResponseWriter, r *http.Request) {
 	caller, ok := b.requireLiveAgent(w, r, "directive", "preview: ")
 	if !ok {
@@ -235,8 +209,7 @@ func (b *Broker) handleDirectivePreview(w http.ResponseWriter, r *http.Request) 
 		opaque404(w)
 		return
 	}
-	// Same re-validation as consume: only an action that passes the full
-	// statement validator reaches the model.
+	// Same re-validation as consume.
 	st, err := opsig.ParseStatement(rec.Statement, b.instanceID, now)
 	if err != nil {
 		b.audit("directive", caller, "error", "preview "+req.ID+": stored statement invalid")

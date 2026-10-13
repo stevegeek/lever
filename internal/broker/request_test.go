@@ -17,8 +17,8 @@ import (
 )
 
 func TestRequestConstraintMintsNarrowedToken(t *testing.T) {
-	// The constraint loop (request.go:63-66) must bake every requested constraint
-	// into the minted token so it can ONLY be used for that exact param value.
+	// Every requested constraint is baked into the minted token, so it can
+	// only be used for that exact param value.
 	b := New(restrictedConfig(t))
 	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "A"}})
 	if w.Code != http.StatusOK {
@@ -36,8 +36,8 @@ func TestRequestConstraintMintsNarrowedToken(t *testing.T) {
 }
 
 func TestRequestDeniesConstraintValueOutsideAllowedSet(t *testing.T) {
-	// ValidateConstraints (request.go:58) must fail closed when a requested value is
-	// outside the tool's AllowedValues — no token is minted.
+	// ValidateConstraints fails closed when a requested value is outside the
+	// tool's AllowedValues: no token is minted.
 	b := New(restrictedConfig(t))
 	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "db", Op: "read", BoundTo: "analyst", Constraints: map[string]string{"table": "secrets"}})
 	if w.Code != http.StatusForbidden {
@@ -51,7 +51,6 @@ func reqBody(t *testing.T, cr wire.CapRequest) *bytes.Reader {
 	return bytes.NewReader(body)
 }
 
-// postRequest sends cr to /request as the given caller CN.
 func postRequest(t *testing.T, b *Broker, cn string, cr wire.CapRequest) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest("POST", "/request", reqBody(t, cr))
@@ -61,7 +60,6 @@ func postRequest(t *testing.T, b *Broker, cn string, cr wire.CapRequest) *httpte
 	return w
 }
 
-// mintedToken decodes the raw token out of a 200 /request response.
 func mintedToken(t *testing.T, w *httptest.ResponseRecorder) []byte {
 	t.Helper()
 	var resp wire.CapResponse
@@ -70,8 +68,6 @@ func mintedToken(t *testing.T, w *httptest.ResponseRecorder) []byte {
 	return raw
 }
 
-// verifyAs checks raw against the broker's key as caller using tool.op with
-// params (nil for none), at now and epoch 0.
 func verifyAs(b *Broker, raw []byte, caller, tool, op string, params map[string]string) error {
 	if params == nil {
 		params = map[string]string{}
@@ -189,9 +185,8 @@ func TestRequestDeniesWildcardMintOnFineTool(t *testing.T) {
 }
 
 func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
-	// The /request deny audit must include the requested tool, the original op
-	// (pre-coercion), and bound_to context so live denies can be debugged without
-	// tmux pane forensics.
+	// The /request deny audit carries the requested tool, the original op
+	// (pre-coercion) and bound_to, so live denies can be debugged.
 	cfg, audit := coarseConfig(t, false) // analyst has no wildcard grant
 	b := New(cfg)
 	w := postRequest(t, b, "analyst", wire.CapRequest{Tool: "utilities", Op: "get_weather", BoundTo: "analyst"})
@@ -199,7 +194,6 @@ func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
 		t.Fatalf("status = %d, want 403 (no wildcard grant)", w.Code)
 	}
 	auditStr := audit.String()
-	// The audit detail must include the tool name.
 	if !strings.Contains(auditStr, "tool=utilities") {
 		t.Fatalf("policy deny audit must include tool name, got: %s", auditStr)
 	}
@@ -209,10 +203,9 @@ func TestRequestPolicyDenyAuditIncludesToolAndOp(t *testing.T) {
 	}
 }
 
-// TestRequestDenyLeaksReason proves the /request policy-resolution deny
-// (MayObtainRule) returns its specific, leak-safe reason as the HTTP body —
-// not a bare "forbidden" — so agents can self-correct instead of
-// reverse-engineering grants by trial and error.
+// TestRequestDenyLeaksReason: a MayObtainRule deny returns its specific,
+// leak-safe reason as the HTTP body, not a bare "forbidden", so agents can
+// self-correct.
 func TestRequestDenyLeaksReason(t *testing.T) {
 	cfg, _ := coarseConfig(t, false) // analyst has no wildcard grant
 	b := New(cfg)
@@ -227,11 +220,9 @@ func TestRequestDenyLeaksReason(t *testing.T) {
 }
 
 func TestRequestPolicyDenyDetailPinsFullSuffixWithCoercionAndDelegation(t *testing.T) {
-	// Characterization for the deny-detail suffix (plan item A3): pin the FULL
-	// detail string — including both optional segments (coerced_to= for a
-	// coarse tool, bound_to= for delegation) and the closing paren — in the
-	// HTTP body and the audit line. Only substrings were asserted before, so
-	// a suffix-builder regression would have passed silently.
+	// Pins the full deny detail, with both optional segments (coerced_to= for
+	// a coarse tool, bound_to= for delegation) and the closing paren, in the
+	// HTTP body and the audit line.
 	cfg, audit := coarseConfig(t, false) // analyst holds no wildcard grant
 	b := New(cfg)
 	// A delegation attempt: bound to worker.

@@ -149,10 +149,10 @@ func TestValidateConstraintsEmptyAllowedSliceRejectsAll(t *testing.T) {
 	}
 }
 
-// Declared params (#21): when an op declares its parameter set, a constraint
-// key outside Params ∪ CaveatParam keys is rejected AT MINT — a typo'd key
-// would otherwise mint an over-narrowed token that fails closed only at call
-// time, far from the mistake. Undeclared ops stay permissive.
+// When an op declares its parameter set, a constraint key outside Params ∪
+// CaveatParam keys is rejected at mint: a typo'd key would otherwise mint an
+// over-narrowed token that fails closed only at call time, far from the
+// mistake. Undeclared ops stay permissive.
 func TestValidateConstraintsDeclaredParams(t *testing.T) {
 	r := New()
 	tool := dbTool()
@@ -174,7 +174,7 @@ func TestValidateConstraintsDeclaredParams(t *testing.T) {
 		t.Fatal("a stray reserved-ish key must be rejected at mint when params are declared")
 	}
 
-	// Undeclared op (no Params) keeps today's permissive behavior.
+	// An undeclared op (no Params) stays permissive.
 	perm := dbTool()
 	perm.Name = "db2"
 	_ = r.Register(perm)

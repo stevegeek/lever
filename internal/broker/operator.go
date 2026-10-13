@@ -12,15 +12,9 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// handleOperatorNote sends a `lever msg send` note: the unsigned sibling of
-// handleDirectiveSend on the operator's own 0600 socket (OperatorHandler).
-// The note is recorded in the sent ledger as operator-note, so the recipient
-// can verify it. The authority is the host user's, the same as `lever
-// attach`; it is never a signed directive's.
-//
-// To follows handleDirectiveResolve's aliasing: "manager", the manager's cert
-// CN or its scion slug (the app name) mean the manager; anything else must be
-// a declared worker's name.
+// handleOperatorNote sends a `lever msg send` note, recorded in the sent
+// ledger so the recipient can verify it. Its authority is the host user's
+// (the 0600 socket), never a signed directive's.
 func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 	var req wire.OperatorNoteRequest
 	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
@@ -43,7 +37,6 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "messaging unavailable", http.StatusBadGateway)
 		return
 	}
-	// The same early answer /msg/send gives, before anything is recorded.
 	if refusal := b.notRunningRefusal(r.Context(), operatorActor, slug, toManager); refusal != "" {
 		b.audit("msg", "operator", "deny", "note->"+cn+": "+refusal)
 		http.Error(w, refusal, http.StatusConflict)
@@ -65,16 +58,10 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.OperatorNoteResponse{ID: ref})
 }
 
-// handleOperatorWake resumes a suspended or stopped worker for the remote
-// chat page (a login that may message it sent it a message). It runs the
-// same checks and the same resume as the manager's resume verb
-// (handleWorkerResume): the role guard, the hub's phase, then resumeRecord,
-// which stages a fresh ticket, picks the verb by phase and waits until the
-// worker is live. Narrower than the verb: only a declared worker (never the
-// manager), and only from suspended, or stopped for the operator's own
-// login (a contact may not undo an operator's stop; running is a no-op success:
-// a resume that won the worker's lock got there first). It is on the 0600 operator
-// socket, never on the admin listener the hub's network can reach.
+// handleOperatorWake resumes a worker for the remote chat page, with the same
+// checks as the manager's resume verb but narrower: never the manager, and a
+// stopped worker only for the operator's own login. It is on the 0600
+// operator socket, never the admin listener the hub's network can reach.
 func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 	var req wire.OperatorWakeRequest
 	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
@@ -90,7 +77,7 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.isRevoked(spec.Name) {
-		// Its identity is withdrawn: a wake would stage it a fresh ticket.
+		// A wake would stage a revoked identity a fresh ticket.
 		b.audit("worker", actor, "deny", "wake "+spec.Name+": revoked")
 		http.Error(w, "revoked", http.StatusForbidden)
 		return
@@ -99,9 +86,6 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	// The same lock as the start route and the resume verb: a manager
-	// resuming this worker at the same moment would otherwise read
-	// "suspended" too, and the second resume fail on a live record.
 	unlock, ok := b.lockWorkerOrRefuse(w, ctx, actor, "wake", spec.Name)
 	if !ok {
 		return
@@ -112,8 +96,7 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "refused", http.StatusConflict)
 		return
 	}
-	// phaseOf passes the hub's phase through scion.PhaseLabel, so it is a
-	// known word here and safe to audit.
+	// A known label from phaseOf, so safe to audit.
 	phase, err := b.phaseOf(ctx, spec)
 	if err != nil {
 		b.audit("worker", actor, "error", "wake "+spec.Name+": phase: "+err.Error())
@@ -121,14 +104,12 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if phase == scion.PhaseRunning {
-		// Live already (another resume won the lock): what the caller wants.
 		b.audit("worker", actor, "allow", "wake "+spec.Name+": already running")
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
 	if phase == scion.PhaseStopped && req.Tier != "operator" {
-		// Stopped is the operator's own decision; only the operator's login
-		// undoes it. A contact wakes only a suspended worker.
+		// Stopped is the operator's decision; a contact may not undo it.
 		b.audit("worker", actor, "deny", "wake "+spec.Name+": stopped, and the login is not the operator's")
 		http.Error(w, "stopped by the operator", http.StatusConflict)
 		return
@@ -141,7 +122,7 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 	b.resumeRecord(ctx, w, spec, phase, actor)
 }
 
-// boundedLogin keeps a caller-supplied login to one short audit token.
+// boundedLogin keeps a caller-supplied login to one short, safe audit token.
 func boundedLogin(s string) string {
 	s = strings.ToValidUTF8(s, "_")
 	if len(s) > 120 {

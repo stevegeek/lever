@@ -9,17 +9,13 @@ import (
 	"testing"
 )
 
-// TestLLMProxyEndToEnd is the end-to-end test for the LLM proxy.
-// It wires a real Broker (with registered reserved "llm" tool, apiKey, and a
-// fake Anthropic httptest upstream) and proves all five security properties in
-// one consolidated integration test.
+// TestLLMProxyEndToEnd proves the LLM proxy's security properties against a
+// real Broker and a fake Anthropic upstream.
 func TestLLMProxyEndToEnd(t *testing.T) {
 	const realKey = "sk-REAL-KEY-doneGate-9x7z"
 
-	// ── Assertion 1: Inject + Strip ──────────────────────────────────────────
-	// The real key arrives at the fake upstream (x-api-key == configured key)
-	// AND the inbound capability token does NOT (no Authorization/x-api-key
-	// carrying the capability token upstream).
+	// The real key reaches the upstream and the inbound capability token does
+	// not.
 	t.Run("InjectAndStrip", func(t *testing.T) {
 		var gotKey, gotAuth string
 		up := fakeAnthropic(t, &gotKey, &gotAuth)
@@ -36,11 +32,9 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d body %q", rec.Code, rec.Body.String())
 		}
-		// Real key must arrive at upstream.
 		if gotKey != realKey {
 			t.Errorf("upstream x-api-key = %q, want %q", gotKey, realKey)
 		}
-		// Capability token must NOT arrive upstream as Authorization.
 		if gotAuth != "" {
 			t.Errorf("capability token leaked upstream as Authorization=%q", gotAuth)
 		}
@@ -48,21 +42,17 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 		// capability token), so a non-equal gotKey would also catch token-as-key forwarding.
 	})
 
-	// ── Assertion 2: Key never leaks back — incl. error path ────────────────
-	// Point the fake upstream at a 401 handler that echoes the injected key
-	// back as a response header and sets WWW-Authenticate. Assert the proxy
-	// stripped both (R5) AND the real key appears in NONE of the bytes
-	// (headers + body) returned to the jail.
+	// The key never leaks back, on the error path included: a 401 upstream
+	// that echoes the key in a header and sets WWW-Authenticate has both
+	// stripped, and the key is in none of the bytes returned to the jail.
 	t.Run("KeyNeverLeaksOnError", func(t *testing.T) {
 		const errorKey = "sk-REAL-KEY-errorpath-8z2q"
 		var upCalls atomic.Int32
 
 		leakyUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			upCalls.Add(1)
-			// Simulate a leaky upstream: echo the injected x-api-key back in
-			// response headers, plus a WWW-Authenticate challenge.
 			if k := r.Header.Get("x-api-key"); k != "" {
-				w.Header().Set("x-api-key", k) // R5: proxy must strip this
+				w.Header().Set("x-api-key", k) // the proxy must strip this
 			}
 			w.Header().Set("WWW-Authenticate", `Bearer realm="anthropic", charset="UTF-8"`)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -109,10 +99,7 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 		}
 	})
 
-	// ── Assertion 3: Revoked denied, no upstream call ────────────────────────
-	// After Revoke(caller), the call must be denied AND the upstream counter
-	// must remain zero — a regression that calls upstream before checking
-	// revocation would increment the counter and be caught.
+	// A revoked caller is denied before any upstream call.
 	t.Run("RevokedDeniedNoUpstreamCall", func(t *testing.T) {
 		var upCalls atomic.Int32
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -138,9 +125,8 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 		}
 	})
 
-	// ── Assertion 4: Epoch-bump denied, no upstream call ─────────────────────
-	// After BumpEpoch(), a token minted at the old epoch must be denied AND
-	// the upstream must not be called.
+	// After BumpEpoch a token from the old epoch is denied before any upstream
+	// call.
 	t.Run("EpochBumpDeniedNoUpstreamCall", func(t *testing.T) {
 		var upCalls atomic.Int32
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -166,10 +152,8 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 		}
 	})
 
-	// ── Assertion 5: SSRF / fixed upstream ──────────────────────────────────
-	// The proxy must ONLY dial b.llmUpstream.Host regardless of what Host
-	// header (or path) the caller supplies. Set Host: evil.example and assert
-	// the fixed fake upstream still received the request.
+	// SSRF: the proxy dials only b.llmUpstream.Host, whatever Host header or
+	// path the caller supplies.
 	t.Run("SSRFFixedUpstream", func(t *testing.T) {
 		var upCalls atomic.Int32
 		var upSeenHost string
@@ -195,7 +179,6 @@ func TestLLMProxyEndToEnd(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status %d body %q", rec.Code, rec.Body.String())
 		}
-		// The fixed upstream MUST have received the request.
 		if upCalls.Load() == 0 {
 			t.Fatal("fake upstream was not called; request did not reach configured upstream")
 		}

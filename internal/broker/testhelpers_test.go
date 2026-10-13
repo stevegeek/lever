@@ -26,8 +26,8 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// makeCSRForCN builds a PEM CSR for cn and discards the private key (the broker
-// only ever sees the CSR). Returns the CSR PEM.
+// makeCSRForCN builds a PEM CSR for cn and discards the private key: the broker
+// only ever sees the CSR.
 func makeCSRForCN(t *testing.T, cn string) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -70,14 +70,11 @@ func regTool(name, backend, op string) registry.Tool {
 		Operations: map[string]registry.Operation{op: {Name: op}}}
 }
 
-// ---- Config builders ----
-//
-// testConfig is the ONE broker Config builder; every fixture below is a thin
-// composition of it with option funcs. The base is a fully keyed broker
-// (keys, CA, ticket store), the default policy + registry (analyst obtains
-// db.read; manager delegates db.read to worker; tool "db"), manager identity
-// "manager" (slug = CN), one declared worker "worker", and a
-// discarded log.
+// testConfig is the base broker Config that every fixture composes with option
+// funcs: a fully keyed broker (keys, CA, ticket store), the default policy and
+// registry (analyst obtains db.read; manager delegates db.read to worker; tool
+// "db"), manager identity "manager" (slug = CN), one declared worker "worker",
+// and a discarded log.
 
 type configOpt func(*Config)
 
@@ -189,7 +186,6 @@ func withLLM(t *testing.T, apiKey []byte, upstreamURL string) configOpt {
 	}
 }
 
-// auditConfig returns testConfig with the audit log captured in a buffer.
 func auditConfig(t *testing.T) (Config, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -295,11 +291,11 @@ func runningFleet() *fakeRuntime {
 	return &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: agents}}
 }
 
-// msgBroker's fixture deliberately makes the manager cert CN ("manager") and
-// the manager scion agent SLUG ("assistant", the app name) DIFFER: a live bug
-// (scion: `Agent "manager" not found in project`) hid behind an earlier
-// fixture where CN == slug, so routing to agent:<CN> passed by coincidence.
-// No runtime is wired: it serves the pure target-resolution tests.
+// msgBroker deliberately makes the manager cert CN ("manager") and the
+// manager's scion slug ("assistant", the app name) differ: with CN == slug,
+// routing to agent:<CN> passes by coincidence where scion would answer `Agent
+// "manager" not found in project`. No runtime is wired: it serves the pure
+// target-resolution tests.
 func msgBroker(t *testing.T, g2g bool) *Broker {
 	t.Helper()
 	return New(testConfig(t, withManager("manager", "assistant"), withRuntime(nil, msgWorkers...),
@@ -324,8 +320,8 @@ func newMsgTestBroker(t *testing.T, g2g bool) (*Broker, *fakeMsgRuntime, *bytes.
 func directiveTestBroker(t *testing.T) (b *Broker, priv string, allowedSigners string, rt *fakeDirectiveRuntime) {
 	t.Helper()
 	priv, as := genOperatorKey(t)
-	// The manager and the worker are running: a directive for an agent that
-	// is not is refused before it is stored (lever#25).
+	// The manager and the worker are running: a directive for an agent that is
+	// not is refused before it is stored.
 	rt = &fakeDirectiveRuntime{fakeRuntime: fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {
 		{Slug: "manager", Phase: scion.PhaseRunning}, {Slug: "worker", Phase: scion.PhaseRunning},
 	}}}}
@@ -339,8 +335,6 @@ func directiveTestBroker(t *testing.T) (b *Broker, priv string, allowedSigners s
 		})
 	return New(cfg), priv, as, rt
 }
-
-// ---- Client-cert fakes, one per fidelity level ----
 
 // fakeTLSWithCN returns a synthetic TLS connection state whose verified client
 // cert CN is cn — no CA involved. Enough for ca.RequireAgent in handler tests.
@@ -375,10 +369,10 @@ func leafFor(t *testing.T, b *Broker, cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{signedCert(t, b, cn).Leaf}}
 }
 
-// mintWorkerTicket is the host authority's half of a worker dispatch — the
-// broker mints the ticket itself and hands it to the guest channel — for a
-// test that plays the worker's boot by hand. Nothing an agent can reach
-// mints a worker ticket any more (the jail /provision route is gone).
+// mintWorkerTicket is the host authority's half of a worker dispatch (the
+// broker mints the ticket and hands it to the guest channel), for a test that
+// plays the worker's boot by hand. Nothing an agent can reach mints a worker
+// ticket.
 func mintWorkerTicket(t *testing.T, b *Broker, worker string) string {
 	t.Helper()
 	bs, err := b.bootstrapFor(worker, nil)

@@ -20,13 +20,10 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// withSentLedger turns the sent ledger on in a fresh directory and returns
-// its path.
 func withSentLedger(dir *string) configOpt {
 	return func(c *Config) { c.Chat.SentLedgerDir = *dir }
 }
 
-// sentBroker is newMsgTestBroker with the sent ledger on.
 func sentBroker(t *testing.T, g2g bool) (*Broker, *fakeMsgRuntime, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "sent-ledger")
@@ -38,7 +35,6 @@ func sentBroker(t *testing.T, g2g bool) (*Broker, *fakeMsgRuntime, string) {
 
 var refRE = regexp.MustCompile(` ref=([0-9a-f]{32})$`)
 
-// refOf is the ref on a body's first line.
 func refOf(t *testing.T, body string) string {
 	t.Helper()
 	first, _, _ := strings.Cut(body, "\n")
@@ -49,8 +45,7 @@ func refOf(t *testing.T, body string) string {
 	return m[1]
 }
 
-// recorded is the sent-ledger entry for ref, read back from disk (a fresh
-// Open, as a restarted broker would).
+// recorded reads the entry back with a fresh Open, as a restarted broker would.
 func recorded(t *testing.T, dir, cn, ref string) sentledger.Sent {
 	t.Helper()
 	l, err := sentledger.Open(dir, time.Now())
@@ -106,7 +101,6 @@ func TestSendKindIgnoresTheRequest(t *testing.T) {
 	}
 }
 
-// failingLedgerDir is a sent-ledger path that cannot be created.
 func failingLedgerDir(t *testing.T) string {
 	t.Helper()
 	f := filepath.Join(t.TempDir(), "file")
@@ -172,7 +166,7 @@ func TestSendWithTheLedgerOffIsUnrecorded(t *testing.T) {
 // TestDirectiveNoticeIsRecorded: the notice is recorded as directive-notice
 // for the target's CN. With its record unwritable the notice is not sent, so
 // the directive is revoked and the send is an error: nothing stays pending
-// that the agent was never told about (lever#25).
+// that the agent was never told about.
 func TestDirectiveNoticeIsRecorded(t *testing.T) {
 	for _, broken := range []bool{false, true} {
 		b, priv, _, rt := directiveTestBroker(t)
@@ -220,7 +214,7 @@ func TestDirectiveNoticeIsRecorded(t *testing.T) {
 // TestDirectiveForAnAgentThatIsNotRunningIsNotStored: the hub delivers no
 // notice to a suspended, stopped or recordless agent, so the send is refused
 // with the phase and nothing is stored, sent or recorded; the same statement
-// goes through once the agent runs (lever#25).
+// goes through once the agent runs.
 func TestDirectiveForAnAgentThatIsNotRunningIsNotStored(t *testing.T) {
 	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError, "resumed", ""} {
 		b, priv, _, rt := directiveTestBroker(t)
@@ -411,7 +405,6 @@ func TestSendTimeoutsFitTheInFlightBound(t *testing.T) {
 	}
 }
 
-// postNote posts an operator note straight to OperatorHandler.
 func postNote(t *testing.T, b *Broker, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, wire.PathOperatorNote, strings.NewReader(body))
@@ -506,8 +499,7 @@ func TestServeListenersRefusesATCPOperatorListener(t *testing.T) {
 	}
 }
 
-// fleetWith is runningFleet with one agent's phase replaced ("" removes its
-// record).
+// fleetWith replaces one agent's phase in runningFleet; "" removes its record.
 func fleetWith(slug, phase string) *fakeRuntime {
 	rt := runningFleet()
 	agents := rt.agents[testInstanceProject][:0]

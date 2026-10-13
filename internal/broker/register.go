@@ -9,12 +9,11 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// handleRegister merges a first-party tool's registration against the
-// CONFIG-AUTHORITATIVE envelope pre-loaded at boot (D4): the host config owns
-// backend/allowed_values/FirstParty/permitted-ops; the tool supplies only
-// caveat_param (the stored value, preserving single-source projection-agreement).
-// A tool can never widen its own envelope, and an unconfigured tool is rejected
-// before any registry write. Served only on the host-loopback admin listener.
+// handleRegister merges a first-party tool's registration into the
+// CONFIG-AUTHORITATIVE envelope loaded at boot: config owns everything but
+// caveat_param, so a tool can never widen its own envelope, and an
+// unconfigured tool is rejected before any registry write. Admin listener
+// only.
 func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req wire.RegisterRequest
 	if err := decodeBody(w, r, adminBodyLimit, &req); err != nil {
@@ -29,13 +28,11 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cfg.External {
-		// External tools are registered from config at boot and are fronted,
-		// not spawned — nothing legitimate self-registers under their name.
+		// Nothing legitimate self-registers under an external tool's name.
 		b.audit("register", req.Name, "deny", "external tool does not self-register")
 		http.Error(w, "external tool does not self-register", http.StatusForbidden)
 		return
 	}
-	// Rebuild ops from the CONFIG op set; attach the body's caveat_param.
 	bodyCP := make(map[string]map[string]string, len(req.Operations))
 	for _, o := range req.Operations {
 		if _, known := cfg.Operations[o.Name]; !known {
@@ -47,8 +44,8 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	merged := make(map[string]registry.Operation, len(cfg.Operations))
 	for name, op := range cfg.Operations {
-		cp := bodyCP[name]           // may be nil if the body didn't include this op
-		if len(op.CaveatParam) > 0 { // config declared a guard — body must match
+		cp := bodyCP[name]
+		if len(op.CaveatParam) > 0 { // a config guard: the body must match
 			if !maps.Equal(op.CaveatParam, cp) {
 				b.audit("register", req.Name, "deny", "caveat_param mismatch for "+name)
 				http.Error(w, "caveat_param mismatch", http.StatusForbidden)
@@ -56,8 +53,7 @@ func (b *Broker) handleRegister(w http.ResponseWriter, r *http.Request) {
 			}
 			cp = op.CaveatParam
 		}
-		// Params come from CONFIG only (the declared guard) — a self-
-		// registering tool cannot widen or drop the operator's declared set.
+		// Params come from config only: a tool cannot widen or drop them.
 		merged[name] = registry.Operation{Name: name, CaveatParam: cp, Params: op.Params}
 	}
 	t := registry.Tool{

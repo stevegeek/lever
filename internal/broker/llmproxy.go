@@ -11,27 +11,23 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
-// llmProxyHandler verifies an llm capability token, strips it, injects the real
-// Console key, and reverse-proxies (streaming) to the FIXED upstream
-// (b.llmUpstream — never client-controlled, so no SSRF) — for the Messages-API
-// paths in llmPathAllowed only. Fail closed on any auth/verify failure; never
-// log key or token bytes.
+// llmProxyHandler verifies an llm capability token, swaps it for the real
+// key, and proxies the allowlisted Messages-API paths to the FIXED upstream
+// (never client-controlled, so no SSRF). Fails closed; never logs key or
+// token bytes.
 func (b *Broker) llmProxyHandler() http.Handler {
 	rp := &httputil.ReverseProxy{}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		// Route + scrub forwarding/identity headers (shared with the MCP
-		// gateway; forwarding headers only — it never touches credentials).
 		rewriteUpstream(pr, b.llmUpstream)
-		// Strip the inbound capability token — NEVER forward it upstream.
+		// NEVER forward the capability token upstream.
 		pr.Out.Header.Del("Authorization")
 		pr.Out.Header.Del("x-api-key")
-		// Inject the real Console key + required version header.
 		pr.Out.Header.Set("x-api-key", string(b.apiKey))
 		if pr.Out.Header.Get("anthropic-version") == "" {
 			pr.Out.Header.Set("anthropic-version", "2023-06-01")
 		}
 	}
-	// R5: do not echo upstream auth/error headers back to the jail.
+	// Do not echo upstream auth headers back to the jail.
 	rp.ModifyResponse = func(resp *http.Response) error {
 		resp.Header.Del("WWW-Authenticate")
 		resp.Header.Del("x-api-key")
@@ -55,10 +51,8 @@ func (b *Broker) llmProxyHandler() http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		// Token id for mint↔use correlation (best-effort parse; never the
-		// token bytes). Parsed before the revoked check so a post-revocation
-		// replay still correlates with its mint; on deny paths it is the
-		// token's CLAIMED id — the signature has not been checked yet.
+		// Parsed before the revoked check so a replay after revocation still
+		// ties to its mint. On deny paths it is the CLAIMED id.
 		tokID := token.ID(raw)
 		if b.isRevoked(caller) {
 			b.audit("llm", caller, "deny", "revoked", "id", tokID)
@@ -75,8 +69,7 @@ func (b *Broker) llmProxyHandler() http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		// capability(llm) admits the Messages API only — never the rest of
-		// what the Console key permits (files, batches, admin endpoints).
+		// The Messages API only, never the rest of what the key permits.
 		if !llmPathAllowed(r.Method, r.URL.EscapedPath()) {
 			b.audit("llm", caller, "deny", "path not allowlisted: "+r.Method+" "+r.URL.EscapedPath(), "id", tokID)
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -87,15 +80,10 @@ func (b *Broker) llmProxyHandler() http.Handler {
 	})
 }
 
-// llmPathAllowed reports whether method + path (post-StripPrefix, escaped
-// form so a percent-encoded spelling cannot slip past) is one of the
-// Messages-API endpoints Claude Code calls through ANTHROPIC_BASE_URL:
-// create/count-tokens messages and list/get models. Exact matches only — no
-// trailing slash, no deeper segments (batches, files, organizations, …). The
-// model id of GET /v1/models/{id} is charset-checked (validModelID), not just
-// slash-free: the escaped path is what is matched here, but the upstream
-// decodes it, so a percent-encoded byte (`..%2F..`) would become a different
-// path on the far side.
+// llmPathAllowed matches the escaped path exactly against the endpoints
+// Claude Code calls through ANTHROPIC_BASE_URL. The model id is
+// charset-checked because the upstream decodes the path, so `..%2F..` would
+// become a different path there.
 func llmPathAllowed(method, path string) bool {
 	switch method {
 	case http.MethodPost:
@@ -110,10 +98,8 @@ func llmPathAllowed(method, path string) bool {
 	return false
 }
 
-// validModelID reports whether id is a plausible Anthropic model id:
-// non-empty, only `[A-Za-z0-9._:-]` (`claude-opus-5`,
-// `claude-3-5-sonnet-20241022`), and not a bare `.`/`..` segment. No
-// percent sign, so no encoded byte survives to the upstream's decoder.
+// validModelID allows no percent sign, so no encoded byte reaches the
+// upstream's decoder, and no bare `.`/`..` segment.
 func validModelID(id string) bool {
 	if id == "" || id == "." || id == ".." {
 		return false
@@ -130,9 +116,8 @@ func validModelID(id string) bool {
 	return true
 }
 
-// bearerToken extracts and base64url-decodes the capability token from the
-// Authorization: Bearer header (lever-agent sets ANTHROPIC_AUTH_TOKEN to the
-// base64url-encoded raw token, which Claude Code sends as a bearer credential).
+// bearerToken decodes the token Claude Code sends as a bearer credential
+// (ANTHROPIC_AUTH_TOKEN, base64url).
 func bearerToken(r *http.Request) ([]byte, bool) {
 	h := r.Header.Get("Authorization")
 	const p = "Bearer "

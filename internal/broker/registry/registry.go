@@ -1,13 +1,10 @@
 // Package registry holds the broker's view of registered MCP tools: their
-// backends, operations, the caveat→param mapping that lets the gateway turn a
-// request's real arguments into the constraint-keyed param set the token layer
-// verifies, and optional allowed-value rules.
+// backends, operations, the caveat→param mapping that turns a request's real
+// arguments into the param set the token layer verifies, and optional
+// allowed-value rules.
 //
-// The registry is concurrency-safe (Registry.mu) because, unlike
-// rules.Policy, it is mutated while the broker serves: the config-seeded
-// envelope is loaded at boot, but each first-party tool then merges its
-// registration through the admin /register route (Register) while the jail
-// listener is already answering /request, /tools and gateway lookups.
+// Unlike rules.Policy it is mutated while the broker serves (first-party
+// tools register through /register), so it is concurrency-safe.
 package registry
 
 import (
@@ -19,10 +16,8 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// Reserved names of the broker's built-in LLM pseudo-tool (the /llm proxy,
-// which has no backend subprocess and no /mcp/llm/ route) and of a coarse
-// tool's single operation. Declared in wire, the contract leaf, so config can
-// spell them without importing this package; aliased here for the broker side.
+// Reserved names of the LLM pseudo-tool and of a coarse tool's single
+// operation, declared in wire so config can use them without this package.
 const (
 	ReservedLLMTool = wire.ReservedLLMTool
 	ReservedLLMOp   = wire.ReservedLLMOp
@@ -32,17 +27,13 @@ const (
 // Operation describes one operation a tool exposes.
 type Operation struct {
 	Name string
-	// CaveatParam maps a token constraint key to the request parameter name it
-	// constrains, for non-identity mappings (e.g. constraint "table" ⇒ arg
-	// "schema.table"). Constraint keys absent here are identity-mapped
-	// (constraint key == arg name).
+	// CaveatParam maps a constraint key to the argument it constrains (e.g.
+	// "table" ⇒ "schema.table"). Absent keys are identity-mapped.
 	CaveatParam map[string]string
-	// Params optionally declares the operation's argument names (config's
-	// opt-in `params:` list). When non-empty, ValidateConstraints rejects a
-	// mint whose constraint keys fall outside Params ∪ CaveatParam keys —
-	// turning a deferred, misattributed call-time denial (a typo'd key mints
-	// an over-narrowed token that can never match) into an immediate
-	// mint-time error (#21). Empty = permissive (any key is a constraint).
+	// Params optionally declares the argument names. When non-empty,
+	// ValidateConstraints rejects a constraint key outside Params ∪
+	// CaveatParam at mint time, instead of minting a token that can never
+	// match. Empty = permissive.
 	Params []string
 }
 
@@ -51,27 +42,22 @@ type Tool struct {
 	Name       string
 	Backend    string
 	Operations map[string]Operation
-	// AllowedValues optionally restricts a constraint key to a permitted set
-	// (e.g. table ∈ {A,B}). An absent key is unrestricted at this layer; the
-	// tool still backstops in its own logic.
+	// AllowedValues optionally restricts a constraint key to a permitted set.
+	// An absent key is unrestricted here; the tool still backstops.
 	AllowedValues map[string][]string
-	// FirstParty marks a capability-aware tool that runs the captool SDK and
-	// verifies tokens itself; the gateway forwards the token + caller to it
-	// rather than stripping (see the gateway). Third-party tools leave this false.
+	// FirstParty marks a tool that verifies tokens itself (captool); the
+	// gateway forwards the token and caller to it instead of stripping them.
 	FirstParty bool
-	// External marks an already-running host server the broker fronts but does
-	// not spawn or expect to self-register: it is registered from config at
-	// boot, and /register rejects it.
+	// External marks a host server the broker fronts but does not spawn. It
+	// is registered from config, and /register rejects it.
 	External bool
-	// Coarse marks an external tool gated by the single wildcard capability
-	// ({tool, WildcardOp}): the gateway requires that capability for every
-	// tools/call instead of the per-MCP-tool operation.
+	// Coarse makes the gateway require {tool, WildcardOp} for every
+	// tools/call.
 	Coarse bool
 }
 
-// CloneAllowedValues deep-copies an allowed-values map (nil in, nil out) so a
-// registry entry never aliases the caller's map — Register takes ownership of
-// nested maps and callers must not mutate them afterwards.
+// CloneAllowedValues deep-copies m so a registry entry never aliases the
+// caller's map.
 func CloneAllowedValues(m map[string][]string) map[string][]string {
 	if m == nil {
 		return nil
@@ -94,10 +80,8 @@ func New() *Registry {
 	return &Registry{tools: map[string]Tool{}}
 }
 
-// Register records (or replaces, by name) a tool. Name, Backend, and at least
-// one operation are required. Register takes ownership of t's nested maps
-// (Operations, AllowedValues, and each Operation's CaveatParam); callers must
-// not mutate them after registering.
+// Register records (or replaces, by name) a tool. It takes ownership of t's
+// nested maps; callers must not mutate them afterwards.
 func (r *Registry) Register(t Tool) error {
 	if t.Name == "" {
 		return fmt.Errorf("registry: tool has empty name")
@@ -134,8 +118,7 @@ func (r *Registry) HasOperation(tool, op string) bool {
 	return ok
 }
 
-// Names returns the names of all registered tools in unspecified order.
-// It is safe for concurrent use.
+// Names returns the registered tool names in unspecified order.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -146,15 +129,9 @@ func (r *Registry) Names() []string {
 	return names
 }
 
-// MapParams builds the constraint-keyed parameter set the token layer verifies
-// against, from the request's actual MCP arguments, using the operation's
-// CaveatParam renames. Errors if tool/op is unregistered.
-//
-// The mapping itself is mcp.MapConstraintParams — the registry's only use of
-// that package. It lives there, not here, because the broker (through this
-// method) and captool (verify.go) must compute byte-identical param sets or a
-// token minted against one would fail verification against the other; mcp is
-// a stdlib-only leaf, so the import costs the registry no transitive baggage.
+// MapParams builds the constraint-keyed param set the token layer verifies,
+// from the request's MCP arguments. The mapping lives in mcp because the
+// broker and captool must compute byte-identical param sets.
 func (r *Registry) MapParams(tool, op string, args map[string]string) (map[string]string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -169,12 +146,9 @@ func (r *Registry) MapParams(tool, op string, args map[string]string) (map[strin
 	return mcp.MapConstraintParams(o.CaveatParam, args), nil
 }
 
-// ValidateConstraints returns an error if any (key,value) constraint requests a
-// value the tool's AllowedValues forbids, or — when the operation declares its
-// parameter set (Operation.Params, #21) — if any constraint key falls outside
-// Params ∪ CaveatParam keys. Keys without an AllowedValues entry are otherwise
-// unrestricted at this layer (the tool backstops). Used at mint time as
-// defense-in-depth. Errors if the tool or op is unregistered.
+// ValidateConstraints is the mint-time defense-in-depth check: a constraint
+// value AllowedValues forbids, or a key outside a declared Params set, is an
+// error.
 func (r *Registry) ValidateConstraints(tool, op string, constraints map[string]string) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -191,7 +165,7 @@ func (r *Registry) ValidateConstraints(tool, op string, constraints map[string]s
 		for _, p := range o.Params {
 			declared[p] = true
 		}
-		for ck := range o.CaveatParam { // renamed constraint keys are also valid
+		for ck := range o.CaveatParam {
 			declared[ck] = true
 		}
 		for k := range constraints {

@@ -190,27 +190,18 @@ func TestGatewayEnforcesConstraintAgainstArgs(t *testing.T) {
 	g.assertDenied(g.post("worker", toolsCall("read", `"table":"C"`, cap)), "constraint table==A, request table==C")
 }
 
-// --- Regression tests for FIX 1 (gateway level): object arg must NOT satisfy empty-string constraint ---
-
-// TestGatewayDeniesObjectArgAgainstEmptyStringConstraint is the end-to-end bypass
-// regression. A token constrained to table="" must NOT be satisfied by table={"x":1}
-// (or any non-string). Before the fix, mcp.ToolsCall coerced {"x":1} to "" and the
-// token.Verify passed — backend reached. After the fix, {"x":1} projects to `{"x":1}`
-// which does not equal "", so token.Verify denies — backend NOT reached (403).
+// A token constrained to table="" must not be satisfied by table={"x":1} or any
+// non-string: the object projects to `{"x":1}`, which does not equal "", so the
+// call is denied and the backend is never reached.
 func TestGatewayDeniesObjectArgAgainstEmptyStringConstraint(t *testing.T) {
 	g := dbRig(t)
-	// Token constrained to table="" — should only allow a literal empty string.
 	cap := mintFor(t, g.b, "worker", map[string]string{"table": ""})
-	// Request sends table as a JSON object (injection attempt).
 	g.assertDenied(g.post("worker", toolsCall("read", `"table":{"x":1}`, cap)),
 		"object arg bypassed empty-string constraint (token.Verify)")
 }
 
-// --- Regression tests for FIX 2: method allowlist (fail-closed) ---
-
-// TestGatewayDeniesUnknownMethodWithoutReachingBackend verifies that a JSON-RPC
-// method outside the explicit allowlist is rejected 403 and the backend is NOT
-// reached. Before the fix, the default: branch forwarded everything — fail-open.
+// A JSON-RPC method outside the explicit allowlist is rejected 403 and never
+// reaches the backend: the gateway fails closed.
 func TestGatewayDeniesUnknownMethodWithoutReachingBackend(t *testing.T) {
 	g := dbRig(t)
 	g.assertDenied(g.post("worker", `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{}}`),
@@ -433,8 +424,8 @@ func TestGatewayComposesBackendPath(t *testing.T) {
 	}))
 	defer up.Close()
 	b := New(testConfig(t))
-	// notes-style: the server mounts its MCP endpoint under /mcp; the config
-	// backend carries the path, scheme-less (host:port/path).
+	// The server mounts its MCP endpoint under /mcp; the config backend carries
+	// the path, scheme-less (host:port/path).
 	backend := strings.TrimPrefix(up.URL, "http://") + "/mcp"
 	_ = b.reg.Register(regCoarseTool("notes", backend))
 
@@ -452,9 +443,9 @@ func TestGatewayComposesBackendPath(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
-	// Hitting the tool root must forward to the backend's path EXACTLY ("/mcp"),
-	// not "/mcp/": the trailing slash is an artifact of the broker's subtree mux,
-	// and a strict streamable-HTTP endpoint (notes) 404s on it (verified live).
+	// The tool root must forward to the backend's path exactly ("/mcp"), not
+	// "/mcp/": the trailing slash is an artifact of the broker's subtree mux,
+	// and a strict streamable-HTTP endpoint 404s on it (verified live).
 	if gotPath != "/mcp" {
 		t.Fatalf("upstream path = %q, want %q (trailing slash is a mux artifact; strict MCP endpoints 404 on it)", gotPath, "/mcp")
 	}

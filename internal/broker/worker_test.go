@@ -29,7 +29,7 @@ type fakeRuntime struct {
 	resumeProj     []string
 	resumeForced   []string
 	resumeForceErr error
-	resumeErr      error // lever#37: a runtime error whose text carries the container env
+	resumeErr      error // a runtime error whose text carries the container env
 	stopped        []string
 	stopProj       []string
 	suspend        []string
@@ -48,14 +48,14 @@ type fakeRuntime struct {
 	// returns the seeded agents. Healer tests need a phase that persists
 	// across repeated heal attempts.
 	staticPhases bool
-	// exitedAfterStart, when set, makes List report a present-but-DEAD worker
-	// ("scratch") once Start has run — so the post-start liveness poll observes a
-	// crash-looped container (Phase "running", ContainerStatus "Exited (1)").
-	// Before Start it stays absent, so handleWorkerStart still takes the Start path.
+	// exitedAfterStart makes List report "scratch" present but dead (Phase
+	// "running", ContainerStatus "Exited (1)") once Start has run, so the
+	// post-start liveness poll sees a crash loop. Before Start it stays absent,
+	// so handleWorkerStart takes the Start path.
 	exitedAfterStart bool
-	// dieAfterLists, when > 0, models lever#31: after a Start/Resume the record
-	// reads running/Up for this many List calls, then flips to error/Exited —
-	// the harness died after scion reported success.
+	// dieAfterLists, when > 0, makes the record read running/Up for that many
+	// List calls after a Start/Resume and then error/Exited: the harness died
+	// after scion reported success.
 	dieAfterLists int
 	actedLists    int
 	// interimLists, when > 0, makes that many List calls after a Start/Resume
@@ -105,7 +105,6 @@ func (f *fakeRuntime) StageWorkerTicket(_ context.Context, worker string, payloa
 	return nil
 }
 
-// lastStaged decodes the newest envelope staged for worker, or fails.
 func (f *fakeRuntime) lastStaged(t *testing.T, worker string) wire.Bootstrap {
 	t.Helper()
 	ps := f.staged[worker]
@@ -130,11 +129,9 @@ func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, er
 		f.listFirst = f.listFirst[1:]
 		return next, nil
 	}
-	// After a Start/Resume, model scion bringing the worker up: the record shows
-	// running + a live container, so the post-start liveness poll succeeds. This
-	// mirrors the real runtime — the pre-action `agents` map is the observe-first
-	// state; the poll sees the result of the action. exitedAfterStart flips it to
-	// a crash-loop (present but dead) to exercise the liveness-timeout path.
+	// After a Start/Resume the record reads running with a live container, so
+	// the post-start liveness poll succeeds. The pre-action agents map is the
+	// observe-first state. exitedAfterStart turns the result into a crash loop.
 	if name, acted := f.lastActed(); acted && !f.staticPhases {
 		if f.exitedAfterStart {
 			return []scion.Agent{{Slug: name, Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}}, nil
@@ -154,8 +151,8 @@ func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, er
 	return f.agents[project], nil
 }
 
-// lastActed reports the worker name a Start/Resume acted on, and whether any
-// such action has happened yet (so pre-action List calls return the seed state).
+// lastActed reports the worker a Start/Resume acted on, and whether one has
+// happened yet: pre-action List calls return the seed state.
 func (f *fakeRuntime) lastActed() (string, bool) {
 	if len(f.started) > 0 {
 		return f.started[len(f.started)-1].Worker, true
@@ -202,9 +199,8 @@ func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event,
 	return nil, nil
 }
 
-// testInstanceProject is the constant instance project (-g) used across
-// worker/msg tests, matching the single-project model: every worker is an
-// agent within this one project, distinguished by --workspace subdir.
+// testInstanceProject is the instance project (-g): every worker is an agent in
+// it, distinguished by its --workspace subdir.
 const testInstanceProject = "/lever"
 
 func TestWorkerSpecLookup(t *testing.T) {
@@ -245,8 +241,8 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	if fi, err := os.Stat(hostWorkspace); err != nil || !fi.IsDir() {
 		t.Fatalf("host workspace not created: %v", err)
 	}
-	// the envelope went to the GUEST channel with the broker CA/URL and the
-	// worker CN — and nowhere in the tree (the manager's mount)
+	// The envelope went to the guest channel with the broker CA/URL and the
+	// worker CN, and nowhere into the tree (the manager's mount).
 	bs := rt.lastStaged(t, "worker")
 	if bs.Ticket == "" || bs.BrokerCA != "CA-PEM" || bs.BrokerURL != "https://10.0.0.2:8080" || bs.AgentCN != "worker" {
 		t.Fatalf("bad bootstrap: %+v", bs)
@@ -254,11 +250,10 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(hostWorkspace, ".lever")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("SECURITY: a ticket directory was created inside the worker's tree subdir (stat err %v)", err)
 	}
-	// scion start called with the constant instance project (-g) + per-worker
-	// --workspace subdir (no longer equal to each other) + api-key + image +
-	// model. Image and Model are config-resolved host-side: the manager names a
-	// worker and never supplies either, so the spec's values must be what
-	// reaches scion.
+	// scion start gets the instance project (-g), the per-worker --workspace
+	// subdir, the api key, image and model. Image and Model are resolved
+	// host-side from config: the manager names a worker and never supplies
+	// either.
 	if len(rt.started) != 1 {
 		t.Fatalf("start calls = %d, want 1", len(rt.started))
 	}
@@ -315,19 +310,17 @@ func TestWorkerStart_suspended_resumesNoReprovision(t *testing.T) {
 	if rt.resumeProj[0] != testInstanceProject {
 		t.Fatalf("resume project = %q, want the instance project %q", rt.resumeProj[0], testInstanceProject)
 	}
-	// Resume DOES stage a fresh one-use ticket (the 0.10-era manager fix,
-	// mirrored): a worker resumed after its leaf/ticket lifetime would
-	// otherwise re-enrol with a spent ticket and wedge into phase=error
-	// (live-hit 2026-07-31). Harmless when the leaf is still valid — boot
-	// skips enrol and the ticket ages out unspent.
+	// Resume stages a fresh one-use ticket: a worker resumed after its
+	// leaf/ticket lifetime would otherwise re-enrol with a spent ticket and
+	// wedge in phase=error. Harmless while the leaf is valid: boot skips enrol
+	// and the ticket ages out unspent.
 	if bs := rt.lastStaged(t, "worker"); bs.AgentCN != "worker" {
 		t.Fatalf("resume must stage a fresh bootstrap ticket for the worker, got %+v", bs)
 	}
 }
 
-// TestWorkerStart_terminalPhase_resumesNoReprovision verifies that any non-empty,
-// non-running phase (e.g. "exited") takes the resume path — a fresh ticket is
-// staged (see the suspended-phase test) but scion start is never re-run.
+// Any non-empty, non-running phase (e.g. "exited") takes the resume path: a
+// fresh ticket is staged but scion start is never re-run.
 func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		TicketDir: "/run/user/501/lever/tickets/worker"}
@@ -352,9 +345,9 @@ func TestWorkerStart_terminalPhase_resumesNoReprovision(t *testing.T) {
 	}
 }
 
-// An ERROR-phase worker record is recovered via resume --force (scion#895)
-// with a fresh ticket staged — the 2026-07-31 wedge (spent-ticket enrol deny
-// -> error phase -> 409 on every message) heals without a purge.
+// An error-phase worker record is recovered with resume --force and a fresh
+// ticket, so a spent-ticket enrol deny that left it in error (409 on every
+// message) heals without a purge.
 func TestWorkerStart_errorPhase_resumeForce(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		TicketDir: "/run/user/501/lever/tickets/worker"}
@@ -433,11 +426,10 @@ func TestWorkerStartLivenessTimeout(t *testing.T) {
 	}
 }
 
-// midPollListFailRuntime wraps fakeRuntime to fail the first failAfterAct List
-// calls that occur AFTER a Start/Resume — modelling transient hub blips DURING
-// the post-start liveness poll. The observe-first List (pre-action) still
-// succeeds, matching the real sequence: create/resume already succeeded, so the
-// hub is demonstrably up and a mid-poll List error is a hiccup, not a failure.
+// midPollListFailRuntime fails the first failAfterAct List calls after a
+// Start/Resume: transient hub blips during the post-start liveness poll. The
+// observe-first List still succeeds, as in the real sequence where
+// create/resume already proved the hub up.
 type midPollListFailRuntime struct {
 	*fakeRuntime
 	failAfterAct int
@@ -454,12 +446,9 @@ func (r *midPollListFailRuntime) List(ctx context.Context, project string) ([]sc
 	return r.fakeRuntime.List(ctx, project)
 }
 
-// TestWorkerStartLivenessToleratesMidPollListErrors pins waitWorkerLive's
-// mid-poll List tolerance: a transient List error during the post-start
-// liveness poll must NOT abort the start — the failed attempt is consumed
-// within the existing budget and the poll succeeds as soon as a List call
-// reports the worker running/live. This behavior must survive the WaitAgentLive
-// extraction (plan B3).
+// A transient List error during the post-start liveness poll must not abort the
+// start: it uses up an attempt within the budget and the poll succeeds once a
+// List reports the worker running and live.
 func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
 	spec := WorkerSpec{Name: "scratch", WorkspaceSubdir: "workers/scratch", HostWorkspace: t.TempDir(),
 		TicketDir: "/run/user/501/lever/tickets/worker"}
@@ -483,11 +472,9 @@ func TestWorkerStartLivenessToleratesMidPollListErrors(t *testing.T) {
 	}
 }
 
-// TestWorkerStartStageFailure makes the guest ticket channel fail on BOTH
-// the fresh-start (absent) and resume (existing non-running) paths, and
-// asserts each returns 500 with body "stage error" and dispatches no scion
-// verb. A worker whose ticket did not land must not be started to fail at
-// enrol behind a runtime error.
+// A failing guest ticket channel on both the fresh-start and resume paths
+// answers 500 "stage error" and runs no scion verb: a worker whose ticket did
+// not land must not be started only to fail at enrol.
 func TestWorkerStartStageFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -578,9 +565,8 @@ func TestWorkerRoutes_authBeforeDecode(t *testing.T) {
 	}
 }
 
-// TestWorkerList proves the list fan-out is collapsed to a SINGLE
-// List(instanceProject) call that returns the whole fleet (multiple workers),
-// not one call per declared worker.
+// The list fan-out is a single List(instanceProject) call that returns the
+// whole fleet, not one call per declared worker.
 func TestWorkerList(t *testing.T) {
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
 		testInstanceProject: {
@@ -622,17 +608,14 @@ func TestWorkerList(t *testing.T) {
 	}
 }
 
-// TestWorkerNilRuntime_returns502 proves that when the scion runtime is unwired
-// (nil) the worker handlers return 502, not a panic from a nil-interface call.
+// With the scion runtime unwired (nil), as in a manual `lever broker serve`,
+// the worker handlers answer 502 instead of panicking.
 func TestWorkerNilRuntime_returns502(t *testing.T) {
-	// Build a broker with an explicit nil runtime (no LEVER_JAIL_USER/UID env).
-	// Runtime nil: unwired, simulates a manual `lever broker serve`.
-	// Both verbs with the manager CN must return 502, not panic.
 	assertNilRuntimeVerbs(t, "test-manager", http.StatusBadGateway)
 }
 
-// TestWorkerNilRuntime_authzPrecedence proves that even with nil runtime, an
-// unauthenticated or non-manager caller gets 403 (authz runs before the nil check).
+// Even with a nil runtime, a non-manager caller gets 403: authz runs before the
+// nil check.
 func TestWorkerNilRuntime_authzPrecedence(t *testing.T) {
 	assertNilRuntimeVerbs(t, "intruder", http.StatusForbidden)
 }
@@ -748,8 +731,8 @@ func TestWorkerStart_absent_missingInstructionsFileFailsBeforeStaging(t *testing
 }
 
 // A task past scion's argv cap is refused by name with 413 before the phase
-// lookup, so the manager learns WHY instead of getting a generic runtime
-// error for a container that exited "command too long" (lever#30).
+// lookup, so the manager learns why instead of getting a generic runtime error
+// for a container that exited "command too long".
 func TestWorkerStart_oversizedTaskIs413WithoutStart(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
 		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1"}
@@ -797,20 +780,18 @@ func TestWorkerStart_absent_oversizedInstructionsFailBeforeStaging(t *testing.T)
 	}
 }
 
-// lever#31 on the worker path: the record is live when the broker first looks
-// and dead a moment later. With a settle window the dispatch fails and the
-// manager hears WHY — "came up, then died" with the observation — instead of a
-// 200 "running" over an exited container.
+// The record is live when the broker first looks and dead a moment later. With
+// a settle window the dispatch fails and tells the manager "came up, then died"
+// instead of a 200 "running" over an exited container.
 func TestWorkerStartFailsWhenHarnessDiesDuringSettle(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: filepath.Join(t.TempDir(), "workers", "worker"),
 		TicketDir: "/run/user/501/lever/tickets/worker", Image: "img:1"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}, dieAfterLists: 2}
 	b := newTestBroker(t, rt, spec)
-	// The window is long on purpose: two dead readings end it at once, a few
-	// milliseconds in, so its length never costs a passing run anything. A
-	// short one made the test a race with the scheduler — a settle poll that
-	// a loaded machine fired after the deadline read the record still live
-	// and closed the window before the death was due.
+	// The window is long on purpose: two dead readings end it within
+	// milliseconds. A short one raced the scheduler: a settle poll fired late
+	// on a loaded machine read the record still live and closed the window
+	// before the death was due.
 	b.liveAttempts, b.liveInterval, b.liveSettle = 3, time.Millisecond, 10*time.Second
 
 	rec := callWorker(t, b, "/worker/start", `{"worker":"worker","task":"do it"}`, "test-manager")
@@ -929,13 +910,12 @@ func TestWorkerStart_workspaceInTreeSymlinkIsFollowed(t *testing.T) {
 	}
 }
 
-// lever#36: the resume VERB (`lever-manager agent resume`, POST
-// /worker/resume) must stage a fresh one-use ticket before scion resumes the
-// container, exactly as the start-path resume does. The ticket directory is a
-// tmpfs under the run user's XDG_RUNTIME_DIR, so a jail machine restart
-// empties it; without re-staging podman refuses the record's volume
-// ("statfs …/lever/tickets/<w>: no such file or directory") on every
-// resume after `lever stop && lever up`.
+// The resume verb (POST /worker/resume) must stage a fresh one-use ticket
+// before scion resumes the container, as the start-path resume does. The ticket
+// directory is a tmpfs under the run user's XDG_RUNTIME_DIR that a jail machine
+// restart empties; without re-staging podman refuses the record's volume
+// ("statfs …/lever/tickets/<w>: no such file or directory") on every resume
+// after `lever stop && lever up`.
 func TestWorkerResumeVerbStagesFreshTicket(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
 		TicketDir: "/run/user/501/lever/tickets/worker"}
@@ -984,9 +964,9 @@ func TestWorkerResumeVerbStagesFreshTicket(t *testing.T) {
 	}
 }
 
-// lever#37: a runtime error echoes scion's `podman run … -e KEY=VALUE …`
-// command line, container env included. Whatever the scion client failed to
-// scrub, the audit line itself must never carry a credential.
+// A runtime error echoes scion's `podman run … -e KEY=VALUE …` command line,
+// container env included. Whatever the scion client failed to scrub, the audit
+// line must never carry a credential.
 func TestWorkerVerbAuditNeverCarriesRuntimeSecrets(t *testing.T) {
 	const token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789"
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker",
@@ -1126,10 +1106,10 @@ func TestWorkerResumeVerbByPhase(t *testing.T) {
 	}
 }
 
-// The resume verb answers only when the worker is live. scion's resume
-// returns while the record still reads "resumed", and the hub refuses a
-// message to an agent in that phase, so an answer given then made the
-// manager's next `msg send` fail.
+// The resume verb answers only when the worker is live: scion's resume returns
+// while the record still reads "resumed", and the hub refuses a message to an
+// agent in that phase, so an earlier answer would make the manager's next `msg
+// send` fail.
 func TestWorkerResumeVerbWaitsUntilRunning(t *testing.T) {
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", TicketDir: "/run/user/501/lever/tickets/worker"}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{
@@ -1319,7 +1299,7 @@ func TestWorkerLivenessErrorCarriesNoAgentText(t *testing.T) {
 }
 
 // TestRunningRecordWithADeadContainerIsNotRunning: the hub keeps a record
-// "running" for minutes after its container died (live-seen on Lima). In
+// "running" for minutes after its container died. In
 // that window a message must be refused, not "sent" to nothing, and the
 // resume verb must try the forced resume instead of answering "already
 // running". A blank container status is "cannot tell" and stays running.
@@ -1475,7 +1455,6 @@ func strictTree(t *testing.T, rt *fakeRuntime, buf *bytes.Buffer) (string, Worke
 	return tree, spec, b
 }
 
-// swapToLink replaces dir with a symlink to target.
 func swapToLink(t *testing.T, dir, target string) {
 	t.Helper()
 	if err := os.RemoveAll(dir); err != nil {

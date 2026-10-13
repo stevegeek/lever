@@ -2,14 +2,11 @@ package broker
 
 // Messages an agent sends to a contact (remote.agent_messages).
 //
-// The hub lets an agent send to any hub user at any time, and stamps the
-// agent as the sender. Lever cannot stop the send; it decides what a contact
-// is SHOWN. So the broker authorizes a message here — the contact lists the
-// caller, a reply answers that contact's verified post, an initiated message
-// is inside the limit — and records the sha256 of its exact text in the
-// agent ledger. The agent then sends that text itself, and the remote proxy
-// shows a contact only agent messages whose text the ledger holds
-// (/operator/agent-messages/match). The text is never logged.
+// The hub lets an agent send to any hub user at any time; lever cannot stop
+// the send, only decide what a contact is SHOWN. The broker authorizes a
+// message here and records the sha256 of its exact text in the agent ledger,
+// and the remote proxy shows a contact only agent messages whose text the
+// ledger holds. The text is never logged.
 
 import (
 	"errors"
@@ -30,28 +27,26 @@ type AgentMessagesConfig struct {
 	Enabled       bool
 	FollowUpAfter time.Duration
 	MaxChars      int
-	// LedgerDir is the agent ledger; "" = the state directory is inside
-	// the tree, so nothing can be authorized (every call: unavailable).
+	// LedgerDir "" means the state directory is inside the tree: every call
+	// answers unavailable.
 	LedgerDir string
 	Contacts  []ContactEntry
 }
 
-// ContactEntry is one tier: contact login: its hub email (lowercased, the
-// address a send goes to) and the agents it lists to message.
+// ContactEntry is one contact login, its lowercased hub email and the agents
+// it lists.
 type ContactEntry struct {
 	Login, Email string
 	Agents       []string
 }
 
-// Defaults for a config built without the effective values (brokerctl
-// always passes them; config.DefaultAgentFollowUpAfter/DefaultAgentMaxChars).
 const (
 	defaultFollowUpAfter = 24 * time.Hour
 	defaultMaxChars      = 4000
 )
 
-// withDefaults fills a zero FollowUpAfter or MaxChars, so a zero limit
-// never allows a reminder at once or refuses every text.
+// withDefaults ensures a zero limit never allows a reminder at once or
+// refuses every text.
 func (c AgentMessagesConfig) withDefaults() AgentMessagesConfig {
 	if c.FollowUpAfter <= 0 {
 		c.FollowUpAfter = defaultFollowUpAfter
@@ -63,24 +58,19 @@ func (c AgentMessagesConfig) withDefaults() AgentMessagesConfig {
 }
 
 const (
-	// contactCallLimit bounds contacts + contact_message calls per agent per
-	// minute, so refusals cannot flood the audit log.
+	// contactCallLimit keeps refusals from flooding the audit log.
 	contactCallLimit = 60
-	// contactAuthPerHour bounds authorizations per agent per hour, counted
-	// from the ledger (it survives a restart).
+	// contactAuthPerHour is counted from the ledger, so it survives a
+	// restart.
 	contactAuthPerHour = 30
-	// contactReplyWindow is how long after a contact's post an agent may
-	// reply to it outside the initiate rule.
 	contactReplyWindow = 24 * time.Hour
-	// contactRepliesPerRef bounds the replies to one contact post, so one
-	// verified post cannot carry an agent's whole hourly rate for a day.
-	// Counted from the ledger, under its lock.
+	// contactRepliesPerRef: one verified post cannot carry an agent's whole
+	// hourly rate for a day.
 	contactRepliesPerRef = 3
 	// contactBodyLimit fits a 16000-character text in JSON escapes.
 	contactBodyLimit = 128 << 10
 )
 
-// The refusal words.
 const (
 	refuseNotContact  = "not-a-contact"
 	refuseLimit       = "limit"
@@ -93,7 +83,6 @@ const (
 	refuseUnavailable = "unavailable"
 )
 
-// agentRecord opens the agent ledger on first use and again after a failure.
 type agentRecord struct {
 	dir    string
 	mu     sync.Mutex
@@ -116,7 +105,6 @@ func (a *agentRecord) get() (*agentledger.Ledger, error) {
 	return a.ledger, nil
 }
 
-// contactFor is the entry for login when it lists agent.
 func (b *Broker) contactFor(login, agent string) (ContactEntry, bool) {
 	for _, c := range b.agentMsgs.Contacts {
 		if c.Login == login {
@@ -130,11 +118,8 @@ func (b *Broker) contactFor(login, agent string) (ContactEntry, bool) {
 	return ContactEntry{}, false
 }
 
-// initiateDecision is the limit on messages an agent starts, per contact:
-// with none unanswered it may start one; with one, a single reminder once
-// followUp has passed; with two, nothing until the contact writes. initiated
-// are the creation times of the agent's initiated authorizations to the
-// contact; only those after the contact's last post count.
+// initiateDecision limits messages an agent starts, per contact: one, then a
+// single reminder after followUp, then nothing until the contact writes.
 func initiateDecision(initiated []time.Time, lastFromContact time.Time, followUp time.Duration, now time.Time) (bool, time.Time) {
 	var open []time.Time
 	for _, t := range initiated {
@@ -155,17 +140,15 @@ func initiateDecision(initiated []time.Time, lastFromContact time.Time, followUp
 	return false, time.Time{}
 }
 
-// contactText checks the text the hub would store unchanged: valid UTF-8, no
-// NUL or other control but tab and newline, no "@" at a word start (the hub
-// rewrites "@<member email>" and routes agent @mentions), not blank, at most
-// max characters as the hub counts them. U+FFFD is refused too: the JSON
-// decoder puts it in place of invalid UTF-8, so it marks bytes that were not
-// text before they reached the broker.
+// contactText accepts only text the hub stores unchanged: no "@" at a word
+// start (the hub rewrites "@<member email>" and routes @mentions), no
+// controls but tab and newline, and no U+FFFD, which the JSON decoder puts in
+// place of invalid UTF-8.
 func contactText(text string, max int) string {
 	if !utf8.ValidString(text) {
 		return refuseBadText
 	}
-	prev := rune(-1) // the rune before r; -1 at the start
+	prev := rune(-1)
 	for _, r := range text {
 		if r == '＠' || r == '@' && (prev < 0 || !wordRune(prev)) {
 			return refuseBadText
@@ -184,11 +167,9 @@ func contactText(text string, max int) string {
 	return ""
 }
 
-// wordRune is scion's mention boundary rule (mention_translate.go
-// isWordChar) applied to the rune before an "@": an ASCII letter, digit,
-// "_" or "-" there means the "@" is inside a word, which the hub leaves
-// alone. Any other rune before it (space, punctuation, a non-ASCII letter
-// such as "é") is a boundary to the hub, so the "@" there is refused.
+// wordRune mirrors scion's mention boundary rule (isWordChar): only these
+// runes before an "@" keep it inside a word; any other, a non-ASCII letter
+// included, is a boundary to the hub.
 func wordRune(r rune) bool {
 	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-'
 }
@@ -247,7 +228,6 @@ func rfc(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// agentHubID is the caller's hub agent id (resolveAgentID, as verifyWeb).
 func (b *Broker) agentHubID(r *http.Request, slug string) (string, error) {
 	if b.resolveAgentID == nil {
 		return "", errors.New("no agent id resolver")
@@ -261,7 +241,6 @@ func (b *Broker) agentHubID(r *http.Request, slug string) (string, error) {
 
 var errRate = errors.New(refuseRate)
 
-// errReplyCap: the contact post already has contactRepliesPerRef replies.
 var errReplyCap = errors.New(refuseLimit)
 
 type limitErr struct{ next time.Time }

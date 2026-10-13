@@ -7,13 +7,22 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.39.0]
+
 ### Added
 
 - **A live e2e of the whole stack on the pinned scion (lever#206).** `make test-lima-stack-e2e`
   brings an instance up with the agent image (built in the guest from the pin, or from
   `IMAGE_TAR`), starts a worker, sends messages both ways, signs in an operator and a contact
-  through the proxy, checks the experiment fence on the hub and in the proxy, runs doctor, then
-  `lever stop` and `lever up`. `make test-lima-e2e` does not start scion.
+  through the proxy, checks the experiment fence on the hub and in the proxy, removes a contact
+  while an agent loops the controller rename, runs doctor, then `lever stop` and `lever up`.
+  `make test-lima-e2e` does not start scion. `SAVE_IMAGE_TAR` keeps the image archive it built.
+- **A live e2e of the hub's identities (lever#73).** `make test-lima-hubauth-e2e IMAGE_TAR=<file>`
+  brings an instance up with the older release on its scion pin, migrates it with this lever onto
+  the new pin while the manager and a worker run, adds and removes contacts while they run (one
+  while an agent loops the controller rename), rotates the controller token, checks what an agent
+  can and cannot do, and brings a fresh instance up; after the migration and on the fresh
+  instance the manager starts a worker and the experiment fence is checked.
 - **Tree backups: host-side snapshots of the instance tree, off by default (lever#74).** With
   `tree_backup: {enabled: true}`, `lever stop` and `lever destroy` snapshot the tree once the VM is
   off (`--keep-vm` after the agents are suspended and the guest synced), and
@@ -39,6 +48,36 @@ version bump moves the block under the new version heading.
   Mercurial and Jujutsu files through which those tools would run a command. `lever tree diff`
   prints rows of at most 80 columns, so agent text cannot pass for one of its headers.
   `lever doctor` has a *tree backup* row.
+- **A release ships scion prebuilt, so its pin needs no Go toolchain (lever#191).** The release
+  build compiles scion at the pin the examples use (`b41cd6fe`) for linux/amd64 and linux/arm64,
+  uploads the two gzip-compressed binaries (about 40 MB each) with the release, and embeds their
+  sha256 and sizes in `lever`. When `scion.version` names that pin, `lever apply` downloads the
+  binary for the guest's architecture from that release instead of building it, so the host skips
+  the scion compile (about 4 CPU-minutes) and needs no Go. The download is https only, from
+  `github.com` and GitHub's release asset hosts; lever checks it against the embedded digests and
+  the ELF architecture before it installs anything, and reads no checksum from the server. A
+  download that does not match stops the apply. A download that cannot happen (offline, no such
+  asset) falls back to the source build. `LEVER_SCION_DOWNLOAD=off` always builds. `lever doctor`'s
+  *go toolchain* row passes without Go when the download applies. `remote.enabled` still needs Go
+  and node for the web UI, and a lever built from a checkout builds scion as before.
+- **A slim agent image, opt-in (lever#192).** `make lever-image-slim` builds
+  `scionlocal/lever-claude-slim:<arch>` from a Debian trixie base with only what scion and lever
+  need in an agent container (sciontool and scion cross-compiled from the scion source the jail
+  runs, the `scion` user, python3, git, zsh, tzdata), then the same lever layer as the full image,
+  so Claude Code is installed once, at its pin. It needs no scion image build and should come to
+  about 1 GB instead of about 5 GB, which shortens the image load and podman's rootless
+  preparation and saves about 12 GB of disk across the image's three copies. It leaves out sudo,
+  gh, chromium and the browser tools, gcloud, gcsfuse, Go, kubectl, golangci-lint and bun, and
+  the everyday tools scion's base adds (curl, jq, ripgrep, less, make, g++ and the like); an
+  instance that needs one adds it in its own Dockerfile. Point `manager.image` at it to opt in:
+  the full image stays the default, and an instance that does not opt in is unchanged.
+- **An agent-image contract check (lever#192).** `make image-contract IMAGE=<ref>` checks a built
+  image, of either flavor, against what lever and scion rely on: the entrypoint, the `scion` user,
+  the labels doctor reads, sciontool, scion, the pinned tmux, python3, git, lever's binaries for
+  the right arch, the boot hook, `/etc/claude-code`, Claude Code at the labelled version (read from
+  its `package.json`, never run), lever's environment variables and the commands lever's probes
+  use, and that `lever-agent claude-ready` writes the ready marker in a scion-shaped tmux session.
+  It runs the image without network. `LEVER_IMAGE_MAX_MB` also fails an oversized image.
 
 ### Changed
 
@@ -46,34 +85,10 @@ version bump moves the block under the new version heading.
   prebuilt scion, the Makefile's `SCION_VERSION` and the docs move from `e0f61f2d`. lever follows
   what changed in scion since: `scion server start` now gives up its own readiness wait after
   about 30 s with the server still starting, which lever counts as a start before its longer wait;
-  `hub token create` prints the expiry in local time, so lever mints with `--json` (an expiry it
-  cannot read is estimated from the requested lifetime, never left unknown); a `hub link` under
-  the controller token no longer registers a re-initialised project, so lever points the project
-  at the hub's existing record first; an unconfirmed `scion delete` is re-listed before a
-  recreate; and every non-interactive scion call passes `--non-interactive`, without the unused
-  `SCION_HUB_ENABLED`.
-- **The controller token carries more scopes, so the next bring-up re-mints it (lever#206).** On
-  the new scion a token may start or resume an agent only in a role its scopes cover, and listing
-  notifications needs `inbox:read`. The controller token now carries the read-only skill,
-  template and harness-config scopes the baseline role covers, and `inbox:read` when the jail's
-  scion knows it. The re-mint needs the dev-auth window, which opens only while no container runs:
-  after upgrading, run `lever stop`, then `lever up`.
-- **The jail's runtime broker is linked to the project as the dev identity (lever#206).** The new
-  scion links a broker to a project only for a caller allowed to update that broker, which no
-  hub token can be, so the controller token's hub link no longer links it and no agent could
-  start ("no runtime brokers available"). When the instance's hub project lists no broker once
-  the hub's broker has registered (on a fresh instance, the first bring-up), lever runs the
-  dev-auth window again, whose hub link links it, and starts the hub again. Beside running
-  containers the apply fails with `lever stop`, then `lever up`.
-- **The remote proxy follows the new hub (lever#206).** A contact may send `offer_wake`, which the
-  hub's web chat now sends on every message (never `wake`: a contact wakes a worker only through
-  the chat page). The hub's named SSE heartbeat passes through to the browser, a duplicate send's
-  409 `send_in_progress` reads as "no clear answer" on the chat page, the hub's new root files
-  (favicon, manifest, icons) reach contacts, and a contact's unread count is a fixed zero.
-- **Jail ABI 4.** The in-jail code changed, and the image carries sciontool (and, in the slim
-  image, scion) from the pin: rebuild the agent image (`make lever-image` or
-  `make lever-image-slim`, then any instance image built from it) and recreate the manager on it
-  with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so.
+  a `hub link` under the controller token no longer registers a re-initialised project, so lever
+  points the project at the hub's existing record first; an unconfirmed `scion delete` is re-listed
+  before a recreate; and every non-interactive scion call passes `--non-interactive`, without the
+  unused `SCION_HUB_ENABLED`.
 - **No more dev-auth window: lever governs the hub while agents run (lever#73, lever#20).** Lever
   is now scion's authenticating proxy. The jail's hub runs in scion's proxy auth mode with the JWT
   provider and `invite_only`, and trusts only short-lived assertions (30 s, ES256) that lever signs
@@ -94,10 +109,10 @@ version bump moves the block under the new version heading.
   `lever reload` invite each configured login's hub user, write its ceiling, then bind its tier's
   role, while agents run; the first sign-in activates that same user with its role in force.
   Removing a login suspends its hub user (the web refuses it at once, the API within the hub's
-  60 s cache) and drops its bindings, before any other hub work; adding it back reactivates it. A replacement ceiling is
-  written under a second name before the old one is deleted, so there is no gap. The proxy checks
-  that each session belongs to the hub user lever recorded for that login and refuses only that
-  login otherwise.
+  60 s cache) and drops its bindings, before any other hub work; adding it back reactivates it. A
+  replacement ceiling is written under a second name before the old one is deleted, so there is no
+  gap. The proxy checks that each session belongs to the hub user lever recorded for that login
+  and refuses only that login otherwise.
 - **The remote proxy signs its users in with an assertion (lever#73).** It sends `GET /` with an
   assertion for the login's hub address, takes the session cookie, and checks the user ID. Its
   signer signs only the configured logins' addresses. The audit log's `oidc-*` and
@@ -124,6 +139,25 @@ version bump moves the block under the new version heading.
   environment in the jail: the guest shell hands them to `curl` on a pipe. The remote proxy reads
   the guest clock for every sign-in and refuses the sign-in when it cannot, instead of signing on
   the host clock.
+- **The controller token carries more scopes, so the next apply re-mints it (lever#206).** On the
+  new scion a token may start or resume an agent only in a role its scopes cover, a mint is checked
+  scope by scope against its issuer's bindings, and listing notifications needs `inbox:read`. The
+  controller token now carries the read-only skill, template and harness-config scopes the baseline
+  role covers, and `inbox:read` when the jail's scion knows it. The re-mint runs while agents run.
+  A mint the hub answers without one of those scopes is revoked and fails the apply, and the
+  migration's authority probe also lists the controller's notifications.
+- **lever-admin links the jail's runtime broker to the project (lever#206).** The new scion links a
+  broker to a project only for a caller allowed to update that broker (its owner or a super-admin),
+  which no hub token can be, so the controller token's hub link links none and no agent could
+  start ("no runtime brokers available"). Every apply checks with the controller token that the
+  instance's hub project lists a broker; when it lists none (a fresh instance), it links the
+  jail's own broker as `lever-admin`, and refuses when the hub lists any number of brokers but one.
+  No hub restart is needed.
+- **The remote proxy follows the new hub (lever#206).** A contact may send `offer_wake`, which the
+  hub's web chat now sends on every message (never `wake`: a contact wakes a worker only through
+  the chat page). The hub's named SSE heartbeat passes through to the browser, a duplicate send's
+  409 `send_in_progress` reads as "no clear answer" on the chat page, the hub's new root files
+  (favicon, manifest, icons) reach contacts, and a contact's unread count is a fixed zero.
 - **Reserved hub addresses.** `remote.allowed_users` may not name `lever-admin@lever.local`,
   `lever-controller@lever.local` or any `@localhost` address (scion's dev user is
   `<os-user>@localhost`); config load refuses it while remote access is on.
@@ -131,8 +165,8 @@ version bump moves the block under the new version heading.
   from another key or for another instance gets 401, one for a random uninvited address gets 403,
   `lever-admin` is admin, no OAuth login is offered, the running hub carries lever's auth env and
   no dev auth, no dev token lies in the jail (apply now removes one), and the public key's file and
-  directory are root's and writable by nobody else. *hub identities* checks that `lever-admin` is the only admin and that the controller holds
-  only the tokens lever recorded. *remote web role* now reads the hub live. The *dev-auth window*
+  directory are root's and writable by nobody else. *hub identities* checks that `lever-admin` is
+  the only admin and that the controller holds only the tokens lever recorded. *remote web role* now reads the hub live. The *dev-auth window*
   row and the login-provider part of *remote access* are gone.
 - **The broker rides a token rotation.** It retries a hub 401 once when the PAT file now holds a
   different token, and re-resolves the controller's sender label on a verification miss (at most
@@ -158,13 +192,24 @@ version bump moves the block under the new version heading.
 - **Scion's conduit and artifacts experiments are kept off (lever#207).** The new scion has two
   alpha experiments, off by default: `hub.conduit` (a shell, sftp and port relay into every agent,
   reaching the jail loopback) and `hub.artifacts` (hub-held publishing with unauthenticated share
-  links). Every dev-auth window writes explicit `false` overrides for both, and every apply asks
-  the live hub, before and right after it starts, whether either is on; a live one is pinned off
-  through the window, or the apply fails with `lever stop`, then `lever up`. The new `lever
-  doctor` row *scion conduit and artifacts* fails while either is on. The remote proxy refuses
-  conduit, artifacts and writes to the experiments admin route for every login, and also an
-  agent's port tunnel and delegations and scion's test-identity routes. On an older scion nothing
-  changes.
+  links). Every apply's hub-identity step writes explicit `false` overrides for both as
+  `lever-admin`, records the pin in `.lever-state/hub-experiments.json`, and proves at the hub that
+  both are off; one that was on is pinned off and the hub restarted, since conduit's relay starts
+  only with the hub, and one still on fails the apply. The new `lever doctor` row *scion conduit
+  and artifacts* fails while either is on. The remote proxy refuses conduit, artifacts and writes
+  to the experiments admin route for every login, and also an agent's port tunnel and delegations
+  and scion's test-identity routes. On an older scion nothing changes.
+- **A remote sign-in can no longer land on scion's dev user (lever#73).** scion's workstation
+  `PUT /api/v1/system/identity` route accepts any authenticated loopback caller with no permission
+  check, so any jailed agent can rename scion's dev user, the super-admin on older levers and the
+  controller on a migrated instance. Every remote login's hub user is now invited and recorded
+  before its first sign-in, so the dev user cannot take that address, and the proxy keeps a
+  session only when it belongs to exactly the hub user lever recorded for the login, never to
+  scion's dev user. `lever apply` never records, binds, caps or suspends lever's own hub users for
+  a login, whatever its records say. This does not stop an agent from calling the route or the
+  other unchecked `/api/v1/system/*` writers (that needs an upstream scion permission check, or
+  running the hub in hosted mode); see the known issues below and the worker-isolation security
+  model.
 - **The state directory's inside-the-tree check compares file identity (lever#74).** Lever keeps
   no ledger, conversation backup, push key or voice model in the state directory when that
   directory lies in the tree, where agents could read or replace them. The check compared real
@@ -185,10 +230,14 @@ version bump moves the block under the new version heading.
   renamed `lever-controller@lever.local` and demoted to member; it keeps the project, the PATs and
   every agent. Lever then checks the controller PAT's authority without changing anything; if a
   check fails the apply fails with the evidence and the controller stays a member (lever never
-  makes it an admin again), and the next apply checks again. See the operations guide, "The first apply after upgrading".
+  makes it an admin again), and the next apply checks again. The same apply installs the new scion
+  pin in the jail. See the operations guide, "The first apply after upgrading".
 - Downgrading after the migration is not supported.
-- The jail ABI is now 4 (`internal/scion`, which `lever-manager` imports, changed), so `lever
-  doctor` asks for the agent image to be rebuilt; nothing in the image behaves differently.
+- **Jail ABI 4.** The in-jail code changed (`internal/scion`, which `lever-manager` imports), and
+  the image carries sciontool (and, in the slim image, scion) from the new pin: rebuild the agent
+  image (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
+  recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
+  version* row says so.
 
 ### Known issues
 
@@ -200,60 +249,6 @@ version bump moves the block under the new version heading.
   then lever's messages carry the label the agent chose (no forgery follows: verification needs
   lever's own record). An agent renaming in a loop makes an apply that must mint a controller token
   fail, never a revocation; `lever stop` ends it.
-
-## [0.38.0] - 2026-10-13
-
-### Added
-
-- **A release ships scion prebuilt, so its pin needs no Go toolchain (lever#191).** The release
-  build compiles scion at the pin the examples use (`e0f61f2d`) for linux/amd64 and linux/arm64,
-  uploads the two gzip-compressed binaries (about 40 MB each) with the release, and embeds their
-  sha256 and sizes in `lever`. When `scion.version` names that pin, `lever apply` downloads the
-  binary for the guest's architecture from that release instead of building it, so the host skips
-  the scion compile (about 4 CPU-minutes) and needs no Go. The download is https only, from
-  `github.com` and GitHub's release asset hosts; lever checks it against the embedded digests and
-  the ELF architecture before it installs anything, and reads no checksum from the server. A
-  download that does not match stops the apply. A download that cannot happen (offline, no such
-  asset) falls back to the source build. `LEVER_SCION_DOWNLOAD=off` always builds. `lever doctor`'s
-  *go toolchain* row passes without Go when the download applies. `remote.enabled` still needs Go
-  and node for the web UI, and a lever built from a checkout builds scion as before.
-- **A slim agent image, opt-in (lever#192).** `make lever-image-slim` builds
-  `scionlocal/lever-claude-slim:<arch>` from a Debian trixie base with only what scion and lever
-  need in an agent container (sciontool and scion cross-compiled from the scion source the jail
-  runs, the `scion` user, python3, git, zsh, tzdata), then the same lever layer as the full image,
-  so Claude Code is installed once, at its pin. It needs no scion image build and should come to
-  about 1 GB instead of about 5 GB, which shortens the image load and podman's rootless
-  preparation and saves about 12 GB of disk across the image's three copies. It leaves out sudo,
-  gh, chromium and the browser tools, gcloud, gcsfuse, Go, kubectl, golangci-lint and bun, and
-  the everyday tools scion's base adds (curl, jq, ripgrep, less, make, g++ and the like); an
-  instance that needs one adds it in its own Dockerfile. Point `manager.image` at it to opt in:
-  the full image stays the default, and an instance that does not opt in is unchanged. The lever
-  layer and the Jail ABI are unchanged, so an existing image needs no rebuild.
-- **An agent-image contract check (lever#192).** `make image-contract IMAGE=<ref>` checks a built
-  image, of either flavor, against what lever and scion rely on: the entrypoint, the `scion` user,
-  the labels doctor reads, sciontool, scion, the pinned tmux, python3, git, lever's binaries for
-  the right arch, the boot hook, `/etc/claude-code`, Claude Code at the labelled version (read from
-  its `package.json`, never run), lever's environment variables and the commands lever's probes
-  use, and that `lever-agent claude-ready` writes the ready marker in a scion-shaped tmux session.
-  It runs the image without network. `LEVER_IMAGE_MAX_MB` also fails an oversized image.
-
-### Security
-
-- **A remote sign-in can no longer land on scion's dev super-admin row (lever#73).** scion's
-  workstation `PUT /api/v1/system/identity` route accepts any authenticated loopback caller with
-  no permission check, and every jailed agent reaches the hub on loopback with its own agent
-  token, so an agent can rename the dev super-admin user to the email of an operator or contact
-  who has not signed in yet; that email's first sign-in would then resolve to the super-admin row.
-  lever now verifies, when it mints a remote hub session, that the session resolves to the hub
-  user it expects for that login: never scion's fixed dev-user id, and, when `lever apply`
-  recorded an id for the login, exactly that id. A session that resolves to anything else is
-  refused (and retried at most once a minute), so the affected sign-in fails closed while every
-  other login is unaffected. `lever apply` no longer binds a role, ceiling or record to an allowed
-  login whose hub user is the dev row; it warns and leaves the login pending. `lever doctor` adds a *dev user identity* row that reports when the dev row carries
-  a configured remote login's email. This closes the impersonation path at the point of use; it
-  does not stop an agent from calling the route or the other unchecked `/api/v1/system/*` writers
-  (that needs an upstream scion permission check, or running the hub in hosted mode), and the
-  controller's own sender label can still be changed. See the worker-isolation security model for the full statement.
 
 ## [0.37.0] - 2026-10-13
 

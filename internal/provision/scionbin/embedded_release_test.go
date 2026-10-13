@@ -1,0 +1,65 @@
+package scionbin_test
+
+import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"testing"
+
+	"github.com/stevegeek/lever/internal/provision/scionbin"
+)
+
+// The release build runs this with LEVER_REQUIRE_SCION_RELEASE set to the
+// version being released, after genrelease and before building lever: it
+// fails the release when the manifest lever is about to embed is missing,
+// names another release or pin, or does not match the assets the release
+// uploads.
+func TestReleaseManifestEmbedded(t *testing.T) {
+	want := os.Getenv("LEVER_REQUIRE_SCION_RELEASE")
+	if want == "" {
+		t.Skip("LEVER_REQUIRE_SCION_RELEASE not set (only the release build requires the manifest)")
+	}
+	rel, err := scionbin.LoadRelease(".")
+	if err != nil || rel == nil {
+		t.Fatalf("no valid release manifest under %s: %v", scionbin.ReleaseDir, err)
+	}
+	if rel.LeverVersion != want || rel.ScionVersion != scionbin.ReleasePin {
+		t.Fatalf("manifest is for lever %s, scion %s; want lever %s, scion %s",
+			rel.LeverVersion, rel.ScionVersion, want, scionbin.ReleasePin)
+	}
+	assets := filepath.Join("..", "..", "..", "build", "scion-release")
+	for _, arch := range scionbin.ReleaseArches {
+		a, ok := rel.Assets[arch]
+		if !ok {
+			t.Fatalf("manifest has no asset for linux/%s", arch)
+		}
+		gz, err := os.ReadFile(filepath.Join(assets, a.Name))
+		if err != nil {
+			t.Fatalf("asset for linux/%s: %v", arch, err)
+		}
+		if int64(len(gz)) != a.Size || sum(gz) != a.SHA256 {
+			t.Fatalf("asset %s does not match the manifest", a.Name)
+		}
+	}
+}
+
+// The examples pin the scion the release ships prebuilt, so a new instance
+// copied from one downloads it instead of building it.
+func TestExamplesPinTheReleaseScion(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "examples", "*", "lever.yaml"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no example configs found: %v", err)
+	}
+	re := regexp.MustCompile(`(?m)^\s+version:\s*(\S+)`)
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range re.FindAllSubmatch(b, -1) {
+			if string(m[1]) != scionbin.ReleasePin {
+				t.Errorf("%s pins scion %s, want %s (scionbin.ReleasePin)", f, m[1], scionbin.ReleasePin)
+			}
+		}
+	}
+}

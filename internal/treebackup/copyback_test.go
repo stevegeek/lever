@@ -77,3 +77,45 @@ func TestCopyBackCommandMatchesTheGuide(t *testing.T) {
 		t.Fatalf("the operations guide does not give %q", cmd)
 	}
 }
+
+// A file the agent replaced by a link to one of the operator's own files
+// must not be written through by the documented copy-back.
+func TestDocumentedCopyBackDoesNotWriteThroughALink(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("no rsync")
+	}
+	e := newSnapEnv(t)
+	writeFile(t, filepath.Join(e.tree, "build.sh"), "echo planted\n")
+	h1 := e.snap(t)
+	victim := filepath.Join(filepath.Dir(e.tree), "victim")
+	writeFile(t, victim, "operator's own\n")
+	os.Remove(filepath.Join(e.tree, "build.sh"))
+	if err := os.Symlink(victim, filepath.Join(e.tree, "build.sh")); err != nil {
+		t.Fatal(err)
+	}
+	s := e.store(t)
+	target := filepath.Join(filepath.Dir(e.tree), "restored")
+	if _, err := Restore(context.Background(), RestoreOptions{
+		Target: target, Manifest: s.Open(h1.ID), Blobs: s,
+		Forbidden: []string{e.tree, e.state}, InsideFD: fsutil.InsideByIdentityFD,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	argv := append(copyBackCommand(t), target+"/", e.tree+"/")
+	if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := readFile(t, victim); got != "operator's own\n" {
+		t.Fatalf("the copy-back wrote through the link: victim holds %q", got)
+	}
+}
+
+func TestGuideNeverOffersCpForTheCopyBack(t *testing.T) {
+	guide, err := os.ReadFile("../../docs-site/_guides/operations.md")
+	if err != nil {
+		t.Skip(err)
+	}
+	if strings.Contains(string(guide), "cp -RP") || strings.Contains(string(guide), "`cp -P`") {
+		t.Fatal("the operations guide offers cp for the copy-back")
+	}
+}

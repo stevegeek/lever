@@ -924,14 +924,18 @@ directory or the store. `--path` restores those subtrees (and their parent direc
 **Copying back into the tree**, from a restore of snapshot `<id>` into `<dir>`:
 
 1. `lever stop`, so that no agent writes while you copy.
-2. `lever tree snapshot`, then `lever tree diff <id> latest -- <paths>`: check that no directory on
-   the way to what you copy back became a link (a `T` or `L` line). A copy into the tree follows
-   such a link out of it.
-3. Copy with `rsync -r --no-links --checksum <dir>/ <tree>/` (or only the paths you need), or with
-   `cp -RP <dir>/. <tree>/`; never with plain `cp -r`, which follows links the agents left in the
-   tree. `--checksum` matters: the restore gives every file its recorded modification time, and
-   rsync's default check skips a file whose size and time match, so a file an agent damaged but
-   kept at the same size and time would stay damaged. `cp -RP` copies every file.
+2. `lever tree snapshot`, then `lever tree diff <id> latest -- <paths>`: look for `T` and `L`
+   lines, on what you copy back and on every directory above it. Each is a file or directory an
+   agent turned into a link, possibly to one of your own files outside the tree (`~/.zshrc`). Delete
+   each such link from the tree (`rm`, which removes the link, not its target) before you copy.
+3. Copy with `rsync -r --no-links --checksum <dir>/ <tree>/` (or only the paths you need). rsync
+   replaces a link in the destination instead of writing through it. Never use `cp`, with or
+   without `-P`: `-P` concerns links in the source, and `cp` writes through a link it finds in the
+   destination, out of the tree. `--checksum` matters: the restore gives every file its recorded
+   modification time, and rsync's default check skips a file whose size and time match, so a file
+   an agent damaged but kept at the same size and time would stay damaged. If your rsync refuses
+   either option (macOS 15 ships openrsync), install rsync proper (Homebrew's `rsync`) rather than
+   leave one out.
 4. `lever tree snapshot` again, and `lever tree diff <id> latest -- <paths>` must show no `M`, `T`,
    `L` or `D` line for what you copied back. A `P` line is a mode the restore did not keep (files
    are 0600 unless `--keep-modes`).
@@ -970,7 +974,8 @@ sure to have when it commits (the reserve, plus the part of `min_free` that new 
 take), so on a full disk the snapshot commits incomplete with `truncated(disk)` instead of failing.
 A commit that fails anyway gives the reserve back. A commit that used the reserve makes a new one
 once there is room; until then doctor says so, and another snapshot on the still-full disk may
-fail. With `min_free: 0` the manifest always fits the reserve alone. The status doctor reads is
+fail. With `min_free: 0` every manifest is held to the reserve alone, even on an empty disk: the
+first snapshot then stops at about 150 000 entries, and each later one at about twice the last. The status doctor reads is
 written even on a full disk.
 
 After each snapshot lever starts `lever tree gc` in the background (log in

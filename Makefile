@@ -185,3 +185,9 @@ test-apikey-e2e: install lever-image-bins
 .PHONY: test-lima-e2e
 test-lima-e2e: install
 	bash tools/test/lima-e2e.sh
+
+# The whole stack on the pinned scion (agent image, manager, worker, remote
+# access, the experiment fence); see the script's header for what it needs.
+.PHONY: test-lima-stack-e2e
+test-lima-stack-e2e: install
+	bash tools/test/lima-stack-e2e.sh

@@ -7,6 +7,55 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **scion is pinned to `b41cd6fe`, its nightly-20261013 (lever#206).** The examples, the release's
+  prebuilt scion, the Makefile's `SCION_VERSION` and the docs move from `e0f61f2d`. lever follows
+  what changed in scion since: `scion server start` now gives up its own readiness wait after
+  about 30 s with the server still starting, which lever counts as a start before its longer wait;
+  `hub token create` prints the expiry in local time, so lever mints with `--json` (an expiry it
+  cannot read is estimated from the requested lifetime, never left unknown); a `hub link` under
+  the controller token no longer registers a re-initialised project, so lever points the project
+  at the hub's existing record first; an unconfirmed `scion delete` is re-listed before a
+  recreate; and every non-interactive scion call passes `--non-interactive`, without the unused
+  `SCION_HUB_ENABLED`.
+- **The controller token carries more scopes, so the next bring-up re-mints it (lever#206).** On
+  the new scion a token may start or resume an agent only in a role its scopes cover, and listing
+  notifications needs `inbox:read`. The controller token now carries the read-only skill,
+  template and harness-config scopes the baseline role covers, and `inbox:read` when the jail's
+  scion knows it. The re-mint needs the dev-auth window, which opens only while no container runs:
+  after upgrading, run `lever stop`, then `lever up`.
+- **The remote proxy follows the new hub (lever#206).** A contact may send `offer_wake`, which the
+  hub's web chat now sends on every message (never `wake`: a contact wakes a worker only through
+  the chat page). The hub's named SSE heartbeat passes through to the browser, a duplicate send's
+  409 `send_in_progress` reads as "no clear answer" on the chat page, the hub's new root files
+  (favicon, manifest, icons) reach contacts, and a contact's unread count is a fixed zero.
+- **Jail ABI 4.** The in-jail code changed, and the image carries sciontool (and, in the slim
+  image, scion) from the pin: rebuild the agent image (`make lever-image` or
+  `make lever-image-slim`, then any instance image built from it) and recreate the manager on it
+  with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so.
+
+### Security
+
+- **Scion's conduit and artifacts experiments are kept off (lever#207).** The new scion has two
+  alpha experiments, off by default: `hub.conduit` (a shell, sftp and port relay into every agent,
+  reaching the jail loopback) and `hub.artifacts` (hub-held publishing with unauthenticated share
+  links). Every dev-auth window writes explicit `false` overrides for both, and every apply asks
+  the live hub, before and right after it starts, whether either is on; a live one is pinned off
+  through the window, or the apply fails with `lever stop`, then `lever up`. The new `lever
+  doctor` row *scion conduit and artifacts* fails while either is on. The remote proxy refuses
+  conduit, artifacts and writes to the experiments admin route for every login, and also an
+  agent's port tunnel and delegations and scion's test-identity routes. On an older scion nothing
+  changes.
+
+### Added
+
+- **A live e2e of the whole stack on the pinned scion (lever#206).** `make test-lima-stack-e2e`
+  brings an instance up with the agent image (built in the guest from the pin, or from
+  `IMAGE_TAR`), starts a worker, sends messages both ways, signs in an operator and a contact
+  through the proxy, checks the experiment fence on the hub and in the proxy, runs doctor, then
+  `lever stop` and `lever up`. `make test-lima-e2e` does not start scion.
+
 ## [0.38.0] - 2026-10-13
 
 ### Added

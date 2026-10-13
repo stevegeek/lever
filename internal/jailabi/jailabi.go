@@ -30,7 +30,7 @@ package jailabi
 
 // JailABI is the in-jail compatibility version. See the package doc for how
 // and when to bump it.
-const JailABI = 3
+const JailABI = 4
 
 // Label is the image label that carries JailABI (image/lever-claude/Dockerfile).
 const Label = "lever_jail_abi"

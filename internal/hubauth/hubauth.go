@@ -27,6 +27,11 @@ const (
 	Backdate = 30 * time.Second
 )
 
+// GuestPublicKeyPath is where the guest holds the public half for the hub:
+// root-owned and outside every home, which scion's workstation routes let any
+// loopback caller write under.
+const GuestPublicKeyPath = "/etc/lever/hub-auth.pub"
+
 const (
 	adminSub      = "lever-admin"
 	controllerSub = "lever-controller"

@@ -306,11 +306,10 @@ func writeJSONEpoch(w http.ResponseWriter, a broker.EpochAnswer) {
 	_ = json.NewEncoder(w).Encode(a)
 }
 
-// TestEgressAllowlistCarriesTheLoginPort: the guest's login forwarder reaches
-// the provider's host port, so that port must be in the egress allowlist the
-// backend turns into iptables ACCEPT rules, or the hub's discovery fetch times
-// out and the browser gets a 502. A non-remote instance must not gain it.
-func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
+// TestEgressAllowlistIgnoresRemoteAccess: the hub login needs no host port,
+// so enabling remote access (even with a leftover remote.login_port) must not
+// widen the egress allowlist the backend turns into iptables ACCEPT rules.
+func TestEgressAllowlistIgnoresRemoteAccess(t *testing.T) {
 	build := func(t *testing.T, remote bool) backend.Config {
 		t.Helper()
 		p := writeTmpConfig(t)
@@ -319,7 +318,7 @@ func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
 			t.Fatal(err)
 		}
 		if remote {
-			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net"}
+			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net", LoginPort: 8447}
 		}
 		sb := &stubBackend{}
 		if _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, inertApplyOpts); err != nil {
@@ -331,18 +330,9 @@ func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
 		return sb.upCfg
 	}
 
-	off := build(t, false)
-	if slices.Contains(off.AllowedPorts, 8447) {
-		t.Fatalf("a non-remote instance was granted the login port: %v", off.AllowedPorts)
-	}
-
-	on := build(t, true)
-	if !slices.Contains(on.AllowedPorts, 8447) {
-		t.Fatalf("AllowedPorts = %v, want the login port 8447 — without it the jail drops the forwarder's dial to the host", on.AllowedPorts)
-	}
-	// Remote access adds exactly one port and widens nothing else.
-	if want := append(append([]int{}, off.AllowedPorts...), 8447); !slices.Equal(on.AllowedPorts, want) {
-		t.Fatalf("AllowedPorts = %v, want exactly %v — the grant must add one port, not widen the alias", on.AllowedPorts, want)
+	off, on := build(t, false), build(t, true)
+	if !slices.Equal(on.AllowedPorts, off.AllowedPorts) || slices.Contains(on.AllowedPorts, 8447) {
+		t.Fatalf("AllowedPorts with remote = %v, without = %v; remote access must add no port", on.AllowedPorts, off.AllowedPorts)
 	}
 }
 

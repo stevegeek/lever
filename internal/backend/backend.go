@@ -140,26 +140,16 @@ type Backend interface {
 	// InstallGuestBinary streams a host-local executable into the guest at
 	// destPath as root, through the backend's root prefix.
 	InstallGuestBinary(ctx context.Context, localPath, destPath string) error
-	// EnsureHubLogin provisions the guest half of the remote-access login: the
-	// loopback forwarder that lets the hub see lever's host-side OIDC provider
-	// as a LOCAL issuer (scion refuses any other kind), and the `oidc_login`
-	// block in the guest's ~/.scion/settings.yaml.
-	//
-	// It reports whether the hub's configuration changed. scion reads that
-	// file only at startup, so the caller must restart a running hub on a
-	// change, and must not on no change.
-	EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error)
+	// EnsureHubAuth installs the hub's assertion public key root-owned in the
+	// guest and converges the hub's auth block in ~/.scion/settings.yaml (the
+	// running hub takes its auth settings from env; the file is for readers),
+	// dropping any oidc_login block. It reports whether the hub must restart:
+	// the key file changed or an oidc_login block was removed, both read only
+	// at hub startup. See guest.EnsureHubAuth.
+	EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error)
 	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
 	// reporting whether it wrote anything. See guest.EnsureLeverTemplate.
 	EnsureLeverTemplate(ctx context.Context) (bool, error)
-	// DisableHubLogin stops and removes the guest-side forwarder and drops the
-	// `oidc_login` block, so no unauthenticated jail→host loopback bridge
-	// outlives remote access. Idempotent.
-	//
-	// It reports whether the hub's configuration changed (the block was
-	// removed); the forwarder is not part of the answer because no hub reads
-	// it. See guest.DisableHubLogin.
-	DisableHubLogin(ctx context.Context) (bool, error)
 	// EnsureScionTelemetry converges the top-level `telemetry:` block of the
 	// guest's ~/.scion/settings.yaml: off=true writes `enabled: false`;
 	// off=false removes only the exact block lever wrote. It reports whether
@@ -183,9 +173,9 @@ type Backend interface {
 	// in-tree marker workspacePath/.scion. Read-only, machine-only transport.
 	ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error)
 	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the
-	// registration(s) for workspacePath when it differs from endpoint. Minting
-	// the controller PAT links the project against a throwaway hub, and the
-	// register step skips re-init when the registration is sound, so without
-	// this the project would point at a hub that no longer exists.
+	// registration(s) for workspacePath when it differs from endpoint. Older
+	// levers linked the project against a throwaway hub on another port, and
+	// the register step skips re-init when the registration is sound, so
+	// without this the project would point at a hub that no longer exists.
 	RepairScionHubEndpoint(ctx context.Context, workspacePath, endpoint string) error
 }

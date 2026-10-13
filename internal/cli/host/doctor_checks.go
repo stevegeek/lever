@@ -2,15 +2,12 @@ package host
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"maps"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,11 +75,9 @@ type doctorProbes struct {
 	leverVersion     func(imageRef string) (string, error)
 	leverVersionTar  func(tarPath, imageRef string) (string, error)
 	// jailABI and jailABITar read the lever_jail_abi label (internal/jailabi).
-	jailABI         func(imageRef string) (string, error)
-	jailABITar      func(tarPath, imageRef string) (string, error)
-	remoteHealthz   func(healthzProbe) (int, error)
-	remoteLogin     func(port int) (loginProbeResult, error)
-	remoteJailLogin func(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error)
+	jailABI       func(imageRef string) (string, error)
+	jailABITar    func(tarPath, imageRef string) (string, error)
+	remoteHealthz func(healthzProbe) (int, error)
 	// portHolder names the process on a host loopback port ("pid 123, python3"),
 	// or "" when it cannot tell.
 	portHolder func(ctx context.Context, port int) string
@@ -105,10 +100,8 @@ func productionProbes(r proc.Runner) doctorProbes {
 		jailABITar: func(tarPath, imageRef string) (string, error) {
 			return jail.ImageTarLabel(tarPath, imageRef, jailabi.Label)
 		},
-		remoteHealthz:   remoteHealthzProbe,
-		remoteLogin:     remoteLoginProbe,
-		remoteJailLogin: remoteJailLoginProbe,
-		portHolder:      func(ctx context.Context, port int) string { return lsofHolder(ctx, r, port) },
+		remoteHealthz: remoteHealthzProbe,
+		portHolder:    func(ctx context.Context, port int) string { return lsofHolder(ctx, r, port) },
 	}
 }
 
@@ -176,131 +169,13 @@ func remoteHealthzProbe(p healthzProbe) (int, error) {
 	return resp.StatusCode, nil
 }
 
-type loginProbeResult struct {
-	discovery int    // status of GET /.well-known/openid-configuration
-	authorize int    // status of GET /authorize — 404 is the ONLY healthy answer
-	authzURL  string // the authorization_endpoint discovery advertises
-}
-
-// remoteLoginProbe checks that the local OIDC provider serves discovery and
-// has no authorization endpoint. Nothing legitimate calls /authorize (the
-// proxy mints codes in-process), so anything but a 404 means this build can
-// mint an authorization code over HTTP on a port every jailed agent can reach.
-func remoteLoginProbe(port int) (loginProbeResult, error) {
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	var out loginProbeResult
-
-	resp, err := doctorHTTPClient.Get(base + "/.well-known/openid-configuration")
-	if err != nil {
-		return out, err
-	}
-	defer resp.Body.Close()
-	out.discovery = resp.StatusCode
-	var doc struct {
-		AuthorizationEndpoint string `json:"authorization_endpoint"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&doc); err == nil {
-		out.authzURL = doc.AuthorizationEndpoint
-	}
-
-	aresp, err := doctorHTTPClient.Get(base + "/authorize")
-	if err != nil {
-		return out, err
-	}
-	defer aresp.Body.Close()
-	out.authorize = aresp.StatusCode
-	return out, nil
-}
-
-// remoteJailLoginScript asks the hub, from inside the jail, to start an OIDC
-// login and prints "<status> <redirect-url>". curl reports %{redirect_url}
-// for a 3xx without following it. No Authorization header: doctor asks what
-// an unauthenticated browser would get.
-//
-// curl's path is absolute: the jail run user's PATH has user-writable
-// directories ahead of /usr/bin, and a shim there could fake the answer.
-const remoteJailLoginScript = `exec /usr/bin/curl -sS --connect-timeout 5 --max-time 20 ` +
-	`-o /dev/null -w '%{http_code} %{redirect_url}' "$1"`
-
-func remoteJailLoginProbe(ctx context.Context, jr proc.Runner, hubURL string) (status int, redirect string, err error) {
-	res, err := jr.Run(ctx, nil, "sh", "-c", remoteJailLoginScript, "_", hubURL+"/auth/login/oidc")
-	if err != nil {
-		return 0, "", fmt.Errorf("%v: %s", err, strings.TrimSpace(res.Stderr))
-	}
-	fields := strings.Fields(res.Stdout)
-	if len(fields) == 0 {
-		return 0, "", fmt.Errorf("no answer from the hub")
-	}
-	status, err = strconv.Atoi(fields[0])
-	if err != nil {
-		return 0, "", fmt.Errorf("unparseable answer %q", strings.TrimSpace(res.Stdout))
-	}
-	if len(fields) > 1 {
-		redirect = fields[1]
-	}
-	return status, redirect, nil
-}
-
-// isLoopbackURL reports whether raw addresses the local machine, which is
-// what the jail has a route to.
-func isLoopbackURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-// checkRemoteLoginPath asks the hub to start a login; it is the only check
-// that exercises the guest half. To build the redirect the hub fetches the
-// provider's discovery through lever's guest forwarder to the host provider,
-// so a 302 to lever's dead authorization endpoint proves the oidc_login block,
-// the forwarder and the provider. A host-side probe would stay green while the
-// browser got a 502.
-//
-// Limit: the hub caches discovery for an hour, so a 302 proves only that the
-// chain worked at the first login since the hub started.
-func checkRemoteLoginPath(ctx context.Context, jr proc.Runner, st state.State, p doctorProbes) (detail string, fix string, ok bool) {
-	if jr == nil {
-		return "", "", true // no jail transport wired (tests)
-	}
-	status, redirect, err := p.remoteJailLogin(ctx, jr, scionpkg.DefaultHubEndpoint)
-	switch {
-	case err != nil:
-		return fmt.Sprintf("could not ask the hub to start a login from inside the jail: %v", err),
-			"is the machine up? `lever apply`", false
-	case status == http.StatusBadRequest:
-		return "the hub does not have lever's OIDC login configured (it refused to start one)",
-			"run `lever apply` — it writes the oidc_login block into the jail's ~/.scion/settings.yaml and restarts the hub so it is read", false
-	case status == http.StatusInternalServerError:
-		return "the hub could not reach lever's login provider (it failed to build an authorization URL)",
-			"the jail cannot reach the provider on the host: re-run `lever apply` to reinstall and restart the forwarder. " +
-				"On `egress: closed`, a login port granted since the instance came up needs `lever down` + `lever up` — a live " +
-				"closed chain is deliberately never rebuilt in place (internal/backend/guest.ApplyEgress, the I2 property)", false
-	case status != http.StatusFound:
-		return fmt.Sprintf("the hub answered %d when asked to start a login, want 302", status),
-			"inspect " + stateRel(st, st.RemoteLog()), false
-	case !strings.HasPrefix(redirect, remoteproxy.DeadAuthorizationEndpoint):
-		return fmt.Sprintf("the hub starts logins against %q, not lever's provider", redirect),
-			"another OIDC provider is configured in the jail's ~/.scion/settings.yaml — remove it and re-run `lever apply`", false
-	}
-	return "login path reaches the provider through the jail", "", true
-}
-
 // checkRemote verifies the remote-access proxy when configured: the process is
 // alive and listening on EffectiveRemotePort, the remote PAT apply mints is not
-// group/other-accessible (a world-readable token is a leak even unsent), the
-// login path is intact, and finally GET /healthz through the proxy returns 200.
-//
-// /healthz must be last: the proxy opens a hub web session before forwarding,
-// so a broken login path makes it 502 and would shadow the specific failure.
-// The probe performs a real login, so the hub creates or reuses a user row for
-// its identity (allowed_users[0], or the unnamed operator).
+// group/other-accessible (a world-readable token is a leak even unsent), and
+// GET /healthz through the proxy returns 200. The proxy opens a hub web
+// session with a lever assertion before forwarding, so a 200 proves the
+// sign-in; it signs in an invited login (allowed_users[0], or the unnamed
+// operator), never creates one.
 //
 // Disabled is a pass: remote access is opt-in. PAT expiry is not checked:
 // lever has no cheap read for it.
@@ -325,34 +200,6 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 	case fi.Mode().Perm()&0o077 != 0:
 		return checkResult{name, false, fmt.Sprintf("remote.pat has mode %04o (group/other-accessible, want 0600)", fi.Mode().Perm()), "chmod 600 " + st.RemotePAT()}
 	}
-	// The login checks must run before /healthz: a broken login chain makes
-	// healthz answer 502 and would hide the actionable diagnosis.
-	loginPort := app.EffectiveRemoteLoginPort()
-	login, err := p.remoteLogin(loginPort)
-	switch {
-	case err != nil:
-		return checkResult{name, false, fmt.Sprintf("the login provider on 127.0.0.1:%d is unreachable: %v", loginPort, err),
-			"inspect " + remoteLog + " — without it the hub cannot log the browser in, and the web UI stays at 401"}
-	case login.discovery != http.StatusOK:
-		return checkResult{name, false, fmt.Sprintf("the login provider answered %d to OIDC discovery, want 200", login.discovery),
-			"inspect " + remoteLog}
-	case login.authorize != http.StatusNotFound:
-		// A provider that answers /authorize can mint an authorization code over
-		// HTTP, and every jailed agent reaches that port through the guest forwarder.
-		// See remoteproxy.Provider.handleAuthorize.
-		return checkResult{name, false, fmt.Sprintf("the login provider answered %d to GET /authorize, want 404 — it must have NO authorization endpoint", login.authorize),
-			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
-	case isLoopbackURL(login.authzURL):
-		// Any authorization endpoint on loopback is one the jail can reach (guest
-		// loopback is mapped into every agent netns). lever's advertised endpoint
-		// names a host that does not resolve.
-		return checkResult{name, false, fmt.Sprintf("OIDC discovery advertises an authorization endpoint on loopback (%s), which the jail can reach", login.authzURL),
-			"this is a security defect in this lever build, not a configuration problem: stop the proxy (`lever stop`) and report it"}
-	}
-	if detail, fix, ok := checkRemoteLoginPath(ctx, jr, st, p); !ok {
-		return checkResult{name, false, detail, fix}
-	}
-
 	status, err := p.remoteHealthz(healthzProbe{Addr: addr, Port: port,
 		Header: app.EffectiveRemoteIdentityHeader(), Login: firstOrEmpty(app.Remote.Logins())})
 	if err != nil {
@@ -361,7 +208,7 @@ func checkRemote(ctx context.Context, app *config.App, st state.State, p doctorP
 	if status != http.StatusOK {
 		return checkResult{name, false, fmt.Sprintf("GET /healthz through the proxy returned %d, want 200", status), "inspect " + remoteLog + " and " + stateRel(st, st.RemoteAudit())}
 	}
-	return checkResult{name, true, alive.detail + fmt.Sprintf(", PAT present, healthz OK, login provider on 127.0.0.1:%d (no authorization endpoint), hub login path reaches it", loginPort), ""}
+	return checkResult{name, true, alive.detail + ", PAT present, healthz OK (the proxy signed in with a lever assertion)", ""}
 }
 
 // checkRemoteExposure warns per remote setting that weakens a default
@@ -508,11 +355,11 @@ func checkAgentMessages(app *config.App, st state.State, live agentMsgsLive) che
 	}
 	if live.proxyMatches != nil {
 		if on {
-			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(app)); running && !ok {
+			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(app, st)); running && !ok {
 				stale = append(stale, "remote proxy")
 			}
 		} else if onApp.AgentMessagesOn() {
-			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(&onApp)); running && ok {
+			if running, ok := live.proxyMatches(brokerctl.RemoteConfigHash(&onApp, st)); running && ok {
 				stale = append(stale, "remote proxy")
 			}
 		}
@@ -2115,8 +1962,7 @@ func checkLeverVersion(imageRef, tarPath, host, hostFull string, hostABI int, p 
 // finding (scion's 90-day default, no agent:message). The fix is a re-apply.
 func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, known scopeKnownFunc, now time.Time) checkResult {
 	const name = "hub tokens"
-	const fix = "run `lever apply` (it re-mints the token in the bootstrap dev-auth window and revokes the old one); " +
-		"when agents are running and the scope set changed, apply cannot open that window: run `lever stop`, then `lever up`"
+	const fix = "run `lever apply` (it re-mints the token as the controller and revokes the old one, while agents run)"
 	type tokenCheck struct {
 		label string
 		load  func() (string, error)
@@ -2150,56 +1996,6 @@ func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, kno
 			c.label, int(rec.ExpiresAt.Sub(now).Hours()/24), rec.ExpiresAt.Format("2006-01-02")))
 	}
 	return checkResult{name, true, strings.Join(details, "; "), ""}
-}
-
-// checkRemoteWebRole reports whether remote-role.json covers every allowed user
-// with the current permission set and the project-create ceiling. Granting
-// needs hub-admin, which doctor never has, so it reads only the record: what
-// lever last granted, not what the hub holds now.
-func checkRemoteWebRole(ctx context.Context, st state.State, remote remoteAccess, known scopeKnownFunc) checkResult {
-	const name = "remote web role"
-	if !remote.Enabled {
-		return checkResult{name, true, "disabled", ""}
-	}
-	const fix = "run `lever apply` (it grants the role in the bootstrap dev-auth window, which opens only while " +
-		"no container runs in the jail, the manager included; otherwise run `lever stop`, then `lever up`)"
-	rec, found, err := st.LoadRemoteRoleRecord()
-	if err != nil {
-		return checkResult{name, false, err.Error(), fix}
-	}
-	perms := remoteRolePermissions(remoteRoleLifecycle(ctx, known, rec))
-	reason := remoteRoleReason(rec, found, remote.Emails, remote.Contacts, perms)
-	if reason == "" {
-		var ops []string
-		for _, e := range remote.Emails {
-			if !slices.Contains(remote.Contacts, e) {
-				ops = append(ops, e)
-			}
-		}
-		bound := fmt.Sprintf("%s bound on the project for %s", remoteWebRoleName, strings.Join(ops, ", "))
-		if len(ops) == 0 {
-			bound = "no operator login"
-		}
-		if len(remote.Contacts) > 0 {
-			bound += fmt.Sprintf("; %s for %s", contactRoleName, strings.Join(remote.Contacts, ", "))
-		}
-		return checkResult{name, true, bound + "; " + projectCreatePermission + " withheld by an access constraint", ""}
-	}
-	if strings.HasPrefix(reason, remoteCeilingMissing) {
-		return checkResult{name, false, reason, fix}
-	}
-	detail := "the web UI will answer 403: " + reason
-	for _, e := range remote.Emails {
-		if _, bound := rec.Bound[e]; !bound && !slices.Contains(rec.Pending, e) {
-			return checkResult{name, false, detail, fix}
-		}
-	}
-	if len(rec.Pending) > 0 && hubapi.SamePermissions(rec.Permissions, perms) {
-		// Not "will answer 403": a pending user may have signed in since and the hub's
-		// default role may allow some of the UI. Only lever's role is known unbound.
-		return checkResult{name, false, "the role is not bound yet: " + reason, remoteRoleFix}
-	}
-	return checkResult{name, false, detail, fix}
 }
 
 type roleCeilingReader func(ctx context.Context, project string) (hubapi.RoleCeiling, error)
@@ -2333,39 +2129,4 @@ func checkScionTelemetry(ctx context.Context, mode config.ScionTelemetryMode, re
 	return checkResult{check, false,
 		fmt.Sprintf("the jail's settings turn telemetry off but manager %q was started with %s=%s — its every hook still waits out OTLP export timeouts", name, scionTelemetryEnv, got),
 		"run `lever stop && lever up` (the conversation is kept) so the manager starts with the current settings"}
-}
-
-// devAuthWindowProbeScript prints "token" when the jail user's dev token
-// exists and "listening" when something answers HTTP on the throwaway port. $1
-// is the token path relative to $HOME, $2 the port.
-const devAuthWindowProbeScript = `out=""
-[ -e "$HOME/$1" ] && out="token"
-curl -s -o /dev/null -m 3 "http://127.0.0.1:$2/healthz" && out="$out listening"
-printf '%s' "$out"`
-
-// checkDevAuthWindow reports a dev-auth window left open: the throwaway hub
-// listening on the jail's 127.0.0.1:throwawayHubPort, or scion's dev token on
-// disk. Either is an admin credential surface: the hub honours the dev token as
-// super-admin, and scion reuses the file on the next dev-auth start. The window
-// closes both itself, even on SIGINT/SIGTERM; what is left survived a SIGKILL,
-// a crash, or a failed cleanup.
-func checkDevAuthWindow(ctx context.Context, jr proc.Runner) checkResult {
-	const check = "dev-auth window"
-	res, err := jr.Run(ctx, nil, "sh", "-c", devAuthWindowProbeScript, "_", layout.DevTokenRel, strconv.Itoa(throwawayHubPort))
-	if err != nil {
-		return checkResult{check, false, "could not probe the jail: " + firstLine(err.Error()), "run `lever doctor` again once the jail is up"}
-	}
-	out := res.Stdout
-	listening, token := strings.Contains(out, "listening"), strings.Contains(out, "token")
-	switch {
-	case listening:
-		return checkResult{check, false,
-			fmt.Sprintf("a hub answers on the jail's 127.0.0.1:%d, the port of the bootstrap dev-auth hub; it grants super-admin to its dev token, and agents can reach jail-loopback ports", throwawayHubPort),
-			"in the jail, `scion server stop` stops it and `rm ~/" + layout.DevTokenRel + "` removes its token; then `lever apply` starts the live hub"}
-	case token:
-		return checkResult{check, false,
-			"the jail user's ~/" + layout.DevTokenRel + " exists; it is a hub admin credential, and the next dev-auth start reuses it",
-			"in the jail, `rm ~/" + layout.DevTokenRel + "`"}
-	}
-	return checkResult{check, true, "closed (no dev-auth hub, no dev token)", ""}
 }

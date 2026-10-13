@@ -67,14 +67,14 @@ func clearStagedRuntimeState(app *config.App) {
 	_ = os.Remove(filepath.Join(app.Tree, ".lever")) // removed only if now empty
 }
 
-// removePATs clears both hub tokens, their records and the remote web role
-// record: all describe the hub database that dies with the machine, and a
-// leftover token would be reused and rejected by the fresh hub (a leftover
-// role record would stop the next apply granting). Every path is attempted
+// removePATs clears both hub tokens, their records, the remote web role
+// record and the hub identity record: all describe the hub database that dies
+// with the machine, and a leftover token would be reused and rejected by the
+// fresh hub. The assertion key stays: it is not tied to one hub database. Every path is attempted
 // and each failure reported.
 func removePATs(st state.State) error {
 	var errs []error
-	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole()} {
+	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole(), st.HubIdentityFile()} {
 		if err := removeIfPresent(p); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", filepath.Base(p), err))
 		}

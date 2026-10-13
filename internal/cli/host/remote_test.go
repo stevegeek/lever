@@ -62,6 +62,7 @@ func serveUntilBind(t *testing.T, dir, p string) error {
 	if err := os.MkdirAll(filepath.Join(dir, state.DirName), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	provisionRemoteHubLogin(t, state.ForConfig(dir), nil)
 	t.Chdir(dir)
 	_, err := clitest.Exec(t, newRemoteServeCmd(defaultFactory), p)
 	if err == nil {
@@ -81,9 +82,9 @@ func serveUntilBind(t *testing.T, dir, p string) error {
 // bind on a held port, not at a gate.
 func TestRemoteServeLimaBackendPassesGates(t *testing.T) {
 	dir := t.TempDir()
-	port, login := heldPort(t), freeRemotePort(t)
+	port := heldPort(t)
 	p := writeInstanceInto(t, dir, fmt.Sprintf("name: x\nbackend: lima\ntree: workspace\nbroker:\n  llm_auth: subscription\n"+
-		"remote:\n  enabled: true\n  port: %d\n  login_port: %d\n  base_url: \"https://vm.exe.xyz:8445\"\n", port, login))
+		"remote:\n  enabled: true\n  port: %d\n  base_url: \"https://vm.exe.xyz:8445\"\n", port))
 	serveUntilBind(t, dir, p)
 }
 
@@ -91,8 +92,8 @@ func TestRemoteServeLimaBackendPassesGates(t *testing.T) {
 // port makes Serve fail fast rather than block.
 func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
 	dir := t.TempDir()
-	port, login := heldPort(t), freeRemotePort(t)
-	p := writeInstanceInto(t, dir, instanceYAML("x", fmt.Sprintf("remote:\n  enabled: true\n  port: %d\n  login_port: %d\n  base_url: \"https://mac.tail1234.ts.net\"\n", port, login)))
+	port := heldPort(t)
+	p := writeInstanceInto(t, dir, instanceYAML("x", fmt.Sprintf("remote:\n  enabled: true\n  port: %d\n  base_url: \"https://mac.tail1234.ts.net\"\n", port)))
 	serveUntilBind(t, dir, p)
 }
 
@@ -118,14 +119,15 @@ func freeRemotePort(t *testing.T) int {
 func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	dir := t.TempDir()
 	p := writeInstanceInto(t, dir, instanceYAML("x", fmt.Sprintf(
-		"remote:\n  enabled: true\n  port: %d\n  login_port: %d\n  base_url: \"https://mac.tail1234.ts.net\"\n",
-		freeRemotePort(t), freeRemotePort(t))))
+		"remote:\n  enabled: true\n  port: %d\n  base_url: \"https://mac.tail1234.ts.net\"\n",
+		freeRemotePort(t))))
 	t.Chdir(dir)
 
 	st := state.ForConfig(dir)
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	provisionRemoteHubLogin(t, st, nil)
 	// A previous apply's record, for another config. remote.pid names this process,
 	// which runs the command under test: the file a hand-started proxy takes over.
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
@@ -149,7 +151,7 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := brokerctl.RemoteConfigHash(app)
+	want := brokerctl.RemoteConfigHash(app, st)
 	deadline := time.Now().Add(5 * time.Second)
 	for !st.RemoteStampMatches(cli.VersionString(), want) {
 		if time.Now().After(deadline) {

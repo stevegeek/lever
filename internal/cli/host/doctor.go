@@ -118,6 +118,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	// role.
 	jailScion := brokerctl.HostScionClient(jr, state, app.Scion.AgentRole)
 	rolesSupported := jailScion.RolesSupported
+	hubAuth := newDoctorHubAuth(ctx, jr, state)
 	// scion's own listing, not the hub's: it carries phase and container status
 	// and names the project by its in-jail path.
 	listAgents := func(ctx context.Context, project string) ([]scionpkg.Agent, error) {
@@ -227,10 +228,9 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult {
 			return checkPATTokens(ctx, state, app.RemoteEnabled(), jailScion.KnowsUATScope, time.Now())
 		},
-		func() checkResult { return checkDevAuthWindow(ctx, jr) },
-		func() checkResult {
-			return checkRemoteWebRole(ctx, state, remoteAccessFor(app), jailScion.KnowsUATScope)
-		},
+		func() checkResult { return checkHubAuthentication(ctx, hubAuth, jailScion.RunningHub) },
+		func() checkResult { return checkHubIdentities(ctx, hubAuth) },
+		func() checkResult { return checkRemoteWebRole(ctx, app, hubAuth) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },
 		func() checkResult {

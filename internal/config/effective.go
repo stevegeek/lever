@@ -24,8 +24,7 @@ const (
 	DefaultBrokerAdminPort = 8444
 )
 
-// DefaultRemotePort is remote.port when unset. 8446 is taken by the jail's
-// mirrored login forwarder (GuestLoginIssuerPort).
+// DefaultRemotePort is remote.port when unset.
 const DefaultRemotePort = 8445
 
 // DefaultDirectiveExpiry is operator.directive_expiry when unset.
@@ -117,11 +116,6 @@ func (a *App) EffectiveAllowedPorts() []int {
 	}
 	return out
 }
-
-// EffectiveRemoteLoginPort is always 0: no listener uses remote.login_port.
-//
-// Deprecated: remote.login_port is ignored; see Warnings.
-func (a *App) EffectiveRemoteLoginPort() int { return 0 }
 
 // Warnings are settings that load but no longer do anything, one sentence
 // each. Unlike RemoteWarnings they apply whether or not remote access is on.

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/chatledger"
+	"github.com/stevegeek/lever/internal/hubauth"
 )
 
 // Config wires a Handler. All fields required unless noted.
@@ -201,8 +202,8 @@ func mintsCredential(method, p string) bool {
 //     the caller the new project's owner, and a first-time user holds
 //     project.create until the next `lever apply`, so these are refused
 //     whatever the hub's state.
-//   - /auth/callback/*: only the login driver needs it, and it dials the hub
-//     directly.
+//   - /auth/callback/*: no lever login uses it, and through the proxy it could
+//     only churn logins.
 //
 // p is the decoded path.
 func refusedRoute(method, p string) bool {
@@ -259,23 +260,19 @@ func loginReturnTarget(v string) string {
 type Decision string
 
 const (
-	DecisionAllow               Decision = "allow"
-	DecisionDenyHost            Decision = "deny-host"
-	DecisionDenyOrigin          Decision = "deny-origin"
-	DecisionDenyUser            Decision = "deny-user"
-	DecisionDenyMint            Decision = "deny-credential-mint"
-	DecisionDenyRoute           Decision = "deny-route"
-	DecisionDenyNoSession       Decision = "deny-no-session"
-	DecisionLoginRedirect       Decision = "login-redirect"
-	DecisionOIDCSession         Decision = "oidc-session"
-	DecisionOIDCSessionFailed   Decision = "oidc-session-failed"
-	DecisionOIDCDiscovery       Decision = "oidc-discovery"
-	DecisionOIDCToken           Decision = "oidc-token"
-	DecisionOIDCTokenRefused    Decision = "oidc-token-refused"
-	DecisionOIDCUserinfo        Decision = "oidc-userinfo"
-	DecisionOIDCUserinfoRefused Decision = "oidc-userinfo-refused"
-	DecisionOIDCNotFound        Decision = "oidc-not-found"
-	DecisionDenyAuthorize       Decision = "deny-authorize"
+	DecisionAllow            Decision = "allow"
+	DecisionDenyHost         Decision = "deny-host"
+	DecisionDenyOrigin       Decision = "deny-origin"
+	DecisionDenyUser         Decision = "deny-user"
+	DecisionDenyMint         Decision = "deny-credential-mint"
+	DecisionDenyRoute        Decision = "deny-route"
+	DecisionDenyNoSession    Decision = "deny-no-session"
+	DecisionLoginRedirect    Decision = "login-redirect"
+	DecisionHubSession       Decision = "hub-session"
+	DecisionHubSessionFailed Decision = "hub-session-failed"
+	// DecisionHubSessionRefused: the login has no recorded hub user, or the
+	// hub's session belongs to another one.
+	DecisionHubSessionRefused Decision = "hub-session-refused"
 )
 
 // AuditLine is emitted once per request. It never carries the session value.
@@ -466,7 +463,9 @@ func rewriteUpstream(target *url.URL, identityHeader string) func(*httputil.Prox
 		pr.Out.Header.Del(identityHeader)
 		for k := range pr.Out.Header {
 			if clientIdentityHeader(k) {
-				pr.Out.Header.Del(k)
+				// Del would canonicalize k and miss a non-canonical key, which
+				// the hub canonicalizes on receipt.
+				delete(pr.Out.Header, k)
 			}
 		}
 		if s := stateFrom(pr.In); s != nil && s.cookie != "" {
@@ -478,7 +477,8 @@ func rewriteUpstream(target *url.URL, identityHeader string) func(*httputil.Prox
 
 // clientIdentityHeader reports headers scion's auth middleware reads as
 // identity or credentials (besides Authorization and Cookie): never the
-// client's to send.
+// client's to send. The hub trusts hubauth.Header as an admin-grade
+// assertion on any route, so a client copy must never reach it.
 func clientIdentityHeader(k string) bool {
 	k = strings.ToLower(k)
 	switch {
@@ -488,7 +488,7 @@ func clientIdentityHeader(k string) bool {
 		return true
 	}
 	switch k {
-	case "x-goog-iap-jwt-assertion", "x-api-key":
+	case "x-goog-iap-jwt-assertion", "x-api-key", strings.ToLower(hubauth.Header):
 		return true
 	}
 	return false
@@ -686,9 +686,9 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ModifyResponse/ErrorHandler set Status and audit.
 	state := &ctxState{line: &line, login: operator}
 
-	// A sign-in navigation is answered here, never forwarded: the hub would
-	// redirect to an OIDC endpoint that deliberately does not resolve. The
-	// driver dials the hub directly, so it cannot recurse here.
+	// A sign-in navigation is answered here, never forwarded: the session
+	// comes from the login driver, not the hub's login page. The driver dials
+	// the hub directly, so it cannot recurse here.
 	if isLoginPath(r.URL.Path) && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		g.serveLogin(w, r, &line, operator)
 		return
@@ -718,7 +718,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.forward(w, r, state, operator)
 }
 
-// operatorFor is the identity asserted to the hub (session cache key, OIDC
+// operatorFor is the identity asserted to the hub (session cache key, hub
 // login). The header counts only when AllowedUsers pins it: unverified, it
 // must not become a hub user row, so the hub gets the unnamed operator.
 // Called after authorize.

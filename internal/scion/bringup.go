@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -440,28 +441,6 @@ type ServerOpts struct {
 	// is mounted on the web port and --port is ignored. Zero means scion's
 	// default.
 	WebPort int
-	// HubPort, when > 0, passes --port: the port the Hub API binds when the
-	// web frontend is off (DisableWeb). The co-located runtime broker follows
-	// it.
-	HubPort int
-	// DisableWeb passes --enable-web=false, the only way to turn scion's web
-	// frontend off in workstation mode. Only the throwaway dev-auth hub sets
-	// it: with the frontend on, scion's devAuthMiddleware signs any
-	// session-less request in as the dev super-admin with API authority; with
-	// it off every non-public route needs the Bearer dev token. Set HubPort
-	// with it. Mutually exclusive with EnableWeb.
-	DisableWeb bool
-	// DisableRuntimeBroker passes --enable-runtime-broker=false. A hub with a
-	// broker can create agent containers (overdue scheduled or pending
-	// dispatches at startup), and a dev-auth hub mints each a full-role token
-	// signed with the key the live hub trusts, so the throwaway must not have
-	// one.
-	DisableRuntimeBroker bool
-	// Exclusive refuses to treat an already-running daemon as success. scion
-	// keeps one server pid file per jail home whatever the port, so a
-	// throwaway started beside the real hub would be told "already running"
-	// about the real one, and its cleanup stop would stop the real hub.
-	Exclusive bool
 	// DevAuth is always emitted explicitly (--dev-auth=true|false) so the real
 	// hub is never left on the (dev-auth-on) default by omission.
 	DevAuth bool
@@ -491,6 +470,12 @@ type ServerOpts struct {
 	// out. The flag, not env, because scion's daemon persists and replays its
 	// argv on restart. Empty omits the flag.
 	SessionSecret string
+	// Env is set on the start command only, and the daemonised hub inherits it.
+	// It pins the hub's auth configuration: scion lets SCION_SERVER_* override
+	// settings.yaml, which agents can rewrite through the workstation routes.
+	// The values are configuration, never credentials: the jail runner puts env
+	// on the host argv.
+	Env map[string]string
 	// Progress, when non-nil, gets a line while the start waits on a slow
 	// hub (see waitHubReady). Not part of the argv.
 	Progress func(format string, args ...any)
@@ -503,22 +488,9 @@ type ServerOpts struct {
 // its argv, and this call tolerates scion's "already running" refusal. A
 // caller that needs a changed option to take effect must ServerStop first.
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
-	if o.DisableWeb && o.EnableWeb {
-		return errors.New("scion server start: EnableWeb and DisableWeb are mutually exclusive")
-	}
 	args := []string{"server", "start"}
 	if o.WebPort > 0 {
 		args = append(args, "--web-port", strconv.Itoa(o.WebPort))
-	}
-	if o.HubPort > 0 {
-		args = append(args, "--port", strconv.Itoa(o.HubPort))
-	}
-	if o.DisableWeb {
-		// Equals form: a bare boolean flag cannot carry false.
-		args = append(args, "--enable-web=false")
-	}
-	if o.DisableRuntimeBroker {
-		args = append(args, "--enable-runtime-broker=false")
 	}
 	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
 	// Equals form, so the argv matches scion's own daemon re-exec form.
@@ -538,7 +510,7 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	_, _ = c.serverPIDProbe(ctx)
 	// runSecret: the argv carries the session secret, which redactArgs does
 	// not know. The scrub is textual, so AlreadyRunning still matches.
-	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && (o.Exclusive || !AlreadyRunning(err)) {
+	if _, err := c.runSecretEnv(ctx, o.Env, o.SessionSecret, args...); err != nil && !AlreadyRunning(err) {
 		return err
 	}
 	return c.waitHubReady(ctx, o.Progress)
@@ -599,6 +571,83 @@ func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {
 	return pid, nil
 }
 
+// RunningHub is what the live hub daemon was started with: its argv and the
+// part of its environment lever pins (HubEnvPrefixes). Running is false when no
+// scion server runs.
+type RunningHub struct {
+	Running bool
+	PID     int
+	Argv    []string
+	Env     map[string]string
+}
+
+// HubEnvPrefixes are the environment keys RunningHub reports. Only these
+// leave the jail: the daemon's environment can hold the session secret and a
+// hub token.
+var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAILS", "LEVER_HUB_"}
+
+// runningHubScript prints the server's pid, then its NUL-separated argv, a
+// separator line, then the allowed env entries. The env filter runs in the
+// guest, so nothing else of the daemon's environment is ever read out.
+var runningHubScript = `f="$HOME/$1"
+[ -f "$f" ] || exit 0
+pid=$(tr -cd '0-9' < "$f")
+[ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
+case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
+*scion*" server "*) ;;
+*) exit 0 ;;
+esac
+printf '%s\n' "$pid"
+tr '\000' '\n' < "/proc/$pid/cmdline"
+printf '%s\n' '--lever-env--'
+tr '\000' '\n' < "/proc/$pid/environ" | grep -E '^(` + strings.Join(hubEnvPatterns(), "|") + `)' | grep -v '^SCION_SERVER_SESSION' || true
+`
+
+func hubEnvPatterns() []string {
+	out := make([]string, len(HubEnvPrefixes))
+	for i, p := range HubEnvPrefixes {
+		out[i] = regexp.QuoteMeta(p)
+	}
+	return out
+}
+
+// RunningHub reads the live hub's argv and pinned env from /proc in the jail.
+func (c *Client) RunningHub(ctx context.Context) (RunningHub, error) {
+	res, err := c.r.Run(ctx, nil, "sh", "-c", runningHubScript, "_", layout.ServerPIDRel)
+	if err != nil {
+		return RunningHub{}, fmt.Errorf("reading the running hub: %w", err)
+	}
+	return parseRunningHub(res.Stdout)
+}
+
+func parseRunningHub(out string) (RunningHub, error) {
+	first, rest, _ := strings.Cut(out, "\n")
+	first = strings.TrimSpace(first)
+	if first == "" || strings.HasPrefix(first, "stale:") {
+		return RunningHub{}, nil
+	}
+	pid, err := strconv.Atoi(first)
+	if err != nil {
+		return RunningHub{}, fmt.Errorf("running hub probe printed %q", first)
+	}
+	h := RunningHub{Running: true, PID: pid, Env: map[string]string{}}
+	argv, env, ok := strings.Cut(rest, "--lever-env--\n")
+	if !ok {
+		return RunningHub{}, fmt.Errorf("running hub probe: no environment section")
+	}
+	for _, a := range strings.Split(strings.TrimSuffix(argv, "\n"), "\n") {
+		if a != "" {
+			h.Argv = append(h.Argv, a)
+		}
+	}
+	for _, kv := range strings.Split(env, "\n") {
+		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+			h.Env[k] = v
+		}
+	}
+	return h, nil
+}
+
 const serverExitWait = 15 * time.Second
 
 const waitPIDGoneScript = `i=0
@@ -625,7 +674,7 @@ func (c *Client) waitPIDGone(ctx context.Context, pid int) error {
 // encoding=raw on every non-@file value. Encoding it here would hand the
 // agent a corrupt credential. An older pin fails loudly (errBase64Pin).
 func (c *Client) SecretSet(ctx context.Context, key, value string) error {
-	_, err := c.runSecret(ctx, "", value, "hub", "env", "set", "--secret", "--always", key, value)
+	_, err := c.runSecret(ctx, value, "hub", "env", "set", "--secret", "--always", key, value)
 	return secretSetErr(key, err)
 }
 

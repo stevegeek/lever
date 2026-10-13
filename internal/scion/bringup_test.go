@@ -369,29 +369,6 @@ func TestServerPIDProbeScriptRemovesAStalePidFile(t *testing.T) {
 	}
 }
 
-// The throwaway dev-auth hub's argv: web off, so the Hub API binds --port and
-// every non-public route needs the Bearer dev token.
-func TestServerStartArgvWebDisabled(t *testing.T) {
-	f, c := okScion()
-	if err := c.ServerStart(context.Background(), ServerOpts{HubPort: 48080, DisableWeb: true, DevAuth: true, Exclusive: true}); err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(serverStartCall(t, f).Args, " ")
-	if got != "server start --port 48080 --enable-web=false --dev-auth=true" {
-		t.Errorf("args = %q", got)
-	}
-}
-
-func TestServerStartRejectsEnableAndDisableWeb(t *testing.T) {
-	f, c := okScion()
-	if err := c.ServerStart(context.Background(), ServerOpts{EnableWeb: true, DisableWeb: true}); err == nil {
-		t.Fatal("want an error for EnableWeb with DisableWeb")
-	}
-	if len(f.Calls) != 0 {
-		t.Fatalf("ran %d call(s) for an invalid option set", len(f.Calls))
-	}
-}
-
 // notRunningRunner simulates scion server stop failing because no server is
 // running; FakeRunner cannot carry a custom error message.
 type notRunningRunner struct {
@@ -500,29 +477,6 @@ func TestIsAgentAbsent(t *testing.T) {
 			"no git origin remote found",
 		},
 		[]error{nil, errors.New("No runtime brokers available"), errors.New("timeout")})
-}
-
-// alreadyRunningRunner answers every `scion server start` the way scion does
-// when the jail's one server pid file names a live daemon.
-type alreadyRunningRunner struct{ *proc.FakeRunner }
-
-func (r *alreadyRunningRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
-	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "start" {
-		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
-		return proc.Result{Code: 1, Stderr: "Error: server is already running (PID: 1731)"}, fmt.Errorf("exit status 1")
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
-
-// An exclusive start must fail on "already running": that answer is about
-// another hub, and tolerating it would stop the live hub on cleanup.
-func TestServerStartExclusiveRefusesAlreadyRunning(t *testing.T) {
-	r := &alreadyRunningRunner{FakeRunner: proc.NewFakeRunner()}
-	c := New(r, Options{})
-	err := c.ServerStart(context.Background(), ServerOpts{WebPort: 48080, DevAuth: true, Exclusive: true})
-	if err == nil || !AlreadyRunning(err) {
-		t.Fatalf("exclusive ServerStart err = %v, want an already-running error", err)
-	}
 }
 
 func TestIsRefusedByHub(t *testing.T) {

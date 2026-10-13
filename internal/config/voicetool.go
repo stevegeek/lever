@@ -176,7 +176,6 @@ func (a *App) validateWhisperTools() error {
 			what string
 		}{
 			{a.EffectiveAdminPort(), "the broker's admin port"},
-			{GuestLoginIssuerPort, "the port the jail's login forwarder is mirrored onto"},
 		}
 		if a.RemoteEnabled() {
 			own = append(own, struct {

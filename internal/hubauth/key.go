@@ -152,3 +152,13 @@ func (k *Key) Fingerprint() string {
 	sum := sha256.Sum256(k.publicDER())
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
+
+// NewEphemeralKey is a key that never touches disk, for checks that a hub
+// refuses assertions lever's key did not sign.
+func NewEphemeralKey() (*Key, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("hubauth: generate key: %w", err)
+	}
+	return &Key{priv: priv}, nil
+}

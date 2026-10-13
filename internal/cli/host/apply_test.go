@@ -16,14 +16,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
-	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/testutil"
 )
@@ -103,9 +104,11 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	if deps.RemoveJailFile == nil {
 		t.Fatal("buildApplyDeps did not wire Deps.RemoveJailFile")
 	}
+	before := len(f.Calls) // the guest clock read
 	if err := deps.RemoveJailFile(context.Background(), "/lever/.scion"); err != nil {
 		t.Fatalf("RemoveJailFile: %v", err)
 	}
+	f.Calls = f.Calls[before:]
 	if len(f.Calls) != 1 {
 		t.Fatalf("expected exactly one jail-runner call, got %+v", f.Calls)
 	}
@@ -226,15 +229,18 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsWiresEnsureControllerPAT runs the mint window through the
-// buildApplyDeps wiring rather than calling ensureControllerPAT directly.
-func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
+// buildApplyDeps creates the hub assertion key under the instance's state
+// dir, reads the guest clock through the jail runner, and wires the
+// hub-identity deps; EnsureHubAuth hands the backend this instance's key,
+// issuer and audience.
+func TestBuildApplyDepsWiresHubAuth(t *testing.T) {
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := patMintRunner("pat-wired-abc")
+	f := proc.NewFakeRunner()
+	f.Script("date +%s", proc.Result{Stdout: "1700000000\n"})
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
@@ -242,21 +248,61 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
 	}
-	deps := w.deps
-	if deps.EnsureControllerPAT == nil {
-		t.Fatal("buildApplyDeps did not wire Deps.EnsureControllerPAT")
-	}
-	if err := deps.EnsureControllerPAT(context.Background()); err != nil {
-		t.Fatalf("EnsureControllerPAT: %v", err)
-	}
-
 	st := state.ForConfig(filepath.Dir(p))
-	tok, err := st.LoadControllerPAT()
+	fi, err := os.Stat(st.HubAuthKey())
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("hub auth key: %v, %v; want a 0600 file under the state dir", fi, err)
+	}
+	if countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "date +%s") }) != 1 {
+		t.Fatalf("the guest clock was not read once through the jail runner: %+v", f.Calls)
+	}
+	if off := w.clock.Offset; off > -time.Hour*24*365 && off < time.Hour*24*365 {
+		// 1700000000 is late 2023: a clock read from it is far behind today.
+		t.Fatalf("clock offset %v does not come from the guest reading", off)
+	}
+	d := w.deps
+	if d.EnsureHubIdentity == nil || d.EnsureHubAuth == nil || d.ProjectLinked == nil {
+		t.Fatal("buildApplyDeps did not wire the hub-identity deps")
+	}
+	id, err := st.EnsureInstanceID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tok != "pat-wired-abc" {
-		t.Fatalf("persisted PAT = %q, want %q (buildApplyDeps' state dir must derive from configPath)", tok, "pat-wired-abc")
+	if !reflect.DeepEqual(d.HubAuthEnv, apply.HubAuthEnv(id, w.hubKey.Fingerprint())) {
+		t.Fatalf("HubAuthEnv = %v", d.HubAuthEnv)
+	}
+	if _, err := d.EnsureHubAuth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sb.hubAuthCalls) != 1 {
+		t.Fatalf("EnsureHubAuth calls = %d, want 1", len(sb.hubAuthCalls))
+	}
+	got := sb.hubAuthCalls[0]
+	if !bytes.Equal(got.PublicKeyPEM, w.hubKey.PublicPEM()) || got.Issuer != hubauth.Issuer(id) ||
+		got.Audience != hubauth.Audience(id) || got.AdminEmail != hubauth.AdminEmail || got.Header != hubauth.Header ||
+		got.RemoteOn != app.RemoteEnabled() {
+		t.Fatalf("EnsureHubAuth spec = %+v", got)
+	}
+
+	// A second build keeps the key.
+	fp := w.hubKey.Fingerprint()
+	w2, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w2.hubKey.Fingerprint() != fp {
+		t.Fatal("a re-apply rotated the hub assertion key")
+	}
+}
+
+// An unreadable guest clock signs on the host clock, with a warning.
+func TestReadGuestClockFallsBackToTheHostClock(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("date +%s", proc.Result{Stdout: "not a number\n"})
+	var logged []string
+	c := readGuestClock(context.Background(), f, func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	if c.Offset != 0 || len(logged) != 1 || !strings.Contains(logged[0], "host clock") {
+		t.Fatalf("clock %+v, log %q", c, logged)
 	}
 }
 
@@ -407,7 +453,7 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: port,
-		version: "v-test", cfgHash: "hash-test", selfExe: selfExe}
+		version: "v-test", cfgHash: func() string { return "hash-test" }, selfExe: selfExe}
 	if err := rc.Start(context.Background()); err != nil {
 		t.Fatalf("Start on an already-serving proxy must reuse (nil), got: %v", err)
 	}
@@ -440,7 +486,7 @@ func TestRemoteControllerStartTreatsAReusedPIDAsStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: ln.Addr().(*net.TCPAddr).Port,
-		version: "v-test", cfgHash: "hash-NEW", selfExe: "/no/such/lever-binary"}
+		version: "v-test", cfgHash: func() string { return "hash-NEW" }, selfExe: "/no/such/lever-binary"}
 	if err := rc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "/no/such/lever-binary") {
 		t.Fatalf("Start = %v, want the spawn's failure", err)
 	}
@@ -475,7 +521,7 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml",
-		port: ln.Addr().(*net.TCPAddr).Port, version: "v-test", cfgHash: "hash-NEW", selfExe: selfExe}
+		port: ln.Addr().(*net.TCPAddr).Port, version: "v-test", cfgHash: func() string { return "hash-NEW" }, selfExe: selfExe}
 
 	if err := rc.Start(context.Background()); err == nil {
 		t.Fatal("Start reused a proxy running a DIFFERENT remote config — a changed allowed_users/base_url would be silently ignored")
@@ -505,7 +551,7 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: 48997, selfExe: selfExe})
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: 48997, selfExe: selfExe, cfgHash: func() string { return "hash-test" }})
 	err := rc.Start(context.Background())
 	if err == nil {
 		t.Fatal("a stand-in that never listens must not report the proxy as serving")
@@ -530,7 +576,7 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	dir := t.TempDir()
 	st := state.ForConfig(dir) // no remote.pid at all
 
-	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: 48996, selfExe: selfExe})
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: 48996, selfExe: selfExe, cfgHash: func() string { return "hash-test" }})
 	err := rc.Start(context.Background())
 	testutil.WantErrIs(t, err, errRemoteProxyNotListening) // spawned, then checked
 	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
@@ -538,128 +584,9 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	}
 }
 
-// callIndex returns the index of the first call satisfying pred, or -1.
-func callIndex(calls []proc.Call, pred func(proc.Call) bool) int {
-	for i, c := range calls {
-		if pred(c) {
-			return i
-		}
-	}
-	return -1
-}
-
 func callHasPrefix(c proc.Call, prefix string) bool {
 	full := strings.TrimSpace(c.Name + " " + strings.Join(c.Args, " "))
 	return strings.HasPrefix(full, prefix)
-}
-
-// TestEnsureControllerPATMintsThenNoOps: the first call runs the throwaway
-// start, init, hub link, token create with exact scopes, persist 0600, stop and
-// dev-token removal in that order; a second call with the PAT persisted makes
-// no runner calls at all.
-func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
-	tree := t.TempDir()
-	st := state.ForConfig(t.TempDir())
-	const jailMount = "/lever"
-
-	f := patMintRunner("pat-mint-xyz")
-
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
-		t.Fatalf("ensureControllerPAT: %v", err)
-	}
-
-	fi, err := os.Stat(st.ControllerPAT())
-	if err != nil {
-		t.Fatalf("controller.pat not written: %v", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("controller.pat perm = %#o, want 0600", perm)
-	}
-	tok, err := st.LoadControllerPAT()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tok != "pat-mint-xyz" {
-		t.Fatalf("persisted PAT = %q, want %q", tok, "pat-mint-xyz")
-	}
-
-	iStart := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") })
-	iInit := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion init") })
-	iLink := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub link") })
-	iToken := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") })
-	// Two stops: the first clears the shared pid file before the start, the second
-	// stops the throwaway after the mint.
-	var stops []int
-	for i, c := range f.Calls {
-		if callHasPrefix(c, "scion server stop") {
-			stops = append(stops, i)
-		}
-	}
-	iRm := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "sh -c if") })
-	if iStart < 0 || iInit < 0 || iLink < 0 || iToken < 0 || len(stops) != 2 || iRm < 0 {
-		t.Fatalf("missing expected call(s); calls=%+v", f.Calls)
-	}
-	if !(stops[0] < iStart && iStart < iInit && iInit < iLink && iLink < iToken && iToken < stops[1]) {
-		t.Fatalf("calls out of order: prestop=%d start=%d init=%d link=%d token=%d stop=%d", stops[0], iStart, iInit, iLink, iToken, stops[1])
-	}
-
-	// Throwaway port distinct from 8080; dev-auth on; web off, so no dev
-	// auto-login and the API binds --port; runtime broker off, so the dev-auth hub
-	// cannot create full-role agents.
-	startArgs := strings.Join(f.Calls[iStart].Args, " ")
-	const wantStart = "server start --port 48080 --enable-web=false --enable-runtime-broker=false --dev-auth=true"
-	if startArgs != wantStart {
-		t.Fatalf("throwaway server start args = %q, want %q", startArgs, wantStart)
-	}
-	// The container check runs before the live hub is stopped.
-	if iPs := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, argvPodmanPs) }); iPs < 0 || iPs > stops[0] {
-		t.Fatalf("container check at %d, want before the first stop at %d", iPs, stops[0])
-	}
-
-	if f.Calls[iInit].Dir != jailMount {
-		t.Fatalf("init dir = %q, want %q", f.Calls[iInit].Dir, jailMount)
-	}
-	if f.Calls[iLink].Dir != jailMount {
-		t.Fatalf("hub link dir = %q, want %q", f.Calls[iLink].Dir, jailMount)
-	}
-
-	// The project name is the jail mount's basename ("lever"). The scope set is
-	// exact; newer scions gate message sends on agent:message alone.
-	tokenArgs := strings.Join(f.Calls[iToken].Args, " ")
-	if !strings.Contains(tokenArgs, "--project lever") {
-		t.Fatalf("hub token create args = %q, want --project lever", tokenArgs)
-	}
-	if !strings.Contains(tokenArgs, "--name lever-controller") {
-		t.Fatalf("hub token create args = %q, want --name lever-controller", tokenArgs)
-	}
-	if got, want := scopesArg(t, f.Calls[iToken]), "agent:manage,agent:attach,agent:message,project:read,project:update"; got != want {
-		t.Fatalf("hub token create --scopes = %q, want %q", got, want)
-	}
-	// Never scion's 90-day default: an expiring token takes the instance down.
-	if !strings.Contains(tokenArgs, "--expires "+patExpires) {
-		t.Fatalf("hub token create args = %q, want --expires %s", tokenArgs, patExpires)
-	}
-	if f.Calls[iToken].Dir != jailMount {
-		t.Fatalf("hub token create dir = %q, want %q", f.Calls[iToken].Dir, jailMount)
-	}
-
-	// The dev-token removal uses removeJailFileScript on ~/.scion/dev-token, with
-	// ~ resolved in-jail, not hardcoded.
-	rm := f.Calls[iRm]
-	if len(rm.Args) != 4 || rm.Args[0] != "-c" || rm.Args[2] != "_" || rm.Args[3] != "/home/tester/.scion/dev-token" {
-		t.Fatalf("dev-token removal args = %+v, want [-c <script> _ /home/tester/.scion/dev-token]", rm.Args)
-	}
-
-	callsAfterFirst := len(f.Calls)
-
-	// Second call: no-op; the window opens at most once.
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
-		t.Fatalf("second ensureControllerPAT: %v", err)
-	}
-	if len(f.Calls) != callsAfterFirst {
-		t.Fatalf("second call made %d new runner call(s), want 0 (must be a no-op): %+v",
-			len(f.Calls)-callsAfterFirst, f.Calls[callsAfterFirst:])
-	}
 }
 
 func countCalls(calls []proc.Call, pred func(proc.Call) bool) int {
@@ -670,318 +597,6 @@ func countCalls(calls []proc.Call, pred func(proc.Call) bool) int {
 		}
 	}
 	return n
-}
-
-// tokenCreateCallFor returns the token-create call whose --name is name.
-func tokenCreateCallFor(t *testing.T, calls []proc.Call, name string) proc.Call {
-	t.Helper()
-	for _, c := range calls {
-		if !callHasPrefix(c, "scion hub token create") {
-			continue
-		}
-		for i, a := range c.Args {
-			if a == "--name" && i+1 < len(c.Args) && c.Args[i+1] == name {
-				return c
-			}
-		}
-	}
-	t.Fatalf("no hub token create call with --name %s found; calls=%+v", name, calls)
-	return proc.Call{}
-}
-
-// scopesArg returns the exact --scopes argv element: a Contains check on the
-// joined line would pass with extra scopes appended.
-func scopesArg(t *testing.T, c proc.Call) string {
-	t.Helper()
-	for i, a := range c.Args {
-		if a == "--scopes" && i+1 < len(c.Args) {
-			return c.Args[i+1]
-		}
-	}
-	t.Fatalf("no --scopes flag in call args=%+v", c.Args)
-	return ""
-}
-
-// TestEnsurePATsMintsBothInOneWindow: a fresh state with remote enabled mints
-// both PATs in one window.
-func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
-	tree := t.TempDir()
-	st := state.ForConfig(t.TempDir())
-	const jailMount = "/lever"
-
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	scriptTokenCreate(f, "lever-controller", "pat-controller-1")
-	scriptTokenCreate(f, "lever-remote", "pat-remote-1")
-
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{Enabled: true}, patMintOpts{AdminHub: newFakeAdminHub()}); err != nil {
-		t.Fatalf("ensureControllerPAT: %v", err)
-	}
-
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
-		t.Fatalf("scion server start calls = %d, want 1 (one shared window)", n)
-	}
-	// The throwaway must keep the web frontend off even with remote enabled: a
-	// dev-auth hub with the frontend on signs any session-less request in as
-	// super-admin.
-	for _, c := range f.Calls {
-		if callHasPrefix(c, "scion server start") {
-			joined := strings.Join(c.Args, " ")
-			if !strings.Contains(joined, "--enable-web=false") || strings.Contains(joined, "--web-assets-dir") || strings.Contains(joined, "--base-url") {
-				t.Fatalf("throwaway mint hub must run with --enable-web=false and no web flags: %q", joined)
-			}
-		}
-	}
-	// ServerStop runs explicitly and via the deferred kill, so check existence,
-	// not an exact count.
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server stop") }); n < 1 {
-		t.Fatalf("scion server stop calls = %d, want at least 1", n)
-	}
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 2 {
-		t.Fatalf("scion hub token create calls = %d, want 2 (controller + remote)", n)
-	}
-
-	// Exact match: an extra scope such as agent:manage must never reach the
-	// remote token.
-	controllerCall := tokenCreateCallFor(t, f.Calls, "lever-controller")
-	if got, want := scopesArg(t, controllerCall), "agent:manage,agent:attach,agent:message,project:read,project:update"; got != want {
-		t.Fatalf("controller mint --scopes = %q, want %q", got, want)
-	}
-	remoteCall := tokenCreateCallFor(t, f.Calls, "lever-remote")
-	if got, want := scopesArg(t, remoteCall), "agent:read,agent:list,project:read,agent:attach,agent:message"; got != want {
-		t.Fatalf("remote mint --scopes = %q, want %q", got, want)
-	}
-
-	ctok, err := st.LoadControllerPAT()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ctok != "pat-controller-1" {
-		t.Fatalf("persisted controller PAT = %q, want %q", ctok, "pat-controller-1")
-	}
-	rtok, err := st.LoadRemotePAT()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rtok != "pat-remote-1" {
-		t.Fatalf("persisted remote PAT = %q, want %q", rtok, "pat-remote-1")
-	}
-	for _, path := range []string{st.ControllerPAT(), st.RemotePAT()} {
-		fi, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("%s not written: %v", path, err)
-		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			t.Fatalf("%s perm = %#o, want 0600", path, perm)
-		}
-	}
-}
-
-// TestEnsurePATsRemoteOnlyWindowWhenControllerExists: remote access enabled
-// later opens a window that mints only the remote token.
-func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
-	tree := t.TempDir()
-	st := state.ForConfig(t.TempDir())
-	const jailMount = "/lever"
-	seedPAT(t, st, "controller", "pat-controller-existing")
-
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	scriptTokenCreate(f, "lever-remote", "pat-remote-2")
-	// "--name lever-controller" is unscripted, so a controller re-mint fails the
-	// test.
-
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{Enabled: true}, patMintOpts{AdminHub: newFakeAdminHub()}); err != nil {
-		t.Fatalf("ensureControllerPAT: %v", err)
-	}
-
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
-		t.Fatalf("scion server start calls = %d, want 1 (remote-only window still opens)", n)
-	}
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
-		t.Fatalf("scion hub token create calls = %d, want 1 (remote only)", n)
-	}
-
-	ctok, err := st.LoadControllerPAT()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ctok != "pat-controller-existing" {
-		t.Fatalf("controller PAT = %q, want unchanged %q", ctok, "pat-controller-existing")
-	}
-	rtok, err := st.LoadRemotePAT()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rtok != "pat-remote-2" {
-		t.Fatalf("persisted remote PAT = %q, want %q", rtok, "pat-remote-2")
-	}
-}
-
-// TestEnsurePATsNoWindowWhenNothingMissing: with both PATs and the role grant
-// recorded, no window opens (zero scion calls).
-func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
-	tree := t.TempDir()
-	st := state.ForConfig(t.TempDir())
-	const jailMount = "/lever"
-	seedPAT(t, st, "controller", "pat-controller-existing")
-	seedPAT(t, st, "remote", "pat-remote-existing")
-	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: remoteRolePermissions(false),
-		Bound:              map[string]string{"lever-operator@lever.local": "user-1"},
-		Ceilings:           map[string]string{"lever-operator@lever.local": "ac-1"},
-		CeilingPermissions: remoteRolePermissions(false)}); err != nil {
-		t.Fatal(err)
-	}
-
-	f := proc.NewFakeRunner() // no scripts: any call is an error
-
-	ra := remoteAccess{Enabled: true, Emails: []string{"lever-operator@lever.local"}}
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, ra, patMintOpts{}); err != nil {
-		t.Fatalf("ensureControllerPAT: %v", err)
-	}
-	if len(f.Calls) != 0 {
-		t.Fatalf("scion calls = %d, want 0 (nothing missing, no window): %+v", len(f.Calls), f.Calls)
-	}
-}
-
-// TestEnsurePATsRemoteDisabledUnchanged: with remote off, one controller mint
-// and no remote token.
-func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
-	tree := t.TempDir()
-	st := state.ForConfig(t.TempDir())
-	const jailMount = "/lever"
-
-	f := proc.NewFakeRunner()
-	scriptPATMintChain(f)
-	scriptTokenCreate(f, "lever-controller", "pat-controller-3")
-	// "--name lever-remote" is unscripted: remote off must never mint it.
-
-	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
-		t.Fatalf("ensureControllerPAT: %v", err)
-	}
-
-	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") }); n != 1 {
-		t.Fatalf("scion hub token create calls = %d, want 1 (controller only)", n)
-	}
-	ctok, err := st.LoadControllerPAT()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ctok != "pat-controller-3" {
-		t.Fatalf("persisted controller PAT = %q, want %q", ctok, "pat-controller-3")
-	}
-	rtok, err := st.LoadRemotePAT()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rtok != "" {
-		t.Fatalf("remote PAT = %q, want empty (remote disabled, never minted)", rtok)
-	}
-}
-
-// TestApplyBootstrapTokenThenLockedHubEndToEnd drives the real
-// ensureControllerPAT and then the real-hub server start through the same
-// scion.Client apply.Run uses. It proves the composition: the throwaway runs
-// first; the real hub runs on 8080 with dev-auth off and carries the just-minted
-// PAT as SCION_HUB_TOKEN (HubTokenSource reads it lazily); a re-apply skips the
-// throwaway and threads the same PAT.
-func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
-	ctx := context.Background()
-	p := writeTmpConfig(t)
-	app, err := config.Load(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	f := patMintRunner("pat-e2e-round-trip")
-	sb := &stubBackend{runner: f}
-	bf := func(string, string) (backend.Backend, error) { return sb, nil }
-
-	// First apply: bootstrap-token, then scion-server.
-	w, err := buildApplyDeps(ctx, app, p, bf, inertApplyOpts)
-	if err != nil {
-		t.Fatalf("buildApplyDeps: %v", err)
-	}
-	deps := w.deps
-	if deps.EnsureControllerPAT == nil {
-		t.Fatal("buildApplyDeps did not wire Deps.EnsureControllerPAT")
-	}
-	if err := deps.EnsureControllerPAT(ctx); err != nil {
-		t.Fatalf("bootstrap-token step: %v", err)
-	}
-	if err := deps.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
-		t.Fatalf("scion-server step: %v", err)
-	}
-
-	iThrowaway := callIndex(f.Calls, func(c proc.Call) bool {
-		return callHasPrefix(c, "scion server start --port 48080")
-	})
-	iReal := callIndex(f.Calls, func(c proc.Call) bool {
-		return callHasPrefix(c, "scion server start --web-port 8080")
-	})
-	if iThrowaway < 0 || iReal < 0 {
-		t.Fatalf("missing server-start call(s); calls=%+v", f.Calls)
-	}
-	if !(iThrowaway < iReal) {
-		t.Fatalf("throwaway server start (call %d) must precede the real hub server start (call %d)", iThrowaway, iReal)
-	}
-
-	realArgs := strings.Join(f.Calls[iReal].Args, " ")
-	if !strings.Contains(realArgs, "--web-port 8080") || !strings.Contains(realArgs, "--dev-auth=false") {
-		t.Fatalf("real hub server start args = %q, want --web-port 8080 --dev-auth=false", realArgs)
-	}
-
-	// The client that started the real hub carries the minted PAT in its env.
-	if got := f.Calls[iReal].Env["SCION_HUB_TOKEN"]; got != "pat-e2e-round-trip" {
-		t.Fatalf("real hub server-start env SCION_HUB_TOKEN = %q, want %q (mint->thread round-trip broken)", got, "pat-e2e-round-trip")
-	}
-
-	st := state.ForConfig(filepath.Dir(p))
-	fi, err := os.Stat(st.ControllerPAT())
-	if err != nil {
-		t.Fatalf("controller.pat not written: %v", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("controller.pat perm = %#o, want 0600", perm)
-	}
-
-	callsAfterFirst := len(f.Calls)
-
-	// Second apply against the same state: bootstrap-token must not open a window.
-	w2, err := buildApplyDeps(ctx, app, p, bf, inertApplyOpts)
-	if err != nil {
-		t.Fatalf("buildApplyDeps (2nd apply): %v", err)
-	}
-	deps2 := w2.deps
-	if err := deps2.EnsureControllerPAT(ctx); err != nil {
-		t.Fatalf("bootstrap-token step (2nd apply): %v", err)
-	}
-	// The only call allowed is the read-only scope probe (`scion hub token create
-	// --help`).
-	for _, c := range f.Calls[callsAfterFirst:] {
-		if !callHasPrefix(c, "scion hub token create --help") {
-			t.Fatalf("2nd apply's bootstrap-token made runner call %+v, want only the scope probe (must be a no-op): %+v",
-				c, f.Calls[callsAfterFirst:])
-		}
-	}
-
-	if err := deps2.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
-		t.Fatalf("scion-server step (2nd apply): %v", err)
-	}
-	// ServerStart appends a waitHubReady "list" call, so the server start is not
-	// simply the last call.
-	iReal2 := -1
-	for idx, c := range f.Calls {
-		if callHasPrefix(c, "scion server start --web-port 8080") {
-			iReal2 = idx
-		}
-	}
-	if iReal2 < callsAfterFirst {
-		t.Fatalf("2nd apply's real hub server start not found after call %d; calls=%+v", callsAfterFirst, f.Calls)
-	}
-	if got := f.Calls[iReal2].Env["SCION_HUB_TOKEN"]; got != "pat-e2e-round-trip" {
-		t.Fatalf("2nd apply's real hub server-start env SCION_HUB_TOKEN = %q, want %q (reused PAT not threaded)", got, "pat-e2e-round-trip")
-	}
 }
 
 // TestRemoteProxyStartFailsLoudlyWhenItNeverBinds: a proxy that died on a bind
@@ -1014,7 +629,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
 
-	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: port})
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: port, cfgHash: func() string { return "hash-test" }})
 	err = rc.awaitListening(context.Background(), child)
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
@@ -1076,7 +691,7 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	_ = ln.Close()
 
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: freePort,
-		version: "v-test", cfgHash: "hash-test", selfExe: selfExe}
+		version: "v-test", cfgHash: func() string { return "hash-test" }, selfExe: selfExe}
 	if err := rc.Start(context.Background()); err == nil {
 		t.Fatal("Start must not silently succeed here")
 	}
@@ -1155,7 +770,7 @@ func TestRemoteRecordStampWaitsForThePIDFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	const pid = 4242
-	rc := &remoteController{state: st, version: "v-test", cfgHash: "hash-test",
+	rc := &remoteController{state: st, version: "v-test", cfgHash: func() string { return "hash-test" },
 		startTimeout: 2 * time.Second, startInterval: 10 * time.Millisecond}
 	if err := os.WriteFile(st.RemotePID(), []byte("4241\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1165,7 +780,7 @@ func TestRemoteRecordStampWaitsForThePIDFile(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		wrote <- os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(pid)+"\n"), 0o600)
 	}()
-	if err := rc.recordStamp(context.Background(), pid); err != nil {
+	if err := rc.recordStamp(context.Background(), pid, "hash-test"); err != nil {
 		t.Fatalf("recordStamp: %v", err)
 	}
 	if err := <-wrote; err != nil {
@@ -1183,9 +798,9 @@ func TestRemoteRecordStampTimesOut(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rc := &remoteController{state: st, version: "v-test", cfgHash: "hash-test",
+	rc := &remoteController{state: st, version: "v-test", cfgHash: func() string { return "hash-test" },
 		startTimeout: 50 * time.Millisecond, startInterval: 5 * time.Millisecond}
-	err := rc.recordStamp(context.Background(), 4242)
+	err := rc.recordStamp(context.Background(), 4242, "hash-test")
 	testutil.WantErrContaining(t, err, "remote.pid")
 	if _, serr := os.Stat(st.RemoteStamp()); serr == nil {
 		t.Fatal("a stamp was written for a proxy that never wrote its pid file")

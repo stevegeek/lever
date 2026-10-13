@@ -14,10 +14,9 @@ import (
 // the project it is bound on, and each bound user by email with its hub user
 // id.
 //
-// It is the only way apply and doctor can tell the grant is done: role
-// admin needs the throwaway dev-auth window, so neither can ask the hub.
-// Pending lists allowed users with no hub user yet at grant time; a record
-// with any is incomplete and the next apply retries them.
+// Doctor reads the hub itself; the record says what the last apply bound.
+// Pending is left from older levers, which could not bind a user before its
+// first sign-in.
 //
 // Ceilings and CeilingPermissions record the access constraint on each bound
 // user, so the hub-member baseline cannot create a project (see

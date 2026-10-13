@@ -2,41 +2,42 @@ package remoteproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubauth"
 )
 
-// The server-side login handshake. The proxy drives scion's OIDC browser flow
-// itself with a per-attempt cookie jar; the browser is never redirected:
+// The server-side login. The hub runs in scion's proxy auth mode and trusts
+// a lever-signed assertion in hubauth.Header:
 //
-//  1. GET the hub's /auth/login/oidc without following the 302, which yields
-//     state, redirect_uri and client_id and sets the state cookie.
-//  2. Mint a code in-process with Provider.Mint (so /authorize need not exist).
-//  3. GET the hub's callback with that code and state using the SAME jar; the
+//  1. GET hubLoginPath with a fresh assertion for the login's hub email; the
 //     hub answers with a scion_sess cookie that is now a session.
+//  2. GET authMePath with that cookie alone; the user id must be the one
+//     `lever apply` recorded for that email.
 //
-// scion keeps the login state in the cookie that becomes the session, so a
-// dropped or swapped jar fails as state_mismatch. The session cookie stays
+// The assertion is sent on step 1 only, and never on a forwarded request
+// (rewriteUpstream strips any client copy). The session cookie stays
 // host-side: proxy.go injects it hub-bound and strips it from every response,
 // so the browser never holds a hub credential.
 
 const (
-	// sessionCookieName carries the login state first and the session after.
 	sessionCookieName = "scion_sess"
 
-	// pkg/hub/web.go routes /auth/login/ and /auth/callback/.
-	oidcLoginPath      = "/auth/login/oidc"
-	callbackPathPrefix = "/auth/callback/"
+	// hubLoginPath must be a route scion's web layer runs its session
+	// middleware on: under /auth/ and /api/v1/ the assertion is checked but
+	// no session is created.
+	hubLoginPath = "/"
+	authMePath   = "/api/v1/auth/me"
 
 	loginTimeout = 30 * time.Second
 
@@ -45,8 +46,10 @@ const (
 	// The hub refreshes the 15-minute access token inside the cookie itself.
 	sessionMaxAge = 12 * time.Hour
 
-	// maxLoginBody only drains for keep-alive: the handshake has no body.
+	// maxLoginBody only drains for keep-alive: the login reads no body.
 	maxLoginBody = 8 << 10
+	// maxAuthMeBody bounds the one body the login decodes.
+	maxAuthMeBody = 64 << 10
 )
 
 type LoginConfig struct {
@@ -54,18 +57,23 @@ type LoginConfig struct {
 	Hub *url.URL
 	// DialContext reaches Hub (the jail dial); nil uses the default dialer.
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	Provider    *Provider
+	// Sign returns a hub assertion for a lowercased hub email. Required.
+	Sign func(email string) (string, error)
+	// HubUserID returns the hub user id recorded for a lowercased hub email.
+	// A login without one is refused. Required.
+	HubUserID func(email string) (string, bool)
 	// Audit receives one line per login outcome; nil disables. It never
-	// carries the cookie or the code.
+	// carries the assertion or the cookie.
 	Audit func(line AuditLine)
 }
 
 // LoginDriver obtains and caches hub sessions, one per verified operator.
 type LoginDriver struct {
-	hub      *url.URL
-	client   *http.Client
-	provider *Provider
-	audit    func(AuditLine)
+	hub       *url.URL
+	client    *http.Client
+	sign      func(string) (string, error)
+	hubUserID func(string) (string, bool)
+	audit     func(AuditLine)
 
 	now func() time.Time
 
@@ -82,29 +90,30 @@ type sessionEntry struct {
 	at     time.Time // when the login succeeded; see sessionMaxAge
 }
 
-// NewLoginDriver builds the driver. Its client has no jar (each attempt gets
-// its own) and never follows a redirect: every hop is inspected.
+// NewLoginDriver builds the driver. Its client has no jar and never follows a
+// redirect: a redirect would carry the assertion to wherever the hub points.
 func NewLoginDriver(cfg LoginConfig) *LoginDriver {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	if cfg.DialContext != nil {
 		t.DialContext = cfg.DialContext
 	}
-	// An operator's HTTP_PROXY must never route this handshake off the host.
+	// An operator's HTTP_PROXY must never route the login off the host.
 	t.Proxy = nil
 	return &LoginDriver{
-		hub:      cfg.Hub,
-		client:   &http.Client{Transport: t, CheckRedirect: noRedirect},
-		provider: cfg.Provider,
-		audit:    cfg.Audit,
-		now:      time.Now,
-		sessions: map[string]*sessionEntry{},
+		hub:       cfg.Hub,
+		client:    &http.Client{Transport: t, CheckRedirect: noRedirect},
+		sign:      cfg.Sign,
+		hubUserID: cfg.HubUserID,
+		audit:     cfg.Audit,
+		now:       time.Now,
+		sessions:  map[string]*sessionEntry{},
 	}
 }
 
 func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-func (d *LoginDriver) hubURL(pathAndQuery string) string {
-	return strings.TrimSuffix(d.hub.String(), "/") + pathAndQuery
+func (d *LoginDriver) hubURL(path string) string {
+	return strings.TrimSuffix(d.hub.String(), "/") + path
 }
 
 // Cookie returns the hub session cookie for a verified operator login,
@@ -168,10 +177,10 @@ var errLoginPanicked = errors.New("remoteproxy: login: the shared login attempt 
 
 // Tests match on these.
 var (
-	errForeignProvider = errors.New("remoteproxy: login: the hub is configured against a different OIDC provider")
-	// errForeignClientID is completed in place ("... client_id %q, not lever's %q").
-	errForeignClientID = errors.New("remoteproxy: login: the hub asked for client_id")
-	errNoSessionMinted = errors.New("remoteproxy: login: the hub answered without turning the login-state cookie into a session")
+	errNoRecordedUser = errors.New("remoteproxy: login: no hub user is recorded for this login; run `lever apply`")
+	errUserMismatch   = errors.New("remoteproxy: login: the hub session belongs to another hub user than the one recorded for this login")
+	errNoSession      = errors.New("remoteproxy: login: the hub set no session cookie")
+	errLoginStatus    = errors.New("remoteproxy: login: the hub refused the login")
 )
 
 // Invalidate drops a cached session so the next request logs in again. It
@@ -200,147 +209,106 @@ func (d *LoginDriver) login(ctx context.Context, operator string) (string, error
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginTimeout)
 	defer cancel()
 
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return "", fmt.Errorf("remoteproxy: login: cookie jar: %w", err)
+	email := strings.ToLower(identityFor(operator).Email)
+	// Checked before the hub is asked, so an unrecorded login never reaches
+	// the hub, where a first sign-in would create or activate a user.
+	want, ok := d.lookupUser(email)
+	if !ok {
+		d.recordRefused(operator, hubLoginPath, errNoRecordedUser)
+		return "", errNoRecordedUser
 	}
-	// Two logins must never share the state cookie that ties a callback to
-	// its attempt.
-	client := *d.client
-	client.Jar = jar
-
-	start, err := d.begin(ctx, &client)
+	if d.sign == nil {
+		err := errors.New("remoteproxy: login: no assertion signer")
+		d.recordLogin(operator, 0, err)
+		return "", err
+	}
+	assertion, err := d.sign(email)
+	if err != nil {
+		// The signer's error is lever's own text, but bound it anyway.
+		err = fmt.Errorf("remoteproxy: login: sign the assertion: %s", truncateAudit(err.Error()))
+		d.recordLogin(operator, 0, err)
+		return "", err
+	}
+	cookie, err := d.session(ctx, assertion)
 	if err != nil {
 		d.recordLogin(operator, 0, err)
 		return "", err
 	}
-	// Remember the state value so a callback that fails without replacing it
-	// is not mistaken for a session.
-	stateCookie := jarCookie(client.Jar, d.hub)
-	code, err := d.provider.Mint(start.state, start.redirectURI, start.clientID, identityFor(operator))
+	got, err := d.whoAmI(ctx, cookie)
 	if err != nil {
 		d.recordLogin(operator, 0, err)
 		return "", err
 	}
-	q, err := d.provider.CallbackQuery(code, start.state)
-	if err != nil {
-		d.recordLogin(operator, 0, err)
-		return "", err
-	}
-	cookie, err := d.callback(ctx, &client, start.redirectURI, q, stateCookie)
-	if err != nil {
-		d.recordLogin(operator, 0, err)
-		return "", err
+	if got != want {
+		d.recordRefused(operator, authMePath, errUserMismatch)
+		return "", errUserMismatch
 	}
 	d.recordLogin(operator, http.StatusOK, nil)
 	return cookie, nil
 }
 
-type loginStart struct {
-	state       string
-	redirectURI string
-	clientID    string
+func (d *LoginDriver) lookupUser(email string) (string, bool) {
+	if d.hubUserID == nil {
+		return "", false
+	}
+	id, ok := d.hubUserID(email)
+	return id, ok && id != ""
 }
 
-func (d *LoginDriver) begin(ctx context.Context, client *http.Client) (loginStart, error) {
-	resp, err := d.get(ctx, client, d.hubURL(oidcLoginPath))
+// session sends the assertion and takes the session cookie. Neither the
+// assertion nor any cookie value appears in an error.
+func (d *LoginDriver) session(ctx context.Context, assertion string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.hubURL(hubLoginPath), nil)
 	if err != nil {
-		return loginStart{}, fmt.Errorf("remoteproxy: login: start: %w", err)
+		return "", fmt.Errorf("remoteproxy: login: building the request: %w", err)
+	}
+	req.Header.Set(hubauth.Header, assertion)
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("remoteproxy: login: %w", requoted(hubLoginPath, err))
 	}
 	defer drain(resp)
-	loc := resp.Header.Get("Location")
-	if resp.StatusCode != http.StatusFound || loc == "" {
-		return loginStart{}, fmt.Errorf("remoteproxy: login: the hub answered %s to %s instead of starting an OIDC login — "+
-			"is oidc_login configured in the guest ~/.scion/settings.yaml, and was the hub restarted since?", resp.Status, oidcLoginPath)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%w: it answered %d to GET %s", errLoginStatus, resp.StatusCode, hubLoginPath)
 	}
-	// The hub builds this URL from our discovery document; anything else means
-	// another OIDC provider, and lever must not mint a code for its login.
-	if !strings.HasPrefix(loc, DeadAuthorizationEndpoint) {
-		return loginStart{}, fmt.Errorf("%w (it redirected somewhere other than %s)", errForeignProvider, DeadAuthorizationEndpoint)
+	for _, c := range resp.Cookies() {
+		if c.Name == sessionCookieName && c.Value != "" {
+			return c.Value, nil
+		}
 	}
-	u, err := url.Parse(loc)
-	if err != nil {
-		return loginStart{}, fmt.Errorf("remoteproxy: login: parse the hub's redirect: %w", err)
-	}
-	q := u.Query()
-	st := loginStart{state: q.Get("state"), redirectURI: q.Get("redirect_uri"), clientID: q.Get("client_id")}
-	if st.state == "" || st.redirectURI == "" {
-		return loginStart{}, fmt.Errorf("remoteproxy: login: the hub's redirect carried no state or redirect_uri")
-	}
-	if st.clientID != LoginClientID {
-		return loginStart{}, fmt.Errorf("%w %q, not lever's %q — "+
-			"the guest ~/.scion/settings.yaml oidc_login block does not match this proxy", errForeignClientID, st.clientID, LoginClientID)
-	}
-	return st, nil
+	return "", fmt.Errorf("%w (GET %s answered %d)", errNoSession, hubLoginPath, resp.StatusCode)
 }
 
-// callback performs step 3. Only the redirect_uri's origin is replaced (the
-// hub's base_url need not resolve here); path and query stay as issued, since
-// the hub re-sends the redirect_uri to /token.
-func (d *LoginDriver) callback(ctx context.Context, client *http.Client, redirectURI string, q url.Values, stateCookie string) (string, error) {
-	ru, err := url.Parse(redirectURI)
+// whoAmI reads the session's hub user id. A cookie the hub minted without a
+// session fails here rather than passing for one.
+func (d *LoginDriver) whoAmI(ctx context.Context, cookie string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.hubURL(authMePath), nil)
 	if err != nil {
-		return "", fmt.Errorf("remoteproxy: login: parse the hub's redirect_uri: %w", err)
+		return "", fmt.Errorf("remoteproxy: login: building the request: %w", err)
 	}
-	if !strings.HasPrefix(ru.Path, callbackPathPrefix) {
-		return "", fmt.Errorf("remoteproxy: login: the hub's redirect_uri points at %q, not its own %s callback", ru.Path, callbackPathPrefix)
-	}
-	resp, err := d.get(ctx, client, d.hubURL(ru.Path+"?"+q.Encode()))
+	req.Header.Set("Cookie", sessionCookieName+"="+cookie)
+	req.Header.Set("Accept", "application/json")
+	resp, err := d.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("remoteproxy: login: callback: %w", err)
+		return "", fmt.Errorf("remoteproxy: login: %w", requoted(authMePath, err))
 	}
 	defer drain(resp)
-	// A failed login redirects to /login?error=<reason>, the hub's own fixed
-	// vocabulary, so the reason is safe to report.
-	if loc := resp.Header.Get("Location"); strings.HasPrefix(loc, "/login?") {
-		if reason := loginErrorReason(loc); reason != "" {
-			return "", fmt.Errorf("remoteproxy: login: the hub refused the callback (%s)", reason)
-		}
-		return "", fmt.Errorf("remoteproxy: login: the hub refused the callback")
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%w: it answered %d to GET %s with the new session", errLoginStatus, resp.StatusCode, authMePath)
 	}
-	// The jar already held this cookie with the login state: require a new
-	// value, or the state would pass for a session.
-	if c := jarCookie(client.Jar, d.hub); c != "" && c != stateCookie {
-		return c, nil
+	var me struct {
+		ID string `json:"id"`
 	}
-	return "", fmt.Errorf("%w (it answered %s and left the %s cookie as it was)", errNoSessionMinted, resp.Status, sessionCookieName)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAuthMeBody)).Decode(&me); err != nil {
+		return "", fmt.Errorf("remoteproxy: login: GET %s: the answer is not the expected JSON", authMePath)
+	}
+	if me.ID == "" {
+		return "", fmt.Errorf("remoteproxy: login: GET %s named no user id", authMePath)
+	}
+	return me.ID, nil
 }
 
-func jarCookie(jar http.CookieJar, u *url.URL) string {
-	for _, c := range jar.Cookies(u) {
-		if c.Name == sessionCookieName {
-			return c.Value
-		}
-	}
-	return ""
-}
-
-// loginErrorReason is bounded because it is returned in an error message.
-func loginErrorReason(location string) string {
-	u, err := url.Parse(location)
-	if err != nil {
-		return ""
-	}
-	return truncateAudit(u.Query().Get("error"))
-}
-
-func (d *LoginDriver) get(ctx context.Context, client *http.Client, rawURL string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		// Not %w and not rawURL: the stdlib error quotes the URL, and the
-		// callback request carries the authorization code in its query.
-		return nil, fmt.Errorf("remoteproxy: login: building the request: %v", redactURL(err))
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, requoted(req.URL.Path, err)
-	}
-	return resp, nil
-}
-
-// requoted restates a transport failure without its URL: a *url.Error quotes
-// the full URL, and the callback's query carries the authorization code,
-// which would reach the audit log and remote.log.
+// requoted restates a transport failure without its URL.
 func requoted(path string, err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
@@ -349,37 +317,50 @@ func requoted(path string, err error) error {
 	return err
 }
 
-// redactURL strips a query string from an error that is not a *url.Error.
-func redactURL(err error) string {
-	msg := err.Error()
-	if i := strings.Index(msg, "?"); i >= 0 {
-		return msg[:i] + "?<redacted>"
-	}
-	return msg
-}
-
 func drain(resp *http.Response) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxLoginBody))
 	_ = resp.Body.Close()
 }
 
-// recordLogin never records the cookie; err is lever's own message.
+// recordLogin never records the assertion or the cookie; err is lever's own
+// message.
 func (d *LoginDriver) recordLogin(operator string, status int, err error) {
 	if d.audit == nil {
 		return
 	}
 	line := AuditLine{
 		Time:     time.Now().UTC(),
-		TSLogin:  operator,
+		TSLogin:  truncateAudit(operator),
 		Method:   http.MethodGet,
-		Path:     oidcLoginPath,
-		Decision: DecisionOIDCSession,
+		Path:     hubLoginPath,
+		Decision: DecisionHubSession,
 		Status:   status,
 	}
 	if err != nil {
-		line.Decision, line.Error = DecisionOIDCSessionFailed, err.Error()
+		line.Decision, line.Error = DecisionHubSessionFailed, err.Error()
 	}
 	d.audit(line)
+}
+
+func (d *LoginDriver) recordRefused(operator, path string, err error) {
+	if d.audit == nil {
+		return
+	}
+	d.audit(AuditLine{
+		Time:     time.Now().UTC(),
+		TSLogin:  truncateAudit(operator),
+		Method:   http.MethodGet,
+		Path:     path,
+		Decision: DecisionHubSessionRefused,
+		Error:    err.Error(),
+	})
+}
+
+// Identity is the hub identity a verified login maps to.
+type Identity struct {
+	Subject string
+	Email   string // the hub keys its user row on this
+	Name    string
 }
 
 // unnamedOperator is the placeholder hub identity when remote.allowed_users

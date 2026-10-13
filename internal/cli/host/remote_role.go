@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
-	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/remoteproxy"
-	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -24,8 +22,7 @@ import (
 // remoteproxy.HubUserEmails); this role and the ceiling below are where the
 // remote surface is narrowed. A signed-in user otherwise holds only the
 // hub-members binding, so chat and /events answer 403. Role and binding admin
-// is hub-admin only and scion denies UATs on hub-level resources, so the grant
-// runs in the throwaway dev-auth window as the super-admin.
+// is hub-admin only, so hub-identity grants it as lever-admin.
 const remoteWebRoleName = "lever-remote"
 
 const remoteWebRoleDescription = "Managed by lever: the remote web UI's read, attach and message surface on this project."
@@ -59,27 +56,9 @@ const (
 	lifecycleScope      = "agent:lifecycle"
 )
 
-// recordedLifecycle reports whether the record was granted with
-// agent.lifecycle: the variant to keep when lever cannot ask the hub.
-func recordedLifecycle(rec state.RemoteRoleRecord) bool {
-	return slices.Contains(rec.Permissions, lifecyclePermission)
-}
-
 // scopeKnownFunc asks the jail's scion whether it knows a UAT scope
 // (scion.Client.KnowsUATScope). nil means lever cannot ask.
 type scopeKnownFunc func(ctx context.Context, scope string) (bool, error)
-
-// remoteRoleLifecycle decides whether the remote role carries agent.lifecycle:
-// what the jail's scion says or, when it cannot be asked, the recorded variant,
-// so an unanswered probe never churns the grant.
-func remoteRoleLifecycle(ctx context.Context, known scopeKnownFunc, rec state.RemoteRoleRecord) bool {
-	if known != nil {
-		if has, err := known(ctx, lifecycleScope); err == nil {
-			return has
-		}
-	}
-	return recordedLifecycle(rec)
-}
 
 // projectCreatePermission is the one hub-member permission the remote web
 // users must not hold: a project a web user created would be owned by that
@@ -95,17 +74,21 @@ const remoteCeilingPurpose = "Managed by lever: the remote web UI user may not c
 	"Maximum = hub-member minus project.create, plus the lever-remote project role."
 
 // remoteCeilingName names lever's access constraint on one remote web user.
-// scion keeps constraint names unique per scope.
+// scion keeps constraint names unique per scope, so a replacement goes under
+// the second name (remoteCeilingNames) while the first still stands.
 func remoteCeilingName(email string) string { return "lever-remote-ceiling:" + email }
+
+func remoteCeilingNames(email string) []string {
+	return []string{remoteCeilingName(email), remoteCeilingName(email) + ":b"}
+}
 
 // remoteCeilingPermissions is each ceiling's maximum-permission set: the
 // hub-member role's permissions as the hub holds them, minus project.create,
 // plus the lever-remote role's (or the ceiling would cut the surface the role
 // grants). A constraint only reduces.
 //
-// It is read from the hub so a scion upgrade adding a hub-member permission is
-// picked up the next time the window runs. Until then the ceiling withholds the
-// new permission; deleting remote-role.json forces a recompute.
+// It is read from the hub on every apply, so a scion upgrade adding a
+// hub-member permission is picked up by the next apply.
 func remoteCeilingPermissions(hubMember, role []string) []string {
 	var out []string
 	for _, p := range append(slices.Clone(hubMember), role...) {
@@ -115,26 +98,6 @@ func remoteCeilingPermissions(hubMember, role []string) []string {
 	}
 	slices.Sort(out)
 	return out
-}
-
-// remoteAccess is what the bootstrap-token step needs of the remote block.
-type remoteAccess struct {
-	Enabled bool
-	Emails  []string
-	// Contacts is the subset of Emails with tier contact: they get the contact
-	// role, never the web role.
-	Contacts []string
-}
-
-func remoteAccessFor(app *config.App) remoteAccess {
-	if !app.RemoteEnabled() {
-		return remoteAccess{}
-	}
-	ra := remoteAccess{Enabled: true, Emails: remoteproxy.HubUserEmails(app.Remote.Logins())}
-	if c := app.Remote.LoginsWithTier(config.TierContact); len(c) > 0 {
-		ra.Contacts = remoteproxy.HubUserEmails(c)
-	}
-	return ra
 }
 
 // contactRoleName is the project role a contact-tier login's hub user gets
@@ -151,215 +114,179 @@ const contactRoleDescription = "Managed by lever: a remote contact may send dire
 
 func contactRolePermissions() []string { return []string{"agent.message"} }
 
-// remoteRoleFix is the repair for a pending user: the hub user exists only
-// after its first sign-in, and only a dev-auth window can bind it. The window
-// never opens beside a running container (windowBlocked), so otherwise only
-// `lever stop` + `lever up` binds it.
-const remoteRoleFix = "after the first sign-in from the phone, run `lever apply`; it binds the role only while " +
-	"no container runs in the jail (the manager included); otherwise run `lever stop`, then `lever up`"
-
-// remoteRoleReason says why the grant must (re)run, or "" when the record
-// covers every email with the current permission set and a ceiling. It reads
-// the record only, so `lever doctor` can use it without admin credentials.
-func remoteRoleReason(rec state.RemoteRoleRecord, found bool, emails, contacts, perms []string) string {
-	if !found {
-		return "no grant recorded"
-	}
-	if r := contactRoleReason(rec, emails, contacts); r != "" {
-		return r
-	}
-	if !hubapi.SamePermissions(rec.Permissions, perms) {
-		return fmt.Sprintf("the role was granted with %s; this lever needs %s",
-			strings.Join(rec.Permissions, ","), strings.Join(perms, ","))
-	}
-	if len(rec.Ceilings) > 0 && !ceilingPermissionsFit(rec.CeilingPermissions, perms) {
-		return fmt.Sprintf("the project-create ceiling was written with %s; it must hold %s and not %s",
-			strings.Join(rec.CeilingPermissions, ","), strings.Join(perms, ","), projectCreatePermission)
-	}
-	var pending, unbound, uncapped []string
-	for _, e := range emails {
-		if _, ok := rec.Bound[e]; ok {
-			if rec.Ceilings[e] == "" {
-				uncapped = append(uncapped, e)
-			}
-			continue
-		}
-		if slices.Contains(rec.Pending, e) {
-			pending = append(pending, e)
-		} else {
-			unbound = append(unbound, e)
-		}
-	}
-	switch {
-	case len(unbound) > 0:
-		return "not bound yet: " + strings.Join(unbound, ", ")
-	case len(uncapped) > 0:
-		return remoteCeilingMissing + ": " + strings.Join(uncapped, ", ")
-	case len(pending) > 0:
-		// Pending is what the hub said at the last grant; lever cannot ask again
-		// without a dev-auth window.
-		return "no hub user at the last grant (not signed in then): " + strings.Join(pending, ", ")
-	}
-	return ""
+// remoteUser is one configured remote login's hub user.
+type remoteUser struct {
+	Email   string
+	Contact bool
 }
 
-// contactRoleReason checks every bound email holds its tier's role, and the
-// contact role and ceiling hold the current set. A tier change re-runs the
-// grant.
-func contactRoleReason(rec state.RemoteRoleRecord, emails, contacts []string) string {
-	for _, e := range emails {
-		if _, bound := rec.Bound[e]; !bound {
-			continue
-		}
-		if want, got := slices.Contains(contacts, e), slices.Contains(rec.Contacts, e); want != got {
-			return "the tier of " + e + " changed"
-		}
+// remoteUsersFor is every login whose hub user lever invites and binds:
+// allowed_users whether remote access is on or off (an address lever has not
+// invited yet is one an agent could put on the controller row through scion's
+// identity route), and the placeholder operator only when remote access is on
+// with no allowed_users.
+func remoteUsersFor(app *config.App) []remoteUser {
+	if !app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {
+		return nil
 	}
-	if len(contacts) == 0 {
-		return ""
+	contacts := remoteproxy.HubUserEmails(app.Remote.LoginsWithTier(config.TierContact))
+	if len(app.Remote.LoginsWithTier(config.TierContact)) == 0 {
+		contacts = nil
 	}
-	perms := contactRolePermissions()
-	if len(rec.Contacts) > 0 && !hubapi.SamePermissions(rec.ContactPermissions, perms) {
-		return fmt.Sprintf("the contact role was granted with %s; this lever needs %s",
-			strings.Join(rec.ContactPermissions, ","), strings.Join(perms, ","))
+	var out []remoteUser
+	for _, e := range remoteproxy.HubUserEmails(app.Remote.Logins()) {
+		e = strings.ToLower(e)
+		out = append(out, remoteUser{Email: e, Contact: slices.ContainsFunc(contacts, func(c string) bool { return strings.EqualFold(c, e) })})
 	}
-	if len(rec.Contacts) > 0 && !hubapi.SamePermissions(rec.ContactCeilingPermissions, perms) {
-		return fmt.Sprintf("the contacts' ceiling was written with %s; it must be exactly %s",
-			strings.Join(rec.ContactCeilingPermissions, ","), strings.Join(perms, ","))
-	}
-	return ""
+	return out
 }
 
-// remoteCeilingMissing: unlike the other reasons the web UI works, but it can
-// create projects.
-const remoteCeilingMissing = "no project-create ceiling yet, so the web UI can create projects"
-
-// ceilingPermissionsFit reports whether a recorded ceiling keeps the role's
-// permissions and withholds project.create. The rest comes from the hub-member
-// role, which record-only readers cannot see.
-func ceilingPermissionsFit(ceiling, role []string) bool {
-	if len(ceiling) == 0 {
-		return false
+// ensureRemoteUsers is hub-identity step F. Every configured login's hub user
+// is invited when absent, capped, then bound to its tier's role, before it
+// first signs in; the first sign-in then activates that same row with its
+// role and ceiling already in force. A login whose row is lever's own, the dev
+// user, or not the one recorded for it is refused (only that login), and the
+// proxy then refuses it too. A login removed from the config is suspended and
+// unbound; suspension applies at once on the web and within the hub's 60 s
+// cache on the API.
+func (h *hubIdentity) ensureRemoteUsers(ctx context.Context, rec *state.HubIdentity, defs []hubapi.RoleDefinition, lifecycle bool) error {
+	users := remoteUsersFor(h.app)
+	if rec.Users == nil {
+		rec.Users = map[string]string{}
 	}
-	if slices.Contains(ceiling, projectCreatePermission) {
-		return false
+	if len(users) == 0 && len(rec.Users) == 0 {
+		return nil
 	}
-	for _, p := range role {
-		if !slices.Contains(ceiling, p) {
-			return false
-		}
-	}
-	return true
-}
-
-// readDevToken reads the throwaway hub's dev token from the jail user's
-// ~/.scion/dev-token. The value goes straight into a JailCurl env and is never
-// printed.
-func readDevToken(ctx context.Context, jr proc.Runner) (string, error) {
-	res, err := jr.Run(ctx, nil, "sh", "-c", `cat "$HOME/`+layout.DevTokenRel+`"`)
-	if err != nil {
-		return "", fmt.Errorf("reading the throwaway hub's dev token: %w", err)
-	}
-	tok := strings.TrimSpace(res.Stdout)
-	if tok == "" {
-		return "", errors.New("the throwaway hub's dev token file is empty")
-	}
-	return tok, nil
-}
-
-// ensureRemoteWebRole makes the hub hold the remote web role with exactly
-// remoteRolePermissions, each email's hub user bound to it on the project, and
-// a project-create ceiling per user. It runs as the dev identity (hc is the
-// throwaway hub) and returns the record to persist.
-//
-// Idempotent. An email with no hub user yet (it appears on first sign-in) is
-// listed in Pending and warned about. Bindings and ceilings of users removed
-// from allowed_users are left in place: lever does not revoke here.
-func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey string, emails, contacts []string, lifecycle bool, now time.Time, warn func(string, ...any)) (state.RemoteRoleRecord, error) {
+	hc := h.admin
 	perms := remoteRolePermissions(lifecycle)
-	projectID, err := hc.ProjectID(ctx, projectKey, throwawayHubURL)
+	role, err := ensureProjectRole(ctx, hc, defs, remoteWebRoleName, remoteWebRoleDescription, perms, h.warn)
 	if err != nil {
-		return state.RemoteRoleRecord{}, err
+		return errHubIdentity("%w", err)
 	}
-
-	defs, err := hc.RoleDefinitions(ctx)
+	cperms := contactRolePermissions()
+	contactRole, err := ensureProjectRole(ctx, hc, defs, contactRoleName, contactRoleDescription, cperms, h.warn)
 	if err != nil {
-		return state.RemoteRoleRecord{}, err
-	}
-	role, err := ensureProjectRole(ctx, hc, defs, remoteWebRoleName, remoteWebRoleDescription, perms, warn)
-	if err != nil {
-		return state.RemoteRoleRecord{}, err
+		return errHubIdentity("%w", err)
 	}
 	hubMember, ok := systemRole(defs, hubMemberRoleName)
 	if !ok {
-		return state.RemoteRoleRecord{}, fmt.Errorf("the hub lists no %s system role, so lever cannot compute the project-create ceiling", hubMemberRoleName)
+		return errHubIdentity("the hub lists no %s system role, so lever cannot compute the project-create ceiling", hubMemberRoleName)
 	}
 	ceiling := remoteCeilingPermissions(hubMember.Permissions, perms)
-
-	rec := state.RemoteRoleRecord{
-		RoleID: role.ID, Permissions: perms, ProjectID: projectID,
+	contactCeiling := slices.Clone(cperms)
+	rr := state.RemoteRoleRecord{
+		RoleID: role.ID, Permissions: perms, ProjectID: rec.ProjectID,
 		Bound: map[string]string{}, Ceilings: map[string]string{},
-		CeilingPermissions: ceiling, GrantedAt: now,
+		CeilingPermissions: ceiling, GrantedAt: h.guestNow(),
+		ContactRoleID: contactRole.ID, ContactPermissions: cperms, ContactCeilingPermissions: contactCeiling,
 	}
-	var contactRole hubapi.RoleDefinition
-	var contactCeiling []string
-	if len(contacts) > 0 {
-		cperms := contactRolePermissions()
-		if contactRole, err = ensureProjectRole(ctx, hc, defs, contactRoleName, contactRoleDescription, cperms, warn); err != nil {
-			return state.RemoteRoleRecord{}, err
-		}
-		// A contact's ceiling is its role alone: the fenced chat needs only identity
-		// and agent.message, so hub-member's other reads are withheld too (defence
-		// behind the proxy fence).
-		contactCeiling = slices.Clone(cperms)
-		rec.ContactRoleID, rec.ContactPermissions, rec.ContactCeilingPermissions = contactRole.ID, cperms, contactCeiling
-	} else if r, ok := projectRoleNamed(defs, contactRoleName); ok {
-		// No contacts now, but moving earlier ones back to operator needs the old
-		// role's id.
-		contactRole = r
-	}
-	for _, email := range emails {
-		u, found, err := hc.UserByEmail(ctx, email)
+	configured := map[string]bool{}
+	for _, u := range users {
+		configured[u.Email] = true
+		id, err := h.remoteUserID(ctx, u.Email, rec)
 		if err != nil {
-			return state.RemoteRoleRecord{}, fmt.Errorf("looking up hub user %s: %w", email, err)
+			if errors.Is(err, errLoginRefused) {
+				h.warn("hub-identity: %v; that login is refused until this is resolved", err)
+				continue
+			}
+			return err
 		}
-		if !found {
-			rec.Pending = append(rec.Pending, email)
-			continue
-		}
-		isContact := slices.Contains(contacts, email)
 		grant, drop, name, userCeiling := role.ID, contactRole.ID, remoteWebRoleName, ceiling
-		if isContact {
+		if u.Contact {
 			grant, drop, name, userCeiling = contactRole.ID, role.ID, contactRoleName, contactCeiling
 		}
-		// The other tier's binding goes first: a login moved to contact must lose the
-		// terminal and lifecycle it had.
-		if err := dropProjectRoleBinding(ctx, hc, drop, u.ID, projectID); err != nil {
-			if isContact {
-				// A contact that keeps the web role keeps terminal and start/stop: fail the
-				// apply rather than warn.
-				return state.RemoteRoleRecord{}, fmt.Errorf("%w: removing contact %s from role %s: %w", errCeilingRemoved, email, remoteWebRoleName, err)
-			}
-			return state.RemoteRoleRecord{}, fmt.Errorf("removing hub user %s from its previous role: %w", email, err)
-		}
-		if err := ensureProjectRoleBinding(ctx, hc, grant, u.ID, projectID); err != nil {
-			return state.RemoteRoleRecord{}, fmt.Errorf("binding hub user %s to role %s: %w", email, name, err)
-		}
-		rec.Bound[email] = u.ID
-		if isContact {
-			rec.Contacts = append(rec.Contacts, email)
-		}
-		id, err := ensureRemoteCeiling(ctx, hc, email, u.ID, userCeiling, warn)
+		// The ceiling first, then the bindings: a tier move never leaves the user
+		// with more than either tier allows.
+		cid, err := ensureRemoteCeiling(ctx, hc, u.Email, id, userCeiling, h.warn)
 		if err != nil {
-			return state.RemoteRoleRecord{}, fmt.Errorf("capping hub user %s (no project create): %w", email, err)
+			return errHubIdentity("capping hub user %s: %w", u.Email, err)
 		}
-		rec.Ceilings[email] = id
+		if err := dropProjectRoleBinding(ctx, hc, drop, id, rec.ProjectID); err != nil {
+			return errHubIdentity("%w: removing %s from its previous role: %w", errCeilingRemoved, u.Email, err)
+		}
+		if err := ensureProjectRoleBinding(ctx, hc, grant, id, rec.ProjectID); err != nil {
+			return errHubIdentity("binding hub user %s to role %s: %w", u.Email, name, err)
+		}
+		rec.Users[u.Email] = id
+		rr.Bound[u.Email], rr.Ceilings[u.Email] = id, cid
+		if u.Contact {
+			rr.Contacts = append(rr.Contacts, u.Email)
+		}
 	}
-	if len(rec.Pending) > 0 {
-		warn("remote web role: no hub user yet for %s, so the web UI will answer 403 for it; %s",
-			strings.Join(rec.Pending, ", "), remoteRoleFix)
+	for email, id := range rec.Users {
+		if configured[email] {
+			continue
+		}
+		if err := h.suspendRemoteUser(ctx, email, id, rec.ProjectID, role.ID, contactRole.ID); err != nil {
+			return err
+		}
 	}
-	return rec, nil
+	if err := h.st.SaveRemoteRoleRecord(rr); err != nil {
+		return errHubIdentity("persisting remote-role.json: %w", err)
+	}
+	return nil
+}
+
+// errLoginRefused marks a login lever will not bind.
+var errLoginRefused = errors.New("remote login refused")
+
+// remoteUserID finds or invites the login's hub user and checks it is one
+// lever may bind. A suspended row (the login was removed earlier and is back)
+// is reactivated.
+func (h *hubIdentity) remoteUserID(ctx context.Context, email string, rec *state.HubIdentity) (string, error) {
+	if hubauth.IsReserved(email) {
+		return "", fmt.Errorf("%w: %s is a reserved address", errLoginRefused, email)
+	}
+	u, found, err := h.admin.UserByEmail(ctx, email)
+	if err != nil {
+		return "", errHubIdentity("looking up hub user %s: %w", email, err)
+	}
+	if !found {
+		inv, err := h.admin.InviteUser(ctx, email)
+		switch {
+		case err == nil:
+			u = inv
+		case errors.Is(err, hubapi.ErrUserExists):
+			// Created between the lookup and the invite: read it back.
+			if u, found, err = h.admin.UserByEmail(ctx, email); err != nil || !found {
+				return "", errHubIdentity("hub user %s exists but cannot be read back: %v", email, err)
+			}
+		default:
+			return "", errHubIdentity("inviting %s: %w", email, err)
+		}
+	}
+	switch {
+	case u.ID == devUserID || u.ID == rec.AdminID || u.ID == rec.ControllerID:
+		return "", fmt.Errorf("%w: %s resolves to one of lever's own hub users (%s)", errLoginRefused, email, u.ID)
+	case rec.Users[email] != "" && rec.Users[email] != u.ID:
+		return "", fmt.Errorf("%w: %s is hub user %s, not the %s lever bound before", errLoginRefused, email, u.ID, rec.Users[email])
+	}
+	if u.Status == "suspended" {
+		if _, err := h.admin.UpdateUser(ctx, u.ID, "", "active"); err != nil {
+			return "", errHubIdentity("reactivating %s: %w", email, err)
+		}
+	}
+	return u.ID, nil
+}
+
+// suspendRemoteUser suspends first: it fails closed sooner than the unbind.
+func (h *hubIdentity) suspendRemoteUser(ctx context.Context, email, id, projectID string, roleIDs ...string) error {
+	u, ok, err := h.admin.GetUser(ctx, id)
+	if err != nil {
+		return errHubIdentity("reading removed login %s: %w", email, err)
+	}
+	if ok && u.Status != "suspended" {
+		if _, err := h.admin.UpdateUser(ctx, id, "", "suspended"); err != nil {
+			return errHubIdentity("suspending removed login %s: %w", email, err)
+		}
+		h.log("lever: remote login %s was removed from the config; its hub user is suspended", email)
+	}
+	for _, r := range roleIDs {
+		if err := dropProjectRoleBinding(ctx, h.admin, r, id, projectID); err != nil {
+			return errHubIdentity("unbinding removed login %s: %w", email, err)
+		}
+	}
+	return nil
 }
 
 func projectRoleNamed(defs []hubapi.RoleDefinition, name string) (hubapi.RoleDefinition, bool) {
@@ -465,24 +392,33 @@ func systemRole(defs []hubapi.RoleDefinition, name string) (hubapi.RoleDefinitio
 // scope because project.create is checked there; a system constraint applies
 // at every scope, so perms must also cover the lever-remote role's permissions.
 //
-// A matching constraint is kept. One with lever's name but another subject or
-// set is deleted and recreated: names are unique per scope and scion has no
-// partial update without If-Match, so the new one cannot come first. The live
-// hub is stopped during the window, but a failed create leaves the user with
-// no ceiling, so it returns errCeilingRemoved, which fails the apply. A
-// recovery-disabled constraint is scion's offline-recovery state and is not
-// lever's to undo.
+// A matching constraint is kept. Otherwise the new one is written first, under
+// whichever of the user's two names is free, and only then are the old ones
+// deleted: constraints only reduce, so for that moment the user holds the
+// intersection, never more than either. A recovery-disabled constraint is
+// scion's offline-recovery state and is not lever's to undo.
 func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID string, perms []string, warn func(string, ...any)) (string, error) {
-	name := remoteCeilingName(email)
-	have, err := hc.AccessConstraintsNamed(ctx, name)
-	if err != nil {
-		return "", err
+	names := remoteCeilingNames(email)
+	var have []hubapi.AccessConstraint
+	used := map[string]bool{}
+	for _, n := range names {
+		cs, err := hc.AccessConstraintsNamed(ctx, n)
+		if err != nil {
+			return "", err
+		}
+		for _, c := range cs {
+			if c.Name != n || used[c.Name+"\x00"+c.ID] {
+				continue
+			}
+			used[c.Name], used[c.Name+"\x00"+c.ID] = true, true
+			have = append(have, c)
+		}
 	}
 	keep := ""
 	var stale []hubapi.AccessConstraint
 	for _, c := range have {
 		if c.Status == "recovery_disabled" {
-			return "", fmt.Errorf("access constraint %s (%s) is recovery-disabled; lever will not modify it", name, c.ID)
+			return "", fmt.Errorf("access constraint %s (%s) is recovery-disabled; lever will not modify it", c.Name, c.ID)
 		}
 		if keep == "" && c.ScopeType == hubapi.ConstraintScopeSystem && c.Subject.Kind == hubapi.ConstraintSubjectPrincipal &&
 			c.Subject.PrincipalType == hubapi.PrincipalUser && c.Subject.PrincipalID == userID {
@@ -498,37 +434,37 @@ func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID s
 		}
 		stale = append(stale, c)
 	}
-	deleted := 0
-	for _, c := range stale {
-		warn("remote web ceiling: access constraint %s (%s) does not match (subject %s, permissions %s); replacing it",
-			name, c.ID, c.Subject.PrincipalID, strings.Join(c.MaximumPermissions, ","))
-		if err := hc.DeleteAccessConstraint(ctx, c.ID, c.Revision); err != nil {
-			return "", ceilingRemovedIf(deleted > 0, fmt.Errorf("deleting access constraint %s: %w", c.ID, err))
+	if keep == "" {
+		free := ""
+		for _, n := range names {
+			if !used[n] {
+				free = n
+				break
+			}
 		}
-		deleted++
+		if free == "" {
+			return "", fmt.Errorf("both of lever's ceiling names for %s are taken by constraints that do not match; delete one with scion and re-apply", email)
+		}
+		got, err := createCeiling(ctx, hc, free, userID, perms)
+		if err != nil {
+			return "", err
+		}
+		keep = got
 	}
-	if keep != "" {
-		return keep, nil
+	for _, c := range stale {
+		warn("remote web ceiling: access constraint %s (%s) does not match (subject %s, permissions %s); replaced",
+			c.Name, c.ID, c.Subject.PrincipalID, strings.Join(c.MaximumPermissions, ","))
+		if err := hc.DeleteAccessConstraint(ctx, c.ID, c.Revision); err != nil {
+			return "", fmt.Errorf("deleting access constraint %s: %w", c.ID, err)
+		}
 	}
-	got, err := createCeiling(ctx, hc, name, userID, perms)
-	if err != nil {
-		return "", ceilingRemovedIf(deleted > 0, err)
-	}
-	return got, nil
+	return keep, nil
 }
 
-// errCeilingRemoved marks a replacement that deleted the old constraint and
-// then failed; grantRemoteWebRole fails the apply on it.
+// errCeilingRemoved marks a tier move that left a contact bound to the web
+// role; the apply fails on it.
 var errCeilingRemoved = errors.New("the grant left a remote user with more authority than its tier allows " +
-	"(an old project-create ceiling deleted and the new one not written, or a contact still bound to the web role) " +
-	"until a `lever apply` completes it")
-
-func ceilingRemovedIf(removed bool, err error) error {
-	if !removed {
-		return err
-	}
-	return fmt.Errorf("%w: %w", errCeilingRemoved, err)
-}
+	"(a contact still bound to the web role) until a `lever apply` completes it")
 
 // createCeiling checks the hub kept the ceiling it wrote.
 func createCeiling(ctx context.Context, hc *hubapi.Client, name, userID string, perms []string) (string, error) {

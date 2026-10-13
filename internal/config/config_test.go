@@ -1387,16 +1387,13 @@ func TestRemoteLoginPortIsIgnoredWithAWarning(t *testing.T) {
 	for _, body := range []string{
 		base + "  login_port: 8444\n",
 		base + "  login_port: 8445\n",
-		base + fmt.Sprintf("  login_port: %d\n", GuestLoginIssuerPort),
+		base + "  login_port: 8446\n",
 		base + "  login_port: 9500\n",
 		"name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  login_port: 9500\n",
 	} {
 		app, err := LoadNoHostChecks(writeConfig(t, body))
 		if err != nil {
 			t.Fatalf("%q must load: %v", body, err)
-		}
-		if got := app.EffectiveRemoteLoginPort(); got != 0 {
-			t.Errorf("EffectiveRemoteLoginPort() = %d, want 0", got)
 		}
 		if slices.Contains(app.EffectiveAllowedPorts(), app.Remote.LoginPort) {
 			t.Errorf("login_port %d granted to the jail", app.Remote.LoginPort)
@@ -1409,8 +1406,10 @@ func TestRemoteLoginPortIsIgnoredWithAWarning(t *testing.T) {
 			t.Errorf("RemoteWarnings() names login_port: %v", app.RemoteWarnings())
 		}
 	}
-	// The proxy's own port still may not be the mirrored guest issuer port.
-	rejectNoHost(t, base+fmt.Sprintf("  port: %d\n", GuestLoginIssuerPort), "mirrored")
+	// 8446 was the guest login forwarder's port; nothing reserves it now.
+	if _, err := LoadNoHostChecks(writeConfig(t, base+"  port: 8446\n")); err != nil {
+		t.Fatalf("remote.port 8446 must load now that no forwarder is mirrored onto it: %v", err)
+	}
 }
 
 func TestRemotePortCollisionRejected(t *testing.T) {

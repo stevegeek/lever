@@ -65,8 +65,8 @@ func fillDeps(d Deps) Deps {
 	if d.BrokerHealthy == nil {
 		d.BrokerHealthy = func(context.Context) error { return nil }
 	}
-	if d.EnsureControllerPAT == nil {
-		d.EnsureControllerPAT = func(context.Context) error { return nil }
+	if d.EnsureHubIdentity == nil {
+		d.EnsureHubIdentity = func(context.Context) error { return nil }
 	}
 	if d.WaitBrokerReady == nil {
 		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
@@ -79,14 +79,11 @@ func fillDeps(d Deps) Deps {
 	if d.RearmBootstrap == nil {
 		d.RearmBootstrap = func(context.Context) error { return nil }
 	}
-	if d.EnsureHubLogin == nil {
-		d.EnsureHubLogin = func(context.Context) (bool, error) { return false, nil }
+	if d.EnsureHubAuth == nil {
+		d.EnsureHubAuth = func(context.Context) (bool, error) { return false, nil }
 	}
 	if d.EnsureScionTelemetry == nil {
 		d.EnsureScionTelemetry = func(context.Context) (bool, error) { return false, nil }
-	}
-	if d.DisableHubLogin == nil {
-		d.DisableHubLogin = func(context.Context) (bool, error) { return false, nil }
 	}
 	if d.EnsureAgentTemplate == nil {
 		d.EnsureAgentTemplate = func(context.Context, string) (bool, error) { return false, nil }
@@ -105,6 +102,9 @@ func fillDeps(d Deps) Deps {
 	}
 	if d.ScionProjectRegistered == nil {
 		d.ScionProjectRegistered = func(context.Context, string) (bool, error) { return false, nil }
+	}
+	if d.ProjectLinked == nil {
+		d.ProjectLinked = func(context.Context, string) (bool, error) { return true, nil }
 	}
 	if d.StripProjectSharedDirs == nil {
 		d.StripProjectSharedDirs = func(context.Context, string) error { return nil }
@@ -1472,10 +1472,9 @@ func (r *serverStartOrderRunner) Run(ctx context.Context, env map[string]string,
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// TestRunBootstrapTokenRunsOnceBeforeScionServer: EnsureControllerPAT runs
-// exactly once and before `scion server start`; the controller PAT must exist
-// before the dev-auth-off hub locks down.
-func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
+// TestRunHubIdentityRunsOnceAfterScionServer: hub-identity talks to the live
+// hub, so it runs exactly once and after `scion server start`.
+func TestRunHubIdentityRunsOnceAfterScionServer(t *testing.T) {
 	f := scionOKRunner()
 	app := helloApp(t.TempDir())
 	var order []string
@@ -1484,9 +1483,9 @@ func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
 	ensureCalls := 0
 	deps := Deps{
 		Scion: scion.New(sr, scion.Options{}),
-		EnsureControllerPAT: func(context.Context) error {
+		EnsureHubIdentity: func(context.Context) error {
 			ensureCalls++
-			order = append(order, "bootstrap-token")
+			order = append(order, "hub-identity")
 			return nil
 		},
 	}
@@ -1494,28 +1493,34 @@ func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if ensureCalls != 1 {
-		t.Fatalf("EnsureControllerPAT calls = %d, want 1", ensureCalls)
+		t.Fatalf("EnsureHubIdentity calls = %d, want 1", ensureCalls)
 	}
-	btIdx, serverIdx := -1, -1
-	for i, v := range order {
-		if v == "bootstrap-token" && btIdx < 0 {
-			btIdx = i
-		}
-		if v == "server-start" && serverIdx < 0 {
-			serverIdx = i
-		}
+	hiIdx, serverIdx := slices.Index(order, "hub-identity"), slices.Index(order, "server-start")
+	if hiIdx < 0 || serverIdx < 0 {
+		t.Fatalf("expected both hub-identity and server-start recorded; order=%v", order)
 	}
-	if btIdx < 0 || serverIdx < 0 {
-		t.Fatalf("expected both bootstrap-token and server-start recorded; order=%v", order)
-	}
-	if !(btIdx < serverIdx) {
-		t.Fatalf("bootstrap-token must run before scion-server; order=%v", order)
+	if !(serverIdx < hiIdx) {
+		t.Fatalf("hub-identity must run after scion-server; order=%v", order)
 	}
 }
 
-// TestRunBootstrapTokenSkipsCleanlyWhenNil: a nil EnsureControllerPAT does not
-// error or block the scion-server step.
-func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
+func TestRunHubIdentityFailureFailsTheApply(t *testing.T) {
+	f := scionOKRunner()
+	app := helloApp(t.TempDir())
+	boom := errors.New("boom")
+	err := runApply(app, Deps{
+		Scion:             hubScion(f, app),
+		EnsureHubIdentity: func(context.Context) error { return boom },
+	})
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), "hub-identity") {
+		t.Fatalf("err = %v, want the hub-identity failure", err)
+	}
+	if managerStarted(f) {
+		t.Fatalf("the manager started after hub-identity failed; calls=%s", joinedCalls(f))
+	}
+}
+
+func TestRunStartsTheHub(t *testing.T) {
 	f := scionOKRunner()
 	app := helloApp(t.TempDir())
 	deps := Deps{
@@ -1542,7 +1547,7 @@ func TestRunBootstrapTokenSkipsCleanlyWhenNil(t *testing.T) {
 		}
 	}
 	if !sawServerStart {
-		t.Fatalf("scion-server must still run when EnsureControllerPAT is nil; calls=%+v", f.Calls)
+		t.Fatalf("scion-server did not start the hub; calls=%+v", f.Calls)
 	}
 }
 
@@ -2238,8 +2243,7 @@ func TestRegisterStripsSharedDirsOnBothPaths(t *testing.T) {
 			if err := runApply(app, deps); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			// The hub knows the project by the workspace basename — the same
-			// name ensureControllerPAT passes to `hub token create`.
+			// The hub knows the project by the workspace basename.
 			if len(stripCalls) != 1 || stripCalls[0] != "lever" {
 				t.Fatalf("StripProjectSharedDirs calls = %+v, want [lever]", stripCalls)
 			}
@@ -2748,10 +2752,9 @@ func TestStartManagerVerifyAgentRolePassesThrough(t *testing.T) {
 	}
 }
 
-// TestRegisterRepairsHubEndpointOnTheSkipPath: minting the controller PAT
-// `hub link`s the project against a throwaway hub on its own port, and the
-// skip path keeps that stale endpoint, which bare scion verbs such as
-// `lever attach` then dial.
+// TestRegisterRepairsHubEndpointOnTheSkipPath: a project linked against a
+// hub on another port keeps that stale endpoint on the skip path, and bare
+// scion verbs such as `lever attach` then dial it.
 func TestRegisterRepairsHubEndpointOnTheSkipPath(t *testing.T) {
 	tree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tree, ".scion"), []byte("project-id: real\n"), 0o644); err != nil {
@@ -2799,55 +2802,6 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 	}
 }
 
-// TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged: scion reads
-// `oidc_login` only at startup, so a running hub must restart when the block
-// changes, but an unconditional restart would drop every agent's hub
-// connection on every apply.
-func TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged(t *testing.T) {
-	run := func(t *testing.T, changed bool, ensureErr error) ([]proc.Call, error) {
-		t.Helper()
-		f := scionOKRunner()
-		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-			Manager: config.Manager{Image: "img"},
-			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
-		deps := Deps{
-			Scion:          hubScion(f, app),
-			EnsureHubLogin: func(context.Context) (bool, error) { return changed, ensureErr },
-		}
-		return f.Calls, runApply(app, deps)
-	}
-	stopped := func(calls []proc.Call) bool {
-		for _, c := range calls {
-			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" && c.Args[1] == "stop" {
-				return true
-			}
-		}
-		return false
-	}
-
-	calls, err := run(t, false, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if stopped(calls) {
-		t.Fatal("an unchanged login configuration restarted the hub — every apply would drop the agents' connections")
-	}
-
-	calls, err = run(t, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !stopped(calls) {
-		t.Fatal("a changed login configuration did not restart the hub, so scion would never read it")
-	}
-
-	// A failure to provision the guest half must fail the apply, not start a
-	// hub whose login path silently does not work.
-	if _, err := run(t, false, errors.New("no go toolchain")); err == nil {
-		t.Fatal("EnsureHubLogin's failure did not fail the apply")
-	}
-}
-
 // TestScionServerWaitsForTheBroker: a just-started hub registers its runtime
 // broker only after it serves, so the step waits for it before
 // register-project's hub link, via scion's global settings since the tree may
@@ -2860,8 +2814,8 @@ func TestScionServerWaitsForTheBroker(t *testing.T) {
 			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
 		var waits []string
 		deps := Deps{
-			Scion:          hubScion(f, app),
-			EnsureHubLogin: func(context.Context) (bool, error) { return changed, nil },
+			Scion:         hubScion(f, app),
+			EnsureHubAuth: func(context.Context) (bool, error) { return changed, nil },
 			WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
 				waits = append(waits, project)
 				return false, nil
@@ -3022,114 +2976,25 @@ func TestScionServerConvergesTelemetryWithoutRestarting(t *testing.T) {
 	}
 }
 
-// TestRemoteDisabledConvergesTheGuestLoginPathOff: the forwarder is an
-// unauthenticated bridge from guest loopback (reachable from every agent's
-// netns) to a host loopback port beside lever's broker listeners. Stopping the
-// proxy does not stop it, so every apply with remote access off must take it
-// down.
-func TestRemoteDisabledConvergesTheGuestLoginPathOff(t *testing.T) {
-	run := func(t *testing.T, remote config.Remote) (disabled, ensured int) {
-		t.Helper()
-		f := scionOKRunner()
-		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-			Manager: config.Manager{Image: "img"}, Remote: remote}
-		deps := Deps{
-			Scion:           hubScion(f, app),
-			EnsureHubLogin:  func(context.Context) (bool, error) { ensured++; return false, nil },
-			DisableHubLogin: func(context.Context) (bool, error) { disabled++; return false, nil },
-		}
-		if err := runApply(app, deps); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		return disabled, ensured
-	}
-
-	disabled, _ := run(t, config.Remote{})
-	if disabled != 1 {
-		t.Fatalf("remote off: DisableHubLogin called %d times, want 1 — the guest bridge outlives the feature otherwise", disabled)
-	}
-
-	disabled, ensured := run(t, config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"})
-	if disabled != 0 {
-		t.Fatalf("remote on: DisableHubLogin called %d times, want 0", disabled)
-	}
-	if ensured != 1 {
-		t.Fatalf("remote on: EnsureHubLogin called %d times, want 1", ensured)
-	}
-}
-
-// TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState is the off
-// half of TestScionServerRestartsTheHubOnlyWhenTheLoginConfigChanged. `scion
-// server start` returns on a running daemon without touching its argv, so a
-// hub still serving a removed login must be restarted. An apply that found
-// nothing to remove must not restart, since that drops every agent's
-// connection.
-func TestRemoteOffRestartsTheHubOnlyWhenTheGuestStillHadLoginState(t *testing.T) {
-	run := func(t *testing.T, changed bool) (server, logs []string) {
-		t.Helper()
-		f := scionOKRunner()
-		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-			Manager: config.Manager{Image: "img"}}
-		deps := Deps{
-			Scion:           hubScion(f, app),
-			DisableHubLogin: func(context.Context) (bool, error) { return changed, nil },
-			Log:             func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
-		}
-		if err := runApply(app, deps); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-		for _, c := range f.Calls {
-			if c.Name == "scion" && len(c.Args) >= 2 && c.Args[0] == "server" {
-				server = append(server, strings.Join(c.Args, " "))
-			}
-		}
-		return server, logs
-	}
-
-	// The step's own start is tolerated by the running daemon; the stop and
-	// second start replace the argv, which must carry no web flags because
-	// the staged assets directory is gone.
-	const plain = "server start --web-port 8080 --dev-auth=false"
-	server, logs := run(t, true)
-	want := []string{plain, "server stop", plain}
-	if !slices.Equal(server, want) {
-		t.Fatalf("server calls = %q, want %q — the hub was not restarted after the login was removed", server, want)
-	}
-	if len(logs) != 1 || !strings.Contains(logs[0], "restarting the hub") {
-		t.Fatalf("logs = %q, want one line saying the hub is being restarted", logs)
-	}
-
-	server, logs = run(t, false)
-	if !slices.Equal(server, []string{plain}) {
-		t.Fatalf("server calls = %q, want just the step's own start — a converged instance bounced the hub and every agent's connection to it", server)
-	}
-	if len(logs) != 0 {
-		t.Fatalf("logs = %q, want none: a re-apply with remote access already off has nothing to report", logs)
-	}
-}
-
-// TestRemoteOffSkipsTheHubRestartWhenThePlanDoesNotManageTheHub: a BrokerOnly
-// plan need not have a scion binary, so it must not order a hub restart; the
-// guest forwarder still comes down.
-func TestRemoteOffSkipsTheHubRestartWhenThePlanDoesNotManageTheHub(t *testing.T) {
+// TestRemoteOffBrokerOnlyDoesNotDriveScion: a BrokerOnly plan need not have a
+// scion binary, so converging remote access off must not touch the hub.
+func TestRemoteOffBrokerOnlyDoesNotDriveScion(t *testing.T) {
 	f := scionOKRunner()
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 		Manager: config.Manager{Image: "img"}}
-	disabled := 0
+	stopped := 0
 	deps := Deps{
 		Scion:           hubScion(f, app),
-		DisableHubLogin: func(context.Context) (bool, error) { disabled++; return true, nil },
+		StopRemoteProxy: func(context.Context) error { stopped++; return nil },
 	}
 	if err := Run(context.Background(), app, fillDeps(deps), PlanOpts{BrokerOnly: true}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if disabled != 1 {
-		t.Fatalf("DisableHubLogin called %d times, want 1 — the jail→host bridge must come down on this path too", disabled)
+	if stopped != 1 {
+		t.Fatalf("StopRemoteProxy called %d times, want 1", stopped)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "scion" {
-			t.Fatalf("the broker-only plan drove scion: %q", strings.Join(c.Args, " "))
-		}
+	if len(f.Calls) != 0 {
+		t.Fatalf("the broker-only plan drove scion or the guest: %+v", f.Calls)
 	}
 }
 
@@ -3164,9 +3029,13 @@ func TestScionServerRestartsAHubThatIsAlreadyStopped(t *testing.T) {
 		Manager: config.Manager{Image: "img"},
 		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
 	runner := &stoppedHubRunner{inner: &agentLifecycleRunner{FakeRunner: f, slug: app.Name}}
+	// A running hub whose guest key file changed: the restart's stop meets a
+	// daemon that already went away.
+	scriptRunningHub(f, runningHubOut(42, matchingHubArgv(app), testHubAuthEnv()))
 	deps := Deps{
-		Scion:          scion.New(runner, scion.Options{HubEndpoint: testHubEndpoint}),
-		EnsureHubLogin: func(context.Context) (bool, error) { return true, nil },
+		Scion:         scion.New(runner, scion.Options{HubEndpoint: testHubEndpoint}),
+		HubAuthEnv:    testHubAuthEnv(),
+		EnsureHubAuth: func(context.Context) (bool, error) { return true, nil },
 	}
 
 	if err := runApply(app, deps); err != nil {

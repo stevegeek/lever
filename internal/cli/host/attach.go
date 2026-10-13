@@ -159,7 +159,7 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			if err := b.ResolveRunUser(cmd.Context()); err != nil {
 				return fmt.Errorf("attach: %w (%v) — run `lever up` first", errJailNotUp, err)
 			}
-			// HubTokenSource gives the client the controller PAT for the dev-auth-off hub.
+			// HubTokenSource gives the client the controller PAT.
 			// attachArgv stages it in the guest, since the exec'd argv is public.
 			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
 			slug, project, err := attachTarget(app, b.MountDest(), argOrEmpty(args))

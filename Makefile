@@ -8,16 +8,9 @@ PREFIX ?= $(HOME)/.local/bin
 # The instance tree, bind-mounted into the manager container.
 LEVER_INSTANCE ?= $(HOME)/lever-instance
 
-# Cross-compile the guest's login forwarder into
-# internal/provision/loginfwd/prebuilt/ for go:embed, so the built lever needs
-# no Go toolchain for remote access. The release workflow runs the same command.
-.PHONY: loginfwd-prebuilt
-loginfwd-prebuilt:
-	go run ./internal/provision/loginfwd/genprebuilt
-
 # Install the host `lever` binary and the host tools onto PATH.
 .PHONY: install
-install: loginfwd-prebuilt
+install:
 	@mkdir -p $(PREFIX)
 	go build -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
@@ -185,3 +178,4 @@ test-apikey-e2e: install lever-image-bins
 .PHONY: test-lima-e2e
 test-lima-e2e: install
 	bash tools/test/lima-e2e.sh
+

@@ -95,15 +95,18 @@ func filesStampOf(app *config.App) *filesStamp {
 }
 
 // RemoteConfigHash digests the config a `lever remote serve` process captures
-// at startup (see state.RemoteConfigHash). It is the only mapping of
-// config.App onto state.RemoteIdentity, so state stays free of config types.
-func RemoteConfigHash(app *config.App) string {
+// at startup (see state.RemoteConfigHash): the config and the hub-identity
+// record it signs in with. It is the only mapping of config.App onto
+// state.RemoteIdentity, so state stays free of config types.
+func RemoteConfigHash(app *config.App, st state.State) string {
+	hub, _, _ := st.LoadHubIdentity()
 	id := state.RemoteIdentity{
 		Enabled:      app.Remote.Enabled,
 		Port:         app.Remote.Port,
 		BaseURL:      app.Remote.BaseURL,
 		AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
-		LoginPort:    app.Remote.LoginPort,
+		HubUsers:     hub.Users,
+		HubKey:       hub.KeyFingerprint,
 		// Effective values, so spelling out the default (or changing the
 		// header's case) does not bounce the proxy.
 		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),

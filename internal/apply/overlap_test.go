@@ -65,25 +65,25 @@ func runWithProgressCtx(ctx context.Context, t *testing.T, deps Deps, out *syncO
 }
 
 func TestLoadImageRunsAlongsideTheHubSteps(t *testing.T) {
-	patRan := make(chan struct{})
-	var loadSawPAT atomic.Bool
+	identityRan := make(chan struct{})
+	var loadSawIdentity atomic.Bool
 	out, err := runWithProgress(t, Deps{
 		LoadImage: func(ctx context.Context, _ string) error {
 			select {
-			case <-patRan:
-				loadSawPAT.Store(true)
+			case <-identityRan:
+				loadSawIdentity.Store(true)
 				return nil
 			case <-time.After(overlapTimeout):
-				return errors.New("bootstrap-token never ran while the image loaded")
+				return errors.New("hub-identity never ran while the image loaded")
 			}
 		},
-		EnsureControllerPAT: func(context.Context) error { close(patRan); return nil },
+		EnsureHubIdentity: func(context.Context) error { close(identityRan); return nil },
 	})
 	if err != nil {
 		t.Fatalf("Run: %v\n%s", err, out)
 	}
-	if !loadSawPAT.Load() {
-		t.Fatal("load-image did not overlap bootstrap-token")
+	if !loadSawIdentity.Load() {
+		t.Fatal("load-image did not overlap hub-identity")
 	}
 	if !strings.Contains(out, "load-image "+testImage+" ... (alongside the next steps)") || !strings.Contains(out, "load-image "+testImage+" ok") {
 		t.Fatalf("progress list:\n%s", out)
@@ -170,27 +170,27 @@ func TestMintWaitsForTheBroker(t *testing.T) {
 }
 
 func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
-	patStarted := make(chan struct{})
-	var patDone, serverRan atomic.Bool
+	identityStarted := make(chan struct{})
+	var identityDone, laterRan atomic.Bool
 	out := &syncOut{}
 	_, err := runWithProgressCtx(context.Background(), t, Deps{
 		LoadImage: func(context.Context, string) error {
 			select {
-			case <-patStarted:
+			case <-identityStarted:
 			case <-time.After(overlapTimeout):
 			}
 			return errBoom
 		},
-		EnsureControllerPAT: func(context.Context) error {
-			close(patStarted)
+		EnsureHubIdentity: func(context.Context) error {
+			close(identityStarted)
 			// The step in front ends only once the lane step is listed
 			// as failed.
 			out.waitFor(testImage + " FAILED")
-			patDone.Store(true)
+			identityDone.Store(true)
 			return nil
 		},
-		EnsureScionTelemetry: func(context.Context) (bool, error) {
-			serverRan.Store(true)
+		EnsureAgentTemplate: func(context.Context, string) (bool, error) {
+			laterRan.Store(true)
 			return false, nil
 		},
 	}, out)
@@ -198,13 +198,13 @@ func TestBackgroundFailureStopsTheRunAfterTheRunningStep(t *testing.T) {
 	if !strings.Contains(err.Error(), "step load-image") {
 		t.Fatalf("error does not name the failed step: %v", err)
 	}
-	if !patDone.Load() {
+	if !identityDone.Load() {
 		t.Fatal("the running foreground step was not left to finish")
 	}
-	if serverRan.Load() {
+	if laterRan.Load() {
 		t.Fatal("a step after the background failure ran")
 	}
-	if got := out.String(); !strings.Contains(got, "load-image "+testImage+" FAILED") || !strings.Contains(got, "bootstrap-token ok") {
+	if got := out.String(); !strings.Contains(got, "load-image "+testImage+" FAILED") || !strings.Contains(got, "hub-identity ok") {
 		t.Fatalf("progress list:\n%s", got)
 	}
 }
@@ -255,7 +255,7 @@ func TestInterruptListsLaneStepsAsStopped(t *testing.T) {
 			<-lctx.Done()
 			return lctx.Err()
 		},
-		EnsureControllerPAT: func(c context.Context) error {
+		EnsureHubIdentity: func(c context.Context) error {
 			cancel()
 			<-c.Done()
 			return c.Err()
@@ -282,7 +282,7 @@ func TestForegroundFailureStopsTheLanes(t *testing.T) {
 				return nil
 			}
 		},
-		EnsureControllerPAT: func(context.Context) error { return errBoom },
+		EnsureHubIdentity: func(context.Context) error { return errBoom },
 	})
 	testutil.WantErrIs(t, err, errBoom)
 	if strings.Contains(err.Error(), "load-image") || errors.Is(err, context.Canceled) {
@@ -300,23 +300,23 @@ func TestForegroundFailureStopsTheLanes(t *testing.T) {
 }
 
 func TestBothFailuresAreReported(t *testing.T) {
-	patStarted, brokerFailed := make(chan struct{}), make(chan struct{})
+	identityStarted, brokerFailed := make(chan struct{}), make(chan struct{})
 	errBroker := errors.New("broker did not become healthy")
 	_, err := runWithProgress(t, Deps{
 		BrokerHealthy: func(context.Context) error {
 			defer close(brokerFailed)
-			<-patStarted
+			<-identityStarted
 			return errBroker
 		},
-		EnsureControllerPAT: func(context.Context) error {
-			close(patStarted)
+		EnsureHubIdentity: func(context.Context) error {
+			close(identityStarted)
 			<-brokerFailed
 			return errBoom
 		},
 	})
 	testutil.WantErrIs(t, err, errBoom)
 	testutil.WantErrIs(t, err, errBroker)
-	if !strings.Contains(err.Error(), "step broker-up") || !strings.Contains(err.Error(), "step bootstrap-token") {
+	if !strings.Contains(err.Error(), "step broker-up") || !strings.Contains(err.Error(), "step hub-identity") {
 		t.Fatalf("error: %v", err)
 	}
 }

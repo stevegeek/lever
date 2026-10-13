@@ -25,7 +25,6 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
-	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -41,19 +40,12 @@ var (
 	failProbes = doctorProbes{dial: failDial}
 )
 
-// healthyRemoteProbes makes the remote-access chain look green, including the
-// provider's 404 on /authorize. Every probe is stubbed: a test must never reach
-// a proxy running on this host.
+// healthyRemoteProbes makes the remote-access chain look green. Every probe is
+// stubbed: a test must never reach a proxy running on this host.
 func healthyRemoteProbes() doctorProbes {
 	return doctorProbes{
 		dial:          okDial,
 		remoteHealthz: func(healthzProbe) (int, error) { return 200, nil },
-		remoteLogin: func(int) (loginProbeResult, error) {
-			return loginProbeResult{discovery: 200, authorize: 404, authzURL: "https://lever.invalid/authorize"}, nil
-		},
-		remoteJailLogin: func(context.Context, proc.Runner, string) (int, string, error) {
-			return 302, remoteproxy.DeadAuthorizationEndpoint, nil
-		},
 	}
 }
 
@@ -815,75 +807,6 @@ func TestCheckRemoteHealthy(t *testing.T) {
 	}
 }
 
-// TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz pins the probe order. The
-// proxy opens a hub web session before forwarding /healthz, so a broken login
-// chain makes healthz 502 too; probing it first would hide the actionable
-// login-path message. The cause must win over the symptom.
-func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
-	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := state.ForConfig(t.TempDir())
-	writeRemotePID(t, st, os.Getpid())
-	writeRemotePAT(t, st, 0o600)
-
-	// The host-side provider is healthy; the hub cannot reach it through the guest
-	// forwarder.
-	p := healthyRemoteProbes()
-	p.remoteJailLogin = func(context.Context, proc.Runner, string) (int, string, error) {
-		return 500, "", nil
-	}
-	healthzProbed := false
-	p.remoteHealthz = func(healthzProbe) (int, error) {
-		healthzProbed = true
-		return 502, nil
-	}
-
-	r := checkRemote(context.Background(), app, st, p, proc.NewFakeRunner())
-	if r.ok {
-		t.Fatal("a hub that cannot reach the login provider must fail the check")
-	}
-	if !strings.Contains(r.detail, "could not reach lever's login provider") {
-		t.Fatalf("detail = %q, want the login-path diagnosis rather than the healthz symptom", r.detail)
-	}
-	if !strings.Contains(r.fix, "lever down") {
-		t.Fatalf("fix = %q, want the actionable egress remediation", r.fix)
-	}
-	if healthzProbed {
-		t.Fatal("healthz was probed before the login diagnosis: its 502 is a CONSEQUENCE of the broken login, and reporting it shadows the cause")
-	}
-}
-
-// TestCheckRemoteFlagsALiveAuthorizeEndpoint: anything but 404 on /authorize
-// can mint an authorization code over HTTP on a port every jailed agent
-// reaches.
-func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
-	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := state.ForConfig(t.TempDir())
-	writeRemotePID(t, st, os.Getpid())
-	writeRemotePAT(t, st, 0o600)
-	for _, tc := range []struct {
-		name  string
-		probe loginProbeResult
-		want  string
-	}{
-		{"authorize answers", loginProbeResult{discovery: 200, authorize: 302, authzURL: "https://lever.invalid/authorize"}, "/authorize"},
-		{"discovery advertises a loopback authorize endpoint", loginProbeResult{discovery: 200, authorize: 404, authzURL: "http://127.0.0.1:8446/authorize"}, "on loopback"},
-		{"discovery advertises localhost by name", loginProbeResult{discovery: 200, authorize: 404, authzURL: "http://localhost:9999/authorize"}, "on loopback"},
-		{"discovery is not served", loginProbeResult{discovery: 500, authorize: 404}, "discovery"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := healthyRemoteProbes()
-			p.remoteLogin = func(int) (loginProbeResult, error) { return tc.probe, nil }
-			r := checkRemote(context.Background(), app, st, p, nil)
-			if r.ok {
-				t.Fatalf("%s must fail the check", tc.name)
-			}
-			if !strings.Contains(r.detail, tc.want) {
-				t.Fatalf("detail = %q, want it to name %q", r.detail, tc.want)
-			}
-		})
-	}
-}
-
 // The proxy's allowed_users gate trusts the identity header. Doctor runs
 // host-side, as trusted as the PAT file, so it sends the first allowed user, or
 // a pinned instance would 403 its own check.
@@ -1272,57 +1195,6 @@ func TestCheckNodeToolchainProbeError(t *testing.T) {
 	}
 }
 
-// TestCheckRemoteLoginPathProvesTheGuestHalf: the host-side probe can be green
-// while the browser gets a 502. Asking the hub to start a login exercises the
-// guest forwarder and the hub's oidc_login block.
-func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
-	jr := proc.NewFakeRunner()
-	st := state.ForConfig(t.TempDir())
-
-	for _, tc := range []struct {
-		name     string
-		status   int
-		redirect string
-		err      error
-		ok       bool
-		want     string
-	}{
-		{"healthy", 302, remoteproxy.DeadAuthorizationEndpoint + "?client_id=lever-remote", nil, true, "reaches the provider"},
-		{"hub has no oidc_login", 400, "", nil, false, "does not have lever's OIDC login configured"},
-		{"forwarder down", 500, "", nil, false, "could not reach lever's login provider"},
-		{"another IdP configured", 302, "https://accounts.google.example/o/oauth2/auth", nil, false, "not lever's provider"},
-		{"jail unreachable", 0, "", errors.New("machine not found"), false, "from inside the jail"},
-		{"unexpected status", 418, "", nil, false, "want 302"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := doctorProbes{remoteJailLogin: func(context.Context, proc.Runner, string) (int, string, error) {
-				return tc.status, tc.redirect, tc.err
-			}}
-			detail, _, ok := checkRemoteLoginPath(context.Background(), jr, st, p)
-			if ok != tc.ok {
-				t.Fatalf("ok = %v, want %v (detail %q)", ok, tc.ok, detail)
-			}
-			if !strings.Contains(detail, tc.want) {
-				t.Fatalf("detail = %q, want it to mention %q", detail, tc.want)
-			}
-		})
-	}
-}
-
-// The probe asks the hub as an unauthenticated browser would, from inside the
-// jail, with an absolute curl path (the run user's PATH has writable
-// directories ahead of /usr/bin).
-func TestRemoteJailLoginScriptShape(t *testing.T) {
-	for _, want := range []string{"/usr/bin/curl", "-o /dev/null", "%{http_code} %{redirect_url}"} {
-		if !strings.Contains(remoteJailLoginScript, want) {
-			t.Fatalf("script missing %q:\n%s", want, remoteJailLoginScript)
-		}
-	}
-	if strings.Contains(remoteJailLoginScript, "Authorization") {
-		t.Fatalf("the login route is public; sending a credential would test the wrong thing:\n%s", remoteJailLoginScript)
-	}
-}
-
 func TestStateRel(t *testing.T) {
 	st := state.ForConfig(filepath.Join(t.TempDir(), "inst"))
 	if got := stateRel(st, st.RemoteLog()); got != ".lever-state/remote.log" {
@@ -1387,7 +1259,7 @@ func TestProductionProbesWiresEveryField(t *testing.T) {
 	if p.dial == nil || p.goVersion == nil || p.nodeToolchain == nil || p.claudeVersion == nil ||
 		p.claudeVersionTar == nil || p.leverVersion == nil || p.leverVersionTar == nil ||
 		p.jailABI == nil || p.jailABITar == nil ||
-		p.remoteHealthz == nil || p.remoteLogin == nil || p.remoteJailLogin == nil {
+		p.remoteHealthz == nil || p.portHolder == nil {
 		t.Fatalf("productionProbes left a probe nil: %+v", p)
 	}
 }

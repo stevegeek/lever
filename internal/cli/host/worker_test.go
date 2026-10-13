@@ -34,7 +34,7 @@ func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
 	}
 
 	// purge's scion client must keep its HubTokenSource, or it deletes
-	// anonymously against the dev-auth-off hub.
+	// anonymously, and the hub refuses it.
 	if err := state.ForConfig(dir).SaveControllerPAT("pat-worker-purge"); err != nil {
 		t.Fatal(err)
 	}

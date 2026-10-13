@@ -164,13 +164,13 @@ func TestConfigHashFilesOnlyWhileOn(t *testing.T) {
 
 func TestRemoteConfigHashFilesOnlyWhileOn(t *testing.T) {
 	app := remoteTestApp(t)
-	off := RemoteConfigHash(app)
+	off := RemoteConfigHash(app, state.State{})
 	app.Remote.Files.MaxBytes = 5 << 20
-	if RemoteConfigHash(app) != off {
+	if RemoteConfigHash(app, state.State{}) != off {
 		t.Fatal("files settings while off changed the proxy hash")
 	}
 	app.Remote.Files.Enabled = true
-	if RemoteConfigHash(app) == off {
+	if RemoteConfigHash(app, state.State{}) == off {
 		t.Fatal("turning files on must restart the proxy")
 	}
 }
@@ -181,7 +181,7 @@ func TestRemoteConfigHashUnchangedWhileFilesOff(t *testing.T) {
 	id := state.RemoteIdentity{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net", AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
 		IdentityHeader: app.EffectiveRemoteIdentityHeader(), Bind: app.EffectiveRemoteBind(), Landing: app.EffectiveRemoteLanding(),
 		Name: "boss", Workers: []string{"w1", "w2"}, Tree: "/t"}
-	if RemoteConfigHash(app) != state.RemoteConfigHash(id) {
+	if RemoteConfigHash(app, state.State{}) != state.RemoteConfigHash(id) {
 		t.Fatal("off must keep the pre-change proxy hash")
 	}
 }
@@ -213,31 +213,31 @@ func TestFilesSwitchesInTheStamps(t *testing.T) {
 	if ConfigHash(app) != oldBroker {
 		t.Fatal("defaults changed the broker stamp")
 	}
-	b0, p0 := ConfigHash(app), RemoteConfigHash(app)
+	b0, p0 := ConfigHash(app), RemoteConfigHash(app, state.State{})
 	yes, no := true, false
 	app.Remote.Files.Uploads, app.Remote.Files.Shares = &yes, &yes
 	app.Remote.AllowedUsers[1].Files = &yes
-	if ConfigHash(app) != b0 || RemoteConfigHash(app) != p0 {
+	if ConfigHash(app) != b0 || RemoteConfigHash(app, state.State{}) != p0 {
 		t.Fatal("explicit defaults changed a stamp")
 	}
 	app.Remote.Files.Uploads = &no
-	if ConfigHash(app) != b0 || RemoteConfigHash(app) == p0 {
+	if ConfigHash(app) != b0 || RemoteConfigHash(app, state.State{}) == p0 {
 		t.Fatal("uploads off: the proxy restarts, the broker does not act on it")
 	}
 	app.Remote.Files.Uploads = &yes
 	app.Remote.Files.Shares = &no
-	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+	if ConfigHash(app) == b0 || RemoteConfigHash(app, state.State{}) == p0 {
 		t.Fatal("shares off must restart both")
 	}
 	app.Remote.Files.Shares = &yes
 	app.Remote.AllowedUsers[1].Files = &no
-	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+	if ConfigHash(app) == b0 || RemoteConfigHash(app, state.State{}) == p0 {
 		t.Fatal("a login with files: false must restart both")
 	}
 	app.Remote.Files.Enabled = false
-	off := RemoteConfigHash(app)
+	off := RemoteConfigHash(app, state.State{})
 	app.Remote.AllowedUsers[1].Files = nil
-	if RemoteConfigHash(app) != off {
+	if RemoteConfigHash(app, state.State{}) != off {
 		t.Fatal("files off: the login switch is ignored")
 	}
 }
@@ -247,16 +247,16 @@ func TestFilesSwitchesInTheStamps(t *testing.T) {
 // is in either stamp.
 func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 	app := remoteTestApp(t)
-	b0, off := ConfigHash(app), RemoteConfigHash(app)
+	b0, off := ConfigHash(app), RemoteConfigHash(app, state.State{})
 	app.Remote.Voice = config.Voice{Socket: "/run/lever/whisper.sock", MaxSeconds: 60}
 	no := false
 	app.Remote.AllowedUsers[1].Voice = &no
-	if RemoteConfigHash(app) != off || ConfigHash(app) != b0 {
+	if RemoteConfigHash(app, state.State{}) != off || ConfigHash(app) != b0 {
 		t.Fatal("voice settings while off changed a stamp")
 	}
 	app.Remote.AllowedUsers[1].Voice = nil
 	app.Remote.Voice.Enabled = true
-	on := RemoteConfigHash(app)
+	on := RemoteConfigHash(app, state.State{})
 	if on == off {
 		t.Fatal("turning voice on must restart the proxy")
 	}
@@ -275,7 +275,7 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 		c := *app
 		c.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
 		mut(&c)
-		if RemoteConfigHash(&c) == on {
+		if RemoteConfigHash(&c, state.State{}) == on {
 			t.Errorf("%s: no proxy restart", name)
 		}
 	}
@@ -287,7 +287,7 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 	} {
 		c := *app
 		mut(&c)
-		if RemoteConfigHash(&c) != on {
+		if RemoteConfigHash(&c, state.State{}) != on {
 			t.Errorf("%s: the stamp changed", name)
 		}
 	}

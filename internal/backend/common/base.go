@@ -317,16 +317,12 @@ func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath strin
 	return b.Guest().InstallRootBinary(ctx, localPath, destPath)
 }
 
-func (b *Base) EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error) {
-	return b.Guest().EnsureHubLogin(ctx, spec)
+func (b *Base) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error) {
+	return b.Guest().EnsureHubAuth(ctx, spec)
 }
 
 func (b *Base) EnsureLeverTemplate(ctx context.Context) (bool, error) {
 	return b.Guest().EnsureLeverTemplate(ctx)
-}
-
-func (b *Base) DisableHubLogin(ctx context.Context) (bool, error) {
-	return b.Guest().DisableHubLogin(ctx)
 }
 
 func (b *Base) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error) {

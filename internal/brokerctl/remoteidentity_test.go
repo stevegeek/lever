@@ -14,10 +14,10 @@ import (
 // edit would bounce the proxy and drop live sessions).
 func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	base := &config.App{Remote: config.Remote{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net"}}
-	h := RemoteConfigHash(base)
+	h := RemoteConfigHash(base, state.State{})
 
 	same := &config.App{Remote: config.Remote{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net"}}
-	if RemoteConfigHash(same) != h {
+	if RemoteConfigHash(same, state.State{}) != h {
 		t.Error("identical remote config must hash identically, or every apply restarts the proxy")
 	}
 
@@ -25,7 +25,6 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 		"allowed_users":        func(a *config.App) { a.Remote.AllowedUsers = []config.RemoteUser{{Login: "me@example.com"}} },
 		"base_url":             func(a *config.App) { a.Remote.BaseURL = "https://other.ts.net" },
 		"port":                 func(a *config.App) { a.Remote.Port = 9445 },
-		"login_port":           func(a *config.App) { a.Remote.LoginPort = 8449 },
 		"enabled":              func(a *config.App) { a.Remote.Enabled = false },
 		"identity_header":      func(a *config.App) { a.Remote.IdentityHeader = "X-ExeDev-Email" },
 		"bind":                 func(a *config.App) { a.Remote.Bind = "10.0.0.5" },
@@ -35,7 +34,7 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	} {
 		changed := &config.App{Remote: base.Remote}
 		mutate(changed)
-		if RemoteConfigHash(changed) == h {
+		if RemoteConfigHash(changed, state.State{}) == h {
 			t.Errorf("changing %s did not change the hash — the running proxy would keep the old value", name)
 		}
 	}
@@ -45,13 +44,13 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 	spelled.Remote.IdentityHeader = "tailscale-user-login"
 	spelled.Remote.Bind = "127.0.0.1"
 	spelled.Remote.Landing = config.RemoteLandingConsole
-	if RemoteConfigHash(spelled) != h {
+	if RemoteConfigHash(spelled, state.State{}) != h {
 		t.Error("spelling out the default identity header or bind must not bounce the proxy")
 	}
 
 	// Broker/worker config is not the proxy's to care about.
 	unrelated := &config.App{Remote: base.Remote, Workers: []config.Worker{{Name: "w", Dir: "d"}}}
-	if RemoteConfigHash(unrelated) != h {
+	if RemoteConfigHash(unrelated, state.State{}) != h {
 		t.Error("an unrelated config change must NOT bounce the proxy")
 	}
 }
@@ -62,16 +61,16 @@ func TestRemoteConfigHashTracksRemoteOnly(t *testing.T) {
 func TestRemoteConfigHashCoversWhatTheProxyCaptures(t *testing.T) {
 	base := &config.App{Name: "assistant", Backend: "orbstack",
 		Remote: config.Remote{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net"}}
-	h := RemoteConfigHash(base)
+	h := RemoteConfigHash(base, state.State{})
 
 	renamed := *base
 	renamed.Name = "other"
-	if RemoteConfigHash(&renamed) == h {
+	if RemoteConfigHash(&renamed, state.State{}) == h {
 		t.Error("a renamed instance must not reuse a proxy pointed at the old jail")
 	}
 	rebacked := *base
 	rebacked.Backend = "lima"
-	if RemoteConfigHash(&rebacked) == h {
+	if RemoteConfigHash(&rebacked, state.State{}) == h {
 		t.Error("a changed backend must not reuse a proxy built for the other transport")
 	}
 }
@@ -84,6 +83,10 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 	identity := reflect.TypeFor[state.RemoteIdentity]()
 	for i := range remote.NumField() {
 		f := remote.Field(i)
+		// login_port is parsed only so an old lever.yaml loads; nothing reads it.
+		if f.Name == "LoginPort" {
+			continue
+		}
 		g, ok := identity.FieldByName(f.Name)
 		if !ok {
 			t.Errorf("config.Remote.%s has no state.RemoteIdentity counterpart — add it to RemoteConfigHash", f.Name)
@@ -118,9 +121,11 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}
 	}
-	const appExtras = 4 // Name, Backend, Workers, Tree
+	// Name, Backend, Workers, Tree, and the hub identity (HubUsers, HubKey);
+	// minus LoginPort, which has no counterpart.
+	const appExtras = 4 + 2 - 1
 	if got, want := identity.NumField(), remote.NumField()+appExtras; got != want {
-		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend + Workers + Tree)", got, want)
+		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote - LoginPort + Name + Backend + Workers + Tree + HubUsers + HubKey)", got, want)
 	}
 }
 
@@ -146,7 +151,7 @@ func remoteTestApp(t *testing.T) *config.App {
 
 func TestRemoteHashCoversChatListInputs(t *testing.T) {
 	app := remoteTestApp(t)
-	h0 := RemoteConfigHash(app)
+	h0 := RemoteConfigHash(app, state.State{})
 	for name, mut := range map[string]func(*config.App){
 		"see":         func(a *config.App) { a.Remote.AllowedUsers[1].See = []string{"w2"} },
 		"labels_file": func(a *config.App) { a.Remote.LabelsFile = "workers/labels.json" },
@@ -157,7 +162,7 @@ func TestRemoteHashCoversChatListInputs(t *testing.T) {
 		a.Workers = slices.Clone(app.Workers)
 		a.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
 		mut(&a)
-		if RemoteConfigHash(&a) == h0 {
+		if RemoteConfigHash(&a, state.State{}) == h0 {
 			t.Errorf("%s: hash unchanged; a running proxy would keep the old list", name)
 		}
 	}
@@ -166,10 +171,10 @@ func TestRemoteHashCoversChatListInputs(t *testing.T) {
 func TestRemoteHashOfAConsoleInstanceIgnoresWorkers(t *testing.T) {
 	app := remoteTestApp(t)
 	app.Remote.Landing = ""
-	h0 := RemoteConfigHash(app)
+	h0 := RemoteConfigHash(app, state.State{})
 	app.Workers = append(app.Workers, config.Worker{Name: "w9", Dir: "workers/w9"})
 	app.Tree = "/other"
-	if RemoteConfigHash(app) != h0 {
+	if RemoteConfigHash(app, state.State{}) != h0 {
 		t.Fatal("a worker change bounced a console-landing proxy")
 	}
 }
@@ -177,37 +182,72 @@ func TestRemoteHashOfAConsoleInstanceIgnoresWorkers(t *testing.T) {
 func TestRemoteConfigHashCoversAgentMessages(t *testing.T) {
 	app := &config.App{Name: "hello", Backend: "orbstack", Remote: config.Remote{Enabled: true, BaseURL: "https://x.ts.net",
 		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
-	off := RemoteConfigHash(app)
+	off := RemoteConfigHash(app, state.State{})
 	app.Remote.AgentMessages.Enabled = true
-	if RemoteConfigHash(app) == off {
+	if RemoteConfigHash(app, state.State{}) == off {
 		t.Fatal("the proxy filters only while on: turning it on must restart the proxy")
 	}
 	app.Remote.AgentMessages.Enabled = false
 	app.Remote.AgentMessages.MaxChars = 100
-	if RemoteConfigHash(app) != off {
+	if RemoteConfigHash(app, state.State{}) != off {
 		t.Fatal("off must keep the proxy's hash")
 	}
 }
 func TestRemoteConfigHashPush(t *testing.T) {
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Remote: config.Remote{Enabled: true,
 		BaseURL: "https://mac.ts.net", Landing: config.RemoteLandingChat, AllowedUsers: []config.RemoteUser{{Login: "op@x"}}}}
-	off := RemoteConfigHash(app)
+	off := RemoteConfigHash(app, state.State{})
 	app.Remote.Push.Subject = "mailto:a@b" // set but off
-	if RemoteConfigHash(app) != off {
+	if RemoteConfigHash(app, state.State{}) != off {
 		t.Fatal("a subject without enabled must not restart the proxy")
 	}
 	app.Remote.Push.Enabled = true
-	on := RemoteConfigHash(app)
+	on := RemoteConfigHash(app, state.State{})
 	if on == off {
 		t.Fatal("turning push on must restart the proxy")
 	}
 	app.Remote.Push.Subject = "mailto:c@d"
-	if RemoteConfigHash(app) == on {
+	if RemoteConfigHash(app, state.State{}) == on {
 		t.Fatal("the VAPID subject is captured at start: a change must restart the proxy")
 	}
-	subj := RemoteConfigHash(app)
+	subj := RemoteConfigHash(app, state.State{})
 	app.Remote.Push.TestHosts = []string{"127.0.0.1:9447"}
-	if RemoteConfigHash(app) == subj {
+	if RemoteConfigHash(app, state.State{}) == subj {
 		t.Fatal("the test hosts are captured at start: a change must restart the proxy")
+	}
+}
+
+// TestRemoteConfigHashTracksTheHubIdentity: the proxy signs in with the key
+// and checks each login's recorded hub user id, both read once at startup, so
+// a change to either must restart it; remote.login_port no longer does.
+func TestRemoteConfigHashTracksTheHubIdentity(t *testing.T) {
+	app := &config.App{Name: "x", Backend: "lima"}
+	app.Remote.Enabled = true
+	st := state.State{Dir: t.TempDir()}
+	h0 := RemoteConfigHash(app, st)
+	rec := state.HubIdentity{Version: state.HubIdentityVersion, Mode: state.HubModeFresh,
+		KeyFingerprint: "sha256:aa", Users: map[string]string{"a@example.com": "u1"}}
+	if err := st.SaveHubIdentity(rec); err != nil {
+		t.Fatal(err)
+	}
+	h1 := RemoteConfigHash(app, st)
+	if h1 == h0 {
+		t.Fatal("a new hub identity record did not change the proxy hash")
+	}
+	rec.Users["a@example.com"] = "u2"
+	_ = st.SaveHubIdentity(rec)
+	if RemoteConfigHash(app, st) == h1 {
+		t.Fatal("a login's new hub user id did not change the proxy hash")
+	}
+	h2 := RemoteConfigHash(app, st)
+	rec.KeyFingerprint = "sha256:bb"
+	_ = st.SaveHubIdentity(rec)
+	if RemoteConfigHash(app, st) == h2 {
+		t.Fatal("a new key did not change the proxy hash")
+	}
+	h3 := RemoteConfigHash(app, st)
+	app.Remote.LoginPort = 8449
+	if RemoteConfigHash(app, st) != h3 {
+		t.Fatal("remote.login_port is ignored and must not restart the proxy")
 	}
 }

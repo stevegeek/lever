@@ -42,6 +42,10 @@ type HubIdentity struct {
 	// Users maps each lowercased remote login email to its hub user id.
 	Users   map[string]string `json:"users"`
 	Repairs []string          `json:"repairs,omitempty"`
+	// ProbePending is set when a migration demoted or renamed the controller
+	// and cleared once the controller PAT's authority was probed after it, so
+	// an apply that failed in between probes on the next run.
+	ProbePending bool `json:"probe_pending,omitempty"`
 }
 
 // SaveHubIdentity refuses a record LoadHubIdentity would refuse.

@@ -1,6 +1,6 @@
 // Package provision holds the host-side build pipelines that produce the
-// artefacts lever puts into a jail: the scion binary (scionbin), scion's web
-// UI (webassets) and the remote-access login forwarder (loginfwd). Each
+// artefacts lever puts into a jail: the scion binary (scionbin) and scion's
+// web UI (webassets). Each
 // subpackage takes a proc.Runner and returns a local path; none of them knows
 // how to reach a guest (that is internal/backend/guest's job). This root
 // package carries only what the subpackages share.

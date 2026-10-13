@@ -45,10 +45,11 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/jail` | `JailRunner`: a `proc.Runner` that runs commands inside the jail. |
 | `internal/mcp` | JSON-RPC 2.0 framing and the `tools/call` projection shared by the agent MCP server and `captool`; `MaxBodyBytes`. |
 | `internal/opsig` | Operator-directive signature protocol. |
-| `internal/provision` | Host-side build pipelines that produce a local artefact for the guest: `scionbin` (scion binary: prebuilt/source/pinned module, ELF arch check), `webassets` (scion's SPA via npm, cached per source digest; the node probe `lever doctor` shares), `loginfwd` (the remote-access login forwarder — see below), and the shared `GoBinary` resolver. |
+| `internal/provision` | Host-side build pipelines that produce a local artefact for the guest: `scionbin` (scion binary: prebuilt/source/pinned module, ELF arch check), `webassets` (scion's SPA via npm, cached per source digest; the node probe `lever doctor` shares), and the shared `GoBinary` resolver. |
 | `internal/retry` | `retry.Until`: the one bounded poll loop every wait-for-ready path uses. |
-| `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy, local OIDC provider, chat page, file exchange and web push. |
-| `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys, the oidc_login block and YAML edit helpers). |
+| `internal/hubauth` | lever's hub assertion key and ES256 signer: the identities lever asserts to the hub (admin, controller, remote sign-ins) and the reserved addresses. |
+| `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy, the assertion sign-in, chat page, file exchange and web push. |
+| `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys and YAML edit helpers). |
 | `internal/sentledger` | Host record of every message lever itself sends to an agent. |
 | `internal/sessionrec` | Host record of when each agent's session last started fresh, and with which skill text. |
 | `internal/skills` | Framework-authored SKILL.md files scaffolded into instances. |
@@ -68,16 +69,6 @@ Developer notes for working on lever itself. For using lever, start at the
 
 All binaries are built from one Go module (Go 1.26+). The three in-jail binaries are cross-compiled
 for `linux/<arch>` with `CGO_ENABLED=0` and copied to `/usr/local/bin` in the agent image.
-
-One more in-jail program is NOT built that way: `lever-login-forward`, the remote-access login
-forwarder (`internal/provision/loginfwd/main`). It runs in the jail VM itself, not in an agent
-container, so the agent image cannot carry it. `make install` (through `make loginfwd-prebuilt`) and the
-release build run `go run ./internal/provision/loginfwd/genprebuilt` first, which
-cross-compiles it for linux/amd64 and linux/arm64 into `internal/provision/loginfwd/prebuilt/`,
-where `go:embed` carries it in `lever`; such a `lever` needs no Go toolchain for remote access. A
-`lever` built without that step (`go build`, `go install`) falls back to cross-compiling the
-embedded source on the operator host during `lever apply` of an instance with `remote.enabled`,
-which needs a Go toolchain.
 
 scion itself is too large to embed (about 40 MB per arch compressed). The release build runs
 `go run ./internal/provision/scionbin/genrelease -version <v>` first: it builds scion at

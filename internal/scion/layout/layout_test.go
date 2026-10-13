@@ -78,24 +78,19 @@ func TestEncodeSettingsUsesTwoSpaceIndent(t *testing.T) {
 	}
 }
 
-func TestOIDCLoginNodeKeys(t *testing.T) {
-	n, err := OIDCLogin{Enabled: true, DisplayName: "Lever", IssuerURL: "http://127.0.0.1:8446", ClientID: "lever"}.Node()
-	if err != nil {
+func TestSameYAML(t *testing.T) {
+	var n, other yaml.Node
+	if err := n.Encode(map[string]any{"enabled": true, "display_name": "Lever"}); err != nil {
 		t.Fatal(err)
 	}
-	var keys []string
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		keys = append(keys, n.Content[i].Value)
+	if err := other.Encode(map[string]any{"enabled": true}); err != nil {
+		t.Fatal(err)
 	}
-	if got := strings.Join(keys, ","); got != "enabled,display_name,issuer_url,client_id" {
-		t.Fatalf("keys = %s", got)
-	}
-	same, err := SameYAML(n, n)
+	same, err := SameYAML(&n, &n)
 	if err != nil || !same {
 		t.Fatalf("SameYAML(n, n) = %v, %v", same, err)
 	}
-	other, _ := OIDCLogin{Enabled: true}.Node()
-	if same, _ := SameYAML(n, other); same {
+	if same, _ := SameYAML(&n, &other); same {
 		t.Fatal("different blocks must not compare equal")
 	}
 }

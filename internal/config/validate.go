@@ -472,8 +472,6 @@ func (a *App) validateOperator() error {
 
 // validateRemote rejects a remote block that could not serve safely. It is
 // skipped while remote is disabled, so stale settings do not block loading.
-// The GuestLoginIssuerPort checks matter on OrbStack only (lever's Lima
-// template mirrors no guest port onto the host) and are harmless on Lima.
 func (a *App) validateRemote() error {
 	if !a.Remote.Enabled {
 		return nil
@@ -481,11 +479,6 @@ func (a *App) validateRemote() error {
 	rp := a.EffectiveRemotePort()
 	if rp == a.EffectiveJailPort() || rp == a.EffectiveAdminPort() {
 		return fmt.Errorf("config: remote: port %d collides with a broker listener", rp)
-	}
-	if rp == GuestLoginIssuerPort {
-		// OrbStack mirrors the jail's login forwarder onto this host port.
-		return fmt.Errorf("config: remote: port %d is the port the jail's login forwarder is mirrored onto "+
-			"by the container runtime, so the proxy cannot bind it — pick another", rp)
 	}
 	if slices.Contains(a.Manager.AllowPorts, rp) {
 		// A trust boundary, not a bind collision: the proxy believes the

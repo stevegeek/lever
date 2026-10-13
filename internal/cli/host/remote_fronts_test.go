@@ -32,7 +32,7 @@ func hostDecision(t *testing.T, yaml, host string) remoteproxy.Decision {
 	dial := func(context.Context, string, string) (net.Conn, error) {
 		return nil, errors.New("no jail in this test")
 	}
-	_, h, _, err := buildRemoteHandler(app, st, dial, audit, io.Discard)
+	h, _, err := buildRemoteHandler(app, st, dial, remoteHubLogin{}, audit, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestRemoteHandlerWiresTrustForwardedHost(t *testing.T) {
 			}
 		}
 		dial := func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("no jail") }
-		_, h, _, err := buildRemoteHandler(app, state.ForConfig(t.TempDir()), dial, audit, io.Discard)
+		h, _, err := buildRemoteHandler(app, state.ForConfig(t.TempDir()), dial, remoteHubLogin{}, audit, io.Discard)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,18 +110,17 @@ func TestRemoteHandlerWiresTrustForwardedHost(t *testing.T) {
 // it. The wildcard keeps the test portable; without AllowNonLoopback, Serve
 // refuses it.
 func TestServeRemoteBindsANonLoopbackAddress(t *testing.T) {
-	port, login := freeRemotePort(t), freeRemotePort(t)
-	app := loadInstance(t, fmt.Sprintf(remoteBase+"  port: %d\n  login_port: %d\n  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n", port, login))
+	port := freeRemotePort(t)
+	app := loadInstance(t, fmt.Sprintf(remoteBase+"  port: %d\n  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n", port))
 	dir := t.TempDir()
 	st := state.ForConfig(dir + "/lever.yaml")
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	provider := remoteproxy.NewProvider(remoteproxy.ProviderConfig{Port: login})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- serveRemote(ctx, app, st, provider, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		done <- serveRemote(ctx, app, st, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {

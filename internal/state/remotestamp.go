@@ -18,7 +18,10 @@ type RemoteIdentity struct {
 	Port         int
 	BaseURL      string
 	AllowedUsers []string
-	LoginPort    int
+	// HubUsers and HubKey are the hub-identity record the proxy signs in
+	// with: each login's recorded hub user ID and the assertion key.
+	HubUsers map[string]string `json:",omitempty"`
+	HubKey   string            `json:",omitempty"`
 	// The front's contract: which header carries the login, where the proxy
 	// listens, and whether the Host check reads X-Forwarded-Host.
 	IdentityHeader     string

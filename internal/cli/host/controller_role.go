@@ -1,24 +1,16 @@
 package host
 
-import (
-	"context"
-	"fmt"
-
-	"github.com/stevegeek/lever/internal/hubapi"
-	"github.com/stevegeek/lever/internal/proc"
-)
-
-// controllerRoleName is the project role lever binds to the identity that
-// mints the instance's PATs (the throwaway hub's dev user).
+// controllerRoleName is the project role lever binds to the controller, the
+// hub user that owns the instance project and mints the controller PAT.
 //
 // scion's mint ceiling lets a token carry only scopes its issuer holds
 // through a project-scope binding on the target project; hub-admin and owner
 // grants do not count, and newer scions' owner and admin roles lack
 // agent.attach, so minting agent:attach fails with scope_violation. lever
-// needs attach (`lever attach`, `lever up`, the remote PAT), so this role
-// grants the issuer agent.attach on the instance project and nothing else.
-// Every agent is created through the controller identity, so attach reaches
-// no other user's agents.
+// needs attach (`lever attach`, `lever up`), so this role grants the
+// controller agent.attach on the instance project and nothing else. Every
+// agent is created through the controller, so attach reaches no other user's
+// agents. Its ID is the hub marker hub-identity records.
 const controllerRoleName = "lever-controller"
 
 const controllerRoleDescription = "Managed by lever: lets the instance's controller token attach to agent sessions (lever attach, lever up) and start, stop and resume agents."
@@ -31,56 +23,4 @@ func controllerRolePermissions(lifecycle bool) []string {
 		return []string{"agent.attach", lifecyclePermission}
 	}
 	return []string{"agent.attach"}
-}
-
-// windowAdminHub is curl in the jail against the throwaway hub with its dev
-// token, or o.AdminHub in tests.
-func windowAdminHub(ctx context.Context, jr proc.Runner, o patMintOpts) (hubapi.Doer, error) {
-	if o.AdminHub != nil {
-		return o.AdminHub, nil
-	}
-	tok, err := readDevToken(ctx, jr)
-	if err != nil {
-		return nil, err
-	}
-	return &hubapi.JailCurl{Runner: jr, BaseURL: throwawayHubURL, Token: func() string { return tok }}, nil
-}
-
-// ensureControllerRole makes the hub hold the controller role and binds the
-// calling identity to it on the instance project. Idempotent.
-func ensureControllerRole(ctx context.Context, hc *hubapi.Client, projectKey string, lifecycle bool, warn func(string, ...any)) error {
-	me, err := hc.Me(ctx)
-	if err != nil {
-		return fmt.Errorf("resolving the token issuer: %w", err)
-	}
-	projectID, err := hc.ProjectID(ctx, projectKey, throwawayHubURL)
-	if err != nil {
-		return err
-	}
-	defs, err := hc.RoleDefinitions(ctx)
-	if err != nil {
-		return err
-	}
-	role, err := ensureProjectRole(ctx, hc, defs, controllerRoleName, controllerRoleDescription, controllerRolePermissions(lifecycle), warn)
-	if err != nil {
-		return err
-	}
-	if err := ensureProjectRoleBinding(ctx, hc, role.ID, me.ID, projectID); err != nil {
-		return fmt.Errorf("binding the token issuer to role %s: %w", controllerRoleName, err)
-	}
-	return nil
-}
-
-// grantControllerRole runs before any PAT is minted. A failure only warns: an
-// older scion's mint does not need the role, and on a newer one the mint then
-// fails with scope_violation, which the warning explains.
-func grantControllerRole(ctx context.Context, jr proc.Runner, projectKey string, lifecycle bool, o patMintOpts) {
-	hub, err := windowAdminHub(ctx, jr, o)
-	if err == nil {
-		err = ensureControllerRole(ctx, &hubapi.Client{T: hub}, projectKey, lifecycle, o.warn)
-	}
-	if err != nil {
-		o.warn("bootstrap-token: could not grant the %s role (agent.attach and, on scion f7155ecb or later, agent.lifecycle for the token issuer); "+
-			"on scion f7155ecb or later the token mint then fails with scope_violation: %v", controllerRoleName, err)
-	}
 }

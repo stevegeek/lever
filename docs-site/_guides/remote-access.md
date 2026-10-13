@@ -690,15 +690,19 @@ before, apply warns and leaves it unbound, and the proxy refuses that login (`hu
 every other login keeps working. A reserved address in `allowed_users` is refused at config load
 while remote access is on; with it off no login is bound at all.
 
-**Removing a login takes effect first.** Before any other step, `lever apply` (and `up` and
-`reload`) writes what each login may now do to `.lever-state/remote-grants.json`. The running proxy
-reads that file on every request and before every push: a login that is no longer there, or whose
-tier, agents, `see`, `files` or `voice` changed, is refused at once (`deny-revoked`), including the
-chat page, files, wake and voice, which the proxy answers from its own session without asking the
-hub. Every other login keeps working, and the proxy restart at the end of the apply admits the
-login again under its new settings. A change to a global setting that every login's grant includes
-(the chat page, `files`, `voice`, `read_aloud`) refuses every login until that restart. An unreadable
-or missing file refuses every login. Then, as the first thing it does at the hub, the apply
+**Removing a login takes effect first.** Before anything else, `lever apply`, `lever reload` and
+`lever up` (on every path, also when the manager is already running) write what each login may now
+do to `.lever-state/remote-grants.json`. The running proxy reads that file on every request and
+before every push, and re-checks every open request and stream about once a second: a login that
+is no longer there, or whose tier, agents, `see`, `files` or `voice` changed, is refused at once
+(`deny-revoked`), including the chat page, files, wake and voice, which the proxy answers from its
+own session without asking the hub, and its open `/events` streams and terminal connections are
+closed. Every other login keeps working, and the proxy restart at the end of the apply admits the
+login again under its new settings. A change to a setting every login shares (the front settings,
+the chat page, `agent_messages`, `files`, `voice`, push) refuses every login until that restart. An
+unreadable or missing file refuses every login. A `lever up` that finds the manager running or
+suspended applies nothing else, so it neither suspends at the hub nor restarts the proxy: run
+`lever reload` for that. Then, as the first thing it does at the hub, the apply
 suspends the removed login's hub user and drops its role bindings (the ceiling stays). The hub
 refuses a suspended user's web session at once, and its API access within the hub's 60-second user
 cache. Nothing an agent can do to the hub, nor a later step failing, delays either. Adding the

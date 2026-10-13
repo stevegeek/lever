@@ -876,9 +876,10 @@ way.
 Lever finds the controller by its user ID, through the controller PAT, so an agent renaming the dev
 user does not stop an apply. Only minting or revoking a controller token needs the address: lever
 re-pins it and asserts the controller together, up to five times. If an agent keeps renaming the
-dev user faster than that, the apply fails with `lever-controller's address does not stay on the
-controller`, and says that remote login removals already took effect: they come before any of
-this. The existing token keeps working. Stop the agents (`lever stop`), then run `lever apply`.
+dev user faster than that and the token is only in its last 30 days, lever warns and renews it on a
+later apply. If the token is missing or has other scopes, the apply fails with `lever-controller's
+address does not stay on the controller`, and says that remote login removals already took effect:
+they come before any of this. Stop the agents (`lever stop`), then run `lever apply`.
 
 Two effects to know:
 

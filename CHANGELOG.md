@@ -41,15 +41,17 @@ version bump moves the block under the new version heading.
   assets change.
 - **A removed remote login loses access before anything else in the apply (lever#20).** Every
   `lever apply`, `up` and `reload` first writes what each login may now do to
-  `.lever-state/remote-grants.json`, and the running proxy checks it on every request and push: a
-  removed login, or one whose tier, agents, `see`, `files` or `voice` changed, is refused at once
-  (`deny-revoked`), chat page, files, wake and voice included, until the apply's proxy restart.
-  With remote access off the proxy is stopped first. Neither a later step failing nor an agent
-  disturbing the hub can delay it.
+  `.lever-state/remote-grants.json`, and the running proxy checks it on every request and push and
+  every second for open streams: a removed login, or one whose tier, agents, `see`, `files` or
+  `voice` (or a setting all logins share) changed, is refused at once (`deny-revoked`), chat page,
+  files, wake and voice included, and its open streams are closed, until the apply's proxy
+  restart. With remote access off the proxy is stopped first. Neither a later step failing, nor an
+  agent disturbing the hub or editing its skill file (which stops the contact gate), can delay it.
 - **An agent renaming scion's dev user can no longer wedge an apply (lever#73).** On a migrated
   instance lever identifies the controller by user ID through its PAT, and asserts it only to mint
   or revoke a controller token, re-pinning its address and asserting together up to five times;
-  if something keeps renaming the dev user, the apply fails naming the cause, after the removals
+  if something keeps renaming the dev user, a token that is only due for renewal waits for a later
+  apply with a warning, and a missing one fails the apply naming the cause, after the removals
   above. The controller stays scion's dev user: it owns every existing agent, and scion cannot
   re-own an agent.
 - **Hub assertions are narrower (lever#73).** They live 30 s (scion ignores `jti` and adds 30 s of

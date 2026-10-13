@@ -220,10 +220,12 @@ limactl copy "$WORK/loop.py" "$VM:/tmp/loop.py"
 X cp /tmp/loop.py "lever--$NAME:/tmp/loop.py"
 X exec -d -e LOOP_SECS=600 "lever--$NAME" python3 /tmp/loop.py
 sleep 3
+# Other recorded scopes make the mint urgent: a token only in its renew
+# window would be left for a later apply with a warning.
 python3 - "$INST/.lever-state/controller.pat.json" <<'PY'
-import json, sys, datetime
+import json, sys
 p = sys.argv[1]; d = json.load(open(p))
-d["expires_at"] = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+d["requested_scopes"] = ["agent:manage"]
 json.dump(d, open(p, "w"))
 PY
 ppid0=$(cat "$INST/.lever-state/remote.pid" 2>/dev/null)

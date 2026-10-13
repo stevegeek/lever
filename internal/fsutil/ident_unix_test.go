@@ -258,3 +258,39 @@ func TestParentDir(t *testing.T) {
 		}
 	}
 }
+
+// The FD form answers for the directory the fd holds: a path that is
+// re-pointed after the open does not change the answer.
+func TestInsideByIdentityFDFollowsTheDirectoryNotThePath(t *testing.T) {
+	base := t.TempDir()
+	tree, out := filepath.Join(base, "tree"), filepath.Join(base, "out")
+	mkdirs(t, filepath.Join(tree, "sub"), out)
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(filepath.Join(tree, "sub"), link); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(link, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(out, link); err != nil {
+		t.Fatal(err)
+	}
+	wantInside(t, link, tree, false)
+	in, err := InsideByIdentityFD(fd, link, tree)
+	if err != nil || !in {
+		t.Fatalf("InsideByIdentityFD = %v, %v; want inside", in, err)
+	}
+	ofd, err := unix.Open(out, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(ofd)
+	if in, err := InsideByIdentityFD(ofd, out, tree); err != nil || in {
+		t.Fatalf("InsideByIdentityFD(out) = %v, %v; want outside", in, err)
+	}
+}

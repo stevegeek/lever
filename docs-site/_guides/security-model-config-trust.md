@@ -161,8 +161,11 @@ state directory (`.lever-state`, beside `lever.yaml`) count as inside the tree w
 lies in it, or when the walk up from them reaches the tree's own directory, compared by device and
 inode. A path that does not exist yet is walked from its deepest existing directory. The walk sees
 a case alias or firmlink on macOS, and a bind mount of the tree, which a comparison of paths
-misses, and it needs only search permission on the directories above. It cannot see a directory of
-the tree bind-mounted onto a path outside it; only the operator can make that mount. When the walk
+misses, and it needs only search permission on the directories above. A directory of the tree
+bind-mounted onto a path outside it is not on the walk: on Linux 5.8 and later lever looks up each
+mount root the walk crosses in `/proc/self/mountinfo`, and a mount of a directory at or below the
+tree counts as inside. On older Linux kernels and on macOS that case is not seen; only the operator
+can make such a mount. When the walk
 fails, the path counts as inside: config load refuses it and names the error, and a state
 directory that counts as inside turns off everything lever would keep there for agents not to
 reach (the ledgers, conversation backups, push and voice models), with doctor naming the error.

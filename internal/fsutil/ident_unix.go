@@ -34,8 +34,11 @@ var statOuter = func(path string, st *unix.Stat_t) error { return unix.Stat(path
 // contains nothing. Any other failure is an error, and callers must treat
 // it as "inside": lever cannot prove the opposite.
 //
-// A directory inside outer bind-mounted onto a path outside it is not seen:
-// ".." at a mount root leads to the mount point's parent.
+// ".." at a mount root leads to the mount point's parent, so a directory of
+// outer bind-mounted elsewhere has a chain that never passes outer. On
+// Linux 5.8 and later each mount root on the chain is looked up in
+// /proc/self/mountinfo, and a mount of a directory at or below outer
+// counts as inside (see mountRootInside). Elsewhere that case is not seen.
 func InsideByIdentity(inner, outer string) (bool, error) {
 	var o unix.Stat_t
 	if err := statOuter(outer, &o); err != nil {
@@ -49,22 +52,51 @@ func InsideByIdentity(inner, outer string) (bool, error) {
 		return false, err
 	}
 	defer unix.Close(fd)
-	var cur unix.Stat_t
-	if err := unix.Fstatat(fd, ".", &cur, 0); err != nil {
+	return insideFrom(fd, dir, outer, &o)
+}
+
+// InsideByIdentityFD is InsideByIdentity for the directory open as dirfd:
+// the answer is about the directory the fd holds, whatever its path names
+// now. name is used in errors only.
+func InsideByIdentityFD(dirfd int, name, outer string) (bool, error) {
+	var o unix.Stat_t
+	if err := statOuter(outer, &o); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat %s: %w", outer, err)
+	}
+	return insideFrom(dirfd, name, outer, &o)
+}
+
+func insideFrom(fd int, dir, outer string, o *unix.Stat_t) (bool, error) {
+	mounts := &mountCheck{outer: outer}
+	cur, err := statChain(fd, ".")
+	if err != nil {
 		return false, fmt.Errorf("stat %s: %w", dir, err)
 	}
 	// Built by appending, never with filepath.Join or Clean: those fold ".."
 	// lexically, and the kernel must resolve each one.
 	up := ".."
 	for level := 1; level <= maxIdentityLevels; level++ {
-		if sameIdentity(&cur, &o) {
+		if sameIdentity(&cur.st, o) {
 			return true, nil
 		}
-		var parent unix.Stat_t
-		if err := unix.Fstatat(fd, up, &parent, 0); err != nil {
+		parent, err := statChain(fd, up)
+		if err != nil {
 			return false, fmt.Errorf("stat ancestor %d of %s: %w", level, dir, err)
 		}
-		if sameIdentity(&parent, &cur) {
+		top := sameIdentity(&parent.st, &cur.st)
+		if cur.hasMnt && (top || parent.mnt != cur.mnt) {
+			in, err := mounts.rootInside(cur.mnt)
+			if err != nil {
+				return false, fmt.Errorf("mount above %s: %w", dir, err)
+			}
+			if in {
+				return true, nil
+			}
+		}
+		if top {
 			return false, nil
 		}
 		cur = parent

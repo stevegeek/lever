@@ -20,3 +20,21 @@ func openIdentityDir(p string) (int, error) {
 	}
 	return fd, err
 }
+
+// chainStat is one directory of a ".." chain. darwin has no mount ids, and
+// no bind mounts of its own to look for.
+type chainStat struct {
+	st     unix.Stat_t
+	mnt    uint64
+	hasMnt bool
+}
+
+func statChain(fd int, name string) (chainStat, error) {
+	var c chainStat
+	err := unix.Fstatat(fd, name, &c.st, 0)
+	return c, err
+}
+
+type mountCheck struct{ outer string }
+
+func (*mountCheck) rootInside(uint64) (bool, error) { return false, nil }

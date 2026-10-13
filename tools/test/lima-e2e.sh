@@ -355,6 +355,27 @@ else
   bad "guest tmux core capture: $(printf '%s' "$core_out" | tr '\n' ' ')"
 fi
 
+# The read-only guard's live check against real rootless keep-id containers in
+# this guest: the guest's lsns output parses and shows the runtime's namespace
+# ownership, a first process in a namespace made inside the container is
+# refused, the tree mount's device and inode numbers match (and survive a guest
+# cache drop), a directory moved in the guest is reported, and a directory
+# replaced on the host is reported or, where the tree mount follows the path
+# (9p), followed with its read-only mount. The test builds its image from the guest's own binaries and removes
+# its containers, image and scratch directory.
+say "read-only guard live check (keep-id containers over the tree mount)"
+guardout="$WORK/guard.out"
+( cd "$REPO_ROOT" && LEVER_GUARD_VM_PREFIX="limactl,shell,$MACHINE" \
+    LEVER_GUARD_TREE_HOST="$INST/workspace" LEVER_GUARD_TREE_GUEST=/lever \
+    go test -tags integration -count=1 -timeout 10m -v \
+      -run '^TestContainerLiveMountsInRealGuest$' ./internal/jail/ ) > "$guardout" 2>&1
+sed 's/^/      | /' "$guardout"
+if grep -q '^--- PASS: TestContainerLiveMountsInRealGuest' "$guardout"; then
+  ok "read-only guard: namespaces parsed and owned as required, real mounts held, nested namespace refused, moved directory reported, host-replaced directories $(grep -q 'followed by the mount' "$guardout" && echo 'followed read-only by the mount' || echo reported)"
+else
+  bad "read-only guard live check (output above)"
+fi
+
 # ================================================================================
 # 2. Guest port-forward suppression — the template hazard. A guest 0.0.0.0
 #    listener must NOT be reachable on the host loopback (stock lima would forward

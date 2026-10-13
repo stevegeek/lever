@@ -10,21 +10,14 @@ import (
 	"testing"
 )
 
-// testToolSecret is the broker-side shared secret every captool test presents
-// (rpc sets the header); rpcNoSecret is the direct-dial shape.
 const testToolSecret = "test-tool-secret"
 
-// newTestServer builds the one "db" Server every captool test drives: a single
-// "read" operation with table/filter caveats, the given backstop and handler,
-// the test tool secret, and logging discarded.
 func newTestServer(t *testing.T, backstop func(ValidatedContext, map[string]string) error,
 	handler func(ValidatedContext, map[string]string) (any, error)) *Server {
 	t.Helper()
 	return newTestServerWith(t, testToolSecret, backstop, handler)
 }
 
-// newTestServerWithSecret is testServer with an explicit Config.Secret ("" to
-// exercise the environment/fail-closed paths).
 func newTestServerWithSecret(t *testing.T, secret string) *Server {
 	t.Helper()
 	return newTestServerWith(t, secret,
@@ -63,7 +56,7 @@ func testServer(t *testing.T) *Server {
 		})
 }
 
-// rpc POSTs body to s as the broker would: with the tool secret header set.
+// rpc posts body as the broker would, with the tool secret header.
 func rpc(t *testing.T, s *Server, body string, hdr map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	h := map[string]string{ToolSecretHeader: testToolSecret}
@@ -73,8 +66,8 @@ func rpc(t *testing.T, s *Server, body string, hdr map[string]string) *httptest.
 	return rpcNoSecret(t, s, body, h)
 }
 
-// rpcNoSecret POSTs body to s with exactly hdr — no tool secret unless hdr
-// carries one (the shape of an agent dialling the tool port directly).
+// rpcNoSecret posts body with exactly hdr, as an agent dialling the tool
+// port directly would.
 func rpcNoSecret(t *testing.T, s *Server, body string, hdr map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest("POST", "/", strings.NewReader(body))

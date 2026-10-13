@@ -10,26 +10,21 @@ import (
 	"github.com/stevegeek/lever/internal/mcp"
 )
 
-// handleToolsCall is the gated path: independent token verification + backstop.
-// It returns the framed JSON-RPC reply.
+// handleToolsCall verifies the token independently of the broker, then runs
+// the backstop.
 func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []byte {
 	if caller == "" {
 		s.audit("", "", "deny", "missing X-Lever-Caller")
 		return mcp.Error(id, mcp.CodeServerError, "forbidden")
 	}
-	// Snapshot pubKey under the mutex so we see Register's write atomically and
-	// avoid a data race (Register writes under s.mu; reads must also hold s.mu).
-	// We release before any I/O (freshEpoch, token.Verify) so we never hold the
-	// lock across network calls.
+	// Release the lock before freshEpoch's network call.
 	s.mu.Lock()
 	pubKey := s.pubKey
 	s.mu.Unlock()
 
-	// Fail closed: if Register has not yet run the server has no public key and
-	// cannot verify anything — deny early with an audit trace rather than letting
-	// token.Verify panic on a nil key.  Placement here (after caller, before op
-	// extraction) keeps the audit message generic but avoids a partial parse that
-	// could log misleading op/arg detail derived from an untrusted payload.
+	// Fail closed before Register: with no key nothing can be verified, and
+	// token.Verify would panic. This runs before parsing so the audit line
+	// carries no detail from the untrusted payload.
 	if pubKey == nil {
 		s.audit("", caller, "deny", "not registered")
 		return mcp.Error(id, mcp.CodeServerError, "forbidden")
@@ -59,8 +54,8 @@ func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []by
 	}
 	vc := ValidatedContext{Caller: caller, Tool: s.name, Operation: op, Constraints: params}
 	if o.Backstop != nil {
-		// Pass args (raw execution args), not params: the backstop guards what the
-		// Handler actually executes, independent of token constraint mapping.
+		// The backstop guards the args the Handler executes, not the
+		// constraint-mapped params.
 		if err := o.Backstop(vc, args); err != nil {
 			s.audit(op, caller, "deny", "backstop: "+err.Error())
 			return mcp.Error(id, mcp.CodeServerError, "forbidden")

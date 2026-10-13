@@ -19,11 +19,9 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// Wiring tests for the issue #38 remote knobs: each fails if the config value
-// stops reaching the component that enforces it.
+// Wiring tests for the remote knobs: each fails if the config value stops
+// reaching the component that enforces it.
 
-// hostDecision serves one request with the given Host through the handler
-// `remote serve` builds for yaml, and returns the gate's audit decision.
 func hostDecision(t *testing.T, yaml, host string) remoteproxy.Decision {
 	t.Helper()
 	app := loadInstance(t, yaml)
@@ -108,9 +106,9 @@ func TestRemoteHandlerWiresTrustForwardedHost(t *testing.T) {
 	}
 }
 
-// A non-loopback bind reaches Serve with its acknowledgement: `remote serve`
-// actually listens on it. (The wildcard is used so the test runs on any
-// host; without AllowNonLoopback, Serve refuses it.)
+// A non-loopback bind with its acknowledgement makes `remote serve` listen on
+// it. The wildcard keeps the test portable; without AllowNonLoopback, Serve
+// refuses it.
 func TestServeRemoteBindsANonLoopbackAddress(t *testing.T) {
 	port, login := freeRemotePort(t), freeRemotePort(t)
 	app := loadInstance(t, fmt.Sprintf(remoteBase+"  port: %d\n  login_port: %d\n  bind: 0.0.0.0\n  allow_wildcard_bind: true\n  identity_header: X-ExeDev-Email\n", port, login))
@@ -188,8 +186,6 @@ func TestRemoteStatusTailscaleTargetIsTheListenAddress(t *testing.T) {
 		if !strings.Contains(out, "tailscale serve --bg --https=443 "+want+"\n") {
 			t.Errorf("bind %q: want target %s in:\n%s", extra, want, out)
 		}
-		// A non-default target carries the older-tailscale note; the default
-		// target does not.
 		if strings.Contains(out, "older tailscale releases refuse it") != (extra != "") {
 			t.Errorf("bind %q: note present=%v in:\n%s", extra, !(extra != ""), out)
 		}

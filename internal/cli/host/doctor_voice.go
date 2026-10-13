@@ -13,10 +13,9 @@ import (
 	"github.com/stevegeek/lever/internal/voice"
 )
 
-// checkVoice reports remote.voice: off, or on with its socket and limits,
-// the lever-tool-whisper entry that serves the socket, and that the jail
-// cannot reach the tool's -whisper-port (config validation refuses that,
-// and this row says so again).
+// checkVoice reports remote.voice: off, or on with its socket and limits, the
+// lever-tool-whisper entry serving the socket, and that the jail cannot reach
+// the tool's -whisper-port (validation refuses that; this row restates it).
 func checkVoice(app *config.App) checkResult {
 	const name = "voice"
 	if !app.VoiceOn() {
@@ -48,11 +47,10 @@ func checkVoice(app *config.App) checkResult {
 	return checkResult{name, true, detail + "; audio, transcripts and read-aloud text are never stored", ""}
 }
 
-// doctorWhisperTool is the whisper tool the `voice tool` and `voice model`
-// rows check: with remote.voice on, dictation's (VoiceTool: ok false when
-// no lever-tool-whisper entry serves remote.voice.socket); with it off, the
-// first lever-tool-whisper entry in broker.tools, which agents may use on
-// their own (ok false: none). lost names what a failure costs.
+// doctorWhisperTool is the whisper tool the voice rows check: with
+// remote.voice on, dictation's (ok false when no entry serves the socket);
+// off, the first lever-tool-whisper entry, which agents may use themselves.
+// lost names what a failure costs.
 func doctorWhisperTool(app *config.App) (w config.WhisperTool, ok bool, lost string) {
 	if app.VoiceOn() {
 		w, ok = app.VoiceTool()
@@ -64,8 +62,6 @@ func doctorWhisperTool(app *config.App) (w config.WhisperTool, ok bool, lost str
 	return config.WhisperTool{}, false, ""
 }
 
-// toolLogHint names the log of the whisper tool w (ok false: none
-// configured; socket is the one it should serve), for a fix line.
 func toolLogHint(w config.WhisperTool, ok bool, socket string) string {
 	if ok {
 		return "see " + filepath.Join("tool-logs", w.Name+".log") + " in the state directory"
@@ -73,11 +69,10 @@ func toolLogHint(w config.WhisperTool, ok bool, socket string) string {
 	return "see the log of the lever-tool-whisper that serves " + socket
 }
 
-// checkVoiceTool asks lever-tool-whisper's socket for its health: not
-// running, running with whisper-server not ready, or ready (with the model).
-// With remote.voice on it asks remote.voice.socket; with it off, the
-// -dictate-socket of the first whisper tool, so a tool used by agents alone
-// is checked too. No whisper tool and voice off: no row.
+// checkVoiceTool asks lever-tool-whisper's socket for its health:
+// remote.voice.socket when voice is on, else the first whisper tool's
+// -dictate-socket, so a tool used by agents alone is checked too. No whisper
+// tool and voice off: no row.
 func checkVoiceTool(ctx context.Context, app *config.App) checkResult {
 	const name = "voice tool"
 	w, ok, lost := doctorWhisperTool(app)
@@ -105,11 +100,9 @@ func checkVoiceTool(ctx context.Context, app *config.App) checkResult {
 	return checkResult{name, true, detail, ""}
 }
 
-// checkVoiceModel reports the tool's model (doctorWhisperTool): pinned in
-// lever's table, present in the tool's -models directory, and of the pinned
-// size and sha256 (the whole file is hashed, which takes a few seconds for
-// a large model). It runs for any configured whisper tool, remote.voice on
-// or off.
+// checkVoiceModel reports the tool's model: pinned in lever's table, present
+// in -models, and of the pinned size and sha256 (hashing a large model takes
+// seconds). It runs whenever a whisper tool is configured.
 func checkVoiceModel(app *config.App) checkResult {
 	const name = "voice model"
 	w, ok, lost := doctorWhisperTool(app)

@@ -12,9 +12,8 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// TestVMIDDirPerRole asserts the per-role VM identity dirs are distinct and
-// non-empty (the manager delegates, the worker exercises — they must not share
-// an identity directory).
+// The manager delegates and the worker exercises: they must not share an
+// identity directory.
 func TestVMIDDirPerRole(t *testing.T) {
 	m := vmIDDir("manager")
 	w := vmIDDir("worker")
@@ -23,9 +22,6 @@ func TestVMIDDirPerRole(t *testing.T) {
 	}
 }
 
-// TestEgressVerdict asserts the pure egress decision: PASS iff the allowlisted
-// broker jail port is reachable AND the non-allowlisted admin port is blocked;
-// every other combination FAILS (fail-closed).
 func TestEgressVerdict(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -67,8 +63,7 @@ func TestEgressVerdict(t *testing.T) {
 			errSubstr: "jail port not reachable",
 		},
 		{
-			// Admin probe couldn't be classified: must NOT pass (can't confirm
-			// the admin port is contained) — fail-closed.
+			// An unclassifiable admin probe cannot confirm containment: fail closed.
 			name:      "admin uncertain = FAIL-CLOSED (cannot confirm admin contained)",
 			jail:      stateReachable,
 			admin:     stateUncertain,
@@ -96,9 +91,6 @@ func TestEgressVerdict(t *testing.T) {
 	}
 }
 
-// TestClassifyEgressProbe asserts the probe classifier: exit 0 and TLS-layer
-// errors (35/60) count as reachable (the TCP connection succeeded — connecting is
-// the point); exit 7/28 are blocked; curl-absent / unexpected exits are uncertain.
 func TestClassifyEgressProbe(t *testing.T) {
 	errNonZero := fmt.Errorf("exit") // classifyEgressProbe keys on err==nil + res.Code
 
@@ -132,9 +124,6 @@ func TestClassifyEgressProbe(t *testing.T) {
 	}
 }
 
-// TestAcceptanceWiredAndEnumeratesSixChecks asserts the `lever acceptance`
-// command is wired into the host root and that exactly the six acceptance checks are
-// enumerated, in the spec order.
 func TestAcceptanceWiredAndEnumeratesSixChecks(t *testing.T) {
 	root := newRootWith(defaultFactory)
 	var found bool
@@ -165,10 +154,8 @@ func TestAcceptanceWiredAndEnumeratesSixChecks(t *testing.T) {
 	}
 }
 
-// TestAcceptanceFixtureLoads asserts the live-path fixture lever.yaml parses
-// and carries the acceptance shape: manager delegates db.read → worker, worker has an
-// empty obtain, and the db tool is declared. (The full live run needs a real
-// jail; this guards the fixture the RunE loads.)
+// TestAcceptanceFixtureLoads guards the live fixture: manager delegates
+// db.read to worker, worker has an empty obtain, and the db tool is declared.
 func TestAcceptanceFixtureLoads(t *testing.T) {
 	app, err := config.Load("testdata/acceptance/lever.yaml")
 	if err != nil {
@@ -194,13 +181,9 @@ func TestAcceptanceFixtureLoads(t *testing.T) {
 	}
 }
 
-// TestFormatNoteDeterministicAndVerdict asserts formatNote renders a dated note
-// that iterates acceptanceCheckNames() order (NOT map order), marks each check
-// PASS/FAIL, and that a single FAIL flips the overall verdict to FAIL.
 func TestFormatNoteDeterministicAndVerdict(t *testing.T) {
 	date := "2026-06-25"
 
-	// All-pass case: overall PASS.
 	allPass := map[string]bool{
 		"delegated-read": true,
 		"no-table-c":     true,
@@ -214,7 +197,6 @@ func TestFormatNoteDeterministicAndVerdict(t *testing.T) {
 	if !strings.Contains(note, date) {
 		t.Fatalf("note missing date %q:\n%s", date, note)
 	}
-	// Every check named, in order, each marked PASS.
 	lastIdx := -1
 	for _, name := range acceptanceCheckNames() {
 		idx := strings.Index(note, name)
@@ -232,12 +214,10 @@ func TestFormatNoteDeterministicAndVerdict(t *testing.T) {
 	if !overallPass(allPass) {
 		t.Fatal("overallPass(all true) should be true")
 	}
-	// Overall verdict line present and PASS.
 	if !strings.Contains(note, "Overall: PASS") {
 		t.Fatalf("all-pass note should declare Overall: PASS:\n%s", note)
 	}
 
-	// One FAIL flips the overall verdict.
 	oneFail := map[string]bool{
 		"delegated-read": true,
 		"no-table-c":     true,
@@ -307,8 +287,8 @@ func TestWaitToolsListening(t *testing.T) {
 		{Name: "ext", Backend: "127.0.0.1:3901/mcp", External: true},
 		{Name: "web", Backend: "http://127.0.0.1:3202/mcp"},
 	}}}
-	// Listens on the third try: waits, then passes; the external tool is
-	// never dialled, and a backend with a scheme is dialled at host:port.
+	// Listens on the third try. The external tool is never dialed, and a backend
+	// with a scheme is dialed at host:port.
 	var dialled []string
 	n := 0
 	dial := func(_ context.Context, addr string) error {
@@ -324,7 +304,6 @@ func TestWaitToolsListening(t *testing.T) {
 	if got := strings.Join(dialled, " "); got != "127.0.0.1:3201 127.0.0.1:3201 127.0.0.1:3201 127.0.0.1:3202" {
 		t.Fatalf("dialled %q", got)
 	}
-	// Never listens: a named error after the wait.
 	never := func(context.Context, string) error { return errors.New("connection refused") }
 	err := waitToolsListening(context.Background(), app, never, 300*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), `tool "db" is not listening on 127.0.0.1:3201`) || !strings.Contains(err.Error(), "tool-logs/db.log") {

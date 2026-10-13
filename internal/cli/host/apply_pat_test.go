@@ -14,8 +14,7 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// seedPAT persists a token AND a record that vouches for it (current scopes,
-// a far-off expiry), which is what an instance minted by this lever looks like.
+// seedPAT persists a token and a current record, as this lever mints them.
 func seedPAT(t *testing.T, st state.State, which, token string) {
 	t.Helper()
 	far := time.Now().Add(300 * 24 * time.Hour)
@@ -70,9 +69,8 @@ func TestPATMintReason(t *testing.T) {
 	}
 }
 
-// The record is what lets a later apply or doctor judge the token without a
-// hub call, so a mint must leave one behind that says what was asked, what
-// the hub granted, and when it dies.
+// A mint must leave a record of what was asked, what the hub granted and the
+// expiry, so apply and doctor can judge the token without a hub call.
 func TestEnsureControllerPATWritesTheRecord(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	f := proc.NewFakeRunner()
@@ -102,9 +100,8 @@ func TestEnsureControllerPATWritesTheRecord(t *testing.T) {
 	}
 }
 
-// An upgrade that changes the scope set must re-mint, and the token it
-// replaces must not stay valid in the hub: it is revoked in the same window,
-// by the id the record kept, AFTER the new one is persisted.
+// A scope-set change re-mints, and the replaced token is revoked in the same
+// window, by the recorded id, after the new one is persisted.
 func TestEnsureControllerPATRemintsOnScopeDriftAndRevokesTheOld(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "pat-old")
@@ -130,10 +127,8 @@ func TestEnsureControllerPATRemintsOnScopeDriftAndRevokesTheOld(t *testing.T) {
 	}
 }
 
-// A token minted by a lever that predates records is the live case on every
-// existing instance: it was minted without --expires and without
-// agent:message. It is re-minted once; there is no id to revoke, and that
-// must not be an error.
+// A token without a record (no --expires, no agent:message) is re-minted once;
+// there is no id to revoke, and that is not an error.
 func TestEnsureControllerPATRemintsALegacyTokenWithoutARecord(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	if err := st.SaveControllerPAT("pat-legacy"); err != nil {
@@ -167,9 +162,8 @@ func TestEnsureControllerPATRemintsNearExpiry(t *testing.T) {
 	}
 }
 
-// Revoking the superseded token is best-effort: the new token is already
-// persisted and working, and failing apply here would leave the operator
-// worse off than a stale-but-unreferenced token does. It is reported.
+// Revoking the superseded token is best-effort but reported: the new token is
+// already persisted and working.
 func TestEnsureControllerPATRevokeFailureIsAWarning(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "pat-old")
@@ -229,10 +223,9 @@ func (h *ceilingHub) DoBody(ctx context.Context, m, p string, _ []byte) (int, []
 	return h.Do(ctx, m, p)
 }
 
-// A pre-roles scion has no ceiling setting (it landed with scion#1089), so
-// the step must skip it — not fail apply on a settings write the hub cannot
-// take. A probe that cannot answer fails closed, exactly as the --role stamp
-// does in scion.Client.Start.
+// A scion without roles has no ceiling setting, so the step skips it rather
+// than fail apply. A probe that cannot answer fails closed, as the --role
+// stamp does in scion.Client.Start.
 func TestEnsureAgentRoleCeilingIsGatedOnTheRolesProbe(t *testing.T) {
 	h := &ceilingHub{}
 	no := func(context.Context) (bool, error) { return false, nil }
@@ -253,9 +246,9 @@ func TestEnsureAgentRoleCeilingIsGatedOnTheRolesProbe(t *testing.T) {
 	}
 }
 
-// A first mint grants the controller role in the same window, so the
-// issuer holds agent.attach on the project before hub token create runs
-// (scion f7155ecb and later refuse the mint otherwise).
+// A first mint grants the controller role in the same window, so the issuer
+// holds agent.attach on the project before hub token create (scion with
+// agent.lifecycle refuses the mint otherwise).
 func TestEnsurePATsGrantsControllerRoleBeforeMint(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	f := proc.NewFakeRunner()
@@ -274,15 +267,15 @@ func TestEnsurePATsGrantsControllerRoleBeforeMint(t *testing.T) {
 	}
 }
 
-// A scion upgrade to one with agent.lifecycle re-grants the remote role in
-// the next window, because the jail's scion (not the hub, which may be down
-// on `lever up`) is asked. Without the probe the recorded grant stands.
+// A scion upgrade adding agent.lifecycle re-grants the remote role in the next
+// window: the jail's scion is asked, not the hub, which may be down. Without
+// the probe the recorded grant stands.
 func TestEnsurePATsRegrantsRemoteRoleAfterScionUpgrade(t *testing.T) {
 	for _, probe := range []bool{false, true} {
 		st := state.ForConfig(t.TempDir())
 		seedPAT(t, st, "controller", "pat-c")
-		// The controller token already carries what this probe asks for, so
-		// only the remote role is stale here.
+		// The controller token already carries what the probe asks for; only the
+		// remote role is stale.
 		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-pat-c", Requested: controllerPATScopes(probe),
 			MintedAt: time.Now(), ExpiresAt: time.Now().Add(300 * 24 * time.Hour)}); err != nil {
 			t.Fatal(err)
@@ -337,10 +330,9 @@ func TestEnsurePATsGrantsControllerRoleForRemoteOnlyMint(t *testing.T) {
 	}
 }
 
-// On a scion with agent.lifecycle (f7155ecb) a controller token without
-// agent:lifecycle cannot resume the manager: the hub answers 409 "already
-// exists". The next apply re-mints it with the scope, after granting the
-// issuer agent.lifecycle through the controller role (the mint ceiling).
+// On a scion with agent.lifecycle a controller token without agent:lifecycle
+// cannot resume the manager (409 "already exists"). The next apply re-mints
+// it, after granting the issuer agent.lifecycle through the controller role.
 func TestEnsurePATsRemintsControllerWithLifecycle(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "pat-c")
@@ -396,8 +388,8 @@ func TestControllerLifecycleFallsBackToTheRecord(t *testing.T) {
 	}
 }
 
-// A token whose hub-granted set already holds agent:lifecycle (agent:manage
-// expands to it on scion main) is not re-minted to request it by name.
+// A token whose granted set already holds agent:lifecycle (agent:manage
+// expands to it) is not re-minted.
 func TestControllerLifecycleHonorsTheGrantedSet(t *testing.T) {
 	known := func(context.Context, string) (bool, error) { return true, nil }
 	rec := state.PATRecord{Requested: controllerPATScopes(false), Granted: []string{"agent:attach", lifecycleScope}}

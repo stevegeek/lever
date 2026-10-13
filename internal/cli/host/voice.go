@@ -57,7 +57,7 @@ func newVoiceFetchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Ctrl-C ends the download, and the temp file goes with it.
+			// Ctrl-C ends the download and removes the temp file.
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			f := voice.Fetcher{Progress: cmd.OutOrStdout()}
@@ -78,9 +78,8 @@ func newVoiceFetchCmd() *cobra.Command {
 	}
 }
 
-// voiceFetchTarget is where a fetch goes, and the tool it is for (ok
-// false: none configured): dictation's whisper tool, else the first one,
-// else voice-models/ in the state directory.
+// voiceFetchTarget is dictation's whisper tool, else the first one, else
+// voice-models/ in the state directory (ok false: no tool).
 func voiceFetchTarget(app *config.App, st state.State) (dir string, w config.WhisperTool, ok bool, err error) {
 	w, ok = app.VoiceTool()
 	if !ok {
@@ -102,8 +101,6 @@ func voiceFetchTarget(app *config.App, st state.State) (dir string, w config.Whi
 	return st.VoiceModels(), w, ok, nil
 }
 
-// runVoiceFetch fetches model name ("" = the whisper tool's -model, or the
-// default) with fetch into voiceFetchTarget.
 func runVoiceFetch(ctx context.Context, app *config.App, st state.State, name string,
 	fetch func(context.Context, voice.Model, string) (string, error), out io.Writer) error {
 	dir, w, ok, err := voiceFetchTarget(app, st)
@@ -140,10 +137,9 @@ func runVoiceFetch(ctx context.Context, app *config.App, st state.State, name st
 	return nil
 }
 
-// speechFetchTarget is where a speech model fetch goes, and the tool it is
-// for (ok false: none configured): read-aloud's tts tool, else the first
-// one, else voice-models/ in the state directory (each speech model in its
-// own directory there).
+// speechFetchTarget is read-aloud's tts tool, else the first one, else
+// voice-models/ in the state directory, one directory per model (ok false: no
+// tool).
 func speechFetchTarget(app *config.App, st state.State) (dir string, t config.TTSTool, ok bool, err error) {
 	t, ok = app.SpeechTool()
 	if !ok {
@@ -164,8 +160,6 @@ func speechFetchTarget(app *config.App, st state.State) (dir string, t config.TT
 	return st.VoiceModels(), t, ok, nil
 }
 
-// runSpeechFetch fetches speech model name ("" = the tts tool's -model, or
-// the default) with fetch into speechFetchTarget.
 func runSpeechFetch(ctx context.Context, app *config.App, st state.State, name string,
 	fetch func(context.Context, voice.SpeechModel, string) (string, error), out io.Writer) error {
 	dir, t, ok, err := speechFetchTarget(app, st)

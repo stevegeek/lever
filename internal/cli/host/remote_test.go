@@ -54,12 +54,11 @@ func heldPort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// serveUntilBind runs `remote serve` for the instance in dir and returns its
-// error, which the callers require to be the proxy's bind failure.
+// serveUntilBind runs `remote serve` for the instance in dir; callers require
+// the proxy's bind failure.
 func serveUntilBind(t *testing.T, dir, p string) error {
 	t.Helper()
-	// The audit log opens before Serve binds; without the state dir the
-	// command would fail there and never reach the bind.
+	// The audit log opens before Serve binds, so the state dir must exist.
 	if err := os.MkdirAll(filepath.Join(dir, state.DirName), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -77,9 +76,8 @@ func serveUntilBind(t *testing.T, dir, p string) error {
 	return err
 }
 
-// Lima is no longer gated (issue #38): the login path's only guest→host hop
-// is the one every agent's broker connection makes on both backends. A lima
-// config reaches Serve exactly like an orbstack one: it fails at the proxy's
+// A lima config passes the gates like an orbstack one: the login path's only
+// guest-to-host hop is the one every broker connection makes. It fails at the
 // bind on a held port, not at a gate.
 func TestRemoteServeLimaBackendPassesGates(t *testing.T) {
 	dir := t.TempDir()
@@ -89,10 +87,8 @@ func TestRemoteServeLimaBackendPassesGates(t *testing.T) {
 	serveUntilBind(t, dir, p)
 }
 
-// This does not exercise the real serve loop (that needs a live jail +
-// signal handling); it only proves the gate checks let a valid
-// orbstack+enabled config through to the point where Serve binds, by using
-// a port that's already held so Serve fails fast rather than blocking.
+// The gate checks let a valid orbstack config through to Serve's bind; a held
+// port makes Serve fail fast rather than block.
 func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
 	dir := t.TempDir()
 	port, login := heldPort(t), freeRemotePort(t)
@@ -100,9 +96,8 @@ func TestRemoteServeOrbstackEnabledPassesGates(t *testing.T) {
 	serveUntilBind(t, dir, p)
 }
 
-// freeRemotePort claims a loopback port from the kernel and releases it, so a
-// serve test binds something free rather than the real 8445/8447 a live
-// instance on this host may be holding.
+// freeRemotePort picks a free port rather than the real 8445/8447 a live
+// instance on this host may hold.
 func freeRemotePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -113,18 +108,13 @@ func freeRemotePort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// TestRemoteServeStampsTheConfigItLoaded is the "stale but matching" defect,
-// end to end. `lever apply` reuses a live proxy when remote.pid names a live
-// process, the port answers, and the state dir's stamp matches the config it
-// is applying — but this command is reachable by hand, remote.pid is written
-// by every serve, and the stamp used to be written only by apply. The state
-// dir is keyed on the config file's DIRECTORY, so a second config beside
-// lever.yaml shares both files: serving it used to inherit apply's stamp, and
-// apply then reported success while this process enforced the other config's
-// allowed_users.
-//
-// So `remote serve` must stamp what IT loaded, replacing any record it did not
-// write.
+// TestRemoteServeStampsTheConfigItLoaded: apply reuses a live proxy whose
+// stamp matches the config it applies, but `remote serve` can be run by hand
+// and remote.pid is written by every serve. The state dir is keyed on the
+// config's directory, so a second config beside lever.yaml shares both files.
+// `remote serve` must stamp what it loaded, replacing a record it did not
+// write, or apply would report success while this process enforces another
+// config's allowed_users.
 func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	dir := t.TempDir()
 	p := writeInstanceInto(t, dir, instanceYAML("x", fmt.Sprintf(
@@ -136,9 +126,8 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// The record a previous apply left, for a config this serve knows nothing
-	// about. remote.pid names this process because the command under test runs
-	// in it — exactly the file a hand-started proxy takes over.
+	// A previous apply's record, for another config. remote.pid names this process,
+	// which runs the command under test: the file a hand-started proxy takes over.
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -187,12 +176,8 @@ func TestRemoteServeStampsTheConfigItLoaded(t *testing.T) {
 	}
 }
 
-// base_url unset is now reachable only with remote disabled (or unconfigured
-// entirely) — `remote.enabled: true` with no base_url is rejected at config
-// load (see config.TestRemoteBaseURLRequiredWhenEnabled). `remote status`
-// itself doesn't branch on RemoteEnabled(), so a disabled/unconfigured
-// instance exercises the exact same "nothing set up yet" fields this test
-// checks.
+// `remote status` does not branch on RemoteEnabled(), so an unconfigured
+// instance exercises the same "nothing set up yet" fields.
 func TestRemoteStatusNotRunningNoConfig(t *testing.T) {
 	dir := t.TempDir()
 	p := writeInstanceInto(t, dir, instanceYAML("x", ""))
@@ -268,8 +253,7 @@ func TestRemoteStatusReportsLivePidAndListener(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Record THIS test process's own pid (always alive) so the liveness
-	// check reports alive without needing a real proxy process.
+	// This test's own pid is always alive.
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -287,12 +271,10 @@ func TestRemoteStatusReportsLivePidAndListener(t *testing.T) {
 	}
 }
 
-// TestJailPrefixFnResolvesAndCaches: the proxy dials the hub through this
-// instance's jail, so it needs the backend's transport prefix — with the
-// machine's own run user in it, which is what makes two remote-enabled
-// instances on one host reach different hubs. Resolving costs commands into
-// the machine, so a success must be reused rather than re-probed per
-// connection.
+// TestJailPrefixFnResolvesAndCaches: the transport prefix carries the
+// machine's run user, which is what makes two instances on one host reach
+// different hubs. Resolving costs commands into the machine, so success is
+// reused.
 func TestJailPrefixFnResolvesAndCaches(t *testing.T) {
 	sb := &stubBackend{}
 	var calls int
@@ -317,10 +299,9 @@ func TestJailPrefixFnResolvesAndCaches(t *testing.T) {
 	}
 }
 
-// TestJailPrefixFnRetriesAfterFailure: a jail that is down when the proxy
-// starts must not wedge it permanently. The failed resolve returns nil (which
-// JailDial turns into an actionable dial error), warns once rather than once
-// per connection, and the next dial after the jail comes up succeeds.
+// TestJailPrefixFnRetriesAfterFailure: a jail down at proxy start must not
+// wedge it. The failed resolve returns nil, warns once, and the next dial
+// after the jail comes up succeeds.
 func TestJailPrefixFnRetriesAfterFailure(t *testing.T) {
 	sb := &stubBackend{resolveRunUserErr: errors.New("machine \"lever-x\" is not running")}
 	var warn bytes.Buffer
@@ -345,9 +326,8 @@ func TestJailPrefixFnRetriesAfterFailure(t *testing.T) {
 	}
 }
 
-// TestJailPrefixFnUnknownBackendFails: an unresolvable backend must fail the
-// dial, never fall back to a half-built argv that would exec something
-// unintended on the host.
+// An unresolvable backend must fail the dial, never fall back to a half-built
+// argv that would exec something unintended on the host.
 func TestJailPrefixFnUnknownBackendFails(t *testing.T) {
 	var warn bytes.Buffer
 	fn := jailPrefixFn(func(string, string) (backend.Backend, error) { return &stubBackend{}, nil }, "nope", "lever-x", &warn)
@@ -359,11 +339,8 @@ func TestJailPrefixFnUnknownBackendFails(t *testing.T) {
 	}
 }
 
-// TestJailPrefixFnConcurrentDialsShareOneAttempt: a browser opens several
-// connections at once. If each queued behind the previous one's probe, a
-// wedged machine would hold the second caller for two resolve timeouts, the
-// third for three — the opposite of the fail-the-dial-promptly behavior
-// jailResolveTimeout exists to guarantee. They must share one attempt.
+// TestJailPrefixFnConcurrentDialsShareOneAttempt: concurrent dials share one
+// attempt, or a wedged machine holds the Nth caller for N resolve timeouts.
 func TestJailPrefixFnConcurrentDialsShareOneAttempt(t *testing.T) {
 	release := make(chan struct{})
 	var probes atomic.Int32
@@ -378,8 +355,8 @@ func TestJailPrefixFnConcurrentDialsShareOneAttempt(t *testing.T) {
 	for range dials {
 		go func() { got <- fn() }()
 	}
-	// Let the first caller reach the (blocked) probe before releasing, so the
-	// others genuinely arrive while it is in flight.
+	// Let the first caller reach the blocked probe so the others arrive while it
+	// is in flight.
 	for probes.Load() == 0 {
 		time.Sleep(time.Millisecond)
 	}
@@ -402,8 +379,6 @@ func TestJailPrefixFnConcurrentDialsShareOneAttempt(t *testing.T) {
 	}
 }
 
-// blockingBackend lets a test hold ResolveRunUser open, standing in for a
-// machine that answers slowly or not at all.
 type blockingBackend struct {
 	stubBackend
 	onResolve func()

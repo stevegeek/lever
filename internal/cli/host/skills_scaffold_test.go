@@ -125,12 +125,10 @@ func TestSyncSkillsCheckModeReportsWithoutWriting(t *testing.T) {
 
 func TestEnsureClaudeMDBlock(t *testing.T) {
 	_, tree, stateDir := scaffoldFixture(t)
-	// No CLAUDE.md → created.
 	act, err := ensureClaudeMDBlock(tree, stateDir, false, false)
 	if err != nil || act != skillCreated {
 		t.Fatalf("create: act=%v err=%v", act, err)
 	}
-	// Idempotent.
 	if act, _ = ensureClaudeMDBlock(tree, stateDir, false, false); act != skillUnchanged {
 		t.Fatalf("rerun: %v", act)
 	}
@@ -152,7 +150,6 @@ func TestEnsureClaudeMDBlock(t *testing.T) {
 	if strings.Contains(s, "OLD TEXT") || !strings.Contains(s, "Consult it") {
 		t.Fatal("block not refreshed")
 	}
-	// Check mode on a tree with no CLAUDE.md.
 	tree2 := t.TempDir()
 	if act, _ = ensureClaudeMDBlock(tree2, stateDir, false, true); act != skillMissing {
 		t.Fatalf("check-missing: %v", act)
@@ -179,7 +176,7 @@ func TestAdoptRecordsBaselineAndSyncRespectsIt(t *testing.T) {
 	if err := os.WriteFile(op, []byte("my custom operator notes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// CLAUDE.md deliberately WITHOUT the lever block — adopting that is the point.
+	// CLAUDE.md deliberately without the lever block: adopting that is the point.
 	cm := filepath.Join(tree, "CLAUDE.md")
 	if err := os.WriteFile(cm, []byte("# my own tree docs\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -207,7 +204,6 @@ func TestAdoptRecordsBaselineAndSyncRespectsIt(t *testing.T) {
 		t.Fatal("framework-current file must not get an adoption record")
 	}
 
-	// Check mode: adopted counts as OK.
 	cres, _ := syncSkills(app, stateDir, false, true)
 	if cres[0].Action != skillAdopted || cres[1].Action != skillUnchanged {
 		t.Fatalf("check after adopt: %+v", cres)
@@ -220,7 +216,6 @@ func TestAdoptRecordsBaselineAndSyncRespectsIt(t *testing.T) {
 		t.Fatal("doctor predicate must pass on adopted state")
 	}
 
-	// Plain init (write mode): adopted files untouched, no block appended.
 	wres, _ := syncSkills(app, stateDir, false, false)
 	if wres[0].Action != skillAdopted {
 		t.Fatalf("write after adopt: %+v", wres)
@@ -252,7 +247,7 @@ func TestAdoptedThenEditedIsDrift(t *testing.T) {
 	if _, err := adoptSkills(app, stateDir); err != nil {
 		t.Fatal(err)
 	}
-	// Post-adoption edits (owner… or agent) → drift, never silently OK.
+	// Post-adoption edits (owner or agent) are drift, never silently OK.
 	if err := os.WriteFile(op, []byte("tampered"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +261,6 @@ func TestAdoptedThenEditedIsDrift(t *testing.T) {
 	if act, _ := ensureClaudeMDBlock(tree, stateDir, false, true); act != skillSkipped {
 		t.Fatalf("drifted CLAUDE.md check: %v", act)
 	}
-	// Write mode must not touch drifted owner territory either.
 	if act, _ := ensureClaudeMDBlock(tree, stateDir, false, false); act != skillSkipped {
 		t.Fatalf("drifted CLAUDE.md write: %v", act)
 	}
@@ -305,7 +299,6 @@ func TestAdoptCurrentFileRemovesStaleRecord(t *testing.T) {
 	if _, err := syncSkills(app, stateDir, false, false); err != nil {
 		t.Fatal(err)
 	}
-	// Plant a stale record for a file that is now framework-current.
 	if err := saveAdoptedState(stateDir, map[string]string{opRel: "deadbeef"}); err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +399,6 @@ func TestAdoptCurrentClaudeMDCreatesNoRecord(t *testing.T) {
 	if _, err := ensureClaudeMDBlock(tree, stateDir, false, false); err != nil {
 		t.Fatal(err)
 	}
-	// Plant a stale record for the now-current file.
 	if err := saveAdoptedState(stateDir, map[string]string{claudeMDAdoptKey: "deadbeef"}); err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +420,7 @@ func TestAdoptStaleUnmodifiedScaffoldNotAdopted(t *testing.T) {
 	if _, err := syncSkills(app, stateDir, false, false); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a post-upgrade stale scaffold: on-disk == skills.json record != current.
+	// A stale scaffold after an upgrade: on disk == recorded != current.
 	op := filepath.Join(tree, filepath.FromSlash(opRel))
 	old := []byte("old framework scaffold v0")
 	if err := os.WriteFile(op, old, 0o644); err != nil {
@@ -452,17 +444,16 @@ func TestAdoptStaleUnmodifiedScaffoldNotAdopted(t *testing.T) {
 	if _, ok := readAdopted(t, stateDir)[opRel]; ok {
 		t.Fatal("stale-unmodified scaffold must not get an adoption record")
 	}
-	// `lever init` still refreshes it afterwards.
 	sres, _ := syncSkills(app, stateDir, false, false)
 	if sres[0].Action != skillRefreshed {
 		t.Fatalf("stale scaffold must refresh on plain init: %+v", sres)
 	}
 }
 
-// --- R2: the scaffold engine never follows the tree out to a host file ---
+// The scaffold engine never follows the tree out to a host file.
 
-// hostFileFixture plants an operator-owned file OUTSIDE the tree (the
-// instance's lever.yaml sits exactly there) that no scaffold pass may touch.
+// hostFileFixture plants an operator-owned file outside the tree, where
+// lever.yaml sits, that no scaffold pass may touch.
 func hostFileFixture(t *testing.T, tree string) string {
 	t.Helper()
 	p := filepath.Join(filepath.Dir(tree), "lever.yaml")
@@ -540,8 +531,8 @@ func TestScaffoldRefusesSymlinkedTargetsOutOfTree(t *testing.T) {
 	}
 }
 
-// The case commit 22880a9 kept alive: a CLAUDE.md (or .claude) that is a
-// symlink INSIDE the tree is written through, in place, link intact.
+// A CLAUDE.md or .claude that is a symlink inside the tree is written through,
+// in place, link intact.
 func TestScaffoldFollowsSymlinksInsideTree(t *testing.T) {
 	app, tree, stateDir := scaffoldFixture(t)
 	real := filepath.Join(tree, "docs", "CLAUDE.md")
@@ -629,9 +620,8 @@ func TestScaffoldCapsReads(t *testing.T) {
 	}
 }
 
-// TestSkillTargetsFollowAgentMessages: remote.agent_messages picks the skill
-// variant, so turning it on changes every rendered hash (the contact gate
-// then waits for a fresh session on the new skill).
+// remote.agent_messages picks the skill variant, so it changes every rendered
+// hash (the contact gate then waits for a fresh session).
 func TestSkillTargetsFollowAgentMessages(t *testing.T) {
 	app := &config.App{Name: "boss", Tree: t.TempDir(), Workers: []config.Worker{{Name: "w1"}},
 		Remote: config.Remote{Enabled: true, AllowedUsers: []config.RemoteUser{{Login: "op@x"},

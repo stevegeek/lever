@@ -12,8 +12,8 @@ import (
 	"github.com/stevegeek/lever/internal/cli/clitest"
 )
 
-// initFixture writes a minimal valid lever.yaml + tree into a temp dir and
-// chdirs there (resolveConfigPath finds lever.yaml in the CWD).
+// initFixture writes a minimal lever.yaml and tree into a temp dir and chdirs
+// there.
 func initFixture(t *testing.T) string {
 	t.Helper()
 	root := initFixtureBare(t, "workspace")
@@ -23,15 +23,12 @@ func initFixture(t *testing.T) string {
 	return root
 }
 
-// initFixtureBare writes the lever.yaml (with tree: as given) and chdirs
-// there, but creates NO tree — the state of a fresh instance before its
-// first `lever init`.
+// initFixtureBare writes lever.yaml and chdirs there but creates no tree, as
+// before a first `lever init`.
 func initFixtureBare(t *testing.T, tree string) string {
 	t.Helper()
 	root := t.TempDir()
-	// llm_auth defaults to api-key (which requires broker.api_key_file to
-	// exist at 0600); force subscription mode so the fixture needs no key
-	// file. tree + workers are kept exactly as given in the brief.
+	// Subscription mode, so the fixture needs no api_key_file.
 	yaml := "name: testapp\nbackend: orbstack\ntree: " + tree + "\nbroker:\n  llm_auth: subscription\nworkers:\n  - name: scratch\n    dir: workers/scratch\n"
 	if err := os.WriteFile(filepath.Join(root, "lever.yaml"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
@@ -44,10 +41,9 @@ func initFixtureBare(t *testing.T, tree string) string {
 	return root
 }
 
-// TestInitCreatesMissingTree: the documented order runs `lever init` BEFORE
-// the first `lever up`, on a fresh lever.yaml whose tree: directory need not
-// exist yet. init creates it (one level, under an existing parent) and
-// scaffolds into it.
+// TestInitCreatesMissingTree: `lever init` runs before the first `lever up`,
+// so it creates the tree (one level, under an existing parent) and scaffolds
+// into it.
 func TestInitCreatesMissingTree(t *testing.T) {
 	root := initFixtureBare(t, "workspace")
 	out, err := clitest.Exec(t, newInitCmd())
@@ -70,9 +66,8 @@ func TestInitCreatesMissingTree(t *testing.T) {
 	}
 }
 
-// TestInitRefusesDanglingSymlinkTree: a tree path that is a symlink to
-// nowhere is refused, not created through — creating the link's target
-// would let a planted link choose where the scaffold lands (R2).
+// TestInitRefusesDanglingSymlinkTree: creating a dangling link's target would
+// let a planted link choose where the scaffold lands.
 func TestInitRefusesDanglingSymlinkTree(t *testing.T) {
 	root := initFixtureBare(t, "workspace")
 	target := filepath.Join(root, "elsewhere")
@@ -91,9 +86,8 @@ func TestInitRefusesDanglingSymlinkTree(t *testing.T) {
 	}
 }
 
-// TestInitRefusesTreeWithMissingParent: only the tree directory itself is
-// created, never a chain of parents — a typo'd tree: must not silently
-// materialise a nested path.
+// Only the tree directory itself is created, so a typo cannot materialise a
+// nested path.
 func TestInitRefusesTreeWithMissingParent(t *testing.T) {
 	root := initFixtureBare(t, "nested/workspace")
 	out, err := clitest.Exec(t, newInitCmd())
@@ -105,8 +99,6 @@ func TestInitRefusesTreeWithMissingParent(t *testing.T) {
 	}
 }
 
-// TestInitCheckDoesNotCreateTree: --check is read-only — a missing tree is a
-// failed check, not something to fix.
 func TestInitCheckDoesNotCreateTree(t *testing.T) {
 	root := initFixtureBare(t, "workspace")
 	if _, err := clitest.Exec(t, newInitCmd(), "--check"); err == nil {
@@ -214,14 +206,12 @@ func TestInitAdoptBlessesCustomizationForCheck(t *testing.T) {
 	if out, err := clitest.Exec(t, newInitCmd(), "--check"); err != nil {
 		t.Fatalf("check after adopt must pass: %v\n%s", err, out)
 	}
-	// Adopted file survives a plain re-run untouched.
 	if _, err := clitest.Exec(t, newInitCmd()); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(op); string(b) != "owner edit" {
 		t.Fatal("plain init must not touch an adopted file")
 	}
-	// Drift past the baseline is caught again.
 	if err := os.WriteFile(op, []byte("edited after adoption"), 0o644); err != nil {
 		t.Fatal(err)
 	}

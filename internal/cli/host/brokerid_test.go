@@ -33,9 +33,9 @@ func answer(id, version, hash string) broker.EpochAnswer {
 	return broker.EpochAnswer{EpochResponse: wire.EpochResponse{Version: version, ConfigHash: hash}, InstanceID: id}
 }
 
-// judgeRunningBroker (lever#181): reuse or restart only this instance's
-// broker; another instance's is refused; one predating ids is restarted only
-// when this instance's pid file names a live process.
+// judgeRunningBroker: reuse or restart only this instance's broker; another
+// instance's is refused; one without an id is restarted only when this
+// instance's pid file names a live process.
 func TestJudgeRunningBroker(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -61,7 +61,6 @@ func TestJudgeRunningBroker(t *testing.T) {
 	}
 }
 
-// epochServer answers /epoch with a, on a loopback port.
 func epochServer(t *testing.T, a broker.EpochAnswer) (url string, port int) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +76,6 @@ func epochServer(t *testing.T, a broker.EpochAnswer) (url string, port int) {
 	return srv.URL, port
 }
 
-// stateWithID makes a state dir whose instance id is returned.
 func stateWithID(t *testing.T) (state.State, string) {
 	t.Helper()
 	st := state.State{Dir: t.TempDir()}
@@ -88,15 +86,14 @@ func stateWithID(t *testing.T) (state.State, string) {
 	return st, id
 }
 
-// Another instance's broker on this instance's admin port, with the same
-// version and config hash: apply refuses it and leaves it alone (no stop:
-// the pid file this test writes names a process that must survive).
+// Another instance's broker on this admin port, same version and hash: apply
+// refuses it and stops nothing (the pid file names this test process).
 func TestBrokerStartRefusesAnotherInstancesBroker(t *testing.T) {
 	st, _ := stateWithID(t)
 	app := &config.App{Name: "a"}
 	url, port := epochServer(t, answer(idOther, cli.VersionString(), ""))
 	app.Broker.AdminPort = port
-	// Our pid file names this test process: a stop would kill the test.
+	// A stop would kill the test.
 	if err := os.WriteFile(st.PID(), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +107,8 @@ func TestBrokerStartRefusesAnotherInstancesBroker(t *testing.T) {
 	}
 }
 
-// A broker predating instance ids, with no live broker of ours: refused,
-// never adopted.
+// A broker without an instance id and no live broker of ours: refused, never
+// adopted.
 func TestBrokerStartRefusesAnUnownedOldBroker(t *testing.T) {
 	st, _ := stateWithID(t)
 	url, port := epochServer(t, answer("", "v0.35.0", "h"))
@@ -136,8 +133,6 @@ func TestBrokerStartReusesItsOwnBroker(t *testing.T) {
 	}
 }
 
-// epochServerFor answers with id, this binary's version and the config hash
-// app will have once its admin port is the server's.
 func epochServerFor(t *testing.T, app *config.App, id string) (string, int) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -192,16 +187,15 @@ func TestRequireOwnBroker(t *testing.T) {
 			t.Errorf("%s: %v, want %q", c.name, err, c.want)
 		}
 	}
-	// No id of our own yet: no broker can be ours.
 	_, port := epochServer(t, answer(id, "v", "h"))
 	if err := requireOwnBroker(context.Background(), http.DefaultClient, port, state.State{Dir: t.TempDir()}); err == nil {
 		t.Error("a state dir with no id accepted a broker")
 	}
 }
 
-// This instance's broker from an older binary, but its pid file names no
-// process: the stop stops nothing, the broker still answers, and apply
-// refuses rather than adopting whatever holds the port.
+// This instance's broker from an older binary, with no live pid: the stop
+// stops nothing, the broker still answers, and apply refuses rather than
+// adopt whatever holds the port.
 func TestBrokerStartRefusesWhenTheStopLeavesABroker(t *testing.T) {
 	defer func(w time.Duration) { brokerQuietWait = w }(brokerQuietWait)
 	brokerQuietWait = 300 * time.Millisecond
@@ -215,8 +209,8 @@ func TestBrokerStartRefusesWhenTheStopLeavesABroker(t *testing.T) {
 	}
 }
 
-// instanceState is a state dir beside a config in a temp dir (as apply
-// makes it) with an instance id, and that config's path.
+// instanceState is a state dir with an instance id beside a config, and that
+// config's path.
 func instanceState(t *testing.T) (state.State, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -230,10 +224,8 @@ func instanceState(t *testing.T) (state.State, string) {
 	return st, filepath.Join(root, "lever.yaml")
 }
 
-// A broker predating instance ids answers, and broker.pid names a live
-// process that is NOT this instance's `lever broker serve` (the pid was
-// reused; here, this very test process). That is a stale pid file: nothing
-// ties the broker to this instance, so apply refuses, and signals nothing.
+// A broker without an id answers and broker.pid names a reused pid (this test
+// process): a stale file, so apply refuses and signals nothing.
 func TestBrokerStartTreatsAReusedPIDAsStale(t *testing.T) {
 	st, _ := instanceState(t)
 	url, port := epochServer(t, answer("", "v0.35.0", "h"))
@@ -248,10 +240,9 @@ func TestBrokerStartTreatsAReusedPIDAsStale(t *testing.T) {
 	}
 }
 
-// The same old broker, with broker.pid naming this instance's `lever broker
-// serve` (a stand-in): apply restarts it, so the process is stopped. (The
-// test's /epoch server keeps answering, so Start then refuses what still
-// holds the port; the stop is what this test is about.)
+// The same old broker with broker.pid naming this instance's `lever broker
+// serve`: apply stops it. (The fake /epoch keeps answering, so Start then
+// refuses; the stop is what is tested.)
 func TestBrokerStartStopsItsOwnOldBroker(t *testing.T) {
 	defer func(w time.Duration) { brokerQuietWait = w }(brokerQuietWait)
 	brokerQuietWait = 300 * time.Millisecond
@@ -274,9 +265,8 @@ func TestBrokerStartStopsItsOwnOldBroker(t *testing.T) {
 	}
 }
 
-// heldBrokerErr: Healthy accepts only the broker this apply runs (this
-// instance's id, this binary, this config); every other answer is an error
-// naming the port, and another instance's names the ports to change.
+// heldBrokerErr: only the broker this apply runs is accepted; every other
+// answer names the port, and another instance's names the ports to change.
 func TestHeldBrokerErr(t *testing.T) {
 	if err := heldBrokerErr(answer(idOurs, "v", "h"), idOurs, "v", "h", 8444); err != nil {
 		t.Fatalf("own broker: %v", err)
@@ -300,8 +290,6 @@ func TestHeldBrokerErr(t *testing.T) {
 	}
 }
 
-// stillAnswering: a broker that keeps answering is reported with its
-// identity; a closed port is not.
 func TestBrokerStillAnswering(t *testing.T) {
 	url, _ := epochServer(t, answer(idOther, "0.34.2", "x"))
 	bc := &brokerController{adminURL: url, admin: http.DefaultClient}
@@ -320,9 +308,8 @@ func TestBrokerStillAnswering(t *testing.T) {
 	}
 }
 
-// stillAnswering waits out a broker that is still shutting down: one that
-// answers a few more probes and then falls silent reads as quiet, before
-// the wait ends.
+// stillAnswering waits out a broker that answers a few more probes and then
+// falls silent.
 func TestBrokerStillAnsweringWaitsOutASlowStop(t *testing.T) {
 	var mu sync.Mutex
 	n := 0

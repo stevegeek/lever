@@ -16,30 +16,20 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// instancePortsProbes is what checkInstancePorts observes: the broker's
-// /epoch answer on the admin port, a TCP dial, whether this instance's
-// daemons run, and (best effort) which process listens on a port.
 type instancePortsProbes struct {
-	// epoch reads /epoch on the admin port; an error when no lever broker
-	// answers there.
-	epoch func(adminPort int) (broker.EpochAnswer, error)
-	// dial reports whether something listens on a TCP address.
-	dial dialFunc
-	// brokerAlive and remoteAlive: whether this instance's broker.pid and
-	// remote.pid name a live process.
+	// epoch reads /epoch on the admin port; an error when no lever broker answers.
+	epoch                    func(adminPort int) (broker.EpochAnswer, error)
+	dial                     dialFunc
 	brokerAlive, remoteAlive bool
-	// holder names the process listening on a loopback port ("pid 123,
-	// python3"), or "" when it cannot tell.
+	// holder names the process on a loopback port ("pid 123, python3"), or ""
+	// when it cannot tell.
 	holder func(port int) string
 }
 
-// instancePortsProbesFor wires the probes: the live pid files and /epoch,
-// and doctor's dial and port-holder probes.
 func instancePortsProbesFor(ctx context.Context, st state.State, dp doctorProbes) instancePortsProbes {
 	_, _, brokerAlive := state.PIDStatus(st.PID())
 	_, _, remoteAlive := state.PIDStatus(st.RemotePID())
 	client := &http.Client{Timeout: 2 * time.Second,
-		// A redirect is not the broker's answer: never followed.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return instancePortsProbes{
 		epoch: func(port int) (broker.EpochAnswer, error) {
@@ -59,10 +49,9 @@ func instancePortsProbesFor(ctx context.Context, st state.State, dp doctorProbes
 	}
 }
 
-// lsofHolder asks lsof which process listens on a TCP port. Best effort:
-// lsof may be missing, or the holder another user's process it cannot see.
-// The command name is the process's own and is sanitized where the report
-// is printed.
+// lsofHolder is best effort: lsof may be missing or unable to see another
+// user's process. The command name is the process's own and is sanitized
+// where the report is printed.
 func lsofHolder(ctx context.Context, r proc.Runner, port int) string {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -88,20 +77,17 @@ func lsofHolder(ctx context.Context, r proc.Runner, port int) string {
 	return "pid " + pid + ", " + cmd
 }
 
-// instancePort is one host port this instance binds, and whose process
-// binds it.
 type instancePort struct {
 	port int
 	what string
-	// ownerAlive: the process of this instance that binds the port runs,
-	// so a listener there is (very likely) its own.
+	// ownerAlive: this instance's process for the port runs, so a listener there
+	// is very likely its own.
 	ownerAlive bool
 }
 
-// instancePorts lists the host ports this instance's own processes bind:
-// the broker's two, the supervised tools' backends (the broker's children),
-// and the remote proxy's two when remote access is on. An external tool's
-// port belongs to a server the operator runs, so it is not listed.
+// instancePorts lists the host ports this instance's own processes bind: the
+// broker's two, its supervised tools' backends, and the remote proxy's two
+// when enabled. An external tool's port is the operator's server.
 func instancePorts(app *config.App, brokerAlive, remoteAlive bool) []instancePort {
 	ports := []instancePort{
 		{app.EffectiveJailPort(), "broker.jail_port", brokerAlive},
@@ -124,22 +110,17 @@ func instancePorts(app *config.App, brokerAlive, remoteAlive bool) []instancePor
 	return ports
 }
 
-// checkInstancePorts warns when a port this instance is configured to bind
-// is held by a process that is not this instance's (lever#181). Config
-// validation sees one lever.yaml, so it cannot catch a second instance on
-// the same ports; this row can. Two signals:
+// checkInstancePorts warns when a port this instance binds is held by another
+// process; config validation sees one lever.yaml and cannot catch a second
+// instance. Two signals:
 //
-//   - The broker answering on the admin port reports another instance id
-//     (or none, while this instance's broker is not running): another
-//     instance's broker holds the broker ports.
-//   - While the process of this instance that binds a port is not running,
-//     something listens there anyway: the next bring-up then clashes with
-//     it. Usually the bind fails (or, for the broker, apply refuses); on
-//     macOS a 127.0.0.1 bind can succeed beside a wildcard listener, and
-//     the two then split the port's clients.
+//   - The broker on the admin port reports another instance id (or none,
+//     while this instance's broker is down).
+//   - Something listens on a port whose owning process of this instance is
+//     not running, so the next bring-up clashes. On macOS a 127.0.0.1 bind can
+//     succeed beside a wildcard listener, and the two then split the clients.
 //
-// A warning, not a failure: the holder may be about to exit, and with this
-// instance down nothing is broken yet.
+// A warning: the holder may be exiting, and nothing is broken yet.
 func checkInstancePorts(app *config.App, st state.State, p instancePortsProbes) checkResult {
 	const name = "instance ports"
 	ours, err := st.ReadInstanceID()
@@ -151,8 +132,6 @@ func checkInstancePorts(app *config.App, st state.State, p instancePortsProbes) 
 	if got, err := p.epoch(app.EffectiveAdminPort()); err == nil {
 		switch {
 		case got.InstanceID != "" && got.InstanceID == ours:
-			// This instance's broker, whatever its pid file says: the
-			// broker's ports and its tools' are its own.
 			p.brokerAlive = true
 		case got.InstanceID == "" && p.brokerAlive:
 			return warnResult(name, fmt.Sprintf("the broker on 127.0.0.1:%d reports no instance id: it predates this lever version", app.EffectiveAdminPort()),

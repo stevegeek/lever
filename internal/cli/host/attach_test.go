@@ -28,8 +28,6 @@ func attachApp() *config.App {
 	}
 }
 
-// wantAttachTarget resolves `to` against attachApp and requires slug in the
-// instance project /lever.
 func wantAttachTarget(t *testing.T, to, wantSlug string) {
 	t.Helper()
 	slug, project, err := attachTarget(attachApp(), "/lever", to)
@@ -45,8 +43,8 @@ func TestAttachTargetDefaultsToManager(t *testing.T) { wantAttachTarget(t, "", "
 
 func TestAttachTargetManagerByName(t *testing.T) { wantAttachTarget(t, "assistant", "assistant") }
 
-// Single-project model: the worker's agent record lives in the instance
-// project (the jail mount root), NOT a per-worker /lever/workers/<name>.
+// The worker's record lives in the instance project, not
+// /lever/workers/<name>.
 func TestAttachTargetWorker(t *testing.T) { wantAttachTarget(t, "scratch", "scratch") }
 
 func TestAttachTargetUnknownListsValidNames(t *testing.T) {
@@ -57,11 +55,9 @@ func TestAttachTargetUnknownListsValidNames(t *testing.T) {
 	testutil.WantErrContaining(t, err, "nope", "assistant", "scratch", "worker")
 }
 
-// TestAttachNamePositionalIsNotAConfigPath pins that `attach <name>`'s positional
-// is the agent NAME (fed to attachTarget), never the config path: config is always
-// discovered from the CWD (the explicit-empty variant). A regression that mistook
-// the NAME for a config path would fail at config.Load("scratch") with a
-// file-not-found error, never reaching the jail-not-up hint.
+// TestAttachNamePositionalIsNotAConfigPath: the positional is the agent name
+// and config comes from the CWD; taking "scratch" as a config path would fail
+// before the jail-not-up hint.
 func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -69,14 +65,11 @@ func TestAttachNamePositionalIsNotAConfigPath(t *testing.T) {
 	sb := &stubBackend{resolveRunUserErr: fmt.Errorf("machine %q does not exist", "lever-demo")}
 	root := stubRoot(sb)
 	_, err := clitest.Exec(t, root, "attach", "scratch")
-	// Reaching the jail-not-up hint proves lever.yaml loaded from the CWD and the
-	// positional "scratch" was NOT treated as a config path.
 	wantJailNotUp(t, err)
 }
 
-// TestAttachIsPassiveWhenJailNotUp is the regression test for the reviewed
-// finding: `lever attach` against a down jail must fail fast with a
-// `lever up` hint, never provision the machine (no buildApplyDeps/EnsureUp).
+// TestAttachIsPassiveWhenJailNotUp: attach against a down jail fails fast with
+// a `lever up` hint and never provisions the machine.
 func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -90,11 +83,9 @@ func TestAttachIsPassiveWhenJailNotUp(t *testing.T) {
 	}
 }
 
-// TestAttachArgvKeepsHubTokenOffHostArgv: `lever attach` execs a host process
-// (`orb …`) whose argv every local user can read with `ps` for the whole
-// session. With a controller PAT in state, the token is staged in the guest
-// through the jail runner (on stdin) and the exec'd argv reads it there —
-// the PAT itself appears in no host argv at all.
+// TestAttachArgvKeepsHubTokenOffHostArgv: the attach's host argv is readable
+// by every local user via `ps`, so the PAT is staged in the guest on stdin and
+// appears in no host argv.
 func TestAttachArgvKeepsHubTokenOffHostArgv(t *testing.T) {
 	host := proc.NewFakeRunner()
 	host.Script("orb", proc.Result{})
@@ -142,9 +133,8 @@ func TestAttachArgvWithoutTokenStagesNothing(t *testing.T) {
 	}
 }
 
-// stubDetachOthers replaces the detachOtherClients seam for the test and
-// returns the container refs it was asked to detach clients from; it
-// answers n.
+// stubDetachOthers replaces the detachOtherClients seam, answers n, and
+// returns the refs it was asked about.
 func stubDetachOthers(t *testing.T, n int, err error) *[]string {
 	t.Helper()
 	var refs []string
@@ -157,18 +147,16 @@ func stubDetachOthers(t *testing.T, n int, err error) *[]string {
 	return &refs
 }
 
-// noAttachBinary empties PATH so the attach binary ("stub-attach") cannot be
-// found: execAttach and runAttach then return before they exec or start it.
+// noAttachBinary empties PATH, so execAttach and runAttach return before they
+// exec.
 func noAttachBinary(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
 }
 
-// lever#170: by default an attach leaves the other terminals attached to
-// the agent alone (a second terminal does not take the first one's view);
-// with --detach-others they are detached first (a stale one can freeze
-// the view), and how many is said. The container is the agent's in the
-// instance project.
+// By default an attach leaves other terminals attached; with --detach-others
+// they are detached first (a stale one can freeze the view), and the count is
+// printed.
 func TestDetachBeforeAttach(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -246,8 +234,7 @@ func TestAttachCommandDetachOthersFlag(t *testing.T) {
 			refs := stubDetachOthers(t, 0, nil)
 			sb := &stubBackend{runner: proc.NewFakeRunner()}
 			_, err := clitest.Exec(t, stubRoot(sb), tc.args...)
-			// The attach got as far as looking up its binary: the detach
-			// decision below was made, not skipped by an earlier failure.
+			// The attach reached its binary lookup, so the detach decision was made.
 			testutil.WantErrContaining(t, err, "stub-attach")
 			if (len(*refs) == 1) != tc.asked || len(*refs) > 1 {
 				t.Fatalf("detach refs = %q, want asked %t", *refs, tc.asked)
@@ -259,8 +246,7 @@ func TestAttachCommandDetachOthersFlag(t *testing.T) {
 	}
 }
 
-// Both verbs that attach take --detach-others, off by default, and no
-// longer take --shared (keeping the others attached is the default now).
+// Both attaching verbs take --detach-others, off by default, and not --shared.
 func TestAttachAndUpDetachOthersFlag(t *testing.T) {
 	root := stubRoot(&stubBackend{})
 	for _, verb := range []string{"attach", "up"} {

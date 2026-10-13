@@ -19,8 +19,8 @@ import (
 	"github.com/stevegeek/lever/internal/voice"
 )
 
-// pinTestModel swaps lever's model table for one pinned model named
-// large-v3-turbo whose file is content, for the test's length.
+// pinTestModel swaps in one pinned model, large-v3-turbo with file content,
+// for the test's length.
 func pinTestModel(t *testing.T, content string) voice.Model {
 	t.Helper()
 	sum := sha256.Sum256([]byte(content))
@@ -31,13 +31,10 @@ func pinTestModel(t *testing.T, content string) voice.Model {
 	return m
 }
 
-// voiceDoctorApp is filesApp with voice on, served by a lever-tool-whisper
-// entry whose models directory and socket are outside the tree.
 func voiceDoctorApp(t *testing.T) (*config.App, state.State) {
 	t.Helper()
 	app, st := filesApp(t, false)
-	// Under /tmp: a long TMPDIR (macOS) must not push the socket path over
-	// the Unix socket limit.
+	// Under /tmp: a long macOS TMPDIR would push the socket path over the limit.
 	run, err := os.MkdirTemp("/tmp", "dv")
 	if err != nil {
 		t.Fatal(err)
@@ -64,9 +61,8 @@ func TestCheckVoiceOff(t *testing.T) {
 	}
 }
 
-// remote.voice off with a whisper tool configured (agents only): the tool
-// and model rows still run, against the tool's own -dictate-socket; the
-// voice row says off.
+// With remote.voice off but a whisper tool configured, the tool and model rows
+// still run against its -dictate-socket; the voice row says off.
 func TestCheckVoiceRowsWithVoiceOff(t *testing.T) {
 	app, _ := voiceDoctorApp(t)
 	sock := app.Remote.Voice.Socket
@@ -151,7 +147,7 @@ func TestCheckVoiceTool(t *testing.T) {
 func TestCheckVoiceModel(t *testing.T) {
 	app, _ := voiceDoctorApp(t)
 	w, _ := app.VoiceTool()
-	// The real table, while its values are UNVERIFIED: refused.
+	// The real table, while its values are unverified: refused.
 	if m, _ := voice.Lookup(voice.DefaultModel); m.Pinned() != "" {
 		if r := checkVoiceModel(app); r.ok || !strings.Contains(r.detail, "not verified") {
 			t.Fatalf("unverified table: %+v", r)
@@ -198,7 +194,6 @@ func TestRunVoiceFetch(t *testing.T) {
 		return f.FetchFrom(ctx, m, srv.URL+"/x", dir)
 	}
 	var out bytes.Buffer
-	// Into the tool's -models.
 	if err := runVoiceFetch(context.Background(), app, st, "", fetch, &out); err != nil {
 		t.Fatal(err)
 	}

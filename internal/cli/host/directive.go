@@ -21,19 +21,16 @@ import (
 )
 
 // newDirectiveCmd is the operator's authenticated channel to a running agent:
-// send/list/revoke signed directives, plus a selftest that probes the
-// signing key against the broker's allowed_signers. Every subcommand talks
+// signed directives plus a selftest of the signing key. Every subcommand talks
 // to the broker's 0600 UNIX-socket admin channel (state.State.DirectiveSock),
-// never the loopback admin port — filesystem permissions are the gate.
+// never the loopback admin port: filesystem permissions are the gate.
 func newDirectiveCmd() *cobra.Command {
 	c := &cobra.Command{Use: "directive", Short: "Send authenticated operator directives to an agent"}
 	c.AddCommand(newDirectiveSendCmd(), newDirectiveListCmd(), newDirectiveRevokeCmd(), newDirectiveSelftestCmd())
 	return c
 }
 
-// udsClient builds an http.Client that dials sock (a UNIX socket) for every
-// request regardless of the request URL's host — callers use the placeholder
-// authority "http://lever/..." since only the Transport's DialContext matters.
+// udsClient dials sock for every request whatever the URL's host.
 func udsClient(sock string) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -45,10 +42,7 @@ func udsClient(sock string) *http.Client {
 }
 
 // loadAppAndState resolves the config path (an optional trailing CONFIG arg)
-// and loads both the App and its beside-the-config state dir, mirroring
-// newBrokerServeCmd's path+app+stateFor sequence (broker.go) since directive
-// commands need all three: app for Name/Operator/expiry accessors, state for
-// DirectiveSock.
+// and loads the App and its state dir.
 func loadAppAndState(args []string) (*config.App, state.State, error) {
 	path, err := resolveConfigPath(argOrEmpty(args))
 	if err != nil {
@@ -61,9 +55,8 @@ func loadAppAndState(args []string) (*config.App, state.State, error) {
 	return app, stateFor(path), nil
 }
 
-// signingKey resolves the operator private key: the --key flag if given,
-// else app.Operator.SigningKey, else an error (a directive can never be
-// signed with an implicit/missing key).
+// signingKey is --key, else app.Operator.SigningKey; a directive is never
+// signed with an implicit key.
 func signingKey(flagKey string, app *config.App) (string, error) {
 	if flagKey != "" {
 		return flagKey, nil
@@ -74,10 +67,8 @@ func signingKey(flagKey string, app *config.App) (string, error) {
 	return "", fmt.Errorf("directive: no signing key — pass --key or set operator.signing_key in %s", config.CanonicalName)
 }
 
-// newDirectiveID mints a directive id: 16 crypto/rand bytes formatted as a
-// UUID (8-4-4-4-12 hex). Directive ids are a replay-defence key (see
-// DirectiveStore.Submit), not just a display label, so they must be
-// unpredictable — crypto/rand, not math/rand.
+// newDirectiveID returns 16 crypto/rand bytes as a UUID. The id is a
+// replay-defence key (DirectiveStore.Submit), so it must be unpredictable.
 func newDirectiveID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -86,13 +77,10 @@ func newDirectiveID() (string, error) {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
-// udsURL is the placeholder authority every directive request carries: the
-// UDS transport (udsClient) ignores the host, so only the path matters.
 const udsURL = "http://lever"
 
-// udsErr wraps an httpjson error from the directive channel: a failure to
-// reach the socket gets the "is the broker running?" hint, anything the
-// broker answered (status/decode) is reported as-is under the directive prefix.
+// udsErr adds the "is the broker running?" hint to a failure to reach the
+// socket; anything the broker answered is reported as-is.
 func udsErr(err error) error {
 	if err == nil {
 		return nil
@@ -104,21 +92,16 @@ func udsErr(err error) error {
 	return fmt.Errorf("directive: %w", err)
 }
 
-// udsPost POSTs in as JSON to path on sock, decoding the 200 reply into out
-// (nil to discard). A non-200 status is an error carrying the response body.
 func udsPost(ctx context.Context, sock, path string, in, out any) error {
 	return udsErr(httpjson.Post(ctx, udsClient(sock), udsURL+path, in, out))
 }
 
-// udsGet GETs path on sock, decoding the 200 reply into out.
 func udsGet(ctx context.Context, sock, path string, out any) error {
 	return udsErr(httpjson.Get(ctx, udsClient(sock), udsURL+path, out))
 }
 
-// signAndPostStatement marshals st, prints it for operator review (the
-// operator must be able to see exactly what they're about to sign), signs
-// it under opsig.NamespaceDirective, and POSTs the {statement,signature}
-// envelope to path.
+// signAndPostStatement prints st for the operator to review before signing
+// it under opsig.NamespaceDirective, then POSTs the envelope to path.
 func signAndPostStatement(cmd *cobra.Command, sock, keyPath, path string, st opsig.Statement, out any) error {
 	raw, err := json.Marshal(st)
 	if err != nil {
@@ -136,8 +119,6 @@ func signAndPostStatement(cmd *cobra.Command, sock, keyPath, path string, st ops
 	}, out)
 }
 
-// signAndPostEnvelope builds, signs (opsig.NamespaceAdmin), and POSTs an
-// admin-op envelope (list/revoke).
 func signAndPostEnvelope(cmd *cobra.Command, sock, keyPath, appName, op string, params map[string]string, path string, out any) error {
 	env := opsig.Envelope{V: 1, Instance: appName, Op: op, Params: params, IssuedAt: time.Now().Format(time.RFC3339)}
 	raw, err := json.Marshal(env)
@@ -185,8 +166,8 @@ func newDirectiveSendCmd() *cobra.Command {
 				if err != nil {
 					return usageError{fmt.Errorf("directive send: --not-before: %w", err)}
 				}
-				// The broker refuses a not_before beyond its clock leeway,
-				// so a longer delay can never succeed: refuse it here.
+				// The broker refuses a not_before beyond its clock leeway, so refuse a longer
+				// delay here.
 				if nb.Sub(now) > opsig.ClockLeeway {
 					return usageError{fmt.Errorf("directive send: --not-before %s is more than %s ahead; the broker refuses a later start", notBeforeFlag, opsig.ClockLeeway)}
 				}
@@ -241,9 +222,8 @@ func newDirectiveSendCmd() *cobra.Command {
 			}
 			cmd.Printf("directive %v sent: delivered=%v\n", out.ID, out.Delivered)
 			if !out.Delivered {
-				// A broker older than 0.29 stores a directive whose notice
-				// failed and answers 200. The agent was not told: that is
-				// not a success (lever#25).
+				// An older broker stores a directive whose notice failed and answers 200. The
+				// agent was not told: that is not a success.
 				return fmt.Errorf("directive %s is stored, but its notice did not reach the agent. Revoke it (`lever directive revoke %s`), bring the agent up (`lever up --no-attach`), then send again", out.ID, out.ID)
 			}
 			return nil
@@ -362,10 +342,7 @@ func newDirectiveSelftestCmd() *cobra.Command {
 				ExpiresAt:   now.Add(time.Minute).Format(time.RFC3339),
 				Action:      opsig.Action{Kind: opsig.KindInstruction, Text: "selftest"},
 			}
-			// On failure, propagate err as-is (no extra print here): cobra's
-			// default error handler prints "Error: ..." for a non-nil RunE
-			// return, which — combined with a non-zero exit (main.go) — IS the
-			// failure verdict; printing it twice here would just be noise.
+			// On failure err propagates as-is; the error handler prints it once.
 			var out wire.DirectiveSelftestResponse
 			if err := signAndPostStatement(cmd, st.DirectiveSock(), keyPath, wire.PathDirectiveSelftest, stmt, &out); err != nil {
 				return fmt.Errorf("selftest FAILED: %w", err)

@@ -29,7 +29,7 @@ import (
 )
 
 // writeTmpConfig writes a "demo" instance declaring the worker "worker" with a
-// real tree/workers/worker subdir and returns the config file path.
+// real tree/workers/worker subdir.
 func writeTmpConfig(t *testing.T) string {
 	t.Helper()
 	dir := writeInstance(t, "manager:\n  image: scionlocal/lever-claude:latest\n  allow_ports: [3305]\nworkers:\n  - name: worker\n    dir: workers/worker\n")
@@ -52,8 +52,6 @@ func TestApplyEgressPostureFromConfig(t *testing.T) {
 	}
 }
 
-// TestApplyOpenEgressForSubscription verifies that a subscription instance does
-// not set the closed posture.
 func TestApplyOpenEgressForSubscription(t *testing.T) {
 	app := &config.App{Broker: config.Broker{LLMAuth: config.LLMAuthSubscription, JailPort: 8443}}
 	if app.ClosedInternetEgress() {
@@ -64,8 +62,7 @@ func TestApplyOpenEgressForSubscription(t *testing.T) {
 func TestApplyDryRun(t *testing.T) {
 	p := writeTmpConfig(t)
 
-	// newApplyCmd with nil BackendFactory is safe for --dry-run: the backend
-	// is never touched in dry-run mode (plan is printed and the func returns).
+	// A nil BackendFactory is safe for --dry-run: the backend is never touched.
 	cmd := newApplyCmd(nil)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -84,13 +81,9 @@ func TestApplyDryRun(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner verifies the argv that
-// Deps.RemoveJailFile sends through the jail runner: a `sh -c` guard that
-// removes a marker FILE (never a directory) at the given jail-absolute path,
-// invoked as `sh -c '<script>' _ <jailPath>` so the removal shares the jail's
-// own filesystem view with the `scion init` that follows it (see
-// internal/apply/run.go's register-project case for the
-// VirtioFS unlink/init race this closes).
+// TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner pins the argv: a
+// `sh -c '<script>' _ <jailPath>` guard that removes a file, never a
+// directory, through the jail runner.
 func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
@@ -132,14 +125,10 @@ func TestBuildApplyDepsRemoveJailFileRunsThroughJailRunner(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsEnsuresSessionSecret verifies the persist→thread chain for
-// the hub's session-cookie signing key: buildApplyDeps ensures
-// .lever-state/session-secret (0600, 64 hex) and threads its value into
-// Deps.HubSessionSecret — which internal/apply's scion-server step emits as
-// --session-secret= (pinned there). A second buildApplyDeps over the same
-// state dir must adopt the SAME value: rotation is delete-the-file, never
-// lever's doing. The secret never appears in a failure message — length and
-// equality only.
+// TestBuildApplyDepsEnsuresSessionSecret: buildApplyDeps ensures the session
+// secret (0600, 64 hex) and threads it into Deps.HubSessionSecret; a second
+// build adopts the same value (rotation is deleting the file). Failure
+// messages show length and equality only, never the secret.
 func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
@@ -173,7 +162,6 @@ func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 		t.Fatal("Deps.HubSessionSecret differs from the persisted file")
 	}
 
-	// Re-apply: same state dir, fresh deps — the persisted key is adopted.
 	w2, err := buildApplyDeps(context.Background(), app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("second buildApplyDeps: %v", err)
@@ -184,11 +172,6 @@ func TestBuildApplyDepsEnsuresSessionSecret(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsWiresRemoveScionProjectConfigs verifies buildApplyDeps
-// wires Deps.RemoveScionProjectConfigs straight through to the backend method
-// (which itself reaches the guest — see internal/backend/guest/scionstate.go),
-// so the register-project step in internal/apply/run.go can
-// clear stale ~/.scion/project-configs registrations before `scion init`.
 func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
@@ -214,10 +197,6 @@ func TestBuildApplyDepsWiresRemoveScionProjectConfigs(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsWiresScionProjectRegistered verifies buildApplyDeps wires
-// Deps.ScionProjectRegistered straight through to the backend method, so the
-// register-project step (internal/apply/run.go) can observe
-// whether its destructive clean+init path is even necessary before running it.
 func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
@@ -247,11 +226,7 @@ func TestBuildApplyDepsWiresScionProjectRegistered(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsWiresEnsureControllerPAT verifies buildApplyDeps wires
-// Deps.EnsureControllerPAT to the real ensureControllerPAT (see its doc in
-// apply.go), threading through the jail runner, a state dir derived from the
-// config path, app.Tree, and the stub backend's MountDest — exercising the
-// same mint window as TestEnsureControllerPATMintsThenNoOps, but through the
+// TestBuildApplyDepsWiresEnsureControllerPAT runs the mint window through the
 // buildApplyDeps wiring rather than calling ensureControllerPAT directly.
 func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	p := writeTmpConfig(t)
@@ -285,13 +260,9 @@ func TestBuildApplyDepsWiresEnsureControllerPAT(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsWiresRearmBootstrap verifies buildApplyDeps wires
-// Deps.RearmBootstrap (fix/rearm-bootstrap-on-create — see its doc in
-// internal/apply/run.go). RearmBootstrap's real implementation stops+restarts
-// the broker and hits its live HTTP admin API, which is not something a unit
-// test should exercise (no live broker here — see this branch's CODE-ONLY
-// constraint), so this only pins that buildApplyDeps wires a non-nil func;
-// the behavior itself is covered by internal/apply's fake-deps tests.
+// TestBuildApplyDepsWiresRearmBootstrap only pins that the func is wired: the
+// real one needs a live broker, and the behaviour is covered by
+// internal/apply's fake-deps tests.
 func TestBuildApplyDepsWiresRearmBootstrap(t *testing.T) {
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
@@ -311,11 +282,9 @@ func TestBuildApplyDepsWiresRearmBootstrap(t *testing.T) {
 	}
 }
 
-// TestBuildApplyDepsWiresRemoteProxy mirrors TestBuildApplyDepsWiresRearmBootstrap:
-// it only pins that buildApplyDeps wires non-nil StartRemoteProxy/StopRemoteProxy
-// funcs. Start's live spawn behavior is covered by the
-// TestRemoteControllerStart* tests below; StopRemoteProxy's real kill
-// mechanism is covered in internal/brokerctl (it's a thin passthrough here).
+// TestBuildApplyDepsWiresRemoteProxy only pins that the funcs are wired; Start
+// is covered by the TestRemoteControllerStart* tests and Stop in
+// internal/brokerctl.
 func TestBuildApplyDepsWiresRemoteProxy(t *testing.T) {
 	p := writeTmpConfig(t)
 	app, err := config.Load(p)
@@ -357,8 +326,8 @@ func TestApplyDryRunDiscoversConfig(t *testing.T) {
 
 func TestBrokerServeCmdIsDetachedAndLogged(t *testing.T) {
 	dir := t.TempDir()
-	// A non-existent .lever-state subdir mirrors a fresh apply: brokerServeCmd
-	// must MkdirAll the log's parent, or the open (and the whole bring-up) fails.
+	// A missing .lever-state mirrors a fresh apply: the log's parent must be
+	// created.
 	out := filepath.Join(dir, ".lever-state", "broker.out.log")
 	cmd, f, err := brokerServeCmd("/usr/local/bin/lever", "/x/lever.yaml", out, "198.51.100.7", "devuser", "501")
 	if err != nil {
@@ -387,8 +356,8 @@ func TestBrokerServeCmdIsDetachedAndLogged(t *testing.T) {
 
 func TestRemoteServeCmdIsDetachedAndLogged(t *testing.T) {
 	dir := t.TempDir()
-	// A non-existent .lever-state subdir mirrors a fresh apply: remoteServeCmd
-	// must MkdirAll the log's parent, or the open (and Start) fails.
+	// A missing .lever-state mirrors a fresh apply: the log's parent must be
+	// created.
 	out := filepath.Join(dir, ".lever-state", "remote.log")
 	cmd, f, err := remoteServeCmd("/usr/local/bin/lever", "/x/lever.yaml", out)
 	if err != nil {
@@ -409,17 +378,9 @@ func TestRemoteServeCmdIsDetachedAndLogged(t *testing.T) {
 	}
 }
 
-// TestRemoteControllerStartReusesAlreadyServingProxy proves the idempotence
-// shortcut ("re-apply with a live proxy does
-// NOT spawn a second one"): with a live pid recorded (self-signal-0 trick —
-// the test process's own pid is always alive, same as
-// TestRemoteStatusReportsLivePidAndListener in remote_test.go) AND something
-// actually listening on the configured port, Start must not spawn.
-// selfExe is pointed at a nonexistent binary so a WRONGLY-taken spawn
-// branch fails loudly (cmd.Start() errors) instead of silently succeeding —
-// same "prove the branch, not just the observable" shape as
-// TestStartBrokerReusesMatchingBrokerIdentity's directory-as-pidfile trick in
-// apply_closures_test.go.
+// TestRemoteControllerStartReusesAlreadyServingProxy: with a live, listening,
+// correctly stamped proxy Start must not spawn. selfExe does not exist, so a
+// wrongly taken spawn branch fails loudly.
 func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	selfExe := "/no/such/lever-binary"
 
@@ -428,8 +389,8 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// A stand-in `lever remote serve` for this instance: remote.pid must name
-	// one, not merely a live process (state.State.RemoteStatus).
+	// remote.pid must name a `lever remote serve` of this instance, not merely a
+	// live process.
 	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -442,8 +403,6 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	// The stamp must MATCH, or Start correctly treats the running proxy as
-	// serving a different config and restarts it.
 	if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
 		t.Fatal(err)
 	}
@@ -459,10 +418,9 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 	}
 }
 
-// remote.pid names a live process that is not this instance's `lever remote
-// serve` (the pid was reused; here, this very test process): it is a stale
-// file. Start neither reuses it nor signals it; it spawns a fresh proxy (the
-// spawn fails here, selfExe does not exist, proving Start reached it).
+// remote.pid names a live process that is not this instance's proxy (a reused
+// pid): Start neither reuses nor signals it, and spawns (failing here, since
+// selfExe does not exist).
 func TestRemoteControllerStartTreatsAReusedPIDAsStale(t *testing.T) {
 	dir := t.TempDir()
 	st := state.ForConfig(dir)
@@ -477,8 +435,7 @@ func TestRemoteControllerStartTreatsAReusedPIDAsStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	// A stamp for another config, so a pid taken for the proxy would be
-	// stopped: that would kill this test.
+	// A mismatched stamp: stopping a pid taken for the proxy would kill this test.
 	if err := st.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
 		t.Fatal(err)
 	}
@@ -489,17 +446,13 @@ func TestRemoteControllerStartTreatsAReusedPIDAsStale(t *testing.T) {
 	}
 }
 
-// TestRemoteControllerStartRestartsOnConfigChange is the defect this stamp
-// exists for. The proxy reads `remote:` ONCE and caches it in the handler it
-// builds at startup, so a running proxy keeps enforcing the config it was born
-// with. Before the stamp, Start returned "already serving" on pid+port alone:
-// enabling allowed_users on the live instance left the old process running and
-// identity-free requests kept returning 200, while apply reported success.
+// TestRemoteControllerStartRestartsOnConfigChange: the proxy caches `remote:`
+// at startup, so a stamp mismatch must restart it, or a change such as
+// enabling allowed_users silently does nothing.
 //
-// The running proxy is a real child process here, NOT this test's own pid: the
-// mismatch path kills what remote.pid names, and the self-pid trick used above
-// would kill the test. selfExe points at a nonexistent binary so the
-// respawn fails loudly — proving Start reached the spawn rather than reusing.
+// The running proxy is a real child, not this test's pid, since the mismatch
+// path kills what remote.pid names. selfExe does not exist, so the respawn
+// fails loudly.
 func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	selfExe := "/no/such/lever-binary"
 
@@ -518,7 +471,6 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	}
 	defer ln.Close()
 
-	// Stamp records a DIFFERENT config from the one the controller wants.
 	if err := st.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
 		t.Fatal(err)
 	}
@@ -528,13 +480,8 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	if err := rc.Start(context.Background()); err == nil {
 		t.Fatal("Start reused a proxy running a DIFFERENT remote config — a changed allowed_users/base_url would be silently ignored")
 	}
-	// The stale proxy must be gone: leaving it alive would keep the old config
-	// serving AND hold the port, so the respawn could never bind.
-	//
-	// Reaped via Wait (the stand-in's done), not signal(0): a
-	// killed-but-unreaped child is a ZOMBIE, and signal 0 succeeds on a
-	// zombie because the process entry still exists — so the obvious check
-	// passes whether or not the kill worked.
+	// The stale proxy must be gone, or it keeps the old config and the port.
+	// Checked via Wait, not signal 0: signal 0 succeeds on an unreaped zombie.
 	select {
 	case <-victimDone:
 	case <-time.After(5 * time.Second):
@@ -542,19 +489,10 @@ func TestRemoteControllerStartRestartsOnConfigChange(t *testing.T) {
 	}
 }
 
-// TestRemoteControllerStartRespawnsStalePID proves the second idempotence
-// case: "re-apply after a killed proxy respawns it". A pid file naming a
-// process that is definitely not running (the doctor checks' own
-// implausibly-high-pid convention — see TestCheckBrokerAliveStalePID) must
-// fall through to a fresh spawn, not a false "already serving".
-// selfExe points at `true` so the spawn succeeds harmlessly (exits 0
-// immediately, no lingering process) — mirrors
-// buildDepsAgainstFakeBroker's broker-spawn tests in apply_closures_test.go.
-//
-// That stand-in never listens, so Start's post-spawn liveness wait
-// legitimately fails: what this asserts is the SPAWN DECISION, and the
-// not-listening error is the proof the spawn happened and was then checked.
-// (A nil here would mean the liveness check had been lost.)
+// TestRemoteControllerStartRespawnsStalePID: a pid file naming a dead process
+// must lead to a spawn, not a false "already serving". The stand-in (`true`)
+// never listens, so the not-listening error proves the spawn happened and was
+// then checked.
 func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 	selfExe := "/usr/bin/true"
 
@@ -578,16 +516,14 @@ func TestRemoteControllerStartRespawnsStalePID(t *testing.T) {
 	}
 }
 
-// shortenRemoteProxyStartWait keeps the spawn tests fast: they use a stand-in
-// that never binds, so they always pay the full wait.
+// The spawn tests' stand-in never binds, so they always pay the full wait.
 func shortenRemoteProxyStartWait(rc *remoteController) *remoteController {
 	rc.startTimeout, rc.startInterval = 50*time.Millisecond, 5*time.Millisecond
 	return rc
 }
 
-// TestRemoteControllerStartSpawnsWhenNeverStarted covers the third
-// precondition: no remote.pid at all (a fresh instance, or remote access
-// just enabled) must spawn, exactly like the stale-pid case.
+// TestRemoteControllerStartSpawnsWhenNeverStarted: no remote.pid at all must
+// spawn.
 func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	selfExe := "/usr/bin/true"
 
@@ -595,8 +531,6 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	st := state.ForConfig(dir) // no remote.pid at all
 
 	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: 48996, selfExe: selfExe})
-	// As above: the stand-in never binds, so the spawn is proved by the
-	// liveness check's complaint rather than by a nil.
 	err := rc.Start(context.Background())
 	testutil.WantErrIs(t, err, errRemoteProxyNotListening) // spawned, then checked
 	if _, serr := os.Stat(st.RemoteLog()); serr != nil {
@@ -604,8 +538,7 @@ func TestRemoteControllerStartSpawnsWhenNeverStarted(t *testing.T) {
 	}
 }
 
-// callIndex returns the index of the first call in calls satisfying pred, or
-// -1 if none matches. Helper for the ordered-call assertions below.
+// callIndex returns the index of the first call satisfying pred, or -1.
 func callIndex(calls []proc.Call, pred func(proc.Call) bool) int {
 	for i, c := range calls {
 		if pred(c) {
@@ -620,13 +553,10 @@ func callHasPrefix(c proc.Call, prefix string) bool {
 	return strings.HasPrefix(full, prefix)
 }
 
-// TestEnsureControllerPATMintsThenNoOps drives the whole mint window (see
-// ensureControllerPAT's doc in apply.go) against a fake runner: the first call
-// must run the throwaway server start → init → hub link → hub token create
-// (exact scopes, no agent:message) → persist 0600 → stop → best-effort
-// dev-token removal, IN THAT ORDER; a second call, with the PAT now
-// persisted, must be a complete no-op (no new runner calls at all — in
-// particular no second throwaway server start).
+// TestEnsureControllerPATMintsThenNoOps: the first call runs the throwaway
+// start, init, hub link, token create with exact scopes, persist 0600, stop and
+// dev-token removal in that order; a second call with the PAT persisted makes
+// no runner calls at all.
 func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
@@ -638,7 +568,6 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("ensureControllerPAT: %v", err)
 	}
 
-	// Persisted 0600 with the minted token.
 	fi, err := os.Stat(st.ControllerPAT())
 	if err != nil {
 		t.Fatalf("controller.pat not written: %v", err)
@@ -658,9 +587,8 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	iInit := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion init") })
 	iLink := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub link") })
 	iToken := callIndex(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion hub token create") })
-	// Two stops: the first clears the shared pid file (the live hub, or a
-	// throwaway a failed run left) before the start; the second stops the
-	// throwaway after the mint.
+	// Two stops: the first clears the shared pid file before the start, the second
+	// stops the throwaway after the mint.
 	var stops []int
 	for i, c := range f.Calls {
 		if callHasPrefix(c, "scion server stop") {
@@ -675,9 +603,9 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("calls out of order: prestop=%d start=%d init=%d link=%d token=%d stop=%d", stops[0], iStart, iInit, iLink, iToken, stops[1])
 	}
 
-	// Fixed throwaway port, distinct from the real hub's 8080; dev-auth ON;
-	// web OFF, so no dev auto-login and the API binds --port; runtime broker
-	// OFF, so the dev-auth hub cannot create (full-role) agents.
+	// Throwaway port distinct from 8080; dev-auth on; web off, so no dev
+	// auto-login and the API binds --port; runtime broker off, so the dev-auth hub
+	// cannot create full-role agents.
 	startArgs := strings.Join(f.Calls[iStart].Args, " ")
 	const wantStart = "server start --port 48080 --enable-web=false --enable-runtime-broker=false --dev-auth=true"
 	if startArgs != wantStart {
@@ -688,7 +616,6 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("container check at %d, want before the first stop at %d", iPs, stops[0])
 	}
 
-	// init/hub-link run inside the jail project dir (the tree root).
 	if f.Calls[iInit].Dir != jailMount {
 		t.Fatalf("init dir = %q, want %q", f.Calls[iInit].Dir, jailMount)
 	}
@@ -696,9 +623,8 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 		t.Fatalf("hub link dir = %q, want %q", f.Calls[iLink].Dir, jailMount)
 	}
 
-	// scion requires --project (name/ID) and --name; project name is the jail
-	// mount's basename ("lever"). The scope set is exact; agent:message is on
-	// it because newer scions gate a UAT's message sends on that scope alone.
+	// The project name is the jail mount's basename ("lever"). The scope set is
+	// exact; newer scions gate message sends on agent:message alone.
 	tokenArgs := strings.Join(f.Calls[iToken].Args, " ")
 	if !strings.Contains(tokenArgs, "--project lever") {
 		t.Fatalf("hub token create args = %q, want --project lever", tokenArgs)
@@ -713,14 +639,12 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	if !strings.Contains(tokenArgs, "--expires "+patExpires) {
 		t.Fatalf("hub token create args = %q, want --expires %s", tokenArgs, patExpires)
 	}
-	// Token create runs in the project dir so scion resolves the project context.
 	if f.Calls[iToken].Dir != jailMount {
 		t.Fatalf("hub token create dir = %q, want %q", f.Calls[iToken].Dir, jailMount)
 	}
 
-	// Best-effort dev-token removal ran through the guarded removeJailFile helper
-	// (removeJailFileScript) against ~/.scion/dev-token, where ~ was resolved
-	// in-jail to the scripted $HOME (/home/tester) — not a hardcoded home.
+	// The dev-token removal uses removeJailFileScript on ~/.scion/dev-token, with
+	// ~ resolved in-jail, not hardcoded.
 	rm := f.Calls[iRm]
 	if len(rm.Args) != 4 || rm.Args[0] != "-c" || rm.Args[2] != "_" || rm.Args[3] != "/home/tester/.scion/dev-token" {
 		t.Fatalf("dev-token removal args = %+v, want [-c <script> _ /home/tester/.scion/dev-token]", rm.Args)
@@ -728,8 +652,7 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 
 	callsAfterFirst := len(f.Calls)
 
-	// Second call: PAT already persisted → no-op. In particular, no second
-	// throwaway server start (the agent-free mint window opens at most once).
+	// Second call: no-op; the window opens at most once.
 	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatalf("second ensureControllerPAT: %v", err)
 	}
@@ -739,7 +662,6 @@ func TestEnsureControllerPATMintsThenNoOps(t *testing.T) {
 	}
 }
 
-// countCalls returns how many recorded calls satisfy pred.
 func countCalls(calls []proc.Call, pred func(proc.Call) bool) int {
 	n := 0
 	for _, c := range calls {
@@ -750,9 +672,7 @@ func countCalls(calls []proc.Call, pred func(proc.Call) bool) int {
 	return n
 }
 
-// tokenCreateCallFor returns the "scion hub token create" call whose --name
-// flag equals name, so a test can inspect ITS --scopes argv directly rather
-// than assuming which of possibly several token-create calls is which.
+// tokenCreateCallFor returns the token-create call whose --name is name.
 func tokenCreateCallFor(t *testing.T, calls []proc.Call, name string) proc.Call {
 	t.Helper()
 	for _, c := range calls {
@@ -769,10 +689,8 @@ func tokenCreateCallFor(t *testing.T, calls []proc.Call, name string) proc.Call 
 	return proc.Call{}
 }
 
-// scopesArg returns the literal value of a hub-token-create call's --scopes
-// flag (the exact argv element, not a substring of the joined command line —
-// a Contains check on the joined string passes even when extra scopes are
-// appended, since the expected prefix is still present).
+// scopesArg returns the exact --scopes argv element: a Contains check on the
+// joined line would pass with extra scopes appended.
 func scopesArg(t *testing.T, c proc.Call) string {
 	t.Helper()
 	for i, a := range c.Args {
@@ -784,10 +702,8 @@ func scopesArg(t *testing.T, c proc.Call) string {
 	return ""
 }
 
-// TestEnsurePATsMintsBothInOneWindow: fresh state, remoteEnabled=true — both
-// the controller and remote PATs are missing, so ONE throwaway dev-auth
-// window mints both (see ensureControllerPAT's doc: minting both in one
-// window preserves the agent-free-window property on first bootstrap).
+// TestEnsurePATsMintsBothInOneWindow: a fresh state with remote enabled mints
+// both PATs in one window.
 func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
@@ -805,11 +721,9 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server start") }); n != 1 {
 		t.Fatalf("scion server start calls = %d, want 1 (one shared window)", n)
 	}
-	// The throwaway mint hub must keep the web frontend OFF even though
-	// remoteEnabled is true here: EnableWeb/web assets are for the REAL,
-	// dev-auth-OFF hub the scion-server apply step starts right after this
-	// one (internal/apply/run.go). A dev-auth hub with the frontend on signs
-	// any session-less request in as the super-admin.
+	// The throwaway must keep the web frontend off even with remote enabled: a
+	// dev-auth hub with the frontend on signs any session-less request in as
+	// super-admin.
 	for _, c := range f.Calls {
 		if callHasPrefix(c, "scion server start") {
 			joined := strings.Join(c.Args, " ")
@@ -818,10 +732,8 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 			}
 		}
 	}
-	// ServerStop is called both explicitly (post-mint cleanup) and via the
-	// deferred kill (belt-and-braces against a partial start) — see
-	// ensureControllerPAT's doc; TestEnsureControllerPATMintsThenNoOps checks
-	// existence for the same reason, not an exact count.
+	// ServerStop runs explicitly and via the deferred kill, so check existence,
+	// not an exact count.
 	if n := countCalls(f.Calls, func(c proc.Call) bool { return callHasPrefix(c, "scion server stop") }); n < 1 {
 		t.Fatalf("scion server stop calls = %d, want at least 1", n)
 	}
@@ -829,10 +741,8 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 		t.Fatalf("scion hub token create calls = %d, want 2 (controller + remote)", n)
 	}
 
-	// Exact-match the minted scopes (not a Contains/prefix check — that would
-	// silently pass even if an extra scope, e.g. agent:manage, were appended
-	// to remotePATScopes; see remotePATScopes's doc for why that must never
-	// happen for the remote-proxy token).
+	// Exact match: an extra scope such as agent:manage must never reach the
+	// remote token.
 	controllerCall := tokenCreateCallFor(t, f.Calls, "lever-controller")
 	if got, want := scopesArg(t, controllerCall), "agent:manage,agent:attach,agent:message,project:read,project:update"; got != want {
 		t.Fatalf("controller mint --scopes = %q, want %q", got, want)
@@ -867,12 +777,8 @@ func TestEnsurePATsMintsBothInOneWindow(t *testing.T) {
 	}
 }
 
-// TestEnsurePATsRemoteOnlyWindowWhenControllerExists: the controller PAT was
-// already minted (a pre-existing instance), remoteEnabled=true and the remote
-// PAT is missing (remote.enabled flipped on later). A window still opens —
-// this is the "later-enable" repair case documented alongside the
-// controller-PAT re-mint shape — but it mints ONLY the remote token; the
-// controller PAT is left untouched.
+// TestEnsurePATsRemoteOnlyWindowWhenControllerExists: remote access enabled
+// later opens a window that mints only the remote token.
 func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
@@ -882,9 +788,8 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptPATMintChain(f)
 	scriptTokenCreate(f, "lever-remote", "pat-remote-2")
-	// Deliberately NOT scripting "--name lever-controller": if the code
-	// mistakenly re-mints the controller PAT, the fake runner errors on the
-	// unscripted command and fails the test.
+	// "--name lever-controller" is unscripted, so a controller re-mint fails the
+	// test.
 
 	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{Enabled: true}, patMintOpts{AdminHub: newFakeAdminHub()}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
@@ -913,16 +818,14 @@ func TestEnsurePATsRemoteOnlyWindowWhenControllerExists(t *testing.T) {
 	}
 }
 
-// TestEnsurePATsNoWindowWhenNothingMissing: both PATs already persisted and
-// the remote web role and its ceiling recorded — nothing to mint or grant, so no dev-auth
-// window opens at all (zero scion calls).
+// TestEnsurePATsNoWindowWhenNothingMissing: with both PATs and the role grant
+// recorded, no window opens (zero scion calls).
 func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
 	const jailMount = "/lever"
 	seedPAT(t, st, "controller", "pat-controller-existing")
 	seedPAT(t, st, "remote", "pat-remote-existing")
-	// ...and the remote web role already granted to the (placeholder) user.
 	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{Permissions: remoteRolePermissions(false),
 		Bound:              map[string]string{"lever-operator@lever.local": "user-1"},
 		Ceilings:           map[string]string{"lever-operator@lever.local": "ac-1"},
@@ -941,9 +844,8 @@ func TestEnsurePATsNoWindowWhenNothingMissing(t *testing.T) {
 	}
 }
 
-// TestEnsurePATsRemoteDisabledUnchanged: remoteEnabled=false on a fresh
-// state reproduces the exact pre-remote behavior — one controller mint, no
-// lever-remote token, no remote.pat written.
+// TestEnsurePATsRemoteDisabledUnchanged: with remote off, one controller mint
+// and no remote token.
 func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	tree := t.TempDir()
 	st := state.ForConfig(t.TempDir())
@@ -952,8 +854,7 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptPATMintChain(f)
 	scriptTokenCreate(f, "lever-controller", "pat-controller-3")
-	// Deliberately NOT scripting "--name lever-remote": remoteEnabled=false
-	// must never touch it.
+	// "--name lever-remote" is unscripted: remote off must never mint it.
 
 	if err := ensureControllerPAT(context.Background(), f, st, tree, jailMount, remoteAccess{}, patMintOpts{}); err != nil {
 		t.Fatalf("ensureControllerPAT: %v", err)
@@ -978,26 +879,12 @@ func TestEnsurePATsRemoteDisabledUnchanged(t *testing.T) {
 	}
 }
 
-// TestApplyBootstrapTokenThenLockedHubEndToEnd is the end-to-end proof:
-// it drives the REAL ensureControllerPAT (behind Deps.EnsureControllerPAT, as
-// wired by buildApplyDeps) followed by the REAL-hub scion-server start —
-// exactly the "bootstrap-token" then "scion-server" step sequence runStep
-// executes for every apply (internal/apply/run.go) — through the SAME
-// scion.Client object apply.Run would drive, over one fake jail runner and
-// one temp .lever-state dir.
-//
-// This is deliberately NOT a re-test of TestEnsureControllerPATMintsThenNoOps
-// (the mint window in isolation) or TestBuildApplyDepsWiresEnsureControllerPAT
-// (wiring only, no scion-server). Its new value is proving the COMPOSITION:
-// bootstrap-token precedes scion-server; scion-server locks the real hub
-// (port 8080, dev-auth off); and the mint→persist→thread round-trip actually
-// closes the loop — the client that starts the locked hub carries
-// SCION_HUB_TOKEN=<the PAT ensureControllerPAT just minted and persisted> in
-// its env, because HubTokenSource reads state.LoadControllerPAT() lazily
-// (see scion.Options.HubTokenSource's doc). A second, fresh buildApplyDeps
-// (a re-apply against the same config/state dir) must skip the throwaway
-// entirely (PAT already persisted) while still threading the SAME PAT into
-// the reused hub's env.
+// TestApplyBootstrapTokenThenLockedHubEndToEnd drives the real
+// ensureControllerPAT and then the real-hub server start through the same
+// scion.Client apply.Run uses. It proves the composition: the throwaway runs
+// first; the real hub runs on 8080 with dev-auth off and carries the just-minted
+// PAT as SCION_HUB_TOKEN (HubTokenSource reads it lazily); a re-apply skips the
+// throwaway and threads the same PAT.
 func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	p := writeTmpConfig(t)
@@ -1010,8 +897,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	sb := &stubBackend{runner: f}
 	bf := func(string, string) (backend.Backend, error) { return sb, nil }
 
-	// --- First apply: bootstrap-token then scion-server, via the real Deps
-	// wiring (mirrors runStep's "bootstrap-token"/"scion-server" arms).
+	// First apply: bootstrap-token, then scion-server.
 	w, err := buildApplyDeps(ctx, app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps: %v", err)
@@ -1027,8 +913,6 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 		t.Fatalf("scion-server step: %v", err)
 	}
 
-	// bootstrap-token precedes scion-server: the throwaway (48080, dev-auth
-	// ON) server start must land BEFORE the real hub's (8080, dev-auth OFF).
 	iThrowaway := callIndex(f.Calls, func(c proc.Call) bool {
 		return callHasPrefix(c, "scion server start --port 48080")
 	})
@@ -1042,20 +926,16 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 		t.Fatalf("throwaway server start (call %d) must precede the real hub server start (call %d)", iThrowaway, iReal)
 	}
 
-	// scion-server locks the real hub: port 8080, dev-auth off.
 	realArgs := strings.Join(f.Calls[iReal].Args, " ")
 	if !strings.Contains(realArgs, "--web-port 8080") || !strings.Contains(realArgs, "--dev-auth=false") {
 		t.Fatalf("real hub server start args = %q, want --web-port 8080 --dev-auth=false", realArgs)
 	}
 
-	// The mint → persist → thread round-trip: the SAME client that started
-	// the real, dev-auth-off hub carries SCION_HUB_TOKEN=<minted PAT> in the
-	// env it sent the runner for that call.
+	// The client that started the real hub carries the minted PAT in its env.
 	if got := f.Calls[iReal].Env["SCION_HUB_TOKEN"]; got != "pat-e2e-round-trip" {
 		t.Fatalf("real hub server-start env SCION_HUB_TOKEN = %q, want %q (mint->thread round-trip broken)", got, "pat-e2e-round-trip")
 	}
 
-	// Persisted 0600 under the config-derived state dir.
 	st := state.ForConfig(filepath.Dir(p))
 	fi, err := os.Stat(st.ControllerPAT())
 	if err != nil {
@@ -1067,10 +947,7 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 
 	callsAfterFirst := len(f.Calls)
 
-	// --- Second apply: a FRESH buildApplyDeps against the same config/state
-	// dir (what a real re-apply invocation does). The PAT is already
-	// persisted, so bootstrap-token must be a complete no-op — in
-	// particular, no second throwaway server start.
+	// Second apply against the same state: bootstrap-token must not open a window.
 	w2, err := buildApplyDeps(ctx, app, p, bf, inertApplyOpts)
 	if err != nil {
 		t.Fatalf("buildApplyDeps (2nd apply): %v", err)
@@ -1079,9 +956,8 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	if err := deps2.EnsureControllerPAT(ctx); err != nil {
 		t.Fatalf("bootstrap-token step (2nd apply): %v", err)
 	}
-	// The one call allowed is the read-only scope probe (`scion hub token
-	// create --help`, controllerLifecycle): it decides whether a re-mint is
-	// due, and it opens no window.
+	// The only call allowed is the read-only scope probe (`scion hub token create
+	// --help`).
 	for _, c := range f.Calls[callsAfterFirst:] {
 		if !callHasPrefix(c, "scion hub token create --help") {
 			t.Fatalf("2nd apply's bootstrap-token made runner call %+v, want only the scope probe (must be a no-op): %+v",
@@ -1089,14 +965,11 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 		}
 	}
 
-	// scion-server still runs on every apply (locking the hub is not itself
-	// gated on the mint) and must thread the SAME reused PAT.
 	if err := deps2.Scion.ServerStart(ctx, scion.ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
 		t.Fatalf("scion-server step (2nd apply): %v", err)
 	}
-	// The 2nd apply's real hub server-start is the LAST such call (ServerStart
-	// itself appends a trailing waitHubReady "list" call right after it, so
-	// it is not simply the last entry in f.Calls).
+	// ServerStart appends a waitHubReady "list" call, so the server start is not
+	// simply the last call.
 	iReal2 := -1
 	for idx, c := range f.Calls {
 		if callHasPrefix(c, "scion server start --web-port 8080") {
@@ -1111,11 +984,9 @@ func TestApplyBootstrapTokenThenLockedHubEndToEnd(t *testing.T) {
 	}
 }
 
-// TestRemoteProxyStartFailsLoudlyWhenItNeverBinds is the regression test for a
-// silent success: a proxy that died on a deterministic bind error (its port
-// already taken — which OrbStack's mirroring of a guest listener can do) left
-// `lever apply` printing "is up" and exiting 0, with the operator's next
-// signal a 502 in a browser.
+// TestRemoteProxyStartFailsLoudlyWhenItNeverBinds: a proxy that died on a bind
+// error (a taken port, which OrbStack's mirroring of a guest listener can
+// cause) must fail the apply, not report "is up".
 func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	dir := t.TempDir()
 	st := state.ForConfig(dir)
@@ -1128,7 +999,6 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A port nothing is listening on.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1136,8 +1006,8 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 
-	// A live stand-in for the spawned proxy: awaitListening gives up early
-	// once the child is gone, so it must outlive the test.
+	// The stand-in must outlive the test: awaitListening gives up once the child
+	// is gone.
 	child := exec.Command("sleep", "60")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
@@ -1149,12 +1019,10 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 	if err == nil {
 		t.Fatal("a proxy that never bound was reported as started")
 	}
-	// The cause lives only in that log — this process never sees the child's
-	// stderr — so the error has to carry it.
+	// This process never sees the child's stderr, so the error carries the log.
 	testutil.WantErrIs(t, err, errRemoteProxyNotListening)
 	testutil.WantErrContaining(t, err, "address already in use", st.RemoteLog()) // the log's reason, and the log
 
-	// And a proxy that IS listening passes.
 	ln2, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Skipf("could not re-bind %d: %v", port, err)
@@ -1179,16 +1047,10 @@ func TestLastLogLine(t *testing.T) {
 	}
 }
 
-// TestRemoteControllerStartStopsOldProxyOnPortChange is the regression test for
-// the Critical an independent review found in the first version of the stamp
-// fix. The stop lived INSIDE the `tcpDial(rc.addr())` check, so the one config
-// change that makes that dial fail — a changed remote.port — skipped it: the
-// old proxy kept serving the OLD port with the OLD config (with `tailscale
-// serve` still pointing at it), and the fresh spawn then OVERWROTE remote.pid,
-// leaving no `lever` verb able to stop the leaked process.
-//
-// Here the recorded proxy is alive but nothing listens on the NEW port, which
-// is exactly that sequence.
+// TestRemoteControllerStartStopsOldProxyOnPortChange: a changed remote.port
+// makes the dial fail, and the stop must still happen, or the old proxy keeps
+// serving the old port with the old config while the respawn overwrites
+// remote.pid and leaves it unstoppable.
 func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	selfExe := "/no/such/lever-binary"
 
@@ -1201,14 +1063,11 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(oldProxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Stamp matches: this is a pure PORT move, so the old proxy is "ours" —
-	// it is simply serving somewhere else.
+	// The stamp matches: a pure port move.
 	if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Nothing listens on the new port: bind one and close it to get a port
-	// that is certainly free.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -1227,18 +1086,16 @@ func TestRemoteControllerStartStopsOldProxyOnPortChange(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the old proxy was LEAKED: still serving the previous port with the previous config, and remote.pid no longer names it")
 	}
-	// The other half of "unstoppable": the stop must also drop remote.pid, so
-	// nothing later mistakes a process lever no longer controls for the live
-	// proxy. (Here the respawn fails, so nothing rewrites the file.)
+	// The stop must also drop remote.pid, so nothing later mistakes a process lever
+	// no longer controls for the live proxy.
 	if _, err := os.Stat(st.RemotePID()); err == nil {
 		t.Fatal("remote.pid still names the stopped proxy — `lever remote status` and the next apply both read it as the live one")
 	}
 }
 
-// TestDetachedSelfCmd pins the shared daemon spawn shape both serve commands
-// ride on: argv = self + args + the absolute config path, the instance root
-// as working directory, Setsid, extra env appended to the parent's,
-// and the out log created (parent dir included) and wired to both streams.
+// TestDetachedSelfCmd pins the daemon spawn shape: argv is self, args and the
+// absolute config path; the instance root is the working directory; Setsid;
+// env appended; and the out log created and wired to both streams.
 func TestDetachedSelfCmd(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "state", "x.log")
 	cmd, f, err := detachedSelfCmd("/usr/local/bin/lever", out, "/x/lever.yaml", []string{"K=v"}, "remote", "serve")
@@ -1300,7 +1157,6 @@ func TestRemoteRecordStampWaitsForThePIDFile(t *testing.T) {
 	const pid = 4242
 	rc := &remoteController{state: st, version: "v-test", cfgHash: "hash-test",
 		startTimeout: 2 * time.Second, startInterval: 10 * time.Millisecond}
-	// A stale file first (another pid), then the new proxy's, after a delay.
 	if err := os.WriteFile(st.RemotePID(), []byte("4241\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1364,9 +1220,8 @@ func TestAwaitListeningHonoursContext(t *testing.T) {
 	}
 }
 
-// recordMounts turns the manager record's volumes into the jail mounts
-// apply's stale-mount check compares, and fails for an absent record (so
-// the check says nothing rather than reading "no mounts").
+// recordMounts fails for an absent record, so the check says nothing rather
+// than "no mounts".
 func TestRecordMounts(t *testing.T) {
 	agents := []hubapi.Agent{
 		{Slug: "scratch", Volumes: []hubapi.Volume{{Source: "/x", Target: "/y"}}},

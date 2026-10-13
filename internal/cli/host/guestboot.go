@@ -18,14 +18,11 @@ const guestBootIDPath = "/proc/sys/kernel/random/boot_id"
 // comes from the guest, so anything else is refused rather than stored.
 var bootIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// guestBootRecord is the host-side file state.State.GuestBoot.
 type guestBootRecord struct {
 	BootID     string    `json:"boot_id"`
 	RecordedAt time.Time `json:"recorded_at"`
 }
 
-// jailGuestBoot is apply.GuestBoot over the jail transport and the
-// instance's state dir.
 type jailGuestBoot struct {
 	jr  proc.Runner
 	st  state.State

@@ -12,9 +12,8 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// The token issuer gets a project role holding agent.attach on the instance
-// project, so a mint that asks for agent:attach passes scion's ceiling on
-// scion f7155ecb and later. A second run changes nothing.
+// The issuer gets a project role with agent.attach, so minting agent:attach
+// passes scion's ceiling. A second run changes nothing.
 func TestEnsureControllerRoleBindsIssuer(t *testing.T) {
 	h := newFakeAdminHub()
 	h.me = "dev-user"
@@ -66,8 +65,8 @@ func TestRemoteRoleLifecycleParameter(t *testing.T) {
 	}
 }
 
-// After a scion upgrade to one with agent.lifecycle, a grant recorded
-// without it must run again; the recorded variant alone is accepted.
+// After a scion upgrade adding agent.lifecycle, a grant recorded without it
+// runs again; the recorded variant alone is accepted.
 func TestRemoteRoleReasonAfterScionUpgrade(t *testing.T) {
 	rec := state.RemoteRoleRecord{
 		Permissions: remoteRolePermissions(false), Bound: map[string]string{"op@github": "u1"},

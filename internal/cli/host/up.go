@@ -15,17 +15,11 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-// phaseOrAbsent treats a failed phase probe as "absent" (no manager found)
-// ONLY when the error proves the manager cannot be running (see
-// scion.IsAgentAbsent). That case must fall through to upDecision
-// (-> "apply"), not abort `up`.
-//
-// Every other probe error propagates unchanged: `lever apply` is NOT fully
-// idempotent (each run leaves a duplicate scion project-configs entry), so a
-// transient list failure (auth blip, malformed output) on an already-up
-// instance must not force a re-apply. This scoping also fails safe — if
-// scion's wording ever changes, we regress to the OLD behavior (error out),
-// never to a harmful forced re-apply.
+// phaseOrAbsent treats a failed phase probe as "absent" only when the error
+// proves the manager cannot be running (scion.IsAgentAbsent); up then applies.
+// Every other error propagates: apply is not fully idempotent (each run leaves
+// a duplicate project-configs entry), so a transient list failure must not
+// force a re-apply. If scion's wording changes, this fails safe by erroring.
 func phaseOrAbsent(phase string, err error) (string, error) {
 	if err == nil {
 		return phase, nil
@@ -36,8 +30,6 @@ func phaseOrAbsent(phase string, err error) (string, error) {
 	return "", err
 }
 
-// upAction is the action `up` takes for the manager's current state, as
-// decided by upDecision and dispatched in newUpCmd's switch.
 type upAction string
 
 const (
@@ -46,16 +38,12 @@ const (
 	upNone   upAction = "none"   // already running: nothing to do, just attach
 )
 
-// upDecision maps the manager's current scion phase (""=absent) + --fresh to an action.
 func upDecision(phase string, fresh bool) upAction {
-	// --fresh discards ANY present record, whatever its phase, and the
-	// discard is apply's job (PlanOpts.Fresh, start-manager's converge step),
-	// never decided on the probe here: after `lever stop` the hub is down
-	// until apply's scion-server step, so the probe fails and the record is
-	// invisible — deciding on the probe dropped --fresh on exactly that path
-	// (lever#33). Since 0.12 apply also PRESERVES an error-phase record when
-	// its forced resume comes up dead (#3), so --fresh reaching apply is the
-	// only clean escape hatch for a genuinely-bricked record.
+	// --fresh discards any present record, and the discard is apply's job, never
+	// decided on the probe here: after `lever stop` the hub is down, the probe
+	// fails and the record is invisible. apply also keeps an error-phase record
+	// whose forced resume comes up dead, so --fresh is the only clean escape for a
+	// bricked record.
 	if fresh {
 		return upApply
 	}
@@ -69,37 +57,25 @@ func upDecision(phase string, fresh bool) upAction {
 	}
 }
 
-// verifyManagerRole runs apply's pre-role record guard (see
-// apply.Deps.VerifyAgentRole) on the `up` paths that keep an existing manager
-// record WITHOUT calling apply.Run. project is the in-jail mount root; the hub
-// knows the project by its basename, exactly as apply's own call does.
+// verifyManagerRole runs apply's pre-role record guard
+// (apply.Deps.VerifyAgentRole) on the up paths that keep a manager without
+// calling apply.Run. The hub knows the project by project's basename.
 func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name string) error {
 	return deps.VerifyAgentRole(ctx, hubProjectKey(project), name)
 }
 
-// gateAfterUp is the liveness gate `up` runs before it prints "is up." or
-// attaches, chosen by the path taken. The apply paths (create, --fresh) are
-// already gated inside apply.Run's start-manager step, settle window included,
-// so they add nothing here. A resume acted on the manager moments ago and
-// gets the full gate: live, then held for the settle window. A manager that
-// was already running when `up` looked gets one observation, no settle (a
-// failed list is retried a few times) and is refused only on positive
-// evidence of a death — a harness that died earlier reads as an error phase
-// or an exited container — because holding a healthy long-running manager
-// for ten seconds on every `up` would be a poor trade.
+// gateAfterUp is the liveness gate before up prints "is up." or attaches. The
+// apply paths are already gated inside apply.Run. A resume gets the full gate:
+// live, then held for the settle window. A manager already running gets one
+// observation, no settle, and is refused only on positive evidence of a death:
+// holding a healthy manager for ten seconds on every up is a poor trade.
 //
-// prog (may be nil) is the resume's progress line (lever#168), handed the
-// gate's stages.
-//
-// A resume's gate is the same whether or not a terminal is attached next:
-// it waits for claude to report its session start (lever#188). Attaching at
-// the pane would attach the operator to a claude --continue that exits a
-// second later for want of a conversation (lever#202); the gate names that
-// cause instead.
-//
-// guard (the resume path's lever#158 checks, nil elsewhere) reads the tree
-// mounts back once the manager is live, if that could not be done right
-// after the resume: the manager is not reported up before.
+// prog (may be nil) is the resume's progress line. A resume's gate waits for
+// claude to report its session start whether or not a terminal attaches next,
+// so a claude --continue with no conversation is named rather than attached
+// to. guard (resume path only) reads the tree mounts back once the manager is
+// live if that could not be done right after the resume; the manager is not
+// reported up before.
 func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, guard *apply.ManagerResume) error {
 	switch d {
 	case upResume:
@@ -121,11 +97,10 @@ func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name
 	}
 }
 
-// resumeForUp is up's own resume of the manager, between the checks
-// apply's start-manager step runs around its resume (lever#158): before it
-// the host tree and a mount whose directory is gone, right after it where
-// each tree mount comes from (a mismatch suspends the manager). The
-// returned guard's Live runs after the gate (gateAfterUp).
+// resumeForUp is up's own resume, between the checks apply's start-manager
+// step runs around its resume: before it the host tree and gone mount
+// directories, right after it where each tree mount comes from (a mismatch
+// suspends the manager). The guard's Live runs after the gate.
 func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project string, resume func(context.Context) error) (*apply.ManagerResume, error) {
 	guard, err := apply.BeginManagerResume(ctx, deps, app, project, "up")
 	if err != nil {
@@ -161,9 +136,8 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// The first line of every up, before the jail is touched: what
-			// runs, on which backend (lever#195). A VM boot can take a
-			// minute; it is never silent.
+			// The first line of every up, before the jail is touched: what runs, on which
+			// backend. A VM boot can take a minute and is never silent.
 			run, pctx, err := startBringup(cmd, app, stateFor(path), "up", progressMode)
 			if err != nil {
 				return err
@@ -175,15 +149,12 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			printContactSessionWarnings(cmd, app, stateFor(path))
-			// The bring-up runs under a signal-aware context (see
-			// applySignalContext); the attach below does not, so the
-			// operator's keys go to the manager, not to this handler.
+			// The bring-up runs under a signal-aware context; the attach does not, so the
+			// operator's keys go to the manager.
 			ctx, stop := applySignalContext(pctx)
 			defer stop()
-			// buildApplyDeps brings the jail up through the backend's EnsureUp
-			// on every path below, before up looks at the manager: on Lima
-			// that converges the guest hardening (crash recovery, guest_kernel;
-			// lever#179) whether up then applies, resumes or only attaches.
+			// buildApplyDeps brings the jail up through EnsureUp on every path, so on Lima
+			// the guest hardening converges whether up applies, resumes or attaches.
 			rep.Group("jail", 0)
 			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
 			if err != nil {
@@ -200,31 +171,25 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return err // possibly-transient probe failure: do NOT force apply
 			}
 			if probeErr != nil {
-				// The probe error proves the manager isn't up NOW (hub down
-				// after `lever stop` or on a fresh machine; project 404 =
-				// never hub-registered) — fall through to apply, which starts
-				// the hub / registers the manager, rather than dying. It does
-				// NOT prove the record is absent: after `stop` a suspended
-				// record is waiting behind the down hub, which is why --fresh
-				// rides into apply rather than being decided here (lever#33).
+				// The probe error proves the manager is not up now (hub down, or project never
+				// registered): fall through to apply. It does not prove the record is absent:
+				// after `stop` a suspended record waits behind the down hub, which is why
+				// --fresh rides into apply.
 				check.Note(upProbeReason(probeErr))
 				if fresh {
 					rep.Log(upProbeNotice(probeErr, fresh))
 				}
 			}
 			decision := upDecision(phase, fresh)
-			// On a terminal the operator is attached to a manager apply
-			// created as soon as claude runs, and the manager is checked
-			// after the detach, instead of after a wait nobody watches
-			// (lever#188). A resume waits for claude's session start first,
-			// so a claude --continue with no conversation is caught before
-			// the attach (lever#202). --no-attach and a stdin that is not a
-			// terminal wait on every path.
+			// On a terminal the operator attaches to a manager apply created as soon as
+			// claude runs, and the manager is checked after the detach. A resume waits for
+			// claude's session start first, so a --continue with no conversation is
+			// caught before the attach. --no-attach and a non-terminal stdin wait on every
+			// path.
 			attachTTY := !noAttach && isTerminal(os.Stdin)
-			// A record left "running" by a hard VM kill (a new guest boot,
-			// no live container) is suspended here and resumed below: what
-			// the operator used to do by hand with `lever stop` + `lever up`
-			// (lever#179). Never --fresh: the conversation is kept.
+			// A record left "running" by a hard VM kill (new guest boot, no live
+			// container) is suspended here and resumed below. Never --fresh: the
+			// conversation is kept.
 			if decision == upNone && apply.RecoverAfterGuestRestart(ctx, deps, app.Name, project) {
 				decision = upResume
 			}
@@ -233,21 +198,18 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			check.Done(nil)
 			var prog *apply.Progress
-			// guard is set on the resume path: it checked the tree before the
-			// resume and reads the mounts back after it (lever#158).
+			// guard checks the tree before the resume and reads the mounts back after it.
 			var guard *apply.ManagerResume
 			switch decision {
 			case upApply:
-				// --fresh: apply's start-manager step deletes any record it
-				// finds once the hub is up and creates anew; a failed delete
-				// is fatal there, so the old session is never resumed silently.
-				// Unless --no-backup, the conversation is backed up first, and
-				// a failed backup keeps the record (lever#198).
+				// --fresh: apply's start-manager deletes any record once the hub is up and
+				// creates anew; a failed delete is fatal, so the old session is never resumed
+				// silently. Unless --no-backup the conversation is backed up first, and a
+				// failed backup keeps the record.
 				//
-				// Without --fresh, a resume whose claude finds no
-				// conversation to continue is started fresh, once the guest
-				// shows the home holds no transcript (lever#202); the backup
-				// guards that start too.
+				// Without --fresh, a resume whose claude finds no conversation is started
+				// fresh once the guest shows the home holds no transcript; the backup guards
+				// that start too.
 				var saved *convbackup.Meta
 				conv := newConvOps(w, app, stateFor(path))
 				switch {
@@ -277,21 +239,16 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 					}
 				}
 			case upResume:
-				// `up` resumes a suspended manager ITSELF, without going through
-				// apply.Run, so apply's pre-role record guard would not run on
-				// the commonest path of all (stop suspends; up resumes). Run it
-				// here for the same reason apply does.
+				// up resumes a suspended manager without apply.Run, so apply's pre-role guard
+				// must run here too.
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
 				guard, err = resumeForUp(ctx, deps, app, project, func(ctx context.Context) error {
 					resume := rep.Start("resume manager")
 					resume.TailFrom(w.stepTail(apply.KindStartManager))
-					// The resume and the gate after it can run over a minute
-					// (container start, pre-start hook, claude, settle): print
-					// progress about every 15 s (lever#168), or hand the stages
-					// to the progress list. Stopped on every return; the gate
-					// below gets the stages.
+					// The resume and its gate can run over a minute: print progress about every
+					// 15 s, or hand the stages to the progress list.
 					prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
 					return sc.Resume(ctx, app.Name, project)
 				})
@@ -300,26 +257,21 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 					return err
 				}
 			case upNone:
-				// A running manager is not exempt: it refreshes its own token
-				// periodically, and scion#1101 re-derives scopes from the stored
-				// role on every refresh, so an unrolled record acquires full
-				// authority without ever restarting. `lever attach` still
-				// reaches the manager if the operator needs it while deciding.
+				// A running manager is not exempt: scion re-derives scopes from the stored
+				// role on every token refresh, so an unrolled record gains full authority
+				// without restarting.
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
-				// A running manager can still hold an expired hub token (the
-				// refresh timer stalls while the host sleeps), and its workers
-				// too; apply.Run would heal them, but this path bypasses it.
+				// A running manager or its workers can hold an expired hub token (the refresh
+				// timer stalls while the host sleeps); this path bypasses apply.Run's heal.
 				heal := rep.Start("refresh agent sessions")
 				apply.HealSessions(ctx, deps, app, project)
 				heal.Done(nil)
 				rep.Start("check manager is live")
 			}
-			// The paths that act on the manager without apply.Run used to reach
-			// the "is up." print with no observation at all, and the apply
-			// paths returned on the first live look — over a harness that dies
-			// a moment later (lever#31). Gate every path before claiming up.
+			// Gate every path before claiming up: a harness can die a moment after its
+			// first live look.
 			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, guard)
 			prog.Stop()
 			if err != nil {
@@ -327,8 +279,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			}
 			apply.RecordGuestBoot(ctx, deps)
 			stop()
-			// The list ends before the attach: from here the terminal is the
-			// manager's.
+			// The list ends before the attach: from here the terminal is the manager's.
 			run.finish(nil)
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)
@@ -353,9 +304,8 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 	return c
 }
 
-// checkFreshFlags refuses flag combinations that mean nothing: --no-backup
-// and --keep-conversation act on the record --fresh deletes, and keeping a
-// conversation needs its backup.
+// checkFreshFlags: --no-backup and --keep-conversation act on the record
+// --fresh deletes, and keeping a conversation needs its backup.
 func checkFreshFlags(fresh, noBackup, keepConv bool) error {
 	switch {
 	case (noBackup || keepConv) && !fresh:
@@ -366,7 +316,6 @@ func checkFreshFlags(fresh, noBackup, keepConv bool) error {
 	return nil
 }
 
-// upDecisionNote says, on the check step, what up found and will do.
 func upDecisionNote(phase string, d upAction) string {
 	switch d {
 	case upNone:
@@ -386,9 +335,8 @@ func upDecisionNote(phase string, d upAction) string {
 	return fmt.Sprintf("phase %s; bringing it up", scion.PhaseLabel(phase))
 }
 
-// upProbeReason is the probe failure in the operator's words (lever#195):
-// the hub after `lever stop` or a VM restart answers "connection refused",
-// which says nothing to someone who did not write the hub client.
+// upProbeReason is the probe failure in the operator's words: a hub that is
+// down answers "connection refused".
 func upProbeReason(probeErr error) string {
 	msg := strings.ToLower(probeErr.Error())
 	switch {
@@ -400,19 +348,16 @@ func upProbeReason(probeErr error) string {
 	return "no running manager (" + firstLine(probeErr.Error()) + "); bringing the application up"
 }
 
-// hubNotRunning reports scion's answer when the jail's hub does not serve:
-// after `lever stop --keep-vm`, a VM restart, or a hub that exited.
+// hubNotRunning reports scion's answer when the jail's hub does not serve.
 func hubNotRunning(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "is not responding")
 }
 
-// upProbeNotice is the line `up` prints when the phase probe could not see
-// the manager. probeErr is scion's raw CLI error, which on a fresh machine
-// includes scion's entire usage dump after the first line — keep only that
-// first line so a normal bring-up doesn't print a scary wall of text. Under
-// --fresh it must say what the flag will do, because the probe failing is
-// exactly the case where a silent resume used to happen (lever#33).
+// upProbeNotice keeps only the first line of scion's error, which on a fresh
+// machine includes the whole usage dump. Under --fresh it says what the flag
+// will do, since a failed probe is when a silent resume would otherwise
+// happen.
 func upProbeNotice(probeErr error, fresh bool) string {
 	reason := upProbeReason(probeErr)
 	if fresh {
@@ -421,10 +366,8 @@ func upProbeNotice(probeErr error, fresh bool) string {
 	return "lever: " + reason
 }
 
-// firstLine returns the first line of s, trimmed of surrounding whitespace
-// and sanitized for the terminal. Used to keep scion's raw CLI errors —
-// which can carry an entire usage dump after the first line, and which the
-// jail can lace with escape sequences — down to one short, printable reason.
+// firstLine returns s's first line, trimmed and sanitized: scion's errors can
+// carry a usage dump and jail-controlled escape sequences.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]

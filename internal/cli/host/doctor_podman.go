@@ -10,22 +10,18 @@ import (
 
 const podmanStorageCheck = "podman storage"
 
-// podmanResetFix is the recovery every damaged-store verdict points at: back
-// up, reset the store as the jail user, bring the instance up again on the
-// same records. The runbook in the operations guide has the detail.
+// podmanResetFix is the recovery for a damaged store: back up, reset it as the
+// jail user, and bring the instance up on the same records (see the operations
+// guide).
 const podmanResetFix = "if `lever up` fails at load-image: back up first (the guest's ~/.scion with the hub database, and the agent homes), " +
 	"then in the guest as the jail user run `podman system reset --force` (it removes every image, container and " +
 	"podman volume in the jail; the hub records, agent homes and the tree stay), then `lever up` without --fresh; " +
 	"see \"Recovering the jail's podman store\" in the operations guide"
 
-// checkPodmanStorage reports the health of the jail's rootless podman store
-// (lever#173): podman's own corruption warning fails the row; layers no image
-// or container uses, or layers flagged incomplete, warn. Orphan layers are
-// harmless until a load reuses a damaged one, which is how the reported
-// load-image failure happened. read is jail.ReadStoreHealth over the jail
-// runner: bounded, as the jail run user; lever changes nothing (podman's own
-// startup cleanup may run). lever never deletes a layer; the fix says how to
-// recover.
+// checkPodmanStorage reports the jail's rootless podman store: podman's
+// corruption warning fails; unused or incomplete layers warn, since a load
+// that reuses a damaged orphan layer fails. Read-only (bounded, as the run
+// user): lever never deletes a layer; the fix says how to recover.
 func checkPodmanStorage(ctx context.Context, read func(context.Context) (jail.StoreHealth, error)) checkResult {
 	h, err := read(ctx)
 	if err != nil {

@@ -33,15 +33,18 @@ off.
 | `comment` | `number`, `body` | Add a markdown comment. |
 | `move_card` | `number`, `column` | Move a card to a column of the board. `column` is a column id; a column of another board is refused with the list of valid columns. |
 | `create_card` | `title`, `description` | Create a card on the board. An empty description is written as `(no description)` after the prefix. |
+| `close_card` | `number`, `comment` (optional) | Opt-in, see [Closing cards](#closing-cards-opt-in). Close an open card on the board, after posting `comment` with the prefix when one is given. |
 
 A refusal comes back as `{"ok": false, "error": "..."}`, for example when a card is not on the
-board. The tool never closes a card.
+board. The six operations above `close_card` are offered by default. `close_card` exists only when
+`-ops` lists it; without it the tool never closes a card. The tool never reopens or deletes a card.
 
 The CLI turns a body or description from markdown into HTML and passes raw HTML through. The tool
 refuses a body or description that contains `action-text-attachment` or `trix-attachment` (any
 case): with that markup an agent could @mention an account user, which notifies them as the token
-owner, or re-embed an attachment it saw. `comment` and `create_card` together are limited to 10
-calls per minute per tool process; a call over the limit gets an error that starts with `rate`.
+owner, or re-embed an attachment it saw. Comments, created cards and closed cards together are limited to
+10 per minute per tool process (a `close_card` with a comment counts as two, and sends neither
+when only one fits); a call over the limit gets an error that starts with `rate`.
 
 ## Configure the tool
 
@@ -84,10 +87,51 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-state` | yes | Absolute path of a private directory. It holds empty `home/` and `work/` directories and temporary body files. |
 | `-prefix` | no | Text put before every comment and description. Default `[lever-dev agent] `. It must not be empty. |
 | `-name` | no | Tool name. Default `fizzy`. It must equal the `name` in the config. |
+| `-ops` | no | Comma list of the operations to offer: `list_cards`, `show_card`, `list_comments`, `comment`, `move_card`, `create_card`, `close_card`. Default: all but `close_card`. The list replaces the default, so name every operation you want. An operation not listed does not exist. |
 
 Create a Fizzy personal access token only for this tool. Do not keep a `~/.fizzy.yaml` on the
 host: the tool refuses to start when a `.fizzy.yaml` or `.fizzy.yml` exists in its state directory
 or in any directory above it, because the CLI would read it.
+
+## Closing cards (opt-in)
+
+In Fizzy, Done is a card's closed state, not a column of the board, so `move_card` cannot finish a
+card. `close_card` closes one, through `fizzy card close <number>`. To offer it, add it to `-ops`
+with the operations you already offer, list it under `operations`, and grant it to the agents that
+may close cards:
+
+```yaml
+broker:
+  tools:
+    - name: fizzy
+      command: [/home/you/.local/bin/lever-tool-fizzy,
+                # -fizzy, -token-file, -account, -board, -state as above
+                -ops, "list_cards,show_card,list_comments,comment,move_card,create_card,close_card"]
+      backend: 127.0.0.1:3211
+      operations:
+        # the six operations as above, and:
+        - {name: close_card, params: [number, comment]}
+manager:
+  obtain:
+    # the six grants as above, and:
+    - {tool: fizzy, op: close_card}
+```
+
+Do all three. When `-ops` offers `close_card` but `operations` does not list it, the broker refuses
+the tool's registration; when `operations` lists it but `-ops` does not, a call finds no such
+operation.
+
+`close_card` is its own capability: an agent with the other grants but not this one cannot close
+a card. It acts only on a card of `-board`. It reads the card first and refuses a card that is
+already closed, or whose closed state it cannot read, and then posts nothing. When `comment` is
+given (and not blank), the tool posts it first, with the same prefix and the same checks as
+`comment`; if the comment fails, the card is not closed. The result is `{"ok": true, "number":
+"<number>", "closed": true, "commented": true|false}`. If the close fails after the comment was
+posted, the error says so. Each call writes an audit line `fizzy.close_card` with the caller and
+the card. The tool never reopens or deletes a card.
+
+**Risk:** closing a card notifies its watchers, as the token owner. Grant `close_card` only to an
+agent whose job includes finishing cards, for example a manager that closes cards after a release.
 
 ## Residual risk
 

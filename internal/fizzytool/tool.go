@@ -15,20 +15,20 @@ import (
 // ErrOtherBoard: the card is not on the configured board.
 var ErrOtherBoard = errors.New("card is not on the Lever board")
 
-// DefaultWriteLimit is how many comments and created cards together the
-// tool sends in any one minute when Tool.WriteLimit is 0.
+// DefaultWriteLimit is how many comments, created cards and closed cards
+// together the tool sends in any one minute when Tool.WriteLimit is 0.
 const DefaultWriteLimit = 10
 
-// Tool is the six operations of spec §4b.3.
+// Tool is the six operations of spec §4b.3, and the opt-in close_card.
 type Tool struct {
 	CLI    CLI
 	Board  string
 	Prefix string // prepended to every comment and description
 	TmpDir string // private (0700) dir for body files
 	Log    *slog.Logger
-	// WriteLimit caps comment + create_card calls per sliding minute for
-	// this process, so a looping agent cannot flood the board (and its
-	// watchers' notifications). 0 means DefaultWriteLimit.
+	// WriteLimit caps comments, created cards and closed cards per sliding
+	// minute for this process, so a looping agent cannot flood the board
+	// (and its watchers' notifications). 0 means DefaultWriteLimit.
 	WriteLimit int
 	// Now is time.Now; a test seam.
 	Now func() time.Time
@@ -37,9 +37,13 @@ type Tool struct {
 	writes []time.Time // send times within the last minute, oldest first
 }
 
-// takeWrite counts one comment or card create against the per-minute cap,
-// or refuses it.
-func (t *Tool) takeWrite() error {
+// takeWrite counts one comment, card create or card close against the
+// per-minute cap, or refuses it.
+func (t *Tool) takeWrite() error { return t.takeWrites(1) }
+
+// takeWrites counts n writes of one call against the cap together, or
+// refuses them all, so a call is never cut off between its writes.
+func (t *Tool) takeWrites(n int) error {
 	now := time.Now
 	if t.Now != nil {
 		now = t.Now
@@ -50,18 +54,20 @@ func (t *Tool) takeWrite() error {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := now()
+	at := now()
 	keep := t.writes[:0]
 	for _, w := range t.writes {
-		if n.Sub(w) < time.Minute {
+		if at.Sub(w) < time.Minute {
 			keep = append(keep, w)
 		}
 	}
 	t.writes = keep
-	if len(t.writes) >= limit {
-		return fmt.Errorf("rate: at most %d comments and new cards per minute; try again in a minute", limit)
+	if len(t.writes)+n > limit {
+		return fmt.Errorf("rate: at most %d comments, new cards and closed cards per minute; try again in a minute", limit)
 	}
-	t.writes = append(t.writes, n)
+	for range n {
+		t.writes = append(t.writes, at)
+	}
 	return nil
 }
 
@@ -266,4 +272,59 @@ func (t *Tool) CreateCard(ctx context.Context, caller, title, description string
 		return e
 	})
 	return out, err
+}
+
+// ErrClosed: the card is already closed.
+var ErrClosed = errors.New("card is already closed")
+
+// CloseCard closes an open card on t.Board (Fizzy's Done is the closed
+// state, not a column), after posting comment with the prefix when one is
+// given. A closed card is refused and nothing is posted. It never reopens
+// or deletes a card.
+func (t *Tool) CloseCard(ctx context.Context, caller, number, comment string) (res any, err error) {
+	defer func() { t.audit("close_card", caller, number, "", err) }()
+	if err := ValidNumber(number); err != nil {
+		return nil, err
+	}
+	if err := ValidText(comment); err != nil {
+		return nil, err
+	}
+	data, err := t.checkCard(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	// A card whose state cannot be read is refused, not closed blind.
+	var c struct {
+		Closed *bool `json:"closed"`
+	}
+	if json.Unmarshal(data, &c) != nil || c.Closed == nil {
+		return nil, fmt.Errorf("card %s: response has no closed state", number)
+	}
+	if *c.Closed {
+		return nil, fmt.Errorf("card %s: %w; nothing posted", number, ErrClosed)
+	}
+	withComment := strings.TrimSpace(comment) != ""
+	writes := 1
+	if withComment {
+		writes = 2
+	}
+	if err := t.takeWrites(writes); err != nil {
+		return nil, err
+	}
+	if withComment {
+		err := t.withTextFile(t.Prefix+comment, func(p string) error {
+			_, e := t.CLI.Run(ctx, "comment", "create", "--card="+number, "--body_file="+p)
+			return e
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%w; the card was not closed", err)
+		}
+	}
+	if _, err := t.CLI.Run(ctx, "card", "close", number); err != nil {
+		if withComment {
+			return nil, fmt.Errorf("%w; the comment was posted, and the card may still be open", err)
+		}
+		return nil, err
+	}
+	return map[string]any{"ok": true, "number": number, "closed": true, "commented": withComment}, nil
 }

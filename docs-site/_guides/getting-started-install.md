@@ -17,7 +17,7 @@ UI from source) still need Go. See [prebuilt scion](/reference/config/#prebuilt-
 To build from a checkout instead:
 
 ```sh
-cd /path/to/lever_to
+cd /path/to/lever
 make all
 ```
 

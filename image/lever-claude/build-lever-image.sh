@@ -3,15 +3,12 @@
 # (or, with LEVER_IMAGE_FLAVOR=slim, lever-claude-slim from lever's slim base),
 # tagged for the local image registry (scionlocal) so scion uses it with no pull.
 #
-# Prerequisite: the bin/ and scionhook/ build-context dirs must be staged first
-# (cross-compiled binaries + the pre-start hook). `make lever-image` does that
-# for you, then runs this script; run it standalone only if you staged them
-# yourself.
+# The bin/ and scionhook/ build-context dirs must be staged first;
+# `make lever-image` does that, then runs this script.
 #
-# Images are tagged BY ARCH (…:arm64 / …:amd64), never :latest, so a host that
-# builds both arches (an arm64 dev laptop cross-building an amd64 server image)
-# never clobbers one with the other. lever resolves a tagless `manager.image` to
-# the jail's arch tag at apply time (see internal/config archImage).
+# Images are tagged by arch, never :latest, so a host that builds both arches
+# never clobbers one with the other. lever resolves a tagless `manager.image`
+# to the jail's arch tag at apply time (internal/config archImage).
 #
 # Env:
 #   LEVER_IMAGE_REGISTRY  registry prefix for the scionlocal tag (default: scionlocal)
@@ -72,9 +69,8 @@ for d in bin scionhook; do
   }
 done
 
-# Clobber guard: this tag is also what a real (possibly customized) instance
-# image uses. Refuse to silently overwrite one — a Ruby-less generic image
-# replacing a customized one boots a manager missing that instance's tooling.
+# This tag is also what a customized instance image uses: refuse to silently
+# overwrite one with the generic image.
 if [ "${LEVER_IMAGE_FORCE:-}" != "1" ] && docker image inspect "${TARGET}" >/dev/null 2>&1; then
   cat >&2 <<EOF
 ${TARGET} already exists. Building would overwrite it with the generic image.

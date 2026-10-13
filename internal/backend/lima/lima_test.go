@@ -708,3 +708,21 @@ func TestEnsureUpNestedVirtUnknownLeavesGuest(t *testing.T) {
 		}
 	}
 }
+
+func TestMachineStopped(t *testing.T) {
+	for out, want := range map[string]bool{
+		"":                                     true,
+		"other Running\n":                      true,
+		vm + " Stopped\n":                      true,
+		vm + " Running\n":                      false,
+		vm + " Broken\n":                       false,
+		"other Stopped\n" + vm + " Starting\n": false,
+	} {
+		f := proc.NewFakeRunner()
+		scriptList(f, out)
+		got, err := New(f, vm, common.Options{}).MachineStopped(context.Background())
+		if err != nil || got != want {
+			t.Errorf("list %q: MachineStopped = %v, %v; want %v", out, got, err, want)
+		}
+	}
+}

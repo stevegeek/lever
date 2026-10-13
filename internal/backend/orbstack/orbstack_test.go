@@ -617,3 +617,19 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 	}
 	backendtest.AssertNoNodeTooling(t, f)
 }
+
+func TestMachineStopped(t *testing.T) {
+	for out, want := range map[string]bool{
+		listAbsent:                     true,
+		listStopped:                    true,
+		listRunning:                    false,
+		machine + " starting ubuntu\n": false,
+	} {
+		f := proc.NewFakeRunner()
+		scriptList(f, out)
+		got, err := New(f, machine, common.Options{}).MachineStopped(context.Background())
+		if err != nil || got != want {
+			t.Errorf("list %q: MachineStopped = %v, %v; want %v", out, got, err, want)
+		}
+	}
+}

@@ -179,6 +179,17 @@ func parseMachineStatus(stdout, name string) (status string, found bool) {
 	return "", false
 }
 
+// MachineStopped reports whether the machine is stopped or absent, so
+// nothing in it can write the tree. Any other status, unknown ones
+// included, is not stopped.
+func (o *OrbStack) MachineStopped(ctx context.Context) (bool, error) {
+	status, found, err := o.machineStatus(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !found || strings.EqualFold(status, "stopped"), nil
+}
+
 // Teardown deletes the jail machine. Idempotent.
 func (o *OrbStack) Teardown(ctx context.Context) error {
 	return o.orbIfPresent(ctx, "delete")

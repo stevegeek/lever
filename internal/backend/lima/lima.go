@@ -370,6 +370,17 @@ func (l *Lima) Teardown(ctx context.Context) error {
 
 // Stop powers the VM off but keeps its disk. Idempotent: limactl tolerates
 // stopping an already-stopped VM.
+// MachineStopped reports whether the VM is stopped or absent, so nothing
+// in it can write the tree. Any other status, unknown ones included, is not
+// stopped.
+func (l *Lima) MachineStopped(ctx context.Context) (bool, error) {
+	status, err := l.vmStatus(ctx)
+	if err != nil {
+		return false, err
+	}
+	return status == "" || status == "Stopped", nil
+}
+
 func (l *Lima) Stop(ctx context.Context) error {
 	status, err := l.vmStatus(ctx)
 	if err != nil {

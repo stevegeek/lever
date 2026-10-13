@@ -774,7 +774,7 @@ off as usual.
 ## Hub identities
 
 The jail's scion hub runs in scion's proxy auth mode. It trusts one thing: a short-lived assertion
-(an ES256 JWT, 90 s) that lever signs on the host for each request, with a key the jail never
+(an ES256 JWT, 30 s) that lever signs on the host for each request, with a key the jail never
 holds. Nothing in the jail can mint a hub session, so lever governs the hub while agents run, and
 there is no dev-auth window and no "stop every container first". See
 [security model §4.2](/security-model/worker-isolation/) for the reasoning.
@@ -787,6 +787,7 @@ What lever holds:
 | `.lever-state/hub-identity.json` | no secret: whether the hub was set up fresh or migrated, the admin's and the controller's hub user IDs, the project ID, the key fingerprint, the **hub marker** (the ID of lever's `lever-controller` role), the hub user ID recorded for each remote login, and any repairs lever made |
 | `.lever-state/controller.pat` (+ `.json`) | the controller PAT the broker and lever's own scion calls use, as before |
 | `.lever-state/remote.pat` (+ `.json`) | with remote access on: the PAT the proxy lists agents with (for the chat page and the contact fence); it never enters the jail |
+| `.lever-state/remote-grants.json` | no secret: what each remote login may do under the config the last apply started from. Written before every other apply step; the running proxy refuses a login whose entry is gone or changed |
 
 The hub users:
 
@@ -841,8 +842,11 @@ warning and sets the hub up as new. Anything less (a role missing while the admi
 unexpected error) fails the apply and names the flag.
 
 When the reset was deliberate, run `lever up --reset-hub-identity` (or `lever apply
---reset-hub-identity`). It forgets `hub-identity.json`, both PATs and their records and
-`remote-role.json`, then sets the hub up as new.
+--reset-hub-identity`). It revokes the recorded PATs on the hub, best effort (they would stay valid
+and unrecorded on a hub whose database was in fact kept), forgets `hub-identity.json`, both PATs
+and their records and `remote-role.json`, then sets the hub up as new. The tree's `.scion` marker
+must still name the project lever registered before; a marker that names another is refused,
+since the tree is the manager's workspace.
 
 ### The first apply after upgrading
 
@@ -858,14 +862,23 @@ the hub. Agents keep running; the hub restarts once.
    the PATs and every agent; nothing moves.
 4. lever then checks, without changing anything, that the controller PAT still has every authority
    lever uses: the hub's own per-agent capability answer for each agent, the project reads, and
-   `scion list`. If any is missing, lever gives the dev user its admin role back, so agents keep
-   working, and fails the apply with the evidence.
+   `scion list`. If any is missing, lever fails the apply with the evidence and checks again on the
+   next apply. The controller stays a member: lever never gives it the admin role back, since an
+   admin role granted through the hub's API outlives scion's own reconcile. Report the evidence;
+   the fix is a permission on lever's `lever-controller` role.
 5. Remote logins are invited and bound by their existing user IDs.
 
 If an agent had renamed scion's dev user to `lever-admin@lever.local` (scion lets any loopback
 caller rename that user), lever restores the address with the controller PAT and waits out the
 hub's 60 s user cache before it goes on. Every later apply re-pins the dev user's address the same
 way.
+
+Lever finds the controller by its user ID, through the controller PAT, so an agent renaming the dev
+user does not stop an apply. Only minting or revoking a controller token needs the address: lever
+re-pins it and asserts the controller together, up to five times. If an agent keeps renaming the
+dev user faster than that, the apply fails with `lever-controller's address does not stay on the
+controller`, and says that remote login removals already took effect: they come before any of
+this. The existing token keeps working. Stop the agents (`lever stop`), then run `lever apply`.
 
 Two effects to know:
 
@@ -941,8 +954,11 @@ Both open the hub database directly; `recover-authz` refuses while a hub runs. T
 | Doctor fails "modified since adoption" | something changed a scaffold after you adopted it — possibly an agent (the tree is agent-writable) | review the diff first; if the change is yours, re-run `lever init --adopt`; if not, `lever init --force` restores framework content |
 | `lever apply`/`up` fails at `hub-identity`: "lever-admin resolves to scion's dev user on a hub lever brought up without dev auth" | something started this instance's hub with dev auth (scion's workstation default), which seeds scion's dev user | stop that hub; if the hub database is disposable, `lever up --reset-hub-identity`. See [hub identities](#hub-identities) |
 | `lever apply`/`up` fails at `hub-identity`: "the hub does not list lever's lever-controller role …, but lever-admin's row predates this run" | the hub database is not the one lever recorded, and lever cannot tell a deliberate reset from damage | if you reset the hub database on purpose, `lever up --reset-hub-identity`; otherwise find out what changed the hub before re-running |
-| `lever apply` fails at `hub-identity`: "the controller (scion's dev user) lacks an authority lever needs after its demotion … Its admin role was restored" | the first apply after an upgrade demoted the controller, and the probe of the controller PAT then failed | nothing is broken: the agents keep working on the restored role. Report the error text; the fix is a permission on lever's `lever-controller` role, not a re-run |
-| Doctor's `hub authentication` row fails | the hub runs without lever's auth settings (started by hand, or before a key change), the jail's public key differs from the host key, a login provider is configured, or scion's dev token exists | `lever apply` (it reinstalls the key, pins the settings and restarts the hub when they differ) |
+| `lever apply` fails at `hub-identity`: "the controller (scion's dev user) lacks an authority lever needs after its demotion … It stays a member" | the first apply after an upgrade demoted the controller, and the probe of the controller PAT then failed | lever's agent operations that need the missing authority fail until it is fixed; lever does not make the controller an admin again. Report the error text; the fix is a permission on lever's `lever-controller` role |
+| `lever apply` fails at `hub-identity`: "lever-controller's address does not stay on the controller … long enough to mint or revoke its token" | a token was due (missing, near expiry, or with other scopes), and something, most likely an agent, kept renaming scion's dev user through the hub's identity route | removals of remote logins already took effect and the old token keeps working. `lever stop`, then `lever apply`; find which agent made the calls |
+| `lever apply` warns "the controller's address is … right after lever re-pinned it" | something keeps renaming scion's dev user, most likely an agent; the apply does not need the address unless a token is due | find the agent; until it stops, lever's messages carry the agent-chosen sender label (see [credentials](/security-model/credentials/)) |
+| `lever apply`/`up --reset-hub-identity` fails: "the tree's project marker … names project …, but lever last registered …" | the tree's `.scion` marker, in the manager's workspace, names another project than the one lever registered | if the marker is lever's own (a project you re-created on purpose), remove `<tree>/.scion` on the host and run again; otherwise an agent wrote it |
+| Doctor's `hub authentication` row fails | the hub runs without lever's auth settings (started by hand, or before a key change), the hub admits an address nobody invited (not `invite_only`), the jail's public key differs from the host key or its directory or file is not root's or is writable by others, a login provider is configured, or scion's dev token exists | `lever apply` (it reinstalls the key, pins the settings, removes the dev token and restarts the hub when they differ) |
 | Doctor's `hub identities` row fails | another hub admin exists, the controller holds a token lever did not record, or scion's dev user was renamed since the last apply | `lever apply` (it demotes extra admins and restores the controller's address); revoke an unrecorded token with scion |
 
 ## Two instances on one host

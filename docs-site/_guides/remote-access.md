@@ -261,8 +261,9 @@ lever remote serve (host process)
 
 first UI request for an operator
   1. proxy signs an assertion for that login's hub email (ES256, header X-Lever-Hub-Assertion,
-     about 90 s of life, iss lever:<instance-id>, aud scion-hub:<instance-id>) and sends
-     GET / to the hub with it, through the jail. It does not follow redirects.
+     30 s of life, iss lever:<instance-id>, aud scion-hub:<instance-id>, on the guest's
+     clock, read through the jail for each sign-in; a failed read refuses the sign-in) and
+     sends GET / to the hub with it, through the jail. It does not follow redirects.
   2. the hub verifies the assertion against the public key lever installed in the jail and
      answers with a scion_sess cookie: a session for that hub user.
   3. proxy calls GET /api/v1/auth/me with that cookie alone. The user ID must be the one lever
@@ -689,12 +690,21 @@ before, apply warns and leaves it unbound, and the proxy refuses that login (`hu
 every other login keeps working. A reserved address in `allowed_users` is refused at config load
 while remote access is on; with it off no login is bound at all.
 
-**Removing a login suspends its hub user.** When a login leaves the config, the next apply suspends
-its hub user first, then drops its role bindings (the ceiling stays), then restarts the proxy
-without it. The hub refuses a suspended user's web session at once, and its API access within the
-hub's 60-second user cache. Adding the login back reactivates the same hub user and binds it again.
-Turning remote access off does the same to every login (none can sign in then), and turning it back
-on reactivates and binds them before the proxy starts.
+**Removing a login takes effect first.** Before any other step, `lever apply` (and `up` and
+`reload`) writes what each login may now do to `.lever-state/remote-grants.json`. The running proxy
+reads that file on every request and before every push: a login that is no longer there, or whose
+tier, agents, `see`, `files` or `voice` changed, is refused at once (`deny-revoked`), including the
+chat page, files, wake and voice, which the proxy answers from its own session without asking the
+hub. Every other login keeps working, and the proxy restart at the end of the apply admits the
+login again under its new settings. A change to a global setting that every login's grant includes
+(the chat page, `files`, `voice`, `read_aloud`) refuses every login until that restart. An unreadable
+or missing file refuses every login. Then, as the first thing it does at the hub, the apply
+suspends the removed login's hub user and drops its role bindings (the ceiling stays). The hub
+refuses a suspended user's web session at once, and its API access within the hub's 60-second user
+cache. Nothing an agent can do to the hub, nor a later step failing, delays either. Adding the
+login back reactivates the same hub user and binds it again. Turning remote access off stops the
+proxy before any other step and suspends every login (none can sign in then); turning it back on
+reactivates and binds them before the proxy starts.
 
 `lever doctor`'s `remote web role` row reads the hub, not the record: each configured login's hub
 user is the one lever recorded, bound to its tier's role, capped and not suspended, and each removed
@@ -1017,8 +1027,8 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   while agents run: apply invites the contact's hub user, caps it and binds
   `lever-remote-contact` before the proxy accepts the login (see [the remote web
   role](#the-remote-web-role)). The contact's first sign-in finds the role and the ceiling already
-  in force, and the fence applies from the first request. Removing the contact suspends its hub
-  user.
+  in force, and the fence applies from the first request. Removing the contact refuses it at the
+  proxy before any other apply step, then suspends its hub user.
 - **Privacy.** Anyone with `project.read` on the instance project (an operator) can read a
   contact's chat with an agent in the project message log. The contact's own event stream still
   carries its other direct chats, if an agent outside its list starts one with it; its DM list is

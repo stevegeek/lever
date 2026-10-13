@@ -257,6 +257,12 @@ token, and run no role check. Three of them matter here:
   - **R2.** Every apply re-pins the controller's address to `lever-controller@lever.local`, as the
     admin, or with the controller PAT if that fails.
 
+  Lever identifies the controller by its user ID, through its PAT, and asserts it only to mint or
+  revoke a controller token, re-pinning the address and asserting together up to five times. An
+  agent that renames the dev user in a loop can make such an apply fail, and the error says so, but
+  it cannot delay a revocation: removed remote logins are refused at the proxy before any apply
+  step and suspended at the hub before any controller work.
+
   Meanwhile the remote proxy checks every login's hub user against the ID lever recorded, so a
   rename aimed at a contact's address costs that login (refused, and audited as
   `hub-session-refused`), not the others. Lever invites every configured login before anything
@@ -275,4 +281,8 @@ after it carries the old label and answers `unknown_sender`; accepting an old la
 could influence, would weaken the partition verification relies on. Agents verify on receipt, so
 only messages in flight across the upgrade are affected. When the controller's label changes under
 a running broker (a rename, then the next apply's repair), the broker re-resolves it on a
-verification miss, at most once every 30 seconds.
+verification miss, at most once every 30 seconds. So between an agent's rename and the next apply,
+lever's own messages carry the label the agent chose, and `message_verify` accepts lever's sends
+under it. That window costs nothing to forgery: verifying a lever message still needs lever's own
+outbox record, hub addresses are unique, and a label that collides with a remote login's sender is
+refused. Every apply re-pins the address and warns when it changes again right after.

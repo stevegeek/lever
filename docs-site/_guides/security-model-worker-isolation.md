@@ -118,10 +118,13 @@ interactive sign-in.
   agent cannot replace the key the hub reads.
 - **One assertion per request, never stored.** Each carries `iss` = `lever:<instance-id>`,
   `aud` = `scion-hub:<instance-id>` (scion checks either only when it is configured, so lever always
-  sets both), a lifetime of 90 seconds and an `iat` 30 seconds in the past, signed against the
-  guest's clock. It travels in the `X-Lever-Hub-Assertion` header over lever's existing jail
-  transports, on the child's stdin, never in host or guest argv. The jail-side `curl` sends it only
-  to an allowlist of hub API paths, never to an agent port-proxy path (`/ports/`), and never with an
+  sets both), a lifetime of 30 seconds and an `iat` 5 seconds in the past, signed against the
+  guest's clock. Scion does not remember a used assertion (it ignores `jti`) and adds 30 seconds of
+  skew, so the short lifetime is what bounds a replay. It travels in the `X-Lever-Hub-Assertion`
+  header over lever's existing jail transports, on the child's stdin, never in host or guest argv
+  and never in an environment: the jail-side shell reads it into an unexported variable and hands
+  it to `curl` on a pipe. `curl` sends it only for the exact method and path of each call lever
+  makes (no other route, no other method, no agent port-proxy path), and never with an
   `Authorization` header (scion tries the assertion only on a request with no bearer token).
 - **Pinned through the environment.** Lever starts the hub with the auth settings as `SCION_SERVER_*`
   variables (`AUTH_MODE=proxy`, `AUTH_USERACCESSMODE=invite_only`, `AUTH_PROXY_PROVIDER=jwt`, the
@@ -134,7 +137,8 @@ interactive sign-in.
   hub's env, its `--dev-auth=false` or its web-assets argv differ from what lever starts it with, or
   when the public key file changed or an `oidc_login` block was removed.
 - **`invite_only`.** The hub admits only `lever-admin@lever.local` and users that exist (invited or
-  active). An assertion for any other address is refused.
+  active). An assertion for any other address is refused; `lever doctor` proves it by signing one
+  for a random address.
 
 **The identities.**
 
@@ -153,12 +157,22 @@ up, the controller is scion's dev user (the row an older lever minted its tokens
 **Workstation routes.** Lever runs the hub non-hosted, so scion's `/api/v1/system/*` routes accept
 any authenticated loopback caller, an agent token included. One of them renames scion's dev user.
 On a fresh instance there is no dev user, so this is a no-op. On a migrated one an agent can rename
-the controller between applies. The next apply re-pins the address, and if the agent had taken
+the controller, between applies or in a loop. Lever therefore identifies the controller by user ID,
+through its PAT, and needs its address only to mint or revoke a controller token; then it re-pins
+the address and asserts the controller together, a bounded number of times, and fails naming the
+cause if a loop keeps winning. The next apply re-pins the address, and if the agent had taken
 `lever-admin@lever.local` for it, lever restores the controller's address with the controller PAT
-and waits out the hub's 60-second email cache before it asserts the admin again. Meanwhile the
-proxy refuses a remote login whose hub user is not the one lever recorded, so a rename costs at
-most the login it aims at. See [credentials](/security-model/credentials/) for the controller's
-sender label.
+and waits out the hub's 60-second email cache before it asserts the admin again. None of this can
+hold up a revocation: a removed remote login is refused at the proxy before any apply step, and
+suspended at the hub right after lever-admin is asserted. The proxy also refuses a remote login
+whose hub user is not the one lever recorded, so a rename costs at most the login it aims at. See
+[credentials](/security-model/credentials/) for the controller's sender label.
+
+**Why the controller stays scion's dev user.** On a migrated instance that row owns the project,
+created every agent and is the root of every agent's attested ancestry, and scion grants an agent's
+owner and ancestry by user ID. Scion can transfer a project's ownership but not an agent's, so
+moving the controller to a fresh, unrenamable user would cut every existing agent off from it. The
+rename route is contained instead, as above.
 
 Every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
 capability broker on the manager's behalf, and by `lever` itself for attach/msg/stop) is

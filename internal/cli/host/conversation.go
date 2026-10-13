@@ -124,6 +124,15 @@ func (o convOps) clock() time.Time {
 // convbackup.Keep. found is false when the manager's home holds no
 // projects; a home lever cannot find is convbackup.ErrNoHome.
 func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, found bool, err error) {
+	return o.backupIf(ctx, reason, false)
+}
+
+// backupIf is backup; skipEmpty treats a projects directory with no byte of
+// transcript in it (no file, or only empty ones) as nothing to back up: no backup is saved, and none is pruned. The
+// fresh start of a manager with no conversation (lever#202) uses it, so an
+// agent that empties its transcripts cannot push the real backups out of
+// the store one `lever up` at a time.
+func (o convOps) backupIf(ctx context.Context, reason string, skipEmpty bool) (m convbackup.Meta, found bool, err error) {
 	store, err := o.store()
 	if err != nil {
 		return m, false, err
@@ -131,6 +140,15 @@ func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, 
 	raw, found, changed, err := o.guest.Capture(ctx)
 	if err != nil || !found {
 		return m, false, err
+	}
+	if skipEmpty {
+		st, cerr := convbackup.Copy(io.Discard, strings.NewReader(raw), "projects", convbackup.DefaultLimits)
+		if cerr != nil {
+			return m, false, fmt.Errorf("reading the manager's conversation: %w", cerr)
+		}
+		if st.Bytes == 0 {
+			return m, false, nil
+		}
 	}
 	m = convbackup.Meta{Agent: o.app.Name, Created: o.clock(), Reason: reason, Version: cli.VersionString()}
 	// The session record of the conversation being saved: the skill it
@@ -166,6 +184,18 @@ func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, 
 // it ends (a manager that will not suspend is copied as it runs). *saved is
 // set to the backup when there was a conversation to save.
 func (o convOps) backupBeforeDelete(saved **convbackup.Meta) func(ctx context.Context, rec *scion.Agent) error {
+	return o.backupBeforeDeleteAs(saved, "up --fresh", false)
+}
+
+// backupBeforeNoConversationFresh is apply's BackupManagerConversation for a
+// plain `lever up`, which deletes a record only for the fresh start of a
+// manager with no conversation (lever#202): a projects directory with no
+// transcript content is not saved (backupIf), and the reason says which start it was.
+func (o convOps) backupBeforeNoConversationFresh(saved **convbackup.Meta) func(ctx context.Context, rec *scion.Agent) error {
+	return o.backupBeforeDeleteAs(saved, "up (no conversation)", true)
+}
+
+func (o convOps) backupBeforeDeleteAs(saved **convbackup.Meta, reason string, skipEmpty bool) func(ctx context.Context, rec *scion.Agent) error {
 	return func(ctx context.Context, rec *scion.Agent) error {
 		suspended := false
 		if rec != nil && rec.Phase == scion.PhaseRunning && o.sc != nil {
@@ -177,7 +207,7 @@ func (o convOps) backupBeforeDelete(saved **convbackup.Meta) func(ctx context.Co
 			}
 			cancel()
 		}
-		m, found, err := o.backup(ctx, "up --fresh")
+		m, found, err := o.backupIf(ctx, reason, skipEmpty)
 		if errors.Is(err, convbackup.ErrNoHome) {
 			// The record exists, so scion will delete a home lever could
 			// not find (a registration or a layout lever does not know):
@@ -197,6 +227,23 @@ func (o convOps) backupBeforeDelete(saved **convbackup.Meta) func(ctx context.Co
 		*saved = &m
 		return nil
 	}
+}
+
+// conversationEmpty is apply's ManagerConversationEmpty for `lever up`
+// (lever#202): nil only when the guest shows the manager's home holds no
+// transcript (convbackup.TranscriptsNone). Any other answer is the reason
+// lever does not start the manager fresh on its own.
+func (o convOps) conversationEmpty(ctx context.Context) error {
+	t, err := o.guest.Transcripts(ctx)
+	switch {
+	case err != nil:
+		return err
+	case t == convbackup.TranscriptsNone:
+		return nil
+	case t == convbackup.TranscriptsSome:
+		return errors.New("its .claude/projects holds transcripts, so claude --continue may have looked for another working directory's conversation")
+	}
+	return errors.New("its .claude holds links, special files or another projects directory, which lever does not read")
 }
 
 // restore puts backup id ("" = the newest) into the manager's home and

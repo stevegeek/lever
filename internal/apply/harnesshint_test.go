@@ -208,3 +208,53 @@ func TestWithHarnessDeathHintLeavesOtherErrorsAlone(t *testing.T) {
 		t.Errorf("nil error became %v", got)
 	}
 }
+
+// lever#202: claude --continue with no conversation in the agent home is
+// named, with the fresh start as the way out, from a terminal stream too,
+// and the log is never repeated.
+func TestHarnessDeathHintNoConversation(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tail string
+		want string
+	}{
+		{"plain", "sciontool: starting harness\nNo conversation found to continue\n", NoConversationHint},
+		{"colours and wrapping", "\x1b[31mNo conversation found\r\n to\x1b[1Ccontinue\x1b[0m", NoConversationHint},
+		{"upper case", "NO CONVERSATION FOUND TO CONTINUE", NoConversationHint},
+		{"other words", "No conversation found; continuing", ""},
+		{"stale background printed last", noConvLog + "\n" + staleBgLog, StaleBackgroundHint},
+		{"no conversation printed last", staleBgLog + "\n" + noConvLog, NoConversationHint},
+	} {
+		if got := HarnessDeathHint(c.tail); got != c.want {
+			t.Errorf("%s: hint %q, want %q", c.name, got, c.want)
+		}
+		if got := NoConversationInLog(c.tail); got != (c.want == NoConversationHint) {
+			t.Errorf("%s: NoConversationInLog = %v", c.name, got)
+		}
+	}
+	for _, w := range []string{"no conversation to continue", "claude --continue", "never used", "lever up --fresh", "loses nothing", "backs up"} {
+		if !strings.Contains(NoConversationHint, w) {
+			t.Errorf("hint lacks %q", w)
+		}
+	}
+	if ErrNoConversation.Error() != NoConversationHint {
+		t.Fatalf("ErrNoConversation reads %q", ErrNoConversation)
+	}
+
+	// The gate's error wraps both the sentinel and the cause; the log is
+	// not repeated.
+	died := errors.Join(scion.ErrAgentDied)
+	d := Deps{HarnessLogTail: func(context.Context, string) (string, error) { return "SECRET-LINE\n" + noConvLog, nil }}
+	got := withHarnessDeathHint(context.Background(), d, died, "/lever", "hello")
+	if !errors.Is(got, scion.ErrAgentDied) || !errors.Is(got, ErrNoConversation) || !strings.Contains(got.Error(), NoConversationHint) {
+		t.Fatalf("got %v", got)
+	}
+	if strings.Contains(got.Error(), "SECRET") {
+		t.Fatalf("log repeated: %v", got)
+	}
+	// The stale-background hint does not carry the sentinel.
+	d.HarnessLogTail = func(context.Context, string) (string, error) { return staleBgLog, nil }
+	if got := withHarnessDeathHint(context.Background(), d, died, "/lever", "hello"); errors.Is(got, ErrNoConversation) {
+		t.Fatalf("stale background read as no conversation: %v", got)
+	}
+}

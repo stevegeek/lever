@@ -144,6 +144,8 @@ type run struct {
 	// attach is PlanOpts.Attach: start-manager's gate ends once claude's
 	// pane is alive (lever#188).
 	attach bool
+	// freshNoConv is PlanOpts.FreshWithoutConversation (lever#202).
+	freshNoConv bool
 	// managerCreated records that THIS run created the manager record (a
 	// create that answered "already exists" does not count). Only a created
 	// record is known to carry the manager.read_only mounts; any other is
@@ -329,7 +331,19 @@ type Deps struct {
 	// with nothing deleted: a backup the operator asked for never fails
 	// silently into a discard (lever#198). Nil backs nothing up
 	// (`up --fresh --no-backup`, and `apply`, which never deletes a record).
+	//
+	// It also runs before the fresh start that replaces a resume with no
+	// conversation to continue (PlanOpts.FreshWithoutConversation): that
+	// start is proven to lose nothing, and the backup is the second guard.
 	BackupManagerConversation func(ctx context.Context, rec *scion.Agent) error
+	// ManagerConversationEmpty proves, from the guest, that the manager's
+	// agent home holds no conversation: no transcript with content in
+	// .claude/projects, no link or special file there, and no other
+	// projects directory beside it (convbackup.Guest.Transcripts). nil means
+	// proven; any error (the reason, made safe to print) means not proven,
+	// and start-manager then starts nothing fresh on its own (lever#202).
+	// nil func: never proven.
+	ManagerConversationEmpty func(ctx context.Context) error
 	// InspectContainerMounts reads a jail container's mounts (id or name),
 	// jail.ContainerMounts in production. Used to warn when a manager that
 	// apply kept or resumed lacks the manager.read_only mounts, which only a
@@ -578,6 +592,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		phaseSettle: d.PhaseSettleRetry.or(defaultPhaseSettleRetry),
 		fresh:       opts.Fresh,
 		attach:      opts.Attach,
+		freshNoConv: opts.FreshWithoutConversation,
 	}
 	// The plan is kept, not just ranged over: the converge-to-off reconciliation
 	// below needs to know whether this run manages the hub at all (see
@@ -1223,11 +1238,25 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// mounts back before the failure is reported, so a swapped mount is
 	// suspended rather than left running unchecked. A container that is not
 	// running reads as unverified, which says nothing here.
+	var mountErr error
 	if err != nil && !verified && rec != nil && !r.fresh && !managerKept(rec) && !r.managerCreated {
 		probes.wait()
-		if _, verr := r.verifyResumedTreeMounts(ctx, jp); verr != nil {
-			err = errors.Join(err, verr)
+		if _, mountErr = r.verifyResumedTreeMounts(ctx, jp); mountErr != nil {
+			err = errors.Join(err, mountErr)
 		}
+	}
+	// A resume whose claude found no conversation to continue: under `lever
+	// up`, a home proven to hold none is started fresh, as `lever up
+	// --fresh` would (lever#202). Never after a failed mount check (that
+	// manager is suspended, and its operator decides), never for `lever
+	// apply`. A container that is not running reads as unverified there,
+	// not failed: its mounts go with the delete, and the new container's
+	// come from the config.
+	if err != nil && resumed && mountErr == nil && r.freshNoConv && !r.fresh && errors.Is(err, ErrNoConversation) {
+		probes.abandon()
+		probes = r.startPostLive(ctx, jp)
+		err = r.startFreshWithoutConversation(ctx, jp, opts, err, probes.start)
+		resumed = false
 	}
 	if err == nil && resumed && !verified {
 		// The post-live probes (started by the gate) read the same mounts:
@@ -1248,6 +1277,55 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	RecordGuestBoot(ctx, r.d)
 	probes.finish()
 	return nil
+}
+
+// startFreshWithoutConversation replaces a resume that died because claude
+// --continue found no conversation (cause, which wraps ErrNoConversation)
+// with a fresh start: the delete and create of `lever up --fresh`, then the
+// liveness gate again (onHarness starts the post-live probes). The log
+// line that said so is the agent's word, so it only starts the look: the
+// fresh start happens when Deps.ManagerConversationEmpty proves from the
+// guest that the agent home holds no transcript, and the conversation
+// backup of --fresh (Deps.BackupManagerConversation) still runs first,
+// right before the delete. Whatever is not proven, or fails before the
+// delete, returns cause with the record kept. It is loud: one line says
+// what lever does and why.
+//
+// A fresh start records a new session (Deps.BeginSession), as --fresh does:
+// the new conversation starts on the skill on disk now. The failed resume
+// may have spent the enrolment ticket this run staged, so the create
+// re-arms the broker for a new one (ensureFreshBootstrap).
+func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts scion.StartOpts, cause error, onHarness func()) error {
+	if r.d.ManagerConversationEmpty == nil {
+		return cause
+	}
+	if perr := r.d.ManagerConversationEmpty(ctx); perr != nil {
+		r.d.Log("start-manager: manager %q has no conversation to continue, but lever did not start it fresh on its own: it could not prove that the agent home holds no transcript (%s)", r.app.Name, termsafe.Sanitize(perr.Error()))
+		return cause
+	}
+	agents, err := r.listAgentsRetry(ctx, jp)
+	if err != nil {
+		r.d.Log("start-manager: manager %q has no conversation to continue, but lever did not start it fresh on its own: it could not read the record (%s)", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)))
+		return cause
+	}
+	rec := scion.FindAgent(agents, r.app.Name)
+	if rec == nil {
+		r.d.Log("start-manager: manager %q has no conversation to continue, and its record is gone; lever did not start it fresh on its own", r.app.Name)
+		return cause
+	}
+	if r.d.BackupManagerConversation != nil {
+		if err := r.d.BackupManagerConversation(ctx, rec); err != nil {
+			return fmt.Errorf("%w; lever went to start it fresh, but backing up its conversation failed, so the manager was NOT deleted: %w", cause, err)
+		}
+	}
+	// The resume's boot may have redeemed this run's ticket: mint anew.
+	r.minted = false
+	if err := r.recoverDeleteAndCreate(ctx, jp, opts,
+		fmt.Sprintf("start-manager: manager %q has no conversation to continue: claude --continue found none, and its agent home holds no transcript, so it was never used. Starting it FRESH, as `lever up --fresh` would (deleting record in phase %s; nothing is lost)", r.app.Name, scion.BoundedQuote(rec.Phase)),
+		"a fresh start of a manager with no conversation"); err != nil {
+		return err
+	}
+	return r.waitManagerLive(ctx, jp, true, onHarness)
 }
 
 // warnManagerClaude runs after the manager is live: boot applies the

@@ -490,3 +490,63 @@ func TestRestoreResumeChecks(t *testing.T) {
 		t.Fatalf("err = %v calls %v, want no resume without the checks", err, f.sc.calls)
 	}
 }
+
+// TestConversationEmpty (lever#202): `lever up` starts a manager fresh on
+// its own only when the guest shows its home holds no transcript; anything
+// else is a reason, never a pass.
+func TestConversationEmpty(t *testing.T) {
+	f := newConvFixture(t)
+	if err := f.ops.conversationEmpty(context.Background()); err != nil {
+		t.Fatalf("no .claude: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.agentHome, ".claude", "projects", "-workspace"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ops.conversationEmpty(context.Background()); err != nil {
+		t.Fatalf("empty projects: %v", err)
+	}
+	writeConvFile(t, f.transcript("s.jsonl"), "{}\n")
+	if err := f.ops.conversationEmpty(context.Background()); err == nil || !strings.Contains(err.Error(), "holds transcripts") {
+		t.Fatalf("a transcript: %v", err)
+	}
+	if err := os.Remove(f.transcript("s.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(f.home, f.transcript("l.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ops.conversationEmpty(context.Background()); err == nil || !strings.Contains(err.Error(), "links") {
+		t.Fatalf("a link: %v", err)
+	}
+	f.ops.guest.Agent = "other"
+	if err := f.ops.conversationEmpty(context.Background()); !errors.Is(err, convbackup.ErrNoHome) {
+		t.Fatalf("no home: %v", err)
+	}
+}
+
+// TestNoConversationBackupSkipsEmpty (lever#202): the backup before the
+// fresh start of a manager with no conversation saves nothing, and prunes
+// nothing, when the transcripts hold no content, so an agent cannot rotate
+// the real backups out of the store; content is saved under its own reason.
+func TestNoConversationBackupSkipsEmpty(t *testing.T) {
+	f := newConvFixture(t)
+	store, err := f.ops.store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConvFile(t, f.transcript("empty.jsonl"), "")
+	var saved *convbackup.Meta
+	if err := f.ops.backupBeforeNoConversationFresh(&saved)(context.Background(), &scion.Agent{Phase: scion.PhaseError}); err != nil {
+		t.Fatal(err)
+	}
+	if all, _ := store.List(); saved != nil || len(all) != 0 {
+		t.Fatalf("an empty conversation was saved: %v %v", saved, all)
+	}
+	writeConvFile(t, f.transcript("s.jsonl"), "{}\n")
+	if err := f.ops.backupBeforeNoConversationFresh(&saved)(context.Background(), &scion.Agent{Phase: scion.PhaseError}); err != nil {
+		t.Fatal(err)
+	}
+	if saved == nil || saved.Reason != "up (no conversation)" {
+		t.Fatalf("saved = %+v", saved)
+	}
+}

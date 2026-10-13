@@ -181,7 +181,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkInstancePorts(app, state, instancePortsProbesFor(ctx, state, probes))
 		},
 		func() checkResult {
-			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, time.Now())
+			return checkManagerLive(ctx, b.MountDest(), app.Name, listAgents, agentSession, agentSession.LogTail, time.Now())
 		},
 		func() checkResult {
 			return checkAgentHubTokens(ctx, b.MountDest(), app.Name, networkCheckedAgents(app.Name, workerNames), listAgents, agentSession)

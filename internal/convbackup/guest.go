@@ -123,6 +123,81 @@ if ! mv -T -- "$new" projects; then
 fi
 `
 
+// transcriptsScript prints what the home's .claude/projects holds, as one
+// marker line: LEVER-NONE when there is no .claude, no projects, or a
+// projects (a plain directory) holding no regular file with any content and
+// nothing but directories and regular files; LEVER-SOME when it holds a
+// regular file with content; LEVER-OTHER when it holds a link or a special
+// file, or when .claude holds another entry whose name starts with
+// "projects" (a restore's parked transcripts, say). It reads names and sizes
+// only, follows no link (find does not, and enterClaude refuses a linked
+// .claude), and fails on any find error (an unreadable directory may hide a
+// transcript).
+var transcriptsScript = homeScript + `[ -e .claude ] || [ -L .claude ] || { echo LEVER-NONE; exit 0; }
+` + enterClaude + `for e in projects?*; do
+  [ -e "$e" ] || [ -L "$e" ] || continue
+  echo LEVER-OTHER; exit 0
+done
+[ -e projects ] || [ -L projects ] || { echo LEVER-NONE; exit 0; }
+[ -d projects ] && [ ! -L projects ] || { echo ".claude/projects in the manager's home is not a plain directory" >&2; exit 13; }
+other=$(find projects ! -type d ! -type f -print -quit) || exit 2
+[ -z "$other" ] || { echo LEVER-OTHER; exit 0; }
+some=$(find projects -type f -size +0c -print -quit) || exit 2
+[ -z "$some" ] || { echo LEVER-SOME; exit 0; }
+echo LEVER-NONE
+`
+
+// Transcripts is what Guest.Transcripts found in the manager's home.
+type Transcripts int
+
+const (
+	// TranscriptsNone: no .claude, no .claude/projects, or one that holds
+	// only directories and empty regular files, and no other "projects*"
+	// entry in .claude. The home holds no conversation.
+	TranscriptsNone Transcripts = iota + 1
+	// TranscriptsSome: .claude/projects holds a regular file with content.
+	TranscriptsSome
+	// TranscriptsOther: a link or a special file in .claude/projects, or
+	// another "projects*" entry in .claude. Not proof either way.
+	TranscriptsOther
+)
+
+// transcriptsTimeout bounds Guest.Transcripts.
+var transcriptsTimeout = time.Minute
+
+// Transcripts looks, from the guest, at what the manager's home holds in
+// .claude/projects (see TranscriptsNone and the others), reading names and
+// sizes only. A missing home is ErrNoHome, a linked .claude or projects
+// ErrNotPlainDir; any other failure is an error. Only TranscriptsNone with a
+// nil error proves the home holds no conversation.
+func (g Guest) Transcripts(ctx context.Context) (Transcripts, error) {
+	ctx, cancel := context.WithTimeout(ctx, transcriptsTimeout)
+	defer cancel()
+	ctx = proc.WithOutputLimit(ctx, 4<<10)
+	res, err := g.R.Run(ctx, nil, "bash", "--noprofile", "--norc", "-c", transcriptsScript, "lever-conversation", g.Workspace, g.Agent)
+	if err == nil && res.Code != 0 {
+		err = fmt.Errorf("exit status %d", res.Code)
+	}
+	if err != nil {
+		switch res.Code {
+		case exitNoHome:
+			return 0, ErrNoHome
+		case exitNotPlainDir:
+			return 0, ErrNotPlainDir
+		}
+		return 0, fmt.Errorf("reading the manager's transcripts in the jail: %v%s", err, stderrTail(res.Stderr))
+	}
+	switch strings.TrimSpace(res.Stdout) {
+	case "LEVER-NONE":
+		return TranscriptsNone, nil
+	case "LEVER-SOME":
+		return TranscriptsSome, nil
+	case "LEVER-OTHER":
+		return TranscriptsOther, nil
+	}
+	return 0, errors.New("reading the manager's transcripts in the jail: unexpected output")
+}
+
 // ErrNoHome means lever found no home for the manager in the jail: no
 // registration claims the workspace, or the record has no home directory.
 var ErrNoHome = errors.New("lever found no home for the manager in the jail")

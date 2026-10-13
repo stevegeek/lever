@@ -266,6 +266,23 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **A manager with no conversation to continue starts fresh, and says why (lever#202).** A manager
+  started and never sent a message has no transcript in its home, so scion's resume of it (`claude
+  --continue`, after a crash or a `lever stop`) ended with Claude's "No conversation found to
+  continue", and lever reported only that the harness was not live. Now the start gate reads that
+  phrase in the container log (bounded, never printed) and names the cause, with `lever up
+  --fresh` as the way out. `lever up` goes further: it looks at the manager's home from the guest,
+  through the same link-refusing scripts as the conversation backup (lever#198), and only when
+  `.claude/projects` holds no transcript with content, no link or special file, and no other
+  `projects*` directory beside it does it start the manager fresh, as `--fresh` would: the
+  backup runs first, the record is deleted, a new enrolment ticket is minted and the new session
+  is recorded. It prints a line saying so. Anything not proven, a failed backup, or a resume whose
+  tree mounts failed their check keeps the record and prints the reason. This covers the resumes
+  `up` runs through its bring-up (a crashed manager, and every `up` after `lever stop`). When `up`
+  resumes a suspended manager itself (the hub was still running, or the guest restarted under
+  it), or when claude dies only after `up` has attached the terminal, `up` names the cause, and
+  the next `lever up` makes the fresh start. `lever apply` never starts a manager fresh. Doctor's
+  manager row names the cause for an error-phase manager.
 - **A command that fails at run time no longer prints its usage text.** `lever up`, `lever apply`
   and most other commands printed the usage after any error, so a manager that did not come up
   read as a flag problem. The usage now follows only flag and argument errors (an unknown or

@@ -243,12 +243,21 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// is fatal there, so the old session is never resumed silently.
 				// Unless --no-backup, the conversation is backed up first, and
 				// a failed backup keeps the record (lever#198).
+				//
+				// Without --fresh, a resume whose claude finds no
+				// conversation to continue is started fresh, once the guest
+				// shows the home holds no transcript (lever#202); the backup
+				// guards that start too.
 				var saved *convbackup.Meta
 				conv := newConvOps(w, app, stateFor(path))
-				if fresh && !noBackup {
+				switch {
+				case fresh && !noBackup:
 					deps.BackupManagerConversation = conv.backupBeforeDelete(&saved)
+				case !fresh:
+					deps.BackupManagerConversation = conv.backupBeforeNoConversationFresh(&saved)
 				}
-				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh, Attach: attachTTY}); err != nil {
+				deps.ManagerConversationEmpty = conv.conversationEmpty
+				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh, Attach: attachTTY, FreshWithoutConversation: !fresh}); err != nil {
 					if saved != nil {
 						rep.Log(fmt.Sprintf("lever: the previous conversation is backed up as %s; once the manager is up, `lever conversation restore %s` brings it back", saved.ID, saved.ID))
 					}

@@ -16,9 +16,10 @@ func newCoreSandbox(t *testing.T) (corePaths, string, string) {
 	}
 	root := t.TempDir()
 	p := corePaths{
-		Handler: filepath.Join(root, "usr/local/libexec/lever-core-handler"),
-		Sysctl:  filepath.Join(root, "etc/sysctl.d/99-lever-core.conf"),
-		Dir:     filepath.Join(root, "var/lib/lever/cores"),
+		Handler:  filepath.Join(root, "usr/local/libexec/lever-core-handler"),
+		Sysctl:   filepath.Join(root, "etc/sysctl.d/99-lever-core.conf"),
+		Dir:      filepath.Join(root, "var/lib/lever/cores"),
+		OwnerUID: os.Getuid(),
 	}
 	bin := filepath.Join(root, "bin")
 	log := filepath.Join(root, "calls.log")
@@ -31,8 +32,21 @@ func newCoreSandbox(t *testing.T) (corePaths, string, string) {
 		}
 	}
 	stub("sysctl", `echo "sysctl $*" >> `+shellSingleQuote(log))
-	stub("systemctl", `echo "systemctl $*" >> `+shellSingleQuote(log)+`; case "$1" in is-enabled) [ -n "${APPORT_ENABLED:-}" ] ;; *) exit 0 ;; esac`)
+	stub("systemctl", systemctlStub(log, filepath.Join(root, "apport.masked")))
 	return p, bin, log
+}
+
+// systemctlStub logs its argv and plays an installed apport.service that
+// mask marks masked (masked is a state file); without APPORT_INSTALLED there
+// is no unit.
+func systemctlStub(log, masked string) string {
+	return `echo "systemctl $*" >> ` + shellSingleQuote(log) + `
+case "$1" in
+is-enabled) if [ -e ` + shellSingleQuote(masked) + ` ]; then echo masked; else echo enabled; fi ;;
+cat) [ -n "${APPORT_INSTALLED:-}" ] ;;
+mask) : > ` + shellSingleQuote(masked) + ` ;;
+esac
+exit 0`
 }
 
 func runCoreScript(t *testing.T, p corePaths, bin, log string, env ...string) (GuestReport, string) {
@@ -50,7 +64,7 @@ func runCoreScript(t *testing.T, p corePaths, bin, log string, env ...string) (G
 
 func TestCoreCaptureScriptWritesHandlerAndPattern(t *testing.T) {
 	p, bin, log := newCoreSandbox(t)
-	rep, calls := runCoreScript(t, p, bin, log, "APPORT_ENABLED=1")
+	rep, calls := runCoreScript(t, p, bin, log, "APPORT_INSTALLED=1")
 	if len(rep.Warn) != 0 || len(rep.Reboot) != 0 {
 		t.Fatalf("unexpected report %+v", rep)
 	}
@@ -69,15 +83,15 @@ func TestCoreCaptureScriptWritesHandlerAndPattern(t *testing.T) {
 	if !strings.Contains(calls, "sysctl -q -w kernel.core_pattern=|"+p.Handler+" %P %t %e") {
 		t.Fatalf("core_pattern not set live: %s", calls)
 	}
-	if !strings.Contains(calls, "systemctl disable --now apport.service") {
-		t.Fatalf("apport not disabled: %s", calls)
+	if !strings.Contains(calls, "systemctl stop apport.service") || !strings.Contains(calls, "systemctl mask apport.service") {
+		t.Fatalf("apport not stopped and masked: %s", calls)
 	}
-	// Idempotent; apport already off is left alone.
+	// Idempotent; apport already masked is left alone.
 	before, _ := os.ReadFile(p.Handler)
-	_, calls = runCoreScript(t, p, bin, log)
+	_, calls = runCoreScript(t, p, bin, log, "APPORT_INSTALLED=1")
 	after, _ := os.ReadFile(p.Handler)
-	if !bytes.Equal(before, after) || strings.Contains(calls, "disable") {
-		t.Fatalf("second run changed the handler or disabled apport again: %s", calls)
+	if !bytes.Equal(before, after) || strings.Contains(calls, "mask apport") || strings.Contains(calls, "stop") {
+		t.Fatalf("second run changed the handler or masked apport again: %s", calls)
 	}
 }
 
@@ -88,7 +102,7 @@ func runHandler(t *testing.T, dir string, maxBytes, keep int, core []byte, args 
 		t.Skip("flock not available")
 	}
 	h := filepath.Join(t.TempDir(), "handler")
-	if err := os.WriteFile(h, []byte(coreHandlerScript(dir, maxBytes, keep)), 0o755); err != nil {
+	if err := os.WriteFile(h, []byte(coreHandlerScript(dir, os.Getuid(), maxBytes, keep)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(h, args...)
@@ -134,6 +148,24 @@ func TestCoreHandlerKeepsATmuxServerCore(t *testing.T) {
 	runHandler(t, dir, 1<<20, 2, []byte("x"), "4243", "1760000001", "tmux:", "server")
 	if _, err := os.Stat(filepath.Join(dir, "core.tmux.1760000001.4243")); err != nil {
 		t.Fatalf("split name not kept: %v", err)
+	}
+}
+
+// A core directory that is a symlink, or not the expected owner's, gets
+// nothing written through it.
+func TestCoreHandlerRefusesASymlinkedDir(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "cores")
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatal(err)
+	}
+	runHandler(t, dir, 1<<20, 2, []byte("core"), "1", "2", "tmux: server")
+	if got := coreFiles(t, target); len(got) != 0 {
+		t.Fatalf("wrote %v through a symlink", got)
 	}
 }
 
@@ -232,5 +264,13 @@ func TestCrashRecoveryConvergesCoreCapture(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("want a core-capture warning, got %+v", rep.Warn)
+	}
+}
+
+// In the guest the core directory must be root's.
+func TestCoreHandlerInTheGuestWantsRoot(t *testing.T) {
+	h := coreHandlerScript(realCorePaths.Dir, realCorePaths.OwnerUID, CoreMaxBytes, CoreKeep)
+	if !strings.Contains(h, `[ "$(stat -c %u "$dir")" = 0 ]`) || !strings.Contains(h, "dir='"+CoreDir+"'") {
+		t.Fatalf("guest handler does not require a root-owned %s:\n%s", CoreDir, h)
 	}
 }

@@ -272,12 +272,13 @@ version bump moves the block under the new version heading.
   pane's grid in grid_line_length, the function an upstream 3.5a crash report names for copy mode
   after a size change. The agent image now installs a pinned tmux from trixie-backports
   (`ARG TMUX_VERSION`, 3.6b-1~bpo13+1, label `tmux_version`) through apt, so the Debian archive
-  signatures cover it. When sciontool logged that it reaped the tmux server after a fault signal,
+  signatures cover it; its dependencies stay trixie's. When sciontool logged that it reaped the tmux server after a fault signal,
   `lever up` names it as the cause (after the attach ends and at the start gate), or names a
   SIGKILL as a likely out-of-memory kill. In a Lima jail the guest now keeps the core of a crashed
   tmux server: `kernel.core_pattern` pipes dumps to a lever handler that keeps only `tmux: server`
   dumps, root only in `/var/lib/lever/cores`, one at a time, 256 MiB each and the newest two. Cores
-  never leave the guest. The handler replaces apport and drops other processes' dumps. OrbStack
+  never leave the guest. The handler replaces apport (masked) and drops other processes' dumps. The
+  log line and a kept core come from the agent's side, so lever words them as leads, not proof. OrbStack
   is unchanged, because its kernel is shared. Rebuild the image (`make lever-image`), then
   `lever up --fresh --keep-conversation` puts the manager on it.
 

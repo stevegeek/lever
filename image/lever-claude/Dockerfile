@@ -73,13 +73,16 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
 # update removes the old one from the archive, and the build then fails until
 # this ARG is bumped, rather than silently taking a new tmux. The backports
 # source is removed again, so instance Dockerfiles that extend this image get
-# trixie's apt sources unchanged.
+# trixie's apt sources unchanged. Only tmux comes from backports (no -t): its
+# dependencies stay trixie's. With the source gone, tmux fixes arrive only by
+# bumping this ARG.
 ARG TMUX_VERSION=3.6b-1~bpo13+1
 RUN . /etc/os-release \
   && test "$VERSION_CODENAME" = trixie \
-  && echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/lever-trixie-backports.list \
+  && test -s /usr/share/keyrings/debian-archive-keyring.gpg \
+  && echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/lever-trixie-backports.list \
   && apt-get update \
-  && apt-get install -y --no-install-recommends -t trixie-backports "tmux=${TMUX_VERSION}" \
+  && apt-get install -y --no-install-recommends "tmux=${TMUX_VERSION}" \
   && rm -f /etc/apt/sources.list.d/lever-trixie-backports.list \
   && rm -rf /var/lib/apt/lists/* \
   && test "$(tmux -V)" = "tmux ${TMUX_VERSION%%-*}"

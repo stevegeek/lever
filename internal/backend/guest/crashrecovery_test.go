@@ -36,9 +36,10 @@ func newCrashSandbox(t *testing.T) *crashSandbox {
 		Cmdline:    filepath.Join(root, "proc/cmdline"),
 		SysModule:  filepath.Join(root, "sys/module"),
 		Core: corePaths{
-			Handler: filepath.Join(root, "usr/local/libexec/lever-core-handler"),
-			Sysctl:  filepath.Join(root, "etc/sysctl.d/99-lever-core.conf"),
-			Dir:     filepath.Join(root, "var/lib/lever/cores"),
+			Handler:  filepath.Join(root, "usr/local/libexec/lever-core-handler"),
+			Sysctl:   filepath.Join(root, "etc/sysctl.d/99-lever-core.conf"),
+			Dir:      filepath.Join(root, "var/lib/lever/cores"),
+			OwnerUID: os.Getuid(),
 		},
 	}
 	for _, d := range []string{s.bin, filepath.Dir(s.paths.GrubCfg), filepath.Dir(s.paths.Cmdline), s.paths.SysModule} {
@@ -48,7 +49,7 @@ func newCrashSandbox(t *testing.T) *crashSandbox {
 	}
 	// update-grub regenerates grub.cfg from the drop-in, as the real one does.
 	s.stub("sysctl", `echo "sysctl $*" >> `+shellSingleQuote(s.log))
-	s.stub("systemctl", `echo "systemctl $*" >> `+shellSingleQuote(s.log)+`; [ "$1" != is-enabled ]`)
+	s.stub("systemctl", systemctlStub(s.log, filepath.Join(root, "apport.masked")))
 	s.stub("modprobe", `echo "modprobe $*" >> `+shellSingleQuote(s.log)+`; rm -rf `+shellSingleQuote(filepath.Join(s.paths.SysModule, "efi_pstore")))
 	s.stub("update-grub", `echo "update-grub" >> `+shellSingleQuote(s.log)+`; grep -o 'efi_pstore[^"]*' `+shellSingleQuote(s.paths.GrubDropIn)+` > `+shellSingleQuote(s.paths.GrubCfg))
 	s.write(s.paths.Cmdline, "BOOT_IMAGE=/vmlinuz root=LABEL=cloudimg-rootfs ro console=ttyS0\n")

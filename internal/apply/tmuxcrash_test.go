@@ -27,6 +27,9 @@ func TestHarnessDeathHintTmuxServer(t *testing.T) {
 		{"sigkill", "Reaped zombie process 7 (tmux: server) (reason: killed by signal killed, exit code: -1)", TmuxServerKilledHint},
 		{"wrapped by the pane", "Reaped zombie process 7 (tmux:\r\n server) (reason: killed by\x1b[1Csignal segmentation\r\nfault, exit code: -1)", TmuxServerCrashHint},
 		{"second line names the crash", "Reaped zombie process 7 (tmux: server) (reason: killed by signal terminated, exit code: -1)\nReaped zombie process 9 (tmux: server) (reason: killed by signal segmentation fault, exit code: -1)", TmuxServerCrashHint},
+		{"last line wins", "Reaped zombie process 7 (tmux: server) (reason: killed by signal segmentation fault, exit code: -1)\nReaped zombie process 9 (tmux: server) (reason: killed by signal killed, exit code: -1)", TmuxServerKilledHint},
+		{"a later clean exit clears it", "Reaped zombie process 7 (tmux: server) (reason: killed by signal segmentation fault, exit code: -1)\nReaped zombie process 9 (tmux: server) (reason: exited, exit code: 0)", ""},
+		{"sigtrap", "Reaped zombie process 7 (tmux: server) (reason: killed by signal trace/breakpoint trap, exit code: -1)", TmuxServerCrashHint},
 		{"clean exit", "Reaped zombie process 7 (tmux: server) (reason: exited, exit code: 0)", ""},
 		{"sigterm", "Reaped zombie process 7 (tmux: server) (reason: killed by signal terminated, exit code: -1)", ""},
 		{"another process segfaulted", "Reaped zombie process 7 (node) (reason: killed by signal segmentation fault, exit code: -1)", ""},
@@ -37,7 +40,7 @@ func TestHarnessDeathHintTmuxServer(t *testing.T) {
 			t.Errorf("%s: hint = %q, want %q", c.name, got, c.want)
 		}
 	}
-	for _, w := range []string{"tmux server", "crashed", "lever up", "/var/lib/lever/cores", "tmux server crashes"} {
+	for _, w := range []string{"tmux server", "tmux crash", "not proof", "lever up", "/var/lib/lever/cores", "tmux server crashes"} {
 		if !strings.Contains(TmuxServerCrashHint, w) {
 			t.Errorf("crash hint lacks %q", w)
 		}

@@ -13,7 +13,8 @@ import (
 //
 //   - kernel.core_pattern pipes every core dump in the guest to a small
 //     handler lever installs. A piped dump ignores the crashing process's
-//     RLIMIT_CORE (the kernel sets no limit for a pipe), so the agent
+//     RLIMIT_CORE (the kernel sets no limit for a pipe; only a limit of
+//     exactly 1 byte stops it, a recursion guard), so the agent
 //     container's default soft limit of 0 does not stop it, and nothing in
 //     the agent image or the container's limits changes.
 //   - The handler keeps a dump only when the process is named "tmux:
@@ -31,10 +32,13 @@ import (
 // can crash its own processes named "tmux: server" at will, so the handler
 // bounds the disk it can fill: one dump at a time (a non-blocking lock; a
 // dump that finds it held is dropped), each cut at CoreMaxBytes, and at
-// most CoreKeep cores (the oldest is removed first).
+// most CoreKeep cores (the oldest is removed first). The same freedom lets
+// it drop or push out a real core with fakes: a kept core is untrusted
+// diagnostic material, not proof. The handler writes only into a real,
+// root-owned directory (no symlink).
 //
 // The guest's own core handler, if any, is replaced: Ubuntu's apport is
-// disabled (its service rewrites core_pattern at boot) and other processes'
+// masked (its service rewrites core_pattern at boot) and other processes'
 // dumps are dropped. A lever guest runs nothing else to debug.
 //
 // EnsureCrashRecovery converges it on every apply and up. Lima only: an
@@ -58,9 +62,10 @@ const (
 // them into a temp dir.
 type corePaths struct {
 	Handler, Sysctl, Dir string
+	OwnerUID             int // the core directory's owner: root in the guest
 }
 
-var realCorePaths = corePaths{Handler: CoreHandlerPath, Sysctl: CoreSysctlPath, Dir: CoreDir}
+var realCorePaths = corePaths{Handler: CoreHandlerPath, Sysctl: CoreSysctlPath, Dir: CoreDir, OwnerUID: 0}
 
 // corePattern is the kernel.core_pattern value: the handler with the global
 // pid, the dump time and the process name (last: it may hold spaces, and
@@ -71,8 +76,9 @@ func corePattern(handler string) string {
 
 // coreHandlerScript is the handler the kernel runs, as root, for every core
 // dump in the guest, with the core on its standard input. dir holds the
-// kept cores.
-func coreHandlerScript(dir string, maxBytes, keep int) string {
+// kept cores and must be a real directory owned by ownerUID (root, 0, in
+// the guest).
+func coreHandlerScript(dir string, ownerUID, maxBytes, keep int) string {
 	q := shellSingleQuote
 	return `#!/bin/sh
 # Written by lever (tmux server cores, lever#201). Do not edit: lever apply rewrites it.
@@ -95,6 +101,7 @@ case "$pid" in ''|*[!0-9]*) exit 0 ;; esac
 case "$t" in ''|*[!0-9]*) exit 0 ;; esac
 umask 077
 mkdir -p "$dir" || exit 0
+[ -d "$dir" ] && [ ! -L "$dir" ] && [ "$(stat -c %u "$dir")" = ` + strconv.Itoa(ownerUID) + ` ] || exit 0
 chmod 0700 "$dir" || exit 0
 exec 9>>"$dir/.lock" || exit 0
 flock -n 9 || exit 0
@@ -113,20 +120,30 @@ exit 0
 // coreCaptureScript is the root script that converges the capture (run by
 // EnsureCrashRecovery, in a subshell of its script): it writes
 // the handler and the sysctl file when their content differs, creates the
-// core directory, disables apport (whose service sets its own core_pattern
-// at boot), and sets core_pattern live on every run. A failed write exits
+// core directory, stops and masks apport (whose service sets its own
+// core_pattern at boot, and a package upgrade could re-enable), and sets core_pattern live on every run. A failed write exits
 // 1; a failed sysctl or apport disable is a warning.
 func coreCaptureScript(p corePaths) string {
 	q := shellSingleQuote
 	var b strings.Builder
 	b.WriteString("set -eu\n")
 	b.WriteString(convergeShell)
-	fmt.Fprintf(&b, "converge %s %s || true\n", q(p.Handler), q(strings.TrimSuffix(coreHandlerScript(p.Dir, CoreMaxBytes, CoreKeep), "\n")))
-	fmt.Fprintf(&b, "chmod 0755 %s || exit 1\n", q(p.Handler))
+	// The handler is written executable before it is moved into place: the
+	// live core_pattern may already name it.
+	fmt.Fprintf(&b, "h=%s\nc=%s\n", q(p.Handler), q(strings.TrimSuffix(coreHandlerScript(p.Dir, p.OwnerUID, CoreMaxBytes, CoreKeep), "\n")))
+	b.WriteString(`if ! [ -f "$h" ] || [ "$(cat "$h")" != "$c" ]; then
+  mkdir -p "$(dirname "$h")" || exit 1
+  printf '%s\n' "$c" > "$h.lever-tmp" || exit 1
+  chmod 0755 "$h.lever-tmp" || exit 1
+  mv -f "$h.lever-tmp" "$h" || exit 1
+fi
+`)
 	fmt.Fprintf(&b, "mkdir -p %s || exit 1\nchmod 0700 %s || exit 1\n", q(p.Dir), q(p.Dir))
 	fmt.Fprintf(&b, "converge %s %s || true\n", q(p.Sysctl), q(coreSysctlFile(p.Handler)))
-	fmt.Fprintf(&b, `if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled --quiet apport.service 2>/dev/null; then
-  systemctl disable --now apport.service >/dev/null 2>&1 || echo %s
+	fmt.Fprintf(&b, `if command -v systemctl >/dev/null 2>&1 && [ "$(systemctl is-enabled apport.service 2>/dev/null)" != masked ] &&
+  systemctl cat apport.service >/dev/null 2>&1; then
+  systemctl stop apport.service >/dev/null 2>&1 || true
+  systemctl mask apport.service >/dev/null 2>&1 || echo %s
 fi
 `, q("warn: could not disable apport; it sets its own core_pattern at boot, until lever apply or up sets lever's again"))
 	kv := "kernel.core_pattern=" + corePattern(p.Handler)

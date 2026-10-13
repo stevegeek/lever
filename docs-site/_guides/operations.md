@@ -590,7 +590,7 @@ The agent image installs a pinned tmux from trixie-backports, replacing the base
 
 **What lever reports.** sciontool logs the reaped server in the container log (`Reaped zombie
 process … (tmux: server) (reason: killed by signal segmentation fault …)`). When the manager died,
-`lever up` (after your attach ends, or at the start gate) reads that line and names the cause: a
+`lever up` (after your attach ends, or at the start gate) reads the last such line and names the cause: a
 crash (a fault signal: segmentation fault, abort, bus error) or a kill (SIGKILL, usually the guest's
 out-of-memory killer; the guest's `sudo dmesg` names the victim). lever matches the fixed line only
 and repeats nothing of the log. `lever up` starts the manager again; the conversation is kept when
@@ -603,9 +603,11 @@ other dump. The cores stay in the guest, in `/var/lib/lever/cores` (root only, m
 named `core.tmux.<time>.<pid>`); lever never copies one to the host or into a container. A tmux
 server core holds the terminal contents of the agent's panes, so treat it as you would the
 agent's conversation. The agent can crash its own processes, so the handler bounds what it keeps:
-one dump at a time, each cut at 256 MiB, and the newest two. A piped dump does not depend on the
+one dump at a time, each cut at 256 MiB, and the newest two. The same freedom lets the agent drop
+a real core or push it out with fakes, and print a fake reaper line: the hint and a kept core are
+leads, not proof. A piped dump does not depend on the
 container's core size limit, so nothing in the agent image or its container changes. The handler
-replaces the guest's own core handler: Ubuntu's apport is disabled, and other processes' dumps are
+replaces the guest's own core handler: Ubuntu's apport is stopped and masked, and other processes' dumps are
 dropped. An OrbStack machine shares one kernel with every other machine on the host and lever
 does not change its `core_pattern`, so there no core is kept.
 

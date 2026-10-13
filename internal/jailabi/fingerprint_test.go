@@ -41,6 +41,11 @@ var jailRoots = []string{
 
 // jailExtraFiles are non-Go files that shape the image: the pre-start hook
 // it copies in, and the Dockerfile (its ENV lines are a host-jail contract).
+// Both image flavors build that Dockerfile. The slim flavor's base,
+// image/scion-slim/Dockerfile, is not here: like scion-claude under the full
+// flavor it carries scion's side of the container (sciontool, the scion user)
+// and nothing lever's host code speaks to, and image/contract checks a built
+// image of either flavor for what lever relies on.
 var jailExtraFiles = []string{
 	"cmd/lever-agent/scionhook/pre-start",
 	"image/lever-claude/Dockerfile",

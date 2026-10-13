@@ -108,6 +108,55 @@ docker tag scion-claude:latest scion-claude:arm64   # or :amd64, matching the im
 (The build script reports this if the arch-tagged base is missing.) See scion's `image-build/`
 for detail; scion owns this step.
 
+**The slim image (opt-in).** `scion-claude` brings chromium, gcloud, gcsfuse, Go, kubectl,
+golangci-lint and bun, and a lever image built on it is about 5 GB. `make lever-image-slim` builds
+`scionlocal/lever-claude-slim:<arch>` instead, with no scion image build at all: a Debian trixie
+base (`node:24-trixie-slim`) with only what scion and lever need in an agent container (sciontool
+and scion, the `scion` user, python3 for scion's Claude provisioner, git, zsh, tzdata, procps and
+nano), then the same lever layer as the full image (Claude Code at its pin, installed once, the
+pinned tmux, lever's binaries, the boot hook and `/etc/claude-code`). It should come to about 1 GB;
+`make image-contract` prints the built size.
+
+```sh
+make lever-image-slim SCION_VERSION=e0f61f2d   # your lever.yaml's scion.version
+```
+
+sciontool and scion are cross-compiled on the host from the scion source the jail runs: set
+`SCION_VERSION` to your `scion.version`, or `SCION_SRC=/path/to/scion` to the checkout your
+`scion.source` names (the default is the pin the shipped examples use). The slim base records it
+in a `scion_version` label. Then point `manager.image` (and any worker `image:`) at
+`scionlocal/lever-claude-slim`, `lever apply`, and recreate the agents on it with `lever up --fresh
+--keep-conversation`. The full image stays the default and nothing changes for an instance that
+does not opt in.
+
+What the slim image leaves out, on purpose: `sudo` (the agent has no root in its container, so it
+cannot `apt-get install` at run time), `gh` (lever's agents reach GitHub through the
+[github tool](/github-tool/)), chromium and the Playwright and Chrome DevTools tools, gcloud, gcsfuse, Go, kubectl,
+golangci-lint, bun, oh-my-zsh and scion's in-container firewall script (lever enforces egress in
+the jail). It also lacks the everyday tools scion's base adds, which neither scion's runtime nor
+lever uses but agents often do: curl, wget, jq, ripgrep, less, make, g++, vim, rsync, unzip,
+openssh-client and the network utilities. An agent that needs a toolchain gets it from an instance Dockerfile `FROM
+scionlocal/lever-claude-slim:<arch>`, as below.
+
+**Checking an image: `make image-contract`.** `image/contract/check-image.sh` checks a built image
+against what lever and scion rely on: the entrypoint (`sciontool init --`), the `scion` user (uid
+and gid 1000, its home and shell), the labels doctor reads, sciontool, scion, the pinned tmux,
+python3, git, the terminfo and timezone data, lever's binaries for the right arch, the boot hook,
+`/etc/claude-code`, Claude Code at the labelled version (read from its `package.json`; it never
+runs `claude`), lever's environment variables and the commands lever's probes use. It then starts
+a tmux session shaped like scion's and checks that `lever-agent claude-ready` writes the marker
+lever's manager gate waits for. It runs the image with no network and removes the container.
+
+```sh
+make image-contract                                    # scionlocal/lever-claude-slim:<arch>
+make image-contract IMAGE=scionlocal/lever-claude:arm64
+LEVER_IMAGE_MAX_MB=1600 make image-contract            # also fail an image above 1.6 GB
+```
+
+It works on either flavor, and on an instance image built from one (`CONTAINER_CLI=podman` for
+podman). Run it after every image build; it is the check that the slim image still has everything
+the full one gives lever.
+
 **Extending the image for your instance.** The generic image is minimal: scion's harness plus
 lever's binaries and boot hook. If your agents need a language toolchain or a project CLI, write an
 instance Dockerfile `FROM scionlocal/lever-claude:<arch>` that adds it, and point `manager.image` (and any

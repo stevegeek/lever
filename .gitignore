@@ -31,6 +31,7 @@ local.mk
 # Generic agent-image build artifacts (staged by `make lever-image`).
 image/lever-claude/bin/
 image/lever-claude/scionhook/
+image/scion-slim/bin/
 
 # Stray local build outputs at repo root.
 /lever-tool-todo

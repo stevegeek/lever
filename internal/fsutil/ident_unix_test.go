@@ -294,3 +294,40 @@ func TestInsideByIdentityFDFollowsTheDirectoryNotThePath(t *testing.T) {
 		t.Fatalf("InsideByIdentityFD(out) = %v, %v; want outside", in, err)
 	}
 }
+
+// An agent renaming an ancestor back and forth while the check walks up
+// must never make a directory inside the tree read as outside it.
+func TestInsideByIdentityFDHoldsWhileAncestorsMove(t *testing.T) {
+	tree := filepath.Join(t.TempDir(), "tree")
+	mkdirs(t, filepath.Join(tree, "a", "b"))
+	fd, err := unix.Open(filepath.Join(tree, "a", "b"), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.Rename(filepath.Join(tree, "a", "b"), filepath.Join(tree, "b"))
+			_ = os.Rename(filepath.Join(tree, "b"), filepath.Join(tree, "a", "b"))
+		}
+	}()
+	outside := 0
+	for i := 0; i < 5000; i++ {
+		if in, err := InsideByIdentityFD(fd, "b", tree); err == nil && !in {
+			outside++
+		}
+	}
+	close(stop)
+	<-done
+	if outside > 0 {
+		t.Fatalf("%d of 5000 checks said outside for a directory inside the tree", outside)
+	}
+}

@@ -69,38 +69,54 @@ func InsideByIdentityFD(dirfd int, name, outer string) (bool, error) {
 	return insideFrom(dirfd, name, outer, &o)
 }
 
+// insideFrom walks up from the directory open as fd, one fd per level:
+// each parent is opened as ".." of the directory before it, never as a
+// "../.." path from the start, which an agent renaming an ancestor between
+// two levels could send around outer.
 func insideFrom(fd int, dir, outer string, o *unix.Stat_t) (bool, error) {
 	mounts := &mountCheck{outer: outer}
-	cur, err := statChain(fd, ".")
+	cur, err := statChain(fd)
 	if err != nil {
 		return false, fmt.Errorf("stat %s: %w", dir, err)
 	}
-	// Built by appending, never with filepath.Join or Clean: those fold ".."
-	// lexically, and the kernel must resolve each one.
-	up := ".."
+	curfd, owned := fd, -1
+	defer func() {
+		if owned >= 0 {
+			unix.Close(owned)
+		}
+	}()
 	for level := 1; level <= maxIdentityLevels; level++ {
 		if sameIdentity(&cur.st, o) {
 			return true, nil
 		}
-		parent, err := statChain(fd, up)
+		pfd, err := openParentDir(curfd)
 		if err != nil {
+			return false, fmt.Errorf("open ancestor %d of %s: %w", level, dir, err)
+		}
+		parent, err := statChain(pfd)
+		if err != nil {
+			unix.Close(pfd)
 			return false, fmt.Errorf("stat ancestor %d of %s: %w", level, dir, err)
 		}
 		top := sameIdentity(&parent.st, &cur.st)
 		if cur.hasMnt && (top || parent.mnt != cur.mnt) {
 			in, err := mounts.rootInside(cur.mnt)
-			if err != nil {
-				return false, fmt.Errorf("mount above %s: %w", dir, err)
-			}
-			if in {
-				return true, nil
+			if err != nil || in || top {
+				unix.Close(pfd)
+				if err != nil {
+					return false, fmt.Errorf("mount above %s: %w", dir, err)
+				}
+				return in, nil
 			}
 		}
 		if top {
+			unix.Close(pfd)
 			return false, nil
 		}
-		cur = parent
-		up += "/.."
+		if owned >= 0 {
+			unix.Close(owned)
+		}
+		curfd, owned, cur = pfd, pfd, parent
 	}
 	return false, fmt.Errorf("%s: more than %d ancestors", dir, maxIdentityLevels)
 }

@@ -29,10 +29,18 @@ type chainStat struct {
 	hasMnt bool
 }
 
-func statChain(fd int, name string) (chainStat, error) {
+func statChain(fd int) (chainStat, error) {
 	var c chainStat
-	err := unix.Fstatat(fd, name, &c.st, 0)
+	err := unix.Fstat(fd, &c.st)
 	return c, err
+}
+
+func openParentDir(fd int) (int, error) {
+	pfd, err := unix.Openat(fd, "..", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.EACCES) {
+		pfd, err = unix.Openat(fd, "..", oSearch|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	}
+	return pfd, err
 }
 
 type mountCheck struct{ outer string }

@@ -27,16 +27,20 @@ type chainStat struct {
 	hasMnt bool
 }
 
-func statChain(fd int, name string) (chainStat, error) {
+func statChain(fd int) (chainStat, error) {
 	var c chainStat
-	if err := unix.Fstatat(fd, name, &c.st, 0); err != nil {
+	if err := unix.Fstat(fd, &c.st); err != nil {
 		return c, err
 	}
 	var x unix.Statx_t
-	if err := unix.Statx(fd, name, unix.AT_STATX_SYNC_AS_STAT, unix.STATX_MNT_ID, &x); err == nil && x.Mask&unix.STATX_MNT_ID != 0 {
+	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_STATX_SYNC_AS_STAT, unix.STATX_MNT_ID, &x); err == nil && x.Mask&unix.STATX_MNT_ID != 0 {
 		c.mnt, c.hasMnt = x.Mnt_id, true
 	}
 	return c, nil
+}
+
+func openParentDir(fd int) (int, error) {
+	return unix.Openat(fd, "..", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 }
 
 // mountCheck answers, for the mount roots met on one ".." chain, whether the
@@ -130,7 +134,9 @@ func readMountinfo(name string) (map[uint64]mountInfo, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
+		// The kernel escapes only space, tab, newline and backslash, so
+		// fields are split on the space alone.
+		fields := strings.Split(sc.Text(), " ")
 		if len(fields) < 5 {
 			return nil, fmt.Errorf("%s: short line %q", name, sc.Text())
 		}

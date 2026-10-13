@@ -163,7 +163,7 @@ func newDirectiveSendCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			agent := args[0]
 			if (instruction == "") == (actionJSON == "") {
-				return fmt.Errorf("directive send: exactly one of --instruction or --action is required")
+				return usageError{errors.New("directive send: exactly one of --instruction or --action is required")}
 			}
 
 			var action opsig.Action

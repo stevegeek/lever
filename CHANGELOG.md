@@ -266,6 +266,10 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **A command that fails at run time no longer prints its usage text.** `lever up`, `lever apply`
+  and most other commands printed the usage after any error, so a manager that did not come up
+  read as a flag problem. The usage now follows only flag and argument errors (an unknown or
+  missing flag, a wrong flag combination, the wrong number of arguments).
 - **`lever acceptance` waits for its tools to listen** (up to 30 s) before it runs the checks, and
   fails naming the tool, its address and its log when one never does. A first check could reach
   the gateway before the tool bound its port and fail with a 502 unrelated to the capability under

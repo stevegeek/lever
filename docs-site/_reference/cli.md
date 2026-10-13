@@ -61,6 +61,9 @@ text from the jail):
 | `3` | lever could not resume the manager. The record and its conversation are kept. Run `lever up` again (a transient failure clears) and `lever doctor` for the cause; `lever up --fresh` starts a new conversation (it backs up the old one first). |
 | `4` | The hub refused the resume (a token without the lifecycle scope, or a phase that cannot be resumed now). The manager is kept. Do **not** answer this with `--fresh`. |
 
+A command prints its usage text only after a flag or argument error (an unknown or missing flag, a
+wrong combination of flags, the wrong number of arguments), not after a failure at run time.
+
 `lever doctor` and `lever init --check` exit `1` when a check fails.
 
 ### Operator directives

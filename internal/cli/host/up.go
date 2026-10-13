@@ -350,9 +350,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 func checkFreshFlags(fresh, noBackup, keepConv bool) error {
 	switch {
 	case (noBackup || keepConv) && !fresh:
-		return errors.New("--no-backup and --keep-conversation go with --fresh")
+		return usageError{errors.New("--no-backup and --keep-conversation go with --fresh")}
 	case noBackup && keepConv:
-		return errors.New("--keep-conversation needs the backup that --no-backup skips")
+		return usageError{errors.New("--keep-conversation needs the backup that --no-backup skips")}
 	}
 	return nil
 }

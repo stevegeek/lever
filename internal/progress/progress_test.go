@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-// clock is a settable time source.
 type clock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -43,8 +42,7 @@ func (m *manualTicker) ticker(time.Duration) (<-chan time.Time, func()) {
 func (m *manualTicker) tick() {
 	m.ch <- time.Time{}
 	// The loop takes the next tick only after it handled this one, so the
-	// second send returns once the first redraw is written. A second tick
-	// at the same time draws nothing new.
+	// second send returns once the first redraw is written.
 	m.ch <- time.Time{}
 }
 
@@ -389,9 +387,9 @@ func TestRecordIsNeverOpenedThroughALink(t *testing.T) {
 	}
 }
 
-// TestBackgroundStepRunsBesideTheForeground (lever#189): the next Start
-// does not end a background step, its Detail (through WithStep) does not
-// land on the foreground step, and each step ends with its own outcome.
+// TestBackgroundStepRunsBesideTheForeground: the next Start does not end a
+// background step, its Detail (through WithStep) does not land on the
+// foreground step, and each step ends with its own outcome.
 func TestBackgroundStepRunsBesideTheForeground(t *testing.T) {
 	rep, out, c, m := newRep(t, ModePlain, "")
 	rep.Group("apply", 3)

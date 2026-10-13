@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// renderer draws the events. Every method is called with the Reporter's
-// lock held, so a renderer needs no lock of its own.
+// renderer methods are called with the Reporter's lock held, so a renderer
+// needs no lock of its own.
 type renderer interface {
 	header(text string, now time.Time)
 	start(s *Step, now time.Time)
@@ -23,7 +23,6 @@ type renderer interface {
 	tick() time.Duration
 }
 
-// stepName is "[3/11] scion-server" for a numbered step, else the label.
 func stepName(s *Step) string {
 	if s.Of > 0 {
 		return fmt.Sprintf("[%d/%d] %s", s.N, s.Of, s.Label)
@@ -31,7 +30,6 @@ func stepName(s *Step) string {
 	return s.Label
 }
 
-// marker is the fixed-width word in front of a finished step.
 func marker(state string) string {
 	switch state {
 	case "ok":
@@ -44,7 +42,6 @@ func marker(state string) string {
 	return "..  "
 }
 
-// tailBlock is a failure's log tail, indented under the FAIL line.
 func tailBlock(src string, tail []string) string {
 	if len(tail) == 0 {
 		if src == "" {
@@ -60,12 +57,9 @@ func tailBlock(src string, tail []string) string {
 	return b.String()
 }
 
-// ttyRenderer keeps one live line at the bottom of the terminal: the
-// running step, its sub-stage and its elapsed time, redrawn each second.
-// Finished steps, log lines and the summary are written above it. With
-// steps running alongside each other (lever#189) the line shows the
-// foreground step (or, with none, the oldest background one) and names the
-// others after it.
+// ttyRenderer keeps one live line at the bottom of the terminal, redrawn each
+// second, and writes everything else above it. The line shows the foreground
+// step (or, with none, the oldest background one) and names the others.
 type ttyRenderer struct {
 	w       io.Writer
 	width   int
@@ -75,7 +69,6 @@ type ttyRenderer struct {
 	drawn   bool
 }
 
-// focus is the step the live line is about, and the others still running.
 func (t *ttyRenderer) focus() (*Step, []*Step) {
 	if t.cur != nil {
 		return t.cur, t.bg
@@ -195,9 +188,9 @@ func (t *ttyRenderer) finish(sum Summary, now time.Time) {
 	}
 }
 
-// plainRenderer writes one timestamped line per event, for a log file, a
-// pipe or a terminal that cannot redraw. A step that runs past
-// heartbeatEvery says so at each multiple, with its sub-stage.
+// plainRenderer writes one timestamped line per event, for a log, a pipe or
+// a terminal that cannot redraw. A step running past heartbeatEvery says so
+// at each multiple.
 type plainRenderer struct {
 	w io.Writer
 }
@@ -254,8 +247,8 @@ func (p *plainRenderer) finish(sum Summary, now time.Time) {
 	}
 }
 
-// jsonRenderer writes the event stream itself (Reporter.emit calls write);
-// its renderer methods add only a failure's tail.
+// jsonRenderer: Reporter.emit writes the event stream; its renderer methods
+// add only a failure's tail.
 type jsonRenderer struct {
 	w io.Writer
 }

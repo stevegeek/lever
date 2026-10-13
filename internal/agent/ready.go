@@ -18,21 +18,18 @@ const (
 )
 
 // ErrNotHarness is WriteReadyMarker's answer for a session outside a tmux
-// pane: a claude that is not scion's harness (boot's `claude mcp add`, a
-// `claude -p` through podman exec). It writes nothing.
+// pane, i.e. a claude that is not scion's harness. It writes nothing.
 var ErrNotHarness = errors.New("not in a tmux pane")
 
-// WriteReadyMarker is the claude-ready hook (lever#188): it writes
-// wire.ReadyMarker for this container run and pane to path. procRoot is the
-// /proc to read the run's identity from (a test seam); pane is $TMUX_PANE.
+// WriteReadyMarker is the claude-ready hook: it writes wire.ReadyMarker for
+// this container run and pane to path. pane is $TMUX_PANE.
 //
 // The marker only claims that a claude session started in that pane. The
 // agent can write it itself, which claims no more than a live pane already
 // does, and the manager gate compares it for equality only.
 //
-// The file is written next to path (0600: the probe reads it as the same
-// user) and renamed over it, so a symbolic link planted at path is
-// replaced, never followed.
+// The file is written next to path (0600) and renamed over it, so a symbolic
+// link planted at path is replaced, never followed.
 func WriteReadyMarker(path, procRoot, pane string) error {
 	if pane == "" {
 		return ErrNotHarness
@@ -62,7 +59,6 @@ func WriteReadyMarker(path, procRoot, pane string) error {
 	return nil
 }
 
-// validPaneID reports whether s is a tmux pane id: "%" and digits.
 func validPaneID(s string) bool {
 	rest, ok := strings.CutPrefix(s, "%")
 	if !ok || rest == "" || len(rest) > 10 {
@@ -77,10 +73,9 @@ func validPaneID(s string) bool {
 }
 
 // RunIdentity names this container run: the guest kernel's boot id and the
-// start time of the container's PID 1 (field 22 of <procRoot>/1/stat). A
-// new container, or the same one started again, has a new PID 1; a guest
-// reboot has a new boot id. The manager gate's reader computes the same two
-// values in shell (jail's readyScript) and must agree with this parse.
+// start time of the container's PID 1 (field 22 of <procRoot>/1/stat). The
+// manager gate's reader computes the same two values in shell (the jail's
+// readyScript) and must agree with this parse.
 func RunIdentity(procRoot string) (bootID, pid1Start string, err error) {
 	b, err := readBounded(filepath.Join(procRoot, "sys/kernel/random/boot_id"), 128)
 	if err != nil {

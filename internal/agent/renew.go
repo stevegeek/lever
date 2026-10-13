@@ -40,10 +40,8 @@ type RenewConfig struct {
 	SettingsPath string
 }
 
-// RenewOnce performs a single renewal cycle: Renew c.Identity, write the
-// renewed identity back to c.IDDir, then (api-key mode) refresh the LLM
-// capability token and rewrite the settings.json env block so the next claude
-// launch picks up the fresh token.
+// RenewOnce performs a single renewal cycle: renew and write back the
+// identity, then in api-key mode refresh the LLM token in settings.json.
 func RenewOnce(ctx context.Context, c RenewConfig) error {
 	renewed, err := Renew(ctx, c.BrokerURL, c.Identity)
 	if err != nil {

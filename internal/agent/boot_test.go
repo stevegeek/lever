@@ -14,8 +14,6 @@ import (
 	"github.com/stevegeek/lever/internal/broker/brokertest"
 )
 
-// writeBootstrap writes a bootstrap.json for env under dir with a freshly
-// provisioned "worker" ticket and returns its path.
 func writeBootstrap(t *testing.T, env *brokertest.Env, dir string) string {
 	t.Helper()
 	ticket := env.WorkerTicket(t, "worker")
@@ -32,9 +30,6 @@ func writeBootstrap(t *testing.T, env *brokertest.Env, dir string) string {
 	return bsPath
 }
 
-// baseBootConfig returns a BootConfig wired to env with a provisioned "worker"
-// ticket, ready for Boot to enrol and configure: an explicit tool list, a
-// settings.json under the temp dir, and a no-op MCPAdd.
 func baseBootConfig(t *testing.T, env *brokertest.Env) BootConfig {
 	t.Helper()
 	dir := t.TempDir()
@@ -68,10 +63,8 @@ func TestBootAPIKeyWritesAnthropicEnv(t *testing.T) {
 }
 
 func TestBootAPIKeyFailsClosedOnTokenError(t *testing.T) {
-	// Fail closed: if the broker won't mint an llm token (no obtain grant for
-	// "worker" here), Boot must abort BEFORE writing the settings env — a
-	// partial overlay with a missing/empty ANTHROPIC_AUTH_TOKEN would hand
-	// claude an unauthenticated proxy config.
+	// Fail closed: with no llm obtain grant, Boot must abort before writing the
+	// settings env rather than leave a blank ANTHROPIC_AUTH_TOKEN.
 	env := testBroker(t)
 	c := baseBootConfig(t, env)
 	c.LLMAuth = LLMAuthAPIKey
@@ -111,7 +104,6 @@ func TestBootEnrolOnlySkipsSettingsAndMCP(t *testing.T) {
 	}
 }
 
-// mcpCall records a single MCPAdd invocation.
 type mcpCall struct {
 	name string
 	argv []string
@@ -135,12 +127,10 @@ func TestBootEnrolsAndConfigures(t *testing.T) {
 		t.Fatalf("settings env missing the harness overlay: %v", envOverlay)
 	}
 
-	// capability server + one per broker tool ("db").
 	if len(calls) < 2 {
 		t.Fatalf("expected mcp add for capability server + db, got %v", calls)
 	}
 
-	// Assert capability server is registered in stdio form (no --transport flag).
 	capCall := calls[0]
 	if capCall.name != "lever-capability" {
 		t.Errorf("first MCPAdd must register lever-capability, got %q", capCall.name)
@@ -154,7 +144,6 @@ func TestBootEnrolsAndConfigures(t *testing.T) {
 		}
 	}
 
-	// Assert broker tool "db" is registered with --transport http + full broker URL.
 	var dbCall *mcpCall
 	for i := range calls {
 		if calls[i].name == "db" {
@@ -175,7 +164,6 @@ func TestBootEnrolsAndConfigures(t *testing.T) {
 func TestBootIsIdempotent(t *testing.T) {
 	env := testBroker(t)
 
-	// First boot: enrols and configures.
 	cfg := baseBootConfig(t, env)
 	idDir := cfg.IDDir
 	if err := Boot(context.Background(), cfg); err != nil {
@@ -183,8 +171,7 @@ func TestBootIsIdempotent(t *testing.T) {
 	}
 	id1, _ := LoadIdentity(idDir)
 
-	// Second boot: the ticket is now burned; if boot tried to re-enrol it would fail.
-	// Idempotency means it sees the valid cert and skips enrol.
+	// The ticket is burned, so a second boot succeeds only by skipping enrol.
 	var secondCalls []mcpCall
 	cfg2 := cfg
 	cfg2.MCPAdd = func(name string, argv ...string) error {
@@ -199,8 +186,7 @@ func TestBootIsIdempotent(t *testing.T) {
 		t.Fatal("idempotent boot must not re-enrol / change the cert")
 	}
 
-	// Second boot must still register tools with the full broker URL (bootstrap
-	// re-read from file on the skip-enrol path).
+	// The skip-enrol path must still read the broker URL from the bootstrap.
 	var dbCall2 *mcpCall
 	for i := range secondCalls {
 		if secondCalls[i].name == "db" {
@@ -214,9 +200,8 @@ func TestBootIsIdempotent(t *testing.T) {
 	assertBrokerToolArgv(t, "db", dbCall2.argv, LocalGatewayURL)
 }
 
-// TestBootDiscoveryUsesBrokerNotGateway proves the boot-time tool-discovery call
-// still hits the real broker over the direct mTLS client — the gateway sidecar is
-// not up during pre-start, so routing discovery through it would deadlock boot.
+// TestBootDiscoveryUsesBrokerNotGateway: the gateway sidecar is not up during
+// pre-start, so discovery must go straight to the broker.
 func TestBootDiscoveryUsesBrokerNotGateway(t *testing.T) {
 	// No gateway is listening on LocalGatewayAddr during this test, so a
 	// discovery that succeeds proves it went straight to the broker over mTLS.
@@ -253,8 +238,6 @@ func TestBootExplicitToolsSkipDiscovery(t *testing.T) {
 	}
 }
 
-// assertBrokerToolArgv checks that argv for a broker tool registration contains
-// --transport http and the full broker URL path for the tool.
 func assertBrokerToolArgv(t *testing.T, tool string, argv []string, brokerURL string) {
 	t.Helper()
 	joined := strings.Join(argv, " ")
@@ -268,7 +251,6 @@ func assertBrokerToolArgv(t *testing.T, tool string, argv []string, brokerURL st
 	if !strings.Contains(joined, wantSuffix) {
 		t.Errorf("broker tool %q MCPAdd argv must contain %q, got %v", tool, wantSuffix, argv)
 	}
-	// Verify the exact flag sequence --transport http appears.
 	found := false
 	for i := 0; i+1 < len(argv); i++ {
 		if argv[i] == "--transport" && argv[i+1] == "http" {
@@ -298,10 +280,8 @@ func TestLoadBootstrapNormalizesBrokerURL(t *testing.T) {
 	}
 }
 
-// boot reads the bootstrap in scion's pre-start hook (as root on a rootful
-// runtime; as the agent user under rootless podman) from the agent-writable
-// tree: a symlink at .lever or at bootstrap.json is refused by
-// name (a non-regular file — a FIFO — would otherwise also hang the read).
+// boot may read the bootstrap as root from the agent-writable tree: a symlink
+// at .lever or at bootstrap.json is refused by name.
 func TestLoadBootstrapRefusesSymlink(t *testing.T) {
 	ws := t.TempDir()
 	real := filepath.Join(ws, "real.json")
@@ -318,18 +298,14 @@ func TestLoadBootstrapRefusesSymlink(t *testing.T) {
 	if _, err := LoadBootstrap(filepath.Join(dir, "bootstrap.json")); !errors.Is(err, errRefusedPath) {
 		t.Fatalf("LoadBootstrap through a symlink: err = %v, want errRefusedPath", err)
 	}
-	// An absent bootstrap must still be reported as fs.ErrNotExist (sidecar's
-	// no-bootstrap-is-noop relies on it).
+	// WriteSidecarSpecs relies on fs.ErrNotExist for an absent bootstrap.
 	if _, err := LoadBootstrap(filepath.Join(ws, "missing", "bootstrap.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("absent bootstrap: err = %v, want fs.ErrNotExist", err)
 	}
 }
 
-// A WORKER's bootstrap is not in its workspace: the broker mounts the guest
-// ticket directory read-only at /run/lever and points boot at
-// /run/lever/bootstrap.json through LEVER_BOOTSTRAP. LoadBootstrap reads that
-// shape through the same two-levels-up os.Root confinement, so a link planted
-// at either component is still refused.
+// A worker's bootstrap is the read-only /run/lever/bootstrap.json mount; the
+// same confinement still refuses a link at either component.
 func TestLoadBootstrapReadsMountedWorkerTicket(t *testing.T) {
 	root := t.TempDir() // stands in for "/"
 	dir := filepath.Join(root, "run", "lever")

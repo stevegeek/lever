@@ -15,11 +15,9 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// contacts and contact_message (remote.agent_messages): a message to a
-// contact goes through the broker first (authorize and record), then the
-// agent sends the recorded text with scion message. contactMessageTool
-// writes that text to a 0600 file itself, so the bytes the hub stores are
-// the bytes the broker hashed: no editor newline, no shell quoting.
+// A message to a contact is authorized and recorded by the broker first, then
+// sent with scion message. contactMessageTool writes the text to a 0600 file
+// itself, so the bytes the hub stores are the bytes the broker hashed.
 
 const contactsDescription = "List the contacts you may message (the logins whose lever config lists you), " +
 	"with when they last wrote to you and whether you may start a message now (can_initiate, next_allowed_at)."
@@ -32,14 +30,12 @@ var (
 	// plainTarget is a scion reference safe inside the single quotes of the
 	// returned command: "@" and a plain email.
 	plainTarget = regexp.MustCompile(`^@[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$`)
-	// plainRef is a record id (agentledger.NewID).
-	plainRef = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	plainRef    = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	// plainPath is a body file path the command line carries unquoted.
 	plainPath = regexp.MustCompile(`^[A-Za-z0-9/._-]+$`)
 )
 
-// contactToolSchemas are the tools/list entries of contacts and
-// contact_message: plain top-level objects (no combinator, #24).
+// contactToolSchemas are plain top-level objects with no combinator.
 func contactToolSchemas(strProp func(string) map[string]any) []any {
 	return []any{
 		map[string]any{"name": "contacts", "description": contactsDescription,
@@ -54,7 +50,6 @@ func contactToolSchemas(strProp func(string) map[string]any) []any {
 	}
 }
 
-// contactsTool returns the broker's answer to PathContacts unchanged.
 func contactsTool(s *MCPServer, ctx context.Context, _ map[string]string) (string, error) {
 	var raw json.RawMessage
 	if err := httpjson.Post(ctx, s.client, s.brokerURL+wire.PathContacts, struct{}{}, &raw); err != nil {
@@ -64,13 +59,12 @@ func contactsTool(s *MCPServer, ctx context.Context, _ map[string]string) (strin
 }
 
 // contactMessageTool authorizes the text with the broker and, when allowed,
-// writes it to a new 0600 body file and returns the one command that sends
-// it. A refusal is a normal result (ok false, the reason word), so the model
-// reads the word; a broker answer this tool would not put on a command line
-// is an error.
+// writes it to a new 0600 body file and returns the command that sends it. A
+// refusal is a normal result; a broker answer that is unsafe to put on a
+// command line is an error.
 func contactMessageTool(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
-	// to goes to the broker as given: it compares it exactly with the
-	// configured logins, so " c@x" is not-a-contact rather than a guess.
+	// to goes to the broker untrimmed: it compares exactly, so " c@x" is
+	// not-a-contact rather than a guess.
 	to, text, ref := args["to"], args["text"], strings.TrimSpace(args["reply_to_ref"])
 	if to == "" || text == "" {
 		return "", invalidParams{errors.New(`"to" and "text" are required`)}
@@ -101,10 +95,8 @@ func contactMessageTool(s *MCPServer, ctx context.Context, args map[string]strin
 	if err != nil {
 		return "", fmt.Errorf("writing the body file: %w", err)
 	}
-	// The exact authorized bytes, trailing newline included: scion message
-	// --body-file reads the file unchanged (cmd/message.go
-	// resolveMessageBody; only the stdin form "-" trims), and the hub
-	// stores it unchanged once the broker refused mention-like "@".
+	// The exact authorized bytes: scion message --body-file reads the file
+	// unchanged (only the stdin form trims).
 	_, werr := f.WriteString(text)
 	if err := errors.Join(werr, f.Close()); err != nil {
 		_ = os.Remove(path)

@@ -9,7 +9,6 @@ import (
 	"testing"
 )
 
-// readSettingsEnv reads the env block from a claude settings.json.
 func readSettingsEnv(t *testing.T, path string) map[string]string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -90,9 +89,9 @@ func TestWriteSettingsEnvRejectsCorruptExisting(t *testing.T) {
 	}
 }
 
-// settings.json is read-modify-written by boot (scion pre-start hook; root on
-// a rootful runtime, the agent user under rootless podman) under the agent-writable $HOME: a symlink at ~/.claude or at settings.json
-// must be refused by name, with no write through the link.
+// boot may write settings.json as root under the agent-writable $HOME: a
+// symlink at ~/.claude or at settings.json must be refused by name, with no
+// write through the link.
 func TestWriteSettingsEnvRefusesSymlinkedFile(t *testing.T) {
 	home := t.TempDir()
 	victim := filepath.Join(home, "victim.json")

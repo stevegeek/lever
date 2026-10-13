@@ -15,10 +15,8 @@ import (
 	"github.com/stevegeek/lever/internal/mcp"
 )
 
-// TestServeStdioOneLineInOneLineOut pins the command-mode MCP transport: every
-// non-blank input line is one JSON-RPC message answered by exactly one output
-// line, blank lines are skipped, and a malformed line still gets a framed
-// parse-error reply rather than killing the session.
+// TestServeStdioOneLineInOneLineOut: blank lines are skipped, and a malformed
+// line gets a framed parse-error reply rather than killing the session.
 func TestServeStdioOneLineInOneLineOut(t *testing.T) {
 	srv := NewMCPServer(MCPConfig{BrokerURL: "https://broker.invalid", AgentCN: "worker", Client: http.DefaultClient})
 	in := strings.Join([]string{
@@ -101,11 +99,8 @@ func TestServeStdioLineCapMatchesHTTPBodyCap(t *testing.T) {
 	}
 }
 
-// TestServeStdioReturnsOnContextCancel pins the R1 fix for serve-capability:
-// the verb's ctx is SIGINT/SIGTERM-bound, so ServeStdio must return promptly
-// (and cleanly, nil) on cancel even while blocked waiting for the next line on
-// a stdin that never closes — rather than only cancelling an in-flight broker
-// call and going back to the read.
+// TestServeStdioReturnsOnContextCancel: ServeStdio must return nil promptly
+// on cancel even while blocked reading a stdin that never closes.
 func TestServeStdioReturnsOnContextCancel(t *testing.T) {
 	srv := NewMCPServer(MCPConfig{BrokerURL: "https://broker.invalid", AgentCN: "worker", Client: http.DefaultClient})
 	inR, inW := io.Pipe()

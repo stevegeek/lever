@@ -12,37 +12,23 @@ import (
 // write under the agent-writable home is a symbolic link, or exists as
 // something other than the kind of file expected there.
 //
-// `lever-agent boot` runs in scion's pre-start hook, and every file it
-// touches (~/.lever-id/*, ~/.claude/settings.json, ~/.scion/scion-services.yaml,
-// the manager's /workspace/.lever/bootstrap.json) sits in a tree the agent
-// (uid 1000) owns. A worker's /run/lever/bootstrap.json is a read-only
-// mount, but it takes the same path: one reader, one rule.
-//
-// Under rootless podman, the runtime lever uses, the hook does NOT run as
-// root: scion starts the container with --userns=keep-id:uid=1000,gid=1000
-// and SCION_KEEPID_UID=1000 (scion pkg/runtime/podman.go), and sciontool
-// init drops to the scion user (uid 1000) in setupHostUser before it runs
-// the pre-start hooks (scion cmd/sciontool/commands/init.go). So boot
-// normally runs with the agent's own rights, and a link the agent plants
-// gains it nothing it could not do itself. The confinement is kept anyway,
-// as defence: on a rootful runtime, or when that drop fails (sciontool logs
-// the failed setuid and carries on as container root), boot runs as root,
-// and following a link would hand the agent a root write (chmod 0700 the
-// target, write attacker-chosen bytes through it) or a root read (a FIFO
-// also hangs the read, at any uid). Nothing here relies on boot being root
-// or on it not being root. So, mirroring wire.Stage on the host side, all work goes
-// through an os.Root anchored at the one component the agent cannot replace
-// (the mount point: $HOME or /workspace), and every agent-controlled component
-// is Lstat-checked and refused if it is a link — even one that stays inside
-// the root, because a link there is never legitimate.
+// lever-agent boot runs in scion's pre-start hook, and every file it touches
+// sits in a tree the agent owns (a worker's read-only bootstrap mount takes
+// the same path). Under rootless podman sciontool drops to the agent user
+// before pre-start hooks, so a planted link gains nothing. On a rootful
+// runtime, or when that drop fails (sciontool logs it and carries on as
+// container root), boot runs as root, and following a link would give the
+// agent a root write or read; a FIFO hangs the read at any uid. Nothing here
+// may rely on boot being root or not. So all work goes through an os.Root
+// anchored at the mount point the agent cannot replace, and every
+// agent-controlled component is Lstat-checked and refused if it is a link,
+// even one that stays inside the root.
 var errRefusedPath = errors.New("agent: refusing to follow a symbolic link under the agent-writable tree")
 
 // splitAbove returns the directory depth levels above path as an os.Root
 // anchor, with path made relative to it. depth counts the agent-controlled
-// components in the production layout: 1 for ~/.lever-id (root = $HOME),
-// 2 for ~/.claude/settings.json, <ws>/.lever/bootstrap.json and
-// /run/lever/bootstrap.json. The anchor must already exist; a relative path
-// anchors at ".".
+// components, e.g. 1 for ~/.lever-id, 2 for ~/.claude/settings.json. The
+// anchor must already exist; a relative path anchors at ".".
 func splitAbove(path string, depth int) (root, rel string) {
 	path = filepath.Clean(path)
 	root = path
@@ -58,9 +44,8 @@ func splitAbove(path string, depth int) (root, rel string) {
 
 // refuseLink fails with errRefusedPath when name exists inside r and is a
 // symbolic link, or is not a directory (wantDir) / a regular file (!wantDir).
-// An absent name is fine (the caller creates it). The check is by Lstat, so it
-// never follows the link it is checking; r's own confinement then bounds any
-// TOCTOU swap to the root, where the agent could already write anyway.
+// An absent name is fine. r's confinement bounds any TOCTOU swap after the
+// Lstat to the root, where the agent could already write anyway.
 func refuseLink(r *os.Root, name string, wantDir bool) error {
 	fi, err := r.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -80,9 +65,8 @@ func refuseLink(r *os.Root, name string, wantDir bool) error {
 	return nil
 }
 
-// checkedFile refuses a link at rel's directory (when it is not the root
-// itself) and at rel, in that order, so a linked directory is reported before
-// anything is created under it.
+// checkedFile checks rel's directory before rel, so a linked directory is
+// reported before anything is created under it.
 func checkedFile(r *os.Root, rel string) error {
 	if d := filepath.Dir(rel); d != "." {
 		if err := refuseLink(r, d, true); err != nil {

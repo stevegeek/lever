@@ -10,9 +10,8 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// contact_files and share_file (remote.files): the facts about a file come
-// from the broker's host record, never from what the agent finds in its
-// .lever-files directory.
+// The facts about a file come from the broker's host record, never from what
+// the agent finds in its .lever-files directory.
 
 const contactFilesDescription = "List one login's files with you, from lever's host record: the files that login uploaded to you " +
 	"and the files you shared with it (id, login, name, size, sha256, path, at), and that login's in_dir and out_dir. " +
@@ -23,8 +22,7 @@ const shareFileDescription = "Share one file with a login: write it into that lo
 	"then call this with the login and the file's path. Lever records its sha256; the login downloads exactly those bytes. " +
 	"Refusals: not-a-contact, bad-path, not-found, symlink, hard-link, not-a-file, too-large, extension, rate, off, shares-off, unavailable."
 
-// fileToolSchemas are the tools/list entries of contact_files and
-// share_file: plain top-level objects (no combinator, #24).
+// fileToolSchemas are plain top-level objects with no combinator.
 func fileToolSchemas(strProp func(string) map[string]any) []any {
 	return []any{
 		map[string]any{"name": "contact_files", "description": contactFilesDescription,
@@ -40,7 +38,6 @@ func fileToolSchemas(strProp func(string) map[string]any) []any {
 	}
 }
 
-// contactFilesTool returns the broker's answer to PathFilesList unchanged.
 func contactFilesTool(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
 	contact := strings.TrimSpace(args["contact"])
 	if contact == "" {
@@ -51,9 +48,8 @@ func contactFilesTool(s *MCPServer, ctx context.Context, args map[string]string)
 	return string(raw), err
 }
 
-// shareFileTool passes to unchanged (the broker matches it, case-folded,
-// against the configured logins; it never guesses past spaces) and the path
-// trimmed. A refusal is a normal result with its reason word.
+// shareFileTool passes to untrimmed: the broker never guesses past spaces. A
+// refusal is a normal result with its reason word.
 func shareFileTool(s *MCPServer, ctx context.Context, args map[string]string) (string, error) {
 	to, p := args["to"], strings.TrimSpace(args["path"])
 	if to == "" || p == "" {

@@ -16,18 +16,12 @@ import (
 	"github.com/stevegeek/lever/internal/broker/registry"
 )
 
-// testBroker builds a broker that permits provisioning worker "worker" and a CA
-// server cert, and returns a brokertest.Env with all relevant handles for test setup
-// and assertion (including the policy and registry instances the broker was built
-// from, so callers can drive them directly without any production accessor).
+// testBroker builds a broker that permits provisioning worker "worker".
 func testBroker(t *testing.T) *brokertest.Env {
 	t.Helper()
 	return brokertest.NewTestBroker(t, brokertest.Config{})
 }
 
-// allowLLM registers the broker's built-in llm pseudo-tool and grants agent
-// permission to self-obtain it, so RequestLLMToken / RefreshLLMToken succeed
-// against env.
 func allowLLM(t *testing.T, env *brokertest.Env, agent string) {
 	t.Helper()
 	env.Rules.AllowObtain(agent, broker.ReservedLLMTool, broker.ReservedLLMOp)
@@ -41,7 +35,6 @@ func allowLLM(t *testing.T, env *brokertest.Env, agent string) {
 	}
 }
 
-// enrolWorker provisions and enrols "worker" against env, returning its identity.
 func enrolWorker(t *testing.T, env *brokertest.Env) Identity {
 	t.Helper()
 	ticket := env.WorkerTicket(t, "worker")
@@ -52,7 +45,6 @@ func enrolWorker(t *testing.T, env *brokertest.Env) Identity {
 	return id
 }
 
-// csrWithKey returns a CSR PEM and private key PEM for cn.
 func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 	t.Helper()
 	csr, key, err := GenerateCSR(cn)
@@ -62,7 +54,6 @@ func csrWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 	return csr, key
 }
 
-// parseLeaf decodes the first certificate from certPEM.
 func parseLeaf(t *testing.T, certPEM []byte) *x509.Certificate {
 	t.Helper()
 	block, _ := pem.Decode(certPEM)
@@ -76,7 +67,6 @@ func parseLeaf(t *testing.T, certPEM []byte) *x509.Certificate {
 	return cert
 }
 
-// assertMode checks that the file at path has the given permission bits.
 func assertMode(t *testing.T, path string, want uint32) {
 	t.Helper()
 	info, err := os.Stat(path)
@@ -108,7 +98,7 @@ func TestEnrolReturnsSignedIdentity(t *testing.T) {
 func TestEnrolRejectsCNMismatch(t *testing.T) {
 	env := testBroker(t)
 	ticket := env.WorkerTicket(t, "worker")
-	// A CSR CN that doesn't match the ticket's worker must be rejected by the broker.
+	// A CSR CN that does not match the ticket's worker must be rejected.
 	if _, err := Enrol(context.Background(), env.Server.URL, env.CA.CertPEM(), ticket, "evil"); err == nil {
 		t.Fatal("enrol with CN != ticket worker must fail")
 	}
@@ -131,9 +121,7 @@ func TestWriteIdentityPermissions(t *testing.T) {
 }
 
 func TestLoadIdentityMissingReturnsFalse(t *testing.T) {
-	// Boot's idempotency hinges on this: an empty dir must report ok=false so Boot
-	// re-enrols rather than proceeding with a non-existent identity (a wrong true
-	// here would skip enrolment and then fail building the mTLS client).
+	// Boot's idempotency hinges on an empty dir reporting ok=false.
 	if _, ok := LoadIdentity(t.TempDir()); ok {
 		t.Fatal("LoadIdentity on an empty dir must return ok=false")
 	}
@@ -154,12 +142,9 @@ func TestIdentityCN(t *testing.T) {
 	}
 }
 
-// The identity dir sits under the agent-writable $HOME, and boot (which calls
-// Write) runs in scion's pre-start hook — as the agent user under rootless
-// podman, but as root on a rootful runtime or after a failed privilege drop.
-// An agent that turns ~/.lever-id, or a file inside it, into a symlink would
-// then get root to chmod the target 0700 and write attacker-chosen bytes through the link.
-// Write must refuse by name and leave the target untouched.
+// The identity dir is agent-writable and boot may run as root, so a symlinked
+// ~/.lever-id (or a file in it) would get root to chmod and write through the
+// link. Write must refuse by name and leave the target untouched.
 func TestWriteIdentityRefusesSymlinkedDir(t *testing.T) {
 	id := Identity{CertPEM: []byte("c"), KeyPEM: []byte("k"), CAPEM: []byte("a")}
 	home := t.TempDir()

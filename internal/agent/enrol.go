@@ -1,7 +1,7 @@
 // Package agent is the in-jail lever-agent core: it owns the agent's keypair
-// (generated in-container, never leaves), enrols + renews its mTLS identity with
-// the broker, mints/attenuates capability tokens on the LLM's behalf, and serves
-// the capability MCP tool.
+// (generated in-container; it never leaves), enrols and renews its mTLS
+// identity with the broker, mints capability tokens on the LLM's behalf, and
+// serves the capability MCP tool.
 package agent
 
 import (
@@ -52,8 +52,7 @@ func GenerateCSR(cn string) (csrPEM, keyPEM []byte, err error) {
 	return csrPEM, keyPEM, nil
 }
 
-// caClient builds an HTTPS client that trusts caPEM (server-authenticated; the
-// agent has no client cert yet at enrol — /enrol uses VerifyClientCertIfGiven).
+// caClient has no client cert: at enrol the agent has none yet.
 func caClient(caPEM []byte) (*http.Client, error) {
 	pool, err := caPool(caPEM)
 	if err != nil {
@@ -81,10 +80,8 @@ func Enrol(ctx context.Context, brokerURL string, caPEM []byte, ticket, cn strin
 }
 
 // Write persists the identity: agent.crt/ca.crt 0644, agent.key 0600, dir 0700.
-// dir's parent must exist (it is $HOME in production). The work is confined to
-// that parent and refuses a symlink at dir or at any of the three files: boot
-// calls this under the agent-writable home, as the agent user under rootless
-// podman and as root otherwise (see errRefusedPath).
+// dir's parent must exist. The work is confined to that parent and refuses a
+// symlink at dir or at any of the three files (see errRefusedPath).
 func (id Identity) Write(dir string) error {
 	root, base := splitAbove(dir, 1)
 	r, err := os.OpenRoot(root)
@@ -132,7 +129,6 @@ func LoadIdentity(dir string) (Identity, bool) {
 	return Identity{CertPEM: cert, KeyPEM: key, CAPEM: caPEM}, true
 }
 
-// parseLeafPEM parses the first certificate in certPEM.
 func parseLeafPEM(certPEM []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
@@ -145,8 +141,8 @@ func parseLeafPEM(certPEM []byte) (*x509.Certificate, error) {
 	return leaf, nil
 }
 
-// CN returns the common name of the identity's leaf certificate — the name the
-// broker authenticated this agent under, and so the bound_to of a self-obtain.
+// CN returns the common name of the identity's leaf certificate, the name the
+// broker authenticated this agent under.
 func (id Identity) CN() (string, error) {
 	leaf, err := parseLeafPEM(id.CertPEM)
 	if err != nil {

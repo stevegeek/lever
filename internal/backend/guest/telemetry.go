@@ -9,35 +9,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Convergence of the top-level `telemetry:` block in the jail's
-// ~/.scion/settings.yaml (config scion.telemetry).
+// The top-level `telemetry:` block in the jail's ~/.scion/settings.yaml.
 //
-// Why lever writes it at all: since scion#1792 sciontool telemetry defaults ON
-// (pkg/sciontool/telemetry/config.go LoadConfig, SCION_TELEMETRY_ENABLED
-// default true), and so does cloud export. With no cloud destination
-// configured, the pipeline `sciontool init` starts refuses to start
-// ("cloud telemetry enabled but destination is not configured",
-// pkg/sciontool/telemetry/pipeline.go Start), so nothing listens on the
-// in-container 127.0.0.1:4317 — yet every `sciontool hook` invocation still
-// builds OTLP exporters against it (cmd/sciontool/commands/hook.go) and waits
-// out their export and shutdown timeouts. Claude fires 8 hook events,
-// including Pre/PostToolUse on every tool call, so a trivial turn took
-// minutes.
+// sciontool telemetry and cloud export default ON. With no cloud destination
+// the pipeline refuses to start, so nothing listens on 127.0.0.1:4317, yet
+// every `sciontool hook` still builds OTLP exporters against it and waits out
+// their timeouts; Claude fires hooks on every tool call, so a trivial turn
+// takes minutes.
 //
-// `telemetry.enabled: false` is what scion turns into
-// SCION_TELEMETRY_ENABLED=false for every agent it starts
-// (pkg/config/telemetry_convert.go TelemetryConfigToEnv). `scion config set`
-// refuses the key ("unknown or complex setting key"), hence the file edit.
-//
-// It takes effect at agent START: the runtime broker reads the file on every
-// start (pkg/agent/run.go LoadEffectiveSettings), but a running container keeps
-// the env it was created with, and the hub caches the block at its own startup
-// as the default it stamps onto newly created agents. So a change reported
-// here is acted on by `lever stop && lever up`, which the caller tells the
-// operator — lever does not restart the manager on its own.
+// scion turns `telemetry.enabled: false` into SCION_TELEMETRY_ENABLED=false
+// for every agent it starts. `scion config set` refuses the key, hence the
+// file edit. It takes effect only at agent START (and the hub caches the
+// block at its own startup), so the caller tells the operator to stop and
+// up; lever does not restart the manager on its own.
 
-// EnsureScionTelemetry converges the jail's settings file on the
-// posture off asks for, and reports whether it wrote the file.
+// EnsureScionTelemetry reports whether it wrote the file.
 func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error) {
 	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
@@ -59,20 +45,15 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 	return true, nil
 }
 
-// telemetrySettingsConverged returns the settings content for the requested
-// telemetry posture, and whether it differs from existing.
+// telemetrySettingsConverged:
 //
-//   - off: `telemetry.enabled` is set to false. Every other key in the block
-//     (an operator's cloud/filter config) and in the file is kept; an explicit
-//     `enabled: true` is overridden, because lever's config is the switch — the
-//     way to keep scion's telemetry on is scion.telemetry: scion-default.
-//   - !off (scion-default): the block is removed ONLY when it is exactly what
-//     off writes (`enabled: false` and nothing else). Anything richer is the
-//     operator's own and stays untouched.
+//   - off: `telemetry.enabled` is set to false, keeping every other key; an
+//     explicit `enabled: true` is overridden, because lever's config is the
+//     switch.
+//   - !off: the block is removed ONLY when it is exactly what off writes.
+//     Anything richer is the operator's own.
 //
-// "Changed" is semantic, so a re-apply that finds the file converged writes
-// nothing. A `telemetry:` that is not a mapping is refused on the off path
-// (lever cannot set a key inside it) and left alone on the other.
+// "Changed" is semantic, so a converged file is not rewritten.
 func telemetrySettingsConverged(existing []byte, off bool) ([]byte, bool, error) {
 	if !off && len(bytes.TrimSpace(existing)) == 0 {
 		return existing, false, nil
@@ -115,22 +96,19 @@ func telemetrySettingsConverged(existing []byte, off bool) ([]byte, bool, error)
 	return out, true, nil
 }
 
-// isLeverTelemetryOff reports whether a telemetry node is exactly the block
-// the off path writes into a file that had none.
 func isLeverTelemetryOff(n *yaml.Node) bool {
 	return n.Kind == yaml.MappingNode && len(n.Content) == 2 &&
 		n.Content[0].Value == layout.KeyEnabled && isFalse(n.Content[1])
 }
 
-// isFalse reports whether a scalar node decodes to boolean false.
 func isFalse(n *yaml.Node) bool {
 	var b bool
 	return n.Kind == yaml.ScalarNode && n.Decode(&b) == nil && !b
 }
 
-// ScionTelemetryEnabled reads what the settings file says about agent
-// telemetry: "false" / "true" for an explicit `telemetry.enabled`, "" when the
-// key is absent (scion's default, which is ON). Pure; used by doctor.
+// ScionTelemetryEnabled returns "false" / "true" for an explicit
+// `telemetry.enabled`, "" when the key is absent (scion's default, which is
+// ON).
 func ScionTelemetryEnabled(settings []byte) (string, error) {
 	doc, err := layout.ParseSettings(settings)
 	if err != nil {

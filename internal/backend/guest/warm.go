@@ -15,38 +15,31 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// The warm path (lever#187). A bring-up of a jail that is already provisioned
-// used to make one guest round trip per check (whoami, id -u, the five
-// runtime scripts, uname, sha256sum, four chain probes, the alias lookup, the
-// resolver reads, two commits, two nested-virt scripts): on Lima each is a
-// `limactl shell` of a quarter to half a second. Probe reads all of that in
-// two guest calls, one as the run user and one as root, and the backend
-// decides from the Snapshot what it can leave alone:
+// The warm path. Probe reads the guest state in two guest calls, one as the
+// run user and one as root, and the backend decides from the Snapshot what it
+// can leave alone:
 //
-//   - the runtimes, by a root-owned provisioning stamp (ProvisionStampPath)
-//     that names the exact scripts EnsureRuntimes runs and the boot they ran
-//     in;
+//   - the runtimes, by a root-owned provisioning stamp that names the exact
+//     scripts EnsureRuntimes runs and the boot they ran in;
 //   - the scion binary, by the digest of the installed file itself;
-//   - the egress chains, by VERIFYING them: VerifyEgress compares both live
-//     chains and the OUTPUT jumps against the exact ruleset ApplyEgress would
-//     commit. The stamp never stands in for the firewall: a chain that is
-//     missing, tampered with, half-applied or merely stale is rebuilt;
+//   - the egress chains, by VERIFYING them against the exact ruleset
+//     ApplyEgress would commit. The stamp never stands in for the firewall:
+//     a chain that is missing, tampered with, half-applied or stale is
+//     rebuilt;
 //   - nested virt, by the device mode and the udev rule.
 //
-// Whatever the probe cannot read, or reads in a form it does not expect,
-// sends that part down the full path, which is what ran before.
+// Whatever the probe cannot read, or reads in an unexpected form, sends that
+// part down the full path.
 
 // ProvisionStampPath is the root-owned record that EnsureRuntimes completed
 // in this guest: "<ProvisionStampKey> <boot key>". The boot key makes it per
-// boot, so a rebooted guest provisions once more (cheap next to the boot)
-// and nothing a boot resets is ever assumed.
+// boot, so nothing a boot resets is ever assumed.
 const ProvisionStampPath = "/var/lib/lever/provision.stamp"
 
 // ProbeSpec says what Probe reads beyond the fixed items.
 type ProbeSpec struct {
-	// HostAlias is resolved with getent as the run user, as the backends'
-	// ResolveHostAlias does. Empty skips the lookup (the closed posture,
-	// whose DROP blocks DNS by design).
+	// HostAlias is resolved with getent as the run user. Empty skips the
+	// lookup (the closed posture, whose DROP blocks DNS by design).
 	HostAlias string
 	// DNSChain is a nat-table chain to list (Lima's LIMADNS); empty skips.
 	DNSChain string
@@ -56,7 +49,6 @@ type ProbeSpec struct {
 	HashPaths []string
 }
 
-// probeItem is one probed command: its stdout and its exit code.
 type probeItem struct {
 	out  string
 	code int
@@ -80,7 +72,7 @@ func (s *Snapshot) item(key string) (string, bool) {
 	return it.out, true
 }
 
-// RunUser returns the guest run user and uid, as ReadRunUser reads them.
+// RunUser returns the guest run user and uid.
 func (s *Snapshot) RunUser() (user, uid string, ok bool) {
 	u, ok1 := s.item("user")
 	id, ok2 := s.item("uid")
@@ -91,7 +83,7 @@ func (s *Snapshot) RunUser() (user, uid string, ok bool) {
 	return u, id, true
 }
 
-// GOARCH returns the guest arch as Guest.GOARCH reports it.
+// GOARCH returns the guest arch.
 func (s *Snapshot) GOARCH() (string, bool) {
 	u, ok := s.item("arch")
 	if !ok {
@@ -102,7 +94,7 @@ func (s *Snapshot) GOARCH() (string, bool) {
 }
 
 // Digest returns the sha256 the root probe computed for path (one of
-// ProbeSpec.HashPaths), or false when it could not.
+// ProbeSpec.HashPaths).
 func (s *Snapshot) Digest(path string) (string, bool) {
 	if s == nil {
 		return "", false
@@ -118,9 +110,8 @@ func (s *Snapshot) Digest(path string) (string, bool) {
 	return "", false
 }
 
-// bootKey identifies this boot of the guest: the kernel's boot id and the
-// start time of pid 1, so a machine restarted on a kernel that kept running
-// (an OrbStack machine shares the VM's) counts as a new boot too.
+// bootKey includes pid 1's start time, so a machine restarted on a kernel
+// that kept running (an OrbStack machine shares the VM's) is a new boot too.
 func (s *Snapshot) bootKey() (string, bool) {
 	out, ok := s.item("boot")
 	f := strings.Fields(out)
@@ -131,9 +122,8 @@ func (s *Snapshot) bootKey() (string, bool) {
 }
 
 // Provisioned reports whether the provisioning stamp records key in this
-// boot, and the run user's pasta drop-in is still the one the provisioning
-// writes for this guest's pasta: that file belongs to the run user, so the
-// stamp cannot vouch for it, and the full path rewrites it on every run.
+// boot and the pasta drop-in is still current: that file belongs to the run
+// user, so the stamp cannot vouch for it.
 func (s *Snapshot) Provisioned(key string) bool {
 	boot, ok := s.bootKey()
 	if !ok {
@@ -143,8 +133,6 @@ func (s *Snapshot) Provisioned(key string) bool {
 	return ok && strings.TrimSpace(stamp) == key+" "+boot && s.pastaConverged()
 }
 
-// pastaConverged reports whether the drop-in holds what pastaDropInScript
-// would write for the pasta --help text the probe read.
 func (s *Snapshot) pastaConverged() bool {
 	got, ok := s.item("pasta")
 	help, read := s.items["pastahelp"]
@@ -164,9 +152,7 @@ func (s *Snapshot) pastaConverged() bool {
 }
 
 // NestedVirtConverged reports whether the guest already holds what
-// EnsureNestedVirt(on) would leave: on, a character /dev/kvm of mode 0666
-// and lever's udev rule; off, no rule and no /dev/kvm usable by everyone.
-// Either way the legacy podman drop-in must be gone.
+// EnsureNestedVirt(on) would leave.
 func (s *Snapshot) NestedVirtConverged(on bool) bool {
 	if s == nil {
 		return false
@@ -192,46 +178,28 @@ func (s *Snapshot) NestedVirtConverged(on bool) bool {
 }
 
 // DNSProbe is how a backend's DNSForward hook is computed from a Snapshot:
-// the nat chain and resolver file the probe reads (ProbeSpec.DNSChain and
-// ResolvConf) and the pure function the hook applies to them.
+// what the probe reads and the pure function the hook applies to it.
 type DNSProbe struct {
 	NATChain   string
 	ResolvConf string
-	// Forwards returns the targets from the nat listing (natOK: the listing
-	// was read) and the resolver file (resolvOK: it was read).
-	Forwards func(nat string, natOK bool, resolv string, resolvOK bool, aliasV4 string) []egress.DNSForward
+	Forwards   func(nat string, natOK bool, resolv string, resolvOK bool, aliasV4 string) []egress.DNSForward
 }
 
 // VerifyEgress reports whether the live egress state is exactly what
 // ApplyEgress would leave for (allowedPorts, closedInternet), and if so the
 // IPv4 alias the chains use. Exactly means: in both families OUTPUT's FIRST
-// rule is the jump to LEVER_EGRESS and it jumps there nowhere else
-// (egress.JumpFirst, the state ensureEgressChain leaves; a rule ahead of the
-// jump would decide packets before the lever chain saw them), and each
-// family's chain lists the very rules ApplyEgress would commit, in order,
-// with nothing added (egress.ListingMatches).
+// rule is the jump to LEVER_EGRESS and it jumps there nowhere else, and each
+// chain lists the very rules ApplyEgress would commit, in order, with nothing
+// added.
 //
-// What it cannot see: it reads the chains as `iptables -S` prints them. On
-// an nf_tables guest a rule added with nft itself, in a form iptables-nft
-// cannot translate back, may print as something else or not at all, and
-// would then not be noticed here. The full path repairs such a rule as a
-// side effect (its `iptables-restore --noflush` re-declares the chain, which
-// empties it, on every apply); the warm path skips that rewrite when the
-// listing matches. Comparing `nft list chain` too would need a second
-// rendering of the ruleset in nft's syntax, and nft is not always installed,
-// so it is not done; writing nft rules into the guest takes root, which the
-// trust note on Probe covers (security-model-jail.md says so too).
+// It reads the chains as `iptables -S` prints them, so on an nf_tables guest
+// a rule added with nft that iptables-nft cannot translate back may go
+// unnoticed; the full path would have emptied it. Writing nft rules takes
+// guest root, which the trust note on Probe covers.
 //
-// The aliases come from where ApplyEgress takes them: in the open posture
-// from the getent lookup the probe ran (and the resolver's forward targets
-// from dns, when the backend has any; a backend with a DNSForward hook and no
-// DNSProbe cannot be verified here and gets dns == nil with hasDNS true); in
-// the closed posture from the live chains, as the closed re-apply always has
-// (existingClosedAlias), since the closed chain's DROP blocks DNS by design.
-// A closed chain read that way can only hold its alias's allowlisted ports
-// open; it is compared rule for rule all the same.
-//
-// false sends the caller to the full ApplyEgress, which converges the chains.
+// The aliases come from where ApplyEgress takes them: the getent lookup in
+// the open posture, the live chains in the closed one. A backend with a
+// DNSForward hook and no DNSProbe cannot be verified here.
 func (s *Snapshot) VerifyEgress(allowedPorts []int, closedInternet bool, hasDNS bool, dns *DNSProbe) (string, bool) {
 	out4, ok4 := s.item("out4")
 	out6, ok6 := s.item("out6")
@@ -282,25 +250,19 @@ func (s *Snapshot) VerifyEgress(allowedPorts []int, closedInternet bool, hasDNS 
 }
 
 // Probe reads the guest state the warm path decides on, in two guest calls:
-// one as the run user, one as root. Every section of the output is framed by
-// a line carrying a fresh random nonce per call, so nothing a root section
-// prints (a file, a listing) can pose as another section, and a section the
-// script did not ask for fails the probe. The user call runs in the run
-// user's login shell, so the run user can shape everything it reports (as it
-// could the separate whoami/getent calls before); nothing it reports is
+// one as the run user, one as root. Every section is framed by a line
+// carrying a fresh random nonce per call, so nothing a section prints can
+// pose as another section, and an unrequested section fails the probe. The
+// run user can shape everything the user call reports, so nothing from it is
 // trusted on its own: an alias it gave must still match the root-read chains
-// exactly, and its pasta drop-in is its own file. An error means the snapshot
-// cannot be trusted as a whole; the caller then takes the full path.
+// exactly. An error means the caller takes the full path.
 //
-// The root call is only as trustworthy as the RootPrefix it runs through.
-// On OrbStack that is `orb -u root`, which the run user has no part in. On
-// Lima it is `limactl shell <vm> sudo ...`: it runs in the run user's own
-// session, and that user has passwordless sudo, so a compromised run user
-// is root in the guest and controls what the root call reports (and what
-// any root command the full path runs does; that was so before the probe
-// and is not made worse by it). Nothing on Lima is defended against a
-// compromised run user by the root probe; the boundary there is the
-// rootless container the agents run in, and the VM around it.
+// The root call is only as trustworthy as the RootPrefix. On Lima it is
+// `limactl shell <vm> sudo ...` in the run user's own session, and that user
+// has passwordless sudo, so a compromised run user controls what the root
+// call reports (as it does any root command of the full path). On Lima the
+// boundary is the rootless container the agents run in and the VM around
+// it, not the root probe.
 func (g Guest) Probe(ctx context.Context, spec ProbeSpec) (*Snapshot, error) {
 	snap := &Snapshot{items: map[string]probeItem{}, spec: spec}
 	for _, part := range []struct {
@@ -322,8 +284,7 @@ func (g Guest) Probe(ctx context.Context, spec ProbeSpec) (*Snapshot, error) {
 	return snap, nil
 }
 
-// probeCall runs one probe script through prefix and returns exactly the
-// sections keys names, or an error.
+// probeCall returns exactly the sections keys names, or an error.
 func (g Guest) probeCall(ctx context.Context, prefix []string, script string, keys []string) (map[string]probeItem, error) {
 	// A nonce per call: the run user sees the user call's.
 	nonce, err := probeNonce()
@@ -350,16 +311,11 @@ func (g Guest) probeCall(ctx context.Context, prefix []string, script string, ke
 	return items, nil
 }
 
-// RefreshEgress reads both families' OUTPUT and lever chain listings again,
-// in one root call, into s, so VerifyEgress judges the chains as they are
-// now rather than as Probe found them: a bring-up may spend minutes between
-// the two (a scion build). When the read fails, the listings are dropped
-// from s, and VerifyEgress then reports false: the full path runs. A nil s
-// is left alone. The alias lookup and the resolver state (ahosts, dnschain,
-// resolv) are deliberately left as Probe read them: they only shape the
-// ruleset the live chains are compared with, and a chain that changed is
-// caught by these four listings; re-reading the alias would take a call
-// as the run user too.
+// RefreshEgress re-reads both families' OUTPUT and lever chain listings into
+// s, so VerifyEgress judges the chains as they are now: a bring-up may spend
+// minutes after Probe. A failed read drops the listings, so the full path
+// runs. The alias and resolver state are deliberately not re-read: they only
+// shape the comparison, and a changed chain is caught by the listings.
 func (g Guest) RefreshEgress(ctx context.Context, s *Snapshot) {
 	if s == nil {
 		return
@@ -382,18 +338,15 @@ func probeNonce() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// probeHead is the shell function both probe scripts start with: emit runs
-// a command, keeps its stdout (stderr is dropped: a warning there must not
-// enter a listing that is compared line for line) and prints it under a
-// header line `@@<nonce> <key> <exit code>`.
+// probeHead drops stderr: a warning there must not enter a listing that is
+// compared line for line.
 const probeHead = `N=$1
 emit() { k=$1; shift; o=$("$@" 2>/dev/null); c=$?; printf '@@%s %s %d\n%s\n' "$N" "$k" "$c" "$o"; }
 `
 
-// userProbeScript reads, as the run user, what ReadRunUser, GOARCH, the
-// alias lookup, the pasta drop-in check and the legacy kvm drop-in check
-// read. Absolute paths keep a stray PATH entry out of the answers; they do
-// not keep out the run user, who controls its own login shell (see Probe).
+// userProbeScript: absolute paths keep a stray PATH entry out of the
+// answers; they do not keep out the run user, who controls its own login
+// shell (see Probe).
 func userProbeScript(spec ProbeSpec) string {
 	var b strings.Builder
 	b.WriteString(probeHead)
@@ -417,36 +370,27 @@ func userProbeKeys(spec ProbeSpec) []string {
 	return keys
 }
 
-// bootKeyScript prints the boot id and pid 1's start time (field 22 of
-// /proc/1/stat; pid 1's command name has no space).
+// bootKeyScript: field 22 of /proc/1/stat is pid 1's start time (its command
+// name has no space).
 const bootKeyScript = `bootkey() { /usr/bin/cat /proc/sys/kernel/random/boot_id && /usr/bin/cut -d' ' -f22 /proc/1/stat; }
 `
 
-// probeIptables picks the iptables binaries by absolute path, as the rest
-// of the probe names its commands, so no PATH entry chooses them: Ubuntu
-// (24.04, 26.04, and OrbStack's Ubuntu machines) installs them in
-// /usr/sbin; /sbin is the fallback for a guest without the merged /usr.
-// With neither, the listings fail (exit 127), and an unread listing sends
-// the egress step down the full path.
+// probeIptables picks the iptables binaries by absolute path, so no PATH
+// entry chooses them; /sbin is the fallback for a guest without merged /usr.
 const probeIptables = `IPT=/usr/sbin/iptables; [ -x "$IPT" ] || IPT=/sbin/iptables
 IP6T=/usr/sbin/ip6tables; [ -x "$IP6T" ] || IP6T=/sbin/ip6tables
 `
 
-// egressProbeScript lists both families' OUTPUT and lever chain, the
-// sections out4, chain4, out6 and chain6.
 const egressProbeScript = `emit out4 "$IPT" -S OUTPUT
 emit chain4 "$IPT" -S ` + egress.Chain + `
 emit out6 "$IP6T" -S OUTPUT
 emit chain6 "$IP6T" -S ` + egress.Chain + `
 `
 
-// egressProbeKeys are the sections egressProbeScript prints.
 var egressProbeKeys = []string{"out4", "chain4", "out6", "chain6"}
 
-// rootProbeScript reads, as root, the stamp, both families' OUTPUT jump and
-// lever chain, the resolver state, the kvm state and the file digests.
-// Every command is named by absolute path except test, which is the bash
-// builtin (emit runs it as a command word, and no PATH lookup is made).
+// rootProbeScript names every command by absolute path except test, which is
+// the bash builtin, so no PATH lookup is made.
 func rootProbeScript(spec ProbeSpec) string {
 	var b strings.Builder
 	b.WriteString(probeHead)
@@ -485,8 +429,7 @@ func rootProbeKeys(spec ProbeSpec) []string {
 
 var probeHeaderRe = regexp.MustCompile(`^@@([0-9a-f]+) ([a-z0-9]+) ([0-9]+)$`)
 
-// parseProbe splits probe output into its sections. A header with another
-// nonce, a key seen twice, or text before the first header is an error.
+// parseProbe: a key seen twice or text before the first header is an error.
 func parseProbe(out, nonce string) (map[string]probeItem, error) {
 	items := map[string]probeItem{}
 	var cur string
@@ -518,12 +461,9 @@ func parseProbe(out, nonce string) (map[string]probeItem, error) {
 	return items, nil
 }
 
-// ProvisionStampKey names the exact provisioning EnsureRuntimes(runUser)
-// performs: a hash of every guest command it issues, in order, recorded by
-// running it against a host runner that only records. Any change to those
-// scripts (a package added, a drop-in changed, a step removed) changes the
-// key, so a guest provisioned by an older lever provisions again; there is no
-// version number to forget to bump.
+// ProvisionStampKey is a hash of every guest command EnsureRuntimes(runUser)
+// issues, in order, so any change to those scripts changes the key; there is
+// no version number to forget to bump.
 func ProvisionStampKey(runUser string) string {
 	rec := &recordRunner{}
 	g := Guest{Host: rec, UserPrefix: []string{"user"}, RootPrefix: []string{"root"}}
@@ -539,7 +479,6 @@ func ProvisionStampKey(runUser string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// recordRunner records each command and succeeds without running it.
 type recordRunner struct{ calls [][]string }
 
 func (r *recordRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
@@ -555,8 +494,8 @@ func (r *recordRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// writeProvisionStampScript writes "$1 <boot key>" to the stamp atomically,
-// root-owned and readable (the key is not a secret; only root may write it).
+// writeProvisionStampScript: the stamp is root-owned and world-readable; the
+// key is not a secret, only root may write it.
 const writeProvisionStampScript = bootKeyScript + `set -e
 umask 022
 d=$(dirname ` + ProvisionStampPath + `)
@@ -569,8 +508,8 @@ mv -f ` + ProvisionStampPath + `.tmp ` + ProvisionStampPath + `
 `
 
 // WriteProvisionStamp records that EnsureRuntimes completed for key in the
-// current boot. Best-effort for the caller: a missing stamp only costs the
-// next bring-up a full provisioning.
+// current boot. A missing stamp only costs the next bring-up a full
+// provisioning.
 func (g Guest) WriteProvisionStamp(ctx context.Context, key string) error {
 	_, err := g.RootRun(ctx, "/bin/bash", "-c", writeProvisionStampScript, "lever-stamp", key)
 	return err

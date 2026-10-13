@@ -8,34 +8,21 @@ import (
 	"github.com/stevegeek/lever/internal/provision/loginfwd"
 )
 
-// Installing, starting and stopping the guest-side login forwarder. See
-// hublogin.go for why it exists.
-
 const (
-	// LoginForwardPath is where the guest-side forwarder is installed. Beside
-	// scionDestPath, for the same reason: it is a part of scion's environment
-	// that lever puts there.
 	LoginForwardPath = "/usr/local/bin/lever-login-forward"
 
-	// loginForwardLog is where the forwarder's own stderr goes in the guest.
-	// It carries connection-level failures only; no request ever passes
-	// through it in readable form.
+	// loginForwardLog carries connection-level failures only; no request
+	// ever passes through it in readable form.
 	loginForwardLog = "/tmp/lever-login-forward.log"
 )
 
-// disableLoginForwardScript kills and removes the guest-side forwarder,
-// reporting whether there was one. Run through the ROOT prefix: the binary
-// lives in /usr/local/bin, and root can signal a process the run user owns.
+// disableLoginForwardScript runs through the ROOT prefix: root can signal a
+// process the run user owns. Bare command names are safe here because they
+// resolve on root's PATH, which no run user can write to.
 //
-// pkill's exit codes are read rather than swallowed: 1 means "nothing matched"
-// (a binary installed but not running, which is fine), while anything above
-// that — 127 for a pkill that is not there at all — means the kill did not
-// happen, and removing the binary while its process keeps bridging would be
+// pkill exit 1 means nothing matched; anything above means the kill did not
+// happen, and removing the binary while its process keeps bridging is
 // exactly the state this exists to prevent.
-//
-// Bare command names here, unlike loginForwardScript: these resolve on
-// guest ROOT's PATH, which no run user can write to, and that is the
-// convention InstallRootBinary and stageWebAssetsScript already follow.
 const disableLoginForwardScript = `set -u
 if [ ! -e ` + LoginForwardPath + ` ]; then echo "FOUND 0"; exit 0; fi
 pkill -f '` + loginForwardMatch + `'
@@ -45,11 +32,6 @@ rm -f ` + LoginForwardPath + `
 echo "FOUND 1"
 `
 
-// ensureLoginForwarder gets the forwarder for the guest's architecture (the
-// copy embedded in this lever, or a host-side build when there is none — see
-// loginfwd.Forwarder), installs it if the guest does not already hold those
-// exact bytes, and makes sure it is running with the arguments this spec asks
-// for.
 func (g Guest) ensureLoginForwarder(ctx context.Context, spec types.HubLogin) error {
 	arch, err := g.GOARCH(ctx)
 	if err != nil {
@@ -59,9 +41,6 @@ func (g Guest) ensureLoginForwarder(ctx context.Context, spec types.HubLogin) er
 	if err != nil {
 		return fmt.Errorf("guest: %w", err)
 	}
-	// Same hash-skip as the scion binary: compare against the file in the
-	// guest, so a deleted or replaced binary re-installs rather than being
-	// assumed present.
 	replaced, err := g.InstallRootBinaryIfChanged(ctx, bin, LoginForwardPath)
 	if err != nil {
 		return fmt.Errorf("guest: %w", err)
@@ -74,42 +53,29 @@ func (g Guest) ensureLoginForwarder(ctx context.Context, spec types.HubLogin) er
 	return nil
 }
 
-// loginForwardMatch is the pgrep/pkill pattern for ANY login forwarder,
-// whatever arguments it carries. Anchored, so it cannot match the script that
-// merely mentions the path.
-//
-// Matching the PATH rather than the desired argv is load-bearing on the stop
-// side. A forwarder whose `-target` port changed — an operator editing
-// remote.login_port does exactly that — is still holding the listen port, so
-// killing only an exact-argv match leaves it running, the replacement unable
-// to bind, and the port answering all the same. That was a live failure.
+// loginForwardMatch matches ANY login forwarder, whatever arguments it
+// carries; anchored, so it cannot match a script that merely mentions the
+// path. Matching the path is load-bearing on the stop side: a forwarder with
+// a stale `-target` still holds the listen port, so the replacement could not
+// bind.
 const loginForwardMatch = "^" + LoginForwardPath
 
-// loginForwardScript is the exact bash body that makes the forwarder run with
-// the arguments spec asks for. Split out from ensureLoginForwarder so a test
-// can assert it without a guest (the shape scionConfigRemoveScript uses).
-//
-// Every decision it makes is about the ARGUMENTS, not merely about whether
+// loginForwardScript decides on the ARGUMENTS, not merely on whether
 // something is running:
 //
 //   - Skip only when a process with EXACTLY this argv is running AND the port
-//     answers. A forwarder carrying a stale `-target` (an operator edited
-//     remote.login_port) fails that test and gets replaced.
-//   - Stop by BINARY PATH, whatever argv the running one carries. Killing only
-//     an exact-argv match left a stale forwarder holding the listen port,
-//     which is what made this a live failure rather than a no-op.
-//   - Declare success only when a process with THIS argv is running and the
-//     port answers. "The port answers" alone was satisfied by the stale
-//     process, so the script reported success while the replacement had
-//     already died unable to bind — the silent half of the same bug.
+//     answers, so a stale `-target` gets replaced.
+//   - Stop by binary path, whatever argv the running one carries.
+//   - Succeed only when a process with THIS argv is running and the port
+//     answers: a stale process can answer the port while the replacement
+//     died unable to bind.
 //
-// `force` is set when the binary was just replaced, since a process running
-// the right arguments would otherwise go on serving the old code.
+// force is set when the binary was just replaced, so the old code stops
+// being served.
 //
-// Absolute paths throughout: UserRun passes no env, so a bare command name
-// resolves on the guest run-user's PATH, which has run-user-writable
-// directories ahead of /usr/bin. bash's own /dev/tcp is used for the liveness
-// probe precisely because it is a builtin — there is no netcat to shadow.
+// Absolute paths throughout: a bare command name resolves on the run user's
+// PATH, which has run-user-writable directories ahead of /usr/bin. The
+// liveness probe uses bash's builtin /dev/tcp, so there is nothing to shadow.
 func loginForwardScript(spec types.HubLogin, force bool) string {
 	argv := fmt.Sprintf("%s -listen 127.0.0.1:%d -target %s:%d",
 		LoginForwardPath, spec.IssuerPort, spec.HostAddress, spec.HostPort)

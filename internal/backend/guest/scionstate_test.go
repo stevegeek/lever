@@ -120,19 +120,16 @@ func writeProjectConfig(t *testing.T, home, name, workspacePath string) string {
 }
 
 // TestScionConfigRemoveScriptDeletesOnlyMatches runs the ACTUAL bash body
-// (shared with prod via scionConfigRemoveScript) against a real temp
-// filesystem, because substring assertions can't prove a destructive `rm -rf`
-// deletes the right dirs and only those. It verifies exact-match scoping, the
-// glob-anchored dirname derivation, that no-workspace_path entries are spared,
-// and idempotency.
+// against a real temp filesystem, because substring assertions cannot prove a
+// destructive `rm -rf` deletes the right dirs and only those.
 func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
 	home := t.TempDir()
 
-	// Two entries claim /lever (the accumulation this fix targets), one claims
-	// the worker path, one has no workspace_path line at all.
+	// Two entries claim /lever, one claims the worker path, one has no
+	// workspace_path line at all.
 	mgr1 := writeProjectConfig(t, home, "lever__aaaa1111", "/lever")
 	mgr2 := writeProjectConfig(t, home, "lever__bbbb2222", "/lever")
 	worker := writeProjectConfig(t, home, "worker__cccc3333", "/lever/workers/worker")
@@ -173,12 +170,8 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	}
 }
 
-// The four scenarios below pin scionProjectRegistered's exactly-one-valid-
-// registration predicate: registered requires BOTH exactly one matching entry
-// AND the in-tree marker. Pure-Go over types.ScionProjectState (mirroring
-// how internal/cli's checkScionProject is tested), since the underlying
-// marker+entries read is already covered by TestParseScionState* above and by
-// ReadScionProjectState's real production use — nothing new is parsed here.
+// The four scenarios below pin scionProjectRegistered: registered requires
+// BOTH exactly one matching entry AND the in-tree marker.
 
 func TestScionProjectRegisteredOneMatchingEntryPlusMarker(t *testing.T) {
 	st := types.ScionProjectState{
@@ -317,10 +310,7 @@ func readFileString(t *testing.T, p string) string {
 }
 
 // TestScionHubEndpointRepairScript runs the ACTUAL bash body against a real
-// filesystem. The bug it closes: minting the controller PAT `hub link`s the
-// project against a THROWAWAY hub, persisting that port here, and the
-// register-project step skips its re-init when the registration is already
-// sound — so `lever attach`, which execs scion bare, dialled a dead port.
+// filesystem.
 func TestScionHubEndpointRepairScript(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")

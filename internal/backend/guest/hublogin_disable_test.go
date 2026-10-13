@@ -20,24 +20,13 @@ func writtenSettings(f *proc.FakeRunner) (written string, writes int) {
 	return written, writes
 }
 
-// TestDisableHubLoginRemovesTheBlockWhenTheForwarderIsAlreadyGone pins the
-// composition of DisableHubLogin's two halves, which the pure-function tests
-// around it cannot see.
-//
-// The settings edit used to be gated on the guest script reporting FOUND 1 —
-// and the script `rm -f`s the binary BEFORE that edit runs. So a settings write
-// that failed once (a transient guest error, the machine going away
-// mid-command) made the failure PERMANENT: every later apply found no binary,
-// returned early, and left the oidc_login block advertising a login for a
-// provider that no longer exists, with no lever verb that removes it. The same
-// state arrives via an out-of-band `rm` of the binary, or a guest rebuild that
-// wipes /usr/local/bin while the home survives.
-//
-// Convergence must not depend on a step that already succeeded: FOUND 0 and a
-// settings file that still holds the block must still end with the block gone.
+// TestDisableHubLoginRemovesTheBlockWhenTheForwarderIsAlreadyGone: the script
+// removes the binary before the settings edit, so a failed edit, an
+// out-of-band `rm` or a wiped /usr/local/bin all leave FOUND 0 with the block
+// still there. Convergence must not depend on a step that already
+// succeeded: the block must still end up gone.
 func TestDisableHubLoginRemovesTheBlockWhenTheForwarderIsAlreadyGone(t *testing.T) {
-	// The fixture is what EnsureHubLogin actually writes, so this proves the
-	// round trip rather than a hand-made approximation of it.
+	// The fixture is what EnsureHubLogin actually writes.
 	settings, _, err := hubSettingsConverged([]byte("# top\nversion: 1\nserver:\n  user_access_mode: open\n"), testHubLogin(), false)
 	if err != nil {
 		t.Fatalf("hubSettingsConverged: %v", err)

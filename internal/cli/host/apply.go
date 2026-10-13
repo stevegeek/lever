@@ -545,11 +545,18 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		lifecycle = remoteRoleLifecycle(ctx, o.ScopeKnown, rolerec)
 		roleReason = remoteRoleReason(rolerec, rolefound, remote.Emails, remote.Contacts, remoteRolePermissions(lifecycle))
 	}
-	if controllerReason == "" && remoteReason == "" && roleReason == "" {
+	exp, err := checkHubExperimentsForApply(ctx, &hubapi.Client{T: hubJailTransport(jr, st)}, st, o.ScopeKnown)
+	if err != nil {
+		return fmt.Errorf("bootstrap-token: %w", err)
+	}
+	if controllerReason == "" && remoteReason == "" && roleReason == "" && exp.reason == "" {
 		return nil // nothing to mint or grant; no dev-auth window
 	}
 	if blocked := windowBlocked(ctx, jr); blocked != "" {
-		why := strings.Join(nonEmpty(controllerReason, remoteReason, roleReason), "; ")
+		why := strings.Join(nonEmpty(controllerReason, remoteReason, roleReason, exp.reason), "; ")
+		if exp.urgent {
+			return experimentsWindowBlocked(exp.reason, blocked)
+		}
 		if urgent {
 			return fmt.Errorf("bootstrap-token: the controller token must be minted (%s), but the dev-auth window cannot open: %s. "+
 				"Agents can reach the jail loopback, and the window's dev-auth hub would hand them admin-grade tokens. "+
@@ -583,6 +590,11 @@ func ensureControllerPAT(ctx context.Context, jr proc.Runner, st state.State, tr
 		return fmt.Errorf("bootstrap-token: throwaway server: %w", err)
 	}
 	started = true
+	if exp.has {
+		if err := pinHubExperimentsOff(ctx, jr, st, now, o); err != nil {
+			return err
+		}
+	}
 
 	jp := apply.JailPath(tree, tree, jailMount)
 	if err := tw.InitProject(ctx, jp); err != nil {
@@ -1181,7 +1193,8 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// unlink/init race; see the register-project case in internal/apply/run.go).
 		RemoveJailFile: w.removeJailFile,
 
-		EnsureControllerPAT: w.ensureControllerPAT,
+		EnsureControllerPAT:     w.ensureControllerPAT,
+		EnsureHubExperimentsOff: w.ensureHubExperimentsOff,
 
 		// RemoveScionProjectConfigs clears stale ~/.scion/project-configs entries
 		// before re-init, so apply does not add a duplicate registration every run.

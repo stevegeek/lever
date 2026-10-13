@@ -309,6 +309,18 @@ decide:
   which includes `project.create`, until the next `lever apply` binds the ceiling. The proxy
   refuses these routes so that this gap never matters.
 - `/auth/callback/*`. The login driver dials the hub's callback directly, never through the proxy.
+- scion's conduit (`/api/v1/conduit*`, `/api/v1/admin/conduit*`: a shell, sftp and port relay
+  into agents through the hub) and artifacts (`/api/v1/artifacts*`, with its unauthenticated
+  `shared/` and `view/` links), and every write to `/api/v1/admin/experiments`, which switches
+  them on. Both experiments are off, and lever keeps them off (see
+  [worker isolation](/security-model-worker-isolation/)); the proxy refuses them in any case. Reading
+  `/api/v1/admin/experiments` stays admin-only at the hub.
+- An agent's `ports/tunnel` (the agent side's own socket) and `delegations` (they hand the
+  signed-in user's authority to an agent) under `/api/v1/agents/<id>/`, and the test-identity
+  routes (`/api/v1/test-identit*`, `/auth/test-identity*`), which mint credentials or sessions.
+
+These routes are matched in lower case and by prefix, so another spelling of the same route is
+refused too.
 
 The proxy also accepts `Sec-Fetch-Site` only as `same-origin` or `none`: a page on a sibling
 tailnet name is `same-site` and is refused. There is one exception, a top-level page load of an
@@ -990,7 +1002,10 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   to the [chat page](#the-chat-page) instead, and the contact gets neither that landing page nor
   the hub's web UI shell. Everything else is refused (audit `deny-contact`).
 - **What a contact may not send.** A word that starts with `@` (scion would route the message to
-  another agent), a reply to a message by id, an attachment, or any field other than the text.
+  another agent), a reply to a message by id, an attachment, or any field other than the text, its
+  idempotency key and `offer_wake` (the hub's web chat sends it on every message; it only changes
+  how the hub answers when the agent is not running). `wake` is refused: a contact wakes a worker
+  only through the chat page's wake, which checks the session and limits the rate.
   The proxy answers 403 with the reason; the contact rewrites the message. The text itself is not
   filtered: a contact may write anything, a lever marker included.
 - **Markers cannot make chat pass for lever.** The agent verifies the message, and the broker

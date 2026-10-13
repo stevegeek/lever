@@ -193,6 +193,12 @@ type Deps struct {
 	// mint window as one op (see plan.go's bootstrap-token Step). It must be
 	// idempotent: a no-op when a valid PAT is already persisted.
 	EnsureControllerPAT func(ctx context.Context) error
+	// EnsureHubExperimentsOff runs right after the scion-server step starts the
+	// hub: when scion's conduit or artifacts experiment is on there, it pins it
+	// off through the dev-auth window and starts the hub again, or fails with
+	// the repair while containers run. A no-op on a scion without hub
+	// experiments.
+	EnsureHubExperimentsOff func(ctx context.Context) error
 	// WaitBrokerReady blocks until the scion runtime broker is registered and
 	// online. The workstation daemon brings up its Hub API and its runtime broker
 	// separately, so without it the first create or resume races the broker's
@@ -421,6 +427,7 @@ func (d Deps) check() error {
 		{"StartBroker", d.StartBroker == nil},
 		{"BrokerHealthy", d.BrokerHealthy == nil},
 		{"EnsureControllerPAT", d.EnsureControllerPAT == nil},
+		{"EnsureHubExperimentsOff", d.EnsureHubExperimentsOff == nil},
 		{"WaitBrokerReady", d.WaitBrokerReady == nil},
 		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
 		{"RearmBootstrap", d.RearmBootstrap == nil},
@@ -628,6 +635,9 @@ func (r *run) scionServer(ctx context.Context) error {
 		}
 	}
 	if err := r.d.Scion.ServerStart(ctx, r.hubServerOpts()); err != nil {
+		return err
+	}
+	if err := r.d.EnsureHubExperimentsOff(ctx); err != nil {
 		return err
 	}
 	// A just-started hub registers its runtime broker only after it serves, and

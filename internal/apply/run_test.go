@@ -68,6 +68,9 @@ func fillDeps(d Deps) Deps {
 	if d.EnsureControllerPAT == nil {
 		d.EnsureControllerPAT = func(context.Context) error { return nil }
 	}
+	if d.EnsureHubExperimentsOff == nil {
+		d.EnsureHubExperimentsOff = func(context.Context) error { return nil }
+	}
 	if d.WaitBrokerReady == nil {
 		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
 	}
@@ -1502,6 +1505,38 @@ func TestRunBootstrapTokenRunsOnceBeforeScionServer(t *testing.T) {
 	}
 	if !(btIdx < serverIdx) {
 		t.Fatalf("bootstrap-token must run before scion-server; order=%v", order)
+	}
+}
+
+// TestRunPinsHubExperimentsAfterTheHubStarts: the experiments check needs a
+// serving hub, and its failure stops the apply before any agent starts.
+func TestRunPinsHubExperimentsAfterTheHubStarts(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		f := scionOKRunner()
+		app := helloApp(t.TempDir())
+		var order []string
+		alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
+		sr := &serverStartOrderRunner{agentLifecycleRunner: alr, order: &order}
+		deps := Deps{
+			Scion: scion.New(sr, scion.Options{}),
+			EnsureHubExperimentsOff: func(context.Context) error {
+				order = append(order, "experiments")
+				if fail {
+					return errors.New("conduit is on")
+				}
+				return nil
+			},
+		}
+		err := runApply(app, deps)
+		if fail != (err != nil) || (fail && !strings.Contains(err.Error(), "conduit is on")) {
+			t.Fatalf("fail=%v: Run = %v", fail, err)
+		}
+		if got := strings.Join(order, ","); !strings.HasPrefix(got, "server-start,experiments") {
+			t.Fatalf("fail=%v: order = %v, want the check right after the hub starts", fail, order)
+		}
+		if fail && alr.startCalls+alr.resumeCalls > 0 {
+			t.Fatal("an agent started after the experiments check failed")
+		}
 	}
 }
 

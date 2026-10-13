@@ -2403,3 +2403,43 @@ func checkDevAuthWindow(ctx context.Context, jr proc.Runner) checkResult {
 	}
 	return checkResult{check, true, "closed (no dev-auth hub, no dev token)", ""}
 }
+
+// checkHubExperiments fails when the hub serves a pinned-off scion experiment
+// (pinnedOffExperiments), probed with the controller PAT, and warns when it is
+// off only by scion's default because lever never pinned it on this hub. The
+// pin is read from hub-experiments.json: the admin view needs hub-admin, which
+// doctor never has. An unreachable hub is not a finding; one that answered
+// unusably is.
+func checkHubExperiments(ctx context.Context, st state.State, known scopeKnownFunc, hc *hubapi.Client) checkResult {
+	const name = "scion conduit and artifacts"
+	rec, found, err := st.LoadHubExperimentsRecord()
+	if err != nil {
+		return checkResult{name, false, err.Error(), "remove " + stateDirName() + "/hub-experiments.json, then run `lever apply`"}
+	}
+	on, err := liveExperiments(ctx, hc)
+	if err != nil {
+		if hubAnswered(err) {
+			return checkResult{name, false, "could not probe the hub: " + err.Error(),
+				"the hub answered, so this is not a down instance — check the controller PAT (`" + stateDirName() + "/`)"}
+		}
+		return checkResult{name, true, "not checked (hub not reachable): " + err.Error(), ""}
+	}
+	if len(on) > 0 {
+		return checkResult{name, false,
+			strings.Join(on, " and ") + " on at the hub: an inbound shell and port path into agents (conduit) or hub-held publishing with unauthenticated share links (artifacts), neither reviewed for the jail",
+			"run `lever stop`, then `lever up`: the bootstrap dev-auth window pins it off before the hub starts again"}
+	}
+	if !hubHasExperiments(ctx, known, rec, found) {
+		return checkResult{name, true, "off: the jail's scion has no hub experiments, so neither feature exists", ""}
+	}
+	if !found || rec.NotApplicable {
+		return warnResult(name,
+			"off by scion's default only: lever has not pinned them off on this hub, so a changed default or an admin's override would turn them on",
+			"run `lever apply` (the pin needs the bootstrap dev-auth window, which opens only while no container runs in the jail; otherwise `lever stop`, then `lever up`)")
+	}
+	if len(rec.Off) == 0 {
+		return checkResult{name, true, "off: this hub registers neither experiment", ""}
+	}
+	return checkResult{name, true, fmt.Sprintf("off at the hub; pinned off by lever on %s (%s)",
+		rec.PinnedAt.Format(time.RFC3339), strings.Join(rec.Off, ", ")), ""}
+}

@@ -109,9 +109,14 @@ it do exactly that. Lever closes this: the real, long-lived Scion hub inside the
 Instead, every Scion lifecycle call (start/stop/suspend/resume/message — issued by the host-side
 capability broker on the manager's behalf, and by `lever` itself for attach/msg/stop) is
 authenticated with a **controller PAT**: a Scion hub token scoped to exactly
-`agent:manage,agent:attach,agent:message,project:read,project:update`, plus `agent:lifecycle`
-when the jail's scion knows that scope (scion `f7155ecb` and later gate start, stop, suspend and
-resume of an existing agent on it; an older hub rejects the unknown scope) (`agent:attach` is
+`agent:manage,agent:attach,agent:message,project:read,project:update`, the read-only
+`skill:read,skill:list,template:read,template:list,harness_config:read,harness_config:list`,
+plus `agent:lifecycle` and `inbox:read` when the jail's scion knows each scope (scion `f7155ecb`
+and later gate start, stop, suspend and resume of an existing agent on `agent:lifecycle`; newer
+scions gate listing notifications on `inbox:read`; an older hub rejects an unknown scope). A
+newer hub gives an agent a token creates or resumes only a role the token's scopes cover, and the
+baseline role's `project:read` covers the skill, template and harness-config reads, so without
+them the PAT could not start or resume a baseline agent (`agent:attach` is
 load-bearing — the `agent:manage` alias alone 403s on `start`, since scion gates the lifecycle
 actions on `agent:attach`; `agent:message` is what newer scions gate a token's message sends on,
 and the alias did not expand to it when older tokens were minted; `project:update` is required
@@ -169,6 +174,22 @@ expand to it). It is:
   remote proxy no longer sends it (every remote request rides the signed-in user's own hub
   session); its scope set is what the `lever-remote` web role is derived from. See
   [remote access](/remote-access/#the-remote-pat).
+- **Also used to keep two scion experiments off.** On a scion with hub-wide experiments, every
+  window writes explicit `false` overrides for `hub.conduit` (an inbound shell, sftp and port path
+  into every agent, reaching the jail loopback and any Unix socket) and `hub.artifacts` (hub-held
+  publishing with unauthenticated share links), through scion's admin experiments route as the dev
+  identity. It never writes `true` and leaves every other override as it is. Both are off by
+  scion's default; the explicit override keeps them off if a later scion changes the default. The
+  window records what it wrote in `.lever-state/hub-experiments.json`; on a hub without the route
+  (an older scion) it records "not applicable". A scion with experiments but no record opens a
+  window for the pin, skipped with a warning while containers run. On every apply lever also asks
+  the live hub, with the controller PAT, whether either is on: `GET /api/v1/conduit/grant-keys`
+  and `GET /api/v1/artifacts?mine=1` answer 404 exactly while their experiment is off. A live one
+  makes the window mandatory: beside running containers the apply fails with `lever stop`, then
+  `lever up`. lever probes again right after it starts the hub, because conduit's relay starts only
+  with the hub. scion has no API to write the artifacts section's own `enabled` switch, so the
+  experiment is the one lever pins. `lever doctor`'s `scion conduit and artifacts` row fails while
+  either is on and warns while they are off only by scion's default.
 
 The result: even a fully compromised worker or manager container has no credential that lets it
 talk to the Scion hub directly. It cannot register a project, request an arbitrary mount, or

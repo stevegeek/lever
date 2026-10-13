@@ -166,10 +166,10 @@ func writeStatus(s *Store, o SnapshotOptions, start time.Time, res *SnapshotResu
 		}
 	case errors.Is(err, ErrBusy):
 		st.Result = "skipped"
-		st.Error = err.Error()
+		st.Error = clipError(err.Error())
 	default:
 		st.Result = "failed"
-		st.Error = err.Error()
+		st.Error = clipError(err.Error())
 	}
 	if werr := s.WriteSnapshotStatus(st); werr != nil && res != nil {
 		res.Warnings = append(res.Warnings, "writing the snapshot status: "+werr.Error())
@@ -230,20 +230,26 @@ func snapshot(ctx context.Context, s *Store, o SnapshotOptions, start time.Time,
 	if o.Limits.Time > 0 {
 		deadline = start.Add(o.Limits.Time)
 	}
+	// Measured after MarkDirty, which makes the first reserve. An agent
+	// can fill the filesystem through the tree before the stop; the
+	// manifest must then fit what is left rather than fail to commit.
+	space, spaceOK := s.ManifestSpace(sinkOpts.MinFree)
 	w, err := Walk(ctx, WalkOptions{
-		Tree:       o.Tree,
-		Limits:     o.Limits,
-		Exclude:    o.Exclude,
-		WorkerDirs: o.WorkerDirs,
-		Known:      known,
-		Cache:      cache,
-		Guard:      guardIdentities(o.Store, o.StateDir),
-		Full:       o.Full,
-		Reverify:   o.Reverify,
-		Start:      start,
-		Deadline:   deadline,
-		Interrupt:  o.Interrupt,
-		Sink:       s.Sink(sinkOpts),
+		SpaceCapped:   spaceOK,
+		ManifestSpace: space,
+		Tree:          o.Tree,
+		Limits:        o.Limits,
+		Exclude:       o.Exclude,
+		WorkerDirs:    o.WorkerDirs,
+		Known:         known,
+		Cache:         cache,
+		Guard:         guardIdentities(o.Store, o.StateDir),
+		Full:          o.Full,
+		Reverify:      o.Reverify,
+		Start:         start,
+		Deadline:      deadline,
+		Interrupt:     o.Interrupt,
+		Sink:          s.Sink(sinkOpts),
 	})
 	if err != nil {
 		return nil, err

@@ -100,6 +100,9 @@ func checkTreeBackup(app *config.App, st state.State, now time.Time) checkResult
 	if len(strays) > 0 {
 		warns = append(warns, fmt.Sprintf("stray files in snapshots/: %s", strings.Join(quoteAll(strays), ", ")))
 	}
+	if valid > 0 && s.ReserveBytes() == 0 {
+		warns = append(warns, "no space is reserved for the next manifest: on a full disk the next snapshot may not commit (free some space; the next snapshot reserves it again)")
+	}
 	if free, err := s.FreeBytes(); err == nil && free < uint64(2*tb.EffectiveMinFree()) {
 		warns = append(warns, fmt.Sprintf("only %s free on the store's filesystem (min_free is %s)", humanBytes(int64(free)), humanBytes(tb.EffectiveMinFree())))
 	}

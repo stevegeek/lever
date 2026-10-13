@@ -390,3 +390,74 @@ func TestRestoreNeutralisesGitLinkAndFoldedNames(t *testing.T) {
 		t.Error("git ran the planted command through the .git link")
 	}
 }
+
+// The agent grows the tree past what the reserve can hold while the
+// reserve is small, then fills the filesystem the tree shares with the
+// store. The stop's snapshot must still commit, cut to the space there is,
+// and the status must record it.
+func TestSnapshotFullDiskManifestLargerThanReserveCommits(t *testing.T) {
+	if !inUserns(t, "TestSnapshotFullDiskManifestLargerThanReserveCommits") {
+		return
+	}
+	prev := minReserve
+	minReserve = 8 << 20
+	t.Cleanup(func() { minReserve = prev })
+	dir := t.TempDir()
+	if err := unix.Mount("tmpfs", dir, "tmpfs", 0, "size=40m"); err != nil {
+		t.Skipf("tmpfs: %v", err)
+	}
+	defer unix.Unmount(dir, unix.MNT_DETACH)
+	e := snapEnv{tree: filepath.Join(dir, "tree"), state: filepath.Join(dir, ".lever-state")}
+	os.Mkdir(e.tree, 0o700)
+	os.Mkdir(e.state, 0o700)
+	writeFile(t, filepath.Join(e.tree, "README"), "good content\n")
+	o := e.opts(TriggerStop)
+	o.MinFree = DefaultLimits().File
+	first, err := Snapshot(context.Background(), o)
+	if err != nil {
+		t.Fatalf("first snapshot: %v", err)
+	}
+	// About 3000 manifest lines of 4.4 KB: more than the 8 MiB reserve.
+	longPathTree(t, e.tree, 3000)
+	writeFile(t, filepath.Join(e.tree, "README"), "DAMAGED by the agent\n")
+	f, _ := os.Create(filepath.Join(e.tree, "fill"))
+	buf := make([]byte, 1<<20)
+	for {
+		if _, err := f.Write(buf); err != nil {
+			break
+		}
+	}
+	for i := 0; ; i++ {
+		if err := os.WriteFile(filepath.Join(e.tree, fmt.Sprintf("s%d", i)), []byte("x"), 0o600); err != nil {
+			break
+		}
+	}
+	f.Close()
+
+	res, err := Snapshot(context.Background(), o)
+	if err != nil {
+		t.Fatalf("no snapshot on a full disk with a manifest larger than the reserve: %v", err)
+	}
+	h := res.Header
+	if h.Complete || h.ID == first.Header.ID {
+		t.Fatalf("snapshot %s complete=%v", h.ID, h.Complete)
+	}
+	disk := false
+	for _, p := range h.Partial {
+		disk = disk || (p.State == StateTruncated && p.Reason == ReasonDisk)
+	}
+	if !disk {
+		t.Fatalf("partial %+v: no truncated(disk)", h.Partial)
+	}
+	s := e.store(t)
+	st, err := s.ReadSnapshotStatus()
+	if err != nil || st.ID != h.ID {
+		t.Fatalf("status after the full-disk snapshot: %+v, %v", st, err)
+	}
+	// Whatever the next stop does on the still-full disk, it is recorded.
+	_, err = Snapshot(context.Background(), o)
+	st2, rerr := s.ReadSnapshotStatus()
+	if rerr != nil || !st2.Time.After(st.Time) || (err != nil && st2.Result != "failed") {
+		t.Fatalf("third snapshot err %v, status %+v (%v)", err, st2, rerr)
+	}
+}

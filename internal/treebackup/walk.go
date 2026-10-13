@@ -89,9 +89,11 @@ type WalkOptions struct {
 	// deadline, with reason interrupted. ctx is cancelled on the second.
 	Interrupt <-chan struct{}
 	Sink      BlobSink
-	// ManifestSpace, when positive and below Limits.Manifest, is the
-	// manifest budget instead: the space the manifest is sure to have.
-	// Running out of it truncates with reason disk.
+	// With SpaceCapped, ManifestSpace is the space the manifest is sure to
+	// have when it is written. When it is below Limits.Manifest it is the
+	// manifest budget instead, and running out of it truncates with reason
+	// disk.
+	SpaceCapped   bool
 	ManifestSpace int64
 }
 
@@ -479,7 +481,7 @@ func newWalker(ctx context.Context, o WalkOptions) *walker {
 	if w.t.IsZero() {
 		w.t = time.Now()
 	}
-	if o.ManifestSpace > 0 && o.ManifestSpace < w.manifest {
+	if o.SpaceCapped && o.ManifestSpace < w.manifest {
 		w.manifest, w.manifestReason = o.ManifestSpace, ReasonDisk
 	}
 	for _, g := range o.Guard {

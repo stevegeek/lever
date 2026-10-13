@@ -575,7 +575,7 @@ load error. Sizes take a number of bytes or a unit (`KiB`, `MiB`, `GiB`, `TiB`, 
 | `keep.weekly` | int | no | `8` | Keep the newest snapshot of each of the last N ISO weeks that have one. |
 | `reverify` | duration | no | `7d` | Re-read a cached file verified longer ago than this, from the read budget left over (`0`: never). |
 | `lock_wait` | duration | no | `2m` | How long a snapshot waits for the store's locks before it is skipped with a warning. |
-| `min_free` | size | no | `2GiB` | Free space (plus 1% of the inodes) below which no new content is stored; the snapshot then commits as incomplete. |
+| `min_free` | size | no | `2GiB` | Free space (plus 1% of the inodes) below which no new content is stored; the snapshot then commits as incomplete. It is also the room the manifest may count on beyond its reserve (see [a full disk](/operations/#retention-and-garbage-collection)). |
 | `limits.file` | size | no | `256MiB` | A larger file is recorded without content (`too-big`). |
 | `limits.read` | size | no | `8GiB` | Bytes read from the tree per snapshot, retries included. |
 | `limits.entries` | int | no | `1000000` | New names listed per snapshot (at most 10 000 000). |

@@ -36,8 +36,34 @@ const (
 	manifestExt      = ".jsonl"
 )
 
-// minReserve is the smallest reserve kept for the manifest write.
-const minReserve = 64 << 20
+// minReserve is the smallest reserve kept for the manifest write. It is a
+// variable for tests.
+var minReserve int64 = 64 << 20
+
+// manifestHeaderRoom is what the header and the trailer can add to the
+// entry lines charged to the manifest budget.
+const manifestHeaderRoom = 1 << 20
+
+// ManifestSpace is the most manifest the store's filesystem is sure to
+// hold at commit time: the reserve's allocated blocks, plus the free space
+// that blobs may not take (min_free, or all of it when no blob may be
+// written), less what one blob can run past min_free between two checks,
+// less the header. ok is false when the free space cannot be read.
+func (s *Store) ManifestSpace(minFree int64) (space int64, ok bool) {
+	free, _, _, err := statfsFunc(s.dirf)
+	if err != nil {
+		return 0, false
+	}
+	var reserve int64
+	if fi, err := lstatRegular(s.root, reserveName); err == nil {
+		reserve = min(fi.Size(), allocated(fi))
+	}
+	keep := clampMul(free, 1)
+	if minFree >= 0 && minFree < keep {
+		keep = minFree
+	}
+	return max(reserve+max(keep-spaceInterval-readChunk, 0)-manifestHeaderRoom, 0), true
+}
 
 // Store is a tree backup store: content-addressed blobs and one manifest
 // per snapshot. Only the host user may own or write it, since it holds
@@ -248,7 +274,7 @@ func (s *Store) MarkDirty() (wasDirty bool, err error) {
 	// The first snapshot has no reserve from an earlier commit. Failing to
 	// make one here only weakens the full-disk case, so it is not an error.
 	if _, err := s.root.Lstat(reserveName); errors.Is(err, fs.ErrNotExist) {
-		_ = s.resizeReserve(minReserve, 0)
+		_, _ = s.resizeReserve(minReserve, 0)
 	}
 	f, err := s.root.OpenFile(dirtyName, os.O_CREATE|os.O_EXCL|os.O_WRONLY|oNoFollow, 0o600)
 	if err != nil {
@@ -382,9 +408,9 @@ func (s *Store) CommitManifest(h *Header, entries []Entry) (warnings []string, e
 	if err := s.RecordSeq(h.Seq); err != nil {
 		warnings = append(warnings, fmt.Sprintf("could not record the snapshot sequence number: %v", err))
 	}
-	if err := s.resizeReserve(h.Limits.Manifest, size); err != nil {
-		warnings = append(warnings, fmt.Sprintf("could not keep %s of reserve for the next manifest: %v",
-			humanBytes(reserveSize(h.Limits.Manifest, size)), err))
+	if kept, err := s.resizeReserve(h.Limits.Manifest, size); err != nil {
+		warnings = append(warnings, fmt.Sprintf("could not keep %s of reserve for the next manifest (kept %s): %v",
+			humanBytes(reserveSize(h.Limits.Manifest, size)), humanBytes(kept), err))
 	}
 	return warnings, nil
 }
@@ -405,13 +431,25 @@ func (s *Store) writeManifestTemp(h *Header, entries []Entry, attempt int, useRe
 	var f *os.File
 	var name string
 	var err error
+	var reserved int64 = -1
 	if useReserve {
 		name = tmpDir + "/" + h.ID + "." + randomSuffix()
 		if err = s.root.Rename(reserveName, name); err == nil {
 			f, err = s.root.OpenFile(name, os.O_WRONLY|oNoFollow, 0)
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			_ = s.root.Remove(name)
+			if err == nil {
+				var fi fs.FileInfo
+				if fi, err = f.Stat(); err == nil {
+					reserved = fi.Size()
+				} else {
+					f.Close()
+					f = nil
+				}
+			}
+			if err != nil {
+				s.giveBackReserve(name, -1)
+				return "", 0, fmt.Errorf("tree backups: write manifest: %w", err)
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
 			return "", 0, fmt.Errorf("tree backups: write manifest: %w", err)
 		}
 	}
@@ -442,10 +480,31 @@ func (s *Store) writeManifestTemp(h *Header, entries []Entry, attempt int, useRe
 		err = cerr
 	}
 	if err != nil {
-		_ = s.root.Remove(name)
+		if reserved >= 0 {
+			s.giveBackReserve(name, reserved)
+		} else {
+			_ = s.root.Remove(name)
+		}
 		return "", 0, fmt.Errorf("tree backups: write manifest: %w", err)
 	}
 	return name, cw.n, nil
+}
+
+// giveBackReserve makes the file at name the reserve again after a failed
+// write into it, at its old size when that is known: a failed commit must
+// not cost the next one its reserve. The blocks it held are still its own,
+// so restoring the size needs no new space unless the write had already
+// shrunk it.
+func (s *Store) giveBackReserve(name string, size int64) {
+	if size >= 0 {
+		if f, err := s.root.OpenFile(name, os.O_RDWR|oNoFollow, 0); err == nil {
+			_ = preallocate(f, size)
+			f.Close()
+		}
+	}
+	if err := s.root.Rename(name, reserveName); err != nil {
+		_ = s.root.Remove(name)
+	}
 }
 
 type countWriter struct {
@@ -487,16 +546,38 @@ func reserveSize(limit, newest int64) int64 {
 	return min(max(minReserve, 2*newest), limit)
 }
 
-func (s *Store) resizeReserve(limit, newest int64) error {
+// resizeReserve sizes the reserve for the next manifest. On a full disk it
+// keeps as much as there is room for, since a smaller reserve still saves
+// a smaller snapshot. kept is the reserve's size afterwards.
+func (s *Store) resizeReserve(limit, newest int64) (kept int64, err error) {
 	f, err := s.root.OpenFile(reserveName, os.O_CREATE|os.O_RDWR|oNoFollow, 0o600)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	err = preallocate(f, reserveSize(limit, newest))
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	defer func() {
+		if fi, serr := f.Stat(); serr == nil {
+			kept = min(fi.Size(), allocated(fi))
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	want := reserveSize(limit, newest)
+	err = preallocate(f, want)
+	if err == nil || !isNoSpace(err) {
+		return 0, err
 	}
-	return err
+	fi, serr := f.Stat()
+	free, _, _, ferr := statfsFunc(s.dirf)
+	if serr != nil || ferr != nil {
+		return 0, err
+	}
+	if part := (min(fi.Size(), allocated(fi)) + clampMul(free, 1)) &^ (1<<20 - 1); part > fi.Size() && part < want {
+		if perr := preallocate(f, part); perr != nil {
+			_ = f.Truncate(fi.Size())
+		}
+	}
+	return 0, err
 }
 
 func humanBytes(n int64) string {

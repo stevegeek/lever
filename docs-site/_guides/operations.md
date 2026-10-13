@@ -945,6 +945,16 @@ every snapshot taken with `lever tree snapshot --pin`. History is never deleted 
 free space on the store's filesystem falls below `min_free` (2 GiB, plus 1% of the inodes), new
 content is skipped (the snapshot is incomplete with reason `disk`) and the manifest still commits.
 
+**A full disk.** The tree and the store usually share a filesystem, so agents can fill it. The
+manifest then goes into space the store holds back for it (`reserve`: 64 MiB, or twice the last
+manifest, up to `limits.manifest`). Before the walk, lever caps the manifest at the space it is
+sure to have when it commits (the reserve, plus the part of `min_free` that new content may not
+take), so on a full disk the snapshot commits incomplete with `truncated(disk)` instead of failing.
+A commit that fails anyway gives the reserve back. A commit that used the reserve makes a new one
+once there is room; until then doctor says so, and another snapshot on the still-full disk may
+fail. With `min_free: 0` the manifest always fits the reserve alone. The status doctor reads is
+written even on a full disk.
+
 After each snapshot lever starts `lever tree gc` in the background (log in
 `.lever-state/logs/tree-gc.log`). GC deletes expired snapshots and content no snapshot references.
 It validates every snapshot first, and when one is invalid it deletes nothing (doctor shows *GC

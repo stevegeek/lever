@@ -274,6 +274,12 @@ func TestDoctorTreeBackupRow(t *testing.T) {
 		t.Fatalf("a week later: %+v", r)
 	}
 	store := filepath.Join(st.Dir, treebackup.StoreDirName)
+	if err := os.Remove(filepath.Join(store, "reserve")); err != nil {
+		t.Fatal(err)
+	}
+	if r := checkTreeBackup(app, st, now); !r.ok || !strings.Contains(r.detail, "no space is reserved") {
+		t.Fatalf("no reserve: %+v", r)
+	}
 	if err := os.WriteFile(filepath.Join(store, "snapshots", ".DS_Store"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

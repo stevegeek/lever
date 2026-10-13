@@ -72,6 +72,14 @@ func flockTry(f *os.File, exclusive bool) error {
 
 func flockUnlock(f *os.File) error { return unix.Flock(int(f.Fd()), unix.LOCK_UN) }
 
+// allocated is the space fi's blocks take on disk.
+func allocated(fi fs.FileInfo) int64 {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return st.Blocks * 512
+	}
+	return 0
+}
+
 func fileKey(fi fs.FileInfo) (string, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {

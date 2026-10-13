@@ -576,6 +576,14 @@ func TestManifestCommitsAfterENOSPC(t *testing.T) {
 	if _, err := s.CommitManifest(h, nil); !errors.Is(err, syscall.ENOSPC) {
 		t.Fatalf("a second ENOSPC: %v", err)
 	}
+	// The failed commit gives the reserve back, at its size: the next
+	// commit on the same full disk still has it.
+	if fi, err := os.Lstat(reserve); err != nil || fi.Size() != 1<<20 {
+		t.Fatalf("reserve after a failed commit: %v", err)
+	}
+	if got := tmpNames(t, s); len(got) != 0 {
+		t.Fatalf("tmp/ = %v", got)
+	}
 }
 
 // TestLowDiskStopsBlobsButManifestCommits: the sink refuses new blobs

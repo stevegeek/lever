@@ -274,7 +274,7 @@ func (h *hubIdentity) suspendRemoteUser(ctx context.Context, email, id, projectI
 		if _, err := h.admin.UpdateUser(ctx, id, "", "suspended"); err != nil {
 			return errHubIdentity("suspending removed login %s: %w", email, err)
 		}
-		h.log("lever: remote login %s was removed from the config; its hub user is suspended", email)
+		h.log("lever: remote login %s is not configured (or remote access is off); its hub user is suspended", email)
 	}
 	for _, r := range roleIDs {
 		if err := dropProjectRoleBinding(ctx, h.admin, r, id, projectID); err != nil {

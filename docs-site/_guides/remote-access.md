@@ -623,7 +623,7 @@ never enters the jail.
 **Minted by the controller, while agents run.** The token is minted by lever's controller hub user
 (`lever-controller@lever.local`), the same identity that mints the controller PAT, with a
 lever-signed assertion against the live hub: no hub stop and no container check. It is minted only
-while remote access is on.
+while remote access is on; the first apply with it off revokes it and removes its files.
 
 **Expiry and scopes are recorded, not asked.** The hub will not tell a token holder anything about
 the token, so lever keeps a record beside it (`.lever-state/remote.pat.json`: scopes asked for,

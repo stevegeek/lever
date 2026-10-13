@@ -217,7 +217,7 @@ func TestDoctorHubAuthRowsOverTheJail(t *testing.T) {
 		app := hiRemoteApp(true, hiOperator(op), hiOperator("new@example.com"))
 		defer func() { h.bindings = kept }()
 		hiWantRow(t, checkRemoteWebRole(ctx, app, d.auth()), false,
-			"new@example.com has no hub user", contact+" was removed from the config but its hub user is invited")
+			"new@example.com has no hub user", contact+" is not a configured login (or remote access is off) but its hub user is invited")
 		hiWantRow(t, checkRemoteWebRole(ctx, d.app, d.auth()), false, contact+" is not bound to "+contactRoleName)
 	})
 	t.Run("record names another key", func(t *testing.T) {

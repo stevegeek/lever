@@ -130,22 +130,41 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		}
 	}
 	rec.AdminID = admin.ID
-	if mode == state.HubModeMigrated && !found {
-		// Recorded before anything is demoted or renamed: a run that stops after
-		// that still leaves the next one a probe to run.
+	if mode == state.HubModeFresh && !found {
+		// A hub with scion's dev user is not new, whatever the host files say
+		// (a deleted PAT, or a reset of a hub whose database was kept): that row
+		// owns the project and every agent, so it becomes the controller.
+		if _, dev, err := h.admin.GetUser(ctx, devUserID); err != nil {
+			return errHubIdentity("looking for scion's dev user: %w", err)
+		} else if dev {
+			h.log("lever: the hub has scion's dev user although lever holds no record of it: treating the hub as migrated")
+			mode = state.HubModeMigrated
+		}
+	}
+	// owe records, before the change, that a migration changed the controller:
+	// a run that stops after it still leaves the next one a probe to run.
+	owe := func() error {
+		if mode != state.HubModeMigrated || rec.ProbePending {
+			return nil
+		}
 		rec.ProbePending = true
 		rec.Version, rec.Mode, rec.KeyFingerprint = state.HubIdentityVersion, mode, h.keyFP
 		if err := h.st.SaveHubIdentity(rec); err != nil {
 			return errHubIdentity("%w", err)
 		}
+		return nil
+	}
+	if !found {
+		if err := owe(); err != nil {
+			return err
+		}
 	}
 
-	demoted, err := h.adminHygiene(ctx, admin.ID)
-	if err != nil {
+	if _, err := h.adminHygiene(ctx, admin.ID, owe); err != nil {
 		return err
 	}
 
-	ctlUser, renamed, err := h.ensureController(ctx, mode, &rec)
+	ctlUser, _, err := h.ensureController(ctx, mode, &rec, owe)
 	if err != nil {
 		return err
 	}
@@ -161,7 +180,7 @@ func (h *hubIdentity) run(ctx context.Context) error {
 			}
 			rec.ProjectID, registered = id, true
 		} else {
-			id, err := h.pat.ProjectID(ctx, path.Base(jp), scion.DefaultHubEndpoint)
+			id, err := h.ctl.ProjectID(ctx, path.Base(jp), scion.DefaultHubEndpoint)
 			if err != nil {
 				return errHubIdentity("finding the instance project: %w", err)
 			}
@@ -184,9 +203,6 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	rec.HubMarker = role.ID
 	// Saved before the mint: a run that fails later must not lose which hub and
 	// users the PAT below belongs to.
-	if mode == state.HubModeMigrated && (demoted[devUserID] || renamed) {
-		rec.ProbePending = true
-	}
 	rec.Version, rec.Mode, rec.KeyFingerprint = state.HubIdentityVersion, mode, h.keyFP
 	if err := h.st.SaveHubIdentity(rec); err != nil {
 		return errHubIdentity("%w", err)
@@ -331,7 +347,7 @@ func (h *hubIdentity) forgetHub() error {
 // adminHygiene demotes every admin but lever-admin, by role and by binding
 // (an admin promoted through the API keeps its binding through scion's own
 // config demotion). It returns the demoted user IDs.
-func (h *hubIdentity) adminHygiene(ctx context.Context, adminID string) (map[string]bool, error) {
+func (h *hubIdentity) adminHygiene(ctx context.Context, adminID string, beforeDevChange func() error) (map[string]bool, error) {
 	admins, err := h.admin.ListAdmins(ctx)
 	if err != nil {
 		return nil, errHubIdentity("listing admins: %w", err)
@@ -340,6 +356,11 @@ func (h *hubIdentity) adminHygiene(ctx context.Context, adminID string) (map[str
 	for _, a := range admins {
 		if a.UserID == adminID {
 			continue
+		}
+		if a.UserID == devUserID {
+			if err := beforeDevChange(); err != nil {
+				return nil, err
+			}
 		}
 		h.log("lever: demoting hub admin %s (%s) to member: only lever-admin administers the hub", a.UserID, a.Email)
 		if _, err := h.admin.UpdateUser(ctx, a.UserID, "member", ""); err != nil {
@@ -366,7 +387,7 @@ func (h *hubIdentity) adminHygiene(ctx context.Context, adminID string) (map[str
 // controller row. Fresh: an invited member. Migrated: scion's dev user,
 // re-pinned to the address on every apply (R2), since any loopback caller can
 // rename it; the address the hub held is never recorded.
-func (h *hubIdentity) ensureController(ctx context.Context, mode string, rec *state.HubIdentity) (hubapi.User, bool, error) {
+func (h *hubIdentity) ensureController(ctx context.Context, mode string, rec *state.HubIdentity, beforeDevChange func() error) (hubapi.User, bool, error) {
 	renamed := false
 	if mode == state.HubModeFresh {
 		if _, ok, err := h.admin.UserByEmail(ctx, hubauth.ControllerEmail); err != nil {
@@ -382,6 +403,9 @@ func (h *hubIdentity) ensureController(ctx context.Context, mode string, rec *st
 			return hubapi.User{}, false, errHubIdentity("reading scion's dev user %s: found=%v %v", devUserID, ok, err)
 		}
 		if !strings.EqualFold(dev.Email, hubauth.ControllerEmail) {
+			if err := beforeDevChange(); err != nil {
+				return hubapi.User{}, false, err
+			}
 			if err := h.admin.SetDevIdentity(ctx, hubauth.ControllerEmail); err != nil {
 				h.warn("hub-identity: re-pinning the dev user's address as lever-admin failed (%v); trying the controller PAT", err)
 				if err := h.pat.SetDevIdentity(ctx, hubauth.ControllerEmail); err != nil {
@@ -513,6 +537,19 @@ func (h *hubIdentity) mintPATs(ctx context.Context, projectID string, lifecycle 
 		return err
 	}
 	if !h.app.RemoteEnabled() {
+		// No proxy runs to use it, so the token is revoked rather than kept.
+		rec, found, err := h.st.LoadRemotePATRecord()
+		if err != nil {
+			return errHubIdentity("%w", err)
+		}
+		if found && rec.ID != "" {
+			if err := h.ctl.RevokeToken(ctx, rec.ID); err != nil && !errors.Is(err, hubapi.ErrNotFound) {
+				return errHubIdentity("revoking the remote PAT: %w", err)
+			}
+		}
+		if err := h.st.RemoveRemotePAT(); err != nil {
+			return errHubIdentity("%w", err)
+		}
 		return nil
 	}
 	return mint("lever-remote", remotePATScopes(), h.st.LoadRemotePAT, h.st.LoadRemotePATRecord,

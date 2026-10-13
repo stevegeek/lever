@@ -312,11 +312,14 @@ func checkRemoteWebRole(ctx context.Context, app *config.App, d doctorHubAuth) c
 			continue
 		}
 		if hu, found, err := admin.GetUser(ctx, id); err == nil && found && hu.Status != "suspended" {
-			problems = append(problems, email+" was removed from the config but its hub user is "+hu.Status)
+			problems = append(problems, email+" is not a configured login (or remote access is off) but its hub user is "+hu.Status)
 		}
 	}
 	if len(problems) > 0 {
 		return checkResult{name, false, strings.Join(problems, "; "), "run `lever apply` (or `lever reload`): it invites, caps and binds every login, and suspends removed ones, while agents run"}
+	}
+	if len(ok) == 0 {
+		return checkResult{name, true, "no configured remote login; every earlier one is suspended", ""}
 	}
 	return checkResult{name, true, "bound and capped before sign-in: " + strings.Join(ok, ", "), ""}
 }

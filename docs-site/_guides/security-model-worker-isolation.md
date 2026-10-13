@@ -203,13 +203,12 @@ member role plus project ownership and `lever-controller` is all it can ever do.
   It is handed to the guest on the child's stdin (or, for the interactive attach, through a 0600
   file under the run user's `XDG_RUNTIME_DIR`), never on the host command line, so `ps` on the
   host does not show it.
-- **Not the only host-side PAT.** A second, narrower host-side PAT
-  (`agent:read,agent:list,project:read,agent:attach,agent:message`) is minted by the controller in
-  the same way when `remote.enabled: true`; it is also stored under `.lever-state/` and never enters
-  the jail. The remote proxy uses it only for read-only agent lists (the chat page and the contact
-  fence); every remote request a person makes rides that person's own hub session. Its scope set is
-  what the `lever-remote` web role is derived from. See
-  [remote access](/remote-access/#the-remote-pat).
+- **Not the only host-side PAT.** A second, read-only host-side PAT
+  (`agent:read,agent:list,project:read`) is minted by the controller in the same way when
+  `remote.enabled: true`, and revoked when it is turned off; it is also stored under `.lever-state/`
+  and never enters the jail. The remote proxy sends it only on GETs of the agent list (the chat
+  page and the contact fence); every remote request a person makes rides that person's own hub
+  session. See [remote access](/remote-access/#the-remote-pat).
 
 `lever doctor`'s `hub authentication` row tests the effective configuration by behaviour, since
 file contents cannot prove it: an assertion signed by another key and one for another instance get

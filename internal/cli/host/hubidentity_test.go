@@ -1239,7 +1239,11 @@ func TestHubIdentityResetForgetsAndBootstraps(t *testing.T) {
 
 func TestHubIdentityRemoteLoginOnTheDevRowIsRefused(t *testing.T) {
 	op, contact := "op@example.com", "c1@example.com"
-	e := newHIEnv(t, hiRemoteApp(true, hiOperator(op), hiContact(contact)))
+	// A hub lever bootstrapped fresh, later started by hand with dev auth: the
+	// dev row appears, carrying an operator's address, after the record.
+	e := newHIEnv(t, hiRemoteApp(true, hiContact(contact)))
+	e.mustRun()
+	e.app = hiRemoteApp(true, hiOperator(op), hiContact(contact))
 	e.hub.addUser(devUserID, op, "member", "active", e.now.Add(-time.Hour))
 	e.mustRun()
 
@@ -1376,7 +1380,7 @@ func TestHubIdentityControllerRowChecks(t *testing.T) {
 		e := newHIEnv(t, hiRemoteApp(false))
 		e.hub.addUser("", hubauth.ControllerEmail, "admin", "active", e.now)
 		rec := state.HubIdentity{}
-		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec); err == nil ||
+		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
 			!strings.Contains(err.Error(), "want an active member") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1386,7 +1390,7 @@ func TestHubIdentityControllerRowChecks(t *testing.T) {
 		e.hub.resolveSuspended = true
 		e.hub.addUser("", hubauth.ControllerEmail, "member", "suspended", e.now)
 		rec := state.HubIdentity{}
-		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec); err == nil ||
+		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
 			!strings.Contains(err.Error(), "want an active member") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1395,7 +1399,7 @@ func TestHubIdentityControllerRowChecks(t *testing.T) {
 		e := newHIEnv(t, hiRemoteApp(false))
 		e.hub.addUser("", hubauth.ControllerEmail, "member", "active", e.now)
 		rec := state.HubIdentity{ControllerID: "user-recorded"}
-		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec); err == nil ||
+		if _, _, err := e.step().ensureController(context.Background(), state.HubModeFresh, &rec, func() error { return nil }); err == nil ||
 			!strings.Contains(err.Error(), "not the recorded controller") {
 			t.Fatalf("err = %v", err)
 		}
@@ -1524,5 +1528,76 @@ func TestHubIdentityProbeThatCannotReadDoesNotRollBack(t *testing.T) {
 	e.mustRun()
 	if rec := e.record(); rec.ProbePending {
 		t.Fatal("a passing probe must clear the pending flag")
+	}
+}
+
+// TestHubIdentityResetOnAHubWithTheDevUserMigrates: a reset of a hub whose
+// database was kept finds scion's dev user still owning everything, so the
+// hub is migrated (and the controller probed), not bootstrapped as new.
+func TestHubIdentityResetOnAHubWithTheDevUserMigrates(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.seedMigrated("scion@localhost", false)
+	e.mustRun()
+	e.reset = true
+	n := len(e.hub.events)
+	e.mustRun()
+	if rec := e.record(); rec.Mode != state.HubModeMigrated || rec.ControllerID != devUserID || rec.ProbePending {
+		t.Fatalf("record = %+v", rec)
+	}
+	if got := hiEventsWith(e.hub.eventsFrom(n), "agents by "+devUserID); len(got) == 0 {
+		t.Fatalf("the reset run did not probe the controller: %q", e.hub.eventsFrom(n))
+	}
+	if !hiAnyContains(e.logs, "treating the hub as migrated") {
+		t.Fatalf("logs %q", e.logs)
+	}
+}
+
+// TestHubIdentityProbeForbiddenRollsBack and ...ServerErrorDoesNot: a 403 is
+// the hub refusing the controller, a 500 says nothing about its authority.
+func TestHubIdentityProbeForbiddenRollsBack(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.seedMigrated("scion@localhost", false)
+	e.hub.down = map[string]int{"GET /api/v1/projects/proj-1/shared-dirs": 403}
+	if err := e.run(); err == nil || !strings.Contains(err.Error(), "restored") {
+		t.Fatalf("run = %v, want a rollback", err)
+	}
+	if dev := e.hub.user(devUserID); dev.Role != "admin" {
+		t.Fatalf("dev row role %q, want admin restored", dev.Role)
+	}
+}
+
+func TestHubIdentityProbeServerErrorDoesNotRollBack(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.seedMigrated("scion@localhost", false)
+	e.hub.down = map[string]int{"GET /api/v1/projects/proj-1/shared-dirs": 500}
+	if err := e.run(); err == nil || strings.Contains(err.Error(), "restored") {
+		t.Fatalf("run = %v, want a failure without a rollback", err)
+	}
+	if dev := e.hub.user(devUserID); dev.Role != "member" {
+		t.Fatalf("dev row role %q, want it left a member", dev.Role)
+	}
+}
+
+// TestHubIdentityRemoteOffRevokesTheRemotePAT: with no proxy to use it, the
+// remote PAT is revoked and its files removed.
+func TestHubIdentityRemoteOffRevokesTheRemotePAT(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(true))
+	e.mustRun()
+	rrec, found, err := e.st.LoadRemotePATRecord()
+	if err != nil || !found || rrec.ID == "" {
+		t.Fatalf("remote PAT record %+v found=%v err=%v", rrec, found, err)
+	}
+	e.app = hiRemoteApp(false)
+	e.mustRun()
+	if _, found, _ := e.st.LoadRemotePATRecord(); found {
+		t.Fatal("the remote PAT record is still on disk")
+	}
+	if tok, _ := e.st.LoadRemotePAT(); tok != "" {
+		t.Fatal("the remote PAT is still on disk")
+	}
+	for _, tk := range e.hub.tokens {
+		if tk.ID == rrec.ID && !tk.Revoked {
+			t.Fatal("the remote PAT was not revoked")
+		}
 	}
 }

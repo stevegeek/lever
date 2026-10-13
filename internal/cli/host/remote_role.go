@@ -327,6 +327,17 @@ func ensureRemoteWebRole(ctx context.Context, hc *hubapi.Client, projectKey stri
 			rec.Pending = append(rec.Pending, email)
 			continue
 		}
+		if u.ID == config.ScionDevUserID {
+			// The dev row carries this login's email, which only scion's
+			// unauthenticated workstation identity route can cause (an agent
+			// renamed it). Binding or capping it would reshape lever's own
+			// controller identity, and recording its id would bless the sign-in
+			// the login driver refuses.
+			warn("remote web role: the hub user for %s is scion's dev super-admin row, which an agent renamed to that address; "+
+				"lever binds nothing to it and the login stays refused until the dev user's email is restored", email)
+			rec.Pending = append(rec.Pending, email)
+			continue
+		}
 		isContact := slices.Contains(contacts, email)
 		grant, drop, name, userCeiling := role.ID, contactRole.ID, remoteWebRoleName, ceiling
 		if isContact {

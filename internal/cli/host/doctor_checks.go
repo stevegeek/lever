@@ -381,6 +381,40 @@ func checkRemoteExposure(app *config.App) checkResult {
 			app.EffectiveRemoteIdentityHeader()+"; see the remote-access guide, non-Tailscale fronts")
 }
 
+// checkDevUserIdentity reports when scion's dev super-admin row has been
+// renamed to the email of a configured remote login. scion's workstation
+// PUT /api/v1/system/identity route accepts any authenticated loopback caller
+// (so any jailed agent) and renames that row with no permission check; if the
+// new email is one a remote person signs in as, that person's first sign-in
+// would resolve to the super-admin row. The remote proxy already refuses such
+// a sign-in (LoginDriver.verifyUser); this row makes the tampering visible. The controller
+// PAT is the dev user, so auth/me reads its current email without any
+// user-listing scope.
+func checkDevUserIdentity(ctx context.Context, app *config.App, me func(context.Context) (hubapi.User, error)) checkResult {
+	const name = "dev user identity"
+	if !app.RemoteEnabled() {
+		// With no remote logins there is nothing a rename could collide with;
+		// the controller sender label is cosmetic until then.
+		return checkResult{}
+	}
+	u, err := me(ctx)
+	if err != nil {
+		// A down or unreachable hub is reported by other rows; not a finding here.
+		return checkResult{}
+	}
+	if u.ID != config.ScionDevUserID {
+		return checkResult{name, true, "the controller identity is not scion's dev user", ""}
+	}
+	for _, email := range app.Remote.HubUserEmails() {
+		if strings.EqualFold(email, u.Email) {
+			return checkResult{name, false,
+				fmt.Sprintf("scion's dev super-admin row now carries %q, which is a configured remote login; an agent used scion's workstation identity route to rename it", u.Email),
+				"the proxy refuses that sign-in; investigate the jail, then restore the dev user's email in the jail hub"}
+		}
+	}
+	return checkResult{name, true, "scion's dev super-admin row carries no configured remote login's email", ""}
+}
+
 // checkVerifiedChat reports whether agents can verify web chat (package
 // chatledger): the proxy records only verified logins, and the ledger proves
 // something only while no jail can write it.

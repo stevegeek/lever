@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/state"
@@ -840,5 +841,39 @@ func TestContactCeilingMustBeExact(t *testing.T) {
 	rec.ContactCeilingPermissions = contactRolePermissions()
 	if r := remoteRoleReason(rec, true, []string{"c@x"}, []string{"c@x"}, remoteRolePermissions(true)); r != "" {
 		t.Fatalf("reason %q for an exact ceiling", r)
+	}
+}
+
+// An agent renamed scion's dev super-admin row to an allowed login's email
+// before that person's first sign-in: apply must not bind, cap or record it.
+func TestRemoteWebRoleRefusesTheDevRow(t *testing.T) {
+	st := state.ForConfig(t.TempDir())
+	seedAllPATs(t, st)
+	hub := newFakeAdminHub()
+	hub.users = append(hub.users, hubapi.User{ID: config.ScionDevUserID, Email: "you@github"})
+	f := proc.NewFakeRunner()
+	scriptPATMintChain(f)
+	warned, warn := collectWarnings()
+
+	ra := remoteAccess{Enabled: true, Emails: []string{"you@github"}}
+	if err := ensureControllerPAT(context.Background(), f, st, t.TempDir(), "/lever", ra, patMintOpts{AdminHub: hub, Warn: warn}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if n := hub.count("POST /api/v1/admin/role-bindings"); n != 0 {
+		t.Fatalf("posted %d role bindings for the dev row, want 0", n)
+	}
+	rec, found, _ := st.LoadRemoteRoleRecord()
+	if !found || rec.Bound["you@github"] != "" || !slices.Contains(rec.Pending, "you@github") {
+		t.Fatalf("record = %+v, want you@github pending and unbound", rec)
+	}
+	if _, ok := rec.Ceilings["you@github"]; ok {
+		t.Fatalf("a ceiling was written for the dev row: %+v", rec.Ceilings)
+	}
+	hit := false
+	for _, w := range *warned {
+		hit = hit || strings.Contains(w, "dev super-admin row")
+	}
+	if !hit {
+		t.Fatalf("warnings = %q, want one naming the dev row", *warned)
 	}
 }

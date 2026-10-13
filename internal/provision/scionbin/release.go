@@ -27,7 +27,7 @@ import (
 
 // ReleasePin is the scion commit a lever release builds its prebuilt scion
 // binaries from, and the scion.version the examples and docs pin.
-const ReleasePin = "e0f61f2d"
+const ReleasePin = "b41cd6fe"
 
 // ReleaseDir is the directory, relative to this package, that the release
 // build's generator (GenerateRelease) writes the manifest into and the embed

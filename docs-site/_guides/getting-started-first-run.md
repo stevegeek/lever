@@ -26,7 +26,7 @@ name: hello-worker
 backend: orbstack
 tree: workspace          # a confined SUBDIR; the root itself is never mounted
 scion:
-  version: e0f61f2d      # pin a scion commit; a lever release ships this one prebuilt
+  version: b41cd6fe      # pin a scion commit; a lever release ships this one prebuilt
 # api-key is the secure default (the real key never enters the container) but
 # needs a Console API key. This demo opts into subscription (your Claude OAuth
 # token), so egress stays open and the token is projected to the agents.

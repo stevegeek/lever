@@ -105,7 +105,7 @@ framework-image-stage:
 # scion cross-compiled here from the scion source the jail runs: set
 # SCION_VERSION to lever.yaml's scion.version, or SCION_SRC to the checkout
 # scion.source names. The default is the pin the shipped examples use.
-SCION_VERSION ?= e0f61f2d
+SCION_VERSION ?= b41cd6fe
 SCION_SRC ?=
 # What the slim base records as its scion version: the pin, or the commit of
 # the SCION_SRC checkout with -dirty for uncommitted changes (never its path,

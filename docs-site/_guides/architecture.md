@@ -162,8 +162,9 @@ sequenceDiagram
 
 Messaging follows the same broker-mediated shape as dispatch: `lever-manager msg send`/`msg
 list`/`watch` are thin mTLS clients of the broker's `/msg/send` and `/msg/list`, never of Scion
-directly. An in-container `scion` CLI call has no hub credential to authenticate with — the hub
-runs with dev-auth off, and only the host-side broker holds the controller PAT (see
+directly. An in-container `scion` CLI call has no hub credential to authenticate with beyond
+scion's own per-agent token — the hub runs with dev-auth off and trusts only assertions signed with
+a host-held key, and only the host-side broker holds the controller PAT (see
 [security-model.md §4](/security-model/worker-isolation/)) — so only the broker can address an arbitrary agent's
 inbox. Because every broker send wears the controller's hub user as its sender, the broker records
 each one in a host-side sent ledger first, and a recipient learns who wrote a message only by

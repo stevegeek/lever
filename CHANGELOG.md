@@ -7,6 +7,85 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **No more dev-auth window: lever governs the hub while agents run (lever#73, lever#20).** Lever
+  is now scion's authenticating proxy. The jail's hub runs in scion's proxy auth mode with the JWT
+  provider and `invite_only`, and trusts only short-lived assertions (90 s, ES256) that lever signs
+  with a key held on the host, `.lever-state/hub-auth.key` (`0600`); the jail holds only the public
+  half, root-owned at `/etc/lever/hub-auth.pub`. The auth settings are pinned through the
+  `SCION_SERVER_*` environment lever starts the hub with, so a write to the jail's
+  `settings.yaml` changes nothing. A new `hub-identity` apply step replaces `bootstrap-token`: it
+  never stops the hub and never lists containers, so adding a contact, rotating a token or changing
+  scopes no longer needs `lever stop`, then `lever up`.
+- **Two lever hub users (lever#73).** `lever-admin@lever.local` is the hub's only admin, through
+  `admin_emails`, and holds no credential at rest. `lever-controller@lever.local` is an ordinary
+  member that owns the project, holds `lever-controller` and mints the controller PAT (and the
+  remote PAT, which the proxy still uses for its read-only agent list). Every other admin is
+  demoted, by role and by super-admin binding. `.lever-state/hub-identity.json` records the users,
+  the project and the key fingerprint.
+- **Contacts and operators are bound before their first sign-in (lever#20).** `lever apply` and
+  `lever reload` invite each configured login's hub user, write its ceiling, then bind its tier's
+  role, while agents run; the first sign-in activates that same user with its role in force.
+  Removing a login suspends its hub user (the web refuses it at once, the API within the hub's
+  60 s cache) and drops its bindings; adding it back reactivates it. A replacement ceiling is
+  written under a second name before the old one is deleted, so there is no gap. The proxy checks
+  that each session belongs to the hub user lever recorded for that login and refuses only that
+  login otherwise.
+- **The remote proxy signs its users in with an assertion (lever#73).** It sends `GET /` with an
+  assertion for the login's hub address, takes the session cookie, and checks the user ID. Its
+  signer signs only the configured logins' addresses. The audit log's `oidc-*` and
+  `deny-authorize` decisions are replaced by `hub-session`, `hub-session-failed` and
+  `hub-session-refused`. Turning remote access on or off restarts the hub once when its web
+  assets change.
+- **Reserved hub addresses.** `remote.allowed_users` may not name `lever-admin@lever.local`,
+  `lever-controller@lever.local` or any `@localhost` address (scion's dev user is
+  `<os-user>@localhost`); config load refuses it while remote access is on, and apply refuses that
+  login otherwise.
+- **New doctor rows (lever#73).** *hub authentication* tests the hub by behaviour: an assertion
+  from another key or for another instance gets 401, `lever-admin` is admin, no OAuth login is
+  offered, the running hub carries lever's auth env and no dev auth, and no dev token lies in the
+  jail. *hub identities* checks that `lever-admin` is the only admin and that the controller holds
+  only the tokens lever recorded. *remote web role* now reads the hub live. The *dev-auth window*
+  row and the login-provider part of *remote access* are gone.
+- **The broker rides a token rotation.** It retries a hub 401 once when the PAT file now holds a
+  different token, and re-resolves the controller's sender label on a verification miss (at most
+  every 30 s); only the current label is accepted. An open `lever attach` keeps streaming across a
+  rotation.
+- **`lever up --reset-hub-identity` / `lever apply --reset-hub-identity`.** After a deliberate hub
+  database reset, it forgets lever's hub records and tokens and sets the hub up as new. Lever does
+  this on its own only on positive evidence (its `lever-controller` role gone and `lever-admin`
+  created by this run); otherwise the apply fails and names the flag.
+
+### Removed
+
+- **The local OIDC provider, the guest login forwarder and the login port (lever#73).** The next
+  apply stops and deletes `/usr/local/bin/lever-login-forward` in an older jail and drops the
+  `oidc_login` block; the old login-port ACCEPT drops out of the egress chain on the same apply,
+  in both postures. `remote.login_port` still loads, is ignored and draws a warning. Port 8446 is
+  no longer reserved.
+
+### Upgrade
+
+- The first `lever apply`, `reload` or `up` migrates the hub while agents run, with one hub
+  restart. Scion's dev user (usually `scion@localhost`), which older levers minted tokens as, is
+  renamed `lever-controller@lever.local` and demoted to member; it keeps the project, the PATs and
+  every agent. Lever then checks the controller PAT's authority without changing anything; if a
+  check fails it gives the dev user its admin role back, so agents keep working, and fails the
+  apply with the evidence. See the operations guide, "The first apply after upgrading".
+- Downgrading after the migration is not supported.
+- The jail ABI is now 4 (`internal/scion`, which `lever-manager` imports, changed), so `lever
+  doctor` asks for the agent image to be rebuilt; nothing in the image behaves differently.
+
+### Known issues
+
+- A message delivered before the migration but verified after it answers `unknown_sender`: it
+  carries the controller's old sender label. Agents verify on receipt, so only messages in flight
+  across the upgrade are affected.
+- On a migrated instance any authenticated loopback caller, an agent included, can still rename
+  the controller through scion's workstation identity route. Every apply re-pins the address, and
+  the proxy refuses only a login whose hub user no longer matches lever's record.
+
 ## [0.38.0] - 2026-10-13
 
 ### Added

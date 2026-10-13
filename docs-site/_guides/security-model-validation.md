@@ -21,8 +21,8 @@ Validated (by hand or by an automated gate):
   broker's jail port but not its admin port or the public internet.
 - Container boot enrols the agent and registers the broker tools over mTLS.
 - Single-project model ([§4](/security-model/worker-isolation/)): one Scion project per instance,
-  hub with dev-auth off, lifecycle driven only by a host-only controller PAT, worker isolation via
-  Scion's relative `--workspace`.
+  hub with dev-auth off that trusts only assertions signed by a host-held key, lifecycle driven
+  only by a host-only controller PAT, worker isolation via Scion's relative `--workspace`.
 - Mid-session leaf rotation: the agent's leaf is renewed every 12h and every long-lived broker
   client re-reads it per handshake ([§6.3](/security-model/credentials/), [agent identity](/agent-identity/)).
 - `lima` backend (`make test-lima-e2e`): the six `lever acceptance` checks under both egress
@@ -52,8 +52,8 @@ Validated by hand on macOS + OrbStack (Apple Silicon). What was demonstrated:
 
 - **The escape exists without the jail.** From inside an ordinary agent container (no host
   filesystem, no Docker socket), using only a Scion hub **development-auth token** (the mode used
-  for this test; the real hub runs `--dev-auth=false` and no agent is ever handed a hub
-  credential, [§4.2](/security-model/worker-isolation/)), the hub accepted a new project + a **provider with an arbitrary host path (no
+  for this test; lever's hub runs `--dev-auth=false` and no agent is handed a hub credential
+  beyond scion's own per-agent token, [§4.2](/security-model/worker-isolation/)), the hub accepted a new project + a **provider with an arbitrary host path (no
   path validation)**; starting an agent then drove the broker to bind-mount a sensitive host
   directory into a new container, whose files were readable. This is the threat the jail closes:
   even where an agent *did* hold a hub credential, there is no host filesystem outside the project

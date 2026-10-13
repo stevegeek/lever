@@ -16,7 +16,7 @@ in `$CLAUDE_CODE_OAUTH_TOKEN` (or a token file in its home). Combined with open 
 the model API ([§8](/security-model/compromise/)), a single prompt-injected worker can read the
 token and exfiltrate it, impersonating the operator's account beyond the jail. The token is ambient,
 shared, and long-lived: the highest-value secret in the system. ([§4](/security-model/worker-isolation/)'s
-dev-auth-off/controller-PAT hardening closes the separate risk of a compromised agent driving the
+proxy-auth/controller-PAT hardening closes the separate risk of a compromised agent driving the
 hub; it does not touch this exposure.) This applies to `llm_auth: subscription` only (§6.1).
 
 **The mechanism.** A host-side capability broker holds the raw credential and never projects it
@@ -153,8 +153,10 @@ container, using that agent's own scion token (distinct from [§4.2](/security-m
 host-only controller PAT — this is the per-agent token scion mints for status/heartbeat use). Two
 controls bound what that token can do:
 
-- **Dev auth is off, hardcoded.** The real hub always starts with `--dev-auth=false`
-  (`internal/apply/run.go`, the `ServerStart(..., DevAuth: false)` call); no config field turns it on.
+- **Dev auth is off, hardcoded.** The hub always starts with `--dev-auth=false`
+  (`internal/apply/run.go`, `HubServerOpts`); no config field turns it on, and the scion-server step
+  restarts a hub that was started without it. The hub authenticates people and lever itself only
+  through assertions signed by a host-held key (§6.4), which no process in the jail can produce.
 - **Every agent is stamped `--role baseline`.** A named scion **role** determines an agent token's
   scopes. lever passes `--role baseline` on `scion start` for every agent, manager and workers alike
   (`internal/scion/lifecycle.go`); `scion.agent_role` overrides the role for operators who need a
@@ -217,3 +219,60 @@ bounds the exposure window of a leaked agent key to a day, backstopping the per-
 revocation that is the real cut (§6.2). Every long-lived broker client must re-read the rotating
 leaf per TLS handshake. The lifecycle (enrolment, renewal, the two long-lived clients, and the
 failure mode when the invariant is broken) is on [Agent identity & certificates](/agent-identity/).
+
+### 6.4 The hub assertion key
+
+Lever is the hub's authenticating proxy ([§4.2](/security-model/worker-isolation/)). Every hub
+sign-in, whether lever's own governance as `lever-admin@lever.local`, the controller minting its
+PAT, or a remote login's web session, is an assertion signed with one ES256 key,
+`.lever-state/hub-auth.key` (`0600`, directory `0700`). The lever CLI and the remote proxy read it;
+nothing in the jail does. The hub holds only the public half.
+
+- **What it is worth.** Admin on this instance's hub, and only with a path to that hub: the hub
+  listens on the jail's loopback, so a stolen key also needs a way into the jail. It is strictly
+  weaker than `.lever-state/session-secret`, which lever already held: scion derives its agent and
+  user token signing keys and its secret-encryption key from the session secret. `hub-identity.json`
+  beside it holds no secret.
+- **Rotation.** Delete the file and run `lever apply`. Lever makes a new key, installs its public
+  half, and restarts the hub once; it finds its hub users again by address. `lever destroy` keeps
+  the key, since it is not tied to one hub database.
+- **The remote proxy holds it too.** The proxy signs only the hub addresses of the configured
+  logins (a positive allowlist) and never a reserved address (`lever-admin@lever.local`,
+  `lever-controller@lever.local`, any `@localhost` address), and it strips any client copy of the
+  assertion header. The proxy is a host process the jail cannot reach; a bug in it, not an agent,
+  is what this allowlist guards against.
+
+**The workstation-route residual.** Lever runs the hub as a workstation hub, where scion's
+`/api/v1/system/*` routes accept any authenticated loopback caller, including an agent's own
+token, and run no role check. Three of them matter here:
+
+- `PUT /api/v1/system/identity` renames scion's dev user. On an instance an older lever brought up,
+  that row is lever's controller (§4.2). A fresh instance has no dev user, and the rename is a
+  no-op. On a migrated one an agent can rename the controller between applies. Lever never records
+  the address it finds there. Two repairs follow:
+  - **R1.** If the agent took `lever-admin@lever.local`, an assertion for the admin resolves to the
+    controller's row. The next apply sees that, restores `lever-controller@lever.local` with the
+    controller PAT (the route accepts it), waits out the hub's 60-second email cache, then asserts
+    the admin again, which creates the real admin row, and demotes every other admin.
+  - **R2.** Every apply re-pins the controller's address to `lever-controller@lever.local`, as the
+    admin, or with the controller PAT if that fails.
+
+  Meanwhile the remote proxy checks every login's hub user against the ID lever recorded, so a
+  rename aimed at a contact's address costs that login (refused, and audited as
+  `hub-session-refused`), not the others. Lever invites every configured login before anything
+  else, so a login's address is taken by the right row before an agent can aim a rename at it.
+- `PATCH /api/v1/system/workstation-settings` and the identity route rewrite the jail's
+  `~/.scion/settings.yaml`. That cannot change the hub's authentication: lever pins it through the
+  environment the hub starts with, and these edits trigger no restart.
+- `POST /api/v1/system/fs/mkdir` creates directories under `$HOME`. The public key lives under
+  `/etc/lever`, root-owned, outside it.
+
+**The sender label.** The hub stamps a message with `user:<the sender's address at send time>`,
+and the broker's `message_verify` accepts lever's own sends only under the controller's current
+label, `user:lever-controller@lever.local`. On a migrated instance the label was the dev user's old
+address (usually `user:scion@localhost`). A message delivered before the migration but verified
+after it carries the old label and answers `unknown_sender`; accepting an old label, which an agent
+could influence, would weaken the partition verification relies on. Agents verify on receipt, so
+only messages in flight across the upgrade are affected. When the controller's label changes under
+a running broker (a rename, then the next apply's repair), the broker re-resolves it on a
+verification miss, at most once every 30 seconds.

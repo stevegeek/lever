@@ -70,8 +70,8 @@ You'll see a `backend: <profile summary>` line, then the ordered plan:
   load-image              scionlocal/lever-claude:arm64
   init-machine
   config-registry
-  bootstrap-token         /…/hello-worker/workspace
   scion-server
+  hub-identity            /…/hello-worker/workspace
   credential              ~/.scion/oauth-token
   register-project        /…/hello-worker/workspace
   agent-template          /…/hello-worker/workspace
@@ -82,9 +82,11 @@ You'll see a `backend: <profile summary>` line, then the ordered plan:
 (With `manager.image_tar` set, the `load-image` line also names the archive it streams in:
 `load-image  scionlocal/lever-claude:arm64 (from /…/hello-worker/images/lever-claude.tar)`.)
 
-`bootstrap-token` mints the controller PAT that drives every later scion verb, through a throwaway
-dev-auth-on hub that is killed before any agent exists; `scion-server` then starts the real hub with
-`--dev-auth=false` (see [security model §4.2](/security-model/worker-isolation/)). `credential`
+`scion-server` starts the jail's hub with `--dev-auth=false`, in scion's proxy auth mode: it trusts
+only assertions lever signs with a key held on the host. `hub-identity` then signs in as lever's
+hub admin and controller, registers the instance's project, and has the controller mint the
+controller PAT that drives every later scion verb (see
+[security model §4.2](/security-model/worker-isolation/)). `credential`
 (present because this example sets `credential_file`) stages the manager's Claude OAuth token.
 `register-project` is the one `scion init`/`hub link` for the whole instance; the manager and every
 worker are agents inside it, and the step also strips scion's default shared scratchpad and writes

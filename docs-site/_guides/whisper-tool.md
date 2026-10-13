@@ -83,7 +83,7 @@ and reads these flags only in its command:
 | `-language` | no | A Whisper language code such as `en` or `de`. Unset: Whisper detects the language of each clip. |
 | `-vocabulary` | no | A comma list of words Whisper should expect (names, jargon), passed to it as a prompt. Each 1 to 64 bytes, no control characters; at most 800 bytes in all. |
 | `-gpu` | no | Default `true`. Write `-gpu=false` (with `=`) to pass `--no-gpu`. |
-| `-whisper-port` | yes | The host loopback port of the whisper-server child. Config load refuses a port in `manager.allow_ports`, the broker's jail and admin ports, the remote proxy and login ports, port 8446, and any tool's `backend` port. Two instances on one host need distinct ports. |
+| `-whisper-port` | yes | The host loopback port of the whisper-server child. Config load refuses a port in `manager.allow_ports`, the broker's jail and admin ports, the remote proxy's port, and any tool's `backend` port. Two instances on one host need distinct ports. |
 | `-dictate-socket` | yes | Absolute path of the dictation socket, outside the tree, at most 103 bytes. Its directory must be yours and private (`0700`); the tool creates it when it is missing. `remote.voice.socket` must be the same path. |
 | `-max-seconds` | no | The longest clip. Default 300, 1 to 600 (config load checks it). `remote.voice.max_seconds` must not be larger. |
 | `-agent-max-seconds` | no | The longest clip of the agent operation `transcribe`. Default 120 (or `-max-seconds` if that is smaller), 1 to `-max-seconds` (config load checks it). It bounds how long one agent clip can hold the GPU ahead of dictation. |

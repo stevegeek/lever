@@ -257,8 +257,8 @@ checks `x`; after a path flag such a word is also checked as that flag's value, 
 would read it. For a whisper tool, config load also requires `-tree` and refuses one that is not the
 instance's tree, checks `-max-seconds` (1 to 600) and `-agent-max-seconds` (1 to `-max-seconds`), and
 refuses a `-whisper-port` the jail may reach (`manager.allow_ports`, the broker's
-jail port, the login port) or that collides with the broker's admin port, the remote proxy's port,
-port 8446 or a tool backend. For a tts tool it requires `-tree` (the instance's), `-models`,
+jail port) or that collides with the broker's admin port, the remote proxy's port or a tool
+backend. For a tts tool it requires `-tree` (the instance's), `-models`,
 `-server` and `-speak-socket` (not a dictation socket, not another tts tool's), and checks
 `-model` and `-voice` against lever's table and `-speed`, `-threads` and `-max-chars` against
 their ranges; the tool has no port. It does not check any other

@@ -1,22 +1,18 @@
 // Command lever-tool-whisper is the host-side broker tool for speech to text.
 // It runs whisper.cpp's whisper-server as its child on host loopback
-// (internal/voice: the supervisor, the pinned model check, the adapter) and
-// offers it two ways:
+// (internal/voice) and offers it two ways:
 //
 //   - dictation for the chat page: the remote proxy posts a checked clip to
-//     the tool's Unix socket (-dictate-socket, remote.voice.socket), which
-//     only the operator's user reaches; never through the broker gateway;
-//   - the MCP operation transcribe for agents, through the broker like any
-//     first-party tool, with a capability from an obtain grant {tool:
-//     whisper, op: transcribe}: a WAV file in the tree root's
-//     .lever-files/whisper/ (/workspace/.lever-files/whisper/ in the
-//     manager's container, which only the manager can write), whoever the
-//     caller is. Without a capability, no agent can use it.
+//     the tool's Unix socket (-dictate-socket), which only the operator's
+//     user reaches, never through the broker gateway;
+//   - the MCP operation transcribe for agents, through the broker with a
+//     capability: a WAV file in the tree root's .lever-files/whisper/, which
+//     only the manager can write, whoever the caller is.
 //
 // One clip at a time reaches whisper-server; a waiting dictation clip goes
-// first in the queue, but a clip already running is never interrupted, so
-// an agent clip (at most -agent-max-seconds long) can keep dictation waiting
-// for one transcription. Audio and transcripts are never stored or logged.
+// first, but a running clip is never interrupted, so an agent clip (at most
+// -agent-max-seconds) can delay dictation by one transcription. Audio and
+// transcripts are never stored or logged.
 package main
 
 import (

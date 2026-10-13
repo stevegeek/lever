@@ -1,6 +1,6 @@
-// Command lever-tool-db is the reference first-party capability-aware tool: a
-// SQLite-backed read-only DB exposed over MCP via captool, with a hard
-// table-allowlist backstop. It is the acceptance vehicle.
+// Command lever-tool-db is the reference first-party capability-aware tool:
+// a read-only SQLite DB exposed over MCP via captool, with a hard table
+// allowlist backstop. It is the acceptance vehicle.
 package main
 
 import (
@@ -33,7 +33,6 @@ func readBackstop(ctx captool.ValidatedContext, args map[string]string) error {
 	return nil
 }
 
-// buildServer declares the read operation over store and returns the captool server.
 func buildServer(store *Store, name, backend, adminURL string) (*captool.Server, error) {
 	return captool.New(captool.Config{
 		Name: name, Version: Version, Backend: backend, AdminURL: adminURL,

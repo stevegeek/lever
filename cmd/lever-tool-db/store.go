@@ -11,10 +11,9 @@ import (
 // absent: it exists in the DB so the backstop can prove it is unreachable.
 var allowedTables = map[string]bool{"A": true, "B": true}
 
-// Store is the reference tool's SQLite-backed data store.
 type Store struct{ db *sql.DB }
 
-// OpenStore opens (pure-Go) SQLite at dsn and seeds tables A, B, C.
+// OpenStore opens SQLite at dsn and seeds tables A, B, C.
 func OpenStore(dsn string) (*Store, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -34,10 +33,8 @@ func (s *Store) seed() error {
 			return fmt.Errorf("ref: create %s: %w", tbl, err)
 		}
 	}
-	// seedData groups rows by table. Idempotency is enforced per-table: if the
-	// table already has rows we skip it entirely, so reopening the same DB never
-	// duplicates rows. Each owner value rides as a bound ? parameter (never
-	// string-concatenated into the query).
+	// A table that already has rows is skipped, so reopening never duplicates
+	// rows. Values are bound parameters.
 	seedData := []struct {
 		tbl  string
 		rows []string
@@ -63,9 +60,9 @@ func (s *Store) seed() error {
 	return nil
 }
 
-// Read returns rows of <table> whose owner == filter. table must be in the
-// allowlist (the table name cannot be a bound parameter, so the allowlist IS
-// the injection guard); filter rides as a bound ? parameter (injection-inert).
+// Read returns rows of table whose owner == filter. The table name cannot be
+// a bound parameter, so the allowlist is the injection guard; filter is
+// bound.
 func (s *Store) Read(table, filter string) ([]map[string]any, error) {
 	if !allowedTables[table] {
 		return nil, fmt.Errorf("ref: table %q not allowed", table)
@@ -87,5 +84,4 @@ func (s *Store) Read(table, filter string) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
-// Close releases the database.
 func (s *Store) Close() error { return s.db.Close() }

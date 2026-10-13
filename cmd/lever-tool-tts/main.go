@@ -1,19 +1,15 @@
-// Command lever-tool-tts is the host-side broker tool for text to speech:
-// natural read-aloud on the chat page, with a local neural voice (Kokoro, or
-// a Piper voice) run by sherpa-onnx on the operator's own host. Agent text
+// Command lever-tool-tts is the host-side broker tool for text to speech: a
+// local neural voice run by sherpa-onnx on the operator's host. Agent text
 // never goes to a cloud speech service.
 //
 // The remote proxy posts each part of a message to the tool's Unix socket
-// (-speak-socket, remote.voice.speak_socket), which only the operator's user
-// reaches; never through the broker gateway. For each part the tool runs
-// sherpa-onnx's sherpa-onnx-offline-tts once as its child (internal/voice:
-// sherpa.go, speaker.go), with the program and the pinned model checked
-// before every run, and answers the WAV. There is no long-running engine and
-// no TCP port: nothing listens but the socket and the tool's MCP backend.
+// (-speak-socket), which only the operator's user reaches, never through the
+// broker gateway. Each part runs sherpa-onnx-offline-tts once as a child,
+// with the program and the pinned model checked before every run. Nothing
+// listens but the socket and the MCP backend.
 //
-// The MCP operation voices (read-only: the model and its voices) is what
-// the broker registers; it gives an agent nothing to speak with. Text and
-// audio are never stored or logged.
+// The MCP operation voices (read-only) is what the broker registers; it gives
+// an agent nothing to speak with. Text and audio are never stored or logged.
 package main
 
 import (
@@ -45,7 +41,6 @@ type opts struct {
 	threads, maxChars                                         int
 }
 
-// DefaultThreads is -threads when unset.
 const DefaultThreads = 2
 
 func parseFlags(args []string) (opts, error) {

@@ -609,16 +609,16 @@ fails or an agent received a message you do not recognise.
 
 ## The remote PAT
 
-`apply` mints a Scion hub token scoped to exactly `agent:read`, `agent:list`, `project:read`,
-`agent:attach`, `agent:message`, persisted host-side only, `.lever-state/remote.pat`, mode `0600`,
-and **different** from the controller PAT the broker itself uses.
+`apply` mints a Scion hub token scoped to exactly `agent:read`, `agent:list` and `project:read`,
+persisted host-side only, `.lever-state/remote.pat`, mode `0600`, and **different** from the
+controller PAT the broker itself uses. It reads and nothing else: it is the controller's token, so
+anything sent with it would carry lever's sender label.
 
 **The proxy uses it for one read.** Every request from the browser rides your hub session (see
 [how the browser is logged in](#how-the-browser-is-logged-in)). The proxy sends the remote PAT only
 on its own read-only `GET`s of the project's agent list, which the [chat page](#the-chat-page)'s
 agent list and the [contact fence](#contacts-chat-only-logins)'s name resolution share. The token
-never enters the jail. Its scope set is also what the [`lever-remote` role](#the-remote-web-role)
-is derived from.
+never enters the jail.
 
 **Minted by the controller, while agents run.** The token is minted by lever's controller hub user
 (`lever-controller@lever.local`), the same identity that mints the controller PAT, with a
@@ -642,9 +642,9 @@ lever apply
 
 The whole web UI, API included, runs as the **hub user** the sign-in created (see
 [who the hub thinks you are](#how-the-browser-is-logged-in)), and scion gives a new user no role on
-any project. So `apply` also creates a custom project role, `lever-remote`, with the same surface as
-the remote PAT (`agent.read`, `agent.list`, `project.read`, `agent.attach`, `agent.message`) plus
-`project.list`, which only the web UI's project list needs (and `agent.lifecycle`, the start, stop
+any project. So `apply` also creates a custom project role, `lever-remote`, with `agent.read`,
+`agent.list`, `project.read`, `agent.attach`, `agent.message` and `project.list`, which only the web
+UI's project list needs (and `agent.lifecycle`, the start, stop
 and suspend controls, on a hub that has that permission), and binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
 unset, it binds the placeholder `lever-operator@lever.local`.
 
@@ -665,9 +665,9 @@ user holds the intersection of the two. The ceiling is read from the hub on ever
 
 **Bound before the first sign-in, while agents run.** Every `lever apply` and `lever reload` runs a
 `hub-identity` step against the live hub, as lever's own admin identity (`lever-admin@lever.local`,
-asserted with the host key; it holds no stored credential). For every configured login (each
-`allowed_users` entry, whether remote access is on or off, and the placeholder operator only when
-remote access is on with no `allowed_users`) it:
+asserted with the host key; it holds no stored credential). While remote access is on, for every
+configured login (each `allowed_users` entry, or the placeholder operator with no `allowed_users`)
+it:
 
 1. invites the login's hub user if the hub has none (scion's `invite_only` admits only invited and
    active users);
@@ -687,12 +687,14 @@ ceiling.
 (the admin, the controller, scion's dev user), or is not the user ID lever recorded for that login
 before, apply warns and leaves it unbound, and the proxy refuses that login (`hub-session-refused`);
 every other login keeps working. A reserved address in `allowed_users` is refused at config load
-while remote access is on, and by apply otherwise.
+while remote access is on; with it off no login is bound at all.
 
 **Removing a login suspends its hub user.** When a login leaves the config, the next apply suspends
 its hub user first, then drops its role bindings (the ceiling stays), then restarts the proxy
 without it. The hub refuses a suspended user's web session at once, and its API access within the
 hub's 60-second user cache. Adding the login back reactivates the same hub user and binds it again.
+Turning remote access off does the same to every login (none can sign in then), and turning it back
+on reactivates and binds them before the proxy starts.
 
 `lever doctor`'s `remote web role` row reads the hub, not the record: each configured login's hub
 user is the one lever recorded, bound to its tier's role, capped and not suspended, and each removed

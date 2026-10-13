@@ -21,7 +21,8 @@ version bump moves the block under the new version heading.
 - **Two lever hub users (lever#73).** `lever-admin@lever.local` is the hub's only admin, through
   `admin_emails`, and holds no credential at rest. `lever-controller@lever.local` is an ordinary
   member that owns the project, holds `lever-controller` and mints the controller PAT (and the
-  remote PAT, which the proxy still uses for its read-only agent list). Every other admin is
+  remote PAT, now read-only: `agent:read`, `agent:list`, `project:read`, all the proxy needs for its
+  agent list). Every other admin is
   demoted, by role and by super-admin binding. `.lever-state/hub-identity.json` records the users,
   the project and the key fingerprint.
 - **Contacts and operators are bound before their first sign-in (lever#20).** `lever apply` and
@@ -40,8 +41,7 @@ version bump moves the block under the new version heading.
   assets change.
 - **Reserved hub addresses.** `remote.allowed_users` may not name `lever-admin@lever.local`,
   `lever-controller@lever.local` or any `@localhost` address (scion's dev user is
-  `<os-user>@localhost`); config load refuses it while remote access is on, and apply refuses that
-  login otherwise.
+  `<os-user>@localhost`); config load refuses it while remote access is on.
 - **New doctor rows (lever#73).** *hub authentication* tests the hub by behaviour: an assertion
   from another key or for another instance gets 401, `lever-admin` is admin, no OAuth login is
   offered, the running hub carries lever's auth env and no dev auth, and no dev token lies in the

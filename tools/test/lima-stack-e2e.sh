@@ -261,6 +261,7 @@ check "the manager runs after the resume" running
 checkx "the manager still lists the worker" 'mgr agent list | grep -q worker'
 checkx "lever msg send after the resume" '(cd "$INST" && "$LEVER" msg send --to "$NAME" "stack e2e after resume" 2>&1) | grep -q Sent'
 checkx "the apply skipped no dev-auth window" '! grep -q "skipped the dev-auth window" "$WORK/up.log"'
+checkx "the broker link survived the restart (no second provider repair)" '! grep -q "linking it in the dev-auth window" "$WORK/up.log"'
 doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
 check "doctor: remote web role bound after the sign-ins" row_ok "remote web role"

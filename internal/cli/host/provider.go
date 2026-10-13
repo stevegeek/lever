@@ -38,7 +38,8 @@ type providerRepair struct {
 // none. Here, after the live hub registered its broker, a project without one
 // gets a second window, and the hub starts again.
 //
-// A project the hub does not list yet is left to register-project.
+// A project the hub does not list is not repaired here: the settle steps
+// after it fail on the same name.
 func ensureProjectProvider(ctx context.Context, r providerRepair) (linked bool, err error) {
 	n, err := projectProviderCount(ctx, r.live, r.project)
 	if err != nil || n != 0 {

@@ -125,7 +125,8 @@ type run struct {
 	// manager.read_only mounts; any other is probed (warnManagerTreeMounts).
 	managerCreated bool
 	// brokerOnline records that the scion-server step already saw the runtime
-	// broker online, so start-manager need not wait for it again.
+	// broker online, so start-manager need not wait for it again. A step that
+	// starts the hub again clears it.
 	brokerOnline bool
 	// subject prefixes the resume checks' messages; empty means "start-manager".
 	subject string
@@ -202,8 +203,8 @@ type Deps struct {
 	// EnsureProjectProvider runs after the hub's runtime broker registered:
 	// when the instance's hub project (by name) lists no runtime broker, it
 	// links the jail's broker through the dev-auth window and starts the hub
-	// again, or fails with the repair. A project the hub does not list yet is
-	// left to register-project. linked reports that the window ran.
+	// again, or fails with the repair. A project the hub does not list is
+	// left alone. linked reports that the window ran.
 	EnsureProjectProvider func(ctx context.Context, projectName string) (linked bool, err error)
 	// WaitBrokerReady blocks until the scion runtime broker is registered and
 	// online. The workstation daemon brings up its Hub API and its runtime broker
@@ -883,16 +884,18 @@ func (r *run) hubLink(ctx context.Context, jp string) error {
 
 // settleProject is the hub-side project state both register paths converge on:
 // a runtime broker to start agents on, no cross-agent shared dir, and a role
-// ceiling. Both must hold whether the
-// registration was just made or found sound.
+// ceiling. All three must hold whether the registration was just made or found
+// sound.
 func (r *run) settleProject(ctx context.Context, jp string) error {
 	projectName := path.Base(jp)
 	linked, err := r.d.EnsureProjectProvider(ctx, projectName)
 	if err != nil {
 		return err
 	}
-	// The repair ran a hub link against the window's throwaway hub.
+	// The repair ran a hub link against the window's throwaway hub, and started
+	// the hub again: start-manager must not trust scion-server's broker wait.
 	if linked {
+		r.brokerOnline = false
 		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
 		}
@@ -953,8 +956,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	// Wait for runtime-broker readiness before any create or resume: the daemon
 	// registers its broker asynchronously after its Hub API is up. Fail-soft; the
 	// broker-unavailable retry backstops it. Skipped when the scion-server step of
-	// this run saw the broker online, since nothing between the two restarts the
-	// hub.
+	// this run saw the broker online and no later step started the hub again.
 	if !r.brokerOnline {
 		if _, err := r.d.WaitBrokerReady(ctx, jp); err != nil {
 			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)

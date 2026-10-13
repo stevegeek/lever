@@ -2828,7 +2828,7 @@ func TestRegisterLinksAProviderBeforeSettling(t *testing.T) {
 			}
 			f := scionOKRunner()
 			app := helloApp(tree)
-			repairs, stripped := 0, 0
+			repairs, stripped, waits := 0, 0, 0
 			var asked []string
 			alr := &agentLifecycleRunner{FakeRunner: f, slug: app.Name}
 			deps := Deps{
@@ -2841,6 +2841,7 @@ func TestRegisterLinksAProviderBeforeSettling(t *testing.T) {
 					return tc.linked, tc.err
 				},
 				StripProjectSharedDirs: func(context.Context, string) error { stripped++; return nil },
+				WaitBrokerReady:        func(context.Context, string) (bool, error) { waits++; return true, nil },
 			}
 			err := runApply(app, deps)
 			if (err != nil) != (tc.err != nil) {
@@ -2851,6 +2852,10 @@ func TestRegisterLinksAProviderBeforeSettling(t *testing.T) {
 			}
 			if repairs != tc.repairs {
 				t.Fatalf("RepairScionHubEndpoint calls = %d, want %d", repairs, tc.repairs)
+			}
+			// A window restarted the hub: start-manager waits for its broker again.
+			if tc.err == nil && waits != tc.repairs {
+				t.Fatalf("WaitBrokerReady calls = %d, want %d", waits, tc.repairs)
 			}
 			if tc.err != nil && (stripped != 0 || alr.startCalls+alr.resumeCalls != 0) {
 				t.Fatalf("after a failed provider repair: strip=%d start=%d resume=%d", stripped, alr.startCalls, alr.resumeCalls)

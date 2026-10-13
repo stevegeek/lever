@@ -179,3 +179,10 @@ test-apikey-e2e: install lever-image-bins
 test-lima-e2e: install
 	bash tools/test/lima-e2e.sh
 
+# Live e2e of the hub's proxy auth on a real Lima VM: migrates an instance an
+# older lever brought up, binds and removes a contact while agents run,
+# rotates the controller PAT, then brings a fresh instance up. Needs
+# IMAGE_TAR (a docker archive of the agent image); see the script's header.
+.PHONY: test-lima-hubauth-e2e
+test-lima-hubauth-e2e: install
+	bash tools/test/lima-hubauth-e2e.sh

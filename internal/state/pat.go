@@ -15,7 +15,7 @@ import (
 // the only way apply or doctor can judge the token: the scopes lever asked
 // for (to detect drift after an upgrade), the scopes granted
 // (informational), mint and expiry times (zero expiry when scion printed
-// none), and the hub's id so the next mint window can revoke it.
+// none), and the hub's id so the next mint can revoke it.
 type PATRecord struct {
 	ID        string    `json:"id,omitempty"`
 	Requested []string  `json:"requested_scopes"`

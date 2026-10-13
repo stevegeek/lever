@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// TestTypesKeepTheirWireShape pins every wire type to the JSON each side used
-// to build by hand (maps, anonymous structs, per-package copies) before the
-// types were declared here. A changed tag would break a peer binary that was
-// built before the change, so the literal shapes are the contract.
+// TestTypesKeepTheirWireShape pins every wire type to its literal JSON shape.
+// A changed tag would break a peer binary built before the change.
 func TestTypesKeepTheirWireShape(t *testing.T) {
 	cases := []struct {
 		name string

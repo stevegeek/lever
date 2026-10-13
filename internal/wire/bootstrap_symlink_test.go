@@ -7,10 +7,8 @@ import (
 	"testing"
 )
 
-// The staging target lives inside the agent's own read-write mount, and the
-// host process that writes it runs as the operator. So an agent that replaces
-// its `.lever` directory with a symlink is asking the host to write, and chmod
-// 0600, wherever the link points. Staging must refuse rather than follow.
+// The staging target is in the agent's read-write mount and the host writes it
+// as the operator, so a symlinked .lever must be refused, not followed.
 
 func TestStageRefusesASymlinkedStagingDir(t *testing.T) {
 	tree := t.TempDir()
@@ -36,8 +34,8 @@ func TestStageRefusesASymlinkedStagingDir(t *testing.T) {
 	}
 }
 
-// The same trick one level down: the worker's own subdirectory is agent-writable
-// too, so `workers/scratch/.lever` may be a link even when the tree root is not.
+// The worker's own subdirectory is agent-writable too, so its .lever may be a
+// link even when the tree root is not.
 func TestStageRefusesASymlinkedNestedStagingDir(t *testing.T) {
 	tree := t.TempDir()
 	outside := t.TempDir()
@@ -111,8 +109,7 @@ func TestStageWritesConfinedAndPrivate(t *testing.T) {
 	}
 }
 
-// A re-stage over an existing file must reassert 0600 — os.WriteFile applies its
-// perm only when it CREATES the file, and every resume re-stages a fresh ticket.
+// A re-stage must reassert 0600: os.WriteFile applies perm only on create.
 func TestStageReassertsModeOnRestage(t *testing.T) {
 	tree := t.TempDir()
 	if err := Stage(tree, ".lever", Bootstrap{Ticket: "one"}); err != nil {

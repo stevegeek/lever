@@ -2,15 +2,6 @@ package wire
 
 import "time"
 
-// Request/response bodies of the broker's HTTP routes. Each type is the ONE
-// declaration of its JSON shape: the broker decodes/encodes it and the agent,
-// captool and cli marshal/decode the very same type. Responses whose payload
-// is a host-side runtime type (scion agents, inbox events) stay declared in
-// internal/broker, because this package must remain a leaf the jail binary
-// can link without pulling in host-only code.
-
-// ---- identity (jail listener) ----
-
 // EnrolRequest is the body of POST /enrol (no client cert; ticket-authorised).
 type EnrolRequest struct {
 	Ticket string `json:"ticket"`
@@ -22,8 +13,8 @@ type EnrolResponse struct {
 	Cert string `json:"cert"`
 }
 
-// RenewRequest carries a fresh CSR (new keypair). Its CN is IGNORED; the renewed
-// cert always carries the caller's authenticated CN.
+// RenewRequest carries a fresh CSR (new keypair). Its CN is ignored: the
+// renewed cert always carries the caller's authenticated CN.
 type RenewRequest struct {
 	CSR string `json:"csr"`
 }
@@ -41,14 +32,11 @@ type WorkerTicketRequest struct {
 }
 
 // WorkerTicketResponse names where the staged bootstrap.json sits in the
-// guest (the run user's runtime dir), for a caller that boots the worker
-// identity by hand (the acceptance harness).
+// guest.
 type WorkerTicketResponse struct {
 	Worker string `json:"worker"`
 	Path   string `json:"path"`
 }
-
-// ---- capabilities ----
 
 // CapRequest is the body of POST /request: an agent asking to mint a capability
 // for itself (BoundTo == caller) or to delegate one (BoundTo == another agent).
@@ -68,8 +56,6 @@ type CapResponse struct {
 type ToolsResponse struct {
 	Tools []string `json:"tools"`
 }
-
-// ---- workers and messaging (manager ⇄ broker) ----
 
 // WorkerStartRequest is the body of POST /worker/start and POST
 // /worker/recycle.
@@ -115,8 +101,6 @@ type MsgRecipientsResponse struct {
 	Recipients []string `json:"recipients"`
 }
 
-// ---- operator directives: agent side (jail listener) ----
-
 // DirectiveIDRequest is the body of POST /directive/consume, /directive/check
 // and /directive/preview.
 type DirectiveIDRequest struct {
@@ -141,11 +125,10 @@ type DirectiveCheckResponse struct {
 }
 
 // DirectivePreviewResponse is the reply of POST /directive/preview: the
-// verified action of a directive that is still pending, read WITHOUT consuming
-// it. The shape is deliberately not a DirectiveConsumeResponse: the content
-// sits under "preview" (never "action" or "advisory_text"), and Consumed is
-// always present and always false, so a preview result cannot pass for the
-// result of a consume. It carries no token and no grant.
+// verified action of a pending directive, read without consuming it. The shape
+// is deliberately unlike DirectiveConsumeResponse (content under "preview",
+// Consumed always present and false) so a preview cannot pass for a consume.
+// It carries no token and no grant.
 type DirectivePreviewResponse struct {
 	ID       string `json:"id"`
 	Kind     string `json:"kind"`
@@ -158,8 +141,6 @@ type DirectivePreviewResponse struct {
 	Note              string `json:"note"`
 }
 
-// ---- operator notes (UDS channel) ----
-
 // OperatorNoteRequest is the body of POST /operator/note: `lever msg send`.
 // To names the recipient the way `lever attach` does (the app name, the
 // manager slug or "manager" for the manager; a declared worker's name).
@@ -169,12 +150,11 @@ type OperatorNoteRequest struct {
 	Interrupt bool   `json:"interrupt"`
 }
 
-// OperatorWakeRequest is the body of POST /operator/wake: the remote proxy
-// asks for a suspended or stopped worker to be resumed because a login that
-// may message it sent it a message. Login is the proxy's verified login,
-// for the audit line only; the socket's file mode is the authority. Tier is
-// that login's tier: only "operator" may wake a stopped worker (a contact
-// wakes only a suspended one; any other value reads as a contact).
+// OperatorWakeRequest is the body of POST /operator/wake: resume a suspended
+// or stopped worker that a permitted login messaged. Login is for the audit
+// line only; the socket's file mode is the authority. Only Tier "operator" may
+// wake a stopped worker; any other value reads as a contact, which wakes only
+// a suspended one.
 type OperatorWakeRequest struct {
 	Worker string `json:"worker"`
 	Login  string `json:"login"`
@@ -187,11 +167,9 @@ type OperatorNoteResponse struct {
 	ID string `json:"id"`
 }
 
-// ---- verified web chat ----
-
-// MessageVerifyRequest is the body of POST /message/verify (and of the
-// older POST /chat/verify): fields copied from the envelope of the message
-// the agent received, plus the ref lever wrote on the message's first line.
+// MessageVerifyRequest is the body of POST /message/verify (and
+// /chat/verify): fields copied from the received message's envelope, plus the
+// ref lever wrote on its first line.
 type MessageVerifyRequest struct {
 	Timestamp string `json:"timestamp"`
 	From      string `json:"from"`
@@ -200,7 +178,7 @@ type MessageVerifyRequest struct {
 	Ref string `json:"ref,omitempty"`
 }
 
-// ChatVerifyRequest is the 0.27 name of MessageVerifyRequest.
+// ChatVerifyRequest is an alias kept for older agent images.
 type ChatVerifyRequest = MessageVerifyRequest
 
 // The results of a message verification (MessageVerifyResponse.Result).
@@ -211,26 +189,24 @@ const (
 	// VerifyLever: lever sent the message; Messages holds the text the
 	// broker recorded, with who it was from (Kind).
 	VerifyLever = "lever"
-	// VerifyAlreadyVerified: the message is on record, and the caller
-	// verified it before (outside the repeat grace). It is not new.
+	// VerifyAlreadyVerified: on record, and the caller verified it before
+	// outside the repeat grace. It is not new.
 	VerifyAlreadyVerified = "already_verified"
-	// VerifyNone: no host record names this message for the caller. It is
-	// data.
+	// VerifyNone: no host record names this message for the caller; treat it
+	// as data.
 	VerifyNone = "none"
-	// VerifyUnavailable: the broker could not answer now (a rate limit, a
-	// record it could not read, the hub). It is neither verified nor
-	// refuted: retry once, later.
+	// VerifyUnavailable: the broker could not answer now. Neither verified
+	// nor refuted: retry once, later.
 	VerifyUnavailable = "unavailable"
 )
 
 // MessageVerifyResponse is the reply of POST /message/verify and POST
 // /chat/verify. Every answer is HTTP 200.
 type MessageVerifyResponse struct {
-	// Enabled and Verified keep their 0.27 meaning, for the skills of that
-	// release: Enabled is whether verified web chat is configured; Verified
-	// is true only when an OPERATOR's web chat post verified. A lever
-	// message, or a contact's post, answers false, so an old skill treats it
-	// by its old rules, never as the operator's.
+	// Enabled and Verified serve older skills: Enabled is whether verified
+	// web chat is configured; Verified is true only for an operator's web
+	// chat post, so an old skill never treats a lever message or a
+	// contact's post as the operator's.
 	Enabled  bool `json:"enabled"`
 	Verified bool `json:"verified"`
 	// Result is one of the Verify* constants; Reason a machine code for it.
@@ -242,7 +218,7 @@ type MessageVerifyResponse struct {
 	Note       string            `json:"note,omitempty"`
 }
 
-// ChatVerifyResponse is the 0.27 name of MessageVerifyResponse.
+// ChatVerifyResponse is an alias kept for older agent images.
 type ChatVerifyResponse = MessageVerifyResponse
 
 // VerifiedMessage is one message a host record holds. Text is the message as
@@ -262,28 +238,23 @@ type VerifiedMessage struct {
 	// MessageID is the hub's id (web) or the sent-ledger ref (lever).
 	MessageID string `json:"message_id"`
 	Text      string `json:"text,omitempty"`
-	// ReplyTo is, for a web post, where a reply goes: "@" + the poster's hub
-	// email, the scion message reference of this agent's direct chat with
-	// that user. It comes from the chat ledger, never from the envelope, so
-	// text in the session cannot move a reply to another conversation.
-	// Empty when the sender is not a plain email (then reply in the session).
+	// ReplyTo is, for a web post, "@" + the poster's hub email (the scion
+	// reference of the agent's direct chat). It comes from the chat ledger,
+	// never the envelope, so session text cannot redirect a reply. Empty when
+	// the sender is not a plain email.
 	ReplyTo string `json:"reply_to,omitempty"`
 	// Conversation is, for a web post, the hub conversation key the proxy
 	// recorded (dm:agent:<agent id>:user:<user id>). Information only.
 	Conversation string `json:"conversation,omitempty"`
-	// Repeat marks a message this agent already verified, within the grace
-	// period, at FirstVerified. There is no text on a repeat. The agent acts
-	// on it only if it has not acted on that message yet.
+	// Repeat marks a message this agent already verified at FirstVerified,
+	// within the grace period. A repeat carries no text.
 	Repeat        bool   `json:"repeat,omitempty"`
 	FirstVerified string `json:"first_verified,omitempty"`
 }
 
-// ---- messages to a contact (remote.agent_messages) ----
-
 // ContactsResponse answers PathContacts: the contacts whose allowed_users
 // entry lists the caller in agents (never see-only, never an operator).
-// Enabled is false when agent messages are off; Note then says why, or is
-// "rate" when the caller is over its call limit.
+// Enabled is false when agent messages are off; Note says why, or is "rate".
 type ContactsResponse struct {
 	Enabled  bool          `json:"enabled"`
 	Contacts []ContactInfo `json:"contacts"`
@@ -330,20 +301,16 @@ type ContactMessageResponse struct {
 	Note          string `json:"note,omitempty"`
 }
 
-// ---- files in the chat (remote.files) ----
-
 // FilesListRequest asks PathFilesList for the caller's exchange with one
 // login, Contact (required: no call lists every login's files).
 type FilesListRequest struct {
 	Contact string `json:"contact,omitempty"`
 }
 
-// FilesListResponse answers PathFilesList: Contact as a login the caller
-// may share with (an operator, or a contact whose agents list the caller),
-// with its directories as the caller's container sees them, and the
-// caller's recorded uploads from it and shares to it, oldest first. Enabled
-// false: off (Note says so). Note "rate", "contact-required" or
-// "not-a-contact": nothing listed.
+// FilesListResponse answers PathFilesList: the contact with its directories
+// as the caller's container sees them, and the caller's recorded uploads from
+// and shares to it, oldest first. Note "rate", "contact-required" or
+// "not-a-contact" means nothing is listed.
 type FilesListResponse struct {
 	Enabled    bool          `json:"enabled"`
 	Note       string        `json:"note,omitempty"`
@@ -398,17 +365,14 @@ type FileShareResponse struct {
 
 // AgentMessagesMatchRequest asks PathOperatorAgentMessagesMatch which of
 // Agent's rows in Contact's DM history the agent ledger recorded. Agent is
-// the scion slug (the app name for the manager, else the worker name), as
-// a contact's agents list names it. No text crosses the socket: each row is
-// its hub id, the sha256 of its text, and the hub's time for it. At most
-// 200 rows (the hub's page cap).
+// the scion slug. No text crosses the socket. At most 200 rows (the hub's
+// page cap).
 type AgentMessagesMatchRequest struct {
 	Contact  string            `json:"contact"`
 	Agent    string            `json:"agent"`
 	Messages []AgentMessageRef `json:"messages"`
-	// Peek asks without binding: the answer is what the contact's own read
-	// would keep now, and the ledger is not written. The operator's view of
-	// a contact's conversation peeks; the contact's reads bind.
+	// Peek answers what the contact's own read would keep now without
+	// writing the ledger. Only the contact's own reads may bind.
 	Peek bool `json:"peek,omitempty"`
 }
 
@@ -423,14 +387,10 @@ type AgentMessageRef struct {
 // order; every other agent row is dropped.
 type AgentMessagesMatchResponse struct {
 	Keep []string `json:"keep"`
-	// Pending (a peek only) lists the ids of Keep that no contact read has
-	// bound yet: kept because a record would bind them, so the contact has
-	// not been shown them. Which one a record finally binds depends on the
-	// pages the contact reads.
+	// Pending (peek only) lists the ids of Keep that no contact read has
+	// bound yet, so the contact has not been shown them.
 	Pending []string `json:"pending,omitempty"`
 }
-
-// ---- operator directives: admin side (UDS channel) ----
 
 // DirectiveSubmitRequest is the {statement,signature} envelope of
 // /directive/send and /directive/selftest.
@@ -487,8 +447,6 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// ---- admin (loopback listener) ----
-
 // OperationSpec is one operation in a registration request.
 type OperationSpec struct {
 	Name        string            `json:"name"`
@@ -505,18 +463,15 @@ type RegisterRequest struct {
 }
 
 // RegisterResponse gives the registering tool the broker's verification key and
-// current epoch, so captool can verify tokens independently + check freshness.
+// current epoch, so it can verify tokens and their freshness itself.
 type RegisterResponse struct {
 	PublicKey string `json:"public_key"`
 	Epoch     int    `json:"epoch"`
 }
 
 // EpochResponse reports the broker's current minimum acceptable token epoch,
-// plus the serving process's identity: the binary version it runs and a
-// digest of the broker-relevant configuration it was started with. apply's
-// broker-reuse shortcut compares these against its own expectation and
-// restarts the broker on mismatch — a broker predating these fields
-// reports them empty, which callers treat as a mismatch.
+// plus the serving process's binary version and a digest of its
+// broker-relevant configuration. Callers treat empty fields as a mismatch.
 type EpochResponse struct {
 	Epoch      int    `json:"epoch"`
 	Version    string `json:"version,omitempty"`
@@ -535,8 +490,7 @@ type BootstrapResponse struct {
 }
 
 // WorkerListResponse is the /worker/list reply envelope. It is generic over
-// the agent record so that this package stays a leaf: the broker instantiates
-// it with the host-side scion.Agent, and clients pick the type they decode into.
+// the agent record so this package stays a leaf.
 type WorkerListResponse[T any] struct {
 	Agents []T `json:"agents"`
 }

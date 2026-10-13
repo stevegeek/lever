@@ -1,9 +1,7 @@
-// Package wire holds the on-the-wire/on-disk envelope types shared across the
-// host, the broker and the in-container agent — the ONE place their JSON
-// contract is declared, so a tag can never drift between a producer and a
-// consumer that live in different packages. It is a leaf: it imports nothing
-// internal, so any package (including internal/agent, whose tests import
-// internal/broker) can depend on it without an import cycle.
+// Package wire holds the on-the-wire and on-disk envelope types shared by the
+// host, the broker and the in-container agent, so a JSON tag cannot drift
+// between producer and consumer. It is a leaf: it must import nothing
+// internal, so any package can depend on it without an import cycle.
 package wire
 
 import (
@@ -13,43 +11,33 @@ import (
 	"path/filepath"
 )
 
-// Bootstrap is the enrolment envelope the host/manager (for the manager) or the
-// broker (for a worker, and on auto-re-enrol) deposits as bootstrap.json for an
-// agent's lever-agent boot to consume. Previously this 4-field struct was
-// declared three times (agent, apply, broker) with hand-maintained,
-// "must-stay-identical" json tags; this is now its single declaration.
+// Bootstrap is the enrolment envelope the host (for the manager) or the broker
+// (for a worker, and on auto-re-enrol) deposits as bootstrap.json for
+// lever-agent boot to consume.
 type Bootstrap struct {
 	Ticket    string `json:"ticket"`
 	BrokerCA  string `json:"broker_ca"`
 	BrokerURL string `json:"broker_url"`
 	AgentCN   string `json:"agent_cn"`
-	// Claude is the agent's Claude Code configuration from the host config
-	// (manager.claude_settings / after_compact_note, or the worker's own),
+	// Claude is the agent's Claude Code configuration from the host config,
 	// applied by lever-agent boot at every start. nil when none is
 	// configured.
 	Claude *Claude `json:"claude,omitempty"`
 }
 
-// Stage writes b as <root>/<rel>/bootstrap.json — the deposit LoadBootstrap
-// reads by convention — creating the directory 0700 and the file 0600. This is
-// the single staging path for the envelope, shared by the host (manager
-// enrolment) and the broker (worker dispatch + auto-re-enrol, which re-stages a
-// fresh ticket over the existing file on every resume).
+// Stage writes b as <root>/<rel>/bootstrap.json (directory 0700, file 0600).
+// It may overwrite an existing file on re-stage.
 //
-// EVERYTHING under root is agent-writable, and the process calling this is the
-// HOST, running as the operator. So rel names a path an adversary controls: an
-// agent that replaces its `.lever` with a symlink is asking the host to write,
-// and chmod 0600, wherever the link points — the instance root's lever.yaml,
-// the broker's revocation state, the controller PAT. root is the one component
-// the agent cannot replace (it is the mount point), so all work happens through
-// an os.Root confined to it, which refuses to traverse out by symlink or by
-// `..`. A symlink at the staging dir or at bootstrap.json is refused outright,
-// even one that stays inside the tree, because staging one agent's ticket into
-// another agent's directory is its own defect.
+// Everything under root is agent-writable, and the caller is the host running
+// as the operator, so rel is adversary-controlled: a symlinked .lever would
+// make the host write and chmod wherever the link points. root is the mount
+// point the agent cannot replace, so all work goes through an os.Root confined
+// to it. A symlink at the staging dir or at bootstrap.json is refused even when
+// it stays inside the tree, since it could stage one agent's ticket into
+// another agent's directory.
 //
-// The explicit Chmod after WriteFile is load-bearing on a re-stage: WriteFile
-// applies its perm only when it CREATES the file, so overwriting an existing
-// bootstrap.json would otherwise keep whatever mode it already had.
+// The Chmod after WriteFile is needed on re-stage: WriteFile applies perm only
+// when it creates the file.
 func Stage(root, rel string, b Bootstrap) error {
 	r, err := os.OpenRoot(root)
 	if err != nil {
@@ -82,9 +70,8 @@ func Stage(root, rel string, b Bootstrap) error {
 	return nil
 }
 
-// refuseSymlink fails when name exists inside r and is a symbolic link. An
-// absent name is fine (Stage creates it); any other stat error is left to the
-// operation that follows, which reports it with better context.
+// refuseSymlink fails when name is a symbolic link. Stat errors are ignored:
+// the operation that follows reports them with better context.
 func refuseSymlink(r *os.Root, name string) error {
 	fi, err := r.Lstat(name)
 	if err != nil {

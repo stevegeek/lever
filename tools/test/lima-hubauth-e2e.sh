@@ -6,7 +6,10 @@
 # this lever while the manager and a worker run, adds and removes a contact
 # while they run, removes one while the manager loops that rename with a token
 # due, forces a controller PAT rotation, checks what an agent can
-# and cannot do, and finally brings a fresh instance up with this lever.
+# and cannot do, and finally brings a fresh instance up with this lever. The
+# migration also moves the jail from OLD_SCION_VERSION to SCION_VERSION, as an
+# upgrade from the older release does; after it, and on the fresh instance,
+# the manager starts a worker and the experiment fence is checked.
 #
 # Needs: Lima >= 2.0, Go, an agent image archive (IMAGE_TAR: a docker archive
 # holding $IMAGE:<arch>, e.g. from `podman save` of `make lever-image-slim`'s
@@ -16,7 +19,8 @@
 #
 # Env: IMAGE_TAR (required), IMAGE (default scionlocal/lever-claude-slim),
 # OLD_LEVER | OLD_REF, LEVER (default ~/.local/bin/lever), SCION_VERSION
-# (default e0f61f2d), NAME, KEEP=1.
+# (default: the release pin), OLD_SCION_VERSION (the older lever's pin,
+# default e0f61f2d), NAME, KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -25,6 +29,9 @@ VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 IMAGE="${IMAGE:-scionlocal/lever-claude-slim}"
 : "${IMAGE_TAR:?set IMAGE_TAR to a docker archive holding $IMAGE:<arch>}"
+SCION_VERSION="${SCION_VERSION:-$(sed -n 's/^const ReleasePin = "\(.*\)"/\1/p' "$REPO_ROOT/internal/provision/scionbin/release.go")}"
+OLD_SCION_VERSION="${OLD_SCION_VERSION:-e0f61f2d}"
+CUR_SCION="$OLD_SCION_VERSION"
 
 ts() { date -u +%H:%M:%SZ; }
 fail=0
@@ -72,8 +79,8 @@ mkdir -p "$WORK/bin"
 (cd "$REPO_ROOT" && GOOS=linux GOARCH=$ARCH CGO_ENABLED=0 go build -o "$WORK/bin/lever-agent" ./cmd/lever-agent) || exit 1
 export LEVER_AGENT_BIN="$WORK/bin/lever-agent"
 
-mkdir -p "$INST/workspace" "$INST/workers/worker"
-touch "$INST/workspace/.gitkeep" "$INST/workers/worker/.gitkeep"
+mkdir -p "$INST/workspace" "$INST/workers/worker" "$INST/workers/worker2"
+touch "$INST/workspace/.gitkeep" "$INST/workers/worker/.gitkeep" "$INST/workers/worker2/.gitkeep"
 echo "Manager for the hub auth e2e. Do nothing unless asked." > "$INST/manager.md"
 printf 'sk-ant-FAKE-hubauth-%s' "$$" > "$INST/console-api-key"; chmod 600 "$INST/console-api-key"
 ln -f "$IMAGE_TAR" "$INST/img.tar" 2>/dev/null || cp "$IMAGE_TAR" "$INST/img.tar"
@@ -81,7 +88,7 @@ write_config() { # $1: extra allowed_users lines
 	cat > "$INST/lever.yaml" <<EOF
 name: $NAME
 scion:
-  version: ${SCION_VERSION:-e0f61f2d}
+  version: $CUR_SCION
 backend: lima
 cpus: 4
 memory: 6GiB
@@ -95,6 +102,9 @@ manager:
 workers:
   - name: worker
     dir: workers/worker
+    obtain: []
+  - name: worker2
+    dir: workers/worker2
     obtain: []
 broker:
   jail_port: $JP
@@ -125,8 +135,37 @@ proxy() { # $1 login, rest curl args: a request through the host proxy as that l
 }
 running() { X ps --format '{{.Names}}' | grep -qx "lever--$NAME"; }
 mgrlist() { X exec "lever--$NAME" lever-manager agent list 2>&1 | grep -q worker; }
+# hubcode <path>: a hub GET's status with the controller PAT (over stdin).
+hubcode() { G sh -c 'read -r t; curl -sS -m 20 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $t" "http://127.0.0.1:8080$1"' _ "$1" < "$INST/.lever-state/controller.pat"; }
+# fenced <login> <curl args...>: a 403 from the proxy's own route fence.
+fenced() {
+	local login=$1 out; shift
+	out=$(proxy "$login" -w '\n%{http_code}' "$@")
+	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not forward this route"* ]]
+}
+# fence_checks <label>: scion's conduit and artifacts are off at the hub, lever
+# recorded the pin, and the proxy refuses them and an experiments write.
+fence_checks() {
+	local p code
+	for p in /api/v1/conduit/grant-keys /api/v1/artifacts; do
+		code=$(hubcode "$p")
+		checkx "$1: hub answers $p with 404 ($code)" '[ "$code" = 404 ]'
+	done
+	check "$1: lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
+	checkx "$1: proxy refuses conduit" 'fenced operator@example.com "http://127.0.0.1:$RP/api/v1/conduit/grant-keys"'
+	checkx "$1: proxy refuses artifacts" 'fenced operator@example.com "http://127.0.0.1:$RP/api/v1/artifacts"'
+	checkx "$1: proxy refuses an experiments write" \
+		'fenced operator@example.com -X PUT -H "Content-Type: application/json" --data "{\"overrides\":{\"hub.conduit\":true}}" "http://127.0.0.1:$RP/api/v1/admin/experiments"'
+	check "$1: doctor: scion conduit and artifacts" row_ok "scion conduit and artifacts"
+}
+# start_worker2 <label>: the manager starts a worker through the broker as the
+# controller, on the pinned scion.
+start_worker2() {
+	X exec "lever--$NAME" lever-manager agent start worker2 --task probe2 2>&1 | tail -1 | sed 's/^/      | /'
+	checkx "$1: the manager starts worker2" 'X exec "lever--$NAME" lever-manager agent list 2>&1 | grep -q worker2'
+}
 
-say "old lever: apply (dev-auth window flow)"
+say "old lever: apply (dev-auth window flow, scion $OLD_SCION_VERSION)"
 write_config ""
 (cd "$INST" && "$OLD_LEVER" init >/dev/null 2>&1)
 for i in 1 2; do
@@ -149,9 +188,11 @@ limactl copy "$WORK/r1.py" "$VM:/tmp/r1.py"
 X cp /tmp/r1.py "lever--$NAME:/tmp/r1.py"
 checkx "an agent can rename the dev user (the hazard R1 repairs)" '[ "$(X exec -e E2E_EMAIL=lever-admin@lever.local "lever--$NAME" python3 /tmp/r1.py)" = 200 ]'
 
-say "migrate with this lever while the manager and the worker run"
+say "migrate with this lever (scion $SCION_VERSION) while the manager and the worker run"
 pid0=$(hubpid)
 mgr0=$(X inspect -f '{{.State.StartedAt}}' "lever--$NAME")
+CUR_SCION="$SCION_VERSION"
+write_config ""
 (cd "$INST" && "$LEVER" init >/dev/null 2>&1)
 (cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tee "$WORK/migrate.log" | tail -25)
 pid1=$(hubpid)
@@ -170,6 +211,9 @@ checkx "broker path: resume the worker" 'X exec "lever--$NAME" lever-manager age
 checkx "lever msg send after the migration" '(cd "$INST" && "$LEVER" msg send --to "$NAME" post-migration 2>&1) | grep -q Sent'
 att=$(cd "$INST" && timeout 15 script -qfec "'$LEVER' attach" /dev/null 2>&1 | head -c 4000)
 checkx "lever attach opens with the member controller's PAT" '[ ${#att} -gt 100 ] && ! printf "%s" "$att" | grep -qiE "authentication failed|forbidden|no access token"'
+checkx "the migration needed no broker link (the old window linked it)" '! grep -q "linking the jail.s runtime broker" "$WORK/migrate.log"'
+start_worker2 "migrated"
+fence_checks "migrated"
 
 say "a contact added while agents run"
 write_config "    - { login: contact2@example.com, tier: contact, agents: [$NAME] }"
@@ -296,7 +340,7 @@ say "a fresh instance with this lever"
 # A first apply on a new VM can lose the image tag right after the load (a
 # pre-existing flake of image_tar); the second apply finds the image loaded.
 for i in 1 2; do
-	(cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tail -15) && break
+	(cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tee -a "$WORK/fresh.log" | tail -15) && break
 done
 check "the record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
 check "no dev-token file and no dev user" row_ok "hub identities"
@@ -304,6 +348,9 @@ check "doctor: hub authentication (fresh)" row_ok "hub authentication"
 check "doctor: remote web role (fresh)" row_ok "remote web role"
 check "doctor: scion project registration (fresh)" row_ok "scion project registration"
 check "fresh: manager runs" running
+check "fresh: lever-admin linked the jail's runtime broker" grep -q "linking the jail's runtime broker .* as lever-admin" "$WORK/fresh.log"
+start_worker2 "fresh"
+fence_checks "fresh"
 
 say "teardown"
 (cd "$INST" && "$LEVER" destroy 2>&1 | tail -1)

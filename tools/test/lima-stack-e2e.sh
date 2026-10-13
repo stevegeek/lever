@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Live Lima e2e of the whole stack on the pinned scion: a real `lever up`
-# with the agent image, a manager and a worker, messages both ways, remote
-# access for an operator and a contact, the experiment fence, `lever stop` and
-# a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
+# with the agent image (lever-admin links the runtime broker and pins the
+# experiments off), a manager and a worker, messages both ways, remote access
+# for an operator and a contact, the experiment fence, a contact removed while
+# an agent loops the controller rename, `lever stop` and a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
 # Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
@@ -12,7 +13,8 @@
 # the host.
 #
 # Env: SCION_VERSION (default: the release pin), IMAGE_TAR, IMAGE (default
-# scionlocal/lever-claude-slim), LEVER (default ~/.local/bin/lever), NAME,
+# scionlocal/lever-claude-slim), SAVE_IMAGE_TAR (copy the archive lever loaded
+# there, e.g. for the hub auth e2e), LEVER (default ~/.local/bin/lever), NAME,
 # KEEP=1 (leave the VM for inspection).
 set -uo pipefail
 
@@ -65,10 +67,9 @@ export PATH="$(cd "$REPO_ROOT" && go env GOROOT)/bin:$PATH" LEVER_PROGRESS=plain
 
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 pick() { local p=$((21000 + RANDOM % 8000)); while port_busy $p; do p=$((p + 1)); done; echo $p; }
-JP=$(pick); AP=$(pick); RP=$(pick); LP=$(pick)
+JP=$(pick); AP=$(pick); RP=$(pick)
 while [ "$AP" = "$JP" ]; do AP=$(pick); done
 while [ "$RP" = "$JP" ] || [ "$RP" = "$AP" ]; do RP=$(pick); done
-while [ "$LP" = "$JP" ] || [ "$LP" = "$AP" ] || [ "$LP" = "$RP" ]; do LP=$(pick); done
 
 command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
 [ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
@@ -86,8 +87,8 @@ mkdir -p "$INST/workspace" "$INST/workers/worker"
 touch "$INST/workspace/.gitkeep" "$INST/workers/worker/.gitkeep"
 echo "Manager for the stack e2e. Do nothing unless asked." > "$INST/manager.md"
 printf 'sk-ant-FAKE-stack-%s' "$$" > "$INST/console-api-key"; chmod 600 "$INST/console-api-key"
-# write_config <image_tar line>: lever loads the image from a docker archive,
-# since the host may have no docker.
+# write_config <image_tar line> [extra allowed_users lines]: lever loads the
+# image from a docker archive, since the host may have no docker.
 write_config() {
 cat > "$INST/lever.yaml" <<EOF
 name: $NAME
@@ -116,15 +117,17 @@ remote:
   enabled: true
   base_url: "https://stack.example.invalid"
   port: $RP
-  login_port: $LP
   allowed_users:
     - $OPERATOR
     - { login: $CONTACT, tier: contact, agents: [$NAME] }
+${2:-}
 EOF
 }
+IMAGE_LINE=""
 if [ -n "${IMAGE_TAR:-}" ]; then
 	ln -f "$IMAGE_TAR" "$INST/img.tar" 2>/dev/null || cp "$IMAGE_TAR" "$INST/img.tar"
-	write_config "  image_tar: img.tar"
+	IMAGE_LINE="  image_tar: img.tar"
+	write_config "$IMAGE_LINE"
 else
 	write_config ""
 fi
@@ -132,6 +135,11 @@ fi
 G() { limactl shell --workdir / "$VM" -- "$@"; }
 X() { G sh -c "XDG_RUNTIME_DIR=/run/user/\$(id -u) podman $*"; }
 running() { X ps --format '{{.Names}}' | grep -qx "lever--$NAME"; }
+# hubproxyenv: the running hub carries lever's proxy-mode env (matched in the
+# guest; nothing else of its environment leaves the jail).
+hubproxyenv() { G sh -c 'pid=$(tr -cd 0-9 < ~/.scion/server.pid); tr "\000" "\n" < /proc/$pid/environ | grep -qx SCION_SERVER_AUTH_MODE=proxy'; }
+# hubbody <path>: a hub GET's body with the controller PAT (over stdin).
+hubbody() { G sh -c 'read -r t; curl -sS -m 20 -H "Authorization: Bearer $t" "http://127.0.0.1:8080$1"' _ "$1" < "$INST/.lever-state/controller.pat"; }
 mgr() { X exec "lever--$NAME" lever-manager "$@" 2>&1; }
 # hub <method> <path> [body]: an HTTP status from the jail hub with the
 # controller PAT, which goes over stdin, never argv.
@@ -205,7 +213,11 @@ if [ -z "${IMAGE_TAR:-}" ]; then
 		bad "saving the agent image"; exit 1
 	fi
 	G rm -f /tmp/stack-img.tar
-	write_config "  image_tar: img.tar"
+	IMAGE_LINE="  image_tar: img.tar"
+	write_config "$IMAGE_LINE"
+fi
+if [ -n "${SAVE_IMAGE_TAR:-}" ]; then
+	if cp "$INST/img.tar" "$SAVE_IMAGE_TAR"; then ok "agent image archive saved to $SAVE_IMAGE_TAR"; else bad "saving the image archive to $SAVE_IMAGE_TAR"; fi
 fi
 
 say "lever up on scion $SCION_VERSION"
@@ -215,6 +227,22 @@ checkx "the jail runs scion $SCION_VERSION" 'grep -q "scion $SCION_VERSION ok" "
 rec="$INST/.lever-state/controller.pat.json"
 checkx "the controller PAT has a recorded expiry" 'python3 -c "import json,sys,datetime as d; e=json.load(open(sys.argv[1])).get(\"expires_at\",\"\"); t=d.datetime.fromisoformat(e.replace(\"Z\",\"+00:00\")); n=d.datetime.now(d.timezone.utc); sys.exit(0 if d.timedelta(days=300)<t-n<d.timedelta(days=366) else 1)" "$rec"'
 checkx "the controller PAT carries inbox:read" 'python3 -c "import json,sys; sys.exit(0 if \"inbox:read\" in json.load(open(sys.argv[1]))[\"requested_scopes\"] else 1)" "$rec"'
+cat > "$WORK/granted.py" <<'PY'
+import json, sys
+g = json.load(open(sys.argv[1])).get("granted_scopes") or []
+want = ["skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list", "inbox:read"]
+missing = [w for w in want if w not in g]
+print("      | granted:", ",".join(g), "missing:", ",".join(missing))
+sys.exit(1 if missing else 0)
+PY
+check "the controller PAT was granted the baseline reads and inbox:read" python3 "$WORK/granted.py" "$rec"
+check "the hub runs in proxy auth mode" hubproxyenv
+check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
+check "lever-admin linked the jail's runtime broker" grep -q "linking the jail's runtime broker .* as lever-admin" "$WORK/up.log"
+PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
+checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
+check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
+check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
 
 say "manager, worker and messages"
 # X joins its arguments into one shell line, so no argument here holds a space.
@@ -249,10 +277,73 @@ doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
 check "doctor: scion conduit and artifacts" row_ok "scion conduit and artifacts"
 check "doctor: remote access" row_ok "remote access"
-check "doctor: dev user identity" row_ok "dev user identity"
-# Before a login's first sign-in its hub user does not exist, so the web role
-# binds at the next window (`lever stop`, then `lever up`); see below.
-checkx "doctor: no failed row but the pending web role" '! printf "%s\n" "$doctor_out" | grep "^✗ " | grep -vq "^✗ remote web role — the role is not bound yet"'
+check "doctor: hub authentication" row_ok "hub authentication"
+check "doctor: hub identities" row_ok "hub identities"
+check "doctor: remote web role (bound before any sign-in)" row_ok "remote web role"
+checkx "doctor: no failed row" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+
+say "a contact removed while an agent loops the controller rename, with a token due"
+# Any agent can rename scion's dev user through the hub's workstation identity
+# route; a removal must still take effect: at the proxy before any step, and at
+# the hub before any controller work.
+write_config "$IMAGE_LINE" "    - { login: contact2@example.com, tier: contact, agents: [$NAME] }"
+(cd "$INST" && timeout 1800 "$LEVER" reload 2>&1 | mask_secrets | tail -3)
+code=$(pcode contact2@example.com "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "contact2 signs in before the removal ($code)" '[ "$code" = 200 ]'
+cat > "$WORK/loop.py" <<'PY'
+import json, os, time, urllib.request
+tok = open(os.path.expanduser("~/.scion/scion-token")).read().strip()
+ep = os.environ.get("SCION_HUB_ENDPOINT") or os.environ.get("SCION_HUB_URL")
+end = time.time() + float(os.environ.get("LOOP_SECS", "600"))
+n = 0
+while time.time() < end:
+    req = urllib.request.Request(ep + "/api/v1/system/identity", data=json.dumps({"email": "agent-chosen@example.org"}).encode(), method="PUT",
+                                 headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=5)
+        n += 1
+        if n == 1:
+            open("/tmp/loop.ok", "w").write("1")
+    except Exception:
+        pass
+    time.sleep(0.002)
+PY
+limactl copy "$WORK/loop.py" "$VM:/tmp/loop.py"
+X cp /tmp/loop.py "lever--$NAME:/tmp/loop.py"
+X exec -d -e LOOP_SECS=600 "lever--$NAME" python3 /tmp/loop.py
+sleep 3
+checkx "the agent's rename loop reaches the hub" 'X exec "lever--$NAME" test -e /tmp/loop.ok'
+# Other recorded scopes make the mint urgent: a token only in its renew window
+# would be left for a later apply with a warning.
+python3 - "$rec" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["requested_scopes"] = ["agent:manage"]
+json.dump(d, open(p, "w"))
+PY
+ppid0=$(cat "$INST/.lever-state/remote.pid" 2>/dev/null)
+write_config "$IMAGE_LINE"
+(cd "$INST" && timeout 1800 "$LEVER" reload > "$WORK/race.log" 2>&1); race_rc=$?
+tail -4 "$WORK/race.log" | mask_secrets
+code=$(pcode contact2@example.com "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "the removed contact is refused under the rename loop ($code)" '[ "$code" = 403 ]'
+doctor_run
+check "doctor: the removed contact's hub user is suspended under the loop" row_ok "remote web role"
+if [ "$race_rc" != 0 ]; then
+	check "the failed apply names the rename and says removals took effect" grep -q "does not stay on the controller.*already took effect" "$WORK/race.log"
+	checkx "the proxy was not restarted (the fence refused the contact)" '[ "$ppid0" = "$(cat "$INST/.lever-state/remote.pid")" ]'
+	check "the stale proxy audited the refusal as deny-revoked" grep -q '"ts_login":"contact2@example.com".*"decision":"deny-revoked"' "$INST/.lever-state/remote-audit.jsonl"
+else
+	echo "      | note: the controller assertion won the race; the apply minted and restarted the proxy"
+fi
+X exec "lever--$NAME" pkill -f loop.py
+sleep 2
+up 5
+check "the manager runs after the loop stops" running
+checkx "the controller keeps its agents: the manager still lists the worker" 'mgr agent list | grep -q worker'
+doctor_run
+check "after the loop stops, doctor: hub identities" row_ok "hub identities"
+check "after the loop stops, doctor: remote web role" row_ok "remote web role"
 
 say "lever stop, then lever up (agents resume)"
 (cd "$INST" && timeout 900 "$LEVER" stop 2>&1 | tail -3)
@@ -260,8 +351,8 @@ up 15
 check "the manager runs after the resume" running
 checkx "the manager still lists the worker" 'mgr agent list | grep -q worker'
 checkx "lever msg send after the resume" '(cd "$INST" && "$LEVER" msg send --to "$NAME" "stack e2e after resume" 2>&1) | grep -q Sent'
-checkx "the apply skipped no dev-auth window" '! grep -q "skipped the dev-auth window" "$WORK/up.log"'
-checkx "the broker link survived the restart (no second provider repair)" '! grep -q "linking it in the dev-auth window" "$WORK/up.log"'
+checkx "the broker link survived the restart (no second link)" '! grep -q "linking the jail.s runtime broker" "$WORK/up.log"'
+checkx "the manager resumes the suspended worker" 'mgr agent resume worker | grep -qE "running|resumed"'
 doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
 check "doctor: remote web role bound after the sign-ins" row_ok "remote web role"

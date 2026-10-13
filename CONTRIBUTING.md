@@ -90,7 +90,9 @@ tests that name it (`grep -rn <old pin> .`). The next release ships the new pin 
 
 The agent image carries sciontool (and, in the slim image, scion) built from the pin, so a bump
 needs a new image: bump `JailABI` (see below) so `lever doctor` asks for the rebuild. Run
-`make test-lima-stack-e2e` on the new pin: `make test-lima-e2e` does not start scion.
+`make test-lima-stack-e2e` on the new pin: `make test-lima-e2e` does not start scion. With
+`SAVE_IMAGE_TAR=<file>` it keeps the image archive it built, for `make test-lima-hubauth-e2e
+IMAGE_TAR=<file>`, which migrates an instance the older release brought up on its pin.
 
 ## Build
 
@@ -119,6 +121,7 @@ make test-integration  # `-tags integration` tests; each skips unless its env/to
 make test-apikey-e2e   # live api-key /llm path with a fake upstream; needs OrbStack + podman
 make test-lima-e2e     # live lima backend gate; needs Lima >= 2.0
 make test-lima-stack-e2e # live whole stack on the pinned scion (agent image, remote access); needs Lima >= 2.0
+make test-lima-hubauth-e2e # live hub identities: migration from the older release, contacts while agents run; needs IMAGE_TAR
 lever acceptance       # six-check live gate against a running instance
 ```
 

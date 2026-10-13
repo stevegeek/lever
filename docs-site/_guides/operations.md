@@ -865,7 +865,10 @@ every other byte as `\xNN`, so two different names never print the same and noth
 wrote can drive your terminal. To pass such a path back, prefix the printed form with `q:`:
 `lever tree cat latest 'q:"odd\xffname"'`. Text from files is shown with a two-character prefix;
 a line that holds control, format or invisible characters is shown escaped, marked by `\` in the
-second column.
+second column. `lever tree diff` prints no row wider than 80 columns: a longer line goes on in rows
+that start with `| `, so text an agent padded past the edge of the terminal cannot start a row and
+pass for one of lever's own lines (`== M <path>`, `@@`). On a terminal narrower than 80 columns the
+terminal wraps rows itself and that no longer holds.
 
 ### Restoring
 

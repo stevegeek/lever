@@ -194,7 +194,8 @@ const maxRawLine = 1000
 // points in no table are unassigned (as of the package's Unicode version);
 // together with Cc, Cf, Co, Cs, Zl and Zp they are escaped. Variation
 // selectors and tag characters are M or Cf but are named explicitly because
-// they change how neighbouring text looks.
+// they change how neighbouring text looks, and so are the invisible letters
+// and marks of blankLooking.
 func rawSafe(r rune) bool {
 	switch {
 	case r == '\t':
@@ -207,10 +208,23 @@ func rawSafe(r rune) bool {
 		return false
 	case r == 0x2028 || r == 0x2029:
 		return false
-	case unicode.Is(unicode.Cf, r):
+	case unicode.Is(unicode.Cf, r), blankLooking(r):
 		return false
 	}
 	return unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.P, unicode.S, unicode.Zs)
+}
+
+// blankLooking are the default-ignorable code points outside Cf, plus the
+// braille blank: letters and marks that render as nothing, so a line made
+// of them looks empty or like a shorter one.
+func blankLooking(r rune) bool {
+	switch {
+	case r == 0x034F, r == 0x115F, r == 0x1160, r == 0x17B4, r == 0x17B5, r == 0x2800, r == 0x3164, r == 0xFFA0:
+		return true
+	case r >= 0x180B && r <= 0x180F:
+		return true
+	}
+	return false
 }
 
 // contentLine renders one line of file content (without its newline) after
@@ -288,4 +302,43 @@ func safeText(s string) string {
 		}
 	}
 	return s
+}
+
+// Every row `lever tree diff` prints is at most rowWidth terminal columns. A longer line goes on in rows that start with rowCont, which no
+// first row starts with. A terminal at least this wide therefore never
+// wraps a row itself, and agent-written text that runs past the edge can
+// never appear at the start of a row, where it could pass for a header
+// such as "== M <path>" or "@@".
+const (
+	rowWidth = 80
+	rowCont  = "| "
+)
+
+// runeColumns over-estimates the columns r takes: every rune outside ASCII
+// counts as a wide one, and a tab as a full tab stop.
+func runeColumns(r rune) int {
+	switch {
+	case r == '\t':
+		return 8
+	case r >= 0x20 && r < 0x7f:
+		return 1
+	}
+	return 2
+}
+
+// rows splits a line lever is about to print into rows of at most rowWidth
+// columns, never inside a rune.
+func rows(s string) []string {
+	var out []string
+	width, start, prefix := 0, 0, ""
+	limit := rowWidth
+	for i, r := range s {
+		c := runeColumns(r)
+		if width+c > limit {
+			out = append(out, prefix+s[start:i])
+			start, prefix, width, limit = i, rowCont, 0, rowWidth-len(rowCont)
+		}
+		width += c
+	}
+	return append(out, prefix+s[start:])
 }

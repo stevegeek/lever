@@ -2,6 +2,7 @@ package treebackup
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand/v2"
 	"strings"
 	"testing"
@@ -203,5 +204,70 @@ func TestContentLineMarkerCannotBeForged(t *testing.T) {
 	esc := contentLine('+', []byte(`\u{2026}(+5 bytes)`+"\x01"))
 	if !strings.Contains(esc, `\\u{2026}`) {
 		t.Fatalf("escaped line %q", esc)
+	}
+}
+
+// Content padded past the terminal's edge must not start a row of its own:
+// a terminal soft-wraps a long row, and the wrapped part would read as a
+// section or hunk header lever printed.
+func TestDiffRowsCannotForgeHeaders(t *testing.T) {
+	blobs := memBlobs{}
+	forged := "x" + strings.Repeat(" ", 200) + "== M .ssh/authorized_keys"
+	hunk := strings.Repeat("一", 60) + "@@ -9,9 +9,9 @@"
+	longPath := "d/" + strings.Repeat("p", 70) + " == M .ssh/authorized_keys"
+	oldM := memManifest(hdr("o"), []Entry{dirE("d"), fileE(blobs, "notes.txt", "a\n"), fileE(blobs, longPath, "1\n")})
+	newM := memManifest(hdr("n"), []Entry{dirE("d"), fileE(blobs, "notes.txt", forged+"\n"+hunk+"\n"), fileE(blobs, longPath, "2\n")})
+	out, _ := runDiff(t, oldM, newM, DiffOptions{Blobs: blobs})
+	headers := 0
+	for _, row := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		cols := 0
+		for _, r := range row {
+			cols += runeColumns(r)
+		}
+		if cols > rowWidth {
+			t.Errorf("row of %d columns: %q", cols, row)
+		}
+		if strings.HasPrefix(row, "== M ") {
+			headers++
+		}
+		if strings.HasPrefix(row, "== M .ssh") || strings.HasPrefix(row, "@@ -9,9") {
+			t.Errorf("forged header row %q", row)
+		}
+	}
+	if headers != 2 {
+		t.Errorf("%d section headers, want 2:\n%s", headers, out)
+	}
+}
+
+// Letters and marks that render as nothing are escaped, so a line of them
+// cannot pass for an empty one.
+func TestContentLineEscapesInvisibleLetters(t *testing.T) {
+	for _, r := range []rune{0x3164, 0x115F, 0x1160, 0xFFA0, 0x2800, 0x034F, 0x17B4, 0x180B} {
+		got := contentLine('+', []byte(string([]rune{r, r, r})))
+		want := fmt.Sprintf(`+\\u{%04X}\u{%04X}\u{%04X}`, r, r, r)
+		if got != want {
+			t.Errorf("U+%04X: got %q, want %q", r, got, want)
+		}
+	}
+}
+
+func TestRowsSplitOnRunesWithinTheWidth(t *testing.T) {
+	line := "+ " + strings.Repeat("é", 100) + "\tend"
+	rs := rows(line)
+	if len(rs) < 3 {
+		t.Fatalf("rows %q", rs)
+	}
+	var back strings.Builder
+	for i, r := range rs {
+		if i > 0 {
+			if !strings.HasPrefix(r, rowCont) {
+				t.Fatalf("row %d %q has no continuation mark", i, r)
+			}
+			r = r[len(rowCont):]
+		}
+		back.WriteString(r)
+	}
+	if back.String() != line {
+		t.Fatalf("rows do not join back: %q", back.String())
 	}
 }

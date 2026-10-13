@@ -566,6 +566,7 @@ type outWriter struct {
 	w       io.Writer
 	n       int64
 	limit   int64 // 0 is unlimited
+	wrap    bool  // print in rows (see rows)
 	stopped bool
 	err     error
 }
@@ -582,11 +583,17 @@ func (o *outWriter) line(s string) bool {
 		_, o.err = io.WriteString(o.w, outLimitMarker+"\n")
 		return false
 	}
-	n, err := io.WriteString(o.w, s+"\n")
-	o.n += int64(n)
-	if err != nil {
-		o.err = err
-		return false
+	rs := []string{s}
+	if o.wrap {
+		rs = rows(s)
+	}
+	for _, row := range rs {
+		n, err := io.WriteString(o.w, row+"\n")
+		o.n += int64(n)
+		if err != nil {
+			o.err = err
+			return false
+		}
 	}
 	return true
 }
@@ -637,7 +644,7 @@ func Diff(w io.Writer, oldM, newM OpenManifest, o DiffOptions) (DiffCounts, erro
 		return DiffCounts{}, err
 	}
 
-	out := &outWriter{w: w}
+	out := &outWriter{w: w, wrap: true}
 	if !o.NoLimit {
 		out.limit = DiffOutputLimit
 	}

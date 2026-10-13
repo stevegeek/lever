@@ -60,7 +60,6 @@ func write(ic icon) error {
 						continue
 					}
 					bg++
-					// The glyph, scaled about the centre.
 					gx, gy := 0.5+(x-0.5)/ic.scale, 0.5+(y-0.5)/ic.scale
 					if glyph(gx, gy) {
 						fg++

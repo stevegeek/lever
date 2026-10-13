@@ -232,7 +232,6 @@ func TestWatchIgnoresOtherSubjects(t *testing.T) {
 	}
 }
 
-// TestWatchCatchesUpAfterReconnect is Review Focus 1.
 func TestWatchCatchesUpAfterReconnect(t *testing.T) {
 	e := startWatch(t, func(e *watchEnv) { e.p.store.Add(chatOp, sub("op")) })
 	eventually(t, "a stream", func() bool { return e.sse.count() == 1 })
@@ -247,7 +246,6 @@ func TestWatchCatchesUpAfterReconnect(t *testing.T) {
 	}
 }
 
-// TestWatchRenewsARejectedSession is Review Focus 1.
 func TestWatchRenewsARejectedSession(t *testing.T) {
 	var sess *stubSession
 	e := startWatch(t, func(e *watchEnv) {

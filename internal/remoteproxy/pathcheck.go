@@ -13,13 +13,12 @@ const DecisionDenyPath Decision = "deny-path"
 //
 // Every route decision in the proxy (mintsCredential, refusedRoute, the chat
 // page, the contact fence's allow-list) reads r.URL.Path as given, by prefix
-// or by segment. A path that some later reader could resolve to a different
-// route would let a request pass under one name and land on another: the
-// contact fence once forwarded GET /assets/../lever/api/chat to the hub with
-// the contact's session, because "/assets/" is an allowed prefix. The hub's
-// mux answers such a path with a redirect today, but the proxy does not rely
-// on that. It refuses, for every tier, any path that is not already in the
-// one spelling every reader agrees on:
+// or by segment. A path that a later reader could resolve to a different
+// route would pass under one name and land on another (for example
+// /assets/../lever/api/chat under the contact's allowed "/assets/" prefix).
+// The proxy does not rely on the hub's mux redirecting such paths: for every
+// tier it refuses any path not already in the one spelling every reader
+// agrees on:
 //
 //   - not rooted ("*", an opaque form);
 //   - a "." or ".." segment, or an empty one ("//");
@@ -31,8 +30,7 @@ const DecisionDenyPath Decision = "deny-path"
 // What passes decodes to the same segments however it is read, so the
 // decisions and the forwarded request (ReverseProxy sends r.URL's escaped
 // path) name the same route. ServeHTTP runs it first, before authorize and
-// every tier decision; what mintsCredential says about the hub's redirect
-// for such a path is no longer what keeps it out.
+// every tier decision.
 func unsafePath(r *http.Request) string {
 	p := r.URL.Path
 	if !strings.HasPrefix(p, "/") {

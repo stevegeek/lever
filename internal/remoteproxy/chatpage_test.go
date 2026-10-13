@@ -182,7 +182,6 @@ func TestChatPageCSPAllowsNoInlineCode(t *testing.T) {
 		t.Errorf("push off: the CSP names a worker source: %s", csp)
 	}
 	// The whole policy, pinned: a directive added or widened shows up here.
-	// With push off it is byte-identical to the policy before push existed.
 	if want := "default-src 'none'; script-src mac.ts.net/lever/; style-src mac.ts.net/lever/; connect-src 'self'; " +
 		"img-src mac.ts.net/favicon.svg mac.ts.net/lever/; manifest-src mac.ts.net/lever/; base-uri 'none'; form-action 'none'; " +
 		"frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"; csp != want {
@@ -224,7 +223,7 @@ func TestChatPageLanding(t *testing.T) {
 	if got := hub.reached(); len(got) != 0 {
 		t.Fatalf("a landing redirect reached the hub: %v", got)
 	}
-	// Not a read, or not exactly "/": the hub's, as before.
+	// Not a read, or not exactly "/": the hub's.
 	for _, c := range [][2]string{{"POST", "/"}, {"GET", "/agents"}, {"GET", "/chat"}, {"GET", "/leverage"}, {"GET", "/api/v1/agents"}} {
 		rw := chatDo(h, chatOp, c[0], c[1])
 		if rw.Code != http.StatusOK || rw.Header().Get("Location") != "" {
@@ -436,11 +435,9 @@ func TestChatPagePostIsStillRecorded(t *testing.T) {
 // another object (XMLHttpRequest.open, the file upload) is not one.
 var chatSinkRE = regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new\s+Function|setTimeout\s*\(\s*['"\x60]|setInterval\s*\(\s*['"\x60]|srcdoc|javascript:|createContextualFragment|DOMParser|\.setHTML|parseHTMLUnsafe|import\s*\(|\.src\s*=|\.href\s*=|location\s*(\.href)?\s*=|location\.(assign|replace)|\blocation\s*\[|\bnavigat(e|ion)\b|Object\.assign\(\s*location|Reflect\.set\(\s*location|(?:^|[^.\w$])open\s*\(|\b(?:window|self|globalThis|top|parent|opener|frames)\s*\.\s*open\s*\(|\[\s*['"\x60]open['"\x60]\s*\]|setAttributeNS\(|createElementNS\(|setAttribute\(\s*['"\x60](on|style|src)|\[\s*['"\x60][^\]]*\+`)
 
-// TestChatPageHasNoMarkupSink: the page shows agent text on the operator's
-// origin, so its script may only ever write text. This fails on the ways a
-// later edit could turn text into markup or code.
-// The narrowed open( rule still catches a page-level open and window.open,
-// and lets a method of another object (XMLHttpRequest.open) through.
+// TestMarkupSinkRuleOpen: the open( rule catches a page-level open and
+// window.open, and lets a method of another object (XMLHttpRequest.open)
+// through.
 func TestMarkupSinkRuleOpen(t *testing.T) {
 	for src, bad := range map[string]bool{"open('x')": true, "window.open('x')": true, " open (u)": true, "window . open(u)": true, "self.open(u)": true, "globalThis . open(u)": true, "top.open(u)": true, "parent.open(u)": true,
 		"opener.open(u)": true, "frames.open(u)": true, "window['open'](u)": true, "x[ \"open\" ](u)": true, "el.setAttributeNS(n, k, v)": true,
@@ -454,6 +451,9 @@ func TestMarkupSinkRuleOpen(t *testing.T) {
 	}
 }
 
+// TestChatPageHasNoMarkupSink: the page shows agent text on the operator's
+// origin, so its script may only ever write text. This fails on the ways a
+// later edit could turn text into markup or code.
 func TestChatPageHasNoMarkupSink(t *testing.T) {
 	for _, name := range []string{"chatui/chat.js", "chatui/chatcore.js", "chatui/sw.js"} {
 		b, err := chatUI.ReadFile(name)
@@ -489,8 +489,8 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 	// helper's (the dictation clip goes through it too, to lever's own
 	// route with its custom header) and read-aloud's (a part of a message,
 	// to lever's own speak route with the same header, answered as audio),
-	// and the one XMLHttpRequest is the upload. A new element kind, attribute or request shows up here, to be
-	// looked at.
+	// and the one XMLHttpRequest is the upload. A new element kind,
+	// attribute or request shows up here, to be looked at.
 	js, err := chatUI.ReadFile("chatui/chat.js")
 	if err != nil {
 		t.Fatal(err)
@@ -773,7 +773,7 @@ func TestContactFenceUnchangedUnderChat(t *testing.T) {
 	}
 }
 
-// landing unset: a contact still gets the old landing page.
+// landing unset: a contact gets lever's landing page.
 func TestContactLandingWithoutChat(t *testing.T) {
 	hub := newPageHub(t)
 	cfg := chatConfig(t, hub)

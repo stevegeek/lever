@@ -172,7 +172,6 @@ func sameOriginWrite(r *http.Request, serveHost string) bool {
 	return len(s) == 0 || len(s) == 1 && strings.EqualFold(s[0], "same-origin")
 }
 
-// servePush answers the key and subscription routes for v.
 func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, p string) {
 	refuse := func(status int, word string) {
 		line.Reason = word

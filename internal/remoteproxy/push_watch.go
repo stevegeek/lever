@@ -146,7 +146,6 @@ func (p *Push) streamClient() *http.Client {
 	return &http.Client{Transport: t, CheckRedirect: noRedirect}
 }
 
-// streamOnce runs one connection until it ends.
 func (p *Push) streamOnce(ctx context.Context, login string) error {
 	g := p.g
 	cookie, err := g.cfg.Session.Cookie(ctx, login)

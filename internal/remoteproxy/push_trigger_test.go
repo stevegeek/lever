@@ -247,7 +247,6 @@ func TestCheckContactOnlyForRowsTheMatcherShows(t *testing.T) {
 	}
 }
 
-// TestCheckMatcherDownThenUp is Review Focus 4.
 func TestCheckMatcherDownThenUp(t *testing.T) {
 	down := true
 	e := newTriggerEnv(t, func(_ context.Context, _, _ string, msgs []AgentMessage) (map[string]bool, error) {
@@ -367,7 +366,6 @@ func TestCheckCatchUpEmptyDMThenRow(t *testing.T) {
 	}
 }
 
-// TestCheckCatchUpSkipsOldRows is Review Focus 5.
 func TestCheckCatchUpSkipsOldRows(t *testing.T) {
 	e := newTriggerEnv(t, nil)
 	e.p.store.Add(chatOp, sub("op"))

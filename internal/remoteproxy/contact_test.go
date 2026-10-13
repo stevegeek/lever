@@ -107,7 +107,7 @@ func TestContactFenceAllows(t *testing.T) {
 // TestContactFenceForwardsAnyText: a contact's words are not filtered for
 // lever markers or envelope look-alikes. They are recorded as the contact's
 // and verify as the contact's, so what they say cannot change who they are
-// from; a regex over the text was never a boundary.
+// from.
 func TestContactFenceForwardsAnyText(t *testing.T) {
 	hub := newContactHub(t)
 	h := contactHandler(t, hub, nil)

@@ -19,7 +19,7 @@ import (
 
 // The wake route: POST /lever/api/agents/<name>/wake. A login that may
 // message a suspended worker (or, the operator, a stopped one) asks lever
-// to resume it (spec: wake on message). The resume itself is the broker's, over its 0600 operator
+// to resume it. The resume itself is the broker's, over its 0600 operator
 // socket (Config.Wake), the same code the manager's resume verb runs.
 //
 // Order matters: method, browser provenance, the login's lists, the hub

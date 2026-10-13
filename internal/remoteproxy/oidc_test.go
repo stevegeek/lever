@@ -14,7 +14,6 @@ import (
 // testIdentity is the operator the provider asserts in these tests.
 var testIdentity = Identity{Subject: "lever-remote:op@example.test", Email: "op@example.test", Name: "op@example.test"}
 
-// newTestProvider returns a provider plus the audit lines it emits.
 func newTestProvider(t *testing.T, now func() time.Time) (*Provider, *auditSink) {
 	t.Helper()
 	sink := &auditSink{}
@@ -44,7 +43,6 @@ func (s *auditSink) all() []AuditLine {
 	return append([]AuditLine(nil), s.lines...)
 }
 
-// serveProvider runs a request against the provider's handler.
 func serveProvider(p *Provider, req *http.Request) *httptest.ResponseRecorder {
 	rw := httptest.NewRecorder()
 	p.Handler().ServeHTTP(rw, req)
@@ -74,20 +72,15 @@ func mintTestCode(t *testing.T, p *Provider) string {
 	return code
 }
 
-// TestAuthorizeIsPermanently404 pins the decision recorded in
-// Provider.handleAuthorize. If this test fails because /authorize now answers,
-// the failure is not a broken test: an authorization endpoint is an HTTP
-// endpoint that MINTS AUTHORIZATION CODES, this provider is reachable from
-// inside the jail (lever maps guest loopback into every agent netns at
-// 169.254.1.2), and scion's OIDC login validates no signature — so any jailed
-// agent could mint a code, have the hub exchange it, and receive a hub web
-// session as any identity it asserts. Do not "finish" this route. The login is
-// driven server-side and mints codes by calling Provider.Mint directly.
 // authorizeIsPermanently404 names the decision handleAuthorize enforces, so
-// the grep that finds "/authorize" in this package also finds the reason it
-// 404s.
+// a grep for "/authorize" in this package also finds the reason it 404s.
 const authorizeIsPermanently404 = "/authorize must never be implemented: it would be an HTTP code-minting endpoint reachable from inside the jail"
 
+// TestAuthorizeIsPermanently404 pins Provider.handleAuthorize. If it fails
+// because /authorize now answers, the code is wrong, not the test: this
+// provider is reachable from inside the jail and scion's OIDC login validates
+// no signature, so an HTTP endpoint that mints codes would give any jailed
+// agent a hub web session as any identity. Do not "finish" this route.
 func TestAuthorizeIsPermanently404(t *testing.T) {
 	p, sink := newTestProvider(t, nil)
 	for _, target := range []string{
@@ -115,10 +108,10 @@ func TestAuthorizeIsPermanently404(t *testing.T) {
 	}
 }
 
-// TestDiscoveryAdvertisesAnEndpointThisProviderDoesNotServe covers the other
-// half of the same decision: scion refuses to start a login unless discovery
-// carries an authorization_endpoint, so one is advertised — but it must point
-// at a host that cannot resolve, never at this provider.
+// TestDiscoveryAdvertisesAnEndpointThisProviderDoesNotServe: scion refuses
+// to start a login unless discovery carries an authorization_endpoint, so one
+// is advertised, but it must point at a host that cannot resolve, never at
+// this provider.
 func TestDiscoveryAdvertisesAnEndpointThisProviderDoesNotServe(t *testing.T) {
 	p, _ := newTestProvider(t, nil)
 	rw := serveProvider(p, httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil))
@@ -142,8 +135,8 @@ func TestDiscoveryAdvertisesAnEndpointThisProviderDoesNotServe(t *testing.T) {
 	if got := doc["userinfo_endpoint"]; got != p.IssuerURL()+"/userinfo" {
 		t.Fatalf("userinfo_endpoint = %v", got)
 	}
-	// jwks_uri is deliberately absent: no id_token is ever issued, so the hub
-	// never fetches keys, and advertising a URI nothing serves would be a lie.
+	// jwks_uri is absent: no id_token is ever issued, so the hub never
+	// fetches keys.
 	if _, ok := doc["jwks_uri"]; ok {
 		t.Fatalf("discovery advertises jwks_uri, which nothing serves")
 	}
@@ -246,9 +239,9 @@ func TestTokenRefusesGET(t *testing.T) {
 	}
 }
 
-// TestCallbackQueryEnforcesTheStateBinding covers the third binding. The hub
-// never sends state to /token, so this is the only place a code paired with
-// the wrong login attempt can be caught.
+// TestCallbackQueryEnforcesTheStateBinding: the hub never sends state to
+// /token, so this is the only place a code paired with the wrong login
+// attempt can be caught.
 func TestCallbackQueryEnforcesTheStateBinding(t *testing.T) {
 	p, _ := newTestProvider(t, nil)
 	code := mintTestCode(t, p)

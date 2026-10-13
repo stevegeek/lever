@@ -18,84 +18,64 @@ import (
 
 // ServeConfig configures Serve.
 type ServeConfig struct {
-	// Port is the port the proxy binds.
 	Port int
 	// Bind is the IP address the proxy binds. "" binds 127.0.0.1, the
 	// default and the posture the rest of the package assumes. A loopback
 	// address must yield a loopback listener (fail closed otherwise, see
 	// listenProxy). Anything else is refused unless AllowNonLoopback is set.
 	Bind string
-	// AllowNonLoopback acknowledges a non-loopback Bind. It exists so that a
-	// caller cannot widen the listener by passing an address alone: the one
-	// caller (`lever remote serve`) sets it from a config that
-	// config.validateRemoteBind has already restricted to an address the jail
-	// cannot reach, or to an acknowledged wildcard. The login provider's
-	// listener is never affected: it is always loopback.
+	// AllowNonLoopback acknowledges a non-loopback Bind, so a caller cannot
+	// widen the listener by passing an address alone. `lever remote serve`
+	// sets it from a config that config.validateRemoteBind restricted to an
+	// address the jail cannot reach, or to an acknowledged wildcard. The login
+	// provider's listener is always loopback.
 	AllowNonLoopback bool
 	// Handler is the pre-built proxy handler (NewHandler's return value).
-	// Its Audit callback, if any, must already be wired by the caller
-	// BEFORE Serve is called: Handler is an opaque http.Handler, so Serve
-	// has no way to reach back into it and rewire its audit sink.
+	// Its Audit callback must be wired BEFORE Serve is called: Serve cannot
+	// reach into an opaque http.Handler to rewire it.
 	Handler http.Handler
-	// PIDPath, when non-empty, is where Serve records its own pid — written
-	// once the listener is bound (so a pid file on disk means the proxy is,
-	// or was, actually listening) and removed on shutdown.
+	// PIDPath, when non-empty, is where Serve records its own pid, written
+	// once the listener is bound and removed on shutdown.
 	PIDPath string
 	// Stamp, when non-nil, records what THIS process is serving. Serve calls
 	// it once, after the listeners are bound and PIDPath is written, and
 	// before the first request can be handled.
 	//
-	// The running proxy has to be what writes that record, which is why this
-	// hook exists at all. `lever apply` decides whether to reuse a running
-	// proxy or restart it by comparing a host-side stamp
-	// (state.State.WriteRemoteStamp) — but apply is not the only thing
-	// that starts proxies, while the pid file it reads is written by every
-	// one of them. A proxy started by hand against a different config used to
-	// inherit the stamp apply had left, so apply reported success against a
-	// process enforcing a config it had never seen. Only the process itself
-	// knows what it is running.
+	// The running proxy must write that record itself: `lever apply` compares
+	// a host-side stamp (state.State.WriteRemoteStamp) to decide whether to
+	// reuse a running proxy, but apply is not the only thing that starts
+	// proxies. Only the process itself knows what config it enforces.
 	//
-	// Ordering is part of the contract in both directions: after the bind, so
-	// a proxy that could not take the port leaves the incumbent's record
-	// alone; after the pid file, so an implementation may key its record on
-	// the pid it finds there (brokerctl's does).
+	// Ordering is part of the contract: after the bind, so a proxy that could
+	// not take the port leaves the incumbent's record alone; after the pid
+	// file, so an implementation may key its record on that pid.
 	//
-	// An error is a warning, not a failed serve — a proxy that is up and
-	// working must not be taken down over a bookkeeping file. That is only
-	// safe while the implementation leaves NO record behind when it fails:
-	// no stamp costs the next apply a redundant restart, a stale one costs it
-	// the whole check. state.State.WriteRemoteStamp removes the file on
-	// every failure path for this reason.
+	// An error is a warning, not a failed serve. That is only safe while the
+	// implementation leaves NO record behind when it fails (a stale stamp
+	// would defeat apply's check); state.State.WriteRemoteStamp removes the
+	// file on every failure path.
 	Stamp func() error
 	// Provider, when non-nil, is the local OIDC provider, served on its OWN
-	// loopback listener (127.0.0.1:Provider.Port()) for the life of the
-	// serve.
-	//
-	// A second listener rather than extra routes on the proxy's own, because
-	// the two have opposite audiences: the proxy answers the operator's
-	// browser through `tailscale serve`, while the provider answers the hub's
-	// back channel, which arrives from inside the jail through the guest
-	// forwarder. One shared listener would publish the provider's endpoints
-	// to the tailnet and the proxy's to the jail — each reachable by a caller
-	// that has no business with it.
+	// loopback listener (127.0.0.1:Provider.Port()) for the life of the serve.
+	// The proxy answers the operator's browser through `tailscale serve`, the
+	// provider answers the hub's back channel from inside the jail; one shared
+	// listener would expose each to a caller that has no business with it.
 	Provider *Provider
 }
 
 // Serve runs the proxy until ctx is cancelled: bind the proxy (127.0.0.1:<Port>
-// by default, failing closed on a non-loopback listener; see listenProxy for
-// an acknowledged non-loopback Bind), bind the provider's own
-// loopback port when one is configured, write the pid file, record what
-// this process is serving (Stamp), and serve. The audit JSONL is the
-// caller's: it opens it (OpenAudit) before building Handler. On ctx.Done it shuts both servers down
-// gracefully, removes the pid file, and returns. Mirrors brokerctl.Serve's
-// bind → pid → serve → remove-pid ordering (internal/brokerctl/serve.go).
+// by default; see listenProxy for a non-loopback Bind), bind the provider's
+// loopback port when one is configured, write the pid file, record what this
+// process is serving (Stamp), and serve. The caller opens the audit JSONL
+// (OpenAudit) before building Handler. On ctx.Done it shuts both servers
+// down gracefully, removes the pid file, and returns.
 func Serve(ctx context.Context, cfg ServeConfig) error {
 	ln, err := listenProxy(cfg.Bind, cfg.Port, cfg.AllowNonLoopback)
 	if err != nil {
 		return err
 	}
 	// Both listeners are bound before anything else, so a port collision
-	// fails the serve outright instead of leaving a proxy up whose login path
+	// fails the serve outright instead of leaving a proxy whose login path
 	// can never work.
 	var provLn net.Listener
 	if cfg.Provider != nil {
@@ -120,9 +100,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 
 	// Each goroutine closes over its OWN *http.Server, never over the slice:
 	// appending the provider rewrites the slice header while the proxy's
-	// goroutine is already running, which is a genuine data race on that
-	// variable (caught by -race as soon as a test configured a provider). The
-	// slice is the shutdown list, and only this goroutine touches it.
+	// goroutine runs (a data race). Only this goroutine touches the slice.
 	proxySrv := newServer(cfg.Handler)
 	servers := []*http.Server{proxySrv}
 	serveErr := make(chan error, 2)
@@ -150,16 +128,13 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		if err := shutdownAll(); err != nil {
 			return err
 		}
-		// Wait for every Serve to actually return before the listeners are
-		// considered released.
 		for range servers {
 			<-serveErr
 		}
 		return nil
 	case err := <-serveErr:
-		// One of them stopped on its own. Take the other down too: a proxy
-		// with no provider cannot log in, and a provider with no proxy serves
-		// nobody, so half-running is never the state to leave behind.
+		// One of them stopped on its own: take the other down too. Half-running
+		// is never a useful state.
 		_ = shutdownAll()
 		for range servers[1:] {
 			<-serveErr
@@ -174,13 +149,10 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 // listenLoopback binds 127.0.0.1:<port> and fails closed on anything but a
 // loopback address.
 //
-// The proxy's identity-header gate is only as strong as "nothing but the
-// authenticating front can reach this listener" (see proxy.go's package doc):
-// a non-loopback listener would let any LAN/tailnet peer reach it directly
-// and set that header itself, bypassing the gate — which is why a
-// non-loopback proxy bind goes through listenProxy's acknowledgement instead. The provider's listener carries
-// the same requirement for a different reason — off loopback it would be an
-// unauthenticated identity endpoint on the network.
+// The proxy's identity-header gate holds only while nothing but the
+// authenticating front can reach this listener (see proxy.go's package doc):
+// a peer that reaches it directly could set that header itself. Off
+// loopback, the provider would be an unauthenticated identity endpoint.
 func listenLoopback(port int) (net.Listener, error) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -196,10 +168,9 @@ func listenLoopback(port int) (net.Listener, error) {
 // listenProxy binds the proxy's own listener: loopback by default (the same
 // fail-closed listener as listenLoopback), or the configured address.
 //
-// A non-loopback address is the one case where "only the front can reach this
-// listener" stops being a property of the bind and becomes the operator's
-// firewall's job, so it needs the explicit acknowledgement, and it is
-// announced on stderr (remote.log) every time the proxy starts.
+// A non-loopback address makes "only the front can reach this listener"
+// the operator's firewall's job, so it needs the explicit acknowledgement
+// and is announced on stderr (remote.log) every time the proxy starts.
 func listenProxy(bind string, port int, allowNonLoopback bool) (net.Listener, error) {
 	if bind == "" {
 		return listenLoopback(port)
@@ -237,24 +208,17 @@ const (
 
 // newServer builds the proxy's http.Server.
 //
-// Two timeouts, and deliberately not the other two. Defence in depth rather
-// than a live need — the listener is loopback-only behind `tailscale serve` —
-// so the bar is "cannot break a legitimate session", and only these two clear
-// it:
+// Only two timeouts, chosen so they cannot break a legitimate session:
 //
 //   - ReadHeaderTimeout covers the header phase alone. Once the headers are
 //     read, conn.readRequest resets the read deadline to ReadTimeout's
 //     deadline, which is zero here, so nothing bounds the rest.
 //   - IdleTimeout applies only between requests on a kept-alive connection.
 //
-// WriteTimeout and ReadTimeout must NOT be added. WriteTimeout is armed on the
-// raw connection before the handler runs and bounds the whole response write,
-// so the hub's streamed transcripts would die mid-stream at the timeout. (An
-// upgraded connection would survive it, but only because Hijack clears every
-// deadline — an accident of the hijack path, not a property to rely on, and no
-// help at all to the streaming path.) ReadTimeout is worse than it looks: it
-// is what makes the header deadline persist as a whole-request read deadline,
-// which is precisely why ReadHeaderTimeout is safe here without it.
+// WriteTimeout and ReadTimeout must NOT be added. WriteTimeout bounds the
+// whole response write, so the hub's streamed transcripts would die at the
+// timeout. ReadTimeout would make the header deadline persist as a
+// whole-request read deadline.
 func newServer(h http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           h,
@@ -263,8 +227,7 @@ func newServer(h http.Handler) *http.Server {
 	}
 }
 
-// isLoopbackAddr reports whether ta is bound to a loopback address. Same
-// check shape as the broker admin listener's guard (internal/broker/server.go).
+// isLoopbackAddr reports whether ta is bound to a loopback address.
 func isLoopbackAddr(ta *net.TCPAddr) bool {
 	return ta != nil && ta.IP.IsLoopback()
 }

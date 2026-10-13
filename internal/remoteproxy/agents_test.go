@@ -176,8 +176,8 @@ func TestAgentsListOperatorOrderAndLinks(t *testing.T) {
 	}
 }
 
-// TestAgentsListHidesWhatALoginMayNotSee (Review Focus 1): a contact's
-// answer names only its own agents.
+// TestAgentsListHidesWhatALoginMayNotSee: a contact's answer names only its
+// own agents.
 func TestAgentsListHidesWhatALoginMayNotSee(t *testing.T) {
 	hub := newPageHub(t)
 	cfg := chatConfig(t, hub) // contact c@x: agents [w1]; see [w2]; hidden w3; manager boss
@@ -446,7 +446,7 @@ func TestUnreadCountsOnlyRecordedAgentRows(t *testing.T) {
 
 // With agent messages on, a contact's unread count holds only the rows the
 // broker keeps; a broker that cannot answer leaves the count out. The
-// operator's count is spec 1's, whatever the broker says.
+// operator's count does not depend on the broker.
 func TestUnreadOmittedWhenTheBrokerIsDown(t *testing.T) {
 	w1Key := "dm:agent:" + agentW1 + ":user:" + chatUID
 	dms := `{"dms":[{"conversationKey":"` + w1Key + `","hasUnread":true}]}`

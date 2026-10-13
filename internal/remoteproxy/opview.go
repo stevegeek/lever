@@ -16,7 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/chatledger"
 )
 
-// The operator's read-only view of contact conversations (spec 5).
+// The operator's read-only view of contact conversations.
 //
 // GET /lever/api/contacts lists every contact login with the agents it may
 // message; GET /lever/api/contacts/<login>/agents/<name>/messages reads one
@@ -64,9 +64,8 @@ type contactsAnswer struct {
 
 // opViewTarget splits an ESCAPED path under /lever/api/contacts: list for
 // the bare route, or the login and agent of a messages route (files for the
-// files route, remote.files). Splitting the
-// escaped form keeps a "/" inside a login (legal in allowed_users) in its
-// segment; the proxy's path check (pathcheck.go) refuses such a path before
+// files route). Splitting the escaped form keeps a "/" inside a login (legal
+// in allowed_users) in its segment; pathcheck.go refuses such a path before
 // it gets here, so a login holding "/" cannot be opened.
 func opViewTarget(escaped string) (login, name string, list, files, ok bool) {
 	if escaped == chatContactsPath {
@@ -109,7 +108,6 @@ func (g *gate) contactUser(login string) (string, bool) {
 	return uid, ok && validHubID(uid)
 }
 
-// serveOperatorView answers both routes for v (the requesting login).
 func (g *gate) serveOperatorView(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer) {
 	if v.tier != chatledger.TierOperator {
 		g.deny(w, line, http.StatusForbidden, DecisionDenyContact, "a contact may only chat with its agents")

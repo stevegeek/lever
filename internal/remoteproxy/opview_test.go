@@ -496,8 +496,7 @@ func TestOperatorViewLoginEncoding(t *testing.T) {
 	cfg.Contacts["a/b@x"] = []string{"w1"}
 	h := viewHandler(t, cfg)
 	// The proxy's path check refuses an encoded slash on every route, so a
-	// login holding "/" cannot be opened in the view (the guide says so);
-	// nothing is asked for it.
+	// login holding "/" cannot be opened in the view; nothing is asked for it.
 	if rw := viewDo(h, "op@x", "GET", "/lever/api/contacts/"+url.PathEscape("a/b@x")+"/agents/w1/messages"); rw.Code != http.StatusBadRequest {
 		t.Fatalf("an escaped slash = %d %s", rw.Code, rw.Body)
 	}

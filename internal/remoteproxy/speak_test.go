@@ -18,7 +18,6 @@ import (
 
 var errNotSentTest = errors.New("not sent")
 
-// speakRec is a speech tool that records what it was sent.
 type speakRec struct {
 	mu    sync.Mutex
 	texts []string

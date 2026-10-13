@@ -9,7 +9,7 @@ import (
 
 // unsafePathSpellings are paths that some reader could resolve to another
 // route than the one the proxy's prefix checks see. The first ones are the
-// contact-tier escape from an allowed static prefix (card #81).
+// contact-tier escape from an allowed static prefix.
 var unsafePathSpellings = []string{
 	"/assets/../lever/api/chat",
 	"/assets/%2e%2e/lever/api/chat",
@@ -56,7 +56,7 @@ func TestUnsafePathRefusedForEveryTier(t *testing.T) {
 }
 
 // TestSafePathsStillPass: the spellings the web UI uses, and ones that only
-// look like the refused class, are forwarded as before.
+// look like the refused class, are forwarded.
 func TestSafePathsStillPass(t *testing.T) {
 	hub := newContactHub(t)
 	h := contactHandler(t, hub, nil)

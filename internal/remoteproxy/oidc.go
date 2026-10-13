@@ -16,91 +16,72 @@ import (
 // The local OIDC provider.
 //
 // scion's web layer authenticates a browser by ONE thing: the `scion_sess`
-// cookie. It never reads Authorization (pkg/hub/web.go sessionAuthMiddleware),
-// and the API turns the same cookie into a bearer (sessionToBearerMiddleware),
-// so that one cookie is what the proxy sends on every request. The supported
-// way to obtain it without dev-auth is scion's generic OIDC login, so lever runs the smallest provider that
-// login path actually consumes.
+// cookie (it never reads Authorization, and the API turns the cookie into a
+// bearer), so that cookie is what the proxy sends on every request. The
+// supported way to obtain it without dev-auth is scion's generic OIDC login,
+// so lever runs the smallest provider that login path consumes.
 //
-// What scion validates on that path: nothing. It requests no id_token, parses
-// none, fetches no JWKS, uses neither PKCE nor a nonce, and never checks that
-// the discovery document's issuer matches the configured one. It exchanges a
-// code at /token and reads /userinfo. The security of this therefore does NOT
-// come from OIDC. It comes from ONE property: an authorization code can only
-// be created by an in-process call to Provider.Mint, inside the host-side
-// proxy, at the same trust level as the state files sitting beside it.
-// There is no HTTP route that mints one — see handleAuthorize.
+// scion validates nothing on that path: no id_token, no JWKS, no PKCE, no
+// nonce, no issuer check. It exchanges a code at /token and reads /userinfo.
+// The security therefore does NOT come from OIDC but from ONE property: an
+// authorization code can only be created by an in-process call to
+// Provider.Mint inside the host-side proxy. No HTTP route mints one (see
+// handleAuthorize).
 //
-// Everything the hub reaches (discovery, /token, /userinfo) is also reachable
-// from inside the jail, because the guest-side forwarder that gives the hub a
-// loopback issuer is reachable from every agent netns (lever maps guest
-// loopback in at 169.254.1.2; see internal/backend/guest.EnsureRuntimes). That
-// residual exposure is deliberate and bounded: without a code, none of those
-// three endpoints yields a token, a session, or an identity.
+// Discovery, /token and /userinfo are also reachable from inside the jail
+// (the guest-side forwarder is reachable from every agent netns at
+// 169.254.1.2; see internal/backend/guest.EnsureRuntimes). Without a code,
+// none of them yields a token, a session or an identity.
 
 const (
 	// LoginClientID is the client_id lever writes into the hub's oidc_login
-	// block (internal/backend/guest.EnsureHubLogin puts it there) and the only
-	// one this provider will mint a code for. There is no client registry and
-	// no client secret: with a single, local relying party, the client_id is a
-	// consistency check between the hub's configuration and ours, not a
-	// credential. Exported because the two ends of that contract are
-	// configured by different packages and must not drift.
+	// block (internal/backend/guest.EnsureHubLogin) and the only one this
+	// provider mints a code for. With a single local relying party it is a
+	// consistency check, not a credential; exported so the two ends cannot
+	// drift.
 	LoginClientID = "lever-remote"
 
-	// codeTTL bounds how long a minted code may sit unredeemed. The hub
-	// redeems within one round trip of the callback, so this is generous
-	// already; it exists so a code that never reaches the hub (a failed
-	// callback, a killed request) cannot be redeemed later.
+	// codeTTL bounds how long a minted code may sit unredeemed, so a code
+	// that never reaches the hub cannot be redeemed later.
 	codeTTL = 60 * time.Second
 
 	// tokenTTL bounds the access token /token hands back. The hub uses it
-	// once, immediately, for /userinfo. Deliberately NOT single-use: a retry
-	// inside the hub's own exchange would otherwise fail closed for no
-	// security gain, since the token grants nothing but the identity lever
-	// already chose.
+	// once, for /userinfo. NOT single-use: a retry inside the hub's exchange
+	// would fail for no security gain, since the token grants nothing but
+	// the identity lever already chose.
 	tokenTTL = 2 * time.Minute
 
-	// secretBytes is the entropy in a code and in an access token. 32 bytes
-	// from crypto/rand — the code is the only secret in the whole flow.
+	// secretBytes is the entropy in a code and in an access token (from
+	// crypto/rand): the code is the only secret in the whole flow.
 	secretBytes = 32
 
 	// DeadAuthorizationEndpoint is what discovery advertises for
-	// authorization_endpoint. scion's discovery parse REQUIRES the field to
-	// be present (pkg/hub/oidc_discovery.go returns an error without it, and
-	// /auth/login/oidc then 500s) but nothing ever dials it: the proxy drives
-	// the whole login server-side. It names a host that cannot resolve, so it
-	// can never be mistaken for a live endpoint, and it deliberately does NOT
-	// point at this provider's own /authorize — see handleAuthorize.
-	// Exported so `lever doctor` can assert that the hub redirects HERE and
-	// nowhere else, which is what proves the hub is configured against
-	// lever's provider rather than someone's real IdP.
+	// authorization_endpoint. scion's discovery parse requires the field
+	// (/auth/login/oidc 500s without it) but nothing dials it: the proxy
+	// drives the login server-side. It names a host that cannot resolve and
+	// deliberately does NOT point at this provider's /authorize (see
+	// handleAuthorize). `lever doctor` asserts the hub redirects HERE, which
+	// proves the hub is configured against lever's provider.
 	DeadAuthorizationEndpoint = "https://lever.invalid/authorize"
 )
 
-// Identity is the operator the provider asserts at /userinfo. The proxy fills
-// it from the tailnet login it already verified against remote.allowed_users
-// (see Config.AllowedUsers), so the hub's user row reflects the identity the
-// front end authenticated — not an identity this provider invented.
+// Identity is the operator the provider asserts at /userinfo: the login the
+// proxy already verified against remote.allowed_users, never one this
+// provider invents.
 type Identity struct {
 	Subject string // OIDC `sub`; stable per operator
 	Email   string // the hub keys its user row on this
 	Name    string // display name
 }
 
-// ProviderConfig configures NewProvider.
 type ProviderConfig struct {
 	// Port is the loopback port the provider listens on, ON THE HOST.
 	Port int
-	// IssuerPort is the port the HUB dials — the guest-side loopback port the
-	// forwarder listens on, which the hub sees as local and therefore
-	// accepts (a non-loopback http issuer makes it refuse to start). It is a
-	// DIFFERENT number from Port: OrbStack mirrors a guest listener onto the
-	// host at the same port, so one number for both halves left the provider
-	// unable to bind its own (see config.GuestLoginIssuerPort).
-	//
-	// Zero means "the same as Port", which is what a test wants when nothing
-	// sits between the hub and the provider.
+	// IssuerPort is the port the HUB dials: the guest-side loopback port the
+	// forwarder listens on (the hub refuses a non-loopback http issuer). It
+	// differs from Port because OrbStack mirrors a guest listener onto the
+	// host at the same port (see config.GuestLoginIssuerPort). Zero means
+	// "the same as Port", for tests with nothing in between.
 	IssuerPort int
 	// Audit receives one line per request the provider answers; nil disables
 	// (tests). Values never carry a code, token or cookie.
@@ -121,7 +102,6 @@ type Provider struct {
 	tokens map[string]*grant
 }
 
-// grant is one minted authorization code and what it is bound to.
 type grant struct {
 	state       string
 	redirectURI string
@@ -164,11 +144,9 @@ func (p *Provider) IssuerURL() string { return p.issuer }
 // permanent /authorize 404, and a 404 catch-all.
 func (p *Provider) Handler() http.Handler { return p.handler }
 
-// Mint creates an authorization code bound to one login attempt.
-//
-// This is the whole authorization step, and it is a function call: no route,
-// no redirect, no HTTP. Only the proxy process can reach it, which is the
-// single property the security of this flow rests on.
+// Mint creates an authorization code bound to one login attempt. This is
+// the whole authorization step, and it is a function call: only the proxy
+// process can reach it, which is the property this flow's security rests on.
 func (p *Provider) Mint(state, redirectURI, clientID string, id Identity) (string, error) {
 	code, err := randomSecret()
 	if err != nil {
@@ -194,14 +172,9 @@ func (p *Provider) Mint(state, redirectURI, clientID string, id Identity) (strin
 }
 
 // CallbackQuery builds the query the hub's callback consumes for code, and
-// refuses if state is not the one code was minted for.
-//
-// It is where the code's binding to STATE is enforced. The other two bindings
-// are checked at /token, because the hub re-sends redirect_uri and client_id
-// there — but it never sends state to /token, so a provider that only checked
-// what /token carries would record a state binding it never enforced. The
-// proxy is what chooses which state accompanies which code, so this is the
-// point at which the pairing can still be wrong and still be caught.
+// refuses if state is not the one code was minted for. This is where the
+// STATE binding is enforced: the hub never sends state to /token, which
+// checks the other two bindings.
 func (p *Provider) CallbackQuery(code, state string) (url.Values, error) {
 	p.mu.Lock()
 	g, ok := p.codes[code]
@@ -232,29 +205,18 @@ func (p *Provider) buildHandler() http.Handler {
 // handleAuthorize is a permanent, deliberate 404. It must NEVER be
 // implemented.
 //
-// THE ESCALATION IT PREVENTS. scion's OIDC login path validates nothing (see
-// the file header): whoever can obtain an authorization code can have the hub
-// exchange it and receive a hub WEB SESSION for any email the provider
-// asserts — an ADMIN session if server.hub.admin_emails were ever set. A
-// working /authorize is exactly "an HTTP endpoint that mints codes". This
-// provider is reachable from inside the jail, because the guest-side forwarder
-// that gives the hub a loopback issuer is mapped into every agent's network
-// namespace at 169.254.1.2 (lever configures pasta --map-host-loopback so
-// agents can reach the VM-loopback hub; internal/backend/guest.EnsureRuntimes).
-// So implementing this route would hand every jailed agent a path from "can
-// reach the hub with a scoped token" to "IS a hub user" — created, in lever's
-// own process, on request. That is strictly worse than any capability lever
-// grants today.
+// scion's OIDC login validates nothing (see the file header): whoever obtains
+// an authorization code gets a hub WEB SESSION for whatever email the
+// provider asserts, an ADMIN session if server.hub.admin_emails were set. A
+// working /authorize is an HTTP endpoint that mints codes, and this provider
+// is reachable from every agent's network namespace at 169.254.1.2 (pasta
+// --map-host-loopback; internal/backend/guest.EnsureRuntimes). Implementing
+// it would let any jailed agent become a hub user.
 //
-// It is REGISTERED rather than simply absent on purpose: an absent route reads
-// as an oversight and invites a future contributor to "finish" the provider.
-// The discovery document advertises DeadAuthorizationEndpoint — not this path
-// — because scion requires the field to exist, not because anything dials it.
-// The proxy drives the whole login server-side and mints codes by calling
-// Provider.Mint directly; nothing in a working setup ever arrives here.
-//
-// A hit is therefore either a misconfiguration or an in-jail probe, which is
-// why it is audited.
+// It is registered rather than absent so it does not read as an oversight to
+// "finish". Discovery advertises DeadAuthorizationEndpoint instead; the proxy
+// mints codes by calling Provider.Mint. A hit is a misconfiguration or an
+// in-jail probe, so it is audited.
 func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	p.record(r, DecisionDenyAuthorize, http.StatusNotFound, "the local OIDC provider has no authorization endpoint by design")
 	http.NotFound(w, r)
@@ -265,10 +227,9 @@ func (p *Provider) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// discoveryDoc is the OIDC discovery document, holding exactly the fields
-// scion reads plus the standard capability advertisements. jwks_uri is absent:
-// the hub never fetches it (no id_token is ever issued or parsed), and
-// advertising a URI nothing serves would be a lie.
+// handleDiscovery serves exactly the fields scion reads plus the standard
+// capability advertisements. jwks_uri is absent: no id_token is ever issued,
+// and nothing serves one.
 func (p *Provider) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	p.record(r, DecisionOIDCDiscovery, http.StatusOK, "")
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -284,12 +245,9 @@ func (p *Provider) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleToken redeems a code for an access token.
-//
-// The code is consumed on presentation, before any binding is checked: a code
-// that has been shown to this endpoint is spent whatever the outcome, so a
-// replay cannot be distinguished from a first attempt by timing or by trying
-// variations of the other parameters.
+// handleToken redeems a code for an access token. The code is consumed on
+// presentation, before any binding is checked, so a replay cannot be told
+// from a first attempt by timing or by varying the other parameters.
 func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		p.record(r, DecisionOIDCTokenRefused, http.StatusMethodNotAllowed, "token endpoint takes POST")
@@ -348,9 +306,8 @@ func (p *Provider) redeem(code, grantType, redirectURI, clientID string) (*grant
 }
 
 // handleUserinfo answers with the operator identity bound to the access
-// token. email_verified is true because the identity did not come from a
-// user-supplied claim at all: the proxy verified it at the tailnet edge before
-// the code was minted. scion refuses a login whose email is unverified.
+// token. email_verified is true because the proxy verified the identity at
+// the front before the code was minted; scion refuses an unverified email.
 func (p *Provider) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 	tok, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
@@ -381,9 +338,8 @@ func (p *Provider) handleUserinfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // sweepLocked drops expired codes and tokens. Called with p.mu held, on every
-// mint and every redemption, so the maps track live logins rather than growing
-// with every probe. Both maps are keyed by unguessable secrets, so nothing but
-// a legitimate login ever adds to them in the first place.
+// mint and redemption. Both maps are keyed by unguessable secrets, so only a
+// legitimate login adds to them.
 func (p *Provider) sweepLocked(now time.Time) {
 	for k, g := range p.codes {
 		if now.After(g.expires) {
@@ -397,9 +353,9 @@ func (p *Provider) sweepLocked(now time.Time) {
 	}
 }
 
-// record emits one audit line per provider request. TSLogin is left empty: the
-// caller is the hub's back channel (or an in-jail prober), never a browser
-// whose tailnet identity the proxy verified.
+// record emits one audit line per provider request. TSLogin is left empty:
+// the caller is the hub's back channel (or an in-jail prober), never a
+// verified browser.
 func (p *Provider) record(r *http.Request, decision Decision, status int, reason string) {
 	if p.audit == nil {
 		return
@@ -424,7 +380,6 @@ func bearerToken(header string) (string, bool) {
 	return header[len(prefix):], true
 }
 
-// randomSecret returns secretBytes of crypto/rand entropy, hex-encoded.
 func randomSecret() (string, error) {
 	b := make([]byte, secretBytes)
 	if _, err := rand.Read(b); err != nil {

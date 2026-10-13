@@ -18,22 +18,19 @@ import (
 	"time"
 )
 
-// helperEnv switches this test binary into "guest-side nc" mode. A dial's
-// prefix can then be the test binary itself, which makes the whole transport
-// testable without orb, limactl, or a real nc on the host.
+// helperEnv switches this test binary into "guest-side nc" mode, so a dial's
+// prefix can be the test binary itself, with no orb, limactl or real nc.
 const helperEnv = "LEVER_TEST_JAILDIAL_HELPER"
 
 // helperAddrEnv redirects the helper to a fixed address instead of the one
-// JailDial appended. It lets a test point Target at an address nothing
-// listens on, so the test can only pass if the request really travelled over
-// the jail transport.
+// JailDial appended, so a test can point Target at an address nothing
+// listens on and pass only over the jail transport.
 const helperAddrEnv = "LEVER_TEST_JAILDIAL_ADDR"
 
 // TestJailDialHelperProcess is not a test: re-executed with helperEnv set, it
-// impersonates the `nc <host> <port>` that JailDial runs inside the jail —
-// connect to the named address, then shuttle stdin/stdout over it. It exits
-// the process itself so the testing package never prints its own PASS line
-// into the stream the parent is reading as HTTP.
+// impersonates the `nc <host> <port>` that JailDial runs inside the jail. It
+// exits the process itself so the testing package never prints its PASS
+// line into the stream the parent is reading as HTTP.
 func TestJailDialHelperProcess(t *testing.T) {
 	if os.Getenv(helperEnv) != "1" {
 		return
@@ -76,8 +73,6 @@ func helperPrefix(t *testing.T) []string {
 	return []string{os.Args[0], "-test.run=^TestJailDialHelperProcess$", "--"}
 }
 
-// staticPrefix wraps a fixed argv so tests can hand JailDial a prefix without
-// a resolver.
 func staticPrefix(argv ...string) func() []string {
 	return func() []string { return argv }
 }
@@ -256,10 +251,9 @@ func TestJailDialRemoteAddrNamesTheJailTarget(t *testing.T) {
 	}
 }
 
-// TestJailDialCarriesHTTPKeepAlive drives a real http.Transport over the jail
-// transport, with the test binary standing in for the guest's nc. Two
-// sequential requests on one connection prove the conn is well-behaved enough
-// for keep-alive, which is what the proxy actually needs.
+// TestJailDialCarriesHTTPKeepAlive: two sequential requests through a real
+// http.Transport on one connection, with the test binary standing in for the
+// guest's nc.
 func TestJailDialCarriesHTTPKeepAlive(t *testing.T) {
 	var conns atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -298,10 +292,8 @@ func TestJailDialCarriesHTTPKeepAlive(t *testing.T) {
 
 // TestJailDialCarriesWebSocketUpgrade drives a real 101 Switching Protocols
 // handshake and a bidirectional exchange over a jailConn, through the full
-// NewHandler stack. This is the hub's attach stream: without it, the jail
-// transport's WebSocket claim rests on stdlib reasoning alone, and a later
-// swap of http.Transport for a hand-rolled RoundTripper would break attach
-// with every other test still green.
+// NewHandler stack: the hub's attach stream. It fails if http.Transport is
+// swapped for a RoundTripper that breaks upgrades.
 func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	var gotAuth, gotCookie string
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -333,11 +325,9 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	}))
 	defer hub.Close()
 
-	// The prefix is the test binary standing in for the guest's nc, so the
-	// tunnel really does run over a jailConn's pipes. Target names an address
-	// nothing listens on and the helper is redirected to the hub, so a
-	// handler that quietly kept the default dialer fails outright here rather
-	// than passing by reaching the hub the ordinary way.
+	// The tunnel really runs over a jailConn's pipes: Target names an
+	// address nothing listens on and the helper is redirected to the hub,
+	// so a handler that kept the default dialer fails here.
 	t.Setenv(helperAddrEnv, mustURL(t, hub.URL).Host)
 	proxy := httptest.NewServer(NewHandler(Config{
 		Target:      mustURL(t, "http://127.0.0.1:1"),
@@ -399,11 +389,9 @@ func TestJailDialCarriesWebSocketUpgrade(t *testing.T) {
 	}
 }
 
-// TestEndChildRefusesAfterReap is the pid-reuse guard. Once the wait
-// goroutine reaps the child, its pid is free for the OS to hand to an
-// unrelated process — so a raw kill(-pid) at that point signals whatever
-// process group later holds it. The proxy starts one child per connection, so
-// this is reachable rather than theoretical. endChild must decline instead.
+// TestEndChildRefusesAfterReap is the pid-reuse guard: once the child is
+// reaped its pid may belong to an unrelated process group, so endChild must
+// decline.
 func TestEndChildRefusesAfterReap(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -418,9 +406,8 @@ func TestEndChildRefusesAfterReap(t *testing.T) {
 	}
 }
 
-// TestEndChildEndsALiveChild: declining after the reap must not turn into
-// declining always — a live child still has to die, or Close leaks one jail
-// process per connection.
+// TestEndChildEndsALiveChild: a live child still has to die, or Close leaks
+// one jail process per connection.
 func TestEndChildEndsALiveChild(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exec sleep 30")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -435,10 +422,9 @@ func TestEndChildEndsALiveChild(t *testing.T) {
 	}
 }
 
-// TestJailDialCloseAfterChildExited: the ordinary path. The hub closes, the
-// child exits, the wait goroutine reaps it, and only then does the proxy
-// close the conn. That Close must be quiet and must not disturb the recorded
-// exit.
+// TestJailDialCloseAfterChildExited: the hub closes, the child exits and is
+// reaped, then the proxy closes the conn. That Close must be quiet and must
+// not disturb the recorded exit.
 func TestJailDialCloseAfterChildExited(t *testing.T) {
 	c, err := dialTest(t, shPrefix("exit 0"), "127.0.0.1:8080")
 	if err != nil {
@@ -462,9 +448,8 @@ func TestJailDialCloseAfterChildExited(t *testing.T) {
 }
 
 // TestJailDialMissingMachineIsNotDiagnosedAsMissingNC: `orb -m <gone>` says
-// "machine not found". Reading that as a missing netcat sends the operator to
-// apt-get for something `lever up` fixes, so the hint must key on the
-// shell's full "command not found", not a bare "not found".
+// "machine not found", which is not a missing netcat; the hint keys on the
+// shell's full "command not found".
 func TestJailDialMissingMachineIsNotDiagnosedAsMissingNC(t *testing.T) {
 	c, err := dialTest(t, shPrefix("echo 'orb: machine not found' >&2; exit 1"), "127.0.0.1:8080")
 	if err != nil {

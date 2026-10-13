@@ -70,9 +70,9 @@ func agentRow(m historyRow, uid, agentID string) bool {
 // agent rows are not asked about (and not in the answer). An agent row is
 // never kept when its sender id is not the DM's agent, or it has a type
 // other than agentTypes, no id, no text (a deleted one), no readable time,
-// or an id that appears more than once in rows. Only an id the proxy asked about can be in the answer: the
-// broker's keep list is checked against the question, never trusted on its
-// own.
+// or an id that appears more than once in rows. Only an id the proxy asked
+// about can be in the answer: the broker's keep list is checked against the
+// question, never trusted on its own.
 func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
 	return askAgentRows(ctx, g.cfg.MatchAgentMessages, contact, agent, agentID, uid, rows)
 }
@@ -127,7 +127,6 @@ var errNoMatcher = errors.New("no agent message matcher")
 // an agent row of any other type is never asked about: never shown.
 var agentTypes = map[string]bool{"instruction": true, "input-needed": true, "assistant-reply": true}
 
-// idCounts counts each row id on a page.
 func idCounts(rows []historyRow) map[string]int {
 	n := map[string]int{}
 	for _, m := range rows {
@@ -265,8 +264,7 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 		}
 		for id := range m {
 			// An attachment's name and type are the agent's own text, which
-			// the ledger never authorized: no agent row keeps one (files
-			// for contacts are a later spec).
+			// the ledger never authorized: no agent row keeps one.
 			if removed[id] || !listed[id] || k == "messageAttachments" && agentIDs[id] {
 				delete(m, id)
 				continue

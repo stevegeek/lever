@@ -806,8 +806,8 @@ test('send: not stored the first time: the retry stores it once and clears the d
 
 test('send: the history never settles a send: only the hub\'s answer to the key does', async () => {
   // Whatever the history shows after a failed send, the page concludes
-  // nothing: the error and the draft stay. Each of these once looked like
-  // "it arrived" to a rule that guessed, and none of them is the failed send.
+  // nothing: the error and the draft stay. Each of these could be guessed
+  // as "it arrived", and none of them is the failed send.
   const own = (over) => msg(1, { msg: 'yes', senderId: 'u1', ...over });
   for (const [name, firstRead, laterRead] of [
     ['an old message with the same words, first read failed', { status: 502, body: '' }, { status: 200, body: { messages: [own()] } }],
@@ -1025,7 +1025,7 @@ test('a held Enter is one send', async () => {
   assert.equal(env.count('POST', HISTORY), 1, 'a repeat alone sends nothing');
 });
 
-// The agent list (multi-agent page).
+// The agent list.
 
 test('start shows the list in the server\'s order with chips and badges', async () => {
   const env = await load(hubWith({ agents: () => roster([BOSS({ activity: 'waiting', unread: 2 }), A('w1', { state: 'suspended', label: 'Via Roma 12' }), A('w2', { access: 'see', state: 'stopped' })]) }));

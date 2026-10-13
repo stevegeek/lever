@@ -6,12 +6,12 @@ package remoteproxy
 // agent here, and nothing is stored: the clip is read into memory, checked,
 // handed to the transcriber (the broker tool lever-tool-whisper, over its
 // dictation socket: package voice) and dropped; the text goes back only to
-// the login that sent the clip. The audit line has the login, the clip's length, the outcome and the
-// latency; never the audio, never the text.
+// the login that sent the clip. The audit line has the login, the clip's
+// length, the outcome and the latency; never the audio, never the text.
 //
-// The shape follows the upload route (files.go): the login gate, a custom
-// header no other site can send, per-login rates, slots of which a contact
-// never takes the last, and a body deadline that scales with the size.
+// Like the upload route (files.go): the login gate, a custom header no other
+// site can send, per-login rates, slots of which a contact never takes the
+// last, and a body deadline that scales with the size.
 
 import (
 	"bytes"
@@ -83,7 +83,6 @@ const (
 	voiceBodyMax  = 30 * time.Minute
 )
 
-// voiceState holds the route's slots and per-login counts.
 type voiceState struct {
 	cfg      VoiceConfig
 	now      func() time.Time // tests
@@ -241,7 +240,6 @@ func (s *voiceState) refund(login string, seconds float64, at time.Time) {
 	}
 }
 
-// voiceAudio reports whether a Content-Type names a WAV body.
 func voiceAudio(ct string) bool {
 	mt, _, err := mime.ParseMediaType(ct)
 	return err == nil && (mt == "audio/wav" || mt == "audio/wave" || mt == "audio/x-wav")
@@ -253,7 +251,6 @@ func (g *gate) refuseVoice(w http.ResponseWriter, r *http.Request, line *AuditLi
 	g.answerFileJSON(w, r, line, DecisionDenyVoice, status, map[string]any{"error": word})
 }
 
-// serveVoice answers POST /lever/api/voice/transcribe for v.
 func (g *gate) serveVoice(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer) {
 	s := g.voice
 	if r.Method != http.MethodPost {

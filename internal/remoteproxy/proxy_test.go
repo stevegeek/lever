@@ -25,11 +25,10 @@ func mustURL(t *testing.T, s string) *url.URL {
 	return u
 }
 
-// TestPhoneCannotChooseItsIdentity: a phone-supplied Authorization header is
-// stripped, not forwarded — scion's sessionToBearerMiddleware lets any request
-// that carries one straight through, so forwarding it would let the phone pick
-// the hub identity the API runs as. The phone's own Cookie is replaced by the
-// operator's session, never merged with it.
+// TestPhoneCannotChooseItsIdentity: a client-supplied Authorization header is
+// stripped (scion lets any request carrying one straight through, so it
+// would pick the hub identity the API runs as), and the client's Cookie is
+// replaced by the session, never merged with it.
 func TestPhoneCannotChooseItsIdentity(t *testing.T) {
 	hub := newRecordingHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
@@ -320,10 +319,8 @@ func TestUpgradeRequestGetsRewrite(t *testing.T) {
 	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	rw := httptest.NewRecorder()
 	h.ServeHTTP(rw, req)
-	// The fake hub does not complete the upgrade (plain 200 response), so
-	// the ReverseProxy treats it as a normal response and we can inspect
-	// the headers it received to prove the Rewrite hook ran on this
-	// upgrade-shaped request.
+	// The fake hub does not complete the upgrade, so the response's
+	// headers show the Rewrite hook ran on this upgrade-shaped request.
 	if n := hub.hits(); n != 1 {
 		t.Fatalf("hub hit count = %d, want 1", n)
 	}
@@ -335,9 +332,9 @@ func TestUpgradeRequestGetsRewrite(t *testing.T) {
 	}
 }
 
-// TestStripsSetCookieFromHubResponse: the hub mints a fresh scion_sess cookie on every
-// cookie-less request; the phone must never receive it, since a leaked
-// scion_sess would be an alternate, lever-unmanaged credential.
+// TestStripsSetCookieFromHubResponse: the hub mints a fresh scion_sess on
+// every cookie-less request; the client must never receive it, since it
+// would be an alternate, lever-unmanaged credential.
 func TestStripsSetCookieFromHubResponse(t *testing.T) {
 	hub := newRecordingHub(t)
 	hub.answerWith(200, http.Header{"Set-Cookie": {"scion_sess=abc123; Path=/; HttpOnly"}})
@@ -356,15 +353,10 @@ func TestStripsSetCookieFromHubResponse(t *testing.T) {
 	}
 }
 
-// --- Fix round 1: adversarial review findings ---
-
-// TestOriginNullWithEmptyServeHostDenied is the minimal repro of the
-// fail-open bug: an unconfigured ServeHost ("") combined with an Origin
-// that parses to an empty host (browsers send exactly this for sandboxed/
-// opaque origins) made url.Parse's u.Host ("") case-insensitively equal
-// cfg.ServeHost (""), so the request was WRONGLY allowed and forwarded with
-// the credential injected. base_url is optional in config, so ServeHost=="" is a
-// reachable misconfiguration, not a hypothetical.
+// TestOriginNullWithEmptyServeHostDenied: with ServeHost "" (base_url is
+// optional in config), an Origin that parses to an empty host ("null", from
+// sandboxed or opaque origins) must not compare equal and be forwarded with
+// the credential injected.
 func TestOriginNullWithEmptyServeHostDenied(t *testing.T) {
 	assertGateRefuses(t, "", http.Header{"Origin": {"null"}})
 }
@@ -381,21 +373,18 @@ func TestEmptyServeHostDeniesAnyOriginBearingRequest(t *testing.T) {
 	}
 }
 
-// TestEmptyServeHostDeniesHeaderFreeRequestToo pins the stricter half of the
-// fix: an unconfigured ServeHost fails closed for EVERY request, not just
-// Origin-bearing ones — a curl/native request with no Origin and no
-// Sec-Fetch-Site header must also be refused, since "unconfigured" can
-// never be distinguished from "misconfigured" from inside the handler.
+// TestEmptyServeHostDeniesHeaderFreeRequestToo: an unconfigured ServeHost
+// fails closed for EVERY request, including one with no Origin and no
+// Sec-Fetch-Site.
 func TestEmptyServeHostDeniesHeaderFreeRequestToo(t *testing.T) {
 	assertGateRefuses(t, "", nil) // no Origin, no Sec-Fetch-Site
 }
 
-// TestInboundTailscaleHeadersStrippedFromForward: the handler trusts a
-// client-supplied Tailscale-User-Login for its OWN AllowedUsers gate (that
-// trust is a documented precondition on the loopback bind + tailscale
-// serve, enforced by the caller — see the package doc comment), but must
-// never forward client-supplied Tailscale-* headers to the hub, or a caller
-// could forge an identity the HUB itself trusts.
+// TestInboundTailscaleHeadersStrippedFromForward: the gate trusts a
+// client-supplied Tailscale-User-Login for its own AllowedUsers check (the
+// front-only-reachability precondition in the package doc), but must never
+// forward Tailscale-* to the hub, or a caller could forge an identity the
+// HUB trusts.
 func TestInboundTailscaleHeadersStrippedFromForward(t *testing.T) {
 	hub := newRecordingHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
@@ -417,8 +406,7 @@ func TestInboundTailscaleHeadersStrippedFromForward(t *testing.T) {
 }
 
 // TestSubdomainOriginRejected pins the exact-match rule: a subdomain of
-// ServeHost must not pass (guards against an accidental HasSuffix/Contains
-// regression).
+// ServeHost must not pass.
 func TestSubdomainOriginRejected(t *testing.T) {
 	assertGateRefuses(t, "mac.ts.net", http.Header{"Origin": {"https://evil.mac.ts.net"}})
 }
@@ -437,9 +425,7 @@ func TestServeHostCaseInsensitiveMatch(t *testing.T) {
 }
 
 // TestMultiValueAndLowercaseSetCookieStripped: the hub may emit more than
-// one Set-Cookie header, and http.Header canonicalizes key case on write
-// (so "set-cookie" and "Set-Cookie" land under the same canonical key) —
-// pin that Header.Del("Set-Cookie") removes ALL of them regardless.
+// one Set-Cookie header, in any case; Header.Del("Set-Cookie") removes all.
 func TestMultiValueAndLowercaseSetCookieStripped(t *testing.T) {
 	hub := newRecordingHub(t)
 	hub.answerWith(200, http.Header{"Set-Cookie": {"scion_sess=abc123; Path=/", "other=xyz; Path=/"}})
@@ -458,12 +444,9 @@ func TestMultiValueAndLowercaseSetCookieStripped(t *testing.T) {
 	}
 }
 
-// TestMultipleOriginHeadersRejected: a client sending two Origin header
-// values (legal at the wire level) must not be able to have the gate
-// evaluate one value while a downstream reader (or the hub) sees another —
-// r.Header.Get only ever inspects the FIRST value, so a client could put an
-// allowed host first and an attacker-controlled host second. Reject
-// outright rather than pick a value.
+// TestMultipleOriginHeadersRejected: r.Header.Get inspects only the FIRST
+// value, so a client could put an allowed host first and another second for
+// a downstream reader. Reject outright rather than pick a value.
 func TestMultipleOriginHeadersRejected(t *testing.T) {
 	assertGateRefuses(t, "mac.ts.net", http.Header{"Origin": {"https://mac.ts.net", "https://evil.example"}})
 }
@@ -474,11 +457,9 @@ func TestMultipleSecFetchSiteHeadersRejected(t *testing.T) {
 	assertGateRefuses(t, "mac.ts.net", http.Header{"Sec-Fetch-Site": {"same-origin", "cross-site"}})
 }
 
-// TestSecFetchSiteAllowlist: Sec-Fetch-Site must be an allowlist of
-// {same-origin, none} rather than a denylist of {cross-site} — same-site is
-// a sibling tailnet name, not this proxy's origin, and
-// any other/unrecognized value (a future spec addition, a spoofed value
-// from a non-browser client, a typo) must be refused, not silently passed.
+// TestSecFetchSiteAllowlist: Sec-Fetch-Site is an allowlist of
+// {same-origin, none}: same-site is a sibling tailnet name, not this proxy's
+// origin, and any unrecognized value must be refused, not silently passed.
 func TestSecFetchSiteAllowlist(t *testing.T) {
 	cases := []struct {
 		value      string
@@ -513,9 +494,8 @@ func TestSecFetchSiteAllowlist(t *testing.T) {
 	}
 }
 
-// TestAuditLineCapturesUpstreamStatusOnAllow: the allow-path AuditLine must
-// carry the real upstream status code, not the zero value — the audit call
-// used to fire before the round trip even started.
+// TestAuditLineCapturesUpstreamStatusOnAllow: the allow-path AuditLine
+// carries the real upstream status code, not the zero value.
 func TestAuditLineCapturesUpstreamStatusOnAllow(t *testing.T) {
 	hub := newRecordingHub(t)
 	hub.answerWith(201, nil)
@@ -545,10 +525,9 @@ func TestAuditLineCapturesUpstreamStatusOnAllow(t *testing.T) {
 	}
 }
 
-// TestAuditLineEmittedOnUpstreamFailure: the "exactly one AuditLine per
-// request" contract must hold even when the round trip to the hub fails
-// outright (hub down/unreachable) — that path bypasses ModifyResponse, so
-// the audit call must not be silently dropped there.
+// TestAuditLineEmittedOnUpstreamFailure: "exactly one AuditLine per request"
+// holds when the round trip to the hub fails outright, which bypasses
+// ModifyResponse.
 func TestAuditLineEmittedOnUpstreamFailure(t *testing.T) {
 	// A target with nothing listening: connection refused.
 	unreachable := mustURL(t, "http://127.0.0.1:1")
@@ -574,14 +553,11 @@ func TestAuditLineEmittedOnUpstreamFailure(t *testing.T) {
 	}
 }
 
-// TestCustomDialContextIsUsed proves cfg.DialContext actually carries the
-// proxied request — the jail transport's whole point — and that session
-// injection and header stripping still apply on that path. The target is
-// deliberately an address nothing listens on (port 1, standing in for the
-// real 127.0.0.1:8080): only a dialer that ignores it and reaches the test
-// server can succeed, so a Transport that quietly kept the default dialer
-// fails here rather than passing by accident — and cannot reach a hub that
-// happens to be listening on the developer's own 8080 while doing so.
+// TestCustomDialContextIsUsed proves cfg.DialContext carries the proxied
+// request, with session injection and header stripping on that path. The
+// target is an address nothing listens on (port 1), so a Transport that
+// kept the default dialer fails here instead of reaching a hub that happens
+// to listen on the developer's own 8080.
 func TestCustomDialContextIsUsed(t *testing.T) {
 	hub := newRecordingHub(t)
 	hubAddr := mustURL(t, hub.URL).Host
@@ -628,10 +604,8 @@ func TestCustomDialContextIsUsed(t *testing.T) {
 	}
 }
 
-// TestTargetHostHeaderIsThePreservedHubAddress: dialing through the jail must
-// not change what the hub is told it is. Target stays 127.0.0.1:8080 — the
-// hub's address INSIDE the guest — so the Host header stays correct even
-// though the connection is a pipe to a process.
+// TestTargetHostHeaderIsThePreservedHubAddress: dialing through the jail does
+// not change the Host header: it stays the hub's address inside the guest.
 func TestTargetHostHeaderIsThePreservedHubAddress(t *testing.T) {
 	var gotHost string
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -656,9 +630,8 @@ func TestTargetHostHeaderIsThePreservedHubAddress(t *testing.T) {
 }
 
 // TestDialFailureIsAudited: a transport that cannot reach the hub must say
-// why. A 502 with no recorded cause is indistinguishable from an auth
-// failure or a wedged hub, which is precisely the diagnosis the jail
-// transport's error messages exist to provide.
+// why: a 502 with no recorded cause is indistinguishable from an auth
+// failure or a wedged hub.
 func TestDialFailureIsAudited(t *testing.T) {
 	var lines []AuditLine
 	h := NewHandler(Config{
@@ -687,12 +660,10 @@ func TestDialFailureIsAudited(t *testing.T) {
 	}
 }
 
-// TestSlowHubHeadersAreBounded: nothing else in the stack bounds getting a
-// response out of the hub — the jail dial returns as soon as the child
-// starts, and Serve builds an http.Server with no timeouts. Without the
-// transport's header timeout a wedged machine holds the request open forever,
-// producing no answer and no audit line. The failure must be bounded, a 502,
-// and recorded with its cause.
+// TestSlowHubHeadersAreBounded: the jail dial returns as soon as the child
+// starts and Serve's http.Server has no write timeout, so only the
+// transport's header timeout keeps a wedged machine from holding the
+// request open forever. The failure must be a bounded 502 with its cause.
 func TestSlowHubHeadersAreBounded(t *testing.T) {
 	// A listener that accepts and then says nothing: the shape of a jail that
 	// connects but never answers.
@@ -751,9 +722,8 @@ func TestSlowHubHeadersAreBounded(t *testing.T) {
 }
 
 // TestStreamedBodyOutlivesTheHeaderTimeout pins that the bound is on HEADERS
-// only. The hub's transcript and attach streams send headers immediately and
-// then dribble for as long as the operator watches; a timeout that covered
-// the body would cut them off mid-stream.
+// only: the hub's transcript and attach streams dribble for as long as the
+// operator watches.
 func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 	const timeout = 100 * time.Millisecond
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -781,9 +751,8 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 	proxy := httptest.NewServer(h)
 	defer proxy.Close()
 
-	// Through a REAL listener, so Host is the loopback address httptest chose.
-	// Set it to the tailnet name the Config serves, which is what `tailscale
-	// serve` forwards — otherwise the Host gate refuses it (see hostAllowed).
+	// Through a REAL listener, so Host is the loopback address; set it to
+	// the tailnet name `tailscale serve` forwards, or hostAllowed refuses.
 	req, err := http.NewRequest(http.MethodGet, proxy.URL+"/api/v1/agents/x/transcript", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -811,23 +780,20 @@ func TestStreamedBodyOutlivesTheHeaderTimeout(t *testing.T) {
 // Host unchanged for a TCP backend.
 const testServeHost = "mac.ts.net"
 
-// proxyRequest builds a request as it ARRIVES at the proxy. It exists because
-// httptest.NewRequest defaults Host to "example.com", which is precisely the
-// shape hostAllowed now refuses — a request asking for a name this proxy does
-// not answer to. Tests that want to exercise a WRONG Host set req.Host
-// themselves, explicitly.
+// proxyRequest builds a request as it ARRIVES at the proxy: httptest's
+// default Host "example.com" is a name hostAllowed refuses. Tests that want
+// a WRONG Host set req.Host themselves.
 func proxyRequest(method, target string, body io.Reader) *http.Request {
 	r := httptest.NewRequest(method, target, body)
 	r.Host = testServeHost
 	return r
 }
 
-// TestHostGateRefusesDNSRebinding is the regression test for the hole an
-// independent review found and I reproduced against the live proxy: with no
-// Origin and no Sec-Fetch-Site, every other gate passes by default, so a
-// rebound page on the attacker's own name reached the hub with the injected
-// credential's authority. The browser cannot lie here — it sends the name the victim
-// navigated to.
+// TestHostGateRefusesDNSRebinding: with no Origin and no Sec-Fetch-Site every
+// other gate passes by default, so only the Host check stops a rebound page
+// on the attacker's own name from reaching the hub with the injected
+// credential's authority. The browser cannot lie here: it sends the name the
+// victim navigated to.
 func TestHostGateRefusesDNSRebinding(t *testing.T) {
 	hub := newRecordingHub(t)
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
@@ -867,14 +833,10 @@ func TestHostGateRefusesDNSRebinding(t *testing.T) {
 	}
 }
 
-// TestAuditFieldsAreBoundedOnEveryDecisionPath is the regression test for an
-// unbounded write to the operator's disk. Path, method and Tailscale-User-Login
-// are all chosen by the caller, and the gate audits DENIALS as well as allowed
-// requests — lines written before any identity check has passed. Without a cap,
-// anything that reaches the listener appends close to a megabyte per request
-// (http.Server's default MaxHeaderBytes) to remote-audit.jsonl, which sits in
-// the same state directory as the broker's own data. The provider's sink has
-// always bounded its path; this is the same file.
+// TestAuditFieldsAreBoundedOnEveryDecisionPath: path, method and the
+// identity header are caller-chosen, and the gate audits DENIALS before any
+// identity check, so without a cap anything that reaches the listener
+// appends close to a megabyte per request to remote-audit.jsonl.
 func TestAuditFieldsAreBoundedOnEveryDecisionPath(t *testing.T) {
 	huge := strings.Repeat("A", 4096)
 	for _, tc := range []struct {
@@ -921,12 +883,10 @@ func TestAuditFieldsAreBoundedOnEveryDecisionPath(t *testing.T) {
 	}
 }
 
-// TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy pins the split the bound
-// depends on: the audit line carries a truncated COPY of the tailnet login,
-// while every decision keeps using the value the front end actually sent.
-// Deciding on the truncated one would make any two logins sharing their first
-// maxAuditFieldLen bytes the same operator — one allowlist verdict and one hub
-// session between them.
+// TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy: the audit line carries a
+// truncated COPY of the login, while every decision uses the value the front
+// sent. Deciding on the truncated one would merge any two logins sharing
+// their first maxAuditFieldLen bytes into one operator.
 func TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy(t *testing.T) {
 	prefix := strings.Repeat("a", maxAuditFieldLen)
 	allowed := prefix + "-real@example.com"
@@ -971,9 +931,8 @@ func TestTheGateDecidesOnTheWholeLoginNotTheAuditCopy(t *testing.T) {
 }
 
 // setResponseHeaderTimeout lowers the header wait on the Transport NewHandler
-// built for a DialContext config, so a test can exercise the 502 path without
-// waiting out the production bound. The seam is the built instance, not a
-// Config field: production has no reason to set it.
+// built for a DialContext config, so a test can exercise the 502 path
+// quickly. Production has no reason to set it, so it is not a Config field.
 func setResponseHeaderTimeout(t *testing.T, h http.Handler, d time.Duration) {
 	t.Helper()
 	tr, ok := h.(*gate).rp.Transport.(*http.Transport)
@@ -1282,8 +1241,7 @@ func TestEntryNavigationContactLanding(t *testing.T) {
 
 // TestRefusedNavigationIsAPage: a refused top-level page load gets a small
 // HTML page with a link back to "/", not text/plain (which a phone offers as
-// a download), with the same status and decision and nothing cached. Every
-// other refusal is unchanged.
+// a download), with the same status and decision and nothing cached.
 func TestRefusedNavigationIsAPage(t *testing.T) {
 	hub := newPageHub(t)
 	var lines []AuditLine
@@ -1336,7 +1294,7 @@ func TestRefusedNavigationIsAPage(t *testing.T) {
 		t.Errorf("HEAD: %d %q %d bytes, want a bodiless 403 page", rw.Code, rw.Header().Get("Content-Type"), rw.Body.Len())
 	}
 
-	// Not a top-level page load: the plain-text refusal as before.
+	// Not a top-level page load: the plain-text refusal.
 	for name, hdr := range map[string][]string{
 		"iframe":          {"Sec-Fetch-Dest", "iframe"},
 		"fetch":           {"Sec-Fetch-Mode", "cors", "Sec-Fetch-Dest", "empty"},

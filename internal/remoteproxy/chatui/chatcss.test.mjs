@@ -2,8 +2,8 @@
 // browser runs. This test applies chat.css's display rules the way a
 // browser does (media query, specificity, order, !important) to the three
 // elements whose display decides the layout, for a phone and a wide screen,
-// with a chat open and without. It caught a wide screen with a chat open
-// that hid the list, Back included: no way back without a reload.
+// with a chat open and without: a wide screen with a chat open must not
+// hide the list, Back included.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

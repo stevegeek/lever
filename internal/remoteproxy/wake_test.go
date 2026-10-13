@@ -95,7 +95,6 @@ func TestWakeASuspendedWorker(t *testing.T) {
 	}
 }
 
-// Review Focus 2.
 func TestWakeRefusesWhatTheLoginMayNotMessage(t *testing.T) {
 	hub := newPageHub(t)
 	wr := &wakeRec{}
@@ -134,7 +133,6 @@ func TestWakeRefusesWhatTheLoginMayNotMessage(t *testing.T) {
 	}
 }
 
-// Review Focus 3.
 func TestWakeOriginRules(t *testing.T) {
 	hub := newPageHub(t)
 	wr := &wakeRec{}

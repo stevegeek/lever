@@ -13,8 +13,8 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// Tests for the non-Tailscale-front knobs (issue #38): a configurable
-// identity header, X-Forwarded-Host, and a non-loopback bind.
+// Tests for the non-Tailscale-front knobs: a configurable identity header,
+// X-Forwarded-Host, and a non-loopback bind.
 
 const exeHeader = "X-ExeDev-Email"
 
@@ -174,8 +174,8 @@ func TestForwardedHostOptIn(t *testing.T) {
 		{"forwarded host names another site", "127.0.0.1", http.Header{"X-Forwarded-Host": {"evil.example"}}, 403},
 		{"two forwarded hosts", "127.0.0.1", http.Header{"X-Forwarded-Host": {testServeHost, "evil.example"}}, 403},
 		{"comma-joined forwarded hosts", "127.0.0.1", http.Header{"X-Forwarded-Host": {"evil.example, " + testServeHost}}, 403},
-		// The 2026-08-22 rebind, with the header added: the browser sends
-		// the attacker's NAME in Host, so the header is not believed.
+		// A DNS rebind with the header added: the browser sends the
+		// attacker's NAME in Host, so the header is not believed.
 		{"rebound name with a forged forwarded host", "evil.example:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
 		{"localhost is a name, not an IP", "localhost:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},
 		{"a rewritten name is not supported", "internal-name:8445", http.Header{"X-Forwarded-Host": {testServeHost}}, 403},

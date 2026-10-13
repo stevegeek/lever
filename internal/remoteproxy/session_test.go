@@ -47,10 +47,9 @@ func (s *stubSession) state() (handedOut int, invalidated []string, logins []str
 }
 
 // TestAPIRequestRidesTheSession: /api/v1 carries the operator's own hub
-// session and NO Authorization header. scion's sessionToBearerMiddleware
-// turns the cookie into a bearer only when the request has none, so any
-// Authorization at all — the remote PAT the proxy used to inject, or one the
-// phone sent — would decide the identity instead, and the chat's DM
+// session and NO Authorization header. scion turns the cookie into a bearer
+// only when the request has none, so any Authorization (a PAT, or one the
+// browser sent) would decide the identity instead, and the chat's DM
 // participant check would see a second user.
 func TestAPIRequestRidesTheSession(t *testing.T) {
 	hub := newRecordingHub(t)
@@ -82,8 +81,8 @@ func TestAPIRequestRidesTheSession(t *testing.T) {
 	}
 }
 
-// TestShellRequestCarriesOnlyTheSession: the shell is unchanged — the cookie
-// is what scion's web layer reads — and no longer carries a PAT beside it.
+// TestShellRequestCarriesOnlyTheSession: the shell gets the cookie scion's
+// web layer reads, and no PAT beside it.
 func TestShellRequestCarriesOnlyTheSession(t *testing.T) {
 	hub := newRecordingHub(t)
 	sess := &stubSession{cookie: "sess-value"}
@@ -150,8 +149,8 @@ func answerUnauthenticatedOnce(status int, location string) (func(http.ResponseW
 
 // TestStaleSessionIsRenewedAndTheRequestRetried: when the hub no longer knows
 // the session (it restarted, or the session lapsed), the operator must get
-// their page — not scion's login screen, whose "sign in" button leads to an
-// authorization endpoint that does not resolve, by design.
+// their page, not scion's login screen, whose "sign in" button leads to an
+// authorization endpoint that does not resolve.
 func TestStaleSessionIsRenewedAndTheRequestRetried(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -246,8 +245,8 @@ func TestOnlyBodilessMethodsAreRetried(t *testing.T) {
 	}
 }
 
-// TestAPIGetIsRetriedLikeTheShell: an API read is as bodiless as a shell GET,
-// and now rides the same session, so a lapsed session heals the same way.
+// TestAPIGetIsRetriedLikeTheShell: an API read is as bodiless as a shell GET
+// and rides the same session, so a lapsed session heals the same way.
 func TestAPIGetIsRetriedLikeTheShell(t *testing.T) {
 	hub := newRecordingHub(t)
 	answer, calls := answerUnauthenticatedOnce(http.StatusUnauthorized, "")
@@ -546,9 +545,9 @@ func TestSignInNavigationLoginFailureIs502(t *testing.T) {
 
 // TestSignInEndToEndNeverLeaksTheDeadEndpoint drives the REAL login driver
 // against the scripted hub: the intercepted navigation triggers exactly one
-// handshake (the driver's own step-1 GET reaches the hub directly, not
-// through the handler — no recursion), the browser is sent to "/", and no
-// response ever carries the dead authorization endpoint.
+// handshake (the driver's step-1 GET reaches the hub directly, not through
+// the handler), the browser is sent to "/", and no response ever carries the
+// dead authorization endpoint.
 func TestSignInEndToEndNeverLeaksTheDeadEndpoint(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())
@@ -601,12 +600,10 @@ func TestLoginFailureNamesTheConfiguredLog(t *testing.T) {
 }
 
 // TestUnpinnedIdentityIsNeverAssertedToTheHub: with allowed_users empty the
-// gate verifies NOTHING about Tailscale-User-Login (the header is not even
-// required), so the hub login must be driven for the unnamed operator, not
-// for whatever the header happens to say — otherwise the hub's user row names
-// an identity nothing checked. With allowed_users set, the login that passed
-// the gate is exactly what the hub records (the guide's "Who the hub thinks
-// you are"), and that path must keep working unchanged.
+// gate verifies NOTHING about Tailscale-User-Login, so the hub login must be
+// driven for the unnamed operator, not for whatever the header says. With
+// allowed_users set, the login that passed the gate is exactly what the hub
+// records.
 func TestUnpinnedIdentityIsNeverAssertedToTheHub(t *testing.T) {
 	cases := []struct {
 		name      string

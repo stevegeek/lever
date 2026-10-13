@@ -274,7 +274,6 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 	return deny("a contact may only chat with its agents")
 }
 
-// fenceConversation checks a /api/v1/chat/conversations/{key}/... request.
 func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *AuditLine, scope contactScope, deny func(string) *http.Request) *http.Request {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	key, sub, _ := strings.Cut(rest, "/")

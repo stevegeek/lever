@@ -11,7 +11,7 @@ package remoteproxy
 // private copy whose sha256 equals its record (CopyVerified), as an
 // attachment that no browser renders. A login sees and fetches only its
 // own uploads and the shares recorded for it; an operator may also fetch
-// any record of an agent it may message (spec 5's view links here). The
+// any record of an agent it may message (the operator view links here). The
 // hub is never asked; nothing here reaches /api/.
 
 import (
@@ -149,7 +149,6 @@ type filesState struct {
 	lists, downloads, uploadTries *loginRate
 }
 
-// newFilesState is the file exchange for cfg, its ledger not yet opened.
 func newFilesState(cfg FilesConfig) *filesState {
 	return &filesState{cfg: cfg, now: time.Now, bytesPerDay: uploadBytesPerDay,
 		uploading: map[string]int{}, downloading: map[string]int{}, pending: map[string][]int64{},
@@ -340,8 +339,8 @@ type fileEntry struct {
 }
 
 // filesFor is login's exchange with agent, newest first, at most
-// maxFileList rows: its uploads and the agent's shares to it. Spec 5's
-// operator view lists a contact's files with this.
+// maxFileList rows: its uploads and the agent's shares to it. The operator
+// view lists a contact's files with this.
 func (g *gate) filesFor(agent, login string) ([]fileEntry, error) {
 	led, err := g.files.led()
 	if err != nil {
@@ -368,7 +367,7 @@ func (g *gate) filesFor(agent, login string) ([]fileEntry, error) {
 
 // mayDownload: a login fetches its own uploads and the shares recorded for
 // it; an operator also fetches any record of an agent it may message (the
-// caller checked that), which spec 5's operator view links to.
+// caller checked that), which the operator view links to.
 func mayDownload(v viewer, rec fileledger.Record) bool {
 	return sameLogin(rec.Login, v.login) || v.tier == chatledger.TierOperator
 }

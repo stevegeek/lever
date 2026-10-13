@@ -17,53 +17,39 @@ import (
 
 // jailNC is the command run INSIDE the jail to bridge a pair of pipes to a TCP
 // address. The guest carries OpenBSD netcat; socat and ncat are not installed.
-// Deliberately no -w: openbsd nc applies that timeout to an IDLE connection as
-// well as to connect, which would cut the hub's long-lived attach WebSockets
-// mid-session.
+// No -w: openbsd nc applies that timeout to an idle connection too, which
+// would cut the hub's long-lived attach WebSockets.
 const jailNC = "nc"
 
-// ncNotFound is the shell's exit code for an absent command — the same signal
-// internal/hubapi/jailcurl.go reads for a missing curl.
+// ncNotFound is the shell's exit code for an absent command.
 const ncNotFound = 127
 
 // childGrace bounds two waits on the child: how long an I/O error waits for
-// its exit status before reporting the raw pipe error, and how long Close
-// waits for the reap. Only failure paths pay it — by the time either runs the
-// child has been killed or has already closed the pipe — and neither may hang
+// its exit status, and how long Close waits for the reap. Neither may hang
 // the proxy's request path.
 const childGrace = 2 * time.Second
 
 // stderrLimit caps how much of the child's stderr is kept for the error
-// message. A per-connection buffer that grows with whatever the guest writes
-// is a memory leak a remote client can trigger, and an error should quote a
-// hint rather than a transcript.
+// message, so a guest cannot grow a per-connection buffer without bound.
 const stderrLimit = 512
 
 // JailDial returns a DialContext that reaches a TCP address INSIDE this
 // instance's jail, by running `<prefix...> nc <host> <port>` on the host and
 // adapting the child's stdin/stdout to a net.Conn.
 //
-// The host has no direct route to the hub: the hub binds the JAIL's loopback,
-// and a host-side 127.0.0.1:8080 that appears to reach it is an artifact of
-// OrbStack's port forwarding from whichever machine claimed the port first —
-// not necessarily this instance's (internal/scion/client.go states the rule;
-// internal/hubapi/jailcurl.go is the same rule applied to lever's other hub
-// calls). Dialing through the jail is what lets two remote-enabled instances
-// share a host: each proxy reaches its OWN hub instead of contending for one
-// forwarded port.
+// The hub binds the jail's loopback. A host-side 127.0.0.1:8080 that appears
+// to reach it is OrbStack's port forwarding from whichever machine claimed
+// the port first, not necessarily this instance's, so each proxy dials
+// through its own jail.
 //
 // prefixFn returns the backend's jail argv prefix, e.g.
 // ["orb","-m","lever-x","-u","devuser"] or ["limactl","shell","lever-x"]. It
-// is a func rather than a value so a jail that was down, rebuilt, or renamed
-// when the proxy started is resolved on a later dial instead of pinned at
-// construction; an empty return means "cannot resolve the jail right now" and
-// fails that dial with an actionable message.
+// is resolved on every dial so a jail that was down, rebuilt or renamed when
+// the proxy started is still found; an empty return fails that dial.
 //
-// The returned conn is live before the guest's TCP connect completes: nothing
-// is written to stdout until the hub answers, so a refused connection cannot
-// surface as a dial error. It surfaces on the first Read instead, carrying the
-// child's exit status and stderr (see jailConn.translate) rather than a bare
-// EOF.
+// The returned conn is live before the guest's TCP connect completes, so a
+// refused connection surfaces on the first Read, carrying the child's exit
+// status and stderr (see jailConn.translate) rather than a bare EOF.
 func JailDial(prefixFn func() []string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		switch network {
@@ -88,19 +74,15 @@ func JailDial(prefixFn func() []string) func(ctx context.Context, network, addr 
 
 // startJailConn runs the jail command and wires its pipes into a net.Conn.
 //
-// The child's lifetime is governed by a context of the conn's own, cancelled
-// by Close (and by the GC cleanup below), NOT by the dial context. A conn
-// outlives the request that dialled it — that is what keep-alive is — and
-// net/http hands DialContext a context it has already detached from the
-// request for exactly that reason (Transport.getConn: "the dial should
-// proceed even if the request is canceled"). Context values are carried
-// through; only cancellation is ours to decide.
+// The child's lifetime follows a context of the conn's own, cancelled by
+// Close (and by the GC cleanup below), NOT the dial context: a kept-alive
+// conn outlives the request that dialled it, and net/http already detaches
+// the dial context from the request. Context values are carried through.
 func startJailConn(dialCtx context.Context, prefix []string, addr, host, port string) (net.Conn, error) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(dialCtx))
-	// os.Pipe rather than cmd.StdinPipe/StdoutPipe: those hand back plain
-	// io.ReadCloser/io.WriteCloser, and a conn whose SetDeadline is a no-op
-	// turns every timeout in http.Transport into a hang. An *os.File over a
-	// pipe is pollable, so its deadlines are real.
+	// os.Pipe rather than cmd.StdinPipe/StdoutPipe: an *os.File over a pipe is
+	// pollable, so its deadlines are real. A conn whose SetDeadline is a no-op
+	// turns every timeout in http.Transport into a hang.
 	inR, inW, err := os.Pipe()
 	if err != nil {
 		cancel()
@@ -118,15 +100,12 @@ func startJailConn(dialCtx context.Context, prefix []string, addr, host, port st
 	cmd := exec.CommandContext(ctx, prefix[0], argv...)
 	stderr := &capBuffer{}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, stderr
-	// Own process group so endChild can reach a wrapper's helper. Killing only
-	// the direct child leaves such a helper holding the stdout pipe open, and a
-	// conn that never sees EOF is a stuck proxy goroutine.
+	// Own process group so endChild can reach a wrapper's helper, which would
+	// otherwise hold the stdout pipe open and leave a conn that never sees EOF.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return endChild(cmd) }
 	// Bound Wait even if something the child spawned inherited its stderr and
-	// outlived it: past this, exec closes the pipes and stops waiting, so the
-	// wait goroutine cannot be pinned open by a process lever does not know
-	// about.
+	// outlived it.
 	cmd.WaitDelay = childGrace
 
 	if err := cmd.Start(); err != nil {
@@ -142,10 +121,9 @@ func startJailConn(dialCtx context.Context, prefix []string, addr, host, port st
 	inR.Close()
 	outW.Close()
 
-	// The wait state is its own object rather than fields on the conn, so the
-	// goroutine below captures IT and not the conn. A goroutine holding the
-	// conn would keep it reachable for as long as the child lives, which is
-	// exactly when the cleanup registered further down needs it collectable.
+	// The wait state is its own object so the goroutine below does not keep
+	// the conn reachable while the child lives: the cleanup below needs the
+	// conn collectable.
 	w := &childWait{done: make(chan struct{})}
 	c := &jailConn{in: inW, out: outR, stderr: stderr, prefix: prefix, addr: addr,
 		cancel: cancel, wait: w}
@@ -153,24 +131,19 @@ func startJailConn(dialCtx context.Context, prefix []string, addr, host, port st
 		w.err = cmd.Wait() // written before done closes; read only after
 		close(w.done)
 	}()
-	// Last resort for a conn dropped without Close: cancelling is the entire
-	// cleanup, and the cancel func holds no reference back to the conn, so
-	// this cannot keep the conn itself alive. Close remains the real path —
-	// this only stops a caller's mistake from leaking a jail process forever.
+	// Last resort for a conn dropped without Close; the cancel func holds no
+	// reference back to the conn, so this cannot keep it alive.
 	runtime.AddCleanup(c, func(stop context.CancelFunc) { stop() }, cancel)
 	return c, nil
 }
 
 // endChild ends cmd's process. It signals the process GROUP only once
 // os.Process.Kill has confirmed the direct child was still ours to signal:
-// after the wait goroutine reaps it, the pid is free for the OS to hand to an
-// unrelated process, and a raw kill(-pid) would then hit whatever group later
-// holds it. os.Process guards against that; a bare syscall does not. The proxy
-// starts one child per connection against a pid space of a few tens of
-// thousands, so pid reuse is reachable, not theoretical.
+// after the reap the pid may belong to an unrelated process, and with one
+// child per connection pid reuse is reachable.
 //
-// Returning os.ErrProcessDone is meaningful to exec: it treats it as "the
-// process already finished" and injects no error (see Cmd.watchCtx).
+// Returning os.ErrProcessDone tells exec the process already finished, so
+// it injects no error (see Cmd.watchCtx).
 func endChild(cmd *exec.Cmd) error {
 	p := cmd.Process
 	if p == nil {
@@ -179,12 +152,10 @@ func endChild(cmd *exec.Cmd) error {
 	if err := p.Kill(); err != nil {
 		return err
 	}
-	// Honest residual: Kill has returned by now, so the wait goroutine could
-	// reap and the OS recycle the pid before this line runs. That needs a full
-	// pid-space wrap inside a few microseconds. Go offers nothing tighter —
-	// os.Process has no group-signal API to inherit its pidfd guarantees — and
-	// the alternative, not signalling the group, leaves a wrapper's helper
-	// holding the pipes open.
+	// Residual race: the child could be reaped and its pid recycled between
+	// Kill and this line, which needs a full pid-space wrap in microseconds.
+	// os.Process has no group-signal API, and not signalling the group would
+	// leave a wrapper's helper holding the pipes open.
 	_ = syscall.Kill(-p.Pid, syscall.SIGKILL)
 	return nil
 }
@@ -204,9 +175,9 @@ type jailConn struct {
 	closed    atomic.Bool
 }
 
-// childWait carries the child's exit status from the wait goroutine to
-// whoever needs to explain a failed read or write. Separate from jailConn so
-// the goroutine does not pin the conn — see startJailConn.
+// childWait carries the child's exit status from the wait goroutine to a
+// failed read or write. Separate from jailConn so the goroutine does not pin
+// the conn.
 type childWait struct {
 	done chan struct{}
 	err  error // written before done closes; read only after
@@ -224,12 +195,10 @@ func (c *jailConn) Write(p []byte) (int, error) {
 	return n, c.translate(err)
 }
 
-// translate replaces a pipe-level error with the reason the JAIL side failed,
-// when there is one. At the pipe, a missing nc, a stopped machine, and a hub
-// refusing the connection all look identical — "EOF" or "broken pipe" — and a
-// 502 with no cause is exactly what this transport must not produce. A child
-// that exited cleanly leaves the error alone: that is an ordinary end of
-// stream, not a failure.
+// translate replaces a pipe-level error with the reason the jail side failed,
+// when there is one: at the pipe, a missing nc, a stopped machine and a hub
+// refusing the connection all look like "EOF" or "broken pipe". A child that
+// exited cleanly leaves the error alone.
 //
 // Deadline errors and errors after Close pass through: those are this side's
 // doing, so the child's exit status would misattribute them.
@@ -256,7 +225,6 @@ func (c *jailConn) translate(err error) error {
 	return c.diagnose()
 }
 
-// diagnose renders the child's failure as something an operator can act on.
 func (c *jailConn) diagnose() error {
 	via := strings.Join(c.prefix, " ")
 	said := strings.TrimSpace(c.stderr.String())
@@ -273,13 +241,10 @@ func (c *jailConn) diagnose() error {
 }
 
 // ncMissing reports whether the child died because the guest has no netcat.
-// Exit 127 is the shell's own signal for it; the wording counts too, since a
-// prefix binary may report a failed exec with a code of its own.
-//
-// The wording test is deliberately the full "command not found" rather than a
-// bare "not found": `orb -m <gone>` says "machine not found", and diagnosing a
-// destroyed or renamed machine as a missing netcat sends the operator to
-// apt-get for a problem `lever up` fixes.
+// Exit 127 is the shell's signal for it; the wording counts too, since a
+// prefix binary may report a failed exec with a code of its own. It matches
+// the full "command not found": `orb -m <gone>` says "machine not found",
+// which `lever up` fixes, not a netcat install.
 func (c *jailConn) ncMissing(stderr string) bool {
 	var ee *exec.ExitError
 	if errors.As(c.wait.err, &ee) && ee.ExitCode() == ncNotFound {
@@ -293,17 +258,11 @@ func (c *jailConn) Close() error {
 		c.closed.Store(true)
 		c.in.Close()
 		c.out.Close()
-		// Ending the child goes through exec's context machinery rather than a
-		// direct signal. Note what that does NOT buy: exec's watchCtx selects
-		// between handing its result to Wait and the context being done, so
-		// Cancel can still fire on a child Wait has already reaped. What keeps
-		// that safe is the Kill guard inside endChild — do not remove it on
-		// the belief that exec has already ruled the case out.
+		// exec's watchCtx can still fire Cancel on a child Wait has already
+		// reaped; the Kill guard inside endChild is what keeps that safe.
 		c.cancel()
-		// Wait for the reap: the proxy opens one child per connection, so a
-		// Close that returns before the child is waited on leaks a zombie per
-		// request. Bounded because Close runs on the request path — past the
-		// grace the wait goroutine still reaps, just not before Close returns.
+		// Wait for the reap, or each connection leaks a zombie. Bounded because
+		// Close runs on the request path; the wait goroutine still reaps later.
 		select {
 		case <-c.wait.done:
 		case <-time.After(childGrace):
@@ -322,18 +281,15 @@ func (c *jailConn) SetWriteDeadline(t time.Time) error { return c.in.SetWriteDea
 func (c *jailConn) LocalAddr() net.Addr  { return jailAddr{"jail-dial"} }
 func (c *jailConn) RemoteAddr() net.Addr { return jailAddr{c.addr} }
 
-// jailAddr names the jail-side endpoint a jailConn reaches. net.Conn's
-// contract wants a net.Addr, but there is no host-side socket to describe —
-// the bytes travel over pipes to a process — so this reports where the
-// connection actually went rather than inventing a plausible host address.
+// jailAddr names the jail-side endpoint a jailConn reaches: there is no
+// host-side socket to describe.
 type jailAddr struct{ addr string }
 
 func (a jailAddr) Network() string { return "jail" }
 func (a jailAddr) String() string  { return a.addr }
 
 // capBuffer keeps at most stderrLimit bytes of the child's stderr. Guarded
-// because exec's copier writes it from its own goroutine while a Read on this
-// side may be building an error message.
+// because exec's copier writes it from its own goroutine.
 type capBuffer struct {
 	mu  sync.Mutex
 	buf []byte
@@ -345,8 +301,8 @@ func (b *capBuffer) Write(p []byte) (int, error) {
 	if n := stderrLimit - len(b.buf); n > 0 {
 		b.buf = append(b.buf, p[:min(n, len(p))]...)
 	}
-	// Report a full write regardless: dropping the tail is this buffer's
-	// choice, and a short write would make exec tear the child's stderr down.
+	// Report a full write: a short write would make exec tear the child's
+	// stderr down.
 	return len(p), nil
 }
 

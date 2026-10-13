@@ -10,14 +10,13 @@ package remoteproxy
 // and the latency; never the text, never the audio.
 //
 // The route takes the text from the page, not only a message reference: a
-// server-side lookup would have to repeat, exactly, every rule of what a
-// login is shown (a contact's filtered history above all), and a mistake
-// there would read out a message the login may not see. Text the page
-// sends is text the login already has. Any text a login sends is spoken,
-// so the route is a speech service for the logins, but a bounded one: the
-// text is bounded per request (the tool's -max-chars) and per login
-// (characters an hour and a day), the reference must name an agent the
-// login's roster lists, and voice: false on a login turns it off.
+// server-side lookup would have to repeat every rule of what a login is shown
+// (a contact's filtered history above all), and a mistake there would read
+// out a message the login may not see. Text the page sends is text the login
+// already has. Since any text a login sends is spoken, the route is bounded:
+// per request (the tool's -max-chars), per login (characters an hour and a
+// day), the reference must name an agent the login's roster lists, and
+// voice: false on a login turns it off.
 
 import (
 	"context"
@@ -78,7 +77,6 @@ const (
 	maxMessageRef = 128
 )
 
-// speakState holds the route's slots and per-login counts.
 type speakState struct {
 	cfg SpeechConfig
 	now func() time.Time // tests
@@ -213,7 +211,6 @@ func (g *gate) refuseSpeak(w http.ResponseWriter, r *http.Request, line *AuditLi
 	g.answerFileJSON(w, r, line, DecisionDenySpeak, status, map[string]any{"error": word})
 }
 
-// serveSpeak answers POST /lever/api/voice/speak for v.
 func (g *gate) serveSpeak(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer) {
 	s := g.speak
 	if r.Method != http.MethodPost {

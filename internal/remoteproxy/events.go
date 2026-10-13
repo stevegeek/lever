@@ -12,16 +12,13 @@ import (
 	"strings"
 )
 
-// The events stream of a contact, with agent messages on.
-//
-// The hub's chat events carry the message text and the sender's name. The
-// page uses an event only as "read the list and the history again"
-// (chat.js openStream) and reads only its subject, so a contact gets each
-// event reduced to its subject (and the stream's numeric event id): whatever
-// the hub sends, no text, no sender and no message id reaches the contact
-// this way. The reducer works one event at a time and returns each as soon
-// as it is complete, so the stream stays live (ReverseProxy flushes every
-// write of a text/event-stream answer). Anything it cannot read is dropped.
+// A contact's events stream. The hub's chat events carry the message text and
+// the sender's name, but the page uses an event only as "reload the list and
+// history" (chat.js openStream) and reads only its subject. So each event is
+// reduced to its subject and numeric event id: no text, sender or message id
+// reaches the contact this way. Each event is returned as soon as it is
+// complete so the stream stays live (ReverseProxy flushes every write of a
+// text/event-stream answer). Anything unreadable is dropped.
 
 const (
 	maxEventLine  = 1 << 20
@@ -53,7 +50,6 @@ func reduceEvents(uid string) func(*http.Response) {
 	}
 }
 
-// eventReducer reads the hub's stream and hands out reduced events.
 type eventReducer struct {
 	src    *bufio.Reader
 	body   io.Closer

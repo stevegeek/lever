@@ -22,7 +22,6 @@ import (
 // wavClip is a canonical clip of n samples (PCM s16le, 16 kHz, mono).
 func wavClip(n int) []byte { return voice.CanonicalWAV(n) }
 
-// voiceRec is a transcriber that records what it was sent.
 type voiceRec struct {
 	mu    sync.Mutex
 	clips [][]byte

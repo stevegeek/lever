@@ -19,7 +19,6 @@ const (
 		`","type":"instruction","createdAt":"2026-09-28T10:15:02.123456789Z","dispatchState":"dispatched"}`
 )
 
-// chatHub answers every request with status and body.
 func chatHub(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,8 +48,6 @@ func (l *ledgerSpy) all() []chatledger.Entry {
 	return append([]chatledger.Entry(nil), l.entries...)
 }
 
-// chatPost sends one request through a proxy in front of hub and returns the
-// client's answer.
 func chatPost(t *testing.T, hub *httptest.Server, allowed []string, login, method, path string, spy *ledgerSpy) *httptest.ResponseRecorder {
 	t.Helper()
 	h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(), ServeHost: testServeHost,

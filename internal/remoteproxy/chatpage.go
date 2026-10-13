@@ -25,32 +25,26 @@ import (
 //
 //   - The page reads and sends through the hub's own chat routes, forwarded
 //     by this proxy like any other request. A contact's go through the
-//     contact fence exactly as before (contact.go): the page gains no hub
-//     route a contact did not have. A message it posts is recorded by
-//     recordChat exactly as one posted from the hub's web UI, and verifies
-//     the same way (package chatledger). Nothing here signs, records or
-//     delivers a message.
+//     contact fence (contact.go): the page gains no hub route a contact did
+//     not have. A message it posts is recorded by recordChat exactly as one
+//     posted from the hub's web UI (package chatledger). Nothing here signs,
+//     records or delivers a message.
 //   - Everything below is answered only for a verified login that passed
-//     the gate, operator or contact. What each sees is built server-side
-//     from its tier and lists (agents.go): a contact never learns of an
-//     agent outside its lists.
-//   - What lever serves is fixed: the files embedded in the binary, a
-//     manifest per tier, and the agent list (JSON built from config, the
-//     hub's records reduced to fixed words, and cleaned labels). No other
-//     agent-written byte is served from here. The page writes what it reads
-//     from the hub as text only (see chatui/chat.js), and its CSP allows no
-//     inline script.
-//   - Its own writes are the wake route alone (wake.go).
+//     the gate. What each sees is built server-side from its tier and lists
+//     (agents.go): a contact never learns of an agent outside its lists.
+//   - What lever serves is fixed: the embedded files, a manifest per tier,
+//     and the agent list (JSON built from config, the hub's records reduced
+//     to fixed words, and cleaned labels). No other agent-written byte is
+//     served from here. The page writes what it reads from the hub as text
+//     only (see chatui/chat.js), and its CSP allows no inline script.
 //
 // The whole /lever/ prefix is lever's while the page is on: an unknown path
 // under it is a 404, never forwarded, so a route added here later cannot
 // shadow one the hub answers.
 
-// The page is installable as an app (a web app manifest and icons, below).
 // The page has no service worker unless remote.push is on. Then
-// /lever/sw.js is a push-only worker (no fetch handler, no cache): it shows
-// a notification and opens the chat, and never sits between the page and
-// its requests, so it cannot serve a stale page.
+// /lever/sw.js is a push-only worker (no fetch handler, no cache): it never
+// sits between the page and its requests, so it cannot serve a stale page.
 
 //go:generate go run chaticons_gen.go
 //go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js chatui/sw.js chatui/*.png
@@ -66,7 +60,7 @@ const (
 	chatAgentsPath   = "/lever/api/agents"
 	chatManifestPath = "/lever/manifest.webmanifest"
 	// chatConsolePath is where the page's link to the hub's web UI goes: its
-	// agent list, since "/" now leads back to the chat page.
+	// agent list, since "/" leads to the chat page.
 	chatConsolePath = "/agents"
 )
 
@@ -74,25 +68,21 @@ const (
 // lever's own /lever/ path, talks only to its own origin, and allows no
 // inline script or style, no frame, no form target and no other origin.
 //
-// The path matters. The hub serves agent-written files under /api/ with a
-// type taken from the file name, so on this origin 'self' would also admit a
-// .js file an agent wrote. The page has no markup sink for an agent to name
-// such a file through (TestChatPageHasNoMarkupSink); this keeps a sink added
-// by mistake from loading agent script as well. The app manifest and its
-// icons come from /lever/ too (manifest-src, img-src). A serveHost the
-// policy cannot name (cspHost) falls back to 'self'.
+// The path matters: the hub serves agent-written files under /api/ with a
+// type taken from the file name, so 'self' would also admit a .js file an
+// agent wrote. The page has no markup sink to name such a file through
+// (TestChatPageHasNoMarkupSink); this keeps a sink added by mistake from
+// loading agent script. A serveHost the policy cannot name (cspHost) falls
+// back to 'self'.
 //
-// The policy names base_url's host, so the page runs only when opened there.
-// Opened under another name the Host check admits (the loopback probe
-// address, or a bind address), the browser blocks the page's own files:
-// those names are for probes and fronts, not for a browser.
+// The policy names base_url's host, so opened under another name the Host
+// check admits (the loopback probe address, or a bind address), the browser
+// blocks the page's own files: those names are not for a browser.
 //
-// With push on (remote.push), two directives change and nothing else:
-// worker-src names /lever/ for the push-only worker, and Trusted Types
-// allows exactly one policy, lever-sw, whose only output is the literal
-// worker URL (chat.js): serviceWorker.register is a script-URL sink, so with
-// no policy at all the page could not register its worker. Off, the policy
-// is the one the page had before push existed.
+// With push on, two directives change: worker-src names /lever/ for the
+// push-only worker, and Trusted Types allows exactly one policy, lever-sw,
+// whose only output is the literal worker URL (chat.js):
+// serviceWorker.register is a script-URL sink.
 func chatCSPFor(serveHost string, push bool) string {
 	own, img := "'self'", "'self'"
 	if cspHost(serveHost) {
@@ -143,7 +133,6 @@ func cspHost(host string) bool {
 	return true
 }
 
-// chatFile is one embedded file, read once.
 type chatFile struct {
 	contentType string
 	body        []byte
@@ -218,11 +207,9 @@ func newChatPage(cfg Config) *chatPage {
 // names no agent (the manager may be outside the contact's lists).
 const contactAppName = "Chat"
 
-// chatManifest is the page's web app manifest: what a browser needs to
-// install the page as an app (Chrome's "Install page as app", Safari's "Add
-// to Home Screen"). It opens /lever/chat in a window of its own; the
-// Terminal and Console links leave its scope and still work, shown by the
-// browser as pages outside the app.
+// chatManifest is the page's web app manifest. It opens /lever/chat in a
+// window of its own; the Terminal and Console links leave its scope and
+// still work.
 type chatManifest struct {
 	Name            string             `json:"name"`
 	ShortName       string             `json:"short_name"`
@@ -243,10 +230,9 @@ type chatManifestIcon struct {
 }
 
 // chatManifestFor names the app after the instance (the manager's agent
-// name is the instance name, a short [a-z0-9-] token config validates). The
-// colours are chat.css's light ones: --bg behind the window while it loads,
-// --panel for the title bar, which the header continues. The dark scheme
-// sets its own bar colour in chat.html; a manifest has one.
+// name, a short [a-z0-9-] token config validates). The colours are
+// chat.css's light ones; the dark scheme sets its own bar colour in
+// chat.html, since a manifest has one.
 func chatManifestFor(instance string) chatManifest {
 	short := instance
 	if r := []rune(short); len(r) > 12 {
@@ -373,14 +359,10 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		w.Header().Set("Content-Type", f.contentType)
 		w.Header().Set("ETag", f.etag)
 		// Revalidate on every load: the files change with the lever binary.
-		// private: the answer at this URL depends on who asks (the manifest
-		// differs per tier), so no shared cache may keep it. No Vary: the
-		// login comes from the front's identity header, not from anything
-		// the browser sends (Vary: Cookie would name the wrong input), and
-		// none is needed: no-cache makes the browser revalidate every load,
-		// and each tier's manifest has its own ETag, so a browser that
-		// changed login sends the other tier's tag and gets a 200 with its
-		// own manifest, never a 304 for the old one.
+		// private: the manifest differs per tier, so no shared cache may keep
+		// it. No Vary: the login comes from the front's identity header, not
+		// from anything the browser sends; each tier's manifest has its own
+		// ETag, so a browser that changed login never gets a 304 for the old one.
 		w.Header().Set("Cache-Control", "private, no-cache")
 	}
 	if etagMatches(r.Header.Get("If-None-Match"), f.etag) {

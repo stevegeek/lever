@@ -20,9 +20,8 @@ import (
 )
 
 // startProvider serves a Provider on a real loopback listener whose port the
-// provider knows, so its discovery document advertises endpoints that actually
-// resolve — the same arrangement as production, where the guest forwarder
-// makes 127.0.0.1:<port> mean this listener from inside the jail too.
+// provider knows, so its discovery document advertises endpoints that
+// resolve, as the guest forwarder arranges in production.
 func startProvider(t *testing.T) (*Provider, *auditSink, *httptest.Server) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -41,20 +40,18 @@ func startProvider(t *testing.T) (*Provider, *auditSink, *httptest.Server) {
 	return p, sink, srv
 }
 
-// fakeScionHub models the parts of scion's web layer this handshake touches,
-// as read from pkg/hub/web.go and pkg/hub/oauth.go at pin e82a2a08:
+// fakeScionHub models the parts of scion's web layer this handshake touches:
 //
 //   - ONE cookie, scion_sess, carrying the login state first and the session
 //     afterwards;
-//   - a redirect_uri built from the hub's own base_url — which is the hub's
-//     localhost default, NOT an address this proxy can reach, so the driver
-//     has to rewrite the origin;
+//   - a redirect_uri built from the hub's own base_url (its localhost
+//     default, not an address the proxy can reach), so the driver has to
+//     rewrite the origin;
 //   - a callback that constant-time compares the state, then calls the
-//     provider's /token and /userinfo back-channel itself;
+//     provider's /token and /userinfo itself;
 //   - a web shell that answers 401 (or a redirect to the login page) without a
-//     session, and an API that passes a request through untouched when it
-//     carries an Authorization header and otherwise runs as the session's
-//     user (sessionToBearerMiddleware).
+//     session, and an API that passes a request carrying an Authorization
+//     header through untouched and otherwise runs as the session's user.
 type fakeScionHub struct {
 	*httptest.Server
 	issuer   string // the configured oidc_login.issuer_url
@@ -71,7 +68,6 @@ type fakeScionHub struct {
 	callbacks int
 	apiCalls  []http.Header // headers of every /api/v1 request
 
-	// knobs
 	dropState        bool   // "forget" the state, as a lost cookie jar would
 	authzOverride    string // redirect somewhere other than our provider
 	clientIDOverride string // ask for a client_id lever did not configure
@@ -243,7 +239,6 @@ func (h *fakeScionHub) exchange(code string) (string, error) {
 	return info.Email, nil
 }
 
-// handleShell is the session-gated web surface.
 func (h *fakeScionHub) handleShell(w http.ResponseWriter, r *http.Request) {
 	if email, ok := h.sessionEmail(r); ok {
 		w.Header().Set("Content-Type", "text/plain")
@@ -312,9 +307,8 @@ func newTestDriver(t *testing.T) (*LoginDriver, *fakeScionHub, *Provider, *audit
 	return d, hub, p, psink
 }
 
-// TestHandshakeCompletesWithNoAuthorizeRouteRegistered is the decisive test
-// for the whole design: a full hub login, driven server-side, while the
-// provider has no authorization endpoint at all.
+// TestHandshakeCompletesWithNoAuthorizeRouteRegistered: a full hub login,
+// driven server-side, while the provider has no authorization endpoint.
 func TestHandshakeCompletesWithNoAuthorizeRouteRegistered(t *testing.T) {
 	d, hub, p, psink := newTestDriver(t)
 
@@ -367,10 +361,9 @@ func TestHandshakeCompletesWithNoAuthorizeRouteRegistered(t *testing.T) {
 }
 
 // TestLoginRewritesTheHubIssuedRedirectOrigin: the hub builds redirect_uri
-// from its own base_url (localhost:8080 by default), which is not an address
-// the proxy can reach — it dials the hub through the jail. Only the origin may
-// be replaced; the code stays bound to the redirect_uri as issued, because
-// that is the string the hub re-sends to /token.
+// from its own base_url, which the proxy cannot reach. Only the origin may be
+// replaced; the code stays bound to the redirect_uri as issued, which the hub
+// re-sends to /token.
 func TestLoginRewritesTheHubIssuedRedirectOrigin(t *testing.T) {
 	d, hub, _, _ := newTestDriver(t)
 	if strings.Contains(hub.URL, "8080") {
@@ -642,9 +635,8 @@ func TestALoginSurvivesTheRequestThatStartedIt(t *testing.T) {
 	}
 }
 
-// mintedCodes reads the codes the provider currently holds. Used by the
-// hygiene test below, which needs the one secret the audit log must never
-// contain and which no API exposes on purpose.
+// mintedCodes reads the codes the provider holds: the one secret the audit
+// log must never contain, which no API exposes.
 func mintedCodes(p *Provider) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -655,11 +647,9 @@ func mintedCodes(p *Provider) []string {
 	return out
 }
 
-// TestAFailedCallbackNeverAuditsTheCode is the regression test for a real
-// leak: http.Client.Do returns a *url.Error whose message quotes the WHOLE
-// request URL, and the callback leg carries the authorization code in its
-// query. A wedged jail dial, a hub that dies mid-handshake, or the login
-// timeout was enough to write a live code into the audit log and remote.log.
+// TestAFailedCallbackNeverAuditsTheCode: a *url.Error quotes the WHOLE request
+// URL, and the callback leg carries the authorization code in its query, so
+// a failed callback must not write the code into the audit log or remote.log.
 func TestAFailedCallbackNeverAuditsTheCode(t *testing.T) {
 	d, hub, p, _ := newTestDriver(t)
 	sink := &auditSink{}
@@ -703,17 +693,12 @@ func TestALoginNeedsANewCookieNotTheStateOne(t *testing.T) {
 	}
 }
 
-// TestAPanickingAttemptDoesNotWedgeTheDriver is the regression test for a
-// permanent wedge. The handshake runs inline on a request's own goroutine and
-// net/http recovers a handler panic per connection, so a panic under Cookie
-// leaves the PROCESS alive. Before the release was deferred it also left that
-// operator's single-flight entry in the map with its channel never closed, and
-// every later request for the same login then waited on a result that could
-// never arrive — until its own context expired, for the life of the process.
-//
-// The panic is injected through the audit sink because that is operator-owned
-// code called on this very goroutine (a closed log file is enough), but the
-// property under test is the release, not the sink.
+// TestAPanickingAttemptDoesNotWedgeTheDriver: net/http recovers a handler
+// panic, so a panic under Cookie leaves the process alive; the operator's
+// single-flight entry must still be released, or every later request for
+// that login waits forever. The panic is injected through the audit sink
+// (operator-owned code on this goroutine); the property under test is the
+// release.
 func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())
@@ -762,11 +747,10 @@ func TestAPanickingAttemptDoesNotWedgeTheDriver(t *testing.T) {
 	}
 }
 
-// TestAPanickingAttemptReleasesTheWaitersOnIt covers the other half: the
-// callers that joined the attempt have no way out of their own, since the
-// goroutine running it is the only one that can close the channel they park
-// on. They must be released, and with an error — the zero cookie a panic
-// leaves behind would otherwise read as a perfectly good empty session.
+// TestAPanickingAttemptReleasesTheWaitersOnIt: callers that joined the
+// attempt are parked on a channel only its goroutine can close. They must be
+// released with an error: the zero cookie a panic leaves would otherwise
+// read as an empty session.
 func TestAPanickingAttemptReleasesTheWaitersOnIt(t *testing.T) {
 	p, _, _ := startProvider(t)
 	hub := newFakeScionHub(t, p.IssuerURL())

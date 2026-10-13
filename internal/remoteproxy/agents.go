@@ -25,7 +25,7 @@ import (
 // lists never appears; a see-only agent carries no id, conversation, unread
 // count or activity, so the page has nothing to open its history with. The
 // page talks to the hub through the proxy for everything else, behind the
-// contact fence as before.
+// contact fence.
 
 // AgentRecord is one hub agent record as the chat page may use it. Phase
 // and Activity are already reduced to scion's known words
@@ -125,7 +125,7 @@ func activityWord(a string) string {
 		return "waiting"
 	case "completed", "stalled":
 		// stalled = no report for a while: what an agent at its prompt looks
-		// like (the predecessor page reads it as idle too).
+		// like.
 		return "idle"
 	}
 	return ""
@@ -156,7 +156,6 @@ func managerFirst(mgr string, names []string) []string {
 	return out
 }
 
-// mayMessage reports whether v may message name.
 func (v viewer) mayMessage(name string) bool { return slices.Contains(v.message, name) }
 
 // buildAgents is the list for v: the manager first (whichever list it is
@@ -456,7 +455,6 @@ func (c *chatPage) now() time.Time {
 	return time.Now()
 }
 
-// serveAgents answers GET /lever/api/agents for v.
 func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, cookie string) {
 	answer := func(body []byte) {
 		g.answerChat(w, line, DecisionAllow, http.StatusOK, func() {

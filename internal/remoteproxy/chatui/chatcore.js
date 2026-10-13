@@ -228,12 +228,12 @@ const NOTE_ASLEEP = 'asleep – your message wakes it';
 const NOTE_OFFLINE = 'the assistant is offline';
 const NOTE_UNKNOWN = 'state unknown – retrying';
 
-// inputView says what the chat of agent a offers (the spec's state table):
-// input (the composer is on), note (a fixed line under it), ask (the "Ask
-// the manager to start" button; only when the login may message the
-// manager), wake (a send wakes the agent first), viewOnly (no history, no
-// input). The manager is never woken from the page. tier is the login's:
-// a contact (anything but 'operator') wakes only a suspended worker.
+// inputView says what the chat of agent a offers: input (the composer is
+// on), note (a fixed line under it), ask (the "Ask the manager to start"
+// button; only when the login may message the manager), wake (a send wakes
+// the agent first), viewOnly (no history, no input). The manager is never
+// woken from the page. tier is the login's: a contact (anything but
+// 'operator') wakes only a suspended worker.
 export function inputView(a, canAskManager, tier) {
   const off = { input: false, note: '', ask: false, wake: false, viewOnly: false };
   if (!a || a.access !== 'message') return { ...off, viewOnly: true };
@@ -332,7 +332,6 @@ export function transcriptItems(body) {
     });
 }
 
-// transcriptPath is the route of one transcript page.
 export function transcriptPath(login, name, cursor) {
   const q = new URLSearchParams({ limit: '50' });
   if (cursor) q.set('cursor', cursor);
@@ -345,7 +344,6 @@ export function viewFilesPath(login, name) {
   return `/lever/api/contacts/${encodeURIComponent(login)}/agents/${encodeURIComponent(name)}/files`;
 }
 
-// transcriptWho names a row's writer.
 export function transcriptWho(m, login, name) {
   if (m.from === 'contact') return login;
   return m.from === 'agent' ? name : 'hub';
@@ -495,7 +493,7 @@ export function downloadPath(agent, id) {
 // Dictation and read-aloud (remote.voice). The page records a clip, turns it
 // into WAV (16 kHz, mono, 16-bit) here, and posts it; the text that comes
 // back goes into the message box, never straight to the agent. Read-aloud
-// uses the browser's own on-device voices only.
+// uses on-device voices, or lever's server voices (below).
 export const VOICE_RATE = 16000;
 export const VOICE_MAX_SECONDS = 600; // the config's ceiling
 export const VOICE_MIN_SAMPLES = VOICE_RATE / 10; // the server refuses less

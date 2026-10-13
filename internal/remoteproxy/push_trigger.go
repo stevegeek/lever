@@ -20,11 +20,11 @@ import (
 //
 // A check reads the newest page of one DM as the login (its own session,
 // what the page itself would read), picks the newest row the DM agent
-// wrote, and, for a contact with agent messages on, only a row the spec-2
-// matcher shows (agentmsgs.go): a contact is never told about a message
-// it would not be shown. The mark per (login, agent) is the newest row a
-// decision covered; it is stored before the push goes out, so a crash or
-// restart never sends one row twice.
+// wrote, and, for a contact with agent messages on, only a row the agent
+// message matcher shows (agentmsgs.go): a contact is never told about a
+// message it would not be shown. The mark per (login, agent) is the newest
+// row a decision covered; it is stored before the push goes out, so a crash
+// or restart never sends one row twice.
 
 const (
 	pushHistoryPage = 20

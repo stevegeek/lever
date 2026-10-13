@@ -14,7 +14,6 @@ import (
 	"github.com/stevegeek/lever/internal/webpush"
 )
 
-// fakeSender records pushes instead of sending them.
 type fakeSender struct {
 	mu   sync.Mutex
 	sent []string // "<endpoint> <payload>"

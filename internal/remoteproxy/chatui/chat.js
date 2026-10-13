@@ -85,7 +85,7 @@ const HOLD_MS = 2000; // Send stays off this long after the replay note
 const SYSTEM_MAX = 500; // characters of a hub line, on one line
 const OPEN_KEY = 'lever-chat-open'; // the name of the open chat
 // Drafts and unsent records are kept per agent name (draftKey, unsentKey).
-// The bare keys are what the one-agent page kept; start adopts them once.
+// The bare keys are a single-agent layout's; start adopts them once.
 const OLD_DRAFT_KEY = 'lever-chat-draft';
 const OLD_UNSENT_KEY = 'lever-chat-unsent';
 const draftKey = (name) => `${OLD_DRAFT_KEY}:${name}`;
@@ -463,7 +463,6 @@ async function readTranscript(cursor) {
   }
 }
 
-// leaveTranscript closes the open transcript, if any.
 function leaveTranscript() {
   view = null;
   viewSeq++;
@@ -496,7 +495,6 @@ function openTranscript(login, name) {
   void loadViewFiles();
 }
 
-// pollView refreshes the contact list and the open transcript.
 function pollView() {
   if (document.visibilityState !== 'visible') return;
   void reloadContacts();
@@ -673,9 +671,8 @@ function loadUnsent(c) {
   }
 }
 
-// adoptOldRecords moves what the one-agent page kept (one draft, one unsent
-// record, both for the manager) to the per-agent keys, once: an unclear send
-// keeps its key across the upgrade.
+// adoptOldRecords moves the bare-key draft and unsent record (both the
+// manager's) to the per-agent keys, once: an unclear send keeps its key.
 function adoptOldRecords(l) {
   const oldUnsent = stored(OLD_UNSENT_KEY);
   const oldDraft = stored(OLD_DRAFT_KEY);
@@ -1133,7 +1130,6 @@ function speak(m, button) {
   speakDevice(m, button, text);
 }
 
-// speakDevice reads text with the device's own voice.
 function speakDevice(m, button, text) {
   if (!speechOn()) {
     showError('This device has no on-device voice to read with.');
@@ -1665,8 +1661,8 @@ async function send() {
     listSoon();
   } else if (again) {
     // The hub refused this attempt, which says nothing about the earlier
-    // one. The key stays, so a later press still finds it.
-    // A refused attempt did not arrive, so it does not count as one that may have.
+    // one. The key stays, so a later press still finds it; the refused
+    // attempt did not arrive, so it is not counted.
     setUnsent(c, { ...c.unsent, tries: earlier });
     say(`This attempt was refused (${reason(res)}). An earlier attempt had no clear answer and may have arrived: look at the conversation.`);
     listSoon();

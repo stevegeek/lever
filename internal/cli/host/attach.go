@@ -62,19 +62,22 @@ var detachOtherClients = func(ctx context.Context, r proc.Runner, ref string) (i
 	return jail.AgentProbe{R: r}.DetachClients(ctx, ref)
 }
 
-// sharedFlagUsage is the --shared flag's help, on attach and up.
-const sharedFlagUsage = "keep the terminals earlier attaches left on the agent attached (by default they are detached first: a stale one can freeze the view)"
+// detachOthersFlagUsage is the --detach-others flag's help, on attach and up.
+const detachOthersFlagUsage = "first detach the other terminals attached to the agent (by default they stay attached); use it when a stale attach froze the view"
 
 // detachBeforeAttach detaches the tmux clients earlier attaches left on
-// slug's session before the attach, unless shared (lever#170): an earlier
-// attach whose terminal went away stays attached as a stale client, and the
-// new view can then freeze or keep the old terminal's size. What
-// `tmux attach -d` does (scion's attach has no such flag), except that the
-// container's own client is spared (jail.AgentProbe.DetachClients). Best-effort: a failure is not reported
-// (scion's attach that follows reports a container that is not there),
-// and a count of detached clients is printed to w.
-func detachBeforeAttach(ctx context.Context, w io.Writer, r proc.Runner, slug, project string, shared bool) {
-	if shared {
+// slug's session before the attach, when detachOthers is set (lever#170,
+// the --detach-others flag): an earlier attach whose terminal went away
+// stays attached as a stale client, and the new view can then freeze or
+// keep the old terminal's size. By default nothing is detached, so a
+// second terminal can attach without taking the first one's view away.
+// What `tmux attach -d` does (scion's attach has no such flag), except that
+// the container's own client is spared (jail.AgentProbe.DetachClients).
+// Best-effort: a failure is not reported (scion's attach that follows
+// reports a container that is not there), and a count of detached clients
+// is printed to w.
+func detachBeforeAttach(ctx context.Context, w io.Writer, r proc.Runner, slug, project string, detachOthers bool) {
+	if !detachOthers {
 		return
 	}
 	n, err := detachOtherClients(ctx, r, jail.ContainerName(path.Base(project), slug))
@@ -85,16 +88,16 @@ func detachBeforeAttach(ctx context.Context, w io.Writer, r proc.Runner, slug, p
 	if n > 1 {
 		noun = "terminals"
 	}
-	fmt.Fprintf(w, "lever: detached %d earlier %s attached to %q (a stale attach can freeze the view; --shared keeps them)\n", n, noun, slug)
+	fmt.Fprintf(w, "lever: detached %d other %s attached to %q (--detach-others)\n", n, noun, slug)
 }
 
 // execAttach replaces the current process with the backend-wrapped scion attach
 // for slug in project — the same TTY-handover chain `lever up` uses. It only
-// returns on error (syscall.Exec does not return on success). Unless shared,
-// other terminals attached to the agent are detached first
+// returns on error (syscall.Exec does not return on success). With
+// detachOthers, other terminals attached to the agent are detached first
 // (detachBeforeAttach).
-func execAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, shared bool) error {
-	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, shared)
+func execAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, detachOthers bool) error {
+	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, detachOthers)
 	argv, err := attachArgv(ctx, b, sc, slug, project)
 	if err != nil {
 		return err
@@ -115,9 +118,10 @@ func execAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.C
 // rather than dying under it. A terminate or hangup sent to lever is
 // passed on to the attach, which then ends, as exec'ing it did. (The child
 // gets the default handling back on exec; only an ignored signal would be
-// inherited, so they are caught, not ignored.)
-func runAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, shared bool) error {
-	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, shared)
+// inherited, so they are caught, not ignored.) With detachOthers, other
+// terminals attached to the agent are detached first (detachBeforeAttach).
+func runAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, detachOthers bool) error {
+	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, detachOthers)
 	argv, err := attachArgv(ctx, b, sc, slug, project)
 	if err != nil {
 		return err
@@ -157,7 +161,7 @@ func runAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Cl
 // rather than provisioning it. If the jail is up but the target agent/worker is
 // not running, scion's own attach error surfaces.
 func newAttachCmd(bf BackendFactory) *cobra.Command {
-	var shared bool
+	var detachOthers bool
 	c := &cobra.Command{
 		Use:   "attach [NAME]",
 		Args:  cobra.MaximumNArgs(1),
@@ -187,9 +191,9 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, slug, project, shared)
+			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, slug, project, detachOthers)
 		},
 	}
-	c.Flags().BoolVar(&shared, "shared", false, sharedFlagUsage)
+	c.Flags().BoolVar(&detachOthers, "detach-others", false, detachOthersFlagUsage)
 	return c
 }

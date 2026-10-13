@@ -150,7 +150,7 @@ func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project 
 }
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
-	var fresh, noAttach, shared, noBackup, keepConv bool
+	var fresh, noAttach, detachOthers, noBackup, keepConv bool
 	var progressMode string
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
@@ -326,9 +326,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return nil
 			}
 			if !attachTTY {
-				return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
+				return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
 			}
-			attachErr := runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, shared)
+			attachErr := runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
 			if err := apply.CheckManagerAfterDetach(cmd.Context(), deps, app.Name, project); err != nil {
 				return err
 			}
@@ -339,7 +339,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 	c.Flags().BoolVar(&noBackup, "no-backup", false, "with --fresh: discard the old conversation without backing it up")
 	c.Flags().BoolVar(&keepConv, "keep-conversation", false, "with --fresh: recreate the manager and resume it on the old conversation")
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
-	c.Flags().BoolVar(&shared, "shared", false, sharedFlagUsage)
+	c.Flags().BoolVar(&detachOthers, "detach-others", false, detachOthersFlagUsage)
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c
 }

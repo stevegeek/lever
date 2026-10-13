@@ -453,11 +453,18 @@ record's home in the jail, where Claude Code keeps the conversation (`~/.claude/
 
   The fresh start `up` makes on its own does not move the contact baseline (see
   [remote access](/remote-access/)): it records the new session only when the manager's lever
-  skill on disk is the one its last recorded session started with. The agent can bring this start
+  skill on disk, read before the delete and again right before the create (when the old container
+  is gone), is the one its last recorded session started with. The agent can bring this start
   about (an empty home, a claude that exits) and can write the skill in the tree, so when the
   skill has changed, `up` records a session that matches no skill and says that contacts cannot
-  post to the manager until `lever up --fresh`. Putting the old skill text back does not lift
-  that; only your own `--fresh` does.
+  post to the manager until it next starts fresh other than on its own (`lever up --fresh`).
+  Putting the old skill text back does not lift that. A manager lever has no session record of
+  gets none from this start either, so contacts stay refused. A conversation from such a session
+  keeps the refusal through `--fresh --keep-conversation` and `lever conversation restore`.
+
+  On a terminal, a resumed manager whose claude waits at a dialog before its session starts (a
+  login, trust or update prompt) is attached only after the 2 min wait for its session start;
+  `lever attach` from another terminal reaches it sooner.
 - **Recreating the VM** (`lever destroy`, `lever up`) loses the agent homes too: run
   `lever conversation backup` first and `lever conversation restore` after. `lever destroy` does
   not touch the state directory.

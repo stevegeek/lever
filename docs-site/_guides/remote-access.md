@@ -1003,9 +1003,11 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   apply, a worker created by the broker; never a resume) with the skill on disk then, in
   `.lever-state/sessions.jsonl` (0600, a host record like the ledgers). The fresh start `lever up`
   makes on its own for a manager with no conversation to continue is the exception: the agent can
-  bring it about, so it is recorded only when the skill on disk is the one the manager's last
-  recorded session started with, and otherwise recorded as matching no skill, until your own
-  `lever up --fresh`. The proxy lets a contact
+  bring it about, so it is recorded only when the skill on disk (read before the delete and again
+  right before the create) is the one the manager's last recorded session started with. Otherwise
+  lever records a session matching no skill, which refuses contacts until the manager next starts
+  fresh other than on its own (`lever up --fresh`); a manager with no record gets none. The proxy
+  lets a contact
   post to an agent only while that agent's last fresh start saw the skill that is on disk now;
   otherwise it answers 403 "this agent cannot take your messages yet". Every bring-up prints one
   warning line that names such agents (at most eight, grouped by reason). For the manager, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` does not help, the kept conversation keeps its old skill); a

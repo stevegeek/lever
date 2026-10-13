@@ -295,17 +295,21 @@ version bump moves the block under the new version heading.
   `.claude/projects` holds no transcript with content, no link or special file, and no other
   `projects*` directory beside it does it start the manager fresh, as `--fresh` would: the
   backup runs first, the record is deleted and a new enrolment ticket is minted. It prints a line
-  saying so. Anything not proven, a failed backup, or a resume whose tree mounts failed their
-  check keeps the record and prints the reason. This covers the resumes `up` runs through its
+  saying so. Anything not proven, a failed backup, a session record lever cannot write, or a
+  resume whose tree mounts failed their check keeps the record and prints the reason. This covers the resumes `up` runs through its
   bring-up (a crashed manager, and every `up` after `lever stop`), on a terminal too: `up`
   attaches to a resumed manager only once claude has reported its session start, so the exit is
   caught first. When `up` resumes a suspended manager itself (the hub was still running, or the
   guest restarted under it), it names the cause and keeps the record; `lever stop && lever up`
   then makes the fresh start. Because the agent can bring this start about and can write its
   skill, the start records the new session for the contact gate only when the manager's lever
-  skill on disk is the one its last recorded session started with; otherwise it records a session
-  that matches no skill, so contacts cannot post to the manager until the operator's
-  `lever up --fresh` (putting the old skill back does not lift it), and says so. `lever apply`
+  skill, read before the delete and again right before the create, is the one its last recorded
+  session started with. Otherwise it records a session that matches no skill and says so: contacts
+  cannot post to the manager until it next starts fresh other than on its own (`lever up
+  --fresh`), and putting the old skill back does not lift that. A manager with no session record
+  gets none, so contacts stay refused there too. On a terminal, a resumed manager whose claude
+  waits at a dialog (a login, trust or update prompt) is attached only after the 2 min wait for
+  its session start. `lever apply`
   never starts a manager fresh. Doctor's manager row names the cause for an error-phase manager.
 - **A command that fails at run time no longer prints its usage text.** `lever up`, `lever apply`
   and most other commands printed the usage after any error, so a manager that did not come up

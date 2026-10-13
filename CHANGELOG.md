@@ -7,24 +7,6 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-### Security
-
-- **A remote sign-in can no longer land on scion's dev super-admin row (lever#73).** scion's
-  workstation `PUT /api/v1/system/identity` route accepts any authenticated loopback caller with
-  no permission check, and every jailed agent reaches the hub on loopback with its own agent
-  token, so an agent can rename the dev super-admin user to the email of an operator or contact
-  who has not signed in yet; that email's first sign-in would then resolve to the super-admin row.
-  lever now verifies, when it mints a remote hub session, that the session resolves to the hub
-  user it expects for that login: never scion's fixed dev-user id, and, when `lever apply`
-  recorded an id for the login, exactly that id. A session that resolves to anything else is
-  refused (and retried at most once a minute), so the affected sign-in fails closed while every
-  other login is unaffected. `lever apply` no longer binds a role, ceiling or record to an allowed
-  login whose hub user is the dev row; it warns and leaves the login pending. `lever doctor` adds a *dev user identity* row that reports when the dev row carries
-  a configured remote login's email. This closes the impersonation path at the point of use; it
-  does not stop an agent from calling the route or the other unchecked `/api/v1/system/*` writers
-  (that needs an upstream scion permission check, or running the hub in hosted mode), and the
-  controller's own sender label can still be changed. See the worker-isolation security model for the full statement.
-
 ## [0.38.0] - 2026-10-13
 
 ### Added
@@ -60,6 +42,24 @@ version bump moves the block under the new version heading.
   its `package.json`, never run), lever's environment variables and the commands lever's probes
   use, and that `lever-agent claude-ready` writes the ready marker in a scion-shaped tmux session.
   It runs the image without network. `LEVER_IMAGE_MAX_MB` also fails an oversized image.
+
+### Security
+
+- **A remote sign-in can no longer land on scion's dev super-admin row (lever#73).** scion's
+  workstation `PUT /api/v1/system/identity` route accepts any authenticated loopback caller with
+  no permission check, and every jailed agent reaches the hub on loopback with its own agent
+  token, so an agent can rename the dev super-admin user to the email of an operator or contact
+  who has not signed in yet; that email's first sign-in would then resolve to the super-admin row.
+  lever now verifies, when it mints a remote hub session, that the session resolves to the hub
+  user it expects for that login: never scion's fixed dev-user id, and, when `lever apply`
+  recorded an id for the login, exactly that id. A session that resolves to anything else is
+  refused (and retried at most once a minute), so the affected sign-in fails closed while every
+  other login is unaffected. `lever apply` no longer binds a role, ceiling or record to an allowed
+  login whose hub user is the dev row; it warns and leaves the login pending. `lever doctor` adds a *dev user identity* row that reports when the dev row carries
+  a configured remote login's email. This closes the impersonation path at the point of use; it
+  does not stop an agent from calling the route or the other unchecked `/api/v1/system/*` writers
+  (that needs an upstream scion permission check, or running the hub in hosted mode), and the
+  controller's own sender label can still be changed. See the worker-isolation security model for the full statement.
 
 ## [0.37.0] - 2026-10-13
 

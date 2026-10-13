@@ -62,10 +62,11 @@ type noConvCase struct {
 	backup     func(context.Context, *scion.Agent) error
 	mounts     func(jp string) []jail.Mount
 	liveChecks []error // successive CheckLiveMounts answers: nil = the mount is elsewhere
-	// unattended is Deps.BeginUnattendedSession's answer: its error, and
-	// what its commit returns. noUnattended leaves it nil.
-	unattendedErr, unattendedCommitErr error
-	noUnattended                       bool
+	// unattended is Deps.BeginUnattendedSession's answer: its error, its
+	// Refused, Begin's error and what its commit returns. noUnattended
+	// leaves it nil.
+	unattendedErr, unattendedRefused, beginErr, unattendedCommitErr error
+	noUnattended                                                    bool
 }
 
 type noConvResult struct {
@@ -105,13 +106,19 @@ func runNoConv(t *testing.T, c noConvCase) noConvResult {
 		},
 	}
 	if !c.noUnattended {
-		d.BeginUnattendedSession = func(string) (func() error, error) {
+		d.BeginUnattendedSession = func(string) (UnattendedSession, error) {
 			res.unattended++
 			res.order = append(res.order, "fence")
 			if c.unattendedErr != nil {
-				return nil, c.unattendedErr
+				return UnattendedSession{}, c.unattendedErr
 			}
-			return func() error { res.uncommits++; return c.unattendedCommitErr }, nil
+			return UnattendedSession{Refused: c.unattendedRefused, Begin: func() (func() error, error) {
+				res.order = append(res.order, "begin")
+				if c.beginErr != nil {
+					return nil, c.beginErr
+				}
+				return func() error { res.uncommits++; return c.unattendedCommitErr }, nil
+			}}, nil
 		}
 	}
 	if c.empty != nil {
@@ -164,7 +171,7 @@ func TestStartManagerStartsFreshWithoutConversation(t *testing.T) {
 			if res.err != nil {
 				t.Fatalf("Run: %v", res.err)
 			}
-			want := []string{"resume", "proof", "backup", "fence", "delete", "start"}
+			want := []string{"resume", "proof", "backup", "fence", "delete", "begin", "start"}
 			if strings.Join(res.order, ",") != strings.Join(want, ",") {
 				t.Fatalf("order = %v, want %v", res.order, want)
 			}
@@ -385,8 +392,10 @@ func TestAttachResumeWithoutConversationStartsFresh(t *testing.T) {
 				BeginSession: func(string) func() error {
 					return func() error { t.Error("the unattended fresh start recorded through BeginSession"); return nil }
 				},
-				BeginUnattendedSession: func(string) (func() error, error) {
-					return func() error { commits++; return nil }, nil
+				BeginUnattendedSession: func(string) (UnattendedSession, error) {
+					return UnattendedSession{Begin: func() (func() error, error) {
+						return func() error { commits++; return nil }, nil
+					}}, nil
 				},
 				ManagerConversationEmpty: func(context.Context) error {
 					order = append(order, "proof")
@@ -464,6 +473,39 @@ func TestStartManagerFreshWithoutConversationUnrecordedSkill(t *testing.T) {
 		if !strings.Contains(res.loggedJoined, w) {
 			t.Fatalf("logs %q lack %q", res.logs, w)
 		}
+	}
+}
+
+// A skill already changed before the delete is said before the fresh
+// start, and not again after it.
+func TestStartManagerFreshWithoutConversationRefusedUpFront(t *testing.T) {
+	why := errors.New("its lever skill on disk is not the one its last recorded session started with")
+	res := runNoConv(t, noConvCase{phase: "error", log: noConvLog,
+		opts: PlanOpts{FreshWithoutConversation: true}, empty: proven, backup: backupOK,
+		unattendedRefused: why, unattendedCommitErr: why})
+	if res.err != nil {
+		t.Fatalf("Run: %v", res.err)
+	}
+	if n := strings.Count(res.loggedJoined, "is not recorded as a new session"); n != 1 {
+		t.Fatalf("said %d times, want once before the start: %q", n, res.logs)
+	}
+	fresh := strings.Index(res.loggedJoined, "Starting it FRESH")
+	if said := strings.Index(res.loggedJoined, "is about to make on its own is not recorded"); said < 0 || said > fresh {
+		t.Fatalf("the refusal was not said before the fresh start: %q", res.logs)
+	}
+}
+
+// A refusing record that cannot be written right before the create stops
+// the create: the record is gone, and the error says so.
+func TestStartManagerFreshWithoutConversationBeginFails(t *testing.T) {
+	res := runNoConv(t, noConvCase{phase: "error", log: noConvLog,
+		opts: PlanOpts{FreshWithoutConversation: true}, empty: proven, backup: backupOK,
+		beginErr: errors.New("disk full")})
+	if res.err == nil || !strings.Contains(res.err.Error(), "did not create the manager") || !strings.Contains(res.err.Error(), "disk full") {
+		t.Fatalf("err = %v", res.err)
+	}
+	if res.r.deleteCalls != 1 || res.r.startCalls != 0 {
+		t.Fatalf("deletes=%d starts=%d, want the delete and no create", res.r.deleteCalls, res.r.startCalls)
 	}
 }
 

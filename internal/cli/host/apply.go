@@ -1491,7 +1491,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		},
 		// BeginUnattendedSession records the fresh start lever makes on its
 		// own (lever#202) only over an unchanged skill.
-		BeginUnattendedSession: func(agent string) (func() error, error) {
+		BeginUnattendedSession: func(agent string) (apply.UnattendedSession, error) {
 			return brokerctl.BeginUnattendedSession(w.app, st, cli.VersionString(), agent)
 		},
 		// InspectContainerMounts lets apply warn when a manager it kept or

@@ -360,8 +360,11 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	if parked != "" {
 		o.log("conversation: the transcripts it replaced are in the manager's home at %s", parked)
 	}
-	if hash == restoredUnknownSkill {
+	switch hash {
+	case restoredUnknownSkill:
 		o.log("conversation: the backup does not say which lever skill the conversation started with, so contacts cannot post to the manager until it next starts fresh")
+	case brokerctl.UncheckedSkill:
+		o.log("conversation: the conversation comes from a fresh start lever made on its own over a changed skill, so contacts cannot post to the manager until it next starts fresh without --keep-conversation")
 	}
 	done = true
 	if err := o.verifyRole(ctx); err != nil {

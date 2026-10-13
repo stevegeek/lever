@@ -151,8 +151,9 @@ type run struct {
 	// manager with no conversation (lever#202): the create records its
 	// session with unattendedCommit (Deps.BeginUnattendedSession), never
 	// with Deps.BeginSession. A nil unattendedCommit records nothing.
-	unattended       bool
-	unattendedCommit func() error
+	unattended        bool
+	unattendedBegin   func() (commit func() error, err error)
+	unattendedRefused bool
 	// managerCreated records that THIS run created the manager record (a
 	// create that answered "already exists" does not count). Only a created
 	// record is known to carry the manager.read_only mounts; any other is
@@ -337,16 +338,18 @@ type Deps struct {
 	// conversation to continue (lever#202). The agent can bring that start
 	// about (an emptied home, a claude that exits), and its tree holds the
 	// skill the record names, so such a start must not re-baseline the
-	// session on a skill the agent wrote. It is called before the record
-	// is deleted. commit records the start only when the skill on disk is
-	// the one the manager's last recorded session started with; otherwise
-	// it writes nothing and returns why, after the call itself has already
-	// recorded a session matching no skill, so contacts stay refused until
-	// a deliberate `lever up --fresh` (even if the old skill text comes
-	// back). An error means that refusing record could not be written:
-	// lever then does not start the manager fresh on its own. When
-	// BeginSession is set and this is nil, lever does not either.
-	BeginUnattendedSession func(agent string) (commit func() error, err error)
+	// session on a skill the agent wrote. It is called before the record is
+	// deleted, and when the skill on disk is not the one the manager's last
+	// recorded session started with it records, at once, a session matching
+	// no skill (UnattendedSession.Refused says why), so contacts stay refused
+	// even if the old skill text comes back. UnattendedSession.Begin runs
+	// after the delete, right before the create, when the old container can
+	// no longer write the tree: it reads the skill again and returns the
+	// commit that records the new session only over that same skill. An
+	// error from either means the refusing record could not be written:
+	// lever then does not start (or create) the manager on its own. When
+	// BeginSession is set and this is nil, lever does not start it either.
+	BeginUnattendedSession func(agent string) (UnattendedSession, error)
 	// BackupManagerConversation, when set, runs under PlanOpts.Fresh just
 	// before the manager record rec is deleted (scion deletes the record's
 	// home, and the conversation with it). An error stops the fresh start
@@ -602,6 +605,19 @@ func (d Deps) check() error {
 		}
 	}
 	return nil
+}
+
+// UnattendedSession is Deps.BeginUnattendedSession's answer (lever#202).
+type UnattendedSession struct {
+	// Refused, when set, says why the start is not recorded as a new
+	// session: a session matching no skill was recorded already, and
+	// contacts stay refused until the operator's --fresh.
+	Refused error
+	// Begin runs right before the create, after the delete. Its commit
+	// records the new session, or returns why it does not. Its error means
+	// a refusing record could not be written, and the manager is not
+	// created. Nil records nothing.
+	Begin func() (commit func() error, err error)
 }
 
 // Run executes the bring-up Plan for app. load-image is host-side; the rest
@@ -1317,8 +1333,9 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 // delete, returns cause with the record kept. It is loud: one line says
 // what lever does and why.
 //
-// A fresh start records a new session only when the skill on disk is the
-// one the manager's last recorded session started with
+// A fresh start records a new session only when the skill on disk, read
+// before the delete and again right before the create, is the one the
+// manager's last recorded session started with
 // (Deps.BeginUnattendedSession): the agent can bring this start about, and
 // can write the skill, so unlike --fresh it never re-baselines the session
 // on a changed skill; contacts then stay refused until `lever up --fresh`,
@@ -1352,23 +1369,26 @@ func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts
 	// backup (which carries the last session's skill with it): a start the
 	// agent can bring about must not record a skill it wrote
 	// (BeginUnattendedSession).
-	var commit func() error
+	var sess UnattendedSession
 	switch {
 	case r.d.BeginUnattendedSession != nil:
-		c, serr := r.d.BeginUnattendedSession(r.app.Name)
+		u, serr := r.d.BeginUnattendedSession(r.app.Name)
 		if serr != nil {
 			r.d.Log("start-manager: manager %q has no conversation to continue, but lever did not start it fresh on its own: it could not record that the new session's skill is unchecked (%s)", r.app.Name, termsafe.Sanitize(serr.Error()))
 			return cause
 		}
-		commit = c
+		sess = u
 	case r.d.BeginSession != nil:
 		r.d.Log("start-manager: manager %q has no conversation to continue, but lever did not start it fresh on its own: it cannot check the skill the new session would be recorded with", r.app.Name)
 		return cause
 	}
+	if sess.Refused != nil {
+		r.d.Log("start-manager: the fresh start lever is about to make on its own is not recorded as a new session (%s); contacts cannot post to manager %q until it starts fresh at your word (`lever up --fresh`)", termsafe.Sanitize(sess.Refused.Error()), r.app.Name)
+	}
 	// The resume's boot may have redeemed this run's ticket: mint anew.
 	r.minted = false
-	r.unattended, r.unattendedCommit = true, commit
-	defer func() { r.unattended, r.unattendedCommit = false, nil }()
+	r.unattended, r.unattendedBegin, r.unattendedRefused = true, sess.Begin, sess.Refused != nil
+	defer func() { r.unattended, r.unattendedBegin, r.unattendedRefused = false, nil, false }()
 	if err := r.recoverDeleteAndCreate(ctx, jp, opts,
 		fmt.Sprintf("start-manager: manager %q has no conversation to continue: claude --continue found none, and its agent home holds no transcript, so it was never used. Starting it FRESH, as `lever up --fresh` would (deleting record in phase %s; nothing is lost)", r.app.Name, scion.BoundedQuote(rec.Phase)),
 		"a fresh start of a manager with no conversation"); err != nil {
@@ -2506,8 +2526,15 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	}
 	var commit func() error
 	switch {
+	case r.unattended && r.unattendedBegin != nil:
+		// After the delete, with the old container gone: the skill is read
+		// again here, and only this reading can be recorded.
+		c, berr := r.unattendedBegin()
+		if berr != nil {
+			return fmt.Errorf("start-manager: the manager record was deleted for a fresh start lever made on its own, but lever did not create the manager: it could not record that the new session's skill is unchecked (%s). Run `lever up --fresh`", termsafe.Sanitize(berr.Error()))
+		}
+		commit = c
 	case r.unattended:
-		commit = r.unattendedCommit
 	case r.d.BeginSession != nil:
 		commit = r.d.BeginSession(r.app.Name)
 	}
@@ -2541,7 +2568,7 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	}
 	if err == nil && created && commit != nil {
 		if cerr := commit(); cerr != nil {
-			if r.unattended {
+			if r.unattended && !r.unattendedRefused {
 				r.d.Log("start-manager: this fresh start, which lever made on its own, is not recorded as a new session (%s); contacts cannot post to the manager until `lever up --fresh` starts it fresh", termsafe.Sanitize(cerr.Error()))
 			} else {
 				r.d.Log("start-manager: could not record the manager's fresh session (%v); contacts cannot post to it until the next fresh start", cerr)

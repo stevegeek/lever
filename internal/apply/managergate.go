@@ -398,7 +398,7 @@ func confirmHarnessPane(ctx context.Context, h harnessCheck, settle time.Duratio
 // (lever#188). Only when there is no marker to wait for (an older image), or
 // none came in that time over a pane that stayed alive (then with a warning
 // once the window passes), does it hold a window: harnessSettle once the
-// // pane was seen, b.Settle otherwise. With o.attach (a manager start-manager
+// pane was seen, b.Settle otherwise. With o.attach (a manager start-manager
 // created, under `lever up` on a terminal) the gate ends once the pane is
 // alive: the caller attaches the operator's terminal at once and checks the
 // manager after the detach (CheckManagerAfterDetach) instead.

@@ -163,7 +163,11 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	r, ok := recs[agent]
 	switch {
 	case !ok:
-		return errors.New("lever has no record of its session starting fresh")
+		return errNoSessionRecord
+	case r.SkillHash == restoredUnknownSkill:
+		return errors.New("its conversation was restored from a backup that does not say which skill it started with")
+	case r.SkillHash == brokerctl.UncheckedSkill:
+		return errors.New("lever started it fresh on its own while its skill differed from its last session's")
 	case r.SkillHash != skills.ContentHash(onDisk) && r.SkillHash != hash:
 		// ContentHash leaves out the release stamp, so a release that
 		// renders the same skill text keeps the session fresh; the full
@@ -172,6 +176,10 @@ func contactSession(app *config.App, st state.State, agent string) error {
 	}
 	return nil
 }
+
+// errNoSessionRecord is contactSession's refusal of an agent lever has no
+// session record of.
+var errNoSessionRecord = errors.New("lever has no record of its session starting fresh")
 
 // staleSessionError is contactSession's refusal of a session that started
 // before the current skill. Its text carries the start time and version;
@@ -259,10 +267,11 @@ func contactSessionWarning(manager string, blocked []blockedContactAgent) string
 	}
 	var reasons []string
 	byReason := map[string][]string{}
-	hasManager, hasWorker := false, false
+	hasManager, hasWorker, managerNoRecord := false, false, false
 	for i, b := range blocked {
 		if b.name == manager {
 			hasManager = true
+			managerNoRecord = b.reason == errNoSessionRecord.Error()
 		} else {
 			hasWorker = true
 		}
@@ -286,8 +295,12 @@ func contactSessionWarning(manager string, blocked []blockedContactAgent) string
 		how = append(how, "a worker takes contact messages once the broker next creates it fresh")
 	}
 	if hasManager {
-		how = append(how, fmt.Sprintf("for the manager %s, run `lever up --fresh` (it backs the conversation up first; --keep-conversation does not help here, the kept conversation keeps the skill it started with), or let this bring-up create it",
-			termsafe.Sanitize(manager)))
+		create := ""
+		if managerNoRecord {
+			create = ", or let this bring-up create it"
+		}
+		how = append(how, fmt.Sprintf("for the manager %s, run `lever up --fresh` (it backs the conversation up first; --keep-conversation does not help here, the kept conversation keeps the skill it started with)%s",
+			termsafe.Sanitize(manager), create))
 	}
 	if len(blocked) == 1 {
 		return fmt.Sprintf("lever: warning: remote: contacts cannot post to %s until its session starts fresh; %s",

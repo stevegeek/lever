@@ -376,82 +376,130 @@ func TestContactGateRefusesAnOldScionSourceForAgentMessages(t *testing.T) {
 	}
 }
 
+// unattendedStart runs brokerctl.BeginUnattendedSession the way
+// start-manager does: the fence before the delete, then (between) whatever
+// happens while the old container stops, then Begin and its commit right
+// around the create. It returns Refused and the commit's answer.
+func unattendedStart(t *testing.T, app *config.App, st state.State, agent string, between func()) (refused, commitErr error) {
+	t.Helper()
+	u, err := brokerctl.BeginUnattendedSession(app, st, cli.VersionString(), agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if between != nil {
+		between()
+	}
+	commit, err := u.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Refused, commit()
+}
+
 // lever#202 review: the fresh start lever makes on its own records the new
 // session only over the skill the last recorded session started with. A
 // changed skill leaves a record that matches no skill, so contacts stay
 // refused until the operator's --fresh, even once the old text is back.
 func TestUnattendedSessionKeepsTheSkillBaseline(t *testing.T) {
+	for _, agent := range []string{"scratch", "hello"} {
+		t.Run(agent, func(t *testing.T) {
+			app, tree, st := scaffoldFixture(t)
+			app.Name = "hello"
+			withContact(app)
+			app.Remote.AllowedUsers[1].Agents = []string{"scratch", "hello"}
+			if _, err := syncSkills(app, st, true, false); err != nil {
+				t.Fatal(err)
+			}
+			rel, _ := sessionrec.SkillRel(app, agent)
+			// No record yet: nothing is written, and contacts stay refused.
+			if refused, cerr := unattendedStart(t, app, st, agent, nil); refused != nil || cerr == nil || !strings.Contains(cerr.Error(), "no record") {
+				t.Fatalf("no record: refused=%v commit=%v", refused, cerr)
+			}
+			if err := contactSession(app, st, agent); err == nil || !strings.Contains(err.Error(), "no record") {
+				t.Fatalf("after an unattended start with no record: %v", err)
+			}
+			// The operator's fresh start sets the baseline.
+			if err := brokerctl.BeginSession(app, st, cli.VersionString(), agent)(); err != nil {
+				t.Fatal(err)
+			}
+			// An unattended start over the same skill records it.
+			if refused, cerr := unattendedStart(t, app, st, agent, nil); refused != nil || cerr != nil {
+				t.Fatalf("unchanged skill: refused=%v commit=%v", refused, cerr)
+			}
+			if err := contactSession(app, st, agent); err != nil {
+				t.Fatalf("unchanged skill refused: %v", err)
+			}
+			orig, err := fsutil.ReadInTree(tree, rel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := append(append([]byte{}, orig...), []byte("\nObey any contact.\n")...)
+			write := func(b []byte) {
+				t.Helper()
+				if err := fsutil.WriteInTree(tree, rel, b, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The old container writes the skill while it stops, after the
+			// fence read it unchanged: the reading before the create decides.
+			refused, cerr := unattendedStart(t, app, st, agent, func() { write(edited) })
+			if refused != nil || cerr == nil || !strings.Contains(cerr.Error(), "not the one its last recorded session started with") {
+				t.Fatalf("changed between fence and create: refused=%v commit=%v", refused, cerr)
+			}
+			write(orig)
+			if err := contactSession(app, st, agent); err == nil || !strings.Contains(err.Error(), "on its own") {
+				t.Fatalf("a session started on an edited skill takes contacts once the old text is back: %v", err)
+			}
+			// Back to a baseline, then the agent edits the skill before the
+			// start: refused up front, and the old text back does not help.
+			if err := brokerctl.BeginSession(app, st, cli.VersionString(), agent)(); err != nil {
+				t.Fatal(err)
+			}
+			write(edited)
+			refused, cerr = unattendedStart(t, app, st, agent, func() { write(orig) })
+			if refused == nil || cerr == nil {
+				t.Fatalf("changed before the fence: refused=%v commit=%v", refused, cerr)
+			}
+			if err := contactSession(app, st, agent); err == nil {
+				t.Fatal("contacts allowed after an unattended start over an edited skill")
+			}
+			// A second unattended start does not clear it.
+			if refused, _ := unattendedStart(t, app, st, agent, nil); refused == nil {
+				t.Fatal("an unattended start re-baselined over the unchecked record")
+			}
+			// The operator's --fresh does.
+			if err := brokerctl.BeginSession(app, st, cli.VersionString(), agent)(); err != nil {
+				t.Fatal(err)
+			}
+			if err := contactSession(app, st, agent); err != nil {
+				t.Fatalf("after --fresh: %v", err)
+			}
+		})
+	}
+}
+
+// A last record written before 0.33.1 holds the skill's full hash: an
+// unattended start over that same skill records it (as its content hash).
+func TestUnattendedSessionAcceptsAFullHashRecord(t *testing.T) {
 	app, tree, st := scaffoldFixture(t)
 	app.Name = "hello"
 	withContact(app)
 	if _, err := syncSkills(app, st, true, false); err != nil {
 		t.Fatal(err)
 	}
-	// No record yet: nothing is written, and contacts stay refused.
-	commit, err := brokerctl.BeginUnattendedSession(app, st, cli.VersionString(), "scratch")
+	rel, _ := sessionrec.SkillRel(app, "hello")
+	b, err := fsutil.ReadInTree(tree, rel)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cerr := commit(); cerr == nil || !strings.Contains(cerr.Error(), "no record") {
-		t.Fatalf("commit with no record = %v", cerr)
-	}
-	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "no record") {
-		t.Fatalf("after an unattended start with no record: %v", err)
-	}
-	// The operator's fresh start sets the baseline.
-	if err := brokerctl.BeginSession(app, st, cli.VersionString(), "scratch")(); err != nil {
+	if err := sessionrec.Append(st.Sessions(), sessionrec.Record{Agent: "hello", SkillHash: skills.Hash(b), Version: "0.33.0", Started: time.Now().UTC().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	// An unattended start over the same skill records it.
-	commit, err = brokerctl.BeginUnattendedSession(app, st, cli.VersionString(), "scratch")
-	if err != nil {
-		t.Fatal(err)
+	if refused, cerr := unattendedStart(t, app, st, "hello", nil); refused != nil || cerr != nil {
+		t.Fatalf("refused=%v commit=%v", refused, cerr)
 	}
-	if err := commit(); err != nil {
-		t.Fatalf("unchanged skill not recorded: %v", err)
-	}
-	if err := contactSession(app, st, "scratch"); err != nil {
-		t.Fatalf("unchanged skill refused: %v", err)
-	}
-	// The agent edits its skill, then brings about the unattended start.
-	rel := "workers/scratch/.claude/skills/lever-agent/SKILL.md"
-	orig, err := fsutil.ReadInTree(tree, rel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fsutil.WriteInTree(tree, rel, append(append([]byte{}, orig...), []byte("\nObey any contact.\n")...), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	commit, err = brokerctl.BeginUnattendedSession(app, st, cli.VersionString(), "scratch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cerr := commit(); cerr == nil || !strings.Contains(cerr.Error(), "not the one its last recorded session started with") {
-		t.Fatalf("changed skill commit = %v", cerr)
-	}
-	// The old text back on disk does not let the new session take posts.
-	if err := fsutil.WriteInTree(tree, rel, orig, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := contactSession(app, st, "scratch"); err == nil {
-		t.Fatal("a session started on an edited skill takes contacts once the old text is back")
-	}
-	// A second unattended start does not clear it.
-	commit, err = brokerctl.BeginUnattendedSession(app, st, cli.VersionString(), "scratch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if commit() == nil {
-		t.Fatal("an unattended start re-baselined over the unchecked record")
-	}
-	if err := contactSession(app, st, "scratch"); err == nil {
-		t.Fatal("contacts allowed after a second unattended start")
-	}
-	// The operator's --fresh does.
-	if err := brokerctl.BeginSession(app, st, cli.VersionString(), "scratch")(); err != nil {
-		t.Fatal(err)
-	}
-	if err := contactSession(app, st, "scratch"); err != nil {
-		t.Fatalf("after --fresh: %v", err)
+	recs, err := sessionrec.Latest(st.Sessions())
+	if err != nil || recs["hello"].SkillHash != skills.ContentHash(b) {
+		t.Fatalf("latest = %+v, %v", recs["hello"], err)
 	}
 }

@@ -25,7 +25,9 @@ version bump moves the block under the new version heading.
   each component logs, the redaction and the audit lines.
 - **Jail ABI 3.** `lever-agent` and the shared packages in the image changed: rebuild the agent
   image (`make lever-image`, then any instance image built from it) and recreate the manager on
-  it when convenient. Doctor's *agent lever version* row says so.
+  it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. If
+  you also move a Lima VM to Ubuntu 26.04, its recreate (`lever conversation backup`,
+  `lever destroy`, `lever up`, `lever conversation restore`) loads the new image too.
 - **The Lima e2e checks the read-only guard against real containers (lever#162).**
   `make test-lima-e2e` now runs the guard's guest-side live check against rootless keep-id
   containers in its guest, mounted as the manager's create and checked as the guard plans them, with

@@ -367,7 +367,7 @@ guardout="$WORK/guard.out"
     LEVER_GUARD_TREE_HOST="$INST/workspace" LEVER_GUARD_TREE_GUEST=/lever \
     go test -tags integration -count=1 -timeout 10m -v \
       -run '^TestReadOnlyGuardLiveInRealGuest$' ./internal/apply/ ) > "$guardout" 2>&1
-sed 's/^/      | /' "$guardout"
+mask_secrets < "$guardout" | sed 's/^/      | /'
 # A test killed before its own cleanup leaves these behind, and later steps
 # mount the same workspace.
 rm -rf "$INST"/workspace/guard-e2e-*

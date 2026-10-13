@@ -31,7 +31,8 @@ Validated (by hand or by an automated gate):
   (namespace ownership as the check reads it and `lsns` as root reports it, a nested first process
   refused, the tree mount's pins matched by mount root and inode, a directory moved in the guest
   reported, one replaced on the host reported or followed by its mount (followed on 9p, read-only
-  kept)), on a Linux host (QEMU, 9p) so far; not yet run under vz/virtiofs
+  kept)), on a Linux host (QEMU, 9p) so far; not yet run under vz/virtiofs; and every line of the
+  broker's and the tools' logs is in lever's log shape, with the test API key in none of them
   ([§5.5](/security-model/config-trust/)).
 
 Not validated:

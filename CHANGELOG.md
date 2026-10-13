@@ -321,12 +321,14 @@ version bump moves the block under the new version heading.
   `lever up` names it as the cause (after the attach ends and at the start gate), or names a
   SIGKILL as a likely out-of-memory kill. In a Lima jail the guest now keeps the core of a crashed
   tmux server: `kernel.core_pattern` pipes dumps to a lever handler that keeps only `tmux: server`
-  dumps, root only in `/var/lib/lever/cores`, one at a time, 256 MiB each and the newest two. Cores
-  never leave the guest. The handler replaces apport (masked) and drops other processes' dumps. The
-  log line and a kept core come from the agent's side, so lever words them as leads, not proof. OrbStack
-  is unchanged, because its kernel is shared. Rebuild the image (`make lever-image`), then
+  dumps, root only in `/var/lib/lever/cores`, one at a time, 256 MiB each, the newest two and at
+  most one a minute; `kernel.core_pipe_limit` is 1, so the kernel runs one handler at a time and
+  skips a dump past it. Cores never leave the guest. A core holds the tmux server's memory, which
+  can include the container's environment and the tokens in it, besides the panes' contents. The
+  handler replaces apport (masked) and drops other processes' dumps. The log line and a kept core
+  come from the agent's side, so lever words them as leads, not proof. OrbStack is unchanged,
+  because its kernel is shared. Rebuild the image (`make lever-image`), then
   `lever up --fresh --keep-conversation` puts the manager on it.
-
 - **`lever acceptance` waits for its tools to listen** (up to 30 s) before it runs the checks, and
   fails naming the tool, its address and its log when one never does. A first check could reach
   the gateway before the tool bound its port and fail with a 502 unrelated to the capability under

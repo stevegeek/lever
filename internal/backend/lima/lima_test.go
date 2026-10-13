@@ -33,7 +33,6 @@ func TestProfileDeclaresSeparateKernel(t *testing.T) {
 	}
 }
 
-// The VM every test drives, and its guest transport prefixes.
 const (
 	vm   = "lever-x"
 	tree = "/Users/x/tree"
@@ -53,13 +52,11 @@ const (
 	listAbsent  = ""
 )
 
-// limaVersionScript scripts a successful `limactl --version` response for the
-// installed dev version (verified live: `limactl version 2.1.3`).
+// limaVersionScript's output format was verified live: `limactl version 2.1.3`.
 func limaVersionScript(f *proc.FakeRunner) {
 	f.Script("limactl --version", proc.Result{Stdout: "limactl version 2.1.3\n"})
 }
 
-// scriptList scripts the VM listing EnsureUp/Stop/Teardown consult first.
 func scriptList(f *proc.FakeRunner, out string) {
 	f.Script("limactl list --format", proc.Result{Stdout: out})
 }
@@ -72,8 +69,7 @@ func scriptLifecycle(f *proc.FakeRunner) {
 	f.Script("limactl start --tty=false "+vm, proc.Result{Stdout: "started\n"})
 }
 
-// scriptedVM scripts a fully up (Running) VM: version, list, whoami/id -u,
-// runtimes, egress. Used by tests that only care about post-EnsureUp state.
+// scriptedVM scripts a fully up (Running) VM.
 func scriptedVM(f *proc.FakeRunner) {
 	limaVersionScript(f)
 	scriptList(f, listRunning)
@@ -81,14 +77,9 @@ func scriptedVM(f *proc.FakeRunner) {
 	limaGuest.ScriptProvision(f, "501", backendtest.AhostsDual)
 }
 
-// callIndex returns the index of the first "limactl" call whose leading args
-// exactly match want, or -1.
 func callIndex(f *proc.FakeRunner, want ...string) int {
 	return f.CallIndex(proc.ArgvPrefix("limactl", want...))
 }
-
-// --- Test 1: fresh host — version, list, create (template tmpfile), start,
-// whoami/id -u, runtimes, egress, in that order. ---
 
 func TestEnsureUpFreshHostFullSequence(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -135,8 +126,6 @@ func TestEnsureUpFreshHostFullSequence(t *testing.T) {
 	}
 }
 
-// --- Test 2: idempotency — Running VM → no create, no start. ---
-
 func TestEnsureUpIsIdempotentWhenRunning(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptedVM(f) // "lever-x Running"
@@ -147,11 +136,8 @@ func TestEnsureUpIsIdempotentWhenRunning(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
-	// Neither create nor start: the VM is already Running.
 	backendtest.AssertNoSubcommand(t, f, "limactl", "create", "start")
 }
-
-// --- Test 3: Stopped VM → start but no create. ---
 
 func TestEnsureUpStartsStoppedVMWithoutCreate(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -169,11 +155,8 @@ func TestEnsureUpStartsStoppedVMWithoutCreate(t *testing.T) {
 	if !f.Called(proc.Subcommand("limactl", "start")) {
 		t.Fatal("expected `limactl start` for a Stopped VM")
 	}
-	// create must NOT be called for an already-existing (Stopped) VM.
 	backendtest.AssertNoSubcommand(t, f, "limactl", "create")
 }
-
-// --- Test 4: version preflight — Lima >= 2.0.0 required. ---
 
 func TestEnsureUpRejectsOldLima(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -207,8 +190,6 @@ func TestLimaVersionAtLeast(t *testing.T) {
 		return common.VersionAtLeast(context.Background(), f, []string{"limactl", "--version"}, limaVersionRe, 2, 0, 0)
 	})
 }
-
-// --- ResolveRunUser: passive attach must resolve without provisioning. ---
 
 func TestResolveRunUserResolvesWhenVMRunning(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -256,8 +237,6 @@ func TestResolveRunUserErrorsWhenVMStopped(t *testing.T) {
 	backendtest.AssertNoSubcommand(t, f, "limactl", "start")
 }
 
-// --- Test 5: teardown. ---
-
 func TestTeardownDeletesVMWhenPresent(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptList(f, listRunning)
@@ -276,8 +255,6 @@ func TestTeardownIsNoopWhenAbsent(t *testing.T) {
 	}
 	backendtest.AssertNoSubcommand(t, f, "limactl", "delete")
 }
-
-// --- Stop: power off, keep disk (distinct from Teardown). ---
 
 func TestStopStopsVMWhenListed(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -307,8 +284,6 @@ func TestStopOnAlreadyStoppedVMIsHarmless(t *testing.T) {
 	}
 }
 
-// --- Test 6: RunUID — default before EnsureUp, resolved uid after. ---
-
 func TestRunUIDDefaultBeforeEnsureUp(t *testing.T) {
 	l := New(proc.NewFakeRunner(), "lever-x", common.Options{})
 	if got := l.RunUID(); got != common.DefaultRunUID {
@@ -331,8 +306,6 @@ func TestRunUIDReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 		t.Fatalf("RunUID should be the resolved uid 1000; got %q", got)
 	}
 }
-
-// --- Test 7: HostToolAlias + JailPrefix. ---
 
 func TestHostToolAliasAndJailPrefix(t *testing.T) {
 	if got := New(proc.NewFakeRunner(), "lever-x", common.Options{}).HostToolAlias(); got != "host.lima.internal" {
@@ -368,14 +341,10 @@ func TestJailTransportMethods(t *testing.T) {
 	}
 }
 
-// --- F1 guard: per-backend exact-argv assertions for the image-op / jail-
-// transport forwarders. Before F1 these had no per-backend argv assertion
-// (TestJailTransportMethods only checked non-nil), so a prefix mis-wiring in
-// the shared base — lima's jail prefix is the static ["limactl","shell",vm] —
-// would only fail at runtime. LoadImage/ImageLoaded/PruneJailImages exec docker
-// directly (unobservable offline) but share jailPrefix() with JailRunner and
-// AttachArgv, so pinning those two transitively guards them; InstallGuestBinary
-// is pinned directly through the root transport. ---
+// Exact-argv assertions for the jail-transport forwarders, so a prefix
+// mis-wiring in the shared base fails here rather than at runtime.
+// LoadImage/ImageLoaded/PruneJailImages share jailPrefix() with JailRunner
+// and AttachArgv, so pinning those two guards them too.
 
 func TestInstallGuestBinaryArgv(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -433,8 +402,6 @@ func TestAttachArgvFullPrefix(t *testing.T) {
 		t.Fatalf("inner command not trailing: %v", last2)
 	}
 }
-
-// --- Additional coverage mirroring orbstack's suite. ---
 
 func TestEnsureUpRequiresProjectTree(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -504,10 +471,8 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	backendtest.AssertClosedChainKept(t, r, l.HostAliasV4())
 }
 
-// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec. The
-// literal now lives once in common.Base.Provision, but each backend still pins
-// it end to end (and asserts the negative) so a backend that stops calling
-// Provision, or calls it with the wrong config, is caught here.
+// EnsureUp must thread Config.ScionWebUI into the guest's ScionSpec; pinned
+// per backend so one that stops calling Provision correctly is caught.
 func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -548,7 +513,7 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 	backendtest.AssertNoNodeTooling(t, f)
 }
 
-// --- lever#34: Lima's LIMADNS DNAT targets are ACCEPTed in the open posture ---
+// Lima's LIMADNS DNAT targets are ACCEPTed in the open posture.
 
 // natRunner scripts a Running VM whose guest answers the LIMADNS chain read.
 func natRunner(chain string) *backendtest.NATChainRunner {

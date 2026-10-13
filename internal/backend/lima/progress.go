@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-// instanceDir is the VM's Lima directory: what `limactl list --json`
-// reported, else $LIMA_HOME/<vm> or ~/.lima/<vm>.
 func (l *Lima) instanceDir(inst realizedInstance) string {
 	if inst.Dir != "" {
 		return inst.Dir
@@ -25,12 +23,10 @@ func (l *Lima) instanceDir(inst realizedInstance) string {
 	return filepath.Join(home, l.Machine())
 }
 
-// tailRead bounds how much of a log file lastLines reads from its end.
 const tailRead = 64 << 10
 
 // lastLines returns up to n last lines of the file at path; nil when it
-// cannot be read. Lima's ha.stderr.log holds JSON lines: each is shown as
-// its msg (with its error, if any), so the tail reads as prose.
+// cannot be read.
 func lastLines(path string, n int) []string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -54,8 +50,7 @@ func lastLines(path string, n int) []string {
 	return lines
 }
 
-// limaLine renders one ha.stderr.log line: Lima writes logrus JSON
-// ({"level":"info","msg":"...","time":"..."}); anything else is kept as is.
+// limaLine: Lima writes logrus JSON lines; anything else is kept as is.
 func limaLine(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, "{") {
@@ -79,10 +74,8 @@ func limaLine(raw string) string {
 	return out
 }
 
-// watchLimaStage reports Lima's latest boot message to detail about once a
-// second while a `limactl start` runs; the returned func stops it. Lima
-// appends to ha.stderr.log across starts, so only lines written after the
-// watch began count.
+// watchLimaStage: Lima appends to ha.stderr.log across starts, so only lines
+// written after the watch began count. The returned func stops it.
 func watchLimaStage(ctx context.Context, path string, detail func(string)) func() {
 	var offset int64
 	if fi, err := os.Stat(path); err == nil {
@@ -111,8 +104,7 @@ func watchLimaStage(ctx context.Context, path string, detail func(string)) func(
 	return func() { close(stop); <-done }
 }
 
-// latestLimaMsg is the last message written to path after offset, and the
-// new offset. A file that shrank (rotated) is read from its start.
+// latestLimaMsg reads a file that shrank (rotated) from its start.
 func latestLimaMsg(path string, offset int64) (string, int64) {
 	f, err := os.Open(path)
 	if err != nil {

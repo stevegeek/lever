@@ -10,8 +10,8 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// The guest profile converges after the hardening and before provisioning
-// (whose apt run the small profile's stopped timers no longer compete with);
+// The guest profile converges after the hardening and before provisioning,
+// so the small profile's stopped apt timers cannot compete with its apt run;
 // no profile (no config) runs no script.
 func TestEnsureUpGuestProfile(t *testing.T) {
 	for _, profile := range []string{guest.GuestProfileSmall, guest.GuestProfileStandard} {

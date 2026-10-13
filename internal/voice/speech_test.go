@@ -61,7 +61,6 @@ func testSpeechModel() SpeechModel {
 	}
 }
 
-// testSpeechManifest is the manifest of testSpeechFiles.
 func testSpeechManifest() []SpeechFile {
 	var out []SpeechFile
 	for p, c := range testSpeechFiles {
@@ -375,7 +374,6 @@ func TestGitHubReleaseHost(t *testing.T) {
 	}
 }
 
-// tarEntry is one entry of a test archive.
 type tarEntry struct {
 	name, body string
 	typ        byte
@@ -807,7 +805,6 @@ func TestRemoveStaleSpeech(t *testing.T) {
 	}
 }
 
-// fakeEngine is a SpeechEngine for the socket tests.
 type fakeEngine struct {
 	ready bool
 	err   error

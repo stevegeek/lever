@@ -15,17 +15,14 @@ import (
 	"github.com/stevegeek/lever/internal/fsutil"
 )
 
-// AgentDir is the tree-relative directory the clips of the agent operation
-// are read from (/workspace/.lever-files/whisper in the manager's
-// container). It is at the tree root, so only the manager can write it (a
-// worker mounts only its own dir); but it is read for every caller, so any
-// agent with a transcribe capability (a delegated or obtained one included)
-// reads the files the manager put there. Like the github tool's bundle
-// directory, it does not depend on the caller.
+// AgentDir is the tree-relative directory the agent operation reads clips
+// from. At the tree root only the manager can write it (a worker mounts only
+// its own dir), but it is read for every caller, so any agent with a
+// transcribe capability reads the files the manager put there.
 const AgentDir = ".lever-files/whisper"
 
-// The per-caller limits of the agent operation, in memory (they start again
-// when the tool restarts).
+// The per-caller limits of the agent operation, in memory (reset when the
+// tool restarts).
 const (
 	AgentClipsPerHour  = 30
 	AgentSecondsPerDay = 60 * 60
@@ -46,23 +43,20 @@ func CheckAgentFile(name string) error {
 // hard link, checked like a dictation clip, and transcribed after any
 // waiting dictation.
 type AgentTranscriber struct {
-	Tree string
-	// MaxSeconds is the longest agent clip (-agent-max-seconds).
+	Tree       string
 	MaxSeconds int
 	Svc        Transcriber
 	Queue      *Queue
 	// QueueWait bounds the wait for the GPU; zero = 2 minutes.
 	QueueWait time.Duration
 	// MaxWait bounds one transcription once it has the GPU; zero =
-	// AgentMaxWait(MaxSeconds, true). An agent's call cannot be cancelled from its
-	// side (the handler has no request context), and a running clip is
-	// never interrupted for dictation, so this also bounds how long an agent
-	// clip can keep a dictation clip waiting.
+	// AgentMaxWait(MaxSeconds, true). An agent's call cannot be cancelled
+	// and a running clip is never interrupted for dictation, so this also
+	// bounds how long an agent clip can keep a dictation clip waiting.
 	MaxWait time.Duration
-	// Log receives one line per call: the caller, the file name, the
-	// clip's length, the outcome and the latency; never the text.
+	// Log receives one line per call: caller, file name, length, outcome
+	// and latency; never the text.
 	Log func(format string, a ...any)
-	// Now is the clock (tests); nil = time.Now.
 	Now func() time.Time
 
 	mu   sync.Mutex
@@ -87,9 +81,8 @@ func (a *AgentTranscriber) logf(format string, args ...any) {
 	}
 }
 
-// Transcribe reads, checks and transcribes caller's file and returns the
-// cleaned transcript (CleanText). Its errors are fit for the agent: they
-// name no host path.
+// Transcribe returns caller's file's cleaned transcript. Its errors name no
+// host path.
 func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) (text string, err error) {
 	seconds := 0.0
 	start := time.Now()
@@ -156,8 +149,8 @@ func (a *AgentTranscriber) Transcribe(ctx context.Context, caller, file string) 
 	return CleanText(raw), nil
 }
 
-// read copies the file into memory: no symbolic link on any component, no
-// hard link, at most the largest clip of MaxSeconds.
+// read: no symbolic link on any component, no hard link, at most the largest
+// clip of MaxSeconds.
 func (a *AgentTranscriber) read(file string) ([]byte, error) {
 	limit := MaxClipBytes(a.MaxSeconds)
 	f, _, err := fsutil.OpenInTreeNoLinks(a.Tree, path.Join(AgentDir, file), limit)
@@ -184,16 +177,14 @@ func (a *AgentTranscriber) read(file string) ([]byte, error) {
 	return b, nil
 }
 
-// tooLong is the refusal of a file over MaxSeconds.
 func (a *AgentTranscriber) tooLong(file string) error {
 	return fmt.Errorf("file %s is too long: the agent operation takes at most %d seconds of audio (the tool's -agent-max-seconds); split it into shorter clips", file, a.MaxSeconds)
 }
 
 // AgentMaxWait is how long one agent clip of at most maxSeconds may keep
-// whisper-server: with a GPU, as long as the clip, at least 30 s (a GPU
-// transcribes far faster than real time); on the CPU (gpu false), which can
-// be slower than real time, four times the clip, at least 2 minutes. A clip
-// that takes longer is cut off as failed.
+// whisper-server: with a GPU, as long as the clip, at least 30 s; on the
+// CPU, which can be slower than real time, four times the clip, at least 2
+// minutes. A clip that takes longer fails.
 func AgentMaxWait(maxSeconds int, gpu bool) time.Duration {
 	if !gpu {
 		return time.Duration(max(4*maxSeconds, 120)) * time.Second
@@ -201,9 +192,8 @@ func AgentMaxWait(maxSeconds int, gpu bool) time.Duration {
 	return time.Duration(max(maxSeconds, 30)) * time.Second
 }
 
-// check refuses one more clip of seconds by caller over AgentClipsPerHour
-// or AgentSecondsPerDay, and with take also counts it. Uses older than a
-// day are forgotten.
+// check refuses one more clip of seconds over AgentClipsPerHour or
+// AgentSecondsPerDay, and with take also counts it.
 func (a *AgentTranscriber) check(caller string, seconds float64, now time.Time, take bool) error {
 	key := strings.ToLower(caller)
 	a.mu.Lock()
@@ -243,8 +233,6 @@ func (a *AgentTranscriber) check(caller string, seconds float64, now time.Time, 
 	return nil
 }
 
-// refund gives back the use take recorded at the same moment for the same
-// length.
 func (a *AgentTranscriber) refund(caller string, seconds float64, at time.Time) {
 	key := strings.ToLower(caller)
 	a.mu.Lock()

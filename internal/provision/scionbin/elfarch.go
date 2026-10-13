@@ -15,12 +15,10 @@ var elfMachineForGOARCH = map[string]elf.Machine{
 }
 
 // VerifyELFArch reports whether path is a linux executable for wantGOARCH.
-//
-// This is the point of accepting a prebuilt binary: it was built somewhere
-// else, so an architecture mix-up is the realistic failure. Caught here it is a
-// config error naming both arches, raised before anything is written into the
-// guest. Uncaught it surfaces inside the guest at manager start as "exec format
-// error", which points at nothing.
+// A prebuilt binary was built elsewhere, so an architecture mix-up is the
+// realistic failure: caught here it is a config error naming both arches,
+// raised before anything is written into the guest, instead of an "exec
+// format error" at manager start.
 func VerifyELFArch(path, wantGOARCH string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -42,10 +40,8 @@ func VerifyELFArch(path, wantGOARCH string) error {
 	if f.Type != elf.ET_EXEC && f.Type != elf.ET_DYN {
 		return fmt.Errorf("scion binary %q is an ELF %v, not an executable", path, f.Type)
 	}
-	// The machine alone does not pin the ABI: a 32-bit or big-endian header can
-	// still declare EM_X86_64/EM_AARCH64, and either would fail in the guest
-	// with the exec-format error this check exists to prevent. Real toolchains
-	// do not emit these, which is exactly why they would be baffling.
+	// The machine alone does not pin the ABI: a 32-bit or big-endian header
+	// can still declare EM_X86_64/EM_AARCH64 and would fail in the guest.
 	if f.Class != elf.ELFCLASS64 {
 		return fmt.Errorf("scion binary %q is %v, but the guest needs a 64-bit binary", path, f.Class)
 	}

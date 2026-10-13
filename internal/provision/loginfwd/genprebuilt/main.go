@@ -1,17 +1,13 @@
 // Command genprebuilt cross-compiles lever-login-forward for every guest
-// architecture lever supports and writes the results, gzip-compressed, into
-// internal/provision/loginfwd/prebuilt/, where `//go:embed` picks them up for
-// the NEXT build of lever. See the loginfwd package doc for why the forwarder
-// ships embedded.
+// architecture and writes the results, gzip-compressed, into
+// internal/provision/loginfwd/prebuilt/ for the next build of lever to embed.
 //
 // Run from the repository root, before building lever:
 //
 //	go run ./internal/provision/loginfwd/genprebuilt
 //
-// `make install`, `make loginfwd-prebuilt` and the release workflow's
-// goreleaser before-hook do exactly this. The build is offline (GOPROXY=off,
-// stdlib-only program) and uses the same recipe as the apply-time fallback
-// (loginfwd.BuildTo).
+// The build is offline (GOPROXY=off, stdlib-only program) and uses the same
+// recipe as the apply-time fallback (loginfwd.BuildTo).
 package main
 
 import (

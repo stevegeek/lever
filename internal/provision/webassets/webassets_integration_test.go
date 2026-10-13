@@ -18,14 +18,9 @@ import (
 //
 //	go test -tags integration -run TestRealScionWebBuild ./internal/provision/webassets/ -v
 //
-// Requires a real go toolchain (to fetch the scion module), a real node >= 20
-// with npm, and network access for `npm ci`. Touches no guest: it exercises the
-// HOST half only — fetch, copy out of the read-only module cache, npm ci, vite
-// build, and the per-pin cache hit.
-//
-// This is the test that answers "does the pinned module's web/ actually build?",
-// which no amount of FakeRunner argv-pinning can. Override the pin with
-// LEVER_SCION_VERSION to check a candidate before moving examples onto it.
+// Requires a real go toolchain, node >= 20 with npm, and network access for
+// `npm ci`. Touches no guest: it exercises the host half only. Override the
+// pin with LEVER_SCION_VERSION to check a candidate.
 func TestRealScionWebBuild(t *testing.T) {
 	version := os.Getenv("LEVER_SCION_VERSION")
 	if version == "" {
@@ -42,9 +37,8 @@ func TestRealScionWebBuild(t *testing.T) {
 	}
 	t.Logf("scion %s web sources: %s", version, srcWeb)
 
-	// The build lands in the developer's real cache — the same path production
-	// uses, so PATH and any walk-up version manager behave identically here.
-	// Removed afterwards so a test run does not leave a few hundred MB behind.
+	// The build lands in the real cache, as in production, so PATH and any
+	// walk-up version manager behave identically. Removed afterwards.
 	digest, err := HashSource(srcWeb)
 	if err != nil {
 		t.Fatalf("HashSource: %v", err)
@@ -85,9 +79,8 @@ func TestRealScionWebBuild(t *testing.T) {
 		t.Fatalf("no completion marker: %v", err)
 	}
 
-	// Keep the sizes the guide quotes honest as scion's SPA grows, and keep the
-	// sourcemap exclusion earning its place: it only pays if maps stay a large
-	// fraction of the build.
+	// Keep the sizes the guide quotes honest, and check the sourcemap
+	// exclusion still removes a large fraction of the build.
 	var total, maps int64
 	err = filepath.WalkDir(dist, func(p string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -116,8 +109,7 @@ func TestRealScionWebBuild(t *testing.T) {
 		t.Errorf("staged payload grew to %.1fMB; the remote-access guide quotes ~3.3MB", float64(staged)/mb)
 	}
 
-	// The cache is the whole point: a re-apply on an unchanged pin must not
-	// re-run npm.
+	// A re-apply on an unchanged pin must not re-run npm.
 	start = time.Now()
 	dist2, digest2, err := Build(ctx, r, srcWeb)
 	if err != nil {
@@ -135,10 +127,8 @@ func TestRealScionWebBuild(t *testing.T) {
 		t.Fatal("the second build rewrote the marker; npm ran again on an unchanged pin")
 	}
 
-	// A cache directory that lost its assets — hand-edited, or left by an
-	// older lever that built in place — must be rebuilt, not adopted. This is
-	// the branch where the atomic publish finds its destination occupied by
-	// something incomplete and has to clear it first.
+	// A cache directory that lost its assets must be rebuilt, not adopted:
+	// the atomic publish finds its destination occupied and clears it first.
 	if err := os.Remove(filepath.Join(dist, filepath.FromSlash(layout.WebAssetsSentinel))); err != nil {
 		t.Fatal(err)
 	}

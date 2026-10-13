@@ -17,9 +17,8 @@ import (
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
-// isolateCacheDir points os.UserCacheDir at a temp dir for the duration of a
-// test, so a build/cache test never reads or writes the developer's real
-// ~/Library/Caches (darwin) or ~/.cache (linux).
+// isolateCacheDir points os.UserCacheDir at a temp dir so no test touches the
+// developer's real cache.
 func isolateCacheDir(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -93,13 +92,11 @@ func TestNodeMajor(t *testing.T) {
 	}
 }
 
-// Toolchain versions a supported host answers with.
 const (
 	nodeOK = "v25.9.0"
 	npmOK  = "11.12.1"
 )
 
-// scriptToolchain scripts a usable node/npm pair.
 func scriptToolchain(f *proc.FakeRunner) {
 	f.Script("node --version", proc.Result{Stdout: nodeOK + "\n"})
 	f.Script("npm --version", proc.Result{Stdout: npmOK + "\n"})
@@ -157,9 +154,8 @@ func TestCheckNodeToolchain(t *testing.T) {
 	}
 }
 
-// The digest must key on build INPUTS only. Build output written back into the
-// source tree (npm's postinstall and copy:client scripts do exactly that) would
-// otherwise change the key on every build — a cache that never hits.
+// The digest keys on build inputs only: output npm's scripts write back into
+// the source tree would otherwise change the key on every build.
 func TestHashWebSourceIgnoresBuildOutput(t *testing.T) {
 	web := filepath.Join(fakeScionSource(t), "web")
 	before, err := HashSource(web)
@@ -383,9 +379,8 @@ func TestBuildWebAssetsFailsEarlyWithoutNode(t *testing.T) {
 	}
 }
 
-// The whole point of keying the build directory on the sources: a second
-// Build on an unchanged pin must not run npm again, and must resolve to the
-// cached dist.
+// A second Build on an unchanged pin must not run npm again and resolves to
+// the cached dist.
 func TestBuildReusesCachedBuild(t *testing.T) {
 	cacheRoot := isolateCacheDir(t)
 	src := fakeScionSource(t)

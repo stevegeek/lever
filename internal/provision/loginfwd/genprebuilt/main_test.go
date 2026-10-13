@@ -10,10 +10,9 @@ import (
 	"github.com/stevegeek/lever/internal/provision/loginfwd"
 )
 
-// TestGenerateWritesWhatLoginfwdEmbeds runs the real generator into a temp
-// directory (offline: GOPROXY=off, stdlib-only program) and checks that the
-// result is exactly the shape loginfwd reads: one archive per guest arch and
-// the current source digest.
+// TestGenerateWritesWhatLoginfwdEmbeds runs the real generator offline into a
+// temp directory and checks the result is the shape loginfwd reads: one
+// archive per guest arch and the current source digest.
 func TestGenerateWritesWhatLoginfwdEmbeds(t *testing.T) {
 	if testing.Short() {
 		t.Skip("cross-compiles twice")

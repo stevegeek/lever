@@ -169,13 +169,13 @@ func newDirectiveSendCmd() *cobra.Command {
 			var action opsig.Action
 			if actionJSON != "" {
 				if err := json.Unmarshal([]byte(actionJSON), &action); err != nil {
-					return fmt.Errorf("directive send: --action: invalid JSON: %w", err)
+					return usageError{fmt.Errorf("directive send: --action: invalid JSON: %w", err)}
 				}
 			} else {
 				action = opsig.Action{Kind: opsig.KindInstruction, Text: instruction}
 			}
 			if err := opsig.ValidateAction(action); err != nil {
-				return fmt.Errorf("directive send: invalid action: %w", err)
+				return usageError{fmt.Errorf("directive send: invalid action: %w", err)}
 			}
 
 			now := time.Now()
@@ -183,12 +183,12 @@ func newDirectiveSendCmd() *cobra.Command {
 			if notBeforeFlag != "" {
 				nb, err := time.Parse(time.RFC3339, notBeforeFlag)
 				if err != nil {
-					return fmt.Errorf("directive send: --not-before: %w", err)
+					return usageError{fmt.Errorf("directive send: --not-before: %w", err)}
 				}
 				// The broker refuses a not_before beyond its clock leeway,
 				// so a longer delay can never succeed: refuse it here.
 				if nb.Sub(now) > opsig.ClockLeeway {
-					return fmt.Errorf("directive send: --not-before %s is more than %s ahead; the broker refuses a later start", notBeforeFlag, opsig.ClockLeeway)
+					return usageError{fmt.Errorf("directive send: --not-before %s is more than %s ahead; the broker refuses a later start", notBeforeFlag, opsig.ClockLeeway)}
 				}
 				notBefore = nb
 			}
@@ -206,7 +206,7 @@ func newDirectiveSendCmd() *cobra.Command {
 			if expiresFlag != "" {
 				d, err := time.ParseDuration(expiresFlag)
 				if err != nil {
-					return fmt.Errorf("directive send: --expires: %w", err)
+					return usageError{fmt.Errorf("directive send: --expires: %w", err)}
 				}
 				expiry = d
 			}

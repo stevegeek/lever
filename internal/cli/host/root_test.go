@@ -101,10 +101,18 @@ func TestUsageOnlyForUsageErrors(t *testing.T) {
 		{"unknown flag", []string{"up", "--bogus"}, true},
 		{"too many arguments", []string{"up", "a", "b"}, true},
 		{"flag combination checked in RunE", []string{"up", "--no-backup"}, true},
+		{"bad --action JSON", []string{"directive", "send", "hello", "--action", "{"}, true},
+		{"invalid action", []string{"directive", "send", "hello", "--action", `{"kind":"nope"}`}, true},
+		{"bad --not-before", []string{"directive", "send", "hello", "--instruction", "x", "--not-before", "soon"}, true},
+		{"--not-before too far ahead", []string{"directive", "send", "hello", "--instruction", "x", "--not-before", "2999-01-01T00:00:00Z"}, true},
 	} {
 		out, err := clitest.Exec(t, NewRoot(), c.argv...)
 		if err == nil {
 			t.Fatalf("%s: no error", c.name)
+		}
+		usage := usage
+		if c.argv[0] == "directive" {
+			usage = "Usage:\n  lever directive send"
 		}
 		if got := strings.Contains(out, usage); got != c.wantUsage {
 			t.Errorf("%s: usage printed = %v, want %v:\n%s", c.name, got, c.wantUsage, out)

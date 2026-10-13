@@ -49,7 +49,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// alone: stop preserves everything for a fast resume.
 			ia := loadInstanceApp()
 			if keepVM && ia.app == nil {
-				return fmt.Errorf("stop: --keep-vm needs an instance: run it from the instance root (no lever.yaml found)")
+				return usageError{errors.New("stop: --keep-vm needs an instance: run it from the instance root (no lever.yaml found)")}
 			}
 			var appName string
 			var st state.State // set alongside appName; valid whenever appName != ""

@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -39,7 +40,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// refuses a --machine target rather than leave a foreign jail
 			// half stopped.
 			if keepVM && *machine != "" {
-				return fmt.Errorf("stop: --keep-vm acts on the current instance; run it from the instance root without --machine")
+				return usageError{errors.New("stop: --keep-vm acts on the current instance; run it from the instance root without --machine")}
 			}
 			// Resolve the app (for the manager's scion slug) and, when targeting
 			// the current instance (no explicit --machine), stop the host-side

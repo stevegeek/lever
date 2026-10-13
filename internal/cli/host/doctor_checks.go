@@ -1117,7 +1117,12 @@ type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, er
 // whether claude still runs: another claude process in the container firing
 // the shared SessionEnd hook leaves the harness running (apply reports it
 // running again), a claude that exited does not.
-func checkManagerLive(ctx context.Context, project, name string, list agentLister, session agentSessionReader, now time.Time) checkResult {
+//
+// A manager whose forced resume died because claude --continue found no
+// conversation (lever#202) is named as such: logTail (nil = not read) reads
+// its container log, which is matched for a fixed phrase only
+// (apply.NoConversationInLog) and never printed.
+func checkManagerLive(ctx context.Context, project, name string, list agentLister, session agentSessionReader, logTail containerLogReader, now time.Time) checkResult {
 	const check = "manager agent"
 	if list == nil {
 		return checkResult{check, true, "not checked", ""}
@@ -1188,9 +1193,27 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	if a.Phase == "error" {
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
 	}
-	return checkResult{check, false,
-		fmt.Sprintf("manager %q is not live: phase %s, container %s", name, scionpkg.BoundedQuote(a.Phase), scionpkg.BoundedQuote(a.ContainerStatus)), fix}
+	detail := fmt.Sprintf("manager %q is not live: phase %s, container %s", name, scionpkg.BoundedQuote(a.Phase), scionpkg.BoundedQuote(a.ContainerStatus))
+	// Only an error-phase record: `lever up` resumes it with --force (and
+	// --continue), and starts it fresh when that finds no conversation. A
+	// stopped record resumes in a new session anyway.
+	if a.Phase == scionpkg.PhaseError && logTail != nil {
+		if tail, err := logTail(ctx, ref); (err == nil || tail != "") && apply.NoConversationInLog(tail) {
+			return checkResult{check, false, detail + " — its claude found no conversation to continue, so the manager was most likely never used", noConversationFix}
+		}
+	}
+	return checkResult{check, false, detail, fix}
 }
+
+// containerLogReader reads the tail of an agent container's log
+// (jail.AgentProbe.LogTail in production): the agent's word, matched for
+// fixed phrases and never printed.
+type containerLogReader func(ctx context.Context, ref string) (string, error)
+
+// noConversationFix is the manager row's fix for a manager whose claude
+// found no conversation to continue (lever#202).
+const noConversationFix = "run `lever up`: it starts the manager fresh on its own once it has checked from the guest that the agent home holds no transcript. " +
+	"`lever up --fresh` starts it fresh in any case, and loses nothing: it backs up any transcript first"
 
 // stoppedResumeFix is the fix for a manager whose session really ended:
 // scion's hub resumes a stopped record with a fresh harness session (only a

@@ -68,6 +68,13 @@ type PlanOpts struct {
 	// and the caller checks the manager after the detach
 	// (CheckManagerAfterDetach) (lever#188). The plan itself is unchanged.
 	Attach bool
+	// FreshWithoutConversation lets start-manager replace a resume that died
+	// because claude --continue found no conversation with a fresh start, as
+	// `lever up --fresh` would, once Deps.ManagerConversationEmpty proved
+	// from the guest that the home holds no transcript (lever#202). `lever
+	// up` sets it; `lever apply` does not, and never deletes a record. The
+	// plan itself is unchanged.
+	FreshWithoutConversation bool
 }
 
 // brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.

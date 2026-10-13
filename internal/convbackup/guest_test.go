@@ -265,3 +265,99 @@ func TestInstallUnknownFailureIsNotNotSwapped(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// TestTranscripts: only a home with no transcript content proves there is
+// no conversation; content, a link, a special file, a parked projects
+// directory or an unreadable directory never does.
+func TestTranscripts(t *testing.T) {
+	home, ah := fakeJail(t)
+	cl := filepath.Join(ah, ".claude")
+	want := func(name string, w Transcripts) {
+		t.Helper()
+		got, err := guest().Transcripts(context.Background())
+		if err != nil || got != w {
+			t.Fatalf("%s: got %v, %v; want %v", name, got, err, w)
+		}
+	}
+	want("no .claude", TranscriptsNone)
+	if err := os.Mkdir(cl, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cl, "settings.json"), "{}")
+	want("no projects", TranscriptsNone)
+	if err := os.MkdirAll(filepath.Join(cl, "projects", "-workspace", "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cl, "projects", "-workspace", "empty.jsonl"), "")
+	want("empty directories and an empty file", TranscriptsNone)
+
+	writeFile(t, filepath.Join(cl, "projects", "-workspace", "sub", "s.jsonl"), "{}\n")
+	want("a transcript", TranscriptsSome)
+	if err := os.Remove(filepath.Join(cl, "projects", "-workspace", "sub", "s.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := filepath.Join(home, "secret")
+	writeFile(t, secret, "SECRET")
+	link := filepath.Join(cl, "projects", "-workspace", "l.jsonl")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	want("a link", TranscriptsOther)
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("mkfifo", filepath.Join(cl, "projects", "fifo")).Run(); err == nil {
+		want("a fifo", TranscriptsOther)
+		if err := os.Remove(filepath.Join(cl, "projects", "fifo")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(cl, "projects.lever-replaced-20261012T100000Z"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want("parked transcripts", TranscriptsOther)
+	if err := os.Remove(filepath.Join(cl, "projects.lever-replaced-20261012T100000Z")); err != nil {
+		t.Fatal(err)
+	}
+	want("back to empty", TranscriptsNone)
+
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(cl, "projects", "-workspace", "sub")
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, err := guest().Transcripts(context.Background())
+		_ = os.Chmod(locked, 0o700)
+		if err == nil {
+			t.Fatal("an unreadable directory proved nothing is there")
+		}
+	}
+
+	if err := os.RemoveAll(filepath.Join(cl, "projects")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "elsewhere"), filepath.Join(cl, "projects")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guest().Transcripts(context.Background()); !errors.Is(err, ErrNotPlainDir) {
+		t.Fatalf("projects link: %v", err)
+	}
+	if err := os.Remove(filepath.Join(cl, "projects")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(cl); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "elsewhere"), cl); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guest().Transcripts(context.Background()); !errors.Is(err, ErrNotPlainDir) {
+		t.Fatalf(".claude link: %v", err)
+	}
+	g := guest()
+	g.Agent = "other"
+	if _, err := g.Transcripts(context.Background()); !errors.Is(err, ErrNoHome) {
+		t.Fatalf("no home: %v", err)
+	}
+}

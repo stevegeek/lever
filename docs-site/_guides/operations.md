@@ -886,8 +886,9 @@ directory or the store. `--path` restores those subtrees (and their parent direc
   them); `none` creates none.
 - **Git and code that runs on use:** in any directory with an entry named `HEAD`, the entries
   `config`, `config.worktree`, `commondir` and `hooks` are written as `<name>.lever-restored`, and
-  every regular file named `.git` as `.git.lever-restored`, so `git status` in the restored tree
-  runs nothing an agent planted. `--keep-git` turns this off. Other files that run on use
+  every `.git` that is not a directory (a gitlink file, or a link) as `.git.lever-restored`, so
+  `git status` in the restored tree runs nothing an agent planted. Names are compared as a
+  case-insensitive filesystem folds them. `--keep-git` turns this off. Other files that run on use
   (`.envrc`, editor settings, Makefiles) are restored as they are.
 - FIFOs, sockets, devices, the broker ticket and entries without content are not created.
 - Two names that the target filesystem folds into one (by case on APFS) are a collision: lever

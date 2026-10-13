@@ -34,6 +34,9 @@ func treeInstance(t *testing.T, extra string) string {
 	if err := os.WriteFile(filepath.Join(dir, "workspace", "docs", "a.md"), []byte("alpha\nbeta\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Outside the clock window in which a fresh directory reads as
+	// listing-unstable.
+	time.Sleep(50 * time.Millisecond)
 	t.Chdir(dir)
 	prev := startTreeGC
 	startTreeGC = func(*cobra.Command, *treeEnv) {}

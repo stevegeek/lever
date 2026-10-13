@@ -298,6 +298,9 @@ type node struct {
 	// and set the state that explains any shortfall.
 	listed    bool
 	attempted bool
+	// listedMtime and listedCtime are the directory's times right after its listing,
+	// for the recheck once every listing is done.
+	listedMtime, listedCtime int64
 	// kids are the names of walkable child directories.
 	kids   []string
 	known  *Entry
@@ -424,6 +427,7 @@ func Walk(ctx context.Context, o WalkOptions) (*WalkResult, error) {
 	if err := w.phaseB(); err != nil {
 		return nil, err
 	}
+	w.recheckListings()
 	w.finishPass1()
 	if err := w.pass2Content(); err != nil {
 		return nil, err
@@ -549,7 +553,7 @@ func (w *walker) lost(n *node, s State) {
 }
 
 func entryFromStat(rel []byte, st *sysStat) Entry {
-	return Entry{
+	e := Entry{
 		Path:    rel,
 		Type:    typeOf(st.Mode),
 		HasMeta: true,
@@ -561,6 +565,12 @@ func entryFromStat(rel []byte, st *sysStat) Entry {
 		Ino:     st.Ino,
 		Nlink:   st.Nlink,
 	}
+	// A file type outside the known set (a darwin whiteout) is never
+	// opened; "unknown" always carries "unreadable".
+	if e.Type == TypeUnknown {
+		e.State = StateUnreadable
+	}
+	return e
 }
 
 // lookup records one name of the directory dirfd, without adding it. gone
@@ -883,11 +893,10 @@ func (w *walker) walkRoot(r *writerRoot) error {
 func (w *walker) openChild(pfd int, n *node) (int, bool) {
 	fd, err := sysOpenDir(pfd, string(BaseName(n.e.Path)))
 	if err != nil {
-		if classify(err) == errCrossDev {
-			w.lost(n, StateMount)
-		} else {
-			w.lost(n, StateChanged)
-		}
+		// Even a mount that appeared since this directory was recorded is
+		// "changed", not "mount": the directory may already hold recorded
+		// children, and a mount is a leaf.
+		w.lost(n, StateChanged)
 		return -1, false
 	}
 	st, err := sysFstat(fd)
@@ -1077,8 +1086,44 @@ read:
 	}
 	if full && n.e.Listing == "" && (n != w.rootNode || w.root.Listing == "") {
 		n.listed = true
+		if err == nil {
+			n.listedMtime, n.listedCtime = after.Mtime, after.Ctime
+		}
 	}
 	return nil
+}
+
+// recheckListings stats every fully listed directory again once phase B
+// is over. A name moved into a directory after its listing, out of one not
+// listed yet, is in neither listing; the second directory's own check
+// catches the removal only if it is listed later, so the first must be
+// checked again here. A directory that cannot be checked counts as changed.
+func (w *walker) recheckListings() {
+	var listed []*node
+	if w.rootNode != nil && w.rootNode.listed {
+		listed = append(listed, w.rootNode)
+	}
+	for _, n := range w.all {
+		if n.listed && n != w.rootNode {
+			listed = append(listed, n)
+		}
+	}
+	slices.SortFunc(listed, func(a, b *node) int { return ComparePaths(a.e.Path, b.e.Path) })
+	for _, n := range listed {
+		var p []byte
+		if n != w.rootNode {
+			p = n.e.Path
+		}
+		fd, ok := w.dirs.get(p)
+		if !ok {
+			w.listingUnstable(n)
+			continue
+		}
+		st, err := sysFstat(fd)
+		if err != nil || st.Mtime != n.listedMtime || st.Ctime != n.listedCtime {
+			w.listingUnstable(n)
+		}
+	}
 }
 
 // finishPass1 sorts the entries and marks every walkable directory phase B

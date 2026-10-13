@@ -882,41 +882,28 @@ func (r *restorer) diskName(e *Entry) string {
 	if r.headDirs[string(ParentOf(e.Path))] && isGitControl(name) {
 		return name + neutralSuffix
 	}
-	if e.Type == TypeFile && asciiEqualFold(name, ".git") {
+	// A .git link is a gitlink too, through whatever file it points at.
+	if e.Type != TypeDir && foldEqual(name, ".git") {
 		return name + neutralSuffix
 	}
 	return name
 }
 
-func isHEAD(name []byte) bool { return asciiEqualFold(string(name), "HEAD") }
+// The git names are compared as a case-insensitive target would fold
+// them, not by ASCII alone: "hoo\u212As" (a Kelvin sign) is "hooks" on such
+// a filesystem.
+func isHEAD(name []byte) bool { return foldEqual(string(name), "HEAD") }
 
 func isGitControl(name string) bool {
 	for _, n := range []string{"config", "config.worktree", "commondir", "hooks"} {
-		if asciiEqualFold(name, n) {
+		if foldEqual(name, n) {
 			return true
 		}
 	}
 	return false
 }
 
-func asciiEqualFold(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		x, y := a[i], b[i]
-		if 'A' <= x && x <= 'Z' {
-			x += 'a' - 'A'
-		}
-		if 'A' <= y && y <= 'Z' {
-			y += 'a' - 'A'
-		}
-		if x != y {
-			return false
-		}
-	}
-	return true
-}
+func foldEqual(a, b string) bool { return foldKey(a) == foldKey(b) }
 
 // foldKey maps names a case-insensitive filesystem treats as one to the
 // same key: each valid rune becomes the smallest rune of its Unicode

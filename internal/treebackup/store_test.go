@@ -363,8 +363,16 @@ func TestGarbageBlobWithDirtyIsReplaced(t *testing.T) {
 	if b, _ := os.ReadFile(p); string(b) != "hello" {
 		t.Fatalf("blob = %q", b)
 	}
+	// Other orphans of the crash may still be garbage: the marker stays
+	// until GC has re-hashed what survived its sweep.
+	if _, err := os.Lstat(filepath.Join(s.Dir(), dirtyName)); err != nil {
+		t.Fatal("the commit removed the marker of a crashed snapshot")
+	}
+	if _, err := s.GC(GCOptions{Keep: Keep{Last: 5}, Wait: time.Second}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Lstat(filepath.Join(s.Dir(), dirtyName)); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatal("dirty survived the commit")
+		t.Fatal("GC left the marker")
 	}
 }
 

@@ -89,13 +89,13 @@ func checkTreeBackup(app *config.App, st state.State, now time.Time) checkResult
 	case "failed", "skipped":
 		warns = append(warns, fmt.Sprintf("the last snapshot attempt (%s, %s) %s: %s", snap.Trigger, snap.Time.Local().Format("2006-01-02 15:04"), snap.Result, snap.Error))
 	}
+	// Blocked survives busy runs, which keep the id: a store that is busy
+	// every time GC tries must not hide a block.
 	switch {
-	case gc.Result == treebackup.GCBlocked:
-		warns = append(warns, fmt.Sprintf("GC is blocked by %s: nothing is deleted until it is fixed (`lever tree verify`, `lever tree delete`)", gc.Blocked))
-	case !gc.Time.IsZero() && now.Sub(gc.Time) > 7*24*time.Hour:
-		warns = append(warns, "GC has not run for 7 days")
-	case gc.Result == treebackup.GCSkippedBusy && valid > 0:
-		warns = append(warns, "the last GC found the store busy")
+	case gc.Blocked != "":
+		warns = append(warns, fmt.Sprintf("GC is blocked by %s: nothing is deleted until it is fixed (`lever tree verify`, `lever tree delete`)", treebackup.Q([]byte(gc.Blocked))))
+	case !gc.Time.IsZero() && (gc.LastOK.IsZero() || now.Sub(gc.LastOK) > 7*24*time.Hour):
+		warns = append(warns, "GC has not finished for 7 days")
 	}
 	if len(strays) > 0 {
 		warns = append(warns, fmt.Sprintf("stray files in snapshots/: %s", strings.Join(quoteAll(strays), ", ")))
@@ -113,7 +113,10 @@ func checkTreeBackup(app *config.App, st state.State, now time.Time) checkResult
 		detail = fmt.Sprintf("last snapshot %s ago (%s, %s, %s) · %s", ago(now.Sub(newest.Created)), newest.Trigger, newest.Quiescent, state, detail)
 	}
 	if !gc.Time.IsZero() {
-		detail += fmt.Sprintf(" · %s · GC %s ago", humanBytes(gc.StoreBytes), ago(now.Sub(gc.Time)))
+		detail += fmt.Sprintf(" · %s", humanBytes(gc.StoreBytes))
+		if !gc.LastOK.IsZero() {
+			detail += fmt.Sprintf(" · GC %s ago", ago(now.Sub(gc.LastOK)))
+		}
 	}
 	if len(warns) > 0 {
 		return checkResult{name: treeBackupRow, ok: true, detail: detail + "; " + strings.Join(warns, "; "),

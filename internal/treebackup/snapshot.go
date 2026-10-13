@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/stevegeek/lever/internal/fsutil"
@@ -34,7 +36,6 @@ func (p Placement) CheckPlacement() error {
 		{p.Store, p.Tree, "the tree backup store is inside the tree"},
 		{p.StateDir, p.Tree, "the state directory is inside the tree"},
 		{filepath.Dir(p.StateDir), p.Tree, "the state directory's parent is inside the tree"},
-		{p.Tree, p.Store, "the tree is inside the tree backup store"},
 	} {
 		in, err := insideByIdentity(c.inner, c.outer)
 		if err != nil {
@@ -44,7 +45,39 @@ func (p Placement) CheckPlacement() error {
 			return fmt.Errorf("%w: %s (%s, %s)", ErrUnsafe, c.what, c.inner, c.outer)
 		}
 	}
+	// The tree itself may be unsearchable (an agent can chmod its root), so
+	// "the tree inside the store" is asked of the tree's parent, which the
+	// operator owns, plus the tree's own identity, which a stat of the tree
+	// gets without any permission on it.
+	in, err := treeInsideStore(p.Tree, p.Store)
+	if err != nil {
+		return fmt.Errorf("%w: cannot prove the tree %s is outside the store %s: %v", ErrUnsafe, p.Tree, p.Store, err)
+	}
+	if in {
+		return fmt.Errorf("%w: the tree is inside the tree backup store (%s, %s)", ErrUnsafe, p.Tree, p.Store)
+	}
 	return nil
+}
+
+func treeInsideStore(tree, store string) (bool, error) {
+	real, err := filepath.EvalSymlinks(tree)
+	if err != nil {
+		return false, err
+	}
+	td, ti, err := statIdentity(real)
+	if err != nil {
+		return false, err
+	}
+	sd, si, err := statIdentity(store)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, err
+	case td == sd && ti == si:
+		return true, nil
+	}
+	return insideByIdentity(filepath.Dir(real), store)
 }
 
 // SnapshotOptions configure one snapshot.
@@ -86,35 +119,6 @@ func Snapshot(ctx context.Context, o SnapshotOptions) (*SnapshotResult, error) {
 		now = time.Now
 	}
 	start := now().UTC()
-	res, err := snapshot(ctx, o, start, now)
-	if s, serr := OpenStore(o.Store, false); serr == nil {
-		st := SnapshotStatus{Time: start, Trigger: o.Trigger}
-		prev, _ := s.ReadSnapshotStatus()
-		st.NewestID = prev.NewestID
-		switch {
-		case err == nil:
-			st.ID = res.Header.ID
-			st.NewestID = res.Header.ID
-			st.Result = "complete"
-			if !res.Header.Complete {
-				st.Result = "incomplete"
-			}
-		case errors.Is(err, ErrBusy):
-			st.Result = "skipped"
-			st.Error = err.Error()
-		default:
-			st.Result = "failed"
-			st.Error = err.Error()
-		}
-		if werr := s.WriteSnapshotStatus(st); werr != nil && res != nil {
-			res.Warnings = append(res.Warnings, "writing the snapshot status: "+werr.Error())
-		}
-		s.Close()
-	}
-	return res, err
-}
-
-func snapshot(ctx context.Context, o SnapshotOptions, start time.Time, now func() time.Time) (*SnapshotResult, error) {
 	if err := o.CheckPlacement(); err != nil {
 		return nil, err
 	}
@@ -126,6 +130,43 @@ func snapshot(ctx context.Context, o SnapshotOptions, start time.Time, now func(
 		return nil, err
 	}
 	defer s.Close()
+	res, err := snapshot(ctx, s, o, start, now)
+	if errors.Is(err, ErrBusy) {
+		// Written without the snapshot lock, which the other snapshot holds:
+		// its own status, written under the lock, may replace this one.
+		writeStatus(s, o, start, nil, err)
+	}
+	return res, err
+}
+
+// writeStatus records the attempt in status-snapshot.json. A failure to
+// write it is a warning on a committed snapshot and is otherwise dropped:
+// the snapshot's own error says more.
+func writeStatus(s *Store, o SnapshotOptions, start time.Time, res *SnapshotResult, err error) {
+	st := SnapshotStatus{Time: start, Trigger: o.Trigger}
+	prev, _ := s.ReadSnapshotStatus()
+	st.NewestID = prev.NewestID
+	switch {
+	case err == nil:
+		st.ID = res.Header.ID
+		st.NewestID = res.Header.ID
+		st.Result = "complete"
+		if !res.Header.Complete {
+			st.Result = "incomplete"
+		}
+	case errors.Is(err, ErrBusy):
+		st.Result = "skipped"
+		st.Error = err.Error()
+	default:
+		st.Result = "failed"
+		st.Error = err.Error()
+	}
+	if werr := s.WriteSnapshotStatus(st); werr != nil && res != nil {
+		res.Warnings = append(res.Warnings, "writing the snapshot status: "+werr.Error())
+	}
+}
+
+func snapshot(ctx context.Context, s *Store, o SnapshotOptions, start time.Time, now func() time.Time) (res *SnapshotResult, err error) {
 	shared, err := s.LockShared(o.LockWait)
 	if err != nil {
 		return nil, err
@@ -140,6 +181,7 @@ func snapshot(ctx context.Context, o SnapshotOptions, start time.Time, now func(
 		return nil, err
 	}
 	defer snap.Release()
+	defer func() { writeStatus(s, o, start, res, err) }()
 
 	quiet := QuiescentNone
 	if o.Quiescent != nil {
@@ -161,8 +203,17 @@ func snapshot(ctx context.Context, o SnapshotOptions, start time.Time, now func(
 	if err != nil {
 		return nil, err
 	}
+	sinkOpts := SinkOptions{MinFree: o.MinFree}
 	wasDirty, err := s.MarkDirty()
-	if err != nil {
+	switch {
+	case err == nil:
+		sinkOpts.Rehash = wasDirty
+	case errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT):
+		// Without the marker no blob may be written: a crash would leave
+		// unsynced orphans nothing knows to re-hash. Every new file is then
+		// skipped(disk), and the manifest still commits from the reserve.
+		sinkOpts.MinFree = math.MaxInt64
+	default:
 		return nil, err
 	}
 	var deadline time.Time
@@ -182,7 +233,7 @@ func snapshot(ctx context.Context, o SnapshotOptions, start time.Time, now func(
 		Start:      start,
 		Deadline:   deadline,
 		Interrupt:  o.Interrupt,
-		Sink:       s.Sink(SinkOptions{MinFree: o.MinFree, Rehash: wasDirty}),
+		Sink:       s.Sink(sinkOpts),
 	})
 	if err != nil {
 		return nil, err

@@ -47,6 +47,10 @@ type Store struct {
 	root *os.Root
 	dirf *os.File
 	key  string
+	// crashed: MarkDirty found the marker of a snapshot that never
+	// committed. Its unsynced orphans can be garbage of the right size, so
+	// the marker stays until a GC has re-hashed every surviving blob.
+	crashed bool
 }
 
 // OpenStore opens the store at dir, which must be a real directory, mode
@@ -234,11 +238,13 @@ func (s *Store) MarkDirty() (wasDirty bool, err error) {
 		if !fi.Mode().IsRegular() {
 			return true, fmt.Errorf("tree backups: %s is not a regular file", dirtyName)
 		}
+		s.crashed = true
 		return true, nil
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return false, fmt.Errorf("tree backups: %w", err)
 	}
+	s.crashed = false
 	// The first snapshot has no reserve from an earlier commit. Failing to
 	// make one here only weakens the full-disk case, so it is not an error.
 	if _, err := s.root.Lstat(reserveName); errors.Is(err, fs.ErrNotExist) {
@@ -261,9 +267,10 @@ func (s *Store) MarkDirty() (wasDirty bool, err error) {
 	return false, nil
 }
 
-// NextSeq assigns the next seq and records it as the high-water mark, so
-// it is never handed out again, even after the snapshot that took it is
-// deleted. The caller holds snapshot.lock.
+// NextSeq returns the seq the next snapshot takes: one above both the
+// high-water mark and every manifest. It writes nothing, so a full disk
+// cannot stop a snapshot here; RecordSeq stores the mark once the manifest
+// is committed. The caller holds snapshot.lock.
 func (s *Store) NextSeq() (uint64, error) {
 	var high uint64
 	b, err := s.readSmall(seqName, 32)
@@ -286,11 +293,14 @@ func (s *Store) NextSeq() (uint64, error) {
 			high = in.Header.Seq
 		}
 	}
-	next := high + 1
-	if err := s.replaceFile(seqName, []byte(strconv.FormatUint(next, 10)+"\n")); err != nil {
-		return 0, err
-	}
-	return next, nil
+	return high + 1, nil
+}
+
+// RecordSeq stores seq as the high-water mark, so it is never handed out
+// again, even after the snapshot that took it is deleted. Until it is
+// written, the committed manifest itself holds the mark.
+func (s *Store) RecordSeq(seq uint64) error {
+	return s.replaceFile(seqName, []byte(strconv.FormatUint(seq, 10)+"\n"))
 }
 
 func manifestName(id string) string { return snapshotsDir + "/" + id + manifestExt }
@@ -364,8 +374,13 @@ func (s *Store) CommitManifest(h *Header, entries []Entry) (warnings []string, e
 	if err := s.syncSubdir(snapshotsDir); err != nil {
 		warnings = append(warnings, fmt.Sprintf("the snapshot may not survive a power loss: %v", err))
 	}
-	if err := s.root.Remove(dirtyName); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		warnings = append(warnings, fmt.Sprintf("could not remove the dirty marker: %v", err))
+	if !s.crashed {
+		if err := s.root.Remove(dirtyName); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			warnings = append(warnings, fmt.Sprintf("could not remove the dirty marker: %v", err))
+		}
+	}
+	if err := s.RecordSeq(h.Seq); err != nil {
+		warnings = append(warnings, fmt.Sprintf("could not record the snapshot sequence number: %v", err))
 	}
 	if err := s.resizeReserve(h.Limits.Manifest, size); err != nil {
 		warnings = append(warnings, fmt.Sprintf("could not keep %s of reserve for the next manifest: %v",

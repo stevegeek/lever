@@ -21,6 +21,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/treebackup"
 )
 
@@ -630,20 +631,21 @@ func newTreeVerifyCmd() *cobra.Command {
 
 func printVerify(w io.Writer, r *treebackup.VerifyReport) bool {
 	fmt.Fprintf(w, "%d manifests, %d blobs checked\n", r.Manifests, r.Blobs)
-	section := func(title string, items []string) {
+	section := func(title string, items []string, render func(string) string) {
 		if len(items) == 0 {
 			return
 		}
 		fmt.Fprintf(w, "%s:\n", title)
 		for _, it := range items {
-			fmt.Fprintf(w, "  %s\n", it)
+			fmt.Fprintf(w, "  %s\n", render(it))
 		}
 	}
-	section("invalid manifests", r.Problems)
-	section("damaged blobs", r.BadBlobs)
-	section("missing blobs", r.MissingBlobs)
-	section("stray files", r.Strays)
-	section("quarantined", r.Quarantined)
+	name := func(s string) string { return treebackup.Q([]byte(s)) }
+	section("invalid manifests", r.Problems, termsafe.Sanitize)
+	section("damaged blobs", r.BadBlobs, name)
+	section("missing blobs", r.MissingBlobs, name)
+	section("stray files", r.Strays, name)
+	section("quarantined", r.Quarantined, name)
 	for _, s := range r.DuplicateSeq {
 		fmt.Fprintf(w, "duplicate seq: %d\n", s)
 	}
@@ -712,13 +714,16 @@ func printGC(w io.Writer, r *treebackup.GCResult) {
 		fmt.Fprintln(w, "tree gc: the store is busy; skipped")
 		return
 	case r.Blocked != "":
-		fmt.Fprintf(w, "tree gc: BLOCKED by %s: nothing was deleted (`lever tree verify` names the problem; `lever tree delete` removes a bad manifest)\n", r.Blocked)
+		fmt.Fprintf(w, "tree gc: BLOCKED by %s: nothing was deleted (`lever tree verify` names the problem; `lever tree delete` removes a bad manifest)\n", treebackup.Q([]byte(r.Blocked)))
 	}
 	for _, id := range r.Deleted {
-		fmt.Fprintf(w, "deleted snapshot %s\n", id)
+		fmt.Fprintf(w, "deleted snapshot %s\n", treebackup.Q([]byte(id)))
 	}
 	for _, n := range r.Strays {
-		fmt.Fprintf(w, "stray file in snapshots/ (ignored): %s\n", n)
+		fmt.Fprintf(w, "stray file in snapshots/ (ignored): %s\n", treebackup.Q([]byte(n)))
+	}
+	for _, sum := range r.Quarantined {
+		fmt.Fprintf(w, "damaged blob moved to blobs/corrupt/: %s\n", treebackup.Q([]byte(sum)))
 	}
 	fmt.Fprintf(w, "tree gc: %d blobs removed; %d blobs, %s kept\n", r.BlobsRemoved, r.BlobCount, humanBytes(r.StoreBytes))
 }
@@ -802,6 +807,9 @@ func newTreeLockCmd() *cobra.Command {
 			defer l.Release()
 			latest, _ := s.Resolve("latest")
 			c := exec.CommandContext(cmd.Context(), bin, after[1:]...)
+			// The program sees the name it was given, not the resolved path: a
+			// multi-call binary (busybox) dispatches on it.
+			c.Args[0] = after[0]
 			c.Env = append(lockEnv(os.Environ(), path), treebackup.EnvStore+"="+s.Dir(), treebackup.EnvLatest+"="+latest)
 			c.Stdin, c.Stdout, c.Stderr = cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr()
 			if err := c.Run(); err != nil {

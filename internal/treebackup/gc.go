@@ -34,6 +34,8 @@ type GCResult struct {
 	StoreBytes   int64
 	BlobCount    int64
 	Busy         bool
+	// Quarantined are blobs moved to blobs/corrupt/ after a crash.
+	Quarantined []string
 }
 
 func (o *GCOptions) now() time.Time {
@@ -108,8 +110,15 @@ func (s *Store) Delete(ids []string, o GCOptions) (*GCResult, error) {
 }
 
 func (s *Store) writeGC(o GCOptions, st GCStatus, keepSizes bool) error {
+	prev, perr := s.ReadGCStatus()
+	if perr == nil {
+		st.LastOK = prev.LastOK
+	}
+	if st.Result == GCOK {
+		st.LastOK = o.now()
+	}
 	if keepSizes {
-		if prev, err := s.ReadGCStatus(); err == nil {
+		if perr == nil {
 			st.StoreBytes, st.BlobCount = prev.StoreBytes, prev.BlobCount
 			// A skipped run proves nothing about the manifest that blocked
 			// the last one, and doctor must keep naming it.
@@ -219,7 +228,46 @@ func (s *Store) collect(res *GCResult, o GCOptions) error {
 	if err != nil {
 		return fmt.Errorf("tree backups: sweep: %w", err)
 	}
+	if err := s.clearCrash(res); err != nil {
+		return err
+	}
 	return s.writeGC(o, GCStatus{Result: GCOK, StoreBytes: res.StoreBytes, BlobCount: res.BlobCount}, false)
+}
+
+// clearCrash runs when a snapshot crashed after writing blobs: it re-hashes
+// every blob that survived the sweep and quarantines the ones whose bytes
+// do not match their name, then removes the marker. The Bloom mark alone
+// cannot do this: a false positive keeps an orphan, and an orphan that was
+// never synced can be garbage of the right size that a later dedup would
+// trust. No snapshot can be writing: GC holds the store lock exclusive.
+func (s *Store) clearCrash(res *GCResult) error {
+	if _, err := s.root.Lstat(dirtyName); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	var bad []string
+	err := s.walkBlobs(func(sum string, size int64) error {
+		got, err := s.hashFile(blobName(sum))
+		if err != nil {
+			return err
+		}
+		if got != sum {
+			bad = append(bad, sum)
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("tree backups: re-hashing after a crash: %w", err)
+	}
+	for _, sum := range bad {
+		if err := s.quarantine(sum); err != nil {
+			return err
+		}
+		res.Quarantined = append(res.Quarantined, sum)
+	}
+	if err := s.root.Remove(dirtyName); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("tree backups: %w", err)
+	}
+	return nil
 }
 
 // markManifest streams one manifest into bf, calling each (when set) for

@@ -32,6 +32,8 @@ type GCStatus struct {
 	Blocked    string    `json:"blocked,omitempty"`
 	StoreBytes int64     `json:"store_bytes"`
 	BlobCount  int64     `json:"blob_count"`
+	// LastOK is the last GC that finished.
+	LastOK time.Time `json:"last_ok,omitzero"`
 }
 
 // GC results.

@@ -79,13 +79,20 @@ func (s *Store) verifyShared() (*VerifyReport, error) {
 	for _, n := range strays {
 		rep.Strays = append(rep.Strays, snapshotsDir+"/"+n)
 	}
+	// Only a fully validated manifest's file count sizes the filter: a
+	// header line alone can claim any count.
 	var refs int64
 	seqs := map[uint64]int{}
-	for _, in := range infos {
-		if in.Header != nil {
-			refs += in.Header.Counts.ByType[TypeFile]
-			seqs[in.Header.Seq]++
+	for i, in := range infos {
+		if in.Header == nil {
+			continue
 		}
+		seqs[in.Header.Seq]++
+		if _, err := ValidateAll(s.Open(in.ID)); err != nil {
+			infos[i].Header, infos[i].Err = nil, err
+			continue
+		}
+		refs += in.Header.Counts.ByType[TypeFile]
 	}
 	for seq, n := range seqs {
 		if n > 1 {

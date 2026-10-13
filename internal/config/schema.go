@@ -338,10 +338,8 @@ type Remote struct {
 	// refused. Off by default: anything that reaches the listener directly
 	// can set that header.
 	TrustForwardedHost bool `yaml:"trust_forwarded_host"`
-	// LoginPort is the host loopback port the local OIDC provider binds. The
-	// hub dials a different guest port (GuestLoginIssuerPort) that a
-	// forwarder carries here, because OrbStack mirrors a guest listener onto
-	// the host at the same number, so one number for both would collide.
+	// LoginPort is parsed so an old lever.yaml still loads, and otherwise
+	// ignored (App.Warnings names it).
 	LoginPort int `yaml:"login_port"`
 	// Landing is what the remote origin opens on: the hub's web UI
 	// (RemoteLandingConsole, the default) or lever's chat page

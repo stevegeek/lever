@@ -30,7 +30,7 @@ func knownBackend(name string) bool {
 // It is a constant, and not the port the host-side provider binds, because
 // OrbStack mirrors a guest listener onto the host at the same number. With
 // one number for both halves the provider could not bind, and a forwarder
-// dialling host 8446 would dial the mirror of itself and hang. So neither
-// host listener (remote.port, remote.login_port) may name it. Nothing dials
+// dialling host 8446 would dial the mirror of itself and hang. So the
+// proxy's host listener (remote.port) may not name it. Nothing dials
 // the mirror, so a second instance whose mirror cannot bind loses nothing.
 const GuestLoginIssuerPort = 8446

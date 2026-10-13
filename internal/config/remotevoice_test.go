@@ -91,7 +91,7 @@ func TestWhisperToolValidation(t *testing.T) {
 		"custom, list":      {func(a *App) { withPort("9100")(a); a.Manager.AllowPorts = []int{9100} }, "jail may reach"},
 		"custom":            {func(a *App) { withPort("9100")(a); a.Manager.AllowPorts = []int{8448} }, ""},
 		"jail":              {withPort("8443"), "jail may reach"},
-		"login":             {withPort("8447"), "jail may reach"},
+		"former login port": {withPort("8447"), ""},
 		"proxy":             {withPort("8445"), "remote proxy"},
 		"proxy, remote off": {func(a *App) { a.Remote = Remote{}; withPort("8445")(a) }, ""},
 		"admin":             {withPort("8444"), "admin"},

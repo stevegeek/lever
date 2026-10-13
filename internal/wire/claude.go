@@ -114,3 +114,33 @@ const (
 	DisableAgentViewEnv     = "CLAUDE_CODE_DISABLE_AGENT_VIEW"
 	DisableAgentViewSetting = "disableAgentView"
 )
+
+// ReadyHookCommand is the command of lever's claude-ready hook: a
+// SessionStart hook with no matcher that lever-agent boot writes into the
+// managed-settings file of every agent at every start. Claude Code runs it
+// once a session has started (a new one, or the one --continue resumed), and
+// it writes ReadyMarkerPath. lever's manager gate waits for that marker after
+// a start (lever#188); the command is also how a re-run of boot finds the
+// hook to replace it, and how the gate tells an image that writes no marker
+// (an older lever-agent) from a claude that has not started yet.
+const ReadyHookCommand = "lever-agent claude-ready"
+
+// ReadyMarkerPath is where the claude-ready hook writes its marker inside
+// the container. /tmp, not the agent home: the home outlives the container,
+// and the marker means nothing outside the container run that wrote it.
+const ReadyMarkerPath = "/tmp/lever-claude-ready"
+
+// ReadyMarkerMax bounds a read of the marker.
+const ReadyMarkerMax = 256
+
+// ReadyMarker is the marker's content for one claude session start: the
+// guest kernel's boot id, the start time of the container's PID 1 (field 22
+// of /proc/1/stat, in clock ticks since boot) and claude's tmux pane id
+// ($TMUX_PANE). The first two name the container run, so a marker a
+// previous run left behind never matches; the pane id ties it to the pane
+// scion runs claude in. The reader builds the same line from what it reads
+// itself and compares the two for equality: the marker carries no data of
+// its own.
+func ReadyMarker(bootID, pid1Start, pane string) string {
+	return "v1 " + bootID + " " + pid1Start + " " + pane
+}

@@ -500,3 +500,14 @@ func TestAfterCompactPrintsHookJSON(t *testing.T) {
 		t.Fatal("no note must be an error")
 	}
 }
+
+// Outside a tmux pane the hook is a no-op that succeeds (Claude Code shows a
+// failing SessionStart hook to the session); with arguments it refuses.
+func TestClaudeReadyOutsideAPaneIsANoOp(t *testing.T) {
+	if err := cmdClaudeReady(nil, ""); err != nil {
+		t.Fatalf("outside a pane: %v", err)
+	}
+	if err := cmdClaudeReady([]string{"x"}, "%0"); err == nil {
+		t.Fatal("arguments were accepted")
+	}
+}

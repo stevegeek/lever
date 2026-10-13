@@ -635,6 +635,9 @@ type gate struct {
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration
+	live        liveRequests
+	// revokeEvery overrides revokePoll (tests).
+	revokeEvery time.Duration
 }
 
 func (g *gate) audit(line AuditLine) {
@@ -693,6 +696,10 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// operatorFor: the header is verified only when AllowedUsers pins it.
 	operator := g.operatorFor(login)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer g.track(operator, cancel)()
+	r = r.WithContext(ctx)
 	line.Decision = DecisionAllow
 	// ModifyResponse/ErrorHandler set Status and audit.
 	state := &ctxState{line: &line, login: operator}

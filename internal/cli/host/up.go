@@ -145,6 +145,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			defer run.finishOnReturn(&err)
 			rep := run.rep
 			printRemoteWarnings(cmd, app)
+			if err := fenceNow(app, stateFor(path)); err != nil {
+				return err
+			}
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
 			}

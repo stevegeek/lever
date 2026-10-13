@@ -3,10 +3,13 @@ package remoteproxy
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 )
 
 // revocation is a LoginCurrent whose answer a test changes while the
@@ -101,5 +104,55 @@ func TestRevokedLoginGetsNoPush(t *testing.T) {
 	}
 	if err := e.p.streamOnce(context.Background(), chatOp); !errors.Is(err, errPushSession) {
 		t.Fatalf("streamOnce for a revoked login: %v", err)
+	}
+}
+
+// An /events stream opened before the revocation ends with it: no new
+// request would reach the check.
+func TestRevocationEndsAnOpenStream(t *testing.T) {
+	hub := newPageHub(t)
+	hub.route = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/events" {
+			return false
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		for {
+			if _, err := io.WriteString(w, "data: {}\n\n"); err != nil {
+				return true
+			}
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return true
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	rev := &revocation{}
+	cfg := chatConfig(t, hub)
+	cfg.LoginCurrent = rev.current
+	h := NewHandler(cfg).(*gate)
+	h.revokeEvery = 20 * time.Millisecond
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	req, _ := http.NewRequest("GET", srv.URL+"/events?sub=x", nil)
+	req.Host = testServeHost
+	req.Header.Set("Tailscale-User-Login", chatOp)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 64)
+	if _, err := resp.Body.Read(buf); err != nil {
+		t.Fatalf("the stream did not open: %v", err)
+	}
+	rev.revoke(chatOp)
+	done := make(chan error, 1)
+	go func() { _, err := io.Copy(io.Discard, resp.Body); done <- err }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the open stream outlived the revocation")
 	}
 }

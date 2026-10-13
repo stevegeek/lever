@@ -459,6 +459,9 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			}
 			defer run.finishOnReturn(&err)
 			printRemoteWarnings(cmd, app)
+			if err := fenceNow(app, stateFor(path)); err != nil {
+				return err
+			}
 			if err := checkContactGate(app, stateFor(path)); err != nil {
 				return err
 			}
@@ -788,8 +791,8 @@ func (w *applyWiring) initHubAuth(ctx context.Context) error {
 }
 
 // readGuestClock reads `date +%s` in the jail. A failed read signs on the
-// host clock: the 30 s backdate and 90 s lifetime absorb small skew, and doctor
-// reports large skew.
+// host clock: the jail is then unreachable for the assertions too, and doctor
+// reports a large skew.
 func readGuestClock(ctx context.Context, jr proc.Runner, log func(string, ...any)) hubauth.Clock {
 	at := time.Now()
 	res, err := jr.Run(ctx, nil, "date", "+%s")

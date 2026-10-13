@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -29,9 +30,11 @@ func remoteGrants(app *config.App) state.RemoteGrants {
 }
 
 // grantDigest covers everything the proxy decides per login from its start-up
-// config. A change in any of it, wider or narrower, refuses the login until
-// the apply's proxy restart: a stale proxy must never keep more than the
-// config now grants, and telling wider from narrower is not worth the risk.
+// config, and every setting all logins share (brokerctl.RemoteGlobalHash: the
+// front, agent_messages, files, voice, push). A change in any of it, wider or
+// narrower, refuses the login until the apply's proxy restart: a stale proxy
+// must never keep more than the config now grants, and telling wider from
+// narrower is not worth the risk.
 func grantDigest(app *config.App, u config.RemoteUser) string {
 	agents, see := slices.Clone(u.Agents), slices.Clone(u.See)
 	slices.Sort(agents)
@@ -46,11 +49,13 @@ func grantDigest(app *config.App, u config.RemoteUser) string {
 		Shares    bool     `json:"shares"`
 		Voice     bool     `json:"voice"`
 		ReadAloud string   `json:"read_aloud"`
+		Global    string   `json:"global"`
 	}{
 		Tier: u.EffectiveTier(), Agents: agents, See: see,
 		Chat:  app.RemoteLandingChat(),
 		Files: app.FilesOn() && u.FilesAllowed(), Uploads: app.FilesUploadsOn(), Shares: app.FilesSharesOn(),
 		Voice: app.VoiceOn() && u.VoiceAllowed(), ReadAloud: string(app.EffectiveReadAloud()),
+		Global: brokerctl.RemoteGlobalHash(app),
 	})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -58,6 +63,9 @@ func grantDigest(app *config.App, u config.RemoteUser) string {
 
 // fenceRemoteLogins is Deps.FenceRemoteLogins: it writes the grants before
 // anything else in the apply, and stops the proxy when remote access is off.
+// `lever apply` and `lever up` also run it before anything that can refuse
+// to go on (the contact gate reads agent-writable skill files), and `up` on
+// every path, also when it applies nothing.
 func fenceRemoteLogins(app *config.App, st state.State, stop func() error) error {
 	if err := st.SaveRemoteGrants(remoteGrants(app)); err != nil {
 		return fmt.Errorf("writing the remote login grants: %w", err)
@@ -66,6 +74,12 @@ func fenceRemoteLogins(app *config.App, st state.State, stop func() error) error
 		return stop()
 	}
 	return nil
+}
+
+// fenceNow is fenceRemoteLogins for a command, with the proxy stopped by its
+// pidfile.
+func fenceNow(app *config.App, st state.State) error {
+	return fenceRemoteLogins(app, st, func() error { return brokerctl.StopRemoteProxy(st) })
 }
 
 var errRemoteGrantChanged = errors.New("this login's remote access changed since the proxy started")

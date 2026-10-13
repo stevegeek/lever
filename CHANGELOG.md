@@ -28,16 +28,16 @@ version bump moves the block under the new version heading.
   it when convenient. Doctor's *agent lever version* row says so.
 - **The Lima e2e checks the read-only guard against real containers (lever#162).**
   `make test-lima-e2e` now runs the guard's guest-side live check against rootless keep-id
-  containers in its guest, mounted as the manager's create and checked as the guard plans them,
-  with nothing pulled: in Lima's guest the container's PID and mount namespaces are owned by its
-  user namespace and the guest's `lsns` output parses; the tree mount and its pins pass with
-  matching devices, mount roots and inode numbers, also after a guest cache drop; a first process
-  in a user and mount namespace made inside the container is refused; and a directory moved in the
-  guest is reported. On a Linux host Lima runs QEMU and mounts the tree over 9p, which reaches a
-  directory by its path: after a rename-based replace of an entry, and after an entry's parent was
-  removed and recreated on the host, the container read the new directories and the entry stayed
-  read-only, so the check rightly reports nothing. The guard itself is unchanged. The step has not
-  yet run under vz/virtiofs (Lima on macOS).
+  containers in its guest, mounted as the manager's create and checked as the guard plans them, with
+  nothing pulled: in Lima's guest the container's PID and mount namespaces are owned by its user
+  namespace, as the guard reads it and as `lsns` run as root shows it; the tree mount and its pins
+  pass with matching devices, mount roots and inode numbers, also after a guest cache drop; a first
+  process in a user and mount namespace made inside the container is refused; and a directory moved
+  in the guest is reported. On a Linux host Lima runs QEMU and mounts the tree over 9p, which
+  reaches a directory by its path: after a rename-based replace of an entry, and after an entry's
+  parent was removed and recreated on the host, the container read the new directories and the entry
+  stayed read-only, so the check rightly reports nothing. The step has not yet run under
+  vz/virtiofs (Lima on macOS).
 - **New Lima jail VMs run Ubuntu 26.04 LTS (lever#203).** The Lima template boots the 26.04 cloud
   image from a dated release directory, pinned by URL and sha256 for each architecture, so Lima
   refuses an image that does not match; before, it named the moving 24.04 `release/` alias with no
@@ -57,6 +57,22 @@ version bump moves the block under the new version heading.
   Doctor's *guest kernel* row now names the guest's Ubuntu release, checks that release's package,
   and notes when an older VM is not on the release new VMs get. The operations guide records two
   26.04 kernels that ran nested KVM guests under load without a fault, in short runs.
+
+### Fixed
+
+- **The read-only guard's namespace check works on Linux 7.0 guests (lever#162).** It read the
+  owners of the manager's namespaces with `lsns` as the run user, and on a 7.0 kernel (the
+  Ubuntu 26.04 guest) `lsns` from util-linux 2.41 exits 2 with "Unsupported ioctl
+  NS_GET_USERNS" on every call: it walks every process in `/proc` whatever `--task` says, and
+  the namespace links of a process the run user may not trace (its own `systemd --user`, which
+  holds `CAP_WAKE_ALARM`) now open as a directory instead of failing with "Permission denied".
+  The guard failed closed: every tool was held back and doctor's *manager read-only paths* row
+  failed for any instance with `read_only` paths. The check now reads the user, mount and PID
+  namespaces of the manager's first process only, with a short program run by the guest's
+  `perl` (part of every Debian and Ubuntu system): the same `NS_GET_USERNS` ioctl, each
+  descriptor proven a namespace of the expected type, and anything it cannot read is an error.
+  The rule is unchanged, and it no longer needs util-linux 2.38 in the guest. Checked on Ubuntu
+  26.04 (kernel 7.0) and 24.04 (kernel 6.8) Lima guests.
 
 ## [0.36.1] - 2026-10-13
 

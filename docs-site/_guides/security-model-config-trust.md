@@ -287,11 +287,14 @@ the guest path and at `/proc/<pid>/root/<target>`, so a protected directory repl
 the new directory instead, still read-only (§5.1.1). That process must also be in the mount and user
 namespaces the container runtime created: a root agent that could ptrace it could otherwise move it
 into namespaces made inside the container and show a staged view. The reference is the owner of its
-PID namespace, which a process can never leave; `lsns` (util-linux 2.38 or later in the guest) reads
-the owners. In Lima's guest, under rootless podman with scion's keep-id mapping, the container's PID
-and mount namespaces are owned by its user namespace, as the check requires; OrbStack's guest has
-not been checked. `make test-lima-e2e` runs the whole check against real keep-id containers in a
-Lima guest on every run: the guest's `lsns` output parses, the tree mounts and their pins pass with
+PID namespace, which a process can never leave; a short program run by the guest's `perl` (part of
+every Debian and Ubuntu system) reads the owners of that one process's namespaces with the
+`NS_GET_USERNS` ioctl, and anything it cannot read fails the check. (`lsns` cannot be used: as the
+run user on a Linux 7.0 guest it fails on every call, because it walks every process.) In Lima's
+guest, under rootless podman with scion's keep-id mapping, the container's PID and mount namespaces
+are owned by its user namespace, as the check requires; OrbStack's guest has not been checked.
+`make test-lima-e2e` runs the whole check against real keep-id containers in a Lima guest on every run:
+the ownership the check reads matches `lsns` run as root, the tree mounts and their pins pass with
 matching devices, mount roots and inode numbers (also after the guest drops its caches), a first
 process moved into a user and mount namespace of its own is refused, a directory moved in the guest
 is reported, and a directory replaced on the host is either reported or followed by its mount (new

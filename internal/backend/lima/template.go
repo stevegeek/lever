@@ -20,10 +20,11 @@ vmType: {{.VMType}}
 mountType: virtiofs
 {{- end}}
 images:
-  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
-    arch: "aarch64"
-  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
-    arch: "x86_64"
+{{- range .Images}}
+  - location: "{{.URL}}"
+    arch: "{{.Arch}}"
+    digest: "sha256:{{.SHA256}}"
+{{- end}}
 disk: {{.Disk}}
 {{- if .CPUs}}
 cpus: {{.CPUs}}
@@ -63,6 +64,34 @@ portForwards:
 
 var tpl = template.Must(template.New("lima").Parse(templateText))
 
+// GuestImage is one architecture's jail guest image: a dated Ubuntu cloud
+// image release, so the URL keeps naming the bytes the digest pins (the
+// "release/" alias moves with every refresh and would then fail Lima's
+// digest check). Lima verifies the download against SHA256 before it boots
+// the VM and refuses a mismatch.
+type GuestImage struct {
+	Arch, URL, SHA256 string
+}
+
+// GuestRelease is the Ubuntu release of the jail guest image.
+const GuestRelease = "26.04"
+
+// GuestImages are the pinned jail guest images, one per Lima arch. The
+// digests are the SHA256SUMS of that release directory. Moving to a newer
+// serial changes only new VMs: Lima reads the image at create time.
+var GuestImages = []GuestImage{
+	{
+		Arch:   "aarch64",
+		URL:    "https://cloud-images.ubuntu.com/releases/resolute/release-20260927/ubuntu-26.04-server-cloudimg-arm64.img",
+		SHA256: "63a93bd5a8d76e33b15ceb5daa3657bd79be804748051ab178e643b0f5da22e7",
+	},
+	{
+		Arch:   "x86_64",
+		URL:    "https://cloud-images.ubuntu.com/releases/resolute/release-20260927/ubuntu-26.04-server-cloudimg-amd64.img",
+		SHA256: "8800651811af9a85465ad1d552add729947bb16488dddb4a9b5305a3d97332b2",
+	},
+}
+
 // defaultDisk caps the Lima guest disk. Lima's own omitted-disk default is
 // 100GiB (grow-only qcow2 on the host) — a silent host-wedge on smaller
 // hosts. Applied only at VM creation; resizing an existing jail needs
@@ -92,7 +121,8 @@ func RenderTemplate(projectTree string, o TemplateOpts) (string, error) {
 		VMType, ProjectTree, Disk, Memory string
 		CPUs                              int
 		NestedVirt                        bool
-	}{vmType, projectTree, o.Disk, o.Memory, o.CPUs, o.NestedVirt}
+		Images                            []GuestImage
+	}{vmType, projectTree, o.Disk, o.Memory, o.CPUs, o.NestedVirt, GuestImages}
 	var buf bytes.Buffer
 	if err := tpl.Execute(&buf, data); err != nil {
 		return "", err

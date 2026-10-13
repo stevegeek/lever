@@ -95,15 +95,16 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// existing guest — the guard still passes and apt still never runs. They
 	// are named so a future base image cannot drop one and break a lever
 	// feature silently. passt (pasta) is only a Recommends of Ubuntu's podman,
-	// and agents need it to reach the hub (lever#35); Ubuntu 24.04 guests
-	// normally have it already, so the guard still passes there.
+	// and agents need it to reach the hub (lever#35); apt installs
+	// Recommends by default, so a guest lever already provisioned has it
+	// and the guard still passes there.
 	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns passt curl netcat-openbsd iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns passt curl netcat-openbsd iptables podman; }`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
-	// Ubuntu >= 23.10 (the Lima jail guest is 24.04) ships
-	// kernel.apparmor_restrict_unprivileged_userns=1, which blocks the rootless
-	// runtimes' rootlesskit/pasta from creating the unprivileged user namespace
-	// they require — without this rootless podman fails with
+	// Ubuntu >= 23.10 (the Lima jail guest is 26.04, or 24.04 on an older
+	// VM) ships kernel.apparmor_restrict_unprivileged_userns=1, which blocks
+	// the rootless runtimes' rootlesskit/pasta from creating the
+	// unprivileged user namespace they require — without this rootless podman fails with
 	// "fork/exec /proc/self/exe: permission denied". The jail is a dedicated VM
 	// whose OWN kernel is the containment boundary (backend Guarantee 0:
 	// separate-kernel), and its sole purpose is to run the agent's untrusted

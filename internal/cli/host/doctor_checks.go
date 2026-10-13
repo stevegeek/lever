@@ -2207,7 +2207,7 @@ func brokerStartTime(pidPath string) (time.Time, bool) {
 // scanBrokerLogCertExpiry returns the timestamp of the most recent expired- /
 // bad-certificate TLS handshake error in the tail of the broker log at path.
 // Two line shapes are read: lever's daemon log line ("time=<RFC3339, UTC>
-// level=… msg=…", since lever#197) and the Go-stdlog prefix a broker before
+// level=… msg=…", from 0.36.0) and the Go-stdlog prefix a broker before
 // it wrote ("2006/01/02 15:04:05 …", local time), which an older file still
 // holds. Lines without the fingerprint or a parseable timestamp are ignored.
 func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {

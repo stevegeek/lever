@@ -100,7 +100,8 @@ fail=0
 # steps as plain timestamped lines (LEVER_PROGRESS=plain) and records them in
 # the instance's .lever-state/logs/.
 export LEVER_PROGRESS="${LEVER_PROGRESS:-plain}"
-ts()   { date +%H:%M:%S; }
+# UTC, like lever's log lines, so a line here and one in a log tail compare.
+ts()   { date -u +%H:%M:%SZ; }
 phase_name=""; phase_start=$SECONDS; phase_times=""
 end_phase() {
   [ -n "$phase_name" ] || return 0
@@ -114,8 +115,9 @@ ok()   { printf '%s   PASS: %s\n' "$(ts)" "$*"; }
 bad()  { printf '%s   FAIL: %s\n' "$(ts)" "$*"; fail=1; }
 
 # mask_secrets hides anything shaped like a credential, on top of lever's own
-# masking in these logs: API keys, GitHub tokens, bearer tokens, PEM private
-# keys, and the value of any secret/token/password/key field. perl, because
+# masking in these logs: every shape lever's redaction masks (a Go test,
+# tools/test, holds the two together), plus PEM private keys, URL user
+# info and the value of any secret/token/password/key field. perl, because
 # BSD sed has no case-insensitive substitution; without perl nothing is
 # printed rather than something unmasked.
 mask_secrets() {
@@ -124,7 +126,9 @@ mask_secrets() {
     return 0
   fi
   perl -pe '
+    s/(^|\s)(-e|--env)([ =])([A-Za-z_][A-Za-z0-9_]*=)\S*/$1$2$3$4***/g;
     s/sk-ant-[A-Za-z0-9_-]+/sk-ant-***/g;
+    s/\bscion_pat_[A-Za-z0-9_-]+/scion_pat_***/g;
     s/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/$1***/g;
     s/(authorization["\x27]?\s*[:=]\s*).*/$1***/gi;
     s/(bearer\s+)[A-Za-z0-9._~+\/=-]+/$1***/gi;
@@ -133,6 +137,7 @@ mask_secrets() {
     $k = 1 if /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
     if ($k) { $k = 0 if /-----END [A-Z ]*PRIVATE KEY-----/; $_ = "[private key masked]\n"; }
     s/((?:secret|token|password|passwd|credential|private[_-]?key|api[_-]?key)[A-Za-z_-]*["\x27]?\s*[:=]\s*["\x27]?)[^"\x27\s,}]+/$1***/gi;
+    s/(--?[a-z0-9-]*(?:secret|token|password)[a-z0-9-]*)(?<!-file)(?<!-path)(?<!-dir)(?<!-env)(?<!-name)\s+[^\s-]\S*/$1 ***/gi;
   '
 }
 
@@ -435,7 +440,28 @@ if run_acceptance; then ok "acceptance PASSED on closed re-apply (idempotent)"; 
 if egress_closed_in_guest; then ok "LEVER_EGRESS still closed after re-apply (egress never reopened)"; else bad "egress chain not closed after re-apply"; fi
 
 # ================================================================================
-# 5. Teardown.
+# 5. Log lines. Every line the broker and its tool wrote, across all three
+#    bring-ups, has lever's one shape (UTC time, level, msg, component), and
+#    the dummy API key appears in none of them.
+# ================================================================================
+say "log lines: one shape, no credential"
+logline_re='^time=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z level=(DEBUG|INFO|WARN|ERROR) msg=.* component=[a-z0-9-]+( |$)'
+st="$INST/.lever-state"
+key="$(cat "$INST/console-api-key")"
+for f in "$st/broker.out.log" "$st/broker.log" "$st"/tool-logs/*.log; do
+  [ -f "$f" ] || { bad "no ${f#$WORK/}"; continue; }
+  odd="$(grep -vE "$logline_re" "$f" | grep -c .)"
+  if [ "$odd" = "0" ]; then
+    ok "$(grep -c . "$f") lines in lever's log shape: ${f#$WORK/}"
+  else
+    bad "$odd lines not in lever's log shape: ${f#$WORK/}"
+    grep -vE "$logline_re" "$f" | grep . | head -n 5 | mask_secrets | sed 's/^/      | /'
+  fi
+  if grep -qF "$key" "$f"; then bad "the API key appears in ${f#$WORK/}"; fi
+done
+
+# ================================================================================
+# 6. Teardown.
 # ================================================================================
 say "teardown"
 pkill -f "lever broker serve.*$INST" 2>/dev/null

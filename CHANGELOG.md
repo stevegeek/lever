@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **The rest of lever logs in the one line shape (lever#197).** `lever-agent`'s unattended verbs
+  now write lever's log lines (UTC time, level, message, `component=lever-agent cmd=<verb>`,
+  masked credentials): `boot` in the container's log, the `gateway` and `renew` sidecars in
+  scion's service logs, `serve-capability` in Claude Code's MCP log. Its one-shot verbs
+  (`request`, `delegate`, `call`, the Claude Code hooks) and `lever-manager` print what they
+  printed before. The broker's lines about one tool (held back, failed to start) are broker log
+  lines in that tool's log instead of bare `lever: …` text, and the broker's and the remote
+  proxy's warnings carry the cause in an `err` field instead of a prefix in the message. The
+  captool SDK gains `NewLogger` for a tool's own lines and masks its decision lines' `detail`
+  whatever logger a tool passes. Audit lines keep their form: `broker.decision`, the tools'
+  decision lines, `remote-audit.jsonl`, `directives.log` and the ledgers. The Lima e2e prints UTC
+  times, masks every credential shape lever masks, and checks that the broker's and the tool's
+  logs hold only lever's line shape. The operations guide describes the shape, the levels, where
+  each component logs, the redaction and the audit lines.
+- **Jail ABI 3.** `lever-agent` and the shared packages in the image changed: rebuild the agent
+  image (`make lever-image`, then any instance image built from it) and recreate the manager on
+  it when convenient. Doctor's *agent lever version* row says so.
+
 ## [0.36.1] - 2026-10-13
 
 ### Added

@@ -112,7 +112,7 @@ func Boot(ctx context.Context, c BootConfig) error {
 		// not stop the agent.
 		if err := bs.Claude.Validate(); err != nil {
 			if c.Log != nil {
-				c.Log("lever-agent boot: bootstrap claude block refused, not delivered: %v", err)
+				c.Log("bootstrap claude block refused, not delivered: %v", err)
 			}
 		} else {
 			claude = bs.Claude
@@ -165,7 +165,7 @@ func Boot(ctx context.Context, c BootConfig) error {
 	}
 	if bsErr != nil && c.ManagedSettingsPath != "" && c.Log != nil {
 		// No envelope means no claude block: say why lever's values go.
-		c.Log("lever-agent boot: no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any (the agent-view switch is still written)", bsErr, c.ManagedSettingsPath)
+		c.Log("no readable bootstrap envelope (%v); removing lever's claude settings from %s, if any (the agent-view switch is still written)", bsErr, c.ManagedSettingsPath)
 	}
 	// The Claude settings are optional: a failed write must not stop the
 	// agent (on rootless podman the pre-start hook runs as the agent user, and
@@ -175,9 +175,9 @@ func Boot(ctx context.Context, c BootConfig) error {
 	// the log names that, not a claude config that was never there.
 	if err := WriteManagedSettings(c.ManagedSettingsPath, claude); err != nil && c.Log != nil {
 		if claude.IsZero() {
-			c.Log("lever-agent boot: agent-view switch not written (%v); background sessions stay possible", err)
+			c.Log("agent-view switch not written (%v); background sessions stay possible", err)
 		} else {
-			c.Log("lever-agent boot: claude settings not delivered, nor the agent-view switch (background sessions stay possible): %v", err)
+			c.Log("claude settings not delivered, nor the agent-view switch (background sessions stay possible): %v", err)
 		}
 	}
 	if c.MCPAdd == nil {

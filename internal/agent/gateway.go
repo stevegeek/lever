@@ -6,7 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -79,7 +79,7 @@ func (s *clientCertSource) GetClientCertificate(_ *tls.CertificateRequestInfo) (
 			if s.cert == nil || now().After(s.cert.Leaf.NotAfter) {
 				return nil, rerr
 			}
-			log.Printf("gateway: re-read agent leaf failed, serving cached: %v", rerr)
+			slog.Warn("re-reading the agent leaf failed; serving the cached one", "err", rerr)
 		}
 	}
 	return s.cert, nil

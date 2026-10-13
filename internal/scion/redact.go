@@ -14,7 +14,7 @@ import "github.com/stevegeek/lever/internal/logging"
 // backstop for text that never went through the client.
 //
 // The rules are lever's one redaction rule set, logging.Redact, which every
-// daemon log line also goes through (lever#197).
+// daemon log line also goes through.
 func RedactSecrets(s string) string {
 	return logging.Redact(s)
 }

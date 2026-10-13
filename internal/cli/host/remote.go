@@ -48,7 +48,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 		Short: "Run the remote-access proxy (foreground)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// A daemon: every line it writes (remote.log when apply spawned
-			// it) takes lever's log shape (lever#197).
+			// it) takes lever's log shape.
 			daemonLogging(cmd, "remote-proxy")
 			path, app, err := loadRemoteApp(args)
 			if err != nil {

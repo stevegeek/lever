@@ -137,7 +137,7 @@ func TestSupervisorLogsGuardRefusalOncePerClass(t *testing.T) {
 	waitFor(t, func() bool { return n.Load() > 5 })
 	s.Stop()
 	b, _ := os.ReadFile(filepath.Join(logs, "ro.log"))
-	if c := strings.Count(string(b), "not starting tool"); c != 1 {
+	if c := strings.Count(string(b), "not starting the tool"); c != 1 {
 		t.Fatalf("logged %d times, want once for one class", c)
 	}
 	if strings.Contains(string(b), "\x1b") {

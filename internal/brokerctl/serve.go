@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -328,7 +329,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	if caPEM, err := os.ReadFile(st.CACert()); err == nil {
 		d.BrokerCAPEM = string(caPEM)
 	} else {
-		daemon.Warnf("broker CA read: %v", err)
+		slog.Warn("could not read the broker CA", "err", err)
 	}
 
 	// Worker dispatch runs host-side with operator identity (jail runner). apply
@@ -498,7 +499,7 @@ func bindListeners(app *config.App, st state.State) (jailLn, adminLn, dirLn, opL
 	if !StateInsideTree(app, st) {
 		ul, lerr := bindSocket(st.OperatorSock())
 		if lerr != nil {
-			daemon.Warnf("operator socket: %v; `lever msg send` is unavailable", lerr)
+			slog.Warn("no operator socket; lever msg send is unavailable", "err", lerr)
 		} else {
 			opLn = ul
 		}

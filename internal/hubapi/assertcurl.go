@@ -43,6 +43,16 @@ const assertCurlBodyScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; `
 	`-H @- -H 'Accept: application/json' ` +
 	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
 
+// assertCurlIfMatchScript is assertCurlBodyScript with an If-Match header
+// from the environment. run accepts only a decimal revision, so the value
+// cannot carry a header break.
+const assertCurlIfMatchScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
+	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
+	`-o - -w '\n%{http_code}' -X "$1" ` +
+	`-H @- -H 'Accept: application/json' -H "If-Match: $LEVER_HUB_IF_MATCH" ` +
+	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
+
 // AssertCurl is a Doer that runs one request inside the jail with curl,
 // authenticated by a fresh lever assertion instead of the controller PAT.
 type AssertCurl struct {
@@ -84,6 +94,7 @@ var assertionRoutes = []assertionRoute{
 	{http.MethodGet, "/api/v1/admin/access-constraints", true},
 	{http.MethodGet, "/api/v1/admin/access-constraints/{id}", false},
 	{http.MethodPost, "/api/v1/admin/access-constraints", false},
+	{http.MethodPut, "/api/v1/admin/access-constraints/{id}", false},
 	{http.MethodDelete, "/api/v1/admin/access-constraints/{id}", false},
 	{http.MethodPost, "/api/v1/admin/access-constraint-previews", false},
 	{http.MethodGet, "/api/v1/auth/tokens", false},
@@ -99,6 +110,7 @@ var assertionRoutes = []assertionRoute{
 	{http.MethodGet, "/api/v1/artifacts", true},
 	{http.MethodPut, "/api/v1/system/identity", false},
 	{http.MethodPut, "/api/v1/system/registry", false},
+	{http.MethodGet, "/api/v1/system/runtime", false},
 	{http.MethodPut, "/api/v1/system/runtime", false},
 }
 
@@ -189,7 +201,28 @@ func (a *AssertCurl) DoBody(ctx context.Context, method, path string, body []byt
 	return a.run(ctx, method, path, body)
 }
 
-func (a *AssertCurl) run(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+// DoBodyIfMatch is DoBody with an If-Match header; it makes AssertCurl an
+// IfMatchDoer. ifMatch must be a decimal revision.
+func (a *AssertCurl) DoBodyIfMatch(ctx context.Context, method, path string, body []byte, ifMatch string) (int, []byte, error) {
+	if !decimalRevision(ifMatch) {
+		return 0, nil, fmt.Errorf("%s %s: If-Match %q is not a decimal revision", method, path, ifMatch)
+	}
+	return a.run(ctx, method, path, body, ifMatch)
+}
+
+func decimalRevision(s string) bool {
+	if s == "" || len(s) > 19 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *AssertCurl) run(ctx context.Context, method, path string, body []byte, ifMatch ...string) (int, []byte, error) {
 	if err := AssertionPathAllowed(method, path); err != nil {
 		return 0, nil, err
 	}
@@ -216,6 +249,13 @@ func (a *AssertCurl) run(ctx context.Context, method, path string, body []byte) 
 	if body != nil {
 		env = map[string]string{"LEVER_HUB_BODY": string(body)}
 		script = assertCurlBodyScript
+	}
+	if len(ifMatch) > 0 {
+		if body == nil {
+			return 0, nil, fmt.Errorf("%s %s: If-Match needs a request body", method, path)
+		}
+		env["LEVER_HUB_IF_MATCH"] = ifMatch[0]
+		script = assertCurlIfMatchScript
 	}
 	return runCurlStdin(ctx, a.Runner, strings.NewReader(assertion+"\n"), env, script, method, path, strings.TrimRight(a.BaseURL, "/")+path)
 }

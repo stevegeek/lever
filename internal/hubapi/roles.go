@@ -71,17 +71,31 @@ type UserRecord = User
 var ErrBindingExists = errors.New("role binding already exists")
 
 func (c *Client) send(ctx context.Context, method, path string, in, out any) error {
+	return c.sendIfMatch(ctx, method, path, "", in, out)
+}
+
+// sendIfMatch is send with an If-Match header when ifMatch is not "".
+func (c *Client) sendIfMatch(ctx context.Context, method, path, ifMatch string, in, out any) error {
 	body, err := json.Marshal(in)
 	if err != nil {
 		return fmt.Errorf("hubapi: encoding %s %s: %w", method, path, err)
 	}
-	status, resp, err := c.doBody(ctx, method, path, body)
+	var status int
+	var resp []byte
+	if ifMatch == "" {
+		status, resp, err = c.doBody(ctx, method, path, body)
+	} else {
+		im, ok := c.T.(IfMatchDoer)
+		if !ok {
+			return fmt.Errorf("hubapi: transport cannot send If-Match (%s %s)", method, path)
+		}
+		status, resp, err = im.DoBodyIfMatch(ctx, method, path, body, ifMatch)
+	}
 	if err != nil {
 		return err
 	}
 	if status < 200 || status > 299 {
-		return &APIError{Status: status,
-			Msg: fmt.Sprintf("%s %s: HTTP %d: %s", method, path, status, snippet(resp))}
+		return envelopeError(status, fmt.Sprintf("%s %s: HTTP %d: %s", method, path, status, snippet(resp)), resp)
 	}
 	if out == nil {
 		return nil

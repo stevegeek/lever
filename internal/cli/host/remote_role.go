@@ -69,8 +69,9 @@ const remoteCeilingPurpose = "Managed by lever: the remote web UI user may not c
 	"Maximum = hub-member minus project.create, plus the lever-remote project role."
 
 // remoteCeilingName names lever's access constraint on one remote web user.
-// scion keeps constraint names unique per scope, so a replacement goes under
-// the second name (remoteCeilingNames) while the first still stands.
+// scion keeps constraint names unique per scope, so a new ceiling goes under
+// the second name (remoteCeilingNames) while a constraint that is not the
+// user's own holds the first.
 func remoteCeilingName(email string) string { return "lever-remote-ceiling:" + email }
 
 func remoteCeilingNames(email string) []string {
@@ -432,11 +433,18 @@ func systemRole(defs []hubapi.RoleDefinition, name string) (hubapi.RoleDefinitio
 // scope because project.create is checked there; a system constraint applies
 // at every scope, so perms must also cover the lever-remote role's permissions.
 //
-// A matching constraint is kept. Otherwise the new one is written first, under
-// whichever of the user's two names is free, and only then are the old ones
-// deleted: constraints only reduce, so for that moment the user holds the
-// intersection, never more than either. A recovery-disabled constraint is
+// A matching constraint is kept. Otherwise one of the user's own is rewritten
+// in place, and only with none is one created, under whichever of the user's
+// two names is free. Every other constraint under those names is then
+// removed. Constraints only reduce, so while two stand the user holds their
+// intersection, never more than perms. A recovery-disabled constraint is
 // scion's offline-recovery state and is not lever's to undo.
+//
+// In place, not delete and create: scion lets an actor delete a constraint
+// only when it holds every permission of the constraint's maximum set, and a
+// set written on an older scion can name a permission nobody now holds (one
+// scion has since reserved). Removing permissions in an update needs no such
+// authority.
 func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID string, perms []string, warn func(string, ...any)) (string, error) {
 	names := remoteCeilingNames(email)
 	var have []hubapi.AccessConstraint
@@ -454,25 +462,43 @@ func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID s
 			have = append(have, c)
 		}
 	}
-	keep := ""
-	var stale []hubapi.AccessConstraint
-	for _, c := range have {
+	for i, c := range have {
 		if c.Status == "recovery_disabled" {
 			return "", fmt.Errorf("access constraint %s (%s) is recovery-disabled; lever will not modify it", c.Name, c.ID)
 		}
-		if keep == "" && c.ScopeType == hubapi.ConstraintScopeSystem && c.Subject.Kind == hubapi.ConstraintSubjectPrincipal &&
-			c.Subject.PrincipalType == hubapi.PrincipalUser && c.Subject.PrincipalID == userID {
-			d, err := hc.AccessConstraint(ctx, c.ID)
-			if err != nil {
-				return "", err
-			}
-			if hubapi.SamePermissions(d.MaximumPermissions, perms) {
-				keep = c.ID
+		d, err := hc.AccessConstraint(ctx, c.ID)
+		if err != nil {
+			return "", err
+		}
+		if d.ID != c.ID || d.Status == "recovery_disabled" {
+			return "", fmt.Errorf("access constraint %s (%s) read back as %q, status %q", c.Name, c.ID, d.ID, d.Status)
+		}
+		have[i] = d
+	}
+	own := func(c hubapi.AccessConstraint) bool {
+		return c.ScopeType == hubapi.ConstraintScopeSystem && c.Subject.Kind == hubapi.ConstraintSubjectPrincipal &&
+			c.Subject.PrincipalType == hubapi.PrincipalUser && c.Subject.PrincipalID == userID && c.Window == nil
+	}
+	keep := ""
+	for _, c := range have {
+		if own(c) && hubapi.SamePermissions(c.MaximumPermissions, perms) {
+			keep = c.ID
+			break
+		}
+	}
+	if keep == "" {
+		for _, c := range have {
+			if !own(c) {
 				continue
 			}
-			c.MaximumPermissions = d.MaximumPermissions
+			warn("remote web ceiling: access constraint %s (%s) has permissions %s; rewriting them to %s",
+				c.Name, c.ID, strings.Join(c.MaximumPermissions, ","), strings.Join(perms, ","))
+			if err := rewriteCeiling(ctx, hc, c, perms); err != nil {
+				return "", err
+			}
+			keep = c.ID
+			break
 		}
-		stale = append(stale, c)
 	}
 	if keep == "" {
 		free := ""
@@ -491,14 +517,95 @@ func ensureRemoteCeiling(ctx context.Context, hc *hubapi.Client, email, userID s
 		}
 		keep = got
 	}
-	for _, c := range stale {
-		warn("remote web ceiling: access constraint %s (%s) does not match (subject %s, permissions %s); replaced",
+	for _, c := range have {
+		if c.ID == keep {
+			continue
+		}
+		warn("remote web ceiling: access constraint %s (%s) does not match (subject %s, permissions %s); removing it",
 			c.Name, c.ID, c.Subject.PrincipalID, strings.Join(c.MaximumPermissions, ","))
-		if err := hc.DeleteAccessConstraint(ctx, c.ID, c.Revision); err != nil {
-			return "", fmt.Errorf("deleting access constraint %s: %w", c.ID, err)
+		if err := removeConstraint(ctx, hc, c, warn); err != nil {
+			return "", err
 		}
 	}
 	return keep, nil
+}
+
+// rewriteCeiling sets the user's own ceiling c to perms in one update, with
+// lever's purpose and no window. An update that adds a permission lever-admin
+// does not hold is refused; the narrowing part is then made on its own, so
+// the failed apply leaves the user with no more than perms allows.
+func rewriteCeiling(ctx context.Context, hc *hubapi.Client, c hubapi.AccessConstraint, perms []string) error {
+	d := c.Draft(perms)
+	d.Purpose, d.AppliesWhen = remoteCeilingPurpose, nil
+	got, err := hc.UpdateAccessConstraint(ctx, c.ID, c.Revision, d)
+	if missing, refused := hubapi.RelaxationRefused(err); refused {
+		narrow := intersect(c.MaximumPermissions, perms)
+		if len(narrow) > 0 && len(narrow) < len(c.MaximumPermissions) {
+			d.MaximumPermissions = narrow
+			if _, nerr := hc.UpdateAccessConstraint(ctx, c.ID, c.Revision, d); nerr != nil {
+				return fmt.Errorf("updating access constraint %s: %w; narrowing it to %s also failed: %w", c.ID, err, strings.Join(narrow, ","), nerr)
+			}
+		}
+		lacks := "a permission the ceiling adds"
+		if len(missing) > 0 {
+			lacks = strings.Join(missing, ",") + ", which the ceiling adds"
+		}
+		return fmt.Errorf("updating access constraint %s: lever-admin may not widen it (it lacks %s), so the ceiling is narrowed "+
+			"but not widened; grant lever-admin that permission or delete the constraint with scion, then re-apply: %w", c.ID, lacks, err)
+	}
+	if err != nil {
+		return fmt.Errorf("updating access constraint %s: %w", c.ID, err)
+	}
+	if got.ID != c.ID || !hubapi.SamePermissions(got.MaximumPermissions, perms) {
+		return fmt.Errorf("access constraint %s after the update: id %q, permissions %s; want %s (the hub did not keep it)",
+			c.Name, got.ID, strings.Join(got.MaximumPermissions, ","), strings.Join(perms, ","))
+	}
+	return nil
+}
+
+// removeConstraint deletes c. scion refuses a delete by an actor lacking a
+// permission of c's maximum set; c is then narrowed by those permissions,
+// which needs no authority, and deleted again. One that still cannot go is
+// left with a warning: it can only take permissions away.
+func removeConstraint(ctx context.Context, hc *hubapi.Client, c hubapi.AccessConstraint, warn func(string, ...any)) error {
+	err := hc.DeleteAccessConstraint(ctx, c.ID, c.Revision)
+	missing, refused := hubapi.RelaxationRefused(err)
+	if !refused {
+		if err != nil {
+			return fmt.Errorf("deleting access constraint %s: %w", c.ID, err)
+		}
+		return nil
+	}
+	rest := slices.DeleteFunc(slices.Clone(c.MaximumPermissions), func(p string) bool { return slices.Contains(missing, p) })
+	if len(missing) > 0 && len(rest) > 0 && len(rest) < len(c.MaximumPermissions) {
+		d := c.Draft(rest)
+		if d.Purpose == "" {
+			d.Purpose = remoteCeilingPurpose
+		}
+		got, uerr := hc.UpdateAccessConstraint(ctx, c.ID, c.Revision, d)
+		if uerr != nil {
+			return fmt.Errorf("narrowing access constraint %s by %s before deleting it: %w", c.ID, strings.Join(missing, ","), uerr)
+		}
+		if err = hc.DeleteAccessConstraint(ctx, got.ID, got.Revision); err == nil {
+			return nil
+		}
+		if missing, refused = hubapi.RelaxationRefused(err); !refused {
+			return fmt.Errorf("deleting access constraint %s: %w", c.ID, err)
+		}
+	}
+	warn("remote web ceiling: access constraint %s (%s) stays: lever-admin may not delete it (it lacks %s). "+
+		"It only narrows what its subject may do", c.Name, c.ID, strings.Join(missing, ","))
+	return nil
+}
+
+func intersect(a, b []string) []string {
+	var out []string
+	for _, p := range a {
+		if slices.Contains(b, p) && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // errCeilingRemoved marks a tier move that left a contact bound to the web

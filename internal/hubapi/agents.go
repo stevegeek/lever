@@ -60,8 +60,12 @@ type wireAgent struct {
 	} `json:"appliedConfig"`
 }
 
-// agentPageLimit matches the hub's default; one page suffices in practice.
-const agentPageLimit = 500
+// agentPageLimit keeps an agent list page well under AgentListReplyCap: each
+// full record carries its task text, which has no size limit on the hub.
+const agentPageLimit = 50
+
+// AgentListReplyCap is the reply cap on one agent list page.
+const AgentListReplyCap = 8 << 20
 
 // agentPageCap bounds the cursor loop. Giving up loudly is required: a caller
 // handed a truncated list would read a missing agent as nothing to check.
@@ -76,12 +80,21 @@ const agentPageCap = 20
 //
 // Requires an agent read scope on the caller's token.
 func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint string) ([]Agent, error) {
+	agents, _, err := c.AgentsLargestPage(ctx, projectNameOrSlug, endpointHint)
+	return agents, err
+}
+
+// AgentsLargestPage is Agents that also reports the size in bytes of the
+// largest list page the hub sent, to compare with AgentListReplyCap.
+func (c *Client) AgentsLargestPage(ctx context.Context, projectNameOrSlug, endpointHint string) ([]Agent, int, error) {
 	id, err := c.ProjectID(ctx, projectNameOrSlug, endpointHint)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
+	listCtx := WithReplyCap(ctx, AgentListReplyCap)
 	var out []Agent
+	largest := 0
 	cursor := ""
 	for page := 0; page < agentPageCap; page++ {
 		path := fmt.Sprintf("/api/v1/agents?limit=%d&projectId=%s", agentPageLimit, url.QueryEscape(id))
@@ -92,18 +105,20 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 		// Require the key: a caller reads "no record" as "nothing to check",
 		// so a hub that renamed the field would silently disarm the check.
 		var raw map[string]json.RawMessage
-		if err := c.get(ctx, path, &raw); err != nil {
-			return nil, err
+		n, err := c.getSized(listCtx, path, &raw)
+		if err != nil {
+			return nil, 0, err
 		}
+		largest = max(largest, n)
 		field, ok := raw["agents"]
 		if !ok {
-			return nil, &APIError{Msg: fmt.Sprintf(
+			return nil, 0, &APIError{Msg: fmt.Sprintf(
 				"agent list response for project %q has no \"agents\" field; the hub API changed shape and lever cannot confirm what authority its agents hold",
 				projectNameOrSlug)}
 		}
 		var records []wireAgent
 		if err := json.Unmarshal(field, &records); err != nil {
-			return nil, &APIError{Msg: fmt.Sprintf("decoding agents: %v", err)}
+			return nil, 0, &APIError{Msg: fmt.Sprintf("decoding agents: %v", err)}
 		}
 		for _, a := range records {
 			rec := Agent{ID: a.ID, Slug: a.Slug, Name: a.Name,
@@ -121,15 +136,15 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 		next := ""
 		if rawCursor, ok := raw["nextCursor"]; ok {
 			if err := json.Unmarshal(rawCursor, &next); err != nil {
-				return nil, &APIError{Msg: fmt.Sprintf("decoding nextCursor: %v", err)}
+				return nil, 0, &APIError{Msg: fmt.Sprintf("decoding nextCursor: %v", err)}
 			}
 		}
 		if next == "" {
-			return out, nil
+			return out, largest, nil
 		}
 		cursor = next
 	}
-	return nil, &APIError{Msg: fmt.Sprintf(
+	return nil, 0, &APIError{Msg: fmt.Sprintf(
 		"hub still had more agents for project %q after %d pages; refusing to act on a truncated list",
 		projectNameOrSlug, agentPageCap)}
 }

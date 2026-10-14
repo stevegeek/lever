@@ -18,11 +18,16 @@ type AgentCapabilities struct {
 // ProjectAgentCapabilities lists the project's agents with the caller's
 // capabilities (GET /api/v1/agents?projectId=). A response without the
 // capability fields is an error: an empty set would read as "no authority".
+//
+// The compact view drops each record's applied config (its task text) and
+// keeps both capability fields and the cursor. A hub that ignores view sends
+// the full records, which decode the same.
 func (c *Client) ProjectAgentCapabilities(ctx context.Context, projectID string) (AgentCapabilities, error) {
+	ctx = WithReplyCap(ctx, AgentListReplyCap)
 	out := AgentCapabilities{Agents: map[string][]string{}}
 	cursor := ""
 	for page := 0; page < agentPageCap; page++ {
-		path := fmt.Sprintf("/api/v1/agents?limit=%d&projectId=%s", agentPageLimit, url.QueryEscape(projectID))
+		path := fmt.Sprintf("/api/v1/agents?limit=%d&projectId=%s&view=compact", agentPageLimit, url.QueryEscape(projectID))
 		if cursor != "" {
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}

@@ -1054,6 +1054,33 @@ func TestCheckLeverVersionFromTar(t *testing.T) {
 func rolesYes(context.Context) (bool, error) { return true, nil }
 func rolesNo(context.Context) (bool, error)  { return false, nil }
 
+func TestCheckAgentListSize(t *testing.T) {
+	sized := func(n int, err error) agentListSizer {
+		return func(context.Context, string) (int, error) { return n, err }
+	}
+	ctx := context.Background()
+	if r := checkAgentListSize(ctx, "lever", sized(200<<10, nil)); !r.ok || r.fix != "" || !strings.Contains(r.detail, "200 KiB of the 8 MiB") {
+		t.Errorf("a small list passes: %+v", r)
+	}
+	if r := checkAgentListSize(ctx, "lever", sized(hubapi.AgentListReplyCap/2, nil)); r.fix != "" {
+		t.Errorf("exactly half the cap does not warn: %+v", r)
+	}
+	if r := checkAgentListSize(ctx, "lever", sized(hubapi.AgentListReplyCap/2+1, nil)); !r.ok || r.fix == "" {
+		t.Errorf("past half the cap warns without failing: %+v", r)
+	}
+	tooLarge := &hubapi.APIError{TooLarge: true, Msg: "GET /api/v1/agents: too large"}
+	if r := checkAgentListSize(ctx, "lever", sized(0, tooLarge)); r.ok || r.fix == "" {
+		t.Errorf("a page over the cap fails: %+v", r)
+	}
+	lookup := fmt.Errorf("looking up project lever: %v", &hubapi.APIError{TooLarge: true, Msg: "GET /api/v1/projects: too large"})
+	if r := checkAgentListSize(ctx, "lever", sized(0, lookup)); !r.ok {
+		t.Errorf("a project list over its cap is not blamed on the agent list: %+v", r)
+	}
+	if r := checkAgentListSize(ctx, "lever", sized(0, errors.New("down"))); !r.ok || !strings.Contains(r.detail, "not checked") {
+		t.Errorf("an unreachable hub is not checked: %+v", r)
+	}
+}
+
 func TestCheckAgentRolesAllStored(t *testing.T) {
 	list := func(context.Context, string) ([]hubapi.Agent, error) {
 		return []hubapi.Agent{{Slug: "assistant", Role: "baseline"}}, nil

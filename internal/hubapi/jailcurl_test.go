@@ -3,6 +3,7 @@ package hubapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -15,10 +16,13 @@ type scriptedRunner struct {
 	res  proc.Result
 	err  error
 	call proc.Call
+	// limit is the output limit the call's context carried (0 for none).
+	limit int
 }
 
-func (s *scriptedRunner) RunIn(_ context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+func (s *scriptedRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
 	s.call = proc.Call{Name: name, Args: args, Env: env, Dir: dir}
+	s.limit, _ = proc.OutputLimit(ctx)
 	return s.res, s.err
 }
 
@@ -52,9 +56,9 @@ func TestJailCurlRunsInTheJailAndPassesTheTokenAsEnv(t *testing.T) {
 	if r.call.Name != "sh" {
 		t.Fatalf("command = %q, want sh (the request must run inside the jail)", r.call.Name)
 	}
-	// argv is: -c <script> _ <METHOD> <URL>
-	if len(r.call.Args) != 5 || r.call.Args[0] != "-c" {
-		t.Fatalf("argv = %v, want [-c script _ METHOD URL]", r.call.Args)
+	// argv is: -c <script> _ <METHOD> <URL> <CAP>
+	if len(r.call.Args) != 6 || r.call.Args[0] != "-c" {
+		t.Fatalf("argv = %v, want [-c script _ METHOD URL CAP]", r.call.Args)
 	}
 	if r.call.Args[3] != "GET" || r.call.Args[4] != "http://127.0.0.1:8080/api/v1/projects" {
 		t.Errorf("method/url = %q %q", r.call.Args[3], r.call.Args[4])
@@ -135,22 +139,91 @@ func TestJailCurlRejectsOutputWithoutAStatusLine(t *testing.T) {
 func TestJailCurlRejectsAnOversizedBody(t *testing.T) {
 	// Truncating would surface as a JSON decode error that blames the wrong
 	// cause.
-	r := &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", maxBody+1) + "\n200"}}
+	r := &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", DefaultReplyCap+1) + "\n200"}}
 	_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
-	if err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("want an explicit too-large error, got %v", err)
+	assertTooLarge(t, err, "GET /x", "1 MiB")
+}
+
+// assertTooLarge checks err is the reply-cap APIError naming the call and the
+// cap.
+func assertTooLarge(t *testing.T, err error, call, limit string) {
+	t.Helper()
+	var ae *APIError
+	if !errors.As(err, &ae) || !ae.TooLarge {
+		t.Fatalf("want a TooLarge APIError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), call) || !strings.Contains(err.Error(), limit) {
+		t.Errorf("error must name the call %q and the cap %q: %v", call, limit, err)
+	}
+}
+
+func TestJailCurlDefaultCapBoundary(t *testing.T) {
+	r := &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", DefaultReplyCap) + "\n200"}}
+	_, body, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
+	if err != nil || len(body) != DefaultReplyCap {
+		t.Fatalf("a body of exactly the cap must pass: len=%d err=%v", len(body), err)
+	}
+	if r.call.Args[5] != "1048576" {
+		t.Errorf("curl's --max-filesize argument = %q, want the default cap", r.call.Args[5])
+	}
+	if r.limit != DefaultReplyCap+statusTrailerRoom {
+		t.Errorf("output limit = %d, want the cap plus room for the status line", r.limit)
+	}
+}
+
+func TestJailCurlPerCallCap(t *testing.T) {
+	ctx := WithReplyCap(context.Background(), 8<<20)
+	r := &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", 2<<20) + "\n200"}}
+	if _, _, err := jailCurl(r, "t").Do(ctx, "GET", "/big"); err != nil {
+		t.Fatalf("a 2 MiB body under an 8 MiB call cap must pass: %v", err)
+	}
+	if r.call.Args[5] != "8388608" || r.limit != 8<<20+statusTrailerRoom {
+		t.Errorf("cap arg=%q output limit=%d, want the call's cap", r.call.Args[5], r.limit)
+	}
+	r = &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", 8<<20+1) + "\n200"}}
+	_, _, err := jailCurl(r, "t").Do(ctx, "GET", "/big")
+	assertTooLarge(t, err, "GET /big", "8 MiB")
+	// The cap belongs to the call, not the transport.
+	r = &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", 2<<20) + "\n200"}}
+	_, _, err = jailCurl(r, "t").Do(context.Background(), "GET", "/x")
+	assertTooLarge(t, err, "GET /x", "1 MiB")
+}
+
+// A smaller output limit the caller already set stays in force.
+func TestJailCurlKeepsASmallerOuterOutputLimit(t *testing.T) {
+	r := &scriptedRunner{res: proc.Result{Stdout: "{}\n200"}}
+	if _, _, err := jailCurl(r, "t").Do(proc.WithOutputLimit(context.Background(), 4096), "GET", "/x"); err != nil {
+		t.Fatal(err)
+	}
+	if r.limit != 4096 {
+		t.Errorf("output limit = %d, want the caller's 4096", r.limit)
+	}
+}
+
+// A killed or stopped transfer is never a reply, even when what it wrote
+// before the kill ends like one.
+func TestJailCurlTreatsACutTransferAsTooLarge(t *testing.T) {
+	for name, r := range map[string]*scriptedRunner{
+		"output limit": {res: proc.Result{Stdout: "{}\n200", Code: -1}, err: fmt.Errorf("limactl: %w", proc.ErrOutputLimit)},
+		"max-filesize": {res: proc.Result{Stdout: "{}\n200", Code: curlFileSizeExceeded}, err: errors.New("exit status 63")},
+	} {
+		status, body, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
+		if status != 0 || body != nil {
+			t.Errorf("%s: status=%d body=%q, want neither", name, status, body)
+		}
+		assertTooLarge(t, err, "GET /x", "1 MiB")
 	}
 }
 
 func TestJailCurlClassifiesUnparseableOutputAsAnswered(t *testing.T) {
 	// curl exited 0, so something answered: a plain error would make doctor
 	// pass while a wrong service holds the hub port.
-	for _, out := range []string{"body\nnot-a-code", strings.Repeat("x", maxBody+1) + "\n200"} {
+	for _, out := range []string{"body\nnot-a-code", strings.Repeat("x", DefaultReplyCap+1) + "\n200"} {
 		r := &scriptedRunner{res: proc.Result{Stdout: out}}
 		_, _, err := jailCurl(r, "t").Do(context.Background(), "GET", "/x")
 		var apiErr *APIError
 		if !errors.As(err, &apiErr) {
-			t.Errorf("output %q: want an APIError so callers can tell it answered, got %T: %v", out, err, err)
+			t.Errorf("output %q: want an APIError so callers can tell it answered, got %T: %v", snippet([]byte(out)), err, err)
 		}
 	}
 }

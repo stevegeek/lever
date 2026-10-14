@@ -111,6 +111,15 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 	listAgentRoles := func(ctx context.Context, project string) ([]hubapi.Agent, error) {
 		return hc.Agents(ctx, project, scionpkg.DefaultHubEndpoint)
 	}
+	measureAgentList := func(ctx context.Context, project string) (int, error) {
+		// %v, not %w: a project list over its cap must not read as an agent
+		// list over its own.
+		if _, err := hc.ProjectID(ctx, project, scionpkg.DefaultHubEndpoint); err != nil {
+			return 0, fmt.Errorf("looking up project %s: %v", project, err)
+		}
+		_, largest, err := hc.AgentsLargestPage(ctx, project, scionpkg.DefaultHubEndpoint)
+		return largest, err
+	}
 	readCeiling := func(ctx context.Context, project string) (hubapi.RoleCeiling, error) {
 		return hc.AgentRoleCeiling(ctx, project, scionpkg.DefaultHubEndpoint)
 	}
@@ -236,6 +245,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkHubRuntime(ctx, hc) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },
+		func() checkResult { return checkAgentListSize(ctx, project, measureAgentList) },
 		func() checkResult {
 			return checkAgentRoleCeiling(ctx, project, scionpkg.EffectiveAgentRole(app.Scion.AgentRole), rolesSupported, readCeiling)
 		},

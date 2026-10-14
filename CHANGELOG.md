@@ -7,6 +7,34 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-10-14
+
+### Fixed
+
+- **An instance migrated from 0.38 with a remote login no longer fails every apply at the
+  hub-identity step.** The ceiling the older lever wrote on a remote login's hub user names
+  `user.list`, which the older scion's `hub-member` role carried and the pinned scion reserves:
+  no hub user holds it, and scion lets an actor delete a constraint only when it holds every
+  permission the constraint allows, so lever-admin's delete of the old ceiling came back 403
+  (`insufficient_constraint_relaxation_authority`). lever now rewrites the user's own ceiling in
+  place, which only needs authority over the permissions it adds, and needs no second name for
+  it. A constraint it must remove and may not delete (a duplicate, or one on another hub user) is
+  first narrowed by the permissions lever-admin lacks, which needs no authority, then deleted;
+  one that still cannot go stays with a warning, as it only takes permissions away. An instance
+  that kept the old ceiling beside a new one is cleaned up on its next apply. lever-admin gains no
+  permission. The hubauth e2e now caps a remote login with the older lever before the migration.
+- **The hub-identity step's runtime and registry writes survive a slow hub right after its
+  start.** The `PUT /api/v1/system/runtime` as lever-admin could outlast its 20 s limit while the
+  hub reloaded the broker's runtime, and the apply failed although the write had landed. lever
+  now reads the runtime first and skips the write when the hub already has it, reads it back
+  after a write that got no answer, and sends an unanswered runtime or registry write again (both
+  are idempotent), up to three times. A refusal from the hub is still final.
+
+### Upgrade
+
+- **Jail ABI 4, unchanged.** Only host code changed: the agent image and the manager need no
+  rebuild.
+
 ## [0.39.0] - 2026-10-14
 
 ### Added

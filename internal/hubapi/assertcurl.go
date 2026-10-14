@@ -98,6 +98,7 @@ var assertionRoutes = []assertionRoute{
 	{http.MethodGet, "/api/v1/conduit/grant-keys", false},
 	{http.MethodGet, "/api/v1/artifacts", true},
 	{http.MethodPut, "/api/v1/system/identity", false},
+	{http.MethodPut, "/api/v1/system/registry", false},
 }
 
 // idSegment is what a hub-issued ID may look like in a signed path: scion's

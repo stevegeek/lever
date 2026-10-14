@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/hubauth"
@@ -42,6 +43,9 @@ type hiHub struct {
 	projects    []hubapi.Project
 	agents      []hiAgent
 	scopeActs   []string
+	// registry is the hub's agent image registry, which any loopback caller,
+	// an agent included, can set through system/registry.
+	registry string
 
 	// cache models the hub's email-to-user cache: an email keeps resolving to
 	// a row for N more assertions.
@@ -568,6 +572,11 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 			out = append(out, map[string]any{"slug": a.Slug, "_capabilities": map[string]any{"actions": a.Actions}})
 		}
 		return hiJSON(200, map[string]any{"agents": out, "_capabilities": map[string]any{"actions": h.scopeActs}})
+
+	case method == http.MethodPut && p == "/api/v1/system/registry":
+		h.registry = str("image_registry")
+		h.event("registry %s by %s", h.registry, me.ID)
+		return hiJSON(200, map[string]any{"image_registry": h.registry})
 
 	case method == http.MethodPut && p == "/api/v1/system/identity":
 		email := str("email")
@@ -1884,5 +1893,36 @@ func TestHubIdentityFreshRemovesAStaleMarker(t *testing.T) {
 	e.mustRun()
 	if e.jr.removed != 1 {
 		t.Fatalf("a recorded project's marker was removed (%d)", e.jr.removed)
+	}
+}
+
+// An agent can set the hub's image registry through system/registry between
+// applies; every apply sets it back as lever-admin before anything starts an
+// agent, and a hub that refuses the write fails the step before any mint.
+func TestHubIdentityPinsTheImageRegistry(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.hub.registry = "registry.example.org/agent-chosen"
+	e.mustRun()
+	if e.hub.registry != apply.ImageRegistry {
+		t.Fatalf("hub registry = %q after apply, want %q", e.hub.registry, apply.ImageRegistry)
+	}
+	admin := e.hub.byEmail(hubauth.AdminEmail)
+	if admin == nil || !slices.Contains(e.hub.events, "registry "+apply.ImageRegistry+" by "+admin.ID) {
+		t.Fatalf("registry not set as lever-admin; events: %q", e.hub.events)
+	}
+
+	e.hub.registry = "registry.example.org/agent-chosen"
+	e.mustRun()
+	if e.hub.registry != apply.ImageRegistry {
+		t.Fatalf("hub registry = %q after a re-apply, want %q", e.hub.registry, apply.ImageRegistry)
+	}
+
+	f := newHIEnv(t, hiRemoteApp(false))
+	f.hub.down["PUT /api/v1/system/registry"] = http.StatusForbidden
+	if err := f.run(); err == nil || !strings.Contains(err.Error(), "image registry") {
+		t.Fatalf("refused registry write: err = %v", err)
+	}
+	if len(f.hub.tokens) != 0 {
+		t.Fatal("a token was minted after the registry write failed")
 	}
 }

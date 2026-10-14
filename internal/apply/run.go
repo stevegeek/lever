@@ -549,7 +549,7 @@ func (r *run) step(ctx context.Context, s Step) error {
 	case KindInitMachine:
 		return r.d.Scion.InitMachine(ctx)
 	case KindConfigRegistry:
-		return r.d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
+		return r.d.Scion.ConfigSetGlobal(ctx, "image_registry", ImageRegistry)
 	case KindScionServer:
 		return r.scionServer(ctx)
 	case KindHubIdentity:
@@ -797,6 +797,10 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 	}
 	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
+
+// ImageRegistry is the registry prefix scion rewrites every bare agent image
+// name to: the jail's local image store, which load-image fills.
+const ImageRegistry = "scionlocal"
 
 func (r *run) registerProject(ctx context.Context, s Step) error {
 	jp := JailPath(s.Target, r.app.Tree, r.d.JailMount)

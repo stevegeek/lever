@@ -162,6 +162,7 @@ func TestAssertionPathAllowed(t *testing.T) {
 		{"PUT", "/api/v1/admin/experiments"},
 		{"GET", "/api/v1/conduit/grant-keys"},
 		{"GET", "/api/v1/artifacts?mine=1"},
+		{"PUT", "/api/v1/system/registry"},
 	}
 	for _, c := range allowed {
 		if err := AssertionPathAllowed(c.method, c.path); err != nil {
@@ -192,6 +193,9 @@ func TestAssertionPathAllowed(t *testing.T) {
 		{"POST", "/api/v1/admin/users/u-1/invite"},
 		{"GET", "/api/v1/admin/settings"},
 		{"PUT", "/api/v1/system/identity/x"},
+		{"GET", "/api/v1/system/registry"},
+		{"PUT", "/api/v1/system/registry?x=1"},
+		{"PUT", "/api/v1/system/runtime"},
 		{"POST", "/api/v1/auth/tokens/t-1"},
 		{"GET", "/api/v1/users/u.1"},
 		{"GET", "/api/v1/users/"},

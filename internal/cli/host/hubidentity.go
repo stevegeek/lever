@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/hubauth"
@@ -211,6 +212,14 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		restartHub: h.restartHub, log: h.log, warn: h.warn,
 	}); err != nil {
 		return errHubIdentity("%w", err)
+	}
+
+	// The registry route takes any loopback caller, and on a hub with DB-backed
+	// settings an agent's value outranks the config-registry step's
+	// settings.yaml and applies at the next agent start: the next agent would
+	// run an image from the agent's registry.
+	if err := h.admin.SetImageRegistry(ctx, apply.ImageRegistry); err != nil {
+		return errHubIdentity("setting the hub's agent image registry to %s as lever-admin: %w", apply.ImageRegistry, err)
 	}
 
 	if _, err := h.adminHygiene(ctx, admin.ID, owe); err != nil {

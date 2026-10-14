@@ -184,8 +184,10 @@ say "old lever: the operator signs in and a dev-auth window caps it"
 # one reserves: no hub user holds it, so none may delete that ceiling.
 code=$(proxy operator@example.com -o /dev/null -w '%{http_code}' "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "old flow: the operator signs in through the older proxy ($code)" '[ "$code" = 200 ]'
-(cd "$INST" && timeout 1800 "$OLD_LEVER" stop 2>&1 | tail -2)
-(cd "$INST" && timeout 3600 "$OLD_LEVER" up 2>&1 | tail -5)
+(cd "$INST" && timeout 1800 "$OLD_LEVER" stop </dev/null 2>&1 | tail -2); stop_rc=$?
+checkx "old flow: lever stop ($stop_rc)" '[ "$stop_rc" = 0 ]'
+(cd "$INST" && timeout 3600 "$OLD_LEVER" up --no-attach </dev/null 2>&1 | tail -5); up_rc=$?
+checkx "old flow: lever up ($up_rc)" '[ "$up_rc" = 0 ]'
 # rrfield <key> [<email>]: a remote-role.json map entry, or a list joined by commas.
 rrfield() {
 	python3 -c 'import json,sys

@@ -70,8 +70,8 @@ const remoteCeilingPurpose = "Managed by lever: the remote web UI user may not c
 
 // remoteCeilingName names lever's access constraint on one remote web user.
 // scion keeps constraint names unique per scope, so a new ceiling goes under
-// the second name (remoteCeilingNames) while a constraint lever cannot reuse
-// holds the first.
+// the second name (remoteCeilingNames) while a constraint that is not the
+// user's own holds the first.
 func remoteCeilingName(email string) string { return "lever-remote-ceiling:" + email }
 
 func remoteCeilingNames(email string) []string {
@@ -546,7 +546,12 @@ func rewriteCeiling(ctx context.Context, hc *hubapi.Client, c hubapi.AccessConst
 				return fmt.Errorf("updating access constraint %s: %w; narrowing it to %s also failed: %w", c.ID, err, strings.Join(narrow, ","), nerr)
 			}
 		}
-		return fmt.Errorf("updating access constraint %s: lever-admin does not hold %s, which the ceiling adds: %w", c.ID, strings.Join(missing, ","), err)
+		lacks := "a permission the ceiling adds"
+		if len(missing) > 0 {
+			lacks = strings.Join(missing, ",") + ", which the ceiling adds"
+		}
+		return fmt.Errorf("updating access constraint %s: lever-admin may not widen it (it lacks %s), so the ceiling is narrowed "+
+			"but not widened; grant lever-admin that permission or delete the constraint with scion, then re-apply: %w", c.ID, lacks, err)
 	}
 	if err != nil {
 		return fmt.Errorf("updating access constraint %s: %w", c.ID, err)

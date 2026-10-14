@@ -218,6 +218,9 @@ func (c *Client) DeleteAccessConstraint(ctx context.Context, id, revision string
 // narrows and needs no further authority; each permission added needs the
 // actor to hold it (RelaxationRefused).
 func (c *Client) UpdateAccessConstraint(ctx context.Context, id, revision string, d ConstraintDraft) (AccessConstraint, error) {
+	if revision == "" {
+		return AccessConstraint{}, fmt.Errorf("hubapi: updating access constraint %s needs the revision read", id)
+	}
 	tok, err := c.previewToken(ctx, struct {
 		Operation    string          `json:"operation"`
 		Draft        ConstraintDraft `json:"draft"`

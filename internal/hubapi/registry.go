@@ -57,7 +57,9 @@ type systemRuntime struct {
 // hub already has is not written again: each PUT reloads the co-located
 // broker's runtime, which right after a hub start can outlast the request.
 // A PUT that got no answer may still have applied, so the hub is read back
-// before it is sent again.
+// before it is sent again. Both reads trust GET to report the profile PUT
+// writes: true on a hub with DB-backed operational settings (scion's store
+// always provides them), where both use the active profile.
 //
 // The route takes any loopback caller, an agent included. A hub with
 // DB-backed operational settings stores the value in its profiles section,
@@ -143,7 +145,7 @@ func retryUnanswered(ctx context.Context, put func() error, landed func() bool) 
 		}
 		err = put()
 		var ae *APIError
-		if err == nil || errors.As(err, &ae) || errors.Is(err, ErrAssertionPathRefused) || errors.Is(err, errNoTransport) || ctx.Err() != nil {
+		if err == nil || errors.As(err, &ae) || errors.Is(err, ErrAssertionPathRefused) || errors.Is(err, errNoTransport) || errors.Is(err, errCurlMissing) || ctx.Err() != nil {
 			return err
 		}
 		if landed != nil && landed() {

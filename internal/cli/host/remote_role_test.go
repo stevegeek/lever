@@ -628,9 +628,8 @@ func TestRemoteCeilingFromAnOlderScionIsRewritten(t *testing.T) {
 	}
 }
 
-// The state an apply of the earlier release left when it kept the older
-// ceiling beside a new one: a match under the second name and the older
-// scion's under the first. The match is kept; the other is narrowed by what
+// A match under the second name beside the older scion's ceiling under the
+// first, which lever-admin may not delete as it stands. The match is kept; the other is narrowed by what
 // lever-admin lacks, then deleted. A later change of the ceiling rewrites the
 // survivor in place and needs no free name.
 func TestRemoteCeilingBesideAnUndeletableOlderOneIsCleanedUp(t *testing.T) {

@@ -225,6 +225,14 @@ func TestUpdateAccessConstraintPreviewsThenCommitsAtTheRevision(t *testing.T) {
 	}
 }
 
+// An update with no revision is refused before anything is sent.
+func TestUpdateAccessConstraintNeedsARevision(t *testing.T) {
+	f := &fakeDoer{}
+	if _, err := (&Client{T: f}).UpdateAccessConstraint(context.Background(), "ac-1", "", testDraft); err == nil || len(f.calls) != 0 {
+		t.Fatalf("err = %v, calls %v", err, f.calls)
+	}
+}
+
 // A transport that cannot send If-Match fails the update before the PUT.
 func TestUpdateAccessConstraintNeedsIfMatch(t *testing.T) {
 	f := &bodyOnly{fakeDoer{replies: map[string]reply{

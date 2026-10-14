@@ -321,10 +321,23 @@ What still holds: lever does not stop an agent from calling these routes. It can
 are plain loopback HTTP that agents must reach for the rest of the hub API, and an egress rule
 cannot single out one HTTP path. The route group has other writers that run no permission check
 either (the workstation settings, image registry, runtime, init, image pull and build, and
-`fs/mkdir` routes); lever mitigates none of them, and the registry one is the one to watch, since
-it changes where agent images come from. The durable fix is upstream: a permission check on
-scion's `/api/v1/system/*` mutating routes, or running the hub in hosted mode (which removes
-`system/*` entirely).
+`fs/mkdir` routes). The durable fix is upstream: a permission check on scion's `/api/v1/system/*`
+mutating routes, or running the hub in hosted mode (which removes `system/*` entirely).
+
+The image registry route is the one to watch, since it changes where agent images come from.
+scion rewrites a bare image name such as `scionlocal/lever-claude` to the registry it holds, and
+this scion keeps that registry in the hub database, which outranks `settings.yaml` and applies at
+the next agent start without a restart. An agent can therefore point it at a registry it
+controls, and the next agent started, a worker or the manager, would run that registry's image.
+Every `lever apply` sets it back to `scionlocal` as lever-admin before anything starts an agent.
+Between applies it stays open: set `security.require_image_digest`, so every image is pinned by
+digest and a foreign registry can only fail the pull. The runtime route can likewise switch the
+hub's container runtime, which fails agent starts until it is set back by hand.
+
+The project marker `<tree>/.scion` is in the agents' reach too. lever never takes a symlink
+there for the marker and removes one before `scion init`, but scion's broker, starting an agent,
+writes a missing marker through a dangling symlink: an agent can make the jail user create a
+small file of fixed content at a path it chooses. That needs a scion change.
 
 ### 4.4 The hub enforces the role ceiling too
 

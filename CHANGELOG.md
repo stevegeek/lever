@@ -200,6 +200,25 @@ version bump moves the block under the new version heading.
   and artifacts* fails while either is on. The remote proxy refuses conduit, artifacts and writes
   to the experiments admin route for every login, and also an agent's port tunnel and delegations
   and scion's test-identity routes. On an older scion nothing changes.
+- **Every apply sets the hub's agent image registry back (lever#207).** On the new scion the
+  workstation `PUT /api/v1/system/registry` route, which any loopback caller including an agent
+  can call, stores the registry in the hub database, where it outranks `settings.yaml` and applies
+  at the next agent start. An agent could point it at a registry it controls, so the next worker
+  or manager would run that registry's image, and lever's `scion config set` no longer undid it.
+  The hub-identity step now sets it to `scionlocal` as `lever-admin` before anything starts an
+  agent. Between applies it stays open: `security.require_image_digest` turns a foreign
+  registry into a failed pull.
+- **The remote proxy refuses broker writes (lever#207).** A remote web user keeps scion's
+  `broker.create`, so an operator login could register a broker and receive its join token and
+  secret in the browser, and the extra broker blocked lever-admin's link of a new project's
+  broker. Every method but GET and HEAD under `/api/v1/brokers` and `/api/v1/runtime-brokers`
+  is now refused.
+- **A symlink in the tree is never taken for the project marker (lever#73).** The stale-marker
+  removal kept a dangling symlink, the registration check counted any `.scion` as the marker, and
+  a fresh hub kept a marker it could not read, so `scion init` could write the marker through an
+  agent's link to a path the agent chose. Every symlink at the marker path is now removed and
+  never counts as a registration. scion's broker still writes the marker through a dangling link
+  on an agent start when none is there; see the known issues.
 - **A remote sign-in can no longer land on scion's dev user (lever#73).** scion's workstation
   `PUT /api/v1/system/identity` route accepts any authenticated loopback caller with no permission
   check, so any jailed agent can rename scion's dev user, the super-admin on older levers and the
@@ -250,6 +269,11 @@ version bump moves the block under the new version heading.
   then lever's messages carry the label the agent chose (no forgery follows: verification needs
   lever's own record). An agent renaming in a loop makes an apply that must mint a controller token
   fail, never a revocation; `lever stop` ends it.
+- An agent can still change the hub's agent image registry or container runtime between applies
+  through scion's workstation routes; the next apply sets the registry back, not the runtime.
+  scion's broker writes the project marker through a dangling symlink an agent leaves in the tree
+  when it starts an agent, creating a file of fixed content at a path the agent chose as the jail
+  user. Both need a scion change.
 
 ## [0.37.0] - 2026-10-13
 

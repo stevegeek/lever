@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-14
+
 ### Added
 
 - **A release ships scion's web UI prebuilt, so remote access on its pin needs no Go or node

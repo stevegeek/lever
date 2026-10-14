@@ -4,11 +4,14 @@ before:
   hooks:
     - go mod tidy
     # Build scion at the release pin (scionbin.ReleasePin) for linux/amd64 +
-    # arm64 into build/scion-release/ (uploaded below), and write the manifest
-    # pinning their sha256 into internal/provision/scionbin/release/, which
-    # lever embeds. A released lever then downloads the binary for that pin
-    # instead of building it, so the host needs no Go toolchain for scion.
-    - go run ./internal/provision/scionbin/genrelease -version {{ .Version }}
+    # arm64, and its web UI, into build/scion-release/ (uploaded below), and
+    # write the manifest pinning their sha256 into
+    # internal/provision/scionbin/release/, which lever embeds. A released
+    # lever then downloads the binary and the web UI for that pin instead of
+    # building them, so the host needs no Go or node toolchain for scion.
+    # The web UI comes prebuilt from the workflow's webui job (build/web-ui),
+    # so no npm runs where the release token and lever's source are.
+    - go run ./internal/provision/scionbin/genrelease -version {{ .Version }} -web-archive build/web-ui
     # Fail the release if the manifest is missing, names another version or
     # pin, or does not match the assets about to be uploaded.
     - sh -c "LEVER_REQUIRE_SCION_RELEASE={{ .Version }} go test -count=1 -run TestReleaseManifestEmbedded ./internal/provision/scionbin"
@@ -85,6 +88,7 @@ checksum:
   # this file.
   extra_files:
     - glob: ./build/scion-release/scion_*_linux_*.gz
+    - glob: ./build/scion-release/scion-web_*.tar.gz
 
 release:
   # Keep hand-authored release notes: do not let GoReleaser generate a
@@ -93,9 +97,10 @@ release:
   draft: false
   mode: append
   disable: false
-  # Upload the prebuilt scion binaries next to the archives.
+  # Upload the prebuilt scion binaries and web UI next to the archives.
   extra_files:
     - glob: ./build/scion-release/scion_*_linux_*.gz
+    - glob: ./build/scion-release/scion-web_*.tar.gz
 
 changelog:
   disable: true

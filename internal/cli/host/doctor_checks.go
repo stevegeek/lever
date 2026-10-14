@@ -1602,10 +1602,18 @@ func checkGoToolchain(scion config.ScionConfig, prebuilt bool, p doctorProbes) c
 }
 
 // scionPrebuilt reports whether apply downloads the release's prebuilt scion
-// instead of building it. A web UI build still needs the module source, which
-// is fetched with Go. The guest is assumed to run the host's architecture.
+// instead of building it, and its web UI too when the instance serves one (a
+// web UI build needs the module source, which is fetched with Go). The guest
+// is assumed to run the host's architecture.
 func scionPrebuilt(app *config.App) bool {
-	return app.Scion.Version != "" && !app.ScionWebAssets() && scionbin.DownloadsRelease(app.Scion.Version, runtime.GOARCH)
+	return app.Scion.Version != "" && scionbin.DownloadsRelease(app.Scion.Version, runtime.GOARCH) &&
+		(!app.ScionWebAssets() || scionbin.DownloadsWebUI(app.Scion.Version))
+}
+
+// webUIPrebuilt reports whether apply downloads the release's prebuilt scion
+// web UI instead of building it with node.
+func webUIPrebuilt(app *config.App) bool {
+	return app.ScionWebAssets() && app.Scion.Version != "" && scionbin.DownloadsWebUI(app.Scion.Version)
 }
 
 // nodeToolchainProbe validates node and npm for the scion web-asset build. It
@@ -1626,13 +1634,18 @@ func nodeToolchainProbe(r proc.Runner) (string, error) {
 
 // checkNodeToolchain verifies node and npm can build scion's web UI when the
 // instance serves it; otherwise a broken toolchain shows up deep in a failed
-// apply. No UI to build passes.
-func checkNodeToolchain(app *config.App, p doctorProbes) checkResult {
+// apply. No UI to build passes, and so does a missing node when prebuilt
+// (only a failed download builds it).
+func checkNodeToolchain(app *config.App, prebuilt bool, p doctorProbes) checkResult {
 	const name = "node toolchain"
 	if !app.ScionWebAssets() {
 		return checkResult{name, true, "scion web UI build not required", ""}
 	}
 	version, err := p.nodeToolchain()
+	if err != nil && prebuilt {
+		return checkResult{name, true, "not required: lever downloads this release's prebuilt scion web UI for " + app.Scion.Version +
+			" (only a failed download builds it, which needs node and Go)", ""}
+	}
 	if err != nil {
 		fix := ""
 		if errors.Is(err, webassets.ErrNodeToolchain) {

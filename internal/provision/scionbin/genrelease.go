@@ -27,6 +27,11 @@ type GenerateOptions struct {
 	// ManifestDir receives the manifest the lever build embeds (ReleaseDir
 	// of this package).
 	ManifestDir string
+	// WebUI, when set, builds scion's web UI from the downloaded module
+	// source (its root directory) into AssetDir and returns the asset the
+	// manifest pins. internal/provision/webassets provides it: that package
+	// imports this one.
+	WebUI func(ctx context.Context, moduleDir, assetDir string) (*WebAsset, error)
 }
 
 // GenerateRelease builds scion at opts.Pin for every ReleaseArches entry,
@@ -101,6 +106,11 @@ func GenerateRelease(ctx context.Context, r proc.Runner, opts GenerateOptions) e
 			return fmt.Errorf("linux/%s: %w", arch, err)
 		}
 		rel.Assets[arch] = a
+	}
+	if opts.WebUI != nil {
+		if rel.Web, err = opts.WebUI(ctx, dl.Dir, opts.AssetDir); err != nil {
+			return fmt.Errorf("build scion web UI: %w", err)
+		}
 	}
 	if err := rel.validate(); err != nil {
 		return fmt.Errorf("generated manifest: %w", err)

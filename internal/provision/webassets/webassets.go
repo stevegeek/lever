@@ -175,25 +175,34 @@ func Build(ctx context.Context, r proc.Runner, srcWeb string) (dist, digest stri
 	if _, err := os.Stat(filepath.Join(staging, "dist", "client", filepath.FromSlash(layout.WebAssetsSentinel))); err != nil {
 		return "", "", fmt.Errorf("scion web build produced no %s — the build reported success but its output is unusable", layout.WebAssetsSentinel)
 	}
+	if err := publishBuild(staging, buildDir, digest); err != nil {
+		return "", "", err
+	}
+	return dist, digest, nil
+}
+
+// publishBuild marks a finished build in staging complete and moves it to
+// buildDir.
+func publishBuild(staging, buildDir, digest string) error {
 	// Marker before the rename: nothing may observe a half-built cache.
 	if err := os.WriteFile(filepath.Join(staging, BuildMarker), []byte(digest), 0o644); err != nil {
-		return "", "", fmt.Errorf("marking scion web build complete: %w", err)
+		return fmt.Errorf("marking scion web build complete: %w", err)
 	}
 	if err := os.Rename(staging, buildDir); err != nil {
 		// Another build finished first; same digest, same output, so adopt it.
 		if webBuildComplete(buildDir) {
-			return dist, digest, nil
+			return nil
 		}
 		// Otherwise the destination holds something incomplete: clear it and
 		// retry once.
 		if rmErr := os.RemoveAll(buildDir); rmErr != nil {
-			return "", "", fmt.Errorf("clear incomplete web build %s: %w", buildDir, rmErr)
+			return fmt.Errorf("clear incomplete web build %s: %w", buildDir, rmErr)
 		}
 		if err := os.Rename(staging, buildDir); err != nil {
-			return "", "", fmt.Errorf("publish web build to %s: %w", buildDir, err)
+			return fmt.Errorf("publish web build to %s: %w", buildDir, err)
 		}
 	}
-	return dist, digest, nil
+	return nil
 }
 
 // webBuildComplete requires both the completion marker and the asset scion

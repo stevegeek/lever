@@ -6,15 +6,10 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// handleWorkerTicket mints a one-use enrolment ticket for a declared worker
-// and stages it in the guest through the same channel a dispatch uses —
-// the host-side mint the acceptance harness needs to enrol a worker
-// identity without a container. Admin/loopback only. The ticket value never
-// leaves the broker: the response names the staged file's guest path.
-//
-// This replaced the jail listener's /provision route, which handed a ticket
-// for any declared worker to the MANAGER — the identity the channel exists
-// to keep worker tickets away from.
+// handleWorkerTicket stages a worker ticket in the guest, as a dispatch does,
+// for enrolling a worker identity without a container. Admin listener only:
+// it must never be reachable by the manager, whom worker tickets are kept
+// from. The ticket value never leaves the broker; the answer is its path.
 func (b *Broker) handleWorkerTicket(w http.ResponseWriter, r *http.Request) {
 	var req wire.WorkerTicketRequest
 	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.Worker == "" {

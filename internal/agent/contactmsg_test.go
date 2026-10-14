@@ -126,7 +126,7 @@ func TestContactsReturnsTheBrokersAnswer(t *testing.T) {
 	}
 }
 
-// to reaches the broker exactly as given (the broker compares it exactly).
+// to reaches the broker untrimmed: the broker compares it exactly.
 func TestContactMessagePassesToUnchanged(t *testing.T) {
 	var got wire.ContactMessageRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

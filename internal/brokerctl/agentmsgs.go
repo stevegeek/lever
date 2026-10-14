@@ -9,11 +9,10 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// AgentMessages is remote.agent_messages as the broker enforces it: the
-// limits, every contact's hub email and agents, and the ledger directory,
-// which stays "" when the state directory is inside the tree (an agent could
-// write a record there). Only a contact's agents list counts: a see-only
-// agent and an operator login never appear.
+// AgentMessages is remote.agent_messages as the broker enforces it. The
+// ledger directory is "" when the state directory is inside the tree (an
+// agent could write a record there). Only a contact's agents list counts:
+// a see-only agent and an operator login never appear.
 func AgentMessages(app *config.App, st state.State) broker.AgentMessagesConfig {
 	if !app.AgentMessagesOn() {
 		return broker.AgentMessagesConfig{}

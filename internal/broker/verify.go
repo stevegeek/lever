@@ -15,42 +15,32 @@ import (
 
 // Message verification: who wrote a message an agent received.
 //
-// Every message reaches an agent with an envelope whose "from" is either an
-// agent, the system, or a hub user. Every message lever sends wears the same
-// hub user (the controller's), and so can any text anyone types, so neither
-// the envelope nor the text can say who wrote it. Host records can, and the
-// broker answers only from them:
+// Every lever message wears the controller's hub user as sender, and so can
+// any typed text, so neither envelope nor text says who wrote it. The broker
+// answers only from host records:
 //
-//   - a "from" that is one of the remote proxy's sign-ins (WebSenders) is
-//     looked up in the chat ledger only: a web chat post, with its login and
-//     tier;
-//   - a "from" that is the controller's hub user is looked up in the sent
-//     ledger only: a message lever sent, with who it was from (its kind);
-//   - any other "from" has no record to consult.
+//   - a "from" that is a remote proxy sign-in (WebSenders) is looked up in
+//     the chat ledger only;
+//   - the controller's hub user is looked up in the sent ledger only;
+//   - any other "from" has no record.
 //
-// The "from" chooses which record is read and nothing else: the two records
-// never answer for each other, so no envelope can make a web post come back
-// as a lever message or the reverse. The answer is bound to the caller's own
-// identity (its mTLS CN): the caller's own DM for web posts, sends recorded
-// for the caller's CN for lever messages. The agent acts only on the text the
-// answer carries.
+// The "from" only chooses which record is read: the two never answer for each
+// other, so no envelope can make a web post come back as a lever message or
+// the reverse. The answer is bound to the caller's mTLS CN, and the agent acts
+// only on the text the answer carries.
 
-// verifyRateLimit bounds every verify call per CN per minute. The manager
-// verifies every message it receives (each relay, each note, each chat
-// post), so this is sized for a busy fleet, not for directives.
+// verifyRateLimit bounds every verify call per CN per minute; the manager
+// verifies every message it receives.
 const verifyRateLimit = 600
 
 // verifyMissLimit bounds the verify calls per CN per minute that match no
-// record. Injected text can make an agent verify many envelopes that name
-// nothing; those count here only (serveVerify gives their verifyRateLimit
-// call back), so they never spend the budget genuine messages need, since a
-// genuine message is a match.
+// record. Injected text can make an agent verify many empty envelopes; those
+// count here only, so they never spend the budget genuine messages (matches)
+// need.
 const verifyMissLimit = 60
 
-// defaultRetryAfter is the retry hint when the broker cannot say better.
 const defaultRetryAfter = 60
 
-// Reason codes (wire.MessageVerifyResponse.Reason).
 const (
 	reasonNoRecord        = "no_record"
 	reasonExpired         = "expired"
@@ -68,7 +58,6 @@ const (
 	reasonSenderCollision = "sender_collision"
 )
 
-// senderSet is the lowercased set of labels.
 func senderSet(labels []string) map[string]bool {
 	m := make(map[string]bool, len(labels))
 	for _, l := range labels {
@@ -78,11 +67,9 @@ func senderSet(labels []string) map[string]bool {
 }
 
 // controllerSender resolves, once, the envelope sender lever's own sends
-// wear. The hub call runs without the lock, one at a time: callers that
-// arrive meanwhile wait for its answer (or their own context), never behind
-// a lock held across the hub. A failed resolution is not kept, but for
-// controllerRetryAfter every caller gets that error at once rather than
-// another hub timeout each.
+// wear. The hub call runs one at a time without the lock held. A failure is
+// answered from memory for controllerRetryAfter so callers do not each wait
+// out a hub timeout.
 type controllerSender struct {
 	resolve func(ctx context.Context) (string, error)
 	nowFn   func() time.Time
@@ -92,11 +79,16 @@ type controllerSender struct {
 	inflight chan struct{} // closed when the running resolution ends
 	lastErr  error
 	failedAt time.Time
+	// resolvedAt is the start of the last successful resolution or of the
+	// last re-resolution attempt; refresh is rate-limited from it.
+	resolvedAt time.Time
 }
 
-// controllerRetryAfter is how long a failed resolution is answered from
-// memory before the hub is asked again.
 const controllerRetryAfter = 5 * time.Second
+
+// controllerRefreshEvery bounds re-resolutions across all callers: any agent
+// can send an unknown user: label, and each one must not cost a hub call.
+const controllerRefreshEvery = 30 * time.Second
 
 var errNoControllerResolver = errors.New("no controller sender resolver")
 
@@ -107,7 +99,6 @@ func (c *controllerSender) now() time.Time {
 	return time.Now()
 }
 
-// cached is the label when it is resolved already. It never calls the hub.
 func (c *controllerSender) cached() (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -151,6 +142,7 @@ func (c *controllerSender) get(ctx context.Context) (string, error) {
 		}
 		ch := make(chan struct{})
 		c.inflight = ch
+		started := c.now()
 		c.mu.Unlock()
 
 		l, err := c.resolve(ctx)
@@ -161,7 +153,7 @@ func (c *controllerSender) get(ctx context.Context) (string, error) {
 		c.inflight = nil
 		switch {
 		case err == nil:
-			c.label, c.lastErr = strings.ToLower(l), nil
+			c.label, c.lastErr, c.resolvedAt = strings.ToLower(l), nil, started
 		case ctx.Err() == nil:
 			// This caller's own cancellation is not the hub's answer.
 			c.lastErr, c.failedAt = err, c.now()
@@ -175,7 +167,54 @@ func (c *controllerSender) get(ctx context.Context) (string, error) {
 	}
 }
 
-// verifyAnswer is the outcome of one verification, before it is written.
+// refresh re-resolves a known label, at most once per controllerRefreshEvery
+// across callers, and reports the label now held and whether it changed. A
+// failed re-resolution keeps the old label: it is the hub's last answer, and
+// an unknown sender is answered "none" either way.
+func (c *controllerSender) refresh(ctx context.Context) (string, bool) {
+	c.mu.Lock()
+	old := c.label
+	if old == "" || c.resolve == nil {
+		c.mu.Unlock()
+		return old, false
+	}
+	if ch := c.inflight; ch != nil {
+		c.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+		}
+		l, _ := c.cached()
+		return l, l != old
+	}
+	if c.now().Sub(c.resolvedAt) < controllerRefreshEvery {
+		c.mu.Unlock()
+		return old, false
+	}
+	ch := make(chan struct{})
+	c.inflight = ch
+	prev := c.resolvedAt
+	c.resolvedAt = c.now()
+	c.mu.Unlock()
+
+	l, err := c.resolve(ctx)
+	if err == nil && (!strings.HasPrefix(l, "user:") || len(l) <= len("user:")) {
+		err = errors.New("the controller's hub user has no sender label")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inflight = nil
+	close(ch)
+	switch {
+	case err == nil:
+		c.label = strings.ToLower(l)
+	case ctx.Err() != nil:
+		// This caller's own cancellation must not spend the shared slot.
+		c.resolvedAt = prev
+	}
+	return c.label, c.label != old
+}
+
 type verifyAnswer struct {
 	resp   wire.MessageVerifyResponse
 	branch string // "web" | "lever" | "" (routing did not get that far)
@@ -189,10 +228,8 @@ func (b *Broker) verifyNone(branch, reason, note, audit string) verifyAnswer {
 	}}
 }
 
-// verifyUnavailable is the only answer for a failure to answer: a rate
-// limit, a record that cannot be read, the hub, the record of uses. It is
-// never "none", so an agent never reads a broker failure as "this message
-// has no record".
+// verifyUnavailable is the only answer for a failure to answer. It is never
+// "none", so an agent never reads a broker failure as "no record".
 func (b *Broker) verifyUnavailable(branch, reason string, retryAfter int, note, audit string) verifyAnswer {
 	if retryAfter <= 0 {
 		retryAfter = defaultRetryAfter
@@ -203,18 +240,13 @@ func (b *Broker) verifyUnavailable(branch, reason string, retryAfter int, note, 
 	}}
 }
 
-// handleMessageVerify serves POST /message/verify. The caller copies the
-// envelope's timestamp and from, and the ref on a lever message's first
-// line.
 func (b *Broker) handleMessageVerify(w http.ResponseWriter, r *http.Request) {
 	b.serveVerify(w, r, false)
 }
 
-// handleChatVerify serves POST /chat/verify, the route 0.27 agent images
-// post to. It answers like /message/verify, but a lever message without a
-// ref (those images cannot pass one) is matched by its timestamp
-// (sentledger.InWindow). /message/verify never does that: a new image always
-// has the ref, and without the fallback an injected envelope that guesses a
+// handleChatVerify serves /chat/verify for older agent images that cannot
+// pass a ref: a lever message is matched by timestamp instead.
+// /message/verify never does that, so an injected envelope that guesses a
 // timestamp cannot use up a genuine message.
 func (b *Broker) handleChatVerify(w http.ResponseWriter, r *http.Request) {
 	b.serveVerify(w, r, true)
@@ -231,9 +263,8 @@ func (b *Broker) serveVerify(w http.ResponseWriter, r *http.Request, legacy bool
 		a = b.verifyUnavailable("", reasonRateLimited, retrySeconds(wait), "too many verifications this minute", "rate limited")
 	} else {
 		a = b.verify(w, r, caller, now, legacy)
-		// A miss counts against its own, smaller budget and not against the
-		// overall one (its call is given back), so a flood of misses cannot
-		// crowd out genuine messages, which are matches.
+		// A miss counts against its own budget only, so a flood of misses
+		// cannot crowd out genuine messages.
 		if a.resp.Result == wire.VerifyNone || a.resp.Result == wire.VerifyAlreadyVerified {
 			b.verifyRate.refund(caller, now)
 			if ok, wait := b.verifyMissRate.take(caller, now); !ok {
@@ -259,7 +290,6 @@ func retrySeconds(d time.Duration) int {
 	return s
 }
 
-// verify classifies one request. It never writes the response.
 func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, now time.Time, legacy bool) verifyAnswer {
 	var req wire.MessageVerifyRequest
 	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil {
@@ -285,11 +315,10 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, n
 			"controller sender "+controller+" is also a web sender")
 	}
 	if b.webSenders[label] {
-		// A web sender is routed before the controller's label is resolved,
-		// so web chat keeps verifying while the hub is slow or down. Only a
-		// label already known is checked for a collision: the chat ledger
-		// holds proxy-recorded posts only, so reading it for a sender that
-		// turns out to be lever's can only miss, never answer as lever.
+		// Routed before the controller's label is resolved, so web chat keeps
+		// verifying while the hub is down. Only a known label is checked for a
+		// collision: the chat ledger holds proxy-recorded posts only, so it can
+		// never answer as lever.
 		controller, ok := b.controller.cached()
 		if ok && b.webSenders[controller] {
 			return collision(controller)
@@ -297,8 +326,7 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, n
 		if !ok {
 			b.controller.warm()
 		}
-		// The routing decision uses the lowercased label; the lookup uses
-		// the sender exactly as the envelope gave it, as the hub stored it.
+		// The lookup uses the sender exactly as the hub stored it.
 		return b.verifyWeb(r.Context(), caller, from, ts, now)
 	}
 	controller, cerr := b.controller.get(r.Context())
@@ -312,12 +340,23 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, n
 	case label == controller:
 		return b.verifyLever(caller, from, req.Ref, ts, now, legacy)
 	}
+	// The controller's hub email can be renamed under a running broker. Only
+	// the current label is ever accepted: an envelope carrying an earlier one
+	// stays unknown.
+	if fresh, changed := b.controller.refresh(r.Context()); changed {
+		if b.webSenders[fresh] {
+			return collision(fresh)
+		}
+		if label == fresh {
+			return b.verifyLever(caller, from, req.Ref, ts, now, legacy)
+		}
+	}
 	return b.verifyNone("", reasonUnknownSender,
 		"no host record covers messages from "+from+": it is not lever and not a remote login", "unknown sender "+from)
 }
 
-// verifyWeb answers from the chat ledger only: posts into the caller's own
-// agent DM, recorded within chatVerifyWindow.
+// verifyWeb answers from the chat ledger only: posts into the caller's own DM
+// within chatVerifyWindow.
 func (b *Broker) verifyWeb(ctx context.Context, caller, from string, ts, now time.Time) verifyAnswer {
 	const branch = "web"
 	tsKey := chatledger.FormatTime(ts)
@@ -360,9 +399,8 @@ func (b *Broker) verifyWeb(ctx context.Context, caller, from string, ts, now tim
 	}
 	a := b.answerFound(caller, branch, what, found, now, chatVerifyWindow)
 	if a.resp.Result == wire.VerifyWeb {
-		// 0.27's "verified" means the operator wrote it. A contact's post is
-		// not verified in that sense, so an old skill never takes it for the
-		// operator's steering.
+		// Older skills read Verified as "the operator wrote it", so a
+		// contact's post is never Verified.
 		a.resp.Verified = true
 		for _, m := range a.resp.Messages {
 			if m.Tier != chatledger.TierOperator {
@@ -373,13 +411,9 @@ func (b *Broker) verifyWeb(ctx context.Context, caller, from string, ts, now tim
 	return a
 }
 
-// replyRef is the scion message reference for a reply to a web post whose
-// recorded sender is sender ("user:<email>"): "@<email>", which scion
-// resolves to this agent's direct chat with that user
-// (messaging.resolveEmailDM, the same dm:agent:<agent>:user:<user> key the
-// post went to). It is "" unless the email is plain (letters, digits and
-// ".-_+", one "@" not at either end), so the value is safe inside the single
-// quotes the skills put it in.
+// replyRef is "@<email>", which scion resolves to this agent's DM with that
+// user. It is "" unless the email is plain, so the value is safe inside the
+// single quotes the skills put it in.
 func replyRef(sender string) string {
 	email, ok := strings.CutPrefix(sender, "user:")
 	at := strings.IndexByte(email, '@')
@@ -397,8 +431,7 @@ func replyRef(sender string) string {
 }
 
 // verifyLever answers from the sent ledger only: sends recorded for the
-// caller's CN, by ref (or, on the legacy route without a ref, by the
-// envelope timestamp).
+// caller's CN.
 func (b *Broker) verifyLever(caller, from, ref string, ts, now time.Time, legacy bool) verifyAnswer {
 	const branch = "lever"
 	ref = strings.ToLower(strings.TrimSpace(ref))
@@ -452,17 +485,16 @@ func (b *Broker) leverReadError(what string, err error) verifyAnswer {
 	return b.verifyUnavailable("lever", reason, 0, "the record of lever's messages cannot be read", what+": "+err.Error())
 }
 
-// verifiedEntry is one record that matched, before the one-use rule.
 type verifiedEntry struct {
-	useID    string    // the chatUses key: a hub id, or "lever:" + a sent id
-	recorded time.Time // when the record was made (for the degraded start)
+	useID    string // a hub id, or "lever:" + a sent id
+	recorded time.Time
 	expired  bool
 	msg      wire.VerifiedMessage
 }
 
-// answerFound applies the window and the one-use rule to the records that
-// matched: each verifies once with its text, within chatRepeatGrace again
-// as a repeat without text, and after that not at all.
+// answerFound applies the window and the one-use rule: a record verifies once
+// with its text, within chatRepeatGrace again as a repeat without text, and
+// then not at all.
 func (b *Broker) answerFound(caller, branch, what string, found []verifiedEntry, now time.Time, window time.Duration) verifyAnswer {
 	resultFor := map[string]string{"web": wire.VerifyWeb, "lever": wire.VerifyLever}[branch]
 	var msgs []wire.VerifiedMessage
@@ -477,8 +509,8 @@ func (b *Broker) answerFound(caller, branch, what string, found []verifiedEntry,
 		live = append(live, f)
 		want = append(want, useWant{id: f.useID, recorded: f.recorded})
 	}
-	// All the matches are taken at once: a failure takes none of them, so no
-	// match is used up without its text reaching the agent.
+	// All or none, so no match is used up without its text reaching the
+	// agent.
 	var got []useGot
 	if len(want) > 0 {
 		var err error
@@ -494,8 +526,7 @@ func (b *Broker) answerFound(caller, branch, what string, found []verifiedEntry,
 		}
 		m := f.msg
 		if !fresh {
-			// No text on a repeat: the first answer carried it, and a copied
-			// envelope must not hand the agent the text a second time.
+			// A copied envelope must not hand the agent the text twice.
 			m.Repeat, m.FirstVerified, m.Text = true, at.UTC().Format(time.RFC3339), ""
 		}
 		ids = append(ids, m.MessageID)

@@ -13,12 +13,9 @@ import (
 )
 
 // Client builds an mTLS http.Client presenting this identity's cert and trusting
-// its CA. The cert is baked in STATICALLY (loaded once), so this is for
-// SHORT-LIVED, one-shot calls only (boot-time tool discovery, the `request`/
-// `delegate`/`call` CLIs). A LONG-LIVED daemon must NOT use this — it
-// would freeze the boot leaf and keep presenting it after the 24h TTL despite
-// lever-renew rotating the on-disk leaf; use NewReloadingClient instead (see
-// gateway.go), which re-reads per handshake.
+// its CA. The cert is loaded once, so this is for short-lived calls only; a
+// long-lived daemon must use NewReloadingClient, or it keeps presenting the
+// boot leaf after renewal and expiry.
 func (id Identity) Client() (*http.Client, error) {
 	cert, err := tls.X509KeyPair(id.CertPEM, id.KeyPEM)
 	if err != nil {
@@ -45,19 +42,13 @@ func Request(ctx context.Context, brokerURL string, client *http.Client, tool, o
 }
 
 // Call exercises a capability by POSTing a JSON-RPC 2.0 tools/call to the broker
-// gateway at /mcp/<tool>/. The capability token MUST travel in
-// params.arguments._capability (NOT a header): the gateway reads the token
-// exclusively from that field and actively scrubs all inbound X-Lever-* headers.
-// The tool name is encoded in the URL path; op maps to params.name (the operation
-// within that tool); extra constraints are merged into arguments.
+// gateway at /mcp/<tool>/. The token must travel in
+// params.arguments._capability, not a header: the gateway reads it only from
+// there and scrubs inbound X-Lever-* headers.
 //
-// Unlike Request (which swallows a non-200 body into the error), Call returns the
-// raw response body AND the error separately, because the caller prints the body
-// to the user BEFORE surfacing the non-200 error — the acceptance harness's deny
-// checks rely on both the printed output and the non-zero exit. A non-200 yields
-// the body plus a "call:"-wrapped *httpjson.StatusError carrying the code (use
-// httpjson.Status to read it); transport or read failures yield an empty body
-// and the wrapped error.
+// A non-200 returns both the body and a wrapped *httpjson.StatusError, because
+// the caller prints the body before surfacing the error. Transport or read
+// failures return an empty body.
 func Call(ctx context.Context, brokerURL string, client *http.Client, tool, op, token string, constraints map[string]string) (string, error) {
 	body := buildToolCallBody(op, token, constraints)
 	url := brokerURL + "/mcp/" + tool + "/"
@@ -82,11 +73,6 @@ func Call(ctx context.Context, brokerURL string, client *http.Client, tool, op, 
 	return buf.String(), nil
 }
 
-// buildToolCallBody constructs the JSON-RPC 2.0 body for a tools/call request to
-// the capability gateway. The token is placed in arguments._capability as required
-// by the gateway contract (internal/mcp.ToolsCall). The tool's URL
-// path carries the tool name; op maps to params.name (the operation within that
-// tool). Extra key=value constraints from the CLI are merged into arguments.
 func buildToolCallBody(op, token string, args map[string]string) []byte {
 	arguments := make(map[string]any, len(args)+1)
 	for k, v := range args {

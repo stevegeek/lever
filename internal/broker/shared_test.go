@@ -303,7 +303,7 @@ func TestWorkerResume_leftoverSharesWithoutFolders(t *testing.T) {
 }
 
 // The best-effort reader's failed read does not stop the healer's bounce
-// either (the silent heal refusal the fail-closed read caused).
+// either.
 func TestRefuseStaleShares_bestEffortIgnoresReadErrors(t *testing.T) {
 	b := &Broker{leftoverShareVolumes: func(context.Context, string) ([]scion.VolumeMount, error) {
 		return nil, errors.New("hub down")

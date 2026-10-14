@@ -12,11 +12,8 @@ import (
 	"github.com/stevegeek/lever/internal/httpjson"
 )
 
-// TestHarnessEnvOverlayPinsItsKeys pins the exact key set. Boot and the renew
-// sidecar both call this builder and MUST write identical keys — a key added at
-// one call site instead of here would be written at first enrol and then
-// dropped by the next cert rotation (the settings writer merges, so the loss is
-// silent). Update this test deliberately when the contract changes.
+// TestHarnessEnvOverlayPinsItsKeys pins the exact key set Boot and the renew
+// sidecar both write. Update it deliberately when the contract changes.
 func TestHarnessEnvOverlayPinsItsKeys(t *testing.T) {
 	got := HarnessEnvOverlay()
 	want := map[string]string{
@@ -32,27 +29,14 @@ func TestHarnessEnvOverlayPinsItsKeys(t *testing.T) {
 	}
 }
 
-// TestHarnessEnvOverlayForcesClassicRenderer states WHY the renderer flag is in
-// the overlay at all, so a later reader does not drop it as unrelated to
-// identity. Every route to a lever agent is a PTY onto the container's tmux
-// (`lever attach`, or scion's web terminal over `lever remote`), and Claude
-// Code's default fullscreen renderer draws on the alternate screen, which has
-// no scrollback. The operator cannot set this from inside the session either:
-// `/tui default` needs a relaunch, and Claude Code refuses to relaunch a
-// session started with a --system-prompt replacement — which is exactly what
-// scion's harness passes.
+// TestHarnessEnvOverlayForcesClassicRenderer: see HarnessEnvOverlay for why
+// the flag must be in the overlay.
 func TestHarnessEnvOverlayForcesClassicRenderer(t *testing.T) {
 	if got := HarnessEnvOverlay()["CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"]; got != "1" {
 		t.Fatalf("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = %q, want \"1\" — a lever agent is only ever reached through a PTY, where fullscreen rendering has no scrollback", got)
 	}
 }
 
-// The RequestLLMToken tests pin its stable contract: verbatim token on success,
-// a surfaced-body StatusError on non-200, trailing-slash tolerance, and the
-// empty-token guard (which Request does NOT provide, so the wrapper must).
-
-// llmServer answers POST /request with status and body and checks the request
-// shape; any other path is a test failure.
 func llmServer(t *testing.T, status int, body string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,8 +54,7 @@ func llmServer(t *testing.T, status int, body string) string {
 }
 
 func TestRequestLLMTokenReturnsTokenVerbatim(t *testing.T) {
-	// The broker returns an already-base64url token; RequestLLMToken must return
-	// it byte-for-byte (no re-encoding), so the proxy's bearerToken can decode it.
+	// The token must come back byte-for-byte, not re-encoded.
 	tok := "abc123_base64url-verbatim"
 	body, _ := json.Marshal(map[string]string{"token": tok})
 	url := llmServer(t, http.StatusOK, string(body))
@@ -108,8 +91,7 @@ func TestRequestLLMTokenNon200SurfacesBody(t *testing.T) {
 }
 
 func TestRequestLLMTokenEmptyTokenErrors(t *testing.T) {
-	// A 200 with an empty token field must fail closed — a blank ANTHROPIC_AUTH_TOKEN
-	// would silently break LLM auth.
+	// A 200 with an empty token must fail closed.
 	body, _ := json.Marshal(map[string]string{"token": ""})
 	url := llmServer(t, http.StatusOK, string(body))
 	_, err := RequestLLMToken(context.Background(), url, http.DefaultClient, "worker")

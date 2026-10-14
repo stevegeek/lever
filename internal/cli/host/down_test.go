@@ -39,20 +39,18 @@ func TestClearStagedRuntimeState(t *testing.T) {
 	if _, err := os.Stat(manifest); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("manifest should be removed, stat err = %v", err)
 	}
-	// The now-empty .lever dir should be gone too.
 	if _, err := os.Stat(filepath.Join(tree, ".lever")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty .lever dir should be removed, stat err = %v", err)
 	}
 }
 
 func TestClearStagedRuntimeStateMissingIsNoop(t *testing.T) {
-	// Nothing staged: must not panic or error.
 	clearStagedRuntimeState(&config.App{Tree: t.TempDir()})
 }
 
-// TestRemoveControllerPAT: destroy must clear the persisted controller PAT so a
-// later `up` mints a fresh one — the old PAT is signed against the hub DB that
-// died with the machine, and reusing it fails the new hub's readiness auth.
+// TestRemoveControllerPAT: destroy clears the controller PAT: it is signed
+// against the hub database that died with the machine, and reusing it fails
+// the new hub's readiness auth.
 func TestRemoveControllerPAT(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
@@ -71,18 +69,14 @@ func TestRemoveControllerPAT(t *testing.T) {
 }
 
 func TestRemoveControllerPATMissingIsNoop(t *testing.T) {
-	// No PAT staged: destroy must not error.
 	if err := removeIfPresent(state.ForConfig(t.TempDir()).ControllerPAT()); err != nil {
 		t.Fatalf("missing PAT must be a no-op, got %v", err)
 	}
 }
 
-// TestRemoveRemotePAT: destroy must ALSO clear the persisted remote-access
-// PAT, for the same reason as the controller PAT (TestRemoveControllerPAT) —
-// it is minted against the same jail hub DB that dies with the machine.
-// Left behind, ensureControllerPAT's needRemote check sees a non-empty
-// remote.pat after a fresh `up` and skips the re-mint, so the remote proxy
-// would inject a token the new hub's DB has never heard of.
+// TestRemoveRemotePAT: destroy clears the remote PAT too, minted against the
+// same dead hub database; left behind, ensureControllerPAT would skip its
+// re-mint after a fresh `up`.
 func TestRemoveRemotePAT(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
@@ -101,23 +95,15 @@ func TestRemoveRemotePAT(t *testing.T) {
 }
 
 func TestRemoveRemotePATMissingIsNoop(t *testing.T) {
-	// No remote PAT staged (remote never enabled): destroy must not error.
 	if err := removeIfPresent(state.ForConfig(t.TempDir()).RemotePAT()); err != nil {
 		t.Fatalf("missing remote PAT must be a no-op, got %v", err)
 	}
 }
 
-// TestDestroyAlsoStopsRemoteProxy pins the half of "full teardown" that was
-// missing: the remote-access proxy is a host-side daemon exactly like the
-// broker, and `destroy` stopped the broker only.
-//
-// A surviving proxy is not merely untidy. It keeps two loopback listeners and
-// the operator's `tailscale serve` front end pointed at a machine that no
-// longer exists, and — because nothing removed its stamp either — the next
-// `lever up` finds pid alive, port listening and stamp matching, and REUSES
-// that process: one whose cached jail prefix names the destroyed machine, so
-// every request fails with no lever verb that repairs it. `lever stop` has
-// always done this (TestStopAlsoStopsRemoteProxy); destroy must too.
+// TestDestroyAlsoStopsRemoteProxy: destroy must stop the remote proxy as stop
+// does. A surviving proxy keeps its listeners and the tailscale front pointed
+// at a machine that is gone, and with its stamp left the next `lever up`
+// reuses it, with a cached jail prefix naming the destroyed machine.
 func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -126,14 +112,12 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// A real child of this test, not the test's own pid: destroy kills
-	// whatever remote.pid names.
+	// A real child, not the test's pid: destroy kills whatever remote.pid names.
 	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
 	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Written as bytes rather than through WriteRemoteStamp: what matters here
-	// is only that destroy REMOVES it, whatever it holds.
+	// Only the removal matters, whatever the stamp holds.
 	if err := os.WriteFile(st.RemoteStamp(), []byte("v0.17.0 deadbeef\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -151,9 +135,7 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 		t.Fatal("destroy must still tear the jail down")
 	}
 
-	// Reaped with Wait, not signal(0): a killed-but-unreaped child is a
-	// ZOMBIE, and signal 0 succeeds on a zombie — so the obvious liveness
-	// check passes whether or not the kill landed.
+	// Reaped with Wait, not signal 0: signal 0 succeeds on an unreaped zombie.
 	select {
 	case <-proxyDone:
 	case <-time.After(5 * time.Second):
@@ -167,16 +149,12 @@ func TestDestroyAlsoStopsRemoteProxy(t *testing.T) {
 	}
 }
 
-// TestDestroyCallsTeardown verifies the renamed command (Use: "destroy")
-// still tears the jail down.
 func TestDestroyCallsTeardown(t *testing.T) { wantTeardownVia(t, "destroy") }
 
-// TestDownAliasCallsTeardown is the deprecation-safety regression: `lever
-// down` must keep working, unchanged, as a hidden alias of `destroy`.
+// TestDownAliasCallsTeardown: `lever down` must keep working as a hidden alias
+// of `destroy`.
 func TestDownAliasCallsTeardown(t *testing.T) { wantTeardownVia(t, "down") }
 
-// wantTeardownVia runs `lever <verb> --machine lever-x` over a stub backend
-// and requires Backend.Teardown to have run.
 func wantTeardownVia(t *testing.T, verb string) {
 	t.Helper()
 	sb := &stubBackend{}
@@ -188,9 +166,10 @@ func wantTeardownVia(t *testing.T, verb string) {
 	}
 }
 
-// The records go with the tokens: a stale record beside a fresh token would
-// describe the wrong token, and a record without a token is noise. The
-// remote web role record goes too, or the fresh hub would never get the role.
+// The records go with the tokens: a stale record would describe the wrong
+// token. The remote web role record goes too, or the fresh hub would never
+// get the role, and so does the experiments pin record, or the fresh hub
+// would read as pinned.
 func TestRemovePATsClearsTokensAndRecords(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "c")
@@ -198,10 +177,13 @@ func TestRemovePATsClearsTokensAndRecords(t *testing.T) {
 	if err := st.SaveRemoteRoleRecord(state.RemoteRoleRecord{RoleID: "role"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.SaveHubExperimentsRecord(state.HubExperimentsRecord{Off: []string{"hub.conduit"}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := removePATs(st); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole()} {
+	for _, p := range []string{st.ControllerPAT(), st.ControllerPATRecord(), st.RemotePAT(), st.RemotePATRecord(), st.RemoteRole(), st.HubExperiments()} {
 		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s should be removed, stat err = %v", p, err)
 		}
@@ -211,14 +193,12 @@ func TestRemovePATsClearsTokensAndRecords(t *testing.T) {
 	}
 }
 
-// One removal failing must not shield the others: a remote.pat left behind
-// is reused on the next up and rejected by the fresh hub — the case this
-// cleanup exists for. Every path is attempted and every failure reported.
+// One failed removal must not shield the others: a remote.pat left behind is
+// reused and rejected by the fresh hub. Every path is attempted.
 func TestRemovePATsAttemptsEveryFileOnFailure(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "c")
 	seedPAT(t, st, "remote", "r")
-	// A non-empty directory in the controller token's place cannot be removed.
 	if err := os.Remove(st.ControllerPAT()); err != nil {
 		t.Fatal(err)
 	}

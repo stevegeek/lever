@@ -20,22 +20,17 @@ type Event map[string]any
 
 func (e Event) ID() string { id, _ := e["id"].(string); return id }
 
-// WorkerReportedPrefix starts every event message lever relays. The hub
-// builds a notification's message from the watched agent's own Message and
-// TaskSummary, which that agent sets: the text is the worker's, never lever's
-// or the hub's statement.
+// WorkerReportedPrefix starts every event message lever relays. The hub builds
+// a notification's message from fields the watched agent sets, so the text is
+// the worker's, never lever's or the hub's statement.
 const WorkerReportedPrefix = "worker-reported: "
 
-// maxEventMessage bounds a relayed event message, prefix included.
 const maxEventMessage = 1024
 
 // WorkerReported returns a copy of e that is safe to show the manager as data:
-// its "message" sanitized (termsafe: one line, no escapes, no invisible
-// characters), cut to maxEventMessage bytes and marked with
-// WorkerReportedPrefix, and its "status" kept only when it is one of the
-// hub's trigger statuses (StatusLabel). Every other field is unchanged, so
-// the JSON shape stays what scion sends. It is idempotent: the broker applies
-// it, and lever-manager applies it again to what the broker answers.
+// "message" sanitized to one line, bounded and marked with
+// WorkerReportedPrefix, and "status" passed through StatusLabel. It must stay
+// idempotent: the broker and lever-manager both apply it.
 func WorkerReported(e Event) Event {
 	out := make(Event, len(e))
 	for k, v := range e {
@@ -57,10 +52,9 @@ func WorkerReported(e Event) Event {
 	return out
 }
 
-// StatusLabel is a notification status when it is one the hub produces (an
-// activity or a phase in upper case, DELETED, DELIVERY_FAILED), "" when
-// empty, else UNRECOGNISED. The hub derives it from the watched agent's
-// activity or phase, both of which the agent can post as any text.
+// StatusLabel is a notification status when it is one the hub produces, ""
+// when empty, else UNRECOGNISED. The hub derives it from fields the watched
+// agent can post as any text.
 func StatusLabel(status string) string {
 	lower := strings.ToLower(status)
 	switch {
@@ -76,35 +70,29 @@ func StatusLabel(status string) string {
 	return strings.ToUpper(LabelUnrecognised)
 }
 
-// Message sends one message through `scion message`.
+// Message sends one message through scion message.
 //
-// Flags go FIRST and the two positionals sit behind a `--` terminator, because
-// both are agent-controlled. scion's message command takes single-token boolean
-// flags — `-b`/`--broadcast` (every running agent in the project) and
-// `-a`/`--all` (every project on the hub) — and cobra parses flags interspersed
-// with positionals by default. A body of exactly `-b` would therefore bind to
-// the broadcast flag instead of being the message, leaving the recipient as the
-// only positional: the send would fan out to every sibling agent, defeating the
-// worker-to-worker deny the broker applied on the recipient alone. `--` makes
-// the body inert as a flag whatever it contains.
+// Flags go first and both agent-controlled positionals sit behind --: cobra
+// parses interspersed flags, so a body of exactly -b would become the
+// broadcast flag and fan the send out to every agent, defeating the broker's
+// per-recipient deny.
 func (c *Client) Message(ctx context.Context, o MsgOpts) error {
 	args := []string{"message"}
 	if o.Interrupt {
 		args = append(args, "--interrupt")
 	}
 	args = append(args, projectFlag(o.Project)...)
-	args = append(args, "--", o.To, o.Body)
+	args = append(args, nonInteractive, "--", o.To, o.Body)
 	_, err := c.run(ctx, "", args...)
 	return err
 }
 
-// Inbox reads the caller's typed event inbox via `scion notifications` — the
-// command available in agent CLI mode (SCION_CLI_MODE=agent), where `messages`
-// is absent. Events carry id/agentId/status/message. unread=false adds --all
-// (all vs unacknowledged). Requires Hub mode. project scopes to a worker
-// ("" = the caller's own inbox).
+// Inbox reads the caller's event inbox via scion notifications, which exists
+// in agent CLI mode where messages does not. unread=false adds --all. project
+// scopes to a worker ("" is the caller's own inbox). Listing is a read: a user
+// token needs inbox:read on a hub that has that scope, and nothing more.
 func (c *Client) Inbox(ctx context.Context, unread bool, project string) ([]Event, error) {
-	args := []string{"notifications", "--json"}
+	args := []string{"notifications", "--json", nonInteractive}
 	if !unread {
 		args = append(args, "--all")
 	}

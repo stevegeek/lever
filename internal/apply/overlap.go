@@ -10,29 +10,20 @@ import (
 	"github.com/stevegeek/lever/internal/progress"
 )
 
-// Bring-up steps that nothing before start-manager depends on run alongside
-// the others (lever#189). broker-up is a host child process with its own
-// health poll; load-image (with its keep-id warm-up) is podman work in the
-// guest that only an agent start reads. Neither is needed by init-machine,
-// config-registry, bootstrap-token, scion-server, credential,
-// register-project or agent-template, which make up most of a cold apply
-// (the hub's start alone is 15-20 s), so a changed image's load and warm-up
-// and the broker's start hide behind them.
+// Bring-up steps that nothing before start-manager depends on (broker-up,
+// load-image) run in background lanes alongside the foreground steps.
 //
-// Each lane runs its steps one after another, in plan order, on its own
-// goroutine: two image loads never compete for the guest's disk. A step that
-// needs a lane (waitsFor) waits for the whole lane to finish first, and so
-// does the end of the run.
+// Each lane runs its steps in plan order on its own goroutine, so two image
+// loads never compete for the guest's disk. A step that needs a lane
+// (waitsFor) waits for the whole lane, and so does the end of the run.
 //
-// Failures: a lane step that fails ends its lane, prints its FAIL line at
-// once, and stops the run before the next foreground step starts (the
-// foreground step already running is left to finish: interrupting a hub
-// start halfway helps nobody). A foreground failure stops the lanes: their
-// running step is cancelled and listed as stopped, not failed, and steps
-// not yet started are not run. The error returned names every step that
-// really failed.
+// A lane failure stops the run before the next foreground step starts; the
+// foreground step already running is left to finish, since interrupting a
+// hub start halfway helps nobody. A foreground failure cancels the lanes:
+// their running step is listed as stopped, not failed. The error returned
+// names every step that really failed.
 
-// lane names the background lane a step kind runs in; "" is the foreground.
+// lane returns "" for the foreground.
 func lane(k StepKind) string {
 	switch k {
 	case KindBrokerUp:
@@ -44,9 +35,8 @@ func lane(k StepKind) string {
 }
 
 // waitsFor names the lanes a foreground step needs finished before it
-// starts. mint-manager-bootstrap asks the broker for the enrol ticket, the
-// remote proxy reaches the broker's operator socket, and start-manager needs
-// the broker and every image.
+// starts. mint-manager-bootstrap asks the broker for the enrol ticket and the
+// remote proxy reaches the broker's operator socket.
 func waitsFor(k StepKind) []string {
 	switch k {
 	case KindMintManagerBootstrap, KindRemoteProxy:
@@ -57,7 +47,6 @@ func waitsFor(k StepKind) []string {
 	return nil
 }
 
-// bgLane is one background lane of a run.
 type bgLane struct {
 	name   string
 	steps  []Step
@@ -69,13 +58,11 @@ type bgLane struct {
 	err    error  // the lane step that failed, "step <kind>: ..."; set before done closes
 }
 
-// lanes runs a plan's background lanes.
 type lanes struct {
 	r     *run
 	order []*bgLane
 	by    map[string]*bgLane
-	// notify gets one value as each lane ends (buffered for all of them),
-	// so join wakes on any lane.
+	// notify is buffered for every lane so a lane's end never blocks.
 	notify chan struct{}
 }
 
@@ -98,9 +85,8 @@ func startLanes(ctx context.Context, r *run, steps []Step) (*lanes, []Step) {
 		}
 		l.steps = append(l.steps, s)
 	}
-	// Each lane's first step is listed here, in plan order, so those
-	// numbers follow the plan; a lane lists its later steps (a second
-	// image) as it starts them, numbered then.
+	// Each lane's first step is listed here so its number follows the plan;
+	// later lane steps are numbered as they start.
 	ls.notify = make(chan struct{}, len(ls.order))
 	for _, l := range ls.order {
 		lctx, cancel := context.WithCancel(ctx)
@@ -111,7 +97,6 @@ func startLanes(ctx context.Context, r *run, steps []Step) (*lanes, []Step) {
 	return ls, fg
 }
 
-// startStep lists a lane step as started.
 func (ls *lanes) startStep(ctx context.Context, s Step) *progress.Step {
 	ps := progress.From(ctx).Background(stepLabel(s))
 	if ls.r.d.StepTail != nil {
@@ -122,7 +107,6 @@ func (ls *lanes) startStep(ctx context.Context, s Step) *progress.Step {
 	return ps
 }
 
-// run is one lane's goroutine; first is its first step's listing.
 func (ls *lanes) run(ctx context.Context, l *bgLane, first *progress.Step) {
 	defer func() {
 		close(l.done)
@@ -139,8 +123,7 @@ func (ls *lanes) run(ctx context.Context, l *bgLane, first *progress.Step) {
 		}
 		err := ls.r.step(progress.WithStep(ctx, ps), s)
 		if err != nil && (l.stopped() != "" || ctx.Err() != nil) {
-			// Stopped by the run, or by an interrupt (Ctrl-C): not a
-			// failure of this step.
+			// Stopped by the run or an interrupt: not a failure of this step.
 			reason := l.stopped()
 			if reason == "" {
 				reason = failedReason(ctx.Err())
@@ -174,8 +157,6 @@ func (l *bgLane) failure() error {
 	return l.err
 }
 
-// failed returns the error of a lane that has already failed, without
-// waiting for the others.
 func (ls *lanes) failed() error {
 	for _, l := range ls.order {
 		if err := l.failure(); err != nil {
@@ -185,10 +166,8 @@ func (ls *lanes) failed() error {
 	return nil
 }
 
-// join waits for the named lanes (every lane when all is set). A failure
-// of ANY lane, named or not, ends the wait at once and is returned: the
-// run stops before the step that waited. ctx ends the wait (the lanes see
-// the same cancellation).
+// join waits for the named lanes (every lane when all is set). A failure of
+// any lane, named or not, ends the wait at once and is returned.
 func (ls *lanes) join(ctx context.Context, names []string, all bool) error {
 	for {
 		if err := ls.failed(); err != nil {
@@ -216,8 +195,7 @@ func (ls *lanes) join(ctx context.Context, names []string, all bool) error {
 	}
 }
 
-// stop ends every lane still running, for reason, and waits for them all.
-// It returns the failures of lanes that failed on their own, in plan order.
+// stop returns only the failures of lanes that failed on their own.
 func (ls *lanes) stop(reason string) []error {
 	for _, l := range ls.order {
 		l.mu.Lock()
@@ -237,9 +215,7 @@ func (ls *lanes) stop(reason string) []error {
 	return errs
 }
 
-// runSteps runs the plan: the background lanes alongside the foreground
-// steps, each foreground step after the lanes it needs. It returns once
-// every lane has ended, with every real failure joined.
+// runSteps returns once every lane has ended, with every real failure joined.
 func (r *run) runSteps(ctx context.Context, steps []Step) error {
 	rep := progress.From(ctx)
 	ls, fg := startLanes(ctx, r, steps)
@@ -279,7 +255,6 @@ func (r *run) runSteps(ctx context.Context, steps []Step) error {
 	return errors.Join(errs...)
 }
 
-// failedReason is the note on a lane step the run stopped.
 func failedReason(err error) string {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "the run was interrupted"

@@ -18,91 +18,76 @@ import (
 )
 
 // WorkerRuntime is the subset of scion.Client the broker uses to drive worker
-// agents host-side. *scion.Client satisfies it; tests inject a fake.
+// agents host-side.
 type WorkerRuntime interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 	Start(ctx context.Context, o scion.StartOpts) error
 	Resume(ctx context.Context, worker, project string) error
-	// ResumeForce recovers an error-phase record (scion resume --force,
-	// scion#895); refuses phase running. Used by the recovery paths.
+	// ResumeForce recovers an error-phase record (scion resume --force); it
+	// refuses phase running.
 	ResumeForce(ctx context.Context, worker, project string) error
 	Stop(ctx context.Context, worker, project string) error
 	Suspend(ctx context.Context, worker, project string) error
 	EnvSet(ctx context.Context, projectDir, key, value string) error
-	// Message and Inbox ride the same host-side scion client so container
-	// pinning/auth never applies.
 	Message(ctx context.Context, o scion.MsgOpts) error
 	Inbox(ctx context.Context, unread bool, project string) ([]scion.Event, error)
 }
 
-// TicketStager delivers a worker's marshalled enrolment envelope
-// (wire.Bootstrap) to the guest location only that worker's container
-// mounts. Production is jail.StageWorkerTicket over the jail runner; tests
-// record. The broker runs on the host, so this is the ONE way a worker
-// ticket leaves the broker process.
+// TicketStager delivers a worker's enrolment envelope to the guest location
+// only that worker's container mounts. It is the only way a worker ticket
+// leaves the broker process.
 type TicketStager interface {
 	StageWorkerTicket(ctx context.Context, worker string, payload []byte) error
 }
 
-// Where a worker finds its staged ticket INSIDE its container: the broker
-// mounts the guest ticket directory (WorkerSpec.TicketDir) read-only at
-// workerTicketMount and points lever-agent boot at it through
-// workerTicketEnv (cmd/lever-agent's $LEVER_BOOTSTRAP; the pre-start hook
-// also probes the mount itself). The manager's container has no such mount.
+// Inside a worker's container its guest ticket dir is mounted read-only at
+// workerTicketMount, and workerTicketEnv points lever-agent boot at it. The
+// manager's container has no such mount.
 const (
 	workerTicketMount = "/run/lever"
 	workerTicketPath  = workerTicketMount + "/bootstrap.json"
 	workerTicketEnv   = "LEVER_BOOTSTRAP"
 )
 
-// WorkerSpec is the config-derived, path-authoritative description of one worker.
-// The broker never accepts any of these from the manager; they come from config.
+// WorkerSpec describes one worker. It comes from config only; the broker
+// never accepts any of it from the manager.
 type WorkerSpec struct {
-	Name            string // worker identity (== scion agent slug within the instance project)
-	WorkspaceSubdir string // relative --workspace: path RELATIVE to the project root, e.g. "workers/worker" — scion mounts this subtree at /workspace
-	HostWorkspace   string // host path to the same subdir, e.g. <tree>/workers/worker; created tree-confined before start (ensureWorkspaceDir; scion's guard requires it to exist)
-	// TicketDir is the GUEST path of this worker's ticket directory
-	// (jail.WorkerTicketDir: under the run user's XDG_RUNTIME_DIR, outside
-	// every container's default view), where TicketStager writes
-	// bootstrap.json and which the worker's container mounts read-only at
-	// workerTicketMount. Empty ⇒ the worker cannot be dispatched.
+	Name            string // cert CN == scion agent slug
+	WorkspaceSubdir string // --workspace, relative to the project root; scion mounts it at /workspace
+	HostWorkspace   string // host path of the same subdir; must exist before start (scion's guard)
+	// TicketDir is the guest path of this worker's ticket dir, outside every
+	// container's default view; only this worker's container mounts it.
+	// Empty ⇒ the worker cannot be dispatched.
 	TicketDir string
-	Image     string // effective agent image
-	Model     string // effective LLM model; empty ⇒ no --model, scion decides
-	// InstructionsPath is the HOST path of this worker's standing-instructions
-	// file, "" when it has none. Config-authoritative like the rest of the spec
-	// (the manager cannot choose it), but its CONTENT is read at dispatch, not
-	// baked here: the text is create-time material for the agent, so reading it
-	// late lets an edit reach the next fresh start without a broker restart.
+	Image     string
+	Model     string // empty ⇒ no --model, scion decides
+	// InstructionsPath is the host path of the standing instructions ("" =
+	// none). The manager cannot choose it; its content is read at each fresh
+	// start so an edit needs no broker restart.
 	InstructionsPath string
 	APIKey           bool // true ⇒ api-key LLM mode for this worker
-	// Recyclable is workers[].recyclable: the manager may discard this
-	// worker's record and start it fresh (handleWorkerRecycle).
+	// Recyclable lets the manager discard this worker's record and start it
+	// fresh.
 	Recyclable bool
-	// Claude is the worker's own Claude Code config (config.Worker.Claude),
-	// staged in its envelope before every start and resume. nil = none.
+	// Claude is staged in the worker's envelope before every start and
+	// resume. nil = none.
 	Claude *wire.Claude
-	// Shared is this worker's shared_folders plan (config.SharedMountsFor):
-	// mounted at create, and checked on the host before every start and
-	// resume (verifySharedSources, refuseStaleShares).
+	// Shared is mounted at create and checked on the host before every
+	// start and resume.
 	Shared []SharedMount
-	// Resources is workers[].resources: the container's memory and CPU
-	// limits, sent at a fresh start (scion stores them in the record, so a
-	// resume reuses them). Zero = scion's defaults.
+	// Resources is sent at a fresh start only; scion keeps it in the record
+	// for resumes. Zero = scion's defaults.
 	Resources scion.Resources
 }
 
-// workerSpec looks up a declared worker by name (its cert CN, which is also
-// its scion slug).
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
 	s, ok := b.workers[name]
 	return s, ok
 }
 
 // identity resolves an agent name to its (cert CN, scion slug) pair. The
-// manager answers to its cert CN or its scion slug (the app name — distinct,
-// see IdentityConfig.ManagerSlug); a declared worker's CN IS its slug. A caller that
-// needs a strict CN (not an alias) compares the returned cn with its input.
+// manager answers to either; a worker's CN is its slug. A caller that needs a
+// strict CN compares the returned cn with its input.
 func (b *Broker) identity(name string) (cn, slug string, isManager, ok bool) {
 	if name == b.manager || name == b.managerSlug {
 		return b.manager, b.managerSlug, true, true
@@ -113,11 +98,9 @@ func (b *Broker) identity(name string) (cn, slug string, isManager, ok bool) {
 	return "", "", false, false
 }
 
-// runtimeReady returns true when the scion runtime is wired. When the runtime
-// is nil (no LEVER_JAIL_USER/UID env, e.g. a manual `lever broker serve` with
-// no prior `lever apply`), it writes a 502 and an audit line and returns false.
-// MUST be called after authn/authz: it audits b.manager (correct only
-// post-authn) and unauthenticated callers must receive 403, not 502.
+// runtimeReady writes a 502 when no scion runtime is wired. It MUST be called
+// after authn/authz: it audits b.manager, and an unauthenticated caller must
+// get 403, not 502.
 func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 	if b.runtime == nil {
 		b.audit("worker", b.manager, "error", "runtime not wired")
@@ -127,16 +110,11 @@ func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 	return true
 }
 
-// requireManagerWorker is the shared preamble of the worker dispatch routes:
-// authenticate the caller as the manager, THEN decode the body into req (so
-// an unauthenticated caller gets 403, never 400 — matching /msg), then
-// authorize the named worker against config and check the
-// runtime is wired. Returns the resolved spec, or writes 403/400/502.
+// requireManagerWorker authenticates the manager BEFORE decoding the body
+// (an unauthenticated caller gets 403, never 400), then authorizes the named
+// worker against config and checks the runtime. A revoked manager is refused:
+// dispatch spawns a fully capable agent, so revoke must cut it.
 func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, req any, worker func() string) (WorkerSpec, bool) {
-	// A revoked manager cannot dispatch or tear down workers. Dispatching a worker
-	// is a stronger steering primitive than messaging (it spawns a fresh,
-	// fully-capable agent), so revocation must cut it too — otherwise revoke
-	// leaves the loudest channel open.
 	caller, ok := b.requireManager(w, r, "worker", "")
 	if !ok {
 		return WorkerSpec{}, false
@@ -152,17 +130,15 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, re
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
-	// Runtime check is last — authn/authz above must fire first so an
-	// unauthenticated caller gets 403, not 502.
 	if !b.runtimeReady(w) {
 		return WorkerSpec{}, false
 	}
 	return spec, true
 }
 
-// lockWorker takes name's lifecycle lock, waiting for it as long as ctx
-// allows. The holder reads the phase and acts on it with no other start,
-// resume or wake of that worker in between.
+// lockWorker takes name's lifecycle lock, waiting as long as ctx allows. The
+// holder reads the phase and acts on it with no other lifecycle action of
+// that worker in between.
 func (b *Broker) lockWorker(ctx context.Context, name string) (func(), error) {
 	sem := b.workerSem(name)
 	select {
@@ -181,8 +157,6 @@ func (b *Broker) lockWorker(ctx context.Context, name string) (func(), error) {
 	}
 }
 
-// tryLockWorker takes name's lifecycle lock only when it is free now, and
-// reports false when another holder has it.
 func (b *Broker) tryLockWorker(name string) (func(), bool) {
 	sem := b.workerSem(name)
 	select {
@@ -193,7 +167,6 @@ func (b *Broker) tryLockWorker(name string) (func(), bool) {
 	}
 }
 
-// workerSem is name's lifecycle lock, created on first use.
 func (b *Broker) workerSem(name string) chan struct{} {
 	b.workerLocksMu.Lock()
 	defer b.workerLocksMu.Unlock()
@@ -208,8 +181,6 @@ func (b *Broker) workerSem(name string) chan struct{} {
 	return sem
 }
 
-// lockWorkerOrRefuse is lockWorker for a handler: a caller that gave up
-// while it waited gets 503 and an audit line.
 func (b *Broker) lockWorkerOrRefuse(w http.ResponseWriter, ctx context.Context, actor, verb, name string) (func(), bool) {
 	unlock, err := b.lockWorker(ctx, name)
 	if err != nil {
@@ -225,9 +196,8 @@ func (b *Broker) phaseOf(ctx context.Context, spec WorkerSpec) (string, error) {
 	return phase, err
 }
 
-// recordOf is phaseOf with the record's raw container status, which only a
-// caller's own checks may read (scion.ContainerLive); it is hub text the
-// agent can set, so it is never echoed or audited.
+// recordOf also returns the raw container status. It is agent-settable hub
+// text: callers may test it but never echo or audit it.
 func (b *Broker) recordOf(ctx context.Context, spec WorkerSpec) (phase, containerStatus string, err error) {
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
@@ -235,18 +205,15 @@ func (b *Broker) recordOf(ctx context.Context, spec WorkerSpec) (phase, containe
 	}
 	for _, a := range agents {
 		if a.Slug == spec.Name {
-			// The hub's phase is text the agent can set for itself
-			// (scion.PhaseLabel): only a known phase leaves this function,
-			// so no caller can echo or audit an agent's own words as a
-			// phase.
+			// The hub's phase is agent-settable text: only a known label
+			// leaves this function, so no caller echoes the agent's words.
 			phase := scion.PhaseLabel(a.Phase)
 			if scion.RunningContainerDown(phase, a.ContainerStatus) {
 				// The hub keeps a record "running" for minutes after its
-				// container died (until its own sweep marks it error). In
-				// that window a resume was a no-op and a message was "sent"
-				// to nothing (live-seen on Lima). A blank status is "cannot
-				// tell" and stays running; so does "created", which scion
-				// can report briefly for a record that is running.
+				// container died; in that window a resume is a no-op and a
+				// message goes nowhere. A blank or "created" status stays
+				// running (scion briefly reports "created" for a running
+				// record).
 				return phaseRunningContainerDown, a.ContainerStatus, nil
 			}
 			return phase, a.ContainerStatus, nil
@@ -255,17 +222,14 @@ func (b *Broker) recordOf(ctx context.Context, spec WorkerSpec) (phase, containe
 	return "", "", nil
 }
 
-// phaseRunningContainerDown is what phaseOf reports for a record the hub
-// still calls running while it reports a container that is not live. It is
-// not a scion phase: every comparison with scion.PhaseRunning fails for it,
-// so a message is refused, and the resume verb treats it like the error
-// phase it is about to become.
+// phaseRunningContainerDown is not a scion phase: it fails every comparison
+// with scion.PhaseRunning, so a message is refused, and resume treats it like
+// the error phase it is about to become.
 const phaseRunningContainerDown = "running, container down"
 
 // bootstrapFor mints a one-use enrolment ticket for cn and wraps it in the
-// envelope lever-agent boot consumes, with the agent's Claude Code config:
-// the ONE construction site for a Bootstrap the broker issues (manager and
-// worker alike).
+// envelope lever-agent boot consumes. It is the only place the broker builds a
+// Bootstrap.
 func (b *Broker) bootstrapFor(cn string, claude *wire.Claude) (wire.Bootstrap, error) {
 	ticket, err := b.tickets.Issue(cn, b.ticketTTL)
 	if err != nil {
@@ -274,12 +238,9 @@ func (b *Broker) bootstrapFor(cn string, claude *wire.Claude) (wire.Bootstrap, e
 	return wire.Bootstrap{Ticket: ticket, BrokerCA: b.brokerCAPEM, BrokerURL: b.brokerURL, AgentCN: cn, Claude: claude}, nil
 }
 
-// stageFreshTicket mints a one-use enrolment ticket for the MANAGER (cn) and
-// stages a fresh bootstrap.json under dir — <tree>/.lever, inside the tree
-// the manager itself mounts, which is fine for the manager's own ticket —
-// via the shared wire.Stage, the same host authority `lever up` uses. Called
-// by the auto-re-enrol healer. Workers never take this path: see
-// stageWorkerTicket.
+// stageFreshTicket stages a fresh MANAGER bootstrap.json under dir
+// (<tree>/.lever, inside the manager's own mount). Workers never take this
+// path: see stageWorkerTicket.
 func (b *Broker) stageFreshTicket(cn, dir string) error {
 	bs, err := b.bootstrapFor(cn, b.managerClaude)
 	if err != nil {
@@ -295,17 +256,11 @@ func (b *Broker) stageFreshTicket(cn, dir string) error {
 	return nil
 }
 
-// stageWorkerTicket mints a one-use enrolment ticket for spec and stages the
-// envelope in the GUEST, at spec.TicketDir, through the configured
-// TicketStager — never in the instance tree. The tree is the manager's
-// whole-tree mount, so a ticket staged there (the pre-0.22 layout,
-// <tree>/<dir>/.lever/bootstrap.json) sat readable by the manager between
-// staging and the worker's boot, and a manager that redeemed it first held
-// the worker's identity: its obtain: grants, its inbox, the operator
-// directives addressed to it. The guest runtime dir is visible to no
-// container by default; the worker's own container mounts exactly its
-// directory (workerTicketVolumes). Called on the fresh-start and resume
-// dispatch paths, by the healer and by the admin /worker-ticket route.
+// stageWorkerTicket stages a fresh worker envelope in the GUEST at
+// spec.TicketDir, never in the instance tree: the manager mounts the whole
+// tree, and a manager that redeemed a worker's ticket first would hold that
+// worker's identity (its grants, inbox and directives). Only the worker's own
+// container mounts its ticket dir.
 func (b *Broker) stageWorkerTicket(ctx context.Context, spec WorkerSpec) error {
 	if b.ticketStager == nil {
 		return fmt.Errorf("stage: no worker ticket channel is wired (DispatchConfig.Tickets)")
@@ -327,10 +282,8 @@ func (b *Broker) stageWorkerTicket(ctx context.Context, spec WorkerSpec) error {
 	return nil
 }
 
-// workerTicketVolumes is the container-side half of the channel: the
-// worker's guest ticket directory mounted read-only at workerTicketMount,
-// and LEVER_BOOTSTRAP pointing lever-agent boot at the file. Create-time
-// material (scion keeps a record's volumes and env across resumes).
+// workerTicketVolumes is create-time material: scion keeps a record's
+// volumes and env across resumes.
 func workerTicketVolumes(spec WorkerSpec) ([]scion.VolumeMount, map[string]string) {
 	vols := []scion.VolumeMount{{Source: spec.TicketDir, Target: workerTicketMount, ReadOnly: true}}
 	for _, m := range spec.Shared {
@@ -339,17 +292,13 @@ func workerTicketVolumes(spec WorkerSpec) ([]scion.VolumeMount, map[string]strin
 	return vols, map[string]string{workerTicketEnv: workerTicketPath}
 }
 
-// treePath splits an absolute directory under the instance tree into the
-// confinement anchor the host-side writes need (wire.Stage, ensureWorkspaceDir)
-// and the path below it. The anchor is the instance tree: it is the mount
-// point, so an agent cannot replace it, while everything under it is
-// agent-writable.
+// treePath splits dir into the confinement anchor for host-side writes and
+// the path below it. The anchor is the instance tree: it is the mount point,
+// so an agent cannot replace it, while everything under it is agent-writable.
 //
-// With no tree wired (a Broker built directly in a test) it falls back to the
-// directory's parent. That still refuses a symlink planted at `.lever` itself
-// — the reachable attack, since that is the name inside an agent's own
-// workspace — but not one planted at an ancestor. Production always sets Tree
-// (brokerctl.decorateConfig), which is what closes the ancestor case too.
+// With no tree wired (tests) it falls back to the parent, which still refuses
+// a symlink at `.lever` itself but not at an ancestor. Production always sets
+// Tree, which closes the ancestor case.
 func (b *Broker) treePath(dir string) (root, rel string, err error) {
 	if b.tree == "" {
 		return filepath.Dir(dir), filepath.Base(dir), nil
@@ -364,25 +313,19 @@ func (b *Broker) treePath(dir string) (root, rel string, err error) {
 	return b.tree, rel, nil
 }
 
-// ensureWorkspaceDir creates spec.HostWorkspace (scion's guard requires the
-// --workspace subdir to exist before start) confined to the instance tree.
-// The path is agent-writable and the broker runs as the operator: a plain
-// os.MkdirAll would follow a `<tree>/workers` the manager replaced with a
-// symlink to an absolute host path and create directories there. The walk
-// (refuseEscapingDir) names the refusal with fsutil.ErrEscapesTree; the
-// mkdir itself goes through an os.Root at the tree, which re-checks every
-// component at the syscall, so a swap between the walk and the mkdir is
-// refused rather than followed. A symlink that stays inside the tree (an
-// operator's own layout) is followed, as before.
+// ensureWorkspaceDir creates spec.HostWorkspace confined to the instance
+// tree. The path is agent-writable and the broker runs as the operator, so a
+// plain MkdirAll would follow a symlink the manager planted to a host path.
+// The walk names the refusal; the mkdir goes through an os.Root, which
+// re-checks every component at the syscall so a swap after the walk is
+// refused. An in-tree symlink is followed unless strict.
 func (b *Broker) ensureWorkspaceDir(spec WorkerSpec) error {
 	root, rel, err := b.treePath(spec.HostWorkspace)
 	if err != nil {
 		return err
 	}
 	if b.tree == "" {
-		// No tree wired (a Broker built directly in a test): the workspace's
-		// parent may not exist yet either, so anchor at the nearest existing
-		// ancestor and create everything below it.
+		// No tree wired (tests): the parent may not exist yet either.
 		root, rel, err = existingAnchor(spec.HostWorkspace)
 		if err != nil {
 			return err
@@ -411,20 +354,16 @@ func (b *Broker) ensureWorkspaceDir(spec WorkerSpec) error {
 	if b.afterWorkspaceMkdir != nil {
 		b.afterWorkspaceMkdir()
 	}
-	// Strict: walk again now the directory exists (a swap between the first
-	// walk and the mkdir is caught), then compare where the path REALLY
-	// lands. The same check guards every resume (verifyStrictWorkspace).
+	// Strict: walk again now the directory exists, so a swap between the
+	// first walk and the mkdir is caught, then check the real path.
 	return b.verifyStrictWorkspace(spec)
 }
 
-// verifyStrictWorkspace is the manager.read_only check of an EXISTING
-// worker workspace: no symlink anywhere on its path below the tree, and its
-// real path neither is, contains nor lies inside a read_only entry. scion
-// resolves the worker's --workspace through symlinks and the runtime
-// resolves the bind source again on every container start, so the real
-// path is what the worker mounts read-write — on a fresh dispatch AND on
-// every resume, which is why resumeRecord and the healer run it too. A
-// no-op when read_only is unset or no tree is wired (tests).
+// verifyStrictWorkspace is the manager.read_only check of an existing worker
+// workspace: no symlink on its path below the tree, and its real path does
+// not overlap a read_only entry. The bind source is re-resolved on every
+// container start, so this must run on every resume too. No-op when
+// read_only is unset or no tree is wired.
 func (b *Broker) verifyStrictWorkspace(spec WorkerSpec) error {
 	if len(b.readOnlyDirs) == 0 || b.tree == "" {
 		return nil
@@ -455,14 +394,12 @@ func (b *Broker) verifyStrictWorkspace(spec WorkerSpec) error {
 }
 
 // ErrReadOnlyOverlap refuses a worker workspace that is, contains or lies
-// inside a manager.read_only directory: the worker would mount it
-// read-write. Config validation refuses such a worker dir; this is the
-// broker's own check, against the path as it stands on disk.
+// inside a protected directory, which the worker would mount read-write.
+// This is the broker's on-disk check, on top of config validation.
 var ErrReadOnlyOverlap = errors.New("worker workspace overlaps a protected directory (manager.read_only or a shared folder)")
 
-// refuseReadOnlyOverlap compares a tree-relative worker workspace with
-// every manager.read_only entry, case-folded (the host filesystem usually
-// does not tell case apart).
+// refuseReadOnlyOverlap compares case-folded: the host filesystem is usually
+// case-insensitive.
 func (b *Broker) refuseReadOnlyOverlap(worker, rel string) error {
 	for _, ro := range b.readOnlyDirs {
 		if fsutil.RelOverlapFold(rel, ro) {
@@ -472,8 +409,7 @@ func (b *Broker) refuseReadOnlyOverlap(worker, rel string) error {
 	return nil
 }
 
-// existingAnchor splits dir at its nearest existing PROPER ancestor: root
-// exists, rel (at least dir's base name) is what lies below it.
+// existingAnchor splits dir at its nearest existing proper ancestor.
 func existingAnchor(dir string) (root, rel string, err error) {
 	root = filepath.Dir(dir)
 	for {
@@ -494,14 +430,11 @@ func existingAnchor(dir string) (root, rel string, err error) {
 	return root, rel, nil
 }
 
-// refuseEscapingDir walks rel below root one component at a time (the
-// directory-shaped counterpart of fsutil's confineInTree): a symlink
-// component may resolve only inside the real root, else — or when it
-// dangles — the walk fails with fsutil.ErrEscapesTree; an existing component
-// that is not a directory is a plain error. An absent component ends the walk
-// (MkdirAll creates the rest). noLinks (manager.read_only is set) refuses
-// every symlink component, in-tree or not: a link to a protected directory
-// stays inside the tree, and would hand a worker that directory read-write.
+// refuseEscapingDir walks rel below root: a symlink component must resolve
+// inside the real root (a dangling one fails too) or the walk fails with
+// fsutil.ErrEscapesTree. An absent component ends the walk. noLinks refuses
+// every symlink: an in-tree link to a protected directory would hand a worker
+// that directory read-write.
 func refuseEscapingDir(root, rel string, noLinks bool) error {
 	if rel == "" || rel == "." || !filepath.IsLocal(rel) {
 		return fmt.Errorf("%q: %w", rel, fsutil.ErrEscapesTree)
@@ -551,16 +484,10 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// A task past scion's argv cap can never start a worker: scion inlines it
-	// into a tmux command capped at 16 KiB (lever#30), and the container
-	// would exit 1 with "command too long" behind a generic runtime error.
-	// Refuse it here by name, whatever the worker's phase — a running worker
-	// would ignore the task, but a manager sending one this size has a bug it
-	// needs to hear about, not a silent 200.
-	//
-	// A flag-shaped task (one that begins with "-") is refused the same way
-	// with 400: it is never a task, and lever's start argv keeps it behind
-	// `--` regardless — this is the layer that says so by name.
+	// scion inlines the task into a tmux command capped at 16 KiB, so a
+	// longer one fails the container with a generic error: refuse it by name,
+	// whatever the phase. A flag-shaped task is refused too (the start argv
+	// keeps it behind `--` regardless).
 	if err := scion.CheckTask(req.Task); err != nil {
 		b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
 		status := http.StatusBadRequest
@@ -584,10 +511,8 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case phase == scion.PhaseRunning:
-		// Already running: a no-op. Any new task in req.Task is intentionally
-		// ignored here — the task-mismatch 409 guard on the resume path covers
-		// only the non-running branch (a running worker's task is likewise fixed,
-		// and there is nothing to resume). To run a new task, purge then re-dispatch.
+		// Already running: a no-op. A new task is ignored; a running worker's
+		// task is fixed too.
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 	case phase != "":
 		b.resumeExistingWorker(w, r, spec, phase, req.Task)
@@ -596,14 +521,10 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// resumeExistingWorker is the start route's arm for a non-running record
-// (suspended/stopped/terminal/error). It refuses a re-dispatch that carries a
-// NEW task, then resumes the record (resumeRecord).
 func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, phase, task string) {
 	ctx := r.Context()
-	// Resuming replays the record's ORIGINAL task — scion pins the task at
-	// creation and Resume takes no task — so a re-dispatch carrying a NEW task
-	// must NOT silently resume the old one. Refuse loudly and point at purge.
+	// scion pins the task at creation and Resume takes none, so a re-dispatch
+	// with a new task must not silently resume the old one.
 	if strings.TrimSpace(task) != "" {
 		b.audit("worker", b.manager, "deny", "start "+spec.Name+": task given but worker exists (phase "+phase+")")
 		fresh := "Run `lever worker purge " + spec.Name + "` to start it fresh with a new task"
@@ -613,8 +534,7 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 		http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. "+fresh+", or dispatch with no task to resume.", http.StatusConflict)
 		return
 	}
-	// Refuse a record whose stored role this scion would read as full, BEFORE
-	// staging anything (see DispatchConfig.VerifyAgentRole).
+	// Before staging anything (DispatchConfig.VerifyAgentRole).
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
 		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -623,20 +543,13 @@ func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, sp
 	b.resumeRecord(ctx, w, spec, phase, b.manager)
 }
 
-// resumeRecord brings an existing, non-running worker record back up and
-// answers the request: stage a fresh ticket, resume by phase, wait until the
-// worker is live. The start route (resumeExistingWorker) and the resume verb
-// (handleWorkerResume) share it, so both recover an error-phase record and
-// neither answers before the worker can take a message. It never deletes a
-// record: a purge is the operator's decision. actor names the caller in the
-// audit lines: the manager, or the remote login for a wake
-// (handleOperatorWake).
+// resumeRecord brings a non-running worker record back up and answers only
+// once the worker is live. It never deletes a record: a purge is the
+// operator's decision. actor names the caller in the audit lines.
 func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase, actor string) {
 	if comingUp(phase) {
-		// A start or resume is already under way (scion's interim phases).
-		// A second resume would be refused by the hub, and a fresh ticket
-		// would replace the one the booting worker is about to spend. Only
-		// wait for it.
+		// Already coming up: a fresh ticket would replace the one the booting
+		// worker is about to spend. Only wait.
 		if err := b.waitWorkerLive(ctx, spec); err != nil {
 			b.audit("worker", actor, "error", "resume "+spec.Name+" (already "+phase+"): "+err.Error())
 			http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
@@ -646,17 +559,14 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
-	// broker.max_running_workers: checked before anything is staged, so a
-	// refusal changes nothing.
+	// Before anything is staged, so a refusal changes nothing.
 	release, ok := b.admitOrRefuse(ctx, w, actor, "resume", spec.Name)
 	if !ok {
 		return
 	}
 	defer release()
-	// manager.read_only: a resume re-resolves the workspace bind source, so
-	// a worker dir the manager swapped for a link since the dispatch would
-	// hand the worker whatever the link names. Checked before the ticket is
-	// spent.
+	// A resume re-resolves the workspace bind source, so a worker dir the
+	// manager swapped for a link would hand the worker whatever it names.
 	if err := b.verifyStrictWorkspace(spec); err != nil {
 		if errors.Is(err, ErrSharedFolder) {
 			b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
@@ -670,9 +580,6 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		}
 		b.audit("worker", actor, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
 		if errors.Is(err, fs.ErrNotExist) {
-			// The record outlived its directory: the operator removed (or
-			// moved) the worker dir on the host. Say so; a generic 500 sends
-			// the manager guessing.
 			http.Error(w, "worker "+spec.Name+"'s workspace directory "+spec.WorkspaceSubdir+" no longer exists on the host (the operator removed or moved it); the record was kept. "+
 				"Ask the operator to restore the directory, or to run `lever worker purge "+spec.Name+" --force` and dispatch it again", http.StatusConflict)
 			return
@@ -680,24 +587,17 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		http.Error(w, "workspace error", http.StatusInternalServerError)
 		return
 	}
-	// shared_folders: a resume recreates the container from the record's
-	// volumes, so a record holding access the config has since withdrawn
-	// would get it back.
+	// A resume recreates the container from the record's volumes, so a
+	// record holding access the config has withdrawn would get it back.
 	if err := b.checkSharedAccess(ctx, spec, true); err != nil {
 		b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
 		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err)+"; the record was kept", http.StatusForbidden)
 		return
 	}
-	// Stage a fresh one-use ticket BEFORE resuming (mirrors apply's
-	// ensureFreshBootstrap for the manager), for two reasons. A worker
-	// resumed after its leaf/ticket lifetime re-enrols on boot, and the
-	// previously staged ticket is long spent — without this it wedges into
-	// phase=error (live-hit 2026-07-31). And the record's ticket volume is a
-	// tmpfs directory under the run user's XDG_RUNTIME_DIR, so a jail machine
-	// restart empties it and podman refuses the mount source ("statfs
-	// …/lever/tickets/<w>: no such file or directory") on every resume until
-	// something re-stages (lever#36). Harmless when the leaf is still valid:
-	// boot skips enrol and the ticket ages out unspent.
+	// Stage a fresh ticket BEFORE resuming: a worker past its leaf lifetime
+	// re-enrols on boot and the old ticket is spent, and the ticket dir is
+	// tmpfs, so after a jail restart podman refuses the missing mount source.
+	// Harmless when the leaf is still valid: the ticket ages out unspent.
 	if err := b.stageWorkerTicket(ctx, spec); err != nil {
 		b.audit("worker", actor, "error", "resume "+err.Error())
 		http.Error(w, "stage error", http.StatusInternalServerError)
@@ -705,22 +605,18 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	}
 	resume := b.runtime.Resume
 	if phase == scion.PhaseError || phase == phaseRunningContainerDown {
-		// Only resume --force (scion#895) recovers an error-phase record: a
-		// worker left running across `lever stop` + `lever up` comes back in
-		// this phase, and a plain resume of it answers 409. A running record
-		// whose container died is the same case a few minutes early; if the
-		// hub does not take the forced resume yet, its refusal below tells
-		// the manager to try again.
+		// Only resume --force recovers an error-phase record (a plain resume
+		// answers 409). A running record with a dead container is the same
+		// case early; if the hub refuses, the manager is told to retry.
 		resume = b.runtime.ResumeForce
 	}
 	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
 		b.audit("worker", actor, "error", "resume "+spec.Name+" (phase "+phase+"): "+err.Error())
-		// Generic wire bodies (the scion error text can echo the container
-		// env): the detail stays in the audit log.
+		// Generic wire bodies: the scion error text can echo the container
+		// env. The detail stays in the audit log.
 		if scion.IsRefusedByHub(err) {
-			// The hub refused the call, which says nothing about the worker's
-			// state (scion folds an authorization denial and a record in a
-			// transitional phase into one 409 "already exists in this project").
+			// scion folds an authorization denial and a transitional phase
+			// into one 409, so this says nothing about the worker's state.
 			http.Error(w, "the hub refused to resume worker "+spec.Name+" (phase "+phase+"); its record was kept, nothing was deleted. "+
 				"The record may be in a transitional phase: check `lever-manager agent list` and try again. "+
 				"If the refusal persists, the operator should run `lever doctor`.", http.StatusConflict)
@@ -739,9 +635,8 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
-// comingUp reports whether phase is one of scion's interim phases on the way
-// to running: a first start (created, provisioning, cloning, starting) or a
-// resume ("resumed", which the CLI reports and the hub's enum does not have).
+// comingUp reports scion's interim phases on the way to running; "resumed"
+// is reported by the CLI but absent from the hub's enum.
 func comingUp(phase string) bool {
 	switch phase {
 	case "created", "provisioning", "cloning", "starting", "resumed":
@@ -750,35 +645,29 @@ func comingUp(phase string) bool {
 	return false
 }
 
-// workerPurgeHint names the recovery for a worker record that does not
-// resume. The broker only names it: deleting a record is never automatic.
+// workerPurgeHint only names the recovery: deleting a record is never
+// automatic.
 func workerPurgeHint(worker string) string {
 	return "If it does not recover, the operator can run `lever worker purge " + worker + "` on the host, then start the worker fresh."
 }
 
-// startFreshWorker provisions an absent worker: mint a one-use ticket, stage it
-// in the guest for that worker alone, then scion start with the ticket
-// directory mounted into the new container.
 func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
 	ctx := r.Context()
-	// broker.max_running_workers, before any side effect.
+	// Before any side effect.
 	release, ok := b.admitOrRefuse(ctx, w, b.manager, "start", spec.Name)
 	if !ok {
 		return
 	}
 	defer release()
-	// Read the standing instructions BEFORE any side effect (ticket, env,
-	// workspace dir): a config that names a file the host cannot read is an
-	// operator error, and it must fail with nothing staged.
+	// Before any side effect: an unreadable file must fail with nothing
+	// staged.
 	instructions, err := readWorkerInstructions(spec)
 	if err != nil {
 		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
 		http.Error(w, "instructions error", http.StatusInternalServerError)
 		return
 	}
-	// The workspace dir comes BEFORE the ticket: a refused (out-of-tree)
-	// workspace must not spend one. Creating the directory is idempotent and
-	// harmless on its own.
+	// Before the ticket: a refused workspace must not spend one.
 	if err := b.ensureWorkspaceDir(spec); err != nil {
 		if errors.Is(err, ErrSharedFolder) {
 			b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
@@ -832,8 +721,7 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	// The agent exists now with a new conversation: record the fresh start
-	// (contacts may post to it). A failure only keeps contacts out.
+	// A failed session record only keeps contacts out.
 	if commit != nil {
 		if err := commit(); err != nil {
 			b.audit("worker", b.manager, "error", "start "+spec.Name+": session record: "+err.Error())
@@ -849,10 +737,8 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
-// readWorkerInstructions loads the worker's standing instructions from the
-// host path config resolved for it (WorkerSpec.InstructionsPath), or "" when
-// it has none. The content goes to scion on stdin as inline agent config, so
-// the file only has to be readable host-side.
+// readWorkerInstructions reads the file host-side; scion gets the content on
+// stdin as inline agent config.
 func readWorkerInstructions(spec WorkerSpec) (string, error) {
 	if spec.InstructionsPath == "" {
 		return "", nil
@@ -867,19 +753,15 @@ func readWorkerInstructions(spec WorkerSpec) (string, error) {
 	return string(b), nil
 }
 
-// defaultLiveAttempts/defaultLiveInterval bound waitWorkerLive's post-start
-// poll (Broker.liveAttempts/liveInterval; tests shrink them per instance).
 const (
 	defaultLiveAttempts = 20
 	defaultLiveInterval = 500 * time.Millisecond
 )
 
-// waitWorkerLive polls the worker's scion record until it shows Phase=="running"
-// AND a live container, or the budget runs out — so a crash-looping worker
-// surfaces as an error instead of a false "running" (mirrors apply's
-// waitManagerLive). scion's own start/resume success can lie (it reports
-// "resumed" for a container whose harness dies moments later), so the observed
-// record — not the CLI exit code — is what makes success meaningful.
+// waitWorkerLive waits for phase running with a live container. scion's own
+// start/resume success can lie (it reports "resumed" for a harness that dies
+// moments later), so the observed record decides, and a crash-looping worker
+// surfaces as an error.
 func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 	err := scion.WaitAgentLive(ctx, func(c context.Context) ([]scion.Agent, error) {
 		return b.runtime.List(c, b.instanceProject)
@@ -887,8 +769,6 @@ func (b *Broker) waitWorkerLive(ctx context.Context, spec WorkerSpec) error {
 	if err == nil {
 		return nil
 	}
-	// WaitAgentLive returns ctx.Err() unwrapped on cancellation; pass it through
-	// as-is and prefix only the exhaustion error with the worker subject.
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
@@ -901,8 +781,6 @@ func (b *Broker) workerVerb(w http.ResponseWriter, r *http.Request, do func(ctx 
 	if !ok {
 		return
 	}
-	// Stop and suspend take the worker's lock too, so neither lands in the
-	// middle of a start, resume or remote wake of it.
 	unlock, ok := b.lockWorkerOrRefuse(w, r.Context(), b.manager, r.URL.Path, spec.Name)
 	if !ok {
 		return
@@ -930,11 +808,8 @@ func (b *Broker) handleWorkerSuspend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
-	// Not workerVerb: that helper folds every failure into error/502
-	// "runtime error" and answers one phase reading. This verb has refusals
-	// that are not runtime errors and must read as such in the audit log, and
-	// it answers only when the worker is live — the same branches
-	// resumeExistingWorker takes on the start path.
+	// Not workerVerb: this verb has refusals that are not runtime errors, and
+	// it answers only once the worker is live.
 	var req wire.WorkerRequest
 	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
 	if !ok {
@@ -951,13 +826,9 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	// Resume only a worker the hub has a record for. scion's resume of a
-	// missing record does not fail: the hub CREATES the agent, from the
-	// project template and scion's default harness (antigravity), not the
-	// worker's configured harness, image, model or role — so the create
-	// fails on an image nobody built, or starts the wrong agent. lever passes
-	// those only on start, so a worker with no record (never started, purged,
-	// or a new jail) is refused here with the verb to use instead.
+	// scion's resume of a missing record CREATES the agent from the project
+	// template and scion's default harness, not the worker's configured
+	// harness, image, model or role. Refuse it and name start instead.
 	phase, err := b.phaseOf(ctx, spec)
 	if err != nil {
 		b.audit("worker", b.manager, "error", "resume "+spec.Name+": phase: "+err.Error())
@@ -971,20 +842,13 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if phase == scion.PhaseRunning {
-		// Already running: a no-op, as on the start route. Nothing is staged.
 		b.audit("worker", b.manager, "allow", "resume "+spec.Name+": already running")
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
-	// This verb is the one the manager actually uses, so it stages the ticket,
-	// picks the verb by phase and waits for the worker exactly as the start
-	// route does. Answering scion's interim "resumed" phase instead made the
-	// manager's next message fail: the hub refuses a message to an agent that
-	// is not running.
 	b.resumeRecord(ctx, w, spec, phase, b.manager)
 }
 
-// checkAgentRole runs the pre-role record guard for one agent, if wired.
 func (b *Broker) checkAgentRole(ctx context.Context, agent string) error {
 	if b.verifyRole == nil {
 		return nil
@@ -993,13 +857,10 @@ func (b *Broker) checkAgentRole(ctx context.Context, agent string) error {
 }
 
 func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
-	// A revoked manager cannot enumerate the fleet either (recon that helps a
-	// compromised-then-revoked manager) — consistent with /msg/list.
+	// A revoked manager cannot enumerate the fleet either.
 	if _, ok := b.requireManager(w, r, "worker", "list: "); !ok {
 		return
 	}
-	// Runtime check is after the manager-CN check — authz precedes so an
-	// unauthenticated caller still gets 403, not 502.
 	if !b.runtimeReady(w) {
 		return
 	}
@@ -1009,10 +870,9 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "runtime error", http.StatusBadGateway)
 		return
 	}
-	// Phase, activity and container status are text each agent can report
-	// about itself. The
-	// manager reads this list in its session, so only known labels go out:
-	// a worker cannot write to the manager through its own status.
+	// Phase, activity and container status are agent-settable text and the
+	// manager reads this list: only known labels go out, so a worker cannot
+	// write to the manager through its own status.
 	for i := range agents {
 		agents[i].Phase = scion.PhaseLabel(agents[i].Phase)
 		agents[i].Activity = scion.ActivityLabel(agents[i].Activity)

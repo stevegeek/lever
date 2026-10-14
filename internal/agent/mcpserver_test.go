@@ -13,13 +13,8 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 )
 
-// fakeDirectiveBroker builds a plain (non-TLS) httptest server standing in
-// for the broker's /directive/consume and /directive/check jail routes: it
-// decodes the {"id":...} body and hands the path + id to handle, which
-// writes the response. Mirrors the plain-http fake-broker pattern used for
-// the CLI's broker calls (cli/msg_test.go's withFakeMsgBroker) — this is
-// unit-level and doesn't exercise mTLS itself, unlike this file's other
-// tests which use the real testBroker().
+// fakeDirectiveBroker is a plain-HTTP stand-in for the broker's directive
+// routes; it does not exercise mTLS.
 func fakeDirectiveBroker(t *testing.T, handle func(w http.ResponseWriter, path, id string)) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,8 +28,6 @@ func fakeDirectiveBroker(t *testing.T, handle func(w http.ResponseWriter, path, 
 	return srv
 }
 
-// rpcText drives a tools/call and returns the result token text, failing if the
-// call returned a JSON-RPC error.
 func rpcText(t *testing.T, s *MCPServer, body string) string {
 	t.Helper()
 	resp := rpc(t, s, body)
@@ -45,7 +38,6 @@ func rpcText(t *testing.T, s *MCPServer, body string) string {
 	return content[0].(map[string]any)["text"].(string)
 }
 
-// verifies reports whether tok verifies for caller with the given params.
 func verifies(pub []byte, tokB64, caller string, params map[string]string) bool {
 	raw, err := base64.RawURLEncoding.DecodeString(tokB64)
 	if err != nil {
@@ -95,7 +87,7 @@ func TestMCPDelegateMintsRecipientBoundConstrainedToken(t *testing.T) {
 		t.Fatal("delegate returned an empty token")
 	}
 	pub := env.Keys.Public
-	// Bound to the recipient (worker), NOT the delegator (manager).
+	// Bound to the recipient, not the delegator.
 	if !verifies(pub, text, "worker", map[string]string{"table": "A", "filter": "alice"}) {
 		t.Fatal("delegated token must verify for the recipient (worker)")
 	}
@@ -109,9 +101,8 @@ func TestMCPDelegateMintsRecipientBoundConstrainedToken(t *testing.T) {
 }
 
 func TestMCPRequestMintsSelfBoundConstrainedToken(t *testing.T) {
-	// The LLM-facing `request` tool (mcpserver.go:121): with no bound_to it defaults
-	// to the caller's own CN, and extra (non-reserved) kv args become narrowing
-	// constraints baked into the minted token (constraintArgs strips tool/op/bound_to).
+	// With no bound_to, request binds to the caller, and extra args become
+	// narrowing constraints in the token.
 	env := testBroker(t)
 	env.Rules.AllowObtain("manager", "db", "read")
 	regDB(t, env)
@@ -121,7 +112,6 @@ func TestMCPRequestMintsSelfBoundConstrainedToken(t *testing.T) {
 
 	text := rpcText(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"request","arguments":{"tool":"db","op":"read","table":"A"}}}`)
 	pub := env.Keys.Public
-	// Self-bound (default bound_to == caller CN).
 	if !verifies(pub, text, "manager", map[string]string{"table": "A"}) {
 		t.Fatal("request token must verify self-bound for the caller (manager) with the constraint satisfied")
 	}
@@ -230,11 +220,8 @@ func TestMCPDirectivePreviewDescriptionSaysNotAuthority(t *testing.T) {
 }
 
 func TestMCPDirectiveConsume404SurfacesAsToolCallError(t *testing.T) {
-	// The broker's opaque-404 contract (unknown id / wrong target / already
-	// consumed / expired / stale generation — all byte-identical) must reach
-	// the model as "not found" and nothing more, matching how the existing
-	// `request` case surfaces a broker error (mcp.Error),
-	// never a transport panic.
+	// The broker's opaque 404 must reach the model as "not found" and nothing
+	// more.
 	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
@@ -254,12 +241,8 @@ func TestMCPDirectiveConsume404SurfacesAsToolCallError(t *testing.T) {
 }
 
 func TestMCPDirectiveAcceptsDirectiveIDAlias(t *testing.T) {
-	// Every identifier the model has ever seen for a directive is spelled
-	// `directive_id` — the signed statement's field, `lever directive send`'s
-	// output, the design docs. Calling the tool with that spelling must work
-	// rather than silently posting an empty id (which the broker rejects as a
-	// bad body and answers with the opaque 404, so the model concludes the
-	// operator's directive does not exist).
+	// The model sees directive_id everywhere, so that spelling must work
+	// rather than post an empty id and get the opaque 404.
 	for _, tc := range []struct{ tool, route string }{
 		{"directive_consume", "/directive/consume"},
 		{"directive_check", "/directive/check"},
@@ -280,11 +263,8 @@ func TestMCPDirectiveAcceptsDirectiveIDAlias(t *testing.T) {
 }
 
 func TestMCPDirectiveMissingIDIsALocalArgumentError(t *testing.T) {
-	// A missing id is the CALLER's mistake, not a directive-state fact, so it
-	// must fail locally with an actionable message and never reach the broker.
-	// Letting it through would return the opaque "not found" — indistinguishable
-	// from "no such directive", which teaches the agent to disbelieve a genuine
-	// operator authorization.
+	// A missing id must fail locally: the broker's opaque "not found" would
+	// teach the agent to disbelieve a genuine operator authorization.
 	for _, tool := range []string{"directive_consume", "directive_check", "directive_preview"} {
 		called := false
 		srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, _ string) { called = true })
@@ -295,9 +275,7 @@ func TestMCPDirectiveMissingIDIsALocalArgumentError(t *testing.T) {
 		if !isErr {
 			t.Fatalf("%s without an id must return a JSON-RPC error, got %v", tool, resp)
 		}
-		// The CODE is half the fix: -32602 (invalid params) is what marks this
-		// as the caller's mistake rather than a broker verdict, so assert it —
-		// a silent revert to -32000 must fail here.
+		// -32602 marks the caller's mistake rather than a broker verdict.
 		if code, _ := e["code"].(float64); int(code) != -32602 {
 			t.Fatalf("%s missing-id error code = %v, want -32602 (invalid params)", tool, e["code"])
 		}
@@ -312,9 +290,7 @@ func TestMCPDirectiveMissingIDIsALocalArgumentError(t *testing.T) {
 }
 
 func TestMCPDirectiveIDGuardsFailLocally(t *testing.T) {
-	// Each of these is a caller-side mistake that must NOT be posted to the
-	// broker: posting it would return the opaque 404 and teach the agent that a
-	// real operator directive does not exist — the whole bug this guards.
+	// Caller-side mistakes that must not be posted to the broker.
 	for _, tc := range []struct{ name, args string }{
 		{"whitespace only", `{"id":"   "}`},
 		{"conflicting spellings", `{"id":"D1","directive_id":"D2"}`},
@@ -339,7 +315,7 @@ func TestMCPDirectiveIDGuardsFailLocally(t *testing.T) {
 	}
 
 	// Surrounding whitespace is trimmed, not rejected: a copy-pasted id with a
-	// trailing newline is a valid id, and failing it would recreate the bug.
+	// trailing newline is valid.
 	var gotID string
 	srv := fakeDirectiveBroker(t, func(w http.ResponseWriter, _, id string) {
 		gotID = id
@@ -353,20 +329,9 @@ func TestMCPDirectiveIDGuardsFailLocally(t *testing.T) {
 }
 
 func TestMCPDirectiveSchemaDeclaresBothSpellings(t *testing.T) {
-	// The advertised contract must match what the server accepts: declaring
-	// only `id` while quietly tolerating `directive_id` leaves a
-	// schema-validating client free to reject the alias before it reaches us,
-	// so BOTH spellings must appear in properties.
-	//
-	// But the schema must ALSO be a plain top-level object with NO combinator
-	// (anyOf/oneOf/allOf) and no top-level required: the Anthropic API rejects
-	// a tool input schema carrying a top-level combinator, and Claude Code
-	// then silently DROPS the tool from the session ("No such tool
-	// available") — the directive channel dies invisibly for exactly the
-	// client it exists for (#24). The exactly-one-spelling rule never depended
-	// on the schema: directiveID() enforces it caller-side with -32602 before
-	// any broker call (see TestMCPDirectiveIDResolution / the both-supplied
-	// and neither-supplied cases below).
+	// Both spellings must appear in properties, and the schema must be a plain
+	// top-level object with no combinator and no top-level required (see
+	// directiveInputSchema).
 	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
 	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
 	for _, tl := range resp["result"].(map[string]any)["tools"].([]any) {
@@ -391,9 +356,8 @@ func TestMCPDirectiveSchemaDeclaresBothSpellings(t *testing.T) {
 	}
 }
 
-// fakeCapBroker stands in for the broker's /request route and records whether
-// it was reached at all. Guards that must fail caller-side assert `called`
-// stays false: reaching the broker is the bug, not the error code.
+// fakeCapBroker records whether the broker was reached at all: for a guard
+// that must fail caller-side, reaching it is the bug.
 func fakeCapBroker(t *testing.T, called *bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -404,10 +368,8 @@ func fakeCapBroker(t *testing.T, called *bool) *httptest.Server {
 	return srv
 }
 
-// rejectedLocally sends one tools/call for tool with args to an MCP server
-// backed by a fake broker and pins the caller-side rejection shape: a -32602
-// (invalid params) JSON-RPC error and the broker never reached. It returns the
-// error message so the caller can pin what it names. label prefixes failures.
+// rejectedLocally pins the caller-side rejection shape: -32602 and the broker
+// never reached. It returns the error message.
 func rejectedLocally(t *testing.T, label, tool, args string) string {
 	t.Helper()
 	called := false
@@ -430,27 +392,20 @@ func rejectedLocally(t *testing.T, label, tool, args string) string {
 }
 
 func TestMCPDelegateWithoutRecipientIsALocalArgumentError(t *testing.T) {
-	// delegate's entire purpose is binding to ANOTHER agent. An absent, blank or
-	// misspelt `to` used to reach the broker as an empty bind target, which the
-	// broker defaults to the caller (request.go: "default: self-obtain") — so a
-	// SELF-bound token was minted and returned as a plain success. The agent then
-	// believes it handed a capability to the recipient when it did not.
+	// An absent, blank or misspelt to would reach the broker as an empty bind
+	// target, which the broker defaults to the caller: a silent self-bound
+	// token.
 	for _, tc := range []struct{ name, args string }{
 		{"absent", `{"tool":"db","op":"read"}`},
 		{"blank", `{"tool":"db","op":"read","to":""}`},
 		{"whitespace only", `{"tool":"db","op":"read","to":"   "}`},
-		// The reported case: misspelt as `agent`, which constraintArgs would not
-		// strip, so it was silently promoted to a bogus narrowing constraint.
+		// constraintArgs would not strip agent, making it a bogus constraint.
 		{"misspelt as agent", `{"tool":"db","op":"read","agent":"worker"}`},
 		// Non-string values are dropped by handleToolsCall, so this arrives absent.
 		{"non-string", `{"tool":"db","op":"read","to":123}`},
-		// Only the sibling tool's spelling: the recipient is named, but under an
-		// argument this tool does not declare, so it would have become a
-		// constraint while the bind target fell back to self.
+		// Only the sibling tool's spelling, which delegate does not declare.
 		{"sibling spelling only", `{"tool":"db","op":"read","bound_to":"worker"}`},
 	} {
-		// An empty bind target self-obtains at the broker, so the rejection
-		// must happen before the request leaves.
 		msg := rejectedLocally(t, "delegate without a recipient ("+tc.name+")", "delegate", tc.args)
 		if !strings.Contains(msg, `"to"`) {
 			t.Fatalf("%s: error = %q, want it to name the missing argument", tc.name, msg)
@@ -459,9 +414,8 @@ func TestMCPDelegateWithoutRecipientIsALocalArgumentError(t *testing.T) {
 }
 
 func TestMCPCapabilityToolsRequireToolAndOp(t *testing.T) {
-	// A blank tool/op reached the broker and came back as a policy/registry
-	// verdict — a broker-shaped answer to a caller-side mistake, the same
-	// misattribution the 0.9.1 directive fix removed.
+	// A blank tool/op must fail locally, not as a misattributed broker
+	// verdict.
 	for _, tc := range []struct{ tool, args, want string }{
 		{"request", `{"op":"read"}`, `"tool"`},
 		{"request", `{"tool":"","op":"read"}`, `"tool"`},
@@ -478,10 +432,7 @@ func TestMCPCapabilityToolsRequireToolAndOp(t *testing.T) {
 }
 
 func TestMCPDelegateRejectsConflictingBindTarget(t *testing.T) {
-	// On `delegate`, `to` is already the bind target, so a `bound_to` that
-	// DISAGREES with it is an unresolvable contradiction: acting on either
-	// spelling binds the token somewhere the caller did not unambiguously ask
-	// for. Reject rather than pick, mirroring directiveID's id/directive_id rule.
+	// A bound_to that disagrees with to is refused rather than picked.
 	msg := rejectedLocally(t, "conflicting bind target", "delegate",
 		`{"tool":"db","op":"read","to":"worker","bound_to":"other"}`)
 	if !strings.Contains(msg, `"to"`) {
@@ -490,10 +441,8 @@ func TestMCPDelegateRejectsConflictingBindTarget(t *testing.T) {
 }
 
 func TestMCPDelegateAcceptsAgreeingBindTarget(t *testing.T) {
-	// A `bound_to` that AGREES with `to` states the same intent twice. directiveID
-	// (same file) tolerates agreeing duplicates and errors only on disagreement;
-	// the two sibling-argument policies must not contradict each other, and
-	// rejecting here would tell the model to use the argument it already used.
+	// A bound_to that agrees with to is accepted, as directiveID accepts
+	// agreeing duplicates.
 	env := testBroker(t)
 	allowDelegate(t, env, "manager", "db", "read", "worker")
 	regDB(t, env)
@@ -513,11 +462,8 @@ func TestMCPDelegateAcceptsAgreeingBindTarget(t *testing.T) {
 }
 
 func TestMCPDelegateRejectsSelfAsRecipient(t *testing.T) {
-	// delegate names another agent to hand off to. Naming yourself hands nothing
-	// off — and it does not even go through the delegate policy: MayObtainRule
-	// (rules.go) branches on requester == boundTo and consults the OBTAIN set, so
-	// an agent with no delegate grants at all gets a success and an audit line
-	// that reads like a self-obtain. Same silent no-op class as the empty `to`.
+	// Self-delegation would bypass the delegate policy (MayObtainRule consults
+	// the obtain set) and audit as a self-obtain.
 	msg := rejectedLocally(t, "self-delegation", "delegate", `{"tool":"db","op":"read","to":"manager"}`)
 	if !strings.Contains(msg, "request") {
 		t.Fatalf("error = %q, want it to point at the tool that does mint for self", msg)
@@ -525,22 +471,12 @@ func TestMCPDelegateRejectsSelfAsRecipient(t *testing.T) {
 }
 
 func TestMCPRequestRejectsSiblingBindArgumentWithoutMisinforming(t *testing.T) {
-	// On `request` this check is the load-bearing one. Unlike delegate's `to`,
-	// `bound_to` is OPTIONAL, so nothing else would catch a stray `to`: it would
-	// pass tool/op validation, bound_to would resolve empty and default to self,
-	// and `to` would fall through into the constraints — a self-bound token
-	// carrying to=worker, returned as a success, which is the exact mirror of the
-	// bug this whole fix exists to close.
-	//
-	// But the argument is genuinely ambiguous: constraint keys ARE tool argument
-	// names (registry.MapParams identity-maps them), and `to` is an ordinary one
-	// for a mail/message/transfer tool. So reject — silence is the worse failure —
-	// while refusing to assert it is "unknown", and name the ways out.
+	// A stray to on request would otherwise become a constraint on a
+	// self-bound token (see requestArgs).
 	msg := rejectedLocally(t, "request with a stray `to` (must not self-bind)", "request",
 		`{"tool":"db","op":"read","to":"worker"}`)
-	// Calling it "unknown" is false for a tool whose argument really is named
-	// `to`, and the repair it invites — dropping the argument — mints a WIDER
-	// token. The message must instead offer both real readings.
+	// "unknown" would invite dropping the argument, which mints a wider
+	// token.
 	if strings.Contains(msg, "unknown") {
 		t.Fatalf("error = %q, must not claim the argument is unknown", msg)
 	}
@@ -550,8 +486,7 @@ func TestMCPRequestRejectsSiblingBindArgumentWithoutMisinforming(t *testing.T) {
 }
 
 func TestMCPUnknownToolDenied(t *testing.T) {
-	// The default case (mcpserver.go:151) must reject an unrecognised tool name with
-	// the JSON-RPC method-not-found code rather than silently minting anything.
+	// An unrecognised tool name gets method-not-found, never a mint.
 	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
 	resp := rpc(t, s, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"bogus","arguments":{}}}`)
 	e, isErr := resp["error"].(map[string]any)
@@ -564,25 +499,22 @@ func TestMCPUnknownToolDenied(t *testing.T) {
 }
 
 func TestMCPServerNeverExposesKey(t *testing.T) {
-	// No response path (initialize, tools/list, or error from tools/call) may leak
-	// key material. This matters because the MCP handler is driven by an in-jail LLM.
+	// No response path may leak key material: the MCP handler is driven by an
+	// in-jail LLM.
 	s := NewMCPServer(MCPConfig{BrokerURL: "http://x", AgentCN: "manager"})
 
-	// 1. initialize
 	resp := rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
 	raw, _ := json.Marshal(resp)
 	if strings.Contains(string(raw), "PRIVATE KEY") {
 		t.Fatal("initialize response must never contain key material")
 	}
 
-	// 2. tools/list
 	resp = rpc(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
 	raw, _ = json.Marshal(resp)
 	if strings.Contains(string(raw), "PRIVATE KEY") {
 		t.Fatal("tools/list response must never contain key material")
 	}
 
-	// 3. tools/call error path (no broker Client configured, so the call will error).
 	resp = rpc(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"unknown_tool","arguments":{}}}`)
 	raw, _ = json.Marshal(resp)
 	if strings.Contains(string(raw), "PRIVATE KEY") {

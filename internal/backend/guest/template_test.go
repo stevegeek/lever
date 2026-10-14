@@ -50,33 +50,19 @@ func TestEnsureLeverTemplateWritesAnEmptyPrompt(t *testing.T) {
 }
 
 // TestEnsureLeverTemplateConvergesAgainstARealFile runs the guest script FOR
-// REAL — bash, with HOME pointed at a temp dir — because the whole convergence
-// decision lives in that script (`[ -s "$f" ] || [ ! -f "$f" ]`) and nowhere
-// in Go. A fake runner returning canned stdout only re-asserts that
-// strings.Contains("", "wrote") is false; it would stay green if `-s` became
-// `-e`, which would make every apply re-truncate the file and report a change.
+// REAL, with HOME pointed at a temp dir, because the whole convergence
+// decision lives in that script and nowhere in Go; a fake runner would stay
+// green if `-s` became `-e`.
 //
-// Three states, one invariant each:
-//
-//   - ABSENT: create the directory and an EMPTY system-prompt.md, and report
-//     the change. Empty is the entire point — scion emits --system-prompt only
-//     when the staged content is non-empty after TrimSpace.
-//   - CONVERGED (present, empty): touch nothing and report NO change. The
-//     caller logs on change, so a re-apply would otherwise print the same
-//     notice forever, and rewriting the file would churn the guest on every
-//     apply.
-//   - NON-EMPTY: truncate back to empty and report the change. This is the
-//     repair path — content here is what puts the placeholder prompt back on
-//     every new agent's command line.
+// ABSENT creates an empty file and reports a change; CONVERGED touches
+// nothing and reports none; NON-EMPTY truncates and reports a change.
 func TestEnsureLeverTemplateConvergesAgainstARealFile(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("no bash on PATH: this test runs the guest script rather than mocking it")
 	}
 	home := t.TempDir()
-	// The prefix shape the real backends use (["orb","-m",m] / ["limactl",
-	// "shell",m]) with a local stand-in: `env HOME=<tmp>` runs the script here,
-	// against a throwaway home, exactly as the guest would run it against the
-	// run user's.
+	// `env HOME=<tmp>` stands in for the guest prefix and runs the script
+	// against a throwaway home.
 	g := Guest{Host: proc.RealRunner{}, UserPrefix: []string{"env", "HOME=" + home}}
 	prompt := filepath.Join(home, ".scion", "templates", LeverTemplateName, "system-prompt.md")
 

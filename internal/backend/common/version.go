@@ -12,9 +12,8 @@ import (
 
 // VersionAtLeast runs argv on the host, extracts "major.minor.patch" from its
 // stdout with re (three numeric capture groups), and reports whether it is
-// >= (major, minor, patch). got is the parsed version on success, or the raw
-// output on parse failure. Errors are prefixed with the argv so the preflight
-// names the tool it probed.
+// >= (major, minor, patch). got is the parsed version, or the raw output on
+// parse failure.
 func VersionAtLeast(ctx context.Context, r proc.Runner, argv []string, re *regexp.Regexp, major, minor, patch int) (ok bool, got string, err error) {
 	name := strings.Join(argv, " ")
 	res, err := r.Run(ctx, nil, argv[0], argv[1:]...)

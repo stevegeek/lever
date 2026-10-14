@@ -44,7 +44,6 @@ func newFilesFixture(t *testing.T) *filesFixture {
 	return &filesFixture{verifyFixture: verifyBroker(t, nil, filesOpt(tree, dir)), tree: tree, dir: dir}
 }
 
-// put writes content at the workspace-relative p of agent's workspace ws.
 func (f *filesFixture) put(t *testing.T, ws, p, content string) {
 	t.Helper()
 	full := filepath.Join(f.tree, ws, p)

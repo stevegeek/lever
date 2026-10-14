@@ -14,6 +14,8 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hubauth"
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/retry"
@@ -25,10 +27,7 @@ import (
 
 // ErrBootstrapLatched is returned by MintManagerBootstrap when the broker's
 // single-use /bootstrap latch is already consumed (HTTP 403). The mint step
-// tolerates it (the manager already has its bootstrap from a prior apply against
-// the SAME broker process). A broker RESTART reopens the latch, so mint then
-// succeeds and re-deposits a fresh ticket — letting a partially-failed first
-// apply recover on re-apply (vs the old skip-if-file-exists, which deadlocked).
+// tolerates it; a broker restart reopens the latch.
 var ErrBootstrapLatched = errors.New("broker /bootstrap latch already consumed")
 
 // RetryBudget bounds one of apply's polls: Attempts tries, Interval apart.
@@ -36,16 +35,13 @@ var ErrBootstrapLatched = errors.New("broker /bootstrap latch already consumed")
 type RetryBudget struct {
 	Attempts int
 	Interval time.Duration
-	// Settle is how long a record must STAY live after it is first observed
-	// live before the manager counts as up (scion.LiveBudget.Settle). Only the
-	// manager liveness budget reads it.
+	// Settle is how long a record must stay live after it is first seen live
+	// before the manager counts as up. Only the manager liveness budget reads it.
 	Settle time.Duration
 }
 
-// or fills b's unset Attempts/Interval from def; the zero value is def
-// entirely. Settle is taken as given once anything is set — zero settle is a
-// legitimate explicit choice (every test relies on it), so only the all-zero
-// budget inherits def's.
+// or fills unset Attempts and Interval from def. Only the all-zero budget
+// inherits def's Settle: a zero settle is a legitimate explicit choice.
 func (b RetryBudget) or(def RetryBudget) RetryBudget {
 	if b == (RetryBudget{}) {
 		return def
@@ -59,117 +55,84 @@ func (b RetryBudget) or(def RetryBudget) RetryBudget {
 	return b
 }
 
-// defaultBrokerStartRetry bounds the start-manager retry that absorbs the
-// runtime-broker registration race: the scion runtime broker registers with
-// the hub ASYNCHRONOUSLY after the server starts, so a start-manager that runs
-// too soon gets "no runtime brokers available". The hub itself is up (the
-// scion-server health check passed), so this is purely a timing window — retry
-// until the broker comes online. (Only the first start races; workers start
-// later when the broker is ready.)
+// defaultBrokerStartRetry absorbs the runtime broker's asynchronous
+// registration with the hub: a start-manager that runs too soon gets "no
+// runtime brokers available" although the hub is up.
 var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
 
-// defaultManagerLiveRetry bounds waitManagerLive's post-start poll.
-// The 10 s settle is lever#31: scion reports the record running before the
-// harness has run a line, and every harness death observed so far (a task past
-// the tmux cap, `claude --continue` with no conversation) landed within three
-// seconds of that. Ten seconds catches those with margin and is still
-// probabilistic for a later death. It is the window of a gate that never saw
-// claude's pane; once the pane is seen the window is harnessSettle, counted
-// from it (lever#188).
+// defaultManagerLiveRetry bounds waitManagerLive's post-start poll. scion
+// reports the record running before the harness has run a line, and every
+// harness death observed (a task past the tmux cap, claude --continue with no
+// conversation) landed within three seconds of that; the 10 s settle catches
+// those with margin but is still probabilistic. It applies to a gate that never
+// saw claude's pane; after that the window is harnessSettle, counted from the
+// pane.
 var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second, Settle: 10 * time.Second}
 
-// defaultPhaseSettleRetry bounds settleManagerPhase's wait for a record caught
-// mid-transition (transitionalPhases). A container start (pre-start hook,
-// enrolment) or a graceful stop each take a few seconds on a warm VM and
-// longer on a cold one; the budget errs long because exhausting it is a loud
-// failure the operator has to act on, while a settle that lands early costs
-// nothing but one more list.
+// defaultPhaseSettleRetry bounds settleManagerPhase. It errs long: exhausting
+// it is a loud failure the operator must act on, while an early settle costs
+// one more list.
 var defaultPhaseSettleRetry = RetryBudget{Attempts: 60, Interval: time.Second}
 
-// transitionalPhases are the phases of scion's record enum
-// (pkg/agent/state/state.go) that a record only passes THROUGH: created,
-// provisioning and cloning on the way to a first start, starting on the way
-// to running, stopping on the way to suspended/stopped. convergeManager has
-// no verb for any of them, and a snapshot of one says nothing about where the
-// record ends up — so apply waits for it to settle (settleManagerPhase)
-// rather than acting on the snapshot. Before P6 such a snapshot took the loud
-// delete+fresh path, which discarded the conversation on a routine `lever up`
-// that raced a `lever stop`.
+// transitionalPhases are scion record phases (pkg/agent/state/state.go) that a
+// record only passes through. convergeManager has no verb for them and a
+// snapshot of one says nothing about where the record ends up, so apply waits
+// for it to settle (settleManagerPhase) instead of acting on it.
 //
-// "resumed" is not in scion's hub phase enum (pkg/agent/state/state.go); it
-// is the local runtime's interim status after `scion resume`, written to the
-// record until the container's own sciontool reports "running" (16s live on
-// 2026-09-11: the broker's lapse healer bounced the manager and a `lever up`
-// inside that window was refused as an unknown phase). It settles on its own,
-// so it is transitional here too.
+// "resumed" is not in scion's hub phase enum: it is the local runtime's interim
+// status after scion resume, until the container's sciontool reports
+// "running", and it settles on its own.
 var transitionalPhases = []string{"created", "provisioning", "cloning", "starting", "stopping", "resumed"}
 
-// apiKeyPlaceholder is the sentinel ANTHROPIC_API_KEY set as a Hub secret for
-// api-key instances. It is NOT a real credential: it exists only to satisfy
-// scion's start-time auth gate so the container (and lever-agent boot) can run.
-// claude sends it as x-api-key to the broker /llm, which strips it and injects
-// the real Console key host-side. Shaped like an Anthropic key (sk-ant- prefix,
-// long) in case scion's auth resolution sanity-checks the format.
+// apiKeyPlaceholder is the ANTHROPIC_API_KEY Hub secret for api-key instances.
+// It is not a credential: it only satisfies scion's start-time auth gate. claude
+// sends it as x-api-key to the broker /llm, which strips it and injects the real
+// key host-side. It is shaped like an Anthropic key in case scion checks the
+// format.
 const apiKeyPlaceholder = "sk-ant-placeholder0lever0broker0injects0the0real0key0do0not0use000000000000000000000000"
 
-// BootstrapMaterial is what the manager's lever-agent consumes to enrol. It is
-// an alias for wire.Bootstrap — the ONE declaration of the enrolment envelope
-// (previously this type carried its own hand-maintained, "must stay identical"
-// copy of the json tags). The alias keeps the apply-domain name at every call
-// site while the field/tag definition lives in exactly one place.
+// BootstrapMaterial is what the manager's lever-agent consumes to enrol.
 type BootstrapMaterial = wire.Bootstrap
 
-// run is one apply execution: the config it converges, the collaborators it
-// acts through, and the one piece of cross-step state the plan carries.
-// Every step executor is a method on it so the per-step signatures stop
-// repeating (ctx, app, d, name, jp, ...).
+// run is one apply execution: the config it converges, its collaborators, and
+// the cross-step state the plan carries.
 type run struct {
-	app *config.App
-	d   Deps
-	// brokerStart, managerLive and phaseSettle are the resolved retry
-	// budgets (Deps overrides or the defaults), fixed for the run.
+	app                                   *config.App
+	d                                     Deps
 	brokerStart, managerLive, phaseSettle RetryBudget
-	// minted records whether THIS apply run actually minted fresh bootstrap
-	// material (as opposed to the mint-manager-bootstrap step tolerating an
-	// already-spent latch — e.g. an idempotent re-apply against the same broker
-	// process; see ErrBootstrapLatched). start-manager's create path needs
-	// exactly that "did we mint fresh material this run" signal.
+	// minted records whether this run minted fresh bootstrap material rather
+	// than tolerating a spent latch (ErrBootstrapLatched); start-manager's create
+	// path depends on it.
 	minted bool
-	// progress is the start-manager progress line while the manager is
-	// started and gated (nil outside that window).
+	// progress is the start-manager progress line; nil outside that window.
 	progress *Progress
 	// fresh is PlanOpts.Fresh: discard any present manager record at
-	// start-manager (lever#33).
+	// start-manager.
 	fresh bool
-	// attach is PlanOpts.Attach: start-manager's gate for a manager this
-	// run created ends once claude's pane is alive (lever#188); a resume's
-	// gate waits for claude's session start as without it (lever#202).
+	// attach is PlanOpts.Attach: the gate for a manager this run created ends once
+	// claude's pane is alive; a resume's gate still waits for claude's session
+	// start.
 	attach bool
-	// freshNoConv is PlanOpts.FreshWithoutConversation (lever#202).
+	// freshNoConv is PlanOpts.FreshWithoutConversation.
 	freshNoConv bool
-	// unattended is set while start-manager makes the fresh start of a
-	// manager with no conversation (lever#202): the create records its
-	// session with unattendedCommit (Deps.BeginUnattendedSession), never
-	// with Deps.BeginSession. A nil unattendedCommit records nothing.
+	// unattended is set while start-manager makes the fresh start of a manager
+	// with no conversation: the create records its session through
+	// unattendedBegin, never Deps.BeginSession. A nil unattendedBegin records
+	// nothing.
 	unattended        bool
 	unattendedBegin   func() (commit func() error, err error)
 	unattendedRefused bool
-	// managerCreated records that THIS run created the manager record (a
-	// create that answered "already exists" does not count). Only a created
-	// record is known to carry the manager.read_only mounts; any other is
-	// probed and warned about (warnManagerTreeMounts).
+	// managerCreated records that this run created the manager record ("already
+	// exists" does not count). Only such a record is known to carry the
+	// manager.read_only mounts; any other is probed (warnManagerTreeMounts).
 	managerCreated bool
-	// brokerOnline records that the scion-server step saw the runtime
-	// broker online after its hub start, so start-manager need not wait
-	// for it again.
+	// brokerOnline records that the scion-server step already saw the runtime
+	// broker online, so start-manager need not wait for it again.
 	brokerOnline bool
-	// subject prefixes the resume checks' messages: "start-manager" in
-	// Run, the command's own name on the other resume paths
-	// (ManagerResume).
+	// subject prefixes the resume checks' messages; empty means "start-manager".
 	subject string
 }
 
-// subjectName is the prefix of the resume checks' messages.
 func (r *run) subjectName() string {
 	if r.subject != "" {
 		return r.subject
@@ -177,396 +140,288 @@ func (r *run) subjectName() string {
 	return "start-manager"
 }
 
-// StageBootstrapMaterial writes m as the manager's one-time enrolment ticket
-// into treeDir/.lever/bootstrap.json (0600) — the path lever-agent boot reads
-// by convention (see start-manager's LEVER_BOOTSTRAP comment below). This is
-// the ONE staging code path, shared by the mint-manager-bootstrap step and
-// start-manager's create-path re-arm (Deps.RearmBootstrap, implemented by the
-// CLI, which stages directly into the tree since start-manager's Step.Target
-// is the manager's slug, not the tree dir — see JailPath/Plan).
+// StageBootstrapMaterial writes m as the manager's one-time enrolment ticket to
+// treeDir/.lever/bootstrap.json (0600), where lever-agent boot reads it. It is
+// the only staging path, shared by the mint step and Deps.RearmBootstrap.
 func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
-	// treeDir is the confinement anchor: it is the mount point, the one
-	// component an agent cannot replace. Everything below it is agent-writable,
-	// so wire.Stage refuses to follow a symlink planted at `.lever`.
+	// treeDir is the mount point, the one component the agent cannot replace.
+	// Everything below it is agent-writable, so wire.Stage refuses to follow a
+	// symlink planted at .lever.
 	return wire.Stage(treeDir, ".lever", m)
 }
 
 // Deps are the executor's collaborators, injected so Run is testable offline.
-// LoadImage and friends are host-side (docker-save|podman-load); Scion runs IN
-// the jail (built on a JailRunner). Every func field except ReadCred,
-// ImageTagPolicy, InspectContainerMounts and CheckLiveMounts is REQUIRED: Run refuses (Deps.check) before its first step when one is nil,
-// so a wiring gap fails loudly instead of silently skipping a step. The CLI
-// wires all of them (buildApplyDeps); tests fill the ones they do not assert
-// on with inert implementations.
+// Scion runs in the jail. Every func field except ReadCred, ImageTagPolicy,
+// InspectContainerMounts and CheckLiveMounts is required: Run refuses
+// (Deps.check) before its first step when one is nil, so a wiring gap fails
+// loudly instead of skipping a step.
 type Deps struct {
 	LoadImage func(ctx context.Context, imageRef string) error
-	// ImageLoaded reports whether the jail already holds imageRef at the same
-	// image ID as the host, letting the load-image step skip a redundant
-	// multi-GB `docker save | podman load` re-stream. This is what stops a
-	// re-apply (including the first-boot retry loop, which re-runs the WHOLE
-	// plan on any step failure) from re-importing every image each time. It is
-	// fail-open by construction (false on any uncertainty), so a wrong answer
-	// costs a redundant load, never a wrongly-skipped one.
+	// ImageLoaded reports whether the jail already holds imageRef at the host's
+	// image ID, so a re-apply skips the multi-GB re-stream. It is fail-open (false
+	// on any uncertainty): a wrong answer costs a redundant load, never a wrongly
+	// skipped one.
 	ImageLoaded func(ctx context.Context, imageRef string) bool
-	// LoadImageTar and ImageLoadedTar are the same pair for an image that
-	// ships as a docker archive (Step.TarPath, from image_tar): the load
-	// streams the file into the jail and the guard compares the archive's
-	// config digest with the jail's ID, so neither touches host docker
-	// (lever#32). Same fail-open contract as ImageLoaded. The load takes
-	// ImageTagPolicy as its allowTag.
+	// LoadImageTar and ImageLoadedTar are the same pair for an image shipped as a
+	// docker archive (Step.TarPath); neither touches host docker. Same fail-open
+	// contract. The load takes ImageTagPolicy as its allowTag.
 	LoadImageTar   func(ctx context.Context, imageRef, tarPath string, allowTag func(ref string) error) error
 	ImageLoadedTar func(ctx context.Context, imageRef, tarPath string) bool
-	// ImageTagPolicy is applied to EVERY tag an image_tar archive carries
-	// before a byte of it is streamed into the jail (R4): a docker archive
-	// can hold several images and `podman load` imports all of them, so the
-	// config ref alone passing security.allowed_image_registries proved
-	// nothing about the rest. OPTIONAL: nil = no policy (the CLI wires
-	// config.Security.ImageTagPolicy, which is nil when no allowlist is set).
+	// ImageTagPolicy is applied to every tag an image_tar archive carries before
+	// any byte is streamed into the jail: an archive can hold several images and
+	// podman load imports all of them, so the config ref passing the registry
+	// allowlist proves nothing about the rest. Optional: nil means no policy.
 	ImageTagPolicy func(ref string) error
-	// PruneImages reclaims dangling images from the jail after a load, so a
-	// rebuilt image does not ratchet the grow-only jail disk up by a full image
-	// size (the superseded copy goes untagged). A no-op when the load added a
-	// new image. Best-effort: a prune failure is logged, not fatal to the
-	// bring-up.
+	// PruneImages removes dangling images after a load, so a rebuilt image does
+	// not grow the grow-only jail disk by a full image. Best-effort.
 	PruneImages func(ctx context.Context) error
-	// WarmImage starts imageRef once under scion's user-namespace mapping so
-	// the first agent start finds podman's id-mapped layer copy built
-	// (lever#165). The load-image step runs it on every image, loaded this
-	// apply or not, bounded by imageWarmTimeout. Best-effort: a failure is
-	// logged, not fatal to the bring-up.
+	// WarmImage starts imageRef once under scion's user-namespace mapping so the
+	// first agent start finds podman's id-mapped layer copy built. It runs on every
+	// image, bounded by imageWarmTimeout. Best-effort.
 	WarmImage func(ctx context.Context, imageRef string) error
 	Scion     *scion.Client
 	ReadCred  func(path string) (string, error) // nil ⇒ defaultReadCred
 	JailMount string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
-	// HubSessionSecret is the hub's session-cookie signing key, threaded into
-	// every hub start this package orders (HubServerOpts). The CLI ensures it
-	// host-side before Run (state.State.EnsureSessionSecret), so the same
-	// key survives hub restarts and browser sessions with it. An argv-only
-	// option: a hub already running keeps its old key until something restarts
-	// it, and introducing the secret does NOT order that restart itself — a
-	// restart drops every agent's hub connection and, with the old key random
-	// and in-memory, would force the very logout it exists to prevent; the
-	// next restart the hub was getting anyway adopts the key at no extra cost.
-	// "" omits the flag (tests; scion falls back to a per-boot random key).
+	// HubSessionSecret is the hub's session-cookie signing key, passed to every
+	// hub start (HubServerOpts) so browser sessions survive hub restarts. It is
+	// argv-only: a running hub keeps its old key, and apply does not restart the
+	// hub to adopt it, since a restart drops every agent's hub connection and would
+	// force the logout the key prevents. "" omits the flag (scion then uses a
+	// per-boot random key).
 	HubSessionSecret string
 	StartBroker      func(ctx context.Context) error
 	BrokerHealthy    func(ctx context.Context) error
-	// EnsureControllerPAT runs the bootstrap-token step: the whole controller-PAT
-	// mint window as one injected op, keeping this package scion-agnostic (the
-	// CLI wires the real throwaway-hub → mint → persist → kill → delete-dev-token
-	// logic — see plan.go's bootstrap-token Step doc). It MUST be idempotent: if
-	// a valid PAT is already persisted, no-op.
-	EnsureControllerPAT func(ctx context.Context) error
-	// WaitBrokerReady blocks until the scion runtime broker is registered AND
-	// online, right before start-manager acts, and after the scion-server
-	// step starts the hub. The workstation daemon brings up
-	// its Hub API (confirmed by scion-server's waitHubReady) and its runtime
-	// broker separately, so without this gate the first create/resume races the
-	// broker's async registration — the flakiness that made first-boot need a
-	// second `up`. The implementation is fail-soft (returns nil on timeout), so
-	// it never fails the bring-up on its own; the start path's broker-unavailable
-	// retry still backstops it. It reports whether it saw the broker online,
-	// so start-manager can skip its own wait when the scion-server step's saw
-	// it in the same run (lever#190).
+	// EnsureHubIdentity runs the hub-identity step against the live hub: the
+	// admin and controller identities, scion's experiments lever keeps off,
+	// the project, the controller PAT and the remote logins (invited and bound
+	// before they first sign in). It is idempotent, never lists containers,
+	// and runs while agents run.
+	EnsureHubIdentity func(ctx context.Context) error
+	// HubAuthEnv pins the hub's auth configuration on every hub start (see
+	// scion.ServerOpts.Env). It also carries the assertion key's fingerprint,
+	// so a hub started before a key change is detected and restarted.
+	HubAuthEnv map[string]string
+	// EnsureProjectProvider runs before each hub link (whose agent sync needs a
+	// broker) and again when the project settles: when the instance's hub
+	// project lists no runtime broker, it links the jail's broker to it as
+	// lever-admin, or fails. A project the hub does not list is left alone.
+	EnsureProjectProvider func(ctx context.Context, jailWorkspacePath string) error
+	// WaitBrokerReady blocks until the scion runtime broker is registered and
+	// online. The workstation daemon brings up its Hub API and its runtime broker
+	// separately, so without it the first create or resume races the broker's
+	// async registration. It is fail-soft (nil on timeout); the start path's
+	// broker-unavailable retry backstops it. It reports whether it saw the broker
+	// online so start-manager can skip its own wait.
 	WaitBrokerReady      func(ctx context.Context, project string) (online bool, err error)
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
-	// RearmBootstrap restarts the broker (re-arming its single-use /bootstrap
-	// latch; broker CA + signing keys persist on disk so existing agent certs
-	// and capability tokens survive the restart), then mints AND STAGES fresh
-	// bootstrap material exactly like the mint-manager-bootstrap step. Called
-	// by start-manager's create path when no fresh material was minted this
-	// apply (the mint step tolerated a spent latch).
+	// RearmBootstrap restarts the broker to re-arm its single-use /bootstrap latch
+	// (the CA and signing keys persist, so agent certs and capability tokens
+	// survive), then mints and stages fresh bootstrap material. start-manager's
+	// create path calls it when this apply minted none.
 	RearmBootstrap func(ctx context.Context) error
-	// EnsureHubLogin brings the GUEST half of the remote-access login path up
-	// to date before the hub starts: the loopback forwarder that makes
-	// lever's host-side OIDC provider look local to the hub, and the
-	// `oidc_login` block in the guest's ~/.scion/settings.yaml. It reports
-	// whether that configuration changed, which is the signal to restart a
-	// hub that is already running — see scionServer. It is the CLI's job
-	// to make this a no-op when remote access is off.
-	EnsureHubLogin func(ctx context.Context) (bool, error)
-	// DisableHubLogin converges the GUEST half of the login path off: stop and
-	// remove the forwarder, drop the `oidc_login` block. Like StopRemoteProxy
-	// it is NOT a Plan step — Run calls it whenever app.RemoteEnabled() is
-	// false, so an instance that turned remote access back off does not keep
-	// an unauthenticated jail→host loopback bridge alive for a feature that no
-	// longer exists.
-	//
-	// It reports "changed" on the same terms EnsureHubLogin does, and Run acts
-	// on it the same way: a change means a hub that is already running was
-	// started from state this call has now removed, so it is restarted. See
-	// disableHubLogin for what counts as a change and why the forwarder does
-	// not.
-	DisableHubLogin func(ctx context.Context) (bool, error)
-	// EnsureScionTelemetry converges the top-level `telemetry:` block of the
-	// guest's ~/.scion/settings.yaml on config scion.telemetry (the CLI binds
-	// the mode), reporting whether the file changed. It runs in the
-	// scion-server step, before the hub starts, so a first bring-up creates
-	// the hub and the manager with it already in place.
-	//
-	// A change is LOGGED, never acted on: the runtime broker reads the block at
-	// every agent start, but a running container keeps the env it was created
-	// with and the hub caches the block at its own startup. `lever stop &&
-	// lever up` applies it everywhere; lever does not bounce a running hub or
-	// manager for a telemetry posture.
+	// EnsureHubAuth installs the assertion public key in the guest and
+	// converges the hub's auth settings before the hub starts. It reports
+	// whether a running hub must restart to read them.
+	EnsureHubAuth func(ctx context.Context) (bool, error)
+	// EnsureScionTelemetry converges the telemetry block of the guest's
+	// ~/.scion/settings.yaml on config scion.telemetry and reports whether it
+	// changed. A change is only logged: the runtime broker reads the block at every
+	// agent start, but a running container keeps its env and the hub caches the
+	// block at startup, and lever does not bounce either for telemetry.
 	EnsureScionTelemetry func(ctx context.Context) (bool, error)
-	// EnsureAgentTemplate backs the agent-template step: put lever's overlay
-	// template in front of scion's stock `default` so newly provisioned agents
-	// do NOT launch with `--system-prompt '# Placeholder'`, which replaces
-	// Claude Code's entire built-in system prompt. projectDir is JAIL-side —
-	// the scion client behind it runs in the jail, where the host tree exists
-	// only at the mount point (project scope is the only settings scope that wins) and
-	// reports whether it changed anything.
-	//
-	// Provisioning-time only, by nature: scion stages an agent's system prompt
-	// once, when its home is created, and never re-stages it. So this governs
-	// agents created from now on; an agent that already exists keeps whatever
-	// it was provisioned with until its staged input is changed in place.
+	// EnsureAgentTemplate puts lever's overlay template in front of scion's stock
+	// default so new agents do not launch with --system-prompt '# Placeholder',
+	// which replaces Claude Code's whole built-in system prompt. projectDir is
+	// jail-side; project scope is the only settings scope that wins. It reports
+	// whether it changed anything. scion stages an agent's system prompt only when
+	// its home is created, so this governs agents created from now on.
 	EnsureAgentTemplate func(ctx context.Context, projectDir string) (bool, error)
-	// BeginSession, when set, is called before the manager is created and
-	// returns what records that session's fresh start (package sessionrec):
-	// it notes the skill on disk now, and the returned commit writes the
-	// record once scion created the agent. It is never called on a resume,
-	// and commit never runs when scion reports the agent already existed, so
-	// a resumed conversation is never recorded as fresh. The remote proxy
-	// lets a contact post to an agent only after such a record. A commit
-	// error is logged, not fatal: the manager is up, and without the record
-	// contacts are refused (fail closed). Nil records nothing.
+	// BeginSession, when set, is called before the manager is created and returns
+	// what records that fresh start (package sessionrec): it notes the skill on
+	// disk now, and commit writes the record once scion created the agent. It is
+	// never called on a resume, and commit never runs when scion reports the agent
+	// already existed, so a resumed conversation is never recorded as fresh. The
+	// remote proxy lets a contact post to an agent only after such a record. A
+	// commit error is logged, not fatal: without the record contacts are refused
+	// (fail closed). Nil records nothing.
 	BeginSession func(agent string) (commit func() error)
-	// BeginUnattendedSession is BeginSession for the fresh start lever makes
-	// on its own, without the operator's --fresh: a manager with no
-	// conversation to continue (lever#202). The agent can bring that start
-	// about (an emptied home, a claude that exits), and its tree holds the
-	// skill the record names, so such a start must not re-baseline the
-	// session on a skill the agent wrote. It is called before the record is
-	// deleted, and when the skill on disk is not the one the manager's last
-	// recorded session started with it records, at once, a session matching
-	// no skill (UnattendedSession.Refused says why), so contacts stay refused
-	// even if the old skill text comes back. UnattendedSession.Begin runs
-	// after the delete, right before the create, when the old container can
-	// no longer write the tree: it reads the skill again and returns the
-	// commit that records the new session only over that same skill. An
-	// error from either means the refusing record could not be written:
-	// lever then does not start (or create) the manager on its own. When
-	// BeginSession is set and this is nil, lever does not start it either.
+	// BeginUnattendedSession is BeginSession for a fresh start lever makes on its
+	// own, for a manager with no conversation to continue. The agent can bring
+	// that start about and its tree holds the skill the record names, so such a
+	// start must not re-baseline the session on a skill the agent wrote. It is
+	// called before the record is deleted; when the skill on disk is not the one
+	// the last recorded session started with, it records at once a session
+	// matching no skill (UnattendedSession.Refused), so contacts stay refused even
+	// if the old skill text comes back. UnattendedSession.Begin runs after the
+	// delete, when the old container can no longer write the tree: it re-reads the
+	// skill and returns a commit that records the new session only over that same
+	// skill. An error from either means the refusing record could not be written,
+	// and lever then does not start or create the manager. When BeginSession is
+	// set and this is nil, lever does not start it either.
 	BeginUnattendedSession func(agent string) (UnattendedSession, error)
-	// BackupManagerConversation, when set, runs under PlanOpts.Fresh just
-	// before the manager record rec is deleted (scion deletes the record's
-	// home, and the conversation with it). An error stops the fresh start
-	// with nothing deleted: a backup the operator asked for never fails
-	// silently into a discard (lever#198). Nil backs nothing up
-	// (`up --fresh --no-backup`, and `apply`, which never deletes a record).
-	//
-	// It also runs before the fresh start that replaces a resume with no
-	// conversation to continue (PlanOpts.FreshWithoutConversation): that
-	// start is proven to lose nothing, and the backup is the second guard.
+	// BackupManagerConversation, when set, runs under PlanOpts.Fresh just before
+	// the manager record rec is deleted (scion deletes its home and conversation
+	// with it). An error stops the fresh start with nothing deleted. Nil backs
+	// nothing up. It also runs, as a second guard, before the fresh start that
+	// replaces a resume with no conversation (PlanOpts.FreshWithoutConversation).
 	BackupManagerConversation func(ctx context.Context, rec *scion.Agent) error
-	// ManagerConversationEmpty proves, from the guest, that the manager's
-	// agent home holds no conversation: no transcript with content in
-	// .claude/projects, no link or special file there, and no other
-	// projects directory beside it (convbackup.Guest.Transcripts). nil means
-	// proven; any error (the reason, made safe to print) means not proven,
-	// and start-manager then starts nothing fresh on its own (lever#202).
-	// nil func: never proven.
+	// ManagerConversationEmpty proves, from the guest, that the manager's agent
+	// home holds no conversation: no transcript with content in .claude/projects,
+	// no link or special file there, and no other projects directory beside it
+	// (convbackup.Guest.Transcripts). nil means proven; any error (the reason, made
+	// safe to print) means not proven, and start-manager then starts nothing fresh
+	// on its own. A nil func never proves it.
 	ManagerConversationEmpty func(ctx context.Context) error
-	// InspectContainerMounts reads a jail container's mounts (id or name),
-	// jail.ContainerMounts in production. Used to warn when a manager that
-	// apply kept or resumed lacks the manager.read_only mounts, which only a
-	// create can add, and, before the keep or resume, to find mounts the
-	// record holds that the config dropped or whose directory is gone
-	// (checkStaleTreeMounts). nil ⇒ the warning says it could not check.
+	// InspectContainerMounts reads a jail container's mounts. It is used to warn
+	// when a kept or resumed manager lacks the manager.read_only mounts, which only
+	// a create adds, and to find mounts the record holds that the config dropped or
+	// whose directory is gone (checkStaleTreeMounts). nil: the warning says it
+	// could not check.
 	InspectContainerMounts func(ctx context.Context, ref string) ([]jail.Mount, error)
-	// CheckLiveMounts checks a running container's mounts from the guest
-	// side (jail.ContainerLiveMounts in production: the kernel's mountinfo
-	// and the device and inode behind each mount, no program run inside
-	// the container, which the agent controls): the live check that a
-	// read_only entry is mounted read-only and was not replaced on the host
-	// after the manager was created. nil ⇒ the warning says it could not
-	// check.
+	// CheckLiveMounts checks a running container's mounts from the guest side
+	// (mountinfo plus device and inode; nothing runs inside the agent-controlled
+	// container): that a read_only entry is mounted read-only and was not replaced
+	// on the host since create. nil: the warning says it could not check.
 	CheckLiveMounts LiveMountChecker
-	// ProbeContainerDevice asks a running container whether path is a
-	// character device in it (jail.ContainerHasCharDevice in production).
-	// Used to warn when nested_virt is on and the manager's container lacks
-	// /dev/kvm (the podman drop-in reaches containers at create time). nil
-	// means the warning says it could not check. Optional.
+	// ProbeContainerDevice reports whether path is a character device in a
+	// running container. It is used to warn when nested_virt is on and the
+	// manager lacks /dev/kvm (the podman drop-in reaches containers only at
+	// create). Optional.
 	ProbeContainerDevice func(ctx context.Context, ref, path string) (bool, error)
 	// ReadClaudeSettings reads back the Claude config in a running agent
-	// container (jail.AgentProbe.ClaudeSettings in production). Used to warn
-	// when the live manager holds other claude_settings / after_compact_note
-	// than the config: they apply at start, so a kept manager has the old
-	// ones until its next start. nil skips the warning. Optional.
+	// container, to warn when the live manager holds other claude_settings or
+	// after_compact_note than the config (they apply only at start). Optional.
 	ReadClaudeSettings func(ctx context.Context, ref string) (jail.ClaudeDelivered, error)
-	// BackgroundSessions counts stale Claude background-session records in
-	// an agent container (jail.AgentProbe.BackgroundSessions in production).
-	// When the manager liveness gate sees the harness die and the container
-	// still runs, stale records are the cause it names first, with the
-	// recovery (withHarnessDeathHint). Only counts come back. nil skips it.
-	// Optional.
+	// BackgroundSessions counts stale Claude background-session records in an
+	// agent container: the first cause the manager gate names when the harness
+	// dies and the container still runs (withHarnessDeathHint). Only counts come
+	// back. Optional.
 	BackgroundSessions func(ctx context.Context, ref string) (jail.BackgroundRecords, error)
-	// HarnessLogTail reads the tail of an agent container's log
-	// (jail.AgentProbe.LogTail in production): the fallback when
-	// BackgroundSessions names no cause (the container is gone, say). It is
-	// matched for fixed phrases (HarnessDeathHint) and never printed. nil
-	// skips the fallback. Optional.
+	// HarnessLogTail reads the tail of an agent container's log, the fallback when
+	// BackgroundSessions names no cause. The tail is agent-controlled: it is only
+	// matched for fixed phrases (HarnessDeathHint) and never printed. Optional.
 	HarnessLogTail func(ctx context.Context, ref string) (string, error)
-	// RecordVolumes reads the extra mounts the hub record of agent in
-	// project was created with (its inline-config volumes, through the
-	// controller's read-only agent listing), as jail mounts. It is
-	// checkStaleTreeMounts' fallback when the manager has no container to
-	// inspect. nil (or an error) ⇒ no fallback.
+	// RecordVolumes reads the extra mounts the hub record of agent was created
+	// with, as jail mounts: checkStaleTreeMounts' fallback when the manager has no
+	// container to inspect. nil (or an error): no fallback.
 	RecordVolumes func(ctx context.Context, project, agent string) ([]jail.Mount, error)
-	// AgentSession reads a running agent's session from inside its container
-	// (jail.AgentProbe in production) so start-manager can heal an expired
-	// hub token and a hub phase "stopped" over a harness that still runs
-	// (HealAgentSession) before it converges the manager, and the workers'
-	// after. nil ⇒ no heal.
+	// AgentSession reads a running agent's session from inside its container so
+	// start-manager can heal an expired hub token or a "stopped" phase over a live
+	// harness (HealAgentSession) before it converges. nil: no heal.
 	AgentSession AgentSessionProbe
-	// ContainerRunning asks podman itself whether an agent container runs
-	// (jail.ContainerRunning in production), not the hub's heartbeat column.
-	// The manager gate reads it when claude's tmux pane is not alive, to tell
-	// a container that stopped (a failed pre-start hook) from one still
-	// booting, and as its fallback when the pane cannot be probed. nil ⇒ the
-	// gate has only the pane probe.
+	// ContainerRunning asks podman, not the hub heartbeat, whether an agent
+	// container runs. The manager gate reads it when claude's pane is not alive, to
+	// tell a stopped container (a failed pre-start hook) from a booting one, and as
+	// its fallback when the pane cannot be probed.
 	ContainerRunning func(ctx context.Context, ref string) (bool, error)
-	// ContainerStartedBeforeBoot asks podman whether an agent container
-	// last started before the guest's current boot
-	// (jail.ContainerStartedBeforeBoot in production). The guest-restart
-	// recovery reads it only when GuestBoot kept no boot id (the first
-	// bring-up after an upgrade). nil ⇒ no such fallback.
+	// ContainerStartedBeforeBoot reports whether an agent container last started
+	// before the guest's current boot. The guest-restart recovery reads it only
+	// when GuestBoot kept no boot id. nil: no fallback.
 	ContainerStartedBeforeBoot func(ctx context.Context, ref string) (bool, error)
-	// GuestBoot reads the jail guest's boot id and keeps the one the
-	// manager last ran live in, so a record left "running" by a hard VM
-	// kill is suspended and resumed instead of refused (GuestBoot's doc).
-	// nil ⇒ no recovery and nothing recorded. Optional.
+	// GuestBoot reads the guest's boot id and keeps the one the manager last ran
+	// live in, so a record left "running" by a hard VM kill is suspended and
+	// resumed instead of refused. Optional.
 	GuestBoot GuestBoot
-	// HarnessWait bounds how long the manager gate waits, once the hub record
-	// reads live, for claude's tmux pane to come alive (the pre-start hook
-	// runs first). Zero takes the production default (2 min).
+	// HarnessWait bounds how long the manager gate waits, once the record reads
+	// live, for claude's tmux pane (the pre-start hook runs first). Zero means
+	// 2 min.
 	HarnessWait time.Duration
-	// ReadyWait bounds how long the manager gate waits, once claude's pane
-	// is alive, for claude to report its session started (the claude-ready
-	// marker, lever#188). Zero takes the production default (2 min).
+	// ReadyWait bounds how long the manager gate waits, once claude's pane is
+	// alive, for claude's session-start marker. Zero means 2 min.
 	ReadyWait time.Duration
-	// clock and progressTicker drive the start progress line (Progress);
-	// nil ⇒ time.Now and a real ticker. Tests inject both.
+	// clock and progressTicker drive the progress line; nil means time.Now and a
+	// real ticker.
 	clock          func() time.Time
 	progressTicker func(time.Duration) (<-chan time.Time, func())
-	// AgentRevoked reports an agent (by slug) the broker has revoked, read
-	// from the persisted revocation list, so the session heal does not reset
-	// a revoked agent's hub token. nil ⇒ none known.
+	// AgentRevoked reports an agent the broker has revoked, so the session heal
+	// never resets a revoked agent's hub token. nil: none known.
 	AgentRevoked func(agent string) bool
-	// StartRemoteProxy backs the remote-proxy step (present only when
-	// app.RemoteEnabled(); see Plan): spawn — or confirm already running —
-	// the daemonized `lever remote serve` proxy (a config with remote disabled
-	// never reaches this step at all).
+	// StartRemoteProxy starts, or confirms running, the daemonized lever remote
+	// serve proxy. Plan includes its step only when remote access is on.
 	StartRemoteProxy func(ctx context.Context) error
-	// StopRemoteProxy tears the remote proxy down (by pidfile, tolerant of
-	// an absent or stale one). It is NOT called from a Plan step — Run calls
-	// it directly, unconditionally, whenever app.RemoteEnabled() is false,
-	// so a proxy left running from a prior apply (remote.enabled flipped
-	// back off since) converges to stopped rather than going on serving
-	// traffic the config no longer authorizes.
+	// StopRemoteProxy stops the remote proxy by pidfile, tolerating an absent or
+	// stale one. Run calls it whenever remote access is off, so a proxy left by a
+	// prior apply stops serving traffic the config no longer authorizes.
 	StopRemoteProxy func(ctx context.Context) error
-	// RemoveJailFile removes a regular file at a jail-absolute path, through the
-	// jail's own filesystem view. Used for the stale `.scion` marker so the
-	// removal and the subsequent in-jail `scion init` cannot race across the
-	// host/guest VirtioFS boundary (a host-side unlink is not promptly visible
-	// to the guest's directory cache). Must NOT remove directories.
+	// FenceRemoteLogins runs before every step: it records what each remote
+	// login may now do, which a running proxy checks on every request, and
+	// stops the proxy when remote access is off. A removed or narrowed login
+	// so loses the proxy at once, whatever a later step does: nothing an
+	// agent can disturb (the hub, the controller's address) stands between
+	// the operator's edit and the revocation.
+	FenceRemoteLogins func(ctx context.Context) error
+	// RemoveJailFile removes a regular file at a jail-absolute path through the
+	// jail's own view, so removing the stale .scion marker cannot race the in-jail
+	// scion init across VirtioFS (a host-side unlink is not promptly visible in the
+	// guest's directory cache). Must not remove directories.
 	RemoveJailFile func(ctx context.Context, jailPath string) error
-	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
-	// registration(s) whose workspace_path == jailWorkspacePath, BEFORE the
-	// register-project step re-inits. Without this, every apply
-	// mints a fresh registration via `scion init` and the old ones accumulate
-	// (the `lever doctor` "duplicate registrations" finding) — this is the
-	// removal counterpart to RemoveJailFile's marker-race fix above.
+	// RemoveScionProjectConfigs removes stale ~/.scion/project-configs
+	// registrations whose workspace_path is jailWorkspacePath before the
+	// register-project step re-inits; otherwise every scion init leaves another
+	// registration behind.
 	RemoveScionProjectConfigs func(ctx context.Context, jailWorkspacePath string) error
-	// ScionProjectRegistered observes whether jailWorkspacePath already has
-	// exactly one valid scion registration (one project-configs entry + the
-	// in-tree marker present) BEFORE the register-project step
-	// decides whether to run its destructive clean+init path at all. true →
-	// skip marker removal, RemoveScionProjectConfigs, and `scion init`/`hub
-	// link` entirely, so a re-apply does not tear down (and orphan) a
-	// resumable scion agent record just to re-mint an identical registration.
-	// A query error falls through to the destructive path unchanged
-	// (fail-open — an observe failure must never turn into a hard apply
-	// failure, and zero/duplicate/torn registrations legitimately need it).
+	// ScionProjectRegistered reports whether jailWorkspacePath already has exactly
+	// one valid scion registration (one project-configs entry and the in-tree
+	// marker). true skips the destructive clean and init, which would orphan a
+	// resumable agent record. A query error falls through to the destructive path
+	// (fail-open: zero, duplicate or torn registrations need it).
 	ScionProjectRegistered func(ctx context.Context, jailWorkspacePath string) (bool, error)
-	// StripProjectSharedDirs removes scion's default `scratchpad` shared dir
-	// from the hub's record of the named project (scion#925). The hub stamps it
-	// on every NEW project and mounts it read-write into EVERY agent of that
-	// project, which is a writable channel between the manager and every worker
-	// — the opposite of lever's subtree isolation. lever's hub runs file/SQLite,
-	// where the server-side default cannot be turned off, so per-project removal
-	// is the only route. Runs on BOTH register paths (already-registered and
-	// freshly re-inited), because a project created before this step existed
-	// still carries the mount. The broker-only VM gate never reaches it at
-	// all: Plan filters KindRegisterProject out entirely.
+	// ProjectLinked reports whether the jail's scion settings for
+	// jailWorkspacePath say the project is hub-linked to the project ID
+	// hub-identity recorded. A sound registration that is not linked is
+	// re-linked, never settled as is.
+	ProjectLinked func(ctx context.Context, jailWorkspacePath string) (bool, error)
+	// StripProjectSharedDirs removes scion's default scratchpad shared dir from
+	// the hub's record of the project. The hub stamps it on every new project and
+	// mounts it read-write into every agent: a writable channel between the manager
+	// and every worker that breaks lever's subtree isolation, and lever's
+	// file/SQLite hub cannot turn the default off. It runs on both register paths,
+	// since an older project still carries the mount.
 	//
-	// A failure is fatal to apply. The alternative is starting a manager and
-	// workers that share a writable directory while the operator believes
-	// they do not, and a silent security regression is worse than a loud
-	// bring-up failure. The hub knows the project by the workspace basename
-	// — the same name ensureControllerPAT passes to `hub token create` — so
-	// the two stay consistent by construction.
+	// A failure is fatal to apply: agents silently sharing a writable directory is
+	// worse than a loud bring-up failure. The project name is the workspace
+	// basename, as ensureControllerPAT passes to hub token create.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
-	// EnsureAgentRoleCeiling writes the project's max/default agent role so the
-	// HUB refuses any create above the role lever stamps — the hub-side
-	// counterpart of `--role` (see hubapi.Client.EnsureAgentRoleCeiling). Runs
-	// on both register paths, like the strip, because a project created before
-	// this step existed has no ceiling. A failure is fatal to apply for the
-	// same reason: an instance whose only role bound is lever's own stamp,
-	// while the operator believes the hub enforces one, is a silent
-	// regression.
+	// EnsureAgentRoleCeiling writes the project's max and default agent role so
+	// the hub refuses any create above the role lever stamps (the hub-side
+	// counterpart of --role). It runs on both register paths, and a failure is
+	// fatal for the same reason as the strip: a ceiling the operator believes the
+	// hub enforces but it does not is a silent regression.
 	EnsureAgentRoleCeiling func(ctx context.Context, projectName string) error
-	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the project's
-	// scion registration when it no longer matches the real hub. Minting the
-	// controller PAT `hub link`s the project against a THROWAWAY hub on its own
-	// port; the register step's re-init would overwrite that, but it is skipped
-	// whenever the registration is already sound, so a re-mint on an established
-	// instance leaves the project pointing at a dead port. Every lever call
-	// passes the endpoint explicitly, so the breakage lands only where scion runs
-	// bare in the jail — `lever attach` (live failure 2026-08-11).
+	// RepairScionHubEndpoint rewrites the project's recorded hub endpoint when it
+	// differs from the real hub's. A registration linked against a hub on another
+	// port keeps that endpoint, since the register step's re-init is skipped when
+	// the registration is sound. lever passes the endpoint explicitly, so a stale
+	// one only breaks where scion runs bare in the jail (lever attach).
 	RepairScionHubEndpoint func(ctx context.Context, jailWorkspacePath string) error
-	// VerifyAgentRole gates KEEPING an existing agent record. It returns a
-	// descriptive error when the hub's record for that agent stores no
-	// authorization role while the installed scion understands roles — the state
-	// a pin bump across scion#1089 leaves behind, because the role is written on
-	// the create path only and is immutable after.
+	// VerifyAgentRole gates keeping an existing agent record: it errors when the
+	// hub's record stores no authorization role while the installed scion
+	// understands roles (a record created before scion had roles; the role is set
+	// only at create and is immutable).
 	//
-	// That combination is not benign: scion#1102 resolves an unset stored role
-	// to `full` (agent create, agent lifecycle, project-secret-read) at dispatch
-	// and, since scion#1101, on every token refresh. `scion resume` carries no
-	// --role flag, so resuming such a record silently promotes it past the
-	// ceiling every other control in lever's model assumes. Refusing is the only
-	// honest answer: lever cannot repair the record either, since the hub
-	// exposes no route to set a stored role.
+	// scion resolves an unset stored role to full (agent create, agent lifecycle,
+	// project-secret-read) at dispatch and on every token refresh, and scion
+	// resume takes no --role, so resuming such a record would silently promote it
+	// past the ceiling lever's model assumes. lever cannot repair the record: the
+	// hub has no route to set a stored role.
 	VerifyAgentRole func(ctx context.Context, project, agent string) error
-	// Log surfaces a loud, user-facing progress/warning line during apply —
-	// such as start-manager's `--fresh` discard notice, which MUST reach the
-	// user rather than vanish into a swallowed return value. buildApplyDeps
-	// wires this to the invoking cobra command's PrintErrf, mirroring how
-	// other user-facing warnings already surface (see internal/cli/host/stop.go,
-	// internal/cli/host/down.go).
+	// Log surfaces a user-facing progress or warning line, such as the --fresh
+	// discard notice, which must reach the user.
 	Log func(format string, args ...any)
 	// StepTail, when set, names where a failure of a step of this kind is
-	// explained (lever#186): it returns a function the progress list runs
-	// only on failure, giving the source's name and its last lines. nil, or
-	// a nil function, shows no tail.
+	// explained: the returned function runs only on failure and gives the source's
+	// name and its last lines. nil, or a nil function, shows no tail.
 	StepTail func(kind StepKind) func() (string, []string)
-	// BrokerStartRetry bounds the retry that absorbs scion's runtime-broker
-	// registration race on manager start/resume/list; ManagerLiveRetry
-	// bounds the post-start liveness poll. Zero values take the production
-	// defaults (30 × 1 s and 15 × 1 s); tests shrink them.
+	// BrokerStartRetry bounds the retry over scion's runtime-broker registration
+	// race on manager start, resume and list; ManagerLiveRetry bounds the
+	// post-start liveness poll. Zero values take the defaults.
 	BrokerStartRetry RetryBudget
 	ManagerLiveRetry RetryBudget
-	// PhaseSettleRetry bounds the wait for a manager record observed in a
-	// transitional phase (transitionalPhases) to settle into one converge
-	// can act on. Zero takes the production default (60 × 1 s).
+	// PhaseSettleRetry bounds the wait for a manager record in a transitional
+	// phase to settle. Zero takes the default.
 	PhaseSettleRetry RetryBudget
 }
 
-// check returns an error naming the first required collaborator left nil.
-// ReadCred is the one optional field (nil ⇒ defaultReadCred).
 func (d Deps) check() error {
 	required := []struct {
 		name string
@@ -581,19 +436,21 @@ func (d Deps) check() error {
 		{"Scion", d.Scion == nil},
 		{"StartBroker", d.StartBroker == nil},
 		{"BrokerHealthy", d.BrokerHealthy == nil},
-		{"EnsureControllerPAT", d.EnsureControllerPAT == nil},
+		{"EnsureHubIdentity", d.EnsureHubIdentity == nil},
+		{"EnsureProjectProvider", d.EnsureProjectProvider == nil},
 		{"WaitBrokerReady", d.WaitBrokerReady == nil},
 		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
 		{"RearmBootstrap", d.RearmBootstrap == nil},
-		{"EnsureHubLogin", d.EnsureHubLogin == nil},
-		{"DisableHubLogin", d.DisableHubLogin == nil},
+		{"EnsureHubAuth", d.EnsureHubAuth == nil},
 		{"EnsureScionTelemetry", d.EnsureScionTelemetry == nil},
 		{"EnsureAgentTemplate", d.EnsureAgentTemplate == nil},
 		{"StartRemoteProxy", d.StartRemoteProxy == nil},
 		{"StopRemoteProxy", d.StopRemoteProxy == nil},
+		{"FenceRemoteLogins", d.FenceRemoteLogins == nil},
 		{"RemoveJailFile", d.RemoveJailFile == nil},
 		{"RemoveScionProjectConfigs", d.RemoveScionProjectConfigs == nil},
 		{"ScionProjectRegistered", d.ScionProjectRegistered == nil},
+		{"ProjectLinked", d.ProjectLinked == nil},
 		{"StripProjectSharedDirs", d.StripProjectSharedDirs == nil},
 		{"RepairScionHubEndpoint", d.RepairScionHubEndpoint == nil},
 		{"VerifyAgentRole", d.VerifyAgentRole == nil},
@@ -607,7 +464,7 @@ func (d Deps) check() error {
 	return nil
 }
 
-// UnattendedSession is Deps.BeginUnattendedSession's answer (lever#202).
+// UnattendedSession is Deps.BeginUnattendedSession's answer.
 type UnattendedSession struct {
 	// Refused, when set, says why the start is not recorded as a new
 	// session: a session matching no skill was recorded already, and
@@ -620,10 +477,8 @@ type UnattendedSession struct {
 	Begin func() (commit func() error, err error)
 }
 
-// Run executes the bring-up Plan for app. load-image is host-side; the rest
-// run in the jail via Deps.Scion. The jail itself is already up: the CLI
-// brings it up before it can build Deps at all (buildApplyDeps needs the
-// jail's run user for the JailRunner), so there is no jail-up step.
+// Run executes the bring-up Plan for app. The jail is already up: the CLI needs
+// it to build Deps.
 func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 	if err := d.check(); err != nil {
 		return err
@@ -636,143 +491,37 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		attach:      opts.Attach,
 		freshNoConv: opts.FreshWithoutConversation,
 	}
-	// The plan is kept, not just ranged over: the converge-to-off reconciliation
-	// below needs to know whether this run manages the hub at all (see
-	// disableHubLogin).
+	if err := d.FenceRemoteLogins(ctx); err != nil {
+		return fmt.Errorf("remote-proxy: %w", err)
+	}
 	steps := Plan(app, opts)
 	rep := progress.From(ctx)
 	rep.Group("apply", len(steps))
-	// broker-up and load-image run alongside the steps after them (lever#189;
-	// see runSteps).
+	// broker-up and load-image run alongside the steps after them (see runSteps).
 	if err := r.runSteps(ctx, steps); err != nil {
 		return err
 	}
 	rep.Group("", 0)
-	// Converge the remote proxy OFF when the config disables it. Plan omits
-	// the remote-proxy step entirely in that case (see its RemoteEnabled
-	// guard) so dry-run output never shows a start step it won't take — but
-	// that also means the step loop above never reaches a proxy left running
-	// from a PRIOR apply (remote.enabled since flipped back off). Reconcile
-	// it here, unconditionally, so a config-off apply always converges to
-	// "not running" rather than leaving a stale proxy serving traffic the
-	// operator no longer intends to expose.
+	// Plan omits the remote-proxy step when remote access is off, so a proxy left
+	// running by a prior apply is converged off here.
 	if !app.RemoteEnabled() {
 		if err := d.StopRemoteProxy(ctx); err != nil {
 			return fmt.Errorf("remote-proxy: %w", err)
 		}
-		// The GUEST half has to converge too, and for a sharper reason than
-		// the proxy does: the login forwarder is an unauthenticated TCP bridge
-		// from guest loopback — reachable from every agent's netns — to a host
-		// loopback port beside lever's own broker listeners. Left running
-		// after the feature is off, it keeps that port bridged into the jail
-		// for whatever binds it next. See Deps.DisableHubLogin.
-		if err := r.disableHubLogin(ctx, steps); err != nil {
-			return fmt.Errorf("hub login: %w", err)
-		}
-		// Two things this convergence deliberately does NOT undo, said here so
-		// the calls above are not read as an exhaustive teardown.
+		// Deliberately left in place:
 		//
-		// lever's overlay agent template (~/.scion/templates/lever) and the
-		// project's default_template that selects it both stay. Neither is
-		// remote-access state — the overlay exists to keep scion's placeholder
-		// system prompt out of every agent it provisions (see
-		// Deps.EnsureAgentTemplate), and that matters exactly as much with
-		// remote access off.
-		//
-		// The SPA lever staged into the guest for the hub also stays
-		// (layout.WebAssetsDir; EnsureScionWebAssets simply skips once
-		// app.ScionWebAssets() is false), and that is deliberate on three
-		// counts:
-		//
-		//   - Nothing lever starts reads it. With remote access off lever
-		//     passes no --web-assets-dir at all (HubServerOpts), and the
-		//     restart above takes the flag out of a running hub's argv. Note
-		//     this is NOT the same as the hub having no UI: scion's
-		//     workstation defaults keep the web frontend on either way (see
-		//     scion.ServerOpts.EnableWeb).
-		//   - It cannot go stale. stagedWebDigest compares digests, so turning
-		//     remote access back on at the SAME pin reuses the staged tree and
-		//     re-stages nothing, while a different pin re-stages.
-		//   - What is left is small. The payload excludes vite's sourcemaps
-		//     (guest.webAssetsExclude measures them at 8.2MB of 11.5MB), so
-		//     this is single-digit MB of root-owned files inside the VM — not
-		//     worth a delete path of its own, run on every apply of every
-		//     remote-off instance, whose failure mode is 404ing a UI the hub
-		//     is still serving.
+		//   - lever's overlay agent template and the project's default_template: they
+		//     keep scion's placeholder system prompt out of every agent, remote access
+		//     or not.
+		//   - The staged hub SPA (layout.WebAssetsDir). Nothing lever starts reads it
+		//     with remote access off (no --web-assets-dir), stagedWebDigest keeps it
+		//     from going stale, and the few MB of it are not worth a delete path whose
+		//     failure mode is 404ing a UI the hub still serves. scion's workstation
+		//     defaults keep the web frontend on either way (scion.ServerOpts.EnableWeb).
 	}
 	return nil
 }
 
-// disableHubLogin converges the guest half of the login path off, and restarts
-// the hub when that removed something the running hub was started FROM.
-//
-// The restart is the OFF path's half of scionServer's. Two pieces of the
-// hub's remote-access state are fixed at startup and nowhere else: it reads
-// `oidc_login` once, from the settings file (pkg/config/hub_config.go), and it
-// takes --web-assets-dir from the argv it was started with. So a hub left
-// running by an earlier apply goes on offering a login whose provider has
-// gone, and goes on serving its SPA out of the directory lever staged for
-// remote access — one lever stops maintaining the moment remote access is off
-// — for as long as that process lives. The scion-server step cannot fix
-// either: `scion server start` refuses on an already-running daemon and the
-// client tolerates the refusal, which is what makes a re-apply cheap. Nothing
-// short of a restart replaces the argv.
-//
-// Note what the restart does NOT do: it does not stop the hub serving a web
-// UI. scion's workstation defaults enable the web frontend whenever the flag
-// is not explicitly set, and lever depends on that — the Hub API is only on
-// 8080 BECAUSE the frontend is on (see scion.ServerOpts.EnableWeb). What the
-// restart takes away is the login, and --web-assets-dir with it; what the
-// frontend then serves depends on the scion pin and is not this function's
-// business.
-//
-// Gated on a real change for the reason the ON path is gated: a restart drops
-// every agent's connection to the hub. An apply that finds the guest already
-// converged must be silent, and DisableHubLogin reports false forever after the
-// block is gone.
-//
-// Inferring the transition from guest state is a CHOICE, not the only option.
-// scion does persist the daemon's launch argv: cmd/server_daemon.go calls
-// daemon.SaveArgs, which writes <globalDir>/server-args.json, and
-// --web-assets-dir is in it verbatim. Reading it would be authoritative and
-// would generalise — a changed web port or assets dir is invisible to guest
-// leftovers. lever does not, for two reasons: it needs a guest file read this
-// path does not otherwise make, and the file is not a statement about what is
-// RUNNING, since daemon.RemoveArgs has no production caller in the pinned
-// module and the file therefore outlives the daemon that wrote it. Worth
-// revisiting if this path ever needs the generality. (`scion server status` is
-// not the alternative: its web field reports component HEALTH, 200 whether or
-// not --enable-web was passed — cmd/server_daemon.go runServerStatus.)
-//
-// The price of that choice, stated because it is easy to assume otherwise: if
-// the settings edit succeeds and the restart then FAILS, the next apply finds
-// nothing left to remove, reports no change, and does not restart — so the hub
-// goes on serving the removed oidc_login from memory. The repair is `lever
-// stop` followed by `lever up`. The ON path has the identical residual.
-//
-// Skipped when this plan does not manage the hub — BrokerOnly, the VM
-// acceptance gate, whose machine need not carry a scion binary at all. The
-// guest still converges there; a hub left from an earlier full apply keeps its
-// flags, and since the guest state that signals the change is now gone, it
-// keeps them until a stop + up rather than until the next apply. That check is
-// also what makes d.Scion safe to dereference below without a nil guard: the
-// scion-server step ran earlier in this same Run and dereferenced it first.
-func (r *run) disableHubLogin(ctx context.Context, steps []Step) error {
-	changed, err := r.d.DisableHubLogin(ctx)
-	if err != nil {
-		return err
-	}
-	if !changed || !planHas(steps, KindScionServer) {
-		return nil
-	}
-	r.d.Log("lever: remote access is off — restarting the hub so it stops offering the remote login")
-	if err := r.d.Scion.ServerStop(ctx); err != nil {
-		return fmt.Errorf("restart the hub: %w", err)
-	}
-	return r.d.Scion.ServerStart(ctx, r.hubServerOpts())
-}
-
-// planHas reports whether the plan includes a step of this kind.
 func planHas(steps []Step, kind StepKind) bool {
 	for _, s := range steps {
 		if s.Kind == kind {
@@ -782,8 +531,7 @@ func planHas(steps []Step, kind StepKind) bool {
 	return false
 }
 
-// stepLabel is a step's name on the progress list: its kind, and for an
-// image its reference (the plan can load several).
+// stepLabel adds an image step's reference, since the plan can load several.
 func stepLabel(s Step) string {
 	if s.Kind == KindLoadImage && s.Target != "" {
 		return string(s.Kind) + " " + s.Target
@@ -791,24 +539,22 @@ func stepLabel(s Step) string {
 	return string(s.Kind)
 }
 
-// step is the thin dispatch over StepKind: it routes each step to its
-// executor. The non-trivial case bodies live in per-kind helpers below,
-// each a method on run — no hidden state beyond it. The default
-// arm is a hard error so a Plan emitting an unknown kind fails loudly.
+// The default arm is a hard error so a Plan emitting an unknown kind fails
+// loudly.
 func (r *run) step(ctx context.Context, s Step) error {
 	switch s.Kind {
 	case KindBrokerUp:
 		return runBrokerUp(ctx, r.d)
 	case KindLoadImage:
-		return runLoadImage(ctx, s, r.d)
+		return runLoadImage(ctx, s, r.d, r.app)
 	case KindInitMachine:
 		return r.d.Scion.InitMachine(ctx)
 	case KindConfigRegistry:
-		return r.d.Scion.ConfigSetGlobal(ctx, "image_registry", "scionlocal")
-	case KindBootstrapToken:
-		return r.d.EnsureControllerPAT(ctx)
+		return r.d.Scion.ConfigSetGlobal(ctx, "image_registry", ImageRegistry)
 	case KindScionServer:
 		return r.scionServer(ctx)
+	case KindHubIdentity:
+		return r.d.EnsureHubIdentity(ctx)
 	case KindCredential:
 		return runCredential(ctx, s, r.d)
 	case KindRegisterProject:
@@ -820,36 +566,18 @@ func (r *run) step(ctx context.Context, s Step) error {
 	case KindStartManager:
 		return r.startManager(ctx, s)
 	case KindRemoteProxy:
-		// Only reached when Plan included the step, i.e. r.app.RemoteEnabled().
+		// Plan includes this step only when remote access is on.
 		return r.d.StartRemoteProxy(ctx)
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
 	}
 }
 
-// scionServer runs the scion-server step: bring the guest's login path up
-// to date, restart the hub if that changed its configuration, then start (or
-// confirm) the hub.
-//
-// The restart is what makes the login path take effect at all: scion reads
-// `oidc_login` once, at startup (pkg/config/hub_config.go), so a hub that was
-// already running when lever wrote the block goes on serving a configuration
-// with no login in it. It is conditional on an actual change, because a
-// restart drops every agent's connection to the hub for the length of one —
-// acceptable to turn remote access on, not acceptable on every apply.
-// A failure anywhere after EnsureHubLogin leaves the guest forwarder
-// installed and running with no hub behind it. That is deliberate, not an
-// oversight: the forwarder bridges guest loopback to the login port on the
-// HOST, where what binds is a lever provider inside some `lever remote serve`
-// — so the half-applied state reaches either nothing (the connection is
-// refused) or a provider, which hands out nothing without a code. (Two remote
-// instances left on the default host port would have the forwarder reach the
-// OTHER instance's provider; the consequence is a login that cannot complete,
-// not an exposure — and config validation asks each instance for its own
-// ports.) Tearing it down here would
-// also tear down a forwarder a previous, successful apply had legitimately
-// left running. The next apply converges it: EnsureHubLogin is idempotent, and
-// with remote access turned off DisableHubLogin removes it outright.
+// scionServer runs the scion-server step. It restarts a running hub only when
+// it was started with other auth settings, another key, or another argv than
+// this apply wants (HubRestartReason), or when the guest's key file or
+// settings changed in a way the hub reads only at startup: a restart drops
+// every agent's hub connection.
 func (r *run) scionServer(ctx context.Context) error {
 	telemetryChanged, err := r.d.EnsureScionTelemetry(ctx)
 	if err != nil {
@@ -859,32 +587,35 @@ func (r *run) scionServer(ctx context.Context) error {
 		r.d.Log("lever: agent telemetry in the jail's scion settings is now %q (scion.telemetry) — agents started from here on use it; "+
 			"a hub or manager that was already running keeps the old setting until `lever stop && lever up`", r.app.EffectiveScionTelemetry())
 	}
-	changed, err := r.d.EnsureHubLogin(ctx)
+	guestChanged, err := r.d.EnsureHubAuth(ctx)
 	if err != nil {
-		return fmt.Errorf("hub login: %w", err)
+		return fmt.Errorf("hub auth: %w", err)
 	}
-	if changed {
-		r.d.Log("lever: the hub's login configuration changed — restarting the hub so it is read")
-		// Stop-then-start, not `scion server restart`: scion's own restart
-		// refuses outright when the daemon is not running, and the hub
-		// being already down is an ordinary state here — after a `lever
-		// stop`, a VM reboot, or a crash. ServerStop tolerates that (see
-		// its doc); ServerStart below tolerates the opposite.
+	opts := r.hubServerOpts()
+	live, err := r.d.Scion.RunningHub(ctx)
+	if err != nil {
+		return fmt.Errorf("hub auth: %w", err)
+	}
+	reason := HubRestartReason(live, opts)
+	if reason == "" && guestChanged && live.Running {
+		reason = "the hub's key file or settings changed"
+	}
+	if reason != "" {
+		r.d.Log("lever: restarting the hub: %s", reason)
+		// Stop-then-start, not scion server restart: scion's restart replays the
+		// old argv without this apply's env, and refuses when no daemon runs.
 		if err := r.d.Scion.ServerStop(ctx); err != nil {
-			return fmt.Errorf("hub login: restart the hub: %w", err)
+			return fmt.Errorf("restart the hub: %w", err)
 		}
 	}
-	if err := r.d.Scion.ServerStart(ctx, r.hubServerOpts()); err != nil {
+	if err := r.d.Scion.ServerStart(ctx, opts); err != nil {
 		return err
 	}
-	// A hub that was just started — the restart above, the end of the
-	// dev-auth bootstrap window, a cold start after `lever stop` or a
-	// reboot — has its runtime broker register only after the hub serves.
-	// register-project's hub link and the steps after it would race that
-	// and fail with a 422 no_runtime_broker (lever#166). So wait on every
-	// apply: with the broker online it is one `hub brokers` call. The wait
-	// is fail-soft, like the one before start-manager. It asks scion's
-	// global settings, because the tree may not be a scion project yet.
+	// A just-started hub registers its runtime broker only after it serves, and
+	// register-project's hub link would race that and fail with a 422
+	// no_runtime_broker, so wait on every apply (one hub brokers call when the
+	// broker is online). Fail-soft. It asks scion's global settings because the
+	// tree may not be a scion project yet.
 	online, err := r.d.WaitBrokerReady(ctx, scionGlobalProject)
 	if err != nil {
 		return fmt.Errorf("scion-server: waiting for runtime broker: %w", err)
@@ -893,44 +624,83 @@ func (r *run) scionServer(ctx context.Context) error {
 	return nil
 }
 
+// HubRestartReason says why a running hub does not match the start opts, or ""
+// when it does (or none runs). It compares the env lever pins, dev auth (a hub
+// an operator started by hand gets scion's dev-auth default) and the web
+// assets argv that toggling remote access changes. scion re-execs its daemon
+// with a normalised argv, so the argv is compared flag by flag, not as a whole.
+func HubRestartReason(live scion.RunningHub, want scion.ServerOpts) string {
+	if !live.Running {
+		return ""
+	}
+	for k, v := range want.Env {
+		if got, ok := live.Env[k]; !ok || got != v {
+			return fmt.Sprintf("it was started without lever's %s setting", k)
+		}
+	}
+	for k := range live.Env {
+		if _, ok := want.Env[k]; !ok {
+			return fmt.Sprintf("it was started with %s, which lever does not set", k)
+		}
+	}
+	if flagValue(live.Argv, "--dev-auth") != "false" {
+		return "it was started without --dev-auth=false"
+	}
+	if got := flagValue(live.Argv, "--web-assets-dir"); got != want.WebAssetsDir {
+		return fmt.Sprintf("its web assets argv is %q, lever wants %q", got, want.WebAssetsDir)
+	}
+	return ""
+}
+
+// flagValue returns the value of --name=value or --name value in argv; a bare
+// boolean --name reads as "true".
+func flagValue(argv []string, name string) string {
+	for i, a := range argv {
+		if v, ok := strings.CutPrefix(a, name+"="); ok {
+			return v
+		}
+		if a == name {
+			if i+1 < len(argv) && !strings.HasPrefix(argv[i+1], "-") {
+				return argv[i+1]
+			}
+			return "true"
+		}
+	}
+	return ""
+}
+
 // scionGlobalProject is the value of scion's -g flag that names its global
 // settings (~/.scion, made by init-machine) instead of a project directory.
 const scionGlobalProject = "global"
 
-// hubServerOpts is HubServerOpts with the run's log as the start's progress
-// sink, so a slow cold start prints that it is waiting.
+// hubServerOpts makes the run's log the start's progress sink, so a slow cold
+// start says it is waiting.
 func (r *run) hubServerOpts() scion.ServerOpts {
-	opts := HubServerOpts(r.app, r.d.HubSessionSecret)
+	opts := HubServerOpts(r.app, r.d.HubSessionSecret, r.d.HubAuthEnv)
 	opts.Progress = r.d.Log
 	return opts
 }
 
-// HubServerOpts is the ONE description of how lever starts the hub for a given
-// config. Every start shares it — this step's, the restart disableHubLogin
-// orders when remote access has just been turned off, and the CLI's restart
-// of the live hub after a failed bootstrap-token window — because the whole point
-// of that restart is to replace an argv that no longer matches the config. Two
-// copies of this could disagree, and the restart would then re-apply the very
-// flags it exists to drop.
-func HubServerOpts(app *config.App, sessionSecret string) scion.ServerOpts {
+// HubServerOpts is the one description of how lever starts the hub for a
+// config. Every start and restart shares it: a restart exists to replace an
+// argv that no longer matches the config, and a second copy could re-apply the
+// flags it should drop.
+func HubServerOpts(app *config.App, sessionSecret string, authEnv map[string]string) scion.ServerOpts {
 	opts := scion.ServerOpts{
 		WebPort:       scion.DefaultHubPort,
 		DevAuth:       false,
 		EnableWeb:     app.RemoteEnabled(),
 		SessionSecret: sessionSecret,
+		Env:           authEnv,
 	}
 	if app.ScionWebAssets() {
-		// Same predicate the backend used to decide whether to stage the
-		// assets, so the flag can never point at a directory nothing put
-		// anything in — see ServerOpts.WebAssetsDir for why that case is
-		// worse than passing no flag at all.
+		// Same predicate as the asset staging, so the flag never points at an empty
+		// directory (see ServerOpts.WebAssetsDir).
 		opts.WebAssetsDir = layout.WebAssetsDir
 	}
 	return opts
 }
 
-// runBrokerUp runs the broker-up step: start the host broker (+ first-party
-// tools), then health-check it before the manager starts.
 func runBrokerUp(ctx context.Context, d Deps) error {
 	if err := d.StartBroker(ctx); err != nil {
 		return err
@@ -938,12 +708,11 @@ func runBrokerUp(ctx context.Context, d Deps) error {
 	return d.BrokerHealthy(ctx)
 }
 
-// agentTemplate runs the agent-template step. Logs on change only: it is a
-// provisioning-time change the operator cannot otherwise see, and silence on a
-// no-op keeps a re-apply quiet.
+// agentTemplate logs only on change: the change is otherwise invisible, and a
+// no-op re-apply stays quiet.
 func (r *run) agentTemplate(ctx context.Context, s Step) error {
-	// The JAIL-side path, not the host one: the scion client behind this closure
-	// runs inside the jail, where the host tree is visible only at the mount.
+	// Jail-side path: the scion client runs inside the jail, where the host tree is
+	// visible only at the mount.
 	changed, err := r.d.EnsureAgentTemplate(ctx, JailPath(s.Target, r.app.Tree, r.d.JailMount))
 	if err != nil {
 		return err
@@ -954,17 +723,23 @@ func (r *run) agentTemplate(ctx context.Context, s Step) error {
 	return nil
 }
 
-// runLoadImage runs the load-image step: skip the multi-GB re-import when the
-// jail already holds this exact image (same ID; fail-open — the guard returns
-// false on any doubt), otherwise load and then best-effort prune the superseded
-// dangling image. The source is the step's archive when it has one (image_tar),
-// else the host docker store.
-func runLoadImage(ctx context.Context, s Step, d Deps) error {
+func runLoadImage(ctx context.Context, s Step, d Deps, app *config.App) error {
 	loaded, load := d.ImageLoaded, d.LoadImage
 	if s.TarPath != "" {
 		loaded = func(ctx context.Context, ref string) bool { return d.ImageLoadedTar(ctx, ref, s.TarPath) }
+		allow := func(tag string) error {
+			if d.ImageTagPolicy != nil {
+				if err := d.ImageTagPolicy(tag); err != nil {
+					return err
+				}
+			}
+			if app != nil {
+				return app.CheckTarTag(s.Target, tag)
+			}
+			return nil
+		}
 		load = func(ctx context.Context, ref string) error {
-			return d.LoadImageTar(ctx, ref, s.TarPath, d.ImageTagPolicy)
+			return d.LoadImageTar(ctx, ref, s.TarPath, allow)
 		}
 	}
 	rep := progress.From(ctx)
@@ -976,20 +751,17 @@ func runLoadImage(ctx context.Context, s Step, d Deps) error {
 			return err
 		}
 		rep.Note("loaded")
-		// After a load, prune dangling images: when this load superseded a tag
-		// (a rebuilt image), the old copy is now untagged and would otherwise
-		// ratchet the grow-only jail disk. A no-op when the load just added a
-		// brand-new image. Best-effort — a prune failure must never fail the
-		// bring-up.
+		// Prune the copy a rebuilt image leaves untagged, or the grow-only jail disk
+		// ratchets up. Best-effort.
 		if err := d.PruneImages(ctx); err != nil {
 			d.Log("load-image: pruning superseded jail images failed: %v", err)
 		}
 	}
-	// Warm an image that was already loaded too: an earlier apply may have
-	// loaded it and then failed or timed out before its warm-up finished.
+	// Warm an already-loaded image too: an earlier apply may have failed before its
+	// warm-up finished.
 	warmImage(ctx, s.Target, d)
-	// A warm-up cut short by the run stopping (lever#189) or an interrupt
-	// is not a finished step.
+	// A warm-up cut short by the run stopping or an interrupt is not a finished
+	// step.
 	return ctx.Err()
 }
 
@@ -997,15 +769,14 @@ func runLoadImage(ctx context.Context, s Step, d Deps) error {
 // 5 GB image took 44 s; the bound leaves room for a slow disk.
 const imageWarmTimeout = 15 * time.Minute
 
-// imageWarmNoticeAfter is how long a warm-up runs before the step says what
-// it is waiting for. A warm image takes well under a second, so a re-apply
-// prints nothing. A variable so tests can shorten it.
+// imageWarmNoticeAfter is how long a warm-up runs before the step says what it
+// is waiting for. A warm image takes well under a second, so a re-apply prints
+// nothing.
 var imageWarmNoticeAfter = 3 * time.Second
 
-// warmImage runs d.WarmImage for ref, bounded by imageWarmTimeout. A failure
-// only warns: the agent start may still succeed (a small image, a podman
-// with native id-mapped mounts), and the start-manager error names the cause
-// if it does not.
+// warmImage only warns on failure: the agent start may still succeed (a small
+// image, a podman with native id-mapped mounts), and the start-manager error
+// names the cause if it does not.
 func warmImage(ctx context.Context, ref string, d Deps) {
 	wctx, cancel := context.WithTimeout(ctx, imageWarmTimeout)
 	defer cancel()
@@ -1027,8 +798,6 @@ func warmImage(ctx context.Context, ref string, d Deps) {
 	}
 }
 
-// runCredential runs the credential step: read the manager credential file
-// (defaultReadCred unless overridden) and set it as the scion secret.
 func runCredential(ctx context.Context, s Step, d Deps) error {
 	read := d.ReadCred
 	if read == nil {
@@ -1041,86 +810,114 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
 
-// registerProject runs the register-project step: observe before doing
-// anything destructive, then (only when the registration is unsound) clear the
-// stale marker + project-config registration(s) and re-init + hub-link.
+// ImageRegistry is the registry prefix scion rewrites a bare agent image name
+// to. Agents lever starts run a qualified name scion never rewrites
+// (imageref.Agent); a record created by an older lever keeps its bare name,
+// which this value resolves to the image load-image tagged for it.
+const ImageRegistry = "scionlocal"
+
+// AgentRuntime is the container runtime the jail's scion starts agents with:
+// load-image fills rootless podman's store, and the warm-up builds podman's
+// layer copy.
+const AgentRuntime = "podman"
+
 func (r *run) registerProject(ctx context.Context, s Step) error {
 	jp := JailPath(s.Target, r.app.Tree, r.d.JailMount)
 
-	// Idempotent register: observe BEFORE doing anything destructive. A
-	// suspended manager (or worker) agent record survives a `lever stop` +
-	// `lever up` cycle (its project linkage lives in this same
-	// project-configs registration) — the marker-removal +
-	// RemoveScionProjectConfigs + re-init below unconditionally tore that
-	// linkage down on every apply, orphaning the record and breaking
-	// `scion resume`. When the registration is already sound (exactly one
-	// project-configs entry for jp AND the in-tree marker present), there
-	// is nothing to fix, so skip the whole destructive path. A query
-	// error, or an unsound registration (zero, duplicate, or torn), falls
-	// through unchanged to the existing destructive path below — fail
-	// open, never a hard apply failure over an observe read.
+	// Observe before anything destructive: a suspended agent record survives lever
+	// stop and lever up, and its project linkage lives in this registration, so
+	// tearing it down orphans the record and breaks scion resume. A query error or
+	// an unsound registration (zero, duplicate or torn) falls through to the
+	// destructive path: fail open, never a hard failure over an observe read.
 	if ok, err := r.d.ScionProjectRegistered(ctx, jp); err == nil && ok {
-		// Sound registration, so nothing below runs — but the recorded hub
-		// ENDPOINT can still be stale. Minting the controller PAT links the
-		// project against a throwaway hub on its own port, and that link
-		// survives precisely because this path skips the re-init. Repair it
-		// here, where the skip happens.
+		// The recorded hub endpoint can be another port's (a link made against a
+		// throwaway hub), and this path skips the re-init that would rewrite it.
 		if err := r.d.RepairScionHubEndpoint(ctx, jp); err != nil {
 			return err
 		}
-		return r.settleProject(ctx, path.Base(jp))
+		linked, err := r.d.ProjectLinked(ctx, jp)
+		if err != nil {
+			return fmt.Errorf("register-project: %w", err)
+		}
+		if !linked {
+			// hub-identity registered the project with this ID and name, so the link
+			// takes scion's already-linked path, which a project PAT may run. Its
+			// agent sync needs a runtime broker on the project.
+			if err := r.d.EnsureProjectProvider(ctx, jp); err != nil {
+				return err
+			}
+			if err := r.hubLink(ctx, jp); err != nil {
+				return err
+			}
+			if linked, err = r.d.ProjectLinked(ctx, jp); err != nil {
+				return fmt.Errorf("register-project: %w", err)
+			} else if !linked {
+				return fmt.Errorf("register-project: scion hub link ran but the project is still not linked to the hub project lever recorded")
+			}
+		}
+		return r.settleProject(ctx, jp)
 	}
 
-	// Remove a stale `.scion` marker FILE left in the tree by a previous
-	// bring-up. It survives `orb delete` (it lives in the bind-mounted tree),
-	// and `scion init` writes workspace_path only on fresh-create — resolving
-	// a stale marker skips it, so the agent mounts an empty managed config-dir
-	// copy instead of the live tree (the in-place mount silently breaks).
-	// Removing it forces a fresh, correct init.
+	// Remove a stale .scion marker file left in the tree by a previous bring-up:
+	// scion init writes workspace_path only on fresh create, so with a stale marker
+	// the agent mounts an empty managed config-dir copy instead of the live tree.
 	//
-	// The tree is a VirtioFS bind mount: the host and the jail do not share
-	// one filesystem view/cache, so a host-side unlink is not promptly
-	// visible to the guest. Live-reproduced: removing the marker on the HOST
-	// then immediately running `scion init` IN the jail failed with
-	// "failed to initialize project: existing project marker is invalid:
-	// open /lever/.scion: no such file or directory" — scion's guest-side
-	// directory scan still saw the just-deleted marker, then the open()
-	// raced the host unlink and lost. Running the identical `scion init`
-	// manually in the jail moments later succeeded (same view, no race).
-	// So the removal must go THROUGH the jail's own filesystem view — the
-	// same view the subsequent in-jail init uses — which is what
-	// r.d.RemoveJailFile does.
+	// The removal must go through the jail's own filesystem view. Over the VirtioFS
+	// bind mount a host-side unlink is not promptly visible to the guest, and the
+	// in-jail scion init then fails with "existing project marker is invalid".
 	if err := r.d.RemoveJailFile(ctx, path.Join(jp, layout.ProjectMarker)); err != nil {
 		return err
 	}
-	// Clear any stale project-config registration(s) for this workspace path
-	// before re-init, so `scion init` mints exactly ONE registration per
-	// workspace instead of leaving the previous apply's dir behind.
+	// Clear stale registrations first so scion init leaves exactly one per
+	// workspace.
 	if err := r.d.RemoveScionProjectConfigs(ctx, jp); err != nil {
 		return err
 	}
 	if err := r.d.Scion.InitProject(ctx, jp); err != nil {
 		return err
 	}
+	if err := r.pinHubProject(ctx, jp); err != nil {
+		return err
+	}
+	if err := r.d.EnsureProjectProvider(ctx, jp); err != nil {
+		return err
+	}
 	if err := r.hubLink(ctx, jp); err != nil {
 		return err
 	}
-	return r.settleProject(ctx, path.Base(jp))
+	return r.settleProject(ctx, jp)
 }
 
-// hubLinkRetryDelays are the waits before each retry of a hub link that
-// failed with no_runtime_broker. A variable so tests can shorten it. Short
-// first (lever#190): a broker that registers moments late costs a second,
-// not five; doubling up to 16 s keeps the backstop's reach (31 s, the old
-// 5, 10, 20 s reached 35 s) for a slow cold start.
+// pinHubProject points the fresh registration at the hub's existing record of
+// this project before the link. The re-init generated a new local ID, and a
+// hub link under the controller PAT refuses an ID the hub does not know (a
+// user token cannot register a project) instead of matching by name. With no
+// record on the hub yet, the link decides as before.
+func (r *run) pinHubProject(ctx context.Context, jp string) error {
+	name := path.Base(jp)
+	id, err := r.d.Scion.HubProjectID(ctx, name)
+	if err != nil {
+		return fmt.Errorf("looking up the hub's record of project %q: %w", name, err)
+	}
+	if id == "" {
+		return nil
+	}
+	if err := r.d.Scion.PinHubProject(ctx, jp, id); err != nil {
+		return fmt.Errorf("pointing %s at hub project %s: %w", jp, id, err)
+	}
+	return nil
+}
+
+// hubLinkRetryDelays are the waits before each retry of a hub link that failed
+// with no_runtime_broker. Short first, so a broker that registers moments late
+// costs a second; doubling reaches 31 s for a slow cold start.
 var hubLinkRetryDelays = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
 
-// hubLink runs `scion hub link`, retrying a 422 no_runtime_broker a few
-// times (lever#166): the link's agent sync creates agents on the hub, which
-// fails while the runtime broker has not registered. The scion-server
-// step's wait for the broker is fail-soft at 30 s, and a cold Lima start
-// can take longer, so this is the backstop. Only that error is retried; a
-// re-link of a linked project is scion's "already linked" path.
+// hubLink retries a 422 no_runtime_broker: the link's agent sync creates agents
+// on the hub, which fails until the runtime broker registers, and the
+// scion-server step's fail-soft wait gives up at 30 s while a cold Lima start
+// can take longer. Only that error is retried; re-linking a linked project is
+// scion's "already linked" path.
 func (r *run) hubLink(ctx context.Context, jp string) error {
 	err := r.d.Scion.HubLink(ctx, jp)
 	for _, d := range hubLinkRetryDelays {
@@ -1138,36 +935,31 @@ func (r *run) hubLink(ctx context.Context, jp string) error {
 	return err
 }
 
-// settleProject is the hub-side project state both register paths converge
-// on: no cross-agent shared dir, and a role ceiling. Both are what the hub
-// records for the project, so both must hold whether the registration was
-// just made or found sound.
-func (r *run) settleProject(ctx context.Context, projectName string) error {
+// settleProject is the hub-side project state both register paths converge on:
+// a runtime broker to start agents on, no cross-agent shared dir, and a role
+// ceiling. All three must hold whether the registration was just made or found
+// sound.
+func (r *run) settleProject(ctx context.Context, jp string) error {
+	projectName := path.Base(jp)
+	if err := r.d.EnsureProjectProvider(ctx, jp); err != nil {
+		return err
+	}
 	if err := r.d.StripProjectSharedDirs(ctx, projectName); err != nil {
 		return err
 	}
 	return r.d.EnsureAgentRoleCeiling(ctx, projectName)
 }
 
-// mintManagerBootstrap runs the mint-manager-bootstrap step: mint the
-// manager's one-time enrol ticket and stage it (0600) for lever-agent to read.
-// Idempotent against the LIVE broker latch (not a stale file): a spent latch is
-// tolerated only when a ticket is already staged.
+// mintManagerBootstrap is idempotent against the live broker latch, not a
+// stale file: a spent latch is tolerated only when a ticket is already staged.
 func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
-	// Idempotent (tied to the LIVE broker latch, not a stale file): mint; if the
-	// latch is already consumed (same broker process as a prior apply), tolerate
-	// it — the manager has its bootstrap.json from then. After a broker restart
-	// the latch reopens, mint succeeds, and a fresh ticket is deposited, so a
-	// partially-failed first apply (bootstrap written but manager never enrolled)
-	// recovers on re-apply. (r.minted is not read after this step.)
+	// After a broker restart the latch reopens and a fresh ticket is deposited, so
+	// a first apply that failed before the manager enrolled recovers on re-apply.
 	m, err := r.d.MintManagerBootstrap(ctx)
 	if err != nil {
 		if errors.Is(err, ErrBootstrapLatched) {
-			// A spent latch is only tolerable when a bootstrap ticket is already
-			// staged (true idempotent re-apply against the same broker). If none
-			// is staged, a stale broker from a prior run is being reused and the
-			// new manager could never enrol — fail loudly instead of booting a
-			// doomed manager.
+			// A spent latch with no staged ticket means a stale broker from a prior run is
+			// being reused, and the new manager could never enrol: fail loudly.
 			staged := filepath.Join(s.Target, ".lever", "bootstrap.json")
 			if _, statErr := os.Stat(staged); statErr == nil {
 				return nil
@@ -1177,19 +969,17 @@ func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 		return err
 	}
 	r.minted = true
-	// Deposit it as a 0600 file in the mount (the lever-agent reads it).
 	return StageBootstrapMaterial(s.Target, m)
 }
 
-// startManager runs the start-manager plan step: observe the manager record,
-// then act on the delta (create / no-op / resume / forced resume, or a
-// refusal on a failed resume or a phase lever cannot act on) and verify the
-// container is actually live. Only --fresh deletes a record
-// (recoverDeleteAndCreate).
+// startManager observes the manager record, acts on the delta (create, no-op,
+// resume, forced resume, or a refusal on a failed resume or a phase lever
+// cannot act on) and verifies the container is live. Only --fresh deletes a
+// record (recoverDeleteAndCreate).
 func (r *run) startManager(ctx context.Context, s Step) error {
 	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
-	// Read the prompt before any waiting: a missing or unreadable prompt file
-	// is a config error and should fail fast, not after the broker-ready poll.
+	// Read the prompt before any waiting: a missing or unreadable prompt file is a
+	// config error and should fail fast.
 	task, err := r.managerTask()
 	if err != nil {
 		return err
@@ -1198,28 +988,20 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err != nil {
 		return err
 	}
-	// The read_only paths must be real directories reached through no
-	// symlink BEFORE anything is acted on: under --fresh the delete runs
-	// ahead of the create, and refusing only at the create would discard
-	// the old session and start no new one. Checked on every path, resume
-	// included — a failure there means the tree changed under a manager
-	// that may hold it writable, which the operator should hear about.
-	// startManagerCreate checks again right before the create: under
-	// --fresh the old manager (which may hold the paths writable) is still
-	// running here, and is gone only after the delete.
+	// The read_only paths must be real directories reached through no symlink
+	// before anything is acted on: under --fresh the delete runs before the create,
+	// and refusing only at the create would discard the old session and start
+	// none. Checked on resume too: a failure means the tree changed under a manager
+	// that may hold it writable. startManagerCreate checks again right before the
+	// create, once the old manager (which may hold the paths writable) is gone.
 	if err := r.app.PrepareManagerReadOnlyHost(); err != nil {
 		return fmt.Errorf("start-manager: %w", err)
 	}
-	// Gate on runtime-broker readiness before any create/resume: the workstation
-	// daemon registers its runtime broker asynchronously AFTER its Hub API comes
-	// up (waitHubReady only proved the latter), so acting now would race it. This
-	// is the proactive complement to the broker-unavailable retry below — wait
-	// for a ready broker rather than only reacting when a call fails against a
-	// not-yet-ready one. Fail-soft (never errors on timeout); the retry backstops.
-	//
-	// Skipped when the scion-server step of this same run saw the broker
-	// online (lever#190): nothing between the two restarts the hub, and a
-	// broker lost since is what the retry below is for.
+	// Wait for runtime-broker readiness before any create or resume: the daemon
+	// registers its broker asynchronously after its Hub API is up. Fail-soft; the
+	// broker-unavailable retry backstops it. Skipped when the scion-server step of
+	// this run saw the broker online, since nothing between the two restarts the
+	// hub.
 	if !r.brokerOnline {
 		if _, err := r.d.WaitBrokerReady(ctx, jp); err != nil {
 			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
@@ -1234,16 +1016,13 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		return err
 	}
 	if !r.fresh {
-		// Before converge: a stopped record whose claude still runs must be
-		// reported running again, or the resume below restarts it FRESH.
-		// The stale-mount check then reads the healed record, so a record
-		// the heal turned running is kept (managerKept) and not refused.
+		// Before converge: a stopped record whose claude still runs must read running
+		// again, or the resume below restarts it fresh. The stale-mount check then
+		// reads the healed record, so such a record is kept (managerKept), not refused.
 		rec = HealAgentSession(ctx, r.d.sessionHealer(), jp, rec)
-		// A record left "running" by a guest that was killed and restarted
-		// is suspended here, so converge resumes it (lever#179). Re-read
-		// after: converge acts on what the hub says now, and a suspend that
-		// did not take leaves the record running, refused by the gate as
-		// before.
+		// A record left "running" by a guest that was killed and restarted is
+		// suspended here so converge resumes it. Re-read after: a suspend that did not
+		// take leaves the record running, and the gate refuses it.
 		if guestRestartedUnder(ctx, r.d, jp, r.app.Name, rec) {
 			suspendAfterGuestRestart(ctx, r.d, "start-manager", jp, r.app.Name, rec)
 			if rec, err = r.observeManager(ctx, jp); err != nil {
@@ -1256,17 +1035,15 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 			return err
 		}
 	}
-	// A container start, the pre-start hook, claude's boot and the settle
-	// window can run over a minute: say what is happening about every 15 s
-	// (lever#168), from the action to the end of the gate.
+	// A container start, the pre-start hook, claude's boot and the settle window
+	// can run over a minute: report progress about every 15 s until the gate ends.
 	r.progress = StartProgress(ctx, r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
-	// The post-live probes run alongside the settle window, from the moment
-	// the gate has seen claude (lever#188), rather than after it.
+	// The post-live probes run alongside the settle window, from the moment the
+	// gate has seen claude.
 	probes := r.startPostLive(ctx, jp)
 	acted, err := r.convergeManager(ctx, jp, rec, opts)
-	// A resume recreated the container from the record's mounts: check
-	// them as soon as it runs (verifyResumedTreeMounts), and again once it
-	// is live if it was not running yet.
+	// A resume recreated the container from the record's mounts: check them as
+	// soon as it runs, and again once it is live if it was not running yet.
 	resumed := err == nil && acted && rec != nil && !r.managerCreated
 	verified := false
 	if resumed {
@@ -1275,9 +1052,8 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	if err == nil {
 		err = r.waitManagerLive(ctx, jp, acted, probes.start)
 	}
-	// A failed resume or gate can still leave a recreated container
-	// running (a scion error after the start, an interrupt): read its
-	// mounts back before the failure is reported, so a swapped mount is
+	// A failed resume or gate can still leave a recreated container running: read
+	// its mounts back before the failure is reported, so a swapped mount is
 	// suspended rather than left running unchecked. A container that is not
 	// running reads as unverified, which says nothing here.
 	var mountErr error
@@ -1287,13 +1063,11 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 			err = errors.Join(err, mountErr)
 		}
 	}
-	// A resume whose claude found no conversation to continue: under `lever
-	// up`, a home proven to hold none is started fresh, as `lever up
-	// --fresh` would (lever#202). Never after a failed mount check (that
-	// manager is suspended, and its operator decides), never for `lever
-	// apply`. A container that is not running reads as unverified there,
-	// not failed: its mounts go with the delete, and the new container's
-	// come from the config.
+	// A resume whose claude found no conversation to continue: under lever up, a
+	// home proven to hold none is started fresh. Never after a failed mount check
+	// (that manager is suspended and its operator decides), never for lever apply.
+	// A container that is not running reads as unverified there, not failed: its
+	// mounts go with the delete, and the new container's come from the config.
 	if err != nil && resumed && mountErr == nil && r.freshNoConv && !r.fresh && errors.Is(err, ErrNoConversation) {
 		probes.abandon()
 		probes = r.startPostLive(ctx, jp)
@@ -1301,10 +1075,9 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 		resumed = false
 	}
 	if err == nil && resumed && !verified {
-		// The post-live probes (started by the gate) read the same mounts:
-		// let them end first, so the two never race, and the manager is
-		// still not reported up until this check has passed — a mismatch
-		// suspends it and the probes' warnings are dropped (abandon).
+		// The post-live probes read the same mounts: let them end first so the two
+		// never race. The manager is not reported up until this check passes; a
+		// mismatch suspends it and the probes' warnings are dropped.
 		probes.wait()
 		if verified, err = r.verifyResumedTreeMounts(ctx, jp); err == nil && !verified {
 			r.warnUnverifiedResume()
@@ -1322,26 +1095,22 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 }
 
 // startFreshWithoutConversation replaces a resume that died because claude
-// --continue found no conversation (cause, which wraps ErrNoConversation)
-// with a fresh start: the delete and create of `lever up --fresh`, then the
-// liveness gate again (onHarness starts the post-live probes). The log
-// line that said so is the agent's word, so it only starts the look: the
-// fresh start happens when Deps.ManagerConversationEmpty proves from the
-// guest that the agent home holds no transcript, and the conversation
-// backup of --fresh (Deps.BackupManagerConversation) still runs first,
-// right before the delete. Whatever is not proven, or fails before the
-// delete, returns cause with the record kept. It is loud: one line says
-// what lever does and why.
+// --continue found no conversation (cause wraps ErrNoConversation) with the
+// delete and create of lever up --fresh, then the liveness gate again
+// (onHarness starts the post-live probes). That log line is the agent's word,
+// so it only starts the look: the fresh start happens only when
+// Deps.ManagerConversationEmpty proves from the guest that the agent home holds
+// no transcript, and the --fresh backup (Deps.BackupManagerConversation) still
+// runs first. Whatever is not proven, or fails before the delete, returns cause
+// with the record kept.
 //
-// A fresh start records a new session only when the skill on disk, read
-// before the delete and again right before the create, is the one the
-// manager's last recorded session started with
-// (Deps.BeginUnattendedSession): the agent can bring this start about, and
-// can write the skill, so unlike --fresh it never re-baselines the session
-// on a changed skill; contacts then stay refused until `lever up --fresh`,
-// and a line says so. The failed resume
-// may have spent the enrolment ticket this run staged, so the create
-// re-arms the broker for a new one (ensureFreshBootstrap).
+// The new session is recorded only when the skill on disk, read before the
+// delete and again right before the create, is the one the manager's last
+// recorded session started with (Deps.BeginUnattendedSession): the agent can
+// bring this start about and can write the skill, so unlike --fresh it never
+// re-baselines the session on a changed skill, and contacts stay refused until
+// lever up --fresh. The failed resume may have spent this run's enrolment
+// ticket, so the create re-arms the broker (ensureFreshBootstrap).
 func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts scion.StartOpts, cause error, onHarness func()) error {
 	if r.d.ManagerConversationEmpty == nil {
 		return cause
@@ -1365,10 +1134,9 @@ func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts
 			return fmt.Errorf("%w; lever went to start it fresh, but backing up its conversation failed, so the manager was NOT deleted: %w", cause, err)
 		}
 	}
-	// The session record before anything is deleted, and after the
-	// backup (which carries the last session's skill with it): a start the
-	// agent can bring about must not record a skill it wrote
-	// (BeginUnattendedSession).
+	// Record before anything is deleted, and after the backup (which carries the
+	// last session's skill): a start the agent can bring about must not record a
+	// skill it wrote.
 	var sess UnattendedSession
 	switch {
 	case r.d.BeginUnattendedSession != nil:
@@ -1397,11 +1165,10 @@ func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts
 	return r.waitManagerLive(ctx, jp, true, onHarness)
 }
 
-// warnManagerClaude runs after the manager is live: boot applies the
-// manager's claude block at start, so a manager apply kept running holds
-// the values of its last start, removed ones included. Silent when they match, when nothing is
-// configured or delivered, and when the read fails (the doctor row
-// "claude settings" reports that).
+// warnManagerClaude: boot applies the manager's claude block only at start, so
+// a kept manager holds the values of its last start, removed ones included.
+// Silent when they match, when nothing is configured or delivered, and when the
+// read fails (the doctor row "claude settings" reports that).
 func (r *run) warnManagerClaude(ctx context.Context, jp string) {
 	if r.d.ReadClaudeSettings == nil {
 		return
@@ -1415,7 +1182,6 @@ func (r *run) warnManagerClaude(ctx context.Context, jp string) {
 		r.app.Name, got.Describe(), jail.DescribeClaude(want))
 }
 
-// managerTask reads the manager's task prompt (when configured).
 func (r *run) managerTask() (string, error) {
 	p := r.app.ManagerPromptPath()
 	if p == "" {
@@ -1426,19 +1192,17 @@ func (r *run) managerTask() (string, error) {
 		return "", fmt.Errorf("reading manager prompt %s: %w", p, err)
 	}
 	task := strings.TrimSpace(string(b))
-	// The task rides scion's argv into a tmux command capped at 16 KiB
-	// (lever#30). Fail here, naming the file, rather than after the
-	// broker-ready wait with a container that exits "command too long".
+	// The task rides scion's argv into a tmux command capped at 16 KiB. Fail here,
+	// naming the file, rather than after the broker-ready wait with a container
+	// that exits "command too long".
 	if err := scion.CheckTask(task); err != nil {
 		return "", fmt.Errorf("manager prompt %s: %w", p, err)
 	}
 	return task, nil
 }
 
-// managerInstructions reads the manager's standing instructions (when
-// configured). Read up front like the prompt — a missing file is a config
-// error — and passed as CONTENT, so the file only has to be readable on the
-// host: the scion binary runs in the jail and never sees the path.
+// managerInstructions is read up front like the prompt and passed as content:
+// the scion binary runs in the jail and never sees the host path.
 func (r *run) managerInstructions() (string, error) {
 	p := r.app.ManagerInstructionsPath()
 	if p == "" {
@@ -1456,17 +1220,12 @@ func (r *run) managerInstructions() (string, error) {
 	return string(b), nil
 }
 
-// managerStartOpts builds the `scion start` options for the manager: the task
-// prompt (already read by managerTask) and, in api-key mode, the project env +
-// placeholder secret the container needs before it boots.
+// managerStartOpts builds the manager's scion start options; in api-key mode
+// it first sets the project env and the placeholder secret.
 //
-// LEVER_BOOTSTRAP reconciliation: we do NOT set LEVER_BOOTSTRAP here.
-// lever-agent boot's canonical-path default (./.lever/bootstrap.json relative
-// to CWD) suffices: scion sets --workspace = jp (the in-jail project tree),
-// and the container's CWD is /workspace, so ./.lever/bootstrap.json resolves
-// to jp/.lever/bootstrap.json — exactly where mint-manager-bootstrap wrote the
-// manager's bootstrap.json. Injecting an env var would be redundant and add a
-// scion StartOpts.Env dependency that the file convention avoids.
+// LEVER_BOOTSTRAP is not set: lever-agent boot defaults to
+// ./.lever/bootstrap.json relative to its CWD /workspace, which is jp, where
+// mint-manager-bootstrap staged the ticket.
 func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions string) (scion.StartOpts, error) {
 	apiKey := r.app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey
 	if apiKey {
@@ -1475,38 +1234,30 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		}
 	}
 	return scion.StartOpts{
-		Worker: r.app.Name, Task: task, Project: jp, Image: r.app.ManagerImage(), Harness: "claude",
-		// Empty when the config names no model, which omits --model and leaves
-		// scion's default resolution alone. Only ever read on a fresh create:
-		// the resume paths below take no model (scion resume has no such flag).
+		Worker: r.app.Name, Task: task, Project: jp, Image: r.app.ManagerAgentImage(), Harness: "claude",
+		// Empty omits --model. Read only on a fresh create: scion resume has no model
+		// flag.
 		Model: r.app.ManagerModel(),
-		// Standing instructions, delivered on scion's stdin as inline config —
-		// never argv (see scion.StartOpts.Instructions). Empty when the config
-		// names no file, which sends no config at all. Create-time only, like
-		// Model: a resume re-projects what scion staged at the fresh create.
+		// Delivered on scion's stdin as inline config, never argv (see
+		// scion.StartOpts.Instructions). Create-time only: a resume re-projects what
+		// scion staged at the fresh create.
 		Instructions: instructions,
-		// manager.read_only: the protected tree paths and their ancestor
-		// pins, as inline-config volumes, plus /dev/kvm under nested_virt.
-		// Nil when neither is configured. Create-time only, like
-		// Instructions: a resume redispatches the volumes scion stored with
-		// the record.
+		// manager.read_only: the protected tree paths and their ancestor pins, plus
+		// /dev/kvm under nested_virt. Create-time only: a resume redispatches the
+		// volumes scion stored with the record.
 		Volumes: managerVolumes(jp, r.app),
-		// Workspace = the in-jail project tree, so the manager edits the real
-		// host files in place (verified 2026-06-16). Without it scion mounts a
-		// managed copy of the externalized config dir, not the live tree.
+		// The in-jail project tree, so the manager edits the host files in place.
+		// Without it scion mounts a managed copy of the externalized config dir.
 		Workspace: jp,
-		// api-key: start with --harness-auth api-key (satisfied by the placeholder
-		// secret set above); the real credential arrives in-container.
+		// api-key: --harness-auth api-key, satisfied by the placeholder secret.
 		APIKey: apiKey,
-		// manager.resources: the container's memory and CPU limits, as inline
-		// config. Create-time only, like Volumes.
+		// manager.resources, as inline config. Create-time only.
 		Resources: ScionResources(r.app.Manager.Resources),
 	}, nil
 }
 
 // ScionResources is an agent's configured limits in the shape scion.Start
-// sends (resources.limits); the zero value for none. Shared by the manager's
-// start here and the broker's worker specs (brokerctl.WorkerSpecs).
+// sends; the zero value for none. The broker's worker specs use it too.
 func ScionResources(r config.Resources) scion.Resources {
 	mem, cpu := r.ScionLimits()
 	return scion.Resources{Memory: mem, CPU: cpu}
@@ -1515,12 +1266,10 @@ func ScionResources(r config.Resources) scion.Resources {
 // KVMDevice is the device nested_virt gives the manager container.
 const KVMDevice = "/dev/kvm"
 
-// managerVolumes is the manager's inline-config volumes: its read_only plan
-// (managerTreeVolumes) and, under nested_virt, KVMDevice bind-mounted to
-// itself. Scion has no per-agent device field; rootless podman passes a
-// --device as this same bind mount (it cannot mknod, and sets no device
-// cgroup), so the manager gets a working /dev/kvm while the hub and the
-// workers get none.
+// managerVolumes adds, under nested_virt, KVMDevice bind-mounted to itself:
+// scion has no per-agent device field, and rootless podman passes a --device as
+// this same bind mount (it cannot mknod and sets no device cgroup), so the
+// manager gets a working /dev/kvm while the hub and the workers get none.
 func managerVolumes(jp string, app *config.App) []scion.VolumeMount {
 	out := managerTreeVolumes(jp, app.ManagerTreeMounts())
 	out = append(out, SharedVolumes(jp, app.SharedMountsFor(app.Name))...)
@@ -1530,10 +1279,9 @@ func managerVolumes(jp string, app *config.App) []scion.VolumeMount {
 	return out
 }
 
-// SharedVolumes turns an agent's shared_folders plan into scion volumes:
-// each folder of the in-jail tree jp mounted at its /shared/<name> target,
-// read-only unless the agent writes it. The broker builds a worker's from
-// the same function, so the two plans cannot drift.
+// SharedVolumes turns an agent's shared_folders plan into scion volumes,
+// read-only unless the agent writes the folder. The broker builds a worker's
+// from it too, so the two plans cannot drift.
 func SharedVolumes(jp string, mounts []config.SharedMount) []scion.VolumeMount {
 	out := make([]scion.VolumeMount, 0, len(mounts))
 	for _, m := range mounts {
@@ -1542,12 +1290,9 @@ func SharedVolumes(jp string, mounts []config.SharedMount) []scion.VolumeMount {
 	return out
 }
 
-// managerTreeVolumes turns the manager's read_only plan into scion volumes:
-// each tree directory bind-mounted over its own place in the workspace —
-// source under jp (the in-jail tree, which scion mounts at /workspace),
-// target under scion.ContainerWorkspace — read-only for an entry and
-// read-write for an ancestor pin. The plan's order (by depth, then path) is
-// kept; podman orders mounts by destination depth anyway.
+// managerTreeVolumes mounts each directory of the read_only plan over its own
+// place in the workspace: read-only for an entry, read-write for an ancestor
+// pin.
 func managerTreeVolumes(jp string, mounts []config.TreeMount) []scion.VolumeMount {
 	if len(mounts) == 0 {
 		return nil
@@ -1564,25 +1309,22 @@ func managerTreeVolumes(jp string, mounts []config.TreeMount) []scion.VolumeMoun
 }
 
 // TreeMountGaps is how a manager container falls short of its
-// manager.read_only plan, each list by tree-relative path. The kinds differ
-// in what they let the agent do, so String words each with its consequence:
+// manager.read_only plan, each list by tree-relative path:
 //
-//   - Missing: an entry with no mount — the agent writes it;
-//   - Writable: an entry mounted read-write — the agent writes it;
-//   - WrongSource: a mount whose source is not that directory of the
-//     in-jail tree — it covers something else;
-//   - Replaced: a planned mount that covers another directory than the
-//     host has there now — the host replaced the directory after the
-//     manager was created, and the mount still covers the old one, while
-//     a write may land in the new one (live check, LiveTreeMountGaps);
-//   - Elsewhere: a planned mount the kernel records as coming from another
-//     place than the tree directory at its path — a symbolic link stood in
-//     the path when the container started (the runtime followed it), or
-//     the directory was renamed since (live check);
-//   - MissingPins: an entry's ancestor with no mount — the agent can
-//     rename it away and recreate the protected path writable;
-//   - MissingWorkerPins: a worker dir (or its ancestor) with no mount —
-//     the manager can replace it with a link and have that worker mount a
+//   - Missing: an entry with no mount; the agent writes it.
+//   - Writable: an entry mounted read-write; the agent writes it.
+//   - WrongSource: a mount whose source is not that directory of the in-jail
+//     tree; it covers something else.
+//   - Replaced: the host replaced the directory after the manager was
+//     created; the mount covers the old one while a write may land in the
+//     new one (live check).
+//   - Elsewhere: the kernel records the mount as coming from another place
+//     than the tree directory at its path: a symlink stood in the path at
+//     start, or the directory was renamed since (live check).
+//   - MissingPins: an entry's ancestor with no mount; the agent can rename it
+//     away and recreate the protected path writable.
+//   - MissingWorkerPins: a worker dir or its ancestor with no mount; the
+//     manager can replace it with a link and have that worker mount a
 //     protected directory read-write.
 type TreeMountGaps struct {
 	Missing, Writable, WrongSource, Replaced, Elsewhere, MissingPins, MissingWorkerPins []string
@@ -1611,19 +1353,16 @@ func (g TreeMountGaps) String() string {
 	return strings.Join(parts, "; ")
 }
 
-// Stale reports whether ANY gap is a replaced directory (others may sit
-// beside it). A fresh create fixes it like the rest, but the operator
-// caused it by replacing a protected directory instead of editing it in
-// place, so the fix text adds that rule.
+// Stale reports whether any gap is a replaced directory. The operator caused it
+// by replacing a protected directory instead of editing it in place, so the fix
+// text adds that rule.
 func (g TreeMountGaps) Stale() bool { return len(g.Replaced)+len(g.Elsewhere) > 0 }
 
-// ManagerTreeMountGaps compares a manager container's mounts with the
-// read_only plan: every planned directory must be mounted at its place in
-// the workspace from the same place in the in-jail tree jp, and an entry
-// must be read-only. A pin's writability is not checked — what makes it a
-// pin is being a mount point, which cannot be renamed or removed. Shared by
-// `lever doctor` and apply's keep/resume warning. The live check
-// (LiveTreeMountGaps) is separate: it needs a running container.
+// ManagerTreeMountGaps compares a manager container's mounts with the read_only
+// plan: every planned directory must be mounted at its place in the workspace
+// from the same place in the in-jail tree jp, and an entry must be read-only. A
+// pin's writability is not checked: being a mount point is what stops it being
+// renamed or removed. The live check is LiveTreeMountGaps.
 func ManagerTreeMountGaps(jp string, want []config.TreeMount, got []jail.Mount) TreeMountGaps {
 	byTarget := make(map[string]jail.Mount, len(got))
 	for _, m := range got {
@@ -1648,14 +1387,12 @@ func ManagerTreeMountGaps(jp string, want []config.TreeMount, got []jail.Mount) 
 	return g
 }
 
-// LiveMountChecker checks a running container's mounts from the guest
-// (jail.ContainerLiveMounts in production).
+// LiveMountChecker checks a running container's mounts from the guest.
 type LiveMountChecker func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error)
 
-// ManagerLivePlan is the tree plan want as the live check reads it: each
-// directory at its place in the workspace, from the same place in the
-// in-jail tree jp, read-only for an entry; each a tree directory over its
-// own place (jail.LiveMount.SelfMount).
+// ManagerLivePlan is the tree plan want as the live check reads it: each a tree
+// directory over its own place (jail.LiveMount.SelfMount), read-only for an
+// entry.
 func ManagerLivePlan(jp string, want []config.TreeMount) []jail.LiveMount {
 	plan := make([]jail.LiveMount, 0, len(want))
 	for _, w := range want {
@@ -1664,16 +1401,14 @@ func ManagerLivePlan(jp string, want []config.TreeMount) []jail.LiveMount {
 	return plan
 }
 
-// LiveTreeMountGaps runs the live half of the tree-plan check on a RUNNING
-// container ref, from the guest side (live): every planned directory a
-// mount point, an entry read-only, each covering the directory the host
-// has there now. A mount podman lists does not prove it — after the host
-// replaced the directory (rename-based deploy, rm -rf and recreate) the
-// mount stays on the old directory and a write lands in the new one — and
-// an answer from inside the container would be the agent's word. Every
-// failure to check is an error (jail.ErrContainerNotRunning,
-// jail.ErrForeignNamespace among them), so a check that did not run never
-// reads as held.
+// LiveTreeMountGaps runs the live half of the tree-plan check on a running
+// container, from the guest side: every planned directory a mount point, an
+// entry read-only, each covering the directory the host has there now. A mount
+// podman lists does not prove that: after the host replaced the directory
+// (rename-based deploy, rm -rf and recreate) the mount stays on the old one and
+// a write lands in the new one, and an answer from inside the container would
+// be the agent's word. Every failure to check is an error, so a check that did
+// not run never reads as held.
 func LiveTreeMountGaps(ctx context.Context, live LiveMountChecker, jp, ref string, want []config.TreeMount) (TreeMountGaps, error) {
 	var g TreeMountGaps
 	if len(want) == 0 {
@@ -1712,9 +1447,9 @@ func LiveTreeMountGaps(ctx context.Context, live LiveMountChecker, jp, ref strin
 	return g, nil
 }
 
-// ManagerTreeMountsFix is the operator's way out of every gap: a fresh
-// create (`up --fresh --keep-conversation` carries the conversation over), and for a
-// replaced directory, editing protected directories in place from now on.
+// ManagerTreeMountsFix is the operator's way out of every gap: a fresh create,
+// and for a replaced directory, editing protected directories in place from
+// now on.
 func ManagerTreeMountsFix(g TreeMountGaps) string {
 	fix := "run `lever up --fresh --keep-conversation` to recreate the manager with the mounts and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"
 	if g.Stale() {
@@ -1723,24 +1458,20 @@ func ManagerTreeMountsFix(g TreeMountGaps) string {
 	return fix
 }
 
-// StaleTreeMounts is how a manager container's tree mounts outlive the
-// config. scion keeps a record's volumes for life and a resume recreates
-// the container from them, so a mount lever made at the create stays after
-// the config stops asking for it, each list by tree-relative path:
+// StaleTreeMounts is how a manager container's tree mounts outlive the config:
+// scion keeps a record's volumes for life and a resume recreates the container
+// from them. Each list is by tree-relative path:
 //
-//   - Gone: the host directory behind the mount no longer exists, or a
-//     symbolic link now stands in its path (lever does not follow it on the
-//     host; see treePathLinked). podman cannot recreate the container
-//     ("statfs …: no such file or directory"), or would mount whatever the
-//     link points at, so the resume is refused (card #157);
-//   - DroppedReadOnly: an entry no longer in manager.read_only, still
-//     mounted read-only — the manager cannot write it until a fresh create;
-//   - DroppedPins: a pin the plan no longer has (a removed entry's
-//     ancestor, a removed worker's dir), still mounted over itself — the
-//     directory cannot be renamed or removed from inside the container.
+//   - Gone: the host directory behind the mount no longer exists, or a symlink
+//     now stands in its path (lever does not follow it; see treePathLinked).
+//     podman cannot recreate the container, or would mount whatever the link
+//     points at, so the resume is refused.
+//   - DroppedReadOnly: an entry no longer in manager.read_only, still mounted
+//     read-only until a fresh create.
+//   - DroppedPins: a pin the plan no longer has, still mounted over itself, so
+//     the directory cannot be renamed or removed from inside the container.
 //
-// The reverse case, an entry ADDED to the config, is a TreeMountGaps
-// Missing gap: it too needs a fresh create.
+// An entry added to the config is a TreeMountGaps Missing gap instead.
 type StaleTreeMounts struct {
 	Gone, DroppedReadOnly, DroppedPins []string
 }
@@ -1750,18 +1481,15 @@ func (s StaleTreeMounts) Empty() bool {
 	return len(s.Gone)+len(s.DroppedReadOnly)+len(s.DroppedPins) == 0
 }
 
-// maxStalePaths and maxStalePathBytes bound what String lists: the paths
-// come from the container's inspect or the hub record, text lever does not
-// control.
+// The paths come from the container's inspect or the hub record, text lever
+// does not control, so String bounds them.
 const (
 	maxStalePaths     = 10
 	maxStalePathBytes = 120
 )
 
-// String words the stale mounts for a doctor row or an apply message. Each
-// path is quoted (%q escapes every control character) after a cut to
-// maxStalePathBytes, and each list stops at maxStalePaths with a count of
-// the rest.
+// String quotes each path (%q escapes every control character) after a cut to
+// maxStalePathBytes, and stops each list at maxStalePaths.
 func (s StaleTreeMounts) String() string {
 	var parts []string
 	add := func(paths []string, what string) {
@@ -1787,9 +1515,8 @@ func (s StaleTreeMounts) String() string {
 	return strings.Join(parts, "; ")
 }
 
-// Fix is the operator's way out: for a gone directory, recreate it (empty
-// is enough) or start fresh; for a dropped mount, keep the directory until
-// a fresh create, which is the only way to drop the mount.
+// Fix is the operator's way out: recreate a gone directory or start fresh; a
+// dropped mount goes only with a fresh create.
 func (s StaleTreeMounts) Fix() string {
 	const fresh = "run `lever up --fresh --keep-conversation` (it recreates the manager with the mounts the config names now and keeps its conversation; plain `--fresh` starts a new one; both back the old one up first)"
 	if len(s.Gone) > 0 {
@@ -1798,12 +1525,10 @@ func (s StaleTreeMounts) Fix() string {
 	return "keep these directories until the next fresh create (a missing one blocks the resume); to drop the mounts now, " + fresh
 }
 
-// ManagerStaleTreeMounts finds, among a manager container's mounts, the
-// tree directories lever mounted over themselves (source the directory in
-// the in-jail tree jp, target the same place under the workspace) that the
-// current read_only plan no longer has, or whose host directory (under
-// tree) is gone. Any other mount — the workspace itself, scion's own — is
-// not lever's and is skipped.
+// ManagerStaleTreeMounts finds the tree directories lever mounted over
+// themselves (treeSelfMount) that the current read_only plan no longer has, or
+// whose host directory under tree is gone. Any other mount is not lever's and
+// is skipped.
 func ManagerStaleTreeMounts(jp, tree string, want []config.TreeMount, got []jail.Mount) StaleTreeMounts {
 	planned := make(map[string]bool, len(want))
 	for _, w := range want {
@@ -1832,14 +1557,12 @@ func ManagerStaleTreeMounts(jp, tree string, want []config.TreeMount, got []jail
 	return s
 }
 
-// treePathLinked walks rel under tree with Lstat, one component at a time,
-// and reports whether any component is a symbolic link. It never follows a
-// link on the host: the tree is agent-writable, and a link could point at a
-// path whose stat blocks (a macOS autofs path such as /net/<host>/x) or at
-// anything outside the tree, which a resume would then mount into the
-// manager. A link anywhere on the path therefore counts as gone (a dangling
-// one included); the error is the first Lstat's (os.ErrNotExist for a
-// missing component).
+// treePathLinked reports whether any component of rel under tree is a
+// symlink, using Lstat one component at a time. It never follows a link on the
+// host: the tree is agent-writable, and a link could point at a path whose stat
+// blocks (a macOS autofs path such as /net/<host>/x) or anywhere outside the
+// tree, which a resume would then mount into the manager. The error is the
+// first Lstat's (os.ErrNotExist for a missing component).
 func treePathLinked(tree, rel string) (bool, error) {
 	p := tree
 	for _, part := range strings.Split(rel, "/") {
@@ -1856,7 +1579,7 @@ func treePathLinked(tree, rel string) (bool, error) {
 }
 
 // treeSelfMount reports whether m is a tree directory mounted over its own
-// place in the workspace, the shape managerTreeVolumes creates, and its
+// place in the workspace (the shape managerTreeVolumes creates), and its
 // tree-relative path.
 func treeSelfMount(jp string, m jail.Mount) (string, bool) {
 	rel, ok := strings.CutPrefix(m.Destination, scion.ContainerWorkspace+"/")
@@ -1866,31 +1589,22 @@ func treeSelfMount(jp string, m jail.Mount) (string, bool) {
 	return rel, m.Source == path.Join(jp, rel)
 }
 
-// managerKept reports whether convergeManager keeps rec as it is (no
-// resume, no restart, so its container is not recreated). Every other arm
-// that acts on a record resumes it — plain, or forced for the error phase —
-// and a resume recreates the container from the record's volumes. One
-// predicate for both, so checkStaleTreeMounts cannot drift from what
-// convergeManager does.
+// managerKept reports whether convergeManager keeps rec as it is. Every other
+// arm resumes it (plain, or forced for the error phase), which recreates the
+// container from the record's volumes. checkStaleTreeMounts uses the same
+// predicate so the two cannot drift.
 func managerKept(rec *scion.Agent) bool { return rec.Phase == scion.PhaseRunning }
 
-// checkStaleTreeMounts runs before apply acts on a manager record it will
-// keep or resume: a mount the record holds for a directory that is gone
-// fails the resume inside podman with a bare statfs error, and a mount the
-// config dropped stays until a fresh create.
+// checkStaleTreeMounts runs before apply keeps or resumes a manager record: a
+// mount for a gone directory fails the resume inside podman with a bare statfs
+// error, and a mount the config dropped stays until a fresh create.
 //
 // It reads the mounts off the manager's container, which a stopped record
-// keeps (scion's stop does not remove it). With no container to inspect,
-// or an inspect that fails, it falls back to the record's own volumes on
-// the hub (Deps.RecordVolumes: the inline-config volumes a resume recreates
-// the container from); with neither it says nothing, and doctor and
-// warnManagerTreeMounts report what they cannot inspect.
-//
-// A gone directory refuses the bring-up before anything is acted on,
-// naming the fix, unless apply will keep the record as it is
-// (kept, from managerKept): every other path resumes it — the forced resume of an
-// error phase too, even while its container is still up — and the resume
-// recreates the container. Everything else is a warning.
+// keeps, falling back to the record's volumes on the hub (Deps.RecordVolumes);
+// with neither it says nothing. A gone directory refuses the bring-up before
+// anything is acted on unless the record is kept as it is (managerKept): every
+// other path, the forced resume of an error phase included, recreates the
+// container. Everything else is a warning.
 func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, kept bool) error {
 	got, ok := r.managerMounts(ctx, jp)
 	if !ok {
@@ -1907,39 +1621,33 @@ func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, kept bool) er
 	return nil
 }
 
-// verifyResumedTreeMounts closes what checkStaleTreeMounts cannot: that
-// check reads the host tree BEFORE the resume, and the runtime resolves
-// each mount source again, following symbolic links, when it recreates the
-// container. An agent that can write a mounted directory's parent (the
-// manager itself during a forced resume, or a writer of a shared folder
-// above a stale mount) can swap the directory for a link in between, and
-// the runtime then mounts whatever the link names — a guest path, read-write
-// for a pin — into the manager. Nothing lever runs can make the runtime's
-// own mount refuse a link, so this checks the result: right after the
-// resume, every directory lever mounted over its own place (treeSelfMount:
-// the current plan and the mounts the record kept from older ones) is read
-// back from the guest (CheckLiveMounts, jail.LiveMount.SelfMount: the
-// kernel's record of where each mount comes from, no program run inside
-// the container). A mount that comes from elsewhere, is missing at its
-// place (the runtime resolves the destination too, in the same tree, so a
-// link moves the mount point as well) or is writable where it should be
-// read-only, or a first process in a namespace made inside the container,
-// suspends the manager and fails the bring-up: fail closed, since the agent may hold a path it must never
-// see. verified is false, with no error, when the check could not run (no
-// container yet, not running, unreadable): the caller tries again once the
-// manager is live, and warns if it still cannot. With no inspect or live
-// check wired there is nothing to run, and verified is true.
 // resumeCheckTimeout bounds one verifyResumedTreeMounts, suspend included.
 const resumeCheckTimeout = 90 * time.Second
 
+// verifyResumedTreeMounts closes what checkStaleTreeMounts cannot: that check
+// reads the host tree before the resume, and the runtime resolves each mount
+// source again, following symlinks, when it recreates the container. An agent
+// that can write a mounted directory's parent (the manager itself during a
+// forced resume, or a writer of a shared folder above a stale mount) can swap
+// the directory for a link in between, and the runtime then mounts whatever
+// the link names (read-write for a pin) into the manager. Nothing lever runs
+// can make the runtime refuse a link, so right after the resume every
+// directory lever mounted over its own place (treeSelfMount) is read back from
+// the guest (CheckLiveMounts: the kernel's record, nothing run inside the
+// container). A mount from elsewhere, missing at its place, or writable where
+// it should be read-only, or a first process in a namespace made inside the
+// container, suspends the manager and fails the bring-up: fail closed, since
+// the agent may hold a path it must never see. verified is false, with no
+// error, when the check could not run: the caller tries again once the manager
+// is live, and warns if it still cannot. With no inspect or live check wired,
+// verified is true.
 func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified bool, err error) {
 	if r.d.InspectContainerMounts == nil || r.d.CheckLiveMounts == nil {
-		// Not wired (tests; the CLI wires both): nothing to check with,
-		// and warnManagerTreeMounts names the gap when a plan exists.
+		// Not wired: warnManagerTreeMounts names the gap when a plan exists.
 		return true, nil
 	}
-	// Detached from the caller's cancellation, bounded: an interrupt (^C)
-	// right after the resume must not skip the check or the suspend.
+	// Detached from the caller's cancellation, bounded: an interrupt right after
+	// the resume must not skip the check or the suspend.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resumeCheckTimeout)
 	defer cancel()
 	ref := jail.ContainerName(path.Base(jp), r.app.Name)
@@ -1967,13 +1675,11 @@ func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified 
 	}
 	var bad []string
 	for _, p := range problems {
-		// Elsewhere: the source was resolved through a link. Missing: the
-		// runtime also resolves the destination inside the container, and
-		// /workspace is the same tree, so a swapped link moves the mount
-		// point too (podman lists it, the kernel has it elsewhere).
-		// Writable: a read-only mount is not. Replaced alone (another
-		// inode behind a mount the kernel records at the right place) is
-		// left to warnManagerTreeMounts: it rests on stable inode numbers.
+		// Elsewhere: the source was resolved through a link. Missing: the runtime also
+		// resolves the destination inside the container, and /workspace is the same
+		// tree, so a swapped link moves the mount point too. Writable: a read-only
+		// mount is not. Replaced alone is left to warnManagerTreeMounts: it rests on
+		// stable inode numbers.
 		switch p.Reason {
 		case jail.LiveMountElsewhere, jail.LiveMountMissing, jail.LiveMountWritable:
 			bad = append(bad, strconv.Quote(strings.TrimPrefix(p.Target, scion.ContainerWorkspace+"/"))+" "+p.Reason)
@@ -1993,15 +1699,10 @@ func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified 
 		r.subjectName(), r.app.Name, why, suspended)
 }
 
-// warnUnverifiedResume is the warning for a resume whose tree mounts
-// lever could not read back even once the manager was live.
 func (r *run) warnUnverifiedResume() {
 	r.d.logf("%s: warning: lever could not check from the guest where manager %q's tree mounts come from after the resume; run `lever doctor` (row \"manager read-only paths\")", r.subjectName(), r.app.Name)
 }
 
-// managerMounts is the manager's mounts for checkStaleTreeMounts: its
-// container's, or else the record's volumes. ok is false when neither can
-// be read.
 func (r *run) managerMounts(ctx context.Context, jp string) ([]jail.Mount, bool) {
 	if r.d.InspectContainerMounts != nil {
 		if got, err := r.d.InspectContainerMounts(ctx, jail.ContainerName(path.Base(jp), r.app.Name)); err == nil {
@@ -2016,16 +1717,12 @@ func (r *run) managerMounts(ctx context.Context, jp string) ([]jail.Mount, bool)
 	return nil, false
 }
 
-// warnManagerTreeMounts runs after apply kept or resumed a manager rather
-// than creating it: manager.read_only is create-time only, so a manager
-// created before the setting (or before an entry was added) does not hold
-// the mounts, and nothing in a resume adds them; and a protected directory
-// replaced on the host since the create is no longer covered. Never fatal —
-// the manager works, it is only unprotected — but loud, naming what is
-// wrong and the way to fix it. The container is found by scion's container
-// name, which a resume keeps (its id changes when scion recreates the
-// container); it is live here (waitManagerLive passed), so the live check
-// (LiveTreeMountGaps, from the guest side) runs too.
+// warnManagerTreeMounts runs after apply kept or resumed a manager:
+// manager.read_only is create-time only, so an older manager may not hold the
+// mounts, and a protected directory replaced on the host since the create is no
+// longer covered. Never fatal (the manager works, only unprotected) but loud.
+// The container is found by scion's container name, which a resume keeps, and
+// it is live here, so the live check (LiveTreeMountGaps) runs too.
 func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 	want := r.app.ManagerTreeMounts()
 	if len(want) == 0 {
@@ -2063,8 +1760,8 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 }
 
 // toolsOnReadOnly names the broker tools whose program relies on
-// manager.read_only (config.App.ToolsOnReadOnly), sorted; the broker holds
-// them back while the manager lacks the mounts (brokerctl.ReadOnlyGuard).
+// manager.read_only, sorted; the broker holds them back while the manager lacks
+// the mounts (brokerctl.ReadOnlyGuard).
 func (r *run) toolsOnReadOnly() []string {
 	m, err := r.app.ToolsOnReadOnly()
 	if err != nil {
@@ -2078,13 +1775,11 @@ func (r *run) toolsOnReadOnly() []string {
 	return tools
 }
 
-// warnManagerNestedVirt runs after the manager is live: nested_virt's
-// /dev/kvm volume is create-time only, so a manager created before the key
-// was turned on lacks the device, and one created while it was on keeps the
-// device after it is turned off (a resume recreates the container from the
-// record's volumes). Both need a fresh create. Off, it probes Lima instances
-// only: nested_virt is Lima-only, so no other manager can hold the device.
-// Never fatal.
+// warnManagerNestedVirt: nested_virt's /dev/kvm volume is create-time only, so
+// a manager created before it was on lacks the device, and one created while it
+// was on keeps it after it is off (a resume recreates the container from the
+// record's volumes). With nested_virt off it probes Lima instances only: no
+// other backend can hold the device. Never fatal.
 func (r *run) warnManagerNestedVirt(ctx context.Context, jp string) {
 	on := r.app.NestedVirt
 	if !on && r.app.Backend != config.BackendLima {
@@ -2112,17 +1807,22 @@ func (r *run) warnManagerNestedVirt(ctx context.Context, jp string) {
 }
 
 // NestedVirtRecreateFix is how a manager gains or drops /dev/kvm: a fresh
-// create, which discards the conversation (a stop and up keeps the record's
-// volumes).
+// create (a stop and up keeps the record's volumes).
 const NestedVirtRecreateFix = "recreate it to apply the change: `lever up --fresh --keep-conversation` (`lever stop` + `lever up` keeps the old devices)"
 
-// convergeManager acts on the observed manager record (nil when absent, already
-// settled out of any transitional phase by observeManager): create, keep,
-// resume, forced resume, the `--fresh` delete+create, or — for a phase it
-// does not know — a refusal that leaves the record alone. acted reports
-// whether it started or resumed anything — what decides if the liveness gate
-// that follows must hold for the settle window (lever#31) or may take one look.
+// convergeManager acts on the observed, settled manager record (nil when
+// absent): create, keep, resume, forced resume, the --fresh delete and create,
+// or, for an unknown phase, a refusal that leaves the record alone. acted
+// reports whether it started or resumed anything, which decides whether the
+// liveness gate must hold for the settle window or may take one look.
 func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) (acted bool, err error) {
+	if rec != nil && !r.fresh && rec.Image != "" && !strings.Contains(rec.Image, "@") && !imageref.Qualified(rec.Image) {
+		// scion keeps the image a record was created with and rewrites an
+		// unqualified one to the hub's image registry at every start, which an
+		// agent can set between applies.
+		r.d.Log("start-manager: WARNING: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; recreate it on %s with `lever up --fresh --keep-conversation`",
+			r.app.Name, termsafe.Sanitize(rec.Image), opts.Image)
+	}
 	switch {
 	case rec == nil:
 		// Under --fresh an "already exists" answer means the observe step
@@ -2130,12 +1830,10 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 		// the session the operator asked to discard, never a success.
 		return true, r.startManagerCreate(ctx, opts, r.fresh)
 	case r.fresh:
-		// `up --fresh`: the operator asked to discard the session, whatever
-		// phase the record is in. Decided HERE, after the hub is up, because
-		// after `lever stop` the record is invisible until this step
-		// (lever#33). Loud, like every other discard; the create that follows
-		// is what puts a changed manager.image into effect (a resume keeps
-		// the image the record was created with).
+		// --fresh discards the session whatever the record's phase. Decided here,
+		// after the hub is up, because after lever stop the record is invisible until
+		// this step. The create that follows is what puts a changed manager.image into
+		// effect (a resume keeps the record's image).
 		if r.d.BackupManagerConversation != nil {
 			if err := r.d.BackupManagerConversation(ctx, rec); err != nil {
 				return false, fmt.Errorf("start-manager: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.app.Name, err)
@@ -2145,9 +1843,8 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 			fmt.Sprintf("start-manager: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.app.Name, scion.BoundedQuote(rec.Phase)),
 			"--fresh delete")
 	case managerKept(rec):
-		// No-op — the liveness verify in startManager still confirms the
-		// container is actually up: a running RECORD with a dead container
-		// must fail loudly, not silently pass.
+		// The liveness gate in startManager still confirms the container is up: a
+		// running record with a dead container must fail loudly.
 		return false, nil
 	case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
 		if rec.Phase == scion.PhaseStopped {
@@ -2156,49 +1853,36 @@ func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, 
 			// say so: the old conversation is still in the agent home.
 			r.d.Log("start-manager: manager %q is in phase stopped; scion resumes a stopped record in a new claude session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", r.app.Name)
 		}
-		// Resume rides the SAME runtime-broker-race retry as a create Start
-		// (see scion.IsBrokerUnavailable's doc): on a cold VM the runtime broker may
-		// not have re-registered with the hub yet, and resume hits that
-		// identical transient window. Only once the retry budget is exhausted
-		// (or the error is not the transient one at all) is the session
-		// declared unrecoverable.
+		// Resume rides the same runtime-broker-race retry as a create (see
+		// scion.IsBrokerUnavailable): on a cold VM the runtime broker may not have
+		// re-registered with the hub yet.
 		return true, r.resumeOrRecover(ctx, jp, resumeVerbPlain(func() error {
 			return r.d.Scion.Resume(ctx, r.app.Name, jp)
 		}))
 	case rec.Phase == scion.PhaseError:
-		// A crashed/wedged manager record. Since scion#895 (`resume
-		// --force`, pin >= 68507153) the error phase IS recoverable — try
-		// that first, with a fresh ticket staged (the leaf may have lapsed
-		// while wedged; same rationale as the suspended branch). A forced
-		// resume that fails keeps the record, like any failed resume.
-		// Live motivation: 2026-07-31, an OrbStack VM reboot corrupted the
-		// container state, resume failed, and the then-unconditional
-		// delete+fresh destroyed the manager conversation (#3).
+		// scion resume --force recovers the error phase. A fresh ticket is staged, as
+		// for a suspended record, since the leaf may have lapsed while wedged. A forced
+		// resume that fails keeps the record, like any failed resume, so a container
+		// state corrupted by a VM reboot never costs the conversation.
 		return true, r.resumeOrRecover(ctx, jp, resumeVerbForce(func() error {
 			return r.d.Scion.ResumeForce(ctx, r.app.Name, jp)
 		}))
 	default:
-		// A transitional phase was settled (or refused) by observeManager
-		// before this switch, so what lands here is a phase this lever does
-		// not know at all — a newer scion enum, or a hostile hub string. There
-		// is no verb to act on it, and guessing used to mean the loud
-		// delete+fresh path: a plain `lever up` discarding the conversation on
-		// a string it could not read (P6). Refuse instead, leaving the record
-		// (and its conversation) in place; the operator's discard is `up
-		// --fresh` (the arm above), which needs no phase at all.
+		// observeManager settled or refused any transitional phase, so this is a phase
+		// lever does not know: a newer scion enum or a hostile hub string. Refuse and
+		// leave the record and its conversation in place; the operator's discard is up
+		// --fresh, which needs no phase.
 		return false, fmt.Errorf("start-manager: manager %q is in phase %s, which lever does not recognise; nothing was changed. Retry once it settles, or run `lever up --fresh` to discard the session and start over",
 			r.app.Name, scion.BoundedQuote(rec.Phase))
 	}
 }
 
-// settleManagerPhase re-observes a manager record seen in a transitional
-// phase (transitionalPhases) until scion moves it to a phase convergeManager
-// can act on, or the record disappears (nil: a concurrent delete — the caller
-// then creates), or the settle budget runs out. Exhaustion is a hard error
-// naming the phase and the two ways out; it never touches the record. A
-// list error mid-poll is treated as "not yet" (the next attempt re-reads),
-// like waitManagerLive; a phase that is neither transitional nor known stops
-// the wait at once so convergeManager's default arm refuses it by name.
+// settleManagerPhase re-observes a record in a transitional phase until it
+// reaches a phase convergeManager can act on, disappears (nil: a concurrent
+// delete; the caller then creates), or the budget runs out. Exhaustion is a
+// hard error that never touches the record. A list error mid-poll counts as
+// "not yet"; a phase neither transitional nor known stops the wait at once so
+// convergeManager refuses it by name.
 func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agent) (*scion.Agent, error) {
 	b := r.phaseSettle
 	r.d.Log("start-manager: manager %q is in phase %q (mid-transition) — waiting up to %s for scion to settle it",
@@ -2222,24 +1906,24 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 		return nil, err
 	}
 	if listErr != nil {
-		// The last look failed, so cur is stale: say so rather than report
-		// a phase nobody observed on the final attempt.
+		// The last look failed, so cur is stale: say so rather than report a phase
+		// nobody observed on the final attempt.
 		return nil, fmt.Errorf("start-manager: manager %q was in phase %q and could not be re-observed within %s (last error: %v); nothing was changed. Retry, or run `lever up --fresh` to discard the session and start over",
 			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, listErr)
 	}
 	if cur.Phase == "created" {
 		return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. %s",
-			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, createdStuckHint(r.app.ManagerImage()))
+			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, createdStuckHint(r.app.ManagerAgentImage()))
 	}
 	return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. Retry once it settles (is a `lever stop` still running?), or run `lever up --fresh` to discard the session and start over",
 		r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval)
 }
 
-// createdStuckHint explains the usual cause of a manager that never leaves
-// phase created (lever#165): scion's start gives up after about 30 s, and the
-// first rootless start of a large image spends longer than that on podman's
-// id-mapped layer copy, so every retry starts again from zero. The load-image
-// step warms the copy; this names the manual warm-up for when that failed.
+// createdStuckHint explains the usual cause of a manager stuck in phase
+// created: scion's start gives up after about 30 s, and the first rootless
+// start of a large image spends longer than that on podman's id-mapped layer
+// copy, so every retry starts from zero. load-image warms the copy; this names
+// the manual warm-up for when that failed.
 func createdStuckHint(image string) string {
 	return fmt.Sprintf("The usual cause is the first start of a large image: podman builds a user-namespace layer copy that takes longer than scion's ~30 s start timeout, so scion retries from zero. "+
 		"Check the `load-image` lines of this apply for a warm-up warning; then, in the guest as the jail user, run `podman run --rm %s --entrypoint true %s` (it can take a few minutes) and run `lever up --fresh` (a manager in phase created has no conversation to lose). "+
@@ -2247,20 +1931,16 @@ func createdStuckHint(image string) string {
 		jail.ScionKeepIDUserns, image)
 }
 
-// prepareAPIKeyMode conveys LEVER_LLM_AUTH=api-key to the manager container so
-// its pre-start hook enters api-key mode (the hook reads $LEVER_LLM_AUTH; scion
-// projects Hub env before pre-start hooks run). Project-scoped (the manager's
-// project = jp) so it never leaks to other agents. Runs BEFORE start so it is
-// present when the container boots.
+// prepareAPIKeyMode sets LEVER_LLM_AUTH=api-key on the manager's project before
+// start, so its pre-start hook enters api-key mode (scion projects Hub env
+// before pre-start hooks run). Project scope keeps it from other agents.
 //
-// It also satisfies scion's start-time auth gate with a placeholder
-// ANTHROPIC_API_KEY (Hub secret, projected to every container — fine since the
-// instance is uniformly api-key). It is a sentinel, NOT a real credential: the
-// agent's real LLM credential is the in-container broker capability token, and
-// the broker /llm overwrites this placeholder x-api-key with the real key.
-// Without it scion's env-gather/auth-resolution refuses to launch the container
-// (and thus lever-agent boot, which writes the real token). Set once here;
-// later-started workers inherit the same Hub secret.
+// It also sets the placeholder ANTHROPIC_API_KEY Hub secret, projected to every
+// container, which is fine since the instance is uniformly api-key. It is not a
+// credential: the agent's LLM credential is its broker capability token, and
+// the broker /llm overwrites the placeholder with the real key. Without it
+// scion's auth resolution refuses to launch the container, and with it
+// lever-agent boot, which writes the real token.
 func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
 	if err := r.d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
 		return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
@@ -2272,45 +1952,33 @@ func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
 }
 
 // observeManager lists the project's agents and returns the manager's record
-// (nil when absent), after refusing to KEEP a record whose stored role the
-// installed scion would read as `full` (see Deps.VerifyAgentRole).
+// (nil when absent), after refusing to keep a record whose stored role the
+// installed scion would read as full (see Deps.VerifyAgentRole).
 //
-// Observe, then act on the delta — scion's verbs are state-specific: start
-// CREATES (409 "already exists" over a stopped record; the 409 error TEXT
-// matches AlreadyRunning, so a blind start false-succeeds through that
-// idempotency check — scion's own exit code is correctly non-zero, verified
-// upstream 2026-07-04); resume covers suspended AND stopped records,
-// relaunching with `claude --continue` (conversation restored). Live evidence
-// 2026-07-04.
+// scion's verbs are state-specific, hence observe then act: start creates (over
+// a stopped record its 409 "already exists" text matches AlreadyRunning, so a
+// blind start false-succeeds), and resume covers suspended and stopped records
+// with claude --continue.
 //
-// The Hub API is up by this point in Plan() (scion-server ran first, and
-// waitHubReady confirmed it), but the runtime broker registers asynchronously
-// after it, so this FIRST call into the hub can still hit the registration
-// window — on a cold VM as a "deadline exceeded" from the hub. So the observe
-// rides the SAME bounded retry as the Start/Resume (scion.IsBrokerUnavailable): a
-// transient broker-not-ready blip is retried, and only a persistent or
-// genuinely-different error is fatal.
+// The runtime broker registers asynchronously after the Hub API, so this first
+// hub call can still hit that window (on a cold VM as "deadline exceeded"); it
+// rides the same bounded retry as Start and Resume. A record in a transitional
+// phase is waited on first (settleManagerPhase), so the role gate and the
+// caller both see a settled one.
 //
-// A record in a transitional phase is first waited on (settleManagerPhase),
-// so the role gate and the caller both see a settled one.
-//
-// The role gate only covers the phases convergeManager keeps the record in:
-// rec == nil creates one, and its default branch refuses anything else. It
-// returns rather than falling into recoverDeleteAndCreate on purpose. That
-// recovery discards the conversation, and refusing here exists to give the
-// operator the choice — losing the session is one of the two ways out, not
-// something a guard may take on their behalf.
+// The role gate covers only the phases convergeManager keeps the record in. It
+// refuses rather than fall into recoverDeleteAndCreate on purpose: that
+// discards the conversation, and losing the session is the operator's choice,
+// not a guard's.
 func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, error) {
 	agents, err := r.listAgentsRetry(ctx, jp)
 	if err != nil {
 		return nil, fmt.Errorf("start-manager: observing agents: %w", err)
 	}
 	rec := scion.FindAgent(agents, r.app.Name)
-	// Under --fresh the record is about to be discarded whatever its phase or
-	// role (convergeManager): waiting for it to settle would be pointless,
-	// and the guard's own remedy for a pre-role record IS "delete the agent
-	// so lever recreates it" — so refusing here would block the one verb
-	// that applies that remedy (review finding on lever#33).
+	// Under --fresh the record is discarded whatever its phase or role: waiting for
+	// it to settle would be pointless, and the role guard's own remedy is the
+	// delete --fresh performs, so it must not block it.
 	if rec != nil && !r.fresh && slices.Contains(transitionalPhases, rec.Phase) {
 		if rec, err = r.settleManagerPhase(ctx, jp, rec); err != nil {
 			return nil, err
@@ -2327,51 +1995,33 @@ func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, erro
 	return rec, nil
 }
 
-// resumeVerb is one of the two resumable arms of convergeManager: a
-// suspended/stopped record via `scion resume`, an error record via `scion
-// resume --force`.
+// resumeVerb is one of convergeManager's two resumable arms: scion resume for a
+// suspended or stopped record, scion resume --force for an error record.
 type resumeVerb struct {
 	label  string // verb name in the log line and the refusal
 	resume func() error
 }
 
-// resumeVerbPlain is the `scion resume` arm for a suspended/stopped record.
 func resumeVerbPlain(run func() error) resumeVerb {
 	return resumeVerb{label: "resume", resume: run}
 }
 
-// resumeVerbForce is the `scion resume --force` arm for an error record.
 func resumeVerbForce(run func() error) resumeVerb {
 	return resumeVerb{label: "resume --force", resume: run}
 }
 
-// resumeOrRecover is the shared body of the two resumable arms. It stages
-// fresh bootstrap material and runs the verb through the runtime-broker-race
-// retry. On failure it keeps a manager that recovered concurrently, and
-// otherwise REFUSES: the record and its conversation stay where they are.
+// resumeOrRecover stages fresh bootstrap material and runs the verb through the
+// runtime-broker-race retry. On failure it keeps a manager that recovered
+// concurrently and otherwise refuses, leaving the record and its conversation
+// in place: a failed resume says the session cannot come up now, not that it is
+// worthless, and discarding it is the operator's call (lever up --fresh).
 //
-// It used to delete the record and create a fresh manager when a resume
-// failed, which discarded the conversation on any failure lever could not
-// classify (lever#3: a VM reboot that corrupted the container state). A
-// resume that fails says the session could not be brought up NOW; it does not
-// say the session is worthless. Discarding one is the operator's decision,
-// and `lever up --fresh` is how they make it.
-//
-// Self-heal an expired mTLS leaf BEFORE resuming. A manager whose short-lived
-// agent leaf expired while the instance was down (the in-container renew
-// sidecar cannot run while stopped, so downtime longer than the leaf lifetime
-// guarantees expiry) must be able to re-enrol on boot. lever-agent's boot
-// re-enrols an expired leaf (ValidCert → false), but ONLY if a fresh, unspent
-// enrolment ticket is staged — and the resume path used to stage none, so the
-// leaf stayed dead and every brokered call failed the mTLS handshake until a
-// full `lever destroy`. ensureFreshBootstrap fixes that without a teardown: it
-// is a no-op when this run already minted fresh material (the normal stop→up
-// path, where broker-up reopened the /bootstrap latch and
-// mint-manager-bootstrap already staged a ticket), and re-arms + stages a
-// fresh ticket only when the broker outlived a spent latch across the
-// manager's downtime — exactly the expired-leaf case. The unspent ticket is
-// harmless when the leaf is still valid (boot's ValidCert passes and skips
-// enrol, leaving it unredeemed).
+// ensureFreshBootstrap runs first so that a manager whose short-lived agent
+// leaf expired while it was stopped (the renew sidecar cannot run then) can
+// re-enrol on boot: lever-agent boot re-enrols an expired leaf only when an
+// unspent ticket is staged. It is a no-op when this run already minted
+// material, and an unspent ticket is harmless when the leaf is still valid
+// (boot skips enrolment).
 func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) error {
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
@@ -2391,15 +2041,12 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 	return ResumeFailed(v.label, rerr)
 }
 
-// ResumeFailed is the error for a manager resume that failed and was not a
-// hub refusal: the record stays, and the operator decides. `lever up`'s own
-// resume path (a machine that is already running) returns it too, so both
-// paths say the same thing.
-//
-// A script tells this case by the exit code (cli.ExitManagerResumeFailed),
-// not by the text. The fixed sentences come first and the hub's words last
-// ("Cause: …"): the cause can carry text an agent chose, and nothing an
-// agent writes may sit where a reader expects lever's own statement.
+// ResumeFailed is the error for a manager resume that failed and was not a hub
+// refusal: the record stays, and the operator decides. lever up's own resume
+// path returns it too. Scripts tell it by exit code
+// (cli.ExitManagerResumeFailed). The fixed sentences come first and the hub's
+// words last: the cause can carry text an agent chose, which must never sit
+// where a reader expects lever's own statement.
 func ResumeFailed(verb string, err error) error {
 	return cli.WithExitCode(fmt.Errorf("start-manager: %s of the manager failed. lever did NOT delete the manager: its record and its conversation are kept. "+
 		"Run `lever up` again (a transient failure clears), and `lever doctor` for the cause if it does not. "+
@@ -2417,14 +2064,10 @@ func HubRefusedResume(verb string, err error) error {
 		cli.ExitHubRefusedResume)
 }
 
-// retryOnBrokerUnavailable runs action up to r.brokerStart.Attempts times,
-// waiting r.brokerStart.Interval between attempts, for as long as each failure is
-// the transient runtime-broker-unavailable race (scion.IsBrokerUnavailable). A nil
-// result, or any non-transient error, returns immediately — the retry budget
-// exists purely to absorb the registration race, not to mask real failures.
-// Shared by startManagerCreate's Start retry and start-manager's Resume retry:
-// `scion resume` hits the identical runtime-broker race as `scion start` (see
-// scion.IsBrokerUnavailable's doc), so both need the same absorbing retry.
+// retryOnBrokerUnavailable retries action within r.brokerStart while each
+// failure is the transient runtime-broker-unavailable race
+// (scion.IsBrokerUnavailable). Any other error returns at once: the budget
+// absorbs the registration race and must not mask real failures.
 func (r *run) retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 	var last error
 	err := retry.Until(ctx, r.brokerStart.Attempts, r.brokerStart.Interval, func() (bool, error) {
@@ -2438,18 +2081,14 @@ func (r *run) retryOnBrokerUnavailable(ctx context.Context, action func() error)
 		return false, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
-		return last // the transient error itself, as before the shared loop
+		return last // the transient error itself
 	}
 	return err
 }
 
-// listAgentsRetry lists the project's agents through the bounded
-// runtime-broker-unavailable retry (retryOnBrokerUnavailable). Used by the two
-// sites that observe the fleet across the async broker-registration window: the
-// initial start-manager observe and the post-failed-resume re-observe (a blip
-// there is correlated with the resume failure it is re-checking). NOTE:
-// waitManagerLive's List is deliberately NOT routed here — it carries its own
-// consume-an-attempt tolerance within its liveness budget.
+// listAgentsRetry lists the project's agents through retryOnBrokerUnavailable.
+// waitManagerLive's List deliberately does not use it: it has its own tolerance
+// within the liveness budget.
 func (r *run) listAgentsRetry(ctx context.Context, jp string) ([]scion.Agent, error) {
 	var agents []scion.Agent
 	if err := r.retryOnBrokerUnavailable(ctx, func() error {
@@ -2465,19 +2104,12 @@ func (r *run) listAgentsRetry(ctx context.Context, jp string) ([]scion.Agent, er
 	return agents, nil
 }
 
-// managerConcurrentlyRecovered re-observes the manager record after a FAILED
-// resume, before the apply ends with the resume error. The broker's
-// auto-re-enrol healer (#22) lives in the broker daemon — started by the
-// broker-up step, i.e. BEFORE start-manager runs — and it bounces lapsed
-// agents via the same scion verbs this step uses, in a separate process with
-// no coordination. So a resume failure here can mean "the healer's own
-// suspend/resume was mid-flight", not "the manager is down": a record that
-// is running on re-observation is a success, not an error to report.
-// The observe rides retryOnBrokerUnavailable: the resume just failed against
-// this same runtime, so a transient blip here is CORRELATED with that failure
-// — an unretried List would undermine the re-observe with a false negative
-// one level up. (Errors that survive the retry budget count as
-// not-recovered: the resume error is reported and the record is kept.)
+// managerConcurrentlyRecovered re-observes the manager after a failed resume.
+// The broker's auto-re-enrol healer bounces lapsed agents with the same scion
+// verbs, in a separate process with no coordination, so a failure here can
+// mean the healer's own suspend and resume was mid-flight: a record running now
+// is a success. The list is retried because a blip here is correlated with the
+// failed resume; errors past the budget count as not recovered.
 func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool {
 	agents, err := r.listAgentsRetry(ctx, jp)
 	if err != nil {
@@ -2489,35 +2121,21 @@ func (r *run) managerConcurrentlyRecovered(ctx context.Context, jp string) bool 
 	return false
 }
 
-// startManagerCreate runs the create-manager retry loop: `scion start` races
-// the runtime-broker registration (see Deps.BrokerStartRetry) and treats an
-// "already running"/"already exists" 409 as success (idempotent re-apply, or a
-// create-race against a record the observe step just missed — scion's own
-// lazy hub-sync can transiently read a live record as absent). Shared by the absent-record branch and the create
-// that follows a `--fresh` delete, so both take the identical retry
-// behavior — including the bootstrap re-arm below, which is why it lives
-// HERE rather than duplicated at each call site.
-//
-// A freshly-created scion agent record has no agent home to reuse (unlike
-// resume, which restores an existing one), so lever-agent boot ALWAYS re-enrols after a create.
-// If the broker's single-use /bootstrap latch was already consumed by an
-// earlier apply against this same broker process (mint-manager-bootstrap
-// tolerated ErrBootstrapLatched — see its doc — leaving r.minted false),
-// a plain create is guaranteed to 403 and the container exits 1. So: before
-// Start, ensure this apply run has fresh, enrolable material — either it was
-// already minted earlier in this same run (r.minted, e.g.
-// mint-manager-bootstrap succeeded outright, or an earlier create in this
-// same Run already re-armed), or r.d.RearmBootstrap mints one now.
+// startManagerCreate runs scion start through the runtime-broker-race retry and
+// treats an "already running"/"already exists" 409 as success (an idempotent
+// re-apply, or a record scion's lazy hub-sync briefly read as absent) unless
+// mustCreate. A created record has no agent home to reuse, so lever-agent boot
+// always re-enrols: ensureFreshBootstrap makes sure the latch is armed, or the
+// create would 403 and the container exit 1.
 func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, mustCreate bool) error {
-	// The second read_only host check (startManager ran the first): after a
-	// --fresh delete, the manager that might have held the tree writable is
-	// gone, so this is the look the create can rely on. Cheap, so it runs
-	// before every create rather than only the --fresh one.
+	// The second read_only host check: after a --fresh delete the manager that
+	// might have held the tree writable is gone, so this is the look the create can
+	// rely on.
 	if err := r.app.PrepareManagerReadOnlyHost(); err != nil {
 		return fmt.Errorf("start-manager: %w", err)
 	}
-	// shared_folders: hard links out of a folder, checked when the
-	// manager's protection begins (config.App.CheckSharedFolderLinks).
+	// shared_folders: hard links out of a folder are checked when the manager's
+	// protection begins.
 	if err := r.app.CheckSharedFolderLinks(); err != nil {
 		return fmt.Errorf("start-manager: %w", err)
 	}
@@ -2541,19 +2159,13 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	created := false
 	err := r.retryOnBrokerUnavailable(ctx, func() error {
 		startErr := r.d.Scion.Start(ctx, opts)
-		// Idempotent: a manager already running/existing (re-apply, or a
-		// create-race the observe step missed) is success, not error. It is
-		// not a fresh session, so it is not recorded as one.
+		// A manager already running or existing is success, not error, but it is not a
+		// fresh session, so it is not recorded as one.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
 			if mustCreate {
-				// Under `--fresh` nothing may exist at this point. An
-				// existing record is the session the operator asked to
-				// discard (or one something else created): never report it
-				// as the fresh manager.
-				// Either the observe step missed a live record, or an earlier
-				// attempt of this very create left one behind and reported a
-				// timeout. lever cannot tell which, so it claims neither a
-				// discard nor a fresh manager.
+				// Under --fresh nothing may exist here: the observe step missed a live record,
+				// or an earlier attempt of this create left one behind and reported a timeout.
+				// lever cannot tell which, so it claims neither a discard nor a fresh manager.
 				return fmt.Errorf("start-manager: --fresh expected no manager record at this point, and the create answered that one exists. "+
 					"lever did NOT report a fresh manager: the record may be the previous session, or one a timed-out attempt of this run left behind. "+
 					"Run `lever up --fresh` again; it deletes the record it finds and creates a new manager. Cause: %s", termsafe.Sanitize(scion.ErrSummary(startErr)))
@@ -2578,28 +2190,21 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	return err
 }
 
-// recoverDeleteAndCreate is the operator's explicit `--fresh`: emit the loud
-// session-discarded notice, delete the record, and — only if the delete
-// succeeds — create a fresh manager. Nothing else deletes a manager record
-// (a failed resume refuses; see resumeOrRecover).
-//
-// logMsg is the fully-formed loud line, and deleteFailReason the clause for
-// the hard delete-failure error ("start-manager: <reason> and delete failed:
-// %w"): there is no safe fallback, since a fresh Start over an undeleted
-// record would just 409.
+// recoverDeleteAndCreate logs the loud discard notice, deletes the manager
+// record, and creates a fresh manager only once the record is gone. Every
+// manager record delete goes through here; a failed resume refuses instead.
+// A Start over an undeleted record would 409, so a delete failure is a hard
+// error ("start-manager: <deleteFailReason> and delete failed: %w").
 func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.StartOpts, logMsg, deleteFailReason string) error {
 	r.d.Log("%s", logMsg)
-	// The delete rides the same runtime-broker-race retry as a create or a
-	// resume: on a cold VM the hub serves before its runtime broker has
-	// registered, and a delete issued in that window fails the same way.
-	// `up --fresh` is the operator's one way out of a manager that does not
-	// resume, so it must not fail on a broker that was only late.
+	// The delete rides the same runtime-broker-race retry: --fresh is the
+	// operator's one way out of a manager that does not resume, so it must not fail
+	// on a broker that was only late.
 	derr := r.retryOnBrokerUnavailable(ctx, func() error { return r.d.Scion.Delete(ctx, r.app.Name, jp) })
-	// What decides is the record, never the words of an error: an attempt
-	// can remove the record and still report a failure, and a delete can
-	// report success (or a "not found" about something else) with the record
-	// still there. `--fresh` is how an operator evicts a session they no
-	// longer trust, so "discarded" must be true before a create follows.
+	// What decides is the record, never an error's words: an attempt can remove the
+	// record and still report a failure, or report success with the record still
+	// there. --fresh evicts a session the operator no longer trusts, so
+	// "discarded" must be true before a create follows.
 	agents, lerr := r.listAgentsRetry(ctx, jp)
 	if lerr != nil {
 		if derr != nil {
@@ -2608,6 +2213,10 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 		return fmt.Errorf("start-manager: %s: the delete was sent, but lever could not confirm the manager record is gone (%v); nothing was created. Run `lever up --fresh` again", deleteFailReason, lerr)
 	}
 	if rec := scion.FindAgent(agents, r.app.Name); rec != nil {
+		if errors.Is(derr, scion.ErrDeleteUnconfirmed) {
+			return fmt.Errorf("start-manager: %s: the hub accepted the delete but the manager record is still there (phase %s), so nothing was created. "+
+				"The hub may still be deleting it: check `lever doctor`, then run `lever up --fresh` again", deleteFailReason, scion.BoundedQuote(rec.Phase))
+		}
 		if derr != nil {
 			return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
 		}
@@ -2616,15 +2225,10 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 	return r.startManagerCreate(ctx, opts, true)
 }
 
-// ensureFreshBootstrap guarantees fresh, enrolable bootstrap material exists
-// before a manager Start OR Resume. If this apply run already minted fresh
-// material (r.minted), it's a no-op. Otherwise, when r.d.RearmBootstrap is
-// set, it re-arms the broker's spent latch and mints+stages fresh material
-// (recording it in r.minted so a SECOND create in the same Run — e.g. a
-// failed-resume recovery that immediately re-creates — does not re-arm
-// twice). A RearmBootstrap that fails is a hard error — a create without
-// enrolable bootstrap is guaranteed to 403, so failing loudly now is strictly
-// better than booting a manager doomed to crash-loop.
+// ensureFreshBootstrap makes sure fresh, enrolable bootstrap material is staged
+// before a manager start or resume: a no-op when this run minted it, otherwise
+// RearmBootstrap re-arms the latch and stages it, once per run. A failed re-arm
+// is a hard error: a manager without enrolable bootstrap would only crash-loop.
 func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 	if r.minted {
 		return nil
@@ -2636,46 +2240,35 @@ func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 	return nil
 }
 
-// waitManagerLive polls r.d.Scion.List until the manager's record shows BOTH
-// Phase=="running" AND a live container, or attempts run out. This is the
-// backstop for both false-success classes above this layer: a blind `scion
-// start`'s 409 "already exists" error text matches the AlreadyRunning
-// idempotency predicate (false success in OUR retry loop — scion's exit code
-// itself is correctly non-zero), and `scion resume`/`scion start` report
-// success ("resumed") for a container that dies moments later (a real scion
-// race: its liveness check is a single immediate poll). Trusting the observed
-// record — not CLI exit codes or error wording — is what makes start-manager's
-// success meaningful. The live-container predicate is scion.ContainerLive,
-// shared with the broker's worker liveness gate.
+// waitManagerLive polls until the manager's record shows phase running and a
+// live container (scion.ContainerLive). It backstops both false successes: a
+// blind scion start's 409 text matches AlreadyRunning, and scion resume and
+// start report success for a container that dies moments later (scion's
+// liveness check is a single immediate poll). Trusting the observed record, not
+// exit codes or error wording, is what makes start-manager's success mean
+// something.
 func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool, onHarness func()) error {
 	b := r.managerLive
 	if !acted {
-		// Nothing was started or resumed: the manager was running before
-		// this apply looked, so holding it for the settle window would prove
-		// nothing and cost every `lever apply`/`lever reload` ten seconds.
-		// One look still refuses a running RECORD over a dead container.
+		// Nothing was started: the manager was already running, so the settle window
+		// would prove nothing and cost every apply ten seconds. One look still refuses
+		// a running record over a dead container.
 		b.Settle = 0
 	}
-	// Only a manager this run created is attached at its pane. A resume
-	// runs claude --continue, which exits a second or two after its pane
-	// comes up when there is no conversation (lever#202): the gate waits
-	// for claude's session start (or the settle window) first, so that exit
-	// is caught here, where start-manager can start the manager fresh,
-	// instead of after the operator attached to a dead session. A created
-	// manager's claude starts no conversation it could fail to find, and
-	// the look after the detach (CheckManagerAfterDetach) catches a later
-	// death as before.
+	// Only a manager this run created is attached at its pane. A resume runs claude
+	// --continue, which exits a second or two after its pane comes up when there is
+	// no conversation, so the gate waits for claude's session start first and that
+	// exit is caught here, where start-manager can start the manager fresh. A
+	// created manager's later death is caught by CheckManagerAfterDetach.
 	attach := r.attach && r.managerCreated
 	err := gateManagerLive(ctx, r.d, b, r.app.Name, jp, "start-manager", r.progress, gateOpts{attach: attach, onHarness: onHarness})
 	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
-// WaitManagerLive is the full gate — become live, see the harness run, then
-// hold for the settle window — for a path that just acted on the manager
-// (`lever up` after its own `scion resume`). Same List, same budget, same
-// in-container check as the start-manager step. prog (may be nil) gets the
-// gate's stages for its progress line. A harness death gets the same hint
-// as the start-manager step (withHarnessDeathHint).
+// WaitManagerLive is the full gate (live, harness running, settle window) for a
+// path that just acted on the manager (lever up after its own scion resume),
+// with the same budget and harness-death hint as the start-manager step. prog
+// may be nil.
 func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
 	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{})
 	return withHarnessDeathHint(ctx, d, err, project, name)
@@ -2686,16 +2279,13 @@ func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Pr
 // rather than after the fifteen the start gate allows.
 const observeAttempts = 3
 
-// ObserveManagerLive is `lever up`'s check for a manager that was already
-// running when `up` looked. It started nothing, so it holds nothing: one
-// observation (a failed list is retried observeAttempts times), no settle,
-// and a refusal ONLY on positive evidence of a death — a missing record, a
-// phase that is not running, or a container status that is present and not
-// live. An EMPTY container status is not evidence either way: that column is
-// refreshed by the runtime broker's heartbeat, not computed at read time, and
-// a momentary blank must not turn a healthy, attachable manager into a
-// refusal the morning after (lever#31 review). Every refusal names what was
-// seen and the ways out.
+// ObserveManagerLive is lever up's check for a manager that was already
+// running. It started nothing, so it holds nothing: one observation (a failed
+// list is retried observeAttempts times), no settle, and a refusal only on
+// positive evidence of a death: no record, a phase that is not running, or a
+// container status that is present and not live. An empty container status is
+// not evidence: the runtime broker's heartbeat refreshes that column, and a
+// momentary blank must not refuse a healthy manager.
 func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error {
 	b := d.ManagerLiveRetry.or(defaultManagerLiveRetry)
 	a, err := scion.ObserveAgent(ctx, func(c context.Context) ([]scion.Agent, error) {
@@ -2719,10 +2309,8 @@ func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error
 	return nil
 }
 
-// JailPath maps a host path under tree to its location inside the jail (mount +
-// suffix). Returns hostPath unchanged when mount=="" or hostPath is not under
-// tree. Exported for the CLI's bootstrap-token step, which registers the tree
-// root through the same mapping.
+// JailPath maps a host path under tree to its location inside the jail. It
+// returns hostPath unchanged when mount is empty or hostPath is not under tree.
 func JailPath(hostPath, tree, mount string) string {
 	if mount == "" || tree == "" {
 		return hostPath
@@ -2741,21 +2329,17 @@ func JailPath(hostPath, tree, mount string) string {
 // file is a sign the path points at something that isn't a credential.
 const maxCredentialBytes = 64 << 10
 
-// defaultReadCred reads a credential file, refusing world-readable files (a real
-// credential should be 0600) and oversized files. This is defence-in-depth for
-// the credential projected into agent containers; see
-// docs-site/_guides/security-model-config-trust.md §5.
+// defaultReadCred reads a credential file, refusing group- or world-accessible
+// and oversized files: defence in depth for the credential projected into agent
+// containers.
 func defaultReadCred(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	// Group bits count, not just world. This is the manager's LLM credential in
-	// subscription mode — the longest-lived, highest-value secret lever handles
-	// — and every other credential in the system (api_key_file, the controller
-	// PAT, the staged bootstrap) is held to exactly 0600. `lever doctor` already
-	// FAILS a group-readable credential file; accepting one here let apply read
-	// it and project it into every agent container while doctor called it broken.
+	// Group bits count too: this is the manager's subscription LLM credential, the
+	// longest-lived secret lever handles, and every other credential is held to
+	// 0600 (lever doctor fails a group-readable one).
 	if info.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("credential file %s is group- or world-accessible (%#o) — restrict it to 0600", path, info.Mode().Perm())
 	}
@@ -2767,4 +2351,26 @@ func defaultReadCred(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// HubAuthEnv is the env every hub start carries: scion's proxy auth mode with
+// the JWT provider, invite-only sign-in and lever-admin as the only admin
+// email. scion maps compound settings only when written without inner
+// underscores (USERACCESSMODE, PUBLICKEYFILE); the underscored spellings are
+// silently ignored, and an ignored user-access mode admits anyone.
+// LEVER_HUB_AUTH_KEY records which key the hub read, for HubRestartReason.
+func HubAuthEnv(instanceID, keyFingerprint string) map[string]string {
+	return map[string]string{
+		"SCION_SERVER_AUTH_MODE":                    "proxy",
+		"SCION_SERVER_AUTH_USERACCESSMODE":          "invite_only",
+		"SCION_SERVER_AUTH_PROXY_PROVIDER":          "jwt",
+		"SCION_SERVER_AUTH_PROXY_JWT_ALGORITHM":     hubauth.Algorithm,
+		"SCION_SERVER_AUTH_PROXY_JWT_HEADER":        hubauth.Header,
+		"SCION_SERVER_AUTH_PROXY_JWT_ISSUER":        hubauth.Issuer(instanceID),
+		"SCION_SERVER_AUTH_PROXY_JWT_AUDIENCE":      hubauth.Audience(instanceID),
+		"SCION_SERVER_AUTH_PROXY_JWT_PUBLICKEYFILE": hubauth.GuestPublicKeyPath,
+		"SCION_SERVER_HUB_ADMINEMAILS":              hubauth.AdminEmail,
+		"SCION_SERVER_AUTH_DEFAULTUSERROLE":         "member",
+		"LEVER_HUB_AUTH_KEY":                        keyFingerprint,
+	}
 }

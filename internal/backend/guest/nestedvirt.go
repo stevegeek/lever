@@ -12,12 +12,10 @@ import (
 // namespace. A kvm group would need --group-add plumbing in scion.
 const KVMUdevRulePath = "/etc/udev/rules.d/65-lever-kvm.rules"
 
-// legacyKVMDropInPath is the podman drop-in earlier builds wrote, which
-// passed /dev/kvm into EVERY container in the guest (hub and workers too).
-// Every apply removes it, so an upgraded instance loses it.
+// legacyKVMDropInPath is a podman drop-in that passes /dev/kvm into EVERY
+// container in the guest, hub and workers too. Every apply removes it.
 const legacyKVMDropInPath = "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"
 
-// kvmUdevRule is the rule written to KVMUdevRulePath.
 const kvmUdevRule = `KERNEL=="kvm", MODE="0666"`
 
 const kvmOnRootScript = `set -e
@@ -40,9 +38,8 @@ const kvmUserScript = `rm -f "` + legacyKVMDropInPath + `"` + "\n"
 
 // EnsureNestedVirt converges the guest's nested-virt setup: on, it checks
 // the jail VM has /dev/kvm and makes it usable by the run user; off, it
-// removes the rule and sets the device back to 0660. Both remove the legacy
-// podman drop-in. Idempotent; run on every apply (Lima only — the caller
-// gates it).
+// removes the rule and sets the device back to 0660. Idempotent. Lima only:
+// the caller gates it.
 func (g Guest) EnsureNestedVirt(ctx context.Context, on bool) error {
 	rootScript := kvmOffRootScript
 	if on {

@@ -26,14 +26,14 @@ name: hello-worker
 backend: orbstack
 tree: workspace          # a confined SUBDIR; the root itself is never mounted
 scion:
-  version: e0f61f2d      # pin a scion commit; fetched + cross-compiled into the jail
+  version: b41cd6fe      # pin a scion commit; a lever release ships this one prebuilt
 # api-key is the secure default (the real key never enters the container) but
 # needs a Console API key. This demo opts into subscription (your Claude OAuth
 # token), so egress stays open and the token is projected to the agents.
 broker:
   llm_auth: subscription
 manager:
-  image: scionlocal/lever-claude
+  image: lever.local/lever-claude
   prompt_file: manager.md   # resolved at the root (host-only), not inside the mount
   credential_file: ~/.scion/oauth-token  # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []
@@ -67,11 +67,11 @@ You'll see a `backend: <profile summary>` line, then the ordered plan:
 
 ```
   broker-up
-  load-image              scionlocal/lever-claude:arm64
+  load-image              lever.local/lever-claude:arm64
   init-machine
   config-registry
-  bootstrap-token         /…/hello-worker/workspace
   scion-server
+  hub-identity            /…/hello-worker/workspace
   credential              ~/.scion/oauth-token
   register-project        /…/hello-worker/workspace
   agent-template          /…/hello-worker/workspace
@@ -80,11 +80,13 @@ You'll see a `backend: <profile summary>` line, then the ordered plan:
 ```
 
 (With `manager.image_tar` set, the `load-image` line also names the archive it streams in:
-`load-image  scionlocal/lever-claude:arm64 (from /…/hello-worker/images/lever-claude.tar)`.)
+`load-image  lever.local/lever-claude:arm64 (from /…/hello-worker/images/lever-claude.tar)`.)
 
-`bootstrap-token` mints the controller PAT that drives every later scion verb, through a throwaway
-dev-auth-on hub that is killed before any agent exists; `scion-server` then starts the real hub with
-`--dev-auth=false` (see [security model §4.2](/security-model/worker-isolation/)). `credential`
+`scion-server` starts the jail's hub with `--dev-auth=false`, in scion's proxy auth mode: it trusts
+only assertions lever signs with a key held on the host. `hub-identity` then signs in as lever's
+hub admin and controller, registers the instance's project, and has the controller mint the
+controller PAT that drives every later scion verb (see
+[security model §4.2](/security-model/worker-isolation/)). `credential`
 (present because this example sets `credential_file`) stages the manager's Claude OAuth token.
 `register-project` is the one `scion init`/`hub link` for the whole instance; the manager and every
 worker are agents inside it, and the step also strips scion's default shared scratchpad and writes

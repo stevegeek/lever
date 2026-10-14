@@ -10,9 +10,9 @@ import (
 	"github.com/stevegeek/lever/internal/logging"
 )
 
-// Every credential lever's redaction masks, the e2e's mask_secrets masks
-// too: it prints the tails of lever's logs, and is the backstop if a line
-// escaped lever's own masking.
+// Every credential lever's redaction masks, the e2e's mask_secrets masks too:
+// it prints the tails of lever's logs and is the backstop if a line escaped
+// lever's own masking.
 func TestE2EMaskCoversLeversRedaction(t *testing.T) {
 	for _, tool := range []string{"bash", "perl"} {
 		if _, err := exec.LookPath(tool); err != nil {

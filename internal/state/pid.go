@@ -13,9 +13,8 @@ import (
 // not hold a positive integer.
 var ErrNotAPID = errors.New("does not contain a pid")
 
-// ReadPID parses the pid recorded in the file at path. A missing file returns
-// the read error (os.ErrNotExist-wrapped); garbage or a non-positive number
-// wraps ErrNotAPID.
+// ReadPID parses the pid in the file at path. A missing file returns the
+// read error; garbage or a non-positive number wraps ErrNotAPID.
 func ReadPID(path string) (int, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -28,9 +27,8 @@ func ReadPID(path string) (int, error) {
 	return pid, nil
 }
 
-// ProcessAlive reports whether pid names a running process, by a signal-0
-// probe. The pid could in principle have been recycled by the OS, but on the
-// single-operator workstation this targets that window is small.
+// ProcessAlive probes pid with signal 0. A recycled pid could fool it; on a
+// single-operator workstation that window is small.
 func ProcessAlive(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -39,15 +37,9 @@ func ProcessAlive(pid int) bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-// PIDStatus reads the pid recorded at path and reports whether that process
-// is currently alive. It is the read-only counterpart to stopping a daemon,
-// used by `lever doctor` and `lever remote status` to tell "never started"
-// from "died".
-//
-//   - found=false: no pid file (never started, or cleanly stopped).
-//   - found=true, alive=false: a stale pid file — the process is gone (or the
-//     file is garbage). This is the "died out from under apply" case.
-//   - found=true, alive=true: the recorded process is running (pid is returned).
+// PIDStatus reads the pid at path and reports whether it is alive, so doctor
+// and `lever remote status` can tell "never started" (found=false) from
+// "died" (found, not alive; also a garbage file).
 func PIDStatus(path string) (pid int, found, alive bool) {
 	if _, err := os.Stat(path); err != nil {
 		return 0, false, false

@@ -5,25 +5,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/imageref"
 )
 
-// imageArch is the arch appended to a tagless local image ref (see archImage).
-// It defaults to the running lever binary's arch, which — since lever runs
-// natively on the host and the jail (OrbStack/Lima) is that same host arch — is
-// the arch the jail's podman needs. (A non-native binary, e.g. amd64 under Rosetta
-// on an arm64 mac, would mis-resolve; a backend-reported jail arch would be
-// stricter but isn't needed for native installs.) A package var so tests are
-// arch-deterministic (CI runs amd64; a dev host is often arm64).
+// imageArch is the running lever binary's arch, which is the jail's for a
+// native install; a non-native binary (amd64 under Rosetta) would
+// mis-resolve. A var so tests are arch-deterministic.
 var imageArch = runtime.GOARCH
 
-// archImage resolves a container image ref to the arch actually needed in the
-// jail: a **tagless** local name (`scionlocal/lever-claude`) gains an arch tag
-// (`…:arm64` / `…:amd64`), so one config is portable across an arm64 laptop and
-// an amd64 server and the two arch builds never clobber each other under a shared
-// `:latest`. An already-tagged (`…:latest`, `…:v3`) or digest-pinned (`…@sha256:…`)
-// ref is an explicit choice and is left untouched — that's the escape hatch. The
-// tag test is "a `:` in the component after the last `/`", so a registry port
-// (`host:5000/img`) is not mistaken for a tag.
+// archImage gives a tagless ref an arch tag, so one config is portable across
+// arches and the two builds never clobber each other under `:latest`. A
+// tagged or digest-pinned ref is left alone. The tag is looked for after the
+// last `/`, so a registry port is not mistaken for one.
 func archImage(ref, arch string) string {
 	if ref == "" || strings.Contains(ref, "@") {
 		return ref
@@ -38,17 +32,13 @@ func archImage(ref, arch string) string {
 	return ref + ":" + arch
 }
 
-// ManagerImage returns the manager's container image, arch-resolved (archImage).
+// ManagerImage returns the manager's container image, arch-resolved.
 func (a *App) ManagerImage() string {
 	return archImage(a.Manager.Image, imageArch)
 }
 
-// WorkerImage returns the container image a worker should run on: its own
-// `image:` if set, else the manager image (the common single-image case, and
-// the image apply already loads into the jail). The manager dispatches workers
-// later, so this is the single source of truth both apply (what to load) and
-// lever-manager (what to pass to `scion start`) resolve against. Arch-resolved
-// (archImage), so a tagless name gets the jail's arch tag.
+// WorkerImage returns a worker's container image, arch-resolved, falling
+// back to the manager's. Both apply and lever-manager resolve against it.
 func (a *App) WorkerImage(g Worker) string {
 	if g.Image != "" {
 		return archImage(g.Image, imageArch)
@@ -56,12 +46,43 @@ func (a *App) WorkerImage(g Worker) string {
 	return a.ManagerImage()
 }
 
-// ImageTagPolicy returns the check apply applies to every tag an image_tar
-// archive carries before it is streamed into the jail (jail.LoadImageTar's
-// allowTag), or nil when no allowed_image_registries is configured. It is
-// the same whole-component prefix rule validateImage applies to the config's
-// own image refs — an archive can hold more images than the one the config
-// names, and each of them gets imported (R4).
+// ManagerAgentImage is the name scion starts the manager on: the jail's
+// podman holds ManagerImage under it (see imageref.Agent).
+func (a *App) ManagerAgentImage() string {
+	return imageref.Agent(a.ManagerImage())
+}
+
+// WorkerAgentImage is WorkerImage under the name scion starts the worker on.
+func (a *App) WorkerAgentImage(g Worker) string {
+	return imageref.Agent(a.WorkerImage(g))
+}
+
+// CheckTarTag refuses a tag in the archive that ships stepRef when it names
+// another configured image, under its configured name or the name agents run
+// it as: podman load imports every tag in an archive, so the tag would repoint
+// that agent's image.
+func (a *App) CheckTarTag(stepRef, tag string) error {
+	plain := strings.TrimPrefix(strings.TrimPrefix(tag, "docker.io/"), "library/")
+	own := imageref.Agent(stepRef)
+	refs := []string{a.ManagerImage()}
+	for _, g := range a.Workers {
+		refs = append(refs, a.WorkerImage(g))
+	}
+	for _, r := range refs {
+		agent := imageref.Agent(r)
+		if r == "" || agent == own {
+			continue
+		}
+		if plain == r || tag == r || imageref.Agent(plain) == agent || tag == agent {
+			return fmt.Errorf("image %q is configured for another agent (it runs as %s); one archive may not carry it", tag, agent)
+		}
+	}
+	return nil
+}
+
+// ImageTagPolicy returns the check applied to every tag an image_tar archive
+// carries, or nil with no allowed_image_registries: an archive can hold more
+// images than the one the config names, and each of them gets imported.
 func (s Security) ImageTagPolicy() func(ref string) error {
 	if len(s.AllowedImageRegistries) == 0 {
 		return nil
@@ -75,11 +96,9 @@ func (s Security) ImageTagPolicy() func(ref string) error {
 	}
 }
 
-// ManagerImageTarPath returns the absolute path of the archive that ships
-// the manager image, or "" when the image comes from host docker. Resolved
-// at the instance ROOT like ManagerPromptPath, for the same reason: the
-// archive is the code the agent runs, so an agent in the mount must not be
-// able to author it.
+// ManagerImageTarPath is resolved at the instance root like
+// ManagerPromptPath: the archive is the code the agent runs, so an agent in
+// the mount must not be able to author it.
 func (a *App) ManagerImageTarPath() string {
 	if a.Manager.ImageTar == "" {
 		return ""
@@ -87,10 +106,8 @@ func (a *App) ManagerImageTarPath() string {
 	return filepath.Join(a.dir, a.Manager.ImageTar)
 }
 
-// WorkerImageTarPath returns the archive that ships a worker's image: its
-// own `image_tar` when it names its own `image:`, the manager's when it
-// inherits the manager image (which is where that image ships), and "" when
-// it names an image with no tar (host docker) or no tar exists at all.
+// WorkerImageTarPath returns the archive that ships a worker's image; a
+// worker that inherits the manager image inherits its tar.
 func (a *App) WorkerImageTarPath(g Worker) string {
 	if g.Image != "" {
 		if g.ImageTar == "" {

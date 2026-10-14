@@ -1,10 +1,8 @@
-// Package brokertest holds the broker fixtures the agent, brokerctl and
-// captool tests share: an in-process broker behind an mTLS httptest server,
-// CA-issued client certs and the clients that present them, the host-side
+// Package brokertest holds shared broker test fixtures: an in-process broker
+// behind an mTLS httptest server, CA-issued client certs, the host-side
 // worker-ticket mint, and a fake admin endpoint for the captool SDK.
 //
-// It imports internal/broker, so broker's own tests cannot use it; they keep
-// their in-package helpers.
+// It imports internal/broker, so broker's own tests cannot use it.
 package brokertest
 
 import (
@@ -41,8 +39,7 @@ type Config struct {
 	ManagerIdentity string
 }
 
-// Env holds every test-side handle for a broker under test, including the
-// policy and registry it was built from so a test can drive them directly.
+// Env holds every test-side handle for a broker under test.
 type Env struct {
 	Broker   *broker.Broker
 	Server   *httptest.Server
@@ -50,13 +47,11 @@ type Env struct {
 	Keys     token.KeyPair
 	Rules    *rules.Policy
 	Registry *registry.Registry
-	// Tickets records every worker envelope the broker staged through its
-	// guest channel (broker.DispatchConfig.Tickets), newest last per worker.
+	// Tickets records every worker envelope the broker staged.
 	Tickets *TicketRecorder
 }
 
-// TicketRecorder is a broker.TicketStager that keeps the staged payloads in
-// memory: the test-side stand-in for the guest runtime directory.
+// TicketRecorder is an in-memory broker.TicketStager.
 type TicketRecorder struct {
 	mu     sync.Mutex
 	staged map[string][][]byte
@@ -84,8 +79,7 @@ func (r *TicketRecorder) Last(worker string) []byte {
 	return ps[len(ps)-1]
 }
 
-// NewTestBroker builds a broker from cfg and serves its jail handler over
-// mTLS on 127.0.0.1, with a CA-issued server cert pinned on the listener.
+// NewTestBroker serves a broker's jail handler over mTLS on 127.0.0.1.
 func NewTestBroker(t *testing.T, cfg Config) *Env {
 	t.Helper()
 	if len(cfg.Workers) == 0 {
@@ -125,9 +119,9 @@ func NewTestBroker(t *testing.T, cfg Config) *Env {
 		t.Fatal(err)
 	}
 	tlsCfg := caInst.ServerTLSConfigSource(src, nil)
-	// httptest.StartTLS injects its own self-signed cert when Certificates is
-	// empty, and the TLS stack only consults GetCertificate for SNI-bearing
-	// hellos — an IP-dialled client sends none. Pin the source's cert.
+	// httptest.StartTLS injects its own cert when Certificates is empty, and
+	// GetCertificate is consulted only for SNI hellos, which an IP-dialled
+	// client never sends. Pin the source's cert.
 	srvCert, err := src.GetCertificate(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +134,7 @@ func NewTestBroker(t *testing.T, cfg Config) *Env {
 	return &Env{Broker: b, Server: srv, CA: caInst, Keys: kp, Rules: pol, Registry: reg, Tickets: rec}
 }
 
-// CSRWithKey returns a PEM CSR for cn plus the matching EC private key PEM.
+// CSRWithKey returns a PEM CSR for cn and its EC private key PEM.
 func CSRWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -160,8 +154,7 @@ func CSRWithKey(t *testing.T, cn string) (csrPEM, keyPEM []byte) {
 		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 }
 
-// Cert issues a CA-signed client cert for cn — the simulated-agent technique:
-// skip mint/enrol and mint the leaf directly from the CA.
+// Cert issues a CA-signed client cert for cn, skipping enrolment.
 func Cert(t *testing.T, caInst *ca.CA, cn string) tls.Certificate {
 	t.Helper()
 	csrPEM, keyPEM := CSRWithKey(t, cn)
@@ -177,9 +170,7 @@ func Cert(t *testing.T, caInst *ca.CA, cn string) tls.Certificate {
 }
 
 // Client builds an mTLS client that pins caInst and presents cert. A
-// non-empty serverName verifies the server cert against that name rather
-// than the dialled address (the broker's real cert names the host alias, not
-// 127.0.0.1).
+// non-empty serverName is verified instead of the dialled address.
 func Client(caInst *ca.CA, cert tls.Certificate, serverName string) *http.Client {
 	pool := x509.NewCertPool()
 	pool.AddCert(caInst.Cert)
@@ -190,17 +181,14 @@ func Client(caInst *ca.CA, cert tls.Certificate, serverName string) *http.Client
 	}}}
 }
 
-// ClientFor issues a cert for cn from the env's CA and returns an mTLS client
-// that presents it to env.Server.
+// ClientFor returns an mTLS client presenting a fresh cert for cn.
 func (e *Env) ClientFor(t *testing.T, cn string) *http.Client {
 	t.Helper()
 	return Client(e.CA, Cert(t, e.CA, cn), "")
 }
 
-// WorkerTicket mints a ticket for worker the way the host does — through the
-// broker's admin /worker-ticket route, which stages the envelope in the guest
-// channel (here: Tickets) — and returns the ticket from the staged envelope.
-// No agent-facing route mints a worker ticket.
+// WorkerTicket mints a worker ticket the way the host does, through the admin
+// /worker-ticket route. No agent-facing route mints a worker ticket.
 func (e *Env) WorkerTicket(t *testing.T, worker string) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"worker": worker})

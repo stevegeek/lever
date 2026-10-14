@@ -23,8 +23,8 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
-	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
 )
@@ -40,27 +40,15 @@ var (
 	failProbes = doctorProbes{dial: failDial}
 )
 
-// healthyRemoteProbes makes the remote-access chain look green: the proxy
-// answers healthz 200, the local OIDC provider serves discovery with NO
-// authorization endpoint (the 404 the whole design rests on — see
-// remoteproxy.Provider.handleAuthorize), and the hub starts logins against
-// lever's dead authorization endpoint. Every probe is stubbed rather than
-// left real: the login probes talk to loopback ports, and a test must never
-// reach a proxy running on this host.
+// healthyRemoteProbes makes the remote-access chain look green. Every probe is
+// stubbed: a test must never reach a proxy running on this host.
 func healthyRemoteProbes() doctorProbes {
 	return doctorProbes{
 		dial:          okDial,
 		remoteHealthz: func(healthzProbe) (int, error) { return 200, nil },
-		remoteLogin: func(int) (loginProbeResult, error) {
-			return loginProbeResult{discovery: 200, authorize: 404, authzURL: "https://lever.invalid/authorize"}, nil
-		},
-		remoteJailLogin: func(context.Context, proc.Runner, string) (int, string, error) {
-			return 302, remoteproxy.DeadAuthorizationEndpoint, nil
-		},
 	}
 }
 
-// writePIDFile records pid at path inside st.Dir, creating the state dir.
 func writePIDFile(t *testing.T, st state.State, path string, pid int) {
 	t.Helper()
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
@@ -158,7 +146,6 @@ func TestCheckToolBackendsSomeDown(t *testing.T) {
 	if !strings.Contains(r.detail, "tasks") {
 		t.Fatalf("detail must name the down tool: %q", r.detail)
 	}
-	// notes's path must be stripped before dialing (dial a host:port, not a URL path).
 	found := false
 	for _, a := range dialed {
 		if a == "127.0.0.1:3901" {
@@ -186,11 +173,8 @@ func TestCheckToolBackendsExternalDown(t *testing.T) {
 	}
 }
 
-// TestCheckToolBackendsSupervisedNeverDialed pins that a supervised tool's
-// Backend (its own MCP listen address, unrelated to spawnability) is never
-// TCP-dialed by the check — only external tools are dialed. Pairs a
-// resolvable supervised command with an always-failing dial: if the
-// supervised branch ever dialed Backend, this would wrongly fail.
+// TestCheckToolBackendsSupervisedNeverDialed: a supervised tool's Backend is
+// never dialed; the dial always fails here, so dialing would fail the check.
 func TestCheckToolBackendsSupervisedNeverDialed(t *testing.T) {
 	tools := []config.Tool{{Name: "db", Command: []string{"true"}, Backend: "127.0.0.1:59999"}}
 	if got := checkToolBackends(tools, t.TempDir(), failProbes); !got.ok {
@@ -198,11 +182,8 @@ func TestCheckToolBackendsSupervisedNeverDialed(t *testing.T) {
 	}
 }
 
-// TestCheckToolBackendsSupervisedAbsolutePathMissing covers the
-// slash-containing (absolute path) supervised branch: today an absolute
-// command path got zero doctor coverage (only the PATH-scoped branch was
-// checked). A missing absolute-path binary must fail the check same as a
-// not-on-PATH bare name.
+// A missing absolute-path supervised binary fails like a bare name not on
+// PATH.
 func TestCheckToolBackendsSupervisedAbsolutePathMissing(t *testing.T) {
 	tools := []config.Tool{{Name: "db", Command: []string{"/nonexistent/definitely-not-here-xyz"}}}
 	got := checkToolBackends(tools, t.TempDir(), okProbes)
@@ -239,8 +220,8 @@ func TestCheckProjectSharedDirsNone(t *testing.T) {
 }
 
 func TestCheckProjectSharedDirsFlagsScratchpad(t *testing.T) {
-	// The scion#925 default: a writable dir mounted into every agent. It must
-	// fail the check, name itself, and offer a fix.
+	// scion's default: a writable dir mounted into every agent must fail, name
+	// itself and offer a fix.
 	list := func(context.Context, string) ([]hubapi.SharedDir, error) {
 		return []hubapi.SharedDir{{Name: "scratchpad"}}, nil
 	}
@@ -257,8 +238,8 @@ func TestCheckProjectSharedDirsFlagsScratchpad(t *testing.T) {
 }
 
 func TestCheckProjectSharedDirsReadOnlyIsLabelled(t *testing.T) {
-	// A read-only entry is still a channel, so it still fails — but the operator
-	// needs to see that it is not writable before deciding what to do.
+	// A read-only entry is still a channel, so it fails, but the detail says it is
+	// not writable.
 	list := func(context.Context, string) ([]hubapi.SharedDir, error) {
 		return []hubapi.SharedDir{{Name: "refs", ReadOnly: true}}, nil
 	}
@@ -272,8 +253,8 @@ func TestCheckProjectSharedDirsReadOnlyIsLabelled(t *testing.T) {
 }
 
 func TestCheckProjectSharedDirsSkipsOnUnreachableHub(t *testing.T) {
-	// A stopped instance already fails the broker check. A second red line here
-	// would be noise, so an unreachable hub passes — but says it was skipped.
+	// An unreachable hub passes (the broker check covers it) but says it was
+	// skipped.
 	list := func(context.Context, string) ([]hubapi.SharedDir, error) {
 		return nil, errors.New("connection refused")
 	}
@@ -287,9 +268,8 @@ func TestCheckProjectSharedDirsSkipsOnUnreachableHub(t *testing.T) {
 }
 
 func TestCheckProjectSharedDirsFailsWhenTheHubAnswered(t *testing.T) {
-	// A 403 (a PAT missing project:read) or a project the hub does not list is
-	// NOT a down instance. Reporting it as "not checked" would hide a real
-	// problem behind a pass, so anything the hub actually answered must fail.
+	// A 403 or an unlisted project is not a down instance: anything the hub
+	// answered must fail rather than hide behind "not checked".
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -315,9 +295,7 @@ func TestCheckProjectSharedDirsFailsWhenTheHubAnswered(t *testing.T) {
 }
 
 func TestHubProjectKeyMatchesTheTokenMintKey(t *testing.T) {
-	// The hub knows the project by its in-jail mount basename. ensureControllerPAT
-	// derives the same key for `hub token create`; if these drift, the strip and
-	// the check both look up a project that does not exist.
+	// The strip and the check must use the key ensureControllerPAT mints with.
 	if got := hubProjectKey("/lever"); got != "lever" {
 		t.Fatalf("hubProjectKey(/lever) = %q, want lever", got)
 	}
@@ -348,7 +326,6 @@ func TestCheckScionProjectNoRegistration(t *testing.T) {
 }
 
 func TestCheckScionProjectRegisteredButMarkerGone(t *testing.T) {
-	// The exact bad-teardown bug: registered for /lever, but the marker is gone.
 	st := types.ScionProjectState{
 		MarkerPresent: false,
 		Entries: []types.ScionProjectEntry{
@@ -369,8 +346,8 @@ func TestCheckScionProjectRegisteredButMarkerGone(t *testing.T) {
 }
 
 func TestCheckScionProjectDuplicateRegistrations(t *testing.T) {
-	// Two entries for /lever even with the marker present — a duplicate that
-	// scion init trips over.
+	// A duplicate registration that scion init trips over, even with the marker
+	// present.
 	st := types.ScionProjectState{
 		MarkerPresent: true,
 		Entries: []types.ScionProjectEntry{
@@ -426,10 +403,8 @@ func TestCheckCredentialFile(t *testing.T) {
 	}
 }
 
-// TestCheckMcpJsonInTree covers a real bug: a .mcp.json
-// anywhere under the instance tree is auto-loaded by Claude as PROJECT
-// scope inside every jailed agent, colliding with the brokered USER-scope
-// tools lever-agent registers (duplicate localhost:PORT endpoints).
+// TestCheckMcpJsonInTree: Claude loads a .mcp.json under the tree as project
+// scope in every jailed agent, colliding with the brokered user-scope tools.
 func TestCheckMcpJsonInTreeNone(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("hi"), 0o644); err != nil {
@@ -478,12 +453,10 @@ func TestCheckMcpJsonInTreeNested(t *testing.T) {
 	}
 }
 
-// TestCheckGoToolchain covers a real pain point: `lever
-// up`/`apply` cross-compile scion and shell out to `go`, and an asdf shim on
-// PATH that isn't actually resolvable blows up as "exit status 126" deep
-// inside apply instead of an up-front, actionable diagnosis.
+// TestCheckGoToolchain: an unresolvable asdf shim otherwise fails as "exit
+// status 126" deep inside apply.
 func TestCheckGoToolchainBuildNotRequired(t *testing.T) {
-	r := checkGoToolchain(config.ScionConfig{}, doctorProbes{})
+	r := checkGoToolchain(config.ScionConfig{}, false, doctorProbes{})
 	if !r.ok {
 		t.Fatalf("no source and no version pinned => no build => pass; got %+v", r)
 	}
@@ -495,7 +468,7 @@ func TestCheckGoToolchainBuildNotRequired(t *testing.T) {
 func TestCheckGoToolchainProbeOK(t *testing.T) {
 	p := doctorProbes{goVersion: func() (string, error) { return "go version go1.26.4 darwin/arm64\n", nil }}
 
-	r := checkGoToolchain(config.ScionConfig{Version: "666333f9"}, p)
+	r := checkGoToolchain(config.ScionConfig{Version: "666333f9"}, false, p)
 	if !r.ok {
 		t.Fatalf("a working go on PATH must pass; got %+v", r)
 	}
@@ -504,10 +477,29 @@ func TestCheckGoToolchainProbeOK(t *testing.T) {
 	}
 }
 
+func TestCheckGoToolchainNotNeededForAPrebuiltScion(t *testing.T) {
+	p := doctorProbes{goVersion: func() (string, error) { return "", errors.New("executable file not found") }}
+	r := checkGoToolchain(config.ScionConfig{Version: scionbin.ReleasePin}, true, p)
+	if !r.ok || !strings.Contains(r.detail, "prebuilt") {
+		t.Fatalf("a downloaded scion needs no Go; got %+v", r)
+	}
+	ok := doctorProbes{goVersion: func() (string, error) { return "go version go1.26.4 linux/amd64\n", nil }}
+	if r := checkGoToolchain(config.ScionConfig{Version: scionbin.ReleasePin}, true, ok); !r.ok || !strings.Contains(r.detail, "go1.26.4") {
+		t.Fatalf("a working go is still reported; got %+v", r)
+	}
+}
+
+func TestScionPrebuiltFalseWithoutAMatchingRelease(t *testing.T) {
+	app := &config.App{Scion: config.ScionConfig{Version: "666333f9"}}
+	if scionPrebuilt(app) {
+		t.Fatal("a version this lever carries no release for is built")
+	}
+}
+
 func TestCheckGoToolchainProbeError(t *testing.T) {
 	p := doctorProbes{goVersion: func() (string, error) { return "", errors.New("exit status 126") }}
 
-	r := checkGoToolchain(config.ScionConfig{Source: "/home/devuser/scion"}, p)
+	r := checkGoToolchain(config.ScionConfig{Source: "/home/devuser/scion"}, false, p)
 	if r.ok {
 		t.Fatal("a broken go (e.g. a dead asdf shim) must fail the check")
 	}
@@ -528,7 +520,6 @@ func TestCheckOperatorSkills(t *testing.T) {
 	app := &config.App{Tree: tree, Workers: []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}}
 	stateDir := state.ForConfig(root)
 
-	// Unscaffolded → fail with `lever init` hint.
 	res := checkOperatorSkills(app, stateDir)
 	if res.ok {
 		t.Fatalf("unscaffolded must fail: %+v", res)
@@ -537,7 +528,6 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatalf("fix must mention lever init: %+v", res)
 	}
 
-	// Scaffold → pass.
 	if _, err := syncSkills(app, stateDir, false, false); err != nil {
 		t.Fatal(err)
 	}
@@ -548,12 +538,9 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatalf("scaffolded must pass: %+v", res)
 	}
 
-	// Owner edit → fail; the hint must signpost BOTH exits (--adopt to accept,
-	// --force to restore) — a user hitting this nag discovers adoption here.
-	// The custom content carries a CURRENT lever-version stamp: an adopted
-	// file's stamp is the owner's attestation of the framework baseline it
-	// was reviewed against, and a missing/old stamp fails the check (#16,
-	// covered below).
+	// Owner edit fails, and the hint names both --adopt and --force. The content
+	// carries a current lever-version stamp: an adopted file's stamp attests the
+	// baseline it was reviewed against.
 	op := filepath.Join(tree, ".claude", "skills", "lever-operator", "SKILL.md")
 	edited := "---\nname: custom\nlever-version: " + cli.Version + "\n---\nmy own guidance\n"
 	if err := os.WriteFile(op, []byte(edited), 0o644); err != nil {
@@ -563,7 +550,6 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatalf("owner-edit must fail with --adopt and --force hints: %+v", res)
 	}
 
-	// Adopt the customization → pass again, detail names the adoption.
 	if _, err := adoptSkills(app, stateDir); err != nil {
 		t.Fatal(err)
 	}
@@ -574,10 +560,8 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatalf("detail should name the adoption: %+v", res)
 	}
 
-	// Adopted baseline STAMPED WITH AN OLD VERSION → fail (#16): the file is
-	// pinned to a framework baseline that has since moved on, possibly past
-	// security-relevant guidance, and doctor is the only surface that can say
-	// so. Also covers the missing-stamp case via the "unknown" label.
+	// An adoption stamped with an old version fails: the baseline may have moved
+	// past security-relevant guidance. The "unknown" label covers a missing stamp.
 	stale := "---\nname: custom\nlever-version: 0.3.1\n---\nmy own guidance\n"
 	if err := os.WriteFile(op, []byte(stale), 0o644); err != nil {
 		t.Fatal(err)
@@ -593,7 +577,6 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatalf("stale-baseline fix must offer re-adopt and reclaim: %+v", res)
 	}
 
-	// Restore the current-stamp adoption for the drift scenario below.
 	if err := os.WriteFile(op, []byte(edited), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +584,7 @@ func TestCheckOperatorSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Drift PAST the adopted baseline → fail with tamper-aware wording.
+	// Drift past the adopted baseline fails with tamper-aware wording.
 	if err := os.WriteFile(op, []byte("edited again"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -614,9 +597,7 @@ func TestCheckOperatorSkills(t *testing.T) {
 	}
 }
 
-// writeDirectivesConfig writes a minimal lever.yaml with operator.allowed_signers
-// set to signersRel (relative to the instance root), or omitted entirely when
-// signersRel is "".
+// writeDirectivesConfig omits operator.allowed_signers when signersRel is "".
 func writeDirectivesConfig(t *testing.T, signersRel string) *config.App {
 	t.Helper()
 	if signersRel == "" {
@@ -625,9 +606,8 @@ func writeDirectivesConfig(t *testing.T, signersRel string) *config.App {
 	return loadInstance(t, "operator:\n  allowed_signers: "+signersRel+"\n")
 }
 
-// writeAllowedSigners generates a real ed25519 SSH keypair and writes a
-// one-line allowed_signers file at path, principal "operator@demo" (matches
-// writeDirectivesConfig's app name). Mirrors opsig_test.go's genKey.
+// writeAllowedSigners writes a real ed25519 key for principal
+// "operator@demo".
 func writeAllowedSigners(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -648,9 +628,6 @@ func writeAllowedSigners(t *testing.T, path string) {
 	}
 }
 
-// TestCheckDirectivesNotConfigured covers the default, opt-in-only state: no
-// operator.allowed_signers means no directive channel, and that's a pass, not
-// a warning — most instances never touch operator directives.
 func TestCheckDirectivesNotConfigured(t *testing.T) {
 	app := writeDirectivesConfig(t, "")
 	st := state.ForConfig(t.TempDir())
@@ -681,7 +658,6 @@ func TestCheckDirectivesEmptyFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Comments and blank lines only — zero substantive key lines.
 	if err := os.WriteFile(path, []byte("# no keys yet\n\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -739,8 +715,6 @@ func TestCheckDirectivesBrokerRunningSocketAbsent(t *testing.T) {
 	}
 }
 
-// writeRemotePAT writes a remote.pat file at the given mode, creating the
-// state dir first.
 func writeRemotePAT(t *testing.T, st state.State, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
@@ -751,8 +725,6 @@ func writeRemotePAT(t *testing.T, st state.State, mode os.FileMode) {
 	}
 }
 
-// TestCheckRemoteDisabled covers the default, opt-in-only state: remote
-// access unconfigured is a pass — most instances never turn it on.
 func TestCheckRemoteDisabled(t *testing.T) {
 	app := loadInstance(t, "")
 	st := state.ForConfig(t.TempDir())
@@ -781,7 +753,6 @@ func TestCheckRemotePATMissing(t *testing.T) {
 	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
 	writeRemotePID(t, st, os.Getpid())
-	// remote.pat intentionally left absent.
 	r := checkRemote(context.Background(), app, st, okProbes, nil)
 	if r.ok {
 		t.Fatal("missing remote.pat must fail")
@@ -791,8 +762,7 @@ func TestCheckRemotePATMissing(t *testing.T) {
 	}
 }
 
-// A remote.pat that exists but is group/other-accessible must fail too —
-// same posture as checkCredentialFile.
+// A group/other-accessible remote.pat fails, as for checkCredentialFile.
 func TestCheckRemotePATBadPermissions(t *testing.T) {
 	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
@@ -813,8 +783,6 @@ func TestCheckRemoteHealthz500(t *testing.T) {
 	writeRemotePID(t, st, os.Getpid())
 	writeRemotePAT(t, st, 0o600)
 
-	// Everything healthz depends on is green, so the 500 is the only failure
-	// left to report.
 	p := healthyRemoteProbes()
 	p.remoteHealthz = func(healthzProbe) (int, error) { return 500, nil }
 
@@ -827,9 +795,6 @@ func TestCheckRemoteHealthz500(t *testing.T) {
 	}
 }
 
-// enabled+all-green: pid alive, port listening, PAT present at 0600, the
-// end-to-end healthz probe returns 200, and the login provider is serving
-// discovery with no authorization endpoint.
 func TestCheckRemoteHealthy(t *testing.T) {
 	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
 	st := state.ForConfig(t.TempDir())
@@ -842,89 +807,9 @@ func TestCheckRemoteHealthy(t *testing.T) {
 	}
 }
 
-// TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz pins the ORDER of the two
-// probes, because the order decides what an operator reads at 2am.
-//
-// /healthz is not an API path, so the proxy opens a hub web session before it
-// forwards the request (remoteproxy.NewHandler's session gate) — a broken
-// login chain makes healthz answer 502 as well. With healthz probed first,
-// doctor reported "GET /healthz returned 502 — inspect remote.log" and never
-// reached checkRemoteLoginPath, so the operator lost the one message that says
-// what to DO (a login port granted since the instance came up needs `lever
-// down` + `lever up`). The cause must win over the symptom.
-func TestCheckRemoteDiagnosesTheLoginPathBeforeHealthz(t *testing.T) {
-	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := state.ForConfig(t.TempDir())
-	writeRemotePID(t, st, os.Getpid())
-	writeRemotePAT(t, st, 0o600)
-
-	// The host-side provider is healthy; the GUEST half is not — the hub
-	// cannot reach the provider through the forwarder, and answers 500.
-	p := healthyRemoteProbes()
-	p.remoteJailLogin = func(context.Context, proc.Runner, string) (int, string, error) {
-		return 500, "", nil
-	}
-	// What the live proxy answers while the login chain is broken.
-	healthzProbed := false
-	p.remoteHealthz = func(healthzProbe) (int, error) {
-		healthzProbed = true
-		return 502, nil
-	}
-
-	r := checkRemote(context.Background(), app, st, p, proc.NewFakeRunner())
-	if r.ok {
-		t.Fatal("a hub that cannot reach the login provider must fail the check")
-	}
-	if !strings.Contains(r.detail, "could not reach lever's login provider") {
-		t.Fatalf("detail = %q, want the login-path diagnosis rather than the healthz symptom", r.detail)
-	}
-	if !strings.Contains(r.fix, "lever down") {
-		t.Fatalf("fix = %q, want the actionable egress remediation", r.fix)
-	}
-	if healthzProbed {
-		t.Fatal("healthz was probed before the login diagnosis: its 502 is a CONSEQUENCE of the broken login, and reporting it shadows the cause")
-	}
-}
-
-// TestCheckRemoteFlagsALiveAuthorizeEndpoint is doctor's copy of the
-// /authorize decision: a provider that answers anything but 404 there can mint
-// an authorization code over HTTP, on a port every jailed agent reaches
-// through the guest forwarder. Nothing legitimate calls it — the proxy drives
-// the login server-side and mints in-process.
-func TestCheckRemoteFlagsALiveAuthorizeEndpoint(t *testing.T) {
-	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n")
-	st := state.ForConfig(t.TempDir())
-	writeRemotePID(t, st, os.Getpid())
-	writeRemotePAT(t, st, 0o600)
-	for _, tc := range []struct {
-		name  string
-		probe loginProbeResult
-		want  string
-	}{
-		{"authorize answers", loginProbeResult{discovery: 200, authorize: 302, authzURL: "https://lever.invalid/authorize"}, "/authorize"},
-		{"discovery advertises a loopback authorize endpoint", loginProbeResult{discovery: 200, authorize: 404, authzURL: "http://127.0.0.1:8446/authorize"}, "on loopback"},
-		{"discovery advertises localhost by name", loginProbeResult{discovery: 200, authorize: 404, authzURL: "http://localhost:9999/authorize"}, "on loopback"},
-		{"discovery is not served", loginProbeResult{discovery: 500, authorize: 404}, "discovery"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := healthyRemoteProbes()
-			p.remoteLogin = func(int) (loginProbeResult, error) { return tc.probe, nil }
-			r := checkRemote(context.Background(), app, st, p, nil)
-			if r.ok {
-				t.Fatalf("%s must fail the check", tc.name)
-			}
-			if !strings.Contains(r.detail, tc.want) {
-				t.Fatalf("detail = %q, want it to name %q", r.detail, tc.want)
-			}
-		})
-	}
-}
-
-// The proxy's own AllowedUsers gate (remoteproxy.Handler) trusts whatever
-// Tailscale-User-Login header a request carries. doctor's liveness probe
-// runs host-side — already as trusted as the PAT file it just read — so it
-// must send the first configured allowed_users entry, or a pinned instance
-// would 403 its own doctor check even when everything is actually healthy.
+// The proxy's allowed_users gate trusts the identity header. Doctor runs
+// host-side, as trusted as the PAT file, so it sends the first allowed user, or
+// a pinned instance would 403 its own check.
 func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
 	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"steve@example.com\", \"other@example.com\"]\n")
 	st := state.ForConfig(t.TempDir())
@@ -949,8 +834,8 @@ func TestCheckRemoteHealthzProbeUsesFirstAllowedUser(t *testing.T) {
 	}
 }
 
-// With another front, the probe must speak ITS header and dial where the
-// proxy actually listens — a non-loopback bind has no 127.0.0.1 listener.
+// With another front, the probe speaks its header and dials the bind address:
+// a non-loopback bind has no 127.0.0.1 listener.
 func TestCheckRemoteHealthzProbeFollowsIdentityHeaderAndBind(t *testing.T) {
 	app := loadInstance(t, "remote:\n  enabled: true\n  base_url: \"https://vm.exe.xyz:8445\"\n"+
 		"  identity_header: x-exedev-email\n  bind: 10.0.0.5\n  allowed_users: [\"me@example.com\"]\n")
@@ -995,8 +880,8 @@ func TestRemoteHealthzProbeSendsTheLoopbackHost(t *testing.T) {
 	}
 }
 
-// Each weakening setting gets a warning row — shown, with a fix, and never
-// counted as a failure — and a default remote block passes plainly.
+// Each weakening setting gets a warning row, never a failure; a default
+// remote block passes plainly.
 func TestCheckRemoteExposure(t *testing.T) {
 	base := "remote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 	if r := checkRemoteExposure(loadInstance(t, base)); !r.ok || r.fix != "" {
@@ -1027,20 +912,17 @@ func TestCheckClaudeVersion(t *testing.T) {
 		t.Fatalf("expected pass reporting the version, got %+v", got)
 	}
 
-	// Missing label (older image) → informational pass, not a hard fail.
 	if got := checkClaudeVersion("img", "", probes("", nil)); !got.ok {
 		t.Fatalf("missing label should be informational, not a failure, got %+v", got)
 	}
 
-	// Inspect error → fail with actionable fix.
 	if got := checkClaudeVersion("img", "", probes("", fmt.Errorf("no such image"))); got.ok {
 		t.Fatalf("inspect error should fail the check")
 	}
 }
 
-// With an image_tar the label comes from the archive: the host docker probe
-// is never consulted (a deploy host may have no docker), the detail names
-// the tar, and a tar the ref is missing from fails with the tar named.
+// With an image_tar the label comes from the archive and host docker is never
+// consulted; a tar missing the ref fails with the tar named.
 func TestCheckClaudeVersionFromTar(t *testing.T) {
 	dockerProbe := func(string) (string, error) { return "", fmt.Errorf("docker: command not found") }
 	p := doctorProbes{
@@ -1058,10 +940,9 @@ func TestCheckClaudeVersionFromTar(t *testing.T) {
 	}
 }
 
-// checkLeverVersion (lever#18): the image tag names only the arch, so the
-// label is the one thing that says which lever its in-jail binaries came
-// from. A different release fails; no label, or an image that cannot be
-// read, is "not checked".
+// TestCheckLeverVersion: the image tag names only the arch, so the label says
+// which lever built the in-jail binaries. A different release fails; no label
+// or an unreadable image is "not checked".
 func TestCheckLeverVersion(t *testing.T) {
 	const host, hostFull = "0.28.1", "0.28.1 (21ff051f651f)"
 	for _, tc := range []struct {
@@ -1098,10 +979,9 @@ func TestCheckLeverVersion(t *testing.T) {
 	}
 }
 
-// checkLeverVersion with a lever_jail_abi label (lever#171): the jail ABI
-// decides, not the release. An image from an earlier release whose in-jail
-// code is unchanged passes and names the release difference; a different
-// ABI fails with the rebuild advice whatever the releases say.
+// With a lever_jail_abi label the ABI decides, not the release: an older
+// release with unchanged in-jail code passes and names the difference; a
+// different ABI fails.
 func TestCheckLeverVersionJailABI(t *testing.T) {
 	const host, hostFull, hostABI = "0.34.2", "0.34.2 (21ff051f651f)", 4
 	for _, tc := range []struct {
@@ -1140,8 +1020,6 @@ func TestCheckLeverVersionJailABI(t *testing.T) {
 		})
 	}
 
-	// From an image_tar both labels come from the archive; an unreadable
-	// ABI label is "not checked", like an unreadable version label.
 	p := doctorProbes{
 		leverVersion:    func(string) (string, error) { return "", fmt.Errorf("docker: command not found") },
 		jailABI:         func(string) (string, error) { return "", fmt.Errorf("docker: command not found") },
@@ -1157,9 +1035,6 @@ func TestCheckLeverVersionJailABI(t *testing.T) {
 	}
 }
 
-// With an image_tar the label comes from the archive, as for the Claude
-// version: the host docker probe is never consulted and the detail names the
-// tar.
 func TestCheckLeverVersionFromTar(t *testing.T) {
 	p := doctorProbes{
 		leverVersion:    func(string) (string, error) { return "", fmt.Errorf("docker: command not found") },
@@ -1176,7 +1051,6 @@ func TestCheckLeverVersionFromTar(t *testing.T) {
 	}
 }
 
-// rolesYes/rolesNo stand in for the scion capability probe.
 func rolesYes(context.Context) (bool, error) { return true, nil }
 func rolesNo(context.Context) (bool, error)  { return false, nil }
 
@@ -1210,8 +1084,8 @@ func TestCheckAgentRolesFlagsUnrolledOnRolesAwareScion(t *testing.T) {
 	}
 }
 
-// Pre-scion#1089 the same records are harmless, so this must not cry wolf —
-// but it is the one place an operator can learn a bump will promote them.
+// On a scion without roles the records are harmless, so the row must not fail,
+// but it warns that a bump will promote them.
 func TestCheckAgentRolesWarnsAheadOfABumpWithoutFailing(t *testing.T) {
 	list := func(context.Context, string) ([]hubapi.Agent, error) {
 		return []hubapi.Agent{{Slug: "assistant"}}, nil
@@ -1262,17 +1136,13 @@ func TestCheckAgentRolesProbeFailureIsNotChecked(t *testing.T) {
 	}
 }
 
-// checkNodeToolchain is the guard that keeps a missing node from surfacing as
-// scion's bare "Web UI Not Available" page in the browser, hours and one
-// context-switch away from the cause.
 func TestCheckNodeToolchainNotRequired(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		app  *config.App
 	}{
 		{"remote off", &config.App{Scion: config.ScionConfig{Version: "e82a2a08"}}},
-		// No scion source to build the SPA from; the operator's own binary may
-		// already embed it.
+		// No scion source to build the SPA from; the operator's binary may embed it.
 		{"binary mode", &config.App{
 			Scion:  config.ScionConfig{Binary: "/host/scion"},
 			Remote: config.Remote{Enabled: true},
@@ -1325,59 +1195,6 @@ func TestCheckNodeToolchainProbeError(t *testing.T) {
 	}
 }
 
-// TestCheckRemoteLoginPathProvesTheGuestHalf: the host-side provider probe can
-// be perfectly green while the browser gets a 502, because it never touches
-// the guest forwarder or the hub's own oidc_login block. Asking the HUB to
-// start a login is what exercises both — it has to fetch discovery through the
-// forwarder before it can answer.
-func TestCheckRemoteLoginPathProvesTheGuestHalf(t *testing.T) {
-	jr := proc.NewFakeRunner()
-	st := state.ForConfig(t.TempDir())
-
-	for _, tc := range []struct {
-		name     string
-		status   int
-		redirect string
-		err      error
-		ok       bool
-		want     string
-	}{
-		{"healthy", 302, remoteproxy.DeadAuthorizationEndpoint + "?client_id=lever-remote", nil, true, "reaches the provider"},
-		{"hub has no oidc_login", 400, "", nil, false, "does not have lever's OIDC login configured"},
-		{"forwarder down", 500, "", nil, false, "could not reach lever's login provider"},
-		{"another IdP configured", 302, "https://accounts.google.example/o/oauth2/auth", nil, false, "not lever's provider"},
-		{"jail unreachable", 0, "", errors.New("machine not found"), false, "from inside the jail"},
-		{"unexpected status", 418, "", nil, false, "want 302"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			p := doctorProbes{remoteJailLogin: func(context.Context, proc.Runner, string) (int, string, error) {
-				return tc.status, tc.redirect, tc.err
-			}}
-			detail, _, ok := checkRemoteLoginPath(context.Background(), jr, st, p)
-			if ok != tc.ok {
-				t.Fatalf("ok = %v, want %v (detail %q)", ok, tc.ok, detail)
-			}
-			if !strings.Contains(detail, tc.want) {
-				t.Fatalf("detail = %q, want it to mention %q", detail, tc.want)
-			}
-		})
-	}
-}
-
-// The probe must ask the hub the way an unauthenticated browser would, from
-// inside the jail, with an absolute curl path (the run user's PATH has
-// writable directories ahead of /usr/bin).
-func TestRemoteJailLoginScriptShape(t *testing.T) {
-	for _, want := range []string{"/usr/bin/curl", "-o /dev/null", "%{http_code} %{redirect_url}"} {
-		if !strings.Contains(remoteJailLoginScript, want) {
-			t.Fatalf("script missing %q:\n%s", want, remoteJailLoginScript)
-		}
-	}
-	if strings.Contains(remoteJailLoginScript, "Authorization") {
-		t.Fatalf("the login route is public; sending a credential would test the wrong thing:\n%s", remoteJailLoginScript)
-	}
-}
-
 func TestStateRel(t *testing.T) {
 	st := state.ForConfig(filepath.Join(t.TempDir(), "inst"))
 	if got := stateRel(st, st.RemoteLog()); got != ".lever-state/remote.log" {
@@ -1391,8 +1208,6 @@ func TestStateRel(t *testing.T) {
 	}
 }
 
-// checkListeningProcess is the ladder both the broker and remote checks climb;
-// each rung names the pid file and the log the caller passed in.
 func TestCheckListeningProcess(t *testing.T) {
 	status := func(pid int, found, alive bool) func() (int, bool, bool) {
 		return func() (int, bool, bool) { return pid, found, alive }
@@ -1419,9 +1234,6 @@ func TestCheckListeningProcess(t *testing.T) {
 	}
 }
 
-// imageLabelProbe asks for the one label it is given, maps docker's
-// "<no value>" (label absent) to "", and reports docker's own stderr on
-// failure.
 func TestImageLabelProbe(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("docker image inspect --format {{index .Config.Labels \"claude_code_version\"}} labelled", proc.Result{Stdout: "2.1.207\n"})
@@ -1441,20 +1253,17 @@ func TestImageLabelProbe(t *testing.T) {
 	}
 }
 
-// productionProbes wires every field: a nil probe would panic the first time
-// a check on a real instance reached it.
+// A nil probe would panic the first time a real check reached it.
 func TestProductionProbesWiresEveryField(t *testing.T) {
 	p := productionProbes(proc.NewFakeRunner())
 	if p.dial == nil || p.goVersion == nil || p.nodeToolchain == nil || p.claudeVersion == nil ||
 		p.claudeVersionTar == nil || p.leverVersion == nil || p.leverVersionTar == nil ||
 		p.jailABI == nil || p.jailABITar == nil ||
-		p.remoteHealthz == nil || p.remoteLogin == nil || p.remoteJailLogin == nil {
+		p.remoteHealthz == nil || p.portHolder == nil {
 		t.Fatalf("productionProbes left a probe nil: %+v", p)
 	}
 }
 
-// checkManagerLive (lever#31): the one doctor row that says whether the agent
-// itself is up, not just the plumbing around it.
 func TestCheckManagerLive(t *testing.T) {
 	now := time.Date(2026, 9, 12, 8, 0, 0, 0, time.UTC)
 	listing := func(agents ...scion.Agent) agentLister {
@@ -1468,10 +1277,8 @@ func TestCheckManagerLive(t *testing.T) {
 		wantFix    string
 	}{
 		{"running", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days"}), true, "Up 4 days", ""},
-		// Activity and its age ride along on a live manager. Crashed and
-		// offline fail the row even though the container is up. Stalled
-		// passes with both readings named: the hub's stall sweeper marks an
-		// idle manager stalled too, and an idle instance must not fail doctor.
+		// Crashed and offline fail even with the container up. Stalled passes: the
+		// stall sweeper marks an idle manager stalled too.
 		{"running, completed", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "completed", LastActivityEvent: now.Add(-3 * time.Minute)}), true, "activity completed, 3m0s ago", ""},
 		{"running, working long", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "working", LastActivityEvent: now.Add(-40 * time.Minute)}), true, "activity working, 40m0s ago", ""},
 		{"running, no event time", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "waiting_for_input"}), true, "activity waiting_for_input)", ""},
@@ -1483,7 +1290,7 @@ func TestCheckManagerLive(t *testing.T) {
 		{"crashed", listing(scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}), false, `phase "error"`, "--force"},
 		{"suspended", listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"}), false, `phase "suspended"`, "resume"},
 		{"running record, dead container", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}), false, "Exited (1)", "lever up"},
-		// A blank column is "cannot tell", read the same way `lever up` reads it.
+		// A blank column is "cannot tell", as `lever up` reads it.
 		{"running record, blank column", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "no container status", ""},
 	}
 	for _, c := range cases {
@@ -1498,8 +1305,7 @@ func TestCheckManagerLive(t *testing.T) {
 			t.Errorf("%s: fix %q should mention %q", c.label, r.fix, c.wantFix)
 		}
 	}
-	// A listing failure is "not checked", never a pass with a claim attached
-	// and never a finding of its own — a down jail is another row's job.
+	// A listing failure is "not checked", never a pass and never a finding.
 	r := checkManagerLive(context.Background(), "/lever", "assistant", func(context.Context, string) ([]scion.Agent, error) {
 		return nil, errors.New("connection refused\nusage: scion list ...")
 	}, nil, nil, now)
@@ -1508,7 +1314,6 @@ func TestCheckManagerLive(t *testing.T) {
 	}
 }
 
-// stubSession is an agentSessionReader with canned answers per container.
 type stubSession struct {
 	tok      map[string]jail.HubTokenTimes
 	tokErr   error
@@ -1534,10 +1339,9 @@ func (s *stubSession) HarnessAlive(_ context.Context, ref string) (bool, error) 
 	return s.alive, s.aliveErr
 }
 
-// TestCheckManagerLiveSessionFaults: the two faults a live container hides.
-// An expired hub token fails the row even while the activity reads stalled
-// (the pass an idle manager gets), and a phase stopped over a live container
-// says whether claude still runs and names the matching fix.
+// TestCheckManagerLiveSessionFaults: an expired hub token fails even while
+// activity reads stalled, and a phase stopped over a live container says
+// whether claude still runs.
 func TestCheckManagerLiveSessionFaults(t *testing.T) {
 	now := time.Date(2026, 10, 6, 19, 30, 0, 0, time.UTC)
 	listing := func(agents ...scion.Agent) agentLister {
@@ -1556,7 +1360,7 @@ func TestCheckManagerLiveSessionFaults(t *testing.T) {
 	if !r.ok || !strings.Contains(r.detail, "idle at its prompt") {
 		t.Fatalf("a valid token keeps the idle-manager pass: %+v", r)
 	}
-	// A token that cannot be read is no finding: the stalled pass stands.
+	// An unreadable token is no finding.
 	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stalled), &stubSession{tokErr: errors.New("exit status 1")}, nil, now)
 	if !r.ok {
 		t.Fatalf("an unreadable token must not fail the row: %+v", r)
@@ -1572,13 +1376,10 @@ func TestCheckManagerLiveSessionFaults(t *testing.T) {
 	if r.ok || !strings.Contains(r.detail, "claude has exited") || !strings.Contains(r.fix, "/resume") {
 		t.Fatalf("stopped with claude gone: %+v", r)
 	}
-	// The harness probe failing falls back to the plain not-live row, with
-	// the stopped fix that names the new session.
 	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(stoppedLive), &stubSession{aliveErr: errors.New("exit status 125")}, nil, now)
 	if r.ok || !strings.Contains(r.detail, `phase "stopped"`) || !strings.Contains(r.fix, "new claude session") {
 		t.Fatalf("stopped, harness unknown: %+v", r)
 	}
-	// A stopped record with no container is not probed at all.
 	s := &stubSession{alive: true}
 	r = checkManagerLive(context.Background(), "/lever", "assistant", listing(scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "stopped"}), s, nil, now)
 	if r.ok || len(s.refs) != 0 || !strings.Contains(r.fix, "/resume") {
@@ -1586,10 +1387,9 @@ func TestCheckManagerLiveSessionFaults(t *testing.T) {
 	}
 }
 
-// TestCheckManagerLiveNoConversation (lever#202): an error-phase manager
-// whose container log says claude found no conversation to continue is
-// named as such, with the fresh start as the fix; the log is never printed,
-// and only an error-phase record's log is read.
+// TestCheckManagerLiveNoConversation: an error-phase manager whose log says
+// claude found no conversation is named as such; the log is never printed and
+// only an error-phase record's log is read.
 func TestCheckManagerLiveNoConversation(t *testing.T) {
 	now := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
 	listing := func(agents ...scion.Agent) agentLister {
@@ -1616,14 +1416,12 @@ func TestCheckManagerLiveNoConversation(t *testing.T) {
 			t.Errorf("fix lacks %q", w)
 		}
 	}
-	// Any other log, or a failed read, keeps the plain error row.
 	for _, tr := range []containerLogReader{tail("Error: other", nil), tail("", errors.New("no container")), nil} {
 		r = checkManagerLive(context.Background(), "/lever", "assistant", listing(crashed), nil, tr, now)
 		if r.ok || !strings.Contains(r.fix, "--force") {
 			t.Fatalf("plain error row changed: %+v", r)
 		}
 	}
-	// Other phases do not read the log.
 	refs = nil
 	for _, a := range []scion.Agent{
 		{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"},
@@ -1640,7 +1438,6 @@ func TestCheckManagerLiveNoConversation(t *testing.T) {
 	}
 }
 
-// TestCheckAgentHubTokens: the token row over the manager and the workers.
 func TestCheckAgentHubTokens(t *testing.T) {
 	now := time.Date(2026, 10, 6, 19, 30, 0, 0, time.UTC)
 	fleet := func(context.Context, string) ([]scion.Agent, error) {
@@ -1675,15 +1472,14 @@ func TestCheckAgentHubTokens(t *testing.T) {
 	if !r.ok || !strings.Contains(r.detail, "not checked (token unreadable): scratch (error)") {
 		t.Fatalf("unreadable worker token: %+v", r)
 	}
-	// The running manager's expired token is the manager row's failure: here
-	// a warning that points there, one fault failing one row.
+	// The running manager's expired token is the manager row's failure; here it
+	// only warns.
 	r = checkAgentHubTokens(context.Background(), "/lever", "assistant", agents, fleet, &stubSession{tok: map[string]jail.HubTokenTimes{
 		"lever--assistant": tok(-10 * time.Minute), "lever--scratch": tok(9 * time.Hour)}})
 	if !r.ok || r.fix == "" || !strings.Contains(r.detail, "the manager agent row reports it") {
 		t.Fatalf("manager expired: %+v", r)
 	}
-	// A phase apply does not heal: a warning naming the phase, not a failure
-	// whose fix would not work.
+	// A phase apply does not heal warns rather than fails: its fix would not work.
 	errFleet := func(context.Context, string) ([]scion.Agent, error) {
 		return []scion.Agent{
 			{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days"},
@@ -1695,7 +1491,6 @@ func TestCheckAgentHubTokens(t *testing.T) {
 	if !r.ok || !strings.Contains(r.detail, `scratch (expired, phase "error")`) || !strings.Contains(r.fix, "resume") {
 		t.Fatalf("expired under phase error: %+v", r)
 	}
-	// A stopped worker over a live container is one apply heals: a failure.
 	stoppedFleet := func(context.Context, string) ([]scion.Agent, error) {
 		return []scion.Agent{{Slug: "scratch", Phase: "stopped", ContainerStatus: "Up 1 hour"}}, nil
 	}
@@ -1716,10 +1511,8 @@ func TestCheckAgentHubTokens(t *testing.T) {
 	}
 }
 
-// TestCheckManagerImage: the manager runs the image its record was created
-// with; a resume never moves it, so a changed manager.image reads as healthy
-// on the version row alone (lever#33). This row compares the record with the
-// config and points at `lever up --fresh`.
+// TestCheckManagerImage: a resume never moves the record's image, so a changed
+// manager.image looks healthy on the version row alone.
 func TestCheckManagerImage(t *testing.T) {
 	listing := func(agents ...scion.Agent) agentLister {
 		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
@@ -1731,15 +1524,23 @@ func TestCheckManagerImage(t *testing.T) {
 		wantDetail string
 		wantFix    string
 	}{
-		{"same", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), true, "scionlocal/lever-claude:arm64", ""},
-		{"same, podman-qualified", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), true, "", ""},
+		{"same", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}), true, "lever.local/lever-claude:arm64", ""},
+		{"created by an older lever on the bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), true, "assistant (scionlocal/lever-claude:arm64) created on an unqualified image name", "lever up --fresh --keep-conversation"},
+		{"same, podman-qualified bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), true, "unqualified", "--keep-conversation"},
+		{"a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64)", "recycling"},
+		{"a worker on a digest", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "x@sha256:aa"}), true, "as configured", ""},
 		{"drifted", listing(scion.Agent{Slug: "assistant", Phase: "suspended", Image: "scionlocal/lever-claude:v1"}), false, "scionlocal/lever-claude:v1", "lever up --fresh"},
-		{"no record", listing(scion.Agent{Slug: "scratch", Phase: "running", Image: "x"}), true, "not checked", ""},
+		{"no manager record, a worker on a bare name", listing(scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64) created on an unqualified", "recycling"},
+		{"drifted manager, a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/other:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), false, "w (scionlocal/lever-claude:arm64)", "lever up --fresh"},
+		{"no record", listing(scion.Agent{Slug: "scratch", Phase: "running", Image: "lever.local/x:1"}), true, "not checked", ""},
 		{"record without image", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "not checked", ""},
 		{"list fails", func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, true, "not checked", ""},
 	}
 	for _, c := range cases {
 		r := checkManagerImage(context.Background(), "/lever", "assistant", "scionlocal/lever-claude:arm64", c.list)
+		if c.label == "same" && r.fix != "" {
+			t.Fatalf("same: a fix %q on a healthy row", r.fix)
+		}
 		if r.ok != c.ok {
 			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
 		}
@@ -1752,8 +1553,8 @@ func TestCheckManagerImage(t *testing.T) {
 	}
 }
 
-// The version row's advice must name the verb that actually recreates the
-// manager: `lever stop && lever up` resumes the record on its old image.
+// The advice must name the verb that recreates the manager: `lever stop &&
+// lever up` resumes on the old image.
 func TestCheckClaudeVersionAdvisesFresh(t *testing.T) {
 	p := doctorProbes{claudeVersion: func(string) (string, error) { return "2.1.240", nil }}
 	got := checkClaudeVersion("img", "", p)
@@ -1762,9 +1563,8 @@ func TestCheckClaudeVersionAdvisesFresh(t *testing.T) {
 	}
 }
 
-// TestCheckOperatorSkillsMissingTreeFailsWithoutCreating: doctor is
-// read-only — a tree that does not exist yet is a failed row pointing at
-// `lever init` (which creates it), never created here.
+// Doctor is read-only: a missing tree fails pointing at `lever init` and is
+// never created.
 func TestCheckOperatorSkillsMissingTreeFailsWithoutCreating(t *testing.T) {
 	root := t.TempDir()
 	tree := filepath.Join(root, "workspace")
@@ -1785,8 +1585,6 @@ func TestCheckWorkerTicketMounts(t *testing.T) {
 	listing := func(agents ...scion.Agent) agentLister {
 		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
 	}
-	// mountsOf answers by container ref; an absent ref is jail.ErrNoContainer
-	// unless it is listed under broken, which is an inspect failure.
 	mountsOf := func(m map[string][]string, broken ...string) mountLister {
 		return func(_ context.Context, ref string) ([]string, error) {
 			if slices.Contains(broken, ref) {
@@ -1821,7 +1619,7 @@ func TestCheckWorkerTicketMounts(t *testing.T) {
 		{"manager mount never inspected", []string{"a"}, both,
 			mountsOf(map[string][]string{"ca": {"/run/lever"}}), true, "1 worker", ""},
 		{"no record", []string{"ghost"}, both, mountsOf(nil), true, "no worker container", ""},
-		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
+		// No id in the listing: the container is found by scion's name.
 		{"no container id, found by name", []string{"a"}, listing(scion.Agent{Slug: "a", Phase: "running"}),
 			mountsOf(map[string][]string{"lever--a": {"/workspace"}}), false, "worker a was created before", "purge a"},
 		{"no container at all", []string{"a"}, listing(scion.Agent{Slug: "a", Phase: "stopped"}), mountsOf(nil), true, "no worker container", ""},
@@ -1851,7 +1649,6 @@ func TestCheckManagerReadOnly(t *testing.T) {
 	listing := func(agents ...scion.Agent) agentLister {
 		return func(context.Context, string) ([]scion.Agent, error) { return agents, nil }
 	}
-	// inspectOf answers by container ref, like mountsOf in the ticket test.
 	inspectOf := func(m map[string][]jail.Mount, broken ...string) mountInspector {
 		return func(_ context.Context, ref string) ([]jail.Mount, error) {
 			if slices.Contains(broken, ref) {
@@ -1864,8 +1661,7 @@ func TestCheckManagerReadOnly(t *testing.T) {
 			return mounts, nil
 		}
 	}
-	// probeOf answers the live check: targets listed in replaced cover
-	// another directory than the host's; err, when set, is the answer.
+	// probeOf: targets in replaced cover another directory than the host's.
 	probeOf := func(err error, replaced ...string) liveMountChecker {
 		return func(_ context.Context, _ string, want []jail.LiveMount) ([]jail.LiveMountProblem, error) {
 			if err != nil {
@@ -1881,7 +1677,6 @@ func TestCheckManagerReadOnly(t *testing.T) {
 		}
 	}
 	refused := probeOf(nil)
-	// A worker dir and its ancestor are pinned too while read_only is set.
 	want := []config.TreeMount{{Rel: "assistant"}, {Rel: "workers", WorkerPin: true}, {Rel: "assistant/tools", ReadOnly: true}, {Rel: "workers/w", WorkerPin: true}}
 	mgr := listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 3 hours", ContainerID: "cm"})
 	ws := jail.Mount{Source: "/lever", Destination: "/workspace", RW: true}
@@ -1893,8 +1688,7 @@ func TestCheckManagerReadOnly(t *testing.T) {
 	}
 	full := append([]jail.Mount{ws, pin, ro}, wpins...)
 	with := func(ms ...jail.Mount) []jail.Mount { return append(append([]jail.Mount{}, ms...), wpins...) }
-	// The host tree behind /lever: every planned dir, and kb (an entry the
-	// config dropped, its dir kept). /lever/gone has no dir.
+	// kb is an entry the config dropped, its dir kept; /lever/gone has no dir.
 	tree := t.TempDir()
 	for _, d := range []string{"assistant/tools", "workers/w", "kb"} {
 		if err := os.MkdirAll(filepath.Join(tree, d), 0o755); err != nil {
@@ -1924,27 +1718,26 @@ func TestCheckManagerReadOnly(t *testing.T) {
 			"assistant/tools mounted read-write", "lever up --fresh"},
 		{"entry from another source", want, mgr, inspectOf(map[string][]jail.Mount{"cm": with(ws, pin, jail.Mount{Source: "/elsewhere", Destination: "/workspace/assistant/tools"})}), refused, false, false,
 			"assistant/tools mounted from another source", "lever up --fresh"},
-		// The false OK the inspect alone gave: the mount is listed, but the
-		// host replaced the directory and a write lands in the new one.
+		// The false OK the inspect alone gave: the mount is listed, but the host
+		// replaced the directory and writes land in the new one.
 		{"entry replaced on the host", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(nil, "/workspace/assistant/tools"), false, false,
 			"assistant/tools covers another directory than the host has there now", "edit protected directories in place"},
-		// A replaced pin is reported too: the whole plan is checked live.
 		{"pin replaced on the host", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(nil, "/workspace/assistant"), false, false,
 			"assistant covers another directory than the host has there now", "edit protected directories in place"},
 		{"probe cannot run", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(errors.New("cannot read the running container's mounts from the guest")), true, true, "live check could not run", "re-run doctor"},
-		// The first process moved into a namespace made inside the
-		// container: a staged view, so the row fails.
+		// The first process sits in a namespace made inside the container: a staged
+		// view.
 		{"foreign namespace", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), probeOf(jail.ErrForeignNamespace), false, false, "mount namespace made inside the container", "compromised"},
 		{"probe not wired", want, mgr, inspectOf(map[string][]jail.Mount{"cm": full}), nil, true, true, "live check is not wired", "lever wiring gap"},
 		{"container not running", want, listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "Exited (0) 2 minutes ago", ContainerID: "cm"}),
 			inspectOf(map[string][]jail.Mount{"cm": full}), refused, true, true, "live check did not run (the manager container is not running)", "lever up"},
-		// No id in the listing (pin 89ed0fe8): the container is found by scion's name.
+		// No id in the listing: the container is found by scion's name.
 		{"no container id, found by name", want, listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "running"}),
 			inspectOf(map[string][]jail.Mount{"lever--assistant": full}), refused, true, false, "checked live from the guest", ""},
 		{"none configured", nil, mgr, inspectOf(nil), refused, true, false, "none configured", ""},
 		{"none configured, nothing mounted", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws}}), refused, true, false, "none configured", ""},
 		{"none configured, list fails", nil, func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, inspectOf(nil), refused, true, false, "none configured", ""},
-		// card #157: the record keeps the mounts of its create.
+		// The record keeps the mounts of its create.
 		{"dropped entry still mounted", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, kb}}), refused, true, false,
 			`"kb" still mounted read-only although no longer in manager.read_only`, "keep these directories"},
 		{"mounted dir gone", nil, mgr, inspectOf(map[string][]jail.Mount{"cm": {ws, gone}}), refused, false, false,
@@ -1979,9 +1772,8 @@ func TestCheckManagerReadOnly(t *testing.T) {
 	}
 }
 
-// card #157: with no manager container, the row reads the hub record's
-// volumes for the mounts a resume would recreate; nothing stale there, or
-// no record, keeps the old "not checked" wording.
+// With no manager container, the row reads the hub record's volumes, which a
+// resume would recreate.
 func TestCheckManagerReadOnlyFallsBackToTheHubRecord(t *testing.T) {
 	tree := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tree, "kb"), 0o755); err != nil {
@@ -2019,15 +1811,12 @@ func TestCheckManagerReadOnlyFallsBackToTheHubRecord(t *testing.T) {
 			t.Errorf("%s: %+v", c.label, r)
 		}
 	}
-	// With a plan configured and no container, the plan half stays "not checked".
 	r := checkManagerReadOnly(context.Background(), "/lever", tree, "assistant", []config.TreeMount{{Rel: "kb", ReadOnly: true}}, mgr, noContainer, recordOf(), refused)
 	if !strings.Contains(r.detail, "not checked (no manager container)") {
 		t.Errorf("plan, no container: %+v", r)
 	}
 }
 
-// lever#34: the guest-DNS row is the one that tells a DNS-dead jail from a
-// healthy idle one.
 func TestCheckGuestDNS(t *testing.T) {
 	const probe = "timeout 10 getent ahosts api.anthropic.com"
 	answered := proc.NewFakeRunner()
@@ -2044,7 +1833,7 @@ func TestCheckGuestDNS(t *testing.T) {
 		t.Fatalf("a failed lookup must fail naming the lima resolver path, got %+v", got)
 	}
 
-	// A resolver that never answers hits the probe's own timeout (exit 124).
+	// A resolver that never answers hits the probe's timeout (exit 124).
 	hung := proc.NewFakeRunner()
 	hung.Script(probe, proc.Result{Code: 124})
 	if got := checkGuestDNS(context.Background(), false, hung); got.ok || !strings.Contains(got.detail, "timed out") {
@@ -2075,8 +1864,7 @@ func TestCheckPATTokensPassesOnACurrentRecord(t *testing.T) {
 	}
 }
 
-// The live case on every instance minted before records existed: no
-// agent:message, a 90-day expiry nobody knows about.
+// A token with no record: no agent:message and an unknown 90-day expiry.
 func TestCheckPATTokensFailsWithoutARecord(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	if err := st.SaveControllerPAT("tok"); err != nil {
@@ -2107,7 +1895,7 @@ func TestCheckPATTokensFailsNearExpiry(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	seedPAT(t, st, "controller", "tok")
 	now := time.Now()
-	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false), ExpiresAt: now.Add(3 * 24 * time.Hour)}); err != nil {
+	if err := st.SaveControllerPATRecord(state.PATRecord{Requested: controllerPATScopes(false, false), ExpiresAt: now.Add(3 * 24 * time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	r := checkPATTokens(context.Background(), st, false, nil, now)
@@ -2178,8 +1966,7 @@ func TestCheckAgentRoleCeilingHubDownIsNotChecked(t *testing.T) {
 }
 
 // A record scion's migration promoted to full is the same hazard as an
-// unrolled one, and the doctor must name it as such rather than list it
-// among the healthy "slug=full" records.
+// unrolled one and must not be listed among the healthy records.
 func TestCheckAgentRolesFlagsGrandfatheredRecords(t *testing.T) {
 	list := func(context.Context, string) ([]hubapi.Agent, error) {
 		return []hubapi.Agent{{Slug: "legacy", Role: "full", RoleGrandfathered: true}, {Slug: "scratch", Role: "baseline"}}, nil
@@ -2193,10 +1980,8 @@ func TestCheckAgentRolesFlagsGrandfatheredRecords(t *testing.T) {
 	}
 }
 
-// The ceiling setting landed in the same scion commit as roles (scion#1089),
-// so a scion without --role has no ceiling to read: not a finding, and the
-// hub is not even asked. A probe that cannot answer is "not checked", never a
-// finding either.
+// A scion without --role has no ceiling setting: not a finding, and the hub is
+// not asked. A probe that cannot answer is "not checked".
 func TestCheckAgentRoleCeilingSkipsAPreRolesScion(t *testing.T) {
 	asked := false
 	read := func(context.Context, string) (hubapi.RoleCeiling, error) {
@@ -2332,11 +2117,10 @@ func TestNetworkCheckedAgentsIncludesManager(t *testing.T) {
 	}
 }
 
-// TestCheckWorkerTreeBootstraps: a bootstrap.json under a worker's own tree
-// fails the row and names the file to delete; the manager's own bootstrap
-// (the tree root's .lever) is not a worker's. A path that goes through a
-// symlink an agent planted fails the row too, but gets NO rm line: pasting
-// one would delete the link's target (the manager's bootstrap).
+// TestCheckWorkerTreeBootstraps: a bootstrap.json under a worker's tree fails
+// and names the file; the tree root's is the manager's. A path through a
+// planted symlink fails too but gets no rm line, which could delete the
+// manager's bootstrap.
 func TestCheckWorkerTreeBootstraps(t *testing.T) {
 	tree := t.TempDir()
 	dirs := map[string]string{"a": filepath.Join(tree, "workers", "a"), "b": filepath.Join(tree, "workers", "b"), "c": filepath.Join(tree, "workers", "c")}

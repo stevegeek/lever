@@ -13,7 +13,7 @@ func (b *Broker) handleBumpEpoch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleRevoke revokes one agent. Admin/loopback only. Body: {"agent":"<cn>"}.
+// handleRevoke revokes one agent. Admin/loopback only.
 func (b *Broker) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	var req wire.RevokeRequest
 	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil || req.Agent == "" {

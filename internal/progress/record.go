@@ -16,9 +16,8 @@ import (
 // keepRecords is how many run records RecordPath keeps in its directory.
 const keepRecords = 10
 
-// RecordPath returns a new run record's path in dir
-// (bringup-<command>-<UTC time>.jsonl), creating dir (0700) and removing
-// the oldest records beyond keepRecords.
+// RecordPath returns a new run record's path in dir, creating dir (0700) and
+// removing the oldest records beyond keepRecords.
 func RecordPath(dir, command string, now time.Time) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("progress records: %w", err)
@@ -28,7 +27,6 @@ func RecordPath(dir, command string, now time.Time) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
-// prune removes the oldest bringup-*.jsonl records in dir, keeping keep.
 func prune(dir string, keep int) {
 	matches, err := filepath.Glob(filepath.Join(dir, "bringup-*.jsonl"))
 	if err != nil || len(matches) <= keep {
@@ -53,8 +51,7 @@ func prune(dir string, keep int) {
 	}
 }
 
-// WriteLast saves sum as the last run's summary (path, mode 0600), written
-// to a temp file and renamed into place.
+// WriteLast atomically saves sum as the last run's summary (0600).
 func WriteLast(path string, sum Summary) error {
 	b, err := json.MarshalIndent(sum, "", "  ")
 	if err != nil {
@@ -96,8 +93,7 @@ func ReadLast(path string) (Summary, error) {
 	return sum, nil
 }
 
-// Describe is the summary in one line for doctor: when, how long, the
-// slowest steps.
+// Describe is the summary in one line for doctor.
 func (s Summary) Describe(now time.Time) string {
 	ago := now.Sub(s.At).Round(time.Minute)
 	when := "just now"

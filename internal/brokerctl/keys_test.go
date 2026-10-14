@@ -74,11 +74,8 @@ func TestDirectivesRoundTripAndAbsentIsZero(t *testing.T) {
 	}
 }
 
-// TestSaveDirectivesIsAtomicAndReplaces proves SaveDirectives writes via a
-// temp-file-then-rename (not a plain in-place write, which would torn-write
-// directives.json — the replay tombstone set — on a mid-write crash): saving
-// a second, different state over a first must fully replace it on reload,
-// and no .tmp-* scratch file may survive a successful save.
+// TestSaveDirectivesIsAtomicAndReplaces: a second save fully replaces the
+// first and no .tmp-* scratch file survives.
 func TestSaveDirectivesIsAtomicAndReplaces(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {

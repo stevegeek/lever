@@ -12,11 +12,9 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// matchingRealizedConfigJSON returns a `limactl list --json <vm>` line (the
-// shape lima's `store.Inspect` produces: a single NDJSON object with a
-// "config" key holding the merged LimaYAML) whose containment fields exactly
-// match what template.go renders for projectTree. Callers mutate a copy of
-// this to script drift scenarios.
+// matchingRealizedConfigJSON returns a `limactl list --json <vm>` line (a
+// single NDJSON object whose "config" key holds the merged LimaYAML) whose
+// containment fields exactly match what template.go renders for projectTree.
 func matchingRealizedConfigJSON(vm, projectTree string) string {
 	return `{"name":"` + vm + `","status":"Running","config":{` +
 		`"mounts":[{"location":"` + projectTree + `","mountPoint":"/lever","writable":true}],` +
@@ -32,12 +30,7 @@ func scriptRealizedConfig(f *proc.FakeRunner, vm, json string) {
 	f.Script("limactl list --json "+vm, proc.Result{Stdout: json + "\n"})
 }
 
-// configDriftMsg is the fragment of the drift error the operator reads; the
-// full wording (naming the VM and the `lever down`/`lever up` repair) is the
-// contract these tests pin.
 const configDriftMsg = "mismatched containment config"
-
-// --- verifyRealizedConfig: direct unit tests (fake runner, no full EnsureUp). ---
 
 func TestVerifyRealizedConfigAcceptsMatch(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -155,13 +148,9 @@ func TestVerifyRealizedConfigDetectsDrift(t *testing.T) {
 	}
 }
 
-// --- EnsureUp integration: drift must fail closed BEFORE any provisioning,
-// and a matching config must not break the Running->skip idempotency. ---
-
-// TestEnsureUpFailsClosedOnDriftedRunningVM proves the exact F2 bug is fixed:
-// an already-Running VM (adopted, not created by this EnsureUp call) whose
+// TestEnsureUpFailsClosedOnDriftedRunningVM: an adopted Running VM whose
 // realized config has drifted from the template must fail EnsureUp closed,
-// and must NOT proceed to provision runtimes/scion/egress on the drifted VM.
+// before provisioning anything on it.
 func TestEnsureUpFailsClosedOnDriftedRunningVM(t *testing.T) {
 	f := proc.NewFakeRunner()
 	limaVersionScript(f)
@@ -187,8 +176,8 @@ func TestEnsureUpFailsClosedOnDriftedRunningVM(t *testing.T) {
 	}
 }
 
-// TestEnsureUpVerifiesRealizedConfigOnFreshCreate proves the check also runs
-// right after `limactl create` (not just on adoption of a pre-existing VM).
+// TestEnsureUpVerifiesRealizedConfigOnFreshCreate: the check also runs right
+// after `limactl create`, not just on adoption.
 func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
 	f := proc.NewFakeRunner()
 	limaVersionScript(f)
@@ -212,9 +201,8 @@ func TestEnsureUpVerifiesRealizedConfigOnFreshCreate(t *testing.T) {
 	}
 }
 
-// TestEnsureUpIsIdempotentWhenRunningAndMatching re-asserts the Running->skip
-// idempotency test (lima_test.go) still holds now that a verify call is
-// interposed: a matching config must still result in no create/start calls.
+// TestEnsureUpIsIdempotentWhenRunningAndMatching: with the verify call
+// interposed, a matching config still results in no create/start calls.
 func TestEnsureUpIsIdempotentWhenRunningAndMatching(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptedVM(f) // scripts a matching realized config for "/Users/x/tree" too

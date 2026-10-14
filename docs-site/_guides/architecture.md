@@ -162,8 +162,9 @@ sequenceDiagram
 
 Messaging follows the same broker-mediated shape as dispatch: `lever-manager msg send`/`msg
 list`/`watch` are thin mTLS clients of the broker's `/msg/send` and `/msg/list`, never of Scion
-directly. An in-container `scion` CLI call has no hub credential to authenticate with — the hub
-runs with dev-auth off, and only the host-side broker holds the controller PAT (see
+directly. An in-container `scion` CLI call has no hub credential to authenticate with beyond
+scion's own per-agent token — the hub runs with dev-auth off and trusts only assertions signed with
+a host-held key, and only the host-side broker holds the controller PAT (see
 [security-model.md §4](/security-model/worker-isolation/)) — so only the broker can address an arbitrary agent's
 inbox. Because every broker send wears the controller's hub user as its sender, the broker records
 each one in a host-side sent ledger first, and a recipient learns who wrote a message only by
@@ -208,7 +209,7 @@ its workers need. Two patterns, both instance choices:
   generic. (A baked toolchain is an *instance* artifact, not part of the core.)
 
 **Images are tagged by architecture.** Agent images carry an arch tag
-(`scionlocal/lever-claude:arm64` / `:amd64`), never a shared `:latest`, so a host that cross-builds
+(`lever.local/lever-claude:arm64` / `:amd64`), never a shared `:latest`, so a host that cross-builds
 both — an arm64 laptop producing an amd64 server image — never clobbers one arch with the other. A
 **tagless** `manager.image` in the config auto-resolves to the jail's arch at apply time (the jail's
 arch equals its host's), so **one config is portable** across an arm64 laptop and an amd64 server; an

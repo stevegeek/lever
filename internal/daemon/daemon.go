@@ -15,12 +15,10 @@ import (
 	"github.com/stevegeek/lever/internal/logging"
 )
 
-// WritePIDFile records the running process's pid at path (0600), creating
-// the parent directory if needed. Callers write it only after their listeners
-// have bound — so a pid file on disk means a daemon is (or was) actually
-// serving, never a failed-bind ghost. A no-op when path is empty (tests that
-// don't care about pid tracking). Returns an error: a pid file we cannot
-// write is a doctor blind spot, so callers treat it as fatal.
+// WritePIDFile records the running process's pid at path (0600). Callers
+// write it only after their listeners have bound, so a pid file never marks a
+// failed-bind ghost. A no-op when path is empty. Callers treat an error as
+// fatal: an unwritable pid file is a doctor blind spot.
 func WritePIDFile(path string) error {
 	if path == "" {
 		return nil
@@ -34,9 +32,8 @@ func WritePIDFile(path string) error {
 	return nil
 }
 
-// RemovePIDFile deletes the pid file on shutdown. A removal failure is a
-// warning (printed to stderr), not fatal (the process is exiting anyway); an
-// already-absent file is fine. A no-op when path is empty.
+// RemovePIDFile deletes the pid file on shutdown; a failure is only warned
+// about. A no-op when path is empty.
 func RemovePIDFile(path string) {
 	if path == "" {
 		return

@@ -26,8 +26,6 @@ func fakeAnthropic(t *testing.T, gotKey *string, gotAuth *string) *httptest.Serv
 	}))
 }
 
-// encodeToken base64url-encodes a raw token for use as an Authorization: Bearer value.
-// Reuses base64urlNoPad from testhelpers_test.go (same package).
 func encodeToken(raw []byte) string { return base64urlNoPad(raw) }
 
 func mintLLM(t *testing.T, priv ed25519.PrivateKey, agent string, epoch int) string {
@@ -44,9 +42,6 @@ func mintLLM(t *testing.T, priv ed25519.PrivateKey, agent string, epoch int) str
 	return encodeToken(raw) // base64.RawURLEncoding — matches the proxy's decode
 }
 
-// newMTLSRequest creates an *http.Request with a verified TLS client cert whose
-// CN is cn, using the broker's CA to sign — matching how gateway/request tests
-// fake ca.RequireAgent via leafFor.
 func newMTLSRequest(t *testing.T, b *Broker, cn, method, target string, body io.Reader) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, target, body)
@@ -130,9 +125,8 @@ func TestLLMProxyDeniesMissingToken(t *testing.T) {
 }
 
 func TestLLMProxyDeniesNoClientCert(t *testing.T) {
-	// RequireAgent (llmproxy.go:50) is the first gate: with no mTLS client cert at
-	// all, the proxy must 403 and never reach the upstream — the token is always
-	// CN-bound (R4 closed by failing closed).
+	// RequireAgent is the first gate: with no client cert the proxy must 403
+	// and never reach the upstream, since the token is always CN-bound.
 	var gotKey, gotAuth string
 	up := fakeAnthropic(t, &gotKey, &gotAuth)
 	defer up.Close()
@@ -153,8 +147,8 @@ func TestLLMProxyDeniesNoClientCert(t *testing.T) {
 }
 
 func TestLLMProxyDeniesMalformedBearer(t *testing.T) {
-	// bearerToken (llmproxy.go:91) base64url-decodes the credential; junk after
-	// "Bearer " must yield 401 with no upstream call (no real key injected).
+	// Junk after "Bearer " must yield 401 with no upstream call (no real key
+	// injected).
 	var gotKey, gotAuth string
 	up := fakeAnthropic(t, &gotKey, &gotAuth)
 	defer up.Close()

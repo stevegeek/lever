@@ -1,29 +1,16 @@
-# Local overrides: put machine-specific paths in an untracked `local.mk` (e.g.
-#   LEVER_INSTANCE := $(HOME)/ai/my-instance
-# It is included first, so its values win over the `?=` defaults below. You can
-# also override per-invocation on the command line (`make install LEVER_INSTANCE=...`)
-# or via the environment — every var below uses `?=`. See local.mk.example.
+# Machine-specific values go in an untracked `local.mk` (see local.mk.example).
+# It is included first, so its values win over the `?=` defaults below, as do
+# the command line and the environment.
 -include local.mk
 
 # Where the host `lever` control-plane binary is installed (must be on PATH).
 PREFIX ?= $(HOME)/.local/bin
-# The instance tree, bind-mounted into the manager container. Set this to your
-# own instance directory (this default is a neutral placeholder).
+# The instance tree, bind-mounted into the manager container.
 LEVER_INSTANCE ?= $(HOME)/lever-instance
 
-# Install the host `lever` binary (darwin/native) onto PATH — your everyday entry
-# (`lever up` from anywhere inside an instance, or `lever up path/to/lever.yaml`).
-# Cross-compile the guest's remote-access login forwarder for linux/amd64 and
-# linux/arm64 into internal/provision/loginfwd/prebuilt/, where go:embed picks
-# it up. A lever built after this needs no Go toolchain for remote access
-# (issue #38); one built without it falls back to compiling the forwarder at
-# apply time. Offline, stdlib-only. The release workflow runs the same command.
-.PHONY: loginfwd-prebuilt
-loginfwd-prebuilt:
-	go run ./internal/provision/loginfwd/genprebuilt
-
+# Install the host `lever` binary and the host tools onto PATH.
 .PHONY: install
-install: loginfwd-prebuilt
+install:
 	@mkdir -p $(PREFIX)
 	go build -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
@@ -37,32 +24,28 @@ install: loginfwd-prebuilt
 	@echo "installed $(PREFIX)/lever-tool-tts"
 
 # The release version lives in internal/cli/root.go (CI greps that exact file).
-# lever-agent cannot link internal/cli, so it is stamped at build time instead:
-# internal/agent.Version is what the capability MCP server's serverInfo reports.
+# lever-agent cannot link internal/cli, so internal/agent.Version is stamped at
+# build time.
 LEVER_VERSION := $(shell sed -n 's/^const Version = "\(.*\)"/\1/p' internal/cli/root.go)
 LEVER_AGENT_LDFLAGS := -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION)
 # lever-tool-db reports its version the same way (captool serverInfo).
 LEVER_TOOL_DB_LDFLAGS := -X main.Version=$(LEVER_VERSION)
 # The agent image's lever_version label: what `lever version` prints for this
-# source (release const, short commit, -dirty for an uncommitted tree), so
-# `lever doctor` can compare the image's binaries with the host lever (#18).
-# Lazy (`=`), so git only runs for the targets that build an image.
+# source, so `lever doctor` can compare the image's binaries with the host
+# lever. Lazy (`=`), so git only runs for the targets that build an image.
 LEVER_GIT_REV = $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 LEVER_GIT_DIRTY = $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
 LEVER_IMAGE_VERSION = $(LEVER_VERSION)$(if $(LEVER_GIT_REV), ($(LEVER_GIT_REV)$(LEVER_GIT_DIRTY)))
-# The agent image's lever_jail_abi label: the in-jail compatibility version
-# (internal/jailabi). `lever doctor` compares it with the host lever, so an
-# image built from an earlier release whose in-jail code is unchanged passes
-# (#171). A test in internal/jailabi keeps this sed's line shape.
+# The agent image's lever_jail_abi label (internal/jailabi), which `lever
+# doctor` compares with the host lever. A test in internal/jailabi keeps this
+# sed's line shape.
 LEVER_JAIL_ABI := $(shell sed -n 's/^const JailABI = \([0-9]*\)$$/\1/p' internal/jailabi/jailabi.go)
 
-# The jail's Linux arch. Defaults to this host's Go arch (arm64 on Apple
-# silicon, amd64 on an x86_64 Linux host); override for a cross build.
+# The jail's Linux arch; override for a cross build.
 LEVER_IMAGE_ARCH ?= $(shell go env GOARCH)
 
-# Cross-compile the in-jail agent helper for the jail's arch (LEVER_IMAGE_ARCH). Used by the
-# acceptance gate (run directly in the VM) and, baked into the
-# agent image.
+# Cross-compile the in-jail agent helper for the acceptance gate (run directly
+# in the VM).
 .PHONY: lever-agent-linux
 lever-agent-linux:
 	@mkdir -p $(LEVER_INSTANCE)/vendor/bin
@@ -70,13 +53,11 @@ lever-agent-linux:
 		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
 	@file $(LEVER_INSTANCE)/vendor/bin/lever-agent
 
-# The lever-claude image build context (where build-lever-image.sh runs docker
-# build). Instance-specific — override to point at your image build dir.
+# The instance's lever-claude image build context.
 LEVER_IMAGE_CTX ?= $(LEVER_INSTANCE)/image/lever-claude
 
-# Cross-compile the agent helper + the reference db tool (the jail's arch, LEVER_IMAGE_ARCH) into the
-# lever-claude image build context, and sync the scion pre-start hook there. Run
-# before build-lever-image.sh so the Dockerfile can COPY them.
+# Stage the in-jail binaries and the scion pre-start hook into LEVER_IMAGE_CTX
+# for the instance's build-lever-image.sh.
 .PHONY: lever-image-bins
 lever-image-bins:
 	@mkdir -p $(LEVER_IMAGE_CTX)/bin $(LEVER_IMAGE_CTX)/scionhook
@@ -90,17 +71,17 @@ lever-image-bins:
 	chmod +x $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	@file $(LEVER_IMAGE_CTX)/bin/lever-agent $(LEVER_IMAGE_CTX)/bin/lever-tool-db $(LEVER_IMAGE_CTX)/bin/lever-manager
 
-# Build the generic, instance-agnostic lever-claude agent image IN-REPO (the
-# image every instance can run as-is): cross-compile the in-jail binaries into
-# image/lever-claude, sync the pre-start hook, then `docker build` FROM the local
-# arch-tagged scion-claude:<arch> base. This is the framework equivalent of the two
-# steps above (lever-image-bins → build-lever-image.sh), self-contained rather than
-# staged into an instance dir. LEVER_IMAGE_ARCH defaults to the host Go arch;
-# override it for a jail of another arch.
-# Requires scion-claude:<arch> in the local Docker store (see the build script).
+# Build the generic lever-claude agent image in-repo, on the local
+# scion-claude:<arch> base (see the build script).
 FRAMEWORK_IMAGE_CTX := image/lever-claude
 .PHONY: lever-image
-lever-image:
+lever-image: framework-image-stage
+	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+
+# Stage the in-jail binaries and the pre-start hook into image/lever-claude, the
+# build context of the lever layer both image flavors share.
+.PHONY: framework-image-stage
+framework-image-stage:
 	@mkdir -p $(FRAMEWORK_IMAGE_CTX)/bin $(FRAMEWORK_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
 		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
@@ -110,46 +91,104 @@ lever-image:
 		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
-	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
 
-# Print the lever_version label value for this source, for an instance image
-# build that stages the binaries itself (`make lever-image-bins`) and so sets
+# The slim agent image, lever.local/lever-claude-slim:<arch>: the same lever
+# layer as lever-image, FROM lever's slim base (image/scion-slim) instead of
+# scion-claude, so it needs no scion image build. The base gets sciontool and
+# scion cross-compiled here from the scion source the jail runs: set
+# SCION_VERSION to lever.yaml's scion.version, or SCION_SRC to the checkout
+# scion.source names. The default is the pin the shipped examples use.
+SCION_VERSION ?= b41cd6fe
+SCION_SRC ?=
+# What the slim base records as its scion version: the pin, or the commit of
+# the SCION_SRC checkout with -dirty for uncommitted changes (never its path,
+# which is the host's).
+SCION_IMAGE_VERSION = $(if $(SCION_SRC),$(or $(shell git -C "$(SCION_SRC)" describe --always --dirty --abbrev=12 2>/dev/null),unknown),$(SCION_VERSION))
+SLIM_BASE_CTX := image/scion-slim
+SCION_MODULE := github.com/GoogleCloudPlatform/scion
+.PHONY: lever-image-slim
+lever-image-slim: framework-image-stage slim-base-bins
+	LEVER_IMAGE_FLAVOR=slim LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" SCION_VERSION="$(SCION_IMAGE_VERSION)" bash $(FRAMEWORK_IMAGE_CTX)/build-lever-image.sh
+
+# Cross-compile sciontool and scion for the slim base. go mod download runs
+# outside this module so it cannot touch lever's go.mod or go.sum. Static
+# (CGO_ENABLED=0) binaries need nothing from the image's libc; no_embed_web is
+# how scion's own base builds them.
+.PHONY: slim-base-bins
+slim-base-bins:
+	@mkdir -p $(SLIM_BASE_CTX)/bin
+	@set -e; out="$(abspath $(SLIM_BASE_CTX))/bin"; src="$(SCION_SRC)"; \
+	if [ -z "$$src" ]; then \
+		dl=$$(cd / && go mod download -json $(SCION_MODULE)@$(SCION_VERSION) 2>&1) || true; \
+		src=$$(printf '%s\n' "$$dl" | sed -n 's/.*"Dir": "\(.*\)".*/\1/p'); \
+		[ -n "$$src" ] || printf '%s\n' "$$dl" | sed -n 's/.*"Error": "\(.*\)".*/go mod download: \1/p' >&2; \
+	fi; \
+	[ -n "$$src" ] && [ -f "$$src/go.mod" ] || { echo "no scion source for $(SCION_MODULE)@$(SCION_VERSION) (set SCION_VERSION or SCION_SRC)" >&2; exit 1; }; \
+	echo "building sciontool and scion from $$src"; \
+	cd "$$src" && \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 go build -trimpath -tags no_embed_web \
+		-ldflags "-s -w -X $(SCION_MODULE)/cmd/sciontool/commands.Version=$(SCION_IMAGE_VERSION) -X $(SCION_MODULE)/cmd/sciontool/commands.Commit=$(SCION_IMAGE_VERSION)" \
+		-o "$$out/sciontool" ./cmd/sciontool && \
+	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 go build -trimpath -tags no_embed_web \
+		-ldflags "-s -w -X $(SCION_MODULE)/pkg/version.Version=$(SCION_IMAGE_VERSION) -X $(SCION_MODULE)/pkg/version.Commit=$(SCION_IMAGE_VERSION)" \
+		-o "$$out/scion" ./cmd/scion
+	@file $(SLIM_BASE_CTX)/bin/sciontool $(SLIM_BASE_CTX)/bin/scion
+
+# Check a built agent image against what lever and scion need in it
+# (image/contract). IMAGE defaults to the slim image for LEVER_IMAGE_ARCH;
+# LEVER_IMAGE_MAX_MB fails an image above that size. Needs docker (or
+# CONTAINER_CLI=podman); runs the image with no network. The expected arch is
+# the image tag's unless LEVER_IMAGE_ARCH is given on the command line or in
+# the environment (the host default would wrongly fail a cross-arch image).
+IMAGE ?= lever.local/lever-claude-slim:$(LEVER_IMAGE_ARCH)
+.PHONY: image-contract
+image-contract:
+	LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" LEVER_IMAGE_ARCH=$(if $(filter command line environment,$(origin LEVER_IMAGE_ARCH)),$(LEVER_IMAGE_ARCH)) bash image/contract/check-image.sh "$(IMAGE)"
+
+# Print the lever_version label value, for an instance image build that sets
 # the label in its own Dockerfile.
 .PHONY: lever-image-version
 lever-image-version:
 	@echo "$(LEVER_IMAGE_VERSION)"
 
-# Print the lever_jail_abi label value for this source, for the same kind of
-# instance image build (LABEL lever_jail_abi="..." in its Dockerfile).
+# Print the lever_jail_abi label value, for the same kind of image build.
 .PHONY: lever-image-jail-abi
 lever-image-jail-abi:
 	@echo "$(LEVER_JAIL_ABI)"
 
-# Build + install the host control plane (PATH). The in-jail binaries
-# (lever-manager, lever-agent, lever-tool-db) ship baked into the agent image
-# via `make lever-image-bins` + the instance Dockerfile, not staged in the tree.
+# The in-jail binaries ship baked into the agent image, not in the tree.
 .PHONY: all
 all: install
 
-# Live api-key headline e2e (fake upstream; no real key). Rebuilds the host lever
-# + image bins, bakes the image, then runs the e2e script. Needs OrbStack + podman.
-# Tests behind the `integration` build tag. Each one still skips unless its own
-# prerequisites are present (LEVER_IT=1 + OrbStack for apply, LEVER_VM_PREFIX
-# for hubapi, a real scion tree + node for webassets), so this only compiles and
-# runs what the current machine can support. Plain `go test ./...` never sees them.
+# Tests behind the `integration` build tag. Each skips unless its own
+# prerequisites are present.
 .PHONY: test-integration
 test-integration:
 	go test -tags integration -timeout 40m ./...
 
+# Live api-key e2e against a fake upstream (no real key). Needs OrbStack and
+# podman.
 .PHONY: test-apikey-e2e
 test-apikey-e2e: install lever-image-bins
 	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
 	bash tools/test/apikey-e2e.sh
 
-# Live lima-backend e2e: §19 `lever acceptance` six checks under both egress
-# postures + guest port-forward suppression + idempotent closed re-bring-up +
-# teardown, on a real Lima VM. Needs Lima >= 2.0 (brew install lima). The script
-# builds the native lever-tool-db and the linux/<guestarch> lever-agent it needs.
+# Live e2e on a real Lima VM (Lima >= 2.0): acceptance checks under both
+# egress postures, port-forward suppression, re-bring-up and teardown.
 .PHONY: test-lima-e2e
 test-lima-e2e: install
 	bash tools/test/lima-e2e.sh
+
+# The whole stack on the pinned scion (agent image, manager, worker, remote
+# access, the experiment fence); see the script's header for what it needs.
+.PHONY: test-lima-stack-e2e
+test-lima-stack-e2e: install
+	bash tools/test/lima-stack-e2e.sh
+
+# Live e2e of the hub's proxy auth on a real Lima VM: migrates an instance an
+# older lever brought up, binds and removes a contact while agents run,
+# rotates the controller PAT, then brings a fresh instance up. Needs
+# IMAGE_TAR (a docker archive of the agent image); see the script's header.
+.PHONY: test-lima-hubauth-e2e
+test-lima-hubauth-e2e: install
+	bash tools/test/lima-hubauth-e2e.sh

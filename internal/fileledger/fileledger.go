@@ -1,15 +1,14 @@
-// Package fileledger is the host record of the chat page's file exchange
-// (remote.files): every upload the remote proxy stored for a login and
-// every file an agent shared with one (broker share_file), with the sha256
-// and size lever saw. A file in an agent's workspace means nothing without
-// a record here: an agent trusts an upload only as listed, and a download
-// serves only bytes that still hash to their record.
+// Package fileledger is the host record of the chat page's file exchange:
+// every upload the remote proxy stored for a login and every file an agent
+// shared with one, with the sha256 and size lever saw. A file in an agent's
+// workspace means nothing without a record here: an agent trusts an upload
+// only as listed, and a download serves only bytes that still hash to their
+// record.
 //
-// Two processes write it — the proxy (uploads) and the broker (shares) —
-// so every append runs under a mutex and a flock on .lock, and reads the
-// agent's records first for the limits. Layout: one file per agent
-// (<agent>.jsonl, 0600) in a 0700 directory in the state directory, outside
-// every jail mount. Records hold names, hashes and sizes, never content.
+// The proxy and the broker both write it, so every append runs under a
+// mutex and a flock on .lock. One file per agent (<agent>.jsonl, 0600) in a
+// 0700 directory outside every jail mount. Records hold names, hashes and
+// sizes, never content.
 package fileledger
 
 import (
@@ -34,10 +33,8 @@ import (
 const (
 	OpUpload = "upload"
 	OpShare  = "share"
-	// RotateCap: past it an agent's file moves to .1 on the next append. A
-	// second move drops the first file's records, and with them the right
-	// to download those files; at ~400 bytes a record that is about 20000
-	// records an agent.
+	// RotateCap: past it an agent's file moves to .1. A second move drops
+	// the oldest records, and with them the right to download those files.
 	RotateCap = 8 << 20
 	label     = "files ledger"
 )
@@ -78,7 +75,7 @@ func IsAgentFile(name string) bool {
 	return ok && agentRE.MatchString(n)
 }
 
-// NewID is a fresh record id: 32 hex digits from crypto/rand.
+// NewID is a fresh random record id.
 func NewID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -91,7 +88,7 @@ func NewID() (string, error) {
 // several processes on one directory (flock).
 type Ledger struct {
 	dir   string
-	cap   int64 // RotateCap; tests shrink it
+	cap   int64 // tests shrink it
 	mu    sync.Mutex
 	files map[string]*hostledger.File
 }
@@ -104,8 +101,8 @@ func Open(dir string) (*Ledger, error) {
 	if err := hostledger.CheckDir(dir, label); err != nil {
 		return nil, err
 	}
-	// MkdirAll keeps an existing directory's mode: set it, so no other user
-	// even lists the agents' files.
+	// MkdirAll keeps an existing directory's mode; no other user may even
+	// list the agents' files.
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
@@ -126,11 +123,9 @@ func (l *Ledger) lock() (func(), error) {
 	return func() { unlock(); l.mu.Unlock() }, nil
 }
 
-// read is agent's records, oldest first by At (the time a list shows): a
-// record is appended when its upload or share finishes, so two that ran at
-// once can be in the file in another order. The rotated file is read, then
-// the main one. A line that does not decode, is not valid, or names another
-// agent is skipped (a torn last line after a crash).
+// read is agent's records sorted by At: a record is appended when its
+// upload or share finishes, so file order can differ. A line that does not
+// decode, is not valid, or names another agent is skipped.
 func (l *Ledger) read(agent string) ([]Record, error) {
 	if !agentRE.MatchString(agent) {
 		return nil, fmt.Errorf("%s: bad agent name %q", label, agent)
@@ -153,10 +148,9 @@ func (l *Ledger) read(agent string) ([]Record, error) {
 	return out, nil
 }
 
-// Add validates r and appends it to its agent's file. Under the mutex and
-// the flock it first reads the agent's records and calls allow (nil: no
-// limit); allow's error is returned unchanged and nothing is written, so a
-// rate or quota check and the append are one step for both writers.
+// Add validates r and appends it to its agent's file. allow (nil: no limit)
+// sees the agent's records under the lock, so a limit check and the append
+// are one step for both writers; its error is returned and nothing written.
 func (l *Ledger) Add(r Record, allow func(prior []Record) error) error {
 	if !r.valid() {
 		return fmt.Errorf("%s: refusing an invalid record", label)
@@ -171,12 +165,8 @@ func (l *Ledger) Add(r Record, allow func(prior []Record) error) error {
 	})
 }
 
-// AddWith is Add for a record built under the lock: build reads agent's
-// records, may refuse (its error is returned unchanged, nothing is written),
-// and returns the record to append. Add is the one caller: the remote proxy
-// reserves an upload against the limits, writes the file into the tree
-// outside the lock, then records it with Add, which checks the limits once
-// more; the caller removes the file when that refuses or fails.
+// AddWith is Add for a record built under the lock from agent's records;
+// build's error is returned and nothing is written.
 func (l *Ledger) AddWith(agent string, build func(prior []Record) (Record, error)) error {
 	unlock, err := l.lock()
 	if err != nil {

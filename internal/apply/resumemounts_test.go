@@ -19,11 +19,11 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// lever#158: the stale-mount check reads the host tree before the resume,
-// and the runtime resolves each mount source again (following links) when
-// it recreates the container. Right after a resume apply reads back, from
-// the guest, where every tree self-mount comes from, and a mount from
-// elsewhere suspends the manager and fails the bring-up.
+// The stale-mount check reads the host tree before the resume, but the
+// runtime resolves each mount source again (following links) when it
+// recreates the container. So apply reads back where every tree self-mount
+// comes from right after a resume, and a mount from elsewhere suspends the
+// manager and fails the bring-up.
 func TestStartManagerVerifiesResumedTreeMounts(t *testing.T) {
 	_, app := readOnlyConfig(t, true)
 	if err := os.MkdirAll(filepath.Join(app.Tree, "kb"), 0o755); err != nil {
@@ -82,9 +82,8 @@ func TestStartManagerVerifiesResumedTreeMounts(t *testing.T) {
 			var logs, refs []string
 			var plans [][]jail.LiveMount
 			i := 0
-			// Called from start-manager and from its post-live probes,
-			// which must not overlap: the check after the resume waits for
-			// the probes (it alone may suspend the manager).
+			// start-manager and its post-live probes must not overlap: the
+			// check after the resume (which alone may suspend) waits for them.
 			var mu sync.Mutex
 			var inFlight atomic.Int32
 			var overlapped atomic.Bool
@@ -170,9 +169,8 @@ func TestStartManagerKeptForeignNamespaceWarns(t *testing.T) {
 	}
 }
 
-// ManagerResume (the resume paths outside start-manager): Settle checks
-// again until the container runs, and fails on what it then finds; a check
-// that never runs is a warning.
+// ManagerResume: Settle checks again until the container runs and fails on
+// what it then finds; a check that never runs is a warning.
 func TestManagerResumeSettle(t *testing.T) {
 	old := settleBudget
 	settleBudget = RetryBudget{Attempts: 4, Interval: time.Millisecond}

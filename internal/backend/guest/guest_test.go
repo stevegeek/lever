@@ -18,8 +18,7 @@ import (
 )
 
 // orbShaped and limaShaped are two argv-prefix shapes exercised by every test
-// below, so the package proves it's genuinely backend-agnostic and not just
-// orbstack with the serial numbers filed off.
+// below, so the package proves it is genuinely backend-agnostic.
 type prefixShape struct {
 	name       string
 	userPrefix []string
@@ -44,8 +43,8 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			if err := g.EnsureRuntimes(context.Background(), "devuser"); err != nil {
 				t.Fatalf("EnsureRuntimes: %v", err)
 			}
-			if len(f.Calls) != 5 {
-				t.Fatalf("expected 5 calls, got %d: %+v", len(f.Calls), f.Calls)
+			if len(f.Calls) != 6 {
+				t.Fatalf("expected 6 calls, got %d: %+v", len(f.Calls), f.Calls)
 			}
 
 			// call 0: root apt install — RootPrefix then bash -lc <script>.
@@ -79,8 +78,7 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 				t.Errorf("call 2 script missing subid/linger for runUser: %q", secondScript)
 			}
 
-			// call 3: user disables a leftover rootless dockerd (lever#183);
-			// nothing installs or starts one any more.
+			// call 3: user disables a leftover rootless dockerd.
 			third := f.Calls[3]
 			if third.Name != shape.userPrefix[0] {
 				t.Fatalf("call 3 should be user-prefixed, got %+v", third)
@@ -104,6 +102,14 @@ func TestEnsureRuntimesArgv(t *testing.T) {
 			fifthScript := fifth.Args[len(fifth.Args)-1]
 			if !strings.Contains(fifthScript, "containers.conf.d") || !strings.Contains(fifthScript, "map-host-loopback") {
 				t.Errorf("call 4 script missing pasta host-loopback mapping: %q", fifthScript)
+			}
+
+			// call 5: user blocks pulls from lever's agent image registry name.
+			sixth := f.Calls[5]
+			sixthScript := sixth.Args[len(sixth.Args)-1]
+			if sixth.Name != shape.userPrefix[0] || !strings.Contains(sixthScript, "registries.conf.d") ||
+				!strings.Contains(sixthScript, `location = "lever.local"`) || !strings.Contains(sixthScript, "blocked = true") {
+				t.Errorf("call 5 does not block lever.local pulls: %+v", sixth)
 			}
 		})
 	}
@@ -254,27 +260,18 @@ func TestEnsureScionVersionDownloadErrorSurfaces(t *testing.T) {
 }
 
 // TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath proves destPath
-// (and its derived .tmp) are safe to interpolate even if a future caller
-// passes a metacharacter-laden value: the guest-side install script embeds
-// destPath inside single quotes, so an embedded `'` substituted raw would
-// close that quote early and let anything after it run as an extra command
-// in the guest. This test uses the REAL runner (not FakeRunner) with a
-// harmless `env` RootPrefix stand-in (env just execs its argv, mirroring "the
-// guest prefix runs bash -c <script>" exactly) so the actual script is
-// genuinely parsed by bash, not just string-matched.
+// (and its derived .tmp) are safe to interpolate even with an embedded `'`.
+// It uses the REAL runner with an `env` RootPrefix stand-in, so bash
+// genuinely parses the script rather than it being string-matched.
 func TestInstallRootBinaryClosesSingleQuoteInjectionInDestPath(t *testing.T) {
 	dir := t.TempDir()
 	local := filepath.Join(dir, "src-bin")
 	if err := os.WriteFile(local, []byte("bin-content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The injected command's target is a bare, slash-free relative filename:
-	// it must not itself embed "/" into destPath, or a CORRECTLY quoted
-	// destPath (the fixed behaviour) would legitimately fail `mv` with ENOENT
-	// (an unrelated implied intermediate directory), muddying what this test
-	// checks. `go test` runs with the package directory as cwd, so a
-	// still-vulnerable injection lands the marker there; resolve + clean it up
-	// via os.Getwd regardless of outcome.
+	// The marker is a bare, slash-free name: a "/" in destPath would make a
+	// correctly quoted mv fail with ENOENT and muddy the check. A vulnerable
+	// injection lands it in the package directory (go test's cwd).
 	const marker = "PWNED-marker-should-not-exist-guest-test"
 	wd, err := os.Getwd()
 	if err != nil {
@@ -328,9 +325,8 @@ func stageBinary(t *testing.T, content string) (string, string) {
 	return p, hex.EncodeToString(sum[:])
 }
 
-// installCalls counts the streaming install (a `bash -c 'cat > …'` script
-// with the binary on stdin), which is the 158MB cost the digest check exists
-// to avoid.
+// installCalls counts the streaming install, the cost the digest check
+// exists to avoid.
 func installCalls(f *proc.FakeRunner) int {
 	n := 0
 	for _, c := range f.Calls {
@@ -406,9 +402,8 @@ func TestInstallIfChangedFailsOnUnreadableLocalFile(t *testing.T) {
 	}
 }
 
-// THE load-bearing test for issue #27. "No Go toolchain on the jail host" means
-// exactly this: in binary mode nothing ever invokes `go`. If it regresses, the
-// feature is silently useless on the machine it exists for.
+// "No Go toolchain on the jail host" means exactly this: in binary mode
+// nothing ever invokes `go`.
 func TestEnsureScionBinaryModeNeverInvokesGo(t *testing.T) {
 	for _, shape := range prefixShapes("lever-jail") {
 		t.Run(shape.name, func(t *testing.T) {
@@ -473,9 +468,8 @@ func TestEnsureScionRejectsNoModeNamingAllThreeKeys(t *testing.T) {
 
 func TestInstallIfChangedHashesTheGuestBinaryNotAMarker(t *testing.T) {
 	// Pin the mechanism: lever must ask the guest what is actually installed.
-	// A marker file recording a past install would still match after the binary
-	// was deleted, truncated or replaced, and lever would skip — leaving the
-	// guest with no working scion and no way for `lever up` to repair it.
+	// A marker file would still match after the binary was deleted, truncated
+	// or replaced.
 	local, sum := stageBinary(t, "scion-bytes")
 	shape := prefixShapes("lever-jail")[0]
 	f := proc.NewFakeRunner()
@@ -536,14 +530,9 @@ func pkgsAfter(t *testing.T, script, marker string) []string {
 }
 
 // TestAptPrereqsGuardMatchesInstallList: the dpkg presence guard and the
-// apt-get install list must name exactly the same packages.
-//
-// A package in the install list but missing from the guard never reaches a
-// guest that already has the others — the guard passes and apt is skipped. A
-// package in the guard but missing from the install list is worse: the guard
-// can never pass, so every EnsureUp re-runs apt, which (see the comment above
-// the script) does not merely cost time — once lever's egress chain is up,
-// apt-get update cannot resolve the mirrors and hangs.
+// apt-get install list must name exactly the same packages. One missing from
+// the guard never reaches a provisioned guest; one missing from the install
+// list makes the guard never pass, and apt hangs once the egress chain is up.
 func TestAptPrereqsGuardMatchesInstallList(t *testing.T) {
 	script := aptPrereqScript(t)
 	guard := pkgsAfter(t, script, "dpkg -s ")
@@ -557,10 +546,8 @@ func TestAptPrereqsGuardMatchesInstallList(t *testing.T) {
 }
 
 // TestAptPrereqsDeclareLeverToolDependencies: lever runs these inside the jail
-// itself, so a base image that stopped shipping one would break a lever feature
-// with no other signal. curl carries every hub call (internal/hubapi/
-// jailcurl.go); netcat-openbsd is how the remote-access proxy dials the hub
-// through the jail (internal/remoteproxy/jaildial.go).
+// itself, so a base image that stopped shipping one would break a lever
+// feature with no other signal.
 func TestAptPrereqsDeclareLeverToolDependencies(t *testing.T) {
 	guard := pkgsAfter(t, aptPrereqScript(t), "dpkg -s ")
 	for _, pkg := range []string{"curl", "netcat-openbsd"} {
@@ -594,11 +581,9 @@ func TestInstallRootBinaryRefusesShortStream(t *testing.T) {
 	}
 }
 
-// swapOnProbe is a Runner that alters the host artifact the moment the guest
-// digest probe runs — that is, BETWEEN the host-side hash and the stream into
-// the guest — the way another local user could on a shared /tmp. rename
-// replaces the path with a new inode (the classic swap); otherwise the bytes
-// are rewritten in place through the same inode.
+// swapOnProbe alters the host artifact BETWEEN the host-side hash and the
+// stream into the guest. rename replaces the path with a new inode;
+// otherwise the bytes are rewritten in place through the same inode.
 type swapOnProbe struct {
 	*proc.FakeRunner
 	path   string
@@ -679,10 +664,9 @@ func TestInstallIfChangedRefusesBytesThatChangedUnderTheHandle(t *testing.T) {
 	}
 }
 
-// TestEnsureScionTakesTheEarlyBuild (lever#189): a build started while the
-// VM booted is installed when the guest has the architecture it was built
-// for, and the guest step builds nothing itself; a guest of another
-// architecture gets its own build.
+// TestEnsureScionTakesTheEarlyBuild: a build started while the VM booted is
+// installed when the guest has the architecture it was built for; a guest of
+// another architecture gets its own build.
 func TestEnsureScionTakesTheEarlyBuild(t *testing.T) {
 	for _, tc := range []struct {
 		uname     string

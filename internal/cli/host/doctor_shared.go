@@ -13,31 +13,24 @@ import (
 	scionpkg "github.com/stevegeek/lever/internal/scion"
 )
 
-// liveMountChecker checks a running container's mounts from the guest
-// (jail.ContainerLiveMounts in production).
 type liveMountChecker func(ctx context.Context, ref string, want []jail.LiveMount) ([]jail.LiveMountProblem, error)
 
-// sharedAgentPlan is one agent's expected shared mounts, by target.
 type sharedAgentPlan struct {
 	name string
 	want map[string]config.SharedMount
 }
 
 // checkSharedFolders compares every agent's container with its
-// shared_folders plan (config.SharedMountsFor): each planned folder mounted
-// at its /shared/<name> target from the folder in the in-jail tree, and
-// read-only unless the agent writes it. A mount beyond the plan (a folder
-// dropped, or access withdrawn) fails: the agent keeps that access until
-// its record is discarded, and the broker refuses to resume such a worker.
-// A planned mount the container lacks warns: the agent was created before
-// the folder was added and gets it only when created again. For a running
-// container the read-only mounts are also checked from the guest side
-// (jail.ContainerLiveMounts: the kernel's mountinfo, and the same directory
-// as on the host), never by a program inside the container.
+// shared_folders plan (config.SharedMountsFor): each folder at
+// /shared/<name> from the in-jail tree, read-only unless the agent writes it.
+// A mount beyond the plan fails: the agent keeps that access until its record
+// is discarded, and the broker refuses to resume such a worker. A missing
+// planned mount warns: it comes only with a new create. Running containers'
+// read-only mounts are also checked from the guest side
+// (jail.ContainerLiveMounts), never by a program inside the container.
 //
-// The manager's tree-path protection for a folder it reads is the
-// "manager read-only paths" row's (ManagerTreeMounts includes it). An agent
-// with no record is not checked; it gets the plan when it is created.
+// The manager's tree-path protection is the "manager read-only paths" row's.
+// An agent with no record is not checked.
 func checkSharedFolders(ctx context.Context, project string, app *config.App, list agentLister, inspect mountInspector, record recordVolumeReader, live liveMountChecker) checkResult {
 	const check = "shared folders"
 	agents := append([]string{app.Name}, workerNamesOf(app)...)
@@ -141,9 +134,8 @@ func checkSharedFolders(ctx context.Context, project string, app *config.App, li
 	return checkResult{check, true, fmt.Sprintf("%d folder(s); mounts as configured in %s (read-only mounts checked live)", len(app.SharedFolders), strings.Join(oks, ", ")), ""}
 }
 
-// sharedGaps compares one agent's mounts under /shared with its plan.
-// fails: a mount beyond the plan, from another source, or read-write where
-// the plan says read-only. warns: a planned mount that is missing.
+// sharedGaps fails a mount beyond the plan, from another source, or writable
+// where the plan says read-only; a missing planned mount warns.
 func sharedGaps(project string, plan sharedAgentPlan, mounts []jail.Mount) (fails, warns []string) {
 	seen := map[string]bool{}
 	for _, m := range mounts {

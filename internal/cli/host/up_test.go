@@ -17,27 +17,17 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// TestPhaseOrAbsent covers the definitive-absence fallback: a failed phase
-// probe whose error proves the manager cannot be running must be treated as
-// "manager absent" so `up` falls through to upDecision -> "apply". Three such
-// signatures: hub unreachable (fresh machine — the hub is only started by
-// apply's scion-server step: "is not responding" / "connection refused"),
-// hub-side project not found (hub up but the manager project never
-// hub-registered, e.g. partial bring-up where `scion init` ran but
-// `scion hub link` didn't: "Project not found (status: 404)"), and no local
-// registration at all (scion's git-origin fallback when a path isn't a
-// registered project: "no git origin remote found"). ANY OTHER probe error
-// must propagate: `lever apply` is not fully idempotent (each run leaves a
-// duplicate scion project-configs entry), so a transient list failure on an
-// already-up instance must NOT force a re-apply.
+// TestPhaseOrAbsent: a probe error proving the manager cannot be running reads
+// as absent, so up applies. Three signatures: hub unreachable (fresh machine),
+// hub project not found (registered locally but never hub-linked), and no
+// local registration (scion's git-origin fallback). Any other error must
+// propagate: apply is not fully idempotent, so a transient list failure must
+// not force a re-apply.
 func TestPhaseOrAbsent(t *testing.T) {
-	// The live fresh-machine repro (both signature fragments present).
 	freshErr := errors.New(`scion list --format json -g /lever: Error: Hub at http://127.0.0.1:8080 is not responding: Get "http://127.0.0.1:8080/api/health": dial tcp 127.0.0.1:8080: connect: connection refused`)
-	// The live partial-bring-up repro: hub up, manager project not registered.
 	notFoundErr := errors.New(`scion list --format json -g /lever: Error: failed to list agents via Hub: not_found: Project not found (status: 404)`)
-	// The live no-local-registration repro: scion's git-origin fallback when
-	// the path isn't a registered project at all (this exact string is
-	// documented in internal/scion/bringup.go).
+	// scion's git-origin fallback when the path is not a registered project (see
+	// internal/scion/bringup.go).
 	noOriginErr := errors.New(`scion list --format json -g /lever: Error: no git origin remote found for this project.`)
 	cases := []struct {
 		name    string
@@ -84,13 +74,10 @@ func TestUpDecision(t *testing.T) {
 		{"suspended", false, upResume},
 		{"running", false, upNone},
 		{"stopped", false, upApply},
-		// --fresh is ALWAYS the apply path, whatever the probe saw: apply's
-		// start-manager step carries the intent (PlanOpts.Fresh) and discards
-		// any present record once the hub is up. Deciding on the probe alone
-		// dropped --fresh after every `lever stop`, when the hub is down and
-		// the record invisible (lever#33); and since 0.12 apply preserves an
-		// error-phase record whose forced resume comes up dead (#3), so
-		// --fresh must reach apply for a bricked record too.
+		// --fresh is always the apply path: start-manager discards any present record
+		// once the hub is up. After `lever stop` the hub is down and the record
+		// invisible to the probe, and apply keeps an error-phase record whose forced
+		// resume died, so --fresh must reach apply.
 		{"running", true, upApply},
 		{"suspended", true, upApply},
 		{"stopped", true, upApply},
@@ -104,13 +91,11 @@ func TestUpDecision(t *testing.T) {
 	}
 }
 
-// The --fresh discard itself (`scion delete`, never `scion stop`, which would
-// leave a resumable stopped record) is pinned where it now lives: apply's
-// start-manager step, TestStartManagerFreshDiscardsPresentRecord.
+// The --fresh discard itself (`scion delete`, never `scion stop`, which leaves
+// a resumable record) is pinned in TestStartManagerFreshDiscardsPresentRecord.
 
-// TestFirstLine covers the extraction used to keep the fresh-bring-up probe
-// message to one short line: scion's error includes its entire usage dump
-// after the first line, which must never reach the user's terminal.
+// TestFirstLine: scion's error carries its usage dump after the first line,
+// which must never reach the terminal.
 func TestFirstLine(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -136,9 +121,8 @@ func TestFirstLine(t *testing.T) {
 	}
 }
 
-// brokerReusable (#19): apply's broker-reuse shortcut may only keep a running broker
-// whose /epoch identity matches this binary AND this broker config. A broker
-// predating the fields reports them empty — always a mismatch.
+// brokerReusable: only a broker whose /epoch identity matches this binary and
+// broker config is kept; empty fields always mismatch.
 func TestBrokerReusable(t *testing.T) {
 	got := wire.EpochResponse{Version: "v", ConfigHash: "h"}
 	if !brokerReusable(got, "v", "h") {
@@ -155,10 +139,9 @@ func TestBrokerReusable(t *testing.T) {
 	}
 }
 
-// TestVerifyManagerRoleGuardsUpsFastPaths: `up` resumes a suspended manager and
-// no-ops a running one WITHOUT calling apply.Run, so the pre-role record guard
-// has to be invoked on those paths explicitly. This pins that it is wired to
-// the same Deps hook, keyed by the hub's project name (the mount basename).
+// TestVerifyManagerRoleGuardsUpsFastPaths: up resumes or keeps the manager
+// without apply.Run, so the pre-role guard must be wired on those paths, keyed
+// by the hub's project name (the mount basename).
 func TestVerifyManagerRoleGuardsUpsFastPaths(t *testing.T) {
 	var gotProject, gotAgent string
 	deps := apply.Deps{
@@ -176,10 +159,9 @@ func TestVerifyManagerRoleGuardsUpsFastPaths(t *testing.T) {
 	}
 }
 
-// gateAfterUp (lever#31): the paths that act on the manager without apply.Run
-// must observe it before "is up." — a resume with the full settle window, a
-// running manager with one fresh look — while the apply paths, gated inside
-// apply.Run already, add nothing.
+// gateAfterUp: paths that bypass apply.Run must observe the manager before "is
+// up." (a resume with the settle window, a running manager with one look);
+// the apply paths add nothing.
 func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 	newDeps := func() (apply.Deps, *proc.FakeRunner) {
 		f := proc.NewFakeRunner()
@@ -221,7 +203,7 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 			t.Fatalf("%s: %d list call(s), want between %d and %d", c.action, lists, c.minLists, c.maxLists)
 		}
 	}
-	// And a dead manager on the resume path is a refusal, not "is up."
+	// A dead manager on the resume path is a refusal, not "is up."
 	f := proc.NewFakeRunner()
 	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"error","containerStatus":"Exited (1) 2 seconds ago"}]`})
 	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond},
@@ -235,10 +217,8 @@ func TestGateAfterUpObservesTheManagerPerPath(t *testing.T) {
 	}
 }
 
-// TestUpProbeNotice: the line `up` prints when the probe could not see the
-// manager. With --fresh it must say the flag survives — that a record found
-// once the hub is up will be discarded — instead of the plain "bringing up"
-// that read as a silent downgrade to resume (lever#33).
+// TestUpProbeNotice: with --fresh the notice must say a record found once the
+// hub is up will be discarded, not read as a silent downgrade to resume.
 func TestUpProbeNotice(t *testing.T) {
 	err := errors.New("hub is not responding\nUsage: scion list ...")
 	plain := upProbeNotice(err, false)
@@ -251,8 +231,8 @@ func TestUpProbeNotice(t *testing.T) {
 	}
 }
 
-// TestUpProbeReason: the probe failure in the operator's words, never the
-// raw client error (lever#195); an unknown error keeps its first line only.
+// TestUpProbeReason: the probe failure in the operator's words, never the raw
+// client error; an unknown error keeps its first line only.
 func TestUpProbeReason(t *testing.T) {
 	cases := map[string]string{
 		"dial tcp 127.0.0.1:8080: connect: connection refused": "hub is not running",
@@ -284,11 +264,10 @@ func TestUpDecisionNote(t *testing.T) {
 	}
 }
 
-// up's own resume (lever#158, also after a guest restart, lever#179) runs
-// the checks apply's start-manager runs around its resume: a mount whose
-// directory is gone refuses before the resume; a tree mount that comes
-// from elsewhere after it suspends the manager, right after the resume or
-// once it is live, and up never reports it up.
+// up's own resume runs the checks apply's start-manager runs around its
+// resume: a mount whose directory is gone refuses before the resume; a tree
+// mount from elsewhere suspends the manager, right after the resume or once
+// live, and up never reports it up.
 func TestResumeForUpChecksTreeMounts(t *testing.T) {
 	mounts := []jail.Mount{
 		{Source: "/lever", Destination: "/workspace", RW: true},
@@ -371,7 +350,6 @@ func TestResumeForUpChecksTreeMounts(t *testing.T) {
 			}
 		})
 	}
-	// The resume path never passes the gate without its checks.
 	f := proc.NewFakeRunner()
 	f.Script("scion", proc.Result{Stdout: `[{"slug":"assistant","phase":"running","containerStatus":"Up 1 second"}]`})
 	deps := apply.Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: apply.RetryBudget{Attempts: 2, Interval: time.Millisecond}}
@@ -380,8 +358,8 @@ func TestResumeForUpChecksTreeMounts(t *testing.T) {
 	}
 }
 
-// noMounts and noProblems are mount readers for a manager with no tree
-// mounts: wired (BeginManagerResume refuses without them), checking nothing.
+// noMounts and noProblems are wired mount readers that check nothing
+// (BeginManagerResume refuses without them).
 func noMounts(context.Context, string) ([]jail.Mount, error) { return nil, nil }
 
 func noProblems(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {

@@ -179,9 +179,8 @@ func TestCheckAgentMessages(t *testing.T) {
 	}
 }
 
-// The row says when the running broker or proxy started with another
-// config while the setting is on; while it is off, only when a process runs
-// with agent messages on (the setting itself differs).
+// While the setting is on the row names a broker or proxy started with another
+// config; while off, only a process running with agent messages on.
 func TestCheckAgentMessagesNamesAStaleProcess(t *testing.T) {
 	st := state.State{Dir: t.TempDir()}
 	users := []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"x"}}}
@@ -194,7 +193,7 @@ func TestCheckAgentMessagesNamesAStaleProcess(t *testing.T) {
 		return func() (string, bool) { return brokerctl.ConfigHash(a), true }
 	}
 	proxy := func(a *config.App) func(string) (bool, bool) {
-		return func(h string) (bool, bool) { return true, h == brokerctl.RemoteConfigHash(a) }
+		return func(h string) (bool, bool) { return true, h == brokerctl.RemoteConfigHash(a, st) }
 	}
 	none := func() (string, bool) { return "", false }
 	noProxy := func(string) (bool, bool) { return false, false }
@@ -265,9 +264,8 @@ func TestCheckAgentMessagesUnsafeContactFile(t *testing.T) {
 	}
 }
 
-// The filter trusts the hub's sender, which scion sets itself only from
-// b3562fb1: the row fails on a scion known to be older and notes one it
-// cannot check.
+// The filter trusts the hub's sender, which only newer scions set themselves:
+// the row fails on a scion known to be older and notes one it cannot check.
 func TestCheckAgentMessagesScionFloor(t *testing.T) {
 	st := state.State{Dir: t.TempDir()}
 	base := func() *config.App {
@@ -304,7 +302,6 @@ func TestCheckAgentMessagesScionFloor(t *testing.T) {
 			t.Errorf("%s: %+v", name, r)
 		}
 	}
-	// Off: nothing to check.
 	app := base()
 	app.Remote.AgentMessages.Enabled = false
 	app.Scion.Version = "v0.0.0-20260801000000-0123456789ab"
@@ -313,8 +310,7 @@ func TestCheckAgentMessagesScionFloor(t *testing.T) {
 	}
 }
 
-// Without remote access the setting cannot be on: the row does not probe
-// the broker.
+// Without remote access the setting cannot be on, so the broker is not probed.
 func TestCheckAgentMessagesSkipsTheBrokerProbeWhenItCannotBeOn(t *testing.T) {
 	st := state.State{Dir: t.TempDir()}
 	app := &config.App{Name: "x", Tree: t.TempDir()}

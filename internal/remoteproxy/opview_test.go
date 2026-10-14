@@ -20,8 +20,8 @@ const (
 	viewCCookie  = "sess-c"
 )
 
-// loginSession hands out one cookie per login and records each login it is
-// asked for: the operator view must never ask for an unbound contact's.
+// loginSession records each login asked for: the view must never ask for an
+// unbound contact's session.
 type loginSession struct {
 	mu          sync.Mutex
 	cookies     map[string]string
@@ -66,11 +66,8 @@ func (s *loginSession) askedFor(login string) int {
 	return n
 }
 
-// viewHub answers the contact's DM history with historyBody, to the
-// contact's session only, and records "METHOD URI COOKIE" per request.
-// /api/v1/auth/me (the contact fence's question, and the operator view's
-// after a failed read) is answered by me (the contact's id when nil) and
-// recorded in meSeen, not seen.
+// viewHub answers history to the contact's session only. /api/v1/auth/me is
+// answered by me (the contact's id when nil) and recorded in meSeen.
 type viewHub struct {
 	*httptest.Server
 	mu     sync.Mutex
@@ -139,8 +136,7 @@ func (a *viewAudit) last() AuditLine {
 
 func (a *viewAudit) all() []AuditLine { a.mu.Lock(); defer a.mu.Unlock(); return slices.Clone(a.lines) }
 
-// viewConfig: manager boss; contact c@x messages w1 and boss and sees w2;
-// contact d@x messages w1 and was never bound to a hub user.
+// viewConfig: contact d@x was never bound to a hub user.
 func viewConfig(t *testing.T, hub *viewHub, sess *loginSession, audit *viewAudit) Config {
 	t.Helper()
 	return Config{Target: mustURL(t, hub.URL), Session: sess, ServeHost: testServeHost,
@@ -284,8 +280,6 @@ func TestOperatorViewRowMapping(t *testing.T) {
 		}
 		return b.String()
 	}
-	// Agent messages on: only the recorded (and bound) agent row is shown
-	// to the contact.
 	cfg := viewConfig(t, hub, sess, audit)
 	cfg.MatchAgentMessages, cfg.PeekAgentMessages = refuseMatch(t), peekOf(recordedOnly("recorded"), false)
 	a := viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
@@ -297,15 +291,12 @@ func TestOperatorViewRowMapping(t *testing.T) {
 	if a.Messages[0].CreatedAt != "2026-10-06T10:00:00Z" {
 		t.Fatalf("createdAt %q", a.Messages[0].CreatedAt)
 	}
-	// The same row, kept only because a record would bind it: not shown to
-	// the contact yet, pending.
+	// A row kept only because a record would bind it: pending, not yet shown.
 	cfg.PeekAgentMessages = peekOf(recordedOnly("recorded"), true)
 	a = viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
 	if got := rows(a); !strings.HasPrefix(got, `a1 agent "recorded" false|pending|a2 agent "SECRET unrecorded" false|`) || strings.Count(got, "pending") != 1 {
 		t.Fatalf("pending: %s", got)
 	}
-	// A pending id the broker names for a row the rule does not keep (not
-	// asked, or not an agent row) is no mark.
 	cfg.PeekAgentMessages = func(context.Context, string, string, []AgentMessage) (map[string]bool, map[string]bool, error) {
 		return map[string]bool{}, map[string]bool{"c1": true, "s1": true, "a2": true}, nil
 	}
@@ -313,7 +304,6 @@ func TestOperatorViewRowMapping(t *testing.T) {
 	if got := rows(a); strings.Contains(got, "pending") {
 		t.Fatalf("pending outside keep: %s", got)
 	}
-	// Off: the contact sees the hub's answer as it is.
 	cfg.MatchAgentMessages, cfg.PeekAgentMessages = nil, nil
 	a = viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
 	if got := rows(a); strings.Contains(got, "false") {
@@ -327,8 +317,7 @@ func TestOperatorViewMatcherFailure(t *testing.T) {
 	down := func(context.Context, string, string, []AgentMessage) (map[string]bool, map[string]bool, error) {
 		return nil, map[string]bool{"a1": true}, errors.New("broker down")
 	}
-	// The broker down, and a peek that is not wired (the view never falls
-	// back to the binding question).
+	// The view never falls back to the binding question.
 	for _, peek := range []func(context.Context, string, string, []AgentMessage) (map[string]bool, map[string]bool, error){down, nil} {
 		cfg.MatchAgentMessages, cfg.PeekAgentMessages = refuseMatch(t), peek
 		a := viewMessages(t, viewDo(viewHandler(t, cfg), "op@x", "GET", viewC))
@@ -343,7 +332,6 @@ func TestOperatorViewMatcherFailure(t *testing.T) {
 	}
 }
 
-// peekOf makes a matcher a peek: every kept row pending, or none (bound).
 func peekOf(match func(context.Context, string, string, []AgentMessage) (map[string]bool, error), pending bool) func(context.Context, string, string, []AgentMessage) (map[string]bool, map[string]bool, error) {
 	return func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, map[string]bool, error) {
 		keep, err := match(ctx, contact, agent, msgs)
@@ -355,7 +343,6 @@ func peekOf(match func(context.Context, string, string, []AgentMessage) (map[str
 	}
 }
 
-// refuseMatch is a binding matcher the operator view must never call.
 func refuseMatch(t *testing.T) func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
 	return func(context.Context, string, string, []AgentMessage) (map[string]bool, error) {
 		t.Error("the operator view asked the binding question")
@@ -363,9 +350,8 @@ func refuseMatch(t *testing.T) func(context.Context, string, string, []AgentMess
 	}
 }
 
-// fakeLedger binds like the broker's agent ledger: one record for the
-// text "same", bound to the earliest unbound row it is asked about; a peek
-// answers the same and binds nothing.
+// fakeLedger binds one record for the text "same" to the earliest unbound
+// row asked about; a peek binds nothing.
 type fakeLedger struct {
 	mu    sync.Mutex
 	bound string
@@ -397,7 +383,6 @@ func (l *fakeLedger) ask(bind bool) func(context.Context, string, string, []Agen
 	}
 }
 
-// peek is ask without binding, with every kept unbound row pending.
 func (l *fakeLedger) peek() func(context.Context, string, string, []AgentMessage) (map[string]bool, map[string]bool, error) {
 	ask := l.ask(false)
 	return func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, map[string]bool, error) {
@@ -415,10 +400,9 @@ func (l *fakeLedger) peek() func(context.Context, string, string, []AgentMessage
 	}
 }
 
-// TestOperatorViewPeeksAndBindsNothing: two agent rows of the same text and
-// one record. The operator reads a page holding only the later one (it
-// would be shown, were it read alone), and binds nothing: the contact's own
-// read of both rows then shows the earliest, as with no operator read.
+// TestOperatorViewPeeksAndBindsNothing: the operator reading only the later
+// of two same-text rows binds nothing, so the contact's own read still shows
+// the earliest.
 func TestOperatorViewPeeksAndBindsNothing(t *testing.T) {
 	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
 	const m1 = `{"id":"m1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"same","createdAt":"2026-10-06T10:00:00Z"}`
@@ -446,7 +430,6 @@ func TestOperatorViewPeeksAndBindsNothing(t *testing.T) {
 	if rw.Code != http.StatusOK || !strings.Contains(rw.Body.String(), `"m1"`) || strings.Contains(rw.Body.String(), `"m2"`) || led.bound != "m1" {
 		t.Fatalf("the contact's read after the operator's: %d %s bound=%q", rw.Code, rw.Body, led.bound)
 	}
-	// The operator's next read shows what the contact now sees.
 	a = viewMessages(t, viewDo(h, "op@x", "GET", viewC))
 	if len(a.Messages) != 2 || a.Messages[0].ID != "m2" || a.Messages[0].ShownToContact || a.Messages[0].Pending ||
 		!a.Messages[1].ShownToContact || a.Messages[1].Pending {
@@ -474,8 +457,7 @@ func TestOperatorViewAllowList(t *testing.T) {
 			t.Errorf("%s: %d %s", p, rw.Code, rw.Body)
 		}
 	}
-	// An encoded dot or slash never reaches the view: the proxy's path
-	// check (pathcheck.go) refuses it first, for every route.
+	// An encoded dot or slash never reaches the view: pathcheck.go refuses it.
 	for _, p := range []string{
 		"/lever/api/contacts/%2E%2E/agents/w1/messages",      // dots
 		"/lever/api/contacts/c%40x%2Fagents%2Fw1%2Fmessages", // one escaped segment
@@ -495,9 +477,7 @@ func TestOperatorViewLoginEncoding(t *testing.T) {
 	cfg.AllowedUsers = append(cfg.AllowedUsers, "a/b@x")
 	cfg.Contacts["a/b@x"] = []string{"w1"}
 	h := viewHandler(t, cfg)
-	// The proxy's path check refuses an encoded slash on every route, so a
-	// login holding "/" cannot be opened in the view (the guide says so);
-	// nothing is asked for it.
+	// So a login holding "/" cannot be opened in the view.
 	if rw := viewDo(h, "op@x", "GET", "/lever/api/contacts/"+url.PathEscape("a/b@x")+"/agents/w1/messages"); rw.Code != http.StatusBadRequest {
 		t.Fatalf("an escaped slash = %d %s", rw.Code, rw.Body)
 	}
@@ -612,10 +592,9 @@ func TestOperatorViewAuditHasNoText(t *testing.T) {
 	}
 }
 
-// TestOperatorViewStaleBinding: apply bound the contact to a hub user its
-// session no longer is (the hub forgot it and the login made a new one).
-// The hub refuses the bound key; the view asks who the session is, GET
-// only, and answers "not-signed-in" with the fixed hint, never a 502.
+// TestOperatorViewStaleBinding: the contact's session is no longer the hub
+// user apply bound. The view asks who it is, GET only, and answers
+// "not-signed-in", never a 502.
 func TestOperatorViewStaleBinding(t *testing.T) {
 	for name, tc := range map[string]struct {
 		me        func(w http.ResponseWriter, r *http.Request)
@@ -657,8 +636,6 @@ func TestOperatorViewStaleBinding(t *testing.T) {
 	}
 }
 
-// TestOperatorViewAsksWhoOnlyAfterAFailedRead: a read that works costs one
-// request.
 func TestOperatorViewAsksWhoOnlyAfterAFailedRead(t *testing.T) {
 	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
 	viewMessages(t, viewDo(viewHandler(t, viewConfig(t, hub, sess, audit)), "op@x", "GET", viewC))
@@ -667,8 +644,6 @@ func TestOperatorViewAsksWhoOnlyAfterAFailedRead(t *testing.T) {
 	}
 }
 
-// TestOperatorViewOversizeAnswer: a history answer over maxHistoryAnswer is
-// not read on, and no row of it is answered.
 func TestOperatorViewOversizeAnswer(t *testing.T) {
 	hub, sess, audit := newViewHub(t), newLoginSession(), &viewAudit{}
 	big := `{"messages":[{"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"`
@@ -683,8 +658,8 @@ func TestOperatorViewOversizeAnswer(t *testing.T) {
 	}
 }
 
-// Each history failure leaves its cause on the audit line: bounded, and
-// never the hub's body or the contact's session.
+// A history failure's audit cause is bounded and never the hub's body or the
+// contact's session.
 func TestOperatorViewFailureHasACause(t *testing.T) {
 	const body = "SECRET hub body"
 	status := func(code int) func(http.ResponseWriter) {

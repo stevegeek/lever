@@ -1,8 +1,8 @@
 // Command fakewhisper is a TEST-ONLY stand-in for whisper.cpp's
 // whisper-server: it takes the flags lever passes (internal/voice/whisper.go)
-// and answers POST /inference with a fixed transcript that names what it
-// was sent, so a test can check the form without a model or a GPU. Never
-// part of a release (.goreleaser.yaml builds only binaries under ./cmd).
+// and answers POST /inference with a fixed transcript naming what it was
+// sent. Never part of a release (.goreleaser.yaml builds only binaries under
+// ./cmd).
 package main
 
 import (
@@ -60,8 +60,8 @@ func main() {
 		size, _ := f.Seek(0, 2)
 		text := fmt.Sprintf(" heard %s %d bytes; language %s; prompt %s; format %s; gpu %v \n", head[:n], size,
 			r.FormValue("language"), r.FormValue("prompt"), r.FormValue("response_format"), !*noGPU)
-		// As whisper.cpp does: the transcript on the console too. lever must
-		// discard it (internal/voice/whisper.go, assumption 5).
+		// As whisper.cpp does: the transcript on the console too, which lever must
+		// discard (internal/voice/whisper.go).
 		fmt.Println("transcript:", text)
 		fmt.Fprintln(os.Stderr, "transcript:", text)
 		w.Header().Set("Content-Type", "application/json")

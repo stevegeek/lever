@@ -1,16 +1,11 @@
 // Package backend defines the substrate contract every containment backend
 // satisfies. Each implementation declares its own guarantees as a Profile;
-// internal/backend/registry is the single table that names the implemented
-// backends and exposes the guarantee matrix derived from it.
+// internal/backend/registry names the implemented backends and exposes the
+// guarantee matrix derived from them.
 //
-// # Dependency direction
-//
-// This package is the CONTRACT. The plain data types its Backend interface
-// carries for the guest-side verbs (HubLogin, ScionProjectState) live in the
-// stdlib-only leaf internal/backend/types, which both this package and the
-// guest helper (internal/backend/guest) import. backend never imports guest:
-// the contract must not depend on one implementation's helper. common (the
-// shared implementation base) imports both, as an implementation should.
+// The plain data types the Backend interface carries live in the stdlib-only
+// leaf internal/backend/types. backend never imports guest: the contract must
+// not depend on one implementation's helper.
 package backend
 
 import (
@@ -22,7 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
 
-// Profile DECLARES what a backend actually guarantees, so the security posture
+// Profile declares what a backend actually guarantees, so the security posture
 // is explicit per backend rather than assumed.
 type Profile struct {
 	Name             string
@@ -42,39 +37,33 @@ type Config struct {
 	MachineName  string // jail identifier
 	ProjectTree  string // host path bind-mounted as the ONLY visible tree
 	AllowedPorts []int  // host-loopback tool ports to allow via the host alias
-	// ScionSource is the host path to a scion source checkout to cross-compile and
-	// install into the jail. Empty disables scion provisioning (back-compat).
+	// ScionSource is the host path to a scion source checkout to cross-compile
+	// and install into the jail. Empty disables scion provisioning.
 	ScionSource string
 	// ScionVersion pins a scion module version/commit that the backend fetches
-	// via the Go module system and cross-compiles into the jail (no vendored
-	// source tree). Mutually exclusive with ScionSource. Empty = none.
+	// via the Go module system and cross-compiles into the jail. Mutually
+	// exclusive with ScionSource. Empty = none.
 	ScionVersion string
 	// ScionBinary is a host path to an already-built linux scion binary,
-	// installed into the guest as-is. Unlike ScionSource and ScionVersion it
-	// needs no Go toolchain, module cache or egress on the machine hosting the
-	// jail. Mutually exclusive with both. Empty = none.
+	// installed as-is; it needs no Go toolchain, module cache or egress on the
+	// host. Mutually exclusive with both. Empty = none.
 	ScionBinary string
-	// ScionWebUI additionally builds scion's SPA on the host and stages it into
-	// the guest, so a `version:`/`source:` scion can serve the web UI. Off by
-	// default: the assets need node+npm on the host and are dead weight for an
-	// instance that never serves a UI. Set from config.App.ScionWebAssets — the
-	// backend obeys it rather than re-deriving it, so the flag lever passes to
-	// the hub and the assets lever staged cannot disagree.
+	// ScionWebUI also builds scion's SPA on the host and stages it into the
+	// guest. Set from config.App.ScionWebAssets: the backend obeys it rather
+	// than re-deriving it, so the flag passed to the hub and the staged assets
+	// cannot disagree.
 	ScionWebUI bool
-	// ScionPrebuild, when set, is the host build of the configured scion,
-	// started before EnsureUp so it runs while the VM boots (lever#189). The
-	// scion step uses it when the guest's architecture matches the one it
-	// was built for. nil: the scion step builds.
+	// ScionPrebuild, when set, is a host build of the configured scion started
+	// before EnsureUp so it runs while the VM boots. It is used when the
+	// guest's architecture matches; nil means the scion step builds.
 	ScionPrebuild *scionbin.Prebuild
-	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port ACCEPTs,
-	// so the jail can reach ONLY the broker port on the host alias. Required for
-	// api-key mode: LLM traffic must flow broker→Anthropic, not
-	// jail→Anthropic directly. False (open posture) is the default for
-	// subscription mode where the agent reaches Anthropic directly.
+	// ClosedInternet appends a catch-all OUTPUT DROP after the per-port
+	// ACCEPTs, so the jail can reach ONLY the allowed ports on the host alias.
+	// Required for api-key mode: LLM traffic must flow broker→Anthropic, never
+	// jail→Anthropic directly.
 	ClosedInternet bool
-	// Disk is the Lima guest disk size (e.g. "24GiB"). Empty selects the
-	// lima package default. Ignored by backends that manage their own disk
-	// (OrbStack).
+	// Disk is the Lima guest disk size (e.g. "24GiB"). Empty selects the lima
+	// package default. Ignored by OrbStack.
 	Disk string
 	// CPUs and Memory size the Lima guest (0 / "" = Lima default).
 	// NestedVirt makes the guest /dev/kvm usable by the run user (Lima on a
@@ -83,52 +72,39 @@ type Config struct {
 	CPUs       int
 	Memory     string
 	NestedVirt bool
-	// NestedVirtUnknown says the caller has no lever.yaml and so does not
-	// know nested_virt (`lever provision`): EnsureUp leaves the guest's
-	// /dev/kvm setup as it is instead of converging it to NestedVirt.
+	// NestedVirtUnknown says the caller has no lever.yaml (`lever provision`):
+	// EnsureUp leaves the guest's /dev/kvm setup as it is.
 	NestedVirtUnknown bool
-	// GuestKernel is the Lima guest kernel flavour to converge on ("hwe"
-	// or "ga"; config.App.EffectiveGuestKernel). "" (`lever provision`, no
-	// config) installs nothing and only reports a pending reboot. Ignored
-	// by OrbStack, whose kernel is OrbStack's.
+	// GuestKernel is the Lima guest kernel flavour to converge on ("hwe" or
+	// "ga"). "" installs nothing and only reports a pending reboot. Lima only.
 	GuestKernel string
 	// GuestProfile is the Lima guest profile to converge on ("small" or
-	// "standard"; config.App.EffectiveGuestProfile, guest.GuestProfile*).
-	// "" (`lever provision`, no config) leaves the guest as it is. Ignored
-	// by OrbStack.
+	// "standard"). "" leaves the guest as it is. Lima only.
 	GuestProfile string
-	// HWEFailStamp is the host path of the stamp lever keeps when the HWE
-	// kernel install failed in this VM (state.State.HWEFailStamp, 0600,
-	// keyed by the guest's machine id). While it names the VM and the
-	// egress posture is closed, a bring-up warns instead of trying apt
-	// again; an apply under the open posture tries again and removes it on
-	// success. "" keeps no stamp. Lima only.
+	// HWEFailStamp is the host path of the stamp kept when the HWE kernel
+	// install failed in this VM (0600, keyed by the guest's machine id). While
+	// it names the VM and egress is closed, bring-up warns instead of retrying
+	// apt; an apply under the open posture retries and removes it on success.
+	// "" keeps no stamp. Lima only.
 	HWEFailStamp string
-	// Warn prints a loud, user-facing line (apply's log). EnsureUp uses it
-	// for advice that must not fail the bring-up, e.g. a cpus or memory
-	// value an existing Lima VM does not have. Nil discards.
+	// Warn prints a user-facing line for advice that must not fail the
+	// bring-up. Nil discards.
 	Warn func(format string, args ...any)
 }
 
-// HasScion reports whether any scion mode is configured.
-//
-// A predicate, not a hand-written condition at each call site: the three fields
-// are checked in two backends, and when ScionBinary was added the struct literal
-// was updated while the guard around it was not — so binary mode silently never
-// ran. One place to change is the fix for that class.
+// HasScion reports whether any scion mode is configured. Call sites must use
+// this rather than testing the fields themselves, so a new mode cannot be
+// silently skipped by a stale guard.
 func (c Config) HasScion() bool {
 	return c.ScionBinary != "" || c.ScionSource != "" || c.ScionVersion != ""
 }
 
 // Backend is the contract the rest of Lever drives. Implementations must make
-// EnsureUp idempotent. RunUser/RunUID/HostAliasV4/JailRunner are valid after
-// EnsureUp (constructors may return sensible defaults before).
+// EnsureUp idempotent. RunUser/RunUID/HostAliasV4 are valid after EnsureUp.
 //
-// JailRunner is the exception: it is safe to call BEFORE EnsureUp and on a
-// stopped machine, because it only builds a runner from cached fields and does
-// no I/O. Before EnsureUp the run user is unresolved, so the prefix defers to
-// the jail's login user — the same user ReadRunUser resolves. buildApplyDeps
-// and doctor both rely on that.
+// JailRunner is safe to call before EnsureUp and on a stopped machine: it only
+// builds a runner from cached fields and does no I/O. Before EnsureUp the
+// prefix defers to the jail's login user, the same user ReadRunUser resolves.
 type Backend interface {
 	EnsureUp(ctx context.Context, cfg Config) error
 	HostToolAlias() string // how an agent reaches allowlisted host tools ("" if none)
@@ -136,113 +112,69 @@ type Backend interface {
 	MountDest() string     // path inside the jail where the project tree is bind-mounted
 	RunUser() string       // the in-jail run user
 	RunUID() string        // the in-jail run user's uid
-	// ResolveRunUser resolves the in-machine run user/uid WITHOUT provisioning:
-	// it errors if the machine is not already up. For passive verbs (attach) that
-	// need the jail transport but must never create or configure the machine.
+	// ResolveRunUser resolves the in-machine run user/uid WITHOUT
+	// provisioning: it errors if the machine is not already up. For passive
+	// verbs that must never create or configure the machine.
 	ResolveRunUser(ctx context.Context) error
 	JailRunner() proc.Runner            // command transport into the jail
 	AttachArgv(inner []string) []string // interactive TTY argv (lever up)
 	LoadImage(ctx context.Context, imageRef string) error
 	// ImageLoaded reports whether the jail already holds imageRef at the same
-	// image ID as the host, so apply can skip a redundant multi-GB re-import.
-	// Fail-open: false on any uncertainty (a not-yet-loaded or rebuilt image, or
-	// an inspect failure) so a broken check loads rather than wrongly skips.
+	// image ID as the host. Fail-open: false on any uncertainty, so a broken
+	// check loads rather than wrongly skips.
 	ImageLoaded(ctx context.Context, imageRef string) bool
 	// LoadImageTar and ImageLoadedTar are the same pair for an image shipped
-	// as a docker archive on the host (config image_tar): the load streams
-	// the file into the jail and the guard compares the archive's config
-	// digest with the jail's image ID, so neither needs host docker. allowTag
+	// as a docker archive on the host; neither needs host docker. allowTag
 	// (nil = no policy) is applied to every tag the archive carries before a
-	// byte is streamed — see jail.LoadImageTar.
+	// byte is streamed; see jail.LoadImageTar.
 	LoadImageTar(ctx context.Context, imageRef, tarPath string, allowTag func(ref string) error) error
 	ImageLoadedTar(ctx context.Context, imageRef, tarPath string) bool
-	// PruneJailImages reclaims dangling (untagged, unreferenced) images from the
-	// jail's container store — the layers a rebuilt tag orphans on the grow-only
-	// jail disk. Never touches a tagged or container-referenced image.
+	// PruneJailImages reclaims dangling images from the jail's grow-only
+	// disk. Never touches a tagged or container-referenced image.
 	PruneJailImages(ctx context.Context) error
 	// WarmJailImage starts imageRef once, with `true` as its entrypoint, under
 	// the user-namespace mapping scion starts agents with, so the first agent
 	// start does not spend scion's start timeout on podman's id-mapped layer
-	// copy (lever#165). Fast when the copy already exists.
+	// copy. Fast when the copy already exists.
 	WarmJailImage(ctx context.Context, imageRef string) error
 	// InstallGuestBinary streams a host-local executable into the guest at
-	// destPath as root (used by the acceptance gate to place lever-agent). The
-	// transport is the backend's root prefix, so callers stay backend-agnostic.
+	// destPath as root, through the backend's root prefix.
 	InstallGuestBinary(ctx context.Context, localPath, destPath string) error
-	// EnsureHubLogin provisions the guest half of the remote-access login
-	// path: the loopback forwarder that lets the hub see lever's host-side
-	// OIDC provider as a LOCAL issuer (scion refuses to start on any other
-	// kind), and the `oidc_login` block in the guest's ~/.scion/settings.yaml.
-	//
-	// It reports whether the hub's configuration changed. scion reads that
-	// file once, at startup, so a change means a running hub is still serving
-	// the old configuration and the caller must restart it — while an
-	// unchanged one restarts nothing, which is what stops a re-apply from
-	// bouncing the hub and every agent's connection to it.
-	EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error)
+	// EnsureHubAuth installs the hub's assertion public key root-owned in the
+	// guest and converges the hub's auth block in ~/.scion/settings.yaml (the
+	// running hub takes its auth settings from env; the file is for readers),
+	// dropping any oidc_login block. It reports whether the hub must restart:
+	// the key file changed or an oidc_login block was removed, both read only
+	// at hub startup. See guest.EnsureHubAuth.
+	EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error)
 	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
-	// reporting whether it wrote anything. The overlay exists to suppress
-	// scion's stock placeholder system prompt, which would otherwise REPLACE
-	// Claude Code's built-in one for every agent provisioned from the default
-	// template. See guest.EnsureLeverTemplate for the full reasoning.
+	// reporting whether it wrote anything. See guest.EnsureLeverTemplate.
 	EnsureLeverTemplate(ctx context.Context) (bool, error)
-	// DisableHubLogin converges that provisioning OFF: it stops and removes
-	// the guest-side forwarder and drops the `oidc_login` block. Called
-	// whenever remote access is not enabled, so an instance that turned it
-	// back off does not keep an unauthenticated jail→host loopback bridge
-	// running for a feature that is gone. Idempotent, and cheap when there is
-	// nothing to remove.
-	//
-	// Like EnsureHubLogin it reports whether the HUB's configuration changed —
-	// here, whether the `oidc_login` block was still there to remove. A hub
-	// that is already running read that block at startup and is still
-	// advertising the login, so the caller restarts it. The forwarder is not
-	// part of the answer: no hub ever reads it, and a restart is too expensive
-	// to spend on a change the hub cannot see. See guest.DisableHubLogin.
-	DisableHubLogin(ctx context.Context) (bool, error)
 	// EnsureScionTelemetry converges the top-level `telemetry:` block of the
-	// guest's ~/.scion/settings.yaml (config scion.telemetry): off=true writes
-	// `enabled: false`; off=false removes only the exact block lever wrote.
-	// It reports whether the file changed. Agents read the block at START, so
-	// a change does not reach a running manager — see guest.EnsureScionTelemetry.
+	// guest's ~/.scion/settings.yaml: off=true writes `enabled: false`;
+	// off=false removes only the exact block lever wrote. It reports whether
+	// the file changed. See guest.EnsureScionTelemetry.
 	EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 	Teardown(ctx context.Context) error
-	// Stop powers the machine off but keeps its disk intact — distinct from
-	// Teardown, which deletes the machine. Idempotent: a no-op if the machine
-	// is already absent, and harmless if it is already stopped. A stopped
-	// machine is resumed (not recreated) by a subsequent EnsureUp.
+	// Stop powers the machine off but keeps its disk, unlike Teardown.
+	// Idempotent; a stopped machine is resumed by a subsequent EnsureUp.
 	Stop(ctx context.Context) error
 	Profile() Profile
 	// ReadScionProjectState reads scion's project-registration state from the
-	// jail (the in-tree marker + ~/.scion/project-configs entries) for `lever
-	// doctor`. Read-only; uses the machine-only guest transport, so it works
-	// without EnsureUp as long as the jail machine is up.
+	// jail. Read-only; uses the machine-only guest transport, so it works
+	// without EnsureUp as long as the machine is up.
 	ReadScionProjectState(ctx context.Context) (types.ScionProjectState, error)
-	// RemoveScionProjectConfigs removes any stale ~/.scion/project-configs
-	// registration(s) whose workspace_path == workspacePath, through the
-	// machine-only guest transport. A no-op when none match. Called before
-	// `scion init` in the register-project apply step so each
-	// apply leaves exactly one registration per workspace instead of
-	// accumulating a duplicate every run (the `lever doctor` "duplicate
-	// registrations" finding).
+	// RemoveScionProjectConfigs removes any ~/.scion/project-configs
+	// registration whose workspace_path == workspacePath, through the
+	// machine-only guest transport. A no-op when none match.
 	RemoveScionProjectConfigs(ctx context.Context, workspacePath string) error
-	// ScionProjectRegistered reports whether workspacePath already has EXACTLY
-	// ONE valid scion registration: one ~/.scion/project-configs entry whose
-	// workspace_path == workspacePath AND the in-tree marker
-	// (workspacePath/.scion) present. Read-only, machine-only guest transport
-	// (no EnsureUp needed) — same pattern as ReadScionProjectState. The
-	// register-project apply step uses this to skip its
-	// destructive clean+init path when the registration is already sound, so a
-	// re-apply no longer tears down a resumable scion agent record just to
-	// re-mint an identical registration.
+	// ScionProjectRegistered reports whether workspacePath has EXACTLY ONE
+	// valid scion registration: one project-configs entry for it AND the
+	// in-tree marker workspacePath/.scion. Read-only, machine-only transport.
 	ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error)
 	// RepairScionHubEndpoint rewrites the hub endpoint recorded in the
-	// project-config registration(s) for workspacePath when it differs from
-	// endpoint. Minting the controller PAT links the project against a
-	// THROWAWAY hub on its own port, and the register step skips its re-init
-	// when the registration is already sound — so a re-mint would otherwise
-	// leave the project pointing at a hub that no longer exists. Only lever's
-	// own calls pass an explicit endpoint, so the damage lands on anything
-	// running scion bare in the jail (`lever attach` was the live case).
+	// registration(s) for workspacePath when it differs from endpoint. A
+	// registration linked against a hub on another port keeps that endpoint,
+	// since the register step skips re-init when the registration is sound.
 	RepairScionHubEndpoint(ctx context.Context, workspacePath, endpoint string) error
 }

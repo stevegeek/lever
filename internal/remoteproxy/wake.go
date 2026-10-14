@@ -17,14 +17,10 @@ import (
 	"github.com/stevegeek/lever/internal/chatledger"
 )
 
-// The wake route: POST /lever/api/agents/<name>/wake. A login that may
-// message a suspended worker (or, the operator, a stopped one) asks lever
-// to resume it (spec: wake on message). The resume itself is the broker's, over its 0600 operator
-// socket (Config.Wake), the same code the manager's resume verb runs.
-//
-// Order matters: method, browser provenance, the login's lists, the hub
-// state, then the limiter, so a refused request never spends the agent's
-// one wake a minute. Every refusal is a fixed reason word; the broker's own
+// The wake route: POST /lever/api/agents/<name>/wake asks the broker (over its
+// 0600 operator socket, Config.Wake) to resume a suspended worker, or for the
+// operator a stopped one. The limiter runs last, so a refused request never
+// spends the agent's one wake a minute. Refusals are fixed words; the broker's
 // text never reaches the page or the audit line.
 
 // Wake audit decisions.
@@ -83,7 +79,6 @@ type wakeLimiter struct {
 	now  func() time.Time
 }
 
-// take spends name's wake for wakeEvery, or reports how long until it may.
 func (l *wakeLimiter) take(name string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -97,8 +92,7 @@ func (l *wakeLimiter) take(name string) (bool, time.Duration) {
 	if l.last == nil {
 		l.last = map[string]time.Time{}
 	}
-	// Forget the old entries: the map holds at most the agents woken in the
-	// last minute.
+	// The map holds at most the agents woken in the last minute.
 	maps.DeleteFunc(l.last, func(_ string, t time.Time) bool { return now.Sub(t) >= wakeEvery })
 	l.last[name] = now
 	return true, 0
@@ -123,11 +117,8 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 		refuse(http.StatusMethodNotAllowed, "method", nil)
 		return
 	}
-	// The gate let a request with no Origin through (checkOrigin); a wake
-	// is a browser POST, which always carries one, so one is required here,
-	// and Sec-Fetch-Site, when sent, must be same-origin ("none" is a typed
-	// navigation, never a page's fetch). The Origin must be the proxy's own
-	// (sameOriginWrite).
+	// checkOrigin lets a request with no Origin through; a wake is a browser
+	// POST, so the proxy's own Origin is required here (sameOriginWrite).
 	if !sameOriginWrite(r, g.cfg.ServeHost) {
 		refuse(http.StatusForbidden, "origin", nil)
 		return
@@ -186,9 +177,7 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	g.answerWakeJSON(w, r, line, DecisionWake, http.StatusAccepted, map[string]string{"state": "starting"})
 }
 
-// wakeFailure maps a broker answer to the page's status and reason word: a
-// broker refusal (4xx: not asleep, not a worker, the role guard, the hub
-// refused) is "refused"; anything else is "failed".
+// wakeFailure: a broker 4xx is "refused", anything else "failed".
 func wakeFailure(err error) (int, string) {
 	var we *WakeError
 	if errors.As(err, &we) && we.Status >= 400 && we.Status < 500 {

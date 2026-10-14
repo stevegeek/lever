@@ -19,14 +19,13 @@ import (
 
 var logLineRE = regexp.MustCompile(`^time=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z level=WARN msg=.* component=remote-proxy( |$)`)
 
-// captureLog makes lever's remote-proxy logger the default for the test,
-// as `lever remote serve` does, and returns what it wrote.
+// captureLog installs the remote-proxy logger as `lever remote serve` does.
 func captureLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	prev, w, flags := slog.Default(), log.Writer(), log.Flags()
 	t.Cleanup(func() {
 		slog.SetDefault(prev)
-		// Restoring slog's own default leaves the log package writing to
+		// Restoring slog's default alone leaves the log package writing to
 		// the replaced handler.
 		log.SetOutput(w)
 		log.SetFlags(flags)

@@ -15,9 +15,9 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// The broker's re-enrol bounce of the manager runs apply's resume checks
-// (lever#158): a mount whose directory is gone refuses before; a tree
-// mount from elsewhere after the resume suspends the manager.
+// The broker's re-enrol bounce of the manager runs apply's resume checks: a
+// mount whose directory is gone refuses before; a tree mount from elsewhere
+// after the resume suspends the manager.
 func TestManagerResumeGuard(t *testing.T) {
 	mounts := []jail.Mount{
 		{Source: "/lever", Destination: "/workspace", RW: true},

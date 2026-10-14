@@ -41,10 +41,8 @@ func TestWriteFileAtomicReplacesContentAndLeavesNoTemp(t *testing.T) {
 	}
 }
 
-// --- tree-confined reads and writes ---
-
-// treeFixture returns an instance root with a tree beneath it and a host file
-// OUTSIDE the tree that no tree operation may touch.
+// treeFixture returns a tree and a host file outside it that no tree
+// operation may touch.
 func treeFixture(t *testing.T) (tree, hostFile string) {
 	t.Helper()
 	root := t.TempDir()
@@ -108,8 +106,8 @@ func TestWriteInTreeKeepsExistingModeAndInode(t *testing.T) {
 	}
 }
 
-// The case commit 22880a9 protected: a CLAUDE.md that is itself a symlink to
-// another file INSIDE the tree is written through, in place.
+// A CLAUDE.md that is a symlink to another file inside the tree is written
+// through, in place.
 func TestWriteInTreeFollowsSymlinkInsideTree(t *testing.T) {
 	tree, _ := treeFixture(t)
 	real := filepath.Join(tree, "docs", "CLAUDE.md")

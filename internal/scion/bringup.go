@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,8 +15,8 @@ import (
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
-// AlreadyRunning reports whether err is a scion "already running" error — used to
-// make bring-up steps idempotent on re-apply (the server/agent is already up).
+// AlreadyRunning reports whether err is a scion "already running" error, so
+// bring-up steps stay idempotent on re-apply.
 func AlreadyRunning(err error) bool {
 	if err == nil {
 		return false
@@ -24,20 +25,12 @@ func AlreadyRunning(err error) bool {
 	return strings.Contains(s, "already running") || strings.Contains(s, "already exists")
 }
 
-// notRunning reports whether err is scion refusing to act on the SERVER daemon
-// because it is not running — `scion server stop` with nothing to stop
-// (cmd/server_daemon.go: "server daemon is not running").
+// notRunning reports whether err is scion server stop finding no server
+// daemon (cmd/server_daemon.go). It is separate from AlreadyRunning, which
+// also guards ServerStart, where "not running" must stay a failure.
 //
-// A predicate of its own rather than another arm of AlreadyRunning, because
-// AlreadyRunning also guards ServerStart, where "not running" must stay a real
-// failure: a start that reports the daemon is not running has not started it.
-//
-// It matches the full "server daemon is not running", not a bare "not running"
-// or even "daemon is not running". Both looser forms swallow messages about
-// OTHER things: scion says "agent 'x' is not running (phase: …)" at the agent
-// level, and "broker daemon is not running" for the runtime broker
-// (cmd/broker.go), so a future caller wrapping `runtime-broker start` with
-// this would get exactly the silent success this predicate exists to prevent.
+// It matches the full "server daemon is not running": looser forms would also
+// swallow scion's agent-level and runtime-broker "not running" messages.
 func notRunning(err error) bool {
 	if err == nil {
 		return false
@@ -45,25 +38,30 @@ func notRunning(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "server daemon is not running")
 }
 
-// IsBrokerUnavailable reports whether err is the "runtime broker not yet
-// registered" condition during bring-up (the registration race), as opposed
-// to a real failure. The scion workstation daemon starts its Hub API and its
-// runtime broker separately: the hub serves before the runtime broker has
-// registered ASYNCHRONOUSLY, so a call issued in that window fails. scion
-// words it three ways depending on the verb and how far the call got before
-// giving up:
-//   - `scion start`: plural "No runtime brokers available".
-//   - `scion resume`: singular "no runtime broker available" — the SAME race
-//     (confirmed in scion pkg/hub/handlers_agent_create_helpers.go:354,408).
-//   - either, on a cold VM: "deadline exceeded" — scion's own internal wait for
-//     the broker times out and surfaces the hub timeout instead of the clean
-//     message (observed live: "context deadline exceeded from the Hub during
-//     start-manager", which needed a second `up` to reconcile).
+// startGaveUpWaiting reports whether err is scion server start giving up its
+// own /healthz wait (about 30 s, cmd/server_start_ready.go) while the daemon
+// it launched is still running. That daemon owns the pid file and may only be
+// slow, so the start counts as done and lever's longer waitHubReady decides.
+// A daemon that exited during the wait is worded differently and stays a
+// failure.
+func startGaveUpWaiting(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "server did not become ready within") &&
+		strings.Contains(s, "The server process is still running")
+}
+
+// IsBrokerUnavailable reports whether err is the bring-up race where the hub
+// serves before its runtime broker has registered. scion words it three ways:
+//   - scion start: "No runtime brokers available".
+//   - scion resume: "no runtime broker available".
+//   - either, on a cold VM: "deadline exceeded", when scion's own wait for
+//     the broker times out.
 //
-// All must be matched or a retry never sees its own transient error as
-// retryable. A caller that retries on it must check its OWN ctx between
-// attempts, since a deadline from that ctx (a genuine timeout, not scion's
-// internal one) matches too.
+// A caller that retries on it must check its own ctx between attempts, since
+// a deadline from that ctx matches too.
 func IsBrokerUnavailable(err error) bool {
 	if err == nil {
 		return false
@@ -80,8 +78,7 @@ func IsBrokerUnavailable(err error) bool {
 // fails this way says nothing about the agent's state, so it must never be
 // "repaired" by deleting the agent. It matches, case-insensitively:
 //   - "already exists in this project": since scion f7155ecb a user token
-//     without agent:lifecycle that resumes an existing agent gets this 409
-//     (handleExistingAgent folds the lifecycle denial into a name conflict);
+//     without agent:lifecycle that resumes an existing agent gets this 409;
 //   - "(status: 403)", "missing required scope", "token does not have
 //     scope": a plain authorization denial.
 func IsRefusedByHub(err error) bool {
@@ -103,12 +100,9 @@ const RefusalHint = "Two causes are possible. (1) On scion f7155ecb or later, a 
 	"that cannot be resumed now (running, starting, stopping or error): wait, check `lever doctor`, then run `lever up` again. " +
 	"To discard the session instead, run `lever up --fresh`"
 
-// ErrSummary reduces a scion CLI error to the lines that say what went wrong.
-// A failed scion verb returns its whole stderr: the "settings file contains
-// unrecognized keys" warnings, the hub's error, and cobra's usage dump. The
-// summary drops the warnings and everything from "Usage:" on, joins the rest
-// on one line and bounds it, so an operator-facing message can carry the
-// cause. It returns plain text; the caller sanitizes it for the terminal.
+// ErrSummary reduces a scion CLI error to the lines that say what went wrong,
+// dropping settings warnings and cobra's usage dump, on one bounded line. It
+// returns plain text; the caller sanitizes it for the terminal.
 func ErrSummary(err error) string {
 	if err == nil {
 		return ""
@@ -140,25 +134,15 @@ func boundSummary(s string, limit int) string {
 	return strings.ToValidUTF8(s[:limit], "") + "…"
 }
 
-// IsAgentAbsent reports whether err from a scion agent verb (`list`, `status`,
-// `resume`…) DEFINITIVELY means the named agent cannot be running — as opposed
-// to an unknown failure a caller must not paper over. It matches, case-
-// insensitively:
-//   - "is not responding" / "connection refused": no hub is reachable on the
-//     machine — the hub is only started by apply's scion-server step, so
-//     before the first apply nothing can be running;
-//   - "project not found": the hub is up but the project was never
-//     hub-registered (e.g. a partial prior bring-up where local `scion init`
-//     ran but `scion hub link` didn't) — no agent can be running under a
-//     project the hub doesn't know, and apply's register-project step (init +
-//     hub link) is exactly the repair;
-//   - "no git origin remote found": scion's documented fallback when the path
-//     isn't a locally registered project at all (no ~/.scion/project-configs
-//     entry — forced project resolution falls back to git; see the
-//     waitHubReady comment documenting this exact string). Lever projects are
-//     directory projects, never git-resolved, so for lever this can only mean
-//     "not registered" — again definitively absent, and register-project is
-//     the repair.
+// IsAgentAbsent reports whether err from a scion agent verb definitively means
+// the named agent cannot be running, as opposed to an unknown failure a caller
+// must not paper over. It matches, case-insensitively:
+//   - "is not responding" / "connection refused": no hub is reachable, and
+//     only apply starts one;
+//   - "project not found": the hub never registered the project;
+//   - "no git origin remote found": scion's fallback when the path is not a
+//     locally registered project; lever projects are never git-resolved, so
+//     this means not registered.
 func IsAgentAbsent(err error) bool {
 	if err == nil {
 		return false
@@ -174,20 +158,9 @@ func IsAgentAbsent(err error) bool {
 // hubReadyTimeout; say so after hubReadyNotice and then every hubReadyEvery;
 // check every hubAliveEvery that a scion server is still alive to wait on.
 //
-// The timeout is a TIME, not an attempt count, and it is long because a hub
-// start is slow before it serves at all. On the assistant's guest each start
-// spends about 14 s between its first log line and "Starting Web Frontend"
-// (server.log, every start since 2026-08-22; 13 s of it is the hub's GCP
-// project-ID lookup timing out against 169.254.169.254 —
-// cmd/server_foreground.go, the Policy Troubleshooter's
-// hub.ResolveGCPProjectID — on a machine that is not on GCP; since
-// lever#182 the egress chain rejects that address, so the lookup fails at
-// once and the budget no longer needs to cover it). Add the
-// daemon's re-exec, a cold page cache for the binary and a 100+ MB hub.db
-// after a reboot, and the probe CLI's own start each attempt, and a cold
-// start overran the old 30 attempts (card #82: "hub not ready after 30
-// attempts" on the first apply after a Mac restart; a retry seconds later
-// found the hub up).
+// The timeout is a time, not an attempt count, and long: a cold hub start
+// after a reboot (daemon re-exec, cold page cache, a large hub.db) can take
+// many seconds before it serves at all.
 const (
 	hubReadyTimeout  = 2 * time.Minute
 	hubReadyInterval = 1 * time.Second
@@ -196,31 +169,21 @@ const (
 	hubAliveEvery    = 5 * time.Second
 )
 
-// waitHubReady polls a lightweight, PROJECT-INDEPENDENT hub call until it
-// succeeds or the budget runs out. `list --all` lists agents across all
-// projects and hits the hub without resolving a current project — unlike
-// `list --global`, which forces project resolution and fails with "no git
-// origin remote found" when run (as here) before any project is registered
-// (verified live 2026-06-17).
+// waitHubReady polls a project-independent hub call until it succeeds or the
+// budget runs out. list --all does not resolve a project, unlike list
+// --global, which fails with "no git origin remote found" before any project
+// is registered.
 //
 // An authentication failure also counts as ready: the hub answered, it only
-// refused the credential. That is the case whenever lever holds no working
-// token for it yet, e.g. the live hub restarted after a dev-auth window whose
-// first mint failed; treating it as "not ready" reported a running hub as
-// down (seen on scion f7155ecb+, where the mint failed with
-// scope_violation). Whoever needs the credential fails on it next, with the
-// real error.
+// refused the credential, which happens whenever lever holds no working token
+// yet. Whoever needs the credential fails on it next, with the real error.
 //
-// The wait follows the server process, so the long budget costs nothing
-// when the start has failed: every hubAliveEvery it runs the pid probe
-// (serverPIDProbe), and once that answers that no scion server is alive —
-// the daemon exited, or its pid file named another process — it stops with
-// ErrHubNotReady and a pointer at the server log. A probe that cannot run
-// says nothing and the wait goes on. notify, when non-nil, gets a line
-// after hubReadyNotice and every hubReadyEvery after it, so a slow start
-// reads as a wait and not as a hang.
+// Every hubAliveEvery it runs serverPIDProbe, and stops with ErrHubNotReady
+// once no scion server is alive, so the long budget costs nothing when the
+// start failed. A probe that cannot run says nothing. notify, when non-nil,
+// gets progress lines so a slow start does not read as a hang.
 func (c *Client) waitHubReady(ctx context.Context, notify func(format string, args ...any)) error {
-	// A progress list (lever#185) shows the wait on its live line instead.
+	// A progress list shows the wait on its live line instead.
 	rep := progress.From(ctx)
 	if rep.Active() {
 		notify = nil
@@ -232,14 +195,10 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 	attempts := 0
 	var lastErr error
 	errGone := errors.New("server gone")
-	// The wait itself runs in the guest (lever#190): one jail call polls the
-	// hub's public /healthz every 150 ms for up to hubAliveEvery, instead of
-	// one jail call and one scion CLI start per second. The scion CLI probe
-	// below still decides: it runs once after each in-guest wait, so the
-	// readiness rule (an answer, or a refused credential) is unchanged, and
-	// a hub that never answers /healthz is still found within hubAliveEvery.
-	// Without an endpoint, or when the in-guest wait cannot run (no curl),
-	// it polls with the CLI every hubReadyInterval as before.
+	// One jail call polls /healthz for up to hubAliveEvery; the scion CLI
+	// probe after each in-guest wait still decides readiness. Without an
+	// endpoint, or when the in-guest wait cannot run, it polls with the CLI
+	// every hubReadyInterval.
 	inGuest := c.hubEndpoint != ""
 	pace := false
 	err := retry.Until(ctx, 0, 0, func() (bool, error) {
@@ -260,7 +219,7 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 				inGuest = false
 			}
 		}
-		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json")
+		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
 		if lastErr == nil || isHubAuthRefusal(lastErr) {
 			return true, nil
 		}
@@ -292,13 +251,11 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 	return err
 }
 
-// healthzScript polls $1/healthz from inside the jail every 150 ms, at most
-// $2 more times: exit 0 once it answers 200, 3 when it never did
-// (waitedExit), 127 without curl, and 4 at once when something answers but
-// not with a 200 or not as plain HTTP (curl 22, 35, 60): a hub that does not
-// serve /healthz there must not cost every attempt the whole window. Each
-// request is bounded, so a hub that accepts and hangs cannot stretch the
-// loop.
+// healthzScript exits 0 once /healthz answers 200, waitedExit when it never
+// did, 127 without curl, and 4 at once when something answers but not with a
+// 200 or not as plain HTTP, so a hub without /healthz does not cost every
+// attempt the whole window. Each request is bounded, so a hub that accepts
+// and hangs cannot stretch the loop.
 const healthzScript = `command -v curl >/dev/null 2>&1 || exit 127
 i=0
 while :; do
@@ -309,10 +266,9 @@ while :; do
   i=$((i+1))
 done`
 
-// waitedExit is how both in-guest waits (healthzScript, brokerWaitScript)
-// say they polled for their whole window without seeing what they wait for.
-// A code of its own, so that a jail transport failure or a shell that could
-// not start (exit 1, 126, 255) is never read as "not ready yet".
+// waitedExit is how both in-guest waits say they polled for their whole
+// window without success. A code of its own, so a jail transport failure or a
+// shell that could not start is never read as "not ready yet".
 const waitedExit = 3
 
 type healthzResult int
@@ -323,9 +279,8 @@ const (
 	healthzUnavailable               // the in-guest poll could not run
 )
 
-// awaitHealthz waits in the jail, for up to d, until the hub's /healthz
-// answers (healthzScript). Only waitedExit means "not up yet"; any other
-// failure (no curl, a jail transport error) means this path is unusable here.
+// awaitHealthz: only waitedExit means "not up yet"; any other failure means
+// the in-guest path is unusable here.
 func (c *Client) awaitHealthz(ctx context.Context, d time.Duration) healthzResult {
 	n := int(d / (150 * time.Millisecond))
 	res, err := c.r.Run(ctx, nil, "sh", "-c", healthzScript, "_", strings.TrimRight(c.hubEndpoint, "/"), strconv.Itoa(n))
@@ -339,8 +294,8 @@ func (c *Client) awaitHealthz(ctx context.Context, d time.Duration) healthzResul
 }
 
 // isHubAuthRefusal reports whether a scion CLI error is the hub refusing the
-// credential (HTTP 401; scion cmd/common.go maps it to this message), which
-// proves the hub is up and answering.
+// credential (HTTP 401, worded by scion cmd/common.go), which proves the hub
+// is up.
 func isHubAuthRefusal(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "authentication failed, login to hub")
 }
@@ -360,10 +315,9 @@ const (
 // brokerPollEvery is how often the in-guest broker wait asks the hub.
 const brokerPollEvery = 200 * time.Millisecond
 
-// runtimeBroker is the subset of a `scion hub brokers --format json` row we read
-// to judge readiness. A broker registers with the hub before it finishes
-// connecting, so "a row exists" is not enough — we wait for one that is actually
-// online/connected.
+// runtimeBroker: a broker registers with the hub before it finishes
+// connecting, so a row existing is not enough; readiness needs one that is
+// online or connected.
 type runtimeBroker struct {
 	Status          string `json:"status"`
 	ConnectionState string `json:"connectionState"`
@@ -373,10 +327,8 @@ func (b runtimeBroker) ready() bool {
 	return b.Status == "online" || b.ConnectionState == "connected"
 }
 
-// brokersOnline reports whether a `hub brokers --format json` output lists
-// a ready broker. parseJSON (not raw Unmarshal): scion prints the dev-auth
-// WARNING banner into the same stream, and parseJSON strips it + ANSI before
-// decoding — matching List/messaging. A parse miss is "not ready".
+// brokersOnline reports whether hub brokers output lists a ready broker. A
+// parse miss is "not ready".
 func brokersOnline(out string) bool {
 	var brokers []runtimeBroker
 	if parseJSON(out, &brokers) != nil {
@@ -385,11 +337,9 @@ func brokersOnline(out string) bool {
 	return slices.ContainsFunc(brokers, runtimeBroker.ready)
 }
 
-// brokerWaitScript runs `scion hub brokers` ($3…) in the jail every 200 ms,
-// at most $1 more times, until its output names an online or connected
-// broker, and prints that output; exit 3 (waitedExit) when none did. The text match only decides when to stop
-// polling: lever parses the printed output itself (brokersOnline) and keeps
-// waiting when it does not hold.
+// brokerWaitScript polls scion hub brokers until its output names an online
+// or connected broker, and prints that output; waitedExit when none did. The
+// text match only decides when to stop: lever parses the output itself.
 const brokerWaitScript = `n=$1; shift
 i=0
 while :; do
@@ -409,32 +359,19 @@ func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) err
 	return err
 }
 
-// RuntimeBrokerReady blocks until the hub reports at least one ONLINE
-// runtime broker, or the budget is exhausted, and reports whether it saw
-// one. The scion workstation
-// daemon brings up its Hub API and its runtime broker separately: waitHubReady
-// (called from ServerStart) confirms the Hub API serves, but the runtime broker
-// registers AND connects asynchronously afterward — and `scion start`/`resume`
-// need it. Gating here closes that window at the source, so the create/resume
-// that follows acts against a ready broker instead of racing it (which
-// otherwise fails the first `up` and needs a second, or leans on the start
-// path's broker-unavailable retry).
+// RuntimeBrokerReady blocks until the hub reports at least one online runtime
+// broker, or the budget is exhausted, and reports whether it saw one. The
+// runtime broker registers and connects asynchronously after the Hub API
+// serves, and scion start and resume need it.
 //
-// The wait runs in the guest (lever#190): one jail call polls `hub brokers`
-// every brokerPollEvery (brokerWaitScript) instead of one jail call per
-// second, so an online broker is seen within a fraction of a second. When
-// that call cannot run, it polls from the host as before.
+// The wait runs in the guest; when that cannot run, it polls from the host.
 //
-// FAIL-SOFT: on budget exhaustion it returns (false, nil), not an error, so the
-// caller proceeds to start regardless — the start path's own bounded
-// broker-unavailable retry (internal/apply's retryOnBrokerUnavailable, gated on
-// IsBrokerUnavailable) is the backstop, and hard-failing the whole bring-up on
-// a readiness probe that can't confirm would be worse than letting start try.
-// Only ctx cancellation returns an error. `hub brokers` lists
-// brokers hub-wide; project scopes only the hub-client/settings resolution, so
-// it is passed to dodge the "no project" resolution failure a bare call hits.
+// Fail-soft: on budget exhaustion it returns (false, nil) and the caller
+// starts anyway, with the start path's IsBrokerUnavailable retry as the
+// backstop. Only ctx cancellation returns an error. project is passed only to
+// avoid scion's "no project" resolution failure; hub brokers is hub-wide.
 func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, error) {
-	args := append([]string{"hub", "brokers", "--format", "json"}, projectFlag(project)...)
+	args := append([]string{"hub", "brokers", "--format", "json", nonInteractive}, projectFlag(project)...)
 	budget := time.Duration(c.brokerReadyAttempts) * c.brokerReadyInterval
 	deadline := time.Now().Add(budget)
 	for {
@@ -461,7 +398,6 @@ func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, 
 		case <-time.After(brokerPollEvery):
 		}
 	}
-	// The rest of the budget, not a fresh one.
 	attempts := c.brokerReadyAttempts
 	if c.brokerReadyInterval > 0 {
 		attempts = max(1, int(time.Until(deadline)/c.brokerReadyInterval))
@@ -481,8 +417,8 @@ func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, 
 	return online, err
 }
 
-// InitMachine seeds the machine-level scion dir + default harness configs
-// (claude/gemini). Required before `--harness claude` resolves.
+// InitMachine seeds the machine-level scion dir and default harness configs.
+// Required before --harness claude resolves.
 func (c *Client) InitMachine(ctx context.Context) error {
 	_, err := c.run(ctx, "", "init", "--machine", "--non-interactive")
 	return err
@@ -490,7 +426,7 @@ func (c *Client) InitMachine(ctx context.Context) error {
 
 // ConfigSetGlobal sets a global scion config key (e.g. image_registry=scionlocal).
 func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
-	_, err := c.run(ctx, "", "config", "set", "--global", key, value)
+	_, err := c.run(ctx, "", "config", "set", "--global", nonInteractive, key, value)
 	return err
 }
 
@@ -498,237 +434,120 @@ func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 // project — the merge of embedded defaults, the machine settings, and the
 // project's own, in that precedence.
 func (c *Client) ConfigGetProject(ctx context.Context, projectDir, key string) (string, error) {
-	// runValue, not run: the result is compared against an expected value, and
-	// scion's settings loader writes warnings to stderr. See runValue.
-	return c.runValue(ctx, projectDir, "config", "get", key)
+	// runValue: the result is compared against an expected value.
+	return c.runValue(ctx, projectDir, "config", "get", nonInteractive, key)
 }
 
 // ConfigSetProject sets a scion config key at PROJECT scope, resolved from
 // projectDir as the working directory.
 //
-// Project scope, not global, because it is the only one that wins: settings are
-// merged with koanf in the order embedded defaults → machine
-// (~/.scion/settings.yaml) → project, so a later file overrides an earlier one
-// (pkg/config/settings_v1.go LoadVersionedSettings). Scion writes
-// `default_template: default` into the project's own settings at registration,
-// which would defeat the same key set globally.
+// Project scope is the one that wins: scion merges embedded defaults, then
+// machine, then project settings, and writes default_template: default into
+// the project's own settings at registration.
 func (c *Client) ConfigSetProject(ctx context.Context, projectDir, key, value string) error {
-	_, err := c.run(ctx, projectDir, "config", "set", key, value)
+	_, err := c.run(ctx, projectDir, "config", "set", nonInteractive, key, value)
 	return err
 }
 
 // ServerOpts configures `scion server start`.
 type ServerOpts struct {
-	// WebPort, when > 0, sets the port the Hub API is reachable on (--web-port).
-	// lever runs scion in workstation/combined mode, where the Hub API is mounted
-	// on the web server's port and the standalone --port flag is IGNORED (verified
-	// live — a `--port 48080` start binds :8080). So --web-port is what actually
-	// controls the Hub API port. Zero lets scion pick its default (8080).
+	// WebPort, when > 0, sets the port the Hub API is reachable on
+	// (--web-port). In workstation mode with the web frontend on, the Hub API
+	// is mounted on the web port and --port is ignored. Zero means scion's
+	// default.
 	WebPort int
-	// HubPort, when > 0, passes --port: the port the Hub API binds when the
-	// web frontend is OFF (DisableWeb). With the frontend on, scion ignores
-	// --port and mounts the API on --web-port instead; with it off the hub
-	// runs its own HTTP server on cfg.Hub.Port, which --port sets
-	// (cmd/server_foreground.go, the `if !enableWeb` branch and the
-	// `Changed("port")` override). The co-located runtime broker follows it
-	// (resolveHubListenPort).
-	HubPort int
-	// DisableWeb passes --enable-web=false, the only way to turn scion's web
-	// frontend off in workstation mode (see EnableWeb). Only the throwaway
-	// dev-auth hub sets it: with the frontend on, scion's devAuthMiddleware
-	// (pkg/hub/web.go) signs ANY session-less request in as the dev
-	// super-admin, and sessionToBearerMiddleware turns that session into API
-	// authority. With it off, every non-public Hub API route needs the
-	// Bearer dev token (pkg/hub/auth.go). Set HubPort with it: the API then
-	// binds --port, not --web-port. Mutually exclusive with EnableWeb.
-	DisableWeb bool
-	// DisableRuntimeBroker passes --enable-runtime-broker=false. Workstation
-	// mode starts a co-located runtime broker by default, and a hub with a
-	// broker can create agent containers: from overdue scheduled dispatches it
-	// fires at startup, or pending dispatch rows it reconciles. A dev-auth hub
-	// mints every agent it creates a FULL-role token signed with the key the
-	// live hub also trusts, so the throwaway must not be able to create one.
-	DisableRuntimeBroker bool
-	// Exclusive refuses to treat an already-running daemon as success. scion
-	// keeps ONE server pid file per jail home, whatever the port, so a start
-	// beside a running hub is answered "server is already running" about THAT
-	// hub. The real hub's idempotent re-apply wants that tolerance; a throwaway
-	// on its own port must not have it: it would wait on a port nothing binds,
-	// and its cleanup stop would then stop the real hub through the shared pid
-	// file.
-	Exclusive bool
 	// DevAuth is always emitted explicitly (--dev-auth=true|false) so the real
 	// hub is never left on the (dev-auth-on) default by omission.
 	DevAuth bool
-	// EnableWeb passes --enable-web. lever sets it only for remote access —
-	// but it does NOT follow that a headless hub stays API-only, and reading
-	// it that way is a mistake with teeth.
+	// EnableWeb passes --enable-web, for remote access only. A hub started
+	// without it still has the web frontend: scion's workstation defaults
+	// enable it unless --enable-web=false is explicit. The live hub must
+	// never pass that: with web disabled the Hub API moves off --web-port,
+	// where the broker, the agents, doctor and the remote proxy all dial it.
+	// So in practice this field decides only WebAssetsDir.
 	//
-	// scion applies WORKSTATION DEFAULTS to every `server start` that is not
-	// --hosted, and one of them is `if !cmd.Flags().Changed("enable-web") {
-	// enableWeb = true }` (cmd/server_config.go applyWorkstationDefaults).
-	// Omitting the flag therefore enables the web frontend exactly as passing
-	// it does — the daemon even re-emits a bare --enable-web into its own
-	// --foreground child argv (cmd/server_daemon.go buildDaemonStartArgs runs
-	// AFTER the defaults are applied). Only an explicit --enable-web=false
-	// would turn it off.
-	//
-	// The LIVE hub must never pass that (only the throwaway dev-auth hub
-	// does, see DisableWeb). With web disabled the Hub API stops being
-	// mounted on the web server and binds cfg.Hub.Port — 9810 — instead
-	// (cmd/server_foreground.go, the `if !enableWeb` branch), while lever's
-	// whole model puts the Hub API on --web-port 8080: the broker, the agents'
-	// SCION_HUB_ENDPOINT, `lever doctor` and the remote proxy all dial it
-	// there. WebPort's "the Hub API is mounted on the web server's port" is
-	// true only because the web frontend is on.
-	//
-	// So what this field actually decides is WebAssetsDir below, which is only
-	// ever passed alongside it. Turning remote access off does not take the
-	// SPA away; it takes away the assets lever staged for it, and the login.
-	//
-	// There is deliberately NO --base-url here, even though the remote
-	// feature knows its public tailnet origin. scion's --base-url is not a
-	// web-only setting: it also becomes the hub's agent-facing endpoint
-	// (cmd/server_foreground.go resolveHubEndpoint), which the hub injects
-	// into every agent container as SCION_HUB_ENDPOINT/SCION_HUB_URL. A jail
-	// agent cannot reach a tailnet name (no DNS for it, and lever's egress
-	// drops 100.64/10), and — worse — a non-loopback endpoint SKIPS scion's
-	// container-bridge rewrite (pkg/runtimebroker/hubenv.go
-	// applyContainerBridgeOverride), the very step that turns the hub's
-	// loopback address into the host.containers.internal form lever's pasta
-	// --map-host-loopback makes reachable. Leaving the flag off keeps the
-	// resolved endpoint on localhost, so the rewrite applies and agents keep
-	// their status/notification/token-refresh callbacks. The SPA does not
-	// need it: it builds every URL relative (no baseURL anywhere in scion's
-	// web client), and lever's proxy strips the hub's session cookie and
-	// never exercises the OAuth redirect path, which are --base-url's only
-	// other consumers.
+	// There is deliberately no --base-url. scion also makes it the hub
+	// endpoint injected into every agent container, and a non-loopback
+	// endpoint is unreachable from the jail and skips scion's
+	// container-bridge rewrite, breaking the agents' hub callbacks. The SPA
+	// builds every URL relative and does not need it.
 	EnableWeb bool
-	// WebAssetsDir, when non-empty, serves the SPA from this GUEST directory
-	// (--web-assets-dir) instead of the binary's embedded filesystem.
+	// WebAssetsDir, when non-empty, serves the SPA from this guest directory
+	// (--web-assets-dir). A binary built from a scion.version pin embeds no
+	// SPA, so lever stages the assets itself.
 	//
-	// It exists because a `scion.version:` pin has no embedded SPA at all: the
-	// upstream repo tracks only web/dist/client/.gitkeep and .gitignores the
-	// built output, so a binary compiled from the fetched module serves scion's
-	// "Web UI Not Available" page. lever builds the assets host-side from that
-	// same module and stages them into the guest, and this flag points the hub
-	// at them (layout.WebAssetsDir).
-	//
-	// Only ever set together with EnableWeb, and only when lever actually staged
-	// the assets — config.App.ScionWebAssets decides both. Setting it otherwise
-	// would be worse than leaving it off: scion takes a non-empty value as an
-	// override and serves that directory whether or not it has anything in it,
-	// so a wrong path REPLACES working embedded assets with 404s rather than
-	// falling back to them.
+	// Set it only with EnableWeb and only when lever staged the assets: scion
+	// serves a non-empty value whether or not it holds anything, so a wrong
+	// path replaces working embedded assets with 404s.
 	WebAssetsDir string
 	// SessionSecret, when non-empty, is the hub's session-cookie signing key
-	// (--session-secret). Without it scion generates a random key per boot and
-	// every hub restart signs every browser out of the web UI. The flag, not
-	// env SCION_SERVER_SESSION_SECRET, because the flag is the durable channel:
-	// scion's daemon persists its argv to ~/.scion/server-args.json and
-	// `scion server restart` replays it verbatim, while env would be lost.
-	// Like every argv-only option it applies at the next START (see below).
-	// Empty omits the flag (scion's per-boot random key) — the throwaway
-	// mint-window hub, whose sessions nobody keeps.
+	// (--session-secret); without it every hub restart signs every browser
+	// out. The flag, not env, because scion's daemon persists and replays its
+	// argv on restart. Empty omits the flag.
 	SessionSecret string
+	// Env is set on the start command only, and the daemonised hub inherits it.
+	// It pins the hub's auth configuration: scion lets SCION_SERVER_* override
+	// settings.yaml, which agents can rewrite through the workstation routes.
+	// The values are configuration, never credentials: the jail runner puts env
+	// on the host argv.
+	Env map[string]string
 	// Progress, when non-nil, gets a line while the start waits on a slow
 	// hub (see waitHubReady). Not part of the argv.
 	Progress func(format string, args ...any)
 }
 
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises
-// and returns.
+// and returns once waitHubReady sees the hub answer.
 //
-// These options describe a START, not a desired state. A daemon that is
-// already running keeps the argv it was started with: scion refuses with
-// "server is already running (PID: n)" rather than reconfiguring anything
-// (cmd/server_daemon.go runServerStartOrDaemon), and this call tolerates that
-// refusal so a re-apply is cheap (see below). So an option that lives only in
-// the argv — WebAssetsDir, SessionSecret — changes nothing until something
-// stops the daemon first. A caller that needs one to take effect must
-// ServerStop, and internal/apply does exactly that, on both the on- and the
-// off-transition of remote access.
+// The options describe a start, not a desired state: a running daemon keeps
+// its argv, and this call tolerates scion's "already running" refusal. A
+// caller that needs a changed option to take effect must ServerStop first.
+//
+// scion's own readiness give-up (startGaveUpWaiting) is not a failure: the
+// daemon keeps starting, and waitHubReady decides.
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
-	if o.DisableWeb && o.EnableWeb {
-		return errors.New("scion server start: EnableWeb and DisableWeb are mutually exclusive")
-	}
 	args := []string{"server", "start"}
 	if o.WebPort > 0 {
 		args = append(args, "--web-port", strconv.Itoa(o.WebPort))
 	}
-	if o.HubPort > 0 {
-		args = append(args, "--port", strconv.Itoa(o.HubPort))
-	}
-	if o.DisableWeb {
-		// Equals form: a bare boolean flag cannot carry false.
-		args = append(args, "--enable-web=false")
-	}
-	if o.DisableRuntimeBroker {
-		args = append(args, "--enable-runtime-broker=false")
-	}
 	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
-	// Equals form, like --web-assets-dir below, so the argv matches scion's
-	// own daemon re-exec form.
+	// Equals form, so the argv matches scion's own daemon re-exec form.
 	if o.SessionSecret != "" {
 		args = append(args, "--session-secret="+o.SessionSecret)
 	}
 	if o.EnableWeb {
 		args = append(args, "--enable-web")
-		// Equals form: it is how scion's own daemon re-emits the flag when it
-		// re-execs itself into the background (cmd/server_daemon.go), so the
-		// argv lever writes matches the argv scion writes for itself.
+		// Equals form, as scion's own daemon re-exec writes it.
 		if o.WebAssetsDir != "" {
 			args = append(args, "--web-assets-dir="+o.WebAssetsDir)
 		}
 	}
-	// A pid file that names a live process which is not a scion server (a
-	// reboot reused the pid) makes scion answer "already running" without
-	// starting anything, and the wait below would then wait on nothing. The
-	// probe removes such a file first. Best-effort: when the jail shell
-	// fails, the start runs as before.
+	// A pid file naming a live non-scion process (a reboot reused the pid)
+	// makes scion answer "already running" without starting anything. The
+	// probe removes such a file first; best-effort.
 	_, _ = c.serverPIDProbe(ctx)
-	// Idempotent: tolerate an already-running server on re-apply; waitHubReady
-	// then confirms the existing server is actually serving.
-	//
-	// runSecret, not run: the argv carries the session secret, and run's error
-	// path renders argv verbatim (redactArgs only knows the hub-secret-set
-	// shapes). The scrub is textual, so AlreadyRunning still matches.
-	if _, err := c.runSecret(ctx, "", o.SessionSecret, args...); err != nil && (o.Exclusive || !AlreadyRunning(err)) {
+	// runSecret: the argv carries the session secret, which redactArgs does
+	// not know. The scrub is textual, so AlreadyRunning still matches.
+	if _, err := c.runSecretEnv(ctx, o.Env, o.SessionSecret, args...); err != nil && !startGaveUpWaiting(err) && !AlreadyRunning(err) {
 		return err
 	}
 	return c.waitHubReady(ctx, o.Progress)
 }
 
-// ServerStop stops the workstation daemon, tolerating a daemon that is not
-// running so callers can call it unconditionally — during teardown, and as the
-// stop half of a restart.
+// ServerStop stops the workstation daemon, tolerating one that is not running
+// (notRunning, not AlreadyRunning) so callers can call it unconditionally.
 //
-// That tolerance is notRunning's, NOT AlreadyRunning's. This comment used to
-// claim AlreadyRunning covered scion's not-running wording; it does not, and a
-// live apply proved it: `scion server stop` against a stopped daemon exits
-// non-zero with "server daemon is not running", which contains neither
-// "already running" nor "already exists", so the error propagated and failed
-// the whole apply. Do not fold the two predicates back together — see
-// notRunning for why.
+// Two guards wrap the stop:
 //
-// Two guards wrap the stop itself:
+//   - Before it, serverPIDProbe: scion signals whatever pid the pid file
+//     names after only a signal-0 check, so after a reboot a stale file can
+//     name an unrelated process of the jail user. Such a file is removed
+//     instead of being signalled.
+//   - After it, waitPIDGone: scion's stop returns after a fixed 500 ms,
+//     possibly before the process has released its ports.
 //
-//   - Before it, the pid file is checked (serverPIDProbe). scion signals
-//     whatever pid ~/.scion/server.pid names after a signal-0 liveness check
-//     only (pkg/daemon/daemon.go StopComponent), so after a VM reboot a
-//     stale file can name an unrelated process of the jail user. A pid whose
-//     /proc cmdline is not a scion server has its pid file removed instead
-//     of being signalled.
-//   - After it, the old daemon is waited on (waitPIDGone). scion's stop
-//     sends SIGINT and returns after a fixed 500 ms, before the process has
-//     necessarily exited and released its ports, so a start right after it
-//     can fail with a port conflict.
-//
-// The probe is best-effort: if the jail shell itself fails, the stop runs as
-// it did before, without the wait.
-//
-// NOTE (live): if the pinned scion build lacks `server stop`, callers should
-// fall back to a jail-process kill; this stays the seam either way.
+// The probe is best-effort: if the jail shell fails, the stop runs without
+// the wait.
 func (c *Client) ServerStop(ctx context.Context) error {
 	pid, _ := c.serverPIDProbe(ctx)
 	if _, err := c.run(ctx, "", "server", "stop"); err != nil && !AlreadyRunning(err) && !notRunning(err) {
@@ -740,14 +559,10 @@ func (c *Client) ServerStop(ctx context.Context) error {
 	return nil
 }
 
-// serverPIDProbeScript prints the pid the server pid file names when that pid
-// is a live scion server, prints nothing when there is no file or the pid is
-// not alive (scion itself then treats the daemon as not running), and REMOVES
-// the file when the pid is alive but is not a scion server — the stale file a
-// reboot leaves, whose pid now belongs to something else. $1 is the pid file
-// path relative to $HOME. The cmdline test matches scion's own daemon argv,
-// `scion server start --foreground ...` (cmd/server_daemon.go
-// buildDaemonStartArgs).
+// serverPIDProbeScript prints the pid the server pid file names when it is a
+// live scion server, nothing when there is no file or the pid is dead, and
+// removes the file when the pid is alive but not a scion server. The cmdline
+// test matches scion's own daemon argv (cmd/server_daemon.go).
 const serverPIDProbeScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
 pid=$(tr -cd '0-9' < "$f")
@@ -757,9 +572,7 @@ case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
 *) rm -f -- "$f"; printf 'stale:%s' "$pid" ;;
 esac`
 
-// serverPIDProbe runs serverPIDProbeScript in the jail and returns the live
-// scion server's pid, or 0 when there is none (or the file was stale and is
-// now gone).
+// serverPIDProbe returns the live scion server's pid, or 0 when there is none.
 func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {
 	res, err := c.r.Run(ctx, nil, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel)
 	if err != nil {
@@ -776,12 +589,85 @@ func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {
 	return pid, nil
 }
 
-// serverExitWait bounds waitPIDGone. scion's daemon shuts its HTTP servers
-// down on SIGINT; that is normally well under a second.
+// RunningHub is what the live hub daemon was started with: its argv and the
+// part of its environment lever pins (HubEnvPrefixes). Running is false when no
+// scion server runs.
+type RunningHub struct {
+	Running bool
+	PID     int
+	Argv    []string
+	Env     map[string]string
+}
+
+// HubEnvPrefixes are the environment keys RunningHub reports. Only these
+// leave the jail: the daemon's environment can hold the session secret and a
+// hub token.
+var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAILS", "LEVER_HUB_"}
+
+// runningHubScript prints the server's pid, then its NUL-separated argv, a
+// separator line, then the allowed env entries. The env filter runs in the
+// guest, so nothing else of the daemon's environment is ever read out.
+var runningHubScript = `f="$HOME/$1"
+[ -f "$f" ] || exit 0
+pid=$(tr -cd '0-9' < "$f")
+[ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
+case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
+*scion*" server "*) ;;
+*) exit 0 ;;
+esac
+printf '%s\n' "$pid"
+tr '\000' '\n' < "/proc/$pid/cmdline"
+printf '%s\n' '--lever-env--'
+tr '\000' '\n' < "/proc/$pid/environ" | grep -E '^(` + strings.Join(hubEnvPatterns(), "|") + `)' | grep -v '^SCION_SERVER_SESSION' || true
+`
+
+func hubEnvPatterns() []string {
+	out := make([]string, len(HubEnvPrefixes))
+	for i, p := range HubEnvPrefixes {
+		out[i] = regexp.QuoteMeta(p)
+	}
+	return out
+}
+
+// RunningHub reads the live hub's argv and pinned env from /proc in the jail.
+func (c *Client) RunningHub(ctx context.Context) (RunningHub, error) {
+	res, err := c.r.Run(ctx, nil, "sh", "-c", runningHubScript, "_", layout.ServerPIDRel)
+	if err != nil {
+		return RunningHub{}, fmt.Errorf("reading the running hub: %w", err)
+	}
+	return parseRunningHub(res.Stdout)
+}
+
+func parseRunningHub(out string) (RunningHub, error) {
+	first, rest, _ := strings.Cut(out, "\n")
+	first = strings.TrimSpace(first)
+	if first == "" || strings.HasPrefix(first, "stale:") {
+		return RunningHub{}, nil
+	}
+	pid, err := strconv.Atoi(first)
+	if err != nil {
+		return RunningHub{}, fmt.Errorf("running hub probe printed %q", first)
+	}
+	h := RunningHub{Running: true, PID: pid, Env: map[string]string{}}
+	argv, env, ok := strings.Cut(rest, "--lever-env--\n")
+	if !ok {
+		return RunningHub{}, fmt.Errorf("running hub probe: no environment section")
+	}
+	for _, a := range strings.Split(strings.TrimSuffix(argv, "\n"), "\n") {
+		if a != "" {
+			h.Argv = append(h.Argv, a)
+		}
+	}
+	for _, kv := range strings.Split(env, "\n") {
+		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+			h.Env[k] = v
+		}
+	}
+	return h, nil
+}
+
 const serverExitWait = 15 * time.Second
 
-// waitPIDGoneScript waits (bounded, in tenths of a second) until /proc/$1 is
-// gone. It exits 1 if the process is still there when $2 tenths have passed.
 const waitPIDGoneScript = `i=0
 while [ -e "/proc/$1" ]; do
   [ "$i" -ge "$2" ] && exit 1
@@ -789,8 +675,6 @@ while [ -e "/proc/$1" ]; do
   i=$((i+1))
 done`
 
-// waitPIDGone blocks until the stopped daemon's pid has exited, so its ports
-// are free for the next start.
 func (c *Client) waitPIDGone(ctx context.Context, pid int) error {
 	tenths := int(serverExitWait / (100 * time.Millisecond))
 	if _, err := c.r.Run(ctx, nil, "sh", "-c", waitPIDGoneScript, "_", strconv.Itoa(pid), strconv.Itoa(tenths)); err != nil {
@@ -799,24 +683,16 @@ func (c *Client) waitPIDGone(ctx context.Context, pid int) error {
 	return nil
 }
 
-// SecretSet stores a Hub secret that is ALWAYS projected into the agent
-// container. It goes through `hub env set --secret`, not `hub secret set`:
-// both write the same secret row (scion's cmd/hub_env.go redirects --secret to
-// the Secret API with type=environment, target=key), but only the env form can
-// set the injection mode. scion normalises an unset mode to as_needed, and
-// since scion #944 (221d2eaf, 2026-08-01) an as_needed value is filtered out of
-// the projected container env — so the secret would sit in the Hub and never
-// reach the agent. The flags exist from 5f56069e (2026-02-11), well below
-// lever's minimum supported pin.
+// SecretSet stores a Hub secret that is always projected into the agent
+// container. It uses hub env set --secret, not hub secret set: both write the
+// same row, but only the env form can set the injection mode, and scion
+// filters an as_needed value out of the projected container env.
 //
-// The value goes over in PLAINTEXT. scion's secret API base64-decodes a value
-// by default, but since ce96122c (#1111, 2026-08-10) the CLI stamps
-// encoding=raw on every non-@file value, so the argument is stored verbatim.
-// Encoding it here would store the base64 TEXT and hand the agent a corrupt
-// credential — which is why this needs a pin of ce96122c or later. An older
-// pin fails loudly at apply, and errBase64Pin explains it.
+// The value goes over in plaintext: since scion ce96122c the CLI stamps
+// encoding=raw on every non-@file value. Encoding it here would hand the
+// agent a corrupt credential. An older pin fails loudly (errBase64Pin).
 func (c *Client) SecretSet(ctx context.Context, key, value string) error {
-	_, err := c.runSecret(ctx, "", value, "hub", "env", "set", "--secret", "--always", key, value)
+	_, err := c.runSecret(ctx, value, "hub", "env", "set", "--secret", "--always", nonInteractive, key, value)
 	return secretSetErr(key, err)
 }
 
@@ -833,36 +709,24 @@ func secretSetErr(key string, err error) error {
 }
 
 // isBase64Rejection reports whether err is the hub refusing a plaintext secret
-// value. Wording from scion's hub env-set handler; like the other predicates
-// here it is the one place that text is known.
+// value (wording from scion's hub env-set handler).
 func isBase64Rejection(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "value must be base64-encoded")
 }
 
-// errBase64Pin names the pin floor rather than the symptom: the hub rejects a
-// plaintext secret only on a scion older than ce96122c, where the CLI did not
-// yet mark values raw.
 var errBase64Pin = errors.New(
 	"scion rejected a plaintext secret value: this scion pin predates ce96122c " +
 		"(#1111, 2026-08-10) — raise scion.source/binary to that commit or later, " +
 		"or scion.version to dbf52f22 or later (commits between 4c045fc8 and " +
 		"dbf52f22 cannot be fetched through the Go module proxy at all)")
 
-// EnvSet sets a NON-secret Hub env var scoped to one agent's project. Unlike
-// SecretSet (encrypted, user-scoped), this is a plain value scoped to the agent
-// by running `hub env set --project` with the agent's project dir as cwd (bare
-// --project infers the project from the working directory), so it does not leak
-// to other agents in the instance. Used to convey LEVER_LLM_AUTH=api-key so an
-// agent's pre-start hook enters api-key mode.
+// EnvSet sets a non-secret Hub env var scoped to one agent's project (bare
+// --project infers it from projectDir as cwd), so it does not leak to other
+// agents. projectDir must be a registered project's dir.
 //
-// --always is load-bearing for the same reason as in SecretSet: without it the
-// variable is stored as_needed and never projected. LEVER_LLM_AUTH is not a
-// key any harness declares as required, so scion's env-gather second pass never
-// asks for it either — as_needed here means "never delivered".
-//
-// projectDir must be a registered project's dir (run after register-project /
-// InitProject).
+// --always is needed as in SecretSet: an as_needed variable no harness
+// declares is never delivered.
 func (c *Client) EnvSet(ctx context.Context, projectDir, key, value string) error {
-	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", "--always", key+"="+value)
+	_, err := c.run(ctx, projectDir, "hub", "env", "set", "--project", "--always", nonInteractive, key+"="+value)
 	return err
 }

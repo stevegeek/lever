@@ -1,22 +1,18 @@
 // Package progress reports a bring-up (`lever apply`, `lever up`) as a list
 // of steps: what runs now, how long each step took, what was skipped and
-// why, and, when a step fails, the last lines of the log that explains it
-// (lever#185, #186, #195).
+// why, and the log tail that explains a failure.
 //
-// A Reporter is carried on the context (With, From), so code deep in a
-// backend or an apply step can name its sub-stage without a new parameter.
-// Every method is safe on a nil *Reporter and then does nothing, so code
-// that runs without one (tests, other commands) needs no checks.
+// A Reporter is carried on the context (With, From), so deep code can name
+// its sub-stage without a new parameter. Every method is safe on a nil
+// *Reporter and then does nothing.
 //
-// Steps can run alongside each other (lever#189): Start begins the
-// foreground step, Background a step that runs beside it. A Background step
-// is ended only by its own Done or Skip, never by the next Start. Code that
-// runs inside a background step takes a context from WithStep, so its
-// Detail and Note land on that step, not on the foreground one.
+// Start begins the foreground step, Background a step that runs beside it
+// and ends only by its own Done or Skip. Code inside a background step takes
+// a context from WithStep, so its Detail and Note land on that step.
 //
-// The same events go to one renderer (a live line on a terminal, plain
-// timestamped lines, or JSON lines) and, when a record path is set, to a
-// JSON-lines record of the run that doctor and the e2e read back.
+// Events go to one renderer (a live terminal line, plain timestamped lines,
+// or JSON lines) and, when a record path is set, to a JSON-lines record that
+// doctor and the e2e read back.
 package progress
 
 import (
@@ -37,7 +33,6 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-// Mode selects the renderer.
 type Mode string
 
 const (
@@ -77,13 +72,12 @@ func AutoMode(w io.Writer, isTerminal func(io.Writer) bool, getenv func(string) 
 }
 
 // heartbeatEvery is how often the plain renderer says a long step still
-// runs, as the manager start line has since lever#168.
+// runs.
 const heartbeatEvery = 15 * time.Second
 
 // tailLines bounds a failure's log tail.
 const tailLines = 15
 
-// Options configure a Reporter.
 type Options struct {
 	Mode   Mode
 	Out    io.Writer // the operator's terminal (stderr)
@@ -124,8 +118,8 @@ type Reporter struct {
 	stopTick func()
 	tickDone chan struct{}
 
-	// root and pin make a view (For): a Reporter whose Current is pin and
-	// whose every other method is root's.
+	// root and pin make a view (For): Current is pin, every other method is
+	// root's.
 	root *Reporter
 	pin  *Step
 }
@@ -212,7 +206,6 @@ func realTicker(d time.Duration) (<-chan time.Time, func()) {
 
 type ctxKey struct{}
 
-// With returns ctx carrying rep.
 func With(ctx context.Context, rep *Reporter) context.Context {
 	return context.WithValue(ctx, ctxKey{}, rep)
 }
@@ -226,10 +219,9 @@ func From(ctx context.Context) *Reporter {
 	return rep
 }
 
-// WithStep returns ctx carrying a view of the Reporter on ctx whose running
-// step is s (For): what a background step's code reports through
-// From(ctx).Detail or Note lands on s. ctx is returned unchanged when it
-// carries no Reporter or s is nil.
+// WithStep returns ctx carrying a view of its Reporter whose running step is
+// s, so a background step's Detail or Note lands on s. ctx is returned
+// unchanged when it carries no Reporter or s is nil.
 func WithStep(ctx context.Context, s *Step) context.Context {
 	rep := From(ctx)
 	if rep == nil || s == nil {
@@ -248,7 +240,6 @@ func (rep *Reporter) For(s *Step) *Reporter {
 	return &Reporter{root: rep.base(), pin: s}
 }
 
-// base is the Reporter a view stands for, or rep itself.
 func (rep *Reporter) base() *Reporter {
 	if rep != nil && rep.root != nil {
 		return rep.root
@@ -257,13 +248,13 @@ func (rep *Reporter) base() *Reporter {
 }
 
 // Active reports whether rep shows step lines itself, so a caller with its
-// own periodic line (the manager start's, lever#168) can stay quiet.
+// own periodic line (the manager start's) can stay quiet.
 func (rep *Reporter) Active() bool {
 	rep = rep.base()
 	return rep != nil && rep.opts.Mode != ModeQuiet
 }
 
-// Header prints the run's first line, before any step: what runs, on what.
+// Header prints the run's first line, before any step.
 func (rep *Reporter) Header(text string) {
 	rep = rep.base()
 	if rep == nil {
@@ -276,9 +267,9 @@ func (rep *Reporter) Header(text string) {
 	rep.r.header(text, rep.opts.Now())
 }
 
-// Group starts a group of steps. total > 0 numbers its steps [n/total];
-// 0 leaves them unnumbered (the jail phases, whose count depends on what
-// the backend finds).
+// Group starts a group of steps. total > 0 numbers its steps [n/total]; 0
+// leaves them unnumbered (the jail phases, whose count depends on what the
+// backend finds).
 func (rep *Reporter) Group(name string, total int) {
 	rep = rep.base()
 	if rep == nil {
@@ -305,10 +296,9 @@ type Step struct {
 	bg     bool // started by Background
 }
 
-// Start begins the foreground step labelled label in the current group. A
-// foreground step still running is ended as done first (steps do not nest);
-// background steps are left running. On a view (For) it begins a
-// background step instead.
+// Start begins the foreground step in the current group, ending a running
+// foreground step as done first (steps do not nest). Background steps keep
+// running. On a view (For) it begins a background step instead.
 func (rep *Reporter) Start(label string) *Step {
 	if rep == nil {
 		return nil
@@ -328,11 +318,9 @@ func (rep *Reporter) Start(label string) *Step {
 	return s
 }
 
-// Background begins a step that runs alongside the foreground one and any
-// other background step (lever#189). It is numbered in start order like
-// any step, and ends only by its own Done or Skip (or Finish): the next
-// Start leaves it running. Code running inside it reports through a
-// context from WithStep.
+// Background begins a step that runs alongside the foreground one. It is
+// numbered in start order and ends only by its own Done or Skip (or Finish).
+// Code inside it reports through a context from WithStep.
 func (rep *Reporter) Background(label string) *Step {
 	rep = rep.base()
 	if rep == nil {
@@ -357,8 +345,7 @@ func (rep *Reporter) newStepLocked(label string, bg bool) *Step {
 	return s
 }
 
-// Detail names what the step waits for now ("hub not answering yet"). It
-// shows on the live line and in the plain heartbeat.
+// Detail names what the step waits for now ("hub not answering yet").
 func (s *Step) Detail(text string) {
 	if s == nil {
 		return
@@ -388,8 +375,7 @@ func (s *Step) Note(text string) {
 }
 
 // TailFrom names where a failure of this step is explained: fn returns the
-// source's name (a path, or "podman logs <container>") and its last lines.
-// It runs only when the step fails.
+// source's name and its last lines. It runs only when the step fails.
 func (s *Step) TailFrom(fn func() (string, []string)) {
 	if s == nil {
 		return
@@ -399,9 +385,8 @@ func (s *Step) TailFrom(fn func() (string, []string)) {
 	s.rep.mu.Unlock()
 }
 
-// Done ends the step: ok when err is nil, failed otherwise. A failure
-// prints the step, its time and the tail of its log (TailFrom); the error
-// itself is left to the caller, which returns it.
+// Done ends the step: ok when err is nil, failed otherwise. A failure prints
+// the step and its log tail; the error itself is left to the caller.
 func (s *Step) Done(err error) {
 	if s == nil {
 		return
@@ -413,7 +398,6 @@ func (s *Step) Done(err error) {
 	s.finish("ok", "", nil)
 }
 
-// Skip ends the step as skipped, with the reason.
 func (s *Step) Skip(reason string) {
 	if s == nil {
 		return
@@ -422,8 +406,7 @@ func (s *Step) Skip(reason string) {
 }
 
 func (s *Step) finish(state, reason string, err error) {
-	// The failure's log tail is read before the lock: it can take a guest
-	// round trip, and the live line keeps ticking meanwhile.
+	// The log tail is read before the lock: it can take a guest round trip.
 	var src string
 	var tail []string
 	// An interrupted run (Ctrl-C) does not wait on a guest round trip for
@@ -462,8 +445,8 @@ func (rep *Reporter) finishLocked(s *Step, state, reason string, err error, src 
 	if err != nil {
 		ev.Error = logging.Redact(oneLine(err.Error()))
 	}
-	// One choke point for what a tail shows: masked, then made safe for
-	// the terminal, whatever its source did already.
+	// One choke point for what a tail shows: masked, then made safe for the
+	// terminal, whatever its source did already.
 	src, tail = termsafe.Sanitize(logging.Redact(src)), sanitizeTail(tail)
 	if state == "fail" {
 		ev.Source, ev.Tail = src, tail
@@ -472,8 +455,7 @@ func (rep *Reporter) finishLocked(s *Step, state, reason string, err error, src 
 	rep.r.done(s, s.end, src, tail)
 }
 
-// Log prints a line (a warning, a notice) above the live line. Lines are
-// sanitized for the terminal.
+// Log prints a line above the live line, sanitized for the terminal.
 func (rep *Reporter) Log(line string) {
 	rep = rep.base()
 	if rep == nil {
@@ -486,8 +468,8 @@ func (rep *Reporter) Log(line string) {
 	rep.r.log(line, rep.opts.Now())
 }
 
-// Command records one external command (LEVER_TRACE). argv is reduced to a
-// safe head by the caller (proc.TraceHead).
+// Command records one external command (LEVER_TRACE). The caller reduces
+// argv to a safe head (proc.TraceHead).
 func (rep *Reporter) Command(head string, d time.Duration, code int, err error) {
 	rep = rep.base()
 	if rep == nil || !rep.opts.Trace {
@@ -504,9 +486,8 @@ func (rep *Reporter) Command(head string, d time.Duration, code int, err error) 
 }
 
 // Finish ends the run: a step left running ends with err's outcome
-// (background steps first, then the foreground one), the summary line is
-// printed (on success), and the record is closed. It returns the summary
-// for the caller's own use.
+// (background steps first), the summary is printed on success, and the
+// record is closed.
 func (rep *Reporter) Finish(err error) Summary {
 	rep = rep.base()
 	if rep == nil {
@@ -542,7 +523,6 @@ func (rep *Reporter) Finish(err error) Summary {
 	return sum
 }
 
-// RecordError reports why the run record could not be opened, if it could not.
 func (rep *Reporter) RecordError() error {
 	rep = rep.base()
 	if rep == nil {
@@ -551,7 +531,6 @@ func (rep *Reporter) RecordError() error {
 	return rep.recErr
 }
 
-// Summary is a finished run.
 type Summary struct {
 	Command string        `json:"command"`
 	Outcome string        `json:"outcome"` // ok or fail
@@ -562,7 +541,6 @@ type Summary struct {
 	At      time.Time     `json:"at"`
 }
 
-// StepTime is one finished step.
 type StepTime struct {
 	Group   string `json:"group,omitempty"`
 	Step    string `json:"step"`
@@ -570,7 +548,6 @@ type StepTime struct {
 	Outcome string `json:"outcome"`
 }
 
-// Line is the summary as the operator reads it.
 func (s Summary) Line() string {
 	verb := s.Command
 	if verb == "" {
@@ -609,20 +586,18 @@ func (rep *Reporter) summaryLocked(err error) Summary {
 	return sum
 }
 
-// event is one line of the JSON renderer and of the run record.
 type event struct {
-	TS      string `json:"ts"`
-	Event   string `json:"event"`
-	Group   string `json:"group,omitempty"`
-	Step    string `json:"step,omitempty"`
-	N       int    `json:"n,omitempty"`
-	Of      int    `json:"of,omitempty"`
-	MS      int64  `json:"ms,omitempty"`
-	Outcome string `json:"outcome,omitempty"`
-	Code    int    `json:"code,omitempty"`
-	Text    string `json:"text,omitempty"`
-	Error   string `json:"error,omitempty"`
-	// Background marks a step started alongside others (lever#189).
+	TS         string   `json:"ts"`
+	Event      string   `json:"event"`
+	Group      string   `json:"group,omitempty"`
+	Step       string   `json:"step,omitempty"`
+	N          int      `json:"n,omitempty"`
+	Of         int      `json:"of,omitempty"`
+	MS         int64    `json:"ms,omitempty"`
+	Outcome    string   `json:"outcome,omitempty"`
+	Code       int      `json:"code,omitempty"`
+	Text       string   `json:"text,omitempty"`
+	Error      string   `json:"error,omitempty"`
 	Background bool     `json:"background,omitempty"`
 	Source     string   `json:"source,omitempty"`
 	Tail       []string `json:"tail,omitempty"`
@@ -648,7 +623,7 @@ func (rep *Reporter) emit(ev event) {
 }
 
 func openRecord(path string) (*os.File, error) {
-	// A new file only, never through a link: the name is the run's own.
+	// A new file only, never through a link.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("progress record: %w", err)
@@ -656,7 +631,6 @@ func openRecord(path string) (*os.File, error) {
 	return f, nil
 }
 
-// oneLine keeps the first line of s, sanitized and trimmed.
 func oneLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
@@ -679,8 +653,6 @@ func sanitizeTail(lines []string) []string {
 	return out
 }
 
-// round formats d for a person: tenths of a second under a minute, whole
-// seconds above.
 func round(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%.1fs", d.Seconds())
@@ -691,8 +663,8 @@ func round(d time.Duration) string {
 // ErrNoRecord is returned by ReadLast when no run was recorded.
 var ErrNoRecord = errors.New("no bring-up recorded yet")
 
-// Current is the running foreground step, or nil; on a view (For), the
-// step the view stands for.
+// Current is the running foreground step, or nil; on a view (For), the step
+// the view stands for.
 func (rep *Reporter) Current() *Step {
 	if rep == nil {
 		return nil
@@ -705,9 +677,8 @@ func (rep *Reporter) Current() *Step {
 	return rep.cur
 }
 
-// Detail sets the running step's sub-stage (Step.Detail), for code that
-// does not hold the step: progress.From(ctx).Detail("hub not answering yet").
+// Detail sets the running step's sub-stage, for code that does not hold the
+// step.
 func (rep *Reporter) Detail(text string) { rep.Current().Detail(text) }
 
-// Note adds a remark to the running step (Step.Note).
 func (rep *Reporter) Note(text string) { rep.Current().Note(text) }

@@ -14,33 +14,24 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// WorkerPurger deletes a worker's scion record and then its staged guest
-// ticket: the teardown of `lever worker purge` (brokerctl.PurgeWorker).
-// err is the record delete's failure, with nothing done; ticketErr a ticket
-// removal that failed after the record was gone. It never touches the
-// worker's workspace.
+// WorkerPurger deletes a worker's scion record, then its staged guest ticket;
+// never its workspace. err means nothing was done; ticketErr is a ticket
+// removal that failed after the record was gone.
 type WorkerPurger interface {
 	PurgeWorker(ctx context.Context, worker string) (ticketErr, err error)
 }
 
-// recycleRateLimit is how many recycles of ONE worker the broker allows in a
-// minute. A deal slot is recycled when its deal ends, so one a minute is far
-// above real use, and it keeps a manager in a loop from churning hub records.
+// recycleRateLimit is per worker per minute: far above real use, and it keeps
+// a looping manager from churning hub records.
 const recycleRateLimit = 1
 
-// taskPreviewLen bounds how much of a recycle's task goes into the audit
-// line: enough to tell two deals apart, never the whole task.
+// taskPreviewLen bounds the task text in an audit line: never the whole task.
 const taskPreviewLen = 60
 
-// recyclablePhase reports whether a worker record in phase may be deleted by
-// a recycle (its container must also be down: handleWorkerRecycle). Suspended and stopped are the phases the manager's own verbs
-// leave. Error is allowed too: the hub sets it for a record whose container
-// is dead (a crash, or a worker left running across `lever stop` + `lever
-// up`), so no live session is lost, and a purge plus a fresh start is the
-// documented recovery for such a record. Every other phase is refused:
-// running, a record the hub still calls running while its container is down
-// (it can still come back; stop it first), the interim phases of a start,
-// resume or stop under way, and an unrecognised phase.
+// recyclablePhase reports whether a recycle may delete a record in phase (its
+// container must also be down). Error is allowed: its container is dead, so
+// no live session is lost. Every other phase is refused, including
+// "running, container down", which can still come back.
 func recyclablePhase(phase string) bool {
 	switch phase {
 	case scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
@@ -49,19 +40,10 @@ func recyclablePhase(phase string) bool {
 	return false
 }
 
-// handleWorkerRecycle discards a declared worker's record and starts it
-// fresh with a new task: the manager's form of `lever worker purge` followed
-// by `agent start`, for a worker slot the operator marked recyclable. The
-// old conversation is lost; the workspace (work product) is kept.
-//
-// Guards, in order: the caller is the manager and not revoked, the worker is
-// declared (requireManagerWorker); it is not the manager; it is recyclable;
-// the task passes the start route's checks; the worker's lifecycle lock is
-// free (no waiting: a recycle never queues behind a start, resume, wake or
-// heal); the record is in a recyclable phase; the instructions file reads;
-// the per-worker rate allows it. Only then is the record deleted, and the
-// start that follows is the start route's own (startFreshWorker), under the
-// same lock.
+// handleWorkerRecycle discards a recyclable worker's record and starts it
+// fresh with a new task; the workspace is kept. Every guard runs before the
+// record is deleted, and the lock is never waited for: a recycle never queues
+// behind another lifecycle action.
 func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 	var req wire.WorkerStartRequest
 	spec, ok := b.requireManagerWorker(w, r, &req, func() string { return req.Worker })
@@ -69,9 +51,8 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verb := "recycle " + spec.Name
-	// Config validation keeps the manager's CN and slug out of workers:, and
-	// the lookup above is exact. Checked again here: a recycle deletes a
-	// record, and the manager's record holds its conversation.
+	// Config validation already excludes this; checked again because a
+	// recycle deletes a record.
 	if spec.Name == b.manager || spec.Name == b.managerSlug {
 		b.audit("worker", b.manager, "deny", verb+": the manager is never recycled")
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -122,10 +103,8 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if phase != "" {
-		// The phase and the container status are both text a running worker
-		// can post about itself, so a phase alone is not proof the session
-		// is down. The hub's container status is checked first, then the
-		// container itself, which no agent can fake.
+		// Phase and container status are agent-settable text, so also check
+		// the container itself, which no agent can fake.
 		if scion.ContainerLive(containerStatus) {
 			notStopped("phase " + phase + " but its container is live")
 			return
@@ -143,16 +122,14 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// The start below reads the same file; read it now so a config that names
-	// an unreadable file fails with the record still in place.
+	// Read now so an unreadable file fails with the record still in place.
 	if _, err := readWorkerInstructions(spec); err != nil {
 		b.audit("worker", b.manager, "error", verb+": "+err.Error())
 		http.Error(w, "instructions error; nothing was deleted", http.StatusInternalServerError)
 		return
 	}
-	// broker.max_running_workers: refuse before the purge, so nothing is
-	// deleted. The start below admits again under the same name, which the
-	// count allows (a worker never counts against itself).
+	// Before the purge. The start below admits again under the same name,
+	// which is allowed (a worker never counts against itself).
 	release, ok := b.admitOrRefuse(ctx, w, b.manager, "recycle", spec.Name)
 	if !ok {
 		return
@@ -171,8 +148,7 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task := fmt.Sprintf("task %d bytes, begins %q", len(req.Task), taskPreview(req.Task))
-	// shared_folders: the fresh start would be refused while the manager
-	// lacks its pins; refuse before the purge, so nothing is deleted.
+	// The fresh start would be refused; refuse before the purge.
 	if err := b.checkSharedAccess(ctx, spec, false); err != nil {
 		b.recycleRate.refund(spec.Name, counted)
 		b.audit("worker", b.manager, "deny", verb+": "+err.Error())
@@ -180,22 +156,18 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if phase == "" {
-		// No record (never started, purged, a new jail): nothing to delete,
-		// and the recycle is a fresh start.
 		b.audit("worker", b.manager, "allow", verb+": no record, starting fresh; "+task)
 	} else {
 		ticketErr, err := b.purger.PurgeWorker(ctx, spec.Name)
 		if err != nil {
-			// Nothing was deleted: the next try may go ahead at once.
 			b.recycleRate.refund(spec.Name, counted)
 			b.audit("worker", b.manager, "error", verb+": purge (phase "+phase+"): "+err.Error())
-			http.Error(w, "runtime error: the record of worker "+spec.Name+" was not deleted; check `lever-manager agent list` and try again. "+
+			http.Error(w, "runtime error: the record of worker "+spec.Name+" was not deleted, or its delete was not confirmed; nothing was started. Check `lever-manager agent list` and try again. "+
 				"If it persists, the operator should run `lever doctor`.", http.StatusBadGateway)
 			return
 		}
 		if ticketErr != nil {
-			// The record is gone; the start stages a fresh ticket over what is
-			// left, so this is only the operator's record.
+			// The start stages a fresh ticket over what is left.
 			b.audit("worker", b.manager, "error", verb+": removing the staged ticket: "+ticketErr.Error())
 		}
 		b.audit("worker", b.manager, "allow", verb+": record deleted (phase "+phase+"), workspace kept; "+task)
@@ -203,9 +175,6 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 	b.startFreshWorker(w, r, spec, req.Task)
 }
 
-// taskPreview is the start of a task for an audit line: at most
-// taskPreviewLen bytes of valid UTF-8, control and format characters
-// replaced by spaces.
 func taskPreview(task string) string {
 	s := strings.ToValidUTF8(task, "_")
 	if len(s) > taskPreviewLen {

@@ -1,8 +1,6 @@
-// Package rules is the broker's request/delegation policy: per agent, which
-// capabilities it may obtain for itself and which it may delegate (mint bound
-// to another agent). It is the delegation/obtain policy. The
-// policy is default-deny; build it with AllowObtain/AllowDelegate (typically
-// from lever.yaml) and query it with MayObtainRule.
+// Package rules is the broker's default-deny request/delegation policy: per
+// agent, which capabilities it may obtain for itself and which it may
+// delegate (mint bound to another agent).
 package rules
 
 type capKey struct {
@@ -15,12 +13,9 @@ type agentPolicy struct {
 	delegate map[capKey]map[string]struct{} // (tool,op) -> recipients it may delegate to
 }
 
-// Policy holds the per-agent request/delegation policy. It is NOT safe for
-// concurrent mutation: build it fully at boot with AllowObtain/AllowDelegate,
-// then query MayObtainRule concurrently. Unlike registry.Registry, nothing
-// mutates it once the broker serves — the policy comes from lever.yaml alone,
-// there is no runtime route that changes a grant, and a policy change means a
-// broker restart (brokerctl.ConfigHash) — so it carries no mutex.
+// Policy is NOT safe for concurrent mutation: build it fully at boot, then
+// query it concurrently. No runtime route changes a grant; a policy change
+// means a broker restart.
 type Policy struct {
 	agents map[string]*agentPolicy
 }
@@ -42,14 +37,13 @@ func (p *Policy) ensure(agent string) *agentPolicy {
 	return ap
 }
 
-// AllowObtain permits agent to obtain (mint for itself) the (tool, op) capability.
+// AllowObtain permits agent to obtain (tool, op) for itself.
 func (p *Policy) AllowObtain(agent, tool, op string) {
 	p.ensure(agent).obtain[capKey{tool, op}] = struct{}{}
 }
 
-// AllowDelegate permits agent to delegate the (tool, op) capability to each
-// recipient in `to` (mint a token bound to that recipient). Recipients
-// accumulate across calls.
+// AllowDelegate permits agent to delegate (tool, op) to each recipient in
+// `to`. Recipients accumulate across calls.
 func (p *Policy) AllowDelegate(agent, tool, op string, to ...string) {
 	ap := p.ensure(agent)
 	k := capKey{tool, op}
@@ -64,12 +58,9 @@ func (p *Policy) AllowDelegate(agent, tool, op string, to ...string) {
 }
 
 // MayObtainRule reports whether requester may mint a token for (tool, op)
-// bound to boundTo and, on allow, a stable identifier of the matched policy
-// rule ("obtain:<agent>:<tool>.<op>" or
-// "delegate:<agent>-><recipient>:<tool>.<op>") for the audit trail.
-// requester == boundTo is a self-obtain (checked against the obtain set);
-// otherwise it is a delegation (checked against the delegate set and its
-// recipient list). Fails closed: denied requests return ("", false).
+// bound to boundTo, and on allow the matched rule's id for the audit trail.
+// requester == boundTo is a self-obtain; otherwise a delegation. Fails
+// closed.
 func (p *Policy) MayObtainRule(requester, boundTo, tool, op string) (string, bool) {
 	ap, ok := p.agents[requester]
 	if !ok {

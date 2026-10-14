@@ -18,8 +18,8 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// sentFixture is an instance with its state dir outside the tree, on a path
-// short enough for a UNIX socket.
+// sentFixture keeps the state dir outside the tree, on a path short enough for
+// a UNIX socket.
 func sentFixture(t *testing.T) (*config.App, state.State) {
 	t.Helper()
 	dir := directiveTestDir(t)
@@ -87,6 +87,32 @@ func TestCheckSentLedgerSymlinkAndInsideTree(t *testing.T) {
 	}
 }
 
+// A state directory whose place lever cannot check counts as inside the tree,
+// and the row names the error rather than claiming it is inside.
+func TestStateRowsNameTheIdentityError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	base := t.TempDir()
+	tree := filepath.Join(base, "tree")
+	locked := filepath.Join(base, "locked")
+	for _, d := range []string{tree, filepath.Join(locked, ".lever-state")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o700) })
+	app := &config.App{Tree: tree}
+	st := state.State{Dir: filepath.Join(locked, ".lever-state")}
+	r := checkSentLedger(app, st)
+	if r.ok || !strings.Contains(r.detail, "cannot prove") || !strings.Contains(r.detail, "permission denied") || !strings.Contains(r.fix, "searchable") {
+		t.Fatalf("row = %+v, want a failure naming the error", r)
+	}
+}
+
 func TestCheckGuestClock(t *testing.T) {
 	now := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
@@ -113,9 +139,8 @@ func TestCheckGuestClock(t *testing.T) {
 	}
 }
 
-// With agent messages on, a guest more than 5 s behind the host fails the
-// row with the reason (contacts are not shown authorized messages); a guest
-// ahead keeps the plain rule.
+// With agent messages on, a guest over 5 s behind fails the row (contacts do
+// not see authorized messages); a guest ahead keeps the plain rule.
 func TestCheckGuestClockWithAgentMessages(t *testing.T) {
 	now := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
@@ -149,9 +174,6 @@ func TestCheckVerifiedChatWithoutAllowedUsersSaysPostsAreData(t *testing.T) {
 	}
 }
 
-// TestPrintRemoteWarningsSaysUnverifiedChatIsData: every bring-up with
-// remote access and no allowed_users says the agents will not act on web
-// chat; with allowed_users it does not.
 func TestPrintRemoteWarningsSaysUnverifiedChatIsData(t *testing.T) {
 	for _, users := range [][]config.RemoteUser{nil, {{Login: "me@example.com"}}} {
 		app := &config.App{Remote: config.Remote{Enabled: true, AllowedUsers: users}}

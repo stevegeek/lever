@@ -14,50 +14,33 @@ import (
 	"github.com/stevegeek/lever/internal/chatledger"
 )
 
-// The chat page.
+// The chat page. With Config.ChatAgent set (remote.landing: chat), the proxy
+// serves its own page under /lever/ and sends "/" there. It is an alternative
+// front for existing routes, not a new route to an agent:
 //
-// With Config.ChatAgent set (remote.landing: chat), the proxy serves a small
-// page of its own under /lever/ and sends "/" there: a list of the login's
-// agents and a chat with each it may message, plus, for an operator, links
-// to each agent's terminal and to the hub's full web UI. It is an
-// alternative front for routes that already exist, not a new route to an
-// agent:
-//
-//   - The page reads and sends through the hub's own chat routes, forwarded
-//     by this proxy like any other request. A contact's go through the
-//     contact fence exactly as before (contact.go): the page gains no hub
-//     route a contact did not have. A message it posts is recorded by
-//     recordChat exactly as one posted from the hub's web UI, and verifies
-//     the same way (package chatledger). Nothing here signs, records or
-//     delivers a message.
-//   - Everything below is answered only for a verified login that passed
-//     the gate, operator or contact. What each sees is built server-side
-//     from its tier and lists (agents.go): a contact never learns of an
-//     agent outside its lists.
-//   - What lever serves is fixed: the files embedded in the binary, a
-//     manifest per tier, and the agent list (JSON built from config, the
-//     hub's records reduced to fixed words, and cleaned labels). No other
-//     agent-written byte is served from here. The page writes what it reads
-//     from the hub as text only (see chatui/chat.js), and its CSP allows no
+//   - It reads and sends through the hub's own chat routes, forwarded like
+//     any request; a contact's go through the contact fence (contact.go).
+//     Posted messages are recorded by recordChat as from the hub's web UI.
+//     Nothing here signs, records or delivers a message.
+//   - Everything is answered only for a verified login that passed the gate,
+//     built server-side from its tier and lists (agents.go): a contact never
+//     learns of an agent outside its lists.
+//   - lever serves only fixed bytes: embedded files, a manifest per tier and
+//     the agent list (config, hub records reduced to fixed words, cleaned
+//     labels). The page writes hub data as text only, and its CSP allows no
 //     inline script.
-//   - Its own writes are the wake route alone (wake.go).
 //
-// The whole /lever/ prefix is lever's while the page is on: an unknown path
-// under it is a 404, never forwarded, so a route added here later cannot
-// shadow one the hub answers.
-
-// The page is installable as an app (a web app manifest and icons, below).
-// The page has no service worker unless remote.push is on. Then
-// /lever/sw.js is a push-only worker (no fetch handler, no cache): it shows
-// a notification and opens the chat, and never sits between the page and
-// its requests, so it cannot serve a stale page.
+// The whole /lever/ prefix is lever's: an unknown path under it is a 404,
+// never forwarded, so a route added here cannot shadow a hub route. The
+// service worker exists only with remote.push and is push-only (no fetch
+// handler, no cache), so it cannot serve a stale page.
 
 //go:generate go run chaticons_gen.go
 //go:embed chatui/chat.html chatui/chat.css chatui/chat.js chatui/chatcore.js chatui/sw.js chatui/*.png
 var chatUI embed.FS
 
-// DecisionChatUnavailable is the audit decision for a chat page request the
-// proxy could not answer (the hub named no usable identity or agent).
+// DecisionChatUnavailable audits a chat page request the proxy could not
+// answer (no usable identity or agent from the hub).
 const DecisionChatUnavailable Decision = "chat-unavailable"
 
 const (
@@ -65,34 +48,21 @@ const (
 	chatPagePath     = "/lever/chat"
 	chatAgentsPath   = "/lever/api/agents"
 	chatManifestPath = "/lever/manifest.webmanifest"
-	// chatConsolePath is where the page's link to the hub's web UI goes: its
-	// agent list, since "/" now leads back to the chat page.
+	// chatConsolePath is the hub's agent list, since "/" leads to the chat page.
 	chatConsolePath = "/agents"
 )
 
-// chatCSPFor is the page's policy: it loads script and style only from
-// lever's own /lever/ path, talks only to its own origin, and allows no
-// inline script or style, no frame, no form target and no other origin.
+// chatCSPFor is the page's policy: script, style and manifest only from
+// lever's own /lever/ path, connections only to its own origin, nothing
+// inline, no frame, no form target. The path matters: the hub serves
+// agent-written files under /api/ with a type from the file name, so 'self'
+// would admit an agent's .js. A serveHost the policy cannot name (cspHost)
+// falls back to 'self'. Opened under any name but base_url's host, the page's
+// own files are blocked; those names are not for a browser.
 //
-// The path matters. The hub serves agent-written files under /api/ with a
-// type taken from the file name, so on this origin 'self' would also admit a
-// .js file an agent wrote. The page has no markup sink for an agent to name
-// such a file through (TestChatPageHasNoMarkupSink); this keeps a sink added
-// by mistake from loading agent script as well. The app manifest and its
-// icons come from /lever/ too (manifest-src, img-src). A serveHost the
-// policy cannot name (cspHost) falls back to 'self'.
-//
-// The policy names base_url's host, so the page runs only when opened there.
-// Opened under another name the Host check admits (the loopback probe
-// address, or a bind address), the browser blocks the page's own files:
-// those names are for probes and fronts, not for a browser.
-//
-// With push on (remote.push), two directives change and nothing else:
-// worker-src names /lever/ for the push-only worker, and Trusted Types
-// allows exactly one policy, lever-sw, whose only output is the literal
-// worker URL (chat.js): serviceWorker.register is a script-URL sink, so with
-// no policy at all the page could not register its worker. Off, the policy
-// is the one the page had before push existed.
+// With push on, worker-src names /lever/ and Trusted Types allows exactly
+// lever-sw, whose only output is the literal worker URL, because
+// serviceWorker.register is a script-URL sink.
 func chatCSPFor(serveHost string, push bool) string {
 	own, img := "'self'", "'self'"
 	if cspHost(serveHost) {
@@ -103,21 +73,19 @@ func chatCSPFor(serveHost string, push bool) string {
 		worker, tt = "worker-src "+own+"; ", chatSWPolicy
 	}
 	// Trusted Types with no policy allowed makes every markup or script sink
-	// throw where the browser supports it: a second guard on the same rule.
+	// throw: a second guard on the same rule.
 	return "default-src 'none'; script-src " + own + "; style-src " + own + "; connect-src 'self'; " +
 		"img-src " + img + "; manifest-src " + own + "; " + worker + "base-uri 'none'; form-action 'none'; frame-ancestors 'none'; " +
 		"require-trusted-types-for 'script'; trusted-types " + tt
 }
 
-// chatSWPolicy is the one Trusted Types policy the page may create, with
-// push on: it turns the literal "/lever/sw.js" into a script URL, nothing
-// else (chat.js; TestChatPageHasNoMarkupSink pins it).
+// chatSWPolicy only turns the literal "/lever/sw.js" into a script URL
+// (TestChatPageHasNoMarkupSink pins it).
 const chatSWPolicy = "lever-sw"
 
-// cspHost reports whether host (a name or an IPv4 address, with an optional
-// port) can be written into a CSP source as it is. An IPv6 literal cannot:
-// the CSP host-source grammar has no brackets, and a browser drops a source
-// it cannot parse, which would leave the page with no script at all.
+// cspHost reports whether host can be written into a CSP source as is. An
+// IPv6 literal cannot: the grammar has no brackets, and a browser drops a
+// source it cannot parse, leaving the page with no script.
 func cspHost(host string) bool {
 	if host == "" || len(host) > 255 {
 		return false
@@ -143,26 +111,21 @@ func cspHost(host string) bool {
 	return true
 }
 
-// chatFile is one embedded file, read once.
 type chatFile struct {
 	contentType string
 	body        []byte
 	etag        string
 }
 
-// chatPage serves the page, for both tiers.
 type chatPage struct {
 	csp   string
 	files map[string]chatFile
-	// manifests is the app manifest per tier: an operator's names the
-	// instance, a contact's is generic, so it names no agent.
+	// manifests is per tier: a contact's is generic so it names no agent.
 	manifests map[string]chatFile
 	whoAmI    func(ctx context.Context, cookie string) (string, error)
-	// hubGet reads a hub JSON route with a login's own session (the agent
-	// list's unread counts).
-	hubGet func(ctx context.Context, cookie, path string, out any) (int, error)
-	// hubBody reads a hub route's raw 200 answer with a login's own session,
-	// GET only (the operator view's one use of a contact's session).
+	// hubGet and hubBody read hub routes with a login's own session; hubBody
+	// is GET only.
+	hubGet  func(ctx context.Context, cookie, path string, out any) (int, error)
 	hubBody func(ctx context.Context, cookie, path string) (int, []byte, error)
 
 	mu      sync.Mutex
@@ -171,8 +134,7 @@ type chatPage struct {
 	nowFn   func() time.Time
 }
 
-// newChatPage loads the embedded files. A file that is missing is a build
-// fault, so it panics rather than serve a page with a hole in it.
+// newChatPage panics on a missing embedded file: that is a build fault.
 func newChatPage(cfg Config) *chatPage {
 	p := &chatPage{csp: chatCSPFor(cfg.ServeHost, cfg.Push != nil), whoAmI: hubWhoAmI(cfg),
 		hubGet: hubGetJSON(cfg), hubBody: hubGetBody(cfg, maxHistoryAnswer), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
@@ -214,15 +176,9 @@ func newChatPage(cfg Config) *chatPage {
 	return p
 }
 
-// contactAppName names a contact's installed app: generic, so the manifest
-// names no agent (the manager may be outside the contact's lists).
+// contactAppName is generic: the manager may be outside a contact's lists.
 const contactAppName = "Chat"
 
-// chatManifest is the page's web app manifest: what a browser needs to
-// install the page as an app (Chrome's "Install page as app", Safari's "Add
-// to Home Screen"). It opens /lever/chat in a window of its own; the
-// Terminal and Console links leave its scope and still work, shown by the
-// browser as pages outside the app.
 type chatManifest struct {
 	Name            string             `json:"name"`
 	ShortName       string             `json:"short_name"`
@@ -242,11 +198,9 @@ type chatManifestIcon struct {
 	Purpose string `json:"purpose"`
 }
 
-// chatManifestFor names the app after the instance (the manager's agent
-// name is the instance name, a short [a-z0-9-] token config validates). The
-// colours are chat.css's light ones: --bg behind the window while it loads,
-// --panel for the title bar, which the header continues. The dark scheme
-// sets its own bar colour in chat.html; a manifest has one.
+// chatManifestFor names the app after the instance (a config-validated
+// [a-z0-9-] token). Colours are chat.css's light ones; chat.html sets the
+// dark bar colour, since a manifest has one.
 func chatManifestFor(instance string) chatManifest {
 	short := instance
 	if r := []rune(short); len(r) > 12 {
@@ -267,10 +221,9 @@ func chatManifestFor(instance string) chatManifest {
 	}
 }
 
-// validHubID reports whether an id the hub named is safe to put in a URL
-// path and a conversation key: the page builds both from it, on the
-// operator's origin. Hub ids are UUIDs; anything with a separator in it is
-// refused rather than escaped.
+// validHubID reports whether a hub id is safe to put in a URL path and a
+// conversation key on the operator's origin. Hub ids are UUIDs; anything with
+// a separator is refused rather than escaped.
 func validHubID(s string) bool {
 	if s == "" || len(s) > 128 {
 		return false
@@ -286,14 +239,12 @@ func validHubID(s string) bool {
 }
 
 // serveChatPage answers a request the chat page owns and reports true, or
-// reports false for a request that goes on (to the contact fence for a
-// contact, to the hub for an operator). login is the verified login, of
-// either tier, and cookie its hub session; the caller has already run
-// authorize.
+// false for one that goes on (to the contact fence or the hub). The caller
+// has already run authorize.
 func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *AuditLine, login, cookie string) bool {
 	if g.chat == nil || login == "" {
-		// No verified login (allowed_users empty): nothing the page sent
-		// would verify, so there is no page.
+		// No verified login (allowed_users empty): nothing the page sent would
+		// verify.
 		return false
 	}
 	p := r.URL.Path
@@ -311,14 +262,13 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	}
 	v := g.viewerFor(login)
 	if p == chatContactsPath || strings.HasPrefix(p, chatContactsPath+"/") {
-		// Before the method check: a contact gets the fence's refusal
-		// whatever it sends.
+		// Before the method check: a contact gets the fence's refusal whatever
+		// it sends.
 		g.serveOperatorView(w, r, line, v)
 		return true
 	}
 	if name, under := wakeTarget(p); under {
 		if name == "" {
-			// Under the agents prefix only the wake route exists.
 			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
 			return true
 		}
@@ -327,8 +277,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	}
 	if agent, id, under := filesTarget(p); under {
 		if !g.filesOnFor(v.login) || agent == "" {
-			// Off, or a path under the prefix that names no agent: the
-			// prefix is lever's either way, never the hub's.
+			// The prefix is lever's even when off; never forward it.
 			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
 			return true
 		}
@@ -342,8 +291,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		case g.speak != nil && p == speakPath:
 			g.serveSpeak(w, r, line, v)
 		default:
-			// Off, or a path under the prefix that is not a route: the
-			// prefix is lever's either way, never the hub's.
+			// The prefix is lever's even when off; never forward it.
 			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)
 		}
 		return true
@@ -372,15 +320,9 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	hdr := func() {
 		w.Header().Set("Content-Type", f.contentType)
 		w.Header().Set("ETag", f.etag)
-		// Revalidate on every load: the files change with the lever binary.
-		// private: the answer at this URL depends on who asks (the manifest
-		// differs per tier), so no shared cache may keep it. No Vary: the
-		// login comes from the front's identity header, not from anything
-		// the browser sends (Vary: Cookie would name the wrong input), and
-		// none is needed: no-cache makes the browser revalidate every load,
-		// and each tier's manifest has its own ETag, so a browser that
-		// changed login sends the other tier's tag and gets a 200 with its
-		// own manifest, never a 304 for the old one.
+		// private: the manifest differs per tier. No Vary: the login comes
+		// from the front's identity header, and each tier's manifest has
+		// its own ETag, so a changed login never gets a stale 304.
 		w.Header().Set("Cache-Control", "private, no-cache")
 	}
 	if etagMatches(r.Header.Get("If-None-Match"), f.etag) {
@@ -391,9 +333,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	return true
 }
 
-// etagMatches reports whether an If-None-Match value names etag: "*", or a
-// list with the tag in it, strong or weak (a front that compresses the
-// answer weakens the tag it passes on).
+// etagMatches accepts weak tags: a compressing front weakens the tag.
 func etagMatches(header, etag string) bool {
 	for _, v := range strings.Split(header, ",") {
 		v = strings.TrimSpace(v)
@@ -404,9 +344,8 @@ func etagMatches(header, etag string) bool {
 	return false
 }
 
-// answerChat writes one of the chat page's own answers and audits it. Every
-// answer carries the page's CSP, whatever its type: a 404 text is then as
-// inert as the page is strict. Nothing is stored unless headers says so.
+// answerChat audits and writes one of the page's own answers. Every answer
+// carries the page's CSP, so even a 404 text is inert.
 func (g *gate) answerChat(w http.ResponseWriter, line *AuditLine, decision Decision, status int, headers func(), body []byte, r *http.Request) {
 	line.Decision, line.Status = decision, status
 	g.audit(*line)

@@ -16,19 +16,15 @@ import (
 
 // Agent messages a contact sees (remote.agent_messages).
 //
-// The hub shows a user every message an agent sends it. With agent messages
-// on, a contact is shown an agent's row only when the broker's agent ledger
-// recorded its exact text for that agent and contact
-// (Config.MatchAgentMessages, over the operator socket). Every other agent
-// row is removed from the history answer, and nothing else in the answer
-// may carry its text: the answer and each kept row keep only listed
-// fields, reply previews go, attachment and extension entries of removed
-// rows go, and so do the attachment entries of every agent row (their names
-// are agent text no record covers). Paging is the hub's:
-// nextCursor and totalCount stay as they are, so a page may hold fewer rows
-// than asked for, and totalCount can show how many rows a page hid (never
-// their text; accepted). Any answer the proxy cannot read becomes an empty
-// page: failing closed.
+// With agent messages on, a contact is shown an agent's row only when the
+// broker's agent ledger recorded its exact text for that agent and contact.
+// Every other agent row is removed from the history answer, and nothing else
+// in the answer may carry its text: kept rows and the answer keep only listed
+// fields, reply previews go, and no agent row keeps attachment entries (their
+// names are agent text no record covers). nextCursor and totalCount stay the
+// hub's, so totalCount can show how many rows a page hid (never their text;
+// accepted). An answer the proxy cannot read becomes an empty page: fail
+// closed.
 
 // AgentMessage is one agent row the broker is asked about: no text.
 type AgentMessage struct {
@@ -45,18 +41,16 @@ type historyRow struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// maxHistoryAnswer bounds the history answer the proxy reads: 200 rows of
-// 16000 characters, JSON-escaped.
+// maxHistoryAnswer: 200 rows of 16000 characters, JSON-escaped.
 const maxHistoryAnswer = 32 << 20
 
-// maxMatchRows is the most rows one broker question carries (the hub's own
-// page cap; the broker refuses more).
+// maxMatchRows is the hub's own page cap; the broker refuses more.
 const maxMatchRows = 200
 
-// agentRow reports whether a row needs a ledger record to be shown: every
-// row but the contact's own and a hub line. A hub line is a system or state
-// type that neither names an agent sender nor carries the DM agent's id; the
-// hub stamps both from the agent's token, so an agent cannot write one.
+// agentRow: every row but the contact's own and a hub line. A hub line is a
+// system or state type that neither names an agent sender nor carries the DM
+// agent's id; the hub stamps both from the agent's token, so an agent cannot
+// write one.
 func agentRow(m historyRow, uid, agentID string) bool {
 	if m.SenderID == uid && uid != "" && strings.HasPrefix(m.Sender, "user:") {
 		return false
@@ -66,19 +60,16 @@ func agentRow(m historyRow, uid, agentID string) bool {
 	return !hubLine
 }
 
-// keepAgentRows asks the broker which agent rows to keep. Rows that are not
-// agent rows are not asked about (and not in the answer). An agent row is
-// never kept when its sender id is not the DM's agent, or it has a type
-// other than agentTypes, no id, no text (a deleted one), no readable time,
-// or an id that appears more than once in rows. Only an id the proxy asked about can be in the answer: the
-// broker's keep list is checked against the question, never trusted on its
-// own.
+// keepAgentRows never keeps an agent row whose sender is not the DM's agent,
+// whose type is not in agentTypes, or with no id, no text, no readable time,
+// or an id repeated in rows. The broker's keep list is checked against the
+// question, never trusted on its own.
 func (g *gate) keepAgentRows(ctx context.Context, contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
 	return askAgentRows(ctx, g.cfg.MatchAgentMessages, contact, agent, agentID, uid, rows)
 }
 
-// askAgentRows is keepAgentRows with the broker question given: the
-// binding match for a contact's reads, the peek for the operator view.
+// askAgentRows takes the broker question: the binding match for a contact's
+// reads, the peek for the operator view.
 func askAgentRows(ctx context.Context, match func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error),
 	contact, agent, agentID, uid string, rows []historyRow) (map[string]bool, error) {
 	if match == nil {
@@ -87,8 +78,7 @@ func askAgentRows(ctx context.Context, match func(ctx context.Context, contact, 
 	seen := idCounts(rows)
 	var ask []AgentMessage
 	for _, m := range rows {
-		// Only the DM agent's own rows are asked about: another sender's row
-		// with the same text must not take the agent's record.
+		// Another sender's row with the same text must not take the agent's record.
 		if !agentRow(m, uid, agentID) || m.SenderID != agentID || !agentTypes[m.Type] || m.ID == "" || m.Msg == "" || seen[m.ID] != 1 {
 			continue
 		}
@@ -120,14 +110,11 @@ func askAgentRows(ctx context.Context, match func(ctx context.Context, contact, 
 
 var errNoMatcher = errors.New("no agent message matcher")
 
-// agentTypes are the types the hub stamps on a message an agent sends a
-// user: "instruction" (scion message), "input-needed" (the outbound
-// default) and "assistant-reply" (the harness hook). The agent picks the
-// type, and a system or state type would draw its text as a hub notice, so
-// an agent row of any other type is never asked about: never shown.
+// agentTypes are what the hub stamps on an agent's message to a user. The
+// agent picks the type, and a system or state type would draw its text as a
+// hub notice, so an agent row of any other type is never shown.
 var agentTypes = map[string]bool{"instruction": true, "input-needed": true, "assistant-reply": true}
 
-// idCounts counts each row id on a page.
 func idCounts(rows []historyRow) map[string]int {
 	n := map[string]int{}
 	for _, m := range rows {
@@ -136,10 +123,8 @@ func idCounts(rows []historyRow) map[string]int {
 	return n
 }
 
-// contactShown is the ids of the rows a contact is shown with agent
-// messages on: a row whose id is unique on the page and that is not an agent
-// row or is one the ledger keeps. filterHistory removes every other row; the
-// operator view (opview.go) marks them, so the two cannot differ.
+// contactShown is shared by filterHistory and the operator view so the two
+// cannot differ.
 func contactShown(rows []historyRow, keep map[string]bool, uid, agentID string) map[string]bool {
 	seen := idCounts(rows)
 	shown := map[string]bool{}
@@ -151,7 +136,6 @@ func contactShown(rows []historyRow, keep map[string]bool, uid, agentID string) 
 	return shown
 }
 
-// emptyHistory is the fail-closed answer.
 var emptyHistory = []byte(`{"messages":[],"totalCount":0}`)
 
 func setBody(resp *http.Response, b []byte) {
@@ -161,13 +145,10 @@ func setBody(resp *http.Response, b []byte) {
 	resp.Header.Del("Content-Encoding")
 }
 
-// The fields a contact's history answer keeps: what lever's chat page and
-// the hub's own chat page read. Each kept row, extension and attachment
-// entry, and the answer itself, is rebuilt from its list, so a field the
-// hub adds later reaches no contact until it is listed here. A row loses
-// channel and threadId (an agent sets both) and groupId; the answer loses
-// replyPreviews (each quotes ANOTHER row's text, which may be one this
-// contact is not shown).
+// Each kept row, entry and the answer itself is rebuilt from these lists, so
+// a field the hub adds later reaches no contact until listed here. Rows lose
+// channel and threadId (agent-set) and groupId; the answer loses
+// replyPreviews (they quote rows this contact may not be shown).
 var (
 	historyFields    = []string{"messages", "nextCursor", "totalCount", "messageAttachments", "messageExtensions"}
 	historyRowFields = []string{"id", "projectId", "sender", "senderId", "recipient", "recipientId", "msg", "type", "urgent",
@@ -179,10 +160,8 @@ var (
 
 var errNoHistoryRows = errors.New("the hub's history answer has no messages list")
 
-// historyMessages decodes the rows of a hub history answer into out: the
-// list under "messages" (null is an empty page), the one key filterHistory
-// reads. An answer without it is an error, so rows under any other key
-// never count.
+// historyMessages requires "messages" (null is an empty page), so rows under
+// any other key never count.
 func historyMessages(raw json.RawMessage, out any) error {
 	if len(raw) == 0 {
 		return errNoHistoryRows
@@ -190,8 +169,6 @@ func historyMessages(raw json.RawMessage, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
-// pickFields is the object raw with only the keys in fields, or ok=false
-// when raw is not an object.
 func pickFields(raw json.RawMessage, fields []string) (map[string]json.RawMessage, bool) {
 	var in map[string]json.RawMessage
 	if json.Unmarshal(raw, &in) != nil || in == nil {
@@ -206,7 +183,6 @@ func pickFields(raw json.RawMessage, fields []string) (map[string]json.RawMessag
 	return out, true
 }
 
-// filterHistory rewrites a 200 history answer for contact.
 func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid string) {
 	if resp.StatusCode != http.StatusOK {
 		return
@@ -240,8 +216,8 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 		if agentRow(m, uid, agentID) {
 			agentIDs[m.ID] = true
 		}
-		// A repeated id is hidden whoever sent it: an entry keyed by it
-		// (attachments, extensions) could belong to either row.
+		// A repeated id is hidden whoever sent it: an entry keyed by it could
+		// belong to either row.
 		if !shown[m.ID] {
 			removed[m.ID] = true
 			continue
@@ -264,9 +240,7 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 			continue
 		}
 		for id := range m {
-			// An attachment's name and type are the agent's own text, which
-			// the ledger never authorized: no agent row keeps one (files
-			// for contacts are a later spec).
+			// An attachment's name and type are agent text the ledger never authorized.
 			if removed[id] || !listed[id] || k == "messageAttachments" && agentIDs[id] {
 				delete(m, id)
 				continue
@@ -286,8 +260,7 @@ func (g *gate) filterHistory(resp *http.Response, contact, agent, agentID, uid s
 	setBody(resp, out)
 }
 
-// pickAttachments rebuilds a row's attachment list from attachmentFields.
-// A list it cannot read, or an entry that is not an object, is dropped.
+// An unreadable list or a non-object entry is dropped.
 func pickAttachments(raw json.RawMessage) json.RawMessage {
 	var in []json.RawMessage
 	out := []map[string]json.RawMessage{}
@@ -302,17 +275,13 @@ func pickAttachments(raw json.RawMessage) json.RawMessage {
 	return b
 }
 
-// dmEntryHidden are the DM list keys a contact does not get with agent
-// messages on: each describes the latest row (its text, sender, id, time)
-// or whether one is unread, and that row may be one the contact is not
-// shown. The chat page takes its unread counts from /lever/api/agents,
-// which counts only shown rows.
+// dmEntryHidden each describe the latest row, which may be one the contact is
+// not shown. The chat page takes unread counts from /lever/api/agents, which
+// counts only shown rows.
 var dmEntryHidden = []string{"lastMessagePreview", "lastMessageSender", "lastMessageId", "lastActivityAt", "hasUnread"}
 
-// dropHiddenReplyTo rebuilds an extension entry from extensionFields and
-// removes its replyToId unless it names a row the contact is shown on this
-// page: the id of a hidden row is not the contact's to see. An entry that
-// is not an object becomes an empty one.
+// dropHiddenReplyTo keeps replyToId only when it names a row the contact is
+// shown on this page. A non-object entry becomes an empty one.
 func dropHiddenReplyTo(raw json.RawMessage, shown map[string]bool) json.RawMessage {
 	e, ok := pickFields(raw, extensionFields)
 	if !ok {
@@ -329,8 +298,7 @@ func dropHiddenReplyTo(raw json.RawMessage, shown map[string]bool) json.RawMessa
 	return b
 }
 
-// stripDMPreviews removes dmEntryHidden from every DM entry. An answer it
-// cannot read becomes an empty list.
+// stripDMPreviews fails closed: an unreadable answer becomes an empty list.
 func stripDMPreviews(resp *http.Response) {
 	if resp.StatusCode != http.StatusOK {
 		return
@@ -359,17 +327,15 @@ func stripDMPreviews(resp *http.Response) {
 
 type rewriteKey struct{}
 
-// withRewrite attaches a response rewrite to the request (the fence sets it,
-// completeAudit runs it, on the first attempt and on the session retry).
+// withRewrite: completeAudit runs the rewrite on the first attempt and on the
+// session retry.
 func withRewrite(r *http.Request, f func(*http.Response)) *http.Request {
 	r = r.Clone(context.WithValue(r.Context(), rewriteKey{}, f))
-	// The proxy reads these answers: ask for them unencoded. Without the
-	// client's header the transport asks for gzip itself and decodes it.
+	// The proxy reads these answers, so ask for them unencoded.
 	r.Header.Del("Accept-Encoding")
 	return r
 }
 
-// contactRewrite is the rewrite the fence attached to r, if any.
 func contactRewrite(r *http.Request) func(*http.Response) {
 	f, _ := r.Context().Value(rewriteKey{}).(func(*http.Response))
 	return f

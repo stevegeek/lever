@@ -13,10 +13,6 @@ import (
 	"github.com/stevegeek/lever/internal/httpjson"
 )
 
-// errServer returns a plain-HTTP test server that answers every request with the
-// given status code and body. It drives the non-200 error paths of the broker
-// helpers deterministically, independent of a live broker — the helpers' TLS
-// config is unused against an http:// URL.
 func errServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -27,7 +23,6 @@ func errServer(t *testing.T, status int, body string) *httptest.Server {
 	return srv
 }
 
-// mustCA generates a throwaway CA for building standalone identities/clients.
 func mustCA(t *testing.T) *ca.CA {
 	t.Helper()
 	c, err := ca.Generate()

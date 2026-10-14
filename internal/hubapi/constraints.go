@@ -10,30 +10,16 @@ import (
 )
 
 // Access constraints are scion's ceiling mechanism: a named maximum-permission
-// set for a subject at a scope. A constraint only ever REDUCES what bindings
-// and relationship grants give; it never grants (pkg/hub/authz.go Decide,
-// step 7c, and access_constraint_eval.go ConstraintsToRestrictions). Several
-// constraints on one principal intersect.
+// set for a subject at a scope. A constraint only ever reduces what bindings
+// grant; several on one principal intersect.
 //
-// Like roles.go, these are hub-ADMIN calls (access_constraint.admin), made
-// only from the bootstrap-token step's dev-auth window. Every mutation is
-// preview-bound: the hub first answers POST
-// /api/v1/admin/access-constraint-previews with a single-use token bound to
-// the actor, the draft's hash and a fingerprint of the hub's state, and the
-// create or delete must carry that token (pkg/hub/handlers_access_constraints.go
-// createAccessConstraint / deleteAccessConstraint, and
-// access_constraint_governance.go CommitBoundaryChange). The token also lives
-// only in the answering hub process's memory, so the preview and the commit
-// must reach the same hub, which the throwaway window guarantees.
-//
-// Shapes are scion's: previewCreateRequest, previewDraftRequest,
-// accessConstraintCreateRequest, accessConstraintDeleteRequest,
-// accessBoundaryListResponse, accessBoundaryDetail (handlers_access_constraints.go)
-// and PreviewResult (access_constraint.go).
+// These are hub-admin calls, made through AssertCurl as the admin identity.
+// Every mutation is preview-bound: the hub issues a single-use token bound to
+// the actor, the draft's hash and the hub's state, held only in that hub
+// process's memory, so the preview and the commit must reach the same hub.
 
 // ConstraintScopeSystem is scion's scope type for a constraint that applies
-// at every scope, system and project alike (access_constraint_eval.go
-// constraintScopeApplies).
+// at every scope, system and project alike.
 const ConstraintScopeSystem = "system"
 
 // ConstraintSubjectPrincipal is scion's subject kind for one exact principal.
@@ -62,8 +48,7 @@ type ConstraintDraft struct {
 }
 
 // AccessConstraint is what lever reads back about a constraint. The list
-// answers without MaximumPermissions (it carries a count only); the detail
-// read fills it in.
+// leaves MaximumPermissions empty; the detail read fills it in.
 type AccessConstraint struct {
 	ID                 string
 	Name               string
@@ -112,8 +97,8 @@ func (c *Client) AccessConstraintsNamed(ctx context.Context, name string) ([]Acc
 	if err := c.get(ctx, "/api/v1/admin/access-constraints?"+q.Encode(), &raw); err != nil {
 		return nil, err
 	}
-	// Require the key, as RoleDefinitions does: a renamed field would decode
-	// to "none" and the caller would create a duplicate.
+	// Require the key: a renamed field would decode to "none" and the caller
+	// would create a duplicate.
 	field, ok := raw["items"]
 	if !ok {
 		return nil, &APIError{Msg: "access constraint list has no \"items\" field; the hub API changed shape"}
@@ -141,8 +126,6 @@ func (c *Client) AccessConstraint(ctx context.Context, id string) (AccessConstra
 	return w.constraint(), nil
 }
 
-// previewToken asks the hub for a preview of one mutation and returns its
-// commit token (POST /api/v1/admin/access-constraint-previews).
 func (c *Client) previewToken(ctx context.Context, req any) (string, error) {
 	var res struct {
 		PreviewToken  string `json:"previewToken"`

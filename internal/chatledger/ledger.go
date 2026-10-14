@@ -1,17 +1,17 @@
 // Package chatledger is the host-side record of web chat posts that passed
 // through the remote proxy (verified web chat).
 //
-// The remote proxy is the ONLY writer: after the hub accepts a chat post that
-// came through the authenticating front from an allowed login, the proxy
-// appends one Entry. The broker is the only reader: an agent asks it, over
-// its own mTLS channel, whether a message it received is in the ledger
-// (`message_verify`), and acts only on the text the broker returns.
+// The remote proxy is the only writer: it appends one Entry after the hub
+// accepts a post that came through the authenticating front from an allowed
+// login. The broker is the only reader: an agent asks it over mTLS whether a
+// message is in the ledger (`message_verify`) and acts only on the text the
+// broker returns.
 //
-// Why an agent cannot forge an entry: the file lives in the host state
-// directory, outside every jail mount; agents reach the hub directly, never
-// through the proxy, so their posts are never recorded; and the proxy records
-// only a request it authorized with a verified login. Nothing is ever added to
-// the message text itself — text in an agent's pane is never evidence.
+// An agent cannot forge an entry: the file lives in the host state directory,
+// outside every jail mount; agents reach the hub directly, never through the
+// proxy; and the proxy records only requests it authorized with a verified
+// login. Nothing is added to the message text itself: text in an agent's pane
+// is never evidence.
 package chatledger
 
 import (
@@ -40,10 +40,9 @@ const (
 )
 
 // RotateCap is the size at which the ledger is moved to <path>.1 (replacing
-// any previous .1) before the next append. Lookup reads both files, so a
-// message stays verifiable for at least RotateCap of later chat — far more
-// than the broker's one-hour verification window needs — and the text of
-// older chat does not pile up on the host.
+// any previous .1) before the next append. Lookup reads both, so a message
+// stays verifiable for far longer than the broker's one-hour window needs,
+// while old chat text does not pile up on the host.
 const RotateCap = 1 << 20
 
 // TimeLayout is the second-resolution UTC form both scion's delivery
@@ -74,7 +73,6 @@ type Entry struct {
 	Text string `json:"text"`
 }
 
-// fileWriter appends entries to one login's file.
 type fileWriter struct {
 	path string
 	once sync.Once
@@ -88,7 +86,6 @@ func (w *fileWriter) Append(e Entry) error {
 	return w.f.Append(e)
 }
 
-// label prefixes the ledger's errors.
 const label = "chat ledger"
 
 // ErrUnsafe means a ledger file can be written by another user, so its
@@ -123,7 +120,6 @@ func lookupFile(path, agentID, sender, createdAt string) ([]Entry, error) {
 	return out, nil
 }
 
-// maxLine bounds one ledger line (hostledger.MaxLine).
 const maxLine = hostledger.MaxLine
 
 func readFile(p string) ([]Entry, error) {
@@ -158,9 +154,8 @@ func FormatTime(t time.Time) string {
 	return t.UTC().Truncate(time.Second).Format(TimeLayout)
 }
 
-// The ledger is a directory with one file per login (FileFor), so the size
-// rotation of one login's file never drops another login's entries: a
-// contact who floods the chat can push out only their own.
+// The ledger is a directory with one file per login (FileFor), so a contact
+// who floods the chat can rotate out only their own entries.
 
 var ledgerFile = regexp.MustCompile(`^l-[0-9a-f]{24}\.jsonl$`)
 
@@ -200,8 +195,6 @@ func (w *Writer) Append(e Entry) error {
 	return fw.Append(e)
 }
 
-// checkDir refuses a ledger directory that is a symlink, not a directory,
-// writable by others, or owned by another user.
 func checkDir(dir string) error { return hostledger.CheckDir(dir, label) }
 
 // Lookup returns the entries for agentID whose Sender is sender and whose
@@ -239,7 +232,6 @@ func Lookup(dir, agentID, sender, createdAt string) ([]Entry, error) {
 	return out, nil
 }
 
-// loginEntries reads one login's file and its rotated copy.
 func loginEntries(dir, login string) ([]Entry, error) {
 	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil

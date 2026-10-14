@@ -17,28 +17,14 @@ import (
 	"time"
 )
 
-// The push watchers.
-//
-// Run keeps one goroutine per login that has a push subscription. Each
-// holds one hub events stream (/events?sub=user.<uid>.chat.>) with the
-// login's own hub session, the same subjects the page subscribes to. The
-// stream is only a hint: an event for one of the login's DMs makes the
-// scheduler run check (push_trigger.go), which reads the history itself.
-//
-//   - Start: Run reads the store's logins (after a proxy restart too) and
-//     starts a watcher for each; subscribe, unsubscribe and a gone
-//     subscription kick it to start or stop watchers.
-//   - Connect: a session from the login driver (it renews after 12 h); a
-//     401 or login redirect invalidates it and the next attempt logs in.
-//   - After every connect, a catch-up check of every target: the hub does
-//     not replay events, and the stream is already open, so a message
-//     stored after this point raises an event and one stored before it is
-//     found by the catch-up.
-//   - Reconnect with backoff (doubling, jittered, reset after a healthy
-//     stream); an idle stream (no event or heartbeat for idle; the hub
-//     beats every 30 s) is dropped and reopened.
-//   - Shutdown: Run's context ends every stream and waits for the
-//     watchers; a send still under way gets shutdownGrace more.
+// The push watchers: one goroutine per login with a subscription, each holding
+// a hub events stream (/events?sub=user.<uid>.chat.>) with the login's own
+// session. The stream is only a hint: an event makes the scheduler run check
+// (push_trigger.go), which reads the history itself. The hub does not replay
+// events, so every connect (on an already open stream) is followed by a
+// catch-up check of every target. An idle stream (the hub beats every 30 s)
+// is dropped and reopened with jittered backoff; a 401 or login redirect
+// invalidates the session.
 
 func (p *Push) Run(ctx context.Context) {
 	if p.g == nil {
@@ -106,9 +92,6 @@ func (p *Push) watch(ctx context.Context, login string) {
 	}
 }
 
-// nextBackoff is the wait before the next connect and the backoff after it:
-// a stream that lived healthy starts again from backoffMin; otherwise the
-// wait doubles up to backoffMax.
 func (p *Push) nextBackoff(backoff, lived time.Duration) (wait, next time.Duration) {
 	if lived >= p.healthy {
 		backoff = p.backoffMin
@@ -131,9 +114,8 @@ func streamFault(err error) string {
 	return "connect"
 }
 
-// streamClient bounds the wait for the headers only (the stream itself runs
-// on) and follows no redirect: a 302 to /login is the hub refusing the
-// session, which streamOnce must see.
+// streamClient times out the headers only and follows no redirect: a 302 to
+// /login is the hub refusing the session, which streamOnce must see.
 func (p *Push) streamClient() *http.Client {
 	var t *http.Transport
 	if p.g.cfg.DialContext != nil {
@@ -146,9 +128,11 @@ func (p *Push) streamClient() *http.Client {
 	return &http.Client{Transport: t, CheckRedirect: noRedirect}
 }
 
-// streamOnce runs one connection until it ends.
 func (p *Push) streamOnce(ctx context.Context, login string) error {
 	g := p.g
+	if !g.loginCurrent(login) {
+		return errPushSession
+	}
 	cookie, err := g.cfg.Session.Cookie(ctx, login)
 	if err != nil {
 		return errPushSession
@@ -159,6 +143,7 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	}
 	sctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	defer g.track(login, func() { cancel(errPushSession) })()
 	u := g.cfg.Target.JoinPath("/events")
 	u.RawQuery = url.Values{"sub": {"user." + uid + ".chat.>"}}.Encode()
 	req, err := http.NewRequestWithContext(sctx, http.MethodGet, u.String(), nil)
@@ -218,11 +203,9 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	}
 }
 
-// dmEventKey reads one event: a DM update for this login, and the DM key
-// it names ("" = check every DM). Nothing else in the event is read. The
-// hub publishes only message events on user.<id>.chat.dm (a
-// UserMessageEvent; edits and deletes go to chat.message.edited and
-// .deleted), and a message names its DM in threadId.
+// dmEventKey reads only the DM key from a chat.dm event ("" = check every DM).
+// The hub publishes only message events there; a message names its DM in
+// threadId.
 func dmEventKey(lines []string, subject string) (string, bool) {
 	var event, data string
 	for _, l := range lines {
@@ -248,11 +231,10 @@ func dmEventKey(lines []string, subject string) (string, bool) {
 	return in.Data.ThreadID, true
 }
 
-// pushScheduler runs one login's checks, one at a time. key "" means every
-// target; catchUp marks a pass after a connect. A check that decided
-// nothing (the hub or the store failed) runs again, with backoff, at most
-// maxCheckRetries times, and keeps its catch-up flag: a message stored in
-// a reconnect gap is found only by that pass.
+// pushScheduler runs one login's checks one at a time (key "" = every
+// target). A failed check is retried with backoff up to maxCheckRetries and
+// keeps its catch-up flag: a message stored in a reconnect gap is found only
+// by that pass.
 type pushScheduler struct {
 	ctx   context.Context
 	p     *Push
@@ -272,8 +254,6 @@ func newPushScheduler(ctx context.Context, p *Push, login string, s *pushSession
 		tries: map[string]int{}, wake: make(chan struct{}, 1)}
 }
 
-// retry schedules key again after a failed check, or gives up after
-// maxCheckRetries (audited; the next event or connect checks it again).
 func (q *pushScheduler) retry(key string, catchUp bool) {
 	q.mu.Lock()
 	q.tries[key]++
@@ -295,7 +275,6 @@ func (q *pushScheduler) done(key string) {
 	q.mu.Unlock()
 }
 
-// add asks for a check of key after the debounce (or after, if longer).
 func (q *pushScheduler) add(key string, after time.Duration, catchUp bool) {
 	at := time.Now().Add(max(after, q.p.debounce))
 	q.mu.Lock()
@@ -360,10 +339,9 @@ func (q *pushScheduler) runDue() {
 		return
 	}
 	q.done("")
-	// A key that names none of the targets (a spelling the hub changed)
-	// checks every DM: dropped, its message would wait for a reconnect.
-	// One audit line per pass counts them: the keys come from agent-sent
-	// events, so a line per key would let an agent flood the audit log.
+	// An unknown key (a spelling the hub changed) checks every DM. One audit
+	// line per pass counts them: the keys come from agent-sent events, and a line
+	// per key would let an agent flood the audit log.
 	unknown := 0
 	for k := range keys {
 		if k != "" && !slices.ContainsFunc(targets, func(t pushTarget) bool { return t.key == k }) {

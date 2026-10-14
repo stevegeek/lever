@@ -1,43 +1,25 @@
-// Package remoteproxy is the host-side seam between the operator's tailnet
-// and the jail hub's web UI. Auth is INJECTED here (the phone never holds a
-// hub credential): every forwarded request, the SPA shell and /api/v1 alike,
-// carries the verified operator's OWN hub web session, obtained host-side by
-// the login driver (login.go), and nothing the client sent in Authorization
-// or Cookie. So the hub authorizes each request as that operator's hub user,
-// and the narrowing lives mostly in the hub: the lever-remote project role and
-// the project-create access constraint `lever apply` grants that user (see
-// internal/cli/host/remote_role.go). The proxy itself refuses the routes the
-// hub does not narrow for that session (mintsCredential, refusedRoute). That injection is exactly why network
-// provenance alone must never authenticate a browser-borne cross-site request: any website open on a
-// tailnet device can make the browser send requests that arrive "from the
-// tailnet". The origin rules below are therefore load-bearing security, not
-// CORS hygiene. The one cross-site request they admit is a top-level page
-// load (GET or HEAD, Sec-Fetch-Mode navigate, Sec-Fetch-Dest document, no
-// Origin) of an entry page, "/" or the chat page: a link tapped in another app
-// arrives that way, and the page itself changes nothing (see entryNavigation).
-// An unconfigured ServeHost fails closed: every request is
-// refused, Origin-bearing or not, rather than let an accidental
-// empty-string match decide. The hub also mints a fresh session cookie on
-// every cookie-less request; that cookie is stripped from every response
-// before it reaches the client, for the same reason — it would be an
-// alternate, lever-unmanaged credential if it ever left the host.
+// Package remoteproxy is the host-side seam between the operator's front
+// (the tailnet by default) and the jail hub's web UI. Every forwarded request
+// carries the verified login's own hub web session, obtained host-side
+// (login.go), and nothing the client sent in Authorization or Cookie, so the
+// browser never holds a hub credential. The hub narrows that user (the
+// lever-remote role); the proxy refuses the routes the hub does not narrow
+// (mintsCredential, refusedRoute).
 //
-// Precondition: this handler is safe to expose ONLY behind a listener that
-// nothing but the authenticating front can reach — `tailscale serve` by
-// default, or another front that sets a verified login in the configured
-// identity header (Config.IdentityHeader; exe.dev's X-ExeDev-Email, say) and
-// OVERWRITES any value the client sent. That front is the sole trustworthy
-// source of the header's value. The configured header and every inbound
-// Tailscale-* header are stripped before forwarding to the hub, so a client
-// can never forge identity to the HUB; but the AllowedUsers check performed
-// HERE still trusts whatever the front set on the request. A directly
-// reachable listener (LAN, a localhost port-forward, or a DNS rebind to the
-// listener's address) lets any caller set the header itself and take the
-// allow path with the injected session. Keeping the listener reachable only
-// by the front is the caller's job: loopback by default, and a non-loopback
-// bind only on an address the jail cannot reach, behind the operator's
-// firewall (see the remote-serve CLI wiring and config.validateRemoteBind).
-// See the 2026-08-16 remote-agent-access design spec and issue #38.
+// Because the credential is injected, network provenance must never
+// authenticate a browser-borne cross-site request: the origin rules are
+// security, not CORS hygiene. The only cross-site request admitted is a
+// top-level load of an entry page (entryNavigation). An unconfigured
+// ServeHost fails closed, and the hub's session cookie is stripped from every
+// response.
+//
+// Precondition: the listener must be reachable only by the authenticating
+// front, which sets the identity header (Config.IdentityHeader) and
+// OVERWRITES any client value. The header is stripped before forwarding, but
+// the AllowedUsers check trusts it; a directly reachable listener (LAN,
+// port-forward, DNS rebind) lets any caller forge it. A non-loopback bind
+// must be on an address the jail cannot reach, behind the operator's firewall
+// (config.validateRemoteBind).
 package remoteproxy
 
 import (
@@ -56,160 +38,109 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/chatledger"
+	"github.com/stevegeek/lever/internal/hubauth"
 )
 
 // Config wires a Handler. All fields required unless noted.
 type Config struct {
-	// Target is the hub base URL AS SEEN FROM THE JAIL, e.g.
-	// "http://127.0.0.1:8080" — the same address every other lever hub call
-	// uses (scion.DefaultHubEndpoint). It is the URL, not the route: with
-	// DialContext set, only the Host header and path come from here.
+	// Target is the hub base URL as seen from the jail. With DialContext set,
+	// only the Host header and path come from here.
 	Target *url.URL
-	// DialContext, when non-nil, is how the proxy reaches Target. `lever
-	// remote serve` sets JailDial, so each instance reaches its OWN guest hub
-	// through its own jail instead of a host port that at most one instance
-	// could own. Nil uses the default net dialer (tests).
+	// DialContext, when non-nil, reaches Target (JailDial in `lever remote
+	// serve`). Nil uses the default dialer.
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	// ServeHost is the public origin's host (e.g. "mac.tail1234.ts.net").
-	// Requests with an Origin header other than https://<ServeHost> are
-	// rejected (the host compared without case). An
-	// empty ServeHost fails closed: EVERY request is refused, Origin-bearing
-	// or not — an unconfigured host can never legitimately match, so treat
-	// "unconfigured" as "deny all" rather than risk a silent empty-string
-	// match (an Origin that parses to an empty host, e.g. "null", would
-	// otherwise compare equal to an empty ServeHost).
+	// ServeHost is the public origin's host. An Origin other than
+	// https://<ServeHost> is rejected. Empty fails closed (every request
+	// refused), since an Origin like "null" parses to an empty host.
 	ServeHost string
-	// ListenPort is the loopback port this proxy binds. It exists so
-	// hostAllowed can admit a host-side probe (`lever doctor` dials
-	// 127.0.0.1:<port>/healthz) without widening the Host allowlist to every
-	// port. Zero admits the tailnet name only.
+	// ListenPort is the loopback port bound, so hostAllowed admits a host-side
+	// probe on that port only. Zero admits the tailnet name only.
 	ListenPort int
 	// AllowedUsers, when non-empty, pins IdentityHeader values.
 	AllowedUsers []string
-	// IdentityHeader is the header the authenticating front puts the verified
-	// login in. "" = DefaultIdentityHeader (Tailscale-User-Login). It is read
-	// for the AllowedUsers check and for the identity asserted to the hub,
-	// and stripped from every forwarded request. The front must OVERWRITE it
-	// — a front that appends to a client-sent value would let the client
-	// choose — and a request carrying it twice, or a comma-joined value, is
-	// refused rather than resolved first-value-wins (see authorize).
+	// LoginCurrent reports why a login this proxy was started with is no
+	// longer admitted by the access `lever apply` last wrote, or nil; the
+	// login is "" when AllowedUsers is empty. It is asked on every request
+	// and before every push, so a removal or narrowing takes effect without
+	// the hub and before the proxy restarts: the proxy answers the chat page,
+	// files, wake and voice from its cached session without asking the hub.
+	// Nil admits every login AllowedUsers admits.
+	LoginCurrent func(login string) error
+	// IdentityHeader carries the front's verified login ("" =
+	// DefaultIdentityHeader). It is stripped from every forwarded request. The
+	// front must OVERWRITE it; a repeated or comma-joined value is refused.
 	IdentityHeader string
-	// TrustForwardedHost makes the Host check read X-Forwarded-Host, when a
-	// request carries one, instead of Host: for a front that rewrites Host
-	// and passes the browser's in X-Forwarded-Host. Off by default, because
-	// any client that reaches the listener directly can set that header —
-	// see hostToCheck.
+	// TrustForwardedHost makes the Host check read X-Forwarded-Host, for a
+	// front that rewrites Host. Off by default: any client reaching the
+	// listener directly can set it (see hostToCheck).
 	TrustForwardedHost bool
-	// BindHost is the specific address the listener is bound to ("" for a
-	// wildcard bind). hostAllowed then also admits "<BindHost>:<ListenPort>",
-	// the Host a front sends when it dials that address and forwards no name.
+	// BindHost is the bound address ("" for a wildcard bind); hostAllowed also
+	// admits "<BindHost>:<ListenPort>".
 	BindHost string
-	// Session supplies the verified operator's hub web session, which is
-	// the ONLY credential the proxy sends, on every request. Required: nil
-	// refuses every request (503), since the proxy would otherwise forward
-	// requests with no identity at all.
+	// Session supplies the verified login's hub web session, the only
+	// credential sent. Nil refuses every request (503).
 	//
-	// One identity for the shell and the API, on purpose. scion's web layer
-	// authenticates a browser by cookie alone (pkg/hub/web.go
-	// sessionAuthMiddleware), and its API layer turns the same cookie into a
-	// bearer token (sessionToBearerMiddleware) — but only when the request
-	// carries NO Authorization header. The proxy used to inject the remote
-	// PAT there, so the API ran as the PAT's owner while the SPA, the chat
-	// and /events ran as the session user; scion's conversation model keys
-	// DMs on the session user, so every chat read and send was a 403. Now
-	// Rewrite strips Authorization and sends the session alone, so both
-	// halves are the same hub user, and what that user may do is the
-	// lever-remote role plus the project-create ceiling, both in the hub.
+	// scion turns the cookie into a bearer only when the request carries no
+	// Authorization header, so Rewrite strips Authorization to keep the shell
+	// and the API the same hub user.
 	Session SessionSource
 	// Audit receives one line per decision; nil disables (tests).
 	Audit func(line AuditLine)
-	// ChatLedger, when non-nil, receives one entry per web chat post the
-	// hub accepted from a verified login (see recordChat and package
-	// chatledger). Nil records nothing, and so nothing verifies. It is
-	// never called when AllowedUsers is empty: then no login is verified.
+	// ChatLedger, when non-nil, receives one entry per web chat post the hub
+	// accepted from a verified login. Never called when AllowedUsers is empty.
 	ChatLedger func(chatledger.Entry) error
-	// Contacts maps each contact-tier login to the names of the agents it
-	// may chat with (see contact.go). A login not in the map is an operator.
-	// The ledger records the tier, so message_verify reports a contact's
-	// message as a contact's.
+	// Contacts maps each contact-tier login to the agents it may chat with
+	// (contact.go). A login not in the map is an operator.
 	Contacts map[string][]string
 	// ResolveAgents maps agent names to hub agent ids for the contact fence.
-	// Required when Contacts is set: without it every contact request is
-	// refused.
+	// Without it every contact request is refused.
 	ResolveAgents func(ctx context.Context) (map[string]string, error)
-	// ContactSession reports why a contact may not post to the named agent
-	// now, or nil when it may: the agent's session must have started fresh
-	// with the lever skill that is on disk now (package sessionrec), since a
-	// resumed session may still follow an older skill that trusts a marker a
-	// contact can type. Nil refuses every contact post.
+	// ContactSession reports why a contact may not post to the agent now, or
+	// nil: the session must have started fresh with the current lever skill,
+	// since an older skill may trust a marker a contact can type. Nil refuses
+	// every contact post.
 	ContactSession func(agent string) error
-	// ChatAgent, when set, is the manager's agent name, and turns on lever's
-	// chat page for every verified login, operator or contact (chatpage.go):
-	// the proxy answers /lever/* itself and redirects "/" (and, for a
-	// contact, every page) to the page. It needs AgentRecords for the agent
-	// list, and a verified login (AllowedUsers). Empty leaves every one of
-	// those paths to the hub (or, for a contact, the fence), as before.
+	// ChatAgent, when set, is the manager's name and turns on lever's chat
+	// page (chatpage.go) for every verified login. Needs AgentRecords and
+	// AllowedUsers.
 	ChatAgent string
-	// Workers is every configured worker name in config order: the agents an
-	// operator sees beside the manager on the chat page.
+	// Workers is every configured worker name in config order.
 	Workers []string
-	// ContactSee maps a contact login to the agents it may see on the chat
-	// page (name, label, state) but not message.
+	// ContactSee maps a contact login to the agents it may see but not message.
 	ContactSee map[string][]string
-	// AgentRecords lists the instance's hub agent records by name, with phase
-	// and activity already reduced to scion's known words. The chat page's
-	// agent list needs it; nil answers every state "unknown".
+	// AgentRecords lists the hub agent records by name; nil answers every
+	// state "unknown".
 	AgentRecords func(ctx context.Context) (map[string]AgentRecord, error)
-	// Labels returns the labels by agent name (nil for none). Optional.
+	// Labels returns the labels by agent name. Optional.
 	Labels func() map[string]string
-	// Wake asks the broker to resume a suspended (or, for the operator,
-	// stopped) worker for a login that may message it (the operator socket's
-	// /operator/wake); tier is the login's. It returns when the worker is
-	// live or the broker refused; a refusal is a *WakeError with the
-	// broker's status. Nil answers every wake 503.
+	// Wake asks the broker to resume a worker for a login that may message it.
+	// A refusal is a *WakeError. Nil answers every wake 503.
 	Wake func(ctx context.Context, login, tier, worker string) error
-	// MatchAgentMessages (remote.agent_messages) reports which agent rows of
-	// a contact's DM the broker's agent ledger recorded, by row id. A
-	// contact is shown no other agent row, no event text, no DM preview,
-	// and only shown rows count as unread (agentmsgs.go, events.go). Any
-	// error hides every agent row. Nil = off: no contact answer is
-	// rewritten.
+	// MatchAgentMessages reports which agent rows of a contact's DM the
+	// broker's agent ledger recorded. A contact sees only those agent rows;
+	// any error hides every agent row. Nil: no contact answer is rewritten.
 	MatchAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (map[string]bool, error)
 	// ContactUser reports the hub user id `lever apply` bound a contact login
-	// to (remote-role.json), or false when it bound none: the contact never
-	// signed in, or signed in after the last apply. The operator view
-	// (opview.go) reads a contact's conversations only for a bound contact,
-	// with that contact's own session; for an unbound one it asks the login
-	// driver for nothing, since a login would create the contact's hub user.
-	// Nil: no contact is bound.
+	// to, or false. The operator view reads only a bound contact's
+	// conversations, and never logs in an unbound one, since that would create
+	// the contact's hub user.
 	ContactUser func(login string) (string, bool)
-	// PeekAgentMessages is MatchAgentMessages without binding: it answers
-	// what the contact's own read would keep now, and the broker writes
-	// nothing. The operator view uses it, so an operator's read never decides
-	// which message a record shows. Nil while MatchAgentMessages is set: the
-	// operator view treats every answer as unmatched (no agent row shown).
-	// pending is the kept ids no contact read has bound yet (not shown to
-	// the contact so far).
+	// PeekAgentMessages is MatchAgentMessages without binding, so an
+	// operator's read never decides which message a record shows. pending is
+	// the kept ids no contact read has bound yet. Nil while MatchAgentMessages
+	// is set: every answer is unmatched.
 	PeekAgentMessages func(ctx context.Context, contact, agent string, msgs []AgentMessage) (keep, pending map[string]bool, err error)
-	// Files (remote.files) turns on the chat page's file exchange: a login
-	// uploads to an agent it may message and downloads what the agent
-	// shared with it (files.go). Nil = off: every /lever/api/files/ path is
-	// a 404. Needs ChatAgent.
+	// Files turns on the chat page's file exchange (files.go). Nil: every
+	// /lever/api/files/ path is a 404.
 	Files *FilesConfig
-	// Voice (remote.voice) turns on dictation: the page records a clip and
-	// /lever/api/voice/transcribe turns it into text for the message box
-	// (voice.go); with Voice.Speech, /lever/api/voice/speak reads a part of
-	// an agent message aloud with lever-tool-tts (speak.go). Nil = off: the
-	// routes are a 404 and the roster carries no voice. Needs ChatAgent.
+	// Voice turns on dictation (voice.go) and, with Voice.Speech, read-aloud
+	// (speak.go). Nil: the routes are a 404.
 	Voice *VoiceConfig
-	// Push, when non-nil, is the Web Push service (remote.push, push.go):
-	// the page's subscription routes and worker, and the hub streams that
-	// turn agent messages into pushes (the caller runs Push.Run). It needs
-	// ChatAgent: without the chat page there is nothing to notify about.
+	// Push is the Web Push service (push.go); the caller runs Push.Run. Needs
+	// ChatAgent.
 	Push *Push
-	// LogPath is where the operator is told to look when the hub login
-	// fails — the proxy's own log, named in that denial's response text.
-	// Optional; "" uses DefaultLogPath.
+	// LogPath is the proxy log named in the hub-login-failed denial ("" =
+	// DefaultLogPath).
 	LogPath string
 }
 
@@ -217,59 +148,33 @@ type Config struct {
 // `tailscale serve` puts the tailnet login in.
 const DefaultIdentityHeader = "Tailscale-User-Login"
 
-// identityHeader is the configured identity header in canonical form.
 func (c Config) identityHeader() string {
 	return http.CanonicalHeaderKey(cmp.Or(c.IdentityHeader, DefaultIdentityHeader))
 }
 
-// DefaultLogPath is the proxy log location named in the hub-login-failed
-// denial when Config.LogPath is unset: the remote proxy's stderr, relative to
-// the instance root (see state.State.RemoteLog).
+// DefaultLogPath is the proxy log, relative to the instance root.
 const DefaultLogPath = ".lever-state/remote.log"
 
-// SessionSource hands out hub web sessions per verified operator, and takes
-// them back when the hub stops honoring them. *LoginDriver implements it; the
-// interface exists so the proxy can be exercised without a hub.
+// SessionSource hands out hub web sessions per verified login.
 type SessionSource interface {
-	// Cookie returns the scion_sess value for an operator login, logging in
-	// on first use. Callers may race; implementations must share one attempt.
+	// Cookie returns the scion_sess value for a login, logging in on first
+	// use. Concurrent callers must share one attempt.
 	Cookie(ctx context.Context, login string) (string, error)
-	// Invalidate drops a session the hub rejected, so the next call logs in
-	// again. The cookie value identifies WHICH session is being dropped, so a
-	// late request cannot discard one a concurrent renewal just installed.
+	// Invalidate drops a session the hub rejected. The cookie names which
+	// one, so a late request cannot discard a session a renewal just installed.
 	Invalidate(login, cookie string)
 }
 
-// authAPIPrefix is the hub's own credential surface (pkg/hub/server.go
-// registers the /api/v1/auth/* routes).
 const authAPIPrefix = "/api/v1/auth/"
 
-// mintsCredential reports whether a request under the hub's /api/v1/auth/
-// surface is anything other than the few calls the web UI makes that hand out
-// nothing. It is an ALLOWLIST, and everything else under the prefix is
-// refused: that surface is where scion mints credentials, and a new minting
-// route must fail closed rather than pass until someone notices. At this pin
-// (pkg/hub/server.go, web.go) the refused routes include POST
-// /api/v1/auth/tokens (a user access token — the session the proxy injects is
-// a session credential, which requireSessionCredential lets mint one; scion's
-// handleTokenByID routes "/api/v1/auth/tokens/" to the same create), the CLI
-// device and authorize flows (/cli/*), /token, /refresh, /login,
-// /integrations/google/exchange (answers a hub access token in its body for
-// a Google token in the request, no session needed), /test-login, /validate
-// and /invite/redeem (which would change the web user's role outside lever).
-// A token in a response body would leave the host, breaking "the phone holds
-// no hub credential" as surely as a Set-Cookie would.
+// mintsCredential reports whether a request under /api/v1/auth/ is anything
+// but the few web-UI calls that hand out nothing. It is an allowlist because
+// that surface is where scion mints credentials (tokens, CLI device flow,
+// Google exchange, invite redeem...): a new minting route must fail closed,
+// and a token in a response body leaves the host as surely as a cookie.
 //
-// Allowed: GET me, admin-status, scopes, providers; POST logout; the SPA's
-// token page listing (GET tokens), reading and deleting one (GET, DELETE
-// tokens/<id>), and revoking one (POST tokens/<id>/revoke).
-//
-// p is the DECODED path (r.URL.Path), which is what scion's http.ServeMux
-// matches on too: it unescapes a literal segment before matching, so
-// "/api/v1/auth/%74okens" reaches the token handler and reads as it here.
-// A path cleaning would change ("//api/v1/auth/tokens", "/api/v1/auth/./cli")
-// is answered with a redirect, not dispatched, so it cannot reach a handler
-// under a spelling this function misses.
+// p is the decoded path, which is what scion's ServeMux matches; paths that
+// cleaning would change get a redirect, not a dispatch.
 func mintsCredential(method, p string) bool {
 	if p == strings.TrimSuffix(authAPIPrefix, "/") {
 		return true
@@ -295,33 +200,56 @@ func mintsCredential(method, p string) bool {
 	return true
 }
 
-// refusedRoute reports whether a request names a hub route the proxy never
-// forwards, whatever the hub would decide. Each group below is one the hub's
-// own authorization does not narrow for the session the proxy injects:
+// refusedRoute reports whether a request names a hub route the hub's own
+// authorization does not narrow for the injected session:
 //
-//   - /api/v1/system/* (pkg/hub/server.go, route class RouteWorkstation). These
-//     run no RBAC at all: requireWorkstation only checks that the hub is not
-//     hosted, and assertLoopback passes because the proxy reaches the hub from
-//     127.0.0.1 inside the jail. They rewrite the image registry (PUT
-//     registry), delete harness configs (POST init), rewrite the super-admin's
-//     email (PUT identity), and list or create guest directories (fs/list,
-//     fs/mkdir). Only GET status is forwarded: the SPA reads it on every load
-//     (web/src/client/main.ts). An unknown route under the prefix is refused,
-//     so a new one fails closed.
-//   - Project creation: POST /api/v1/projects, /api/v1/projects/register and
-//     POST /api/v1/projects/<id>/clone, and the legacy /api/v1/groves
-//     aliases. Each one makes the caller the new project's owner. `lever
-//     apply` caps project.create for the operator's hub user, but a user who
-//     signs in for the first time holds hub-member (project.create included)
-//     until the next apply binds them, so the proxy refuses these routes on
-//     its own, regardless of hub state.
-//   - /auth/callback/*: the hub's OAuth callback. Only the login driver needs
-//     it, and the driver dials the hub directly (login.go), never through
-//     this handler. A client that calls it with the injected session gets a
-//     302 to /login?error=state_mismatch, which is noise at best.
+//   - /api/v1/system/*: no RBAC, and assertLoopback passes because the proxy
+//     reaches the hub from loopback in the jail. Only GET status is
+//     forwarded; unknown routes fail closed.
+//   - Project creation (and register, clone, the /groves aliases): each makes
+//     the caller the new project's owner, and a first-time user holds
+//     project.create until the next `lever apply`, so these are refused
+//     whatever the hub's state.
+//   - /auth/callback/*: no lever login uses it, and through the proxy it could
+//     only churn logins.
+//   - Conduit (the hub's shell, sftp and port relay into agents) and artifacts
+//     (hub-held files with unauthenticated share and view links): lever has
+//     not reviewed either, and both reach past the agent's own surface.
+//   - Experiment writes, which switch those features on. Reading the list
+//     changes nothing and stays admin-only at the hub.
+//   - An agent's port tunnel and delegations: the tunnel is the agent side's
+//     own socket, and a delegation hands the signed-in user's authority to
+//     the agent, which lever assumes hostile.
+//   - Test identities: each mints a credential or a session.
+//   - Broker writes. A remote web user keeps hub-member's broker.create, so
+//     it could register a broker and receive its join token and secret; and
+//     lever-admin links a project's broker only while the hub lists exactly
+//     one, so a stray broker record blocks that link.
 //
-// p is the DECODED path, as for mintsCredential.
+// p is the decoded path. It is compared in lower case, and the feature
+// prefixes without a segment boundary, so no spelling the hub might route
+// slips past ("/api/v1/Conduit", "/api/v1/conduit.", "/api/v1/conduit/").
 func refusedRoute(method, p string) bool {
+	p = strings.ToLower(p)
+	for _, prefix := range refusedPrefixes {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(p, "/api/v1/admin/experiments") {
+		return method != http.MethodGet && method != http.MethodHead
+	}
+	for _, prefix := range brokerWritePrefixes {
+		if strings.HasPrefix(p, prefix) && method != http.MethodGet && method != http.MethodHead {
+			return true
+		}
+	}
+	if rest, ok := strings.CutPrefix(p, "/api/v1/agents/"); ok {
+		if _, sub, ok := strings.Cut(rest, "/"); ok &&
+			(strings.HasPrefix(sub, "ports/tunnel") || strings.HasPrefix(sub, "delegations")) {
+			return true
+		}
+	}
 	if p == "/api/v1/system" || strings.HasPrefix(p, "/api/v1/system/") {
 		return !(p == "/api/v1/system/status" && (method == http.MethodGet || method == http.MethodHead))
 	}
@@ -347,30 +275,32 @@ func refusedRoute(method, p string) bool {
 	return false
 }
 
-// callbackPath is the hub's OAuth callback route (pkg/hub/web.go
-// handleOAuthCallback, /auth/callback/<provider>).
 const callbackPath = "/auth/callback"
 
-// loginPathPrefix is the hub's login route (it routes /auth/login/, see
-// pkg/hub/web.go handleOAuthLogin). The SPA reaches it two ways: the shell's
-// Sign-in link navigates to the bare path, and the login page's provider
-// buttons to /auth/login/<provider>.
+// refusedPrefixes are lower case, with no trailing slash on purpose.
+var refusedPrefixes = []string{
+	"/api/v1/conduit",
+	"/api/v1/admin/conduit",
+	"/api/v1/artifacts",
+	"/api/v1/test-identit", // test-identities and test-identity-delegations
+	"/auth/test-identity",
+}
+
+// brokerWritePrefixes are lower case, with no trailing slash on purpose: the
+// /api/v1/brokers group (create, join, by-id) and the runtime-brokers group.
+var brokerWritePrefixes = []string{"/api/v1/brokers", "/api/v1/runtime-brokers"}
+
+// loginPathPrefix is the hub's login route, bare or /auth/login/<provider>.
 const loginPathPrefix = "/auth/login"
 
-// isLoginPath reports whether p is the hub's login route, bare or with a
-// provider. Not the callback route: refusedRoute refuses /auth/callback/
-// outright, since the login driver reaches it without this handler.
+// isLoginPath excludes the callback route, which refusedRoute refuses.
 func isLoginPath(p string) bool {
 	return p == loginPathPrefix || strings.HasPrefix(p, loginPathPrefix+"/")
 }
 
-// loginReturnTarget picks where an intercepted sign-in navigation lands. The
-// SPA's login page carries its own target as ?returnTo=<path>; that is
-// preserved. Anything but an in-app absolute path falls back to "/": the
-// value is caller-chosen text headed for a Location header, and an absolute
-// or protocol-relative URL ("//evil.test", "/\evil.test" — browsers read a
-// backslash as a slash there) would make the proxy an open redirect on its
-// own origin.
+// loginReturnTarget picks the redirect after an intercepted sign-in. The
+// value is caller-chosen: only an in-app absolute path passes, else "/"
+// ("//evil.test" and "/\evil.test" would make an open redirect).
 func loginReturnTarget(v string) string {
 	if !strings.HasPrefix(v, "/") ||
 		strings.HasPrefix(v, "//") || strings.HasPrefix(v, "/\\") {
@@ -382,102 +312,65 @@ func loginReturnTarget(v string) string {
 	return v
 }
 
-// Decision is an AuditLine outcome. Every value the package emits is a
-// constant below; the gate (NewHandler), the login driver (login.go) and the
-// OIDC provider (oidc.go) each use their own subset.
+// Decision is an AuditLine outcome.
 type Decision string
 
 const (
-	// Gate decisions (NewHandler).
-	DecisionAllow         Decision = "allow"
-	DecisionDenyHost      Decision = "deny-host"
-	DecisionDenyOrigin    Decision = "deny-origin"
-	DecisionDenyUser      Decision = "deny-user"
-	DecisionDenyMint      Decision = "deny-credential-mint"
-	DecisionDenyRoute     Decision = "deny-route"
-	DecisionDenyNoSession Decision = "deny-no-session"
-	DecisionLoginRedirect Decision = "login-redirect"
-	// Login-driver decisions (login.go).
-	DecisionOIDCSession       Decision = "oidc-session"
-	DecisionOIDCSessionFailed Decision = "oidc-session-failed"
-	// Provider decisions (oidc.go).
-	DecisionOIDCDiscovery       Decision = "oidc-discovery"
-	DecisionOIDCToken           Decision = "oidc-token"
-	DecisionOIDCTokenRefused    Decision = "oidc-token-refused"
-	DecisionOIDCUserinfo        Decision = "oidc-userinfo"
-	DecisionOIDCUserinfoRefused Decision = "oidc-userinfo-refused"
-	DecisionOIDCNotFound        Decision = "oidc-not-found"
-	DecisionDenyAuthorize       Decision = "deny-authorize"
+	DecisionAllow      Decision = "allow"
+	DecisionDenyHost   Decision = "deny-host"
+	DecisionDenyOrigin Decision = "deny-origin"
+	DecisionDenyUser   Decision = "deny-user"
+	// DecisionDenyRevoked: the login's access changed since the proxy started
+	// (Config.LoginCurrent).
+	DecisionDenyRevoked      Decision = "deny-revoked"
+	DecisionDenyMint         Decision = "deny-credential-mint"
+	DecisionDenyRoute        Decision = "deny-route"
+	DecisionDenyNoSession    Decision = "deny-no-session"
+	DecisionLoginRedirect    Decision = "login-redirect"
+	DecisionHubSession       Decision = "hub-session"
+	DecisionHubSessionFailed Decision = "hub-session-failed"
+	// DecisionHubSessionRefused: the login has no recorded hub user, or the
+	// hub's session belongs to another one.
+	DecisionHubSessionRefused Decision = "hub-session-refused"
 )
 
-// AuditLine is emitted once per request, regardless of outcome. It never
-// carries the session value.
+// AuditLine is emitted once per request. It never carries the session value.
 type AuditLine struct {
 	Time time.Time `json:"time"`
-	// TSLogin is the value of the configured identity header
-	// (Config.IdentityHeader), as the front sent it. The name and the JSON key
-	// predate configurable headers and are kept so existing audit readers do
-	// not break.
-	TSLogin string `json:"ts_login,omitempty"`
-	Method  string `json:"method"`
-	Path    string `json:"path"`
-	// Decision is the outcome: one of the Decision constants. The gate emits
-	// DecisionAllow, DecisionDenyHost, DecisionDenyOrigin, DecisionDenyUser,
-	// DecisionDenyMint, DecisionDenyRoute, DecisionDenyNoSession and, for an intercepted sign-in
-	// navigation, DecisionLoginRedirect; the contact fence DecisionDenyContact;
-	// the chat page DecisionChatUnavailable and, for its wake route,
-	// DecisionWake, DecisionDenyWake and DecisionWakeResult; the operator view
-	// DecisionOperatorView and DecisionDenyOperatorView; the login driver DecisionOIDCSession
-	// and DecisionOIDCSessionFailed; the provider the DecisionOIDC* values and
-	// DecisionDenyAuthorize.
+	// TSLogin is the identity header's value. The name and JSON key are kept
+	// for existing audit readers.
+	TSLogin  string   `json:"ts_login,omitempty"`
+	Method   string   `json:"method"`
+	Path     string   `json:"path"`
 	Decision Decision `json:"decision"`
 	Status   int      `json:"status,omitempty"`
-	// Reason is a fixed word for why the chat page's wake route refused or
-	// how a late wake ended (wake.go), or, on an allowed line, that the
-	// request was a cross-site or same-site page load the gate admitted
-	// (entryNavigation); never caller or broker text.
+	// Reason is a fixed word (a wake outcome, or an admitted navigation);
+	// never caller or broker text.
 	Reason string `json:"reason,omitempty"`
-	// Contact and Agent name the conversation an operator-view read was for,
-	// and Count how many rows (or contacts) it answered (opview.go). Never
-	// message text.
+	// Contact, Agent and Count describe an operator-view read. Never message
+	// text.
 	Contact string `json:"contact,omitempty"`
 	Agent   string `json:"agent,omitempty"`
 	Count   *int   `json:"count,omitempty"`
-	// AudioSeconds and LatencyMS describe a dictation clip (voice.go): its
-	// length, and how long the transcription took. Never the audio, never
-	// the text.
+	// AudioSeconds and LatencyMS describe a dictation clip. Never the audio
+	// or text.
 	AudioSeconds float64 `json:"audio_seconds,omitempty"`
 	LatencyMS    int64   `json:"latency_ms,omitempty"`
-	// MessageID and Chars describe a read-aloud request (speak.go): the
-	// message the page says the text is from (with Agent), and the text's
-	// length in characters. Never the text, never the audio.
+	// MessageID and Chars describe a read-aloud request. Never the text.
 	MessageID string `json:"message_id,omitempty"`
 	Chars     int    `json:"chars,omitempty"`
-	// Error records why an allowed request never got an answer from the hub
-	// (set only on the 502 path). The transport's own diagnosis lands here
-	// rather than in the client's response body: the operator needs to know
-	// that, say, the jail has no nc, and the remote client must not.
+	// Error is why an allowed request got no hub answer (502); the
+	// transport's diagnosis goes here, not to the client.
 	Error string `json:"error,omitempty"`
 }
 
-// maxAuditFieldLen caps how much caller-chosen text any single audit field
-// carries. Path, Method and TSLogin are copied from the request on both sinks
-// that write remote-audit.jsonl, and both sinks are reachable by someone whose
-// text that is: the provider by anything inside the jail, and the proxy's gate
-// by anything that reaches the listener — the gate audits every DENIAL too, so
-// its line is written before any identity check has passed. (Error is lever's
-// own wording, and Time, Decision and Status are not the caller's at all.) JSON encoding already makes an odd value
-// unambiguous — this bound is about the operator's disk. One request may carry
-// close to a megabyte of request line and headers (http.Server's default
-// MaxHeaderBytes), so without a cap a few thousand of them append gigabytes to
-// a file that lives in the same state directory as the broker's own data.
+// maxAuditFieldLen caps caller-chosen text in one audit field: the gate
+// audits denials before any identity check, and a megabyte of headers per
+// request would otherwise fill the operator's disk.
 const maxAuditFieldLen = 200
 
-// truncateAudit bounds one caller-chosen audit field. The ellipsis marks the
-// value as cut, so a truncated identity or path is never read as a whole one.
-// Callers must audit the truncated copy and DECIDE on the original: a
-// truncated login would collide with every other login sharing its first
-// maxAuditFieldLen bytes.
+// truncateAudit bounds one audit field. Callers audit the truncated copy but
+// DECIDE on the original: truncated logins sharing a prefix would collide.
 func truncateAudit(v string) string {
 	if len(v) <= maxAuditFieldLen {
 		return v
@@ -485,21 +378,12 @@ func truncateAudit(v string) string {
 	return v[:maxAuditFieldLen] + "…"
 }
 
-// responseHeaderTimeout bounds the wait for the hub's response headers.
-// Generous on purpose: it is a last-resort guard against a wedged jail, not a
-// latency budget. The hub answers a healthy request in milliseconds, and the
-// slowest legitimate case — a cold hub still starting inside a machine that
-// just came up — is far under this. Tests lower it on the built Transport
-// (see setResponseHeaderTimeout in proxy_test.go).
+// responseHeaderTimeout is a last-resort guard against a wedged jail, not a
+// latency budget.
 const responseHeaderTimeout = 45 * time.Second
 
-// secFetchSiteAllowed reports whether v is a Sec-Fetch-Site value a
-// same-origin request or a user-initiated navigation can carry. Anything else
-// is refused: an allowlist, not a denylist of "cross-site", so an
-// unrecognized value fails closed instead of silently passing. "same-site" is
-// refused too: another page on a sibling tailnet name (a different machine
-// under the same ts.net registrable domain) is same-site, and the proxy
-// answers only its own origin.
+// secFetchSiteAllowed is an allowlist: unknown values fail closed.
+// "same-site" is refused because a sibling ts.net name is same-site.
 func secFetchSiteAllowed(v string) bool {
 	switch strings.ToLower(v) {
 	case "same-origin", "none":
@@ -508,31 +392,11 @@ func secFetchSiteAllowed(v string) bool {
 	return false
 }
 
-// The one exception to secFetchSiteAllowed: a top-level page load of an
-// entry page, from a link in another app or site (Messages, mail) or from
-// the redirect back from a front's login page. Those carry Sec-Fetch-Site
-// cross-site (same-site for a sibling name), and stay cross-site across
-// every redirect after, so the strict rule alone answers a tapped link with
-// a 403. entryNavigation admits exactly that, and nothing else:
-//
-//   - GET or HEAD, with exactly one Sec-Fetch-Mode, "navigate", and exactly
-//     one Sec-Fetch-Dest, "document" (topLevelNavigation). A frame's load
-//     says iframe, frame, embed or object, and a fetch, a subresource or a
-//     WebSocket says another mode, so none of them is admitted.
-//   - No Origin header. A browser sends none on a GET navigation; an Origin
-//     on one ("null" from a sandboxed or redirected document included) is
-//     not a plain page load.
-//   - Only to an entry page (entryPage): "/" and, with the chat page on,
-//     /lever/chat. Neither changes anything on GET: "/" is the chat page's
-//     fixed redirect, the hub's SPA shell or a contact's landing page, and
-//     /lever/chat is a file from the binary. Each answer forbids framing
-//     (frame-ancestors 'none' and X-Frame-Options: DENY), and a cross-site
-//     opener cannot read a cross-origin page. The page's own requests after
-//     it loads are same-origin, and meet the strict rule as before.
-//
-// The hub session is injected only on forward, as for every request, so the
-// navigation gains nothing a typed URL would not. The audit line records it
-// (navigationReason).
+// entryNavigation admits the one cross-site exception: a top-level GET/HEAD
+// page load of an entry page (a link from elsewhere, or a front's login
+// redirect), with no Origin header and Sec-Fetch-Mode navigate /
+// Sec-Fetch-Dest document. Entry pages change nothing on GET and forbid
+// framing, and the page's later requests meet the strict rule.
 func entryNavigation(r *http.Request, site string, chatPage bool) bool {
 	switch strings.ToLower(site) {
 	case "cross-site", "same-site":
@@ -544,31 +408,22 @@ func entryNavigation(r *http.Request, site string, chatPage bool) bool {
 		topLevelNavigation(r) && entryPage(r.URL.Path, chatPage)
 }
 
-// topLevelNavigation reports whether r says it is a top-level page load:
-// exactly one Sec-Fetch-Mode, "navigate", and exactly one Sec-Fetch-Dest,
-// "document".
 func topLevelNavigation(r *http.Request) bool {
 	mode, dest := r.Header.Values("Sec-Fetch-Mode"), r.Header.Values("Sec-Fetch-Dest")
 	return len(mode) == 1 && strings.EqualFold(mode[0], "navigate") &&
 		len(dest) == 1 && strings.EqualFold(dest[0], "document")
 }
 
-// entryPage reports whether p is a page a link from outside may open: "/",
-// and the chat page when it is on. p is the decoded path.
+// entryPage: "/" and, when on, the chat page. p is the decoded path.
 func entryPage(p string, chatPage bool) bool {
 	return p == "/" || (chatPage && p == chatPagePath)
 }
 
-// Audit reasons for a request entryNavigation admitted, by its
-// Sec-Fetch-Site.
 const (
 	ReasonCrossSiteNavigation = "cross-site-navigation"
 	ReasonSameSiteNavigation  = "same-site-navigation"
 )
 
-// navigationReason is the audit reason for a request checkOrigin admitted:
-// a navigation word when its Sec-Fetch-Site is one only entryNavigation
-// admits, "" otherwise.
 func navigationReason(r *http.Request) string {
 	switch strings.ToLower(r.Header.Get("Sec-Fetch-Site")) {
 	case "cross-site":
@@ -579,9 +434,8 @@ func navigationReason(r *http.Request) string {
 	return ""
 }
 
-// denyFraming forbids framing a hub answer to an entry page. The hub sends
-// X-Frame-Options already; the proxy does not lean on that. A second CSP
-// header only narrows the hub's own.
+// denyFraming forbids framing an entry page without relying on the hub's
+// X-Frame-Options. A second CSP header only narrows the hub's.
 func denyFraming(resp *http.Response) {
 	if resp.Request == nil || !entryPage(resp.Request.URL.Path, true) {
 		return
@@ -590,56 +444,37 @@ func denyFraming(resp *http.Response) {
 	resp.Header.Set("X-Frame-Options", "DENY")
 }
 
-// ctxState carries the session and the in-flight AuditLine from the gate
-// (which decides "allow") to the ReverseProxy hooks (which inject the session
-// and, once the real upstream status is known, complete the audit call).
-// Threaded through the request context because Rewrite/ModifyResponse/
-// ErrorHandler only see *http.Request/*http.Response, not the gate's locals.
+// ctxState carries the session and audit line from the gate to the
+// ReverseProxy hooks.
 type ctxState struct {
-	line *AuditLine
-	// cookie is the hub session injected on THIS attempt.
+	line   *AuditLine
 	cookie string
-	// retry is set by ModifyResponse when the hub rejected that session, and
-	// read by the gate (to log in again) and by sessionRetryWriter (to
-	// swallow the rejection instead of showing the operator a login page).
-	// ModifyResponse runs BEFORE ReverseProxy writes anything to the
-	// ResponseWriter, which is what makes one flag enough for both.
+	// retry: the hub rejected the session. ModifyResponse runs before
+	// ReverseProxy writes anything, so one flag serves the gate and
+	// sessionRetryWriter.
 	retry bool
-	// retryable records that this attempt may be repeated: the first attempt
-	// of a request whose method carries no body. It stops a retry loop (the
-	// second attempt sets it false) and keeps a POST from being replayed.
+	// retryable: first attempt of a bodiless request; a POST is never replayed.
 	retryable bool
-	// stale is set by ModifyResponse when the hub rejected the session on a
-	// first attempt that cannot be repeated (it has a body). The rejection
-	// reaches the client as it is, and the gate drops the session so the
-	// NEXT request logs in again instead of failing the same way.
+	// stale: rejected on a non-repeatable attempt; the gate drops the session.
 	stale bool
-	// retried marks the second attempt of a retried request, whose
-	// rejection stands: a session the login just minted is not stale.
+	// retried: a just-minted session is not stale.
 	retried bool
-	// login is the verified login this request runs as ("" when
-	// AllowedUsers is empty and nothing verified it). recordChat reads it.
+	// login is "" when AllowedUsers is empty and nothing verified it.
 	login string
-	// keepDM, when set, filters the hub's /api/v1/chat/dms answer to the
-	// conversations it allows (the contact fence).
+	// keepDM filters /api/v1/chat/dms for the contact fence.
 	keepDM func(key string) bool
-	// rewrite, when set, rewrites the hub's answer for a contact
-	// (remote.agent_messages): after keepDM, on every attempt.
+	// rewrite rewrites a contact's answer, after keepDM, on every attempt.
 	rewrite func(*http.Response)
 }
 
 type ctxStateKey struct{}
 
-// stateFrom returns the gate's ctxState for r, or nil when r never passed
-// the gate (the ReverseProxy hooks are the only callers).
 func stateFrom(r *http.Request) *ctxState {
 	s, _ := r.Context().Value(ctxStateKey{}).(*ctxState)
 	return s
 }
 
-// NewHandler returns the full middleware+proxy stack: the gate (origin,
-// host, identity and path checks, session injection and one session retry)
-// in front of the reverse proxy newReverseProxy builds.
+// NewHandler returns the gate in front of the reverse proxy.
 func NewHandler(cfg Config) http.Handler {
 	g := &gate{cfg: cfg, rp: newReverseProxy(cfg)}
 	if len(cfg.Contacts) > 0 && cfg.ResolveAgents != nil {
@@ -664,11 +499,6 @@ func NewHandler(cfg Config) http.Handler {
 	return g
 }
 
-// newReverseProxy builds the upstream half: rewriteUpstream injects the
-// session and strips every client-supplied identity;
-// completeAudit strips the hub's cookie and completes the audit line;
-// upstreamFailed does the same on the 502 path. With DialContext set it also
-// owns the Transport (jailTransport).
 func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
 		Rewrite:        rewriteUpstream(cfg.Target, cfg.identityHeader()),
@@ -681,29 +511,20 @@ func newReverseProxy(cfg Config) *httputil.ReverseProxy {
 	return rp
 }
 
-// rewriteUpstream is the ReverseProxy Rewrite hook: point the request at
-// target, strip every client-supplied identity (the configured identity
-// header included), and attach the gate's session as the only one.
 func rewriteUpstream(target *url.URL, identityHeader string) func(*httputil.ProxyRequest) {
 	return func(pr *httputil.ProxyRequest) {
 		pr.SetURL(target)
-		// Strip any client-supplied identity — the injected session is the
-		// only identity the hub ever sees. Authorization matters most:
-		// scion's sessionToBearerMiddleware lets a request that carries
-		// one straight through, so a phone-supplied bearer would choose
-		// the identity the API runs as. The client's own Cookie header
-		// goes too, or a client-supplied scion_sess would be honored as
-		// an alternate credential. The configured identity header and
-		// Tailscale-* are stripped as well: the AllowedUsers gate trusts
-		// them (under the front-only-reachability precondition documented
-		// above), but the hub must never see a client-supplied identity
-		// claim of its own.
+		// The injected session is the only identity the hub sees. scion trusts
+		// any Authorization header, and would honor a client scion_sess. The
+		// identity header and Tailscale-* are for the gate, never the hub.
 		pr.Out.Header.Del("Authorization")
 		pr.Out.Header.Del("Cookie")
 		pr.Out.Header.Del(identityHeader)
 		for k := range pr.Out.Header {
 			if clientIdentityHeader(k) {
-				pr.Out.Header.Del(k)
+				// Del would canonicalize k and miss a non-canonical key, which
+				// the hub canonicalizes on receipt.
+				delete(pr.Out.Header, k)
 			}
 		}
 		if s := stateFrom(pr.In); s != nil && s.cookie != "" {
@@ -713,13 +534,10 @@ func rewriteUpstream(target *url.URL, identityHeader string) func(*httputil.Prox
 	}
 }
 
-// clientIdentityHeader reports whether a request header names an identity or
-// a credential to the hub, other than Authorization and Cookie. None of these
-// is ever the client's to send. Tailscale-* is trusted by the gate, never by
-// the hub. The rest are the headers scion's auth middleware reads
-// (pkg/hub/auth.go, brokerauth.go, federation_auth.go): X-Scion-* (agent
-// token, broker HMAC headers, on-behalf-of, federation token, plugin name),
-// the trusted-proxy X-Forwarded-User-* set, the IAP assertion and X-API-Key.
+// clientIdentityHeader reports headers scion's auth middleware reads as
+// identity or credentials (besides Authorization and Cookie): never the
+// client's to send. The hub trusts hubauth.Header as an admin-grade
+// assertion on any route, so a client copy must never reach it.
 func clientIdentityHeader(k string) bool {
 	k = strings.ToLower(k)
 	switch {
@@ -729,22 +547,16 @@ func clientIdentityHeader(k string) bool {
 		return true
 	}
 	switch k {
-	case "x-goog-iap-jwt-assertion", "x-api-key":
+	case "x-goog-iap-jwt-assertion", "x-api-key", strings.ToLower(hubauth.Header):
 		return true
 	}
 	return false
 }
 
-// completeAudit is the ReverseProxy ModifyResponse hook: strip the hub's
-// session cookie, flag a rejected session for the gate's one retry, and
-// otherwise complete the audit line with the real upstream status.
 func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, contacts map[string][]string) func(*http.Response) error {
 	return func(resp *http.Response) error {
-		// The hub mints a fresh session cookie on every cookie-less
-		// request. The client must never hold a hub credential, cookie
-		// included. Header.Del operates on the canonicalized key, so
-		// this removes every Set-Cookie value regardless of how many
-		// the hub sent or what case it used.
+		// The client must never hold a hub credential, including the fresh
+		// cookie the hub mints on every cookie-less request.
 		resp.Header.Del("Set-Cookie")
 		sandboxAPIDocument(resp)
 		denyFraming(resp)
@@ -759,18 +571,11 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 		}
 		if s := stateFrom(resp.Request); s != nil {
 			if s.retryable && sessionRejected(resp) {
-				// The hub does not know this session (it restarted, or the
-				// session lapsed). Say so, and audit nothing: the gate
-				// replaces the session and repeats the request, and that
-				// attempt is the one that answers the operator. The login
-				// itself is audited by the driver.
+				// The gate retries with a new session; that attempt is audited.
 				s.retry = true
 				return nil
 			}
 			if !s.retried && sessionRejected(resp) {
-				// Same cause, but the request had a body and cannot be
-				// replayed. Let the rejection through; the gate drops the
-				// session so the next request heals it.
 				s.stale = true
 			}
 			recordChat(resp, s.login, tierOf(contacts, s.login), ledger, func(err error) { slog.Warn("chat post not recorded", "err", err) })
@@ -783,9 +588,8 @@ func completeAudit(audit func(AuditLine), ledger func(chatledger.Entry) error, c
 	}
 }
 
-// failOtherSuccess makes a 2xx answer other than 200 a bodiless 502. The
-// contact filters (keepDM, rewrite) read only a 200 answer and pass any
-// other unread, so another success must not keep the hub's body.
+// failOtherSuccess makes a non-200 2xx a bodiless 502: the contact filters
+// read only a 200, so another success must not pass the hub's body unread.
 func failOtherSuccess(resp *http.Response) {
 	if resp.StatusCode == http.StatusOK || resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return
@@ -796,20 +600,12 @@ func failOtherSuccess(resp *http.Response) {
 	setBody(resp, nil)
 }
 
-// sandboxAPIDocument puts every /api/ response in a CSP sandbox.
-//
-// The hub serves agent-written files under /api/ inline, with a type taken
-// from the file name (workspace files with ?view=true, WebDAV, template and
-// skill files, chat attachments), and its CSP allows inline script. Opened
-// as a page through this proxy, such a file would run on the SPA's own
-// origin with the operator's injected session: an agent could write
-// report.html, send the operator a link, and act as them — attach to any
-// agent, or post chat that verifies as the operator's own (package
-// chatledger). A sandboxed document has an opaque origin, so its requests
-// carry "Origin: null", which checkOrigin refuses, and it may not run script
-// or submit forms at all. The SPA reads /api/ with fetch, where a response's
-// CSP has no effect, so the app itself is unchanged. nosniff keeps a browser
-// from reading a JSON or text answer as HTML.
+// sandboxAPIDocument puts every /api/ response in a CSP sandbox. The hub
+// serves agent-written files inline with script allowed; opened as a page
+// here they would run on the SPA's origin with the injected session. A
+// sandboxed document has an opaque origin ("Origin: null", refused) and runs
+// no script. fetch ignores a response CSP. nosniff stops JSON being read as
+// HTML.
 func sandboxAPIDocument(resp *http.Response) {
 	if resp.Request == nil || !strings.HasPrefix(resp.Request.URL.Path, "/api/") {
 		return
@@ -818,10 +614,8 @@ func sandboxAPIDocument(resp *http.Response) {
 	resp.Header.Set("X-Content-Type-Options", "nosniff")
 }
 
-// upstreamFailed is the ReverseProxy ErrorHandler: the upstream round trip
-// failed outright (hub down/unreachable), which bypasses ModifyResponse
-// entirely. Complete the audit call here too, so "exactly one AuditLine per
-// request" holds on this path as well.
+// upstreamFailed completes the audit line when the round trip failed and
+// ModifyResponse never ran.
 func upstreamFailed(audit func(AuditLine)) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
 		if s := stateFrom(r); s != nil && s.line != nil {
@@ -833,9 +627,6 @@ func upstreamFailed(audit func(AuditLine)) func(http.ResponseWriter, *http.Reque
 			case audit != nil:
 				audit(*s.line)
 			case err != nil:
-				// No audit sink wired: the cause still must not vanish, or a
-				// 502 says nothing about whether the jail or the hub is at
-				// fault.
 				slog.Warn("upstream request failed", "err", err)
 			}
 		}
@@ -843,35 +634,23 @@ func upstreamFailed(audit func(AuditLine)) func(http.ResponseWriter, *http.Reque
 	}
 }
 
-// jailTransport is the standard Transport with only its dial replaced. Not a
-// hand-rolled RoundTripper: httputil.ReverseProxy leans on http.Transport's
-// own 101/upgrade handling to carry the hub's WebSocket attach streams, and
-// that is not part of the RoundTripper contract.
+// jailTransport is http.Transport with the dial replaced, not a custom
+// RoundTripper: ReverseProxy needs its upgrade handling for WebSockets.
 func jailTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.DialContext = dial
-	// A jail dial has no host-side socket to proxy. Leaving Proxy set
-	// would let an HTTP_PROXY in the operator's environment silently
-	// redirect hub traffic — carrying the injected session — off the host.
+	// An HTTP_PROXY must never send hub traffic, with the session, off the host.
 	t.Proxy = nil
-	// Nothing else bounds getting a response out of the hub. The jail
-	// dial returns as soon as the child starts, so a wedged machine or a
-	// hung jail transport binary would otherwise hold the request open
-	// forever: no answer, no audit line, and a live child — the exact
-	// diagnosable-502 this transport exists to produce, lost. This bounds
-	// the headers only, so streamed bodies and upgraded connections run
-	// as long as they like.
+	// The jail dial returns once the child starts, so a wedged machine would
+	// otherwise hold the request forever. Bodies and upgrades run on.
 	t.ResponseHeaderTimeout = responseHeaderTimeout
 	return t
 }
 
-// checkOrigin applies the browser-provenance rules (see the package doc):
-// at most one Origin header, and it must be https://<serveHost>; at most one
-// Sec-Fetch-Site header, and it must be same-origin or none, except on a
-// top-level navigation to an entry page (entryNavigation; chatPage says
-// whether /lever/chat is one). It returns the denial and its response text,
-// or "" when the request passes. A request carrying neither header passes —
-// that is what hostAllowed is for.
+// checkOrigin applies the browser-provenance rules: at most one Origin,
+// equal to https://<serveHost>; at most one Sec-Fetch-Site, same-origin or
+// none unless entryNavigation admits it. A request with neither header
+// passes; hostAllowed covers that case.
 func checkOrigin(r *http.Request, serveHost string, chatPage bool) (Decision, string) {
 	if origins := r.Header.Values("Origin"); len(origins) > 0 {
 		if len(origins) > 1 {
@@ -892,8 +671,6 @@ func checkOrigin(r *http.Request, serveHost string, chatPage bool) (Decision, st
 	return "", ""
 }
 
-// gate is the request-side half of the handler: every check that decides
-// whether a request reaches the hub, and the session plumbing around it.
 type gate struct {
 	cfg      Config
 	rp       *httputil.ReverseProxy
@@ -906,6 +683,9 @@ type gate struct {
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration
+	live        liveRequests
+	// revokeEvery overrides revokePoll (tests).
+	revokeEvery time.Duration
 }
 
 func (g *gate) audit(line AuditLine) {
@@ -914,17 +694,14 @@ func (g *gate) audit(line AuditLine) {
 	}
 }
 
-// deny answers the request with status/msg and audits the decision.
 func (g *gate) deny(w http.ResponseWriter, line *AuditLine, status int, decision Decision, msg string) {
 	line.Decision, line.Status = decision, status
 	g.audit(*line)
 	http.Error(w, msg, status)
 }
 
-// denyNavigation is deny for a top-level page load: the same status and
-// decision, answered as a small page with a link back to the landing path
-// instead of text/plain, which a phone may offer as a download. The page has
-// no script, and msg is lever's own text, escaped all the same.
+// denyNavigation is deny answered as a small HTML page (a phone may offer
+// text/plain as a download). No script; msg is escaped anyway.
 func (g *gate) denyNavigation(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, decision Decision, msg string) {
 	line.Decision, line.Status = decision, status
 	g.audit(*line)
@@ -941,33 +718,20 @@ func (g *gate) denyNavigation(w http.ResponseWriter, r *http.Request, line *Audi
 	}
 }
 
-// refusalPage is denyNavigation's body. Its link is a same-origin navigation
-// from this page, which the gate admits.
 func refusalPage(msg string) string {
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
 		`<meta name="viewport" content="width=device-width, initial-scale=1"><title>Refused</title></head>` +
 		`<body><p>` + html.EscapeString(msg) + `</p><p><a href="/">Open the chat</a></p></body></html>` + "\n"
 }
 
-// denyNoSession is the one denial three paths share: the hub login failed.
 func (g *gate) denyNoSession(w http.ResponseWriter, line *AuditLine) {
 	g.deny(w, line, http.StatusBadGateway, DecisionDenyNoSession,
 		"hub login failed — see "+cmp.Or(g.cfg.LogPath, DefaultLogPath))
 }
 
-// ServeHTTP is authorize → (answer a sign-in navigation | attach the
-// session) → forward. The audit line is opened here and completed by
-// whichever of those answers the request.
 func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cfg := g.cfg
-	// The identity the front end asserted, read once and used whole for
-	// every DECISION below (the allowlist, the hub login, the session
-	// cache key). The audit line gets bounded copies of it, of the path
-	// and of the method: all three are caller-chosen text, this line is
-	// written before any check has passed, and the provider's sink
-	// already bounds what it writes to the same file. Deciding on the
-	// truncated value instead would make every login sharing a
-	// maxAuditFieldLen-byte prefix the same operator.
+	// Decide on the whole login; audit only bounded copies of caller text.
 	login := r.Header.Get(cfg.identityHeader())
 	line := AuditLine{Time: time.Now().UTC(), TSLogin: truncateAudit(login), Method: truncateAudit(r.Method), Path: truncateAudit(r.URL.Path)}
 	if msg := unsafePath(r); msg != "" {
@@ -978,46 +742,32 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !g.authorize(w, r, &line, login) {
 		return
 	}
-	// The identity the hub is told about, which is NOT always the header:
-	// the login is verified only when AllowedUsers pins it. See operatorFor.
+	// operatorFor: the header is verified only when AllowedUsers pins it.
 	operator := g.operatorFor(login)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer g.track(operator, cancel)()
+	r = r.WithContext(ctx)
 	line.Decision = DecisionAllow
-	// Status is filled in by ModifyResponse/ErrorHandler once the
-	// upstream round trip completes; the audit call happens there too,
-	// not here, so the line carries the real status instead of the
-	// zero value.
+	// ModifyResponse/ErrorHandler set Status and audit.
 	state := &ctxState{line: &line, login: operator}
 
-	// A browser navigation to the hub's login route is answered HERE,
-	// never forwarded: the hub would 302 it to the OIDC authorization
-	// endpoint, which deliberately does not resolve
-	// (DeadAuthorizationEndpoint) — the whole login is driven server-side
-	// instead (see login.go). Run that driver, then send the browser back
-	// into the app; if the session it hands out is a stale cached one,
-	// the shell GETs that follow heal it through the retry in forward. The
-	// driver cannot recurse into this branch: its own step 1 GETs
-	// /auth/login/oidc with its own client, dialled straight at the hub.
-	// /auth/callback/ never gets this far: authorize refuses it (see
-	// refusedRoute), and the driver's own callback leg dials the hub
-	// directly too.
+	// A sign-in navigation is answered here, never forwarded: the session
+	// comes from the login driver, not the hub's login page. The driver dials
+	// the hub directly, so it cannot recurse here.
 	if isLoginPath(r.URL.Path) && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		g.serveLogin(w, r, &line, operator)
 		return
 	}
 
-	// Every request rides the operator's own hub session (see
-	// Config.Session). Obtaining it is lazy — the first request of the
-	// proxy's life performs the login, and an instance nobody opens a
-	// browser at never logs in at all.
 	cookie, err := cfg.Session.Cookie(r.Context(), operator)
 	if err != nil {
 		g.denyNoSession(w, &line)
 		return
 	}
 	state.cookie = cookie
-	// lever's chat page, for both tiers. It claims only GET/HEAD "/" and the
-	// /lever prefix, and answers them itself, never from the hub. Every other
-	// request of a contact goes on to the fence below, unchanged.
+	// The chat page claims only GET/HEAD "/" and /lever; a contact's other
+	// requests go to the fence.
 	if g.serveChatPage(w, r, &line, operator, cookie) {
 		return
 	}
@@ -1029,22 +779,15 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		state.keepDM = contactKeepDM(r)
 		state.rewrite = contactRewrite(r)
 	}
-	// Only a bodiless method may be repeated: the retry in forward re-runs
-	// the request, and a body has already been consumed by then.
+	// The body is consumed by the time forward retries.
 	state.retryable = r.Method == http.MethodGet || r.Method == http.MethodHead
 	g.forward(w, r, state, operator)
 }
 
-// operatorFor is the identity the proxy asserts to the hub on the operator's
-// behalf: the session cache key, and the login the OIDC provider mints a code
-// for (identityFor). It is the identity header's login ONLY when AllowedUsers pins it,
-// because that check is the only thing that ever verifies the header: with
-// the list empty the gate does not require the header at all, so its value
-// is a claim nobody checked and must not become a hub user row. The hub then
-// records the unnamed placeholder operator instead — which is what the
-// remote-access guide documents, and one more reason to set allowed_users.
-//
-// Called AFTER authorize, so a non-empty AllowedUsers means login is in it.
+// operatorFor is the identity asserted to the hub (session cache key, hub
+// login). The header counts only when AllowedUsers pins it: unverified, it
+// must not become a hub user row, so the hub gets the unnamed operator.
+// Called after authorize.
 func (g *gate) operatorFor(login string) string {
 	if len(g.cfg.AllowedUsers) == 0 {
 		return ""
@@ -1052,24 +795,22 @@ func (g *gate) operatorFor(login string) string {
 	return login
 }
 
-// authorize runs every check that decides whether the request may reach the
-// hub at all — ServeHost configured, Host, Origin/Sec-Fetch-Site, the
-// identity allowlist, a login driver wired, not a credential route — denying
-// (and auditing) on the first failure. It reports whether the request passed.
+// loginCurrent fails closed on any error from Config.LoginCurrent.
+func (g *gate) loginCurrent(login string) bool {
+	return g.cfg.LoginCurrent == nil || g.cfg.LoginCurrent(login) == nil
+}
+
+// authorize runs every check that decides whether a request may reach the
+// hub, denying and auditing on the first failure.
 func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine, login string) bool {
 	cfg := g.cfg
-	// Fail closed on an unconfigured ServeHost: it can never
-	// legitimately match a request's Origin, so refuse everything
-	// rather than let an accidental empty-string comparison decide.
-	// Applies regardless of whether this particular request carries an
-	// Origin header at all.
+	// An empty-string comparison must never decide.
 	if cfg.ServeHost == "" {
 		g.deny(w, line, http.StatusForbidden, DecisionDenyOrigin, "remote host not configured")
 		return false
 	}
 
-	// Host first: it is the only gate a header-free request cannot walk
-	// through. See hostAllowed, and hostToCheck for which header it reads.
+	// Host first: the only check a header-free request cannot skip.
 	host, msg := hostToCheck(r, cfg.TrustForwardedHost)
 	if msg != "" {
 		g.deny(w, line, http.StatusForbidden, DecisionDenyHost, msg)
@@ -1090,15 +831,9 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 	}
 	if len(cfg.AllowedUsers) > 0 {
 		hdr := cfg.identityHeader()
-		// Duplicates are refused for the same reason Origin and
-		// Sec-Fetch-Site are: Header.Get returns only the FIRST value, so a
-		// second one is a header the gate silently ignores while something
-		// downstream might not. A comma-joined value is the same thing in
-		// one line — what a front that APPENDS to a client-sent header
-		// produces ("forged, real") — so it is refused too, rather than
-		// split and resolved first-value-wins, which would hand the choice
-		// to the client. config.validRemoteLogin keeps commas out of
-		// allowed_users, so no legitimate login is lost.
+		// A second value is one the gate ignores and something downstream
+		// might not; a comma-joined value is what an APPENDING front produces.
+		// config.validRemoteLogin keeps commas out of allowed_users.
 		if logins := r.Header.Values(hdr); len(logins) > 1 {
 			g.deny(w, line, http.StatusForbidden, DecisionDenyUser, "multiple "+hdr+" headers refused")
 			return false
@@ -1112,9 +847,11 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 			return false
 		}
 	}
+	if !g.loginCurrent(g.operatorFor(login)) {
+		g.deny(w, line, http.StatusForbidden, DecisionDenyRevoked, "this login's access changed; it is refused until `lever apply` completes")
+		return false
+	}
 	if cfg.Session == nil {
-		// No login driver: there is no identity to send, and forwarding
-		// with none would only earn 401s from the hub.
 		g.deny(w, line, http.StatusServiceUnavailable, DecisionDenyNoSession, "remote login not configured")
 		return false
 	}
@@ -1126,13 +863,11 @@ func (g *gate) authorize(w http.ResponseWriter, r *http.Request, line *AuditLine
 		g.deny(w, line, http.StatusForbidden, DecisionDenyRoute, "the remote proxy does not forward this route")
 		return false
 	}
-	// Only now: a line some later check denies carries no reason.
+	// Set last, so a denied line carries no reason.
 	line.Reason = navigationReason(r)
 	return true
 }
 
-// serveLogin answers an intercepted sign-in navigation: drive the hub login
-// for this operator, then send the browser back into the app.
 func (g *gate) serveLogin(w http.ResponseWriter, r *http.Request, line *AuditLine, operator string) {
 	if _, err := g.cfg.Session.Cookie(r.Context(), operator); err != nil {
 		g.denyNoSession(w, line)
@@ -1143,10 +878,8 @@ func (g *gate) serveLogin(w http.ResponseWriter, r *http.Request, line *AuditLin
 	http.Redirect(w, r, loginReturnTarget(r.URL.Query().Get("returnTo")), http.StatusFound)
 }
 
-// forward hands the authorized request to the reverse proxy. A retryable
-// shell request is held back just long enough to learn whether the hub
-// accepted the session; if it did not, the session is replaced and the
-// request repeated once.
+// forward retries a bodiless request once with a new session when the hub
+// rejects the first.
 func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, operator string) {
 	if !state.retryable {
 		r = r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
@@ -1157,41 +890,29 @@ func (g *gate) forward(w http.ResponseWriter, r *http.Request, state *ctxState, 
 		return
 	}
 
-	// Retryable shell request: hold the response back just long enough to
-	// learn whether the hub accepted the session. If it did (the normal
-	// case), everything streams through untouched.
 	first := r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, state))
 	g.rp.ServeHTTP(&sessionRetryWriter{ResponseWriter: w, state: state}, first)
 	if !state.retry {
 		return
 	}
-	// The hub rejected the session. Replace it and answer the request
-	// properly, rather than letting the operator's browser land on a
-	// login page it cannot complete (the login is server-side; the SPA's
-	// login button leads to an authorization endpoint that does not
-	// resolve, by design — see Provider.handleAuthorize).
+	// Replace the session rather than land the browser on a login page it
+	// cannot complete.
 	g.cfg.Session.Invalidate(operator, state.cookie)
 	cookie, err := g.cfg.Session.Cookie(r.Context(), operator)
 	if err != nil {
 		g.denyNoSession(w, state.line)
 		return
 	}
-	// retryable is deliberately not set: one retry, then the hub's answer
-	// stands whatever it is.
+	// retryable stays false: one retry, then the hub's answer stands.
 	again := &ctxState{line: state.line, cookie: cookie, retried: true, login: state.login, keepDM: state.keepDM, rewrite: state.rewrite}
 	g.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxStateKey{}, again)))
 }
 
-// sessionRejected reports whether the hub's answer means "I do not know this
-// session". scion says it two ways, depending on what it took the request for:
-// a 401 for anything it reads as programmatic, and a 302 to its login page for
-// anything it reads as a browser navigation (pkg/hub/web.go
-// sessionAuthMiddleware). Nothing else is treated as a session problem — in
-// particular a 403 is the hub refusing an ACTION, which a new session would
-// not change. A login redirect that carries ?error= is not one either: scion
-// sends those only from its OAuth callback (state_mismatch, no_code, …), and
-// treating one as "session unknown" would let any client force a fresh login
-// per request.
+// sessionRejected reports whether the hub means "unknown session": 401, or
+// a 302 to its login page. A 403 refuses an action, which a new session
+// would not change. A login redirect with ?error= comes only from scion's
+// OAuth callback; counting it would let any client force a login per
+// request.
 func sessionRejected(resp *http.Response) bool {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return true
@@ -1210,13 +931,7 @@ func sessionRejected(resp *http.Response) bool {
 }
 
 // sessionRetryWriter withholds a response the gate is about to replace.
-//
-// ReverseProxy calls ModifyResponse before it writes anything to the
-// ResponseWriter, so by the time WriteHeader lands here the decision to retry
-// is already made. On a retry the status, headers and body are all dropped —
-// the client sees only the second attempt — and on everything else this is a
-// pass-through: headers were written straight into the real ResponseWriter's
-// map all along, so nothing is copied and a streamed body still streams.
+// ModifyResponse has decided the retry before WriteHeader lands here.
 type sessionRetryWriter struct {
 	http.ResponseWriter
 	state   *ctxState
@@ -1225,8 +940,6 @@ type sessionRetryWriter struct {
 
 func (w *sessionRetryWriter) WriteHeader(status int) {
 	if w.state.retry {
-		// Clear the hub's rejection headers (Location, Content-Type, …) so
-		// the retry writes into a clean response rather than inheriting them.
 		clear(w.ResponseWriter.Header())
 		w.swallow = true
 		return
@@ -1250,50 +963,19 @@ func (w *sessionRetryWriter) Flush() {
 	}
 }
 
-// Unwrap lets http.ResponseController reach the real writer for everything
-// this wrapper does not override — deadlines, and the Hijack that carries the
-// hub's WebSocket upgrades. An upgrade cannot be swallowed anyway: it arrives
-// as a 101, which is not a session rejection.
+// Unwrap lets ResponseController reach Hijack for the hub's WebSocket
+// upgrades (a 101 is never a session rejection).
 func (w *sessionRetryWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
-// hostAllowed reports whether a request asked for a name this proxy answers to.
-//
-// This is the DNS-rebinding defence, and it is the ONE check that does not
-// depend on the client's goodwill. Origin and Sec-Fetch-Site are only present
-// when a browser chooses to send them, so a request without them passes both
-// gates by default. Binding to loopback is not a substitute either — loopback
-// is exactly what a rebind targets: an attacker page on http://evil.test:8445
-// whose DNS flips to 127.0.0.1 is, to the browser, SAME-ORIGIN with the proxy.
-// It then sends no Origin, `Sec-Fetch-Site: same-origin`, and any header it
-// likes (same-origin requests need no preflight), which before this check meant
-// a forged identity header and a reply carrying the injected credential's
-// authority. Verified live 2026-08-22 against the running proxy: `Host:
-// evil.example` + a forged identity returned 200 and real /auth/me data.
-//
-// A rebind cannot beat this because the browser sends the ATTACKER's name in
-// Host — the victim navigated to their domain — while everything legitimate
-// arrives as one of two names:
-//
-//   - serveHost, the tailnet name. `tailscale serve` forwards the client's Host
-//     unchanged for a TCP backend, so real phone traffic carries it verbatim.
-//   - loopback with the proxy's own port, for host-side probes: `lever doctor`
-//     dials http://127.0.0.1:<port>/healthz (and sends that Host even when the
-//     listener is bound elsewhere).
-//
-// plus, when the listener is bound to a specific address (bindHost: any
-// non-wildcard bind, loopback ones such as 127.0.0.2 included), that address
-// with the proxy's port: what a front sends when it dials the address and
-// forwards no name. A wildcard bind admits no such address. An IP literal is no rebinding target — a rebind makes
-// the browser send the ATTACKER's name — and whatever can reach that address
-// can already set any header, which is the non-loopback bind's documented
-// cost, not something this check could take back.
-//
-// Nothing downstream depends on the inbound value: the outbound Host is
-// rewritten by Rewrite (see newReverseProxy).
+// hostAllowed is the DNS-rebinding defence, the one check that does not
+// depend on the client: a rebound page is same-origin with the proxy and
+// sends any header it likes, but its Host is always the attacker's name.
+// Legitimate Hosts are serveHost (`tailscale serve` forwards the client's
+// Host), loopback with the proxy's port (host-side probes), and bindHost
+// with the port for a specific bind (an IP literal is no rebinding target).
 func hostAllowed(host, serveHost string, port int, bindHost string) bool {
 	if host == "" {
-		// HTTP/1.1 requires Host; Go rejects a request without one before
-		// this. Treat the impossible case as hostile.
+		// Go rejects a request without Host; treat it as hostile.
 		return false
 	}
 	if strings.EqualFold(host, serveHost) {
@@ -1301,7 +983,6 @@ func hostAllowed(host, serveHost string, port int, bindHost string) bool {
 	}
 	h, p, err := net.SplitHostPort(host)
 	if err != nil {
-		// No port in the header: only a bare serveHost match (above) counts.
 		return false
 	}
 	if p != strconv.Itoa(port) {
@@ -1320,31 +1001,12 @@ func hostAllowed(host, serveHost string, port int, bindHost string) bool {
 	return false
 }
 
-// hostToCheck picks the name hostAllowed judges: the request's Host, or —
-// only with trustForwarded set and only when the request carries one —
-// X-Forwarded-Host. It returns a denial message instead when that header is
-// ambiguous (more than one, or a comma-joined list, what a chain of appending
-// proxies produces: picking one would let a client-sent value win), or when
-// the request's own Host is not an IP address.
-//
-// That last rule is what keeps the DNS-rebinding defence intact. Host is the
-// one rebinding defence a same-origin page cannot forge, because the browser
-// writes it from the URL; X-Forwarded-Host is an ordinary header that a page
-// rebound onto the listener can set to base_url's host. But a rebind always
-// makes the browser send the ATTACKER's name in Host, never an IP literal. So
-// X-Forwarded-Host is believed only on a request whose Host is an IP address
-// — the address a front dials when it rewrites Host — and a request whose
-// Host is a name is judged on that name, as without the setting. A cross-site
-// page cannot add the header to a request to an IP-literal origin either: it
-// is not CORS-safelisted, so the browser would preflight, and the proxy
-// answers no preflight.
-//
-// A request WITHOUT the header gets the ordinary Host check (that is how the
-// loopback doctor probe passes). The setting is only worth turning on for a
-// front that rewrites Host to an IP address the default refuses (another
-// port, or none); a front that rewrites Host to 127.0.0.1:<port> or
-// <bind>:<port> already passes without it, and one that rewrites Host to a
-// NAME other than base_url's host is not supported.
+// hostToCheck picks the name hostAllowed judges: Host, or with
+// trustForwarded, X-Forwarded-Host when present. An ambiguous header is
+// refused, and the header is believed only when Host is an IP literal: a
+// rebound page can set it, but its Host is always a name, and a cross-site
+// page cannot add it to an IP origin (not CORS-safelisted, no preflight
+// answered). A front that rewrites Host to some other name is unsupported.
 func hostToCheck(r *http.Request, trustForwarded bool) (host, denial string) {
 	if !trustForwarded {
 		return r.Host, ""
@@ -1363,8 +1025,6 @@ func hostToCheck(r *http.Request, trustForwarded bool) (host, denial string) {
 	return strings.TrimSpace(xfh[0]), ""
 }
 
-// isIPHost reports whether a Host header value is an IP literal, with or
-// without a port ("10.0.0.5", "10.0.0.5:8445", "[::1]:8445").
 func isIPHost(host string) bool {
 	h := host
 	if hh, _, err := net.SplitHostPort(host); err == nil {
@@ -1377,8 +1037,6 @@ func isIPHost(host string) bool {
 	return net.ParseIP(h) != nil
 }
 
-// tierOf is the chat tier of a verified login: contact when Contacts names
-// it, operator otherwise.
 func tierOf(contacts map[string][]string, login string) string {
 	if _, ok := contacts[login]; ok {
 		return chatledger.TierContact

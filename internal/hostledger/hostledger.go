@@ -36,7 +36,6 @@ const MaxLine = 1 << 20
 // File appends JSON lines to one record file. Safe for concurrent use by one
 // process.
 type File struct {
-	// Path is the record file.
 	Path string
 	// Label prefixes every error ("chat ledger").
 	Label string

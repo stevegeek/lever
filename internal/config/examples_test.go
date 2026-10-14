@@ -36,10 +36,7 @@ func TestShippedExamplesLoadAndValidate(t *testing.T) {
 }
 
 // Every shipped example passes config load, the in-tree host path check
-// included (the github tool's -tree, the todo tool's agent-editable -csv).
-// Each is copied to a temp instance root with its tree created, and the
-// /home/YOU placeholders point there. nested_virt is dropped off Linux,
-// where it is not valid.
+// included. nested_virt is dropped off Linux, where it is not valid.
 func TestEveryExampleLoads(t *testing.T) {
 	examples, err := filepath.Glob(filepath.Join(repoRoot(t), "examples", "*", "lever.yaml"))
 	if err != nil || len(examples) == 0 {

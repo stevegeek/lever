@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// writeConfig writes body as a lever.yaml in a fresh temp dir and returns its
-// path. The default llm_auth is api-key, which requires a broker.api_key_file
-// these minimal fixtures don't provide, so a body that says nothing about
-// broker:/llm_auth defaults to subscription; tests that care set it explicitly.
+// writeConfig defaults a body that says nothing about broker:/llm_auth to
+// subscription: the api-key default needs a broker.api_key_file these
+// minimal fixtures don't provide.
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	if !strings.Contains(body, "llm_auth") && !strings.Contains(body, "broker:") {
@@ -59,7 +59,6 @@ workers:
 }
 
 func TestScionSourceResolved(t *testing.T) {
-	// relative path → resolved under the config dir and absolute
 	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: relative/scion\n")
 	app, err := LoadNoHostChecks(p)
 	if err != nil {
@@ -73,7 +72,6 @@ func TestScionSourceResolved(t *testing.T) {
 		t.Fatalf("scion source not absolute: %q", app.Scion.Source)
 	}
 
-	// absolute path → stays as-is
 	p = writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  source: /abs/scion-src\n")
 	app, err = LoadNoHostChecks(p)
 	if err != nil {
@@ -83,7 +81,6 @@ func TestScionSourceResolved(t *testing.T) {
 		t.Fatalf("absolute scion source: want /abs/scion-src got %q", app.Scion.Source)
 	}
 
-	// empty → stays empty
 	p = writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
 	app, err = LoadNoHostChecks(p)
 	if err != nil {
@@ -159,8 +156,8 @@ func TestValidateRejectsUnknownBackend(t *testing.T) {
 	rejectNoHost(t, "name: x\nbackend: vmware\ntree: ./tree\nmanager: {}\n", msgUnknownBackend)
 }
 
-// A backend lever cannot run — including ex-roadmap names like linux-docker —
-// must be rejected at config load, naming the valid set.
+// A backend lever cannot run must be rejected at config load, naming the
+// valid set.
 func TestConfigRejectsUnknownBackend(t *testing.T) {
 	rejectNoHost(t, "name: x\nbackend: linux-docker\ntree: ./tree\nmanager: {}\n", msgUnknownBackend, "orbstack")
 }
@@ -188,11 +185,8 @@ func TestValidateRejectsWorkerOutsideTree(t *testing.T) {
 	}
 }
 
-// A worker with dir "." makes WorkerDir(g) == a.Tree, so its jail path collides
-// with the manager's mount root (/lever) — then the worker's register-step
-// removal (scion project-configs + .scion marker) would target the MANAGER's
-// state. Reject it at config time, mirroring confinedRel's "." rejection for
-// `tree`.
+// A worker with dir "." would mount the whole tree and share the manager's
+// mount root.
 func TestValidateRejectsWorkerDirDot(t *testing.T) {
 	for _, dir := range []string{".", "./"} {
 		t.Run(dir, func(t *testing.T) {
@@ -242,8 +236,8 @@ func TestScionAgentRoleValidation(t *testing.T) {
 }
 
 func TestScionAgentRoleDefaultsToUnset(t *testing.T) {
-	// Unset is the default ON PURPOSE: --role exists on no pin lever can
-	// currently fetch, so a non-empty default would break every instance.
+	// Unset is the default on purpose: lever picks the role only when the
+	// installed scion has --role.
 	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  version: abc123\n")
 	a, err := LoadNoHostChecks(p)
 	if err != nil {
@@ -261,10 +255,8 @@ func TestDefaultLLMAuthIsAPIKey(t *testing.T) {
 	}
 }
 
-// Broker ports default to fixed constants when unset (0), so a config need not
-// declare them; an explicit value still wins. Both `apply` and the spawned
-// `broker serve` read the same config, so the default is computed identically
-// in both processes.
+// Broker ports default to fixed constants, so apply and the spawned `broker
+// serve` agree; an explicit value still wins.
 func TestBrokerPortsDefaultWhenUnset(t *testing.T) {
 	a := &App{}
 	if got := a.EffectiveJailPort(); got != DefaultBrokerJailPort {
@@ -348,10 +340,8 @@ func TestWorkerImageFallsBackToManagerImage(t *testing.T) {
 	}
 }
 
-// Model inheritance mirrors WorkerImage, minus the arch munging: the value is
-// scion's own vocabulary and is passed through verbatim. Unset anywhere must
-// stay "" all the way down, because "" is what makes Start omit --model and
-// leave scion's default resolution untouched.
+// The model is passed through verbatim. Unset must stay "" all the way down,
+// because "" is what makes Start omit --model.
 func TestWorkerModelFallsBackToManagerModel(t *testing.T) {
 	app := &App{
 		Manager: Manager{Model: "claude-opus-5"},
@@ -476,8 +466,6 @@ workers:
 }
 
 func TestLoadConfinesTree(t *testing.T) {
-	// tree must be a confined relative subdir: reject "." (root==mount),
-	// absolute, "..", and empty. A normal subdir is accepted and joined.
 	base := "name: demo\nbackend: orbstack\nbroker:\n  llm_auth: subscription\nmanager: {}\n"
 	for _, bad := range []string{".", "/abs/tree", "../escape", ""} {
 		body := base
@@ -547,26 +535,20 @@ func TestValidateRejectsWorkerNameCollidingWithManagerIdentity(t *testing.T) {
 	}
 }
 
-// A worker named like the APP would collide with the manager's scion agent slug
-// (the manager is dispatched as Worker: app.Name): with slug matching in the
-// broker's resolveMsgTarget, messages addressed to that worker would silently
-// route to the manager instead. Config validation must reject the collision.
+// A worker named like the app would share the manager's scion agent slug, so
+// messages to it would route to the manager.
 func TestValidateRejectsWorkerNameCollidingWithAppName(t *testing.T) {
 	rejectNoHost(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\nmanager: {}\nworkers:\n  - name: demo\n    dir: workers/demo\n", "collides with the manager agent")
 }
 
-// manager.allow_ports opens host-loopback ports to the jailed agent — the
-// egress allowlist is the ONLY thing isolating the host-loopback admin API
-// (bootstrap/revoke/bump-epoch) from the guest, so listing the admin port
-// there must be rejected at config load, not left as an operator footgun.
+// The egress allowlist is the only thing isolating the unauthenticated admin
+// API from the guest, so manager.allow_ports must not list the admin port.
 func TestManagerAllowPortsRejectsExplicitAdminPort(t *testing.T) {
 	rejectNoHost(t, "name: demo\nbackend: orbstack\ntree: ws\nbroker:\n  llm_auth: subscription\n  admin_port: 9444\nmanager:\n  allow_ports: [9444]\n", "allow_ports", "admin")
 }
 
 func TestManagerAllowPortsRejectsDefaultAdminPortWhenUnset(t *testing.T) {
-	// broker.admin_port is left unset, so the effective admin port is the
-	// package default (DefaultBrokerAdminPort) — the rejection must use the
-	// EFFECTIVE port, not just a configured one.
+	// broker.admin_port is unset: the rejection must use the effective port.
 	p := writeConfig(t, fmt.Sprintf("name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  allow_ports: [%d]\n", DefaultBrokerAdminPort))
 	if _, err := LoadNoHostChecks(p); err == nil {
 		t.Fatal("manager.allow_ports containing the DEFAULT broker admin port must be rejected")
@@ -728,12 +710,9 @@ func TestLoadRejectsGrantWithUnknownOp(t *testing.T) {
 	rejectNoHost(t, bad) // a delegate grant referencing an undeclared op must be rejected
 }
 
-// TestRejectsMixedLLMAuthInstance: an instance that mixes api-key and
-// subscription agents is UNSUPPORTED and must fail validation — the OAuth
-// credential is a single jail-wide Hub secret and egress is jail-wide, so a
-// subscription agent forces the real token into (and open egress for) the
-// api-key agents' containers, defeating their key isolation. See
-// security-model-credentials.md §6.1.
+// TestRejectsMixedLLMAuthInstance: the OAuth credential and egress are
+// jail-wide, so a subscription agent would defeat the api-key agents' key
+// isolation.
 func TestRejectsMixedLLMAuthInstance(t *testing.T) {
 	// Broker default api-key ⇒ manager is api-key; worker overrides to subscription.
 	a := &App{
@@ -797,10 +776,8 @@ func TestLoadNoHostChecksSkipsProbes(t *testing.T) {
 	testutil.WantErrContaining(t, err, "api_key_file")
 }
 
-// TestInjectsLLMGrantPerAgentMode unit-tests the grant-injection discrimination
-// directly (a valid instance is uniform, so this is exercised on an in-memory
-// App rather than through Load): an api-key agent gets the implicit llm grant, a
-// subscription agent does not.
+// TestInjectsLLMGrantPerAgentMode runs on an in-memory App because a valid
+// instance cannot mix modes.
 func TestInjectsLLMGrantPerAgentMode(t *testing.T) {
 	a := &App{
 		Manager: Manager{LLMAuth: LLMAuthAPIKey},
@@ -829,16 +806,13 @@ func TestEffectiveLLMAuthWorkerOverride(t *testing.T) {
 	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthAPIKey {
 		t.Fatalf("manager: got %q want api-key", got)
 	}
-	// worker inherits broker default when unset
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthAPIKey {
 		t.Fatalf("worker inherit: got %q want api-key", got)
 	}
-	// worker override wins
 	a.Workers[0].LLMAuth = LLMAuthSubscription
 	if got := a.EffectiveWorkerLLMAuth(a.Workers[0]); got != LLMAuthSubscription {
 		t.Fatalf("worker override: got %q want subscription", got)
 	}
-	// manager override wins over the broker default
 	a.Manager.LLMAuth = LLMAuthSubscription
 	if got := a.EffectiveManagerLLMAuth(); got != LLMAuthSubscription {
 		t.Fatalf("manager override: got %q want subscription", got)
@@ -888,7 +862,6 @@ func TestValidateBrokerLLMAuth(t *testing.T) {
 }
 
 func TestClosedInternetEgress(t *testing.T) {
-	// Explicit knob, decoupled from llm_auth: egress: closed ⇒ closed; unset ⇒ open.
 	closedApp := &App{Egress: EgressClosed, Broker: Broker{LLMAuth: LLMAuthAPIKey}, Workers: []Worker{{Name: "w"}}}
 	if !closedApp.ClosedInternetEgress() {
 		t.Fatal("egress: closed ⇒ closed egress")
@@ -1011,10 +984,8 @@ func TestLoadAcceptsBackendWithPath(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsNonExternalAllowNonLoopback: allow_non_loopback only makes
-// sense on an external (fronted) tool, mirroring the existing gate check — a
-// supervised tool setting it is a config mistake that should fail closed, not
-// be silently ignored.
+// TestLoadRejectsNonExternalAllowNonLoopback: on a supervised tool the key
+// is a mistake that must fail closed, not be ignored.
 func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
 	cfg := strings.Replace(baseCfg, "command: [true, -dsn, \"file:ref.db\"]",
 		"command: [true, -dsn, \"file:ref.db\"]\n      allow_non_loopback: true", 1)
@@ -1022,12 +993,8 @@ func TestLoadRejectsNonExternalAllowNonLoopback(t *testing.T) {
 	testutil.WantErrContaining(t, err, "allow_non_loopback", "external")
 }
 
-// TestLoadRejectsIllegalToolNames: tool names flow into the broker's
-// /mcp/<name>/ gateway route and into `claude mcp add`, so they must be
-// constrained to a safe charset like instance/worker names. Both the tool
-// declaration AND the grant referencing it are renamed together, so the
-// failure is the charset check itself, not an unrelated "undeclared tool"
-// error from a stale grant reference.
+// TestLoadRejectsIllegalToolNames renames the tool and its grant together,
+// so the failure is the charset check, not an "undeclared tool" error.
 func TestLoadRejectsIllegalToolNames(t *testing.T) {
 	bad := []string{"bad/name", "Bad", "has space", "star*"}
 	for _, name := range bad {
@@ -1041,9 +1008,6 @@ func TestLoadRejectsIllegalToolNames(t *testing.T) {
 	}
 }
 
-// TestLoadAcceptsExistingValidToolNames pins the existing legitimate tool
-// names (which contain a digit, but no uppercase/space/slash/star) as staying
-// valid once the charset check lands.
 func TestLoadAcceptsExistingValidToolNames(t *testing.T) {
 	if _, err := Load(writeConfig(t, baseCfg)); err != nil {
 		t.Fatalf("tool name %q (db) should remain valid: %v", "db", err)
@@ -1053,10 +1017,8 @@ func TestLoadAcceptsExistingValidToolNames(t *testing.T) {
 	}
 }
 
-// TestLoadAcceptsUnderscoreToolName pins that a real MCP server name with an
-// underscore (e.g. apple_notes) is a valid broker tool name: MCP server names
-// legitimately use underscores, and they are safe in the /mcp/<name>/ URL path.
-// This is the case the initial nameRE reuse wrongly rejected.
+// TestLoadAcceptsUnderscoreToolName: MCP server names use underscores, which
+// are safe in the /mcp/<name>/ path.
 func TestLoadAcceptsUnderscoreToolName(t *testing.T) {
 	cfg := strings.Replace(baseCfg, "name: db", "name: apple_notes", 1)
 	cfg = strings.Replace(cfg, "tool: db, op: read", "tool: apple_notes, op: read", 1)
@@ -1065,9 +1027,8 @@ func TestLoadAcceptsUnderscoreToolName(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsEmptyOperationName: an operation with an empty name is a
-// config mistake — it can never be granted (checkCap compares op strings) and
-// would silently sink into the tool's op set undetected.
+// TestLoadRejectsEmptyOperationName: such an operation could never be
+// granted and would sink into the op set unnoticed.
 func TestLoadRejectsEmptyOperationName(t *testing.T) {
 	cfg := strings.Replace(baseCfg, "{name: read, caveat_param: {table: table, filter: filter}}",
 		"{name: read, caveat_param: {table: table, filter: filter}}\n        - {name: \"\"}", 1)
@@ -1097,9 +1058,7 @@ func TestWorkerToWorkerMessagingDefaultsTrue(t *testing.T) {
 	}
 }
 
-// An unset operator block disables the directive channel entirely (no
-// allowed_signers = no channel) and every effective accessor falls back to
-// its documented default.
+// An unset operator block disables the directive channel.
 func TestOperatorUnsetDisablesDirectives(t *testing.T) {
 	a := &App{Name: "demo"}
 	if a.DirectivesEnabled() {
@@ -1253,11 +1212,9 @@ func TestToolCheckHostResolvesCommand(t *testing.T) {
 	testutil.WantErrContaining(t, err, missingBinary, "PATH")
 }
 
-// TestToolCheckHostRejectsNonExecutableAbsolutePath: the slash-containing
-// (absolute path) branch of Tool.checkHost must apply the same
-// executable-file check as the PATH-scoped branch — a directory or a
-// non-executable file is exactly the #9 failure mode (opaque spawn failure),
-// just via an absolute path instead of a bare PATH-resolved name.
+// TestToolCheckHostRejectsNonExecutableAbsolutePath: an absolute command gets
+// the same executable-file check as a PATH-resolved one, so it does not fail
+// opaquely at spawn.
 func TestToolCheckHostRejectsNonExecutableAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
 	if err := (Tool{Name: "t", Command: []string{dir}}).checkHost(t.TempDir()); err == nil {
@@ -1293,7 +1250,6 @@ func TestToolCheckHostRelativeCommandUsesInstanceDir(t *testing.T) {
 
 func TestAutoReenrolKnob(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"
-	// Default (absent) = all.
 	p := writeConfig(t, base)
 	app, err := LoadNoHostChecks(p)
 	if err != nil {
@@ -1302,7 +1258,6 @@ func TestAutoReenrolKnob(t *testing.T) {
 	if got := app.EffectiveAutoReenrol(); got != AutoReenrolAll {
 		t.Fatalf("default auto_reenrol = %q, want %q", got, AutoReenrolAll)
 	}
-	// Explicit values round-trip.
 	for _, v := range []AutoReenrolMode{AutoReenrolAll, AutoReenrolManager, AutoReenrolOff} {
 		p := writeConfig(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: "+string(v)+"\n")
 		app, err := LoadNoHostChecks(p)
@@ -1313,7 +1268,6 @@ func TestAutoReenrolKnob(t *testing.T) {
 			t.Fatalf("auto_reenrol = %q, want %q", got, v)
 		}
 	}
-	// Invalid value rejected at load.
 	p = writeConfig(t, base+"broker:\n  llm_auth: subscription\n  auto_reenrol: sometimes\n")
 	if _, err := LoadNoHostChecks(p); err == nil {
 		t.Fatal("expected load error for invalid auto_reenrol")
@@ -1378,10 +1332,8 @@ func TestScionBinaryResolvesRelativeToInstanceDir(t *testing.T) {
 }
 
 func TestConfigWithoutScionBlockStillLoads(t *testing.T) {
-	// Most fixtures in this file declare no scion block, and config.Load runs
-	// for commands that never bring anything up (doctor, msg, attach).
-	// Requiring a mode here would break all of them; the missing mode is
-	// reported at bring-up instead.
+	// Commands that bring nothing up load configs with no scion block; the
+	// missing mode is reported at bring-up.
 	p := writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n")
 	if _, err := LoadNoHostChecks(p); err != nil {
 		t.Fatalf("a config with no scion block must still load: %v", err)
@@ -1389,9 +1341,8 @@ func TestConfigWithoutScionBlockStillLoads(t *testing.T) {
 }
 
 func TestScionBinaryAndSourceRejectedInsideTree(t *testing.T) {
-	// The tree is the one place agents can write. A binary or checkout there
-	// would be installed as root as the engine every agent runs under, so a
-	// compromised agent could choose its own engine on the next bring-up.
+	// A binary or checkout in the tree would let a compromised agent choose
+	// its own engine.
 	for _, tc := range []struct{ name, body string }{
 		{"binary in tree", "scion:\n  binary: tree/dist/scion\n"},
 		{"source in tree", "scion:\n  source: tree/scion-src\n"},
@@ -1413,8 +1364,6 @@ func TestScionBinaryOutsideTreeIsAccepted(t *testing.T) {
 	}
 }
 
-// remote is unset by default: disabled, with the proxy port defaulting to
-// 8445 (adjacent to the broker's 8443/8444 block).
 func TestRemoteDefaults(t *testing.T) {
 	app, err := LoadNoHostChecks(writeConfig(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\n"))
 	if err != nil {
@@ -1426,64 +1375,58 @@ func TestRemoteDefaults(t *testing.T) {
 	if got := app.EffectiveRemotePort(); got != 8445 {
 		t.Fatalf("EffectiveRemotePort() = %d, want 8445", got)
 	}
-	if got := app.EffectiveRemoteLoginPort(); got != 8447 {
-		t.Fatalf("EffectiveRemoteLoginPort() = %d, want 8447", got)
+	if w := app.Warnings(); len(w) != 0 {
+		t.Fatalf("Warnings() = %v", w)
 	}
 }
 
-// The login provider gets its own loopback listener, so its port must not
-// collide with the proxy's, with either broker listener, or with the host
-// mirror of the GUEST issuer port — the container runtime publishes the jail's
-// forwarder there, which is what made the provider unable to bind in a live
-// run.
-func TestRemoteLoginPortCollisionsRejected(t *testing.T) {
+// remote.login_port still loads, whatever its value and whether remote is
+// on, but binds and grants nothing, and is named in Warnings.
+func TestRemoteLoginPortIsIgnoredWithAWarning(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-	for name, port := range map[string]int{
-		"jail port":                  8443,
-		"admin port":                 8444,
-		"proxy port":                 8445,
-		"mirrored guest issuer port": GuestLoginIssuerPort,
+	for _, body := range []string{
+		base + "  login_port: 8444\n",
+		base + "  login_port: 8445\n",
+		base + "  login_port: 8446\n",
+		base + "  login_port: 9500\n",
+		"name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  login_port: 9500\n",
 	} {
-		t.Run(name, func(t *testing.T) {
-			rejectNoHost(t, base+fmt.Sprintf("  login_port: %d\n", port), "login_port")
-		})
+		app, err := LoadNoHostChecks(writeConfig(t, body))
+		if err != nil {
+			t.Fatalf("%q must load: %v", body, err)
+		}
+		if slices.Contains(app.EffectiveAllowedPorts(), app.Remote.LoginPort) {
+			t.Errorf("login_port %d granted to the jail", app.Remote.LoginPort)
+		}
+		w := app.Warnings()
+		if len(w) != 1 || w[0] != "remote.login_port is no longer used (the hub login needs no port); remove it" {
+			t.Errorf("Warnings() = %v", w)
+		}
+		if slices.ContainsFunc(app.RemoteWarnings(), func(s string) bool { return strings.Contains(s, "login_port") }) {
+			t.Errorf("RemoteWarnings() names login_port: %v", app.RemoteWarnings())
+		}
 	}
-	// The SAME guard belongs on the proxy's own port: naming the mirrored
-	// guest port there is the identical live failure, just for the other of
-	// lever's two host listeners.
-	rejectNoHost(t, base+fmt.Sprintf("  port: %d\n", GuestLoginIssuerPort), "mirrored")
-
-	body := base + "  login_port: 9500\n"
-	app, err := LoadNoHostChecks(writeConfig(t, body))
-	if err != nil {
-		t.Fatalf("a free login_port must load: %v", err)
-	}
-	if got := app.EffectiveRemoteLoginPort(); got != 9500 {
-		t.Fatalf("EffectiveRemoteLoginPort() = %d, want 9500", got)
+	// 8446 was the guest login forwarder's port; nothing reserves it now.
+	if _, err := LoadNoHostChecks(writeConfig(t, base+"  port: 8446\n")); err != nil {
+		t.Fatalf("remote.port 8446 must load now that no forwarder is mirrored onto it: %v", err)
 	}
 }
 
-// remote.port colliding with the broker's jail port (8443 default) must fail
-// validation — the proxy and the broker's mTLS listener can't share a port.
 func TestRemotePortCollisionRejected(t *testing.T) {
 	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8443\n", "remote")
 }
 
-// remote.port colliding with the broker's admin port must also fail.
 func TestRemotePortCollisionWithAdminPortRejected(t *testing.T) {
 	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 8444\n", "remote")
 }
 
-// TestRemoteProxyPortInManagerAllowPortsRejected: manager.allow_ports opens a
-// jail→host ACCEPT on each port it lists, and the proxy's gate is only sound
-// because nothing but `tailscale serve` can reach its loopback listener.
-// Granting the jail that port means an agent can forge Tailscale-User-Login
-// and ride the operator's hub session, so the pair must not load at all.
+// TestRemoteProxyPortInManagerAllowPortsRejected: granting the jail the
+// proxy's port would let an agent forge the identity header and ride the
+// operator's hub session.
 func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 
-	// The default proxy port, and an explicitly configured one: the check must
-	// follow EffectiveRemotePort, not the literal 8445.
+	// The check must follow EffectiveRemotePort, not the literal 8445.
 	for name, body := range map[string]string{
 		"default proxy port":  base + "manager:\n  allow_ports: [3901, 8445]\n",
 		"explicit proxy port": base + "  port: 9445\nmanager:\n  allow_ports: [9445]\n",
@@ -1493,37 +1436,29 @@ func TestRemoteProxyPortInManagerAllowPortsRejected(t *testing.T) {
 		})
 	}
 
-	// The login port is the opposite case: the guest forwarder exists to reach
-	// it and EffectiveAllowedPorts grants it anyway, so an operator who listed
-	// it by hand (the only way to reach it before that grant existed) must not
-	// be locked out of loading.
-	ok := base + "  login_port: 8447\nmanager:\n  allow_ports: [8447]\n"
+	ok := base + "manager:\n  allow_ports: [8447]\n"
 	app, err := LoadNoHostChecks(writeConfig(t, ok))
 	if err != nil {
-		t.Fatalf("the login port in manager.allow_ports must still load: %v", err)
+		t.Fatalf("another port in manager.allow_ports must load: %v", err)
 	}
 	if !slices.Contains(app.EffectiveAllowedPorts(), 8447) {
-		t.Error("the login port must still be granted to the jail")
+		t.Error("manager.allow_ports must be granted to the jail")
 	}
 	if slices.Contains(app.EffectiveAllowedPorts(), app.EffectiveRemotePort()) {
 		t.Error("no loadable config may grant the jail the proxy's port")
 	}
 
-	// With remote off there is no proxy to reach, and a stale allow_ports
-	// entry must not block loading — same rule as every other remote check.
+	// With remote off a stale allow_ports entry must not block loading.
 	off := "name: x\nbackend: orbstack\ntree: ./tree\nmanager:\n  allow_ports: [8445]\n"
 	if _, err := LoadNoHostChecks(writeConfig(t, off)); err != nil {
 		t.Fatalf("with remote disabled, port 8445 in allow_ports must load: %v", err)
 	}
 }
 
-// base_url, when set, must be an absolute https URL (the tailnet serve
-// hostname) — a bare word or non-https scheme is rejected.
 func TestRemoteBaseURLValidated(t *testing.T) {
 	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"notaurl\"\n", "base_url")
 }
 
-// A well-formed https base_url is accepted.
 func TestRemoteBaseURLAcceptsHTTPS(t *testing.T) {
 	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 	app, err := LoadNoHostChecks(writeConfig(t, body))
@@ -1535,13 +1470,8 @@ func TestRemoteBaseURLAcceptsHTTPS(t *testing.T) {
 	}
 }
 
-// base_url is not merely format-checked when set, it is REQUIRED whenever
-// remote is enabled: an empty base_url means the proxy's ServeHost is empty,
-// and the proxy's own Origin gate fails closed on every request as a result
-// (see remoteproxy.Config.ServeHost) — an enabled-but-base_url-less config
-// can never actually serve anything. Reject it at load time instead of
-// letting it "succeed" into a proxy that refuses 100% of traffic, which
-// previously surfaced only much later as a confusing doctor healthz 403.
+// base_url is required with remote enabled: without it the proxy's Origin
+// gate refuses every request.
 func TestRemoteBaseURLRequiredWhenEnabled(t *testing.T) {
 	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n", "base_url")
 }
@@ -1552,8 +1482,7 @@ func TestRemoteAllowedUsersRejectsEmpty(t *testing.T) {
 	rejectNoHost(t, "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n  allowed_users: [\"ok@example.com\", \"\"]\n", "allowed_users")
 }
 
-// A disabled remote block is not validated at all — a bad port/base_url
-// left over from a previous config doesn't block loading until re-enabled.
+// A disabled remote block is not validated.
 func TestRemoteDisabledSkipsValidation(t *testing.T) {
 	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: false\n  port: 8443\n  base_url: \"notaurl\"\n"
 	if _, err := LoadNoHostChecks(writeConfig(t, body)); err != nil {
@@ -1561,7 +1490,6 @@ func TestRemoteDisabledSkipsValidation(t *testing.T) {
 	}
 }
 
-// An explicit port that doesn't collide is honoured by EffectiveRemotePort.
 func TestRemoteExplicitPortHonoured(t *testing.T) {
 	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  port: 9445\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 	app, err := LoadNoHostChecks(writeConfig(t, body))
@@ -1573,10 +1501,8 @@ func TestRemoteExplicitPortHonoured(t *testing.T) {
 	}
 }
 
-// Both backends load with remote on (issue #38). The Lima rejection is gone:
-// the proxy dials the hub through the jail, and the login forwarder's dial to
-// the host is the same hop, over the same alias and egress grant, that every
-// agent's broker connection makes on Lima.
+// Both backends load with remote on: the proxy dials the hub through the
+// jail.
 func TestRemoteAcceptedOnBothBackends(t *testing.T) {
 	for _, backend := range KnownBackends {
 		t.Run(backend, func(t *testing.T) {
@@ -1585,17 +1511,15 @@ func TestRemoteAcceptedOnBothBackends(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s + remote.enabled should load cleanly: %v", backend, err)
 			}
-			// The login port is granted on both, or the forwarder's dial is
-			// dropped by the jail's egress chain.
-			if !slices.Contains(app.EffectiveAllowedPorts(), app.EffectiveRemoteLoginPort()) {
-				t.Fatalf("%s: the login port must be in the egress allowlist", backend)
+			if got, want := app.EffectiveAllowedPorts(), []int{app.EffectiveJailPort()}; !slices.Equal(got, want) {
+				t.Fatalf("%s: EffectiveAllowedPorts() = %v, want %v", backend, got, want)
 			}
 		})
 	}
 }
 
-// ScionWebAssets is the single predicate behind three decisions that must not
-// disagree: build the SPA, stage it into the guest, and pass --web-assets-dir.
+// ScionWebAssets decides three things that must not disagree: build the SPA,
+// stage it, and pass --web-assets-dir.
 func TestScionWebAssets(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1628,54 +1552,8 @@ func TestScionWebAssets(t *testing.T) {
 	}
 }
 
-// withForwarderPrebuilt makes checkRemoteToolchain see a lever that does (or
-// does not) embed the prebuilt login forwarder, whatever this test binary
-// was built with.
-func withForwarderPrebuilt(t *testing.T, ok bool) {
-	t.Helper()
-	old := remoteForwarderPrebuilt
-	remoteForwarderPrebuilt = func() bool { return ok }
-	t.Cleanup(func() { remoteForwarderPrebuilt = old })
-}
-
-// A lever without the prebuilt login forwarder cross-compiles it at apply
-// time, so it needs a Go toolchain. `scion.binary:` is the mode where that
-// is the ONLY reason for one (the others already need Go for scion itself),
-// and the check is at config load because the apply-time failure would land
-// after the bootstrap-token step has already touched the hub.
-func TestRemoteWithScionBinaryNeedsAGoToolchain(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "scion-linux")
-	if err := os.WriteFile(bin, []byte("not really a binary"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nscion:\n  binary: " + bin +
-		"\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-
-	t.Setenv("PATH", "")
-	withForwarderPrebuilt(t, false)
-	_, err := Load(writeConfig(t, body))
-	testutil.WantErrContaining(t, err, "Go toolchain", "make install")
-
-	// A lever that embeds the forwarder for every guest arch needs no Go at
-	// all: the build-free scion.binary host issue #38 asked for.
-	withForwarderPrebuilt(t, true)
-	if _, err := Load(writeConfig(t, body)); err != nil {
-		t.Fatalf("with a prebuilt forwarder embedded, no toolchain is needed: %v", err)
-	}
-	withForwarderPrebuilt(t, false)
-
-	// With remote off, the same config is fine: nothing cross-compiles.
-	off := strings.Replace(body, "enabled: true", "enabled: false", 1)
-	if _, err := Load(writeConfig(t, off)); err != nil {
-		t.Fatalf("remote off must not need a toolchain: %v", err)
-	}
-}
-
-// The egress allowlist is the only thing that decides whether the jail may
-// dial a host port, so the login port has to be in it while remote access is
-// on — and gone again when it is off, so a grant never outlives the forwarder
-// it exists for.
-func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T) {
+// Turning remote access on grants the jail no extra host port.
+func TestEffectiveAllowedPortsIgnoresRemote(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager:\n  allow_ports: [3305]\n"
 	off, err := LoadNoHostChecks(writeConfig(t, base))
 	if err != nil {
@@ -1689,9 +1567,9 @@ func TestEffectiveAllowedPortsCoversTheLoginPortOnlyWhileRemoteIsOn(t *testing.T
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := []int{on.EffectiveJailPort(), 3305, on.EffectiveRemoteLoginPort()}
+	want := []int{on.EffectiveJailPort(), 3305}
 	if got := on.EffectiveAllowedPorts(); !slices.Equal(got, want) {
-		t.Fatalf("remote on: EffectiveAllowedPorts() = %v, want %v (the forwarder cannot reach the host without it)", got, want)
+		t.Fatalf("remote on: EffectiveAllowedPorts() = %v, want %v", got, want)
 	}
 }
 
@@ -1841,12 +1719,32 @@ func TestRemoteAllowedUsersShape(t *testing.T) {
 	for _, bad := range []string{
 		"a@x.com, b@x.com", "a@x.com,b@x.com", "me @example.com", "tab\there", "usr/1", "usr:1",
 		"alice@id.lever.local", "lever-operator@lever.local",
-		// The hub user lever sends every message as.
-		"dev@localhost", "Dev@LocalHost",
 	} {
 		t.Run(bad, func(t *testing.T) {
 			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users: [%q]\n", bad), "allowed_users")
 		})
+	}
+}
+
+// Lever's own hub identities and scion's dev user (<os-user>@localhost) are
+// never a remote login, in any case and in either allowed_users form.
+func TestRemoteAllowedUsersRefusesReservedAddresses(t *testing.T) {
+	for _, bad := range []string{
+		"lever-admin@lever.local", "LEVER-ADMIN@lever.local", "Lever-Controller@Lever.Local",
+		"lever-controller@lever.local", "dev@localhost", "Dev@LocalHost", "scion@localhost", "X@LOCALHOST",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			if !hubauth.IsReserved(HubEmailFor(bad)) {
+				t.Fatalf("hubauth.IsReserved(%q) = false", bad)
+			}
+			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users: [%q]\n", bad), "allowed_users", "reserved")
+			rejectNoHost(t, remoteOn+fmt.Sprintf("  allowed_users:\n    - login: %q\n      tier: contact\n      agents: [manager]\n", bad), "reserved")
+		})
+	}
+	// Logins with no "@" become @id.lever.local addresses, never reserved.
+	ok := []string{"lever-admin", "localhost", "scion", "me@localhost.example.com"}
+	if _, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  allowed_users: [\""+strings.Join(ok, "\", \"")+"\"]\n")); err != nil {
+		t.Fatalf("%v must load: %v", ok, err)
 	}
 }
 
@@ -1862,8 +1760,8 @@ func TestRemoteWebSenders(t *testing.T) {
 	}
 }
 
-// Another front with no allowed_users admits everyone that front admits;
-// say so. The Tailscale default keeps its long-standing quiet default.
+// Another front with no allowed_users admits everyone that front admits, so
+// it warns; the Tailscale default does not.
 func TestRemoteIdentityHeaderWithoutAllowedUsersWarns(t *testing.T) {
 	app, err := LoadNoHostChecks(writeConfig(t, remoteOn+"  identity_header: X-ExeDev-Email\n"))
 	if err != nil {

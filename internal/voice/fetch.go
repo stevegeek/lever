@@ -24,11 +24,10 @@ var ErrUnpinned = errors.New("model not pinned")
 // file.
 var ErrModel = errors.New("model file")
 
-// HuggingFaceHost reports whether u is one of Hugging Face's own hosts, over
-// https on the default port: the site itself and its content hosts (a
-// download is redirected from huggingface.co to a CDN host under
-// huggingface.co or hf.co). Every other host is refused, the first request
-// and every redirect alike.
+// HuggingFaceHost reports whether u is one of Hugging Face's own hosts (the
+// site, or a CDN host under huggingface.co or hf.co it redirects to), over
+// https on the default port. Every other host is refused, for the first
+// request and every redirect.
 func HuggingFaceHost(u *url.URL) bool {
 	if u.Scheme != "https" || u.User != nil || u.Port() != "" && u.Port() != "443" {
 		return false
@@ -37,13 +36,11 @@ func HuggingFaceHost(u *url.URL) bool {
 	return h == "huggingface.co" || strings.HasSuffix(h, ".huggingface.co") || strings.HasSuffix(h, ".hf.co")
 }
 
-// GitHubReleaseHost reports whether u is a host GitHub serves release
-// assets from, over https on the default port: github.com, which answers a
-// download with a redirect, and the content hosts it redirects to
-// (release-assets.githubusercontent.com, and objects.githubusercontent.com
-// before it). Not any other *.githubusercontent.com host: those serve
-// repository content. Every other host is refused, the first request and
-// every redirect alike. Speech model archives come from there.
+// GitHubReleaseHost reports whether u is a host GitHub serves release assets
+// from, over https on the default port: github.com and the content hosts it
+// redirects to (release-assets.githubusercontent.com,
+// objects.githubusercontent.com). Not any other *.githubusercontent.com
+// host: those serve repository content. Every other host is refused.
 func GitHubReleaseHost(u *url.URL) bool {
 	if u.Scheme != "https" || u.User != nil || u.Port() != "" && u.Port() != "443" {
 		return false
@@ -57,28 +54,25 @@ func GitHubReleaseHost(u *url.URL) bool {
 
 // Fetcher downloads a pinned model. The zero value is the real one.
 type Fetcher struct {
-	// Client is the HTTP client; nil = one with connection timeouts and no
-	// overall limit (a large model takes a while). Its CheckRedirect is
-	// replaced.
+	// Client nil = one with connection timeouts and no overall limit (a
+	// large model takes a while). Its CheckRedirect is replaced.
 	Client *http.Client
 	// AllowHost decides every host the download may reach; nil =
 	// HuggingFaceHost for a Whisper model, GitHubReleaseHost for a speech
-	// model's archive. Tests allow their own loopback server.
+	// archive.
 	AllowHost func(*url.URL) bool
-	// Progress, when set, gets a line every 10 per cent.
-	Progress io.Writer
+	Progress  io.Writer
 }
 
 const maxRedirects = 10
 
-// Fetch downloads m into dir unless a verified copy is there already, and
-// returns its path. The body goes to a private temp file in dir; only a
-// file of the pinned size and sha256 is renamed into place, mode 0600.
+// Fetch downloads m into dir unless a verified copy is there, and returns
+// its path. Only a file of the pinned size and sha256 is renamed into place,
+// 0600.
 func (f Fetcher) Fetch(ctx context.Context, m Model, dir string) (string, error) {
 	return f.FetchFrom(ctx, m, m.URL(), dir)
 }
 
-// FetchFrom is Fetch from src instead of the table's URL (tests).
 func (f Fetcher) FetchFrom(ctx context.Context, m Model, src, dir string) (string, error) {
 	if why := m.Pinned(); why != "" {
 		return "", fmt.Errorf("%w: %s", ErrUnpinned, why)
@@ -105,9 +99,6 @@ func (f Fetcher) FetchFrom(ctx context.Context, m Model, src, dir string) (strin
 	return final, nil
 }
 
-// download is one pinned file to download: its name for messages, its
-// URL, size and sha256, and the hosts it may come from (allow, unless the
-// Fetcher's AllowHost is set; hosts names them in a refusal).
 type download struct {
 	name, src string
 	size      int64
@@ -116,9 +107,9 @@ type download struct {
 	hosts     string
 }
 
-// download fetches d into a private temp file (.fetch-*, mode 0600) in
-// dir and returns its path once its size and sha256 match the pins; the
-// caller renames or removes it. Nothing is left behind on an error.
+// download fetches d into a private 0600 temp file in dir and returns its
+// path once size and sha256 match the pins; the caller renames or removes
+// it. Nothing is left behind on an error.
 func (f Fetcher) download(ctx context.Context, d download, dir string) (string, error) {
 	allow := d.allow
 	if f.AllowHost != nil {
@@ -203,7 +194,6 @@ func (f Fetcher) say(format string, a ...any) {
 	}
 }
 
-// progressReader reports every 10 per cent read.
 type progressReader struct {
 	r           io.Reader
 	total, read int64
@@ -224,8 +214,8 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// PrivateDir makes dir (0700) if it is missing, and refuses one that is a
-// symbolic link, not a directory, open to other users, or not the caller's.
+// PrivateDir makes dir (0700) if missing, and refuses a symbolic link, a
+// non-directory, or one open to other users or not the caller's.
 func PrivateDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -247,8 +237,8 @@ func PrivateDir(dir string) error {
 }
 
 // Verify checks the model file at p: a regular file of the caller's (no
-// symbolic link), not writable by others, of the pinned size and sha256.
-// A missing file is fs.ErrNotExist.
+// symbolic link), not writable by others, of the pinned size and sha256. A
+// missing file is fs.ErrNotExist.
 func Verify(p string, m Model) error {
 	if why := m.Pinned(); why != "" {
 		return fmt.Errorf("%w: %s", ErrUnpinned, why)
@@ -256,9 +246,6 @@ func Verify(p string, m Model) error {
 	return verifyFile(p, m.Size, m.SHA256)
 }
 
-// verifyFile checks the file at p: a regular file of the caller's (no
-// symbolic link), not writable by others, of size bytes and sha256 sum.
-// A missing file is fs.ErrNotExist.
 func verifyFile(p string, size int64, sum string) error {
 	fi, err := os.Lstat(p)
 	if err != nil {
@@ -290,13 +277,12 @@ func verifyFile(p string, size int64, sum string) error {
 	return nil
 }
 
-// ModelPath is where m lives in dir.
 func ModelPath(dir string, m Model) string { return filepath.Join(dir, m.File) }
 
-// CheckServer checks the whisper-server program at p before lever runs it:
-// an absolute path whose real file is a regular, executable file owned by
-// the caller or root and writable by nobody else, in a directory nobody
-// else may write to. It returns the real path.
+// CheckServer checks the program at p before lever runs it: an absolute
+// path whose real file is a regular executable owned by the caller or root
+// and writable by nobody else, in a directory nobody else may write. It
+// returns the real path.
 func CheckServer(p string) (string, error) {
 	if !filepath.IsAbs(p) {
 		return "", fmt.Errorf("voice: -server %q is not an absolute path", p)
@@ -326,8 +312,6 @@ func CheckServer(p string) (string, error) {
 	return real, nil
 }
 
-// safeOwned refuses a path writable by group or others, or owned by
-// someone other than the caller or root.
 func safeOwned(p string, fi fs.FileInfo) error {
 	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("voice: -server: %s is %v: another user can replace what lever runs", p, fi.Mode().Perm())
@@ -338,10 +322,9 @@ func safeOwned(p string, fi fs.FileInfo) error {
 	return nil
 }
 
-// removeStaleFetches deletes what a killed fetch left in dir: partial
-// downloads (regular files named .fetch-*) and partly unpacked speech
-// models (private directories named .fetch-*), untouched for a day (a
-// fetch running now writes continuously). Best effort.
+// removeStaleFetches deletes what a killed fetch left in dir (.fetch-*
+// partial downloads and partly unpacked models) once untouched for a day: a
+// running fetch writes continuously. Best effort.
 func removeStaleFetches(dir string, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

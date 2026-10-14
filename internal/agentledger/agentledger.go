@@ -2,16 +2,15 @@
 // authorized to send to a contact (broker contact_message), and of which hub
 // message each authorization was shown as.
 //
-// The broker is the only reader and writer. An agent sends the message itself
-// (the hub stamps it as that agent); the remote proxy shows a contact an
-// agent's message only when this record holds the sha256 of its exact text,
-// created around the hub's time for it, and binds one record to one hub
-// message, so one authorization never shows twice. The record holds hashes
+// The broker is the only reader and writer. The remote proxy shows a contact
+// an agent's message only when this record holds the sha256 of its exact
+// text, created around the hub's time for it; one record binds to one hub
+// message, so an authorization never shows twice. The record holds hashes
 // and lengths, never the text.
 //
-// Layout: one file per contact (c-<24 hex>.jsonl, 0600) in a 0700 directory
-// in the host state directory, outside every jail mount. A lock file
-// (.lock) serialises the broker and the one replacing it on a restart.
+// One file per contact (0600) in a 0700 directory in the host state
+// directory, outside every jail mount. A .lock file serialises the broker
+// with the one replacing it on a restart.
 package agentledger
 
 import (
@@ -40,23 +39,18 @@ const (
 	// TTL is how long after an authorization the agent has to send it.
 	TTL = 10 * time.Minute
 	// SkewBefore is how much earlier than its record a hub message time may
-	// be. Small: the agent sends after it is authorized, so only the clock
-	// difference between the broker (host) and the hub (guest VM, kept in
-	// sync with the host) can put it before; a message sent before the
+	// be: only the broker/hub clock difference. A message sent before the
 	// authorization must not bind to it.
 	SkewBefore = 10 * time.Second
 	// SkewAfter is how much later than the record's expiry a hub message
 	// time may be: the same clock difference plus the send's own delay.
 	SkewAfter = 2 * time.Minute
 	// RotateCap is the size past which a contact's file moves to .1 on the
-	// next append. A move replaces the previous .1, so the second move drops
-	// every line of the first file: those authorizations and their "shown"
-	// bindings. A message bound in a dropped line stops showing (a binding
-	// whose authorization was dropped shows nothing either), and a dropped
-	// authorization no longer counts toward the initiate rule, the replies
-	// to one contact post or the hourly rate. At ~250 bytes a line, a file
-	// holds about 16000 lines; the hourly rate (30) keeps one agent from
-	// filling one in less than about 500 hours.
+	// next append. A second move drops the first file's authorizations and
+	// bindings: their messages stop showing and they stop counting toward the
+	// initiate rule, reply cap and hourly rate. A file holds about 16000
+	// lines, which the hourly rate keeps one agent from filling in under
+	// about 500 hours.
 	RotateCap = 4 << 20
 	label     = "agent ledger"
 )
@@ -148,15 +142,12 @@ type Ledger struct {
 	dir   string
 	mu    sync.Mutex
 	files map[string]*hostledger.File
-	// hours caches, per contact file, the creation times of its
-	// authorizations by agent, for the hourly rate. An entry is used while
-	// the file and its .1 keep the size and time they had when it was read;
-	// any append (by this broker or another) changes them.
+	// hours caches, per contact file, the creation times of authorizations
+	// by agent for the hourly rate. An entry is valid while the file and its
+	// .1 keep the signature they had when read.
 	hours map[string]hourEntry
-	// states caches, per contact file, the file read back, under the same
-	// rule: a contact's history reads and unread polls (Match, Peek) and its
-	// authorizations then cost one stat each while nothing was appended, not
-	// a parse of the file and its .1 under the lock. Callers never change a
+	// states caches each contact file read back under the same rule, so
+	// reads cost one stat while nothing was appended. Callers never change a
 	// cached state.
 	states map[string]stateEntry
 	reads  int // files read back (contactState); for tests
@@ -184,7 +175,6 @@ func Open(dir string) (*Ledger, error) {
 	return &Ledger{dir: dir, files: map[string]*hostledger.File{}, hours: map[string]hourEntry{}, states: map[string]stateEntry{}}, nil
 }
 
-// lock holds the in-process mutex and the directory's flock.
 func (l *Ledger) lock() (func(), error) {
 	l.mu.Lock()
 	if err := hostledger.CheckDir(l.dir, label); err != nil {
@@ -208,7 +198,6 @@ func (l *Ledger) file(name string) *hostledger.File {
 	return f
 }
 
-// contactState is one contact file read back.
 type contactState struct {
 	auths []Auth            // oldest first
 	byID  map[string]int    // auth id → index
@@ -216,8 +205,8 @@ type contactState struct {
 	used  map[string]string // auth id → hub message id
 }
 
-// state is the contact file read back, from the cache while the file and its
-// .1 keep their signature (fileSig). Called under the lock.
+// state is called under the lock; it uses the cache while fileSig is
+// unchanged.
 func (l *Ledger) state(name string) (contactState, error) {
 	sig, err := l.fileSig(name)
 	if err != nil {
@@ -277,9 +266,8 @@ func (l *Ledger) read(name string) (contactState, error) {
 	return s, nil
 }
 
-// lastHour counts agent's authorizations to anyone since now−1h. A file is
-// read again only when it changed since the last count (fileSig), so the
-// cost of a call is one stat per contact file, not a read of every record.
+// lastHour counts agent's authorizations to anyone since now-1h, rereading
+// a file only when its fileSig changed.
 func (l *Ledger) lastHour(agent string, now time.Time) (int, error) {
 	names, err := os.ReadDir(l.dir)
 	if err != nil {
@@ -321,9 +309,9 @@ func (l *Ledger) lastHour(agent string, now time.Time) (int, error) {
 	return n, nil
 }
 
-// fileSig is the size, modification time, mode, owner and file id (inode) of
-// a contact file and its .1 ("-" for a missing one): a file made unsafe is
-// read (and refused) again, and a file replaced by another is read again.
+// fileSig covers size, mtime, mode, owner and inode of a contact file and
+// its .1, so a file made unsafe is refused again and a replaced file is
+// reread.
 func (l *Ledger) fileSig(name string) (string, error) {
 	var b strings.Builder
 	for _, p := range []string{filepath.Join(l.dir, name), filepath.Join(l.dir, name+".1")} {
@@ -367,9 +355,8 @@ func (l *Ledger) View(agent, contact string, now time.Time) (View, error) {
 }
 
 // Authorize appends a when allow, called under the lock with the current
-// View, returns nil; allow's error is returned unchanged and nothing is
-// written. The lock makes the decision and the append one step, also across
-// a broker and the one replacing it.
+// View, returns nil; allow's error is returned and nothing is written. The
+// lock makes decision and append atomic, also across a broker restart.
 func (l *Ledger) Authorize(a Auth, now time.Time, allow func(View) error) error {
 	if !idRE.MatchString(a.ID) || !shaRE.MatchString(a.SHA256) || (a.Kind != KindInitiated && a.Kind != KindReply) ||
 		a.Agent == "" || a.Contact == "" {
@@ -393,31 +380,27 @@ func (l *Ledger) Authorize(a Auth, now time.Time, allow func(View) error) error 
 }
 
 // Match answers which candidates (one agent's rows of one contact's
-// history) a record holds. A message already bound shows only while its
-// hash is still the one it was bound with; an unbound one binds the oldest
-// unused record of the same hash whose window [Created-SkewBefore, Expires+SkewAfter]
-// holds its time, earliest message first, and the binding is appended
-// before the answer. bound lists the record ids newly bound (for the audit).
-// A failed append keeps none of this call's new bindings.
+// history) a record holds. A bound message shows only while its hash is
+// still the one it was bound with; an unbound one binds the oldest unused
+// record of the same hash whose window [Created-SkewBefore,
+// Expires+SkewAfter] holds its time, earliest message first, and the
+// binding is appended before the answer. bound lists the newly bound
+// record ids. A failed append keeps none of this call's new bindings.
 func (l *Ledger) Match(agent, contact string, msgs []Candidate, now time.Time) (map[string]bool, []string, error) {
 	keep, _, bound, err := l.match(agent, contact, msgs, now, true)
 	return keep, bound, err
 }
 
-// Peek answers what Match would keep for msgs now, and writes nothing: a
-// bound message by its binding, an unbound one by whether a record would
-// bind it. pending is the kept messages of the second kind: no contact read
-// has bound them yet, and which of them a record finally binds depends on
-// the pages the contact reads. The operator's view of a contact's
-// conversation peeks, so its reads (of any page, in any order) never decide
-// which message a record shows; only the contact's own reads bind.
+// Peek answers what Match would keep for msgs now and writes nothing.
+// pending is the kept messages not yet bound. The operator's view peeks, so
+// its reads never decide which message a record shows; only the contact's
+// own reads bind.
 func (l *Ledger) Peek(agent, contact string, msgs []Candidate, now time.Time) (keep, pending map[string]bool, err error) {
 	keep, pending, _, err = l.match(agent, contact, msgs, now, false)
 	return keep, pending, err
 }
 
-// match is Match, appending the new bindings only when write is set.
-// pending is the message ids this call bound (or would bind).
+// match appends the new bindings only when write is set.
 func (l *Ledger) match(agent, contact string, msgs []Candidate, now time.Time, write bool) (keep, pending map[string]bool, bound []string, err error) {
 	unlock, err := l.lock()
 	if err != nil {

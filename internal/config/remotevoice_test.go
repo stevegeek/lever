@@ -14,8 +14,6 @@ import (
 
 const testSocket = "/run/lever/whisper.sock"
 
-// whisperTool is a broker tools entry running lever-tool-whisper with the
-// given extra flags.
 func whisperTool(extra ...string) Tool {
 	cmd := append([]string{"/opt/lever/lever-tool-whisper", "-tree", "/t", "-models", "/s/voice-models",
 		"-server", "/opt/w/whisper-server", "-whisper-port", "8448", "-dictate-socket", testSocket}, extra...)
@@ -86,21 +84,21 @@ func TestWhisperToolValidation(t *testing.T) {
 		mut  func(a *App)
 		want string
 	}{
-		"ok":                {func(a *App) {}, ""},
-		"voice off":         {func(a *App) { a.Remote.Voice = Voice{} }, ""},
-		"allowlisted":       {func(a *App) { a.Manager.AllowPorts = []int{8448} }, "jail may reach"},
-		"allowlisted, off":  {func(a *App) { a.Remote = Remote{}; a.Manager.AllowPorts = []int{8448} }, "jail may reach"},
-		"custom, list":      {func(a *App) { withPort("9100")(a); a.Manager.AllowPorts = []int{9100} }, "jail may reach"},
-		"custom":            {func(a *App) { withPort("9100")(a); a.Manager.AllowPorts = []int{8448} }, ""},
-		"jail":              {withPort("8443"), "jail may reach"},
-		"login":             {withPort("8447"), "jail may reach"},
-		"proxy":             {withPort("8445"), "remote proxy"},
-		"proxy, remote off": {func(a *App) { a.Remote = Remote{}; withPort("8445")(a) }, ""},
-		"admin":             {withPort("8444"), "admin"},
-		"mirror":            {withPort("8446"), "mirrored"},
-		"not a number":      {withPort("x"), "not a port"},
-		"too big":           {withPort("70000"), "not a port"},
-		"own backend":       {withPort("3212"), "backend port"},
+		"ok":                 {func(a *App) {}, ""},
+		"voice off":          {func(a *App) { a.Remote.Voice = Voice{} }, ""},
+		"allowlisted":        {func(a *App) { a.Manager.AllowPorts = []int{8448} }, "jail may reach"},
+		"allowlisted, off":   {func(a *App) { a.Remote = Remote{}; a.Manager.AllowPorts = []int{8448} }, "jail may reach"},
+		"custom, list":       {func(a *App) { withPort("9100")(a); a.Manager.AllowPorts = []int{9100} }, "jail may reach"},
+		"custom":             {func(a *App) { withPort("9100")(a); a.Manager.AllowPorts = []int{8448} }, ""},
+		"jail":               {withPort("8443"), "jail may reach"},
+		"former login port":  {withPort("8447"), ""},
+		"proxy":              {withPort("8445"), "remote proxy"},
+		"proxy, remote off":  {func(a *App) { a.Remote = Remote{}; withPort("8445")(a) }, ""},
+		"admin":              {withPort("8444"), "admin"},
+		"old forwarder port": {withPort("8446"), ""},
+		"not a number":       {withPort("x"), "not a port"},
+		"too big":            {withPort("70000"), "not a port"},
+		"own backend":        {withPort("3212"), "backend port"},
 		"other backend": {func(a *App) {
 			a.Broker.Tools = append(a.Broker.Tools, Tool{Name: "fizzy", Command: []string{"/x"}, Backend: "http://127.0.0.1:8448"})
 		}, "broker tool \"fizzy\""},
@@ -302,7 +300,7 @@ func TestEnvFormsLeverCannotRead(t *testing.T) {
 	for cmd, bad := range map[string]bool{
 		"env -S 'tool -state /s'": false,
 		"env -vS tool":            true,
-		// Read precisely now (parseEnvPrefix), like --split-string tool.
+		// Read precisely, like --split-string tool.
 		"env --split-string=tool":            false,
 		"env -u X tool -state /s":            false,
 		"env CUDA_VISIBLE_DEVICES=0 tool -x": false,

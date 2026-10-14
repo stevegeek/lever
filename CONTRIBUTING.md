@@ -36,7 +36,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/egress` | Jail egress allowlist as iptables/ip6tables rules. |
 | `internal/fileledger` | Host record of chat-page uploads and agent-shared files, with sha256 and size. |
 | `internal/fizzytool` | Host side of `lever-tool-fizzy`: board-confined operations through the `fizzy` CLI. |
-| `internal/fsutil` | Stdlib-only file helpers (`WriteFileAtomic`). |
+| `internal/fsutil` | File helpers (`WriteFileAtomic`, tree-confined access, `InsideByIdentity`); stdlib only, plus `golang.org/x/sys/unix` for the identity check. |
 | `internal/ghpush` | Host side of `lever-tool-github`: request checks, bundle import into a host mirror, the push, and the opt-in PR and release operations over the GitHub REST API. |
 | `internal/hostledger` | Safe JSON-lines file handling shared by the host-side ledgers. |
 | `internal/proc` | The single seam to external commands (`Runner`, `FakeRunner`). |
@@ -45,10 +45,11 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/jail` | `JailRunner`: a `proc.Runner` that runs commands inside the jail. |
 | `internal/mcp` | JSON-RPC 2.0 framing and the `tools/call` projection shared by the agent MCP server and `captool`; `MaxBodyBytes`. |
 | `internal/opsig` | Operator-directive signature protocol. |
-| `internal/provision` | Host-side build pipelines that produce a local artefact for the guest: `scionbin` (scion binary: prebuilt/source/pinned module, ELF arch check), `webassets` (scion's SPA via npm, cached per source digest; the node probe `lever doctor` shares), `loginfwd` (the remote-access login forwarder — see below), and the shared `GoBinary` resolver. |
+| `internal/provision` | Host-side build pipelines that produce a local artefact for the guest: `scionbin` (scion binary: prebuilt/source/pinned module, ELF arch check), `webassets` (scion's SPA via npm, cached per source digest; the node probe `lever doctor` shares), and the shared `GoBinary` resolver. |
 | `internal/retry` | `retry.Until`: the one bounded poll loop every wait-for-ready path uses. |
-| `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy, local OIDC provider, chat page, file exchange and web push. |
-| `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys, the oidc_login block and YAML edit helpers). |
+| `internal/hubauth` | lever's hub assertion key and ES256 signer: the identities lever asserts to the hub (admin, controller, remote sign-ins) and the reserved addresses. |
+| `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy, the assertion sign-in, chat page, file exchange and web push. |
+| `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys and YAML edit helpers). |
 | `internal/sentledger` | Host record of every message lever itself sends to an agent. |
 | `internal/sessionrec` | Host record of when each agent's session last started fresh, and with which skill text. |
 | `internal/skills` | Framework-authored SKILL.md files scaffolded into instances. |
@@ -58,7 +59,9 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/voice` | Speech on the host. Speech to text: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. Text to speech: the pinned speech model archives (unpacked with a manifest of every file), the sherpa-onnx adapter, the per-text runner and the speech socket of `lever-tool-tts`. |
 | `internal/webpush` | Web Push (RFC 8030/8291/8292) sender for the chat page's notifications, stdlib only. |
 | `internal/wire` | Leaf package: agent⇄broker request/response types, route paths and bootstrap material. Imports no other lever package. |
-| `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`). |
+| `image/lever-claude` | Build context for the generic agent image (`lever.local/lever-claude:<arch>`), and the lever layer of the slim one. |
+| `image/scion-slim` | The slim image's base (`make lever-image-slim`): what scion needs in an agent container, in place of `scion-claude`. |
+| `image/contract` | The agent-image contract check (`make image-contract IMAGE=...`) and its tests. |
 | `examples/` | Runnable instances used by docs and tests. |
 | `docs-site/` | Jekyll site for lever.to (`_guides`, `_reference`). |
 | `tools/test` | Live end-to-end test scripts and the fake LLM upstream. |
@@ -67,15 +70,29 @@ Developer notes for working on lever itself. For using lever, start at the
 All binaries are built from one Go module (Go 1.26+). The three in-jail binaries are cross-compiled
 for `linux/<arch>` with `CGO_ENABLED=0` and copied to `/usr/local/bin` in the agent image.
 
-One more in-jail program is NOT built that way: `lever-login-forward`, the remote-access login
-forwarder (`internal/provision/loginfwd/main`). It runs in the jail VM itself, not in an agent
-container, so the agent image cannot carry it. `make install` (through `make loginfwd-prebuilt`) and the
-release build run `go run ./internal/provision/loginfwd/genprebuilt` first, which
-cross-compiles it for linux/amd64 and linux/arm64 into `internal/provision/loginfwd/prebuilt/`,
-where `go:embed` carries it in `lever`; such a `lever` needs no Go toolchain for remote access. A
-`lever` built without that step (`go build`, `go install`) falls back to cross-compiling the
-embedded source on the operator host during `lever apply` of an instance with `remote.enabled`,
-which needs a Go toolchain.
+scion itself is too large to embed (about 40 MB per arch compressed). The release build runs
+`go run ./internal/provision/scionbin/genrelease -version <v>` first: it builds scion at
+`scionbin.ReleasePin` for linux/amd64 and linux/arm64 with the same flags as the apply-time build
+(plus `CGO_ENABLED=0`), writes the gzip-compressed binaries to `build/scion-release/`, which
+goreleaser uploads as release assets, and writes their sha256 and sizes to
+`internal/provision/scionbin/release/manifest.json`, which `go:embed` carries in `lever`. Such a
+`lever` downloads the asset for a matching `scion.version` from its own release and installs it
+only if it matches the embedded digests. Without that step (`make install`, `go build`) lever
+embeds no manifest and builds scion as before. Do not run `genrelease` in a checkout you build
+`lever` from for use: its manifest would name assets that are not on any release.
+
+### Bumping the scion pin
+
+Change `ReleasePin` in `internal/provision/scionbin/release.go` and the `version:` of every
+`examples/*/lever.yaml` together (`TestExamplesPinTheReleaseScion` fails otherwise), then the pin
+in the docs (`grep -rn <old pin> docs-site`), the Makefile's `SCION_VERSION` default and the
+tests that name it (`grep -rn <old pin> .`). The next release ships the new pin prebuilt.
+
+The agent image carries sciontool (and, in the slim image, scion) built from the pin, so a bump
+needs a new image: bump `JailABI` (see below) so `lever doctor` asks for the rebuild. Run
+`make test-lima-stack-e2e` on the new pin: `make test-lima-e2e` does not start scion. With
+`SAVE_IMAGE_TAR=<file>` it keeps the image archive it built, for `make test-lima-hubauth-e2e
+IMAGE_TAR=<file>`, which migrates an instance the older release brought up on its pin.
 
 ## Build
 
@@ -83,6 +100,8 @@ which needs a Go toolchain.
 make install          # host `lever`, `lever-tool-github`, `lever-tool-fizzy`, `lever-tool-whisper`, `lever-tool-tts` → $PREFIX (default ~/.local/bin)
 make lever-image      # cross-compile in-jail binaries + docker build the agent image (LEVER_IMAGE_ARCH, default: host Go arch)
 make lever-image-bins # cross-compile in-jail binaries into an instance's image build context only
+make lever-image-slim # the slim agent image (SCION_VERSION or SCION_SRC: the scion the jail runs)
+make image-contract   # check a built image (IMAGE=..., default the slim one) against what lever and scion need
 ```
 
 Never build a binary into the tree: `go build ./cmd/x` writes `./x` into the current directory.
@@ -101,6 +120,8 @@ go test ./...          # unit and acceptance-fixture tests
 make test-integration  # `-tags integration` tests; each skips unless its env/tooling is present
 make test-apikey-e2e   # live api-key /llm path with a fake upstream; needs OrbStack + podman
 make test-lima-e2e     # live lima backend gate; needs Lima >= 2.0
+make test-lima-stack-e2e # live whole stack on the pinned scion (agent image, remote access); needs Lima >= 2.0
+make test-lima-hubauth-e2e # live hub identities: migration from the older release, contacts while agents run; needs IMAGE_TAR
 lever acceptance       # six-check live gate against a running instance
 ```
 
@@ -178,6 +199,20 @@ update, when the code is the same but its meaning on the wire changed. Two branc
 it conflict in `fingerprint.txt`: after the merge, bump once more and run the update. Deleting
 `fingerprint.txt` and running the update re-records it without a bump, so only do that when no
 image has shipped with the current `JailABI`.
+
+## Comments
+
+A comment says what the code cannot: a non-obvious why, a constraint, a security assumption or
+invariant, a gotcha, or a contract a caller must keep. Keep it short.
+
+- Do not describe what the code does; name things so it reads on its own.
+- Do not reference tickets or card numbers, issue or PR links, other projects, people, or private
+  context.
+- Do not write history ("it used to", "before this change", "renamed from"). Design reasoning and
+  history go in the commit message, the PR text or the docs.
+- Keep license headers, package doc comments, short doc comments on exported identifiers, tool
+  directives (`//go:`, `//nolint`) and comments that state a security assumption.
+- In tests, a comment may say what a non-obvious test proves.
 
 ## Release checklist
 

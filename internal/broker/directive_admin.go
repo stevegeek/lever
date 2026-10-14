@@ -15,18 +15,13 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// adminEnvelopeSkew bounds the freshness window opsig.ParseEnvelope enforces
-// on the signed list/revoke admin-op envelopes.
+// adminEnvelopeSkew is the freshness window of signed admin-op envelopes.
 const adminEnvelopeSkew = 2 * time.Minute
 
-// directiveAuditRotateCap is the size past which append rotates the log to
-// <path>.1 before writing the next line.
 const directiveAuditRotateCap = 1 << 20 // 1 MiB
 
 // directiveAudit is a bounded, append-only JSON-lines audit log for the
-// directive admin channel. A "" path makes append a no-op — the Broker
-// always constructs a non-nil *directiveAudit (see New), so handlers never
-// need to nil-check b.dirAudit.
+// directive admin channel. A "" path makes append a no-op.
 type directiveAudit struct {
 	path string
 	mu   sync.Mutex
@@ -36,9 +31,6 @@ func newDirectiveAudit(path string) *directiveAudit {
 	return &directiveAudit{path: path}
 }
 
-// append writes one JSON line {"ts":..., "event":event, ...kvs} to the audit
-// log, rotating the existing file to <path>.1 (replacing any previous .1)
-// first if it has grown past directiveAuditRotateCap.
 func (a *directiveAudit) append(event string, kvs map[string]any) {
 	if a.path == "" {
 		return
@@ -67,10 +59,8 @@ func (a *directiveAudit) append(event string, kvs map[string]any) {
 	_, _ = f.Write(line)
 }
 
-// DirectiveAdminHandler builds an http.Handler for the operator-directive
-// UDS admin channel (0600 socket — see brokerctl's dirLn bind). When
-// directives are disabled (nil verifier) the whole channel is a 404 handler,
-// so it stays invisible regardless of path or method.
+// DirectiveAdminHandler serves the 0600 directive UDS channel. With
+// directives disabled every path and method 404s.
 func (b *Broker) DirectiveAdminHandler() http.Handler {
 	if b.directiveVerifier == nil {
 		return http.NotFoundHandler()
@@ -84,13 +74,9 @@ func (b *Broker) DirectiveAdminHandler() http.Handler {
 	return mux
 }
 
-// decodeSignedPair decodes a two-field signed JSON envelope (the body shape
-// of every signed directive admin route): signedBodyLimit cap, then
-// base64/std of the message and signature strings. On any failure it writes
-// 400 "bad request" and returns ok=false; callers must return immediately.
-// Signature VERIFICATION stays at the call sites — send and selftest
-// deliberately handle verify failures differently (opaque message vs.
-// verbatim error).
+// decodeSignedPair decodes a signed two-field envelope, writing 400 on
+// failure. Verification stays at the call sites: send and selftest report
+// verify failures differently (opaque vs. verbatim).
 func decodeSignedPair[T any](w http.ResponseWriter, r *http.Request, fields func(T) (msg, sig string)) (raw, sig []byte, ok bool) {
 	var req T
 	if err := decodeBody(w, r, signedBodyLimit, &req); err != nil {
@@ -107,8 +93,6 @@ func decodeSignedPair[T any](w http.ResponseWriter, r *http.Request, fields func
 	return raw, sig, true
 }
 
-// decodeSignedStatement decodes the {statement,signature} envelope shared by
-// send and selftest.
 func decodeSignedStatement(w http.ResponseWriter, r *http.Request) (raw, sig []byte, ok bool) {
 	return decodeSignedPair(w, r, func(q wire.DirectiveSubmitRequest) (string, string) { return q.Statement, q.Signature })
 }
@@ -132,14 +116,14 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid statement", http.StatusBadRequest)
 		return
 	}
-	exp, _ := time.Parse(time.RFC3339, st.ExpiresAt) // already validated by ParseStatement
+	exp, _ := time.Parse(time.RFC3339, st.ExpiresAt) // validated by ParseStatement
 	if exp.Sub(now) > b.directiveExpiryMax {
 		http.Error(w, "expiry beyond instance cap", http.StatusBadRequest)
 		return
 	}
 	nbf, _ := time.Parse(time.RFC3339, st.NotBefore)
-	// Target must be a known agent (by cert CN, not a slug alias) at its
-	// CURRENT generation.
+	// Target must be a known cert CN (not a slug alias) at its CURRENT
+	// generation.
 	cn, slug, _, ok := b.identity(st.TargetAgent.CN)
 	if !ok || cn != st.TargetAgent.CN {
 		http.Error(w, "unknown target agent", http.StatusBadRequest)
@@ -156,11 +140,9 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// A directive whose notice cannot reach the agent is not stored: a stored
-	// directive nobody was told about reads as "in flight" in the ledger and
-	// only runs down its expiry (lever#25). The hub refuses a message to an
-	// agent that is not running, so ask first; the operator brings the agent
-	// up and sends again (the statement is not spent: nothing saw its id).
+	// A directive whose notice cannot reach the agent is not stored, or it
+	// would only sit "in flight" until expiry. The statement is not spent, so
+	// the operator can send it again.
 	if b.runtime != nil {
 		if refusal := b.notRunningRefusal(r.Context(), operatorActor, slug, cn == b.manager); refusal != "" {
 			b.audit("directive", "operator", "deny", "send "+st.DirectiveID+": "+refusal)
@@ -182,45 +164,32 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	b.dirAudit.append("issued", map[string]any{
 		"id": st.DirectiveID, "target": st.TargetAgent.CN, "gen": st.TargetAgent.Generation,
 		"kind": st.Action.Kind,
-		// Re-encoded from the decoded bytes: raw/sig are exactly what Verify
-		// ran over and what the store holds, so this is the same material in
-		// canonical base64.
+		// The exact bytes Verify ran over and the store holds.
 		"statement": base64.StdEncoding.EncodeToString(raw),
 		"signature": base64.StdEncoding.EncodeToString(sig),
 	})
 	delivered := false
 	if b.runtime != nil {
-		// Spell out the call form, including the argument name. This text is the
-		// only thing the model reads at the moment it must construct the call,
-		// and naming the tool without naming its parameter is what let a model
-		// invent one (it sent `directive_id`, the spelling used by the signed
-		// statement and the CLI, against a tool whose parameter was `id`) and
-		// then read the resulting opaque 404 as "no such directive".
-		// The marker line tells the recipient this is lever's notice, not a
-		// chat message, although scion stamps the controller's hub user as
-		// its sender (see directiveNoticeMarker).
-		// The first line is lever's notice marker and the send's ref: the
-		// recipient's message_verify call finds this notice in the sent
-		// ledger by it, so a copy of the text elsewhere proves nothing.
+		// Name the argument too: a model told only the tool name invented a
+		// parameter and read the opaque 404 as "no such directive". The first
+		// line's ref lets message_verify find this notice in the sent ledger,
+		// so a copy of the text elsewhere proves nothing.
 		text := fmt.Sprintf("Operator directive %s is pending. If and only if you independently decide to act on it, retrieve it by calling the directive_consume tool with id=%q.", st.DirectiveID, st.DirectiveID)
 		ref, merr := b.sendRecorded(r.Context(), cn, slug, sentledger.KindDirectiveNotice,
 			func(ref string) string { return refLine(directiveNoticeMarker, ref) + "\n" + text },
 			scion.MsgOpts{To: "agent:" + slug, Project: b.instanceProject})
 		if merr != nil {
-			// The notice did not go out (the agent stopped after the check,
-			// or scion failed). Revoke rather than leave an active directive
-			// the agent was never told about; if the notice did land after
-			// all, its id now consumes as the usual opaque not-found.
+			// Revoke rather than leave an active directive the agent was never
+			// told about; if the notice landed after all, its id now consumes
+			// as the usual opaque not-found.
 			revoked, perr := b.directives.RevokeDirective(st.DirectiveID)
 			b.audit("directive", "operator", "error", "deliver "+st.DirectiveID+" "+ref+": "+merr.Error(), "revoked", revoked, "persisted", perr == nil)
 			b.dirAudit.append("delivered", map[string]any{"id": st.DirectiveID, "ok": false})
 			b.dirAudit.append("revoked", map[string]any{"id": st.DirectiveID, "ok": revoked, "reason": "undelivered"})
 			if !revoked {
-				// Not active any more, so nothing was revoked. The one way
-				// there in this window: the notice DID land although scion
-				// reported a failure, and the agent consumed the directive.
-				// Saying "revoked, send again" would have the operator sign
-				// a second authority for one intent.
+				// No longer active: the notice landed despite the error and
+				// the agent consumed it (or re-enrolled). "Send again" would
+				// have the operator sign a second authority for one intent.
 				state := b.directiveState(st.DirectiveID)
 				http.Error(w, "directive "+st.DirectiveID+": the notice was reported as not delivered, but the directive is no longer active (state: "+state+"). "+
 					"If the state is consumed, the notice reached the agent and the agent took the directive: do NOT send it again. "+
@@ -229,8 +198,6 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if perr != nil {
-				// Revoked in memory only. "Nothing is pending" would be
-				// false after a broker restart.
 				http.Error(w, "directive "+st.DirectiveID+": the notice could not be delivered to the agent, and the directive was revoked in memory only: "+
 					"the broker could not write its state to disk. A broker restart before the directive expires would make it active again. "+
 					"Fix the disk (see the broker log), run `lever directive revoke "+st.DirectiveID+"` again, and send a new directive only after that.", http.StatusBadGateway)
@@ -247,8 +214,6 @@ func (b *Broker) handleDirectiveSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.DirectiveSendResponse{ID: st.DirectiveID, Delivered: delivered})
 }
 
-// directiveState is the stored state of directive id for an operator-facing
-// answer, or "unknown" when the store no longer lists it.
 func (b *Broker) directiveState(id string) string {
 	for _, rec := range b.directives.List(time.Now()) {
 		if rec.ID == id {
@@ -258,12 +223,8 @@ func (b *Broker) directiveState(id string) string {
 	return "unknown"
 }
 
-// handleDirectiveResolve is UNSIGNED: the UDS socket's 0600 perms are the
-// gate, and the response carries no authority (an operator still has to sign
-// a statement against the reported generation to act on it). The agent name
-// follows resolveMsgTarget's aliasing: "manager", the manager's cert CN, or
-// its scion slug all mean the manager; anything else must be a declared
-// worker's name.
+// handleDirectiveResolve is UNSIGNED: the 0600 socket is the gate, and the
+// answer carries no authority (acting on it still needs a signed statement).
 func (b *Broker) handleDirectiveResolve(w http.ResponseWriter, r *http.Request) {
 	agent := r.URL.Query().Get("agent")
 	name := agent
@@ -287,10 +248,8 @@ func (b *Broker) handleDirectiveResolve(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, wire.DirectiveResolveResponse{CN: cn, Slug: slug, Generation: gen})
 }
 
-// verifyAdminEnvelope decodes, verifies (NamespaceAdmin), and parses a signed
-// admin-op envelope from r's body, checking it matches wantOp. On any failure
-// it audits and writes the HTTP response itself and returns ok=false; callers
-// must return immediately when ok is false.
+// verifyAdminEnvelope verifies a signed admin-op envelope for wantOp. On
+// failure it has written the response; callers must return.
 func (b *Broker) verifyAdminEnvelope(w http.ResponseWriter, r *http.Request, op, wantOp string) (opsig.Envelope, bool) {
 	raw, sig, ok := decodeSignedPair(w, r, func(q wire.DirectiveEnvelopeRequest) (string, string) { return q.Envelope, q.Signature })
 	if !ok {
@@ -340,10 +299,9 @@ func (b *Broker) handleDirectiveRevoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.DirectiveRevokeResponse{Revoked: revoked, NotPersisted: perr != nil})
 }
 
-// handleDirectiveSelftest verifies+parses ONLY (no store, no delivery, no
-// generation/target-known checks — the target may be a dummy). It is the
-// allowed_signers-misconfig probe: unlike send, failures return the actual
-// verify/parse error text so an operator can diagnose a bad key/file/clock.
+// handleDirectiveSelftest only verifies and parses (the target may be a
+// dummy). Unlike send, it returns the real error text so an operator can
+// diagnose a bad key, signers file or clock.
 func (b *Broker) handleDirectiveSelftest(w http.ResponseWriter, r *http.Request) {
 	raw, sig, ok := decodeSignedStatement(w, r)
 	if !ok {

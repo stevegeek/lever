@@ -3,6 +3,7 @@ package brokerctl
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -55,6 +56,78 @@ func TestStateInsideTreeSeesThroughSymlinks(t *testing.T) {
 	}
 	if !StateInsideTree(chatApp(link, true, "op"), st) {
 		t.Fatal("StateInsideTree missed a tree reached through a symlink")
+	}
+}
+
+// TestStateInsideTreeByIdentity: state directories that a comparison of
+// resolved paths places outside the tree, though they are (or would be
+// created) inside it.
+func TestStateInsideTreeByIdentity(t *testing.T) {
+	base := t.TempDir()
+	tree := filepath.Join(base, "tree")
+	inst := filepath.Join(base, "inst")
+	for _, d := range []string{filepath.Join(tree, "deep"), inst} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(tree, filepath.Join(inst, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(tree, "not-yet"), filepath.Join(inst, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(tree, "deep"), filepath.Join(inst, "deep")); err != nil {
+		t.Fatal(err)
+	}
+	for name, dir := range map[string]string{
+		"missing below a link into the tree": filepath.Join(inst, "link", "x", ".lever-state"),
+		"a dangling link into the tree":      filepath.Join(inst, "dangling"),
+		"a .. after a link into the tree":    inst + "/deep/../.lever-state",
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := state.State{Dir: dir}
+			app := chatApp(tree, true, "op")
+			if inside, err := StateInsideTreeErr(app, st); !inside || err != nil {
+				t.Fatalf("StateInsideTreeErr = %v, %v; want inside", inside, err)
+			}
+			if ChatLedgerPath(app, st) != "" {
+				t.Fatal("a chat ledger inside the tree")
+			}
+		})
+	}
+	st := state.State{Dir: filepath.Join(inst, ".lever-state")}
+	if inside, err := StateInsideTreeErr(chatApp(tree, true, "op"), st); inside || err != nil {
+		t.Fatalf("StateInsideTreeErr = %v, %v; want outside", inside, err)
+	}
+}
+
+// TestStateInsideTreeFailsClosed: a state directory lever cannot place is
+// inside, and the error says why.
+func TestStateInsideTreeFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	base := t.TempDir()
+	tree := filepath.Join(base, "tree")
+	locked := filepath.Join(base, "locked")
+	for _, d := range []string{tree, filepath.Join(locked, ".lever-state")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o700) })
+	st := state.State{Dir: filepath.Join(locked, ".lever-state")}
+	app := chatApp(tree, true, "op")
+	inside, err := StateInsideTreeErr(app, st)
+	if !inside || err == nil || !strings.Contains(err.Error(), "cannot prove") {
+		t.Fatalf("StateInsideTreeErr = %v, %v; want inside with an error", inside, err)
+	}
+	if !StateInsideTree(app, st) {
+		t.Fatal("StateInsideTree must fail closed")
 	}
 }
 

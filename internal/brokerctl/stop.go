@@ -13,37 +13,25 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// stopPollAttempts × stopPollInterval bounds each of the two waits in
-// stopProcessByPIDFile (after SIGTERM, after SIGKILL) at ~2s.
 const (
 	stopPollAttempts = 40
 	stopPollInterval = 50 * time.Millisecond
 )
 
-// stopProcessByPIDFile stops the process recorded in pidPath: SIGTERM (a
-// graceful shutdown), wait up to ~2s for it to exit, SIGKILL a survivor, then
-// poll briefly to confirm it actually died before returning — a caller that
-// immediately re-spawns the same daemon (e.g. `lever reload`) would otherwise
-// race the SIGKILLed process's release of its listen port and hit EADDRINUSE.
-// Idempotent: a missing, unparseable, or already-dead pid file is a no-op.
+// stopProcessByPIDFile stops the process recorded in pidPath: SIGTERM, wait
+// up to ~2s, SIGKILL a survivor, then confirm it died, or a caller that
+// re-spawns the daemon at once (`lever reload`) races the port release and
+// hits EADDRINUSE. A missing, unparseable or dead pid file is a no-op.
 //
-// identify says what the pid is now (state.State.Identify). A pid file can
-// outlive its process and the OS can give the pid to another one, which
-// signal 0 cannot tell apart; so nothing is signalled unless the pid is the
-// daemon just before the signal, the SIGKILL included. A pid that is not
-// the daemon is a stale file: it is removed and nothing is signalled. A
-// live pid whose argv cannot be read is neither: the file is kept, nothing
-// is signalled, and the stop fails saying so. The wait ends when the pid
-// is no longer the daemon (gone, a zombie, or reused).
+// identify says what the pid is now. A pid file can outlive its process and
+// the pid can be reused, which signal 0 cannot tell, so nothing is signalled
+// unless the pid is the daemon just before each signal. A pid that is not
+// the daemon is a stale file: removed, nothing signalled. A live pid whose
+// argv cannot be read keeps its file, gets no signal, and the stop fails.
 //
-// The process handle is taken BEFORE the check: on Linux os.FindProcess
-// holds a pidfd, and the signals go through it, so a pid reused after the
-// check gets nothing (the pidfd names the checked process, and signalling
-// it once gone fails). Elsewhere a window of the check's duration remains.
-//
-// Shared by StopBroker (broker.pid) and StopRemoteProxy (remote.pid): both
-// daemons are spawned the same Setsid way (see internal/cli/apply.go's
-// brokerServeCmd/remoteServeCmd) and torn down identically.
+// The process handle is taken before the check: on Linux os.FindProcess
+// holds a pidfd and the signals go through it, so a pid reused after the
+// check gets nothing. Elsewhere a window of the check's duration remains.
 func stopProcessByPIDFile(pidPath string, identify func(pid int) state.Identity) error {
 	pid, err := state.ReadPID(pidPath)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -83,23 +71,17 @@ func stopProcessByPIDFile(pidPath string, identify func(pid int) state.Identity)
 	return nil
 }
 
-// StopBroker stops the broker process recorded in the state dir's pid file
-// and removes the pid file — see stopProcessByPIDFile for the exact
-// mechanism. Tearing the broker down here is what keeps a stale broker — and
-// its already-consumed single-use bootstrap latch — from poisoning the next
-// `lever apply` (which would otherwise reuse it and stage no bootstrap
-// ticket).
-//
-// In an instance directory copied or moved from another (lever#181), the
-// pid file came with it and names the other directory's broker: it is
-// removed, never signalled.
+// StopBroker stops the broker recorded in the state dir's pid file. A stale
+// broker, with its consumed single-use bootstrap latch, would otherwise be
+// reused by the next apply, which would stage no bootstrap ticket. A pid
+// file inherited from another instance directory is removed, never
+// signalled.
 func StopBroker(st state.State) error {
 	return stopOwnPIDFile(st, st.PID(), state.BrokerDaemon)
 }
 
-// stopOwnPIDFile is stopProcessByPIDFile for the `lever <sub> serve`
-// daemon of this state directory, except that a pid file this state
-// directory inherited from another (state.FromAnotherDir) is only removed.
+// stopOwnPIDFile only removes a pid file inherited from another state
+// directory (state.FromAnotherDir).
 func stopOwnPIDFile(st state.State, pidPath, sub string) error {
 	if st.FromAnotherDir() {
 		if err := os.Remove(pidPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -110,13 +92,9 @@ func stopOwnPIDFile(st state.State, pidPath, sub string) error {
 	return stopProcessByPIDFile(pidPath, func(pid int) state.Identity { return st.Identify(pid, sub) })
 }
 
-// StopRemoteProxy stops the remote-access proxy process recorded in the state
-// dir's remote.pid file — see stopProcessByPIDFile for the exact mechanism,
-// identical to StopBroker. Called from `lever stop` (alongside StopBroker)
-// and from apply.Run itself when the config disables remote access on an
-// instance that has a stale proxy running (see apply.Deps.StopRemoteProxy) —
-// both call sites may run against an already-stopped proxy, so idempotence
-// matters here as much as it does for StopBroker.
+// StopRemoteProxy stops the remote-access proxy recorded in remote.pid, as
+// StopBroker does. Its callers (`lever stop`, and apply when remote access
+// is turned off) may run against an already-stopped proxy.
 func StopRemoteProxy(st state.State) error {
 	return stopOwnPIDFile(st, st.RemotePID(), state.RemoteDaemon)
 }

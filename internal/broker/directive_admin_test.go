@@ -20,10 +20,8 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// genOperatorKey creates a fresh ed25519 SSH keypair in a temp dir and
-// returns (privPath, allowedSignersPath) with principal "operator@testinst".
-// Duplicated from opsig_test.go's genKey — test helpers are not exported
-// across packages.
+// genOperatorKey returns (privPath, allowedSignersPath) for a fresh ed25519
+// key with principal "operator@testinst".
 func genOperatorKey(t *testing.T) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -45,9 +43,7 @@ func genOperatorKey(t *testing.T) (string, string) {
 	return priv, as
 }
 
-// fakeDirectiveRuntime embeds fakeRuntime (worker_test.go) and additionally
-// records every Message call, so directive-delivery tests can assert on the
-// recipient + body without touching the shared fake.
+// fakeDirectiveRuntime records every Message call on top of fakeRuntime.
 type fakeDirectiveRuntime struct {
 	fakeRuntime
 	messages []scion.MsgOpts
@@ -68,9 +64,8 @@ func (f *fakeDirectiveRuntime) Message(ctx context.Context, o scion.MsgOpts) err
 	return f.fakeRuntime.Message(ctx, o)
 }
 
-// serveDirectiveAdmin binds b.DirectiveAdminHandler() on a real unix socket
-// and returns the socket path. Uses os.MkdirTemp (not t.TempDir) because
-// t.TempDir paths can exceed macOS's ~104-byte unix socket path limit.
+// serveDirectiveAdmin uses os.MkdirTemp, not t.TempDir: t.TempDir paths can
+// exceed macOS's ~104-byte unix socket path limit.
 func serveDirectiveAdmin(t *testing.T, b *Broker) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "d")
@@ -89,8 +84,6 @@ func serveDirectiveAdmin(t *testing.T, b *Broker) string {
 	return sock
 }
 
-// directiveClient returns an http.Client dialing the given unix socket for
-// every request, regardless of host/port in the URL.
 func directiveClient(sock string) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -117,9 +110,6 @@ func instructionAction(text string) opsig.Action {
 	return opsig.Action{Kind: "instruction", Text: text}
 }
 
-// postRaw signs raw under namespace with priv and POSTs the {field1,field2}
-// b64std envelope the send/list/revoke/selftest routes all share, returning
-// the response status and body.
 func postSigned(t *testing.T, client *http.Client, path, priv, namespace string, raw []byte) (int, []byte) {
 	t.Helper()
 	sig, err := opsig.Sign(context.Background(), priv, namespace, raw)
@@ -144,9 +134,6 @@ func postSignedWithSig(t *testing.T, client *http.Client, path string, raw, sig 
 	return resp.StatusCode, got
 }
 
-// fieldNameFor returns the JSON envelope-field name for path: /directive/send
-// and /directive/selftest carry {"statement":...}; /directive/list and
-// /directive/revoke carry {"envelope":...}.
 func fieldNameFor(path string) string {
 	if path == "/directive/list" || path == "/directive/revoke" {
 		return "envelope"
@@ -164,7 +151,6 @@ func postSelftest(t *testing.T, client *http.Client, priv string, st opsig.State
 	return postStatement(t, client, "/directive/selftest", priv, st)
 }
 
-// postStatement marshals st and posts it signed under the directive namespace.
 func postStatement(t *testing.T, client *http.Client, path, priv string, st opsig.Statement) (int, []byte) {
 	t.Helper()
 	raw, err := json.Marshal(st)
@@ -300,9 +286,6 @@ func TestDirectiveSendRejectsStaleGenerationAndUnknownTargetAndDupID(t *testing.
 	}
 }
 
-// assertSendRejectsUnknownTool submits one directive of the given kind that
-// names an unregistered tool and pins the registered-tool gate: 400, and
-// nothing stored.
 func assertSendRejectsUnknownTool(t *testing.T, kind, id string) {
 	t.Helper()
 	b, priv, _, _ := directiveTestBroker(t)
@@ -325,12 +308,9 @@ func TestDirectiveSendRejectsToolCallForUnknownTool(t *testing.T) {
 	assertSendRejectsUnknownTool(t, "tool_call", "11111111-2222-4333-8444-555555555521")
 }
 
-// TestDirectiveSendAcceptsApprovalForRegisteredTool covers the "approval"
-// kind end-to-end through the admin submit path: it is bound-tool-checked like
-// tool_call (the `|| == "approval"` half of directive_admin.go's registered-
-// tool gate), stored, and delivered as a bound action (not advisory). No other
-// test drives an approval directive; it guards that KindApproval keeps the
-// wire value once the literal becomes a constant.
+// TestDirectiveSendAcceptsApprovalForRegisteredTool: an "approval" is
+// checked against the registered tools like tool_call, stored, and delivered
+// as a bound action (not advisory). It also pins KindApproval's wire value.
 func TestDirectiveSendAcceptsApprovalForRegisteredTool(t *testing.T) {
 	b, priv, _, rt := directiveTestBroker(t)
 	sock := serveDirectiveAdmin(t, b)
@@ -365,11 +345,9 @@ func TestDirectiveSendRejectsApprovalForUnknownTool(t *testing.T) {
 	assertSendRejectsUnknownTool(t, "approval", "11111111-2222-4333-8444-555555555532")
 }
 
-// TestDirectiveSendRejectsExpiryBeyondInstanceCap proves the handler's own
-// b.directiveExpiryMax clamp (internal/broker/directive_admin.go, checked
-// AFTER opsig.ParseStatement) actually fires: a statement well inside
-// opsig's own 24h hard ceiling must still be rejected once it exceeds a
-// tighter, instance-configured cap.
+// TestDirectiveSendRejectsExpiryBeyondInstanceCap: a statement inside opsig's
+// 24h ceiling is still rejected once it exceeds the tighter instance cap
+// (b.directiveExpiryMax, checked after opsig.ParseStatement).
 func TestDirectiveSendRejectsExpiryBeyondInstanceCap(t *testing.T) {
 	priv, as := genOperatorKey(t)
 	cfg := testConfig(t)
@@ -459,7 +437,6 @@ func TestDirectiveListAndRevokeRequireFreshSignedEnvelope(t *testing.T) {
 		t.Fatalf("list content = %+v, want the seeded directive %s", listResp.Directives, id)
 	}
 
-	// Valid revoke.
 	code, body = postEnvelope(t, client, "/directive/revoke", priv, adminEnvelope("revoke", map[string]string{"id": id}))
 	if code != http.StatusOK {
 		t.Fatalf("valid revoke status = %d, body=%s", code, body)
@@ -578,10 +555,9 @@ func TestAuditLogRotatesPastCap(t *testing.T) {
 	}
 }
 
-// TestKeyRevocationByEditingAllowedSignersIsLive proves the stolen-key
-// response: truncating allowed_signers on disk takes effect on the VERY NEXT
-// call, no broker restart, because Verify shells out to ssh-keygen -Y verify
-// against the file path every time.
+// TestKeyRevocationByEditingAllowedSignersIsLive: truncating allowed_signers
+// revokes a stolen key on the very next call, with no broker restart, because
+// Verify runs ssh-keygen -Y verify against the file every time.
 func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 	b, priv, allowedSigners, _ := directiveTestBroker(t)
 	sock := serveDirectiveAdmin(t, b)
@@ -600,13 +576,11 @@ func TestKeyRevocationByEditingAllowedSignersIsLive(t *testing.T) {
 		t.Fatalf("first send status = %d, body=%s", code, body)
 	}
 
-	// Live-revoke the operator key by truncating allowed_signers.
 	if err := os.WriteFile(allowedSigners, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Re-send with a DIFFERENT id but the SAME key/signature material shape
-	// (still same key) -- must now fail verification with no restart.
+	// Same key, new id: must fail verification with no restart.
 	id2 := "11111111-2222-4333-8444-555555555552"
 	st2 := directiveStatement(id2, "manager", 1, instructionAction("second"))
 	raw2, _ := json.Marshal(st2)

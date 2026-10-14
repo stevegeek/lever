@@ -1,18 +1,10 @@
 package broker
 
-// directive_e2e_test.go is the end-to-end adversarial validation of the
-// operator-directive feature: ONE broker wired to BOTH real channels at once
-// — the 0600 UDS admin channel (operator side) and the mTLS jail server
-// (agent side) — with real ssh-keygen signing and two distinct agent
-// identities. Where the per-route unit tests each prove one property in
-// isolation, this test drives the whole attack narrative through the real
-// HTTP surfaces in one place, so a regression that only shows up when the
-// channels are combined cannot hide.
-//
-// Target agent = "manager"; non-target = "worker" (a declared worker whose
-// mTLS cert the broker accepts but who is never a directive's target). This
-// mirrors the live scenario (manager is the hardened directive target; a
-// worker is the second agent that must not be able to consume).
+// End-to-end adversarial test of operator directives: one broker serving both
+// the 0600 UDS admin channel and the mTLS jail server, with real ssh-keygen
+// signing, so a regression that only shows when the channels are combined
+// cannot hide. The target is "manager"; "worker" holds an accepted mTLS cert
+// but is never a target and must not be able to consume.
 
 import (
 	"bytes"
@@ -41,7 +33,6 @@ func TestOperatorDirectiveEndToEndAdversarial(t *testing.T) {
 	b.directives.BumpGeneration("manager") // -> gen 1
 	b.directives.BumpGeneration("worker")  // -> gen 1
 
-	// consume posts an id to the mTLS /directive/consume as the given agent.
 	consume := func(client *http.Client, id string) (int, []byte) {
 		t.Helper()
 		return postDirectiveID(t, client, jail.URL, "/directive/consume", id)

@@ -8,8 +8,16 @@ Part of [getting started](/getting-started/). Steps keep their original numberin
 
 ## 1. Install the binaries
 
+A release archive from GitHub holds the same host binaries, ready to run. Its `lever` needs **no Go
+toolchain** for the scion pin of its release (`b41cd6fe`, the pin in the examples): `lever apply`
+downloads that release's prebuilt scion, checks it against the sha256 built into `lever`, and skips
+the scion compile. Any other pin, a failed download, and `remote.enabled` (which builds scion's web
+UI from source) still need Go. See [prebuilt scion](/reference/config/#prebuilt-scion).
+
+To build from a checkout instead:
+
 ```sh
-cd /path/to/lever_to
+cd /path/to/lever
 make all
 ```
 
@@ -34,21 +42,24 @@ binary's own hash: `0.31.0 (bin 3f2a…)`. A `go install …@vX.Y.Z` build shows
 ## 1a. Build the agent image
 
 `examples/hello-worker` (and every instance) runs the agent image
-`scionlocal/lever-claude:<arch>`. Build the generic one in a single command:
+`lever.local/lever-claude:<arch>`. Build the generic one in a single command:
 
 ```sh
 make lever-image
 ```
 
 This cross-compiles the in-jail binaries into `image/lever-claude/`, syncs the pre-start hook, and
-runs `docker build` to produce `scionlocal/lever-claude:<arch>` (the local `scionlocal/` registry
-prefix is what scion loads without a pull).
+runs `docker build` to produce `lever.local/lever-claude:<arch>`, and `scionlocal/lever-claude:<arch>`
+for a `lever.yaml` that still names it. No registry called `lever.local` exists: `lever apply` loads
+the image into the jail, so scion runs it with no pull. The dotted name is what keeps scion from
+swapping in the hub's image registry, which an agent can change (see [worker
+isolation](/security-model/worker-isolation/)).
 
 **Claude Code version:** the image bakes Claude Code at an explicit pin (`ARG
 CLAUDE_CODE_VERSION` in the Dockerfile) and disables the in-container auto-updater — agents never
 self-update; upgrades happen by rebuild. To bump: edit the ARG (or pass `--build-arg
 CLAUDE_CODE_VERSION=X.Y.Z`), rebuild the image with `make lever-image LEVER_IMAGE_FORCE=1` (the
-build script refuses to overwrite an existing `scionlocal/lever-claude:<arch>` without it),
+build script refuses to overwrite an existing `lever.local/lever-claude:<arch>` without it),
 `lever apply`, and recreate the manager on the new image with `lever up --fresh` — a record keeps
 the image it was created with, so `lever stop && lever up` resumes the old one. `--fresh` starts a
 new conversation after backing up the old one; add `--keep-conversation` to keep it. Don't rely on the scion
@@ -65,7 +76,7 @@ version leaves the archive and the build fails at that step: bump the ARG to the
 copies the binaries in itself (below) does not get this step; copy it.
 
 **lever version:** the image tag names only the arch, so a rebuild from another lever checkout
-replaces `scionlocal/lever-claude:<arch>` for every instance on the host. `make lever-image` records
+replaces `lever.local/lever-claude:<arch>` for every instance on the host. `make lever-image` records
 the lever version the in-jail binaries were built from in a second label, `lever_version` (the
 release and short commit of that source, e.g. `0.28.1 (21ff051f651f)`; never a binary hash), and
 the in-jail compatibility version in a third, `lever_jail_abi` (a number that changes only when the
@@ -85,7 +96,7 @@ scion's stock Claude harness image. Build it once from a scion checkout:
 
 ```sh
 git clone https://github.com/GoogleCloudPlatform/scion
-cd scion && git checkout e0f61f2d   # the same commit as scion.version in lever.yaml
+cd scion && git checkout b41cd6fe   # the same commit as scion.version in lever.yaml
 image-build/scripts/build-images.sh --target harnesses
 ```
 
@@ -100,14 +111,63 @@ docker tag scion-claude:latest scion-claude:arm64   # or :amd64, matching the im
 (The build script reports this if the arch-tagged base is missing.) See scion's `image-build/`
 for detail; scion owns this step.
 
+**The slim image (opt-in).** `scion-claude` brings chromium, gcloud, gcsfuse, Go, kubectl,
+golangci-lint and bun, and a lever image built on it is about 5 GB. `make lever-image-slim` builds
+`lever.local/lever-claude-slim:<arch>` instead, with no scion image build at all: a Debian trixie
+base (`node:24-trixie-slim`) with only what scion and lever need in an agent container (sciontool
+and scion, the `scion` user, python3 for scion's Claude provisioner, git, zsh, tzdata, procps and
+nano), then the same lever layer as the full image (Claude Code at its pin, installed once, the
+pinned tmux, lever's binaries, the boot hook and `/etc/claude-code`). It should come to about 1 GB;
+`make image-contract` prints the built size.
+
+```sh
+make lever-image-slim SCION_VERSION=b41cd6fe   # your lever.yaml's scion.version
+```
+
+sciontool and scion are cross-compiled on the host from the scion source the jail runs: set
+`SCION_VERSION` to your `scion.version`, or `SCION_SRC=/path/to/scion` to the checkout your
+`scion.source` names (the default is the pin the shipped examples use). The slim base records it
+in a `scion_version` label. Then point `manager.image` (and any worker `image:`) at
+`lever.local/lever-claude-slim`, `lever apply`, and recreate the agents on it with `lever up --fresh
+--keep-conversation`. The full image stays the default and nothing changes for an instance that
+does not opt in.
+
+What the slim image leaves out, on purpose: `sudo` (the agent has no root in its container, so it
+cannot `apt-get install` at run time), `gh` (lever's agents reach GitHub through the
+[github tool](/github-tool/)), chromium and the Playwright and Chrome DevTools tools, gcloud, gcsfuse, Go, kubectl,
+golangci-lint, bun, oh-my-zsh and scion's in-container firewall script (lever enforces egress in
+the jail). It also lacks the everyday tools scion's base adds, which neither scion's runtime nor
+lever uses but agents often do: curl, wget, jq, ripgrep, less, make, g++, vim, rsync, unzip,
+openssh-client and the network utilities. An agent that needs a toolchain gets it from an instance Dockerfile `FROM
+lever.local/lever-claude-slim:<arch>`, as below.
+
+**Checking an image: `make image-contract`.** `image/contract/check-image.sh` checks a built image
+against what lever and scion rely on: the entrypoint (`sciontool init --`), the `scion` user (uid
+and gid 1000, its home and shell), the labels doctor reads, sciontool, scion, the pinned tmux,
+python3, git, the terminfo and timezone data, lever's binaries for the right arch, the boot hook,
+`/etc/claude-code`, Claude Code at the labelled version (read from its `package.json`; it never
+runs `claude`), lever's environment variables and the commands lever's probes use. It then starts
+a tmux session shaped like scion's and checks that `lever-agent claude-ready` writes the marker
+lever's manager gate waits for. It runs the image with no network and removes the container.
+
+```sh
+make image-contract                                    # lever.local/lever-claude-slim:<arch>
+make image-contract IMAGE=lever.local/lever-claude:arm64
+LEVER_IMAGE_MAX_MB=1600 make image-contract            # also fail an image above 1.6 GB
+```
+
+It works on either flavor, and on an instance image built from one (`CONTAINER_CLI=podman` for
+podman). Run it after every image build; it is the check that the slim image still has everything
+the full one gives lever.
+
 **Extending the image for your instance.** The generic image is minimal: scion's harness plus
 lever's binaries and boot hook. If your agents need a language toolchain or a project CLI, write an
-instance Dockerfile `FROM scionlocal/lever-claude:<arch>` that adds it, and point `manager.image` (and any
+instance Dockerfile `FROM lever.local/lever-claude:<arch>` that adds it, and point `manager.image` (and any
 worker `image:`) at your tag. If your added layer does root-level work
 under `/home/scion`, end it by re-running `RUN chown -R scion:scion /home/scion` and `USER scion`.
 The jail runs rootless podman, where a root-owned home is unwritable by the agent and silently
 breaks its boot hook. Keep instance-specific tooling in that layer, not in the framework image.
-An image built `FROM scionlocal/lever-claude:<arch>` inherits its labels (`claude_code_version`,
+An image built `FROM lever.local/lever-claude:<arch>` inherits its labels (`claude_code_version`,
 `lever_version`, `lever_jail_abi`), so doctor reads them from your tag with no extra step; rebuild
 it after each `make lever-image`. An instance Dockerfile that copies the binaries in itself (`make
 lever-image-bins`) sets the labels itself: `LABEL lever_version="..."` with the value `make -s

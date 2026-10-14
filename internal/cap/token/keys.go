@@ -1,5 +1,3 @@
-// Package token mints and verifies per-agent capability tokens: a compact
-// Ed25519-signed struct (see token.go).
 package token
 
 import (
@@ -17,7 +15,6 @@ type KeyPair struct {
 	Private ed25519.PrivateKey
 }
 
-// Generate creates a fresh root keypair.
 func Generate() (KeyPair, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -44,7 +41,6 @@ func (k KeyPair) SavePublic(path string) error {
 	return nil
 }
 
-// LoadPrivate reads a hex private key and derives the public key from it.
 func LoadPrivate(path string) (KeyPair, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -61,13 +57,11 @@ func LoadPrivate(path string) (KeyPair, error) {
 	return KeyPair{Private: priv, Public: priv.Public().(ed25519.PublicKey)}, nil
 }
 
-// EncodePublicKey renders an Ed25519 public key as hex (same wire form as
-// SavePublic), for publishing over the broker's admin API.
+// EncodePublicKey renders an Ed25519 public key in SavePublic's hex form.
 func EncodePublicKey(pub ed25519.PublicKey) string {
 	return hex.EncodeToString(pub)
 }
 
-// DecodePublicKey parses a hex-encoded Ed25519 public key.
 func DecodePublicKey(s string) (ed25519.PublicKey, error) {
 	b, err := hex.DecodeString(s)
 	if err != nil {

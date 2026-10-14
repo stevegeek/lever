@@ -1,16 +1,10 @@
 // Package layout is lever's record of where scion keeps things on disk and how
-// its machine-level settings file is shaped. It is pure data and pure
-// functions — no exec, no guest transport — so every package that has to name
-// a scion path or edit scion's settings.yaml (internal/backend/guest,
-// internal/provision/webassets) can import it without dragging the scion CLI
-// client (internal/scion) or a runner along.
+// its machine-level settings file is shaped. It must stay pure data and pure
+// functions (no exec, no guest transport) so any package can import it.
 //
-// Everything here mirrors a fact about scion's own code, and each constant
-// names the upstream file it was read from. When scion moves a file or renames
-// a key, this is the one place to change.
-//
-// What does NOT live here: anything that names a scion subcommand, flag or
-// output wording. That is internal/scion (see its package doc).
+// Each constant mirrors a fact about scion's code and names the upstream file
+// it was read from. Subcommands, flags and output wording belong in
+// internal/scion instead.
 package layout
 
 import (
@@ -26,22 +20,20 @@ const (
 	Dir = ".scion"
 
 	// SettingsRel is scion's machine-level settings file
-	// (pkg/config/settings_v1.go). It is ALSO the per-project settings file,
-	// relative to a project-configs entry (see ProjectConfigsRel).
+	// (pkg/config/settings_v1.go). It is also the per-project settings file,
+	// relative to a project-configs entry.
 	SettingsRel = Dir + "/settings.yaml"
 
-	// ServerYAMLRel is scion's legacy server configuration file. Once
-	// settings.yaml carries a `server:` key scion reads that and ignores this
-	// file outright (pkg/config/hub_config.go loadGlobalConfigFromSettings).
+	// ServerYAMLRel is scion's legacy server configuration file, ignored once
+	// settings.yaml carries a server: key (pkg/config/hub_config.go).
 	ServerYAMLRel = Dir + "/server.yaml"
 
 	// ProjectConfigsRel holds one directory per registered project, each with
 	// its own SettingsRel beneath it (e.g. lever__c857bb16/.scion/settings.yaml).
 	ProjectConfigsRel = Dir + "/project-configs"
 
-	// TemplatesRel is the global agent-template directory. Scion force-rewrites
-	// only the `default` entry on every server start
-	// (config.UpdateDefaultTemplates); any other name is left alone.
+	// TemplatesRel is the global agent-template directory. scion rewrites only
+	// the default entry on every server start (config.UpdateDefaultTemplates).
 	TemplatesRel = Dir + "/templates"
 
 	// DevTokenRel is the residual dev-auth admin token scion writes on first
@@ -49,10 +41,9 @@ const (
 	DevTokenRel = Dir + "/dev-token"
 
 	// ServerPIDRel is the pid file of scion's server daemon
-	// (pkg/daemon/daemon.go PIDFileName("server") under config.GetGlobalDir).
-	// scion keeps ONE per home, whatever port the daemon binds, and `scion
-	// server stop` signals whatever pid it names after a signal-0 liveness
-	// check only.
+	// (pkg/daemon/daemon.go). scion keeps one per home, whatever port the
+	// daemon binds, and scion server stop signals whatever pid it names after
+	// only a signal-0 liveness check.
 	ServerPIDRel = Dir + "/server.pid"
 	// ServerLogRel is the server daemon's log (pkg/daemon/daemon.go
 	// LogFileName("server")), where a start that failed says why.
@@ -68,22 +59,14 @@ const ProjectMarker = ".scion"
 // that names the workspace the registration belongs to.
 const WorkspacePathKey = "workspace_path"
 
-// WebAssetsSentinel is the file scion itself treats as proof that a built web
-// asset set is usable: cmd/server_foreground.go warns "assets are incomplete
-// (main.js missing)" when it cannot stat this path, and pkg/hub/web.go's
-// Go-rendered app shell loads exactly this URL. Slash-separated: it is both a
-// URL path and a path under the dist root.
+// WebAssetsSentinel is the file scion treats as proof that a built web asset
+// set is usable (cmd/server_foreground.go, pkg/hub/web.go). Slash-separated:
+// it is both a URL path and a path under the dist root.
 const WebAssetsSentinel = "assets/main.js"
 
 // WebAssetsDir is where lever stages scion's built SPA inside the guest, and
-// therefore the value it passes to `scion server start --web-assets-dir`.
-// Unlike the rest of this file it is lever's choice, not a scion fact, but it
-// is the one guest path both ends of a contract must name — the staging in
-// internal/backend/guest and the flag in internal/apply — and this leaf is
-// what both already import.
-//
-// /usr/local/share is the FHS home for architecture-independent data installed
-// outside the package manager, which is exactly what a built SPA is.
+// the value it passes to scion server start --web-assets-dir. It is lever's
+// choice, not a scion fact.
 const WebAssetsDir = "/usr/local/share/scion/web"
 
 // Keys in the machine-level settings.yaml, as scion's V1 settings schema names
@@ -91,7 +74,8 @@ const WebAssetsDir = "/usr/local/share/scion/web"
 const (
 	// KeyServer is the top-level block holding the hub's server configuration.
 	KeyServer = "server"
-	// KeyOIDCLogin is the OIDC login block under KeyServer (V1OIDCLoginConfig).
+	// KeyOIDCLogin is the OIDC login block under KeyServer (V1OIDCLoginConfig);
+	// lever removes it, since scion offers OAuth whenever it is present.
 	KeyOIDCLogin = "oidc_login"
 	// KeyAuth is the dev-user/identity block under KeyServer (hub.DevUserConfig).
 	KeyAuth = "auth"
@@ -104,39 +88,14 @@ const (
 	KeyMessageBroker = "message_broker"
 	// KeyEnabled is the boolean that switches a block on.
 	KeyEnabled = "enabled"
-	// KeyTelemetry is the TOP-LEVEL telemetry block (V1TelemetryConfig) — a
-	// sibling of KeyServer, not under it. scion turns it into every agent's
-	// SCION_TELEMETRY_* env at start (pkg/config/telemetry_convert.go).
+	// KeyTelemetry is the top-level telemetry block, a sibling of KeyServer.
+	// scion turns it into every agent's SCION_TELEMETRY_* env at start
+	// (pkg/config/telemetry_convert.go).
 	KeyTelemetry = "telemetry"
 )
 
-// OIDCLogin is scion's oidc_login block as it appears under `server:` in
-// settings.yaml (pkg/config/settings_v1.go V1OIDCLoginConfig).
-//
-// Four keys, and deliberately not the other two. client_secret is omitted
-// because lever's provider is a public client and scion only sends the
-// parameter when it is non-empty. scopes is omitted because scion's default is
-// already exactly "openid email profile" (pkg/hub/oauth.go oidcScopes), and a
-// config file should not restate a default.
-type OIDCLogin struct {
-	Enabled     bool   `yaml:"enabled"`
-	DisplayName string `yaml:"display_name"`
-	IssuerURL   string `yaml:"issuer_url"`
-	ClientID    string `yaml:"client_id"`
-}
-
-// Node encodes the block as a YAML mapping node, ready for MapSet.
-func (o OIDCLogin) Node() (*yaml.Node, error) {
-	var n yaml.Node
-	if err := n.Encode(o); err != nil {
-		return nil, fmt.Errorf("encode the %s block: %w", KeyOIDCLogin, err)
-	}
-	return &n, nil
-}
-
-// ParseSettings parses a settings file into a document node. Empty (or
-// whitespace-only) content parses to a zero node, which DocumentRoot turns
-// into an empty mapping — an absent file is a file with nothing in it.
+// ParseSettings parses a settings file into a document node. Empty content
+// parses to a zero node, which DocumentRoot turns into an empty mapping.
 func ParseSettings(content []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(content)) > 0 {
@@ -147,10 +106,8 @@ func ParseSettings(content []byte) (*yaml.Node, error) {
 	return &doc, nil
 }
 
-// EncodeSettings renders an edited settings document back to bytes.
-//
-// Two-space indent: scion's own settings files are written that way, and the
-// file is read by people as often as by programs.
+// EncodeSettings renders an edited settings document back to bytes with
+// scion's two-space indent.
 func EncodeSettings(doc *yaml.Node) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
@@ -209,9 +166,8 @@ func MapGet(m *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-// MapSet replaces key's value in a mapping, or appends the pair when absent.
-// Appending keeps the file's existing order intact, so a diff of a changed
-// settings file shows only what was added.
+// MapSet replaces key's value in a mapping, or appends the pair when absent,
+// keeping the file's existing order.
 func MapSet(m *yaml.Node, key string, val *yaml.Node) {
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		if m.Content[i].Value == key {
@@ -233,9 +189,8 @@ func MapDelete(m *yaml.Node, key string) {
 	}
 }
 
-// SameYAML reports whether two nodes serialise identically — the semantic
-// comparison change detection rests on, so a re-serialisation that only moves
-// whitespace never reads as a change.
+// SameYAML reports whether two nodes serialise identically, so a
+// re-serialisation that only moves whitespace never reads as a change.
 func SameYAML(a, b *yaml.Node) (bool, error) {
 	ab, err := yaml.Marshal(a)
 	if err != nil {

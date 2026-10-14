@@ -46,7 +46,7 @@ func TestContactGateNeedsCurrentSkills(t *testing.T) {
 	if err := checkContactGate(app, st); err != nil {
 		t.Fatalf("current skills refused: %v", err)
 	}
-	// An old skill left in place (a pre-change scaffold).
+	// An old skill left in place.
 	rel := ".claude/skills/lever-operator/SKILL.md"
 	if err := fsutil.WriteInTree(tree, rel, []byte("---\nname: lever-operator\nlever-version: 0.27.0\n---\nA marker counts only on a message that does not verify.\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -76,8 +76,7 @@ func TestContactGateNeedsHostRecords(t *testing.T) {
 	}
 }
 
-// TestContactGateIgnoresInstancesWithoutContacts: no contact login, no gate
-// (operator-only remote access and no remote access both pass as before).
+// TestContactGateIgnoresInstancesWithoutContacts: no contact login, no gate.
 func TestContactGateIgnoresInstancesWithoutContacts(t *testing.T) {
 	app, _, st := scaffoldFixture(t)
 	if err := checkContactGate(app, st); err != nil {
@@ -89,18 +88,17 @@ func TestContactGateIgnoresInstancesWithoutContacts(t *testing.T) {
 	}
 }
 
-// TestContactSessionNeedsAFreshStartWithTheCurrentSkill: the proxy lets a
-// contact post to an agent only when lever recorded a fresh start of that
-// agent's session with the skill that is on disk now, and that skill is this
-// version's. A session lever never recorded (an older lever created it), one
-// that started before `lever init` rewrote the skill (a resumed 0.27
-// conversation), and a stale skill on disk are all refused.
+// TestContactSessionNeedsAFreshStartWithTheCurrentSkill: a contact may post
+// only to an agent whose recorded fresh start used the skill on disk now, and
+// that skill is this version's. An unrecorded session, a session resumed from
+// before `lever init` rewrote the skill, and a stale skill on disk are all
+// refused.
 func TestContactSessionNeedsAFreshStartWithTheCurrentSkill(t *testing.T) {
 	app, tree, st := scaffoldFixture(t)
 	app.Name = "hello"
 	withContact(app)
 	rel := "workers/scratch/.claude/skills/lever-agent/SKILL.md"
-	// A 0.27 skill on disk, and the worker's session started with it.
+	// An old skill on disk, and the worker's session started with it.
 	old := []byte("---\nname: lever-agent\nlever-version: 0.27.0\n---\nOnly the FIRST line counts.\n")
 	if err := fsutil.WriteInTree(tree, rel, old, 0o644); err != nil {
 		t.Fatal(err)
@@ -111,8 +109,8 @@ func TestContactSessionNeedsAFreshStartWithTheCurrentSkill(t *testing.T) {
 	if err := brokerctl.BeginSession(app, st, "0.27.0", "scratch")(); err != nil {
 		t.Fatal(err)
 	}
-	// The operator upgrades and runs lever init: the disk is current, the
-	// resumed session still holds the old text.
+	// After lever init the disk is current; the resumed session still holds the
+	// old text.
 	if _, err := syncSkills(app, st, true, false); err != nil {
 		t.Fatal(err)
 	}
@@ -122,18 +120,15 @@ func TestContactSessionNeedsAFreshStartWithTheCurrentSkill(t *testing.T) {
 	if err := contactSession(app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "started before its current skill") {
 		t.Fatalf("resumed old session: %v", err)
 	}
-	// An agent lever has no record of starting (the manager here).
 	if err := contactSession(app, st, "hello"); err == nil || !strings.Contains(err.Error(), "no record") {
 		t.Fatalf("unrecorded session: %v", err)
 	}
-	// A fresh start with the current skill is allowed.
 	if err := brokerctl.BeginSession(app, st, cli.VersionString(), "scratch")(); err != nil {
 		t.Fatal(err)
 	}
 	if err := contactSession(app, st, "scratch"); err != nil {
 		t.Fatalf("fresh session refused: %v", err)
 	}
-	// An agent the instance does not have is refused.
 	if err := contactSession(app, st, "nobody"); err == nil {
 		t.Fatal("an unknown agent was allowed")
 	}
@@ -156,8 +151,6 @@ func TestContactSessionRefusesInTreeState(t *testing.T) {
 	}
 }
 
-// TestContactSessionWarningsNameTheAgentAndTheFix: a bring-up warns about
-// each contact-listed agent whose session would be refused, with its fix.
 func TestContactSessionWarningsNameTheAgentAndTheFix(t *testing.T) {
 	app, _, st := scaffoldFixture(t)
 	app.Name = "hello"
@@ -170,7 +163,6 @@ func TestContactSessionWarningsNameTheAgentAndTheFix(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetErr(&out)
 	printContactSessionWarnings(cmd, app, st)
-	// One line for both agents, naming each and both fixes.
 	if n := strings.Count(out.String(), "\n"); n != 1 {
 		t.Fatalf("warnings %q: %d lines, want one summarised line", out.String(), n)
 	}
@@ -189,9 +181,9 @@ func TestContactSessionWarningsNameTheAgentAndTheFix(t *testing.T) {
 	}
 }
 
-// TestStaleSkillWarningWithVerifiedChat: with verified chat on and no
-// contact, a bring-up warns about stale skills (a 0.27 manager skill reads
-// the manager's own notes as data), and says nothing once they are current.
+// TestStaleSkillWarningWithVerifiedChat: with verified chat and no contact, a
+// bring-up warns about stale skills (an old manager skill reads the manager's
+// own notes as data) until they are current.
 func TestStaleSkillWarningWithVerifiedChat(t *testing.T) {
 	app, _, st := scaffoldFixture(t)
 	app.Name = "hello"
@@ -242,9 +234,8 @@ func TestContactSessionWarningIsBounded(t *testing.T) {
 	}
 }
 
-// Agents whose sessions predate the current skill share one group in the
-// warning even though each started at its own time (after an upgrade every
-// agent does); the per-agent start time stays in contactSession's error.
+// Sessions predating the current skill share one warning group though each
+// started at its own time; the start time stays in contactSession's error.
 func TestContactSessionWarningGroupsStaleSessions(t *testing.T) {
 	app, _, st := scaffoldFixture(t)
 	app.Name = "hello"
@@ -271,10 +262,9 @@ func TestContactSessionWarningGroupsStaleSessions(t *testing.T) {
 	}
 }
 
-// TestContactSessionSurvivesAStampOnlyRelease: an upgrade that renders the
-// same skill text with a new lever-version stamp keeps a fresh session
-// fresh, and a record written before 0.33.1 (the full-file hash) is still
-// accepted for an unchanged file.
+// TestContactSessionSurvivesAStampOnlyRelease: a release that changes only the
+// lever-version stamp keeps a fresh session fresh, and a full-file-hash record
+// is still accepted for an unchanged file.
 func TestContactSessionSurvivesAStampOnlyRelease(t *testing.T) {
 	app, tree, st := scaffoldFixture(t)
 	app.Name = "hello"
@@ -298,14 +288,13 @@ func TestContactSessionSurvivesAStampOnlyRelease(t *testing.T) {
 	if err := brokerctl.BeginSession(app, st, "0.0.1", "scratch")(); err != nil {
 		t.Fatal(err)
 	}
-	// The upgrade's lever init rewrites only the stamp.
 	if _, err := syncSkills(app, st, true, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := contactSession(app, st, "scratch"); err != nil {
 		t.Fatalf("a stamp-only release made the session stale: %v", err)
 	}
-	// A record from before 0.33.1 holds the full-file hash of the current file.
+	// A record holding the full-file hash of the current file.
 	r := sessionrec.Record{Agent: "scratch", SkillHash: skills.Hash(want), Version: "0.33.0", Started: time.Now().UTC()}
 	if err := sessionrec.Append(st.Sessions(), r); err != nil {
 		t.Fatal(err)
@@ -323,11 +312,10 @@ func TestContactSessionSurvivesAStampOnlyRelease(t *testing.T) {
 	}
 }
 
-// TestContactGateRefusesAnOldScionSourceForAgentMessages: with agent
-// messages on, a scion.source checkout that predates the sender fix is
-// refused at bring-up (config load can only check a pseudo-version), as is
-// a shallow clone that does not show it; one that holds it passes, and one
-// git cannot answer for is doctor's warning, not a refusal. Agent messages off: the checkout is not asked.
+// TestContactGateRefusesAnOldScionSourceForAgentMessages: with agent messages
+// on, a scion.source checkout or shallow clone without the sender fix is
+// refused at bring-up; one with it passes, and one git cannot answer for is
+// doctor's warning. With agent messages off the checkout is not asked.
 func TestContactGateRefusesAnOldScionSourceForAgentMessages(t *testing.T) {
 	app, _, st := scaffoldFixture(t)
 	withContact(app)
@@ -376,10 +364,9 @@ func TestContactGateRefusesAnOldScionSourceForAgentMessages(t *testing.T) {
 	}
 }
 
-// unattendedStart runs brokerctl.BeginUnattendedSession the way
-// start-manager does: the fence before the delete, then (between) whatever
-// happens while the old container stops, then Begin and its commit right
-// around the create. It returns Refused and the commit's answer.
+// unattendedStart runs brokerctl.BeginUnattendedSession as start-manager does:
+// the fence before the delete, then between, then Begin and its commit around
+// the create.
 func unattendedStart(t *testing.T, app *config.App, st state.State, agent string, between func()) (refused, commitErr error) {
 	t.Helper()
 	u, err := brokerctl.BeginUnattendedSession(app, st, cli.VersionString(), agent)
@@ -396,10 +383,10 @@ func unattendedStart(t *testing.T, app *config.App, st state.State, agent string
 	return u.Refused, commit()
 }
 
-// lever#202 review: the fresh start lever makes on its own records the new
-// session only over the skill the last recorded session started with. A
-// changed skill leaves a record that matches no skill, so contacts stay
-// refused until the operator's --fresh, even once the old text is back.
+// The fresh start lever makes on its own records the new session only over the
+// skill the last recorded session started with. A changed skill leaves a record
+// matching no skill, so contacts stay refused until the operator's --fresh,
+// even once the old text is back.
 func TestUnattendedSessionKeepsTheSkillBaseline(t *testing.T) {
 	for _, agent := range []string{"scratch", "hello"} {
 		t.Run(agent, func(t *testing.T) {
@@ -418,11 +405,9 @@ func TestUnattendedSessionKeepsTheSkillBaseline(t *testing.T) {
 			if err := contactSession(app, st, agent); err == nil || !strings.Contains(err.Error(), "no record") {
 				t.Fatalf("after an unattended start with no record: %v", err)
 			}
-			// The operator's fresh start sets the baseline.
 			if err := brokerctl.BeginSession(app, st, cli.VersionString(), agent)(); err != nil {
 				t.Fatal(err)
 			}
-			// An unattended start over the same skill records it.
 			if refused, cerr := unattendedStart(t, app, st, agent, nil); refused != nil || cerr != nil {
 				t.Fatalf("unchanged skill: refused=%v commit=%v", refused, cerr)
 			}
@@ -440,8 +425,8 @@ func TestUnattendedSessionKeepsTheSkillBaseline(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			// The old container writes the skill while it stops, after the
-			// fence read it unchanged: the reading before the create decides.
+			// The old container writes the skill while it stops, after the fence read it
+			// unchanged: the reading before the create decides.
 			refused, cerr := unattendedStart(t, app, st, agent, func() { write(edited) })
 			if refused != nil || cerr == nil || !strings.Contains(cerr.Error(), "not the one its last recorded session started with") {
 				t.Fatalf("changed between fence and create: refused=%v commit=%v", refused, cerr)
@@ -463,11 +448,9 @@ func TestUnattendedSessionKeepsTheSkillBaseline(t *testing.T) {
 			if err := contactSession(app, st, agent); err == nil {
 				t.Fatal("contacts allowed after an unattended start over an edited skill")
 			}
-			// A second unattended start does not clear it.
 			if refused, _ := unattendedStart(t, app, st, agent, nil); refused == nil {
 				t.Fatal("an unattended start re-baselined over the unchecked record")
 			}
-			// The operator's --fresh does.
 			if err := brokerctl.BeginSession(app, st, cli.VersionString(), agent)(); err != nil {
 				t.Fatal(err)
 			}
@@ -478,8 +461,8 @@ func TestUnattendedSessionKeepsTheSkillBaseline(t *testing.T) {
 	}
 }
 
-// A last record written before 0.33.1 holds the skill's full hash: an
-// unattended start over that same skill records it (as its content hash).
+// A full-hash record over the same skill is accepted and recorded as its
+// content hash.
 func TestUnattendedSessionAcceptsAFullHashRecord(t *testing.T) {
 	app, tree, st := scaffoldFixture(t)
 	app.Name = "hello"

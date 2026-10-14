@@ -13,11 +13,8 @@ import (
 )
 
 func TestRefreshLLMTokenFailsClosedLeavesOverlayUntouched(t *testing.T) {
-	// Fail closed: the overlay map is only mutated after a successful token
-	// acquisition. A failed refresh must leave the overlay byte-identical — it
-	// must not add a stale/empty ANTHROPIC_AUTH_TOKEN that a long-running sidecar
-	// would then write over the live, working config. The broker here grants
-	// "worker" no llm obtain, so /request refuses.
+	// Fail closed: a failed refresh must leave the overlay unchanged, or the
+	// sidecar would write a blank token over the working config.
 	env := testBroker(t)
 	id := enrolWorker(t, env)
 	before := map[string]string{"ANTHROPIC_AUTH_TOKEN": "STILL_GOOD", "OTHER": "x"}
@@ -42,12 +39,8 @@ func TestRefreshLLMTokenWritesAnthropicOverlay(t *testing.T) {
 	if overlay["ANTHROPIC_AUTH_TOKEN"] == "" {
 		t.Error("ANTHROPIC_AUTH_TOKEN must be set from the broker's token")
 	}
-	// Host pinning (same as boot): Claude posts LLM traffic to the loopback
-	// gateway, which presents the rotating leaf on its behalf. Pointing renew
-	// back at the mTLS broker re-introduces the 24h cached-leaf outage. The
-	// literal here is an independent pin of LocalGatewayURL; env.Server.URL is
-	// the broker in this test, so the second check proves the base URL is
-	// explicitly NOT the broker.
+	// The base URL must be the loopback gateway, never the broker (see
+	// RefreshLLMToken). The literal pins LocalGatewayURL independently.
 	if want := "http://127.0.0.1:8462/llm"; overlay["ANTHROPIC_BASE_URL"] != want {
 		t.Errorf("ANTHROPIC_BASE_URL = %q, want %q (must point at the loopback gateway, not the broker)", overlay["ANTHROPIC_BASE_URL"], want)
 	}
@@ -60,11 +53,8 @@ func TestRefreshLLMTokenWritesAnthropicOverlay(t *testing.T) {
 	}
 }
 
-// TestRenewOnceAPIKeyRefreshesSettings exercises the api-key branch of RenewOnce
-// (cert rotation + llm-token refresh + settings rewrite) against a real mTLS
-// broker. It pins the env keys the rewritten settings.json must carry: the
-// classic-renderer flag, a fresh ANTHROPIC_AUTH_TOKEN, and a gateway-hosted
-// ANTHROPIC_BASE_URL — NOT the broker.
+// TestRenewOnceAPIKeyRefreshesSettings pins the env keys the rewritten
+// settings.json must carry in api-key mode.
 func TestRenewOnceAPIKeyRefreshesSettings(t *testing.T) {
 	env := testBroker(t)
 	allowLLM(t, env, "worker")

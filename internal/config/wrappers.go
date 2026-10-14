@@ -5,31 +5,22 @@ import (
 	"strings"
 )
 
-// A command wrapper runs another command: `nice -n 5 python3 x.py` runs
-// python3 x.py. Its own options must be read to find that command, or the
-// real program (and the script an interpreter loads) would escape the
-// host-path checks. parseEnvPrefix walks the wrappers below, as many and
-// as nested as the command line has, exactly as their getopt reads them:
-// options first (GNU getopt with "+": stopping at the first operand),
-// then a fixed number of operands of their own, then the command. A form
-// lever cannot read that way (an unknown option, an option that runs no
-// command such as --help or ionice -p, a missing value or command) is
-// unread, and config load refuses the tool's command, as for env. A
-// wrapper not in the table (chrt, time, flock, xargs, sudo, systemd-run
-// and the like) is not read: its first argument is taken as the program.
+// A command wrapper's own options must be read to find the command it runs,
+// or the real program would escape the host-path checks. parseEnvPrefix
+// reads the wrappers below exactly as their getopt does; a form it cannot
+// read is unread, and config load refuses the command, as for env. A wrapper
+// not in the table is taken as the program itself.
 
-// wrapperSpec is one wrapper's option grammar.
 type wrapperSpec struct {
-	short    string          // option letters; a letter followed by ':' takes a value
-	long     map[string]bool // long options, true when they take a value
-	operands int             // operands of its own before the command (timeout's duration)
-	// numeric accepts a leading "-N" (nice's old adjustment form).
-	numeric bool
+	short    string          // getopt letters; ':' after one takes a value
+	long     map[string]bool // true when it takes a value
+	operands int             // its own operands before the command (timeout's duration)
+	numeric  bool            // accepts nice's old "-N" form
 }
 
-// wrapperSpecs are the wrappers lever reads. --help and --version run no
-// command, so they are never listed (an unknown option is unread); nor
-// are ionice's -p/-P/-u and taskset's -p, which act on running processes.
+// wrapperSpecs omit --help, --version and the options that act on running
+// processes (ionice -p/-P/-u, taskset -p): they run no command, so they
+// must read as unread.
 var wrapperSpecs = map[string]wrapperSpec{
 	"nice":    {short: "n:", long: map[string]bool{"adjustment": true}, numeric: true},
 	"nohup":   {},
@@ -42,8 +33,6 @@ var wrapperSpecs = map[string]wrapperSpec{
 
 var numericOptionRE = regexp.MustCompile(`^-[0-9]+$`)
 
-// parseWrapper reads one wrapper's words (after its argv[0]) and returns
-// the command it runs, or an unread form.
 func parseWrapper(name string, spec wrapperSpec, args []string) (cmd []string, unread string) {
 	i := 0
 	if spec.numeric && i < len(args) && numericOptionRE.MatchString(args[i]) {
@@ -101,8 +90,8 @@ options:
 	return args[i:], ""
 }
 
-// longOption resolves a long option name as getopt_long does: an exact
-// name, or the one long option it is a prefix of.
+// longOption resolves a long option as getopt_long does, unambiguous
+// prefixes included.
 func longOption(opts map[string]bool, name string) (full string, takesValue, ok bool) {
 	if name == "" {
 		return "", false, false
@@ -121,11 +110,9 @@ func longOption(opts map[string]bool, name string) (full string, takesValue, ok 
 	return full, takesValue, full != ""
 }
 
-// uvRunValueFlags are the options of `uv run` (and uv's global options
-// before it) that take a value; uvRunCodeFlags those whose value names
-// code uv installs or runs, checked as programs. uvRunBoolFlags take none.
-// Any other option is unread: uv has many, and one missing from these
-// tables would make its value read as the command.
+// uvRunCodeFlags name code uv installs or runs, checked as programs. Any
+// option missing from these tables is unread: its value would otherwise be
+// read as the command.
 var (
 	uvRunValueFlags = map[string]bool{
 		"--extra": true, "--no-extra": true, "--group": true, "--no-group": true, "--only-group": true,
@@ -160,16 +147,9 @@ var (
 	}
 )
 
-// parseUvRun reads `uv [options] run [options] command…` (args after
-// "uv") into the command it amounts to: a script (a .py or .pyw file, or
-// any after --script/--gui-script) is `python <script>`, -m/--module is
-// `python -m`, and anything else is the command itself (`uv run python3
-// x.py`, `uv run ./tool`). It returns the values that name code (paths
-// uv installs from or runs: --with, --project, --directory and the like)
-// and the directory --directory makes the command run in. Anything else
-// (uvx, `uv tool run`, an option missing from the tables) is unread. Not
-// read: UV_* variables an env prefix sets (UV_PROJECT, UV_CACHE_DIR and
-// the like), and where a bare command after `uv run` resolves (the
+// parseUvRun reads `uv [options] run [options] command…` into the command it
+// amounts to (a script becomes `python <script>`). Not read: UV_* variables
+// an env prefix sets, and where a bare command after `uv run` resolves (the
 // project's virtual environment, not the supervisor's PATH).
 func parseUvRun(args []string) (cmd []string, chdir string, paths []interpPath, unread string) {
 	seenRun, script, module := false, false, false

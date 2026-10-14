@@ -10,7 +10,6 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// fakeGuestBoot is an in-memory GuestBoot.
 type fakeGuestBoot struct {
 	current, recorded string
 	currentErr        error
@@ -34,10 +33,9 @@ func podmanSays(running bool) func(context.Context, string) (bool, error) {
 	return func(context.Context, string) (bool, error) { return running, nil }
 }
 
-// TestStartManagerRecoversAfterGuestRestart is lever#179's incident: the VM
-// was killed hard and restarted, the hub record still says running, its
-// container is "created" and never started. apply suspends and resumes it
-// (keeping the conversation) instead of refusing, and records the new boot.
+// After a hard VM restart the hub record still says running over a container
+// that never started: apply suspends and resumes it (keeping the
+// conversation) instead of refusing, and records the new boot.
 func TestStartManagerRecoversAfterGuestRestart(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "created"}
@@ -96,7 +94,7 @@ func TestGuestRestartedUnder(t *testing.T) {
 		{"new boot, podman says stopped", running, &fakeGuestBoot{current: bootB, recorded: bootA}, podmanSays(false), true},
 		{"new boot, podman says running", running, &fakeGuestBoot{current: bootB, recorded: bootA}, podmanSays(true), false},
 		// The hub reports "created" for a starting container too, so
-		// without podman's answer nothing is suspended (lever#179 review).
+		// without podman's answer nothing is suspended.
 		{"new boot, no podman, hub created", running, &fakeGuestBoot{current: bootB, recorded: bootA}, nil, false},
 		{"new boot, podman fails, hub created", running, &fakeGuestBoot{current: bootB, recorded: bootA},
 			func(context.Context, string) (bool, error) { return false, errors.New("podman: no answer") }, false},
@@ -126,9 +124,8 @@ func startedBefore(before bool, err error) func(context.Context, string) (bool, 
 	return func(context.Context, string) (bool, error) { return before, err }
 }
 
-// With no boot id kept (an instance whose last bring-up predates the
-// record), podman's start time is the evidence of a VM restart: the
-// container is not running and last started before the current boot.
+// With no boot id kept, podman's start time is the evidence of a VM restart:
+// the container is not running and last started before the current boot.
 func TestGuestRestartedUnderWithoutRecord(t *testing.T) {
 	running := &scion.Agent{Slug: "hello", Phase: scion.PhaseRunning, ContainerStatus: "created"}
 	noRecord := &fakeGuestBoot{current: bootB}
@@ -178,8 +175,8 @@ func TestGuestRestartedUnderWithoutRecord(t *testing.T) {
 	}
 }
 
-// The upgrade case end to end: no boot id kept, the VM restarted under the
-// manager; apply suspends and resumes it and records the boot.
+// No boot id kept and the VM restarted under the manager: apply suspends and
+// resumes it and records the boot.
 func TestStartManagerRecoversWithoutRecord(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "created"}
@@ -201,8 +198,7 @@ func TestStartManagerRecoversWithoutRecord(t *testing.T) {
 	}
 }
 
-// RecoverAfterGuestRestart is up's half: it suspends and says so only once
-// the record reads suspended.
+// RecoverAfterGuestRestart reports true only once the record reads suspended.
 func TestRecoverAfterGuestRestartForUp(t *testing.T) {
 	_, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "created"}

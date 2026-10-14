@@ -27,9 +27,10 @@ lever remote proxy (host, loopback-only)
 jail hub web port (guest 127.0.0.1:8080, --enable-web)
 ```
 
-The proxy also runs a **local OIDC provider** on its own loopback port, which is how the browser
-gets a hub session without an external identity provider and without dev-auth. See [how the
-browser is logged in](#how-the-browser-is-logged-in) before you enable this.
+The proxy gets the browser's hub session itself, by signing in to the hub with a short-lived
+assertion signed by a key only the host holds; the hub runs in scion's proxy auth mode and accepts
+no other sign-in. There is no external identity provider and no dev-auth. See [how the browser is
+logged in](#how-the-browser-is-logged-in) before you enable this.
 
 ## Accepted posture — read this before enabling it
 
@@ -61,12 +62,14 @@ remote:
   enabled: true                                # default off — opt in
   base_url: "https://myhost.tailxxxx.ts.net"    # REQUIRED whenever enabled — see note below
   # port: 8445                                  # optional; defaults to 8445
-  # login_port: 8447                            # optional; defaults to 8447 (the OIDC provider)
   # allowed_users: []                           # optional identity pinning — see below
 ```
 
-Validation at load: `base_url` must be an absolute `https://` URL. `port` and `login_port` may not
-equal 8443, 8444, 8446, or each other. `port` may not appear in `manager.allow_ports`: that grant
+Validation at load: `base_url` must be an absolute `https://` URL. `port` may not equal the
+broker's ports (8443 and 8444 by default). `allowed_users` may not name an address reserved for
+lever's own hub users (`lever-admin@lever.local`, `lever-controller@lever.local`) or scion's dev
+user (any `@localhost` address). `remote.login_port`, from older levers, still loads but does
+nothing and draws a warning. `port` may not appear in `manager.allow_ports`: that grant
 would let a jailed agent dial the proxy, set the identity header (`Tailscale-User-Login` by default)
 itself, and ride the injected session.
 
@@ -97,7 +100,8 @@ its endpoint on loopback, and keeps the public origin on the host side where the
 The web UI does not miss it: the Scion SPA builds every URL relative to the page it was served
 from, and `--base-url`'s only other consumers — the session cookie's `Secure` flag and the OAuth
 redirect URI — are unreachable here, since the proxy strips the hub's session cookie from every
-response and runs the login itself, host-side, against the hub directly (see [how the browser is
+response, lever configures no OAuth login, and the proxy runs the login itself, host-side, against
+the hub directly (see [how the browser is
 logged in](#how-the-browser-is-logged-in)).
 
 **Both backends.** `remote.enabled: true` loads on `orbstack` and on `lima`. The proxy dials the hub
@@ -112,15 +116,14 @@ a hub is an artifact of OrbStack's port forwarding: it lands on whichever machin
 which need not be this instance's.
 
 **Several remote-enabled instances on one host is supported.** Each proxy reaches its own jail, so
-instances never contend for a shared host port. Each one binds **two** host loopback ports, though
-— the proxy (`port`) and the login provider (`login_port`) — so a second instance must set both,
-and `lever.yaml` can only catch a collision *within* one instance:
+instances never contend for a shared hub port. Each one binds one host loopback port, the proxy's
+(`port`), so a second instance must set its own, and `lever.yaml` can only catch a collision
+*within* one instance:
 
 ```yaml
 # instance B's lever.yaml
 remote:
   port: 8455
-  login_port: 8456
 ```
 
 ```sh
@@ -196,21 +199,15 @@ serving. If you build your own scion and want the UI, build it with its assets e
 lever apply
 ```
 
-This mints the **remote PAT** (see [below](#the-remote-pat)), grants the
-[remote web role](#the-remote-web-role) and its project-create ceiling, and starts the proxy as a
-daemonized child, the same lifecycle pattern as the broker: `apply`/`up` start it, `lever stop`
-stops it alongside the rest of the instance.
+This invites each login's hub user and binds the [remote web role](#the-remote-web-role) and its
+project-create ceiling before anyone signs in, mints the **remote PAT** (see
+[below](#the-remote-pat)), and starts the proxy as a daemonized child, the same lifecycle pattern
+as the broker: `apply`/`up` start it, `lever stop` stops it alongside the rest of the instance.
 
-If this is the **first** time `remote.enabled` has been on for this instance — including flipping
-it on later, after the instance was already bootstrapped — `apply` briefly reopens the same
-jail-loopback-only, dev-auth-on mint window used for the [controller PAT
-re-mint](/security-model/worker-isolation/): a throwaway hub, reachable only from inside the jail,
-up just long enough to mint the token, then torn down. On a fresh bootstrap with `remote.enabled`
-already set, this happens in the *same* window as the controller-PAT mint — no extra window opens.
-The window cannot open while any container runs in the jail, the manager included (an agent
-could reach the dev-auth hub), or when lever cannot list the containers:
-`apply` then skips the remote mint and the role grant with a warning, and goes on. Run `lever
-stop`, then `lever up`, to run them (the manager conversation is kept).
+All of it runs against the live hub, as lever's own hub identities, while agents run: no container
+has to stop. The first apply with remote access on (including flipping it on later) restarts the
+hub once, to give it the web UI (see [how the browser is logged
+in](#how-the-browser-is-logged-in)); agents keep running across that restart.
 
 ### 4. Front it with Tailscale
 
@@ -237,41 +234,48 @@ looks unset), and whether the PAT is present — never its value. `doctor` goes 
 `remote.enabled`, it confirms the proxy process is alive **and** actually listening, that
 `remote.pat` exists at `0600`, does an end-to-end `GET /healthz` **through** the proxy — proving
 the loopback listener, the origin/identity gates, the session login, and the hub itself are all wired
-correctly, not just that a process happens to be running — and checks the login path from both
-ends: that the provider serves discovery and still answers 404 at `/authorize`, and that the HUB,
-asked from inside the jail to start a login, redirects to lever's dead authorization endpoint. That
-last one is the end-to-end proof: the hub has to fetch the provider's discovery document through
-the guest forwarder before it can answer, so a 302 means the `oidc_login` block, the forwarder and
-the provider are all working. (The hub caches discovery for an hour, so it proves the chain worked
-at the first login since the hub started, not that it is reachable this second.) A disabled `remote:` block is always a
-pass; most instances never turn this on.
+correctly, not just that a process happens to be running. The proxy signs in with a lever assertion
+before it forwards, so a `200` proves the sign-in too. Three more rows read the hub itself:
+`hub authentication` (an assertion from another key or for another hub is refused, `lever-admin` is
+the admin, no login provider is offered, the running hub carries lever's auth settings, no dev
+token exists), `hub identities` (`lever-admin` is the only admin, the controller holds only the
+tokens lever recorded) and `remote web role` (each login is the hub user lever recorded, bound to
+its tier's role, capped and not suspended; each removed login is suspended). See the
+[CLI reference](/reference/cli/). A disabled `remote:` block is always a pass for `remote access`;
+most instances never turn this on.
 
 ## How the browser is logged in
 
 The proxy sends one credential, a hub web session, on every request. Scion's web layer
 authenticates a browser by one thing only, a `scion_sess` cookie, and never reads `Authorization`;
-its API layer turns the same cookie into a bearer token for `/api/v1`. Without dev-auth (which lever keeps off) and without an external identity provider (which lever
+its API layer turns the same cookie into a bearer token for `/api/v1`. Without dev-auth (which lever never runs) and without an external identity provider (which lever
 deliberately does not add), a browser would sit at a 401 forever.
 
-lever closes that with a **local OIDC provider** it runs itself, and a login it performs
-**server-side**:
+lever closes that by acting as scion's **authenticating proxy**. The hub runs in scion's proxy
+auth mode with the JWT provider: it accepts a short-lived assertion that lever signs on the host,
+and nothing else creates a browser session. The login is performed **server-side**:
 
 ```
 lever remote serve (host process)
-  ├── the proxy            127.0.0.1:<port>        ← your browser, via tailscale serve
-  └── the OIDC provider    127.0.0.1:<login_port>  ← the hub's back channel, via the jail
-                                                     forwarder (guest 127.0.0.1:8446)
+  └── the proxy            127.0.0.1:<port>        ← your browser, via tailscale serve
 
 first UI request for an operator
-  1. proxy GETs the hub's /auth/login/oidc, keeping its own cookie jar, and does NOT follow the
-     redirect. It reads state / redirect_uri / client_id out of it.
-  2. proxy mints an authorization code BY CALLING A FUNCTION. No HTTP, no endpoint, no redirect.
-  3. proxy GETs the hub's own callback with that code, carrying the jar.
-  4. the hub calls the provider's /token and /userinfo, and answers with a session cookie.
-  5. the proxy keeps that cookie host-side and injects it into every request from then on, UI
+  1. proxy signs an assertion for that login's hub email (ES256, header X-Lever-Hub-Assertion,
+     30 s of life, iss lever:<instance-id>, aud scion-hub:<instance-id>, on the guest's
+     clock, read through the jail for each sign-in; a failed read refuses the sign-in) and
+     sends GET / to the hub with it, through the jail. It does not follow redirects.
+  2. the hub verifies the assertion against the public key lever installed in the jail and
+     answers with a scion_sess cookie: a session for that hub user.
+  3. proxy calls GET /api/v1/auth/me with that cookie alone. The user ID must be the one lever
+     recorded for that login in .lever-state/hub-identity.json; otherwise the login is refused.
+  4. the proxy keeps that cookie host-side and injects it into every request from then on, UI
      and API alike. It logs in again after 12 hours (scion refuses a session cookie older
      than 24), and whenever the hub rejects the session.
 ```
+
+The login path is `/` on purpose: scion creates a session only on its web pages, never under
+`/auth/` or `/api/v1/`, where it checks the assertion but stores nothing. The assertion is sent on
+step 1 only, and never on a forwarded request.
 
 Two things follow, and both are load-bearing.
 
@@ -305,10 +309,22 @@ decide:
   creation. The web UI's onboarding and workstation-settings pages therefore do not work remotely.
 - Project creation: `POST /api/v1/projects`, `/api/v1/projects/register`,
   `POST /api/v1/projects/<id>/clone`, and the legacy `/api/v1/groves` forms. Each one makes the
-  caller the owner of a new project. A user who signs in for the first time holds `hub-member`,
-  which includes `project.create`, until the next `lever apply` binds the ceiling. The proxy
-  refuses these routes so that this gap never matters.
-- `/auth/callback/*`. The login driver dials the hub's callback directly, never through the proxy.
+  caller the owner of a new project. Every hub user holds `hub-member`, which includes
+  `project.create`; lever's ceiling on each remote user takes it away before the user first signs
+  in, and the proxy refuses these routes as well, whatever the hub's state.
+- `/auth/callback/*`. No lever login uses it, and through the proxy it could only churn logins.
+- scion's conduit (`/api/v1/conduit*`, `/api/v1/admin/conduit*`: a shell, sftp and port relay
+  into agents through the hub) and artifacts (`/api/v1/artifacts*`, with its unauthenticated
+  `shared/` and `view/` links), and every write to `/api/v1/admin/experiments`, which switches
+  them on. Both experiments are off, and lever keeps them off (see
+  [worker isolation](/security-model-worker-isolation/)); the proxy refuses them in any case. Reading
+  `/api/v1/admin/experiments` stays admin-only at the hub.
+- An agent's `ports/tunnel` (the agent side's own socket) and `delegations` (they hand the
+  signed-in user's authority to an agent) under `/api/v1/agents/<id>/`, and the test-identity
+  routes (`/api/v1/test-identit*`, `/auth/test-identity*`), which mint credentials or sessions.
+
+These routes are matched in lower case and by prefix, so another spelling of the same route is
+refused too.
 
 The proxy also accepts `Sec-Fetch-Site` only as `same-origin` or `none`: a page on a sibling
 tailnet name is `same-site` and is refused. There is one exception, a top-level page load of an
@@ -338,86 +354,54 @@ an "Open the chat" link to `/` instead of plain text, which a phone can offer as
 Before it forwards a request, the proxy removes every
 client header that names an identity to the hub: `Authorization`, `Cookie`, `Tailscale-*`,
 `X-Scion-*` (the agent token and the broker signature headers among them), `X-Forwarded-User-*`,
-`X-Goog-IAP-JWT-Assertion` and `X-API-Key`.
+`X-Goog-IAP-JWT-Assertion`, `X-API-Key` and `X-Lever-Hub-Assertion`.
 
-**There is no endpoint that mints a session.** This is the part to understand before enabling
-remote access, because Scion's OIDC login path validates *nothing*: it never requests or parses an
-`id_token`, never fetches JWKS, uses neither PKCE nor a nonce, needs no client secret, and does not
-check that the discovery document's issuer matches the one configured. Whatever the provider says
-at `/userinfo`, the hub believes. So the security of this rests on exactly one property — **an
-authorization code can only be created by an in-process call inside the host-side proxy**, at the
-same trust level as the rest of `.lever-state` — and lever holds that property by
-having **no authorization endpoint at all**:
+**Only lever's host key makes a session.** The hub's auth settings are pinned through the
+`SCION_SERVER_*` environment lever starts it with (`auth.mode: proxy`, `user_access_mode:
+invite_only`, `proxy.provider: jwt`, ES256, the header, the issuer and audience, the public key file
+`/etc/lever/hub-auth.pub`, and `admin_emails: [lever-admin@lever.local]`). The environment beats
+`~/.scion/settings.yaml`, so a write to that file from inside the jail does not change how the hub
+authenticates. lever writes the same keys to the file for readers, and removes any `oidc_login`
+block, because scion builds its OAuth login whenever that block is present, whatever the mode.
 
-- `/authorize` is a registered route that returns **404, unconditionally and permanently**, and
-  every hit is written to the audit log. It exists as a route precisely so that its absence cannot
-  read as an oversight somebody later "finishes".
-- Discovery still advertises an `authorization_endpoint`, because Scion refuses to start a login
-  without the field. It advertises `https://lever.invalid/authorize` — a host that cannot resolve —
-  and never dials it.
-- `lever doctor` checks both: that the provider serves discovery, and that `/authorize` still
-  answers 404.
+- The private key is `.lever-state/hub-auth.key` on the host (`0600`). The jail holds only the
+  public half, root-owned, outside every home directory, so an agent cannot replace it. Nothing in
+  the jail can sign an assertion, and no lever process listens in the jail.
+- The proxy's signer signs only the hub emails of the configured logins (`allowed_users`, or the
+  placeholder operator), lowercased, and never a reserved address (`lever-admin@lever.local`,
+  `lever-controller@lever.local`, any `@localhost` address). A login that is not configured gets
+  no assertion.
+- The hub is `invite_only`: an assertion for an email the hub has no invited or active user for is
+  refused (403). `lever apply` invites every configured login before the proxy is restarted with
+  it (see [the remote web role](#the-remote-web-role)), and the proxy refuses a login that has no
+  recorded hub user before it asks the hub.
+- The proxy strips any client copy of `X-Lever-Hub-Assertion`, in any letter case, from every
+  forwarded request.
+- An assertion for another instance (`iss`/`aud`) or from another key gets a 401. `lever doctor`'s
+  `hub authentication` row tests exactly that, by behaviour (see the
+  [CLI reference](/reference/cli/)).
 
-That matters because the provider is **reachable from inside the jail**. The hub only accepts a
-loopback issuer (it validates `issuer_url` at startup and refuses to start otherwise), so a
-logic-free forwarder in the guest listens on the guest's `127.0.0.1:8446` and carries bytes to the
-provider's host port — and lever maps guest loopback into every agent's network namespace, so every agent can
-reach that forwarder. What an agent finds there is discovery, `/token` and `/userinfo`, and none of
-them yields anything without a code. An agent can even start a login against the hub and get a
-state cookie; it cannot mint a code, so it can never finish. Had `/authorize` been implemented, that
-same agent could have obtained a hub session for any identity it cared to assert.
-
-**Who the hub thinks you are.** The provider asserts the Tailscale login the proxy already verified
+**Who the hub thinks you are.** The assertion names the Tailscale login the proxy already verified
 against `allowed_users`, so the hub's user row names that identity, and two operators get two
 sessions rather than sharing one. With `allowed_users` unset there is no verified identity to
 assert and a placeholder (`lever-operator@lever.local`) is used instead, whatever the header says —
-another reason to set it. lever never sets `admin_emails`, so the hub creates these users at its
-ordinary `member` role.
+another reason to set it. These users are hub `member`s; the only hub admin is lever's own
+`lever-admin@lever.local`, which signs in nowhere and holds no stored credential.
 
-**Turning this on restarts the hub, once.** Scion reads the `oidc_login` block at startup only, so
-the first `lever apply` after enabling remote access rewrites the guest's `~/.scion/settings.yaml`
-and restarts the hub so it is read. Later applies find the block already correct and restart
-nothing.
+**Turning remote access on or off restarts the hub, once.** scion's workstation defaults keep the
+hub's web frontend on either way; what remote access adds is `--web-assets-dir`, the SPA lever
+stages for a scion it builds from `scion.source` or `scion.version`. lever restarts the hub when the
+running hub's `--web-assets-dir` differs from the one it wants. (With `scion.binary:` lever stages
+no assets, and the toggle restarts nothing.) Proxy auth stays on either way; nothing else changes
+when remote access is off. Later applies find the hub as wanted and restart nothing.
 
-**Turning it back off removes the forwarder.** Every `lever apply` with `remote.enabled: false`
-stops the guest forwarder, deletes it, and drops the `oidc_login` block. That is not tidiness: the
-forwarder is an unauthenticated TCP bridge from guest loopback — which every agent can reach — to a
-host loopback port sitting beside lever's own 8443/8444/8445. Left running after the feature is
-gone, it would keep that port bridged into the jail for whatever binds it next. No hub restart is
-needed to undo the block; a stale one names a provider that no longer answers.
-
-**Two port numbers, not one.** The hub dials a GUEST loopback port — fixed at `8446`, with no
-config key — and the forwarder there carries the bytes to the provider on the host's `login_port`.
-They must differ, because OrbStack **mirrors a guest listener onto the host at the same number**:
-with one number for both halves, the guest forwarder's mirror took the host port and
-the provider could not bind it. (Lima mirrors nothing — lever's Lima template ignores every
-guest→host port forward — so there the rule is harmless rather than needed.) (Worse, it was order-dependent — a provider that bound first left
-the runtime unable to mirror, and the whole thing worked by luck.) Only the host number is
-configurable, so no configuration can make the two halves of one instance collide; `lever.yaml`
-additionally rejects a `login_port` of `8446`, which is the host port that mirror occupies.
-
-**The login port is granted in the jail's egress allowlist**, and only while remote access is on.
-The forwarder's whole job is to reach a host port, and that allowlist is the one thing deciding
-whether a jail→host dial succeeds — without the grant the dial is dropped, the hub's discovery
-fetch hangs, and the browser gets a 502 with every process apparently healthy. The grant is one
-port, added beside the broker's, and it disappears from the next rebuild when remote access goes
-off.
-
-> **On `egress: closed`, enabling remote access on a RUNNING instance needs `lever destroy` +
-> `lever up`, not just `lever apply`.** A live closed chain is never rebuilt in place (that would
-> briefly open egress under a running agent), so a newly granted port does not take effect until
-> the instance is brought up again. `lever doctor` names this when it sees it.
-
-**No Go toolchain is needed for the forwarder with a release build.** The forwarder is a small
-linux program. Release archives, and a lever built with `make install`, embed it prebuilt for
-linux/amd64 and linux/arm64, so a build-free host (`scion.binary:` and prebuilt binaries shipped
-in) needs no compiler for remote access. A lever built with plain `go build` or `go install`
-carries no prebuilt copy and cross-compiles the forwarder at apply time instead, which needs Go;
-with `scion.binary:` (the only mode that does not already need Go for scion) `lever.yaml` then
-refuses to load when `go` is not on PATH, because the apply-time failure would land after the
-bootstrap-token step had already opened a mint window against the hub. The embedded copy is used
-only when it was built from the forwarder source in the same lever binary; a stale one is ignored
-and the forwarder is built instead.
+**No login port and no forwarder.** The login needs no listener of its own: the proxy reaches the
+hub through the jail like every other hub call, and the jail needs no egress grant for it. On a jail
+an older lever brought up with remote access, the next `lever apply` stops and removes its guest
+login forwarder (`/usr/local/bin/lever-login-forward`) and drops the `oidc_login` block; its
+login-port ACCEPT drops out of the egress chain on the same apply, because every apply verifies the
+chain against the ruleset it wants and rebuilds a chain that differs (atomically, also in the
+`egress: closed` posture). `remote.login_port` still loads, does nothing, and draws a warning.
 
 ## `allowed_users`: pinning who can connect
 
@@ -502,7 +486,7 @@ no chain until the next `lever apply`/`up`, which applies it before it starts an
 `allow_wildcard_bind: true` as well; with the default `identity_header` it is refused outright,
 because it listens on the tailnet address too. A non-loopback bind prints a warning on every `lever apply`,
 `lever up` and `lever remote serve`, and `lever doctor` shows it as a `remote exposure` warning
-row. The login provider stays on loopback regardless.
+row.
 
 **`Host` vs `X-Forwarded-Host`.** The proxy's DNS-rebinding defence matches the request's
 `Host` header against `base_url`'s host (port included when `base_url` has one), and also admits
@@ -545,18 +529,16 @@ remote:
   allowed_users: ["you@example.com"]
 ```
 
-- Use a lever release archive (or `make install` on the build machine): it embeds the login
-  forwarder, so the VM needs no Go.
 - **Never make the port public** (`share set-public`). A public port has no exe.dev login in
   front of it, so no verified header either — the same rule as never using `tailscale funnel`.
 
 > **Warning: the front must forward ONLY the proxy port.** exe.dev can forward any port in
 > 3000-9999, and a front that forwards a port range to the VM's loopback also reaches lever's
 > other host listeners: the broker's admin port (`8444`, unauthenticated), its jail port
-> (`8443`) and the login provider (`8447`). Anyone the front admits could then call them
+> (`8443`). Anyone the front admits could then call them
 > directly, and `allowed_users` does not apply there — it is checked only by the proxy. Grant
 > and use only `remote.port`; if your front cannot be limited to one port, move lever's other
-> listeners (`broker.jail_port`, `broker.admin_port`, `remote.login_port`) outside the range it
+> listeners (`broker.jail_port`, `broker.admin_port`) outside the range it
 > forwards.
 
 - Start with the default loopback `bind`. If exe.dev's front reaches the VM on its private
@@ -575,15 +557,8 @@ These settings have not been live-validated behind exe.dev yet.
 `remote.enabled` loads on the Lima backend, and nothing in the login path is specific to OrbStack:
 
 - The proxy reaches the hub by running `nc 127.0.0.1 8080` inside the jail
-  (`limactl shell <vm> nc …`), as on OrbStack.
-- The guest forwarder listens on the guest's `127.0.0.1:8446` and dials the provider at
-  `host.lima.internal:<login_port>`, which Lima forwards to the host's loopback. That is the same
-  route, the same alias, and the same kind of `LEVER_EGRESS` port grant every agent uses to reach
-  the broker's jail port on Lima; the login port is granted on both backends while remote access is
-  on.
-- Lima mirrors nothing. lever's Lima template ignores every guest→host port forward (and lever
-  verifies that on every bring-up), so the forwarder's guest port never appears on the host. The
-  OrbStack mirror that forced two port numbers does not exist there.
+  (`limactl shell <vm> nc …`), as on OrbStack. The sign-in takes the same route, so it needs no
+  guest→host port and no egress grant.
 
 **Linux hosts are often multi-user.** Every local account on the host shares its loopback, so any
 of them can connect to `127.0.0.1:<remote.port>`, set the identity header and ride your hub session.
@@ -591,9 +566,8 @@ That has always been true of the loopback design; on a shared Linux host it matt
 access only on a host whose other local users you trust as much as the front's users.
 
 **Not live-validated yet.** Until it is, check the login path on a real Lima VM with `lever
-doctor`: the `remote access` row proves the hub reaches the provider through the forwarder (a 302
-to lever's dead authorization endpoint), then that `/healthz` answers 200 through the proxy. On
-`egress: closed`, enable remote access with `lever destroy` + `lever up`, as on OrbStack.
+doctor`: the `hub authentication` row proves the hub accepts only lever's assertions, and the
+`remote access` row that `/healthz` answers 200 through the proxy, which needs a sign-in.
 
 ## Never use `tailscale funnel`
 
@@ -634,51 +608,56 @@ fields and a `reason` word on a refusal / the `push-*` and `deny-push` lines of
 [notifications](#notifications) / `file-upload`, `file-download` and `deny-file` for [files in the
 chat](#files-in-the-chat)), and the upstream status once known. An `allow` line for a cross-site
 or same-site [page load of an entry page](#how-the-browser-is-logged-in) carries the `reason`
-`cross-site-navigation` or `same-site-navigation`. The login path writes there too: `oidc-session` when a session is
-obtained for an operator (`oidc-session-failed` when it is not), `oidc-discovery` / `oidc-token` /
-`oidc-userinfo` for each call the hub's back channel makes (`-refused` variants when the provider
-refuses one, `oidc-not-found` for an unknown path), and `deny-authorize` for anything that probes `/authorize` — nothing legitimate
-ever does, so a line like that is either a misconfiguration or something in the jail looking around.
-No line ever carries a cookie, a code or a token. A request that never got an answer from the hub also carries an `error` field naming the
+`cross-site-navigation` or `same-site-navigation`. The login path writes there too: `hub-session`
+when a session is obtained for an operator, `hub-session-failed` when it is not (the hub refused the
+assertion, set no session cookie, or did not answer), and `hub-session-refused` when lever refuses
+the login itself: no hub user is recorded for it, or the session the hub created belongs to another
+hub user than the one lever recorded. A `hub-session-refused` line means `lever apply` has not run
+since the login was added, or something renamed a hub user; `lever doctor`'s `remote web role` row
+names which.
+No line ever carries a cookie, an assertion or a token. A request that never got an answer from the hub also carries an `error` field naming the
 cause — a stopped jail, a missing `nc`, a hub refusing the connection — since a bare `502` cannot
 tell those apart. The hub does not log this traffic; check this file first if doctor's healthz probe
 fails or an agent received a message you do not recognise.
 
 ## The remote PAT
 
-`apply` mints a Scion hub token scoped to exactly `agent:read`, `agent:list`, `project:read`,
-`agent:attach`, `agent:message`, persisted host-side only, `.lever-state/remote.pat`, mode `0600`,
-and **different** from the controller PAT the broker itself uses.
+`apply` mints a Scion hub token scoped to exactly `agent:read`, `agent:list` and `project:read`,
+persisted host-side only, `.lever-state/remote.pat`, mode `0600`, and **different** from the
+controller PAT the broker itself uses. It reads and nothing else: it is the controller's token, so
+anything sent with it would carry lever's sender label.
 
-**The proxy no longer sends it.** Every request now rides your hub session instead (see [how the
-browser is logged in](#how-the-browser-is-logged-in)). `apply` still mints, records and renews the
-token and `lever doctor` still checks it, so the lifecycle below is unchanged; its scope set is also
-what the [`lever-remote` role](#the-remote-web-role) is derived from.
+**The proxy uses it for one read.** Every request from the browser rides your hub session (see
+[how the browser is logged in](#how-the-browser-is-logged-in)). The proxy sends the remote PAT only
+on its own read-only `GET`s of the project's agent list, which the [chat page](#the-chat-page)'s
+agent list and the [contact fence](#contacts-chat-only-logins)'s name resolution share. The token
+never enters the jail.
+
+**Minted by the controller, while agents run.** The token is minted by lever's controller hub user
+(`lever-controller@lever.local`), the same identity that mints the controller PAT, with a
+lever-signed assertion against the live hub: no hub stop and no container check. It is minted only
+while remote access is on; the first apply with it off revokes it and removes its files.
 
 **Expiry and scopes are recorded, not asked.** The hub will not tell a token holder anything about
 the token, so lever keeps a record beside it (`.lever-state/remote.pat.json`: scopes asked for,
-scopes granted, expiry) and mints with `--expires 360d`. `lever apply` re-mints — in the same
-throwaway dev-auth window as the controller PAT, and revokes the old token — when the record is
-missing (a token minted by an older lever, on scion's 90-day default), when the scope set differs
-from the one this lever mints, or with fewer than 30 days left; `lever doctor`'s `hub tokens` row
-reports the same. To re-mint for a reason the record cannot see (a reset hub database, say),
-delete the file and re-apply:
+scopes granted, expiry) and mints it for 360 days. `lever apply` re-mints it, saving the new token
+and its record before it revokes the old one, when the record is missing (a token minted by an
+older lever, on scion's 90-day default), when the scope set differs from the one this lever mints,
+or with fewer than 30 days left; `lever doctor`'s `hub tokens` row reports the same. To re-mint for
+a reason the record cannot see, delete the file and re-apply:
 
 ```sh
 rm .lever-state/remote.pat
 lever apply
 ```
 
-This is the same repair shape as the controller-PAT re-mint: a brief, jail-loopback-only dev-auth
-window, agent-free, that mints a fresh token and nothing else.
-
 ## The remote web role
 
 The whole web UI, API included, runs as the **hub user** the sign-in created (see
 [who the hub thinks you are](#how-the-browser-is-logged-in)), and scion gives a new user no role on
-any project. So `apply` also creates a custom project role, `lever-remote`, with the same surface as
-the remote PAT (`agent.read`, `agent.list`, `project.read`, `agent.attach`, `agent.message`) plus
-`project.list`, which only the web UI's project list needs (and `agent.lifecycle`, the start, stop
+any project. So `apply` also creates a custom project role, `lever-remote`, with `agent.read`,
+`agent.list`, `project.read`, `agent.attach`, `agent.message` and `project.list`, which only the web
+UI's project list needs (and `agent.lifecycle`, the start, stop
 and suspend controls, on a hub that has that permission), and binds each `allowed_users` entry's hub user to it on this instance's project. With `allowed_users`
 unset, it binds the placeholder `lever-operator@lever.local`.
 
@@ -691,26 +670,61 @@ instead: a system-scope **access constraint** named `lever-remote-ceiling:<email
 user, whose maximum permission set is `hub-member`'s permissions (read from the hub) minus
 `project.create`, plus the `lever-remote` permissions. A constraint only ever takes permissions
 away, and it applies to everything the user holds at every scope, which is why the role's own
-permissions are inside it. scion requires a preview before each constraint change; lever previews
-and commits in one go, and replaces a constraint whose subject or set has drifted. If a scion
-upgrade adds a `hub-member` permission, the ceiling withholds it until the window runs again;
-delete `remote-role.json` and re-apply to recompute.
+permissions are inside it. A constraint whose subject or set has drifted is replaced without a
+gap: the new one is written first, under the user's second name `lever-remote-ceiling:<email>:b`
+(scion keeps constraint names unique), and only then is the old one deleted, so for that moment the
+user holds the intersection of the two. The ceiling is read from the hub on every apply, so a
+`hub-member` permission a scion upgrade adds is picked up by the next apply.
 
-Role and constraint administration are hub-admin only and scion refuses them to every token, so
-this happens in the same throwaway dev-auth window as the PAT mints. `.lever-state/remote-role.json`
-records the role, its permission set, each user bound, and each user's ceiling; a window opens
-only while that record does not cover every allowed user with the current permission set and a
-ceiling. A record written before the ceiling existed has no ceilings, so the first apply after
-upgrading opens the window once. `lever doctor`'s `remote web role` row reads the same record.
+**Bound before the first sign-in, while agents run.** Every `lever apply` and `lever reload` runs a
+`hub-identity` step against the live hub, as lever's own admin identity (`lever-admin@lever.local`,
+asserted with the host key; it holds no stored credential). While remote access is on, for every
+configured login (each `allowed_users` entry, or the placeholder operator with no `allowed_users`)
+it:
 
-**A user exists only after its first sign-in.** On a fresh setup, the web UI answers 403 until the
-role is bound: sign in once from the phone, then run `lever stop` and `lever up` (a `lever apply`
-binds it only while no container runs in the jail, the manager included, see
-[3. Apply](#3-apply)). Until then, `apply` warns
-and tries the window again on every run.
+1. invites the login's hub user if the hub has none (scion's `invite_only` admits only invited and
+   active users);
+2. writes the ceiling;
+3. binds `lever-remote` (or, for a [contact](#contacts-chat-only-logins), `lever-remote-contact`) on
+   this instance's project, and drops the other tier's binding.
 
-Removing a user from `allowed_users` does **not** remove its binding or its ceiling. The proxy then
-refuses that login before it reaches the hub, but the hub user keeps the role.
+The ceiling comes before the binding, so a tier move never leaves the user with more than either
+tier allows. Only after this step does apply restart the proxy with the new login list. At the
+first sign-in the hub activates that same invited row, keeping its ID, with the role and ceiling
+already in force. No container has to stop, and nothing waits for a first sign-in.
+`.lever-state/hub-identity.json` records each login's hub user ID, and
+`.lever-state/remote-role.json` the role, its permission set, each user bound and each user's
+ceiling.
+
+**A login lever cannot vouch for is refused, alone.** If a login's hub user is one of lever's own
+(the admin, the controller, scion's dev user), or is not the user ID lever recorded for that login
+before, apply warns and leaves it unbound, and the proxy refuses that login (`hub-session-refused`);
+every other login keeps working. A reserved address in `allowed_users` is refused at config load
+while remote access is on; with it off no login is bound at all.
+
+**Removing a login takes effect first.** Before anything else, `lever apply`, `lever reload` and
+`lever up` (on every path, also when the manager is already running) write what each login may now
+do to `.lever-state/remote-grants.json`. The running proxy reads that file on every request and
+before every push, and re-checks every open request and stream about once a second: a login that
+is no longer there, or whose tier, agents, `see`, `files` or `voice` changed, is refused at once
+(`deny-revoked`), including the chat page, files, wake and voice, which the proxy answers from its
+own session without asking the hub, and its open `/events` streams and terminal connections are
+closed. Every other login keeps working, and the proxy restart at the end of the apply admits the
+login again under its new settings. A change to a setting every login shares (the front settings,
+the chat page, `agent_messages`, `files`, `voice`, push) refuses every login until that restart. An
+unreadable or missing file refuses every login. A `lever up` that finds the manager running or
+suspended applies nothing else, so it neither suspends at the hub nor restarts the proxy: run
+`lever reload` for that. Then, as the first thing it does at the hub, the apply
+suspends the removed login's hub user and drops its role bindings (the ceiling stays). The hub
+refuses a suspended user's web session at once, and its API access within the hub's 60-second user
+cache. Nothing an agent can do to the hub, nor a later step failing, delays either. Adding the
+login back reactivates the same hub user and binds it again. Turning remote access off stops the
+proxy before any other step and suspends every login (none can sign in then); turning it back on
+reactivates and binds them before the proxy starts.
+
+`lever doctor`'s `remote web role` row reads the hub, not the record: each configured login's hub
+user is the one lever recorded, bound to its tier's role, capped and not suspended, and each removed
+login's hub user is suspended.
 
 ## Verified web chat
 
@@ -741,6 +755,13 @@ from the host records only, and only about messages to that agent (its certifica
   the controller's hub user (the broker asks the hub for it) is looked up in the sent ledger only,
   by the ref. Any other `from` has no record. So the sender only chooses which record is read: a
   contact's post can never come back as a lever message, and the reverse.
+  The controller's hub user is `lever-controller@lever.local`, so lever's messages carry
+  `from: user:lever-controller@lever.local`. Only the current address verifies: when the broker
+  misses on a `user:` label it asks the hub again (at most every 30 seconds), but a message whose
+  envelope carries an earlier address stays unknown. On an instance an older lever brought up, the
+  first apply renames the controller (it was scion's dev user, `<os-user>@localhost`), so a
+  message delivered before that upgrade and verified after it answers `none` (unknown sender);
+  agents verify on receipt, so only messages in flight across the upgrade are affected.
 - The answer's `result` is `web` (a person in the web chat: login and tier), `lever` (lever sent
   it: its kind), `already_verified`, `none` or `unavailable`, with the text as recorded. The agent
   acts on that text, never on the text in its session. The markers stay in the message to make a
@@ -990,7 +1011,10 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   to the [chat page](#the-chat-page) instead, and the contact gets neither that landing page nor
   the hub's web UI shell. Everything else is refused (audit `deny-contact`).
 - **What a contact may not send.** A word that starts with `@` (scion would route the message to
-  another agent), a reply to a message by id, an attachment, or any field other than the text.
+  another agent), a reply to a message by id, an attachment, or any field other than the text, its
+  idempotency key and `offer_wake` (the hub's web chat sends it on every message; it only changes
+  how the hub answers when the agent is not running). `wake` is refused: a contact wakes a worker
+  only through the chat page's wake, which checks the session and limits the rate.
   The proxy answers 403 with the reason; the contact rewrites the message. The text itself is not
   filtered: a contact may write anything, a lever marker included.
 - **Markers cannot make chat pass for lever.** The agent verifies the message, and the broker
@@ -1018,9 +1042,12 @@ grants no hub route: the fence below admits nothing for a see-only agent.
 - **Verified as a contact.** A contact's message verifies with the tier `contact`. The agent
   uses it as the contact's answer for its task, never as an instruction about the system, other
   tasks, tools or recipients, and a worker records the answer in its task files.
-- **Setup order.** The contact signs in once (so the hub has the user); then `lever stop` and
-  `lever up` bind the role, because the grant needs the dev-auth window. Until then the contact
-  gets 403 from the hub, and the fence applies from the first request.
+- **Setup order.** Add the contact to `allowed_users` and run `lever apply` (or `lever reload`)
+  while agents run: apply invites the contact's hub user, caps it and binds
+  `lever-remote-contact` before the proxy accepts the login (see [the remote web
+  role](#the-remote-web-role)). The contact's first sign-in finds the role and the ceiling already
+  in force, and the fence applies from the first request. Removing the contact refuses it at the
+  proxy before any other apply step, then suspends its hub user.
 - **Privacy.** Anyone with `project.read` on the instance project (an operator) can read a
   contact's chat with an agent in the project message log. The contact's own event stream still
   carries its other direct chats, if an agent outside its list starts one with it; its DM list is
@@ -1170,16 +1197,14 @@ encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
   match your config exactly; the conversation key comes from the agent's hub record and the
   contact's hub user id, never from the request.
 - **"has not signed in yet".** The proxy reads only for a contact that `lever apply` bound to a
-  hub user (`.lever-state/remote-role.json`). For any other contact it does not sign in, since a
-  sign-in would create the contact's hub user. After a contact signs in for the first time, bind
-  it with `lever stop`, then `lever up` (a `lever apply` binds it only while no container runs
-  in the jail, the manager included, see [3. Apply](#3-apply)); until then its conversations show "has not signed in yet". When the hub
-  refuses a read and the contact's session belongs to another hub user than the one `apply`
-  bound (the hub forgot the contact, and its next sign-in made a new user), the answer is also
-  `not-signed-in`, with the hint `run lever apply`. To find that out the proxy asks the hub who
-  the session is (`GET /api/v1/auth/me`, no redirect followed), only after a failed read. The
-  proxy's own sign-in for a bound contact can create that new hub user when the hub forgot the
-  old one; this is accepted, since the contact's own next visit does the same.
+  hub user (`.lever-state/remote-role.json`). Apply binds every configured contact before its first
+  sign-in, so this answer means apply has not run since the contact was added, or refused that
+  login (see [the remote web role](#the-remote-web-role)); run `lever apply`. When the hub refuses
+  a read and the contact's session belongs to another hub user than the one `apply` bound, the
+  answer is also `not-signed-in`, with the hint `run lever apply`. To find that out the proxy asks
+  the hub who the session is (`GET /api/v1/auth/me`, no redirect followed), only after a failed
+  read. The proxy's own sign-in never creates a hub user: the hub admits only invited users, and the
+  proxy refuses a session whose user is not the one lever recorded.
 - **Side effects.** A bound contact with no live session in the proxy (after a proxy restart, or
   after the 12-hour renewal) is signed in by the proxy, which moves the contact's `last login` on
   the hub. With `agent_messages` on, your read asks the broker with a peek: the answer is what the
@@ -1594,7 +1619,7 @@ browser).
   whisper-server has no authentication of its own: it is safe because it listens on host
   loopback only, the jail's egress rules drop every host loopback port that is not on the
   allowlist, and config load refuses `-whisper-port` in `manager.allow_ports`, on the broker's
-  jail and admin ports, the login and proxy ports, port 8446 and every tool backend (and the
+  jail and admin ports, the proxy port and every tool backend (and the
   `voice` row of `lever doctor` checks it again). Nothing new is mounted into an agent, and no
   agent can call the dictation route: it is the chat page's, behind the login gate.
 - **Other host processes and web pages.** whisper-server allows cross-origin requests from any
@@ -1696,15 +1721,15 @@ to your own host, never to a cloud speech service.
   web chat it is provably yours, but it is still not a directive (see the accepted posture above).
 - **No credential on the phone.** The session cookie stays on the host, the hub's `Set-Cookie` is
   stripped from every response, and the routes that would return a token are refused.
-- **No identity provider, and no endpoint that mints sessions.** The local OIDC provider has no
-  authorization endpoint at all — see [how the browser is logged
-  in](#how-the-browser-is-logged-in).
+- **No identity provider, and nothing in the jail that mints sessions.** Only an assertion signed
+  with the host-held key makes a hub session, and the proxy signs only for configured logins — see
+  [how the browser is logged in](#how-the-browser-is-logged-in).
 
 ## See also
 
 - [Config reference](/reference/config/) — the full `remote:` key table.
 - [CLI reference](/reference/cli/) — `lever remote serve` / `lever remote status`.
-- [Security model: worker isolation](/security-model/worker-isolation/) — the controller-PAT
-  bootstrap-token window this feature reuses the shape of.
+- [Security model: worker isolation](/security-model/worker-isolation/) — lever's hub identities
+  and the controller PAT.
 - [Operator directives](/operator-directives/) — the one channel that IS authenticated, if you need
   that instead of (or alongside) chat.

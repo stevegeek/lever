@@ -68,7 +68,6 @@ func freePort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-// logs collects a supervisor's lines.
 type logs struct {
 	mu    sync.Mutex
 	lines []string

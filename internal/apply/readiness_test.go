@@ -12,7 +12,6 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// shortHarnessSettle sets harnessSettle for one test.
 func shortHarnessSettle(t *testing.T, d time.Duration) {
 	t.Helper()
 	was := harnessSettle
@@ -34,7 +33,7 @@ func liveGateDeps(p *gateProbe, settle time.Duration) Deps {
 	}
 }
 
-// TestSettleCountsFromClaudesPane (lever#188): once claude's pane is seen
+// TestSettleCountsFromClaudesPane: once claude's pane is seen
 // alive the window is the short harnessSettle, not the budget's Settle.
 func TestSettleCountsFromClaudesPane(t *testing.T) {
 	shortHarnessSettle(t, 10*time.Millisecond)
@@ -72,15 +71,12 @@ func TestNoPaneSignalHoldsTheLongWindow(t *testing.T) {
 	}
 }
 
-// attachGate is start-manager's gate for a manager it created under an up
-// that attaches next (gateOpts.attach).
 func attachGate(ctx context.Context, d Deps, name, project string) error {
 	return gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", nil, gateOpts{attach: true})
 }
 
-// TestAttachGateEndsAtThePane: for a created manager under an up that
-// attaches next the gate ends once the pane is alive, with no window and no
-// second look.
+// TestAttachGateEndsAtThePane: under an up that attaches next the gate ends
+// once the pane is alive, with no window and no second look.
 func TestAttachGateEndsAtThePane(t *testing.T) {
 	shortHarnessSettle(t, time.Minute)
 	p := &gateProbe{alive: []harnessAnswer{{alive: true}}}
@@ -110,9 +106,9 @@ func TestAttachGateStillRefusesADeath(t *testing.T) {
 	}
 }
 
-// TestPostLiveProbesRunDuringTheSettle (lever#188): start-manager's
-// warnings run while the window is held: the look after the window waits
-// (up to a second) for the claude-settings read to have happened.
+// TestPostLiveProbesRunDuringTheSettle: start-manager's warnings run while
+// the window is held; the look after it waits up to a second for the
+// claude-settings read.
 func TestPostLiveProbesRunDuringTheSettle(t *testing.T) {
 	shortHarnessSettle(t, 5*time.Millisecond)
 	app, f := newObserveFirstApp(t)
@@ -176,8 +172,7 @@ func TestPostLiveWarningsAreDroppedOnAFailedStart(t *testing.T) {
 }
 
 // TestPostLiveFinishRunsUnstartedProbes: a gate that never called the hook
-// (one that fails nothing but starts nothing either) still gets the probes,
-// in their old order, after it.
+// still gets the probes after it.
 func TestPostLiveFinishRunsUnstartedProbes(t *testing.T) {
 	sink := &logSink{}
 	app := &config.App{Name: "assistant", Manager: config.Manager{ClaudeSettings: config.ClaudeSettings{AutoCompactWindow: 400000}}}
@@ -195,7 +190,7 @@ func TestPostLiveFinishRunsUnstartedProbes(t *testing.T) {
 	}
 }
 
-// TestCheckManagerAfterDetach (lever#188): after an attach that skipped the
+// TestCheckManagerAfterDetach: after an attach that skipped the
 // window, a live pane is silence; a dead one, a stopped container or a
 // record that left running is reported with what was seen; a probe and a
 // list that both cannot answer say nothing.
@@ -227,8 +222,6 @@ func TestCheckManagerAfterDetach(t *testing.T) {
 	}
 }
 
-// TestApplyAttachEndsStartManagerAtThePane: PlanOpts.Attach (an up that
-// attaches next) ends start-manager's gate once the pane is alive.
 func TestApplyAttachEndsStartManagerAtThePane(t *testing.T) {
 	shortHarnessSettle(t, time.Minute)
 	app, f := newObserveFirstApp(t)

@@ -12,36 +12,23 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// JailHandler builds an http.Handler that routes the jail (mTLS) listener.
-// Routes: /worker/*, /msg/send, /msg/list, /msg/recipients, /directive/consume,
-// /directive/check, /directive/preview, /message/verify, /chat/verify, /contacts, /contact/message,
-// /files/list, /files/share,
-// /enrol, /renew, /request, and one gated proxy per
-// currently-registered tool under /mcp/<name>/. Tool routes are bound at
-// call time — tools must be registered before JailHandler() is called.
+// JailHandler builds the handler for the jail (mTLS) listener, with one gated
+// proxy per registered tool under /mcp/<name>/. Tools must be registered
+// before it is called.
 //
-// Every route runs under the per-route deadlines of b.timeouts: the request
-// body must arrive within Body (a connection read deadline; the listener has
-// no ReadTimeout because /llm streams), and the small JSON control routes
-// also run under an http.TimeoutHandler (Control), answering 503 when the
-// handler overruns.
+// Every route has a body deadline; the JSON control routes also run under an
+// http.TimeoutHandler (503 on overrun).
 //
-// /llm, /mcp/<tool>/ and /worker/* carry ONLY the body deadline. An
-// http.TimeoutHandler buffers the whole response and offers no Flusher, so
-// under one a streaming backend (an MCP streamable-HTTP text/event-stream
-// answer, a streamed completion) delivers nothing until it finishes, and a
-// legitimately long tool call or dispatch is cut at the bound with its
-// buffered output discarded. A per-write deadline is not used either: re-armed
-// on each write it would cut a quiet, long-lived MCP event stream, and cleared
-// after each write it bounds only writes past the kernel send buffer. The
-// handler side of these routes is therefore unbounded, as it was before the
-// body deadline was added: the agent-side client and the runtime calls carry
-// their own timeouts, and a client that goes away cancels the request context.
+// /llm, /mcp/<tool>/ and /worker/* carry ONLY the body deadline: a
+// TimeoutHandler buffers the whole response and has no Flusher, so it would
+// stall a stream and cut a long tool call or dispatch. A per-write deadline
+// would cut a quiet, long-lived MCP event stream. Their handlers are
+// unbounded; the agent-side client and runtime calls carry their own
+// timeouts, and a client that goes away cancels the request context.
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
 	control := func(h http.HandlerFunc) http.Handler { return b.bounded(h, b.timeouts.Control) }
 	worker := func(h http.HandlerFunc) http.Handler { return withBodyDeadline(b.timeouts.Body, h) }
-	// Method patterns: every JSON route is POST-only; /tools is the lone GET.
 	// A wrong method 405s at the mux, before any handler runs.
 	mux.Handle("POST "+wire.PathWorkerStart, worker(b.handleWorkerStart))
 	mux.Handle("POST "+wire.PathWorkerStop, worker(b.handleWorkerStop))
@@ -75,7 +62,6 @@ func (b *Broker) JailHandler() http.Handler {
 			b.audit("gateway", "", "error", err.Error())
 			continue
 		}
-		// Strip the /mcp/<name> prefix so the tool proxy sees a clean path.
 		prefix := "/mcp/" + name
 		mux.Handle(prefix+"/", http.StripPrefix(prefix, withBodyDeadline(b.timeouts.Body, handler)))
 	}
@@ -85,23 +71,16 @@ func (b *Broker) JailHandler() http.Handler {
 	return mux
 }
 
-// bounded wraps a control route (a small JSON exchange, never streamed): the
-// request body must arrive within b.timeouts.Body and h must finish within
-// d, else the client gets 503 and h's eventual output is discarded
-// (http.TimeoutHandler also cancels the request context, so a call in flight
-// is abandoned). The body deadline is set on the OUTER writer: TimeoutHandler's
-// writer has no connection to set it on. Not for a route that streams or
-// legitimately runs long — see JailHandler.
+// bounded is for control routes only, never a streaming one (JailHandler).
+// The body deadline is set on the OUTER writer: TimeoutHandler's writer has
+// no connection to set it on.
 func (b *Broker) bounded(h http.Handler, d time.Duration) http.Handler {
 	return withBodyDeadline(b.timeouts.Body, http.TimeoutHandler(h, d, "request timed out"))
 }
 
-// withBodyDeadline puts a read deadline of d on the connection before h runs,
-// bounding the request-body read (net/http clears the post-header deadline
-// when the server has no ReadTimeout). Per request: the server re-arms the
-// header and idle deadlines itself between requests. Best-effort — a writer
-// with no connection (a test recorder) reports ErrNotSupported and is left
-// alone.
+// withBodyDeadline bounds the request-body read: net/http clears the
+// post-header deadline when the server has no ReadTimeout, and re-arms its own
+// deadlines between requests. A writer with no connection is left alone.
 func withBodyDeadline(d time.Duration, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(d))
@@ -109,19 +88,13 @@ func withBodyDeadline(d time.Duration, h http.Handler) http.Handler {
 	})
 }
 
-// EpochAnswer is the body of GET /epoch: wire.EpochResponse, which
-// first-party tools read for the epoch, plus the instance id, which only
-// host-side lever reads (lever#181). The id lives here, not in package
-// wire, because wire is in-jail code: the field would change the jail ABI
-// for a value no in-jail program reads. A broker predating the id reports
-// it empty.
+// EpochAnswer is the body of GET /epoch. InstanceID is read only host-side,
+// so it lives here rather than in package wire, the in-jail ABI.
 type EpochAnswer struct {
 	wire.EpochResponse
 	InstanceID string `json:"instance_id,omitempty"`
 }
 
-// handleEpoch serves the current epoch for captool freshness checks, and
-// the process identity for lever on the host (admin/loopback).
 func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, EpochAnswer{
 		EpochResponse: wire.EpochResponse{Epoch: b.MinEpoch(), Version: b.version, ConfigHash: b.configHash},
@@ -129,11 +102,8 @@ func (b *Broker) handleEpoch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// AdminHandler builds an http.Handler for the admin (loopback) listener.
-// Routes /register, /epoch, /bump-epoch, /revoke, /bootstrap, /worker-ticket
-// — no capability-gated or agent-facing endpoints. Nothing an agent can
-// reach mints an enrolment ticket: the manager's comes from /bootstrap, a
-// worker's from a dispatch or /worker-ticket, both host-side.
+// AdminHandler builds the handler for the loopback admin listener: no
+// agent-facing routes. Nothing an agent can reach mints an enrolment ticket.
 func (b *Broker) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathRegister, b.handleRegister)
@@ -145,18 +115,11 @@ func (b *Broker) AdminHandler() http.Handler {
 	return mux
 }
 
-// OperatorHandler builds an http.Handler for the operator note channel: the
-// 0600 UNIX socket `lever msg send` posts to (see brokerctl's bindListeners).
-// It is not on the admin TCP listener on purpose: those routes are
-// unauthenticated loopback, reachable by any local process and by the hub's
-// network namespace, and a route there that writes operator-note records
-// would let any of them pass text off as the operator's. The socket's file
-// permissions are the gate, the same boundary as the host records it writes.
-// The remote chat page's wake (handleOperatorWake) is here for the same
-// reason: a resume route on the admin listener would let the jail wake
-// workers. So is the proxy's agent-message match
-// (handleAgentMessagesMatch): it binds ledger records, which nothing in the
-// jail may do.
+// OperatorHandler serves the 0600 operator UNIX socket. These routes are not
+// on the admin TCP listener on purpose: that is unauthenticated loopback,
+// reachable by any local process and the hub's network namespace, which could
+// then pass text off as the operator's, wake workers, or bind ledger records.
+// The socket's file permissions are the gate.
 func (b *Broker) OperatorHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
@@ -165,22 +128,14 @@ func (b *Broker) OperatorHandler() http.Handler {
 	return mux
 }
 
-// ServeListeners runs the broker on pre-bound listeners (the supervisor binds
-// them so it can learn OS-assigned ports before starting tools). Runs until ctx
-// is cancelled. jailLn carries mTLS with a self-rotating serving cert (certSrc
-// re-mints before certTTL expires, so a long-running broker never serves an
-// expired cert); adminLn is loopback plain HTTP. directiveLn is the
-// operator-directive admin channel's UDS socket — nil when directives are
-// disabled (or a caller has no socket to offer); when non-nil it MUST be a
-// *net.UnixListener (fail closed otherwise), since the directive admin routes
-// are gated by the socket's 0600 file permissions, not by network origin.
-// operatorLn is the operator note channel's UDS socket (OperatorHandler), with
-// the same rules: nil for none, else a *net.UnixListener.
+// ServeListeners runs the broker on pre-bound listeners until ctx is
+// cancelled. jailLn is mTLS with a self-rotating serving cert; adminLn must
+// be loopback. directiveLn and operatorLn are nil or MUST be
+// *net.UnixListener (fail closed otherwise): their routes are gated by the
+// socket's 0600 permissions, not network origin.
 func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveLn, operatorLn net.Listener, certSrc *ca.ServerCertSource) error {
-	// Fail closed if the caller bound adminLn on a non-loopback interface.
-	// The unauthenticated admin routes (/bootstrap, /register, /revoke, …) must
-	// never be reachable from a routable interface — enforce the invariant here
-	// rather than relying on every caller to get it right.
+	// The unauthenticated admin routes must never be reachable from a
+	// routable interface: enforce it here, not in every caller.
 	closeAll := func() {
 		for _, ln := range []net.Listener{jailLn, adminLn, directiveLn, operatorLn} {
 			if ln != nil {
@@ -204,17 +159,14 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 	onLapse := b.lapseFunc()
 	tlsCfg := b.ca.ServerTLSConfigSource(certSrc, onLapse)
 	if onLapse != nil {
-		// Auto-re-enrol healer (#22): drains natural-lapse events for the life
-		// of the serve. Only started when the hook is installed at all.
 		go b.runHealer(ctx)
 	}
 	if b.tokenWatchEnabled() {
-		// Expired agent hub tokens (tokenwatch.go): scion's refresh timer
-		// stalls while the host sleeps, and nothing else notices.
+		// scion's hub token refresh timer stalls while the host sleeps, and
+		// nothing else notices.
 		go b.runTokenWatch(ctx)
 	}
-	// No ReadTimeout/WriteTimeout here: /llm streams. Body and handler
-	// deadlines are per route (JailHandler, b.timeouts).
+	// No ReadTimeout/WriteTimeout: /llm streams. Deadlines are per route.
 	jailSrv := &http.Server{
 		Handler: b.JailHandler(), TLSConfig: tlsCfg,
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
@@ -257,7 +209,6 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 			_ = operatorSrv.Shutdown(shutCtx)
 		}
 	}()
-	// Return the first real error (ignore ErrServerClosed from clean shutdown).
 	for i := 0; i < numServers; i++ {
 		if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return err

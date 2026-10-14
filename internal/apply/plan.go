@@ -1,111 +1,85 @@
 // Package apply turns an application config into an ordered bring-up plan and
-// (Part C) executes it. The plan is pure so the bring-up contract is testable
-// without a live stack.
+// executes it. The plan is pure so the bring-up contract is testable without a
+// live stack.
 package apply
 
 import "github.com/stevegeek/lever/internal/config"
 
-// StepKind names a bring-up operation. It is a lever-owned enum: the constants
-// below are the complete, authoritative set (run.step's dispatch has a case for
-// each, plus a hard-error default). The type is a string alias, so untyped
-// literals still convert implicitly — the protection is named-constants-at-every-
-// site + find-refs, not compile-time exhaustiveness (the repo runs no exhaustive
-// linter). Values are the on-the-wire step names printed by `lever apply --dry-run`.
+// StepKind names a bring-up operation. The constants below are the complete
+// set; run.step has a case for each and errors on any other value. Values are
+// the step names printed by `lever apply --dry-run`.
 type StepKind string
 
 const (
-	KindBrokerUp             StepKind = "broker-up"
-	KindLoadImage            StepKind = "load-image"
-	KindInitMachine          StepKind = "init-machine"
-	KindConfigRegistry       StepKind = "config-registry"
-	KindBootstrapToken       StepKind = "bootstrap-token"
-	KindScionServer          StepKind = "scion-server"
+	KindBrokerUp       StepKind = "broker-up"
+	KindLoadImage      StepKind = "load-image"
+	KindInitMachine    StepKind = "init-machine"
+	KindConfigRegistry StepKind = "config-registry"
+	KindScionServer    StepKind = "scion-server"
+	// KindHubIdentity converges lever's hub identities on the live hub: the
+	// admin, the controller, the project, the controller PAT and the remote
+	// logins (see Deps.EnsureHubIdentity).
+	KindHubIdentity          StepKind = "hub-identity"
 	KindCredential           StepKind = "credential"
 	KindRegisterProject      StepKind = "register-project"
 	KindAgentTemplate        StepKind = "agent-template"
 	KindMintManagerBootstrap StepKind = "mint-manager-bootstrap"
 	KindStartManager         StepKind = "start-manager"
 	// KindRemoteProxy daemonizes `lever remote serve` (see Deps.StartRemoteProxy).
-	// Plan emits it ONLY when a.RemoteEnabled() — see Plan's remote-proxy block
-	// — so dry-run output never advertises a start step that won't run. The
-	// converse (remote disabled, a stale proxy left running by a prior apply)
-	// is NOT this step's job: Run reconciles that itself, unconditionally,
-	// after the step loop — see Run's doc in run.go.
+	// Plan emits it only when remote is enabled, last: it signs in only logins
+	// hub-identity has already invited and bound. Stopping a stale proxy when
+	// remote is disabled is Run's job, not this step's.
 	KindRemoteProxy StepKind = "remote-proxy"
 )
 
-// Step is one named bring-up operation. Kind drives the executor; Target
-// carries the operand (a dir to register, the manager slug, etc.). TarPath
-// is set on load-image steps only: the host archive the image ships in, or
-// "" when the image comes from the host docker store (lever#32).
+// Step is one named bring-up operation. TarPath is set on load-image steps
+// only: the host archive the image ships in, or "" when the image comes from
+// the host docker store.
 type Step struct {
 	Kind    StepKind
 	Target  string
 	TarPath string
 }
 
-// PlanOpts controls optional Plan behaviour.
 type PlanOpts struct {
-	// BrokerOnly reduces the plan to the steps the VM-level acceptance gate
-	// needs — broker-up (host broker + tools) and mint-manager-bootstrap (the
-	// manager enrol ticket) — and omits
-	// ALL scion/container/registration steps (load-image, init-machine,
-	// config-registry, bootstrap-token, scion-server, credential, register-*,
-	// start-manager). The gate drives lever-agent directly in the VM, so scion is
-	// never invoked; running init-machine on a fresh machine would fail (no scion
-	// binary). The full container path is a later milestone.
+	// BrokerOnly reduces the plan to broker-up and mint-manager-bootstrap, for
+	// the VM-level acceptance gate that drives lever-agent directly in the VM
+	// without scion (init-machine would fail there: no scion binary).
 	BrokerOnly bool
 	// Fresh carries `lever up --fresh` into the start-manager step: a present
 	// manager record, whatever its phase, is deleted and the manager created
-	// anew instead of resumed. It lives here rather than in `up` because after
-	// `lever stop` the hub is down until apply's scion-server step brings it
-	// up, so `up` can neither see the record nor delete it beforehand
-	// (lever#33). The plan itself is unchanged.
+	// anew. It lives here because after `lever stop` the hub is down until the
+	// scion-server step, so `up` cannot delete the record beforehand.
 	Fresh bool
-	// Attach says the caller (`lever up` on a terminal) attaches the
-	// operator to the manager once Run returns: start-manager's gate for a
-	// manager it created then ends as soon as claude's tmux pane is alive,
-	// with no settle window, and the caller checks the manager after the
-	// detach (CheckManagerAfterDetach) (lever#188). A resume's gate is
-	// unchanged by it: it waits for claude's session start, so a claude
-	// --continue that finds no conversation is caught before the attach
-	// (lever#202). The plan itself is unchanged.
+	// Attach says the caller attaches the operator to the manager once Run
+	// returns: start-manager's gate for a manager it created then ends as soon
+	// as claude's tmux pane is alive, and the caller checks the manager after
+	// the detach (CheckManagerAfterDetach). A resume's gate still waits for
+	// claude's session start, so a --continue that finds no conversation is
+	// caught before the attach.
 	Attach bool
 	// FreshWithoutConversation lets start-manager replace a resume that died
-	// because claude --continue found no conversation with a fresh start, as
-	// `lever up --fresh` would, once Deps.ManagerConversationEmpty proved
-	// from the guest that the home holds no transcript (lever#202). `lever
-	// up` sets it; `lever apply` does not, and never deletes a record. The
-	// plan itself is unchanged.
+	// because claude --continue found no conversation with a fresh start, once
+	// Deps.ManagerConversationEmpty proved from the guest that the home holds
+	// no transcript. `lever apply` never sets it, so it never deletes a record.
 	FreshWithoutConversation bool
 }
 
-// brokerOnlyKinds is the allowlist of steps retained in BrokerOnly mode.
 var brokerOnlyKinds = map[StepKind]bool{
 	KindBrokerUp:             true,
 	KindMintManagerBootstrap: true,
 }
 
-// Plan returns the ordered bring-up for an app. Order is load-bearing: the
-// images must be loaded before the manager starts; projects must be
-// registered before the manager (which orchestrates them) starts. Run starts
-// broker-up and load-image alongside the steps after them and waits for them
-// where a step needs them (lever#189; see waitsFor), so the order here is
-// also the order the list numbers them in. The jail itself is not a step: it
-// is up before Run can be called at all (see Run).
+// Plan returns the ordered bring-up for an app. Order is load-bearing: images
+// must be loaded and projects registered before the manager starts. Run
+// overlaps broker-up and load-image with later steps (see waitsFor). The jail
+// itself is not a step: it is up before Run can be called.
 func Plan(a *config.App, opts PlanOpts) []Step {
-	// Bring the host broker (+ first-party tools) up first; the jail reaches it
-	// at host.orb.internal. Health-checked before the manager starts.
 	steps := []Step{{Kind: KindBrokerUp}}
-	// Load every distinct image into the jail's container runtime: the manager
-	// image plus any worker that overrides it (workers default to the manager
-	// image, which is then loaded once). Workers are started later by the
-	// manager, so their images must already be present — they can't be pulled
-	// under the egress allowlist. Dedup preserves first-seen order.
-	// Each ref carries its archive when the config ships one; Validate has
-	// already refused one ref from two different archives. A ref named both
-	// with and without an archive loads from the archive whatever the
-	// declaration order: a tar is an explicit source, host docker the fallback.
+	// Worker images must be loaded now: they cannot be pulled under the egress
+	// allowlist. Validate has already refused one ref from two different
+	// archives. A ref named both with and without an archive loads from the
+	// archive whatever the declaration order.
 	seen := map[string]int{}
 	addLoad := func(img, tar string) {
 		if img == "" {
@@ -127,32 +101,24 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	steps = append(steps,
 		Step{Kind: KindInitMachine},
 		Step{Kind: KindConfigRegistry},
-		// Mint (or reuse) the controller PAT the executor injects into the real,
-		// dev-auth-off hub via SCION_HUB_TOKEN, BEFORE scion-server locks the hub
-		// down. See Deps.EnsureControllerPAT.
-		Step{Kind: KindBootstrapToken, Target: a.Tree},
 		Step{Kind: KindScionServer},
+		// Needs the live hub, and mints the PAT every later hub call uses.
+		Step{Kind: KindHubIdentity, Target: a.Tree},
 	)
-	if a.RemoteEnabled() {
-		// The proxy reverse-proxies the hub's web API, so the hub must be
-		// confirmed up first — scion-server, just above (see
-		// Deps.StartRemoteProxy). Nothing later in the plan (credential,
-		// register-project, start-manager) is a dependency of the proxy, so
-		// this is the earliest correct placement.
-		steps = append(steps, Step{Kind: KindRemoteProxy})
-	}
 	if a.Manager.CredentialFile != "" {
 		steps = append(steps, Step{Kind: KindCredential, Target: a.Manager.CredentialFile})
 	}
 	steps = append(steps, Step{Kind: KindRegisterProject, Target: a.Tree})
-	// Suppress scion's placeholder system prompt before anything can be
-	// provisioned from it (see Deps.EnsureAgentTemplate). AFTER register-project
-	// because the settings half writes at PROJECT scope, which needs the project
-	// to exist; BEFORE start-manager because provisioning reads the template.
+	// After register-project because the template's settings are written at
+	// project scope; before start-manager because provisioning reads the
+	// template (see Deps.EnsureAgentTemplate).
 	steps = append(steps, Step{Kind: KindAgentTemplate, Target: a.Tree})
-	// Mint the manager's one-time enrol ticket just before spawn (fresh, no TTL race).
+	// The enrol ticket is minted just before spawn so its TTL cannot run out.
 	steps = append(steps, Step{Kind: KindMintManagerBootstrap, Target: a.Tree})
 	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name})
+	if a.RemoteEnabled() {
+		steps = append(steps, Step{Kind: KindRemoteProxy})
+	}
 	if opts.BrokerOnly {
 		filtered := steps[:0:0]
 		for _, s := range steps {

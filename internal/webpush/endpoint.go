@@ -115,8 +115,6 @@ func knownHost(h string) bool {
 	return false
 }
 
-// validLabels: one or more DNS labels, lowercase letters, digits and inner
-// hyphens only.
 func validLabels(s string) bool {
 	if s == "" {
 		return false
@@ -134,7 +132,6 @@ func validLabels(s string) bool {
 	return true
 }
 
-// decodeKey reads base64url with or without padding.
 func decodeKey(s string) ([]byte, error) {
 	return b64.DecodeString(strings.TrimRight(s, "="))
 }

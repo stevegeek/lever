@@ -22,8 +22,8 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// fakeConvScion is a manager record a restore drives: Suspend and Resume
-// move its phase, and every call is recorded in order.
+// fakeConvScion is a manager record a restore drives: Suspend and Resume move
+// its phase, and every call is recorded.
 type fakeConvScion struct {
 	mu         sync.Mutex
 	phase      string
@@ -67,9 +67,9 @@ func (f *fakeConvScion) Resume(context.Context, string, string) error {
 	return nil
 }
 
-// convFixture is an instance (tree and state outside it) and a fake jail
-// HOME laid out as scion lays out the run user's, with the manager "mgr"'s
-// home. The guest scripts run with the real bash and GNU tar.
+// convFixture is an instance and a fake jail HOME laid out as scion lays out
+// the run user's, with the manager "mgr"'s home. The guest scripts run with
+// the real bash and GNU tar.
 type convFixture struct {
 	ops       convOps
 	sc        *fakeConvScion
@@ -80,8 +80,8 @@ type convFixture struct {
 	guard     *fakeResumeGuard
 }
 
-// fakeResumeGuard records the lever#158 checks around a resume, in order,
-// and fails the step named in failAt.
+// fakeResumeGuard records the checks around a resume, in order, and fails the
+// step named in failAt.
 type fakeResumeGuard struct {
 	steps  []string
 	failAt string
@@ -201,8 +201,8 @@ func TestFreshBackupThenRestore(t *testing.T) {
 		t.Fatalf("backup dir: %v %v", fi, err)
 	}
 
-	// The fresh create: a new home with the boot turn's session, a fresh
-	// session record on the current skill, and a running manager.
+	// The fresh create: a new home with the boot turn's session, a fresh session
+	// record on the current skill, and a running manager.
 	if err := os.RemoveAll(filepath.Join(f.agentHome, ".claude")); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestRestoreUnknownSkillRefusesContacts(t *testing.T) {
 	if got := f.latestSkill(t); got != restoredUnknownSkill {
 		t.Fatalf("session record = %q", got)
 	}
-	// backupFirst saved the conversation it replaced: two backups now.
+	// backupFirst saved the replaced conversation: two backups now.
 	store, _ := f.ops.store()
 	if all, _ := store.List(); len(all) != 2 || all[0].Reason != "before restore" {
 		t.Fatalf("backups = %+v", all)
@@ -341,8 +341,6 @@ func TestRestoreRefusals(t *testing.T) {
 	}
 }
 
-// TestCheckFreshFlags: --no-backup and --keep-conversation need --fresh, and
-// not each other.
 func TestCheckFreshFlags(t *testing.T) {
 	for _, c := range []struct {
 		fresh, noBackup, keep, ok bool
@@ -361,8 +359,8 @@ func TestCheckFreshFlags(t *testing.T) {
 	}
 }
 
-// lostInstallRunner runs captures for real and fails every install the way
-// a lost transport does: no exit status the script chose.
+// lostInstallRunner fails every install like a lost transport: no exit status
+// the script chose.
 type lostInstallRunner struct{ proc.RealRunner }
 
 func (lostInstallRunner) RunStdin(context.Context, io.Reader, map[string]string, string, ...string) (proc.Result, error) {
@@ -419,10 +417,9 @@ func TestFreshBackupNoHomeFailsClosed(t *testing.T) {
 	}
 }
 
-// TestRestoreResumeChecks: every resume a restore makes passes the
-// lever#158 checks. A refused pre-check leaves the manager suspended (no
-// resume), and a failed check after the resume fails the restore before
-// the gate reports the manager up.
+// TestRestoreResumeChecks: every resume a restore makes passes the tree-mount
+// checks. A refused pre-check leaves the manager suspended, and a failed check
+// after the resume fails the restore before the gate reports it up.
 func TestRestoreResumeChecks(t *testing.T) {
 	for _, tc := range []struct {
 		failAt    string
@@ -482,7 +479,6 @@ func TestRestoreResumeChecks(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "settle refused") || strings.Join(f.sc.calls, ",") != "resume" {
 		t.Fatalf("err = %v calls %v", err, f.sc.calls)
 	}
-	// A convOps without the checks wired never resumes.
 	f = newConvFixture(t)
 	f.ops.beginResume = nil
 	err = f.ops.resumeAfterFailure(context.Background(), errors.New("cause"), "")
@@ -491,9 +487,9 @@ func TestRestoreResumeChecks(t *testing.T) {
 	}
 }
 
-// TestConversationEmpty (lever#202): `lever up` starts a manager fresh on
-// its own only when the guest shows its home holds no transcript; anything
-// else is a reason, never a pass.
+// TestConversationEmpty: `lever up` starts a manager fresh on its own only
+// when the guest shows its home holds no transcript; anything else is a
+// reason, never a pass.
 func TestConversationEmpty(t *testing.T) {
 	f := newConvFixture(t)
 	if err := f.ops.conversationEmpty(context.Background()); err != nil {
@@ -524,10 +520,9 @@ func TestConversationEmpty(t *testing.T) {
 	}
 }
 
-// TestNoConversationBackupSkipsEmpty (lever#202): the backup before the
-// fresh start of a manager with no conversation saves nothing, and prunes
-// nothing, when the transcripts hold no content, so an agent cannot rotate
-// the real backups out of the store; content is saved under its own reason.
+// TestNoConversationBackupSkipsEmpty: with no transcript content nothing is
+// saved or pruned, so an agent cannot rotate the real backups out of the
+// store; content is saved under its own reason.
 func TestNoConversationBackupSkipsEmpty(t *testing.T) {
 	f := newConvFixture(t)
 	store, err := f.ops.store()

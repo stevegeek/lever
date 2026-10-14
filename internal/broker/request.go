@@ -12,13 +12,8 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// denyDetail builds the deny reason shared by handleRequest's three deny
-// paths (used verbatim as both the audit detail and the 403 body):
-// "<prefix> (tool=<tool> op=<original op>[ coerced_to=<op>][ bound_to=<target>])".
-// The op shown is always the ORIGINAL (pre-coercion) op; coerced_to appears
-// only when the wildcard coercion rewrote it, bound_to only on delegation.
-// The allow-path coercion note ("(op coerced: X -> Y)") is intentionally a
-// different format and stays inline.
+// denyDetail is both the audit detail and the 403 body. The op shown is the
+// ORIGINAL (pre-coercion) op.
 func denyDetail(prefix string, req wire.CapRequest, requestedOp, caller string) string {
 	detail := fmt.Sprintf("%s (tool=%s op=%s", prefix, req.Tool, requestedOp)
 	if requestedOp != req.Op {
@@ -30,20 +25,13 @@ func denyDetail(prefix string, req wire.CapRequest, requestedOp, caller string) 
 	return detail + ")"
 }
 
-// handleRequest mints a capability token after checking, in order: the caller's
-// identity (mTLS); normalizing the op to the wildcard when the tool is
-// coarse-gated (registry has WildcardOp registered); the request/delegation
-// policy (rules.MayObtainRule, checked against the normalized op — no grant
-// widening, the caller must hold the exact {tool, op} grant); the operation
-// is registered (registry.HasOperation); and the requested constraint values
-// are permitted (registry.ValidateConstraints). The token is bound to
-// BoundTo and carries the normalized op. Fails closed at every gate.
+// handleRequest mints a capability token bound to BoundTo. The caller must
+// hold the exact {tool, op} grant for the normalized op, the op must be
+// registered, and the constraint values permitted. Fails closed at every
+// gate.
 func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
-	// A revoked agent cannot mint OR delegate. The gateway already denies a
-	// revoked caller's tool calls at use time, but without this check a revoked
-	// agent could still delegate a fresh token bound to a non-revoked agent
-	// within its configured delegate grants — a channel that would survive
-	// revocation. Fail closed here so `lever revoke` cuts minting too.
+	// A revoked agent cannot mint OR delegate: a delegation to a non-revoked
+	// agent would otherwise survive revocation.
 	caller, ok := b.requireLiveAgent(w, r, "request", "")
 	if !ok {
 		return
@@ -55,16 +43,12 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.BoundTo == "" {
-		req.BoundTo = caller // default: self-obtain
+		req.BoundTo = caller
 	}
-	// Agents cannot know a tool's gate, so a fine-shaped request (a real MCP
-	// op name, e.g. "get_weather") against a coarse tool must be normalized to
-	// the wildcard op BEFORE the policy check. A tool exposes WildcardOp in
-	// the registry only when it is coarse-gated (an existing reviewed
-	// invariant enforced at registration), so this branch never fires for a
-	// fine tool. Crucially this does NOT widen the grant: MayObtainRule below
-	// still requires the caller to hold the exact {tool, "*"} grant, and the
-	// original op is preserved (requestedOp) purely for the audit trail.
+	// An agent cannot know a tool's gate, so a real op name against a coarse
+	// tool is normalized to the wildcard BEFORE the policy check. Only a
+	// coarse tool registers WildcardOp, and this does NOT widen the grant:
+	// the caller must still hold the exact {tool, "*"} grant.
 	requestedOp := req.Op
 	if b.reg.HasOperation(req.Tool, registry.WildcardOp) {
 		req.Op = registry.WildcardOp
@@ -110,12 +94,9 @@ func (b *Broker) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if requestedOp != req.Op {
 		detail += " (op coerced: " + requestedOp + " -> " + req.Op + ")"
 	}
-	// The allow line is the mint ledger: token id (correlates this mint with
-	// later gateway/llm use lines), the matched policy rule, and the minted
-	// claims. The token itself is never logged, and the ledger is written
-	// BEFORE the token leaves the broker so no handed-out token can lack a
-	// mint line. Constraints are JSON (sorted keys) so values containing
-	// '='/',' stay unambiguous.
+	// The allow line is the mint ledger, written BEFORE the token leaves the
+	// broker so no handed-out token lacks a mint line. The token itself is
+	// never logged. Constraints are JSON so any value stays unambiguous.
 	kvs := []any{
 		"id", token.ID(tok),
 		"rule", rule,

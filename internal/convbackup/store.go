@@ -18,7 +18,6 @@ import (
 	"github.com/stevegeek/lever/internal/hostledger"
 )
 
-// DirName is the store's directory in the state directory.
 const DirName = "conversations"
 
 // Keep is how many backups the store keeps: Prune removes the older ones.
@@ -33,15 +32,12 @@ const (
 // maxMeta bounds the read of a meta.json (lever writes a few hundred bytes).
 const maxMeta = 64 << 10
 
-// idRE is the shape of a backup id: the UTC time it was taken, with a
-// counter when two fall in one second. It sorts by time and is safe as a
-// path component and on a terminal.
+// idRE is the backup id: the UTC time taken, with a counter for two in one
+// second. It sorts by time and is safe as a path component and on a terminal.
 var idRE = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z(-[0-9]{1,3})?$`)
 
-// ValidID reports whether id has the shape of a backup id.
 func ValidID(id string) bool { return idRE.MatchString(id) }
 
-// Meta describes one backup.
 type Meta struct {
 	ID      string    `json:"id"`
 	Agent   string    `json:"agent"`
@@ -51,19 +47,17 @@ type Meta struct {
 	Reason  string `json:"reason"`
 	Version string `json:"lever_version"`
 	Stats
-	// SkillHash and SessionStarted are the session record (package
-	// sessionrec) of the conversation when it was backed up: the lever skill
-	// it was started with. A restore records them again, so the remote proxy
-	// judges the restored conversation by the skill it actually read. Empty
-	// when lever had no record.
+	// SkillHash and SessionStarted are the conversation's session record
+	// (sessionrec) at backup time. A restore records them again, so the remote
+	// proxy judges the restored conversation by the skill it actually read.
 	SkillHash      string    `json:"skill_hash,omitempty"`
 	SessionStarted time.Time `json:"session_started,omitzero"`
 }
 
-// Store is the host directory that holds the backups, <state>/conversations:
-// one 0700 directory per backup holding the archive and meta.json (0600).
-// Only lever's host user may own or write it; a backup holds the whole
-// conversation, and with it whatever secrets the agent saw.
+// Store is the host directory of backups: one 0700 directory per backup
+// with the archive and meta.json (0600). Only lever's host user may own or
+// write it: a backup holds the whole conversation and whatever secrets the
+// agent saw.
 type Store struct{ Dir string }
 
 // ErrUnsafe means the store directory is not private to the host user.
@@ -72,9 +66,8 @@ var ErrUnsafe = errors.New("conversation backups: the directory is not private")
 // ErrNotFound means there is no backup with that id (or none at all).
 var ErrNotFound = errors.New("conversation backup not found")
 
-// open returns the store directory as an os.Root, after checking it is a
-// real directory (not a link), owned by this user and closed to everyone
-// else. create makes it (0700) when it is missing.
+// open checks the store is a real directory (not a link), owned by this user
+// and closed to everyone else. create makes it (0700) when missing.
 func (s Store) open(create bool) (*os.Root, error) {
 	if create {
 		if err := os.Mkdir(s.Dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
@@ -101,12 +94,11 @@ func (s Store) open(create bool) (*os.Root, error) {
 	return r, nil
 }
 
-// Path is where the backup id lives on the host.
 func (s Store) Path(id string) string { return filepath.Join(s.Dir, id) }
 
-// Save stores a new backup: write fills its archive, and the Stats it
-// returns go into m with the new id. The backup appears whole or not at all
-// (it is written under a temporary name and renamed).
+// Save stores a new backup: write fills its archive, and its Stats go into m
+// with the new id. It is written under a temporary name and renamed, so it
+// appears whole or not at all.
 func (s Store) Save(m Meta, write func(w io.Writer) (Stats, error)) (Meta, error) {
 	r, err := s.open(true)
 	if err != nil {
@@ -161,7 +153,7 @@ func (s Store) Save(m Meta, write func(w io.Writer) (Stats, error)) (Meta, error
 	return m, nil
 }
 
-// writeNew creates name (0600, never an existing file) and writes b to it.
+// writeNew creates name 0600, never over an existing file.
 func writeNew(r *os.Root, name string, b []byte) error {
 	f, err := r.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -177,7 +169,6 @@ func writeNew(r *os.Root, name string, b []byte) error {
 	return err
 }
 
-// freeID is the id for a backup taken at t that no backup in r has yet.
 func freeID(r *os.Root, t time.Time) (string, error) {
 	base := t.UTC().Format("20060102T150405Z")
 	for i := 1; i < 1000; i++ {
@@ -192,9 +183,8 @@ func freeID(r *os.Root, t time.Time) (string, error) {
 	return "", fmt.Errorf("conversation backups: no free id for %s", base)
 }
 
-// List returns every complete backup, newest first. A missing store is no
-// backups. A directory whose meta.json is missing or unreadable is left
-// out.
+// List returns every complete backup, newest first. A directory whose
+// meta.json is missing or unreadable is left out.
 func (s Store) List() ([]Meta, error) {
 	if _, err := os.Lstat(s.Dir); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -231,8 +221,7 @@ func (s Store) List() ([]Meta, error) {
 	return out, nil
 }
 
-// readMeta reads the meta.json of backup id, which must be a real
-// directory holding a real archive.
+// readMeta requires id to be a real directory holding a real archive.
 func readMeta(r *os.Root, id string) (Meta, error) {
 	fi, err := r.Lstat(id)
 	if err != nil || !fi.IsDir() {
@@ -278,7 +267,6 @@ func (s Store) Get(id string) (Meta, error) {
 	return Meta{}, fmt.Errorf("%w: %q (`lever conversation list` shows them)", ErrNotFound, id)
 }
 
-// Open opens the archive of backup id for reading.
 func (s Store) Open(id string) (io.ReadCloser, error) {
 	if !ValidID(id) {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, id)

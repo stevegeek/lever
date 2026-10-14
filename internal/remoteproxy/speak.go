@@ -1,23 +1,16 @@
 package remoteproxy
 
-// Read-aloud with a server voice (remote.voice.read_aloud: server):
-// POST /lever/api/voice/speak takes one part of an agent message the page
-// shows and answers it spoken, as a WAV, by the broker tool lever-tool-tts
-// on the operator's own host (over its speech socket: package voice).
-// Nothing is stored: the text is read into memory, cleaned, handed to the
-// tool and dropped; the audio goes back only to the login that asked. The
-// audit line has the login, the message reference, the length, the outcome
-// and the latency; never the text, never the audio.
+// Read-aloud with a server voice (read_aloud: server): POST
+// /lever/api/voice/speak speaks one part of an agent message as a WAV via
+// lever-tool-tts (package voice). Nothing is stored; the audio returns only to
+// the login that asked, and the audit line never carries text or audio.
 //
-// The route takes the text from the page, not only a message reference: a
-// server-side lookup would have to repeat, exactly, every rule of what a
-// login is shown (a contact's filtered history above all), and a mistake
-// there would read out a message the login may not see. Text the page
-// sends is text the login already has. Any text a login sends is spoken,
-// so the route is a speech service for the logins, but a bounded one: the
-// text is bounded per request (the tool's -max-chars) and per login
-// (characters an hour and a day), the reference must name an agent the
-// login's roster lists, and voice: false on a login turns it off.
+// The route takes the text from the page rather than looking it up: a lookup
+// would have to repeat every visibility rule (a contact's filtered history
+// above all), and a mistake would read out a message the login may not see.
+// Since any text a login sends is spoken, the route is bounded per request,
+// per login (characters an hour and a day), by the roster (the reference must
+// name a listed agent) and by voice: false.
 
 import (
 	"context"
@@ -36,18 +29,13 @@ import (
 
 // SpeechConfig is read-aloud through lever-tool-tts, as the proxy needs it.
 type SpeechConfig struct {
-	// Available is the tool's health answer when it answers ready
-	// (voice.SpeakClient, cached briefly). False: the roster carries no
-	// server voice, the page reads with the device's voices, and the route
-	// answers unavailable.
+	// Available reports whether lever-tool-tts answers ready (cached briefly).
 	Available func() (voice.SpeakHealth, bool)
-	// Speak turns one text into a WAV with voice ("" = the tool's
-	// default). Its error goes to the audit line, so it must never carry
-	// the text.
+	// Speak turns text into a WAV with voice ("" = default). Its error is
+	// audited, so it must never carry the text.
 	Speak func(ctx context.Context, text, voice string) ([]byte, error)
-	// NotSent reports whether a Speak error means the text never reached
-	// the engine (voice.ErrSpeakNotSent): only then is its use of the
-	// limits given back. nil = never.
+	// NotSent reports whether a Speak error means the text never reached the
+	// engine (voice.ErrSpeakNotSent); only then are the limits given back.
 	NotSent func(error) bool
 }
 
@@ -61,10 +49,9 @@ const (
 	// speakBody bounds a request: the tool's largest -max-chars of
 	// four-byte characters, escaped, and the reference.
 	speakBody = 64 << 10
-	// One text with the engine at a time, and two waiting: speakSlots in
-	// all, of which a contact never takes the last, so the operator can
-	// always listen. A login has one request in flight at most (the page
-	// asks for one part while the one before plays).
+	// One text with the engine at a time and two waiting; a contact never takes
+	// the last of speakSlots, so the operator can always listen. A login has one
+	// request in flight (the page fetches a part while the previous one plays).
 	speakSlots    = 3
 	speakPerLogin = 1
 	// Per login, in memory: characters spoken an hour and a day, and
@@ -72,13 +59,10 @@ const (
 	speakCharsPerHour = 40000
 	speakCharsPerDay  = 200000
 	speakTriesPerHour = 1200
-	// speakBodyWait bounds reading the request body.
-	speakBodyWait = 30 * time.Second
-	// maxMessageRef bounds the message reference.
-	maxMessageRef = 128
+	speakBodyWait     = 30 * time.Second
+	maxMessageRef     = 128
 )
 
-// speakState holds the route's slots and per-login counts.
 type speakState struct {
 	cfg SpeechConfig
 	now func() time.Time // tests
@@ -101,7 +85,6 @@ func newSpeakState(cfg SpeechConfig) *speakState {
 		run: make(chan struct{}, 1), tries: newLoginRate(speakTriesPerHour, time.Hour)}
 }
 
-// begin takes a slot for login, or reports false.
 func (s *speakState) begin(login string, operator bool) (func(), bool) {
 	key := strings.ToLower(login)
 	s.mu.Lock()
@@ -122,9 +105,7 @@ func (s *speakState) begin(login string, operator bool) (func(), bool) {
 	}, true
 }
 
-// take counts chars for login at now, or answers the refusal word ("rate":
-// over the hour's characters, "quota": over the day's). Uses older than a
-// day are forgotten.
+// take counts chars for login, or returns "rate" (hour) or "quota" (day).
 func (s *speakState) take(login string, chars int, now time.Time) string {
 	key := strings.ToLower(login)
 	s.mu.Lock()
@@ -159,8 +140,7 @@ func (s *speakState) take(login string, chars int, now time.Time) string {
 	return ""
 }
 
-// refund gives back a use take recorded at the same moment for the same
-// length, for a text the engine never got.
+// refund gives back a use for a text the engine never got.
 func (s *speakState) refund(login string, chars int, at time.Time) {
 	key := strings.ToLower(login)
 	s.mu.Lock()
@@ -174,8 +154,6 @@ func (s *speakState) refund(login string, chars int, at time.Time) {
 	}
 }
 
-// speechInfo is the roster's server voice entry: present only when the
-// login has read-aloud, read_aloud is server and the tool answers ready.
 type speechInfo struct {
 	Voice    string             `json:"voice"` // the tool's default
 	Voices   []voice.SpeakVoice `json:"voices"`
@@ -193,8 +171,6 @@ func (g *gate) speechInfoFor(login string) *speechInfo {
 	return &speechInfo{Voice: h.Voice, Voices: h.Voices, MaxChars: h.MaxChars}
 }
 
-// validMessageRef is a hub message id as the page has it: 1 to
-// maxMessageRef characters of letters, digits and ._:-.
 func validMessageRef(s string) bool {
 	if s == "" || len(s) > maxMessageRef {
 		return false
@@ -207,13 +183,11 @@ func validMessageRef(s string) bool {
 	return true
 }
 
-// refuseSpeak answers the route with one fixed error word.
 func (g *gate) refuseSpeak(w http.ResponseWriter, r *http.Request, line *AuditLine, status int, word string) {
 	line.Reason = word
 	g.answerFileJSON(w, r, line, DecisionDenySpeak, status, map[string]any{"error": word})
 }
 
-// serveSpeak answers POST /lever/api/voice/speak for v.
 func (g *gate) serveSpeak(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer) {
 	s := g.speak
 	if r.Method != http.MethodPost {

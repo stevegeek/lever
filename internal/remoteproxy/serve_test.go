@@ -16,10 +16,8 @@ import (
 	"time"
 )
 
-// freePort asks the OS for an unused loopback port, then releases it. There
-// is a small window where another process could grab it before Serve binds,
-// but that race exists in the production path too (bindListeners has the
-// same shape) and is not worth avoiding here.
+// freePort releases the port it finds, so another process could take it
+// first; production has the same race.
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -33,9 +31,6 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// waitFor polls cond until it returns true or the timeout elapses, failing
-// the test on timeout. Used to synchronize on Serve's async side effects
-// (pid file appearing/disappearing) without a sleep-and-hope.
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -96,12 +91,8 @@ func TestServeWritesAndRemovesPIDFile(t *testing.T) {
 	}
 }
 
-// TestServeStampsWhatThisProcessIsServing: apply decides whether to reuse a
-// live proxy by reading a host-side record, but the pid file it reads is
-// written by EVERY serve, so only the serving process can keep that record
-// honest. Serve must therefore call Stamp — after the bind and after the pid
-// file, because a record written before either would describe a proxy that
-// never served, and brokerctl keys its record on the pid it finds there.
+// TestServeStampsWhatThisProcessIsServing: Stamp runs after the bind and
+// the pid file, since brokerctl keys its record on that pid.
 func TestServeStampsWhatThisProcessIsServing(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "remote.pid")
@@ -114,8 +105,7 @@ func TestServeStampsWhatThisProcessIsServing(t *testing.T) {
 	seen := make(chan observation, 4)
 	stamp := func() error {
 		b, _ := os.ReadFile(pidPath)
-		// Connect rather than request: the listener is bound by now, but
-		// Serve has not started handling on it yet.
+		// Connect, not request: Serve may not be handling yet.
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
 		if err == nil {
 			_ = c.Close()
@@ -158,11 +148,7 @@ func TestServeStampsWhatThisProcessIsServing(t *testing.T) {
 }
 
 // TestServeDoesNotStampWhenTheBindFails: the losing proxy must leave the
-// incumbent's record alone. Without this ordering a second `lever remote
-// serve` — started by hand, or a duplicate spawn — would overwrite the record
-// of the proxy that actually holds the port and then die, and the next apply
-// would restart a perfectly good proxy (or worse, trust a record for a config
-// nothing is serving).
+// incumbent's record alone.
 func TestServeDoesNotStampWhenTheBindFails(t *testing.T) {
 	dir := t.TempDir()
 	port := freePort(t)
@@ -186,11 +172,8 @@ func TestServeDoesNotStampWhenTheBindFails(t *testing.T) {
 	}
 }
 
-// TestServeKeepsServingWhenStampFails: the record is bookkeeping for the next
-// apply, not a precondition for serving. Taking a working proxy down because a
-// small file could not be written would turn a cosmetic failure into an
-// outage; the cost of the warning path is one redundant restart later, which
-// is what brokerctl's write-or-remove contract guarantees.
+// TestServeKeepsServingWhenStampFails: the record is bookkeeping, not a
+// precondition for serving.
 func TestServeKeepsServingWhenStampFails(t *testing.T) {
 	port := freePort(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -249,13 +232,7 @@ func TestServeSecondOnSamePortErrors(t *testing.T) {
 }
 
 func TestServeFailsClosedOnNonLoopbackAddr(t *testing.T) {
-	// A loopback bind (the default, or an explicit loopback Bind) cannot
-	// yield a non-loopback listener, so the fail-closed branch cannot be
-	// reached through Serve's inputs alone; a non-loopback Bind goes through
-	// listenProxy's acknowledgement instead (TestListenProxyBind). This test
-	// exercises the loopback check directly, the same shape the broker's
-	// admin listener check uses (internal/broker/server.go), to prove the
-	// guard's logic rejects a non-loopback TCPAddr and accepts a loopback one.
+	// Unreachable through Serve's inputs, so test the loopback check directly.
 	nonLoopback := &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 12345}
 	if isLoopbackAddr(nonLoopback) {
 		t.Fatal("0.0.0.0 must not be treated as loopback")
@@ -374,13 +351,9 @@ func statPerm(t *testing.T, path string) os.FileMode {
 	return fi.Mode().Perm()
 }
 
-// TestServerTimeouts pins which four http.Server timeouts the proxy sets and
-// which it must never set. The two zeros are the point: WriteTimeout is armed
-// on the raw connection before the handler runs and would cut the hub's
-// streamed transcripts mid-stream, and ReadTimeout is what would make the
-// header deadline persist across the whole request. Someone tidying up by
-// "completing the set" would break attach and streaming with no failing test
-// anywhere else — so it fails here.
+// TestServerTimeouts: the two zeros are the point. WriteTimeout would cut
+// streamed transcripts and ReadTimeout would make the header deadline
+// cover the whole request.
 func TestServerTimeouts(t *testing.T) {
 	srv := newServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	if srv.ReadHeaderTimeout != serverReadHeaderTimeout {
@@ -401,12 +374,7 @@ func TestServerTimeouts(t *testing.T) {
 }
 
 // TestHeaderAndIdleTimeoutsDoNotBoundTheBody checks the stdlib property
-// newServer's comment relies on: ReadHeaderTimeout covers the header phase
-// only, and IdleTimeout applies between requests, so neither bounds a response
-// still being written. Uses short values because the real ones (20s/120s) are
-// too long to wait on — the field values themselves are pinned by
-// TestServerTimeouts; what is under test here is that these two fields are the
-// SAFE ones to have chosen.
+// newServer relies on: neither timeout bounds a response being written.
 func TestHeaderAndIdleTimeoutsDoNotBoundTheBody(t *testing.T) {
 	const tick = 80 * time.Millisecond
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

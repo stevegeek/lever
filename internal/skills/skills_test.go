@@ -97,8 +97,8 @@ func TestSkillsTeachHostRecordVerification(t *testing.T) {
 				t.Errorf("%s: missing %q", name, want)
 			}
 		}
-		// The retired rule: a marker never counts because a message failed
-		// to verify.
+		// This rule must not appear: a marker never counts because a message
+		// failed to verify.
 		for _, gone := range []string{"A marker\ncounts only on a message that does not verify", "marker counts only"} {
 			if strings.Contains(got, gone) {
 				t.Errorf("%s: still teaches %q", name, gone)
@@ -146,9 +146,9 @@ var agentPre string
 //go:embed testdata/lever-operator.pre.md
 var operatorPre string
 
-// Off renders byte-for-byte what lever rendered before agent messages
-// existed: an instance that does not turn them on gets no skill change, so
-// no agent turns not-fresh for its contacts.
+// Off renders byte-for-byte the testdata baseline: an instance that does not
+// turn agent messages on gets no skill change, so no agent turns not-fresh
+// for its contacts.
 func TestAgentMessagesOffRendersThePreChangeSkill(t *testing.T) {
 	for _, chat := range []bool{false, true} {
 		if got, want := Agent("9.9.9", chat, false, false), renderChat(agentPre, "9.9.9", chat); !bytes.Equal(got, want) {
@@ -228,8 +228,8 @@ func TestFilesOnTeachesTheExchange(t *testing.T) {
 	}
 }
 
-// The direction blocks render only when a direction is off; with both on
-// the files skill is exactly what it was before the blocks existed.
+// The direction blocks render only when a direction is off; with both on the
+// files skill has no trace of them.
 func TestFilesDirectionBlocks(t *testing.T) {
 	dirBlocks := regexp.MustCompile(`(?ms)^<!-- lever:(uploads|shares) off -->\n.*?^<!-- /lever:(uploads|shares) off -->\n`)
 	for name, pair := range map[string][2]string{"agent": {agentSrc, "a"}, "operator": {operatorNoRecycle, "o"}} {
@@ -291,7 +291,7 @@ func TestContentHashIgnoresOnlyTheStamp(t *testing.T) {
 }
 
 // The recycle text renders only for an instance with a recyclable worker; off,
-// the skill is byte-for-byte the text before it (the pre-change render).
+// the skill is byte-for-byte the baseline.
 func TestOperatorRecycleBlocks(t *testing.T) {
 	for _, chat := range []bool{false, true} {
 		if got, want := OperatorWith("9.9.9", chat, false, Files{}, false), renderChat(operatorPre, "9.9.9", chat); !bytes.Equal(got, want) {

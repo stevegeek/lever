@@ -280,7 +280,6 @@ func TestReplyRefsSurviveReopen(t *testing.T) {
 
 type hostledgerFile struct{ dir string }
 
-// append writes one raw line to a contact file, as another broker would.
 func (h *hostledgerFile) append(t *testing.T, name string, v any) error {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -312,10 +311,9 @@ func TestLastHourCountsARotatedFileAlone(t *testing.T) {
 	}
 }
 
-// TestPeekWritesNothing: the operator's read peeks. It answers what a
-// Match would keep, binds nothing, and a later Match binds exactly as it
-// would have with no peek (two rows of the same text, one record: the
-// earliest binds, even when the peek saw only the later one).
+// TestPeekWritesNothing: a peek binds nothing, and a later Match binds as
+// it would have with no peek (two rows of one text, one record: the
+// earliest binds even when the peek saw only the later one).
 func TestPeekWritesNothing(t *testing.T) {
 	l, dir := open(t)
 	a := auth(t, "worker", "c@x", KindInitiated, "hello", t0)

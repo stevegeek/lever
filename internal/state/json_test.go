@@ -28,10 +28,8 @@ func TestLoadJSONGarbageErrors(t *testing.T) {
 	}
 }
 
-// TestSaveJSONIsAtomicAndReplaces proves SaveJSON writes via a temp-file-then-
-// rename (not a plain in-place write, which would torn-write on a mid-write
-// crash): saving a second, different value over a first must fully replace
-// it on reload, the file is 0600, and no .tmp-* scratch file survives.
+// TestSaveJSONIsAtomicAndReplaces: a second save fully replaces the first,
+// the file is 0600, and no .tmp-* scratch file survives.
 func TestSaveJSONIsAtomicAndReplaces(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "v.json")

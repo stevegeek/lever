@@ -24,7 +24,6 @@ func TestWarnManagerClaude(t *testing.T) {
 		}
 	}
 
-	// No reader: nothing to say.
 	r.warnManagerClaude(context.Background(), "/lever/proj")
 	if len(logs) != 0 {
 		t.Fatalf("no reader: %q", logs)
@@ -60,7 +59,6 @@ func TestWarnManagerClaude(t *testing.T) {
 	}
 	logs = nil
 
-	// Nothing configured, nothing delivered: silent.
 	r.d.ReadClaudeSettings = read(jail.ClaudeDelivered{}, nil)
 	r.warnManagerClaude(context.Background(), "/lever/proj")
 	if len(logs) != 0 {

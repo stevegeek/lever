@@ -12,11 +12,10 @@ import (
 	"github.com/stevegeek/lever/internal/voice"
 )
 
-// doctorTTSTool is the tts tool the `tts tool` and `tts model` rows check:
-// with read_aloud: server, read-aloud's (SpeechTool: ok false when no
-// lever-tool-tts entry serves remote.voice.speak_socket); otherwise the
-// first lever-tool-tts entry in broker.tools (ok false: none). lost names
-// what a failure costs.
+// doctorTTSTool is the tts tool the tts rows check: with read_aloud: server,
+// read-aloud's (ok false when no lever-tool-tts entry serves
+// remote.voice.speak_socket); otherwise the first lever-tool-tts entry. lost
+// names what a failure costs.
 func doctorTTSTool(app *config.App) (t config.TTSTool, ok bool, lost string) {
 	if app.EffectiveReadAloud() == config.ReadAloudServer {
 		t, ok = app.SpeechTool()
@@ -28,10 +27,9 @@ func doctorTTSTool(app *config.App) (t config.TTSTool, ok bool, lost string) {
 	return config.TTSTool{}, false, ""
 }
 
-// checkTTSTool asks lever-tool-tts's speech socket for its health: not
-// running, running with the engine or model not ready, or ready. With
-// read_aloud: server it asks remote.voice.speak_socket; otherwise the
-// -speak-socket of the first tts tool. Neither: no row.
+// checkTTSTool asks lever-tool-tts's speech socket for its health: with
+// read_aloud: server remote.voice.speak_socket, else the first tts tool's
+// -speak-socket. Neither: no row.
 func checkTTSTool(ctx context.Context, app *config.App) checkResult {
 	const name = "tts tool"
 	t, ok, lost := doctorTTSTool(app)
@@ -64,11 +62,9 @@ func checkTTSTool(ctx context.Context, app *config.App) checkResult {
 	return checkResult{name, true, detail, ""}
 }
 
-// checkTTSModel reports the tool's speech model (doctorTTSTool): pinned in
-// lever's table, present in the tool's -models directory, every file of
-// the size and sha256 recorded when it was unpacked from the verified
-// archive, and no other file (voice.VerifySpeech; hashed whole: a few
-// seconds).
+// checkTTSModel reports the tool's speech model: pinned in lever's table,
+// present in -models, every file of the size and sha256 recorded when unpacked
+// from the verified archive, and no other file (voice.VerifySpeech).
 func checkTTSModel(app *config.App) checkResult {
 	const name = "tts model"
 	t, ok, lost := doctorTTSTool(app)

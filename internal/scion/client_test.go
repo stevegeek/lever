@@ -26,16 +26,21 @@ func TestRunInjectsEnvAndBin(t *testing.T) {
 	}
 }
 
-func TestEnvAlwaysEnablesHub(t *testing.T) {
+// TestEnvSelectsHubByEndpointOnly: SCION_HUB_ENDPOINT is what puts scion in
+// hub context; the client sets no other hub switch.
+func TestEnvSelectsHubByEndpointOnly(t *testing.T) {
 	f := proc.NewFakeRunner()
 	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
-	if got := c.env()["SCION_HUB_ENABLED"]; got != "true" {
-		t.Fatalf("expected SCION_HUB_ENABLED=true, got %q", got)
+	env := c.env()
+	if env["SCION_HUB_ENDPOINT"] != "http://127.0.0.1:8080" {
+		t.Fatalf("SCION_HUB_ENDPOINT = %q", env["SCION_HUB_ENDPOINT"])
+	}
+	if len(env) != 1 {
+		t.Fatalf("env = %v, want SCION_HUB_ENDPOINT alone", env)
 	}
 }
 
-// TestEnvEmitsLazyHubTokenSource: HubTokenSource is read at call time (the
-// mint-mid-apply case, where the token isn't known at New() time).
+// TestEnvEmitsLazyHubTokenSource: HubTokenSource is read at call time.
 func TestEnvEmitsLazyHubTokenSource(t *testing.T) {
 	f := proc.NewFakeRunner()
 	tok := ""
@@ -50,8 +55,7 @@ func TestEnvEmitsLazyHubTokenSource(t *testing.T) {
 }
 
 // TestEnvOmitsHubTokenWhenUnset: no HubTokenSource means no SCION_HUB_TOKEN
-// key at all (not even empty string) — keeps subscription-mode (no controller
-// PAT) env untouched.
+// key at all, not even an empty one.
 func TestEnvOmitsHubTokenWhenUnset(t *testing.T) {
 	f := proc.NewFakeRunner()
 	c := New(f, Options{HubEndpoint: "http://127.0.0.1:8080"})
@@ -97,12 +101,9 @@ func TestDefaultHubEndpointDerivesFromPort(t *testing.T) {
 	}
 }
 
-// lever#37: scion's runtime error repeats the whole `podman run` argv it
-// executed, `-e KEY=VALUE` pairs included — in subscription mode that is the
-// operator's OAuth token. Every consumer of a scion error (the broker's audit
-// log, CLI output, doctor) goes through run's error, so the value is masked
-// there: env values are elided (key kept), and any Anthropic-shaped token is
-// masked wherever it appears.
+// scion's runtime error repeats the podman run argv, -e KEY=VALUE pairs
+// included, which can carry the operator's OAuth token: run's error must
+// elide env values and mask Anthropic-shaped tokens.
 func TestRunErrorRedactsRuntimeEnvValuesAndTokens(t *testing.T) {
 	const token = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789"
 	f := &failingRunner{FakeRunner: proc.NewFakeRunner()}
@@ -133,9 +134,8 @@ func TestRedactSecretsLeavesOrdinaryTextAlone(t *testing.T) {
 	}
 }
 
-// failingRunner answers every scripted call with its Result AND a non-nil
-// error, the way a real non-zero exit arrives — FakeRunner alone never errs
-// on a scripted command.
+// failingRunner adds a non-nil error to every scripted Result, as a real
+// non-zero exit arrives; FakeRunner never errs on a scripted command.
 type failingRunner struct{ *proc.FakeRunner }
 
 func (f *failingRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
@@ -150,9 +150,8 @@ func (f *failingRunner) Run(ctx context.Context, env map[string]string, name str
 	return f.RunIn(ctx, "", env, name, args...)
 }
 
-// Redaction must never touch output lever PARSES: an inbox message that
-// mentions an env flag is agent-to-agent text relayed verbatim, and masking
-// it inside the JSON would rewrite the message or break the array.
+// Redaction must never touch output lever parses: relayed messages must stay
+// verbatim.
 func TestParseJSONDoesNotRedactParsedOutput(t *testing.T) {
 	raw := `[{"id":"e9","message":"restart with -e DEBUG=true"}]`
 	var got []struct{ Message string }

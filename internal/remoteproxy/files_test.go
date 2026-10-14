@@ -22,8 +22,8 @@ import (
 	"github.com/stevegeek/lever/internal/fileledger"
 )
 
-// filesCfg: chatConfig (boss; w1 w2 w3; contact c@x message [w1], see [w2])
-// plus contact d@x [w1] and files on, 64 bytes, pdf/xlsm/txt.
+// filesCfg adds contact d@x [w1] and files on (64 bytes, pdf/xlsm/txt) to
+// chatConfig.
 func filesCfg(t *testing.T, hub *pageHub) (Config, string, string) {
 	cfg := chatConfig(t, hub)
 	cfg.AllowedUsers = append(cfg.AllowedUsers, "d@x")
@@ -35,7 +35,6 @@ func filesCfg(t *testing.T, hub *pageHub) (Config, string, string) {
 	return cfg, tree, cfg.Files.LedgerDir
 }
 
-// multipartBody is one form with the given parts (field, filename, content).
 func multipartBody(t *testing.T, parts ...[3]string) (string, *bytes.Buffer) {
 	t.Helper()
 	var b bytes.Buffer
@@ -139,10 +138,9 @@ func TestUploadGate(t *testing.T) {
 	cfg, _, _ := filesCfg(t, hub)
 	stale := cfg
 	stale.ContactSession = func(string) error { return errors.New("old skill") }
-	// The hub's records cannot be read: no freshness answer.
 	hubDown := cfg
 	hubDown.AgentRecords = func(context.Context) (map[string]AgentRecord, error) { return nil, errors.New("hub down") }
-	// No record: the session check still runs, as for a post.
+	// No record: the session check still runs.
 	noRecord := stale
 	noRecord.AgentRecords = func(context.Context) (map[string]AgentRecord, error) { return map[string]AgentRecord{}, nil }
 	for name, tc := range map[string]struct {
@@ -229,7 +227,6 @@ func TestUploadSizeLimits(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, tree, _ := filesCfg(t, hub)
 	h := NewHandler(cfg)
-	// Over max_bytes inside the part (the body itself fits the allowance).
 	if rw := upload(t, h, "c@x", "w1", "a.pdf", strings.Repeat("x", 65)); rw.Code != 413 {
 		t.Fatalf("part over max = %d %s", rw.Code, rw.Body)
 	}
@@ -407,8 +404,6 @@ func TestContactStillCannotUseHubAttachments(t *testing.T) {
 	}
 }
 
-// shareRec writes content into agent's out/<key of login>/name and records
-// it as a share, like the broker's share_file.
 func shareRec(t *testing.T, cfg Config, agent, login, name, content string) (string, string) {
 	t.Helper()
 	ws := cfg.Files.Workspaces[agent]
@@ -639,8 +634,8 @@ func TestUploadNeedsTheUploadHeader(t *testing.T) {
 	}
 }
 
-// A refusal under the ledger lock (quota, rate) comes before the copy into
-// the tree: nothing of the refused upload is left there.
+// A refusal under the ledger lock comes before the copy: nothing of the
+// refused upload is left in the tree.
 func TestUploadRefusedByTheLedgerLeavesNothing(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, tree, _ := filesCfg(t, hub)
@@ -688,8 +683,7 @@ func TestUploadBusyThroughTheHandler(t *testing.T) {
 	}
 }
 
-// The append fails after the copy (the agent's ledger file cannot be
-// written): the copy is removed, in/<key>/ is left empty.
+// The ledger append fails after the copy: the copy is removed.
 func TestUploadRemovesTheCopyWhenTheRecordFails(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, tree, ledger := filesCfg(t, hub)
@@ -710,8 +704,8 @@ func TestUploadRemovesTheCopyWhenTheRecordFails(t *testing.T) {
 	}
 }
 
-// The staged file changes before the copy: the copy does not hash to what
-// was staged, so it is removed and nothing is recorded.
+// The staged file changes before the copy: the copy is removed and nothing
+// is recorded.
 func TestUploadComparesTheCopyWithTheStagedFile(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, tree, ledger := filesCfg(t, hub)
@@ -731,8 +725,7 @@ func TestUploadComparesTheCopyWithTheStagedFile(t *testing.T) {
 	}
 }
 
-// Reservations count: with one upload reserved and not yet recorded, a
-// second that would pass only without it is refused.
+// A reserved, not yet recorded upload counts against the quota.
 func TestUploadReservationsCount(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, _, _ := filesCfg(t, hub)
@@ -761,8 +754,8 @@ func TestUploadReservationsCount(t *testing.T) {
 	}
 }
 
-// Refused attempts count: past uploadTriesPerHour a login gets rate even
-// for uploads every other check would refuse.
+// Past uploadTriesPerHour a login gets rate even for uploads every other
+// check would refuse.
 func TestUploadAttemptsAreLimited(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, _, _ := filesCfg(t, hub)
@@ -862,8 +855,7 @@ func TestDownloadBusyThroughTheHandler(t *testing.T) {
 	}
 }
 
-// setAfterStage sets the afterStage seam for one test and restores it.
-// It is a package variable: a test that sets it must not call t.Parallel.
+// setAfterStage: a test that uses it must not call t.Parallel.
 func setAfterStage(t *testing.T, f func(*os.File)) {
 	t.Helper()
 	prev := afterStage
@@ -871,8 +863,8 @@ func setAfterStage(t *testing.T, f func(*os.File)) {
 	t.Cleanup(func() { afterStage = prev })
 }
 
-// A copy that cannot be removed after a refusal is named in the audit
-// line (its path, never its content).
+// A copy that cannot be removed is named in the audit line (path, never
+// content).
 func TestUploadAuditsAnOrphanCopy(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root removes from a read-only directory")
@@ -882,8 +874,6 @@ func TestUploadAuditsAnOrphanCopy(t *testing.T) {
 	var lines lockedLines
 	cfg.Audit = lines.add
 	dir := filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))
-	// The staged file changes (the copy is refused), and the directory
-	// cannot be written once the copy is in it (its removal fails).
 	setAfterStage(t, func(f *os.File) {
 		_, _ = f.WriteAt([]byte("Z"), 0)
 	})
@@ -921,7 +911,6 @@ func TestUploadsOff(t *testing.T) {
 	if ents, _ := os.ReadDir(filepath.Join(tree, "workers/w1", chatfiles.Dir, "in", chatfiles.Key("c@x"))); len(ents) != 1 {
 		t.Fatalf("%v", ents)
 	}
-	// The upload already made stays listed and downloadable by its owner.
 	list := chatDo(off, "c@x", "GET", "/lever/api/files/w1")
 	if list.Code != 200 || !strings.Contains(list.Body.String(), "before.pdf") {
 		t.Fatalf("%d %s", list.Code, list.Body)
@@ -937,8 +926,8 @@ func TestUploadsOff(t *testing.T) {
 	}
 }
 
-// The uploads-off answer comes before the body is read: a body far over
-// the limit still gets uploads-off, not too-large.
+// uploads-off comes before the body is read: a body far over the limit
+// still gets uploads-off, not too-large.
 func TestUploadsOffBeforeTheBody(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, _, _ := filesCfg(t, hub)
@@ -981,8 +970,8 @@ func TestSharesOffRefusesShareDownloads(t *testing.T) {
 	}
 }
 
-// A login with files: false gets what files off gives: every file route a
-// 404 like an unknown path, and no files object in its agents answer.
+// A files: false login gets the files-off 404 on every route and no files
+// object in its agents answer.
 func TestExcludedLoginHasNoFiles(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, _, _ := filesCfg(t, hub)
@@ -1012,7 +1001,6 @@ func TestExcludedLoginHasNoFiles(t *testing.T) {
 	if rw := chatDo(h, chatOp, "GET", "/lever/api/contacts"); !strings.Contains(rw.Body.String(), `"login":"c@x","signedIn":false,"agents":[{"name":"w1","label":"","state":"running"}],"noFiles":true`) {
 		t.Fatalf("%s", rw.Body)
 	}
-	// An operator with files: false has none either, nor the view's files.
 	cfg.Files.Excluded = []string{chatOp}
 	h = NewHandler(cfg)
 	if rw := chatDo(h, chatOp, "GET", "/lever/api/files/w1/"+id); rw.Code != 404 {
@@ -1023,8 +1011,6 @@ func TestExcludedLoginHasNoFiles(t *testing.T) {
 	}
 }
 
-// An operator cannot fetch an excluded contact's record by a known id: the
-// same 404 as an unknown id.
 func TestOperatorCannotDownloadAnExcludedLoginsRecord(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, _, _ := filesCfg(t, hub)
@@ -1041,8 +1027,6 @@ func TestOperatorCannotDownloadAnExcludedLoginsRecord(t *testing.T) {
 	}
 }
 
-// The body deadline grows with max_bytes (64 KiB/s past the 10 min base),
-// up to an hour.
 func TestFileBodyDeadlineScalesWithMaxBytes(t *testing.T) {
 	for maxBytes, want := range map[int64]time.Duration{
 		64:        10 * time.Minute,
@@ -1057,8 +1041,6 @@ func TestFileBodyDeadlineScalesWithMaxBytes(t *testing.T) {
 	}
 }
 
-// deadlineBody is an upload whose connection read deadline passes after
-// the given bytes.
 type deadlineBody struct{ r io.Reader }
 
 func (d *deadlineBody) Read(p []byte) (int, error) {
@@ -1069,8 +1051,8 @@ func (d *deadlineBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// An upload whose body does not arrive within the deadline answers 408
-// "timeout", not 400 "bad-form", wherever the read stops.
+// A body that misses the deadline answers 408 "timeout", not "bad-form",
+// wherever the read stops.
 func TestUploadBodyDeadlineIsATimeout(t *testing.T) {
 	hub := newPageHub(t)
 	cfg, tree, _ := filesCfg(t, hub)

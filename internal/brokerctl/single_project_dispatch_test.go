@@ -1,18 +1,10 @@
 package brokerctl
 
-// single_project_dispatch_test.go is the broker-side single-project
-// integration proof. It drives the REAL config → WorkerSpecs →
-// broker.Config → broker.New chain (BuildBroker + WorkerSpecs, exactly as
-// Serve assembles them, minus the real backend/jail wiring) for a config with
-// TWO workers (dir: workers/a, dir: workers/b), with only the scion runtime
-// faked (no live VM). It proves the collapsed single-project dispatch shape:
-// both workers start as agents within the SAME instance project (`-g`), each
-// gets its OWN --workspace subdir, the host workspace dirs are actually
-// created, and `list` fans in to exactly one runtime call returning the whole
-// fleet — never one call per worker. Under the OLD per-worker-project model
-// this test would fail three ways at once: the two starts' Project fields
-// would differ (or equal their own Workspace) instead of sharing one constant,
-// and the list assertion would see more than one runtime call.
+// The broker-side single-project dispatch proof: the real config ->
+// WorkerSpecs -> BuildBroker -> broker.New chain for two workers, with only
+// the scion runtime faked. Both workers start in the same instance project,
+// each with its own --workspace subdir, the host workspace dirs are created,
+// and `list` is exactly one runtime call for the whole fleet.
 
 import (
 	"context"
@@ -37,12 +29,9 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// fakeWorkerRuntime is a minimal broker.WorkerRuntime fake local to this
-// package (broker's own fakeRuntime, in internal/broker/worker_test.go, is
-// unexported and lives in a _test.go file, so it cannot be imported from
-// here — importing brokerctl FROM internal/broker's test files would also be
-// an import cycle, since brokerctl imports broker). Records every List/Start
-// call so the test can assert call counts and the exact opts passed.
+// fakeWorkerRuntime is local because broker's own fake lives in its _test
+// files (and importing brokerctl there would be a cycle). It records every
+// List/Start call.
 type fakeWorkerRuntime struct {
 	agents       map[string][]scion.Agent // project -> agents, for List
 	started      []scion.StartOpts
@@ -52,7 +41,6 @@ type fakeWorkerRuntime struct {
 	staged       map[string]int // worker -> envelopes staged through the guest channel
 }
 
-// StageWorkerTicket makes the fake the guest ticket channel too.
 func (f *fakeWorkerRuntime) StageWorkerTicket(_ context.Context, worker string, _ []byte) error {
 	if f.staged == nil {
 		f.staged = map[string]int{}
@@ -64,11 +52,9 @@ func (f *fakeWorkerRuntime) StageWorkerTicket(_ context.Context, worker string, 
 func (f *fakeWorkerRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
 	f.listCalls++
 	f.listProjects = append(f.listProjects, project)
-	// Model scion bringing a worker up: once a worker has been Start/Resume'd,
-	// its record reports running + a live container, so the broker's post-start
-	// waitWorkerLive gate passes. Mirrors internal/broker/worker_test.go's fake.
-	// Any explicitly-seeded agents (e.g. the /worker/list fan-in assertion below)
-	// take precedence over the synthesized bring-up entries.
+	// A worker that was started or resumed reports running with a live
+	// container, so the broker's waitWorkerLive gate passes. Seeded agents
+	// take precedence.
 	agents := append([]scion.Agent(nil), f.agents[project]...)
 	for _, w := range f.acted() {
 		if !hasSlug(agents, w) {
@@ -78,8 +64,6 @@ func (f *fakeWorkerRuntime) List(_ context.Context, project string) ([]scion.Age
 	return agents, nil
 }
 
-// acted returns the slugs of every worker a Start or Resume has acted on, so
-// List can synthesize their live records for the liveness poll.
 func (f *fakeWorkerRuntime) acted() []string {
 	acted := make([]string, 0, len(f.started)+len(f.resumed))
 	for _, o := range f.started {
@@ -120,11 +104,8 @@ func (f *fakeWorkerRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.
 	return nil, nil
 }
 
-// fakeTLSWithCN returns a synthetic TLS connection state whose verified client
-// cert CN is cn — enough for ca.RequireAgent (it reads
-// r.TLS.PeerCertificates[0].Subject.CommonName), without a real handshake.
-// Mirrors internal/broker/worker_test.go's helper of the same shape (kept
-// local for the same reason as fakeWorkerRuntime above).
+// fakeTLSWithCN returns a TLS state whose client cert CN is cn, enough for
+// ca.RequireAgent without a handshake.
 func fakeTLSWithCN(cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{
@@ -133,9 +114,6 @@ func fakeTLSWithCN(cn string) *tls.ConnectionState {
 	}
 }
 
-// TestSingleProjectWorkerDispatchAndList drives the collapsed single-project
-// broker dispatch end to end (fake scion runtime only) for a two-worker
-// config.
 func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	tree := t.TempDir() // real dir: HostWorkspace MkdirAll is genuine, assertable
 	kp, err := token.Generate()
@@ -157,8 +135,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		},
 	}
 
-	// Config-derived, path-authoritative worker specs — the SAME production
-	// function Serve calls (see serve.go dispatchConfig: Workers: WorkerSpecs(app, jailMount, env.JailUID)).
+	// The same function Serve's dispatchConfig calls.
 	const jailMount = "/lever"
 	specs := WorkerSpecs(app, jailMount, "501")
 	if len(specs) != 2 {
@@ -170,12 +147,8 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildBroker: %v", err)
 	}
-	// Drive the REAL production wiring (serve.go's decorateConfig), not a
-	// hand-mirrored copy — so this dispatch proof can never silently drift from
-	// what Serve actually assembles. Only Runtime is faked: no LEVER_JAIL_USER/UID
-	// env is set, so decorateConfig takes the no-Runtime path and we inject the
-	// fake afterward. Workers/InstanceProject (jailMount) come from the selected
-	// backend's MountDest, which is "/lever" for orbstack (== the jailMount const).
+	// The real decorateConfig, so this proof cannot drift from Serve. With no
+	// jail env it takes the no-Runtime path; the fake is injected after.
 	be, err := registry.Select(app.Backend, proc.RealRunner{}, "lever-"+app.Name)
 	if err != nil {
 		t.Fatalf("registry.Select: %v", err)
@@ -191,8 +164,8 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		t.Fatalf("decorateConfig InstanceProject = %q, want backend MountDest %q", cfg.Dispatch.InstanceProject, jailMount)
 	}
 	cfg.Dispatch.Runtime = rt
-	// The no-env path also leaves the ticket channel unwired and the specs
-	// without a ticket directory (no jail uid); inject both like the runtime.
+	// The no-env path also leaves tickets unwired and specs without a ticket
+	// directory: inject both.
 	cfg.Dispatch.Tickets = rt
 	cfg.Dispatch.Workers = specs
 	b := broker.New(cfg)
@@ -211,8 +184,8 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		return rec
 	}
 
-	// --- Point: worker A and worker B start, both under the SAME instance
-	// project, each with its OWN --workspace subdir. ---
+	// Both workers start in the same instance project, each with its own
+	// --workspace subdir.
 	recA := call("POST", "/worker/start", `{"worker":"a","task":"do a"}`)
 	if recA.Code != http.StatusOK {
 		t.Fatalf("worker a start status = %d (%s)", recA.Code, recA.Body.String())
@@ -239,9 +212,8 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		t.Fatalf("each worker must get its OWN workspace subdir, got the same for both: %q", optsA.WorkspaceSubdir)
 	}
 
-	// --- Point: each worker's ticket went to the guest channel under ITS
-	// name, and its container mounts exactly its own ticket directory —
-	// nothing was written under the tree. ---
+	// Each worker's ticket went to the guest channel under its name, and its
+	// container mounts only its own ticket directory; nothing under the tree.
 	if rt.staged["a"] != 1 || rt.staged["b"] != 1 {
 		t.Fatalf("staged tickets = %v, want one each for a and b", rt.staged)
 	}
@@ -257,8 +229,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		}
 	}
 
-	// --- Point: each worker's HostWorkspace dir was actually created on
-	// dispatch (real filesystem, t.TempDir()-backed tree). ---
+	// Each HostWorkspace dir was created on dispatch.
 	for _, s := range specs {
 		fi, err := os.Stat(s.HostWorkspace)
 		if err != nil {
@@ -269,8 +240,7 @@ func TestSingleProjectWorkerDispatchAndList(t *testing.T) {
 		}
 	}
 
-	// --- Point: /worker/list fans in to exactly ONE runtime List call with
-	// the instance project, returning BOTH agents — never one call per worker. ---
+	// /worker/list is one runtime List call returning both agents.
 	rt.agents[jailMount] = []scion.Agent{
 		{Slug: "a", Phase: "running"},
 		{Slug: "b", Phase: "running"},

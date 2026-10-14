@@ -52,7 +52,7 @@ func TestHealLapsedRunningWorker(t *testing.T) {
 	}
 }
 
-// A lapsed ERROR-phase worker: healed via ResumeForce (scion#895), no suspend.
+// A lapsed ERROR-phase worker: healed via ResumeForce, no suspend.
 func TestHealLapsedErrorWorkerUsesForce(t *testing.T) {
 	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "scratch", Phase: "error"}},
@@ -530,7 +530,7 @@ func TestFreshStartResetsTheAttemptCount(t *testing.T) {
 	}
 }
 
-// The manager's bounce is a resume: the lever#158 checks run around it
+// The manager's bounce is a resume: the manager-resume checks run around it
 // (DispatchConfig.ManagerResumeGuard). Unwired, or refusing before, the
 // manager is neither staged a ticket nor bounced; refusing after the
 // resume, the heal fails (the guard suspended the manager); a failed

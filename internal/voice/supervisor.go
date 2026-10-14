@@ -15,15 +15,13 @@ import (
 	"time"
 )
 
-// Supervisor runs whisper-server as a child of lever-tool-whisper, bound to
-// host loopback, restarts it with backoff when it exits, and stops it when
-// its context ends. The jail never reaches the port: config validation
-// refuses -whisper-port in every port the jail may reach, so the egress
-// rules drop it.
+// Supervisor runs whisper-server as a child of lever-tool-whisper on host
+// loopback, restarts it with backoff, and stops it when its context ends.
+// The jail never reaches the port: config validation keeps -whisper-port
+// out of every port the jail may reach, so the egress rules drop it.
 //
 // The child's stdout and stderr are discarded, never logged: whisper.cpp
-// prints what it transcribes (whisper.go, assumption 5). Log gets lever's
-// own lines only (start, exit status, backoff).
+// prints what it transcribes (whisper.go, assumption 5).
 type Supervisor struct {
 	Program string
 	Args    []string
@@ -31,19 +29,17 @@ type Supervisor struct {
 	// Env is the child's environment; nil = ChildEnv(os.Environ()).
 	Env []string
 	// Dir is the child's working directory. whisper-server serves static
-	// files from a path relative to it (whisper.go, assumption 7), so it
-	// must be a private host directory, never the tree. "" = inherit.
+	// files relative to it (whisper.go, assumption 7), so it must be a
+	// private host directory, never the tree. "" = inherit.
 	Dir string
-	// Log receives lever's own lines; nil drops them.
 	Log func(format string, a ...any)
-	// Check, when set, runs before every start: a failure skips the start
-	// and is retried after the backoff (Service checks the program again,
-	// so a restart never runs a file someone replaced).
+	// Check, when set, runs before every start; a failure skips the start
+	// and is retried after the backoff, so a restart never runs a file
+	// someone replaced.
 	Check func() error
-	// PidFile, when set, names the running child (written 0600 at each
-	// start, removed when it exits), so a start after a tool killed
+	// PidFile, when set, names the running child (0600, written at each
+	// start and removed when it exits), so a start after a tool killed
 	// outright can stop the child it left behind (reapOrphan, unix only).
-	// Service puts it in the -models directory.
 	PidFile string
 	// Zero values take the defaults below (tests shorten them).
 	MinBackoff, MaxBackoff, StableAfter, StopGrace, ProbeEvery time.Duration
@@ -56,28 +52,22 @@ const (
 	defaultMinBackoff  = time.Second
 	defaultMaxBackoff  = time.Minute
 	defaultStableAfter = time.Minute // a run this long resets the backoff
-	// defaultStopGrace is short: the broker SIGKILLs a tool that has not
-	// exited 1.5 s after its SIGTERM (brokerctl's toolStopGrace), and the
-	// child must be gone by then (off Linux nothing else kills it).
-	// whisper-server keeps no state worth a graceful stop.
+	// defaultStopGrace is short: the broker SIGKILLs a tool 1.5 s after its
+	// SIGTERM (brokerctl's toolStopGrace), and the child must be gone by
+	// then (off Linux nothing else kills it).
 	defaultStopGrace  = time.Second
 	defaultProbeEvery = 250 * time.Millisecond
 )
 
-// PidFileName is the file, in the tool's -models directory (a private host
-// directory the tool owns, outside the tree), that names the running
-// whisper-server child on port. A tool killed outright (SIGKILL inside its
-// stop grace) leaves it behind; off Linux nothing else kills the child,
-// which keeps the port and the GPU memory, so the next start reads the
-// file and stops that orphan (Supervisor.reapOrphan, unix only). The port
-// is in the name: two whisper tools may share a -models directory, and
-// each must find its own child's file.
+// PidFileName is the file in the tool's private -models directory naming
+// the running child on port. A tool killed outright leaves it behind; off
+// Linux nothing else kills the child, which keeps the port and GPU memory,
+// so the next start reads it and stops that orphan. The port is in the
+// name because two whisper tools may share a -models directory.
 func PidFileName(port int) string { return "whisper-server-" + strconv.Itoa(port) + ".pid" }
 
-// Addr is the child's address.
 func (s *Supervisor) Addr() string { return net.JoinHostPort("127.0.0.1", strconv.Itoa(s.Port)) }
 
-// Ready reports whether the child is running and accepting connections.
 func (s *Supervisor) Ready() bool { return s.ready.Load() }
 
 // Blocked reports whether the last attempt could not start the child: the
@@ -98,16 +88,13 @@ func dur(d, def time.Duration) time.Duration {
 }
 
 // childEnvKeys are what the child keeps of the tool's environment: what a
-// GPU build needs to find its libraries and devices, and nothing that could
-// carry a credential (the broker's tool secret included). The broker starts
-// a tool with PATH only; a GPU build that needs more (LD_LIBRARY_PATH,
-// CUDA_VISIBLE_DEVICES) gets it from an env(1) prefix in the tool's command.
+// GPU build needs, and nothing that could carry a credential (the tool
+// secret included). The broker starts a tool with PATH only; a GPU build
+// that needs more gets it from an env(1) prefix in the tool's command.
 var childEnvKeys = []string{"PATH", "HOME", "TMPDIR", "LANG", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"}
 
-// childEnvPrefixes likewise, by prefix.
 var childEnvPrefixes = []string{"LC_", "CUDA_", "GGML_", "NVIDIA_", "HIP_", "ROCR_", "VK_"}
 
-// ChildEnv is environ reduced to childEnvKeys and childEnvPrefixes.
 func ChildEnv(environ []string) []string {
 	var out []string
 	for _, kv := range environ {
@@ -129,8 +116,8 @@ func ChildEnv(environ []string) []string {
 	return out
 }
 
-// portTaken reports whether something already listens on the port: then the
-// child is not started, and nothing is sent there (it is not lever's).
+// portTaken: when something already listens on the port, the child is not
+// started and nothing is sent there (it is not lever's).
 func (s *Supervisor) portTaken() bool {
 	c, err := net.DialTimeout("tcp", s.Addr(), 200*time.Millisecond)
 	if err != nil {
@@ -167,8 +154,8 @@ func (s *Supervisor) Run(ctx context.Context) {
 				continue
 			}
 		}
-		// A child an earlier tool left running (killed before it could
-		// stop it) holds the port: stop it, once verified to be ours.
+		// A child a killed earlier tool left running holds the port: stop it,
+		// once verified to be ours.
 		s.reapOrphan()
 		if s.portTaken() {
 			s.blocked.Store(true)
@@ -193,9 +180,9 @@ func (s *Supervisor) Run(ctx context.Context) {
 	}
 }
 
-// command is the child's command: Stdin, Stdout and Stderr nil (the null
-// device, never a log: whisper.cpp prints transcripts), a reduced
-// environment, its own process group, and Pdeathsig on Linux.
+// command: stdio to the null device, never a log (whisper.cpp prints
+// transcripts), a reduced environment, its own process group, and Pdeathsig
+// on Linux.
 func (s *Supervisor) command() *exec.Cmd {
 	cmd := exec.Command(s.Program, s.Args...)
 	cmd.Dir = s.Dir
@@ -207,13 +194,11 @@ func (s *Supervisor) command() *exec.Cmd {
 	return cmd
 }
 
-// runOnce starts the child once and waits for it to exit or ctx to end.
 func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 	cmd := s.command()
-	//
-	// On Linux the child gets Pdeathsig, which the kernel ties to the thread
-	// that started it: this goroutine keeps that thread until the child is
-	// gone, so the signal fires only when the tool dies.
+	// The kernel ties Pdeathsig to the thread that started the child: this
+	// goroutine keeps that thread until the child is gone, so the signal
+	// fires only when the tool dies.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	start := time.Now()
@@ -251,8 +236,8 @@ func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 		return time.Since(start), exitText(err)
 	case <-ctx.Done():
 		s.ready.Store(false)
-		// The child leads its own process group: signal the group, so
-		// nothing it started outlives it.
+		// The child leads its own process group: signal the group, so nothing
+		// it started outlives it.
 		signalTree(pid, syscall.SIGTERM)
 		t := time.NewTimer(dur(s.StopGrace, defaultStopGrace))
 		defer t.Stop()
@@ -268,8 +253,8 @@ func (s *Supervisor) runOnce(ctx context.Context) (time.Duration, error) {
 	}
 }
 
-// probe marks the child (pid) ready once its port accepts a connection
-// and, where the platform can tell, the listener is the child's own.
+// probe marks the child ready once its port accepts a connection and, where
+// the platform can tell, the listener is the child's own.
 func (s *Supervisor) probe(ctx context.Context, pid int) {
 	tick := time.NewTicker(dur(s.ProbeEvery, defaultProbeEvery))
 	defer tick.Stop()
@@ -283,9 +268,8 @@ func (s *Supervisor) probe(ctx context.Context, pid int) {
 			c.Close()
 			owned, known := listenerOwnedBy(pid, s.Port)
 			if known && !owned {
-				// Another process took the port while the child loaded its
-				// model: nothing is sent there. The child fails to bind and
-				// exits, and the next start finds the port taken.
+				// Another process took the port while the child loaded: nothing is
+				// sent there; the child fails to bind and exits.
 				if !warned {
 					warned = true
 					s.logf("voice: 127.0.0.1:%d answers, but not from whisper-server (pid %d): another process holds it; nothing is sent there", s.Port, pid)

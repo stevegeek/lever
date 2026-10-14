@@ -108,11 +108,9 @@ func TestReadSecretTrims(t *testing.T) {
 	}
 }
 
-// TestEnsureSessionSecretGeneratesOnce proves the generate-then-adopt cycle:
-// first call creates the file 0600 with a 64-hex value; a second call returns
-// the SAME value without rewriting the file (never-rotate — a rewrite would
-// sign every browser session out). Values are proven by length/shape, never
-// printed.
+// TestEnsureSessionSecretGeneratesOnce: the first call creates a 0600 64-hex
+// value; the second returns it without rewriting. Values are proven by
+// shape, never printed.
 func TestEnsureSessionSecretGeneratesOnce(t *testing.T) {
 	s := ForConfig(t.TempDir())
 	v1, err := s.EnsureSessionSecret()
@@ -152,9 +150,8 @@ func TestEnsureSessionSecretGeneratesOnce(t *testing.T) {
 	}
 }
 
-// TestEnsureSessionSecretAdoptsExisting pins the pre-seed path: an operator
-// places the live hub's key in the file (possibly with trailing whitespace),
-// and lever adopts it trimmed, byte-for-byte untouched on disk.
+// TestEnsureSessionSecretAdoptsExisting: an operator-placed key (with
+// trailing whitespace) is adopted trimmed and left untouched on disk.
 func TestEnsureSessionSecretAdoptsExisting(t *testing.T) {
 	seeded := []byte("operator-seeded-value\n")
 	s := seededState(t, State.SessionSecret, seeded, 0o600)

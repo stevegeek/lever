@@ -16,7 +16,6 @@ func TestAttachArgv(t *testing.T) {
 		"orb", "-m", "lever-demo", "-u", "leveruser", "env",
 		"XDG_RUNTIME_DIR=/run/user/501",
 		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"SCION_HUB_ENABLED=true",
 		"scion", "attach", "demo", "-g", "/lever",
 	}
 	if !reflect.DeepEqual(got, want) {

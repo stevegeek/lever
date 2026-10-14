@@ -11,13 +11,10 @@ import (
 	"time"
 )
 
-// StartServeProcess starts a real, long-lived process whose argv is
+// StartServeProcess starts a long-lived process whose argv is
 // `lever <sub> serve <configPath>`, the shape state.ServeProcess recognises
-// as a lever daemon (an empty configPath omits the argument). It is
-// /bin/sh running a script file named sub in a temp dir, so the argv is
-// exactly that and the process sleeps until stopped. The process gets its
-// own process group, and the cleanup kills the group. It is reaped as soon
-// as it exits; done is closed then.
+// as a lever daemon (an empty configPath omits the argument). It runs in its
+// own process group, which cleanup kills; done is closed once it is reaped.
 func StartServeProcess(t testing.TB, sub, configPath string) (cmd *exec.Cmd, done <-chan struct{}) {
 	t.Helper()
 	return StartServeProcessScript(t, sub, configPath, "")

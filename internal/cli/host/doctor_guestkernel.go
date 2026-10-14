@@ -12,11 +12,9 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// guestKernelProbe is what doctor reads about the jail guest's kernel, as
-// the run user, in one exec: the crash-recovery sysctls, whether the
-// command line disables the EFI pstore backend and whether it is still
-// registered, the running and default kernels, and whether the HWE
-// metapackage is installed (lever#179).
+// guestKernelProbe is what doctor reads about the guest kernel, as the run
+// user, in one exec: the crash-recovery sysctls, the EFI pstore state, the
+// running and default kernels, and the HWE metapackage.
 type guestKernelProbe struct {
 	sysctl         map[string]string // key (kernel.panic) -> value
 	cmdline        bool              // guest.EFIPstoreCmdline is on /proc/cmdline
@@ -27,8 +25,8 @@ type guestKernelProbe struct {
 	hwe            bool              // hwePkg is installed
 }
 
-// guestKernelProbeScript prints key=value lines; a value it cannot read is
-// empty. Only fixed paths are read, none of them secret.
+// guestKernelProbeScript prints key=value lines, empty when unreadable. Only
+// fixed, non-secret paths are read.
 func guestKernelProbeScript() string {
 	var b strings.Builder
 	for _, s := range guest.CrashSysctls {
@@ -39,8 +37,8 @@ func guestKernelProbeScript() string {
 	b.WriteString(guest.EFIPstoreActiveShell)
 	b.WriteString("if efi_pstore_active /sys/module; then echo efi_pstore=active; else echo efi_pstore=off; fi\n")
 	b.WriteString("echo \"running=$(uname -r)\"\n")
-	// readlink -f prints a missing path as it is: only a vmlinuz-<version>
-	// target names a default kernel.
+	// readlink -f prints a missing path as it is: only a vmlinuz-<version> target
+	// names a default kernel.
 	b.WriteString("d=$(readlink -f /boot/vmlinuz 2>/dev/null); case \"$d\" in */vmlinuz-*) d=${d##*/vmlinuz-} ;; *) d= ;; esac; echo \"default=$d\"\n")
 	// dash exits on a "." whose file it cannot open, || or not.
 	b.WriteString("VERSION_ID=; if [ -r /etc/os-release ]; then . /etc/os-release; fi\n")
@@ -51,8 +49,7 @@ func guestKernelProbeScript() string {
 	return b.String()
 }
 
-// releaseRE is the shape of an Ubuntu VERSION_ID; anything else the guest
-// reports is not shown.
+// releaseRE is the shape of an Ubuntu VERSION_ID; anything else is not shown.
 var releaseRE = regexp.MustCompile(`^[0-9]{2}\.[0-9]{2}$`)
 
 func parseGuestKernelProbe(out string) guestKernelProbe {
@@ -90,7 +87,6 @@ func parseGuestKernelProbe(out string) guestKernelProbe {
 	return p
 }
 
-// readGuestKernelProbe runs the probe through the jail transport.
 func readGuestKernelProbe(ctx context.Context, jr proc.Runner) (guestKernelProbe, error) {
 	res, err := jr.Run(ctx, nil, "sh", "-c", guestKernelProbeScript())
 	if err != nil {
@@ -105,11 +101,10 @@ func readGuestKernelProbe(ctx context.Context, jr proc.Runner) (guestKernelProbe
 
 const crashRecoveryRebootFix = "run `lever apply`; reboot the VM for the kernel command line (" + lima.RebootAdvice + ")"
 
-// checkGuestCrashRecovery is the doctor row "guest crash recovery": on a
-// Lima guest, the sysctls that turn an oops or a soft lockup into a reboot,
-// and no EFI pstore backend that an oops could hang in (lever#179). A
-// warning, never a failure: the jail works without them, it just does not
-// come back by itself from a kernel crash.
+// checkGuestCrashRecovery checks, on a Lima guest, the sysctls that turn an
+// oops or soft lockup into a reboot, and that no EFI pstore backend an oops
+// could hang in is registered. A warning only: the jail works, it just does
+// not recover from a kernel crash by itself.
 func checkGuestCrashRecovery(backendName string, p guestKernelProbe, perr error) checkResult {
 	const name = "guest crash recovery"
 	if backendName != config.BackendLima {
@@ -142,11 +137,10 @@ func checkGuestCrashRecovery(backendName string, p guestKernelProbe, perr error)
 	return checkResult{name, true, "panic on oops and soft lockup, reboot after 10 s; EFI pstore off", ""}
 }
 
-// checkGuestKernel is the doctor row "guest kernel": the running guest
-// kernel, and a warning when the default kernel differs from it (a reboot
-// is pending), when guest_kernel is hwe but the guest's release has no HWE
-// kernel lever knows or it is not installed, or when nested_virt runs on the 24.04 GA kernel (6.8), the
-// kernel a nested VM crashed (lever#179).
+// checkGuestKernel reports the running guest kernel and warns when a reboot is
+// pending, when guest_kernel is hwe but no known HWE kernel is installed, or
+// when nested_virt runs on the 24.04 GA kernel (6.8), which a nested VM
+// crashed.
 func checkGuestKernel(app *config.App, p guestKernelProbe, perr error) checkResult {
 	const name = "guest kernel"
 	if app.Backend != config.BackendLima {
@@ -181,8 +175,8 @@ func checkGuestKernel(app *config.App, p guestKernelProbe, perr error) checkResu
 		return warnResult(name, detail+"; nested_virt runs on the 24.04 GA kernel (6.8), which crashed under nested VM load", fix)
 	}
 	if p.release != "" && p.release != lima.GuestRelease {
-		// Not a warning: an older guest keeps working, and lever never
-		// upgrades a guest's release in place.
+		// Not a warning: an older guest keeps working, and lever never upgrades a
+		// guest's release in place.
 		detail += "; lever creates new VMs on Ubuntu " + lima.GuestRelease + ", and this VM stays on " + p.release + " until it is recreated (" + lima.RecreateAdvice + ")"
 	}
 	return checkResult{name, true, detail, ""}

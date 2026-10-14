@@ -29,12 +29,9 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// buildDepsAgainstFakeBroker loads writeTmpConfig's app, points its broker
-// admin port at srv (a fake /epoch + /bootstrap httptest server), and returns
-// the live Deps so StartBroker/BrokerHealthy/MintManagerBootstrap dial the
-// fake instead of a real broker. srv MUST already be started (its port is read
-// from srv.URL). The returned app is the one buildApplyDeps captured, so its
-// EffectiveJailPort()/ManagerCN()/ConfigHash feed the closures under test.
+// buildDepsAgainstFakeBroker points the app's broker admin port at srv (a
+// started fake /epoch + /bootstrap server) and returns the live Deps and the
+// app buildApplyDeps captured.
 func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps, *config.App, state.State, string) {
 	t.Helper()
 	p := writeTmpConfig(t)
@@ -54,8 +51,6 @@ func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps,
 	if err != nil {
 		t.Fatal(err)
 	}
-	// buildApplyDeps computes adminURL from app.EffectiveAdminPort(); overriding
-	// it to the fake server's loopback port makes the closures dial the fake.
 	app.Broker.AdminPort = port
 
 	sb := &stubBackend{}
@@ -68,13 +63,10 @@ func buildDepsAgainstFakeBroker(t *testing.T, srv *httptest.Server) (apply.Deps,
 	return deps, app, stateFor(p), p
 }
 
-// TestStartBrokerReusesMatchingBrokerIdentity proves the #19 broker-reuse
-// shortcut: when a running broker's /epoch reports THIS binary's version and
-// THIS config's hash, StartBroker keeps it (returns nil) without restarting.
-// broker.pid is seeded AS A DIRECTORY so that IF StartBroker had wrongly taken
-// the restart branch, StopBroker would fail reading it and StartBroker would
-// error — so a nil return here can only be the reuse branch (which never
-// touches the pid file), not a silent fall-through to spawn.
+// TestStartBrokerReusesMatchingBrokerIdentity: a broker reporting this
+// binary's version and config hash is kept. broker.pid is a directory, so the
+// restart branch would error in StopBroker; a nil return can only be the
+// reuse branch.
 func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	var epochHits int
 	var app *config.App
@@ -98,8 +90,6 @@ func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	var deps apply.Deps
 	deps, app, st, _ = buildDepsAgainstFakeBroker(t, srv)
 
-	// Seed broker.pid as a directory: the restart branch reads it via StopBroker
-	// and would error; the reuse branch never touches it.
 	if err := os.MkdirAll(st.PID(), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -112,19 +102,16 @@ func TestStartBrokerReusesMatchingBrokerIdentity(t *testing.T) {
 	}
 }
 
-// TestStartBrokerRestartsOnIdentityMismatch proves the negative half of #19:
-// when /epoch reports a DIFFERENT version (a broker predating this binary, or a
-// changed tool config), StartBroker refuses to reuse it and enters the restart
-// branch, which stops the stale broker BEFORE re-spawning. broker.pid is a
-// directory so StopBroker fails there — surfacing the restart-branch entry as a
-// deterministic error WITHOUT the real `lever broker serve` spawn that would
-// otherwise follow (and without which this branch is untestable in-process).
+// TestStartBrokerRestartsOnIdentityMismatch: a broker reporting another
+// version is not reused, and the stale broker is stopped before respawning.
+// broker.pid is a directory so StopBroker fails, proving the restart branch
+// without a real spawn.
 func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 	var app *config.App
 	var st state.State
 	mux := http.NewServeMux()
 	mux.HandleFunc("/epoch", func(w http.ResponseWriter, r *http.Request) {
-		// This instance's broker (its id), started by an older binary.
+		// This instance's broker, started by an older binary.
 		id, _ := st.ReadInstanceID()
 		_ = json.NewEncoder(w).Encode(broker.EpochAnswer{EpochResponse: wire.EpochResponse{
 			Epoch:      1,
@@ -150,11 +137,9 @@ func TestStartBrokerRestartsOnIdentityMismatch(t *testing.T) {
 	testutil.WantErrContaining(t, err, "stopping the stale broker before restart")
 }
 
-// TestMintManagerBootstrapSuccess proves the mint closure composes the full
-// BootstrapMaterial: the ticket from /bootstrap's JSON, the CA PEM read from
-// the state dir, and BrokerURL/AgentCN derived from the app (jail port +
-// manager CN). This is the payoff the E2 refactor claims — the closure body had
-// no fast-suite coverage before.
+// TestMintManagerBootstrapSuccess: the mint composes the ticket from
+// /bootstrap, the CA PEM from the state dir, and BrokerURL/AgentCN from the
+// app.
 func TestMintManagerBootstrapSuccess(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/bootstrap", func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +153,6 @@ func TestMintManagerBootstrapSuccess(t *testing.T) {
 
 	deps, app, state, _ := buildDepsAgainstFakeBroker(t, srv)
 
-	// The mint closure reads the CA PEM from state.CACert(); seed it.
 	if err := os.MkdirAll(state.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +171,7 @@ func TestMintManagerBootstrapSuccess(t *testing.T) {
 	if mat.BrokerCA != caPEM {
 		t.Errorf("BrokerCA = %q, want the seeded CA PEM", mat.BrokerCA)
 	}
-	// HostToolAlias() ("host.orb.internal" for the stub) since HostAliasV4() is empty.
+	// HostAliasV4() is empty for the stub, so the URL uses HostToolAlias().
 	wantURL := fmt.Sprintf("https://host.orb.internal:%d", app.EffectiveJailPort())
 	if mat.BrokerURL != wantURL {
 		t.Errorf("BrokerURL = %q, want %q", mat.BrokerURL, wantURL)
@@ -197,9 +181,8 @@ func TestMintManagerBootstrapSuccess(t *testing.T) {
 	}
 }
 
-// TestMintManagerBootstrapLatched proves the 403 -> ErrBootstrapLatched mapping
-// (a spent single-use latch on an idempotent re-apply) survives exactly — a
-// transcription slip here would compile and silently break re-apply.
+// TestMintManagerBootstrapLatched: a 403 must map to ErrBootstrapLatched, or
+// an idempotent re-apply breaks.
 func TestMintManagerBootstrapLatched(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/bootstrap", func(w http.ResponseWriter, r *http.Request) {
@@ -216,8 +199,6 @@ func TestMintManagerBootstrapLatched(t *testing.T) {
 	}
 }
 
-// TestMintManagerBootstrapNon200 proves a non-200/non-403 status is a hard
-// error (not a latch and not a silent success).
 func TestMintManagerBootstrapNon200(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/bootstrap", func(w http.ResponseWriter, r *http.Request) {
@@ -240,9 +221,8 @@ func TestMintManagerBootstrapNon200(t *testing.T) {
 	}
 }
 
-// TestBrokerHealthyReturnsOnOK proves the health poll succeeds as soon as
-// /epoch answers 200 as the broker this apply runs: this instance's id
-// (lever#181), this binary's version and this config's hash.
+// TestBrokerHealthyReturnsOnOK: health succeeds once /epoch answers as this
+// instance's broker with this binary's version and this config's hash.
 func TestBrokerHealthyReturnsOnOK(t *testing.T) {
 	var st state.State
 	var app *config.App
@@ -266,9 +246,8 @@ func TestBrokerHealthyReturnsOnOK(t *testing.T) {
 }
 
 // A broker that is not the one this apply runs is never adopted: another
-// instance's (even with this binary and config), this instance's with
-// another binary or config, or one predating instance ids. Health fails at
-// once, naming the port, instead of polling to the timeout or carrying on.
+// instance's, this instance's with another binary or config, or one without an
+// instance id. Health fails at once, naming the port.
 func TestBrokerHealthyRefusesAForeignBroker(t *testing.T) {
 	var st state.State
 	var app *config.App
@@ -327,15 +306,10 @@ func writeJSONEpoch(w http.ResponseWriter, a broker.EpochAnswer) {
 	_ = json.NewEncoder(w).Encode(a)
 }
 
-// TestEgressAllowlistCarriesTheLoginPort is the regression test for a live
-// failure: the guest's login forwarder exists solely to reach the provider's
-// HOST port, but nothing added that port to the egress allowlist, so the jail
-// dropped the dial. The forwarder listened, the hub's discovery fetch timed
-// out, and the browser got a 502 with every process apparently healthy.
-//
-// It asserts the port reaches the backend — the only thing that builds the
-// iptables ACCEPT rules — and that a non-remote instance does not gain it.
-func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
+// TestEgressAllowlistIgnoresRemoteAccess: the hub login needs no host port,
+// so enabling remote access (even with a leftover remote.login_port) must not
+// widen the egress allowlist the backend turns into iptables ACCEPT rules.
+func TestEgressAllowlistIgnoresRemoteAccess(t *testing.T) {
 	build := func(t *testing.T, remote bool) backend.Config {
 		t.Helper()
 		p := writeTmpConfig(t)
@@ -344,7 +318,7 @@ func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
 			t.Fatal(err)
 		}
 		if remote {
-			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net"}
+			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net", LoginPort: 8447}
 		}
 		sb := &stubBackend{}
 		if _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, inertApplyOpts); err != nil {
@@ -356,26 +330,14 @@ func TestEgressAllowlistCarriesTheLoginPort(t *testing.T) {
 		return sb.upCfg
 	}
 
-	off := build(t, false)
-	if slices.Contains(off.AllowedPorts, 8447) {
-		t.Fatalf("a non-remote instance was granted the login port: %v", off.AllowedPorts)
-	}
-
-	on := build(t, true)
-	if !slices.Contains(on.AllowedPorts, 8447) {
-		t.Fatalf("AllowedPorts = %v, want the login port 8447 — without it the jail drops the forwarder's dial to the host", on.AllowedPorts)
-	}
-	// The grant is narrow: turning remote access on adds exactly one port to
-	// what the instance already had, and widens nothing else.
-	if want := append(append([]int{}, off.AllowedPorts...), 8447); !slices.Equal(on.AllowedPorts, want) {
-		t.Fatalf("AllowedPorts = %v, want exactly %v — the grant must add one port, not widen the alias", on.AllowedPorts, want)
+	off, on := build(t, false), build(t, true)
+	if !slices.Equal(on.AllowedPorts, off.AllowedPorts) || slices.Contains(on.AllowedPorts, 8447) {
+		t.Fatalf("AllowedPorts with remote = %v, without = %v; remote access must add no port", on.AllowedPorts, off.AllowedPorts)
 	}
 }
 
-// TestLeverMayClaimTemplate pins which default_template values lever will take
-// over. The two that matter in opposite directions: scion's stock "default" is
-// the whole point of the overlay and MUST be claimed, while a template the
-// operator chose must never be silently replaced.
+// TestLeverMayClaimTemplate: scion's stock "default" must be claimed, and an
+// operator-chosen template must never be replaced.
 func TestLeverMayClaimTemplate(t *testing.T) {
 	for _, tc := range []struct {
 		current string
@@ -396,8 +358,8 @@ func TestLeverMayClaimTemplate(t *testing.T) {
 }
 
 // TestEnsureScionTelemetryBindsTheConfiguredMode: unset means off (scion's
-// own default makes every hook wait out OTLP timeouts), and scion-default
-// asks the guest to hand the key back.
+// default makes every hook wait out OTLP timeouts); scion-default hands the key
+// back.
 func TestEnsureScionTelemetryBindsTheConfiguredMode(t *testing.T) {
 	for _, c := range []struct {
 		mode config.ScionTelemetryMode

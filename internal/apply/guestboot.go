@@ -8,36 +8,26 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// GuestBoot ties a manager record to the jail guest boot it last ran in
-// (lever#179). A guest that was killed hard (a wedged kernel, Lima killing
-// QEMU) and restarted leaves the hub record saying "running" over a
-// container that never started in the new boot. Nothing suspended the
-// manager, so `lever up` found it "running", observed a dead container and
-// told the operator to run `lever stop` and `lever up` (the suspend there
-// is what makes the next up resume it). With the boot recorded, apply and
-// up tell that case apart from a harness that died in a live guest, and do
-// the suspend and resume themselves; the conversation is kept, never
-// --fresh.
+// GuestBoot ties a manager record to the jail guest boot it last ran in. A
+// guest killed hard and restarted leaves the hub record saying "running" over
+// a container that never started in the new boot; with the boot recorded,
+// apply and up tell that apart from a harness that died in a live guest and
+// suspend and resume the manager themselves, keeping the conversation.
 //
-// Current reads the guest's /proc/sys/kernel/random/boot_id (new on every
-// boot). Recorded and Record keep, host-side, the boot id in which lever
-// last saw the manager live; Recorded returns "" when none is kept.
+// Current reads the guest's boot_id (new on every boot). Recorded and Record
+// keep, host-side, the boot id in which lever last saw the manager live;
+// Recorded returns "" when none is kept.
 type GuestBoot interface {
 	Current(ctx context.Context) (string, error)
 	Recorded() (string, error)
 	Record(id string) error
 }
 
-// guestRestartedUnder reports whether rec is a manager record left over
-// from a guest boot that has ended: the record says running, lever saw the
-// manager live in an earlier boot than the current one, and podman in the
-// guest says the manager's container is not running now. Only podman's
-// own answer counts: the hub briefly reports "created" for a container
-// that is starting, so the hub's status is never evidence of a dead one,
-// and a podman read that fails (or no podman probe at all) answers no. Any
-// read that fails answers no, which leaves today's behaviour in place.
-// With no boot id kept, podman's start time stands in for it
-// (startedInEndedBoot).
+// guestRestartedUnder reports whether rec is a running manager record left
+// over from an ended guest boot. Only podman's answer counts as evidence the
+// container is dead: the hub briefly reports "created" for a container that
+// is starting. Any read that fails answers no. With no boot id kept, podman's
+// start time stands in for it (startedInEndedBoot).
 func guestRestartedUnder(ctx context.Context, d Deps, project, name string, rec *scion.Agent) bool {
 	if rec == nil || rec.Phase != scion.PhaseRunning || d.GuestBoot == nil {
 		return false
@@ -57,8 +47,7 @@ func guestRestartedUnder(ctx context.Context, d Deps, project, name string, rec 
 	return podmanSaysStopped(ctx, d, ref)
 }
 
-// podmanSaysStopped reports podman's own answer that the container ref is
-// not running; no probe, or a probe that fails, answers no.
+// podmanSaysStopped answers no when there is no probe or the probe fails.
 func podmanSaysStopped(ctx context.Context, d Deps, ref string) bool {
 	if d.ContainerRunning == nil {
 		return false
@@ -67,12 +56,10 @@ func podmanSaysStopped(ctx context.Context, d Deps, ref string) bool {
 	return err == nil && !running
 }
 
-// startedInEndedBoot is guestRestartedUnder's evidence when lever kept no
-// boot id: the instance's last bring-up predates the record (an upgrade),
-// or the record file was lost. Then podman must say both that the
-// container is not running and that it last started before the current
-// boot (jail.ContainerStartedBeforeBoot). A container that never started,
-// or any read that fails, answers no.
+// startedInEndedBoot is guestRestartedUnder's evidence when no boot id is
+// kept: podman must say both that the container is not running and that it
+// last started before the current boot. A container that never started, or
+// any read that fails, answers no.
 func startedInEndedBoot(ctx context.Context, d Deps, ref string) bool {
 	if d.ContainerStartedBeforeBoot == nil || !podmanSaysStopped(ctx, d, ref) {
 		return false
@@ -81,10 +68,9 @@ func startedInEndedBoot(ctx context.Context, d Deps, ref string) bool {
 	return err == nil && before
 }
 
-// suspendAfterGuestRestart suspends a manager record guestRestartedUnder
-// found, so the caller's resume path brings it back with its conversation
-// (what `lever stop` + `lever up` did by hand). A failed suspend is logged;
-// the caller re-reads the record and acts on what it finds.
+// suspendAfterGuestRestart suspends so the caller's resume path brings the
+// manager back with its conversation. A failed suspend is only logged: the
+// caller re-reads the record and acts on what it finds.
 func suspendAfterGuestRestart(ctx context.Context, d Deps, subject, project, name string, rec *scion.Agent) {
 	d.logf("%s: manager %q: the jail VM restarted since the manager last ran (a new guest boot) and its container is %s; suspending and resuming it (the conversation is kept)",
 		subject, name, scion.BoundedQuote(rec.ContainerStatus))
@@ -93,12 +79,10 @@ func suspendAfterGuestRestart(ctx context.Context, d Deps, subject, project, nam
 	}
 }
 
-// RecoverAfterGuestRestart is `lever up`'s half of the guest-restart
-// recovery, for a manager up found running: when the record is left over
-// from an ended guest boot (guestRestartedUnder) it suspends it and
-// reports true once the record reads suspended, so up takes its resume
-// path. False otherwise, including when the suspend did not take: up then
-// observes the record as before.
+// RecoverAfterGuestRestart suspends a running manager record left over from
+// an ended guest boot and reports true once the record reads suspended, so
+// `lever up` takes its resume path. False otherwise, including when the
+// suspend did not take.
 func RecoverAfterGuestRestart(ctx context.Context, d Deps, name, project string) bool {
 	agents, err := d.Scion.List(ctx, project)
 	if err != nil {
@@ -117,7 +101,6 @@ func RecoverAfterGuestRestart(ctx context.Context, d Deps, name, project string)
 	return rec != nil && rec.Phase == scion.PhaseSuspended
 }
 
-// logf is d.Log, or nothing when it is nil (the paths outside Run).
 func (d Deps) logf(format string, args ...any) {
 	if d.Log != nil {
 		d.Log(format, args...)
@@ -125,8 +108,8 @@ func (d Deps) logf(format string, args ...any) {
 }
 
 // RecordGuestBoot notes the current guest boot as the one the manager runs
-// in. Called once lever has seen the manager live. Best-effort: a failure
-// only means the next restart is not recognised (logged).
+// in; call it once lever has seen the manager live. Best-effort: a failure
+// only means the next restart is not recognised.
 func RecordGuestBoot(ctx context.Context, d Deps) {
 	if d.GuestBoot == nil {
 		return

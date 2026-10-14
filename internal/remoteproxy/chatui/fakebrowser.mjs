@@ -1,6 +1,5 @@
-// A browser small enough to run chat.js under `node --test`: the few DOM,
-// fetch, EventSource and timer calls the page makes, against a scripted hub.
-// Test support only; it is not embedded in the binary.
+// A browser small enough to run chat.js under `node --test`, against a
+// scripted hub. Test support only; it is not embedded in the binary.
 
 const realSetTimeout = globalThis.setTimeout;
 export const tick = (ms = 0) => new Promise((r) => realSetTimeout(r, ms));
@@ -45,8 +44,8 @@ class FakeNode {
   }
 }
 
-// load starts one page against hub, a function (method, path, body) → {status,
-// body} (or {down: true} for a network fault). It returns the page's parts.
+// hub is (method, path, body) → {status, body}, or {down: true} for a
+// network fault.
 let loads = 0;
 export async function load(hub, opts = {}) {
   const env = { els: {}, calls: [], streams: [], intervals: [], timers: [], reloads: 0, store: { ...opts.store }, log: [], pointerFine: true, uploadNotes: [] };
@@ -65,8 +64,7 @@ export async function load(hub, opts = {}) {
   env.document = doc;
   const winListeners = {};
   globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener: (t, f) => (winListeners[t] ||= []).push(f) };
-  // hide puts the page in the background (visibilitychange); pagehide is
-  // the page being closed, navigated away from or frozen.
+  // pagehide is the page being closed, navigated away from or frozen.
   env.hide = async () => {
     doc.visibilityState = 'hidden';
     doc.hidden = true;
@@ -136,11 +134,8 @@ export async function load(hub, opts = {}) {
     delete globalThis.Notification;
     Object.defineProperty(globalThis, 'navigator', { configurable: true, writable: true, value: {} });
   }
-  // Dictation (opts.media): a microphone, a MediaRecorder and the audio
-  // contexts, as far as the page uses them. The recorder hands over one
-  // chunk on stop; decoding gives opts.media.decoded ({length, sampleRate},
-  // default 1 s at 48 kHz), or throws with opts.media.decodeFails. The
-  // render is a ramp of the requested length, recorded in env.media.
+  // Dictation (opts.media): decoding gives opts.media.decoded (default 1 s at
+  // 48 kHz) or throws with opts.media.decodeFails.
   if (opts.media) {
     const m = (env.media = { streams: 0, stopped: 0, recorders: [], renders: [], denied: !!opts.media.denied });
     globalThis.navigator.mediaDevices = {
@@ -192,8 +187,6 @@ export async function load(hub, opts = {}) {
   } else {
     delete globalThis.window.MediaRecorder;
   }
-  // Read-aloud (opts.speech): speechSynthesis with opts.speech.voices,
-  // recording each utterance spoken and each cancel in env.speech.
   if (opts.speech) {
     const sp = (env.speech = { spoken: [], cancels: 0, listeners: {} });
     globalThis.window.SpeechSynthesisUtterance = class {
@@ -215,8 +208,7 @@ export async function load(hub, opts = {}) {
       for (const f of u.listeners.end || []) f({});
     };
   }
-  // Server voices (opts.audio): a Web Audio context that records each part
-  // decoded and played in env.audio; env.endAudio() ends the part playing.
+  // env.endAudio() ends the part playing.
   if (opts.audio) {
     const au = (env.audio = { contexts: 0, resumes: 0, decoded: [], played: [], stopped: 0 });
     globalThis.window.AudioContext = class {
@@ -271,7 +263,6 @@ export async function load(hub, opts = {}) {
   // The browser's sticky activation (opts.activation): absent unless a test
   // asks, as in a browser without navigator.userActivation.
   if (opts.activation) globalThis.navigator.userActivation = opts.activation;
-  // act is the user's first tap on the page.
   env.act = async (type = 'pointerdown') => {
     doc.dispatch(type);
     await tick(5);
@@ -324,10 +315,8 @@ export async function load(hub, opts = {}) {
       arrayBuffer: async () => new TextEncoder().encode(text).buffer,
     };
   };
-  // Files: a FormData that records its parts, and an XMLHttpRequest that
-  // sends them to the scripted hub; the hub's answer may carry progress
-  // percentages, and the text #upload showed after each lands in
-  // env.uploadNotes.
+  // Files: the hub's answer may carry progress percentages; #upload's text
+  // after each lands in env.uploadNotes.
   globalThis.FormData = class {
     constructor() {
       this.entries = [];
@@ -382,9 +371,8 @@ export async function load(hub, opts = {}) {
   globalThis.clearInterval = (id) => {
     env.intervals = env.intervals.filter((i) => i.id !== id);
   };
-  // Timers are held, not run: a test fires the ones it wants. runTimers
-  // fires the short ones (the page's own pacing); a request's time limit is
-  // long, and runs only when a test asks for it (runTimers(Infinity)).
+  // Timers are held, not run. runTimers fires the short ones (the page's own
+  // pacing); a request's time limit runs only with runTimers(Infinity).
   let timerIds = 0;
   globalThis.setTimeout = (f, ms) => {
     env.timers.push({ f, ms, id: ++timerIds });

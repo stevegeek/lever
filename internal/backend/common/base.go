@@ -1,10 +1,7 @@
-// Package common holds the machinery shared by every "reach the guest via a
-// host-side argv prefix" backend (orbstack, lima). Embed Base and set its
-// Hooks in the constructor: Base implements the prefix/guest-delegating half of
-// the backend.Backend contract once, so a new prefix-reached backend supplies
-// only the parts that genuinely differ (version preflight, machine create/
-// start/stop, and the two prefix/guest hooks). See internal/backend for the
-// contract these compose and internal/backend/{orbstack,lima} for the embedders.
+// Package common holds the machinery shared by every backend that reaches the
+// guest via a host-side argv prefix (orbstack, lima). Embed Base and set its
+// Hooks in the constructor; the embedder supplies only what differs (version
+// preflight, machine lifecycle, and the hooks).
 package common
 
 import (
@@ -22,53 +19,42 @@ import (
 )
 
 const (
-	// MountDest is the path inside the jail where the project tree is bind-
-	// mounted (via `orb create --mount <host>:/lever` or the lima template).
-	// Agents work exclusively within this directory; no host home is visible.
+	// MountDest is the path inside the jail where the project tree is
+	// bind-mounted. No host home is visible.
 	MountDest = "/lever"
-	// DefaultRunUID is the fallback run-user UID (the /run/user/<uid> runtime
-	// dir) before EnsureUp has resolved the real UID.
-	// It matches an OrbStack guest user (the macOS uid, 501 by default) but NOT
-	// a Lima guest user (1000): every command that reaches into the jail calls
-	// EnsureUp or ResolveRunUser first, or its XDG_RUNTIME_DIR is wrong on Lima.
+	// DefaultRunUID is the fallback run-user UID before EnsureUp has resolved
+	// the real one. It matches an OrbStack guest user (501) but NOT a Lima one
+	// (1000): every command that reaches into the jail must call EnsureUp or
+	// ResolveRunUser first, or its XDG_RUNTIME_DIR is wrong on Lima.
 	DefaultRunUID = "501"
 )
 
-// Hooks inject the per-backend variance the shared Base cannot derive from its
-// own state. Both are set once at construction and are pure functions of the
-// backend's runner/machine (no captured mutable state), so Base stays the sole
-// owner of the run user/uid and resolved aliases.
+// Hooks inject the per-backend variance. They are set once at construction and
+// must capture no mutable state, so Base stays the sole owner of the run
+// user/uid and resolved aliases.
 type Hooks struct {
-	// JailPrefix returns the in-jail transport argv prefix. orbstack's depends on
-	// the resolved run user (`orb -m <m> -u <user>`); lima's is static
-	// (`limactl shell <vm>`), hence a hook rather than embedding-dispatch.
+	// JailPrefix returns the in-jail transport argv prefix.
 	JailPrefix func(machine, runUser string) []string
-	// Guest returns the guest provisioner scoped to (r, machine); its User/Root
-	// prefixes differ per backend (orb has a distinct `-u root` form; lima appends
-	// `sudo`).
+	// Guest returns the guest provisioner scoped to (r, machine).
 	Guest func(r proc.Runner, machine string) guest.Guest
-	// ResolveHostAlias resolves the host tool alias's (v4, v6) as seen from inside
-	// the jail. Kept per-backend because each has a dedicated exact-argv test.
+	// ResolveHostAlias resolves the host tool alias's (v4, v6) as seen from
+	// inside the jail.
 	ResolveHostAlias func(ctx context.Context) (v4, v6 string, err error)
 	// DNSForward returns the guest resolver's DNAT targets on the host alias,
-	// ACCEPTed in the open posture so DNS survives the alias DROP (lever#34).
-	// nil when the backend's resolver path is not routed through the alias
-	// (orbstack); lima reads its LIMADNS nat chain.
+	// ACCEPTed in the open posture so DNS survives the alias DROP. nil when
+	// the backend's resolver path is not routed through the alias.
 	DNSForward func(ctx context.Context, aliasV4 string) ([]egress.DNSForward, error)
-	// DNSProbe computes DNSForward's answer from the warm-path probe
-	// (guest.Snapshot.VerifyEgress): what to read, and the same parse. nil
-	// with a DNSForward set means the open posture always takes the full
-	// egress path.
+	// DNSProbe computes DNSForward's answer from the warm-path probe. nil with
+	// a DNSForward set means the open posture always takes the full egress
+	// path.
 	DNSProbe *guest.DNSProbe
 }
 
-// Options is the caller-supplied part of a backend's construction — what the
-// registry decides once and every embedder passes through to NewBase.
+// Options is the caller-supplied part of a backend's construction.
 type Options struct {
-	// ForceHostNetwork is the host-side debugging escape hatch
-	// (jail.ForceHostNetworkEnv) that makes every in-jail scion command fall
-	// back to a shared netns. The registry reads it from the environment;
-	// Base never consults the environment itself.
+	// ForceHostNetwork is the debugging escape hatch (jail.ForceHostNetworkEnv)
+	// that makes every in-jail scion command use a shared netns. Base never
+	// consults the environment itself.
 	ForceHostNetwork bool
 }
 
@@ -81,10 +67,9 @@ type Config struct {
 	Options   Options
 }
 
-// Base carries the shared jail state and implements the prefix/guest-delegating
-// Backend methods once. Embedders build it with NewBase; EnsureUp fills the run
-// user/uid (via ReadRunUser) and the resolved aliases (via ApplyEgress). The
-// resolved state is unexported so only those two paths can change it.
+// Base carries the shared jail state and implements the shared Backend
+// methods. The resolved run user/uid and aliases are unexported so only
+// ReadRunUser, Provision and ApplyEgress can change them.
 type Base struct {
 	r         proc.Runner
 	machine   string
@@ -96,9 +81,8 @@ type Base struct {
 	uid     string // resolved in-jail run-user uid
 	aliasV4 string // resolved IPv4 of hostAlias as seen from the jail
 
-	// warm is the probe of the last Provision when its warm path held (the
-	// provisioning stamp matched, so nothing changed the guest since the
-	// probe); nil otherwise. See WarmSnapshot.
+	// warm is the probe of the last Provision when its warm path held; nil
+	// otherwise. See WarmSnapshot.
 	warm *guest.Snapshot
 }
 
@@ -116,24 +100,20 @@ func (b *Base) Machine() string { return b.machine }
 // Guest returns the shared guest provisioner scoped to this machine.
 func (b *Base) Guest() guest.Guest { return b.hooks.Guest(b.r, b.machine) }
 
-// jailPrefix is the in-jail transport argv prefix for the current run user.
 func (b *Base) jailPrefix() []string { return b.hooks.JailPrefix(b.machine, b.user) }
 
 // HostToolAlias is how an agent reaches allowlisted host tools.
 func (b *Base) HostToolAlias() string { return b.hostAlias }
 
-// HostAliasV4 returns the resolved IPv4 of HostToolAlias as seen from the jail,
-// valid after EnsureUp/ApplyEgress. Empty if not yet resolved.
+// HostAliasV4 is valid after EnsureUp; empty if not yet resolved.
 func (b *Base) HostAliasV4() string { return b.aliasV4 }
 
-// MountDest returns the path inside the jail where the project tree is bind-mounted.
 func (b *Base) MountDest() string { return MountDest }
 
-// RunUser returns the in-jail run user resolved by EnsureUp (valid after EnsureUp).
+// RunUser is valid after EnsureUp.
 func (b *Base) RunUser() string { return b.user }
 
-// RunUID returns the in-jail run-user uid resolved by EnsureUp, falling back to
-// DefaultRunUID if EnsureUp has not yet been called.
+// RunUID falls back to DefaultRunUID before EnsureUp.
 func (b *Base) RunUID() string {
 	if b.uid == "" {
 		return DefaultRunUID
@@ -141,10 +121,8 @@ func (b *Base) RunUID() string {
 	return b.uid
 }
 
-// ReadRunUser caches the in-jail run user and UID (via the guest UserPrefix +
-// whoami / id -u) so the subid/linger script and the runtime dir path
-// work for any guest user, not a hardcoded one. Called after the machine exists
-// and before guest provisioning.
+// ReadRunUser caches the in-jail run user and UID. Call it after the machine
+// exists and before guest provisioning.
 func (b *Base) ReadRunUser(ctx context.Context) error {
 	g := b.Guest()
 	res, err := g.UserRun(ctx, "whoami")
@@ -162,21 +140,14 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 
 // Provision is the shared tail of every embedder's EnsureUp, run once the
 // machine exists: resolve the run user, install the guest runtimes, install
-// scion when cfg asks for one, then apply egress. One copy rather than one
-// per backend: the ScionSpec literal drifted between the two once (ScionBinary
-// was added to both literals while the guard around them was updated in
-// neither — see backend.Config.HasScion).
+// scion when cfg asks for one, then apply egress.
 //
-// It starts with the warm-path probe (guest.Probe, lever#187): two guest
-// calls that read what the steps below would otherwise each read with calls
-// of their own. When the provisioning stamp matches, the runtimes are left
-// alone, scion's arch and installed digest come from the probe, and the
-// egress chains are VERIFIED against the exact ruleset and left alone only
-// when they match (read once more just before that decision when a scion
-// step ran in between, guest.RefreshEgress). When the stamp does not match (a new guest, a reboot, a
-// lever whose provisioning scripts differ), or the probe fails, every step
-// takes its full path as before, and a successful provisioning writes the
-// stamp for the next bring-up.
+// It starts with the warm-path probe (guest.Probe). When the provisioning
+// stamp matches, the runtimes are left alone and the egress chains are
+// VERIFIED against the exact ruleset and left alone only when they match.
+// When the stamp does not match (a new guest, a reboot, changed provisioning
+// scripts) or the probe fails, every step takes its full path, and a
+// successful provisioning writes the stamp.
 func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
 	rep := progress.From(ctx)
 	g := b.Guest()
@@ -252,10 +223,8 @@ func (b *Base) Provision(ctx context.Context, cfg backend.Config) error {
 	return nil
 }
 
-// probeSpec is what the warm-path probe reads for cfg: the alias lookup in
-// the open posture only (the closed chain blocks DNS; its alias is read from
-// the chain), the resolver state the DNSForward hook reads, and the scion
-// binary's digest when cfg installs one.
+// probeSpec looks up the alias in the open posture only: the closed chain
+// blocks DNS, and its alias is read from the chain instead.
 func (b *Base) probeSpec(cfg backend.Config) guest.ProbeSpec {
 	var spec guest.ProbeSpec
 	if !cfg.ClosedInternet {
@@ -271,11 +240,10 @@ func (b *Base) probeSpec(cfg backend.Config) guest.ProbeSpec {
 }
 
 // WarmSnapshot is the probe of the last Provision when its warm path held,
-// for an embedder's own steps after Provision (lima's nested virt); nil when
-// Provision took the full path, which the embedder's steps then take too.
+// for an embedder's own later steps; nil when Provision took the full path,
+// in which case those steps must take it too.
 func (b *Base) WarmSnapshot() *guest.Snapshot { return b.warm }
 
-// scionStepLabel names the scion step by the pin it installs.
 func scionStepLabel(cfg backend.Config) string {
 	switch {
 	case cfg.ScionBinary != "":
@@ -288,12 +256,9 @@ func scionStepLabel(cfg backend.Config) string {
 	return "scion"
 }
 
-// ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records the
-// resolved host alias, preserving the I2 no-reopen property. Called by each
-// embedder's EnsureUp as its last step; it is not part of the Backend
-// contract because nothing outside a backend drives it. Only the IPv4 alias
-// is kept: nothing reads the v6 one back, and the I2 skip path cannot supply
-// it (existingClosedAlias parses only v4 from the live chain).
+// ApplyEgress applies the LEVER_EGRESS ruleset through the guest and records
+// the resolved host alias, preserving the I2 no-reopen property. Only the IPv4
+// alias is kept: the I2 skip path parses only v4 from the live chain.
 func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedInternet bool) error {
 	v4, _, _, err := b.Guest().ApplyEgress(ctx, b.hooks.ResolveHostAlias, b.hooks.DNSForward, allowedPorts, closedInternet)
 	if err != nil {
@@ -303,13 +268,12 @@ func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedIntern
 	return nil
 }
 
-// JailRunner returns the command transport into the jail (valid after EnsureUp,
-// which resolves the run user).
+// JailRunner returns the command transport into the jail; see
+// backend.Backend for its use before EnsureUp.
 func (b *Base) JailRunner() proc.Runner {
 	return b.jail()
 }
 
-// jail builds the transport for the current run user.
 func (b *Base) jail() *jail.Runner {
 	return jail.New(jail.Config{
 		Host:             b.r,
@@ -319,98 +283,64 @@ func (b *Base) jail() *jail.Runner {
 	})
 }
 
-// AttachArgv builds the host argv for an interactive in-jail command.
 func (b *Base) AttachArgv(inner []string) []string {
 	return b.jail().AttachArgv(inner)
 }
 
-// LoadImage streams a host docker image into the jail's rootless podman.
 func (b *Base) LoadImage(ctx context.Context, imageRef string) error {
 	return jail.LoadImage(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
-// ImageLoaded reports whether the jail already holds imageRef at the host's
-// image ID (so a re-import can be skipped). Fail-open — see the interface doc.
+// ImageLoaded is fail-open; see backend.Backend.
 func (b *Base) ImageLoaded(ctx context.Context, imageRef string) bool {
 	return jail.ImageLoaded(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
-// LoadImageTar streams a docker archive on the host into the jail's rootless
-// podman; see jail.LoadImageTar.
 func (b *Base) LoadImageTar(ctx context.Context, imageRef, tarPath string, allowTag func(ref string) error) error {
 	return jail.LoadImageTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath, allowTag)
 }
 
-// ImageLoadedTar reports whether the jail already holds imageRef at the
-// archive's config digest. Fail-open like ImageLoaded.
+// ImageLoadedTar is fail-open like ImageLoaded.
 func (b *Base) ImageLoadedTar(ctx context.Context, imageRef, tarPath string) bool {
 	return jail.ImageLoadedTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath)
 }
 
-// PruneJailImages reclaims dangling images from the jail's rootless podman.
 func (b *Base) PruneJailImages(ctx context.Context) error {
 	return jail.PruneImages(ctx, b.r, b.jailPrefix(), b.RunUID())
 }
 
-// WarmJailImage builds the jail's id-mapped layer copy of imageRef for
-// scion's keep-id mapping; see jail.WarmImage.
 func (b *Base) WarmJailImage(ctx context.Context, imageRef string) error {
 	return jail.WarmImage(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
-// InstallGuestBinary streams a host-local executable into the machine at
-// destPath as root, via the shared guest provisioner (RootPrefix).
 func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {
 	return b.Guest().InstallRootBinary(ctx, localPath, destPath)
 }
 
-// EnsureHubLogin provisions the guest half of the remote-access login path
-// (loopback forwarder + the hub's oidc_login block), reporting whether the
-// hub's configuration changed — see backend.Backend.
-func (b *Base) EnsureHubLogin(ctx context.Context, spec types.HubLogin) (bool, error) {
-	return b.Guest().EnsureHubLogin(ctx, spec)
+func (b *Base) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error) {
+	return b.Guest().EnsureHubAuth(ctx, spec)
 }
 
-// EnsureLeverTemplate creates lever's overlay agent template in the guest —
-// see backend.Backend.
 func (b *Base) EnsureLeverTemplate(ctx context.Context) (bool, error) {
 	return b.Guest().EnsureLeverTemplate(ctx)
 }
 
-// DisableHubLogin converges the guest's remote-access login path off,
-// reporting whether the hub's configuration changed — see backend.Backend.
-func (b *Base) DisableHubLogin(ctx context.Context) (bool, error) {
-	return b.Guest().DisableHubLogin(ctx)
-}
-
-// EnsureScionTelemetry converges the guest settings' `telemetry:` block,
-// reporting whether the file changed — see backend.Backend.
 func (b *Base) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error) {
 	return b.Guest().EnsureScionTelemetry(ctx, off)
 }
 
-// ReadScionProjectState reads scion's registration state from the machine for
-// `lever doctor` (in-tree marker + ~/.scion/project-configs). Read-only via the
-// machine-only guest prefix, so it needs no EnsureUp.
 func (b *Base) ReadScionProjectState(ctx context.Context) (types.ScionProjectState, error) {
 	return b.Guest().ReadScionProjectState(ctx, MountDest)
 }
 
-// RemoveScionProjectConfigs removes stale scion project-config registrations for
-// wp from the machine, via the machine-only guest prefix.
 func (b *Base) RemoveScionProjectConfigs(ctx context.Context, wp string) error {
 	return b.Guest().RemoveScionProjectConfigs(ctx, wp)
 }
 
-// RepairScionHubEndpoint rewrites a stale hub endpoint in the project-config
-// registration(s) for wp — see backend.Backend for why one can be stale.
 func (b *Base) RepairScionHubEndpoint(ctx context.Context, wp, endpoint string) error {
 	return b.Guest().RepairScionHubEndpoint(ctx, wp, endpoint)
 }
 
-// ScionProjectRegistered reports whether workspacePath already has exactly one
-// valid scion registration, via the machine-only guest prefix. Read-only, no
-// EnsureUp.
 func (b *Base) ScionProjectRegistered(ctx context.Context, workspacePath string) (bool, error) {
 	return b.Guest().ScionProjectRegistered(ctx, workspacePath)
 }

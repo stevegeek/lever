@@ -43,13 +43,12 @@ func TestEnvSetArgvAndProjectScope(t *testing.T) {
 		t.Fatalf("want 1 call, got %d", len(f.Calls))
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	// --always is load-bearing: an as_needed var is never projected into the
-	// container (scion #944), and no harness declares LEVER_LLM_AUTH, so the
-	// env-gather second pass never asks for it either.
-	if got != "hub env set --project --always LEVER_LLM_AUTH=api-key" {
+	// --always is required: an as_needed var no harness declares is never
+	// projected into the container.
+	if got != "hub env set --project --always --non-interactive LEVER_LLM_AUTH=api-key" {
 		t.Errorf("args = %q", got)
 	}
-	// Project scope is conveyed by the working directory (bare --project infers it).
+	// Bare --project infers the project from the working directory.
 	if f.Calls[0].Dir != "/jail/work" {
 		t.Errorf("cwd = %q, want /jail/work (project scope)", f.Calls[0].Dir)
 	}
@@ -57,15 +56,13 @@ func TestEnvSetArgvAndProjectScope(t *testing.T) {
 
 // TestSecretSetIsAlwaysInjected pins the two properties a Hub secret needs to
 // reach the agent intact: an explicit injection mode, and a plaintext value.
-// `hub secret set` cannot express the mode at all, so the call goes through the
-// --secret form of `hub env set`, which writes the same row.
 func TestSecretSetIsAlwaysInjected(t *testing.T) {
 	f, c := okScion()
 	if err := c.SecretSet(context.Background(), "ANTHROPIC_API_KEY", "sk-ant-placeholder"); err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(f.Calls[0].Args, " ")
-	want := "hub env set --secret --always ANTHROPIC_API_KEY sk-ant-placeholder"
+	want := "hub env set --secret --always --non-interactive ANTHROPIC_API_KEY sk-ant-placeholder"
 	if got != want {
 		t.Errorf("args = %q, want %q", got, want)
 	}
@@ -109,11 +106,11 @@ func TestBringupArgv(t *testing.T) {
 	j := strings.Join(all, "|")
 	for _, want := range []string{
 		"init --machine --non-interactive",
-		"config set --global image_registry scionlocal",
+		"config set --global --non-interactive image_registry scionlocal",
 		"server start --web-port 8080 --dev-auth=false",
 		// plaintext: scion stamps encoding=raw since ce96122c, so an encoded
 		// value would be stored verbatim.
-		"hub env set --secret --always CLAUDE_CODE_OAUTH_TOKEN sk-ant-rawtoken",
+		"hub env set --secret --always --non-interactive CLAUDE_CODE_OAUTH_TOKEN sk-ant-rawtoken",
 	} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing %q in %q", want, j)
@@ -150,9 +147,7 @@ func TestServerStartArgvWithoutPort(t *testing.T) {
 }
 
 // TestServerStartEmitsEnableWebOnly pins the whole web argv: --enable-web
-// and nothing else. The absence of --base-url is the point — scion turns
-// that flag into the agents' hub endpoint, which no jail agent can reach
-// (see ServerOpts.EnableWeb). internal/apply proves the consequence.
+// and nothing else, in particular no --base-url (see ServerOpts.EnableWeb).
 func TestServerStartEmitsEnableWebOnly(t *testing.T) {
 	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true}
@@ -169,9 +164,8 @@ func TestServerStartEmitsEnableWebOnly(t *testing.T) {
 	}
 }
 
-// A `version:` pin has NO embedded SPA (upstream tracks only
-// web/dist/client/.gitkeep), so the hub must be pointed at the assets lever
-// built and staged, or it serves its "Web UI Not Available" page.
+// A version: pin has no embedded SPA, so the hub must be pointed at the
+// assets lever staged.
 func TestServerStartEmitsWebAssetsDir(t *testing.T) {
 	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, EnableWeb: true, WebAssetsDir: "/usr/local/share/scion/web"}
@@ -185,9 +179,8 @@ func TestServerStartEmitsWebAssetsDir(t *testing.T) {
 	}
 }
 
-// --web-assets-dir without --enable-web would be meaningless, and scion treats
-// any non-empty value as an override that REPLACES embedded assets rather than
-// falling back to them — so the flag never travels alone.
+// --web-assets-dir never travels without --enable-web: scion treats any
+// non-empty value as replacing the embedded assets.
 func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
 	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, WebAssetsDir: "/usr/local/share/scion/web"}
@@ -199,9 +192,8 @@ func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
 	}
 }
 
-// The session-cookie signing key travels in the argv, equals form, so scion's
-// daemon persists it to server-args.json and a `scion server restart` replays
-// it — the whole point: sessions survive hub restarts.
+// The session-cookie signing key travels in the argv so scion's daemon replays
+// it on restart and sessions survive.
 func TestServerStartEmitsSessionSecret(t *testing.T) {
 	f, c := okScion()
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"}
@@ -215,8 +207,6 @@ func TestServerStartEmitsSessionSecret(t *testing.T) {
 	}
 }
 
-// An empty SessionSecret omits the flag entirely (scion generates a per-boot
-// random key) — the throwaway mint-window hub takes this path.
 func TestServerStartOmitsSessionSecretWhenEmpty(t *testing.T) {
 	f, c := okScion()
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: true}); err != nil {
@@ -227,12 +217,10 @@ func TestServerStartOmitsSessionSecretWhenEmpty(t *testing.T) {
 	}
 }
 
-// A failed start's error renders the argv, and the argv carries the secret —
-// ServerStart must scrub it (runSecret), because redactArgs only knows the
-// hub-secret-set argv shapes.
+// A failed start's error renders the argv, which carries the secret:
+// ServerStart must scrub it (runSecret).
 func TestServerStartFailureRedactsSessionSecret(t *testing.T) {
-	// Nothing scripted: the fake fails every call, which drives run's error
-	// path — the one that renders the argv.
+	// Nothing scripted: the fake fails every call.
 	f := proc.NewFakeRunner()
 	c := New(f, Options{})
 	err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"})
@@ -246,13 +234,9 @@ func TestServerStartFailureRedactsSessionSecret(t *testing.T) {
 
 func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
 	f, c := okScion()
-	// EnableWeb left at its zero value must not appear in the argv. Note what
-	// that does and does not buy: it is NOT how a hub is made API-only —
-	// scion's workstation defaults enable the frontend for any start that does
-	// not say otherwise, and lever needs them to (see ServerOpts.EnableWeb).
-	// What it buys is that --web-assets-dir never travels with it, so the hub
-	// falls back to its own embedded assets rather than a directory lever
-	// stages only while remote access is on.
+	// EnableWeb at its zero value must not appear in the argv. This does not
+	// make the hub API-only (see ServerOpts.EnableWeb); it keeps
+	// --web-assets-dir off.
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
 		t.Fatal(err)
 	}
@@ -265,23 +249,11 @@ func TestServerStartOmitsWebFlagsByDefault(t *testing.T) {
 	}
 }
 
-// TestServerStartNeverDisablesTheWebFrontend guards a dependency that lever
-// rested on for the whole remote-access arc without writing it down, and that
-// a plausible tidy-up would break: the flag must be OMITTED when lever does
-// not want the SPA, never sent as --enable-web=false.
-//
-// scion's workstation defaults enable the web frontend for any non-hosted
-// start that does not say otherwise, and lever needs exactly that. With the
-// frontend off, the Hub API is no longer mounted on the web server and binds
-// cfg.Hub.Port — 9810 — instead (cmd/server_foreground.go, the !enableWeb
-// branch), while the broker, every agent's SCION_HUB_ENDPOINT, `lever doctor`
-// and the remote proxy all dial 8080. So "converging" the flag the way
-// DevAuth is converged — explicitly, both ways, which is right for DevAuth —
-// would take the instance down at the next apply.
-//
-// A test rather than only a comment because the comment on ServerOpts.EnableWeb
-// asserted the opposite of the truth for the length of the branch, and prose is
-// one refactor away from being lost.
+// TestServerStartNeverDisablesTheWebFrontend: the live hub must omit
+// --enable-web, never send --enable-web=false. With the frontend off the Hub
+// API moves off port 8080, which the broker, agents, doctor and the remote
+// proxy all dial, so converging the flag both ways like DevAuth would take
+// the instance down.
 func TestServerStartNeverDisablesTheWebFrontend(t *testing.T) {
 	for _, o := range []ServerOpts{
 		{},
@@ -397,35 +369,8 @@ func TestServerPIDProbeScriptRemovesAStalePidFile(t *testing.T) {
 	}
 }
 
-// The throwaway dev-auth hub's argv: web off, so the Hub API binds --port and
-// every non-public route needs the Bearer dev token.
-func TestServerStartArgvWebDisabled(t *testing.T) {
-	f, c := okScion()
-	if err := c.ServerStart(context.Background(), ServerOpts{HubPort: 48080, DisableWeb: true, DevAuth: true, Exclusive: true}); err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Join(serverStartCall(t, f).Args, " ")
-	if got != "server start --port 48080 --enable-web=false --dev-auth=true" {
-		t.Errorf("args = %q", got)
-	}
-}
-
-func TestServerStartRejectsEnableAndDisableWeb(t *testing.T) {
-	f, c := okScion()
-	if err := c.ServerStart(context.Background(), ServerOpts{EnableWeb: true, DisableWeb: true}); err == nil {
-		t.Fatal("want an error for EnableWeb with DisableWeb")
-	}
-	if len(f.Calls) != 0 {
-		t.Fatalf("ran %d call(s) for an invalid option set", len(f.Calls))
-	}
-}
-
-// notRunningRunner simulates `scion server stop` failing because no server is
-// running (a real non-nil error from the runner, scion's own text in Stderr —
-// the FakeRunner only errors on unscripted commands and can't carry a custom
-// error message, so this small wrapper mirrors the alreadyUpRunner pattern in
-// internal/apply/run_test.go), falling through to the wrapped FakeRunner for
-// everything else.
+// notRunningRunner simulates scion server stop failing because no server is
+// running; FakeRunner cannot carry a custom error message.
 type notRunningRunner struct {
 	*proc.FakeRunner
 	stderr string
@@ -443,15 +388,8 @@ func (r *notRunningRunner) Run(ctx context.Context, env map[string]string, name 
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// TestServerStopTolerantOfNotRunning uses scion's REAL wording, which is the
-// whole point of the test.
-//
-// It previously used a hand-written "Error: server already exists / not
-// running", which passed on the "already exists" substring — so it asserted
-// the tolerance while proving nothing about what scion actually says. A live
-// apply found the gap: `scion server stop` on a stopped daemon says "server
-// daemon is not running" (cmd/server_daemon.go), matching neither arm of
-// AlreadyRunning, and the error failed the whole apply.
+// TestServerStopTolerantOfNotRunning must use scion's real wording
+// (cmd/server_daemon.go); a hand-written message proves nothing.
 func TestServerStopTolerantOfNotRunning(t *testing.T) {
 	// Both shapes scion emits: the bare stop message, and the restart variant
 	// that appends a hint.
@@ -505,8 +443,6 @@ func TestAlreadyRunningDoesNotCoverNotRunning(t *testing.T) {
 	}
 }
 
-// assertPredicate checks an error-classifying predicate against the wordings
-// it must accept and the errors it must reject.
 func assertPredicate(t *testing.T, name string, pred func(error) bool, accept []string, reject []error) {
 	t.Helper()
 	for _, msg := range accept {
@@ -541,30 +477,6 @@ func TestIsAgentAbsent(t *testing.T) {
 			"no git origin remote found",
 		},
 		[]error{nil, errors.New("No runtime brokers available"), errors.New("timeout")})
-}
-
-// alreadyRunningRunner answers every `scion server start` the way scion does
-// when the jail's one server pid file names a live daemon.
-type alreadyRunningRunner struct{ *proc.FakeRunner }
-
-func (r *alreadyRunningRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
-	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "start" {
-		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
-		return proc.Result{Code: 1, Stderr: "Error: server is already running (PID: 1731)"}, fmt.Errorf("exit status 1")
-	}
-	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
-}
-
-// An exclusive start (the bootstrap throwaway) must fail on "already
-// running": that answer is about ANOTHER hub, and tolerating it made apply
-// wait on a port nothing binds and then stop the live hub on cleanup.
-func TestServerStartExclusiveRefusesAlreadyRunning(t *testing.T) {
-	r := &alreadyRunningRunner{FakeRunner: proc.NewFakeRunner()}
-	c := New(r, Options{})
-	err := c.ServerStart(context.Background(), ServerOpts{WebPort: 48080, DevAuth: true, Exclusive: true})
-	if err == nil || !AlreadyRunning(err) {
-		t.Fatalf("exclusive ServerStart err = %v, want an already-running error", err)
-	}
 }
 
 func TestIsRefusedByHub(t *testing.T) {
@@ -616,5 +528,69 @@ func TestErrSummary(t *testing.T) {
 	}
 	if ErrSummary(nil) != "" {
 		t.Error("nil error has a summary")
+	}
+}
+
+// startOutputRunner fails every `scion server start` with out, as scion
+// exits 1 after printing it.
+type startOutputRunner struct {
+	*proc.FakeRunner
+	out string
+}
+
+func (r *startOutputRunner) RunIn(ctx context.Context, dir string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "scion" && len(args) >= 2 && args[0] == "server" && args[1] == "start" {
+		r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args, Env: env, Dir: dir})
+		return proc.Result{Code: 1, Stdout: "Starting server as daemon (workstation mode)...\n", Stderr: r.out}, fmt.Errorf("exit status 1")
+	}
+	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// scion's own readiness wait gives up after about 30 s and leaves the daemon
+// running (cmd/server_start_ready.go). That start happened, and lever's longer
+// wait decides; a daemon that exited during the wait is still a failure.
+func TestServerStartToleratesScionReadinessGiveUp(t *testing.T) {
+	const gaveUp = "Error: server did not become ready within 30s: hub API at http://127.0.0.1:48080/healthz did not answer " +
+		"(last error: Get \"http://127.0.0.1:48080/healthz\": dial tcp 127.0.0.1:48080: connect: connection refused)\n\n" +
+		"The server process is still running. Check the log at /home/u/.scion/server.log and 'scion server status'; use 'scion server stop' to stop it\n"
+	const exited = "Error: server did not become ready within 30s: hub API at http://127.0.0.1:48080/healthz did not answer\n\n" +
+		"The server process has exited. Check the log at /home/u/.scion/server.log and 'scion server status'; use 'scion server stop' to stop it\n"
+	const exitedEarly = "Error: the server exited during startup before it became ready. Check log at: /home/u/.scion/server.log\n"
+	for _, tc := range []struct {
+		name    string
+		out     string
+		wantErr bool
+	}{
+		{"gave up, still running", gaveUp, false},
+		{"gave up, process exited", exited, true},
+		{"exited during startup", exitedEarly, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := proc.NewFakeRunner()
+			f.Script("scion list", proc.Result{Stdout: "[]"})
+			c := New(&startOutputRunner{FakeRunner: f, out: tc.out}, Options{})
+			err := c.ServerStart(context.Background(), ServerOpts{WebPort: 48080})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ServerStart err = %v, wantErr %v", err, tc.wantErr)
+			}
+			waited := f.Called(proc.ArgvPrefix("scion", "list", "--all"))
+			if waited == tc.wantErr {
+				t.Fatalf("hub readiness wait ran = %v; want it exactly when the start counts as done", waited)
+			}
+			if err != nil && AlreadyRunning(err) {
+				t.Fatalf("a failed start reads as already running: %v", err)
+			}
+		})
+	}
+}
+
+// The hub-down answer of every agent verb on b41cd6fe, verbatim, still reads
+// as absent.
+func TestIsAgentAbsentMatchesTheNewPinsHubDownWording(t *testing.T) {
+	err := errors.New("scion list --format json -g /lever --non-interactive: Error: hub at http://127.0.0.1:8080 is not responding: " +
+		"request failed: Get \"http://127.0.0.1:8080/healthz\": dial tcp 127.0.0.1:8080: connect: connection refused\n" +
+		"Check the hub with 'scion hub status'.")
+	if !IsAgentAbsent(err) {
+		t.Fatalf("IsAgentAbsent(%q) = false", err)
 	}
 }

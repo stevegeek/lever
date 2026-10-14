@@ -84,10 +84,9 @@ func TestMsgList_postsBrokerRequestAndRendersEvents(t *testing.T) {
 	}
 }
 
-// TestMsgList_marksWorkerText: an event's message is the worker's own text
-// (scion embeds its Message and TaskSummary). msg list prints it on one line,
+// TestMsgList_marksWorkerText: the worker's own text is printed on one line
 // after the worker-reported marker, with escapes and invisible characters
-// gone, and an agent-chosen status as UNRECOGNISED.
+// removed, and an agent-chosen status shown as UNRECOGNISED.
 func TestMsgList_marksWorkerText(t *testing.T) {
 	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -126,9 +125,7 @@ func TestMsgList_defaultFlagsAreUnreadOwnInbox(t *testing.T) {
 
 func TestMsgList_malformedResponseIsAnError(t *testing.T) {
 	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
-		// Valid JSON (passes the raw-message transport) but the wrong shape:
-		// "events" is a string, not an array. Must surface as an error, NOT
-		// render as "Inbox empty." (a silent-empty inbox hides broker faults).
+		// Valid JSON of the wrong shape must be an error, not "Inbox empty.".
 		_, _ = w.Write([]byte(`{"events": "not-an-array"}`))
 	}))
 

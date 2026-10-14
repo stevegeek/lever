@@ -1,27 +1,11 @@
-// Package scion is the single seam to the `scion` CLI. It builds argv + env and
-// delegates execution to an injected proc.Runner, mirroring the Ruby ScionClient
-// so every method is unit-testable with a fake runner.
+// Package scion is the single seam to the scion CLI. It builds argv and env
+// and delegates execution to an injected proc.Runner.
 //
-// # What lives where
-//
-// Scion knowledge is split by KIND, across three places:
-//
-//   - This package owns everything about RUNNING scion: subcommand names,
-//     flags, env vars (SCION_HUB_ENDPOINT, SCION_HUB_TOKEN), the hub's default
-//     port, and every predicate over scion's OUTPUT wording (AlreadyRunning,
-//     IsBrokerUnavailable, IsAgentAbsent, the unexported notRunning and
-//     secretSetErr). No other package may match scion's error text; a caller
-//     that needs a new classification adds a predicate here.
-//   - internal/scion/layout owns scion's ON-DISK shape: the ~/.scion paths,
-//     the settings.yaml key names, the oidc_login block and the YAML edit
-//     helpers. It is pure data, with no runner, so provisioning code can use
-//     it without this package.
-//   - internal/hubapi owns the hub's REST surface, for what the CLI does not
-//     expose.
-//
-// internal/backend/guest writes scion's files inside a jail and
-// internal/provision/scionbin builds the scion binary; both take their paths
-// and keys from layout and know nothing of scion's verbs.
+// It owns everything about running scion: subcommand names, flags, env vars,
+// the hub's default port, and every predicate over scion's output wording. No
+// other package may match scion's error text; add a predicate here instead.
+// scion's on-disk shape lives in internal/scion/layout, and the hub's REST
+// surface in internal/hubapi.
 package scion
 
 import (
@@ -39,34 +23,27 @@ import (
 )
 
 // DefaultHubEndpoint is the hub endpoint on the loopback of whatever runs the
-// request. Every caller resolves it INSIDE the jail — the scion CLI through the
-// jail runner, internal/hubapi through curl — because the hub binds the jail's
-// loopback and the Lima backend suppresses guest→host port forwarding by
-// design. Do not treat it as host-reachable: that holds on OrbStack only, as an
-// implementation detail of its port forwarding.
+// request. Every caller must resolve it inside the jail: the hub binds the
+// jail's loopback and the Lima backend suppresses guest-to-host port
+// forwarding by design. It is host-reachable on OrbStack only, by accident.
 //
-// Passed explicitly as Options.HubEndpoint by host-side constructors — New
-// applies no default, and an empty HubEndpoint omits SCION_HUB_ENDPOINT
-// entirely, deferring to the scion binary's own default.
+// New applies no default: an empty Options.HubEndpoint omits
+// SCION_HUB_ENDPOINT, deferring to the scion binary's own default.
 const DefaultHubEndpoint = "http://127.0.0.1:8080"
 
-// DefaultHubPort is the port scion's hub listens on inside the jail (scion's
-// own --web-port default). DefaultHubEndpoint spells the same port; a test
-// pins the two together so they cannot drift.
+// DefaultHubPort is scion's own --web-port default. A test pins it to
+// DefaultHubEndpoint.
 const DefaultHubPort = 8080
 
 type Options struct {
 	Bin            string        // default "scion"
 	HubEndpoint    string        // SCION_HUB_ENDPOINT
 	HubTokenSource func() string // SCION_HUB_TOKEN (lazy: the controller PAT is minted mid-apply)
-	// AgentRole is passed as `scion start --role <role>` (scion#1089). Empty ⇒
-	// the flag is omitted, which is the default: it does not exist on earlier
-	// pins. See config.ScionConfig.AgentRole.
+	// AgentRole is passed as scion start --role. Empty omits the flag, which
+	// a scion without roles does not accept.
 	AgentRole string
 	// SettingsWarnLog receives each distinct scion settings-keys warning the
-	// client filters out of its output (IsSettingsKeysWarning, lever#169),
-	// one line at a time, so the warning stays in a log file while the
-	// operator never sees it. nil drops it.
+	// client filters out of its output (IsSettingsKeysWarning). nil drops it.
 	SettingsWarnLog func(line string)
 }
 
@@ -78,9 +55,8 @@ type Client struct {
 	r              proc.Runner
 	warnLog        *warnLog
 
-	// Poll budgets (and waitHubReady's progress delay) for waitHubReady /
-	// WaitRuntimeBrokerReady. New sets the
-	// defaults; tests shrink them on the instance.
+	// Poll budgets for waitHubReady and WaitRuntimeBrokerReady; tests shrink
+	// them.
 	hubReadyTimeout     time.Duration
 	hubReadyInterval    time.Duration
 	hubReadyNotice      time.Duration
@@ -111,8 +87,8 @@ func New(r proc.Runner, o Options) *Client {
 	}
 }
 
-// currentHubToken resolves the controller PAT from the lazy source (read at
-// call time: the token isn't known at New() — it is minted mid-apply).
+// currentHubToken reads the source at call time: the controller PAT is minted
+// after New.
 func (c *Client) currentHubToken() string {
 	if c.hubTokenSource != nil {
 		return c.hubTokenSource()
@@ -120,8 +96,10 @@ func (c *Client) currentHubToken() string {
 	return ""
 }
 
+// env selects the hub by SCION_HUB_ENDPOINT alone: it puts scion in hub
+// context on every pin lever supports, whatever the settings files say.
 func (c *Client) env() map[string]string {
-	m := map[string]string{"SCION_HUB_ENABLED": "true"}
+	m := map[string]string{}
 	if c.hubEndpoint != "" {
 		m["SCION_HUB_ENDPOINT"] = c.hubEndpoint
 	}
@@ -131,6 +109,12 @@ func (c *Client) env() map[string]string {
 	return m
 }
 
+// nonInteractive is on every scion command lever runs without a terminal.
+// scion answers a prompt with no terminal by its default, which is often No;
+// with the flag, a prompt either takes its Yes path or fails naming the flag
+// it needs, and never waits on stdin.
+const nonInteractive = "--non-interactive"
+
 func projectFlag(project string) []string {
 	if project == "" {
 		return nil
@@ -138,20 +122,10 @@ func projectFlag(project string) []string {
 	return []string{"-g", project}
 }
 
-// run executes a scion subcommand in the given working directory and returns
-// trimmed combined stdout. dir "" uses the process cwd. Non-zero exit returns
-// an error with the dev-auth banner stripped for readability.
-// runValue is run for a command whose STDOUT is a value lever parses, not text
-// for a human. It returns stdout alone.
-//
-// `run` deliberately folds stderr into its result so an error message carries
-// everything scion said. For a value that is wrong: scion's settings loader
-// writes warnings to stderr (a legacy-format settings file, a deprecated key),
-// and `run` would prepend them to the value. A caller comparing the result
-// against an expected string then silently takes the wrong branch — for
-// `config get default_template`, that means lever decides the operator chose
-// their own template and skips the placeholder-prompt fix, while apply logs
-// that it applied it. Errors still carry both streams.
+// runValue is run for a command whose stdout is a value lever parses. It
+// returns stdout alone: scion's settings loader writes warnings to stderr,
+// which run would prepend to the value and silently change a comparison.
+// Errors still carry both streams.
 func (c *Client) runValue(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	if err != nil {
@@ -162,7 +136,20 @@ func (c *Client) runValue(ctx context.Context, dir string, args ...string) (stri
 }
 
 func (c *Client) run(ctx context.Context, dir string, args ...string) (string, error) {
-	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
+	return c.runEnv(ctx, dir, nil, args...)
+}
+
+// runEnv is run with extra env on top of the client's; extra never sets the
+// hub token, endpoint or switch, which only the client's own options decide.
+func (c *Client) runEnv(ctx context.Context, dir string, extra map[string]string, args ...string) (string, error) {
+	env := c.env()
+	for k, v := range extra {
+		if _, own := env[k]; own || k == "SCION_HUB_TOKEN" || k == "SCION_HUB_ENDPOINT" || k == "SCION_HUB_ENABLED" {
+			continue
+		}
+		env[k] = v
+	}
+	res, err := c.r.RunIn(ctx, dir, env, c.bin, args...)
 	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
 	if err != nil {
 		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
@@ -170,13 +157,10 @@ func (c *Client) run(ctx context.Context, dir string, args ...string) (string, e
 	return strings.TrimSpace(out), nil
 }
 
-// runStdin is run with a byte stream on the command's stdin — the argv-only
-// way to hand scion a value too big for a command line (Start's inline agent
-// config). It folds stderr into the error like run does; the stream itself is
-// never echoed, because argv — all redactArgs ever sees — carries only the
-// `--config -` marker, and scion does not repeat its stdin in an error.
-// Runs in the process cwd: the Runner's stdin seam takes no directory, and
-// no caller that streams needs one.
+// runStdin is run with a byte stream on stdin, for a value too big for a
+// command line. The stream is never echoed: argv carries only the --config -
+// marker, and scion does not repeat its stdin in an error. Runs in the
+// process cwd.
 func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
 	res, err := c.r.RunStdin(ctx, stdin, c.env(), c.bin, args...)
 	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
@@ -186,13 +170,16 @@ func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) 
 	return strings.TrimSpace(out), nil
 }
 
-// runSecret is run for a command whose argv carries a credential. It scrubs the
-// literal value from the whole error — argv and scion's own output alike —
-// which position-based redaction cannot do: a value starting with "-" parses as
-// a flag, and cobra echoes an unknown flag back in its error text.
-// Callers that pass a credential MUST use this rather than run.
-func (c *Client) runSecret(ctx context.Context, dir, secret string, args ...string) (string, error) {
-	out, err := c.run(ctx, dir, args...)
+// runSecret is run for a command whose argv carries a credential. It scrubs
+// the literal value from the whole error, which position-based redaction
+// cannot do: a value starting with "-" parses as a flag, and cobra echoes an
+// unknown flag back. Callers that pass a credential must use this.
+func (c *Client) runSecret(ctx context.Context, secret string, args ...string) (string, error) {
+	return c.runSecretEnv(ctx, nil, secret, args...)
+}
+
+func (c *Client) runSecretEnv(ctx context.Context, extra map[string]string, secret string, args ...string) (string, error) {
+	out, err := c.runEnv(ctx, "", extra, args...)
 	// Short values would scrub unrelated text; nothing lever treats as a
 	// credential is that short.
 	if err != nil && len(secret) >= 8 {
@@ -201,17 +188,13 @@ func (c *Client) runSecret(ctx context.Context, dir, secret string, args ...stri
 	return out, err
 }
 
-// redactArgs renders args for a user-visible error/log, masking secret values by
-// position. It is the backstop under runSecret, and the only defence for a
-// caller that forgets it. Two shapes carry a secret: `hub secret set` and the
-// `--secret` form of `hub env set` (which writes the same Hub row). All other
-// commands render verbatim.
+// redactArgs renders args for a user-visible error or log, masking secret
+// values by position for hub secret set and hub env set --secret. It is the
+// backstop under runSecret.
 //
-// It masks every positional after the first, and treats a lone KEY=VALUE
-// positional as key plus value. That over-masks a command with a separated flag
-// value (`--type file`), which is the safe direction: a missed mask puts a
-// credential in an error message. It cannot mask a value that looks like a
-// flag — hence runSecret.
+// It masks every positional after the first, and a lone KEY=VALUE positional
+// as key plus value. Over-masking a separated flag value is the safe
+// direction. It cannot mask a value that looks like a flag; hence runSecret.
 func redactArgs(args []string) string {
 	if !carriesSecret(args) {
 		return strings.Join(args, " ")
@@ -266,19 +249,16 @@ func clean(output string) string {
 	return strings.TrimSpace(strings.Join(keep, "\n"))
 }
 
-// cleanErr is clean for text that becomes an ERROR: it also masks the
-// credentials scion's runtime error echoes (RedactSecrets, lever#37). Kept
-// apart from clean because parseJSON runs clean on output lever parses —
-// agent inbox messages are relayed verbatim, and a body that merely mentions
-// `-e DEBUG=true` must reach its recipient untouched.
+// cleanErr is clean for text that becomes an error: it also masks credentials
+// (RedactSecrets). clean alone runs on parsed output, which must reach a
+// recipient untouched.
 func cleanErr(output string) string {
 	return RedactSecrets(clean(output))
 }
 
-// parseJSON strips ANSI escapes and the dev-auth WARNING banner (which scion
-// prints on stderr and can land AFTER the JSON, since run concatenates
-// stdout+stderr), skips any preamble before the first JSON token, and unmarshals
-// into v. Empty body unmarshals to nothing (no error).
+// parseJSON skips any preamble before the first JSON token. The dev-auth
+// banner can land after the JSON, since run concatenates stdout and stderr.
+// An empty body is not an error.
 func parseJSON(raw string, v any) error {
 	body := clean(ansiRE.ReplaceAllString(raw, ""))
 	loc := jsonStartRE.FindStringIndex(body)

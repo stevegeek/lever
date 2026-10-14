@@ -23,41 +23,35 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-// The manager's conversation across a fresh create (lever#198). `lever up
-// --fresh` deletes the manager's record, and scion deletes the record's home
+// `lever up --fresh` deletes the manager's record, and scion deletes the home
 // with it, where Claude Code keeps the transcripts. So --fresh backs them up
-// first (package convbackup), and --keep-conversation, or `lever
-// conversation restore` later, puts them back into the new record's home.
+// first (package convbackup), and --keep-conversation or `lever conversation
+// restore` puts them back into the new record's home.
 
-// convScion is the part of *scion.Client a restore drives (a test seam).
 type convScion interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 	Suspend(ctx context.Context, worker, project string) error
 	Resume(ctx context.Context, worker, project string) error
 }
 
-// convOps backs up and restores the manager's conversation.
 type convOps struct {
 	app   *config.App
 	st    state.State
 	guest convbackup.Guest
 	sc    convScion // restore and the pre-backup suspend only
 	log   func(format string, args ...any)
-	// verifyRole is the pre-role record guard a resume passes (as `up`'s
-	// own resume does), and gate the liveness gate after it.
+	// verifyRole is the pre-role record guard a resume passes, and gate the
+	// liveness gate after it.
 	verifyRole func(ctx context.Context) error
 	gate       func(ctx context.Context) error
-	// beginResume starts the checks around every resume of the manager
-	// (apply.BeginManagerResume, lever#158): the host tree before it, the
-	// mounts read back after it. newConvOps always sets it.
+	// beginResume starts the checks around every manager resume
+	// (apply.BeginManagerResume): the host tree before it, the mounts read back
+	// after it. newConvOps always sets it.
 	beginResume func(ctx context.Context) (managerResume, error)
 	now         func() time.Time
-	// suspendWait bounds the wait for a suspended record (a test seam).
 	suspendWait apply.RetryBudget
 }
 
-// managerResume is the part of *apply.ManagerResume a restore drives (a
-// test seam).
 type managerResume interface {
 	Resumed(ctx context.Context) error
 	Live(ctx context.Context) error
@@ -65,7 +59,6 @@ type managerResume interface {
 	AfterFailure(ctx context.Context, cause error) error
 }
 
-// newConvOps wires convOps from a bring-up's live dependencies.
 func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 	project := w.b.MountDest()
 	return convOps{
@@ -86,9 +79,8 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 	}
 }
 
-// startResume runs the checks before a resume of the manager. Without
-// beginResume (a convOps not built by newConvOps) it refuses: a resume
-// whose mounts nobody reads back is never made.
+// startResume refuses without beginResume: a resume whose mounts nobody reads
+// back is never made.
 func (o convOps) startResume(ctx context.Context) (managerResume, error) {
 	if o.beginResume == nil {
 		return nil, errors.New("internal error: no resume checks wired")
@@ -96,14 +88,13 @@ func (o convOps) startResume(ctx context.Context) (managerResume, error) {
 	return o.beginResume(ctx)
 }
 
-// errConvStateInTree: a backup holds the whole conversation, and with it
-// whatever secrets the agent saw; lever keeps none where an agent can read.
+// errConvStateInTree: a backup holds the whole conversation and whatever
+// secrets the agent saw; lever keeps none where an agent can read.
 var errConvStateInTree = fmt.Errorf("the state directory (%s) is inside the tree the agents mount, so lever keeps no conversation backup there", state.DirName)
 
-// restoredUnknownSkill is the session record's skill hash for a restored
-// conversation whose backup did not know the skill it was started with. It
-// matches no skill, so the remote proxy refuses contacts' posts to the
-// manager until it next starts fresh.
+// restoredUnknownSkill matches no skill, so the proxy refuses contacts' posts
+// to a manager restored from a backup without a skill record until it next
+// starts fresh.
 const restoredUnknownSkill = "unknown (restored conversation)"
 
 func (o convOps) store() (convbackup.Store, error) {
@@ -120,18 +111,16 @@ func (o convOps) clock() time.Time {
 	return time.Now().UTC()
 }
 
-// backup copies the manager's transcripts to the store and prunes it to
-// convbackup.Keep. found is false when the manager's home holds no
-// projects; a home lever cannot find is convbackup.ErrNoHome.
+// backup copies the transcripts to the store and prunes it to convbackup.Keep.
+// found is false when the home holds no projects; a home lever cannot find is
+// convbackup.ErrNoHome.
 func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, found bool, err error) {
 	return o.backupIf(ctx, reason, false)
 }
 
-// backupIf is backup; skipEmpty treats a projects directory with no byte of
-// transcript in it (no file, or only empty ones) as nothing to back up: no backup is saved, and none is pruned. The
-// fresh start of a manager with no conversation (lever#202) uses it, so an
-// agent that empties its transcripts cannot push the real backups out of
-// the store one `lever up` at a time.
+// backupIf with skipEmpty saves and prunes nothing when the transcripts hold no
+// bytes, so an agent that empties its transcripts cannot push the real backups
+// out of the store one `lever up` at a time.
 func (o convOps) backupIf(ctx context.Context, reason string, skipEmpty bool) (m convbackup.Meta, found bool, err error) {
 	store, err := o.store()
 	if err != nil {
@@ -151,8 +140,7 @@ func (o convOps) backupIf(ctx context.Context, reason string, skipEmpty bool) (m
 		}
 	}
 	m = convbackup.Meta{Agent: o.app.Name, Created: o.clock(), Reason: reason, Version: cli.VersionString()}
-	// The session record of the conversation being saved: the skill it
-	// started with travels with it (see restore).
+	// The skill the saved session started with travels with it (see restore).
 	if recs, rerr := sessionrec.Latest(o.st.Sessions()); rerr != nil {
 		o.log("conversation: warning: the session record cannot be read (%v); a restore of this backup is treated as started with an unknown skill", rerr)
 	} else if r, ok := recs[o.app.Name]; ok {
@@ -179,18 +167,15 @@ func (o convOps) backupIf(ctx context.Context, reason string, skipEmpty bool) (m
 	return m, true, nil
 }
 
-// backupBeforeDelete is apply's BackupManagerConversation for `up --fresh`:
-// a running manager is suspended first, so the copy is the conversation as
-// it ends (a manager that will not suspend is copied as it runs). *saved is
-// set to the backup when there was a conversation to save.
+// backupBeforeDelete is BackupManagerConversation for `up --fresh`: a running
+// manager is suspended first so the copy is the conversation as it ends. *saved
+// is set when there was a conversation to save.
 func (o convOps) backupBeforeDelete(saved **convbackup.Meta) func(ctx context.Context, rec *scion.Agent) error {
 	return o.backupBeforeDeleteAs(saved, "up --fresh", false)
 }
 
-// backupBeforeNoConversationFresh is apply's BackupManagerConversation for a
-// plain `lever up`, which deletes a record only for the fresh start of a
-// manager with no conversation (lever#202): a projects directory with no
-// transcript content is not saved (backupIf), and the reason says which start it was.
+// backupBeforeNoConversationFresh is BackupManagerConversation for the fresh
+// start of a manager with no conversation: empty transcripts are not saved.
 func (o convOps) backupBeforeNoConversationFresh(saved **convbackup.Meta) func(ctx context.Context, rec *scion.Agent) error {
 	return o.backupBeforeDeleteAs(saved, "up (no conversation)", true)
 }
@@ -209,9 +194,8 @@ func (o convOps) backupBeforeDeleteAs(saved **convbackup.Meta, reason string, sk
 		}
 		m, found, err := o.backupIf(ctx, reason, skipEmpty)
 		if errors.Is(err, convbackup.ErrNoHome) {
-			// The record exists, so scion will delete a home lever could
-			// not find (a registration or a layout lever does not know):
-			// that is no proof there is nothing to lose.
+			// scion will delete a home lever could not find: no proof there is nothing to
+			// lose.
 			err = fmt.Errorf("%w for the record it is about to delete, so it cannot tell whether a conversation would be lost", err)
 		}
 		if err != nil {
@@ -229,10 +213,9 @@ func (o convOps) backupBeforeDeleteAs(saved **convbackup.Meta, reason string, sk
 	}
 }
 
-// conversationEmpty is apply's ManagerConversationEmpty for `lever up`
-// (lever#202): nil only when the guest shows the manager's home holds no
-// transcript (convbackup.TranscriptsNone). Any other answer is the reason
-// lever does not start the manager fresh on its own.
+// conversationEmpty is nil only when the guest shows the manager's home holds
+// no transcript (convbackup.TranscriptsNone). Any other answer is why lever
+// does not start the manager fresh on its own.
 func (o convOps) conversationEmpty(ctx context.Context) error {
 	t, err := o.guest.Transcripts(ctx)
 	switch {
@@ -246,15 +229,14 @@ func (o convOps) conversationEmpty(ctx context.Context) error {
 	return errors.New("its .claude holds links, special files or another projects directory, which lever does not read")
 }
 
-// restore puts backup id ("" = the newest) into the manager's home and
-// resumes the manager on it. The manager must be running or suspended; a
-// running one is suspended first, and every failure after that resumes it
-// as it was. backupFirst saves the conversation it replaces.
+// restore puts backup id ("" = newest) into the manager's home and resumes it.
+// The manager must be running or suspended; a running one is suspended first,
+// and any failure after that resumes it as it was. backupFirst saves the
+// conversation it replaces.
 //
-// The session record is written before the files move: the restored
-// conversation is recorded with the skill it was started with (the
-// backup's), so the remote proxy never takes it for a session started on the
-// skill on disk now.
+// The session record is written before the files move, with the backup's
+// skill, so the proxy never takes the restored conversation for one started on
+// the current skill.
 func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err error) {
 	store, err := o.store()
 	if err != nil {
@@ -267,9 +249,8 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	if m.Agent != "" && m.Agent != o.app.Name {
 		return fmt.Errorf("backup %s is of agent %q, not of this manager %q", m.ID, termsafe.Sanitize(m.Agent), o.app.Name)
 	}
-	// Check the stored archive whole before anything changes, and keep a
-	// second handle open for the install: a backup taken below may prune
-	// this one, and an open file outlives its removal.
+	// Check the archive whole before anything changes, and keep a handle open: a
+	// backup taken below may prune it, and an open file outlives its removal.
 	if err := verifyStored(store, m.ID); err != nil {
 		return err
 	}
@@ -288,9 +269,8 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	if rec == nil {
 		return fmt.Errorf("there is no manager record to restore into; run `lever up --no-attach` first")
 	}
-	// suspended says this restore suspended the manager, and done that a
-	// failure from here on must not resume it (it was resumed, or the role
-	// guard refused it).
+	// suspended: this restore suspended the manager; done: a later failure must
+	// not resume it (already resumed, or the role guard refused).
 	suspended, done := false, false
 	switch rec.Phase {
 	case scion.PhaseRunning:
@@ -303,8 +283,8 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	default:
 		return fmt.Errorf("manager %q is in phase %s; a restore needs it running or suspended (`lever up --no-attach` first)", o.app.Name, scion.BoundedQuote(rec.Phase))
 	}
-	// unsure says an install failed in a way that may have come after the
-	// swap: the manager then holds one conversation or the other.
+	// unsure: an install failed possibly after the swap, so either conversation
+	// may be in place.
 	unsure := false
 	defer func() {
 		if err != nil && suspended && !done {
@@ -336,11 +316,9 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	}
 	parked, err := o.guest.Install(ctx, archive, o.clock().Format("20060102T150405Z"))
 	if err != nil {
-		// Only an install known to have changed nothing gets its record
-		// back. Any other failure (a timeout, a lost transport) may have
-		// come after the swap, so the record refuses contacts until the
-		// manager next starts fresh: never the old conversation under the
-		// current skill.
+		// Only an install known to have changed nothing gets its record back.
+		// Otherwise the record refuses contacts until the manager next starts fresh:
+		// never the old conversation under the current skill.
 		back := restoredUnknownSkill
 		if errors.Is(err, convbackup.ErrNotSwapped) && hadPrev {
 			back = prev.SkillHash
@@ -391,10 +369,9 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	return guard.Live(ctx)
 }
 
-// resumeAfterFailure resumes a manager this code suspended, after cause,
-// through the pre-role record guard, on a context of its own (ctx may be
-// what was cancelled), and says so in the error it returns. how says on
-// which conversation ("" leaves it out).
+// resumeAfterFailure resumes a manager this code suspended, through the
+// pre-role record guard, on its own context (ctx may be what was cancelled).
+// how names the conversation ("" leaves it out).
 func (o convOps) resumeAfterFailure(ctx context.Context, cause error, how string) error {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 	defer cancel()
@@ -425,7 +402,6 @@ func (o convOps) resumeAfterFailure(ctx context.Context, cause error, how string
 	return fmt.Errorf("%w; the manager was resumed%s", cause, how)
 }
 
-// verifyStored reads backup id whole through the archive checks.
 func verifyStored(store convbackup.Store, id string) error {
 	rc, err := store.Open(id)
 	if err != nil {
@@ -439,7 +415,7 @@ func verifyStored(store convbackup.Store, id string) error {
 }
 
 // waitSuspended waits until the hub reads the manager suspended with no live
-// container: no process of the agent's may run while its files move.
+// container: no agent process may run while its files move.
 func (o convOps) waitSuspended(ctx context.Context) error {
 	b := o.suspendWait
 	if b.Attempts <= 0 {
@@ -479,8 +455,6 @@ func (o convOps) recordSession(hash string) error {
 	})
 }
 
-// newConversationCmd is `lever conversation`: the manager's conversation
-// backups, which `lever up --fresh` takes on its own.
 func newConversationCmd(bf BackendFactory) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "conversation",

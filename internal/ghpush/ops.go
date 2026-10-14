@@ -27,7 +27,6 @@ const (
 	OpRelease  = "release"
 )
 
-// AllOps lists every operation in a stable order.
 var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRuns, OpCILog,
 	OpIssueList, OpIssueRead, OpIssueComment, OpIssueClose}
 
@@ -48,30 +47,26 @@ var OpPermissions = map[string]Permissions{
 	OpIssueClose:   {"issues": "write"},
 }
 
-// MergeMethods are the merge methods GitHub accepts.
 var MergeMethods = []string{"squash", "merge", "rebase"}
 
-// DefaultReleaseTag is the default -release-tag pattern.
 const DefaultReleaseTag = `^v[0-9]+\.[0-9]+\.[0-9]+$`
 
-// Bounds on what one call reads from GitHub.
 const (
 	maxCheckRuns   = 100 // one page of check runs (and of statuses) per head SHA
 	maxTagPages    = 20  // 100 tags a page
 	maxReviewPages = 10  // 100 reviews a page
 )
 
-// CheckPolicy is what pr_merge requires of the checks on the head SHA
-// beyond "every one of them passed": at least one check (Any), nothing more
-// (None), or the named checks present and successful (Names). The zero
-// value is no policy, and pr_merge refuses every merge with it.
+// CheckPolicy is what pr_merge requires of the head SHA's checks beyond
+// "every one passed": at least one check (Any), nothing more (None), or the
+// named checks present and successful (Names). The zero value refuses every
+// merge.
 type CheckPolicy struct {
 	Any   bool
 	None  bool
 	Names []string
 }
 
-// set reports whether p is one of the three policies.
 func (p CheckPolicy) set() bool {
 	n := 0
 	for _, b := range []bool{p.Any, p.None, len(p.Names) > 0} {
@@ -84,9 +79,8 @@ func (p CheckPolicy) set() bool {
 
 var checkNameRE = regexp.MustCompile(`^[^\x00-\x1f\x7f,]{1,200}$`)
 
-// ParseCheckPolicy reads -merge-checks: "any" (at least one check, all
-// green), "none" (no check needed; any that exist must still be green), or
-// a comma list of check names that must be present and successful. There is
+// ParseCheckPolicy reads -merge-checks: "any", "none" (any check that exists
+// must still be green), or a comma list of required check names. There is
 // no default: an empty value is refused.
 func ParseCheckPolicy(s string) (CheckPolicy, error) {
 	switch strings.TrimSpace(s) {
@@ -126,9 +120,8 @@ type Ops struct {
 	ReleaseTag      *regexp.Regexp // matched against the whole tag
 	Deadline        time.Duration  // bounds one whole call (0 = none)
 	WebBase         string         // https://github.com (the default when empty), for result URLs
-	// LogHosts are the hosts a job log download may be redirected to
-	// (nil = DefaultLogHosts); LogHTTP, when set, is the client for that
-	// download (tests).
+	// LogHosts are the hosts a job log download may be redirected to (nil =
+	// DefaultLogHosts); LogHTTP is a test client for that download.
 	LogHosts []string
 	LogHTTP  *http.Client
 
@@ -136,7 +129,6 @@ type Ops struct {
 	relLock chan struct{}
 }
 
-// PRResult is what pr_open returns.
 type PRResult struct {
 	OK       bool   `json:"ok"`
 	Existing bool   `json:"existing"`
@@ -147,7 +139,6 @@ type PRResult struct {
 	Base     string `json:"base"`
 }
 
-// Check is one check run or commit status on a head SHA.
 type Check struct {
 	Name       string `json:"name"`
 	Kind       string `json:"kind"` // check_run or status
@@ -155,7 +146,6 @@ type Check struct {
 	Conclusion string `json:"conclusion"`
 }
 
-// PRStatusResult is what pr_status returns.
 type PRStatusResult struct {
 	OK             bool    `json:"ok"`
 	Repo           string  `json:"repo"`
@@ -175,7 +165,6 @@ type PRStatusResult struct {
 	Truncated      bool    `json:"truncated"`
 }
 
-// MergeResult is what pr_merge returns.
 type MergeResult struct {
 	OK         bool     `json:"ok"`
 	Repo       string   `json:"repo"`
@@ -190,8 +179,7 @@ type MergeResult struct {
 	Warning    string   `json:"warning,omitempty"`
 }
 
-// ReleaseResult is what release returns: the tag it created, the commit it
-// points at, and the tag's page on GitHub. The repository's release workflow
+// ReleaseResult is what release returns. The repository's release workflow
 // makes the GitHub release from the tag.
 type ReleaseResult struct {
 	OK        bool   `json:"ok"`
@@ -247,8 +235,8 @@ type ghReview struct {
 	Association string  `json:"author_association"`
 }
 
-// approverAssociations are the author associations whose approval counts:
-// on a public repository anyone can submit an approving review, and GitHub
+// approverAssociations are the author associations whose approval counts: on
+// a public repository anyone can submit an approving review, and GitHub
 // reports it as APPROVED even though it does not count it.
 var approverAssociations = []string{"OWNER", "MEMBER", "COLLABORATOR"}
 
@@ -270,8 +258,8 @@ type ghStatuses struct {
 	} `json:"statuses"`
 }
 
-// textDigest is what the audit line keeps of outward-facing text: its
-// length and a sha256 prefix, never the text.
+// textDigest is what the audit keeps of outward text: length and a sha256
+// prefix, never the text.
 func textDigest(s string) (int, string) {
 	h := sha256.Sum256([]byte(s))
 	return len(s), hex.EncodeToString(h[:])[:16]
@@ -311,8 +299,8 @@ func (o *Ops) repoInfo(ctx context.Context, tok, repo string) (ghRepo, error) {
 	return r, nil
 }
 
-// ValidateRefName is a loose check of a branch name GitHub reported, before
-// it goes into a URL path.
+// ValidateRefName loosely checks a branch name GitHub reported before it goes
+// into a URL path.
 func ValidateRefName(b string) error {
 	if len(b) == 0 || len(b) > 255 || !branchRE.MatchString(b) || strings.Contains(b, "..") {
 		return fmt.Errorf("ref %q: unexpected characters", b)
@@ -328,7 +316,7 @@ func escapeRef(ref string) string {
 	return strings.Join(parts, "/")
 }
 
-// headSHA reads refs/heads/<branch>; found is false on a 404.
+// headSHA: found is false on a 404.
 func (o *Ops) headSHA(ctx context.Context, tok, repo, branch string) (sha string, found bool, err error) {
 	var ref ghRef
 	err = o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/git/ref/heads/"+escapeRef(branch), nil, &ref)
@@ -391,8 +379,8 @@ func (o *Ops) PROpen(ctx context.Context, caller, repo, branch, title, body stri
 	var created ghPull
 	in := map[string]any{"title": title, "body": body, "head": branch, "base": info.DefaultBranch, "maintainer_can_modify": false}
 	if err := o.API.do(ctx, tok, http.MethodPost, "/repos/"+repo+"/pulls", in, &created); err != nil {
-		// Another call may have opened it meanwhile (GitHub: 422 "A pull
-		// request already exists").
+		// Another call may have opened it meanwhile (422 "A pull request
+		// already exists").
 		if isStatus(err, http.StatusUnprocessableEntity) {
 			if existing, found, lerr := o.openPRFor(ctx, tok, repo, branch); lerr == nil && found {
 				return existing, nil
@@ -406,8 +394,8 @@ func (o *Ops) PROpen(ctx context.Context, caller, repo, branch, title, body stri
 	return PRResult{OK: true, Repo: repo, Number: created.Number, URL: created.HTMLURL, Head: branch, Base: info.DefaultBranch}, nil
 }
 
-// openPRFor returns the open PR whose head is branch of repo itself, if any.
-// Its base is whatever that PR has (Base says which).
+// openPRFor returns the open PR whose head is branch of repo itself. Its
+// base is whatever that PR has.
 func (o *Ops) openPRFor(ctx context.Context, tok, repo, branch string) (PRResult, bool, error) {
 	owner := repo[:strings.IndexByte(repo, '/')]
 	q := url.Values{"state": {"open"}, "head": {owner + ":" + branch}, "per_page": {"10"}}
@@ -438,9 +426,8 @@ func (o *Ops) pull(ctx context.Context, tok, repo, number string) (ghPull, error
 	return p, nil
 }
 
-// checks reads the check runs (latest per name) and the commit statuses
-// (latest per context) on sha, one bounded page of each. complete is false
-// when GitHub has more than that page.
+// checks reads the latest check run per name and status per context on sha,
+// one bounded page each; complete is false when GitHub has more.
 func (o *Ops) checks(ctx context.Context, tok, repo, sha string) (cs []Check, combined string, total int, complete bool, err error) {
 	var runs ghCheckRuns
 	q := url.Values{"filter": {"latest"}, "per_page": {strconv.Itoa(maxCheckRuns)}}
@@ -468,7 +455,6 @@ func (o *Ops) checks(ctx context.Context, tok, repo, sha string) (cs []Check, co
 	return cs, sts.State, total, total == len(cs), nil
 }
 
-// PRStatus reports a PR's state, mergeability and the checks on its head.
 func (o *Ops) PRStatus(ctx context.Context, caller, repo, number string) (res PRStatusResult, err error) {
 	defer func() {
 		o.audit(OpPRStatus, err, "caller", caller, "repo", repo, "number", number)
@@ -499,10 +485,9 @@ func (o *Ops) PRStatus(ctx context.Context, caller, repo, number string) (res PR
 	return res, nil
 }
 
-// checkGate is pr_merge's check rule: every check on the head completed
-// with success, neutral or skipped (a status: success), the policy's names
-// are present and succeeded, and (unless the policy is None) at least one
-// check exists.
+// checkGate is pr_merge's check rule: every check on the head completed with
+// success, neutral or skipped, the policy's names succeeded, and (unless
+// None) at least one check exists.
 func checkGate(cs []Check, complete bool, pol CheckPolicy) error {
 	if !pol.set() {
 		return fmt.Errorf("no merge check policy configured (-merge-checks); refusing to merge")
@@ -539,8 +524,7 @@ func checkGate(cs []Check, complete bool, pol CheckPolicy) error {
 		}
 		return fmt.Errorf("checks on the head are not all green: %s; wait for them or fix the branch", strings.Join(bad, ", "))
 	}
-	// Skipped or neutral checks alone are not a check: at least one must
-	// have succeeded.
+	// Skipped or neutral checks alone are not a check.
 	if len(succeeded) == 0 && !pol.None {
 		return fmt.Errorf("no successful check on the head; refusing to merge unchecked code")
 	}
@@ -552,8 +536,8 @@ func checkGate(cs []Check, complete bool, pol CheckPolicy) error {
 	return nil
 }
 
-// checkLabel is a check's name as it may appear in an error: whoever can
-// create a check chooses its name.
+// checkLabel cleans a check name for an error: whoever can create a check
+// chooses its name.
 func checkLabel(name string) string {
 	name = strings.Map(dropControl, name)
 	if r := []rune(name); len(r) > 100 {
@@ -562,8 +546,6 @@ func checkLabel(name string) string {
 	return name
 }
 
-// reviews reads every review on PR number, oldest first, at most
-// maxReviewPages pages.
 func (o *Ops) reviews(ctx context.Context, tok, repo, number string) ([]ghReview, error) {
 	var all []ghReview
 	for page := 1; ; page++ {
@@ -585,7 +567,6 @@ func (o *Ops) reviews(ctx context.Context, tok, repo, number string) ([]ghReview
 	}
 }
 
-// isAppOrBot reports whether a review's author is a bot, or the App itself.
 func (o *Ops) isAppOrBot(u *ghUser) bool {
 	if u == nil || u.Type != "User" {
 		return true
@@ -599,11 +580,10 @@ func (o *Ops) isAppOrBot(u *ghUser) bool {
 
 // reviewGate is pr_merge's review rule. Per reviewer, the latest review that
 // approves, requests changes or was dismissed decides (a comment changes
-// nothing, as on GitHub). Any reviewer whose latest such review requests
-// changes blocks the merge. At least one reviewer who is a person (not a bot
-// and not the App) and the repository's owner, an organization member or a
-// collaborator, must have the latest such review an approval of exactly
-// head. It returns the approvers' logins.
+// nothing, as on GitHub). Any latest request for changes blocks. At least one
+// person (not a bot or the App) who is owner, member or collaborator must
+// have as latest such review an approval of exactly head. It returns the
+// approvers' logins.
 func (o *Ops) reviewGate(rs []ghReview, head string) ([]string, error) {
 	type decision struct {
 		r     ghReview
@@ -652,7 +632,7 @@ func (o *Ops) reviewGate(rs []ghReview, head string) ([]string, error) {
 }
 
 // PRMerge merges an open PR from a prefix branch of the same repository into
-// the default branch, once its checks passed and (unless AllowUnreviewed) a
+// the default branch once its checks passed and (unless AllowUnreviewed) a
 // person approved its head, pinned to the checked head SHA.
 func (o *Ops) PRMerge(ctx context.Context, caller, repo, number, method string) (res MergeResult, err error) {
 	defer func() {
@@ -740,8 +720,8 @@ func (o *Ops) PRMerge(ctx context.Context, caller, repo, number, method string) 
 		return res, fmt.Errorf("merge PR #%s: GitHub did not merge it", number)
 	}
 	res.OK, res.MergeSHA = true, out.SHA
-	// The base can change between the read and the merge (someone retargets
-	// the PR): read it back and say so.
+	// The base can change between read and merge (a retargeted PR): read it
+	// back and say so.
 	after, rerr := o.pull(ctx, tok, repo, number)
 	switch {
 	case rerr != nil:
@@ -767,10 +747,9 @@ func (o *Ops) lockRelease(ctx context.Context) (func(), error) {
 	}
 }
 
-// Release creates tag on the default branch's current head. It creates
-// only the tag: the repository's release workflow builds the GitHub release
-// from it. The tag must match ReleaseTag, not exist, and be greater than
-// every existing tag that matches.
+// Release creates tag on the default branch's current head; the repository's
+// release workflow builds the GitHub release from it. The tag must match
+// ReleaseTag, not exist, and be greater than every existing matching tag.
 func (o *Ops) Release(ctx context.Context, caller, repo, tag string) (res ReleaseResult, err error) {
 	defer func() {
 		o.audit(OpRelease, err, "caller", caller, "repo", repo, "tag", tag, "target", res.Target)
@@ -846,8 +825,8 @@ func (o *Ops) Release(ctx context.Context, caller, repo, tag string) (res Releas
 	}
 	res = ReleaseResult{Repo: repo, Tag: tag, Target: sha}
 	// The tag ref at the SHA just read: GitHub refuses (422) a tag that
-	// appeared since the check, and the tag lands on exactly that commit even
-	// if the branch moves.
+	// appeared since the check, and the tag lands on that commit even if the
+	// branch moves.
 	var created ghRef
 	if err := o.API.do(ctx, tok, http.MethodPost, "/repos/"+repo+"/git/refs",
 		map[string]string{"ref": "refs/tags/" + tag, "sha": sha}, &created); err != nil {

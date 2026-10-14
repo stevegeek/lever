@@ -1,8 +1,9 @@
 // Package egress generates the jail's network egress allowlist as iptables/
-// ip6tables OUTPUT-chain argv. Policy: ACCEPT allowlisted tool ports on the
-// host alias, DROP everything else TO the alias, DROP private/LAN ranges
-// explicitly (defence-in-depth beyond OrbStack routing), leave the public
-// internet open. Rule ORDER matters: allows precede drops.
+// ip6tables argv. Policy: ACCEPT allowlisted tool ports on the host alias,
+// DROP everything else to the alias, DROP private/LAN ranges explicitly
+// (defence in depth beyond backend routing), leave the public internet open
+// unless the closed posture is asked for. Rule order matters: allows precede
+// drops.
 package egress
 
 import (
@@ -13,9 +14,9 @@ import (
 )
 
 // Chain is the dedicated iptables chain lever's egress rules live in. OUTPUT
-// jumps to it; ApplyEgress replaces ONLY this chain, atomically (one
-// iptables-restore --noflush commit per family, see RestoreInput), so a
-// re-apply is idempotent (no rule accumulation) and never leaves it empty.
+// jumps to it; ApplyEgress replaces only this chain, atomically (one
+// iptables-restore --noflush commit per family), so a re-apply never
+// accumulates rules and never leaves it empty.
 const Chain = "LEVER_EGRESS"
 
 type Family int
@@ -36,79 +37,62 @@ var (
 	ipv6Local = []string{"fe80::/10", "fc00::/7"} // link-local + ULA (the host alias ULA is a /128 inside fc00::/7, so allow-before-drop ordering is essential)
 )
 
-// MetadataV4 is the cloud instance-metadata address (GCP, AWS, Azure). It
-// lies inside 169.254/16, which the chain drops, but it is the one address
-// in the chain that is REJECTed rather than dropped (lever#182): the scion
+// MetadataV4 is the cloud instance-metadata address. It lies inside
+// 169.254/16 but is the one address REJECTed rather than dropped: the scion
 // hub looks up a GCP project ID there at every start, and a dropped dial
-// costs it six 2 s timeouts (~13 s) before it serves, where an ICMP
-// host-prohibited reply (EHOSTUNREACH, which its client does not retry) ends
-// the lookup at once. A REJECT is still a refusal: nothing is delivered to
-// the address, and every other link-local address stays dropped.
+// costs it about 13 s of retried timeouts, while EHOSTUNREACH ends the
+// lookup at once. A REJECT still delivers nothing to the address, and every
+// other link-local address stays dropped.
 const MetadataV4 = "169.254.169.254"
 
-// metadataReject is the argv tail of the one REJECT rule, after "-A Chain".
 func metadataReject() []string {
 	return []string{"-d", MetadataV4 + "/32", "-j", "REJECT", "--reject-with", "icmp-host-prohibited"}
 }
 
-// rejectReplyAccept is the argv tail of the ACCEPT that lets the REJECT's
-// answer reach the dialling socket. The kernel sends that ICMP error from
-// and to the guest's own address, out through lo and through OUTPUT, so it
-// meets this chain too; on Lima the guest's address is in 192.168/16, whose
-// DROP would swallow it, and the dial would hang as if dropped. (The closed
-// posture's leading lo ACCEPT already covers it; the open posture has none.)
-// Only a host-prohibited error, only on lo — delivered inside the guest,
-// never leaving it — and only RELATED to a connection conntrack saw.
+// rejectReplyAccept lets the REJECT's ICMP answer reach the dialling socket.
+// The kernel sends it from and to the guest's own address through lo and
+// OUTPUT; on Lima that address is in 192.168/16, whose DROP would swallow it
+// and hang the dial. (The closed posture's lo ACCEPT already covers it.)
+// Only host-prohibited, only on lo (never leaving the guest), and only
+// RELATED to a connection conntrack saw.
 func rejectReplyAccept() []string {
 	return []string{"-o", "lo", "-p", "icmp", "--icmp-type", "host-prohibited", "-m", "conntrack", "--ctstate", "RELATED", "-j", "ACCEPT"}
 }
 
 // BuildRules returns ordered OUTPUT rules. aliasV4/aliasV6 are the resolved
-// host.orb.internal addresses; allowedPorts are host-loopback tool ports.
-// Assumes the OUTPUT chain default policy is ACCEPT: the public internet stays
-// open; only the host alias and the listed private/special-use ranges are dropped.
-// When closedInternet is true a catch-all OUTPUT DROP is appended AFTER all
-// per-port ACCEPTs, so the jail can reach ONLY the already-ACCEPTed destinations
-// (the broker port on the host alias). This is the api-key mode posture.
-// When closedInternet is false, behaviour matches the pre-existing open posture
-// (no catch-all DROP; public internet remains reachable) with two additions present
-// in BOTH postures: rule 1b, an alias-scoped ESTABLISHED ACCEPT that lets a
-// host-initiated control channel into the jail (e.g. Lima's SSH, seen by the guest
-// as the alias IP) answer through the alias DROP below, without granting the guest
-// any NEW outbound (see rule 1b's comment for why this doesn't widen containment);
-// and rule 2b, the metadata REJECT with the lo ACCEPT for its answer (MetadataV4).
-// allowedPorts is config.App.EffectiveAllowedPorts() on every config-driven
-// path (`lever apply`/`up`); the low-level `lever provision --allow-port`
-// takes its list straight from the flag, since it runs without a config at
-// all. In the config-driven case that set is: the
-// broker's jail port, the operator's manager.allow_ports, and — while remote
-// access is on — the local OIDC provider's host port, which the guest's login
-// forwarder dials. That last one surprises people: the forwarder is the only
-// jail→host consumer besides the broker, and this allowlist is the one place
-// that fact is enforced, so a missing grant shows up as a hung discovery fetch
-// rather than as anything mentioning firewalls.
+// host alias addresses; allowedPorts are host-loopback tool ports. It
+// assumes OUTPUT's default policy is ACCEPT.
+//
+// When closedInternet is true a catch-all DROP follows all per-port ACCEPTs,
+// so the jail reaches only the ACCEPTed destinations (the broker port on the
+// host alias): the api-key mode posture. Both postures carry rule 1b (an
+// alias-scoped ESTABLISHED ACCEPT for host-initiated control channels) and
+// rule 2b (the metadata REJECT, MetadataV4).
+//
+// On config-driven paths allowedPorts is config.App.EffectiveAllowedPorts():
+// the broker's jail port, manager.allow_ports, and, while remote access is
+// on, the local OIDC provider's port that the guest's login forwarder dials.
+// This allowlist is the one place that grant is enforced, so a missing one
+// shows up as a hung discovery fetch, not as anything mentioning firewalls.
 func BuildRules(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool) []Rule {
 	return BuildRulesDNS(aliasV4, aliasV6, allowedPorts, closedInternet, nil)
 }
 
 // DNSForward is one destination the guest's DNS traffic is rewritten to on
-// the host alias: a (proto, port) pair read from a backend's nat-table DNAT
-// (see ParseDNATTargets). It exists for Lima (lever#34): the guest resolver
-// address is DNATed in the nat table to <host alias>:<per-boot port> BEFORE
-// the filter OUTPUT chain sees the packet, so every lookup arrives in
-// LEVER_EGRESS as a NEW dial to the alias on a non-allowlisted port and hits
-// the alias DROP — no DNS in the guest or any agent container.
+// the host alias, read from a backend's nat-table DNAT (ParseDNATTargets).
+// On Lima the resolver address is DNATed to <host alias>:<per-boot port>
+// before the filter OUTPUT chain sees it, so without an ACCEPT every lookup
+// hits the alias DROP.
 type DNSForward struct {
 	Proto string // "udp" | "tcp"
 	Port  int
 }
 
 // ParseDNATTargets extracts the DNSForward targets from `iptables -t nat -S
-// <chain>` output whose --to-destination host is aliasV4: for Lima that is the
-// LIMADNS chain (`-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT
+// <chain>` output whose --to-destination host is aliasV4 (Lima's LIMADNS
+// chain: `-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT
 // --to-destination 192.168.5.2:41234`). Only tcp/udp DNAT rules to the alias
-// count; anything else (another host, no port, a non-DNAT rule) is skipped, so
-// the caller never ACCEPTs a port the resolver path does not actually use.
+// count, so the caller never ACCEPTs a port the resolver does not use.
 func ParseDNATTargets(out, aliasV4 string) []DNSForward {
 	var targets []DNSForward
 	for _, line := range strings.Split(out, "\n") {
@@ -146,10 +130,8 @@ func ParseDNATTargets(out, aliasV4 string) []DNSForward {
 
 // ParseResolverUpstreams returns udp and tcp port-53 DNSForward targets when
 // a resolv.conf listing (systemd-resolved's upstream file) names aliasV4 as a
-// nameserver. It covers a Lima guest whose resolver talks to the host alias
-// directly instead of through a LIMADNS DNAT (vmType vz, where LIMADNS is
-// empty and the upstream is <alias>:53): without it the alias DROP swallows
-// every lookup in the open posture. Anything else yields nothing.
+// nameserver: a Lima vz guest talks to <alias>:53 directly, with an empty
+// LIMADNS chain.
 func ParseResolverUpstreams(resolvConf, aliasV4 string) []DNSForward {
 	if aliasV4 == "" {
 		return nil
@@ -163,25 +145,18 @@ func ParseResolverUpstreams(resolvConf, aliasV4 string) []DNSForward {
 	return nil
 }
 
-// BuildRulesDNS is BuildRules plus, in the OPEN posture only, an ACCEPT to the
-// v4 alias for each DNS forward target, placed with the per-port allows (so
-// before the alias DROP). In the closed posture dns is ignored: DNS stays
-// dropped there by design (agents dial the broker by its resolved IP, see
-// security-model §2.2), and opening the resolver would widen containment.
-// With no targets the ruleset is identical to BuildRules.
+// BuildRulesDNS is BuildRules plus, in the open posture only, an ACCEPT to
+// the v4 alias for each DNS target, before the alias DROP. In the closed
+// posture dns is ignored: DNS stays dropped by design (agents dial the
+// broker by IP) and opening the resolver would widen containment.
 func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet bool, dns []DNSForward) []Rule {
 	ports := append([]int(nil), allowedPorts...)
 	sort.Ints(ports)
 	var rules []Rule
 
-	// 0) When closing the internet, ACCEPT loopback FIRST. The catch-all DROP
-	// below matches locally-generated packets to 127.0.0.1/::1 too, so without
-	// this every in-machine localhost service breaks — the scion hub on
-	// 127.0.0.1:8080 (its readiness check) and host-loopback tools. Only added in
-	// the closed posture; in the open posture the default-ACCEPT policy already
-	// permits loopback, so this rule is unnecessary there. (The open posture is
-	// not otherwise byte-identical to pre-existing: rules 1b and 2b below are
-	// emitted in both postures — see the BuildRules docstring.)
+	// 0) Closed posture: ACCEPT loopback first, or the catch-all DROP also
+	// breaks in-machine localhost services (the scion hub on 127.0.0.1:8080,
+	// host-loopback tools). The open posture's default ACCEPT covers it.
 	if closedInternet {
 		rules = append(rules,
 			Rule{IPv4, out("-o", "lo", "-j", "ACCEPT")},
@@ -189,7 +164,7 @@ func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet b
 		)
 	}
 
-	// 1) ACCEPT allowlisted ports to each alias family (BEFORE any drop).
+	// 1) ACCEPT allowlisted ports to each alias family, before any drop.
 	for _, p := range ports {
 		if aliasV4 != "" {
 			rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-p", "tcp", "--dport", strconv.Itoa(p), "-j", "ACCEPT")})
@@ -198,53 +173,42 @@ func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet b
 			rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-p", "tcp", "--dport", strconv.Itoa(p), "-j", "ACCEPT")})
 		}
 	}
-	// 1a) ACCEPT the guest resolver's DNAT targets on the alias (lever#34), open
-	// posture only. Same shape as the per-port allows above; nothing else in
-	// the chain changes, and the closed posture never emits these.
+	// 1a) Open posture only: ACCEPT the guest resolver's DNAT targets on the
+	// alias.
 	if !closedInternet && aliasV4 != "" {
 		for _, d := range dns {
 			rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-p", d.Proto, "--dport", strconv.Itoa(d.Port), "-j", "ACCEPT")})
 		}
 	}
-	// 1b) ACCEPT established replies TO THE HOST ALIAS, before the alias DROP
-	// below. On some backends lever's own control channel into the jail is a
-	// connection the HOST initiates to the guest — Lima drives the guest over SSH
-	// from the host, which the guest sees as the alias IP — and the guest's replies
-	// flow OUTPUT→alias, so the blanket alias DROP below would sever that channel.
-	// Accepting only ESTABLISHED traffic TO THE ALIAS lets the guest answer
-	// host-initiated connections WITHOUT letting it initiate any new outbound: a new
-	// connection is state NEW and still falls through to the per-port allow / DROP /
-	// catch-all, so the egress containment assertions are unchanged (a NEW dial to a
-	// non-allowlisted alias port, or to the internet under closed egress, is still
-	// dropped). Scoped to ESTABLISHED only, not RELATED: Lima's host→guest SSH reply
-	// traffic is a single ESTABLISHED TCP flow, and RELATED would additionally admit
-	// conntrack-helper-spawned expectations (the FTP/SIP ALG bypass class) that
-	// nothing here needs — least privilege, defence in depth. Scoped to the alias so
-	// it never broadens internet egress. Inert on backends whose transport isn't a
-	// host→guest connection (e.g. OrbStack's `orb`).
+	// 1b) ACCEPT ESTABLISHED traffic to the host alias, before the alias DROP.
+	// Some backends' control channel is a connection the host initiates (Lima's
+	// SSH, seen by the guest as the alias IP), and the guest's replies go
+	// OUTPUT to the alias. A new dial is state NEW and still meets the per-port
+	// allow / DROP / catch-all, so containment is unchanged. Not RELATED: that
+	// would also admit conntrack-helper expectations (the FTP/SIP ALG bypass
+	// class) that nothing needs. Scoped to the alias so it never broadens
+	// internet egress.
 	if aliasV4 != "" {
 		rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "ACCEPT")})
 	}
 	if aliasV6 != "" {
 		rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-m", "conntrack", "--ctstate", "ESTABLISHED", "-j", "ACCEPT")})
 	}
-	// 2) DROP everything else to the alias (closes non-allowlisted host loopback).
+	// 2) DROP everything else to the alias.
 	if aliasV4 != "" {
 		rules = append(rules, Rule{IPv4, out("-d", aliasV4, "-j", "DROP")})
 	}
 	if aliasV6 != "" {
 		rules = append(rules, Rule{IPv6, out("-d", aliasV6, "-j", "DROP")})
 	}
-	// 2b) REJECT the instance-metadata address, just before the 169.254/16
-	// DROP below that would otherwise swallow it (see MetadataV4). Both
-	// postures: in the closed one it also precedes the catch-all DROP. This
-	// is the only REJECT in the chain; it is a /32 and admits nothing. Its
-	// ICMP answer to the guest itself needs rejectReplyAccept, first.
+	// 2b) REJECT the metadata address just before the 169.254/16 DROP (see
+	// MetadataV4), in both postures. The only REJECT in the chain; a /32
+	// that admits nothing. Its ICMP answer needs rejectReplyAccept first.
 	rules = append(rules,
 		Rule{IPv4, out(rejectReplyAccept()...)},
 		Rule{IPv4, out(metadataReject()...)},
 	)
-	// 3) DROP private/LAN ranges explicitly (don't rely on OrbStack routing alone).
+	// 3) DROP private/LAN ranges explicitly; do not rely on backend routing.
 	for _, c := range privateV4 {
 		rules = append(rules, Rule{IPv4, out("-d", c, "-j", "DROP")})
 	}
@@ -252,10 +216,9 @@ func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet b
 		rules = append(rules, Rule{IPv6, out("-d", c, "-j", "DROP")})
 	}
 	if closedInternet {
-		// Final catch-all: drop everything not already ACCEPTed above (the broker
-		// port to the host alias). The jail can then reach ONLY the broker — LLM
-		// traffic must flow broker→Anthropic. Order matters: this follows the
-		// per-port ACCEPTs.
+		// Catch-all: the jail reaches only what was ACCEPTed above (the
+		// broker port), so LLM traffic must flow through the broker. It must
+		// follow the per-port ACCEPTs.
 		rules = append(rules,
 			Rule{IPv4, out("-j", "DROP")},
 			Rule{IPv6, out("-j", "DROP")},
@@ -266,7 +229,6 @@ func BuildRulesDNS(aliasV4, aliasV6 string, allowedPorts []int, closedInternet b
 
 func out(a ...string) []string { return append([]string{"-A", Chain}, a...) }
 
-// Binary returns the iptables binary name for a family.
 func (f Family) Binary() string {
 	if f == IPv6 {
 		return "ip6tables"
@@ -274,15 +236,13 @@ func (f Family) Binary() string {
 	return "iptables"
 }
 
-// RestoreBinary is the family's iptables-restore binary.
 func (f Family) RestoreBinary() string { return f.Binary() + "-restore" }
 
 // RestoreInput renders the rules of family f as `iptables-restore --noflush`
-// input that replaces Chain in one commit: the `:Chain` declaration empties an
-// existing user chain inside the same transaction, the rules are appended in
-// order, and COMMIT applies all of it or none. --noflush (the caller's flag)
-// leaves every other chain in the table alone. Rule args contain no
-// whitespace or quotes, so joining them with spaces is the exact line.
+// input that replaces Chain in one commit: the `:Chain` declaration empties
+// the chain inside the transaction and COMMIT applies all or nothing.
+// --noflush leaves every other chain alone. Rule args contain no whitespace
+// or quotes, so joining them with spaces is the exact line.
 func RestoreInput(rules []Rule, f Family) string {
 	var b strings.Builder
 	b.WriteString("*filter\n:" + Chain + " - [0:0]\n")
@@ -295,17 +255,15 @@ func RestoreInput(rules []Rule, f Family) string {
 	return b.String()
 }
 
-// Render is a debug helper: "iptables -A OUTPUT ...".
+// Render is a debug helper.
 func (r Rule) Render() string { return r.Family.Binary() + " " + strings.Join(r.Args, " ") }
 
 // DroppedForJail reports whether ip lies in a range the jail's egress rules
-// DROP in EVERY posture (the private/special-use ranges of rule 3 in
-// BuildRulesDNS; MetadataV4 inside 169.254/16 is REJECTed by rule 2b
-// instead, which refuses it just as surely), so no jailed process can open a connection to it, whatever
-// port it listens on. It is what makes a non-loopback host listener safe from
-// the jail: config.validateRemote accepts a non-loopback remote.bind only on
-// such an address. Loopback is NOT in the set — the jail reaches host
-// loopback through the host alias, which the alias rules govern per port.
+// refuse in every posture (the private ranges of rule 3; MetadataV4 is
+// REJECTed instead), so no jailed process can connect to it on any port.
+// config.validateRemote accepts a non-loopback remote.bind only on such an
+// address. Loopback is not in the set: the jail reaches host loopback
+// through the alias, governed per port.
 func DroppedForJail(ip net.IP) bool {
 	ranges := privateV4
 	if ip.To4() == nil {

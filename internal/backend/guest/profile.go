@@ -6,35 +6,22 @@ import (
 	"strings"
 )
 
-// The guest profile (config guest_profile, Lima only; lever#193).
+// The guest profile (config guest_profile, Lima only).
 //
-// "small" trims a Lima guest for a small host: it disables the Ubuntu cloud
-// image services a jail never uses, and adds zram swap.
-//
-//   - snapd (service, socket, seeding): nothing in the jail is a snap.
-//   - unattended-upgrades and the apt-daily timers: they wake on a timer,
-//     take the dpkg lock and compete with the first `lever up` for CPU,
-//     memory and the lock. The cost is that the guest no longer patches
-//     itself: the operator updates it (or recreates the VM) instead.
-//   - multipathd: the guest has one virtual disk.
-//   - ModemManager, when the image has it.
+// "small" disables the Ubuntu cloud image services a jail never uses and adds
+// zram swap. Disabling unattended-upgrades and the apt-daily timers means the
+// guest no longer patches itself: the operator updates or recreates it.
 //
 // Only units that exist and are enabled are disabled, and lever records
-// them in profileState, so "standard" (or unset) enables exactly those again
-// and removes the zram swap: switching back undoes the profile. A unit the
-// operator disabled themselves is never touched in either direction.
+// them, so "standard" enables exactly those again: a unit the operator
+// disabled themselves is never touched in either direction.
 //
-// zram swap is a compressed swap device in RAM, half the guest's memory,
-// zstd. It turns a short memory spike (Node, a test suite) into swapping
-// instead of the OOM killer taking the largest process, which is often an
-// agent. lever ships its own unit and helper rather than a package, so
-// nothing is installed with apt (a closed-egress guest has no mirrors). A
-// kernel without the zram module only warns.
+// The zram unit and helper are lever's own rather than a package, so nothing
+// is installed with apt (a closed-egress guest has no mirrors). A kernel
+// without the zram module only warns.
 //
-// Lima only: an OrbStack machine is one of many on OrbStack's shared
-// kernel and VM, which lever does not trim (config load refuses the key).
+// Lima only: an OrbStack machine shares OrbStack's kernel and VM.
 
-// Guest profiles (config guest_profile).
 const (
 	GuestProfileStandard = "standard"
 	GuestProfileSmall    = "small"
@@ -50,15 +37,12 @@ var TrimmedUnits = []string{
 	"ModemManager.service",
 }
 
-// ZramUnitName is the systemd unit of lever's zram swap.
 const ZramUnitName = "lever-zram-swap.service"
 
-// profilePaths are the guest paths the profile script writes; a test points
-// them into a temp dir (see crashPaths).
+// profilePaths is a test seam.
 type profilePaths struct {
 	// State lists, one per line, the units lever disabled.
-	State string
-	// ZramUnit and ZramHelper are the swap's systemd unit and its script.
+	State                string
 	ZramUnit, ZramHelper string
 	// ZramDev records the device the helper set up, for its stop.
 	ZramDev string
@@ -71,9 +55,6 @@ var realProfilePaths = profilePaths{
 	ZramDev:    "/run/lever-zram-swap.dev",
 }
 
-// zramHelper is the swap's start/stop script. Start loads the module, sizes
-// the device at half of MemTotal, prefers zstd (falling back to the kernel's
-// default algorithm) and gives it a higher priority than any disk swap.
 func zramHelper(p profilePaths) string {
 	return fmt.Sprintf(`#!/bin/sh
 # Written by lever (guest_profile: small, lever#193). Do not edit: lever apply rewrites it.
@@ -130,8 +111,7 @@ ExecStop=` + p.ZramHelper + ` stop
 WantedBy=swap.target`
 }
 
-// profileConvergeShell writes a file only when its content differs (exit 1
-// on a failed write; returns 0 when it wrote, 1 when it was current).
+// profileConvergeShell is convergeShell with a mode argument.
 const profileConvergeShell = `converge() {
   if [ -f "$1" ] && [ "$(cat "$1")" = "$2" ]; then return 1; fi
   mkdir -p "$(dirname "$1")" || exit 1
@@ -143,9 +123,9 @@ const profileConvergeShell = `converge() {
 unit_exists() { systemctl list-unit-files --no-legend --no-pager "$1" 2>/dev/null | grep -q .; }
 `
 
-// guestProfileScript is the root script EnsureGuestProfile runs. A failed
-// write of lever's own files exits 1; anything systemd refuses is a
-// warning, so the bring-up goes on with a guest that is merely less trim.
+// guestProfileScript: a failed write of lever's own files exits 1; anything
+// systemd refuses is a warning, so the bring-up goes on with a guest that is
+// merely less trim.
 func guestProfileScript(profile string, p profilePaths) string {
 	q := shellSingleQuote
 	var b strings.Builder
@@ -213,10 +193,8 @@ fi
 	return b.String()
 }
 
-// EnsureGuestProfile converges the guest on profile (GuestProfileSmall or
-// GuestProfileStandard) and reports what needs the operator. Idempotent; run
-// on every apply and up. Lima only: the caller gates it, and passes "" to
-// skip (no config, e.g. `lever provision`).
+// EnsureGuestProfile converges the guest on profile and reports what needs
+// the operator. Idempotent; "" skips. Lima only: the caller gates it.
 func (g Guest) EnsureGuestProfile(ctx context.Context, profile string) (GuestReport, error) {
 	switch profile {
 	case "":

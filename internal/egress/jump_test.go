@@ -38,15 +38,12 @@ func TestJumpRestoreInput(t *testing.T) {
 	}
 }
 
-// TestJumpRestoreAgainstRealIptables builds an OUTPUT that bypasses the
-// lever chain (an ACCEPT ahead of the jump, a second jump further down) in
-// a throwaway user and network namespace, applies JumpRestoreInput of its
-// real listing, and checks that the jump is then first and unique
-// (JumpFirst), the other rules kept in their order, and that a second
-// apply from the new listing would change nothing. It also checks that an
-// input built from a stale listing (one copy too many) is refused as a
-// whole, leaving OUTPUT as it was. Skips where unprivileged namespaces or
-// iptables are unavailable.
+// TestJumpRestoreAgainstRealIptables builds an OUTPUT that bypasses the lever
+// chain (an ACCEPT ahead of the jump, a second jump) in a throwaway user and
+// network namespace, and checks that JumpRestoreInput makes the jump first
+// and unique, keeps the other rules' order, is idempotent, and that input
+// from a stale listing is refused whole. Skips where unprivileged namespaces
+// or iptables are unavailable.
 func TestJumpRestoreAgainstRealIptables(t *testing.T) {
 	if _, err := exec.LookPath("unshare"); err != nil {
 		t.Skip("no unshare")

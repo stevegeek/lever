@@ -1,20 +1,11 @@
-// Package logging is the one log line shape of lever's long-running
-// processes: the broker, the remote proxy, the first-party tools, and
-// lever-agent's boot and sidecars in an agent container. Each writes slog
-// text lines,
+// Package logging is the log line shape of lever's long-running processes:
+// slog text lines with the time in UTC to the millisecond, a component
+// field, and credentials masked (Redact) in the message and every string
+// field. Install also routes the standard log package, and so net/http's
+// error lines, through the same handler.
 //
-//	time=2026-10-12T13:00:00.000Z level=INFO msg="..." component=broker key=value ...
-//
-// with the time in UTC to the millisecond, the component naming the
-// process, and credentials masked (Redact) in the message and in every
-// string field. Install also routes the standard library's log package —
-// and so net/http's own error lines — through the same handler, so a
-// daemon's file holds one shape however a line was written.
-//
-// Messages for a person at a terminal (`lever apply`, `lever doctor`, the
-// results of lever-manager and of lever-agent's one-shot verbs) are not log
-// lines and keep their prose form: "<component>: <message>",
-// "<component>: warning: <message>".
+// Messages for a person at a terminal are not log lines and keep their
+// prose form: "<component>: <message>", "<component>: warning: <message>".
 package logging
 
 import (
@@ -38,9 +29,8 @@ func New(w io.Writer, component string) *slog.Logger {
 
 var installed atomic.Bool
 
-// Install makes New(w, component) the process's default logger: slog's
-// and the standard log package's (whose flags and prefix are then unused).
-// Call it once, first thing, in a daemon's main.
+// Install makes New(w, component) the default logger of slog and of the
+// standard log package. Call it once, first thing, in a daemon's main.
 func Install(w io.Writer, component string) *slog.Logger {
 	l := New(w, component)
 	slog.SetDefault(l)
@@ -48,11 +38,10 @@ func Install(w io.Writer, component string) *slog.Logger {
 	return l
 }
 
-// Installed reports whether Install ran: the process is a daemon, and a
-// warning belongs in its log rather than on a terminal.
+// Installed reports whether Install ran, that is whether a warning belongs
+// in a daemon log rather than on a terminal.
 func Installed() bool { return installed.Load() }
 
-// replace formats the time and masks credentials in every string.
 func replace(groups []string, a slog.Attr) slog.Attr {
 	if len(groups) == 0 && a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
 		return slog.String(slog.TimeKey, a.Value.Time().UTC().Format(TimeFormat))
@@ -76,25 +65,17 @@ func replace(groups []string, a slog.Attr) slog.Attr {
 // a reader knows what was there. The rules match a credential's shape, not
 // a word like "token" in prose: "reading token /path failed" stays as it is.
 var (
-	// envValueRE: a container-runtime env argument (-e KEY=VALUE,
-	// --env=KEY=VALUE, ...): the key stays, the value goes.
+	// envValueRE keeps the key of a container-runtime -e/--env argument and
+	// masks the value.
 	envValueRE = regexp.MustCompile(`(^|\s)(-e|--env)([ =])([A-Za-z_][A-Za-z0-9_]*=)\S*`)
 	// anthropicRE: Claude Code OAuth tokens and API keys.
 	anthropicRE = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{8,}`)
-	// githubRE: GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_, github_pat_).
-	githubRE = regexp.MustCompile(`\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{16,}`)
+	githubRE    = regexp.MustCompile(`\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{16,}`)
 	// scionPATRE: the scion hub's personal access tokens.
-	scionPATRE = regexp.MustCompile(`\b(scion_pat_)[A-Za-z0-9_-]{8,}`)
-	// jwtRE: a JSON web token (three base64url parts, the first a JSON
-	// object's "{\"" prefix).
-	jwtRE = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.?[A-Za-z0-9_-]*`)
-	// authHeaderRE: an Authorization or *-Token header's value, with its
-	// scheme (Bearer, Basic) when it has one.
+	scionPATRE   = regexp.MustCompile(`\b(scion_pat_)[A-Za-z0-9_-]{8,}`)
+	jwtRE        = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.?[A-Za-z0-9_-]*`)
 	authHeaderRE = regexp.MustCompile(`(?i)\b(authorization|proxy-authorization|x-[a-z0-9-]*token)(\s*[:=]\s*)(bearer\s+|basic\s+)?\S+`)
-	// bearerRE: a bearer credential outside a header.
-	bearerRE = regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}`)
-	// secretFlagRE: a --*secret*, --*token* or --*password* flag's value,
-	// joined by = or by a space.
+	bearerRE     = regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{16,}`)
 	secretFlagRE = regexp.MustCompile(`(?i)(--?[a-z0-9-]*(secret|token|password)[a-z0-9-]*)(=|\s+)([^\s-]\S*)`)
 )
 
@@ -121,11 +102,10 @@ func Redact(s string) string {
 	})
 }
 
-// Writer returns an io.Writer that logs each line written to it through l:
-// for a daemon whose code also prints operator prose (cobra's Printf, the
-// shared warning helpers), so those lines take the daemon's shape too. A
-// line in the prose form "<component>: warning: <text>" is logged at WARN
-// as <text>, "<component>: error: <text>" at ERROR, anything else at INFO.
+// Writer returns an io.Writer that logs each line through l, so a daemon's
+// operator prose takes the log shape too. A "<component>: warning: <text>"
+// line is logged at WARN, "<component>: error: <text>" at ERROR, anything
+// else at INFO.
 func Writer(l *slog.Logger) io.Writer { return &lineWriter{l: l} }
 
 type lineWriter struct {
@@ -157,8 +137,6 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// proseLevelRE matches the prose form's prefix: "lever: warning: ",
-// "jail: error: ", "start-manager: warning: ".
 var proseLevelRE = regexp.MustCompile(`^([a-z][a-z0-9 -]{0,30}): (?i:(warning|error)): `)
 
 func logProse(l *slog.Logger, line string) {

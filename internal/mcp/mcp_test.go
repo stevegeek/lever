@@ -33,12 +33,8 @@ func TestStripCapabilityRemovesItFromArguments(t *testing.T) {
 	}
 }
 
-// --- Regression tests for FIX 1: canonical encoding of non-string args ---
-
-// TestToolsCallFieldsObjectArgCanonicallyEncoded verifies that a non-string argument
-// value (JSON object) is canonical-JSON-encoded, NOT coerced to "".
-// This FAILS on the pre-fix code (which returns "" for any non-string) and must
-// PASS after the fix.
+// TestToolsCallFieldsObjectArgCanonicallyEncoded: an object argument is
+// JSON-encoded, not coerced to "", so {"$ne":null} cannot match table="".
 func TestToolsCallFieldsObjectArgCanonicallyEncoded(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":{"$ne":null},"_capability":"TOK"}}}`)
 	_, msg, ok := Parse(body)
@@ -55,12 +51,10 @@ func TestToolsCallFieldsObjectArgCanonicallyEncoded(t *testing.T) {
 	if cap != "TOK" {
 		t.Fatalf("cap = %q, want %q", cap, "TOK")
 	}
-	// The object must be canonical-JSON-encoded, NOT the empty string.
 	got := args["table"]
 	if got == "" {
 		t.Fatal("SECURITY REGRESSION: non-string arg coerced to empty string (bypass still present)")
 	}
-	// Ensure it round-trips as the correct JSON value.
 	want := `{"$ne":null}`
 	if got != want {
 		t.Fatalf("args[\"table\"] = %q, want %q", got, want)
@@ -70,8 +64,8 @@ func TestToolsCallFieldsObjectArgCanonicallyEncoded(t *testing.T) {
 	}
 }
 
-// TestToolsCallFieldsNumberArgCanonicallyEncoded verifies that a numeric argument
-// is canonical-JSON-encoded (e.g. 10 → "10"), NOT coerced to "".
+// TestToolsCallFieldsNumberArgCanonicallyEncoded: a number is JSON-encoded,
+// not coerced to "".
 func TestToolsCallFieldsNumberArgCanonicallyEncoded(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"limit":10,"_capability":"TOK"}}}`)
 	_, msg, ok := Parse(body)
@@ -95,8 +89,8 @@ func TestToolsCallFieldsNumberArgCanonicallyEncoded(t *testing.T) {
 	}
 }
 
-// TestToolsCallFieldsStringArgPassesThroughRaw verifies that a plain string
-// argument is still returned as-is (unchanged by the canonical encoding path).
+// TestToolsCallFieldsStringArgPassesThroughRaw: strings are not JSON-encoded.
+
 func TestToolsCallFieldsStringArgPassesThroughRaw(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"TOK"}}}`)
 	_, msg, ok := Parse(body)

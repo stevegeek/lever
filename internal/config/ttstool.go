@@ -10,27 +10,22 @@ import (
 	"github.com/stevegeek/lever/internal/voice"
 )
 
-// ttsProgram is the base name of lever-tool-tts's program.
 const ttsProgram = "lever-tool-tts"
 
-// ttsToolFlags are lever-tool-tts's flags config load reads, only in the
-// command of a tool that runs lever-tool-tts (isTTSCommand).
+// ttsToolFlags are read only in a lever-tool-tts command.
 var ttsToolFlags = map[string]hostPathKind{
 	"server":       hostProgramOutside, // sherpa-onnx-offline-tts, run once per request
 	"models":       hostPrivate,        // the model directory, and the runs' output
 	"speak-socket": hostPrivate,        // the speech socket (remote.voice.speak_socket)
-	// Non-path flags (TTSTools): consumed with their values, never checked
-	// as paths.
-	"model":     hostUnchecked,
-	"voice":     hostUnchecked,
-	"speed":     hostUnchecked,
-	"threads":   hostUnchecked,
-	"max-chars": hostUnchecked,
+	"model":        hostUnchecked,
+	"voice":        hostUnchecked,
+	"speed":        hostUnchecked,
+	"threads":      hostUnchecked,
+	"max-chars":    hostUnchecked,
 }
 
-// isTTSCommand reports whether t runs lever-tool-tts: its program, after an
-// env(1) prefix, has that base name, or its command takes -speak-socket (a
-// renamed copy or wrapper keeps the checks).
+// isTTSCommand also matches a command that takes -speak-socket, so a renamed
+// copy or wrapper keeps the checks.
 func isTTSCommand(t Tool) bool {
 	if t.External || len(t.Command) == 0 {
 		return false
@@ -52,17 +47,15 @@ func isTTSCommand(t Tool) bool {
 }
 
 // TTSTool is what config load reads of a broker tool that runs
-// lever-tool-tts (isTTSCommand). Values are as written ("" when absent);
-// the tool checks its own flags again at start.
+// lever-tool-tts, as written. The tool checks its own flags again at start.
 type TTSTool struct {
-	Name   string
-	Tree   string // -tree
-	Server string // -server
-	Models string // -models
-	Model  string // -model ("" = voice.DefaultSpeechModel)
-	Voice  string // -voice ("" = the model's default)
-	Socket string // -speak-socket
-	// Speed, Threads and MaxChars are as written ("" = the tool's default).
+	Name                     string
+	Tree                     string // -tree
+	Server                   string // -server
+	Models                   string // -models
+	Model                    string // -model
+	Voice                    string // -voice
+	Socket                   string // -speak-socket
 	Speed, Threads, MaxChars string
 }
 
@@ -74,7 +67,7 @@ func (t TTSTool) EffectiveModel() string {
 	return t.Model
 }
 
-// TTSTools lists the broker tools that run lever-tool-tts, in config order.
+// TTSTools lists the broker tools that run lever-tool-tts.
 func (a *App) TTSTools() []TTSTool {
 	var out []TTSTool
 	for _, t := range a.Broker.Tools {
@@ -110,8 +103,7 @@ func (a *App) TTSTools() []TTSTool {
 }
 
 // SpeechTool is the tts tool whose -speak-socket is
-// remote.voice.speak_socket (read-aloud's tool), when read_aloud is server
-// and there is one.
+// remote.voice.speak_socket.
 func (a *App) SpeechTool() (TTSTool, bool) {
 	if a.EffectiveReadAloud() != ReadAloudServer {
 		return TTSTool{}, false
@@ -124,9 +116,8 @@ func (a *App) SpeechTool() (TTSTool, bool) {
 	return TTSTool{}, false
 }
 
-// validateTTSTools checks what config load can of each tts tool's command.
-// There is no port to check: the tool runs its engine once per request as
-// a child, and listens only on its socket and its MCP backend.
+// validateTTSTools has no port to check: the tool runs its engine once per
+// request as a child, and listens only on its socket and its MCP backend.
 func (a *App) validateTTSTools() error {
 	tools := a.TTSTools()
 	var dictate []string

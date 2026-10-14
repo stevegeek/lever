@@ -12,26 +12,19 @@ import (
 )
 
 // ErrNoContainer reports that podman knows no container by the given
-// reference: the record has no container at the moment (never started, or
-// removed), which is not an inspect failure.
+// reference, which is not an inspect failure.
 var ErrNoContainer = errors.New("no such container")
 
-// Mount is one mount of a jail container as podman inspect reports it: the
-// guest-side source, the in-container destination and whether it is
-// writable.
+// Mount is one mount of a jail container as podman inspect reports it.
 type Mount struct {
 	Source      string `json:"Source"`
 	Destination string `json:"Destination"`
 	RW          bool   `json:"RW"`
 }
 
-// ContainerMounts returns the mounts of the jail container named by ref — an
-// id or a name (podman inspect, through r). scion's listing carries neither
-// the mounts nor, on every pin, the id (89ed0fe8 reports an empty
-// containerId), so doctor falls back to scion's container name,
-// <project>--<agent>. Doctor uses this to tell a manager created before
-// manager.read_only named a path (no read-only mount there) from one that
-// holds it read-only.
+// ContainerMounts returns the mounts of the jail container named by ref, an
+// id or a name. scion's listing carries neither the mounts nor, on some
+// scion versions, the id, so callers may pass ContainerName.
 func ContainerMounts(ctx context.Context, r proc.Runner, ref string) ([]Mount, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return nil, fmt.Errorf("inspecting container mounts: invalid container reference %q", ref)
@@ -51,8 +44,7 @@ func ContainerMounts(ctx context.Context, r proc.Runner, ref string) ([]Mount, e
 }
 
 // ContainerMountTargets is ContainerMounts reduced to the in-container mount
-// points. Doctor uses it to tell a worker created before the guest ticket
-// channel (no /run/lever mount) from one that will boot.
+// points.
 func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]string, error) {
 	mounts, err := ContainerMounts(ctx, r, ref)
 	if err != nil {
@@ -66,11 +58,8 @@ func ContainerMountTargets(ctx context.Context, r proc.Runner, ref string) ([]st
 }
 
 // ContainerHasCharDevice reports whether path is a character device inside
-// the running jail container ref (podman exec --user 0 <ref> test -c <path>).
-// Used to tell a manager created before nested_virt (no /dev/kvm) from one
-// that has it. The agent controls what `test` is in its container, so the
-// call is bounded like every other exec into it, and only the exit code is
-// read.
+// the running jail container ref. The agent controls what `test` is in its
+// container, so the call is bounded and only the exit code is read.
 func ContainerHasCharDevice(ctx context.Context, r proc.Runner, ref, path string) (bool, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return false, fmt.Errorf("probing container device: invalid container reference %q", ref)
@@ -96,30 +85,25 @@ func ContainerHasCharDevice(ctx context.Context, r proc.Runner, ref, path string
 	return false, fmt.Errorf("probing container %s device %s: %w", ref, path, err)
 }
 
-// ContainerName is the name scion gives an agent's container: the hub
-// project name, two dashes, the agent slug (scion pkg/agent/run.go
-// containerName). project is the hub project key (the mount dest's base).
+// ContainerName is the name scion gives an agent's container (scion
+// pkg/agent/run.go containerName). project is the hub project key.
 func ContainerName(project, agent string) string {
 	return project + "--" + agent
 }
 
-// envKeyRE is the shape of an environment variable name ContainerEnvValue
-// will look up; it is interpolated into a guest-side grep pattern.
+// envKeyRE guards a name that is interpolated into a guest-side grep pattern.
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// containerEnvScript prints the one `KEY=value` line of a container's
-// creation env that names $2, or nothing. The filtering happens IN THE GUEST
-// on purpose: an agent container's env carries credentials, and none of it
-// but the requested line may cross back to the host (or into an error).
-// podman's own failure keeps its exit status and stderr, so a missing
-// container still reads as ErrNoContainer.
+// containerEnvScript filters in the guest on purpose: an agent container's
+// env carries credentials, and none of it but the requested line may cross
+// back to the host (or into an error). podman's failure keeps its exit status
+// and stderr, so a missing container still reads as ErrNoContainer.
 const containerEnvScript = `out=$(podman inspect --type container --format '{{range .Config.Env}}{{println .}}{{end}}' "$1") || exit $?
 printf '%s\n' "$out" | grep -E "^$2=" | head -n 1
 exit 0`
 
 // ContainerEnvValue reads one variable from the creation env of the jail
-// container named by ref (id or name). set is false when the container has no
-// such variable. Only that one variable ever leaves the guest.
+// container ref. Only that one variable ever leaves the guest.
 func ContainerEnvValue(ctx context.Context, r proc.Runner, ref, key string) (value string, set bool, err error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
 		return "", false, fmt.Errorf("inspecting container env: invalid container reference %q", ref)

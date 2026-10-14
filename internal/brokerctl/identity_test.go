@@ -9,9 +9,8 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// ConfigHash must be deterministic, sensitive to broker-relevant config
-// (tools, worker specs), and INSENSITIVE to config the broker does not bake
-// in at start (a manager-image change must not bounce the broker).
+// ConfigHash is deterministic, sensitive to broker-relevant config, and
+// insensitive to config the broker does not bake in at start.
 func TestConfigHash(t *testing.T) {
 	mk := func() *config.App {
 		return &config.App{
@@ -67,9 +66,8 @@ func TestConfigHash(t *testing.T) {
 	}
 }
 
-// A config that sets none of the claude keys hashes exactly as on 673beaa
-// (v0.33.1, before they existed), so upgrading lever does not restart the
-// broker for them. The golden value was computed on that commit.
+// A config that sets none of the claude keys keeps a golden hash, so
+// upgrading lever does not restart the broker for them.
 func TestConfigHashUnchangedWithoutClaudeKeys(t *testing.T) {
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: "/tmp/tree",
@@ -116,8 +114,8 @@ func TestConfigHashFollowsTheRemoteLogins(t *testing.T) {
 	}
 }
 
-// Off, the broker's stamp is the one it had before agent_messages existed:
-// an upgrade alone never bounces the broker.
+// Off, agent_messages leaves the broker's stamp unchanged: an upgrade alone
+// never bounces the broker.
 func TestConfigHashUnchangedWhileAgentMessagesOff(t *testing.T) {
 	app := &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Remote: config.Remote{Enabled: true,
 		AllowedUsers: []config.RemoteUser{{Login: "op@x"}, {Login: "c@x", Tier: config.TierContact, Agents: []string{"w1"}}}}}
@@ -166,31 +164,30 @@ func TestConfigHashFilesOnlyWhileOn(t *testing.T) {
 
 func TestRemoteConfigHashFilesOnlyWhileOn(t *testing.T) {
 	app := remoteTestApp(t)
-	off := RemoteConfigHash(app)
+	off := RemoteConfigHash(app, state.State{})
 	app.Remote.Files.MaxBytes = 5 << 20
-	if RemoteConfigHash(app) != off {
+	if RemoteConfigHash(app, state.State{}) != off {
 		t.Fatal("files settings while off changed the proxy hash")
 	}
 	app.Remote.Files.Enabled = true
-	if RemoteConfigHash(app) == off {
+	if RemoteConfigHash(app, state.State{}) == off {
 		t.Fatal("turning files on must restart the proxy")
 	}
 }
 
-// Off, the proxy's stamp is the one it had before remote.files existed.
+// Off, remote.files leaves the proxy's stamp unchanged.
 func TestRemoteConfigHashUnchangedWhileFilesOff(t *testing.T) {
 	app := remoteTestApp(t)
 	id := state.RemoteIdentity{Enabled: true, Port: 8445, BaseURL: "https://h.ts.net", AllowedUsers: remoteUserKeys(app.Remote.AllowedUsers),
 		IdentityHeader: app.EffectiveRemoteIdentityHeader(), Bind: app.EffectiveRemoteBind(), Landing: app.EffectiveRemoteLanding(),
 		Name: "boss", Workers: []string{"w1", "w2"}, Tree: "/t"}
-	if RemoteConfigHash(app) != state.RemoteConfigHash(id) {
+	if RemoteConfigHash(app, state.State{}) != state.RemoteConfigHash(id) {
 		t.Fatal("off must keep the pre-change proxy hash")
 	}
 }
 
-// The per-direction and per-login switches change both stamps only when
-// set to their non-default value: an instance with files on and neither
-// key keeps the stamps it had.
+// The per-direction and per-login switches change the stamps only when set
+// to their non-default value.
 func TestFilesSwitchesInTheStamps(t *testing.T) {
 	app := remoteTestApp(t)
 	app.Remote.Files.Enabled = true
@@ -216,31 +213,31 @@ func TestFilesSwitchesInTheStamps(t *testing.T) {
 	if ConfigHash(app) != oldBroker {
 		t.Fatal("defaults changed the broker stamp")
 	}
-	b0, p0 := ConfigHash(app), RemoteConfigHash(app)
+	b0, p0 := ConfigHash(app), RemoteConfigHash(app, state.State{})
 	yes, no := true, false
 	app.Remote.Files.Uploads, app.Remote.Files.Shares = &yes, &yes
 	app.Remote.AllowedUsers[1].Files = &yes
-	if ConfigHash(app) != b0 || RemoteConfigHash(app) != p0 {
+	if ConfigHash(app) != b0 || RemoteConfigHash(app, state.State{}) != p0 {
 		t.Fatal("explicit defaults changed a stamp")
 	}
 	app.Remote.Files.Uploads = &no
-	if ConfigHash(app) != b0 || RemoteConfigHash(app) == p0 {
+	if ConfigHash(app) != b0 || RemoteConfigHash(app, state.State{}) == p0 {
 		t.Fatal("uploads off: the proxy restarts, the broker does not act on it")
 	}
 	app.Remote.Files.Uploads = &yes
 	app.Remote.Files.Shares = &no
-	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+	if ConfigHash(app) == b0 || RemoteConfigHash(app, state.State{}) == p0 {
 		t.Fatal("shares off must restart both")
 	}
 	app.Remote.Files.Shares = &yes
 	app.Remote.AllowedUsers[1].Files = &no
-	if ConfigHash(app) == b0 || RemoteConfigHash(app) == p0 {
+	if ConfigHash(app) == b0 || RemoteConfigHash(app, state.State{}) == p0 {
 		t.Fatal("a login with files: false must restart both")
 	}
 	app.Remote.Files.Enabled = false
-	off := RemoteConfigHash(app)
+	off := RemoteConfigHash(app, state.State{})
 	app.Remote.AllowedUsers[1].Files = nil
-	if RemoteConfigHash(app) != off {
+	if RemoteConfigHash(app, state.State{}) != off {
 		t.Fatal("files off: the login switch is ignored")
 	}
 }
@@ -250,16 +247,16 @@ func TestFilesSwitchesInTheStamps(t *testing.T) {
 // is in either stamp.
 func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 	app := remoteTestApp(t)
-	b0, off := ConfigHash(app), RemoteConfigHash(app)
+	b0, off := ConfigHash(app), RemoteConfigHash(app, state.State{})
 	app.Remote.Voice = config.Voice{Socket: "/run/lever/whisper.sock", MaxSeconds: 60}
 	no := false
 	app.Remote.AllowedUsers[1].Voice = &no
-	if RemoteConfigHash(app) != off || ConfigHash(app) != b0 {
+	if RemoteConfigHash(app, state.State{}) != off || ConfigHash(app) != b0 {
 		t.Fatal("voice settings while off changed a stamp")
 	}
 	app.Remote.AllowedUsers[1].Voice = nil
 	app.Remote.Voice.Enabled = true
-	on := RemoteConfigHash(app)
+	on := RemoteConfigHash(app, state.State{})
 	if on == off {
 		t.Fatal("turning voice on must restart the proxy")
 	}
@@ -278,7 +275,7 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 		c := *app
 		c.Remote.AllowedUsers = slices.Clone(app.Remote.AllowedUsers)
 		mut(&c)
-		if RemoteConfigHash(&c) == on {
+		if RemoteConfigHash(&c, state.State{}) == on {
 			t.Errorf("%s: no proxy restart", name)
 		}
 	}
@@ -290,15 +287,14 @@ func TestRemoteConfigHashVoiceOnlyWhileOn(t *testing.T) {
 	} {
 		c := *app
 		mut(&c)
-		if RemoteConfigHash(&c) != on {
+		if RemoteConfigHash(&c, state.State{}) != on {
 			t.Errorf("%s: the stamp changed", name)
 		}
 	}
 }
 
-// shared_folders and manager.read_only feed the broker's worker specs,
-// shared mounts and guard plan, so changing either must restart it; an
-// instance that sets neither keeps the hash it had (the golden above).
+// shared_folders and manager.read_only must restart the broker when
+// changed; an instance that sets neither keeps the golden hash.
 func TestConfigHashCoversSharedFoldersAndReadOnly(t *testing.T) {
 	mk := func() *config.App {
 		return &config.App{
@@ -333,7 +329,7 @@ func TestConfigHashCoversSharedFoldersAndReadOnly(t *testing.T) {
 		t.Fatal("changing a read_only entry must change the hash")
 	}
 
-	// Neither set: the hash is the one from before either was hashed.
+	// Neither set: the golden hash.
 	plain := mk()
 	plain.SharedFolders = nil
 	plain.Manager.ReadOnly = []string{} // empty, not nil: still omitted

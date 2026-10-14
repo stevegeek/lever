@@ -24,12 +24,9 @@ import (
 )
 
 func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
-	// lever-agent sits on $PATH inside every agent jail, so `delegate` here is
-	// the same mint path the capability MCP tool exposes — and it had the same
-	// defect: an absent -to sent an empty bind target, which the broker defaults
-	// to the caller, printing a SELF-bound token as a success. The checks must
-	// also run BEFORE the identity load, so a bad invocation reports the bad
-	// argument rather than whatever unrelated thing fails first.
+	// An absent -to would make the broker bind the token to the caller and
+	// print it as a success. The checks must run before the identity load, so a
+	// bad invocation reports the bad argument.
 	missingID := filepath.Join(t.TempDir(), "no-such-id-dir")
 	for _, tc := range []struct {
 		name, verb, want string
@@ -37,8 +34,7 @@ func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
 	}{
 		{"delegate without -to", "delegate", `"-to"`, []string{"-tool", "db", "-op", "read"}},
 		{"delegate blank -to", "delegate", `"-to"`, []string{"-tool", "db", "-op", "read", "-to", "  "}},
-		// A positional `to=worker` is swallowed as a CONSTRAINT while -to stays
-		// empty — the CLI shape of the misspelt-argument bug.
+		// A positional `to=worker` is a constraint while -to stays empty.
 		{"delegate with positional to=", "delegate", `"-to"`, []string{"-tool", "db", "-op", "read", "to=worker"}},
 		{"delegate without -tool", "delegate", `"-tool"`, []string{"-op", "read", "-to", "worker"}},
 		{"request without -tool", "request", `"-tool"`, []string{"-op", "read"}},
@@ -77,8 +73,6 @@ func TestRunRequiresSubcommand(t *testing.T) {
 	}
 }
 
-// TestRenewOnceNoIdentityErrors verifies that renewOnce returns an error (not a
-// panic or hang) when no identity exists in the directory.
 func TestRenewOnceNoIdentityErrors(t *testing.T) {
 	tmp := t.TempDir()
 	err := renewOnce(context.Background(), renewOpts{idDir: tmp})
@@ -90,8 +84,6 @@ func TestRenewOnceNoIdentityErrors(t *testing.T) {
 	}
 }
 
-// TestRenewNonLoopReturnsErrorImmediately verifies that run with renew (no
-// --loop) returns immediately with an error for an empty id-dir (no hang).
 func TestRenewNonLoopReturnsErrorImmediately(t *testing.T) {
 	tmp := t.TempDir()
 	err := run([]string{"lever-agent", "renew", "--id-dir", tmp})
@@ -103,31 +95,25 @@ func TestRenewNonLoopReturnsErrorImmediately(t *testing.T) {
 	}
 }
 
-// TestRenewLoopFlagsAcceptedByRealCmd exercises the REAL dispatch path through
-// run() to prove that cmdRenew accepts --loop and --interval without a
-// "flag provided but not defined" parse error. Loop mode only exits on
-// SIGINT/SIGTERM, so we send SIGINT to ourselves after a brief delay to unblock
-// it. The test asserts that any returned error is NOT a flag-parse error (an
-// "no identity" or nil return both indicate the flags were accepted).
+// TestRenewLoopFlagsAcceptedByRealCmd: cmdRenew accepts --loop and
+// --interval through the real dispatch. Loop mode exits only on a signal, so
+// the test sends itself SIGINT.
 func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 	tmp := t.TempDir()
 
-	// Send SIGINT to ourselves after 50ms to unblock the loop.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
 	}()
 
 	err := run([]string{"lever-agent", "renew", "--id-dir", tmp, "--loop", "--interval", "24h"})
-	// Loop mode exits cleanly (nil) on signal. Either way, the error must NOT be
-	// a flag-parse error — that would mean cmdRenew doesn't define --loop/--interval.
 	if isFlagParseError(err) {
 		t.Fatalf("real cmdRenew rejected --loop/--interval (manifest sidecar would break): %v", err)
 	}
 }
 
-// captureStdout redirects os.Stdout for the duration of fn and returns whatever
-// fn printed. Small outputs only (the pipe buffer is not drained concurrently).
+// captureStdout returns what fn printed. Small outputs only: the pipe is not
+// drained concurrently.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -146,9 +132,8 @@ func captureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-// callVerbWorkerID writes a loadable worker identity (a CA-signed leaf) to a
-// temp dir and returns it. The `call` verb only needs id.Client() to build its
-// mTLS client; the server it dials is a plain-HTTP stub.
+// callVerbWorkerID writes a loadable worker identity to a temp dir. The
+// `call` verb only needs id.Client(); the server it dials is plain HTTP.
 func callVerbWorkerID(t *testing.T) string {
 	t.Helper()
 	caInst, err := ca.Generate()
@@ -171,12 +156,10 @@ func callVerbWorkerID(t *testing.T) string {
 	return idDir
 }
 
-// TestCallVerbSemantics pins the wire + I/O contract of the `call` verb, whose
-// only prior coverage was the live acceptance harness (not run by `go test`):
-// it POSTs a JSON-RPC tools/call to /mcp/<tool>/ with Content-Type
-// application/json, the token in arguments._capability, prints the raw response
-// body to stdout EVEN on a non-200, and surfaces a non-200 as an error carrying
-// the status.
+// TestCallVerbSemantics pins the `call` verb's contract: it POSTs a JSON-RPC
+// tools/call to /mcp/<tool>/ with the token in arguments._capability, prints
+// the raw body to stdout even on a non-200, and returns a non-200 as an
+// error carrying the status.
 func TestCallVerbSemantics(t *testing.T) {
 	idDir := callVerbWorkerID(t)
 
@@ -190,8 +173,7 @@ func TestCallVerbSemantics(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotPath, gotCT, gotBody string
-			// Plain-HTTP stub: id.Client's mTLS transport dials http:// fine
-			// (its TLS config is inert for a non-TLS scheme).
+			// id.Client's TLS config is inert for an http:// URL.
 			stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotPath = r.URL.Path
 				gotCT = r.Header.Get("Content-Type")
@@ -227,7 +209,6 @@ func TestCallVerbSemantics(t *testing.T) {
 			if !strings.Contains(gotBody, `"table":"users"`) {
 				t.Errorf("request body missing constraint arg: %s", gotBody)
 			}
-			// Body is printed to stdout regardless of status.
 			if !strings.Contains(out, tc.body) {
 				t.Errorf("stdout = %q, want it to contain response body %q", out, tc.body)
 			}
@@ -242,19 +223,16 @@ func TestCallVerbSemantics(t *testing.T) {
 	}
 }
 
-// TestMCPAddArgsUsesUserScope pins the fix for the worker/manager MCP-wiring gap:
-// the pre-start hook runs `claude mcp add` from the agent home, but the claude
-// session runs in /workspace. `claude mcp add`'s default (local) scope is
-// keyed by CWD, so servers registered from the home are invisible to the
-// session. --scope user makes them global (CWD-independent) — required for both
-// the http broker tools and the stdio capability server.
+// TestMCPAddArgsUsesUserScope: the pre-start hook runs `claude mcp add` from
+// the agent home, but the session runs in /workspace and the default local
+// scope is keyed by cwd, so both the broker tools and the stdio capability
+// server must be user-scoped.
 func TestMCPAddArgsUsesUserScope(t *testing.T) {
 	got := mcpAddArgs("db", []string{"--transport", "http", "https://broker/mcp/db/"})
 	want := []string{"mcp", "add", "--scope", "user", "db", "--transport", "http", "https://broker/mcp/db/"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("http tool args = %v, want %v", got, want)
 	}
-	// The stdio capability server must also be user-scoped.
 	cap := mcpAddArgs("lever-capability", []string{"lever-agent", "serve-capability"})
 	if strings.Join(cap[:4], " ") != "mcp add --scope user" {
 		t.Fatalf("capability server args must lead with `mcp add --scope user`, got %v", cap)
@@ -264,7 +242,6 @@ func TestMCPAddArgsUsesUserScope(t *testing.T) {
 	}
 }
 
-// TestMCPRemoveArgsUserScope pins the remove targets the same user scope as add.
 func TestMCPRemoveArgsUserScope(t *testing.T) {
 	got := mcpRemoveArgs("db")
 	want := []string{"mcp", "remove", "--scope", "user", "db"}
@@ -273,9 +250,9 @@ func TestMCPRemoveArgsUserScope(t *testing.T) {
 	}
 }
 
-// TestClaudeMCPAddIsIdempotent verifies claudeMCP.Add removes before adding and
-// ignores a failing remove (absent server), so a re-boot (scion resume) can't
-// fail the pre-start hook on "already exists".
+// TestClaudeMCPAddIsIdempotent: Add removes before adding and ignores a
+// failing remove, so a scion resume cannot fail the pre-start hook on
+// "already exists".
 func TestClaudeMCPAddIsIdempotent(t *testing.T) {
 	var calls [][]string
 	c := claudeMCP{run: func(name string, args ...string) ([]byte, error) {
@@ -294,7 +271,6 @@ func TestClaudeMCPAddIsIdempotent(t *testing.T) {
 	if calls[0][2] != "remove" || calls[1][2] != "add" {
 		t.Fatalf("must remove before add; got %v then %v", calls[0], calls[1])
 	}
-	// remove: [claude mcp remove --scope user db]; add: [claude mcp add --scope user db --transport …]
 	if calls[0][5] != "db" || calls[1][5] != "db" {
 		t.Fatalf("both must target the same server name; got %v / %v", calls[0], calls[1])
 	}
@@ -313,9 +289,9 @@ func TestClaudeMCPAddSurfacesAddError(t *testing.T) {
 	}
 }
 
-// TestToolsFlagDistinguishesOmittedFromEmpty pins the -tools contract: omitted
-// means auto-discover (set=false); "-tools ”" is an explicit empty list
-// (set=true, no tools); a CSV is trimmed and blanks dropped.
+// TestToolsFlagDistinguishesOmittedFromEmpty: omitted means auto-discover;
+// an explicit empty value is an empty list; a CSV is trimmed and blanks
+// dropped.
 func TestToolsFlagDistinguishesOmittedFromEmpty(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -339,11 +315,8 @@ func TestToolsFlagDistinguishesOmittedFromEmpty(t *testing.T) {
 	}
 }
 
-// TestCommonFlagsDefinesTrio pins the id-dir/broker-url/bootstrap trio that
-// commonFlags registers for the five lazy-resolving subcommands: flag names, the
-// per-command-configurable help strings, and the defaults (id-dir →
-// $HOME/.lever-id, the other two empty). D3 collapses five hand-rolled copies
-// onto this one helper, so this is the guard for that single source of truth.
+// TestCommonFlagsDefinesTrio pins the flag names, help strings and defaults
+// commonFlags registers.
 func TestCommonFlagsDefinesTrio(t *testing.T) {
 	fs := flag.NewFlagSet("x", flag.ContinueOnError)
 	idDir, brokerURL, bootstrap := commonFlags(fs, "id help", "bootstrap help")
@@ -377,12 +350,9 @@ func TestCommonFlagsDefinesTrio(t *testing.T) {
 	}
 }
 
-// TestResolveBrokerURLFallbackChain pins the three-step resolution order of
-// resolveBrokerURL: an explicit --broker-url wins outright without touching any
-// file; otherwise the broker URL is read from a bootstrap file located by
-// --bootstrap, then $LEVER_BOOTSTRAP, then ./.lever/bootstrap.json. D3 folds the
-// path-resolution half into bootstrapPathOrDefault, so this guards the merge —
-// neither resolveBrokerURL nor bootstrapPathOrDefault had a test before.
+// TestResolveBrokerURLFallbackChain: an explicit --broker-url wins without
+// touching any file; otherwise the URL is read from the bootstrap file found
+// by --bootstrap, then $LEVER_BOOTSTRAP, then ./.lever/bootstrap.json.
 func TestResolveBrokerURLFallbackChain(t *testing.T) {
 	writeBootstrap := func(t *testing.T, dir, url string) string {
 		t.Helper()
@@ -398,8 +368,7 @@ func TestResolveBrokerURLFallbackChain(t *testing.T) {
 	}
 
 	t.Run("explicit broker-url wins without reading any file", func(t *testing.T) {
-		// $LEVER_BOOTSTRAP points at a nonexistent file; if it were consulted the
-		// call would error. It must not be — the explicit flag short-circuits.
+		// A nonexistent $LEVER_BOOTSTRAP would error if it were consulted.
 		t.Setenv("LEVER_BOOTSTRAP", filepath.Join(t.TempDir(), "does-not-exist.json"))
 		got, err := resolveBrokerURL("https://explicit.example", "")
 		if err != nil {
@@ -411,7 +380,6 @@ func TestResolveBrokerURLFallbackChain(t *testing.T) {
 	})
 
 	t.Run("bootstrap flag path is read when broker-url is empty", func(t *testing.T) {
-		// env points elsewhere; the explicit --bootstrap path must take precedence.
 		t.Setenv("LEVER_BOOTSTRAP", filepath.Join(t.TempDir(), "wrong.json"))
 		p := writeBootstrap(t, t.TempDir(), "https://from-flag.example")
 		got, err := resolveBrokerURL("", p)
@@ -460,8 +428,7 @@ func TestResolveBrokerURLFallbackChain(t *testing.T) {
 	})
 }
 
-// TestGatewayVerbStopsOnContextCancel pins that the gateway verb is wired to
-// the signal-bound ctx run installs (R1): with the ctx already cancelled the
+// TestGatewayVerbStopsOnContextCancel: with ctx already cancelled the gateway
 // verb returns nil promptly instead of serving until SIGKILL.
 func TestGatewayVerbStopsOnContextCancel(t *testing.T) {
 	idDir := callVerbWorkerID(t)

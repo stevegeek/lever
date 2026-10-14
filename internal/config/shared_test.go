@@ -246,7 +246,7 @@ func TestSharedFolderLabelsFile(t *testing.T) {
 }
 
 // readers: ["*"] loads; an unquoted * is YAML alias syntax and fails to
-// parse, which the docs warn about.
+// parse.
 func TestSharedFoldersStarFromYAML(t *testing.T) {
 	head := "name: demo\nbackend: orbstack\ntree: ws\nworkers:\n  - name: alpha\n    dir: workers/w\nshared_folders:\n  - path: pub\n"
 	if _, err := LoadNoHostChecks(writeConfig(t, head+"    readers: [\"*\"]\n")); err != nil {

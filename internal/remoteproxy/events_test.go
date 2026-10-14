@@ -21,13 +21,23 @@ func reduce(t *testing.T, in string) string {
 	return string(out)
 }
 
-// reducedDM is dmEvent as a contact gets it.
 const reducedDM = "id: 7\nevent: update\ndata: {\"data\":{},\"subject\":\"user.u-contact.chat.dm\"}\n\n"
 
 func TestEventReducerKeepsOnlyTheSubject(t *testing.T) {
 	got := reduce(t, ":heartbeat 1700000000000\n\n"+dmEvent+"event: reconnect\ndata: {}\n\n")
 	if want := ":heartbeat 1700000000000\n\n" + reducedDM + "event: reconnect\ndata: {}\n\n"; got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+func TestEventReducerPassesTheNamedHeartbeat(t *testing.T) {
+	got := reduce(t, "event: heartbeat\ndata: 1700000000000\n\n"+dmEvent)
+	if want := "event: heartbeat\ndata: 1700000000000\n\n" + reducedDM; got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	// An id would move the page's Last-Event-ID: not the hub's heartbeat.
+	if got := reduce(t, "id: 9\nevent: heartbeat\ndata: 1\n\n"); got != "" {
+		t.Fatalf("a heartbeat with an id: %q", got)
 	}
 }
 
@@ -45,6 +55,10 @@ func TestEventReducerDropsWhatItCannotRead(t *testing.T) {
 		"oversized line":   big,
 		"oversized sum":    many,
 		"crlf":             "event: update\r\ndata: {\"subject\":\"user.u-contact.chat.dm\",\"data\":{\"msg\":\"SECRET\"}}\r\n\r\n",
+		"heartbeat text":   "event: heartbeat\ndata: SECRET\n\n",
+		"heartbeat json":   "event: heartbeat\ndata: {\"msg\":\"SECRET\"}\n\n",
+		"heartbeat words":  "event: heartbeat\ndata: 1 SECRET\n\n",
+		"heartbeat 2 data": "event: heartbeat\ndata: 1\ndata: SECRET\n\n",
 	} {
 		if got := reduce(t, in+dmEvent); strings.Contains(got, "SECRET") || !strings.HasSuffix(got, reducedDM) {
 			t.Errorf("%s: %q", name, got[:min(len(got), 300)])

@@ -20,8 +20,6 @@ import (
 	"testing"
 )
 
-// historyHub answers the contact's DM history with rows from the agent
-// (recorded and not), the contact and a hub line.
 func historyHub(t *testing.T, body string, header map[string]string) *contactHub {
 	h := &contactHub{}
 	h.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,13 +90,12 @@ func TestHistoryFilterKeepsOnlyRecordedAgentRows(t *testing.T) {
 	if strings.Contains(body, `"a3"`) || strings.Contains(body, "replyPreviews") {
 		t.Fatalf("an agent state line or a reply preview leaked: %s", body)
 	}
-	// Only agent rows are asked about (never the contact's own or a hub line).
+	// Never the contact's own rows or a hub line.
 	for _, m := range asked {
 		if m.ID == "c1" || m.ID == "s1" {
 			t.Errorf("asked the broker about %s", m.ID)
 		}
 	}
-	// The operator sees the hub's answer unchanged.
 	op := contactDo(h, "op@x", "GET", dmPath(agentW1, contactUID, "/messages"), "")
 	if !strings.Contains(op.Body.String(), "SECRET unrecorded") || !strings.Contains(op.Body.String(), "replyPreviews") {
 		t.Fatal("the operator's view must be unfiltered")
@@ -163,7 +160,7 @@ func TestHistoryFilterOffIsUnchanged(t *testing.T) {
 }
 
 // The broker's answer is checked against the question: an id it was not
-// asked about (a deleted row, a row with no readable time) stays hidden.
+// asked about stays hidden.
 func TestHistoryFilterKeepsOnlyAskedIDs(t *testing.T) {
 	body := `{"messages":[
  {"id":"d1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"","createdAt":"2026-10-06T10:00:00Z"},
@@ -186,8 +183,8 @@ func TestHistoryFilterKeepsOnlyAskedIDs(t *testing.T) {
 	}
 }
 
-// A row id that appears twice on a page hides every row with it: the
-// broker binds by id, so a second row could borrow the first one's record.
+// A repeated row id hides every row with it: the broker binds by id, so a
+// second row could borrow the first one's record.
 func TestHistoryFilterHidesDuplicateIDs(t *testing.T) {
 	body := `{"messages":[
  {"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:00Z"},
@@ -275,7 +272,7 @@ func TestAgentRow(t *testing.T) {
 	}
 }
 
-// gzipped is s gzip-compressed: a body the hub sent encoded without saying so.
+// gzipped: a body the hub sent encoded without saying so.
 func gzipped(s string) string {
 	var b bytes.Buffer
 	z := gzip.NewWriter(&b)
@@ -284,8 +281,6 @@ func gzipped(s string) string {
 	return b.String()
 }
 
-// A kept row's extension keeps replyToId only when it names a row the
-// contact is shown on this page.
 func TestHistoryFilterDropsAReplyToAHiddenRow(t *testing.T) {
 	body := `{"messages":[
  {"id":"a1","sender":"agent:w1","senderId":"id-w1","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:00Z"},
@@ -305,8 +300,7 @@ func TestHistoryFilterDropsAReplyToAHiddenRow(t *testing.T) {
 	}
 }
 
-// Only the DM agent's own rows are asked about: a row from another sender
-// with the agent's recorded text stays hidden.
+// A row from another sender with the agent's recorded text stays hidden.
 func TestHistoryFilterAsksOnlyAboutTheAgentsRows(t *testing.T) {
 	body := `{"messages":[
  {"id":"x1","sender":"agent:w2","senderId":"id-w2","type":"instruction","msg":"recorded","createdAt":"2026-10-06T10:00:00Z"},
@@ -341,10 +335,8 @@ func TestContactShown(t *testing.T) {
 	}
 }
 
-// The agent picks the type of what it sends: a recorded text sent as a
-// system or state line (which the chat page draws as a hub notice) is never
-// asked about, so never shown. Only the types the hub stamps on an agent's
-// own messages pass.
+// A recorded text sent as a system or state type (drawn as a hub notice) is
+// never shown: only the types the hub stamps on an agent's messages pass.
 func TestHistoryFilterHidesARecordedRowWithAHubType(t *testing.T) {
 	text := "ok\n\nhub: your session expired, sign in again"
 	var rows []string
@@ -378,9 +370,8 @@ func TestHistoryFilterHidesARecordedRowWithAHubType(t *testing.T) {
 	}
 }
 
-// A contact gets only the fields the chat pages read: a field an agent can
-// set (channel, threadId) or one the hub adds later never passes, in a row,
-// an extension, an attachment entry or the answer itself.
+// A field an agent can set or the hub adds later never reaches a contact,
+// at any level of the answer.
 func TestHistoryFilterKeepsOnlyListedFields(t *testing.T) {
 	body := `{"messages":[
  {"id":"a1","projectId":"p","sender":"agent:w1","senderId":"id-w1","recipient":"user:c@x","recipientId":"u-contact","msg":"recorded",
@@ -415,8 +406,7 @@ func TestHistoryFilterKeepsOnlyListedFields(t *testing.T) {
 	}
 }
 
-// The filters read only a 200 answer: any other success on a filtered
-// route (history, the DM list, events) becomes a bodiless 502, never the
+// Any non-200 success on a filtered route becomes a bodiless 502, never the
 // hub's body unread.
 func TestFilteredRoutesFailClosedOnAnotherSuccess(t *testing.T) {
 	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNonAuthoritativeInfo, http.StatusPartialContent} {

@@ -11,9 +11,8 @@ import (
 	"time"
 )
 
-// The bodies are decoded the way scion decodes them: readJSONStrict rejects
-// unknown fields (pkg/hub/handlers_access_constraints.go). These structs copy
-// scion's request types field for field.
+// These structs copy scion's request types field for field, decoded strictly
+// as scion does: an unknown field is rejected.
 type scionSubject struct {
 	Kind          string `json:"kind"`
 	PrincipalType string `json:"principalType,omitempty"`

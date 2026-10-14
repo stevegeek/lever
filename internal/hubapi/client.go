@@ -1,19 +1,28 @@
 // Package hubapi is a minimal client for the scion Hub REST API.
 //
-// lever drives scion through its CLI. This package covers only the hub
-// operations the CLI does not expose — today, listing a project's agents,
-// resolving one's hub id and verifying its stored role (see Agents, AgentID,
-// VerifyAgentRole), removing a project's shared directories (see
-// StripSharedDir) and, in the dev-auth mint window only, the role and
-// access-constraint admin the remote web UI needs (see roles.go and
-// constraints.go). Keep it that way: reach for the CLI
-// first.
+// It covers only hub operations the scion CLI does not expose; prefer the
+// CLI.
 //
-// Requests run INSIDE the jail (see JailCurl), never from the host. The hub
-// binds the jail's loopback, and lever's Lima template suppresses every
-// guest→host port forward as a containment guarantee, so a host-side call
-// cannot reach it on that backend. Going through the jail also picks the right
-// hub when two instances are up, instead of racing for one host port.
+// Requests run inside the jail, never from the host: the hub binds the
+// jail's loopback, and the Lima template suppresses every guest-to-host port
+// forward as a containment guarantee. Going through the jail also picks the
+// right hub when two instances are up.
+//
+// There are two transports, and a Client acts as whichever identity its Doer
+// authenticates:
+//
+//   - JailCurl sends the controller PAT as a bearer token. It is the
+//     transport for project-scoped work (projects, agents, shared dirs,
+//     settings).
+//   - AssertCurl sends a fresh lever-signed assertion in the
+//     X-Lever-Hub-Assertion header and never an Authorization header. It is
+//     the transport for identity and governance (users, invites, roles,
+//     bindings, constraints, token mint and revoke, system identity), as
+//     the admin or controller identity, and only for the routes
+//     AssertionPathAllowed accepts.
+//
+// Neither secret reaches a command line: the jail runner carries both on
+// the child's stdin.
 package hubapi
 
 import (
@@ -27,45 +36,39 @@ import (
 )
 
 // Doer performs one hub request and returns the HTTP status and response body.
-// A transport-level failure (the hub is down, the jail is not up) returns a
-// non-nil error and status 0, so callers can never mistake it for a status.
+// A transport-level failure returns a non-nil error and status 0.
 type Doer interface {
 	Do(ctx context.Context, method, path string) (status int, body []byte, err error)
 }
 
-// BodyDoer is a Doer that can also send a request body. Only the project
-// settings write needs one; a Client whose Doer lacks it refuses that write
-// rather than send an empty body, because the settings route is a whole-object
-// PUT and an empty body would wipe every project setting.
+// BodyDoer is a Doer that can also send a request body. A Client whose Doer
+// lacks it refuses the settings write rather than send an empty body, which
+// would wipe every project setting.
 type BodyDoer interface {
 	Doer
 	DoBody(ctx context.Context, method, path string, body []byte) (status int, respBody []byte, err error)
 }
 
-// Client talks to the hub as the controller PAT. It is safe for concurrent use
-// when its Doer is.
+// Client talks to the hub as the identity its Doer authenticates. It is safe
+// for concurrent use when its Doer is.
 type Client struct {
 	T Doer
 }
 
-// APIError means the hub ANSWERED but the answer was not usable: a non-2xx
+// APIError means the hub answered but the answer was not usable: a non-2xx
 // status, a body that would not decode, or a project the hub does not list.
-//
-// The distinction matters to callers that must decide whether a failure is
-// actionable. "lever could not reach the hub" is usually just a stopped
-// instance; "the hub said 403" is a credential problem someone has to fix.
 // Transport failures come back as the Doer's own error, never as an APIError.
 type APIError struct {
 	// Status is the HTTP status, or 0 when the hub replied but the problem was
 	// not the status (an undecodable body, or an absent project).
 	Status int
 	Msg    string
+	// NoProject marks ProjectID's answer for a name the hub does not list.
+	NoProject bool
 }
 
 func (e *APIError) Error() string { return e.Msg }
 
-// errNoTransport is returned by every Client method when the Client was built
-// without a Doer. It is a programming error, not a hub or transport failure.
 var errNoTransport = errors.New("hubapi: client has no transport")
 
 // SharedDir mirrors the fields of scion's api.SharedDir that lever inspects.
@@ -81,7 +84,6 @@ type project struct {
 	Slug string `json:"slug"`
 }
 
-// do issues one request, guarding against a Client built without a transport.
 func (c *Client) do(ctx context.Context, method, path string) (int, []byte, error) {
 	if c.T == nil {
 		return 0, nil, errNoTransport
@@ -89,7 +91,6 @@ func (c *Client) do(ctx context.Context, method, path string) (int, []byte, erro
 	return c.T.Do(ctx, method, path)
 }
 
-// doBody issues one request with a JSON body through the Doer's body path.
 func (c *Client) doBody(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
 	if c.T == nil {
 		return 0, nil, errNoTransport
@@ -101,7 +102,6 @@ func (c *Client) doBody(ctx context.Context, method, path string, body []byte) (
 	return bd.DoBody(ctx, method, path, body)
 }
 
-// get issues a GET and decodes a 2xx JSON body into out.
 func (c *Client) get(ctx context.Context, path string, out any) error {
 	status, body, err := c.do(ctx, http.MethodGet, path)
 	if err != nil {
@@ -118,8 +118,8 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	return nil
 }
 
-// snippet caps a body for an error message. A wrong service on the hub port can
-// return anything, and this text lands in an apply-step error the operator reads.
+// snippet caps a body for an error message: a wrong service on the hub port
+// can return anything, and the operator reads this text.
 func snippet(body []byte) string {
 	const max = 256
 	if len(body) > max {
@@ -128,12 +128,9 @@ func snippet(body []byte) string {
 	return string(body)
 }
 
-// ProjectID resolves a project name or slug to its hub UUID. The shared-dirs
-// endpoints take a UUID only — the hub parses that path segment as one — so
-// every call below resolves first.
-//
-// endpointHint names the hub in the not-found error. That error is the
-// operator's only clue when the jail reached a hub, but the wrong one.
+// ProjectID resolves a project name or slug to its hub UUID. endpointHint
+// names the hub in the not-found error, the operator's only clue when the jail
+// reached the wrong hub.
 func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string) (string, error) {
 	var body struct {
 		Projects []project `json:"projects"`
@@ -147,11 +144,9 @@ func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string)
 			matched = append(matched, p)
 		}
 	}
-	// More than one match must fail, not pick the first. Every other lever call
-	// identifies the project by its in-jail path; only this one matches on a
-	// name. If a hub ever accumulated two records for one tree, taking the first
-	// would strip a shared dir from the wrong record and report success while
-	// the live project kept the writable mount.
+	// More than one match must fail, not pick the first: that could strip a
+	// shared dir from the wrong record and report success while the live
+	// project kept the writable mount.
 	if len(matched) > 1 {
 		ids := make([]string, 0, len(matched))
 		for _, p := range matched {
@@ -163,17 +158,14 @@ func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string)
 	if len(matched) == 1 {
 		return matched[0].ID, nil
 	}
-	return "", &APIError{Msg: fmt.Sprintf("no project named %q at hub %s (it listed %d project(s))",
+	return "", &APIError{NoProject: true, Msg: fmt.Sprintf("no project named %q at hub %s (it listed %d project(s))",
 		nameOrSlug, endpointHint, len(body.Projects))}
 }
 
 // SharedDirs lists a project's shared directories by project UUID.
 func (c *Client) SharedDirs(ctx context.Context, projectID string) ([]SharedDir, error) {
-	// Decode loosely first and REQUIRE the key. StripSharedDir treats an empty
-	// list as proof of removal, so a hub that renamed this field would decode to
-	// zero entries and the verify would pass vacuously — the one failure it
-	// exists to catch. A moved route already fails loud (non-2xx), so this
-	// closes the only silent case.
+	// Require the key: StripSharedDir treats an empty list as proof of
+	// removal, so a renamed field would make its verify pass vacuously.
 	var raw map[string]json.RawMessage
 	if err := c.get(ctx, "/api/v1/projects/"+url.PathEscape(projectID)+"/shared-dirs", &raw); err != nil {
 		return nil, err
@@ -193,39 +185,32 @@ func (c *Client) SharedDirs(ctx context.Context, projectID string) ([]SharedDir,
 // or slug, and then VERIFIES the directory is gone. It is idempotent: removing
 // a directory the project does not carry is a success.
 //
-// The verify read is the point. The hub answers 404 for "no such shared dir",
-// for "no such project", and for "no such route", so the DELETE status alone
-// cannot distinguish "already clean" from "the endpoint moved and lever
-// silently did nothing". Re-reading the list turns all of that into one
-// post-condition, which is what a security control needs.
+// The hub answers 404 for no such dir, project or route alike, so the DELETE
+// status cannot tell "already clean" from "did nothing"; the verify read is
+// the post-condition.
 //
-// This is how lever declines scion's default `scratchpad` shared dir
-// (scion#925). The hub stamps it on every NEW project, mounts it read-write
-// into EVERY agent of that project, and on lever's file/SQLite hub the
-// server-side default cannot be turned off — OperationalSettings is
-// postgres-gated, the admin endpoint returns 501, and the section has no
-// settings.yaml key. Removal must go through the hub: `scion shared-dir
-// remove` edits the broker-local settings file only, and scion's agent start
-// path falls back to the hub's list when that file carries no entries.
+// This declines scion's default scratchpad shared dir, which the hub stamps on
+// every new project and mounts read-write into every agent; on a SQLite hub
+// the default cannot be turned off. It must go through the hub: scion
+// shared-dir remove edits only the broker-local settings file, and agent start
+// falls back to the hub's list when that file is empty.
 //
-// Requires project:update on the caller's token (the endpoint gates on the
-// project ActionUpdate policy; agent:manage does NOT expand to it).
+// Requires project:update on the caller's token; agent:manage does not expand
+// to it.
 func (c *Client) StripSharedDir(ctx context.Context, projectNameOrSlug, endpointHint, dir string) error {
 	id, err := c.ProjectID(ctx, projectNameOrSlug, endpointHint)
 	if err != nil {
 		return err
 	}
 
-	// The id comes from the hub, and dir is a lever constant, so escaping is
-	// belt-and-braces — but it keeps a hostile or buggy hub from choosing the
-	// URL's structure (a `?` or `#` in an id would silently change the request).
+	// Escaping keeps a hostile hub from choosing the URL's structure via the
+	// id (a ? or # would change the request).
 	status, body, err := c.do(ctx, http.MethodDelete,
 		"/api/v1/projects/"+url.PathEscape(id)+"/shared-dirs/"+url.PathEscape(dir))
 	if err != nil {
 		return err
 	}
-	// 404 is not yet an error: the verify read below decides. Anything else
-	// outside 2xx is — a 403 (no project:update) must fail loud.
+	// 404 is left to the verify read; any other non-2xx must fail loud.
 	if status != http.StatusNotFound && (status < 200 || status > 299) {
 		return &APIError{Status: status,
 			Msg: fmt.Sprintf("DELETE shared dir %q on project %q: HTTP %d: %s",
@@ -245,4 +230,12 @@ func (c *Client) StripSharedDir(ctx context.Context, projectNameOrSlug, endpoint
 		}
 	}
 	return nil
+}
+
+// ReadNotifications lists the caller's notifications (GET
+// /api/v1/notifications) and discards them: a token without inbox:read gets
+// 403.
+func (c *Client) ReadNotifications(ctx context.Context) error {
+	var raw json.RawMessage
+	return c.get(ctx, "/api/v1/notifications", &raw)
 }

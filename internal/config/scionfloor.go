@@ -6,16 +6,14 @@ import (
 )
 
 // AgentMessagesScionFloor is the first scion commit whose hub sets a
-// message's sender from the caller's auth (b3562fb1, #1343, 2026-08-28).
-// The agent-messages filter trusts that sender: on an older hub an agent can
-// post a row as its contact and the filter shows it. agentMessagesScionTime
-// is its commit time, the time a pseudo-version of it carries.
+// message's sender from the caller's auth. The agent-messages filter trusts
+// that sender: on an older hub an agent can post a row as its contact.
+// agentMessagesScionTime is its commit time.
 const AgentMessagesScionFloor = "b3562fb19a970a7788bb7aa110c024799506f225"
 
 var agentMessagesScionTime = time.Date(2026, 8, 28, 11, 40, 21, 0, time.UTC)
 
-// pseudoVersionRE is the commit time and hash ending a Go pseudo-version
-// (v0.0.0-20260828114021-b3562fb19a97, vX.Y.Z-pre.0.<time>-<hash>, ...).
+// pseudoVersionRE is the commit time and hash ending a Go pseudo-version.
 var pseudoVersionRE = regexp.MustCompile(`[-.]([0-9]{14})-[0-9a-f]{12}$`)
 
 // ScionVersionTime is the commit time a scion.version pseudo-version

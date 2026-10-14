@@ -1,16 +1,13 @@
 package brokerctl
 
-// external_integration_test.go drives the EXTERNAL-tool path end to end:
+// The external-tool path end to end: config with a fine ("docs-search") and
+// a coarse ("tasks") external tool, BuildBroker, broker.New, ServeListeners,
+// and agents minting via /request and calling through /mcp/<name>/ over mTLS
+// to plain httptest MCP servers the broker did not spawn.
 //
-//	config.Load(lever.yaml with two external tools — fine "docs-search" and
-//	coarse "tasks") → BuildBroker (registers them from config,
-//	FirstParty=false) → broker.New → ServeListeners → agents (CA-issued client
-//	certs) mint via /request and call through the gated /mcp/<name>/ gateway
-//	over mTLS to plain httptest MCP servers, which the broker did NOT spawn.
-//
-// Scenarios (spec §7): coarse token → any MCP call allowed + token stripped;
-// fine token → declared op allowed; /request denies an agent with no grant;
-// the wildcard cannot be minted for — nor satisfy — a fine tool.
+// Coarse token: any MCP call allowed and the token stripped. Fine token: the
+// declared op allowed. /request denies an agent with no grant. The wildcard
+// cannot be minted for, nor satisfy, a fine tool.
 
 import (
 	"context"
@@ -34,9 +31,7 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// fakeMCP is a plain (non-captool) MCP server: it records the last body it
-// received and answers OK. It stands in for a user-session host server the
-// broker fronts but does not spawn.
+// fakeMCP is a plain MCP server that records the last body and answers OK.
 func fakeMCP(t *testing.T, lastBody *string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +41,6 @@ func fakeMCP(t *testing.T, lastBody *string) *httptest.Server {
 	}))
 }
 
-// requestToken POSTs /request as the given client and returns (statusCode, token).
 func requestToken(t *testing.T, client *http.Client, jailURL, tool, op string) (int, string) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]string{"tool": tool, "op": op})
@@ -67,8 +61,6 @@ func requestToken(t *testing.T, client *http.Client, jailURL, tool, op string) (
 	return resp.StatusCode, cr.Token
 }
 
-// mcpCall POSTs a tools/call for mcpTool with the given capability to
-// /mcp/<gatewayTool>/ and returns the HTTP status.
 func mcpCall(t *testing.T, client *http.Client, jailURL, gatewayTool, mcpTool, tok string) int {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{

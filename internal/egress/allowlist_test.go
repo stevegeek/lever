@@ -8,9 +8,8 @@ import (
 )
 
 func TestBuildRulesTargetDedicatedChain(t *testing.T) {
-	// Rules append to the dedicated LEVER_EGRESS chain (which OUTPUT jumps to),
-	// NOT OUTPUT directly — so ApplyEgress can flush ONLY lever's rules on
-	// re-apply (idempotent; no accumulation; restores DNS before re-resolving).
+	// Rules go to the dedicated chain, not OUTPUT, so ApplyEgress can replace
+	// only lever's rules on re-apply.
 	rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, true)
 	for i, r := range rules {
 		if len(r.Args) < 2 || r.Args[0] != "-A" || r.Args[1] != Chain {
@@ -42,15 +41,10 @@ func TestBuildRulesDropsRestToAliasAfterAllows(t *testing.T) {
 	}
 }
 
-// TestBuildRulesAcceptsEstablishedRepliesToAliasBeforeDrop pins the stateful
-// carve-out that keeps a host→guest control channel (Lima's SSH) alive: replies
-// to the host alias on ESTABLISHED connections are ACCEPTed before the
-// blanket alias DROP. Scoped to ESTABLISHED only (not RELATED): Lima's
-// host→guest SSH replies are a single ESTABLISHED TCP flow, and RELATED would
-// additionally admit conntrack-helper-spawned expectations (the FTP/SIP ALG
-// bypass class) for no need here. It is scoped to the alias (never the
-// internet) and present in BOTH postures (the alias DROP exists in both). A
-// NEW dial is unaffected, so containment is unchanged.
+// TestBuildRulesAcceptsEstablishedRepliesToAliasBeforeDrop pins the
+// ESTABLISHED-only (not RELATED) carve-out that keeps a host-to-guest control
+// channel alive: alias-scoped, before the alias DROP, in both postures. A NEW
+// dial is unaffected.
 func TestBuildRulesAcceptsEstablishedRepliesToAliasBeforeDrop(t *testing.T) {
 	for _, closed := range []bool{false, true} {
 		rules := BuildRules("0.250.250.254", "fd07:b51a:cc66:f0::fe", []int{3305}, closed)
@@ -102,7 +96,7 @@ func TestBuildRulesClosedInternetAppendsCatchAllDrop(t *testing.T) {
 	open := BuildRules("10.0.0.1", "fd00::1", []int{8443}, false)
 	closed := BuildRules("10.0.0.1", "fd00::1", []int{8443}, true)
 
-	// Open posture is byte-identical to the pre-existing behavior: no catch-all DROP.
+	// Open posture: no catch-all DROP.
 	if hasCatchAllDrop(open) {
 		t.Fatal("open posture must NOT contain a catch-all OUTPUT DROP")
 	}
@@ -120,9 +114,8 @@ func TestBuildRulesClosedInternetExemptsLoopback(t *testing.T) {
 	open := BuildRules("10.0.0.1", "fd00::1", []int{8443}, false)
 	closed := BuildRules("10.0.0.1", "fd00::1", []int{8443}, true)
 
-	// Closed posture MUST allow loopback before the catch-all DROP, or in-machine
-	// localhost traffic (the scion hub on 127.0.0.1:8080, host-loopback tools) is
-	// dropped. Required for BOTH families.
+	// Closed posture must allow loopback before the catch-all DROP, in both
+	// families, or in-machine localhost traffic is dropped.
 	for _, fam := range []Family{IPv4, IPv6} {
 		lo := loIdx(closed, fam)
 		if lo < 0 {
@@ -139,9 +132,7 @@ func TestBuildRulesClosedInternetExemptsLoopback(t *testing.T) {
 }
 
 // loIdx returns the index of the blanket `-o lo -j ACCEPT` rule for a family,
-// or -1. (The narrow lo ACCEPT for the metadata REJECT's ICMP answer, in both
-// postures, is not it; TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop
-// pins that one.)
+// or -1; the narrow lo ACCEPT for the metadata REJECT's answer is not it.
 func loIdx(rules []Rule, fam Family) int {
 	blanket := []string{"-A", Chain, "-o", "lo", "-j", "ACCEPT"}
 	for i, r := range rules {
@@ -152,7 +143,6 @@ func loIdx(rules []Rule, fam Family) int {
 	return -1
 }
 
-// dropIdxFamily returns the index of the catch-all DROP for a family, or -1.
 func dropIdxFamily(rules []Rule, fam Family) int {
 	catchAll := []string{"-A", Chain, "-j", "DROP"}
 	for i, r := range rules {
@@ -163,7 +153,6 @@ func dropIdxFamily(rules []Rule, fam Family) int {
 	return -1
 }
 
-// helpers
 func familyArgs(rules []Rule, fam Family) []string {
 	var out []string
 	for _, r := range rules {
@@ -183,7 +172,6 @@ func indexOfRule(lines []string, needle string) int {
 	return -1
 }
 
-// helpers for closedInternet test
 func hasCatchAllDropFamily(rules []Rule, fam Family) bool {
 	catchAll := []string{"-A", Chain, "-j", "DROP"}
 	for _, r := range rules {
@@ -218,8 +206,6 @@ func dropIdx(rules []Rule) int {
 	return -1
 }
 
-// --- lever#34: Lima's LIMADNS DNAT targets (guest resolver → host alias:port) ---
-
 const limaDNSChain = "-N LIMADNS\n" +
 	"-A LIMADNS -d 192.168.5.3/32 -p udp -m udp --dport 53 -j DNAT --to-destination 192.168.5.2:41234\n" +
 	"-A LIMADNS -d 192.168.5.3/32 -p tcp -m tcp --dport 53 -j DNAT --to-destination 192.168.5.2:41235\n"
@@ -248,11 +234,9 @@ func TestParseDNATTargetsIgnoresOtherHostsAndJunk(t *testing.T) {
 	}
 }
 
-// TestBuildRulesDNSAcceptsForwardTargetsBeforeAliasDropOpenOnly pins the
-// lever#34 fix: in the OPEN posture the DNAT targets of the guest's resolver
-// are ACCEPTed on the alias, BEFORE the alias DROP, for exactly the parsed
-// proto/port pairs. In the CLOSED posture DNS stays dropped by design (agents
-// dial the broker by IP), so no such rule is emitted.
+// In the open posture the guest resolver's DNAT targets are ACCEPTed on the
+// alias, before the alias DROP, for exactly the parsed proto/port pairs. The
+// closed posture emits none: DNS stays dropped by design.
 func TestBuildRulesDNSAcceptsForwardTargetsBeforeAliasDropOpenOnly(t *testing.T) {
 	dns := []DNSForward{{"udp", 41234}, {"tcp", 41235}}
 	open := familyArgs(BuildRulesDNS("192.168.5.2", "", []int{8443}, false, dns), IPv4)
@@ -371,10 +355,8 @@ func TestParseResolverUpstreams(t *testing.T) {
 	}
 }
 
-// lever#182: the metadata address is REJECTed (so the hub's GCP lookup fails
-// at once) just before the 169.254/16 DROP, in both postures, and that /32
-// REJECT is the ONLY non-DROP refusal in the chain: every other rule is an
-// ACCEPT already asserted elsewhere or a DROP.
+// The metadata address is REJECTed just before the 169.254/16 DROP, in both
+// postures, and that /32 REJECT is the only non-DROP refusal in the chain.
 func TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop(t *testing.T) {
 	const want = "-A " + Chain + " -d 169.254.169.254/32 -j REJECT --reject-with icmp-host-prohibited"
 	for _, closed := range []bool{false, true} {
@@ -392,8 +374,8 @@ func TestBuildRulesRejectsOnlyMetadataBeforeLinkLocalDrop(t *testing.T) {
 			t.Fatal("metadata REJECT must precede the catch-all DROP")
 		}
 		// The REJECT's ICMP answer goes from and to the guest's own address
-		// (192.168.5.15 on Lima) over lo: it must be ACCEPTed before the
-		// private-range DROPs, narrowly, or the dial hangs as if dropped.
+		// over lo: it must be ACCEPTed narrowly before the private-range
+		// DROPs, or the dial hangs as if dropped.
 		const reply = "-A " + Chain + " -o lo -p icmp --icmp-type host-prohibited -m conntrack --ctstate RELATED -j ACCEPT"
 		acc := indexOfRule(v4, "--icmp-type")
 		if acc < 0 || v4[acc] != reply || acc > indexOfRule(v4, "-d 192.168.0.0/16 -j DROP") {

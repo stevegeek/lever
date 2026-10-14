@@ -156,6 +156,20 @@ trusted. Run `lever` from the instance root, or pass an explicit (trusted) path.
 | `scion.binary`, `scion.source` | must not resolve inside `tree` (an agent could otherwise supply the engine on the next bring-up); `binary`, `source`, `version` are mutually exclusive (checked in `config.Load`). |
 | `scion.binary` | regular file, Linux ELF, architecture matches the guest's; checked host-side at bring-up (`scionbin.VerifyELFArch`) before the file is copied into the jail. |
 
+**Inside the tree, by identity.** The boot files, `scion.binary` and `scion.source` above, and the
+state directory (`.lever-state`, beside `lever.yaml`) count as inside the tree when their real path
+lies in it, or when the walk up from them reaches the tree's own directory, compared by device and
+inode. A path that does not exist yet is walked from its deepest existing directory. The walk sees
+a case alias or firmlink on macOS, and a bind mount of the tree, which a comparison of paths
+misses, and it needs only search permission on the directories above. A directory of the tree
+bind-mounted onto a path outside it is not on the walk: on Linux 5.8 and later lever looks up each
+mount root the walk crosses in `/proc/self/mountinfo`, and a mount of a directory at or below the
+tree counts as inside. On older Linux kernels and on macOS that case is not seen; only the operator
+can make such a mount. When the walk
+fails, the path counts as inside: config load refuses it and names the error, and a state
+directory that counts as inside turns off everything lever would keep there for agents not to
+reach (the ledgers, conversation backups, push and voice models), with doctor naming the error.
+
 **`scion.binary` is a trust decision, not only a convenience.** The bytes at that path are installed
 as root at `/usr/local/bin/scion` and become the engine every agent runs under. That sits inside the
 operator boundary this section describes — the config already names container images and mount
@@ -164,6 +178,17 @@ It does drop one property, and the drop is worth stating plainly: `scion.version
 the Go module proxy and is **checksum-verified** against `sum.golang.org`, whereas a `binary:`
 artifact carries no integrity guarantee lever can check. The architecture check catches an honest
 mistake, not a substituted file. Choosing `binary:` makes its provenance yours to guarantee.
+
+**The prebuilt scion of a release.** For the scion pin of its release, a release build of lever
+downloads that release's prebuilt scion instead of building it
+([prebuilt scion](/reference/config/#prebuilt-scion)). The release build compiles it from the
+module-proxy source of the pin and embeds the sha256 and size of each asset in the `lever` binary.
+lever installs a download only when it matches those embedded digests. It never reads a digest
+from the server, so a substituted asset, a compromised CDN or a hostile redirect cannot change
+what runs in the jail. They can still deny the download: a download that cannot happen falls back
+to the source build (checksum-verified as above), and one with other bytes stops the apply. The
+trust root is the `lever` release binary itself and the release build that produced it, the same
+as for every other part of lever.
 
 **Execution plumbing:** argv-clean, no shell injection in the hot paths; the `bash -c` scripts in
 internal/backend/guest (scion install, scion settings write, web-assets staging) single-quote every
@@ -246,8 +271,8 @@ checks `x`; after a path flag such a word is also checked as that flag's value, 
 would read it. For a whisper tool, config load also requires `-tree` and refuses one that is not the
 instance's tree, checks `-max-seconds` (1 to 600) and `-agent-max-seconds` (1 to `-max-seconds`), and
 refuses a `-whisper-port` the jail may reach (`manager.allow_ports`, the broker's
-jail port, the login port) or that collides with the broker's admin port, the remote proxy's port,
-port 8446 or a tool backend. For a tts tool it requires `-tree` (the instance's), `-models`,
+jail port) or that collides with the broker's admin port, the remote proxy's port or a tool
+backend. For a tts tool it requires `-tree` (the instance's), `-models`,
 `-server` and `-speak-socket` (not a dictation socket, not another tts tool's), and checks
 `-model` and `-voice` against lever's table and `-speed`, `-threads` and `-max-chars` against
 their ranges; the tool has no port. It does not check any other

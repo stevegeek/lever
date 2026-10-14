@@ -12,10 +12,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// The template IS the containment surface (spec §4). This test pins the
-// properties whose regression would leak: exactly one mount (the project tree,
-// writable, at /lever), ALL automatic port-forwarding suppressed (a jailed
-// agent must not be able to squat host-loopback ports), containerd off.
+// The template IS the containment surface. This test pins the properties
+// whose regression would leak: exactly one mount (the project tree, writable,
+// at /lever), ALL automatic port-forwarding suppressed (a jailed agent must
+// not squat host-loopback ports), containerd off.
 func TestTemplateContainmentProperties(t *testing.T) {
 	out, err := RenderTemplate("/Users/x/proj", TemplateOpts{})
 	if err != nil {
@@ -63,11 +63,9 @@ func TestTemplateContainmentProperties(t *testing.T) {
 		if !pf.Ignore || len(pf.GuestPortRange) != 2 || pf.GuestPortRange[0] != 1 || pf.GuestPortRange[1] != 65535 {
 			t.Fatalf("every portForwards entry must be a full-range ignore: %+v", pf)
 		}
-		// Lima defaults an omitted proto to "tcp"; without an explicit "any" here,
-		// the ignore rule only suppresses TCP auto-forwarding and a guest UDP
-		// listener still gets forwarded to host loopback by lima's builtin fallback
-		// rule (proto: "any"), letting a jailed agent squat a free host-loopback UDP
-		// port. Both ignore rules must cover ALL protocols, not just TCP.
+		// Lima defaults an omitted proto to "tcp", and its builtin fallback
+		// rule (proto: "any") would still forward a guest UDP listener to host
+		// loopback. Both ignore rules must cover ALL protocols.
 		if pf.Proto != "any" {
 			t.Fatalf("portForwards entry must set proto: \"any\" (lima defaults omitted proto to tcp, leaving UDP auto-forwarded): %+v", pf)
 		}
@@ -106,7 +104,6 @@ func TestRenderTemplateDiskOverride(t *testing.T) {
 	assertDiskLine(t, "48GiB", "disk: 48GiB")
 }
 
-// assertDiskLine renders the template with disk and checks the disk line.
 func assertDiskLine(t *testing.T, disk, want string) {
 	t.Helper()
 	out, err := RenderTemplate("/tmp/tree", TemplateOpts{Disk: disk})

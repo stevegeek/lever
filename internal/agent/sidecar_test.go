@@ -44,8 +44,7 @@ func TestWriteSidecarSpecsAPIKey(t *testing.T) {
 		t.Fatalf("want 2 services, got %d: %s", len(specs), b)
 	}
 
-	// Gateway MUST be emitted first (up before renew) and carry baked absolute
-	// flags — sidecars get no CWD, so it must never fall back to a bootstrap path.
+	// The gateway comes first, with absolute flags: sidecars get no CWD.
 	gw := specs[0]
 	if gw.Name != "lever-gateway" {
 		t.Errorf("specs[0].name = %q, want lever-gateway (emitted first)", gw.Name)
@@ -101,9 +100,8 @@ func TestWriteSidecarSpecsNoBootstrapIsNoop(t *testing.T) {
 	}
 }
 
-// TestWriteSidecarSpecsEmptyBrokerURLIsNoop: a bootstrap that exists but carries
-// no broker URL (brokerless) is a distinct path from a missing bootstrap — it too
-// gets no sidecar, since there is nothing to renew against.
+// TestWriteSidecarSpecsEmptyBrokerURLIsNoop: a bootstrap with no broker URL
+// gets no sidecar either.
 func TestWriteSidecarSpecsEmptyBrokerURLIsNoop(t *testing.T) {
 	home := t.TempDir()
 	bsDir := filepath.Join(home, "ws", ".lever")
@@ -124,9 +122,9 @@ func TestWriteSidecarSpecsEmptyBrokerURLIsNoop(t *testing.T) {
 	}
 }
 
-// scion-services.yaml is written by boot (scion pre-start hook; root on a
-// rootful runtime, the agent user under rootless podman) under the agent-writable $HOME: a symlink at ~/.scion or at the yaml itself must be
-// refused by name, with no write through the link.
+// boot may write scion-services.yaml as root under the agent-writable $HOME:
+// a symlink at ~/.scion or at the yaml must be refused by name, with no write
+// through the link.
 func TestWriteSidecarSpecsRefusesSymlink(t *testing.T) {
 	home := t.TempDir()
 	bootstrap := filepath.Join(home, "bootstrap.json")

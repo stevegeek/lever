@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +28,8 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/hubauth"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/state"
@@ -47,8 +50,6 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Run the remote-access proxy (foreground)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// A daemon: every line it writes (remote.log when apply spawned
-			// it) takes lever's log shape.
 			daemonLogging(cmd, "remote-proxy")
 			path, app, err := loadRemoteApp(args)
 			if err != nil {
@@ -66,19 +67,25 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			}
 			defer auditCloser.Close()
 
-			// One dialler for both the proxied traffic and the login
-			// handshake: the handshake IS hub traffic, and must travel the
-			// same route into this instance's own jail.
-			dial := remoteproxy.JailDial(jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr()))
-			provider, handler, push, err := buildRemoteHandler(app, st, dial, auditFn, cmd.ErrOrStderr())
+			// One jail route for proxied traffic, the login and the clock read: the login is
+			// hub traffic and must reach this instance's jail.
+			prefix := jailPrefixFn(bf, app.Backend, machineName(app.Name), cmd.ErrOrStderr())
+			dial := remoteproxy.JailDial(prefix)
+			hubLogin, err := loadRemoteHubLogin(app, st, func() (hubauth.Clock, error) {
+				return guestClock(cmd.Context(), prefix, proc.RealRunner{}, time.Now)
+			})
+			if err != nil {
+				return err
+			}
+			handler, push, err := buildRemoteHandler(app, st, dial, hubLogin, auditFn, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			// The push watchers live as long as the proxy: the same context
-			// ends both, and the serve waits for every hub stream to close.
+			// The push watchers share the proxy's context, and the serve waits for every
+			// hub stream to close.
 			pushDone := make(chan struct{})
 			go func() {
 				defer close(pushDone)
@@ -87,15 +94,15 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 				}
 			}()
 			printRemoteWarnings(cmd, app)
-			cmd.Printf("remote proxy %q serving on %s, identity header %s (login provider on 127.0.0.1:%d, issuer %s)\n",
-				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader(), provider.Port(), provider.IssuerURL())
+			cmd.Printf("remote proxy %q serving on %s, identity header %s\n",
+				app.Name, app.RemoteListenAddr(), app.EffectiveRemoteIdentityHeader())
 			if app.VoiceOn() {
 				cmd.Printf("dictation on: through lever-tool-whisper's socket %s\n", app.Remote.Voice.Socket)
 				if app.EffectiveReadAloud() == config.ReadAloudServer {
 					cmd.Printf("read-aloud with server voices: through lever-tool-tts's socket %s (the device's voices when it is down)\n", app.Remote.Voice.SpeakSocket)
 				}
 			}
-			err = serveRemote(ctx, app, st, provider, handler)
+			err = serveRemote(ctx, app, st, handler)
 			stop()
 			<-pushDone
 			return err
@@ -103,8 +110,8 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 	}
 }
 
-// loadRemoteApp resolves and loads the config for `remote serve`, applying the
-// two gates every proxy start must pass.
+// loadRemoteApp loads the config for `remote serve` and applies the two gates
+// every proxy start must pass.
 func loadRemoteApp(args []string) (string, *config.App, error) {
 	path, err := resolveConfigPath(argOrEmpty(args))
 	if err != nil {
@@ -117,47 +124,111 @@ func loadRemoteApp(args []string) (string, *config.App, error) {
 	if !app.RemoteEnabled() {
 		return "", nil, errRemoteDisabled
 	}
-	// Both backends: the proxy dials the hub through the jail
-	// (remoteproxy.JailDial), which is backend-agnostic, and
-	// config.validateRemote says why the login path is too.
 	return path, app, nil
 }
 
-// buildRemoteHandler assembles the local OIDC provider, the login driver over
-// it, and the proxy handler that fronts the hub.
-func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), auditFn func(remoteproxy.AuditLine), warn io.Writer) (*remoteproxy.Provider, http.Handler, *remoteproxy.Push, error) {
-	// The hub's address INSIDE the guest, which is where the dialer
-	// lands — so this is also the correct Host header. It is
-	// deliberately not a host-reachable address: see
-	// scion.DefaultHubEndpoint.
+// remoteHubLogin is what the login driver needs to turn a verified login into
+// a hub session. A zero value refuses every login.
+type remoteHubLogin struct {
+	sign      func(email string) (string, error)
+	hubUserID func(email string) (string, bool)
+}
+
+// loadRemoteHubLogin reads the assertion key, the instance id and the
+// recorded hub users once: apply restarts the proxy after changing any of
+// them. clock is read for every sign-in, after the login passed the signer's
+// allowlist: the proxy lives across VM suspends and clock steps, and one
+// reading at start would leave every later sign-in failing until a restart.
+// A failed read refuses the sign-in.
+func loadRemoteHubLogin(app *config.App, st state.State, clock func() (hubauth.Clock, error)) (remoteHubLogin, error) {
+	key, err := hubauth.LoadKey(st.HubAuthKey())
+	if err != nil {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: no usable hub assertion key (%v); run `lever apply`", err)
+	}
+	id, err := st.ReadInstanceID()
+	if err != nil {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: no instance id (%v); run `lever apply`", err)
+	}
+	rec, found, err := st.LoadHubIdentity()
+	if err != nil {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: %v; run `lever apply`", err)
+	}
+	if !found {
+		return remoteHubLogin{}, fmt.Errorf("remote proxy: no hub identity record (%s); run `lever apply`", st.HubIdentityFile())
+	}
+	emails := remoteproxy.HubUserEmails(app.Remote.Logins())
+	for i, e := range emails {
+		emails[i] = strings.ToLower(e)
+	}
+	signer := hubauth.NewRemoteSigner(hubauth.NewSigner(key, id, hubauth.Clock{}), emails)
+	users := make(map[string]string, len(rec.Users))
+	for email, uid := range rec.Users {
+		users[strings.ToLower(email)] = uid
+	}
+	return remoteHubLogin{
+		sign: func(email string) (string, error) {
+			if err := signer.Allowed(email); err != nil {
+				return "", err
+			}
+			c, err := clock()
+			if err != nil {
+				return "", fmt.Errorf("remote proxy: %w; refusing the sign-in rather than sign on the host clock", err)
+			}
+			return signer.WithClock(c).Sign(email)
+		},
+		hubUserID: func(email string) (string, bool) {
+			uid, ok := users[strings.ToLower(email)]
+			return uid, ok && uid != ""
+		},
+	}, nil
+}
+
+// guestClockTimeout bounds one clock read, so a wedged jail delays a sign-in
+// by at most this.
+const guestClockTimeout = 15 * time.Second
+
+// guestClock reads the guest's clock: the hub checks an assertion's iat and
+// exp against its own clock, and the assertion lifetime is too short to
+// absorb an unknown skew.
+func guestClock(ctx context.Context, prefixFn func() []string, run proc.Runner, now func() time.Time) (hubauth.Clock, error) {
+	prefix := prefixFn()
+	if len(prefix) == 0 {
+		return hubauth.Clock{}, errors.New("could not read the guest clock: the jail is not reachable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, guestClockTimeout)
+	defer cancel()
+	ctx = proc.WithOutputLimit(ctx, 64)
+	before := now()
+	res, err := run.Run(ctx, nil, prefix[0], append(slices.Clone(prefix[1:]), "date", "-u", "+%s")...)
+	after := now()
+	if err != nil {
+		return hubauth.Clock{}, fmt.Errorf("could not read the guest clock: %s", firstLine(err.Error()))
+	}
+	epoch, err := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
+	if err != nil {
+		return hubauth.Clock{}, errors.New("could not read the guest clock: unexpected `date` output")
+	}
+	return hubauth.ClockFromGuestEpoch(epoch, before.Add(after.Sub(before)/2)), nil
+}
+
+func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), hubLogin remoteHubLogin, auditFn func(remoteproxy.AuditLine), warn io.Writer) (http.Handler, *remoteproxy.Push, error) {
+	// The hub's address inside the guest, where the dialer lands, so also the
+	// right Host header. It is deliberately not host-reachable (see
+	// scion.DefaultHubEndpoint).
 	target, err := url.Parse(scion.DefaultHubEndpoint)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	// remote.push: nil when off. Built before the handler, which serves its
-	// routes and worker only when it is non-nil.
 	push, err := remotePush(app, st, auditFn, warn)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
-	// The local OIDC provider, and the driver that logs in with it.
-	// Both live in THIS process because an authorization code must be
-	// mintable only by an in-process call — see the provider's own
-	// documentation for what that property is holding up. The guest
-	// reaches this listener through the forwarder `lever apply`
-	// installed (internal/backend/guest.EnsureHubLogin).
-	provider := remoteproxy.NewProvider(remoteproxy.ProviderConfig{
-		Port: app.EffectiveRemoteLoginPort(),
-		// The hub dials the GUEST port; the forwarder carries it here.
-		// Two numbers on purpose — see config.GuestLoginIssuerPort.
-		IssuerPort: config.GuestLoginIssuerPort,
-		Audit:      auditFn,
-	})
 	login := remoteproxy.NewLoginDriver(remoteproxy.LoginConfig{
 		Hub:         target,
 		DialContext: dial,
-		Provider:    provider,
+		Sign:        hubLogin.sign,
+		HubUserID:   hubLogin.hubUserID,
 		Audit:       auditFn,
 	})
 
@@ -166,61 +237,48 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		Target:      target,
 		DialContext: dial,
 		ServeHost:   remoteServeHost(app.Remote.BaseURL),
-		// So the Host gate admits `lever doctor`'s loopback /healthz
-		// probe without widening the allowlist beyond this one port.
+		// Lets the Host gate admit `lever doctor`'s loopback /healthz probe on this
+		// one port.
 		ListenPort:         app.EffectiveRemotePort(),
 		AllowedUsers:       app.Remote.Logins(),
+		LoginCurrent:       remoteLoginCurrent(app, st),
 		IdentityHeader:     app.EffectiveRemoteIdentityHeader(),
 		TrustForwardedHost: app.Remote.TrustForwardedHost,
 		BindHost:           remoteBindHost(app),
 		Session:            login,
 		Audit:              auditFn,
-		// Verified web chat. Only with allowed_users: without it no login
-		// is verified, so there is nothing to vouch for.
+		// Verified web chat needs allowed_users: without it no login is verified.
 		ChatLedger: remoteChatLedger(app, st),
-		// Contacts: chat only, and only with their agents (see
-		// remoteproxy/contact.go). Agent names resolve to hub ids with the
-		// remote PAT, used only for GET agent lists.
+		// Contacts chat only with their agents (remoteproxy/contact.go). Agent names
+		// resolve to hub ids with the remote PAT, for GET agent lists only.
 		Contacts:      remoteContacts(app),
 		ResolveAgents: resolve,
-		// A contact's post reaches an agent only while that agent's session
-		// started fresh with the skill on disk now (contactSession).
-		ContactSession: func(agent string) error { return contactSession(app, st, agent) },
-		// lever's chat page (remote.landing: chat): the manager, the agent
-		// list per login (the same hub records, labels from the tree) and
-		// the wake of a sleeping worker over the broker's operator socket.
-		ChatAgent:    remoteChatAgent(app),
-		Workers:      remoteWorkers(app),
-		ContactSee:   remoteContactSee(app),
-		AgentRecords: records,
-		Labels:       remoteLabels(app),
-		Wake:         remoteWake(app, st),
-		// remote.agent_messages: which agent rows a contact is shown, asked
-		// of the broker over its operator socket. Nil when off.
+		// A contact's post reaches an agent only while its session started fresh with
+		// the current skill on disk (contactSession).
+		ContactSession:     func(agent string) error { return contactSession(app, st, agent) },
+		ChatAgent:          remoteChatAgent(app),
+		Workers:            remoteWorkers(app),
+		ContactSee:         remoteContactSee(app),
+		AgentRecords:       records,
+		Labels:             remoteLabels(app),
+		Wake:               remoteWake(app, st),
 		MatchAgentMessages: remoteAgentMessages(app, st),
-		// The operator's read-only view of contact conversations reads only
-		// for a contact apply bound to a hub user (opview.go).
+		// The operator view of contact conversations reads only for a contact apply
+		// bound to a hub user (opview.go).
 		ContactUser:       remoteContactUser(st),
 		PeekAgentMessages: remoteAgentMessagesPeek(app, st),
-		// The proxy's own log, named the way doctor names it (relative to
-		// the instance root) so the denial text stays byte-identical.
+		// Named as doctor names it, so the denial text stays byte-identical.
 		LogPath: stateRel(st, st.RemoteLog()),
-		// remote.push: the page's notifications (nil when off).
-		Push: push,
-		// remote.files: uploads into each agent's .lever-files/in/, and
-		// downloads of the files it shares. Nil when off.
-		Files: remoteFiles(app, st),
-		// remote.voice: dictation through lever-tool-whisper's socket.
-		// Nil when off.
-		Voice: remoteVoiceConfig(app),
+		Push:    push,
+		Files:   remoteFiles(app, st),
+		Voice:   remoteVoiceConfig(app),
 	})
-	return provider, handler, push, nil
+	return handler, push, nil
 }
 
-// remoteVoiceConfig is dictation (remote.voice) as the proxy runs it: each
-// checked clip goes to lever-tool-whisper's dictation socket; with
-// read_aloud: server, each part of a message read aloud goes to
-// lever-tool-tts's speech socket. Nil when off.
+// remoteVoiceConfig sends each checked clip to lever-tool-whisper's socket and,
+// with read_aloud: server, each spoken part to lever-tool-tts's socket. Nil
+// when off.
 func remoteVoiceConfig(app *config.App) *remoteproxy.VoiceConfig {
 	if !app.VoiceOn() {
 		return nil
@@ -238,11 +296,10 @@ func remoteVoiceConfig(app *config.App) *remoteproxy.VoiceConfig {
 	return vc
 }
 
-// pushTestHosts is the TEST ONLY exception: both remote.push.test_hosts and
-// LEVER_PUSH_TEST_HOSTS must name the same 127.0.0.1 addresses. Either one
-// alone is an error, so neither a stray shell variable of whoever runs
-// `lever apply` nor a config key copied into a real lever.yaml widens where
-// the proxy may connect by itself.
+// pushTestHosts is a test-only exception: remote.push.test_hosts and
+// LEVER_PUSH_TEST_HOSTS must name the same 127.0.0.1 addresses. Either alone is
+// an error, so neither a stray shell variable nor a copied config key widens
+// where the proxy may connect.
 func pushTestHosts(app *config.App, env string) (webpush.TestHosts, error) {
 	fromEnv, err := webpush.ParseTestHosts(env)
 	if err != nil {
@@ -260,10 +317,9 @@ func pushTestHosts(app *config.App, env string) (webpush.TestHosts, error) {
 	return fromEnv, nil
 }
 
-// remotePush builds the Web Push service (remote.push), or nil when off.
-// A malformed LEVER_PUSH_TEST_HOSTS stops the serve: never a silent
-// widening of where the proxy may connect. A fault in the push files keeps
-// the proxy serving with push off, and says so.
+// remotePush builds the Web Push service, or nil when off. A malformed
+// LEVER_PUSH_TEST_HOSTS stops the serve; a fault in the push files keeps the
+// proxy serving with push off, and says so.
 func remotePush(app *config.App, st state.State, auditFn func(remoteproxy.AuditLine), warn io.Writer) (*remoteproxy.Push, error) {
 	if !app.PushOn() {
 		return nil, nil
@@ -294,8 +350,8 @@ func remotePush(app *config.App, st state.State, auditFn func(remoteproxy.AuditL
 	return p, nil
 }
 
-// remoteChatAgent is the agent lever's chat page talks to: the manager, whose
-// agent name is the instance name. Empty when the page is off.
+// remoteChatAgent is the manager, whose agent name is the instance name; empty
+// when the chat page is off.
 func remoteChatAgent(app *config.App) string {
 	if !app.RemoteLandingChat() {
 		return ""
@@ -303,7 +359,6 @@ func remoteChatAgent(app *config.App) string {
 	return app.Name
 }
 
-// remoteContacts maps each contact-tier login to the agents it may chat with.
 func remoteContacts(app *config.App) map[string][]string {
 	out := map[string][]string{}
 	for _, u := range app.Remote.AllowedUsers {
@@ -314,7 +369,6 @@ func remoteContacts(app *config.App) map[string][]string {
 	return out
 }
 
-// remoteContactSee maps each contact-tier login with a see list to it.
 func remoteContactSee(app *config.App) map[string][]string {
 	out := map[string][]string{}
 	for _, u := range app.Remote.AllowedUsers {
@@ -325,7 +379,6 @@ func remoteContactSee(app *config.App) map[string][]string {
 	return out
 }
 
-// remoteWorkers is every configured worker name, in config order.
 func remoteWorkers(app *config.App) []string {
 	out := make([]string, len(app.Workers))
 	for i, w := range app.Workers {
@@ -334,9 +387,8 @@ func remoteWorkers(app *config.App) []string {
 	return out
 }
 
-// remoteFiles is the chat page's file exchange (remote.files), or nil when
-// off. The ledger stays off ("") when the state directory is inside the
-// tree, where an agent could write a record.
+// remoteFiles is remote.files, or nil when off. The ledger stays off when the
+// state directory is inside the tree, where an agent could write a record.
 func remoteFiles(app *config.App, st state.State) *remoteproxy.FilesConfig {
 	if !app.FilesOn() {
 		return nil
@@ -350,8 +402,6 @@ func remoteFiles(app *config.App, st state.State) *remoteproxy.FilesConfig {
 	return c
 }
 
-// remoteLabels is the chat page's labels source, or nil when
-// remote.labels_file is unset.
 func remoteLabels(app *config.App) func() map[string]string {
 	if app.Remote.LabelsFile == "" {
 		return nil
@@ -359,9 +409,9 @@ func remoteLabels(app *config.App) func() map[string]string {
 	return (&remoteproxy.LabelSource{Tree: app.Tree, Rel: app.Remote.LabelsFile}).Labels
 }
 
-// remoteHubAgents lists the instance project's agent records with the remote
-// PAT (GET only, through HubDoer): the chat page's records and the contact
-// fence's name → hub id resolver read the same cached list.
+// remoteHubAgents lists the project's agent records with the remote PAT (GET
+// only, through HubDoer). The chat page and the contact fence read the same
+// cached list.
 func remoteHubAgents(st state.State, target *url.URL, dial func(ctx context.Context, network, addr string) (net.Conn, error)) (
 	func(context.Context) (map[string]remoteproxy.AgentRecord, error), func(context.Context) (map[string]string, error)) {
 	hc := &hubapi.Client{T: &remoteproxy.HubDoer{Target: target, DialContext: dial, Token: func() (string, error) {
@@ -377,37 +427,31 @@ func remoteHubAgents(st state.State, target *url.URL, dial func(ctx context.Cont
 }
 
 // agentRecordsTTL bounds how stale the chat page's states may be; the page
-// polls every few seconds while it waits for a wake.
+// polls every few seconds during a wake.
 const agentRecordsTTL = 3 * time.Second
 
-// agentRecordsRefresh bounds one hub list: it runs on its own context, not
-// on any caller's.
+// agentRecordsRefresh bounds one hub list, which runs on its own context.
 const agentRecordsRefresh = 10 * time.Second
 
-// errAgentListPanicked is the fixed error of a hub list that panicked; it
-// is not cached, so the next caller refreshes again.
+// errAgentListPanicked is not cached, so the next caller refreshes again.
 var errAgentListPanicked = errors.New("the hub agent list failed unexpectedly")
 
-// agentFlight is one hub list in progress; done closes when recs and err
-// are set.
 type agentFlight struct {
 	done chan struct{}
 	recs map[string]remoteproxy.AgentRecord
 	err  error
 }
 
-// cachedAgentRecords wraps one hub agent list in a short cache, keyed by
-// slug, and derives the name → id resolver from it. The cache is shared by
-// every login and by the contact fence, so no caller may spoil it for the
-// others:
+// cachedAgentRecords wraps the hub agent list in a short cache keyed by slug
+// and derives the name-to-id resolver from it. Every login and the contact
+// fence share it, so no caller may spoil it for the others:
 //
-//   - one refresh at a time, on a context of its own (agentRecordsRefresh),
-//     so a caller that gives up does not cancel the list the others wait on;
-//   - a caller waits for that refresh only as long as its own context lets
-//     it, and no lock is held across the hub call;
-//   - a hub error is cached for the TTL (a down hub is not asked on every
-//     poll), but never a context-class error: that says nothing about the
-//     hub's answer.
+//   - one refresh at a time, on its own context, so a caller that gives up
+//     does not cancel the list others wait on;
+//   - a caller waits only as long as its own context allows, and no lock is
+//     held across the hub call;
+//   - a hub error is cached for the TTL, but never a context-class error,
+//     which says nothing about the hub.
 func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now func() time.Time) (
 	func(context.Context) (map[string]remoteproxy.AgentRecord, error), func(context.Context) (map[string]string, error)) {
 	var (
@@ -421,8 +465,7 @@ func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now 
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentRecordsRefresh)
 		defer cancel()
 		agents, err := func() (agents []hubapi.Agent, err error) {
-			// A panic in the list is one failed refresh: on this goroutine
-			// it would end the proxy and leave the flight open for good.
+			// A panic here would end the proxy and leave the flight open for good.
 			defer func() {
 				if recover() != nil {
 					agents, err = nil, errAgentListPanicked
@@ -489,18 +532,17 @@ func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now 
 }
 
 // agentRecordOf reduces a hub record to what the chat page may show. Phase,
-// activity and container status are text an agent can post about itself,
-// so only scion's known words pass (scion.PhaseLabel, ActivityLabel).
+// activity and container status are agent-controlled text, so only scion's
+// known words pass (scion.PhaseLabel, ActivityLabel).
 func agentRecordOf(a hubapi.Agent) remoteproxy.AgentRecord {
 	phase := scion.PhaseLabel(a.Phase)
 	return remoteproxy.AgentRecord{ID: a.ID, Phase: phase, Activity: scion.ActivityLabel(a.Activity),
 		ContainerDown: scion.RunningContainerDown(phase, a.ContainerStatus)}
 }
 
-// remoteWake is the chat page's wake: POST /operator/wake on the broker's
-// 0600 operator socket, the host user's own channel. Nil when the state
-// directory is inside the tree: then the broker binds no operator socket
-// (brokerctl.bindListeners), and the page answers every wake "unavailable".
+// remoteWake POSTs /operator/wake on the broker's 0600 operator socket, the
+// host user's own channel. Nil when the state directory is inside the tree:
+// the broker then binds no operator socket.
 func remoteWake(app *config.App, st state.State) func(ctx context.Context, login, tier, worker string) error {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil
@@ -515,14 +557,14 @@ func remoteWake(app *config.App, st state.State) func(ctx context.Context, login
 	}
 }
 
-// agentMessagesTimeout bounds one match question: the proxy holds the
-// contact's history answer while it waits.
+// agentMessagesTimeout bounds one match question; the proxy holds the
+// contact's history answer meanwhile.
 const agentMessagesTimeout = 10 * time.Second
 
 // remoteAgentMessages asks the broker which agent rows of a contact's DM its
-// agent ledger recorded. Nil when agent messages are off. With the state
-// directory inside the tree there is no operator socket: every call fails,
-// and the proxy hides every agent row. Any answer but 200 is an error.
+// agent ledger recorded. Nil when off. With the state directory inside the
+// tree there is no operator socket, so every call fails and the proxy hides
+// every agent row. Any answer but 200 is an error.
 func remoteAgentMessages(app *config.App, st state.State) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (map[string]bool, error) {
 	ask := remoteAgentMatcher(app, st, false)
 	if ask == nil {
@@ -534,9 +576,8 @@ func remoteAgentMessages(app *config.App, st state.State) func(ctx context.Conte
 	}
 }
 
-// remoteAgentMessagesPeek is remoteAgentMessages without binding (the
-// request's peek): the operator view's question, which writes nothing. It
-// also answers which kept rows are pending (no contact read bound them).
+// remoteAgentMessagesPeek is the operator view's question, which binds and
+// writes nothing. It also answers which kept rows are pending.
 func remoteAgentMessagesPeek(app *config.App, st state.State) func(ctx context.Context, contact, agent string, msgs []remoteproxy.AgentMessage) (keep, pending map[string]bool, err error) {
 	return remoteAgentMatcher(app, st, true)
 }
@@ -573,7 +614,6 @@ func remoteAgentMatcher(app *config.App, st state.State, peek bool) func(ctx con
 				keep[id] = true
 			}
 		}
-		// Pending only for a peek, and only among the kept ids.
 		pending := map[string]bool{}
 		for _, id := range out.Pending {
 			if peek && keep[id] {
@@ -584,8 +624,8 @@ func remoteAgentMatcher(app *config.App, st state.State, peek bool) func(ctx con
 	}
 }
 
-// remoteChatLedger is the proxy's ledger writer, or nil when verified chat is
-// off. brokerctl.ChatLedgerPath makes the same decision for the broker.
+// remoteChatLedger is nil when verified chat is off; brokerctl.ChatLedgerPath
+// makes the same decision for the broker.
 func remoteChatLedger(app *config.App, st state.State) func(chatledger.Entry) error {
 	p := brokerctl.ChatLedgerPath(app, st)
 	if p == "" {
@@ -595,9 +635,8 @@ func remoteChatLedger(app *config.App, st state.State) func(chatledger.Entry) er
 	return chatledger.NewWriter(p).Append
 }
 
-// removeOldChatLedger deletes lever 0.27's single-file ledger (and its
-// rotated copy): 0.28 keeps one file per login in a directory, and the old
-// file only holds old chat text.
+// removeOldChatLedger deletes the legacy single-file ledger and its rotated
+// copy, which only hold old chat text.
 func removeOldChatLedger(st state.State) {
 	for _, name := range []string{"chat-ledger.jsonl", "chat-ledger.jsonl.1"} {
 		p := filepath.Join(st.Dir, name)
@@ -607,65 +646,44 @@ func removeOldChatLedger(st state.State) {
 	}
 }
 
-// serveRemote runs the proxy until ctx ends, stamping the config THIS process
-// actually loaded, not the one whoever started it believes is running. `lever
-// apply` reuses a live proxy only when this record matches the config it is
-// applying, and apply is not the only thing that starts proxies — this
-// command is reachable by hand, and the pid file apply reads is written by
-// every serve. Stamping here is what stops a hand-started proxy from
-// inheriting the record of an apply-started one. See ServeConfig.Stamp.
-func serveRemote(ctx context.Context, app *config.App, st state.State, provider *remoteproxy.Provider, handler http.Handler) error {
+// serveRemote stamps the config this process actually loaded. apply reuses a
+// live proxy only when the stamp matches, and a proxy can be started by hand,
+// so stamping here keeps a hand-started proxy from inheriting the record of
+// an apply-started one. See ServeConfig.Stamp.
+func serveRemote(ctx context.Context, app *config.App, st state.State, handler http.Handler) error {
 	return remoteproxy.Serve(ctx, remoteproxy.ServeConfig{
 		Port: app.EffectiveRemotePort(),
 		Bind: app.EffectiveRemoteBind(),
-		// config.validateRemoteBind already refused every non-loopback
-		// address the jail could reach, and the wildcard without its own
-		// acknowledgement, so a config that loaded may bind what it names.
+		// config.validateRemoteBind already refused every address the jail could reach
+		// and an unacknowledged wildcard.
 		AllowNonLoopback: !app.RemoteBindLoopback(),
 		Handler:          handler,
 		PIDPath:          st.RemotePID(),
-		Provider:         provider,
 		Stamp: func() error {
-			return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app))
+			return st.WriteRemoteStamp(cli.VersionString(), brokerctl.RemoteConfigHash(app, st))
 		},
 	})
 }
 
-// jailResolveTimeout bounds one attempt to read the jail's run user. The
-// probe is three short commands into a running machine; a machine that is
-// wedged must fail the dial rather than hold a request open.
+// jailResolveTimeout bounds one read of the jail's run user: a wedged machine
+// must fail the dial rather than hold a request open.
 const jailResolveTimeout = 15 * time.Second
 
-// jailPrefixFn resolves the argv prefix that reaches inside THIS instance's
-// jail, for remoteproxy.JailDial. On OrbStack that prefix embeds the machine's
-// run user, so resolving it means talking to the machine.
+// jailPrefixFn resolves the argv prefix into this instance's jail for
+// remoteproxy.JailDial; on OrbStack it embeds the machine's run user.
 //
-// Resolution is deferred to the first dial, not done at startup: the proxy is
-// a long-lived process started alongside the rest of the instance, and
-// demanding a running jail before it will serve would make startup order
-// load-bearing and turn a stopped jail into a dead proxy. A failed resolve
-// returns nil — JailDial renders that as an actionable dial error — and the
-// next request tries again.
+// Resolution happens on the first dial, not at startup, so a stopped jail does
+// not make a dead proxy. A failed resolve returns nil (JailDial renders an
+// actionable error) and the next request retries.
 //
-// Success is cached because resolving costs three commands into the machine
-// (`orb list`, `whoami`, `id -u`), which is real latency to pay per
-// connection, and the run user cannot change under a running machine. A
-// rebuilt jail with a different run user therefore needs a proxy restart — and
-// `lever apply` does NOT give you one: its reuse check compares the lever
-// version, the `remote:` block, the instance name and the backend
-// (brokerctl.RemoteConfigHash), none of which a jail rebuild changes, so a
-// matching stamp keeps the old process and its stale prefix. Use `lever stop`
-// + `lever up` after rebuilding the jail. (Verified against
-// remoteController.Start; the comment used to claim the opposite.)
+// Success is cached: resolving costs three commands into the machine, and the
+// run user cannot change under a running machine. A rebuilt jail with another
+// run user needs `lever stop` + `lever up`: apply's reuse stamp
+// (brokerctl.RemoteConfigHash) does not change on a jail rebuild.
 //
-// Concurrent dials share one attempt rather than queueing behind each other:
-// a browser opens several connections at once, and a wedged machine would
-// otherwise hold the second caller for two timeouts, the third for three, and
-// so on — the opposite of failing the dial promptly.
-//
-// warn receives resolve failures, deduplicated for the same reason: the
-// proxy's stderr is remote.log, and ten parallel connections to a down jail
-// must not write ten identical lines per page load.
+// Concurrent dials share one attempt, so a wedged machine does not hold the
+// Nth caller for N timeouts. warn gets resolve failures deduplicated: the
+// proxy's stderr is remote.log.
 func jailPrefixFn(bf BackendFactory, backendName, machine string, warn io.Writer) func() []string {
 	var (
 		mu       sync.Mutex
@@ -699,8 +717,7 @@ func jailPrefixFn(bf BackendFactory, backendName, machine string, warn io.Writer
 			return cached
 		}
 		if wait := inflight; wait != nil {
-			// Another dial is already asking the machine. Take its answer —
-			// including its failure — instead of probing again.
+			// Another dial is already asking: take its answer, failure included.
 			mu.Unlock()
 			<-wait
 			mu.Lock()
@@ -727,11 +744,10 @@ func jailPrefixFn(bf BackendFactory, backendName, machine string, warn io.Writer
 	}
 }
 
-// remoteBindHost is the proxy's specific bind address — loopback included, so
-// a front that rewrites Host to 127.0.0.2:<port> or [::1]:<port> is admitted —
-// which the Host gate admits as "<addr>:<port>" (remoteproxy.Config.BindHost),
-// or "" for a wildcard bind: 0.0.0.0 is no Host, and lever does not enumerate
-// the host's interfaces to guess which address a front dialled.
+// remoteBindHost is the specific bind address (loopback included, so a front
+// that rewrites Host to 127.0.0.2 or [::1] is admitted) as the Host gate's
+// "<addr>:<port>", or "" for a wildcard bind: lever does not guess which
+// interface a front dialed.
 func remoteBindHost(app *config.App) string {
 	if app.RemoteBindWildcard() {
 		return ""
@@ -739,16 +755,12 @@ func remoteBindHost(app *config.App) string {
 	return app.EffectiveRemoteBind()
 }
 
-// printRemoteWarnings prints config.App.RemoteWarnings on stderr, one line
-// each: the remote settings an operator chose that weaken a default
-// protection, restated on every bring-up so they are never forgotten.
-//
-// It also says, on every bring-up, when web chat cannot be verified (remote
-// access with no allowed_users): agents then treat every web chat post as
-// data and do not answer it, which would otherwise look like agents ignoring
-// the operator.
+// printRemoteWarnings restates config.App.RemoteWarnings on every bring-up. It
+// also says when web chat cannot be verified (no allowed_users): agents then
+// treat every web post as data and do not answer, which would otherwise look
+// like agents ignoring the operator.
 func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
-	for _, w := range app.RemoteWarnings() {
+	for _, w := range append(app.Warnings(), app.RemoteWarnings()...) {
 		cmd.PrintErrf("lever: warning: %s\n", w)
 	}
 	if app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {
@@ -757,8 +769,6 @@ func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
 	}
 }
 
-// remoteProbeHost is the host part of app.RemoteProbeAddr(): what a host-side
-// caller dials to reach the proxy.
 func remoteProbeHost(app *config.App) string {
 	h, _, err := net.SplitHostPort(app.RemoteProbeAddr())
 	if err != nil {
@@ -767,17 +777,10 @@ func remoteProbeHost(app *config.App) string {
 	return h
 }
 
-// remoteServeHost derives the proxy's ServeHost from the configured
-// base_url: url.Parse(...).Host, which includes the port when base_url
-// carries one — the Handler matches a request's Origin host:port exactly,
-// ignoring scheme (see remoteproxy.Config.ServeHost). base_url is REQUIRED
-// whenever remote is enabled — config.Load's validateRemote rejects an
-// enabled block with an empty or malformed base_url, so this function only
-// ever sees a well-formed https URL when called from `remote serve` on a
-// config that actually loaded. The empty/unparsable-input branches below
-// are defensive (an empty ServeHost fails every request closed — see
-// proxy.go — rather than risk a silent empty-string Origin match), kept so
-// this stays a total function rather than assuming its caller's invariant.
+// remoteServeHost is url.Parse(baseURL).Host, port included: the handler
+// matches an Origin's host:port exactly (remoteproxy.Config.ServeHost).
+// config.Load guarantees a well-formed base_url when remote is enabled; the
+// empty result for bad input makes the proxy fail every request closed.
 func remoteServeHost(baseURL string) string {
 	if baseURL == "" {
 		return ""
@@ -824,9 +827,8 @@ func newRemoteStatusCmd() *cobra.Command {
 			if app.RemoteBindLoopback() {
 				cmd.Printf("tailscale command: tailscale serve --bg --https=443 http://%s\n", app.RemoteListenAddr())
 				if app.EffectiveRemoteBind() != config.DefaultRemoteBind {
-					// Checked against tailscale 1.102.4's ipn.ExpandProxyTargetValue:
-					// any IP with an explicit scheme is accepted. Older releases
-					// refused every target but localhost/127.0.0.1.
+					// Checked against tailscale 1.102.4: any IP with an explicit scheme is
+					// accepted. Older releases refuse every target but localhost/127.0.0.1.
 					cmd.Println("  note: this target is not 127.0.0.1; older tailscale releases refuse it (\"only localhost or " +
 						"127.0.0.1 proxies are currently supported\") — use a current tailscale, or the default bind")
 				}
@@ -834,22 +836,12 @@ func newRemoteStatusCmd() *cobra.Command {
 			for _, w := range app.RemoteWarnings() {
 				cmd.Printf("lever: warning: %s\n", w)
 			}
-			// The provider's port is worth printing because it is the second
-			// host listener this instance owns: a second remote-enabled
-			// instance needs its own, and config validation can only catch a
-			// collision within one instance. `lever doctor` is what reports
-			// whether it is actually healthy.
-			cmd.Printf("login provider port: %d on host loopback; the jail reaches it from 127.0.0.1:%d\n",
-				app.EffectiveRemoteLoginPort(), config.GuestLoginIssuerPort)
 
 			if app.Remote.BaseURL != "" {
 				cmd.Printf("serve URL: %s\n", app.Remote.BaseURL)
 			} else {
-				// Reachable only with remote disabled (or unconfigured): an
-				// enabled block with no base_url is rejected at config load
-				// (validateRemote), so this can no longer describe a proxy
-				// that's up and 403ing everything — remote access simply
-				// isn't turned on yet.
+				// Reachable only with remote disabled: an enabled block without base_url is
+				// rejected at config load.
 				cmd.Println("base_url not set — remote access needs both `remote.enabled: true` and `remote.base_url` (the front's public https origin) set in lever.yaml; set both, then `lever apply`")
 			}
 
@@ -863,11 +855,9 @@ func newRemoteStatusCmd() *cobra.Command {
 	}
 }
 
-// remoteContactUser is the operator view's source of a contact's hub user
-// id: the one `lever apply` bound it to, as a contact (remote-role.json).
-// Read on each call: apply rewrites the file while the proxy runs, and the
-// operator view is read rarely. A contact apply did not bind (it had not
-// signed in) has none, so the proxy never logs in for it.
+// remoteContactUser returns the hub user id apply bound a contact to
+// (remote-role.json), read per call because apply rewrites it while the proxy
+// runs. An unbound contact has none, so the proxy never logs in for it.
 func remoteContactUser(st state.State) func(login string) (string, bool) {
 	return func(login string) (string, bool) {
 		rec, found, err := st.LoadRemoteRoleRecord()

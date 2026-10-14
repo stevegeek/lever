@@ -1,11 +1,9 @@
-// Package jail provides a JailRunner: a proc.Runner that executes commands
-// INSIDE a jail via a backend-supplied argv prefix — e.g.
-// ["orb","-m",m,"-u",u] (OrbStack) or ["limactl","shell",vm] (Lima) — followed
-// by `env [-C dir] K=V… cmd args`. GNU `env` sets the jail environment (and
-// cwd via -C) with no shell quoting, so scion.Client runs unchanged inside the
-// jail. The host runner it wraps is the real one (the prefix binary runs on
-// the host). The one exception to `env K=V` is the controller PAT
-// (SCION_HUB_TOKEN), which the host argv must never carry — see hubtoken.go.
+// Package jail provides a proc.Runner that executes commands inside a jail
+// via a backend-supplied argv prefix (["orb","-m",m,"-u",u] for OrbStack,
+// ["limactl","shell",vm] for Lima) followed by `env [-C dir] K=V… cmd args`.
+// GNU env needs no shell quoting, so scion.Client runs unchanged inside the
+// jail. The controller PAT (SCION_HUB_TOKEN) never goes on the host argv; see
+// hubtoken.go.
 package jail
 
 import (
@@ -21,20 +19,16 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// compile-time assertion: *Runner satisfies proc.Runner
 var _ proc.Runner = (*Runner)(nil)
 
-// ForceHostNetworkEnv is the host-side escape hatch that makes every in-jail
-// scion command fall back to `--network=host` (a shared netns) for debugging —
-// NOT isolation-safe. See Config.ForceHostNetwork for what it changes.
+// ForceHostNetworkEnv is a debugging escape hatch that makes in-jail scion
+// commands run agents under --network=host. It is not isolation-safe; see
+// Config.ForceHostNetwork.
 const ForceHostNetworkEnv = "LEVER_FORCE_HOST_NETWORK"
 
-// ForceHostNetworkFromEnv reads ForceHostNetworkEnv from the process
-// environment. Parsed as a bool so =0/=false correctly mean OFF and any
-// unparseable/empty value stays OFF (own netns): a surprising value on this
-// security knob never silently re-opens the shared-loopback gap. It is the
-// ONLY place the variable is read; the transport itself (Runner) is pure and
-// takes the answer through Config.
+// ForceHostNetworkFromEnv is the only place ForceHostNetworkEnv is read. Any
+// value that does not parse as true stays off, so a surprising value on this
+// security knob never re-opens the shared loopback.
 func ForceHostNetworkFromEnv() bool {
 	force, _ := strconv.ParseBool(os.Getenv(ForceHostNetworkEnv))
 	return force
@@ -42,25 +36,16 @@ func ForceHostNetworkFromEnv() bool {
 
 // Config is everything a Runner needs to reach one jail.
 type Config struct {
-	Host   proc.Runner // host runner (the prefix binary runs on the host)
-	Prefix []string    // backend argv prefix, e.g. ["orb","-m",m,"-u",u]
-	UID    string      // run-user uid, for XDG_RUNTIME_DIR
+	Host   proc.Runner // the prefix binary runs on the host
+	Prefix []string
+	UID    string // run-user uid, for XDG_RUNTIME_DIR
 	// ForceHostNetwork re-emits scion's SCION_FORCE_HOST_NETWORK so agents run
-	// under --network=host (shared netns) instead of their own pasta netns.
-	// Agents run in their OWN per-agent network namespace by default (rootless
-	// podman's pasta networking), so each container's 127.0.0.1 is private.
-	// That private loopback is what isolates one agent's in-container gateway
-	// proxy (127.0.0.1:8462) from co-resident agents — under a shared
-	// --network=host netns any agent could reach another's gateway and act as
-	// it (no creds). Hub reachability across the netns boundary is restored
-	// host-side, not by host networking: the guest's containers.conf.d
-	// drop-in maps 169.254.1.2 to the VM loopback in whichever way the
-	// guest's pasta supports, and makes host.containers.internal resolve to
-	// it (guest.PastaHostAddr, lever#35), so scion's auto-computed container
-	// hub endpoint reaches the VM-loopback hub. Egress containment is
-	// unaffected: pasta's egress re-emerges on the VM OUTPUT chain
-	// (LEVER_EGRESS), verified live. Constructors take the value from
-	// ForceHostNetworkFromEnv.
+	// under --network=host instead of their own pasta netns. The per-agent
+	// netns keeps each container's 127.0.0.1 private, which is what isolates
+	// one agent's in-container gateway proxy (127.0.0.1:8462) from the others:
+	// under a shared netns any agent could reach another's gateway and act as
+	// it. The hub stays reachable through the guest's pasta mapping of
+	// 169.254.1.2 to the VM loopback (guest.PastaHostAddr).
 	ForceHostNetwork bool
 }
 
@@ -72,13 +57,10 @@ func New(cfg Config) *Runner {
 	return &Runner{cfg: cfg}
 }
 
-// jailEnv is the fixed environment every in-jail command needs. Shared by
-// RunIn and AttachArgv so the env list lives in exactly one place.
 func (r *Runner) jailEnv() []string {
 	env := []string{
 		"XDG_RUNTIME_DIR=/run/user/" + r.cfg.UID,
 		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"SCION_HUB_ENABLED=true",
 	}
 	if r.cfg.ForceHostNetwork {
 		env = append(env, "SCION_FORCE_HOST_NETWORK=1")
@@ -91,18 +73,14 @@ func envKVs(env map[string]string) []string {
 	for k, v := range env {
 		kvs = append(kvs, k+"="+v)
 	}
-	sort.Strings(kvs) // deterministic argv (testability)
+	sort.Strings(kvs)
 	return kvs
 }
 
-// argv builds the full host argv (prefix included) for an in-jail command,
-// and returns the hub token it withheld from that argv ("" when env carries
-// none). With a token the shape is
+// argv returns the hub token it withheld from the argv. With a token the
+// shape is
 //
 //	<prefix> env <jailEnv> sh -c <hubTokenStdinScript> _ env [-C dir] K=V… cmd args
-//
-// so the guest wrapper reads the token from stdin and execs the same `env …`
-// command the token-less shape runs directly.
 func (r *Runner) argv(dir string, env map[string]string, name string, args []string) ([]string, string, error) {
 	tok := env[hubTokenEnv]
 	if err := checkHubToken(tok); err != nil {
@@ -161,13 +139,10 @@ func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]s
 	return r.cfg.Host.RunStdin(ctx, stdin, nil, argv[0], argv[1:]...)
 }
 
-// AttachArgv builds the host argv to attach an interactive scion command INSIDE
-// the jail. It mirrors RunIn's prefix+env shape but returns the argv for the
-// caller to exec() directly — interactive TTY handover can't go through the
-// Runner. inner is the in-jail command (e.g. the argv from
-// scion.Client.AttachArgv). inner carries no hub token: a caller that needs
-// one stages it with StageHubToken and wraps inner in WithHubTokenFromFile,
-// so the token is read in the guest and the host argv stays secret-free.
+// AttachArgv builds the host argv to exec an interactive command inside the
+// jail; a TTY handover cannot go through the Runner. inner must carry no hub
+// token: a caller that needs one stages it with StageHubToken and wraps inner
+// in WithHubTokenFromFile, so the host argv stays secret-free.
 func (r *Runner) AttachArgv(inner []string) []string {
 	return slices.Concat(r.cfg.Prefix, []string{"env"}, r.jailEnv(), inner)
 }

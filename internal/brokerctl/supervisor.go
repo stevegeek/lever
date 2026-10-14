@@ -20,28 +20,23 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-// ToolSpec is what the Supervisor needs to know about one configured tool:
-// the name (for logs and errors), the command to spawn, the loopback backend
-// it serves on, whether it is external (fronted by the broker, never
-// spawned), and the directory it runs in. ToolSpecs builds them from config
-// so the Supervisor itself holds no config types.
+// ToolSpec is what the Supervisor needs to know about one configured tool.
+// ToolSpecs builds them from config so the Supervisor holds no config types.
 type ToolSpec struct {
 	Name     string
 	Command  []string
 	Backend  string
 	External bool
 	// Dir is the tool's working directory and the base of a relative
-	// command: the instance dir, where config load's tree check resolves
-	// the same paths. Empty = the broker's own (tests).
+	// command: the instance dir, where config load's tree check resolves the
+	// same paths. Empty = the broker's own (tests).
 	Dir string
 	// ReadOnly lists the manager.read_only entries the tool's in-tree
-	// program relies on (config.App.ToolsOnReadOnly). Such a tool starts
-	// only once Supervisor.ReadOnlyGuard has seen the running manager
-	// hold them read-only.
+	// program relies on. Such a tool starts only once ReadOnlyGuard has seen
+	// the running manager hold them read-only.
 	ReadOnly []string
 }
 
-// ToolSpecs maps the configured broker tools onto the Supervisor's ToolSpec.
 func ToolSpecs(app *config.App) ([]ToolSpec, error) {
 	onRO, err := app.ToolsOnReadOnly()
 	if err != nil {
@@ -55,26 +50,23 @@ func ToolSpecs(app *config.App) ([]ToolSpec, error) {
 	return specs, nil
 }
 
-// ReadOnlyGuard reports, as nil, that the running manager holds every
-// listed manager.read_only entry read-only; any other answer, including
-// "cannot tell", is an error that holds the tool back.
+// ReadOnlyGuard returns nil only when the running manager holds every listed
+// manager.read_only entry read-only; any other answer, "cannot tell"
+// included, holds the tool back.
 type ReadOnlyGuard func(ctx context.Context, entries []string) error
 
-// readOnlyRetry is how often the supervisor asks ReadOnlyGuard again for a
-// tool it holds back: apply starts the broker before the manager, so a
-// fresh create gains the mounts only after the first ask.
+// readOnlyRetry: apply starts the broker before the manager, so a fresh
+// create gains the mounts only after the first ask.
 const readOnlyRetry = 30 * time.Second
 
-// toolSecretEnv is the environment variable a supervised tool reads its
-// broker-to-tool shared secret from (captool.ToolSecretEnv — spelled here so
-// brokerctl does not import the tool SDK).
+// toolSecretEnv is captool.ToolSecretEnv, spelled here so brokerctl does not
+// import the tool SDK.
 const toolSecretEnv = "LEVER_TOOL_SECRET"
 
-// NewToolSecret mints the per-boot broker-to-tool shared secret: 32 random
-// bytes, hex-encoded (header- and environment-safe). Serve mints one, hands it
-// to the broker (Config.ToolSecret) and to every supervised tool (via the
-// environment) — so a request that reaches a first-party tool's loopback port
-// without passing through the broker is refused by the tool.
+// NewToolSecret mints the per-boot broker-to-tool shared secret (32 random
+// bytes, hex). The broker presents it and every supervised tool requires it,
+// so a request that reaches a tool's loopback port without passing through
+// the broker is refused.
 func NewToolSecret() (string, error) {
 	var buf [32]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -83,8 +75,8 @@ func NewToolSecret() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-// Supervisor launches + tears down the configured first-party tool subprocesses; external tools (broker-fronted, not spawned) are skipped.
-// Tools are host-side, bind loopback, and self-register over the broker admin URL.
+// Supervisor launches and tears down the configured first-party tool
+// subprocesses; external (broker-fronted) tools are not spawned.
 type Supervisor struct {
 	tools      []ToolSpec
 	adminURL   string
@@ -104,27 +96,21 @@ type Supervisor struct {
 	done    chan struct{}
 }
 
-// NewSupervisor builds a supervisor for tools, injecting adminURL as each
-// tool's -admin flag and toolSecret as its LEVER_TOOL_SECRET environment
-// variable (NewToolSecret; the environment, never argv, so it is not
-// ps-visible). Each supervised tool's combined stdout/stderr is written to its
-// own <toolLogDir>/<name>.log so per-tool forensics aren't muddled in a shared
-// file.
+// NewSupervisor builds a supervisor that passes adminURL as each tool's
+// -admin flag and toolSecret in its environment (never argv, so it is not
+// ps-visible). Each tool's output goes to its own <toolLogDir>/<name>.log.
 func NewSupervisor(tools []ToolSpec, adminURL, toolLogDir, toolSecret string) *Supervisor {
 	return &Supervisor{tools: tools, adminURL: adminURL, toolLogDir: toolLogDir, toolSecret: toolSecret}
 }
 
-// Start launches every configured tool as a host subprocess: no shell, an
-// explicit minimal env, and the configured command + injected -backend/-admin
-// flags. It does not wait for registration (the caller health-checks the broker).
-// If any tool fails to start, all already-started tools are force-killed and
-// reaped before returning the error, leaving the supervisor clean.
+// Start launches every configured tool as a host subprocess with no shell
+// and an explicit minimal env. It does not wait for registration. If any tool
+// fails to start, all started tools are killed and reaped before returning.
 //
-// A tool whose program relies on manager.read_only (ToolSpec.ReadOnly) is
-// held back until ReadOnlyGuard passes: a manager created before the
-// entry, or one whose mounts cannot be read, could have rewritten the
-// program. Its log says why; the guard is asked again every retry interval
-// until it passes or Stop runs.
+// A tool relying on manager.read_only is held back until ReadOnlyGuard
+// passes: a manager created before the entry, or one whose mounts cannot be
+// read, could have rewritten the program. The guard is asked again every
+// retry interval until it passes or Stop runs.
 func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -158,8 +144,6 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	return nil
 }
 
-// vetHeld asks ReadOnlyGuard for each held-back tool, starts those it
-// passes, and asks again every retry interval for the rest.
 func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
 	defer close(s.done)
 	retry := s.retry
@@ -178,9 +162,8 @@ func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
 				return
 			}
 			if err != nil {
-				// One line per reason class, not one per retry: the class
-				// is fixed text (guardClass), so changing output cannot
-				// defeat the dedupe; the message is sanitised and bounded.
+				// One line per reason class, not per retry: the class is fixed
+				// text, so changing output cannot defeat the dedupe.
 				if class := guardClass(err); reported[t.Name] != class {
 					reported[t.Name] = class
 					s.logTool(t.Name, slog.LevelWarn, fmt.Sprintf("not starting the tool: its program lies in the tree under manager.read_only %v, "+
@@ -211,11 +194,10 @@ func (s *Supervisor) vetHeld(ctx context.Context, held []ToolSpec) {
 	}
 }
 
-// maxReasonBytes bounds a guard refusal in a tool log line.
 const maxReasonBytes = 512
 
-// boundedReason is a guard refusal for a log line: terminal-safe and cut to
-// maxReasonBytes, whatever produced it.
+// boundedReason makes a guard refusal terminal-safe and bounded, whatever
+// produced it.
 func boundedReason(err error) string {
 	r := termsafe.Sanitize(err.Error())
 	if len(r) > maxReasonBytes {
@@ -224,8 +206,8 @@ func boundedReason(err error) string {
 	return r
 }
 
-// logTool appends one broker line about a tool to the tool's own log (best
-// effort), where whoever reads why the tool is silent will look.
+// logTool writes to the tool's own log (best effort), where whoever asks why
+// the tool is silent will look.
 func (s *Supervisor) logTool(name string, level slog.Level, msg string, args ...any) {
 	f, err := os.OpenFile(filepath.Join(s.toolLogDir, toolLogName(name)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -235,11 +217,10 @@ func (s *Supervisor) logTool(name string, level slog.Level, msg string, args ...
 	logging.New(f, "broker").With("tool", name).Log(context.Background(), level, msg, args...)
 }
 
-// spawnLocked starts one tool. Caller must hold s.mu.
+// spawnLocked: caller holds s.mu.
 func (s *Supervisor) spawnLocked(ctx context.Context, t ToolSpec) error {
-	// Resolved here, not by exec: exec.Command would look a bare name
-	// up on the broker's own PATH, not the fixed one config load
-	// validated it against.
+	// Resolved here, not by exec: exec.Command would search the broker's
+	// own PATH, not the fixed one config load validated against.
 	bin, err := config.ResolveToolCommand(t.Command[0], t.Dir)
 	if err != nil {
 		return fmt.Errorf("brokerctl: tool %q: %w", t.Name, err)
@@ -247,10 +228,9 @@ func (s *Supervisor) spawnLocked(ctx context.Context, t ToolSpec) error {
 	args := append([]string{}, t.Command[1:]...)
 	args = append(args, "-backend", t.Backend, "-admin", s.adminURL)
 	cmd := exec.CommandContext(ctx, bin, args...)
-	// When the broker stops, a tool gets SIGTERM and toolStopGrace to exit
-	// before SIGKILL: lever-tool-whisper stops its whisper-server child in
-	// that time (off Linux nothing else would, and the orphan would keep
-	// the child's port).
+	// SIGTERM then toolStopGrace before SIGKILL: lever-tool-whisper stops its
+	// whisper-server child in that time (off Linux nothing else would, and
+	// the orphan would keep the child's port).
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = toolStopGrace
 	cmd.Dir = t.Dir
@@ -273,13 +253,12 @@ func (s *Supervisor) spawnLocked(ctx context.Context, t ToolSpec) error {
 	return nil
 }
 
-// toolStopGrace is how long a tool has between SIGTERM and SIGKILL. It is
-// short: `lever stop` SIGKILLs a broker that has not exited 2 s after its
-// own SIGTERM, and the tools must be gone by then.
+// toolStopGrace is short: `lever stop` SIGKILLs a broker that has not exited
+// 2 s after its own SIGTERM, and the tools must be gone by then.
 const toolStopGrace = 1500 * time.Millisecond
 
-// Stop stops every launched tool (SIGTERM, then SIGKILL after toolStopGrace)
-// and reaps it. It is safe to call after a failed Start or multiple times.
+// Stop stops and reaps every launched tool (SIGTERM, then SIGKILL after
+// toolStopGrace). Safe after a failed Start or more than once.
 func (s *Supervisor) Stop() {
 	s.mu.Lock()
 	s.stopped = true
@@ -294,8 +273,7 @@ func (s *Supervisor) Stop() {
 	s.stopLocked()
 }
 
-// stopLocked kills and reaps all tracked child processes and clears the slice.
-// Caller must hold s.mu.
+// stopLocked: caller holds s.mu.
 func (s *Supervisor) stopLocked() {
 	for _, cmd := range s.cmds {
 		if cmd.Process != nil {
@@ -328,7 +306,6 @@ func (s *Supervisor) stopLocked() {
 	s.files = nil
 }
 
-// toolLogName maps a tool name to a safe per-tool log filename.
 func toolLogName(name string) string {
 	safe := strings.Map(func(r rune) rune {
 		switch {

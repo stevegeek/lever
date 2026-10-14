@@ -14,41 +14,33 @@ import (
 )
 
 // AgentTokenPath is where scion keeps an agent's hub token inside its
-// container: the scion user's home, .scion/scion-token (scion
-// pkg/sciontool/hub/client.go TokenFilePath). sciontool init reads it at
-// boot, its refresh loop rewrites it, and the broker's reset-auth handler
-// replaces it.
+// container (scion pkg/sciontool/hub/client.go TokenFilePath).
 const AgentTokenPath = "/home/scion/.scion/scion-token"
 
-// agentTokenScript prints the container's clock (Unix seconds) and then the
-// payload segment of the token file named by $1 — the middle of the three
-// JWT segments, and nothing else. The header and the signature stay in the
-// container: without the signature the payload is no credential, only the
-// claims (agent id, project, scopes, expiry). `cut -s` prints nothing for a
-// line without a dot, so a file that is not a JWT (or a bare secret) never
-// leaves the container whole. The read is bounded.
+// agentTokenScript prints the container's clock and only the payload segment
+// of the JWT in $1: without the signature the payload is no credential.
+// `cut -s` prints nothing for a line without a dot, so a file that is not a
+// JWT (or a bare secret) never leaves the container whole. The read is
+// bounded.
 const agentTokenScript = `date -u +%s && head -c 16384 "$1" | cut -s -d. -f2 | head -c 8192`
 
-// HubTokenTimes is what lever reads of an agent's hub token: its expiry and
-// the container's clock at the moment of the read. The container clock is
-// the guest kernel's, which is also the hub's (the hub runs in the guest and
-// checks expiry against its own clock), so the two compare directly even
-// when the guest clock drifted from the host's.
+// HubTokenTimes is an agent hub token's expiry and the container's clock at
+// the read. The container clock is the guest's, which the hub also checks
+// expiry against, so the two compare directly even when the guest clock
+// drifted from the host's.
 type HubTokenTimes struct {
 	Expiry time.Time
 	Now    time.Time
 }
 
 // Expired reports whether the hub refuses the token now. An expired agent
-// token cannot refresh itself (sciontool logs AUTH_LOST), so this is the
-// fault, not a transient: every agent-to-hub call fails with 401 until
-// something injects a new token.
+// token cannot refresh itself (sciontool logs AUTH_LOST): every agent-to-hub
+// call fails with 401 until a new token is injected.
 func (t HubTokenTimes) Expired() bool { return !t.Now.Before(t.Expiry) }
 
 // RefreshOverdue reports a token past its refresh time but not yet expired.
-// sciontool refreshes 2 h before expiry with a Go timer, and a Go timer counts
-// the guest's monotonic clock, which stands still while the host sleeps; a
-// refresh that is late by more than the remaining margin becomes an expiry.
+// sciontool's refresh timer counts the guest's monotonic clock, which stands
+// still while the host sleeps, so a refresh can be late enough to expire.
 func (t HubTokenTimes) RefreshOverdue() bool {
 	return !t.Expired() && !t.Now.Before(t.Expiry.Add(-AgentTokenRefreshMargin))
 }
@@ -57,22 +49,18 @@ func (t HubTokenTimes) RefreshOverdue() bool {
 // agent's hub token (scion cmd/sciontool/commands/init.go).
 const AgentTokenRefreshMargin = 2 * time.Hour
 
-// AgentUser is the user every probe execs as: scion's own execs into an
-// agent container run as "scion" (scion pkg/runtime/podman.go), the user
-// that owns the harness's tmux server and the token file, whatever USER the
-// image declares.
+// AgentUser is the user every probe execs as: scion's own execs run as
+// "scion" (scion pkg/runtime/podman.go), the owner of the harness's tmux
+// server and the token file, whatever USER the image declares.
 const AgentUser = "scion"
 
-// Every exec into an agent container runs a program the agent may be able to
-// replace (lever treats the agent as root in its own container: its harness
-// runs as uid 1000 under rootless podman, but nothing here relies on that)
-// or feed a file it can replace (a FIFO
-// makes `head` block): each gets its own deadline, so a hostile agent
-// cannot hang doctor, apply or the broker, and its output is capped, so it
-// cannot grow the host process (proc.WithOutputLimit).
+// Every exec into an agent container runs a program, or reads a file, the
+// agent may have replaced (lever treats the agent as root there; a FIFO makes
+// `head` block): each gets its own deadline, so a hostile agent cannot hang
+// doctor, apply or the broker, and its output is capped, so it cannot grow
+// the host process.
 const agentExecOutputLimit = 64 << 10
 
-// agentExecTimeout is a var so a test can shrink it.
 var agentExecTimeout = 10 * time.Second
 
 // BoundAgentExec returns ctx with the deadline and output cap every exec
@@ -82,18 +70,16 @@ func BoundAgentExec(ctx context.Context) (context.Context, context.CancelFunc) {
 }
 
 // AgentProbe reads (and, for ReportSessionRunning, nudges) an agent's
-// session from inside its container, through the jail. Every call is a
-// `podman exec` into a container the agent controls, so everything it
-// returns is the agent's own word: it yields only a time, a boolean or an
-// error, and no error carries text from the container.
+// session from inside its container. Everything it returns is the agent's
+// own word: only a time, a boolean or an error, and no error carries text
+// from the container.
 type AgentProbe struct {
 	R proc.Runner
 }
 
 // HubToken reads the agent's hub token expiry and the container clock. Only
-// the exp claim is decoded, and no error repeats what the container printed
-// (the payload is the agent's claims, and the agent can write the file).
-// ErrNoContainer when podman knows no such container.
+// the exp claim is decoded, and no error repeats what the container printed:
+// the agent can write the file.
 func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, error) {
 	if err := checkRef(ref); err != nil {
 		return HubTokenTimes{}, fmt.Errorf("reading agent hub token: %w", err)
@@ -116,9 +102,8 @@ func (p AgentProbe) HubToken(ctx context.Context, ref string) (HubTokenTimes, er
 }
 
 // ErrNoTmuxServer is HarnessAlive's answer when tmux in the container finds
-// no server on the socket it tries: scion has not started its tmux server
-// yet (the pre-start hook is still running), or it is gone, or the exec
-// reached another socket. Not proof either way, so an error.
+// no server on the socket it tries: scion has not started it yet, it is
+// gone, or the exec reached another socket. Not proof either way.
 var ErrNoTmuxServer = errors.New("no tmux server answered")
 
 // ErrProbeTimedOut is a probe exec that passed its deadline.
@@ -130,9 +115,8 @@ type ProbeExitError struct{ Code int }
 
 func (e *ProbeExitError) Error() string { return "exit status " + strconv.Itoa(e.Code) }
 
-// ProbeErrorClass names the class of a probe error in fixed words, for an
-// operator line that must say why a check could not run without repeating
-// anything the container printed.
+// ProbeErrorClass names the class of a probe error in fixed words, so an
+// operator line repeats nothing the container printed.
 func ProbeErrorClass(err error) string {
 	var exit *ProbeExitError
 	switch {
@@ -158,7 +142,6 @@ func ProbeErrorClass(err error) string {
 // no part of the output.
 var ErrTokenShape = errors.New("reading agent hub token: unexpected output (no clock line, or a token without a readable exp claim)")
 
-// parseHubTokenTimes decodes agentTokenScript's two lines.
 func parseHubTokenTimes(out string) (HubTokenTimes, error) {
 	clock, payload, ok := strings.Cut(strings.TrimSpace(out), "\n")
 	if !ok {
@@ -185,14 +168,11 @@ func parseHubTokenTimes(out string) (HubTokenTimes, error) {
 	return HubTokenTimes{Expiry: time.Unix(exp, 0).UTC(), Now: time.Unix(now, 0).UTC()}, nil
 }
 
-// HarnessAlive reports whether the agent's harness is still running: the
-// pane of scion's `agent` tmux window is alive. scion starts the harness as
-// `sh -c 'claude …; echo $? > /tmp/scion-harness-exit-code'` in that window
-// (the `shell` window keeps the session itself alive), so the window goes
-// away when claude exits. tmux answering that it cannot find the window or
-// session is a false; anything else that fails is an error, never a false.
-// The exec runs as the container's user, the uid that owns scion's tmux
-// server (both scion, uid 1000, on the assistant 2026-10-06).
+// HarnessAlive reports whether the pane of scion's `agent` tmux window is
+// alive: scion runs claude in that window (the `shell` window keeps the
+// session alive), so the window goes away when claude exits. Only tmux
+// saying it cannot find the window or session is a false; any other failure
+// is an error.
 func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) {
 	if err := checkRef(ref); err != nil {
 		return false, fmt.Errorf("probing agent harness: %w", err)
@@ -217,12 +197,10 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	case strings.Contains(s, "can't find window"), strings.Contains(s, "can't find session"):
 		return false, nil
 	}
-	// "no server running" and "error connecting to" are not proof the
-	// harness exited: they also mean this exec reached another socket than
-	// scion's server (another uid or TMUX_TMPDIR). Unknown, so an error —
-	// but a distinct one (ErrNoTmuxServer): before claude starts, scion has
-	// not started its tmux server yet, and the manager gate tells that
-	// apart from a probe that could not run at all.
+	// "no server running" and "error connecting to" also mean this exec
+	// reached another socket than scion's (another uid or TMUX_TMPDIR), so
+	// they are not proof the harness exited. A distinct error lets the
+	// manager gate tell "not started yet" from a probe that could not run.
 	if strings.Contains(s, "no server running") || strings.Contains(s, "error connecting to") {
 		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrNoTmuxServer)
 	}
@@ -230,12 +208,10 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 }
 
 // ReportSessionRunning makes the agent report its own session running to the
-// hub, exactly as Claude Code's SessionStart hook does: `sciontool hook
-// SessionStart` in the container, as the container's user, with the agent's
-// own hub token (scion pkg/sciontool/hooks/handlers/hub.go reports phase
-// running, activity working). Nothing new enters the container. sciontool
-// logs a failed hub call and still exits 0, so the caller re-reads the phase
-// to learn whether it worked.
+// hub, as Claude Code's SessionStart hook does, with the agent's own hub
+// token. Nothing new enters the container. sciontool exits 0 even when the
+// hub call fails, so the caller re-reads the phase to learn whether it
+// worked.
 func (p AgentProbe) ReportSessionRunning(ctx context.Context, ref string) error {
 	if err := checkRef(ref); err != nil {
 		return fmt.Errorf("reporting agent session: %w", err)
@@ -260,7 +236,6 @@ func checkRef(ref string) error {
 	return nil
 }
 
-// noSuchContainer reports podman's answer for a container it does not know.
 func noSuchContainer(stderr string) bool {
 	s := strings.ToLower(stderr)
 	return strings.Contains(s, "no such container") || strings.Contains(s, "no such object")
@@ -271,23 +246,15 @@ func noSuchContainer(stderr string) bool {
 const AttachSession = "scion"
 
 // detachClientsScript detaches the tmux clients of the scion session that
-// a `podman exec` started (an attach), and prints one "d" line for each.
-// $1 is the /proc root (a test seam).
+// a `podman exec` started, and prints one "d" line for each. $1 is the /proc
+// root (a test seam).
 //
 // It must spare the container's own client: under podman scion's start
-// command ends in a foreground `attach-session -t scion` (scion
-// pkg/runtime/common.go, tmuxAttachSession), the container's main process.
-// Detaching it would end that process and stop the agent. An exec'd
-// process has no parent inside the container's pid namespace (its parent
-// is podman's, outside), so /proc/<pid>/status reads "PPid: 0"; the main
-// client descends from the container's init and reads a non-zero PPid.
-// Only clients with PPid 0 are detached. PID 1 also reads PPid 0, so it
-// is never detached: an image whose main process is the tmux client
-// itself would otherwise lose it. A pid tmux reports that is not a
-// number, or whose status cannot be read, is left attached. A stale
-// client whose exec session died is reparented inside the container and
-// stays (incomplete cleanup, never harm). The count is the agent's own
-// word, as every AgentProbe answer is.
+// command ends in a foreground `attach-session -t scion`, the container's
+// main process, and detaching it would stop the agent. An exec'd process has
+// no parent inside the container's pid namespace, so its status reads
+// "PPid: 0"; only those are detached. PID 1 also reads PPid 0 and is never
+// detached. Anything unreadable is left attached.
 const detachClientsScript = `clients=$(tmux list-clients -t ` + AttachSession + ` -F '#{client_pid} #{client_tty}' 2>/dev/null) || exit 0
 printf '%s\n' "$clients" | while read -r pid tty; do
   case "$pid" in ''|*[!0-9]*|1) continue ;; esac
@@ -301,14 +268,10 @@ printf '%s\n' "$clients" | while read -r pid tty; do
 done
 exit 0`
 
-// DetachClients detaches the tmux clients that earlier attaches left on
-// the agent's scion session and returns how many it detached. An earlier
-// attach whose terminal went away (a closed window, a dropped ssh, a host
-// that slept) can stay attached as a stale client and freeze or misdraw
-// the view of the next one (lever#170); `lever attach` and `lever up` call
-// this before they attach, as `tmux attach -d` would, sparing the
-// container's own client (detachClientsScript). Only a count leaves the
-// container. No server or no session detaches nothing.
+// DetachClients detaches the tmux clients that earlier attaches left on the
+// agent's scion session and returns how many. A stale client whose terminal
+// went away can freeze or misdraw the next attach. Only a count leaves the
+// container.
 func (p AgentProbe) DetachClients(ctx context.Context, ref string) (int, error) {
 	if err := checkRef(ref); err != nil {
 		return 0, fmt.Errorf("detaching tmux clients: %w", err)

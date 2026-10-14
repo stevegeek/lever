@@ -12,24 +12,19 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/agentledger"
-	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/sentledger"
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// checkSentLedger reports whether agents can verify the messages lever sends
-// them (package sentledger): the broker records every send there, and
-// message_verify answers from it. Without it every worker relay, manager
-// message, operator note and directive notice answers "unavailable", and the
-// agents treat them as data.
+// checkSentLedger reports whether agents can verify lever's messages (package
+// sentledger). Without it message_verify answers "unavailable" for every relay,
+// note and directive notice, and the agents treat them as data.
 func checkSentLedger(app *config.App, st state.State) checkResult {
 	const name = "sent ledger"
-	if brokerctl.StateInsideTree(app, st) {
-		return checkResult{name, false, "off: the state directory " + st.Dir + " is inside the tree " + app.Tree +
-			", which agents mount, so the broker keeps no record of what it sends and no agent can verify a lever message",
-			"point `tree:` at a subdirectory that does not contain " + stateDirName() + "/"}
+	if inside, what, fix := stateInTree(app, st); inside {
+		return checkResult{name, false, "off: " + what + " (agents mount the tree), so the broker keeps no record of what it sends and no agent can verify a lever message", fix}
 	}
 	p := st.SentLedger()
 	running := brokerRunning(st)
@@ -65,7 +60,6 @@ func checkSentLedger(app *config.App, st state.State) checkResult {
 	return checkResult{name, true, fmt.Sprintf("%s/ (%d files, 0700)%s", stateRel(st, p), n, sock), ""}
 }
 
-// brokerRunning reports whether the broker's pid file names a live process.
 func brokerRunning(st state.State) bool {
 	_, found, alive := state.PIDStatus(st.PID())
 	return found && alive
@@ -78,20 +72,16 @@ const guestClockWarn = 2 * time.Second
 // agent messages on, before the row fails: half of agentledger.SkewBefore.
 const agentMessagesClockWarn = 5 * time.Second
 
-// checkGuestClock compares the guest's clock with the host's. A message lever
-// sends is verified by its ref, whatever the clocks say. But an agent image
-// built before message_verify (0.27) cannot pass the ref, and the broker then
-// matches the envelope's timestamp (the hub's clock, in the guest) against
-// the host clock within sentledger.ClockSkew. A guest clock that drifted
-// (Lima after the host slept) fails those verifications, and those agents
-// treat lever's messages as data.
+// checkGuestClock compares the guest's clock with the host's. A message is
+// verified by its ref whatever the clocks say, but an older agent image cannot
+// pass the ref, and the broker then matches the envelope's guest timestamp
+// against the host clock within sentledger.ClockSkew; a drifted guest (Lima
+// after the host slept) fails those verifications.
 //
-// With agent messages on (agentMessages), a guest clock behind the host
-// matters more: the hub stamps a contact message with the guest time, and
-// the agent ledger binds a message only when that time is at most
-// agentledger.SkewBefore before its authorization (host time). A guest
-// more than that behind hides every authorized message from contacts; the
-// row says so past agentMessagesClockWarn.
+// With agent messages on, a guest behind the host matters more: the agent
+// ledger binds a contact message only when its guest timestamp is at most
+// agentledger.SkewBefore before its host-time authorization, so beyond that
+// every authorized message is hidden from contacts.
 func checkGuestClock(ctx context.Context, jr proc.Runner, now func() time.Time, agentMessages bool) checkResult {
 	const name = "guest clock"
 	before := now()

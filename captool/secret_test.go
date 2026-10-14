@@ -6,10 +6,9 @@ import (
 	"testing"
 )
 
-// The broker presents a per-boot shared secret on every request it proxies to
-// a first-party tool (X-Lever-Tool-Secret). A request without it — an agent
-// that reached the tool's loopback port directly, past the broker — is refused
-// before any MCP dispatch, so X-Lever-Caller is never trusted on its own.
+// A request without the tool secret, as from an agent that reached the
+// tool's port past the broker, is refused before any MCP dispatch, so
+// X-Lever-Caller is never trusted on its own.
 
 func TestServeHTTPDeniesMissingToolSecret(t *testing.T) {
 	w := rpcNoSecret(t, testServer(t), `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, nil)
@@ -36,8 +35,8 @@ func TestServeHTTPAcceptsCorrectToolSecret(t *testing.T) {
 	}
 }
 
-// With no secret configured at all (Config.Secret empty and LEVER_TOOL_SECRET
-// unset) the server fails closed: nothing is trusted, so every request is 401.
+// With no secret configured at all the server fails closed: every request is
+// 401.
 func TestServeHTTPDeniesEverythingWhenNoSecretConfigured(t *testing.T) {
 	t.Setenv(ToolSecretEnv, "")
 	s := newTestServerWithSecret(t, "")
@@ -53,8 +52,6 @@ func TestServeHTTPDeniesEverythingWhenNoSecretConfigured(t *testing.T) {
 	}
 }
 
-// The supervisor hands the secret to the tool through the environment
-// (LEVER_TOOL_SECRET); New reads it when Config.Secret is empty.
 func TestNewReadsToolSecretFromEnv(t *testing.T) {
 	t.Setenv(ToolSecretEnv, "from-env")
 	s := newTestServerWithSecret(t, "")
@@ -65,7 +62,6 @@ func TestNewReadsToolSecretFromEnv(t *testing.T) {
 	}
 }
 
-// An explicit Config.Secret wins over the environment.
 func TestNewPrefersConfigSecretOverEnv(t *testing.T) {
 	t.Setenv(ToolSecretEnv, "from-env")
 	s := newTestServerWithSecret(t, "from-config")

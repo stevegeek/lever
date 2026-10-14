@@ -10,6 +10,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {
@@ -120,19 +121,16 @@ func writeProjectConfig(t *testing.T, home, name, workspacePath string) string {
 }
 
 // TestScionConfigRemoveScriptDeletesOnlyMatches runs the ACTUAL bash body
-// (shared with prod via scionConfigRemoveScript) against a real temp
-// filesystem, because substring assertions can't prove a destructive `rm -rf`
-// deletes the right dirs and only those. It verifies exact-match scoping, the
-// glob-anchored dirname derivation, that no-workspace_path entries are spared,
-// and idempotency.
+// against a real temp filesystem, because substring assertions cannot prove a
+// destructive `rm -rf` deletes the right dirs and only those.
 func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
 	home := t.TempDir()
 
-	// Two entries claim /lever (the accumulation this fix targets), one claims
-	// the worker path, one has no workspace_path line at all.
+	// Two entries claim /lever, one claims the worker path, one has no
+	// workspace_path line at all.
 	mgr1 := writeProjectConfig(t, home, "lever__aaaa1111", "/lever")
 	mgr2 := writeProjectConfig(t, home, "lever__bbbb2222", "/lever")
 	worker := writeProjectConfig(t, home, "worker__cccc3333", "/lever/workers/worker")
@@ -173,12 +171,8 @@ func TestScionConfigRemoveScriptDeletesOnlyMatches(t *testing.T) {
 	}
 }
 
-// The four scenarios below pin scionProjectRegistered's exactly-one-valid-
-// registration predicate: registered requires BOTH exactly one matching entry
-// AND the in-tree marker. Pure-Go over types.ScionProjectState (mirroring
-// how internal/cli's checkScionProject is tested), since the underlying
-// marker+entries read is already covered by TestParseScionState* above and by
-// ReadScionProjectState's real production use — nothing new is parsed here.
+// The four scenarios below pin scionProjectRegistered: registered requires
+// BOTH exactly one matching entry AND the in-tree marker.
 
 func TestScionProjectRegisteredOneMatchingEntryPlusMarker(t *testing.T) {
 	st := types.ScionProjectState{
@@ -317,10 +311,7 @@ func readFileString(t *testing.T, p string) string {
 }
 
 // TestScionHubEndpointRepairScript runs the ACTUAL bash body against a real
-// filesystem. The bug it closes: minting the controller PAT `hub link`s the
-// project against a THROWAWAY hub, persisting that port here, and the
-// register-project step skips its re-init when the registration is already
-// sound — so `lever attach`, which execs scion bare, dialled a dead port.
+// filesystem.
 func TestScionHubEndpointRepairScript(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
@@ -378,5 +369,61 @@ func TestScionHubEndpointRepairScript(t *testing.T) {
 	}
 	if readFileString(t, stale) != before {
 		t.Error("second run modified the file")
+	}
+}
+
+// TestMarkerStateScriptCountsOnlyARegularFile runs the marker check under
+// bash: a symlink, dangling or not, and a directory are no marker.
+func TestMarkerStateScriptCountsOnlyARegularFile(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir, m string)
+		want  string
+	}{
+		{"regular file", func(t *testing.T, _, m string) { mustWrite(t, m) }, "MARKER 1"},
+		{"absent", func(*testing.T, string, string) {}, "MARKER 0"},
+		{"dangling symlink", func(t *testing.T, dir, m string) { mustLink(t, filepath.Join(dir, "nowhere"), m) }, "MARKER 0"},
+		{"symlink to a file", func(t *testing.T, dir, m string) {
+			mustWrite(t, filepath.Join(dir, "f"))
+			mustLink(t, filepath.Join(dir, "f"), m)
+		}, "MARKER 0"},
+		{"directory", func(t *testing.T, _, m string) {
+			if err := os.Mkdir(m, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, "MARKER 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ws := filepath.Join(dir, "ws")
+			if err := os.Mkdir(ws, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, dir, filepath.Join(ws, layout.ProjectMarker))
+			out, err := exec.Command("bash", "-c", markerStateScript(ws)).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func mustWrite(t *testing.T, p string) {
+	t.Helper()
+	if err := os.WriteFile(p, []byte("project-id: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustLink(t *testing.T, target, p string) {
+	t.Helper()
+	if err := os.Symlink(target, p); err != nil {
+		t.Fatal(err)
 	}
 }

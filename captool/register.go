@@ -10,8 +10,8 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// Register announces this tool to the broker (first_party=true) and caches the
-// broker's verification public key + current epoch from the response.
+// Register announces this tool to the broker and caches the broker's
+// verification public key and current epoch.
 func (s *Server) Register(ctx context.Context) error {
 	ops := make([]wire.OperationSpec, 0, len(s.ops))
 	for _, o := range s.ops {
@@ -32,8 +32,8 @@ func (s *Server) Register(ctx context.Context) error {
 	return nil
 }
 
-// freshEpoch returns the cached epoch floor, refreshing from /epoch when older
-// than epochTTL. On a refresh error it keeps (and returns) the last good value.
+// freshEpoch returns the epoch floor, cached for epochTTL. On a refresh
+// error it keeps the last good value.
 func (s *Server) freshEpoch(ctx context.Context) int {
 	s.mu.Lock()
 	if time.Since(s.epochAt) < s.epochTTL {

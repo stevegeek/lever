@@ -14,13 +14,10 @@ import (
 	"github.com/stevegeek/lever/internal/retry"
 )
 
-// ContainerLive reports whether a scion `list --format json` containerStatus
-// value describes a LIVE container. For a running container scion passes
-// through the podman status TEXT ("Up 6 seconds", "Up About a minute"), not a
-// canonical token — live-observed 2026-07-04 when a liveness gate wrongly
-// failed a healthy manager by comparing == "running". Non-live values seen:
-// "stopped", "Exited (1) 4 minutes ago". Shared by apply's waitManagerLive and
-// the broker's waitWorkerLive so both consumers use one predicate.
+// ContainerLive reports whether a scion containerStatus value describes a live
+// container. For a running container scion passes through the podman status
+// text ("Up 6 seconds"), not a canonical token; non-live values include
+// "stopped" and "Exited (1) 4 minutes ago".
 func ContainerLive(status string) bool {
 	return status == "running" || strings.HasPrefix(status, "Up")
 }
@@ -35,58 +32,34 @@ func RunningContainerDown(phase, containerStatus string) bool {
 }
 
 // LiveBudget bounds WaitAgentLive. Attempts × Interval is how long a record may
-// take to become live at all; Settle is how long it must then STAY live before
-// the caller may call it up (0 = return on the first live observation, the
-// pre-lever#31 behaviour).
+// take to become live at all; Settle is how long it must then stay live (0
+// returns on the first live observation).
 type LiveBudget struct {
 	Attempts int
 	Interval time.Duration
 	Settle   time.Duration
 }
 
-// WaitAgentLive polls list until the agent named slug shows BOTH Phase=="running"
-// AND a live container (ContainerLive), or attempts run out; then, when the
-// budget has a Settle window, keeps polling and requires that pair to HOLD for
-// the whole window. It is the shared post-action liveness backstop for scion's
-// false-success classes: a blind `scion start`'s 409 "already exists" (exit
-// code is non-zero but its text can match an idempotency predicate a layer up)
-// and a `scion resume`/`scion start` that reports success ("resumed") for a
-// container whose harness dies moments later. Trusting the observed record —
-// not CLI exit codes or error wording — is what makes a caller's success
-// meaningful.
+// WaitAgentLive polls list until the agent named slug shows both
+// Phase=="running" and a live container, or attempts run out; then, when the
+// budget has a Settle window, requires that pair to hold for the whole
+// window. It backstops scion's false successes (a 409 "already exists", a
+// "resumed" whose harness dies moments later): only the observed record is
+// trusted, never CLI exit codes or wording.
 //
-// Why a settle window (lever#31): both signals the first phase reads exist
-// BEFORE the harness has run a line. scion marks the record running right
-// after the container launches, and the in-container supervisor reports
-// PhaseRunning to the hub after waiting only 100 ms for its child; on the
-// legacy path the runtime broker even derives "running" from the same "Up …"
-// container text ContainerLive reads. So a harness that dies one to three
-// seconds in — a task past the tmux cap (lever#30), `claude --continue` with
-// no conversation — passes a first-observation gate and `lever up` prints
-// "is up." over a container that is already Exited (1). A crash sets
-// PhaseError on the hub and a dead container reads "Exited (1) …", so holding
-// the pair for Settle catches every observed case. It is still probabilistic:
-// a harness that dies at Settle + 1 s passes. A sound harness-ready signal is
-// an upstream scion request; this is the honest interim.
+// The settle window exists because both signals appear before the harness has
+// run a line, so a harness that dies seconds in would pass a first-observation
+// gate. It is still probabilistic: a death just after Settle passes.
 //
-// A mid-poll list error does NOT mean the agent isn't live: by the time a caller
-// reaches this poll its observe-first List and the create/resume action have
-// already succeeded, so the hub is demonstrably up and a single error here is
-// far more likely a transient hiccup. The failed attempt is consumed within the
-// SAME budget and polling continues; the error is surfaced only if the whole
-// budget exhausts without ever observing a live record. During the settle
-// window an error is likewise skipped — but a window in which NO observation
-// succeeded is reported, not passed, because nothing was verified.
+// A mid-poll list error is consumed within the same budget and polling
+// continues; it is surfaced only if the budget exhausts. In the settle window
+// errors are skipped too, but a window with no successful observation is
+// reported (ErrAgentUnverified), not passed.
 //
-// On exhaustion it returns a "did not come up" error (no subject prefix — the
-// caller wraps it with its own, e.g. `start-manager: manager %q %w` or
-// `worker %q %w`) reporting the last observed phase/container, or the last list
-// error if the final attempts could not observe the record. A record that
-// stops being live during the settle window returns ErrAgentDied with the
-// elapsed time and the observation that failed. On context cancellation it
-// returns ctx.Err() unwrapped so callers can detect it. Attempts <= 0 is an
-// exhausted budget with nothing observed, not "poll forever" (retry.Until's
-// reading of a non-positive count).
+// On exhaustion it returns an ErrAgentNotLive error with no subject prefix
+// (the caller adds one). A record that stops being live during the window
+// returns ErrAgentDied. Context cancellation returns ctx.Err() unwrapped.
+// Attempts <= 0 is an exhausted budget, not "poll forever".
 func WaitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, b LiveBudget) error {
 	return waitAgentLive(ctx, list, slug, b, wallClock)
 }
@@ -102,11 +75,9 @@ func waitAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 	return holdLive(ctx, list, slug, b.Interval, b.Settle, clk)
 }
 
-// settleClock is the settle window's view of time: now reads it, after waits
-// for one poll interval. Production uses the wall clock. Tests substitute a
-// clock on which every wait returns at once and moves time on by exactly the
-// interval, so a window's outcome follows from the order of observations
-// alone and never from how late a loaded scheduler fires a timer.
+// settleClock lets tests substitute a clock on which every wait returns at
+// once and advances by exactly the interval, so an outcome never depends on
+// scheduler latency.
 type settleClock struct {
 	now   func() time.Time
 	after func(time.Duration) <-chan time.Time
@@ -114,12 +85,9 @@ type settleClock struct {
 
 var wallClock = settleClock{now: time.Now, after: time.After}
 
-// HoldAgentLive is WaitAgentLive's settle phase on its own: the record was
-// just seen live, and must stay live (phase running over a live container)
-// for settle. A caller that puts its own check between becoming live and
-// the hold (apply's manager gate waits for the harness's tmux pane first,
-// so the window starts once the harness runs) composes WaitAgentLive with a
-// zero Settle, its check, then this. settle <= 0 returns nil at once.
+// HoldAgentLive is WaitAgentLive's settle phase on its own, for a caller that
+// puts its own check between becoming live and the hold (WaitAgentLive with a
+// zero Settle, its check, then this). settle <= 0 returns nil at once.
 func HoldAgentLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration) error {
 	if settle <= 0 {
 		return nil
@@ -127,8 +95,6 @@ func HoldAgentLive(ctx context.Context, list func(context.Context) ([]Agent, err
 	return holdLive(ctx, list, slug, interval, settle, wallClock)
 }
 
-// waitLiveOnce is the first phase: poll until the record is live or the
-// attempts run out.
 func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) error {
 	var lastPhase, lastContainer string
 	var lastErr error
@@ -142,8 +108,8 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 			return false, nil
 		}
 		lastErr = nil
-		// Reset first so a record that vanished mid-poll reports "" (its true
-		// last-observed state), not a stale earlier phase.
+		// Reset first so a record that vanished mid-poll reports "", not a
+		// stale earlier phase.
 		lastPhase, lastContainer = "", ""
 		if a := FindAgent(agents, slug); a != nil {
 			lastPhase, lastContainer = a.Phase, a.ContainerStatus
@@ -154,39 +120,27 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 		return err
 	}
 	if lastErr != nil {
-		// %v, not %w: this is a terminal "budget exhausted" condition, and a
-		// list error may itself carry an inner context deadline (an HTTP
-		// timeout inside the scion client) even while OUR ctx stayed live.
-		// Wrapping it would let a caller's errors.Is(err, context.DeadlineExceeded)
-		// match here and misclassify exhaustion as cancellation (dropping the
-		// caller's subject prefix). True cancellation of ctx returns ctx.Err()
-		// via the select above, unwrapped.
+		// %v, not %w: a list error may carry an inner context deadline while
+		// our ctx stayed live, and wrapping it would make exhaustion read as
+		// cancellation.
 		return fmt.Errorf("%w (last error observing agents: %v)", ErrAgentNotLive, lastErr)
 	}
 	return notLiveErr(lastPhase, lastContainer)
 }
 
-// holdLive is the settle phase: observe every interval until settle has
-// elapsed since the record was first seen live, and fail when it is not.
+// holdLive observes every interval until settle has elapsed since the record
+// was first seen live.
 //
-// Two strikes, not one: the container column the hub serves is refreshed by
-// the runtime broker's heartbeat, not computed at read time, and this
-// codebase has already once failed a healthy manager on a single reading of
-// it. A non-live observation therefore only counts when the NEXT observation
-// agrees — one extra interval, and a real death (PhaseError on the hub, an
-// "Exited (1)" container) is stable across it. A pending strike keeps the
-// window open past its deadline for a bounded few polls, so the next
-// SUCCESSFUL observation can decide it; if none comes — a guest VM going down
-// mid-window, container first and scion server a moment later, leaves every
-// list failing — the window ends as unverified rather than polling a dead
-// jail forever (lever#31 review R1). A list error between two non-live
-// readings does not break the chain: it is neither confirmation nor
-// contradiction.
+// Two strikes, not one: the hub's container column is refreshed by the
+// runtime broker's heartbeat, so a single reading can be stale. A non-live
+// observation counts only when the next successful one agrees; a real death
+// is stable across it. A pending strike keeps the window open for a bounded
+// few polls past its deadline; if no observation succeeds (a dying VM), the
+// window ends as unverified. A list error between two non-live readings does
+// not break the chain.
 func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration, clk settleClock) error {
 	if interval <= 0 {
-		// Never spin: a zero interval would call list as fast as the CPU
-		// allows for the whole window. One second is the manager gate's own
-		// cadence.
+		// Never spin on a zero interval.
 		interval = time.Second
 	}
 	// strikeGrace bounds how many polls past the deadline a pending strike may
@@ -216,9 +170,8 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 			case lastPhase == "running" && ContainerLive(lastContainer):
 				strikes = 0
 			case lastPhase == "running" && lastContainer == "":
-				// A blank container column is "cannot tell" — the same reading
-				// `lever up` and doctor make of it — so it neither confirms
-				// nor refutes: strikes stay as they are, like a list error.
+				// A blank container column is "cannot tell": strikes stay as
+				// they are, like a list error.
 			default:
 				if strikes++; strikes >= 2 {
 					return fmt.Errorf("%w after %s (%s) — scion reported success and the record was live, then the harness died; its container log in the guest holds the last output",
@@ -242,8 +195,6 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 	return nil
 }
 
-// describeReading renders an observation for an error message: a record that
-// vanished from the listing says so, rather than printing two empty quotes.
 func describeReading(phase, container string) string {
 	if phase == "" && container == "" {
 		return "record gone from the listing"
@@ -255,10 +206,9 @@ func describeReading(phase, container string) string {
 // observing a live record; the message carries the last observation.
 var ErrAgentNotLive = errors.New("did not come up")
 
-// ErrAgentDied is wrapped by WaitAgentLive when a record that WAS live stops
-// being so inside the settle window: the harness came up and died (lever#31).
-// Distinct from ErrAgentNotLive so a caller can tell "never started" from
-// "started, then crashed" — the second has a container log worth reading.
+// ErrAgentDied is wrapped by WaitAgentLive when a record that was live stops
+// being so inside the settle window. Distinct from ErrAgentNotLive: this case
+// has a container log worth reading.
 var ErrAgentDied = errors.New("came up, then died")
 
 // ErrAgentUnverified is wrapped by WaitAgentLive when the record was seen
@@ -267,17 +217,15 @@ var ErrAgentDied = errors.New("came up, then died")
 var ErrAgentUnverified = errors.New("could not be verified live")
 
 // NotLiveError is WaitAgentLive's exhaustion error when the record was
-// observed but never live. It carries the last observation for a caller that
-// words its own message (apply.ObserveManagerLive); errors.Is(err,
+// observed but never live, carrying the last observation. errors.Is(err,
 // ErrAgentNotLive) holds for it.
 type NotLiveError struct {
 	Phase, Container string
 }
 
 func (e *NotLiveError) Error() string {
-	// Labels, not the raw strings: this error reaches the manager through
-	// the broker's resume and start answers, and both fields are text an
-	// agent can set for itself on the hub.
+	// Labels, not the raw strings: this error reaches the manager, and both
+	// fields are text an agent can set for itself on the hub.
 	return fmt.Sprintf("%v (last phase %q, container %q) — scion reported success but the harness is not live", ErrAgentNotLive, PhaseLabel(e.Phase), ContainerLabel(e.Container))
 }
 
@@ -287,14 +235,10 @@ func notLiveErr(lastPhase, lastContainer string) error {
 	return &NotLiveError{Phase: lastPhase, Container: lastContainer}
 }
 
-// ObserveAgent returns the record for slug as scion lists it NOW, retrying a
-// failed list up to attempts times (a transient hub error is not a verdict).
-// Absent is (nil, nil). It judges nothing: what an observation means depends
-// on the path — a caller that just started the agent wants WaitAgentLive's
-// gate, one that found it running already wants only positive evidence of a
-// death (apply.ObserveManagerLive). Exhaustion reports the last list error
-// (%v, not %w — see waitLiveOnce on why a list error is never wrapped); ctx
-// errors pass through unwrapped.
+// ObserveAgent returns the record for slug as scion lists it now, retrying a
+// failed list up to attempts times. Absent is (nil, nil). It judges nothing.
+// Exhaustion reports the last list error unwrapped (see waitLiveOnce); ctx
+// errors pass through.
 func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) (*Agent, error) {
 	if attempts <= 0 {
 		attempts = 1
@@ -322,9 +266,8 @@ func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, erro
 	return found, nil
 }
 
-// FindAgent returns a pointer to the first agent whose Slug matches, or nil
-// when no record matches. The returned pointer aliases the slice element, so
-// callers read the live record (phase, container status) without copying.
+// FindAgent returns a pointer to the first agent whose Slug matches, or nil.
+// The pointer aliases the slice element.
 func FindAgent(agents []Agent, slug string) *Agent {
 	for i := range agents {
 		if agents[i].Slug == slug {
@@ -338,31 +281,24 @@ type Agent struct {
 	Slug     string `json:"slug"`
 	Phase    string `json:"phase"`
 	Activity string `json:"activity"`
-	// ContainerStatus backstops apply's post-start liveness verification:
-	// scion's own "resumed"/exit-0 can lie (live-proven 2026-07-04 — CLI exits
-	// 0 on a 409 "already exists"; reports "resumed" on a container whose
-	// harness dies moments later), so Phase alone is not trusted.
+	// ContainerStatus backstops liveness checks: scion's "resumed" or exit 0
+	// can lie, so Phase alone is not trusted.
 	ContainerStatus string `json:"containerStatus"`
-	// Image is the container image the record was CREATED with; a resume
-	// redispatches it unchanged, so it can drift from the config's
-	// manager.image after an edit (lever#33). Doctor compares the two.
+	// Image is the container image the record was created with; a resume
+	// redispatches it unchanged, so it can drift from the config.
 	Image string `json:"image"`
-	// ContainerID is the runtime container id scion reports for the record
-	// ("" when none is running). Doctor inspects a worker's mounts by it.
+	// ContainerID is "" when no container is running.
 	ContainerID string `json:"containerId"`
 	// LastActivityEvent is when Activity last changed (zero when the hub has
-	// not reported one). Doctor shows its age next to the activity.
+	// not reported one).
 	LastActivityEvent time.Time `json:"lastActivityEvent,omitempty"`
 }
 
 // Activity values for Agent.Activity, the harness-level state scion's Claude
-// Code hooks report to the hub (pkg/agent/state/state.go upstream): a prompt
-// submit sets working, the Stop hook completed, a notification
-// waiting_for_input; the hub's sweeper sets stalled when no activity event
-// arrives within its stalled_threshold (default 5 min). A harness that cannot
-// reach the model API sits in working until the sweeper marks it stalled
-// (lever#34). The sweeper marks a manager idle at its prompt the same way,
-// so stalled alone does not tell a dead turn from an idle one.
+// Code hooks report to the hub (pkg/agent/state/state.go). The hub's sweeper
+// sets stalled when no activity event arrives within its stalled_threshold,
+// both for a harness that cannot reach the model and for one idle at its
+// prompt, so stalled alone does not tell the two apart.
 const (
 	ActivityWorking         = "working"
 	ActivityWaitingForInput = "waiting_for_input"
@@ -387,11 +323,9 @@ const LabelUnrecognised = "unrecognised"
 
 // PhaseLabel is phase when it is one of scion's phases (or the CLI's interim
 // "resumed"), "" when empty, else LabelUnrecognised. An agent can post any
-// text as its own phase to the hub (its baseline role may update its own
-// status, and the hub stores the string unchecked), so a phase read from the
-// hub is agent-chosen text. Everything that prints a phase to another agent
-// or acts on it by name takes it through here first; what no label matches
-// is never echoed.
+// text as its own phase, so everything that prints a phase to another agent
+// or acts on it by name must go through here; what no label matches is never
+// echoed.
 func PhaseLabel(phase string) string {
 	switch phase {
 	case "", "created", "provisioning", "cloning", "starting", PhaseRunning,
@@ -401,20 +335,18 @@ func PhaseLabel(phase string) string {
 	return LabelUnrecognised
 }
 
-// containerStatusRE matches the container status texts podman and scion
-// produce, and nothing else: "running", "stopped", "created", "Up 6
-// seconds", "Up About a minute", "Up Less than a second", "Exited (1) 4
-// minutes ago". The age is a number and a unit, never free words: an agent
-// can post this field about itself, so no slot may hold a sentence.
+// containerAge and containerStatusRE match only the container status texts
+// podman and scion produce. The age is a number and a unit, never free words:
+// an agent can post this field about itself, so no slot may hold a sentence.
 const containerAge = `(\d{1,4} (second|minute|hour|day|week|month|year)s?|About an? (minute|hour)|Less than a second)`
 
 var containerStatusRE = regexp.MustCompile(`^(running|stopped|created|Created|paused|Paused|Up ` + containerAge + `|Exited \(\d{1,3}\) ` + containerAge + ` ago)$`)
 
 // ContainerLabel is status when it has one of the shapes a runtime reports,
 // "" when empty, else LabelUnrecognised (or "up" for a text that only starts
-// like a live status). An agent can post a containerStatus for its own
-// record, so the text is shown only when it is plainly a status. This is
-// for DISPLAY: ContainerLive still decides liveness from the raw text.
+// like a live status). An agent can post its own containerStatus, so the text
+// is shown only when it is plainly a status. For display only: ContainerLive
+// decides liveness from the raw text.
 func ContainerLabel(status string) string {
 	switch {
 	case status == "", containerStatusRE.MatchString(status):
@@ -446,11 +378,9 @@ func ActivityLabel(activity string) string {
 	return LabelUnrecognised
 }
 
-// Phase values for Agent.Phase. These mirror upstream scion's agent-state wire
-// vocabulary (pkg/agent/state/state.go); the values change only with a pin
-// bump. scion's full enum also includes created/provisioning/cloning/starting/
-// stopping, which no lever comparison site needs. Untyped string constants so
-// they compare directly against the raw Agent.Phase field and switch on it.
+// Phase values for Agent.Phase, mirroring scion's agent-state vocabulary
+// (pkg/agent/state/state.go). Only the phases lever compares against are
+// listed.
 const (
 	PhaseRunning   = "running"
 	PhaseSuspended = "suspended"
@@ -460,15 +390,13 @@ const (
 
 // agentRoleBaseline is the role lever wants for every agent: heartbeat and
 // self-token-refresh, with no agent create/lifecycle or secret scope. Worker
-// dispatch runs host-side under the controller PAT, never an agent's own token,
-// so nothing lever does needs more. Used whenever the installed scion supports
-// roles and the instance did not name one.
+// dispatch runs host-side under the controller PAT, so nothing needs more.
 const agentRoleBaseline = "baseline"
 
 // EffectiveAgentRole is the role lever stamps on every agent it creates and
 // the ceiling it asks the hub to enforce on the project: the configured
-// scion.agent_role, else baseline. One function, so the stamp and the ceiling
-// cannot disagree.
+// scion.agent_role, else baseline. The stamp and the ceiling must not
+// disagree.
 func EffectiveAgentRole(configured string) string {
 	if configured != "" {
 		return configured
@@ -476,29 +404,18 @@ func EffectiveAgentRole(configured string) string {
 	return agentRoleBaseline
 }
 
-// RolesSupported reports whether the installed scion understands agent roles —
-// whether it accepts `start --role` (scion#1089). Exported for the pre-role
-// record guard (hubapi.VerifyAgentRole), which must know whether an EXISTING
-// record's empty stored role is merely "this scion has no roles" or "this
-// scion will read that as full".
+// RolesSupported reports whether the installed scion accepts start --role.
+// hubapi.VerifyAgentRole also needs it to judge an existing record's empty
+// stored role.
 //
-// It asks the binary rather than the pin, because a commit hash
-// says nothing about which features it carries — and getting this wrong in
-// either direction is costly: too eager breaks pre-#1089 pins, too shy hands
-// agents FULL authority on pins at or after scion#1090.
+// It asks the binary rather than the pin: too eager breaks scions without
+// roles, too shy hands agents full authority on scions whose default role is
+// full.
 //
-// The answer is NOT cached, deliberately. This used to memoise a success for
-// the client's lifetime, on the argument that a scion change restarts the
-// broker because brokerctl.ConfigHash covers the scion block. That argument
-// does not hold for `scion.source` and `scion.binary`: those keys are PATHS, so
-// swapping the artifact they point at leaves the config hash byte-identical and
-// the long-lived broker keeps running. One stale "no --role" then disarms two
-// controls at once — every start omits the flag, and the pre-role record guard
-// (hubapi.VerifyAgentRole) returns early — handing agents scion#1090's FULL
-// default with no error and no audit line.
-//
-// A probe is one local `scion start --help` on paths that already start or
-// resume a container, so the cost is noise next to what follows it.
+// The answer is deliberately not cached: scion.source and scion.binary are
+// paths, so the artifact can change under a long-lived broker without a
+// config change, and one stale "no --role" would disarm both the --role stamp
+// and VerifyAgentRole silently. The probe is one local scion start --help.
 func (c *Client) RolesSupported(ctx context.Context) (bool, error) {
 	out, err := c.run(ctx, "", "start", "--help")
 	if err != nil {
@@ -513,95 +430,58 @@ type StartOpts struct {
 	Harness string // default "claude"
 	Project string
 	Image   string // optional
-	// Model is the LLM the agent runs on, emitted as `scion start --model`:
-	// either a scion alias (small, medium, large, extra-large/xl) or an explicit
-	// model ID. Empty emits NO flag, so scion resolves the model itself
-	// (scion#908 resolves an agent with no configured model to the alias
-	// "opus") — that is what keeps an existing config's argv unchanged.
+	// Model is the LLM the agent runs on (scion start --model): a scion alias
+	// or an explicit model ID. Empty emits no flag, so scion resolves it.
 	//
-	// CREATE-time only. `scion resume` has no --model, so the model is fixed
-	// into the agent record when it is provisioned: changing `model:` in
-	// lever.yaml does NOT re-point an agent that already exists, because apply
-	// and the broker resume such an agent rather than re-creating it. The new
-	// value reaches an agent only on a fresh create (a newly declared worker, or
-	// a record that was deleted first).
+	// Create-time only: scion resume has no --model, so a changed model
+	// reaches an agent only on a fresh create.
 	Model string
-	// Instructions is the agent's STANDING instructions text (who it is, how it
-	// must operate), sent as scion inline config `{"agent_instructions": …}` on
-	// STDIN via `--config -`, never on argv. scion stages it under the agent
-	// home and the harness projects it into the agent's USER-level
-	// ~/.claude/CLAUDE.md (a managed block, beside any project CLAUDE.md in
-	// the tree) on every container start. Task stays the boot task — the
-	// first user turn — and is bound by TaskArgvBudget; this channel is bound
-	// only by MaxInstructionsBytes (lever#30). Empty sends no config at all,
-	// which keeps an existing config's argv byte-identical.
+	// Instructions is the agent's standing instructions text, sent as scion
+	// inline config agent_instructions on stdin, never on argv, and bound by
+	// MaxInstructionsBytes. The harness projects it into the agent's
+	// user-level ~/.claude/CLAUDE.md on every container start. Empty sends no
+	// config at all.
 	//
-	// CREATE-time only, like Model: scion stages the content when it provisions
-	// the agent directory and does not re-stage on resume (it merges the inline
-	// config into scion-agent.json, nothing more). An edited manual reaches a
-	// freshly created agent, not one being resumed. What resume DOES do is
-	// re-project the staged copy, so an agent that rewrites its own CLAUDE.md
-	// managed block gets the staged text back at its next start.
+	// Create-time only: scion does not re-stage on resume, but it does
+	// re-project the staged copy, so an agent that rewrites its own managed
+	// block gets the staged text back at its next start.
 	Instructions string
-	// Volumes are extra bind mounts for the agent container, sent as scion
-	// inline config `volumes` beside Instructions. The broker uses one: the
-	// worker's enrolment-ticket directory (jail.WorkerTicketDir), mounted
+	// Volumes are extra bind mounts for the agent container, sent as inline
+	// config. The broker mounts the worker's enrolment-ticket directory
 	// read-only at /run/lever, so the ticket is visible to that container
-	// alone and never to the manager's whole-tree mount. CREATE-time only,
-	// like Instructions: scion merges the inline config into the agent
-	// record and a resume redispatches the stored volumes unchanged.
+	// alone, never to the manager's whole-tree mount. Create-time only.
 	Volumes []VolumeMount
-	// Env is extra container environment, sent as inline config `env`. The
-	// broker sets LEVER_BOOTSTRAP so lever-agent boot reads the mounted
-	// ticket. CREATE-time only, as Volumes.
+	// Env is extra container environment, sent as inline config.
+	// Create-time only.
 	Env map[string]string
 	// Resources caps the agent container's memory and CPU, sent as inline
-	// config `resources.limits` (scion ResourceSpec), which scion's podman
-	// runtime turns into --memory and --cpus. The zero value sends nothing,
-	// so scion's own defaults apply. CREATE-time only, as Volumes: scion
-	// stores the resolved spec in the record and a resume reuses it.
+	// config resources.limits. The zero value sends nothing. Create-time
+	// only.
 	Resources Resources
-	// Workspace is the path mounted as /workspace in the agent container,
-	// passed as `--workspace`. For directory projects this MUST be set to the
-	// (in-jail) project tree to get a live in-place bind mount: scion's default
-	// resolution mounts a managed COPY of the externalized config dir instead
-	// (verified 2026-06-16 — the explicit flag takes provision.go's Case-1
-	// "mount this path directly" path). Empty leaves scion to resolve it.
+	// Workspace is the path mounted as /workspace (--workspace). For a
+	// directory project it must be set to the in-jail project tree to get a
+	// live bind mount; scion's default mounts a managed copy instead. Empty
+	// leaves scion to resolve it.
 	Workspace string
-	// WorkspaceSubdir, when set, is a path RELATIVE to the project's workspace_path
-	// (e.g. "workers/scratch"), passed as a relative `--workspace`. Scion resolves
-	// a relative --workspace against the project root with a containment guard
-	// (rejecting `..`/symlink escape) and mounts exactly that subtree at
-	// /workspace — an absolute --workspace instead mounts that exact host path.
-	// Used for workers so each is confined to its own subdir. Mutually exclusive
-	// with Workspace (both emit the same flag), so a caller sets one or the
-	// other. Requires scion >= b4c9911d (upstream PR #815, relative --workspace).
+	// WorkspaceSubdir, when set, is a path relative to the project's
+	// workspace_path, passed as a relative --workspace. scion resolves it
+	// against the project root with a containment guard against .. and
+	// symlink escape, confining a worker to its own subdir. Mutually exclusive
+	// with Workspace. Requires scion >= b4c9911d.
 	WorkspaceSubdir string
-	// APIKey selects api-key mode for the agent: scion starts the claude harness
-	// with `--harness-auth api-key` (instead of `--harness-auth oauth-token`),
-	// satisfied by a PLACEHOLDER ANTHROPIC_API_KEY the host sets as a Hub secret.
-	// The placeholder is a sentinel, not a real credential: the agent's actual LLM
-	// credential is the broker /llm capability token, written into the claude
-	// settings.json as ANTHROPIC_AUTH_TOKEN by lever-agent boot. claude sends that
-	// token as `Authorization: Bearer` AND the placeholder as `x-api-key`, both to
-	// ANTHROPIC_BASE_URL (the broker /llm), which verifies the token and
-	// overwrites x-api-key with the real key host-side (verified live 2026-06-28).
-	// This placeholder is needed only because scion's start-time auth gate requires
-	// some credential before the container — and thus lever-agent boot — can run.
+	// APIKey selects --harness-auth api-key, satisfied by a placeholder
+	// ANTHROPIC_API_KEY Hub secret. The placeholder is not a credential: it
+	// exists only because scion's start-time auth gate requires one. The real
+	// credential is the broker /llm capability token, which the broker
+	// verifies before overwriting x-api-key with the real key host-side.
 	APIKey bool
 }
 
-// List lists the agents in project (directory-project `-g` scope), parsing
-// the `scion list --format json` array. --non-interactive (implies --yes) so
-// the lazy hub-sync prompt can never wedge a non-tty run (the sync itself is
-// benign for observers: it only removes container-less stale records, which
-// correctly read as absent). Empty/whitespace stdout parses as an empty
-// slice, not an error (parseJSON no-ops on an empty body).
+// List lists the agents in project. Empty stdout is an empty slice.
 func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	args := append([]string{"list", "--format", "json"}, projectFlag(project)...)
-	args = append(args, "--non-interactive")
-	// runValue: stdout only. scion writes settings warnings to stderr, and
-	// folded in after the JSON they break the parse. See runValue.
+	args = append(args, nonInteractive)
+	// runValue: stderr warnings after the JSON would break the parse.
 	out, err := c.runValue(ctx, "", args...)
 	if err != nil {
 		return nil, err
@@ -613,47 +493,48 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	return agents, nil
 }
 
-// Delete removes an agent's record entirely (scion alias `rm`) — "containers
-// and their associated files and worktrees" per scion's own help text. Used by
-// start-manager's loud recovery path when Resume fails and the conversation
-// cannot be restored, to clear the way for a fresh Start.
+// ErrDeleteUnconfirmed is wrapped by Delete when scion exits 0 for a delete the
+// hub accepted (202) but whose completion scion's own wait (about three
+// minutes) never saw: the record may still be there, or still be deleting.
+var ErrDeleteUnconfirmed = errors.New("the hub accepted the delete but scion could not confirm the record is gone")
+
+// deleteAcceptedNotice is scion delete's line for that case
+// (cmd/hub_delete_wait.go hubDeletePendingMessage).
+const deleteAcceptedNotice = "delete accepted; cannot observe completion"
+
+// Delete removes an agent's record entirely, with its containers and files. It
+// fails with ErrDeleteUnconfirmed rather than report a delete nobody saw
+// finish; a caller that must know re-lists either way.
 func (c *Client) Delete(ctx context.Context, worker, project string) error {
-	args := append([]string{"delete", worker}, projectFlag(project)...)
-	args = append(args, "--non-interactive")
-	_, err := c.run(ctx, "", args...)
-	return err
+	out, err := c.run(ctx, "", agentVerb("delete", worker, project)...)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, deleteAcceptedNotice) {
+			return fmt.Errorf("scion delete %s: %w: %s", worker, ErrDeleteUnconfirmed, boundSummary(strings.TrimSpace(line), 300))
+		}
+	}
+	return nil
 }
 
 func (c *Client) Start(ctx context.Context, o StartOpts) error {
-	// Backstop for every caller: a task past the tmux cap can never start an
-	// agent, and a flag-shaped one is never a task, so refuse both here by
-	// name before any scion call (the earlier, friendlier checks at config
-	// load and request decode are the same test).
+	// Backstop for every caller, before any scion call.
 	if err := CheckTask(o.Task); err != nil {
 		return err
 	}
 	if err := CheckInstructions(o.Instructions); err != nil {
 		return err
 	}
-	// Pin the agent role whenever the installed scion understands roles at all.
-	//
-	// This CANNOT be decided from config alone. `--role` does not exist before
-	// scion#1089, so passing it unconditionally breaks every earlier pin — but
-	// scion#1090 then flipped the default role from baseline to FULL, so NOT
-	// passing it on a pin at or after that commit hands every agent
-	// create/lifecycle/secret-read authority. An opaque commit hash tells lever
-	// nothing about which side of that line a pin sits on, so it asks the
-	// binary (see RolesSupported) instead of trusting the operator to know.
-	//
-	// Pre-#1089 scion has no roles at all, so omitting the flag there widens
-	// nothing: agents get the old fixed scope set.
+	// Pin the agent role whenever the installed scion understands roles. An
+	// older scion rejects --role, while a newer one defaults to full, so not
+	// passing it there hands every agent create/lifecycle/secret-read
+	// authority. Omitting it on a scion without roles widens nothing.
 	supported, err := c.RolesSupported(ctx)
 	role := ""
 	switch {
 	case err != nil:
-		// Fail closed. This probe is a local exec of the binary we are about to
-		// run; if it cannot answer, `start` was not going to work either, and
-		// guessing risks silently granting full authority.
+		// Fail closed: guessing risks silently granting full authority.
 		return fmt.Errorf("determining scion agent-role support: %w", err)
 	case supported:
 		role = EffectiveAgentRole(c.agentRole)
@@ -666,12 +547,9 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 		_, runErr := c.run(ctx, "", args...)
 		return runErr
 	}
-	// Standing instructions, volumes and env travel as inline agent config on
-	// scion's STDIN. JSON, not YAML: scion's loader picks the JSON parser on a
-	// leading brace, and json.Marshal escapes anything a manual can contain,
-	// so no quoting rule of a config language can alter the text. Inline
-	// content, not a file:// URI, so nothing depends on where the scion
-	// binary runs or what its working directory is. See StartOpts.Instructions.
+	// JSON, not YAML: scion picks the JSON parser on a leading brace, and
+	// json.Marshal escapes anything a manual can contain. Inline content, not
+	// a file:// URI, so nothing depends on scion's working directory.
 	body, err := json.Marshal(inlineAgentConfig{AgentInstructions: o.Instructions, Volumes: o.Volumes, Env: o.Env, Resources: o.Resources.spec()})
 	if err != nil {
 		return fmt.Errorf("encoding inline agent config: %w", err)
@@ -680,20 +558,13 @@ func (c *Client) Start(ctx context.Context, o StartOpts) error {
 	return runErr
 }
 
-// startArgs builds the `scion start` argv for o; role "" omits --role (the
-// installed scion has no roles, see Start).
+// startArgs builds the scion start argv for o; role "" omits --role.
 //
-// Every flag comes FIRST and the two positionals — worker name, then task —
-// sit behind a `--` terminator. Both positionals are chosen by a caller lever
-// does not trust (the manager, through the broker's /worker/start), and
-// scion's start parses flags interspersed with positionals (cobra's default):
-// a task placed before the flags with no terminator would bind as one of
-// scion's own flags. `--config=<path>` would author the worker's inline
-// config — volumes, user, env, services, system_prompt — and `--no-auth`,
-// `--attach`, `--type`, `--thinking-level` exist too; lever's trailing flags
-// only win where they name the same flag. `--` makes both positionals inert
-// whatever they contain, the shape Client.Message already uses. CheckTask
-// refuses a flag-shaped task independently, as the second layer.
+// Every flag comes first and both positionals (worker name, then task) sit
+// behind --: both are chosen by an untrusted caller, and scion parses
+// interspersed flags, so a task like --config=<path> would author the
+// worker's inline config (volumes, env, services). CheckTask is the second
+// layer.
 func startArgs(o StartOpts, role string) []string {
 	harness := o.Harness
 	if harness == "" {
@@ -702,9 +573,7 @@ func startArgs(o StartOpts, role string) []string {
 	args := projectFlag(o.Project)
 	args = append(args, "start", "--harness", harness)
 	if o.APIKey {
-		// api-key: satisfy scion's start gate with the placeholder ANTHROPIC_API_KEY
-		// (set as a Hub secret host-side); the real credential is the in-container
-		// broker capability token. See StartOpts.APIKey.
+		// See StartOpts.APIKey.
 		args = append(args, "--harness-auth", "api-key")
 	} else {
 		args = append(args, "--harness-auth", "oauth-token")
@@ -716,15 +585,11 @@ func startArgs(o StartOpts, role string) []string {
 		args = append(args, "--image", o.Image)
 	}
 	if o.Model != "" {
-		// Unset means "say nothing": scion's own default model resolution is the
-		// documented fallback, and emitting an empty --model would replace it
-		// with an invalid value. See StartOpts.Model.
+		// An empty --model would replace scion's default with an invalid value.
 		args = append(args, "--model", o.Model)
 	}
 	if o.WorkspaceSubdir != "" {
-		// Relative to the project's workspace_path; scion mounts exactly this
-		// subtree at /workspace (guarded). Same flag as Workspace — scion
-		// branches on filepath.IsAbs.
+		// Same flag as Workspace: scion branches on filepath.IsAbs.
 		args = append(args, "--workspace", o.WorkspaceSubdir)
 	} else if o.Workspace != "" {
 		args = append(args, "--workspace", o.Workspace)
@@ -732,28 +597,21 @@ func startArgs(o StartOpts, role string) []string {
 	if o.hasInlineConfig() {
 		args = append(args, "--config", "-")
 	}
-	return append(args, "--", o.Worker, o.Task)
+	return append(args, nonInteractive, "--", o.Worker, o.Task)
 }
 
-// hasInlineConfig reports whether Start must send an inline config on stdin:
-// any of instructions, volumes, env or resources is set. Absent all four, the
-// argv is byte-identical to a plain start and nothing is written to scion's
-// stdin.
 func (o StartOpts) hasInlineConfig() bool {
 	return o.Instructions != "" || len(o.Volumes) > 0 || len(o.Env) > 0 || o.Resources != (Resources{})
 }
 
 // Resources is an agent's container limits in scion's own notation: Memory a
 // Kubernetes quantity ("1536Mi", "2Gi"), CPU in cores ("1.5") or millicores
-// ("500m"). Config validation (config.Resources) is what bounds them; scion
-// parses them again when it builds the container.
+// ("500m"). Config validation bounds them.
 type Resources struct {
 	Memory string
 	CPU    string
 }
 
-// resourceSpec is the subset of scion's ResourceSpec (pkg/api) lever sends:
-// limits only.
 type resourceSpec struct {
 	Limits resourceList `json:"limits"`
 }
@@ -763,7 +621,6 @@ type resourceList struct {
 	Memory string `json:"memory,omitempty"`
 }
 
-// spec is r as inline config, nil when neither limit is set.
 func (r Resources) spec() *resourceSpec {
 	if r == (Resources{}) {
 		return nil
@@ -775,22 +632,18 @@ func (r Resources) spec() *resourceSpec {
 // --workspace path) inside its container, and the container's CWD.
 const ContainerWorkspace = "/workspace"
 
-// VolumeMount is one container bind mount, in scion's own inline-config
-// shape (`volumes:` entries of type local): source is a guest path, target
-// the path inside the container.
+// VolumeMount is one container bind mount in scion's inline-config shape:
+// source is a guest path, target the path inside the container.
 type VolumeMount struct {
 	Source   string `json:"source"`
 	Target   string `json:"target"`
 	ReadOnly bool   `json:"read_only,omitempty"`
 }
 
-// inlineAgentConfig is the subset of scion's inline agent config (`scion
-// config-schema`) lever sends: the standing instructions, extra volumes,
-// extra env and the container limits. Everything else an agent needs is
-// already a flag, and an inline value would silently override the template
-// chain for that field. Every
-// field is omitempty: scion reads a PRESENT empty agent_instructions as
-// "inline-provided" and would then skip the template's instructions.
+// inlineAgentConfig is the subset of scion's inline agent config lever sends.
+// Any other field would silently override the template chain. Every field is
+// omitempty: scion reads a present empty agent_instructions as
+// inline-provided and would skip the template's instructions.
 type inlineAgentConfig struct {
 	AgentInstructions string            `json:"agent_instructions,omitempty"`
 	Volumes           []VolumeMount     `json:"volumes,omitempty"`
@@ -799,58 +652,51 @@ type inlineAgentConfig struct {
 }
 
 func (c *Client) Resume(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"resume", worker}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("resume", worker, project)...)
 	return err
 }
 
-// ResumeForce is Resume with scion's --force (scion#895, pin >= 68507153):
-// the only verb that recovers a record from phase "error" (plain resume is
-// documented for suspended/stopped only; --force deliberately refuses
-// phase "running"). Used by the recovery paths (#3, #22) so an error-phase
-// record can be retried before the loud delete+fresh fallback discards the
-// conversation.
+// agentVerb is the argv of a scion verb on one agent, with extra flags.
+func agentVerb(verb, agent, project string, flags ...string) []string {
+	args := append([]string{verb, agent}, flags...)
+	args = append(args, projectFlag(project)...)
+	return append(args, nonInteractive)
+}
+
+// ResumeForce is Resume with scion's --force (scion >= 68507153), the only
+// verb that recovers a record from phase "error"; it refuses phase
+// "running".
 func (c *Client) ResumeForce(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"resume", worker, "--force"}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("resume", worker, project, "--force")...)
 	return err
 }
 
 func (c *Client) Stop(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"stop", worker}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("stop", worker, project)...)
 	return err
 }
 func (c *Client) Suspend(ctx context.Context, worker, project string) error {
-	_, err := c.run(ctx, "", append([]string{"suspend", worker}, projectFlag(project)...)...)
+	_, err := c.run(ctx, "", agentVerb("suspend", worker, project)...)
 	return err
 }
 
-// ResetAuth gives a running agent a new hub token without a restart (`scion
-// reset-auth`): the hub mints an agent token from the agent's STORED role and
-// scopes (scion pkg/hub/httpdispatcher.go DispatchAgentResetAuth, the same
-// agentRoleAndScopes every start and refresh uses), and the runtime broker
-// writes it to the agent's token file over exec stdin and signals sciontool
-// to restart its refresh loop. The call authenticates with the controller
-// PAT, like every lever verb; the new token is the agent's own, never a user
-// or controller token, so no authority moves into the container. It is the
-// one recovery for an expired agent token, which cannot refresh itself.
+// ResetAuth gives a running agent a new hub token without a restart (scion
+// reset-auth). The hub mints it from the agent's stored role and scopes, so
+// no user or controller authority moves into the container. It is the one
+// recovery for an expired agent token, which cannot refresh itself.
 func (c *Client) ResetAuth(ctx context.Context, agent, project string) error {
-	args := append([]string{"reset-auth", agent}, projectFlag(project)...)
-	_, err := c.run(ctx, "", append(args, "--non-interactive")...)
+	_, err := c.run(ctx, "", agentVerb("reset-auth", agent, project)...)
 	return err
 }
 
 // AttachArgv returns the in-jail argv to attach interactively. The caller
-// exec()s it (wrapped by the backend's AttachArgv) to hand over the TTY — it
-// never goes through the runner, so it bypasses env() entirely.
+// execs it to hand over the TTY, bypassing env().
 //
-// It pins the ENDPOINT as an `env SCION_HUB_ENDPOINT=…` prefix: attach is the
-// one path that execs scion instead of going through Client.run, so without
-// this it falls back to the endpoint persisted in the jail's project config —
-// state lever does not own and which the controller-PAT mint window can leave
-// pointing at the throwaway hub it started on 48080. It deliberately does NOT
-// embed the controller PAT: the returned argv becomes part of a host process's
-// command line, readable by any local user via `ps`. The caller stages the
-// token in the guest instead (jail.StageHubToken + jail.WithHubTokenFromFile,
-// see internal/cli/host/attach.go), reading it from HubToken.
+// It pins the endpoint with an env SCION_HUB_ENDPOINT= prefix, or scion would
+// fall back to the endpoint persisted in the jail's project config, which can
+// name another port (a link made against a throwaway hub). It must not embed the
+// controller PAT: the argv lands on a host command line readable via ps. The
+// caller stages the token in the guest instead (jail.StageHubToken).
 func (c *Client) AttachArgv(worker, project string) []string {
 	argv := append([]string{c.bin, "attach", worker}, projectFlag(project)...)
 	if c.hubEndpoint != "" {
@@ -859,7 +705,6 @@ func (c *Client) AttachArgv(worker, project string) []string {
 	return argv
 }
 
-// HubToken is the controller PAT this client authenticates with, resolved
-// now from the lazy source ("" when none is set). For the attach path, which
-// cannot use env(); every other verb sends it through the runner itself.
+// HubToken is the controller PAT this client authenticates with ("" when none
+// is set), for the attach path, which cannot use env().
 func (c *Client) HubToken() string { return c.currentHubToken() }

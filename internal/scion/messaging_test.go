@@ -9,7 +9,6 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// msgArgv runs one Message and returns the argv the runner saw.
 func msgArgv(t *testing.T, o MsgOpts) []string {
 	t.Helper()
 	f := proc.NewFakeRunner()
@@ -23,11 +22,8 @@ func msgArgv(t *testing.T, o MsgOpts) []string {
 	return append([]string{f.Calls[0].Name}, f.Calls[0].Args...)
 }
 
-// A message body is agent-controlled. scion's `message` command defines
-// single-token boolean flags -b/--broadcast and -a/--all, and cobra parses flags
-// interspersed with positionals, so an unterminated body of exactly "-b" would
-// bind to the broadcast flag and fan the message out to every agent in the
-// project — past the worker-to-worker deny the broker applied to the recipient.
+// An unterminated body of exactly "-b" would bind to scion's broadcast flag
+// and fan the message out past the broker's per-recipient deny.
 func TestMessagePutsPositionalsBehindATerminator(t *testing.T) {
 	for _, body := range []string{"-b", "--all", "-a", "--broadcast", "-i"} {
 		got := msgArgv(t, MsgOpts{To: "agent:manager", Body: body, Project: "/lever"})
@@ -56,6 +52,24 @@ func TestMessageKeepsItsOwnFlagsBeforeTheTerminator(t *testing.T) {
 	}
 	if strings.Index(argv, "--interrupt") > strings.Index(argv, " -- ") {
 		t.Fatalf("--interrupt must precede the terminator: %s", argv)
+	}
+}
+
+// scion must never wait on a prompt: the flag precedes the terminator, so it
+// stays a flag.
+func TestMessageAndInboxAreNonInteractive(t *testing.T) {
+	got := msgArgv(t, MsgOpts{To: "agent:w", Body: "hello", Project: "/lever"})
+	want := "scion message -g /lever --non-interactive -- agent:w hello"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("argv = %q, want %q", strings.Join(got, " "), want)
+	}
+	f := proc.NewFakeRunner()
+	f.Script("scion notifications", proc.Result{Stdout: "[]"})
+	if _, err := New(f, Options{}).Inbox(context.Background(), false, "/lever"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(f.Calls[0].Args, " "), "notifications --json --non-interactive --all -g /lever"; got != want {
+		t.Fatalf("argv = %q, want %q", got, want)
 	}
 }
 

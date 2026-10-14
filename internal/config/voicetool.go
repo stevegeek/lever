@@ -10,29 +10,22 @@ import (
 )
 
 // WhisperTool is what config load reads of a broker tool that runs
-// lever-tool-whisper: a supervised tool whose program, after an env(1)
-// prefix, has the base name lever-tool-whisper (isWhisperCommand). Values
-// are as written ("" or 0 when absent); the tool checks its own flags again
+// lever-tool-whisper (isWhisperCommand). The tool checks its own flags again
 // at start.
 type WhisperTool struct {
 	Name   string
 	Tree   string // -tree
 	Server string // -server
 	Models string // -models
-	Model  string // -model ("" = the tool's default, voice.DefaultModel)
+	Model  string // -model
 	Socket string // -dictate-socket
-	// Port is -whisper-port (0 when absent or not a number; PortRaw has
-	// what was written).
-	Port    int
-	PortRaw string
-	// MaxSeconds is -max-seconds (0 when absent or not a number: the
-	// tool's default, voice.DefaultMaxSeconds); MaxSecondsSet says the flag
-	// is there, MaxSecondsRaw has what was written.
-	MaxSeconds    int
-	MaxSecondsSet bool
-	MaxSecondsRaw string
-	// AgentMaxSeconds is -agent-max-seconds, likewise (0: the tool's
-	// default, voice.DefaultAgentMaxSeconds within -max-seconds).
+	// Port and the max-seconds fields are 0 when absent or not a number; the
+	// Raw fields hold what was written.
+	Port               int
+	PortRaw            string
+	MaxSeconds         int
+	MaxSecondsSet      bool
+	MaxSecondsRaw      string
 	AgentMaxSeconds    int
 	AgentMaxSecondsSet bool
 	AgentMaxSecondsRaw string
@@ -54,15 +47,13 @@ func (w WhisperTool) EffectiveMaxSeconds() int {
 	return w.MaxSeconds
 }
 
-// EffectiveAgentMaxSeconds is -agent-max-seconds with the tool's default
-// (voice.AgentMaxSeconds).
+// EffectiveAgentMaxSeconds is -agent-max-seconds with the tool's default.
 func (w WhisperTool) EffectiveAgentMaxSeconds() int {
 	return voice.AgentMaxSeconds(w.AgentMaxSeconds, w.EffectiveMaxSeconds())
 }
 
-// WhisperTools lists the broker tools that run lever-tool-whisper, in
-// config order: the program's base name (after an env prefix) is
-// lever-tool-whisper, or the command takes -dictate-socket (isWhisperCommand).
+// WhisperTools lists the broker tools that run lever-tool-whisper
+// (isWhisperCommand).
 func (a *App) WhisperTools() []WhisperTool {
 	var out []WhisperTool
 	for _, t := range a.Broker.Tools {
@@ -104,8 +95,7 @@ func (a *App) WhisperTools() []WhisperTool {
 	return out
 }
 
-// VoiceTool is the whisper tool whose -dictate-socket is remote.voice.socket
-// (dictation's tool), when remote.voice is on and there is one.
+// VoiceTool is the whisper tool whose -dictate-socket is remote.voice.socket.
 func (a *App) VoiceTool() (WhisperTool, bool) {
 	if !a.VoiceOn() {
 		return WhisperTool{}, false
@@ -118,14 +108,10 @@ func (a *App) VoiceTool() (WhisperTool, bool) {
 	return WhisperTool{}, false
 }
 
-// validateWhisperTools checks what config load can of each whisper tool's
-// command. The port matters most: whisper-server has no authentication of
-// its own, and it is safe only because it listens on host loopback and the
-// jail's egress rules drop every host-loopback port that is not
-// allowlisted. So -whisper-port must never be a port the jail may reach
-// (EffectiveAllowedPorts: the broker's jail port, manager.allow_ports, the
-// login port), nor collide with one of lever's own host listeners or a tool
-// backend.
+// validateWhisperTools: whisper-server has no authentication of its own and
+// is safe only because the jail's egress rules drop every host-loopback port
+// that is not allowlisted, so -whisper-port must never be a port the jail
+// may reach (EffectiveAllowedPorts).
 func (a *App) validateWhisperTools() error {
 	for _, t := range a.Broker.Tools {
 		if form := envFormUnread(t.Command); form != "" {
@@ -170,7 +156,7 @@ func (a *App) validateWhisperTools() error {
 			}
 		}
 		// The tool checks its paths against -tree and reads agent files
-		// below it: it must be this instance's tree.
+		// below it.
 		if w.Tree == "" {
 			return fmt.Errorf("config: %s -tree is required: the instance's tree, %s", key, a.Tree)
 		}
@@ -182,7 +168,7 @@ func (a *App) validateWhisperTools() error {
 		}
 		seen[w.Port] = w.Name
 		if slices.Contains(a.EffectiveAllowedPorts(), w.Port) {
-			return fmt.Errorf("config: %s -whisper-port %d is a port the jail may reach (manager.allow_ports, the broker's jail port or the login port): "+
+			return fmt.Errorf("config: %s -whisper-port %d is a port the jail may reach (manager.allow_ports or the broker's jail port): "+
 				"whisper-server has no authentication, and only the egress rules keep agents from it; pick another port, or remove it from manager.allow_ports", key, w.Port)
 		}
 		own := []struct {
@@ -190,7 +176,6 @@ func (a *App) validateWhisperTools() error {
 			what string
 		}{
 			{a.EffectiveAdminPort(), "the broker's admin port"},
-			{GuestLoginIssuerPort, "the port the jail's login forwarder is mirrored onto"},
 		}
 		if a.RemoteEnabled() {
 			own = append(own, struct {
@@ -219,8 +204,6 @@ func (a *App) validateWhisperTools() error {
 	return nil
 }
 
-// sameTree reports whether p names the tree: the same clean path, or the
-// same path once symbolic links are followed.
 func sameTree(p, tree string) bool {
 	if filepath.Clean(p) == filepath.Clean(tree) {
 		return true

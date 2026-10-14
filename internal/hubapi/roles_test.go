@@ -11,7 +11,7 @@ import (
 // lever's: "you@github" must not resolve to "notyou@github".
 func TestUserByEmailMatchesExactlyIgnoringCase(t *testing.T) {
 	f := &fakeDoer{replies: map[string]reply{
-		"GET /api/v1/users?search=you%40github": {status: 200, body: `{"users":[
+		"GET /api/v1/users?limit=200&search=you%40github": {status: 200, body: `{"users":[
 		  {"id":"u-other","email":"notyou@github"},
 		  {"id":"u-you","email":"You@GitHub"}],"totalCount":2}`},
 	}}
@@ -23,7 +23,7 @@ func TestUserByEmailMatchesExactlyIgnoringCase(t *testing.T) {
 
 func TestUserByEmailAbsentIsNotAnError(t *testing.T) {
 	f := &fakeDoer{replies: map[string]reply{
-		"GET /api/v1/users?search=you%40github": {status: 200, body: `{"users":[{"id":"u-other","email":"notyou@github"}]}`},
+		"GET /api/v1/users?limit=200&search=you%40github": {status: 200, body: `{"users":[{"id":"u-other","email":"notyou@github"}]}`},
 	}}
 	if _, found, err := (&Client{T: f}).UserByEmail(context.Background(), "you@github"); err != nil || found {
 		t.Fatalf("found=%v err=%v, want not found and no error", found, err)

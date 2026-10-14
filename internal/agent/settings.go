@@ -9,19 +9,14 @@ import (
 	"path/filepath"
 )
 
-// WriteSettingsEnv MERGES env into the `env` block of the claude settings.json
-// at path, preserving any existing settings and env keys (read-modify-write).
-// This is how the dynamic ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL reach the
-// in-container `claude`: Claude Code natively reads its settings.json `env`
-// block at startup (verified live 2026-06-28), whereas the scion harness
-// env-overlay path is inert for our builtin harness. An empty path is a no-op
-// (enrol-only boot). Written 0600, parent directory 0700.
+// WriteSettingsEnv merges env into the env block of the claude settings.json
+// at path, preserving existing settings and env keys. Claude Code reads that
+// block at startup; scion's harness env-overlay path is inert for this
+// harness. An empty path is a no-op. Written 0600, parent directory 0700.
 //
-// path is <home>/.claude/settings.json: both the directory and the file are
-// agent-writable and boot may run this as root (see errRefusedPath: under
-// rootless podman it runs as the agent user), so the read and the write are
-// confined to <home> (the grandparent) and a symlink at either component is
-// refused (see errRefusedPath). The grandparent must exist.
+// Both the directory and the file are agent-writable and boot may run as
+// root, so the work is confined to the grandparent (which must exist) and a
+// symlink at either component is refused (see errRefusedPath).
 func WriteSettingsEnv(path string, env map[string]string) error {
 	if path == "" {
 		return nil
@@ -40,8 +35,7 @@ func WriteSettingsEnv(path string, env map[string]string) error {
 			return fmt.Errorf("settings dir %s: %w", filepath.Dir(path), err)
 		}
 	}
-	// Merge into existing settings rather than clobber (claude may already have
-	// written model/permissions/etc; mcp config lives in a separate ~/.claude.json).
+	// Merge rather than clobber: claude may already have written settings.
 	settings := map[string]any{}
 	if b, err := r.ReadFile(rel); err == nil {
 		if err := json.Unmarshal(b, &settings); err != nil {

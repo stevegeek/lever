@@ -16,15 +16,13 @@ type Todo struct {
 	Done     bool   `json:"done"`
 }
 
-// Store reads todos from a CSV file on demand. Read-only, no external services —
-// the point of the demo tool is to show a first-party capability tool end to
-// end, not to be a real task manager.
+// Store reads todos from a CSV file on demand.
 type Store struct{ path string }
 
 func OpenStore(path string) *Store { return &Store{path: path} }
 
-// List returns all todos, optionally filtered to only the not-done ones.
-// The CSV header is: id,task,due,priority,done
+// List returns all todos, optionally only the not-done ones. The CSV header
+// is: id,task,due,priority,done
 func (s *Store) List(pendingOnly bool) ([]Todo, error) {
 	f, err := os.Open(s.path)
 	if err != nil {

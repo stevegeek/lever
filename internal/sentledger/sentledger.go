@@ -2,28 +2,23 @@
 // sends to an agent: a worker's relay, a manager message, an operator note
 // (`lever msg send`) and a directive notice.
 //
-// Every one of those messages reaches the agent with the same envelope
-// sender, the controller's hub user, because lever sends them all with the
-// controller PAT. The envelope therefore cannot tell the agent who wrote the
-// text, and neither can the text: anyone whose words reach an agent can type
-// what lever types. This record can. The broker is the only writer: it
-// writes a "send" line before it hands the body to scion, and a "done" line
-// after. An agent asks the broker, over its own mTLS channel, about a
+// All of them reach the agent with the same envelope sender (lever sends
+// with the controller PAT), and anyone whose words reach an agent can type
+// what lever types, so neither envelope nor text says who wrote it. This
+// record can. The broker is the only writer: a "send" line before it hands
+// the body to scion, a "done" line after. An agent asks the broker about a
 // message it received (`message_verify`); the broker answers from this
 // record only, bound to the caller's own identity, and the agent acts only on
 // the text the broker returns.
 //
-// Each send carries a fresh 128-bit id, which lever also writes on the
-// message's first line as "ref=<id>". The id is only a lookup key, never
-// evidence on its own: an agent that passes it gets back the text the record
-// holds for that id, and only when the record names the caller as the
-// recipient. A guessed or copied id finds nothing, or finds real lever text
-// that was sent to the caller.
+// Each send carries a fresh 128-bit id, also written on the message's first
+// line as "ref=<id>". The id is only a lookup key, never evidence: a guessed
+// or copied id finds nothing, or finds real lever text sent to the caller.
 //
-// Why no agent can add a line: the directory lives in the host state
-// directory, outside every jail mount (the broker refuses to keep it when the
-// state directory is inside the tree), and package hostledger refuses a file
-// or directory anyone but the host user can write.
+// No agent can add a line: the directory is in the host state directory,
+// outside every jail mount (the broker refuses a state directory inside the
+// tree), and hostledger refuses a file or directory anyone but the host user
+// can write.
 package sentledger
 
 import (
@@ -59,14 +54,12 @@ const (
 	KindWorkerPrefix = "worker:"
 )
 
-// workerSlug is what a worker kind may name: a config worker name
-// (config's nameRE), with room for dots and underscores.
+// workerSlug is a config worker name (config's nameRE), with room for dots
+// and underscores.
 var workerSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
-// WorkerKind is the kind for a message worker slug sent.
 func WorkerKind(slug string) string { return KindWorkerPrefix + slug }
 
-// ValidKind reports whether k is one of the kinds above.
 func ValidKind(k string) bool {
 	switch k {
 	case KindManager, KindOperatorNote, KindDirectiveNotice:
@@ -82,18 +75,15 @@ func ValidKind(k string) bool {
 const RotateCap = 1 << 20
 
 // Window is how long after lever sent a message it can still be verified.
-// One-use per id (the broker's record of verified messages) already stops a
-// replay, so the window only bounds how long message text stays readable on
-// the host; it is long so a message the agent reads late (a long turn with
-// relays queued behind it) still verifies.
+// One use per id already stops a replay; the window bounds how long text
+// stays readable on the host, and is long so a message read late still
+// verifies.
 const Window = 24 * time.Hour
 
-// retention is how long a file is kept after its last append. Open removes
-// older files, so the text of old messages does not pile up on the host and
-// a file for a worker that no longer exists does not stay forever.
+// retention is how long a file is kept after its last append, so old message
+// text and files of removed workers do not pile up on the host.
 const retention = 2 * Window
 
-// Sent is one recorded send.
 type Sent struct {
 	// ID is the send's id (32 hex), also written on the message's first
 	// line as "ref=<ID>".
@@ -101,8 +91,7 @@ type Sent struct {
 	// Recipient is the recipient's certificate CN, the identity a verifying
 	// caller presents.
 	Recipient string
-	// Slug is the recipient's scion agent slug.
-	Slug string
+	Slug      string
 	// Kind is who sent it (the Kind* constants).
 	Kind string
 	// Body is the exact text lever passed to scion.
@@ -117,7 +106,6 @@ type Sent struct {
 	OK bool
 }
 
-// Done reports whether the send's end was recorded.
 func (s Sent) Done() bool { return !s.After.IsZero() }
 
 // line is one JSON line in a record file: "send" before the scion call,
@@ -142,7 +130,6 @@ const (
 
 var idPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
-// ValidID reports whether id has the form NewID makes.
 func ValidID(id string) bool { return idPattern.MatchString(id) }
 
 // NewID mints a send id: 16 bytes from crypto/rand, in hex.
@@ -171,12 +158,10 @@ func short(s string) string {
 	return hex.EncodeToString(h[:12])
 }
 
-// FileFor is the record file name for (recipient CN, kind).
 func FileFor(recipient, kind string) string {
 	return "s-" + short(recipient) + "-" + short(kind) + ".jsonl"
 }
 
-// stamp identifies a file's content as this process last saw it.
 type stamp struct {
 	ino  uint64
 	size int64
@@ -187,12 +172,10 @@ func stampOf(fi fs.FileInfo) stamp {
 	return stamp{ino: hostledger.FileID(fi), size: fi.Size(), mod: fi.ModTime()}
 }
 
-// Ledger is the record directory plus an in-memory index of the sends it
-// holds, so a lookup costs a map access, not a read of every file. The index
-// mirrors the files: it is loaded at Open, updated by this process's own
-// appends, and reloaded for a file whose content changed under it (a second
-// broker appending during a restart handoff, or a rotation). Safe for
-// concurrent use.
+// Ledger is the record directory plus an in-memory index of its sends. The
+// index is loaded at Open, updated by this process's appends, and reloaded
+// for a file whose content changed under it (a second broker during a
+// restart handoff, or a rotation). Safe for concurrent use.
 type Ledger struct {
 	dir string
 
@@ -204,7 +187,7 @@ type Ledger struct {
 }
 
 // Open creates dir (0700) if needed, refuses an unsafe one, removes files
-// untouched for longer than twice Window, and loads the index.
+// older than retention, and loads the index.
 func Open(dir string, now time.Time) (*Ledger, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("%s: %w", label, err)
@@ -237,11 +220,8 @@ func Open(dir string, now time.Time) (*Ledger, error) {
 	return l, nil
 }
 
-// Dir is the record directory.
 func (l *Ledger) Dir() string { return l.dir }
 
-// names lists the record files in the directory whose recipient hash is
-// prefix ("" for every file).
 func (l *Ledger) names(recipientHash string) ([]string, error) {
 	ents, err := os.ReadDir(l.dir)
 	if err != nil {
@@ -262,7 +242,7 @@ func (l *Ledger) lock() (func(), error) {
 	return hostledger.LockFile(filepath.Join(l.dir, ".lock"))
 }
 
-// file returns the appender for name. Caller holds l.mu.
+// file: caller holds l.mu.
 func (l *Ledger) file(name string) *hostledger.File {
 	f := l.files[name]
 	if f == nil {
@@ -301,7 +281,6 @@ func (l *Ledger) Begin(e Sent) error {
 	return nil
 }
 
-// Done records the end of e's send.
 func (l *Ledger) Done(e Sent, after time.Time, ok bool) error {
 	if err := hostledger.CheckDir(l.dir, label); err != nil {
 		return err
@@ -321,16 +300,15 @@ func (l *Ledger) Done(e Sent, after time.Time, ok bool) error {
 	return nil
 }
 
-// put indexes s as held by file name. Caller holds l.mu.
+// put: caller holds l.mu.
 func (l *Ledger) put(name string, s *Sent) {
 	l.index[s.ID] = s
 	l.where[s.ID] = name
 }
 
-// afterAppend keeps the index in step with name after this process appended
-// ln to it: when the file is exactly the one the index last saw plus that
-// line, only the stamp moves; otherwise (a new file, a rotation, or another
-// process's lines in between) the file is reloaded. Caller holds l.mu.
+// afterAppend only moves the stamp when name is exactly what the index last
+// saw plus ln; otherwise (a new file, a rotation, or another process's lines)
+// it reloads the file. Caller holds l.mu.
 func (l *Ledger) afterAppend(name string, ln line) {
 	fi, err := os.Lstat(filepath.Join(l.dir, name))
 	if err != nil {
@@ -351,16 +329,15 @@ func (l *Ledger) afterAppend(name string, ln line) {
 	}
 }
 
-// reload rereads file name (and its rotated copy) into the index.
 func (l *Ledger) reload(name string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.reloadLocked(name)
 }
 
-// reloadLocked replaces every index entry held by file name with what name
-// and name.1 hold now. It holds the directory lock, so no appender rotates
-// the file between the two reads. Caller holds l.mu.
+// reloadLocked replaces every index entry held by name with what name and
+// name.1 hold now, under the directory lock so no appender rotates between
+// the two reads. Caller holds l.mu.
 func (l *Ledger) reloadLocked(name string) error {
 	unlock, err := l.lock()
 	if err != nil {
@@ -420,7 +397,7 @@ func (l *Ledger) reloadLocked(name string) error {
 }
 
 // refresh reloads every file of recipient whose content changed since the
-// index last saw it (a handoff broker's appends). Caller holds l.mu.
+// index last saw it. Caller holds l.mu.
 func (l *Ledger) refresh(recipient string) error {
 	if err := hostledger.CheckDir(l.dir, label); err != nil {
 		return err
@@ -444,9 +421,9 @@ func (l *Ledger) refresh(recipient string) error {
 	return nil
 }
 
-// ByRef returns the send with id whose recipient is recipient. A miss in
-// the index rereads the recipient's changed files once before it answers
-// false. An id recorded for another recipient is a miss.
+// ByRef returns the send with id whose recipient is recipient. An index miss
+// rereads the recipient's changed files once; an id recorded for another
+// recipient is a miss.
 func (l *Ledger) ByRef(recipient, id string) (Sent, bool, error) {
 	if !ValidID(id) {
 		return Sent{}, false, nil
@@ -493,10 +470,9 @@ func (s Sent) Matches(ts, now time.Time) bool {
 	return !ts.Before(lo) && !ts.After(hi)
 }
 
-// InWindow returns the sends to recipient that an envelope timestamp ts can
-// name (Matches), oldest first. It is the fallback for an agent image whose
-// verify tool cannot pass a ref: a send lever made carries a ref, so a new
-// image never needs it.
+// InWindow returns the sends to recipient that ts can name (Matches), oldest
+// first. It is the fallback for an agent image whose verify tool cannot pass
+// a ref.
 func (l *Ledger) InWindow(recipient string, ts, now time.Time) ([]Sent, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

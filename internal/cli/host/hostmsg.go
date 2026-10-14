@@ -14,23 +14,20 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// newHostMsgCmd is the operator's fire-and-forget note sender: `lever msg send
-// BODY --to NAME`. Operator authority (the host user's, the same trust model as
-// `lever attach`), never a signed directive's. The note goes through the
-// broker's 0600 operator socket (state.State.OperatorSock), which records it in
-// the sent ledger as an operator note before it sends it, so the recipient can
-// verify who wrote it. NAME resolves like attach (the app name → manager; a
-// declared worker name → that worker).
+// newHostMsgCmd is `lever msg send BODY --to NAME`, the operator's
+// fire-and-forget note with the host user's authority, never a directive's.
+// It goes through the broker's 0600 operator socket, which records it in the
+// sent ledger before sending so the recipient can verify who wrote it. NAME
+// resolves like attach.
 func newHostMsgCmd(_ BackendFactory) *cobra.Command {
 	cmd := &cobra.Command{Use: "msg", Short: "Send a note to an agent (host-side, fire-and-forget)"}
 	cmd.AddCommand(hostMsgSend())
 	return cmd
 }
 
-// errNoOperatorSocket is the refusal when the broker has no operator socket:
-// it is not running, or it keeps no host records (the state directory is
-// inside the tree). An unrecorded note would never verify, and the agent
-// would treat it as data, so none is sent.
+// errNoOperatorSocket: the broker is not running or keeps no host records.
+// An unrecorded note would never verify and the agent would treat it as data,
+// so none is sent.
 var errNoOperatorSocket = errors.New("the broker is not running (no operator socket)")
 
 func hostMsgSend() *cobra.Command {
@@ -41,8 +38,7 @@ func hostMsgSend() *cobra.Command {
 		Args:  cobra.MinimumNArgs(1),
 		Short: "Send a message to the manager or a worker (--to NAME)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Config is always discovered from the CWD; the recipient NAME comes
-			// from --to, never a positional config path.
+			// Config comes from the CWD; the recipient comes from --to.
 			app, st, err := loadAppAndState(nil)
 			if err != nil {
 				return err

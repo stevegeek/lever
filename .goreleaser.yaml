@@ -3,12 +3,15 @@ version: 2
 before:
   hooks:
     - go mod tidy
-    # Embed the guest login forwarder (linux/amd64 + arm64) so a released
-    # lever needs no Go toolchain for remote access (issue #38). The test then
-    # fails the release if the embed is missing or stale, rather than shipping
-    # a lever that silently falls back to an apply-time cross-compile.
-    - go run ./internal/provision/loginfwd/genprebuilt
-    - sh -c "LEVER_REQUIRE_PREBUILT_LOGINFWD=1 go test -count=1 -run TestPrebuiltLoginForwarderEmbedded ./internal/provision/loginfwd"
+    # Build scion at the release pin (scionbin.ReleasePin) for linux/amd64 +
+    # arm64 into build/scion-release/ (uploaded below), and write the manifest
+    # pinning their sha256 into internal/provision/scionbin/release/, which
+    # lever embeds. A released lever then downloads the binary for that pin
+    # instead of building it, so the host needs no Go toolchain for scion.
+    - go run ./internal/provision/scionbin/genrelease -version {{ .Version }}
+    # Fail the release if the manifest is missing, names another version or
+    # pin, or does not match the assets about to be uploaded.
+    - sh -c "LEVER_REQUIRE_SCION_RELEASE={{ .Version }} go test -count=1 -run TestReleaseManifestEmbedded ./internal/provision/scionbin"
 
 builds:
   - id: lever
@@ -77,6 +80,11 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+  # List the prebuilt scion assets in checksums.txt too, for anyone checking
+  # a download by hand. lever itself checks the digests it embeds, never
+  # this file.
+  extra_files:
+    - glob: ./build/scion-release/scion_*_linux_*.gz
 
 release:
   # Keep hand-authored release notes: do not let GoReleaser generate a
@@ -85,6 +93,9 @@ release:
   draft: false
   mode: append
   disable: false
+  # Upload the prebuilt scion binaries next to the archives.
+  extra_files:
+    - glob: ./build/scion-release/scion_*_linux_*.gz
 
 changelog:
   disable: true

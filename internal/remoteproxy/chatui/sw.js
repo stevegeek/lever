@@ -1,11 +1,8 @@
-// lever's push-only service worker (remote.push).
-//
-// It shows a notification for a push and opens the chat on a tap. It has
-// NO fetch handler and keeps no cache, so the page's requests never pass
-// through it and it cannot serve a page older than the binary. A push from
-// lever carries only {"v":1,"agent":"<name>"}: there is no message text to
-// show. The name is shown only if this login's agent list (the one the page
-// shows) lists it as an agent it may message.
+// lever's push-only service worker (remote.push). It has NO fetch handler
+// and keeps no cache, so the page's requests never pass through it and it
+// cannot serve a stale page. A push carries only {"v":1,"agent":"<name>"};
+// the name is shown only if this login's agent list lets it message that
+// agent.
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const LIST_MS = 5000;

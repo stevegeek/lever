@@ -1,14 +1,12 @@
 // Package jailabi holds the in-jail compatibility version: the number the
 // agent image is stamped with (its lever_jail_abi label) and that `lever
-// doctor` compares with the host lever (lever#171).
+// doctor` compares with the host lever.
 //
-// The release version is the wrong thing to compare. A release that changes
+// The release version is the wrong thing to compare: a release that changes
 // no in-jail code (lever-agent, lever-manager, lever-tool-db, the scion
 // pre-start hook, the image Dockerfile, anything they import, or the Go
-// version) still bumps it,
-// and the doctor row then told the operator to rebuild the image and discard
-// the manager's conversation for nothing. JailABI changes only when the code
-// baked into the image changes.
+// version) still bumps it. JailABI changes only when the code baked into the
+// image changes.
 //
 // # Bumping it
 //
@@ -32,7 +30,7 @@ package jailabi
 
 // JailABI is the in-jail compatibility version. See the package doc for how
 // and when to bump it.
-const JailABI = 3
+const JailABI = 4
 
 // Label is the image label that carries JailABI (image/lever-claude/Dockerfile).
 const Label = "lever_jail_abi"

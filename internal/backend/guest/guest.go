@@ -1,15 +1,11 @@
-// Package guest provisions an Ubuntu jail guest — rootless container runtimes,
+// Package guest provisions an Ubuntu jail guest (rootless container runtimes,
 // the scion binary and its web assets, the remote-access login forwarder and
-// scion's on-disk state — through host-side argv prefixes. It is shared by
-// every backend that reaches its guest via a "run this as user X" prefix (orb,
-// lima, ...); only the prefixes differ, the provisioning scripts don't.
+// scion's on-disk state) through host-side argv prefixes, for every backend
+// that reaches its guest via a "run this as user X" prefix.
 //
-// It owns the TRANSPORT and the IN-GUEST scripts only. Every artefact it
-// installs is built elsewhere on the host and arrives as a local path:
-// internal/provision/scionbin (the scion binary), internal/provision/webassets
-// (the SPA) and internal/provision/loginfwd (the forwarder). Scion's file
-// layout and settings keys come from internal/scion/layout; the scripts here
-// are assembled from those constants rather than restating them.
+// It owns the transport and the in-guest scripts only. Every artefact it
+// installs is built elsewhere on the host and arrives as a local path. Scion's
+// file layout and settings keys come from internal/scion/layout.
 package guest
 
 import (
@@ -21,6 +17,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
@@ -33,13 +30,8 @@ type Guest struct {
 	Machine    string      // jail identifier (temp-file naming)
 }
 
-// RootRun / UserRun execute args inside the guest via the RootPrefix / UserPrefix
-// transport respectively, e.g. RootPrefix ["orb","-u","root","-m",m] + args
-// ["iptables","-S",chain] runs `orb -u root -m <m> iptables -S <chain>`. Both
-// delegate to prefixRun, which defensively copies prefix[1:] before appending so
-// concurrent callers can't alias/corrupt each other's argv (append may reuse the
-// underlying array when capacity allows) — the single place the prefix-splat
-// idiom lives.
+// RootRun / UserRun execute args inside the guest via the RootPrefix /
+// UserPrefix transport respectively.
 func (g Guest) RootRun(ctx context.Context, args ...string) (proc.Result, error) {
 	return g.prefixRun(ctx, g.RootPrefix, args...)
 }
@@ -48,18 +40,17 @@ func (g Guest) UserRun(ctx context.Context, args ...string) (proc.Result, error)
 	return g.prefixRun(ctx, g.UserPrefix, args...)
 }
 
+// prefixRun copies prefix[1:] before appending so concurrent callers cannot
+// alias each other's argv through a shared backing array.
 func (g Guest) prefixRun(ctx context.Context, prefix []string, args ...string) (proc.Result, error) {
 	argv := append(append([]string{}, prefix[1:]...), args...)
 	return g.Host.Run(ctx, nil, prefix[0], argv...)
 }
 
-// pipeInto streams stdin into a bash script running inside the guest through
-// prefix: `<prefix> bash -c <script>` with the host bytes on its stdin. It is
-// how every host→guest byte stream travels (a binary, a settings file, an
-// asset archive): argv only, through the Runner's stdin seam — no host shell,
-// no `cat X | prefix bash -c '…'` pipeline, no quoting of the prefix words.
-// bash resolves on the prefix user's PATH (root's for RootPrefix, which no run
-// user can write to).
+// pipeInto streams stdin into `<prefix> bash -c <script>`. Every host→guest
+// byte stream must use it: argv only, no host shell, no quoting of the prefix
+// words. bash resolves on the prefix user's PATH (root's for RootPrefix, which
+// no run user can write to).
 func (g Guest) pipeInto(ctx context.Context, prefix []string, stdin io.Reader, script string) error {
 	argv := append(append([]string{}, prefix[1:]...), "bash", "-c", script)
 	_, err := g.Host.RunStdin(ctx, stdin, nil, prefix[0], argv...)
@@ -77,80 +68,68 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 		_, err := g.UserRun(ctx, "bash", "-lc", script)
 		return err
 	}
-	// Guard the apt step behind a dpkg presence check so a re-apply (or a second
-	// egress posture on the same VM) does NOT re-run apt. This is not just an
-	// optimisation: once lever's egress chain is active it drops the RFC1918
-	// ranges, which on Lima include the guest's own DNS upstream (systemd-resolved
-	// forwards to a 192.168.x address). The open posture ACCEPTs that resolver
-	// path since lever#34 (egress.DNSForward), but the closed posture drops it by
-	// design, so `apt-get update` may no longer resolve the mirrors and would
-	// hang. The first EnsureUp (fresh VM, no chain yet) installs
-	// everything; subsequent ones find the packages present and skip apt entirely,
-	// needing no guest DNS. `dpkg -s <pkgs>` succeeds iff ALL are installed.
+	// The dpkg guard is not just an optimisation: once the egress chain is
+	// active, the closed posture drops the guest's own DNS upstream (an RFC1918
+	// address on Lima), so `apt-get update` would hang. A fresh VM has no chain
+	// yet and installs everything; later runs find the packages and skip apt.
 	//
-	// curl is how lever's own hub calls run inside the jail (internal/hubapi/
-	// jailcurl.go); netcat-openbsd is how the remote-access proxy dials the hub
-	// through the jail (internal/remoteproxy/jaildial.go). Both are in the
-	// Debian base image today, so naming them here changes nothing on an
-	// existing guest — the guard still passes and apt still never runs. They
-	// are named so a future base image cannot drop one and break a lever
-	// feature silently. passt (pasta) is only a Recommends of Ubuntu's podman,
-	// and agents need it to reach the hub (lever#35); apt installs
-	// Recommends by default, so a guest lever already provisioned has it
-	// and the guard still passes there.
+	// curl (in-jail hub calls), netcat-openbsd (the remote-access proxy's jail
+	// dial) and passt (only a Recommends of Ubuntu's podman; agents need it to
+	// reach the hub) are named so a future base image cannot silently drop one.
 	if err := root(`dpkg -s uidmap dbus-user-session fuse-overlayfs slirp4netns passt curl netcat-openbsd iptables podman >/dev/null 2>&1 || { DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq uidmap dbus-user-session fuse-overlayfs slirp4netns passt curl netcat-openbsd iptables podman; }`); err != nil {
 		return fmt.Errorf("apt prereqs: %w", err)
 	}
-	// Ubuntu >= 23.10 (the Lima jail guest is 26.04, or 24.04 on an older
-	// VM) ships kernel.apparmor_restrict_unprivileged_userns=1, which blocks
-	// the rootless runtimes' rootlesskit/pasta from creating the
-	// unprivileged user namespace they require — without this rootless
-	// podman fails with "fork/exec /proc/self/exe: permission denied". The
-	// jail is a dedicated VM whose OWN kernel is the containment boundary
-	// (backend Guarantee 0: separate-kernel), and its sole purpose is to run
-	// the agent's untrusted rootless containers, so relaxing this in-guest
-	// knob is the intended jail posture — it is scoped to the throwaway guest
-	// kernel and does not touch the host's. Persisted so it survives a guest reboot and applied live for this
-	// boot. Tolerant of guests without the knob (e.g. the OrbStack distro), where
-	// the sysctl key simply doesn't exist.
+	// Ubuntu >= 23.10 sets kernel.apparmor_restrict_unprivileged_userns=1,
+	// which makes rootless podman fail with "fork/exec /proc/self/exe:
+	// permission denied". Relaxing it is the intended jail posture: it is
+	// scoped to the guest kernel, which is itself the containment boundary,
+	// and never touches the host's. Tolerant of guests without the knob.
 	if err := root(`printf 'kernel.apparmor_restrict_unprivileged_userns=0\n' > /etc/sysctl.d/99-lever-userns.conf; sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true`); err != nil {
 		return fmt.Errorf("relax unprivileged userns for rootless runtimes: %w", err)
 	}
-	// Enable lingering so the run user's systemd instance (and its runtime
-	// dir, which rootless podman uses) survives after the provisioning SSH session closes. `loginctl
-	// enable-linger` is the canonical path (used on OrbStack), but on the Lima
-	// Ubuntu guest systemd-logind's D-Bus interface intermittently hangs — every
-	// loginctl call then blocks until timeout and the step fails ("Could not
-	// enable linger: Connection timed out"). enable-linger merely creates
-	// /var/lib/systemd/linger/<user>, so fall back to writing that marker directly
-	// (the documented equivalent) when loginctl is unresponsive: try it under a
-	// short timeout, else touch the marker. Deterministic on both backends.
+	// Lingering keeps the run user's systemd instance and runtime dir alive
+	// after the provisioning session closes. On the Lima guest systemd-logind's
+	// D-Bus interface intermittently hangs, so loginctl gets a short timeout
+	// and the fallback writes /var/lib/systemd/linger/<user> directly, the
+	// documented equivalent.
 	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; timeout 8 loginctl enable-linger %s 2>/dev/null || { mkdir -p /var/lib/systemd/linger && : > /var/lib/systemd/linger/%s; }`,
 		runUser, runUser, runUser, runUser, runUser, runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)
 	}
-	// Lever used to install and start a rootless dockerd here. Nothing uses it
-	// (scion runs the agents in podman; lever#183), so a VM provisioned
-	// before that has it running and enabled: stop and disable it. A no-op
-	// once it is off or was never installed. The pid file covers the
-	// non-systemd start lever also used; it lives in the run user's runtime
-	// dir, which no agent container sees. The installed files stay.
+	// A guest may still run an unused rootless dockerd; stop and disable it.
+	// A no-op once it is off or was never installed.
 	if err := user(dockerOffScript); err != nil {
 		return fmt.Errorf("disable the unused rootless dockerd: %w", err)
 	}
-	// Per-agent network isolation: agents run in their own pasta netns, and
-	// reach the VM-loopback hub at PastaHostAddr. The drop-in depends on the
-	// guest's pasta version (pastaDropInScript; lever#35).
+	// Agents run in their own pasta netns and reach the VM-loopback hub at
+	// PastaHostAddr.
 	if err := user(pastaDropInScript()); err != nil {
 		return fmt.Errorf("stage pasta hub mapping: %w", err)
+	}
+	if err := user(agentRegistryBlockScript); err != nil {
+		return fmt.Errorf("block pulls from %s: %w", imageref.Registry, err)
 	}
 	return nil
 }
 
-// dockerOffScript stops and disables the rootless dockerd an older lever
-// started in the guest (lever#183), if it is there; it exits 0 either way.
-// A pid file left by a dockerd that died is only acted on while that pid is
-// still a dockerd, so a reused pid is never killed.
+// agentRegistryBlockScript makes podman refuse any pull from lever's agent
+// image registry name. Agents run images load-image put in the store, and
+// no registry by that name exists; a pull happens only when the image is
+// missing, and then it must fail rather than ask whatever answers for that
+// name on the network. Loading, tagging and running stored images do not
+// consult it.
+const agentRegistryBlockScript = `set -e
+mkdir -p "$HOME/.config/containers/registries.conf.d"
+cat > "$HOME/.config/containers/registries.conf.d/10-lever-agent-images.conf" <<'LEVER_EOF'
+[[registry]]
+location = "` + imageref.Registry + `"
+blocked = true
+LEVER_EOF
+`
+
+// dockerOffScript exits 0 either way. A stale pid file is only acted on while
+// that pid is still a dockerd, so a reused pid is never killed. The pid file
+// lives in the run user's runtime dir, which no agent container sees.
 const dockerOffScript = `export XDG_RUNTIME_DIR=/run/user/$(id -u)
 if timeout 10 systemctl --user -q is-enabled docker 2>/dev/null || timeout 10 systemctl --user -q is-active docker 2>/dev/null; then
   timeout 30 systemctl --user disable --now docker >/dev/null 2>&1 || true
@@ -161,8 +140,7 @@ case "$pid" in ''|*[!0-9]*) ;; *)
 esac
 true`
 
-// GOARCH returns the guest's Go cross-compile arch, detected via `uname -m`
-// run inside the guest (as the run user).
+// GOARCH returns the guest's Go cross-compile arch.
 func (g Guest) GOARCH(ctx context.Context) (string, error) {
 	res, err := g.UserRun(ctx, "uname", "-m")
 	if err != nil {
@@ -171,7 +149,6 @@ func (g Guest) GOARCH(ctx context.Context) (string, error) {
 	return goarchOf(res.Stdout)
 }
 
-// goarchOf maps `uname -m` output to a Go arch.
 func goarchOf(uname string) (string, error) {
 	switch u := strings.TrimSpace(uname); u {
 	case "aarch64", "arm64":
@@ -183,31 +160,22 @@ func goarchOf(uname string) (string, error) {
 	}
 }
 
-// scionDestPath is where scion is installed in the guest.
 const scionDestPath = "/usr/local/bin/scion"
 
-// ScionSpec names the one place lever should get scion from. The type is
-// scionbin's; the alias keeps the backends' `guest.ScionSpec{...}` literals
-// beside the other guest calls they make.
+// ScionSpec names the one place lever should get scion from.
 type ScionSpec = scionbin.Spec
 
 // EnsureScion puts the configured scion into the guest at scionDestPath, plus
-// its web assets when the spec asks for them. The binary is resolved on the
-// host by scionbin.Resolve (the Binary branch never touches a toolchain, which
-// is what lets the jail host carry no Go — issue #27) and streamed in by
-// InstallRootBinaryIfChanged.
+// its web assets when the spec asks for them.
 func (g Guest) EnsureScion(ctx context.Context, spec ScionSpec) error {
 	return g.EnsureScionFrom(ctx, spec, nil)
 }
 
 // EnsureScionFrom is EnsureScion with the guest's arch and the installed
-// binary's digest taken from a warm-path probe (ScionProbePath in
-// ProbeSpec.HashPaths) instead of their own guest calls. A nil snapshot, or
-// one that could not read either, reads it from the guest as EnsureScion
-// does.
+// binary's digest taken from a warm-path probe when snap has them.
 func (g Guest) EnsureScionFrom(ctx context.Context, spec ScionSpec, snap *Snapshot) error {
-	// Validate the spec BEFORE touching the guest, so a plainly wrong config
-	// fails without a round-trip and without depending on the guest being up.
+	// Validate before touching the guest, so a wrong config fails without
+	// depending on the guest being up.
 	if err := spec.Validate(); err != nil {
 		return err
 	}
@@ -218,8 +186,6 @@ func (g Guest) EnsureScionFrom(ctx context.Context, spec ScionSpec, snap *Snapsh
 			return fmt.Errorf("detect guest architecture: %w", err)
 		}
 	}
-	// A build started while the VM booted (lever#189) is used when it was
-	// for this guest's architecture; otherwise build now.
 	bin, err, ok := spec.Prebuilt.Result(ctx, spec, arch, g.Machine)
 	if !ok {
 		bin, err = scionbin.Resolve(ctx, g.Host, spec, arch, g.Machine)
@@ -241,27 +207,15 @@ func (g Guest) EnsureScionFrom(ctx context.Context, spec ScionSpec, snap *Snapsh
 const ScionProbePath = scionDestPath
 
 // InstallRootBinary streams a host-local executable into the guest at destPath
-// (mode +x), owned by root, via the RootPrefix transport. It is the backend-
-// agnostic way to place a binary the guest needs — scion (above) and the
-// acceptance gate's lever-agent both use it, so the "which prefix reaches the
-// guest as root" knowledge lives only in the backend's RootPrefix, never in a
-// caller.
+// (mode +x), owned by root, via the RootPrefix transport.
 //
-// The install is atomic: the host file is the stdin of a guest-side script
-// that writes a temp path, checks its byte count against the host file's,
-// makes it executable, then mv's it over destPath (mv is atomic on the same
-// filesystem), so a mid-stream failure can't leave a truncated, executable
-// binary at destPath. The count check is what makes that true: a stream that
-// ends early is a plain EOF to `cat`, which exits 0, so without it the `&&`
-// chain would install the truncated file. destPath is a fixed literal at
-// every call site today (not attacker input), but it — and its derived .tmp
-// — are still shell-quoted, because they are interpolated into the guest
-// script.
+// The install is atomic: a temp file is byte-count checked, then mv'd over
+// destPath, so a mid-stream failure cannot leave a truncated executable (an
+// early EOF makes `cat` exit 0, so the count check is what makes this true).
+// destPath is shell-quoted because it is interpolated into the guest script.
 //
-// The file is opened ONCE: the same descriptor is hashed, then streamed (see
-// hashedHandle). Hashing by path and reopening by path would leave a window
-// in which the path can be pointed at another file, and the build outputs
-// this installs used to live in the shared /tmp.
+// The file is opened ONCE and the same descriptor is hashed, then streamed:
+// reopening by path would leave a window to point the path at another file.
 func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -275,16 +229,14 @@ func (g Guest) InstallRootBinary(ctx context.Context, localPath, destPath string
 	return g.installFromHandle(ctx, h, destPath)
 }
 
-// hashedHandle is an open host file together with the digest and byte count
-// of exactly the bytes it will stream: they were computed from this
-// descriptor, and it is rewound to the start afterwards.
+// hashedHandle is an open host file with the digest and byte count computed
+// from this same descriptor, rewound to the start.
 type hashedHandle struct {
 	f      *os.File
 	size   int64
 	digest string // hex sha256
 }
 
-// hashHandle hashes f from its current offset to EOF and rewinds it.
 func hashHandle(f *os.File) (hashedHandle, error) {
 	h := sha256.New()
 	n, err := io.Copy(h, f)
@@ -297,14 +249,10 @@ func hashHandle(f *os.File) (hashedHandle, error) {
 	return hashedHandle{f: f, size: n, digest: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
-// installFromHandle streams h into the guest at destPath (InstallRootBinary's
-// guest-side script), hashing the bytes on their way out. A stream whose
-// bytes do not hash to h.digest is reported as an error: the one writer a
-// held descriptor cannot exclude is one that rewrites the same inode in
-// place, and a same-size rewrite passes the guest's byte-count check. By
-// then the guest has already swapped the file in, so this cannot undo the
-// install — it makes the apply fail loudly instead of trusting the bytes,
-// and the next apply re-streams because the guest digest no longer matches.
+// installFromHandle re-hashes the bytes as they stream: a held descriptor
+// cannot exclude a same-size in-place rewrite of the inode. The install
+// cannot be undone by then, so the apply fails loudly instead, and the next
+// apply re-streams because the guest digest no longer matches.
 func (g Guest) installFromHandle(ctx context.Context, h hashedHandle, destPath string) error {
 	sent := sha256.New()
 	if err := g.pipeInto(ctx, g.RootPrefix, io.TeeReader(h.f, sent), installRootBinaryScript(destPath, h.size)); err != nil {
@@ -317,30 +265,24 @@ func (g Guest) installFromHandle(ctx context.Context, h hashedHandle, destPath s
 	return nil
 }
 
-// installRootBinaryScript is the guest-side half of InstallRootBinary: read
-// stdin into destPath.tmp, refuse it unless exactly size bytes arrived, then
-// swap it in. `wc -c <` rather than `stat` because the two stats disagree
-// across GNU and BSD and the injection test runs this script on the host.
-// Split out so a test can pin it.
+// installRootBinaryScript uses `wc -c <` rather than `stat` because the two
+// stats disagree across GNU and BSD and the injection test runs this script
+// on the host.
 func installRootBinaryScript(destPath string, size int64) string {
 	tmp := shellSingleQuote(destPath + ".tmp")
 	return fmt.Sprintf("cat > %s && [ \"$(wc -c < %s)\" -eq %d ] && chmod +x %s && mv %s %s", tmp, tmp, size, tmp, tmp, shellSingleQuote(destPath))
 }
 
-// guestFileDigest returns the hex sha256 the guest reports for path, or ""
-// when it cannot be read (no such file, no sha256sum, an unreadable path).
+// guestFileDigest returns "" when the digest cannot be read.
 //
-// Absolute path, not a bare name: UserRun passes no env, so a bare name
-// resolves on the guest user's PATH, which precedes /usr/bin with
-// run-user-writable directories. A shim there could report the expected
-// digest for a replaced binary and pin it forever. That needs guest root
-// (who could replace the binary outright), but the fix is one word.
+// sha256sum is called by absolute path: a bare name resolves on the guest
+// user's PATH, which has run-user-writable directories ahead of /usr/bin, and
+// a shim there could report the expected digest for a replaced binary.
 func (g Guest) guestFileDigest(ctx context.Context, path string) string {
 	res, err := g.UserRun(ctx, "/usr/bin/sha256sum", path)
 	if err != nil {
 		return ""
 	}
-	// `sha256sum` prints "<hex>  <path>"; take the digest field only.
 	if f := strings.Fields(res.Stdout); len(f) > 0 {
 		return f[0]
 	}
@@ -350,34 +292,16 @@ func (g Guest) guestFileDigest(ctx context.Context, path string) string {
 // InstallRootBinaryIfChanged installs localPath at destPath unless the guest
 // already holds exactly those bytes, and reports whether it installed.
 //
-// scion is 158MB and was otherwise re-streamed into the guest on every
-// bring-up, in every mode, whether or not it had changed.
-//
-// It compares against the GUEST BINARY ITSELF, by hashing it in place — not
-// against a marker file recording what lever installed once. A marker attests a
-// past event; only the file answers "is the right binary there NOW?". Hashing
-// the file covers deletion, truncation and out-of-band replacement in one
-// check, keeps `lever up` self-healing the way it was before any skip existed,
-// and needs no second write whose ordering has to be defended.
-//
-// It costs a 158MB read off guest disk rather than a 158MB stream across the
-// transport, which is the cheaper side of that trade by a wide margin.
-//
-// Fails open: if the guest digest cannot be read for any reason — no such file,
-// no sha256sum, an unreadable path — lever installs. Being wrong that way costs
-// redundant work; the other way would skip a real install.
-//
-// The host file is opened once and the same descriptor is hashed, compared
-// and streamed, so the bytes the guest receives are the bytes whose digest
-// decided the install (hashedHandle). Reopening by path between the two
-// would let anyone who can write the path swap the file in the gap.
+// It hashes the GUEST BINARY ITSELF, not a marker of a past install, so
+// deletion, truncation and out-of-band replacement are all caught. Fails
+// open: an unreadable guest digest means install. The host file is opened
+// once, so the bytes streamed are the bytes whose digest decided the install.
 func (g Guest) InstallRootBinaryIfChanged(ctx context.Context, localPath, destPath string) (bool, error) {
 	return g.installRootBinaryIfChanged(ctx, localPath, destPath, func() string { return g.guestFileDigest(ctx, destPath) })
 }
 
-// installRootBinaryIfChanged is InstallRootBinaryIfChanged with the guest
-// digest supplied: read in place, or by the warm-path probe moments earlier
-// (the same sha256sum of the same file, batched with the probe's other reads).
+// installRootBinaryIfChanged takes the guest digest from the caller: read in
+// place, or by the warm-path probe moments earlier.
 func (g Guest) installRootBinaryIfChanged(ctx context.Context, localPath, destPath string, guestDigest func() string) (bool, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -397,9 +321,7 @@ func (g Guest) installRootBinaryIfChanged(ctx context.Context, localPath, destPa
 	return true, nil
 }
 
-// shellSingleQuote wraps s in single quotes safe for POSIX shells, escaping any
-// embedded single quote as the standard '\” sequence (close quote, escaped
-// quote, reopen quote).
+// shellSingleQuote wraps s in single quotes safe for POSIX shells.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

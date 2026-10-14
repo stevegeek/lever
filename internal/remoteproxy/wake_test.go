@@ -95,7 +95,6 @@ func TestWakeASuspendedWorker(t *testing.T) {
 	}
 }
 
-// Review Focus 2.
 func TestWakeRefusesWhatTheLoginMayNotMessage(t *testing.T) {
 	hub := newPageHub(t)
 	wr := &wakeRec{}
@@ -134,7 +133,6 @@ func TestWakeRefusesWhatTheLoginMayNotMessage(t *testing.T) {
 	}
 }
 
-// Review Focus 3.
 func TestWakeOriginRules(t *testing.T) {
 	hub := newPageHub(t)
 	wr := &wakeRec{}
@@ -298,9 +296,8 @@ func TestWakeAnswersBeforeTheResumeEnds(t *testing.T) {
 	}
 }
 
-// Only a plain agent name routes to the wake; anything else under the
-// agents prefix is a 404 (or a 400 from unsafePath), and never reaches the
-// broker.
+// Only a plain agent name routes to the wake; anything else under the prefix
+// is a 404 (or 400 from unsafePath) and never reaches the broker.
 func TestWakeRouteShape(t *testing.T) {
 	hub := newPageHub(t)
 	wr := &wakeRec{}

@@ -36,9 +36,8 @@ func TestVerifyELFArchAcceptsPIE(t *testing.T) {
 }
 
 func TestVerifyELFArchRejectsMismatchNamingBothArches(t *testing.T) {
-	// The failure this exists to catch: a workstation-built binary for the wrong
-	// arch. The message must say which is which, or the operator cannot tell
-	// whether to rebuild the binary or fix the config.
+	// A binary for the wrong arch: the message must say which is which, or
+	// the operator cannot tell whether to fix the binary or the config.
 	p := backendtest.WriteELF64(t, t.TempDir(), backendtest.EMAArch64, backendtest.ETExec)
 	err := scionbin.VerifyELFArch(p, "amd64")
 	if err == nil {

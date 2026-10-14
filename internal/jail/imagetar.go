@@ -15,30 +15,24 @@ import (
 
 // TarImage is one image described by a docker archive's manifest.json.
 type TarImage struct {
-	// RepoTags as written by `docker save`: unqualified names such as
-	// "scionlocal/lever-claude:arm64" or "alpine:latest".
+	// RepoTags are unqualified, as `docker save` writes them.
 	RepoTags []string
-	// ConfigDigest is the bare hex sha256 of the image config blob — the value
-	// `podman load` assigns as the image ID (see normalizeImageID), so it is
-	// what an "already loaded" check compares against the jail.
+	// ConfigDigest is the bare hex sha256 of the image config blob, the value
+	// `podman load` assigns as the image ID.
 	ConfigDigest string
-	// Labels from the config's `config.Labels` (nil when the image has none).
-	Labels map[string]string
+	Labels       map[string]string
 }
 
-// maxConfigBlob bounds how much of a manifest-named config entry is read into
-// memory; a real config is a few KB, and a layer that a corrupt manifest
-// points at must not be slurped.
+// maxConfigBlob: a real config is a few KB, and a layer that a corrupt
+// manifest points at must not be read into memory.
 const maxConfigBlob = 8 << 20
 
-// ReadImageTar parses a docker archive (`docker save` output, either the
-// legacy "<hex>.json" layout or the OCI "blobs/sha256/<hex>" layout that
-// docker ≥ 25 writes) and returns every image it carries. docker writes
-// manifest.json AFTER the layer blobs, so the archive is opened as an
-// *os.File and walked twice: archive/tar skips entry bodies with Seek when
-// its reader is a Seeker, which makes each walk a handful of header reads,
-// not a multi-GB read. The file must therefore reach tar.NewReader directly
-// (no bufio wrapper, which would hide the Seeker).
+// ReadImageTar returns every image a `docker save` archive carries, in the
+// legacy or the OCI layout. docker writes manifest.json after the layer
+// blobs, so the archive is walked more than once; archive/tar skips bodies
+// with Seek when its reader is a Seeker, so the *os.File must reach
+// tar.NewReader directly (a bufio wrapper would hide the Seeker and make each
+// walk a multi-GB read).
 func ReadImageTar(tarPath string) ([]TarImage, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
@@ -80,8 +74,6 @@ func ReadImageTar(tarPath string) ([]TarImage, error) {
 	return imgs, nil
 }
 
-// readTarEntry rewinds f and returns the body of the entry named name (path-
-// cleaned, so "./manifest.json" matches), or an error naming it when absent.
 func readTarEntry(f *os.File, name string, limit int64) ([]byte, error) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -106,10 +98,8 @@ func readTarEntry(f *os.File, name string, limit int64) ([]byte, error) {
 	}
 }
 
-// FindTarImage returns the image in imgs tagged ref, comparing normalised
-// references (see normalizeRef) so a qualified or tagless config ref matches
-// the unqualified RepoTags docker writes. The error names the ref and lists
-// the tags the tar does carry.
+// FindTarImage returns the image in imgs tagged ref, so a qualified or
+// tagless config ref matches the unqualified RepoTags docker writes.
 func FindTarImage(imgs []TarImage, ref string) (TarImage, error) {
 	want := normalizeRef(ref)
 	var have []string
@@ -125,18 +115,14 @@ func FindTarImage(imgs []TarImage, ref string) (TarImage, error) {
 }
 
 // SameImageRef reports whether two image references name the same image
-// once podman's and docker's qualifications are stripped: "docker.io/" or the
-// "localhost/" alias the load step adds (aliasLocalhost), the implied
-// "library/", and an implied ":latest". A different tag or registry is a
-// different image.
+// once podman's and docker's implied qualifications are stripped, including
+// the "localhost/" alias the load step adds.
 func SameImageRef(a, b string) bool {
 	return normalizeRef(strings.TrimPrefix(a, "localhost/")) == normalizeRef(strings.TrimPrefix(b, "localhost/"))
 }
 
-// normalizeRef canonicalises a docker image reference for equality: strips a
-// leading "docker.io/", prefixes the implied "library/" of a single-component
-// name, and appends ":latest" when the name carries no tag or digest. The tag
-// test is "a ':' after the last '/'", so a registry port is not a tag.
+// normalizeRef looks for a tag after the last '/', so a registry port is not
+// a tag.
 func normalizeRef(ref string) string {
 	ref = strings.TrimPrefix(strings.TrimSpace(ref), "docker.io/")
 	if !strings.Contains(ref, "/") {
@@ -150,8 +136,7 @@ func normalizeRef(ref string) string {
 }
 
 // ImageTarLabel returns the value of label key on the image tagged ref in
-// the archive at tarPath ("" when the image carries no such label). It is
-// doctor's substitute for `docker image inspect` on a host with no docker.
+// the archive at tarPath, for a host with no docker to inspect.
 func ImageTarLabel(tarPath, ref, key string) (string, error) {
 	imgs, err := ReadImageTar(tarPath)
 	if err != nil {

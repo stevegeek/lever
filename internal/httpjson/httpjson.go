@@ -1,6 +1,6 @@
 // Package httpjson is the minimal JSON-over-HTTP client helper shared by the
-// lever binaries that talk to the broker: marshal → send → status-check → decode,
-// with one bounded body read and one error shape.
+// lever binaries that talk to the broker, with one bounded body read and one
+// error shape.
 package httpjson
 
 import (
@@ -44,10 +44,8 @@ func Status(err error) int {
 	return 0
 }
 
-// Post marshals in as JSON and POSTs it to url with client, decoding a 200
-// response into out (out may be nil to discard the body). A non-200 yields a
-// *StatusError; transport and decode failures are wrapped as
-// "POST <url>: <err>" and "POST <url>: decode: <err>".
+// Post POSTs in as JSON and decodes a 200 response into out (nil discards
+// it). A non-200 yields a *StatusError.
 func Post(ctx context.Context, client *http.Client, url string, in, out any) error {
 	raw, err := json.Marshal(in)
 	if err != nil {
@@ -61,8 +59,7 @@ func Post(ctx context.Context, client *http.Client, url string, in, out any) err
 	return do(client, req, out)
 }
 
-// Get GETs url with client and decodes a 200 response into out. Errors follow
-// the same contract as Post, prefixed "GET <url>".
+// Get GETs url and decodes a 200 response into out. Errors follow Post.
 func Get(ctx context.Context, client *http.Client, url string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

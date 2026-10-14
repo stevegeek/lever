@@ -1,6 +1,6 @@
-// Package ca is a tiny internal CA: it issues per-agent mTLS certs whose
-// CommonName is the agent identity, and proves the caller identity of a TLS
-// connection. The broker uses it for non-transferable, caller-bound capabilities.
+// Package ca is a small internal CA: it issues per-agent mTLS certs whose
+// CommonName is the agent identity and proves the caller identity of a TLS
+// connection, so broker capabilities are caller-bound and non-transferable.
 package ca
 
 import (
@@ -16,7 +16,6 @@ import (
 	"time"
 )
 
-// CA is a self-signed certificate authority.
 type CA struct {
 	Cert    *x509.Certificate
 	certDER []byte
@@ -49,12 +48,11 @@ func Generate() (*CA, error) {
 	return &CA{Cert: cert, certDER: der, key: key}, nil
 }
 
-// CertPEM returns the CA certificate in PEM form.
 func (c *CA) CertPEM() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.certDER})
 }
 
-// SaveCert writes the CA cert PEM (0644 — public).
+// SaveCert writes the CA cert PEM, 0644 (public).
 func (c *CA) SaveCert(path string) error {
 	if err := os.WriteFile(path, c.CertPEM(), 0o644); err != nil {
 		return fmt.Errorf("ca: save cert: %w", err)
@@ -62,7 +60,7 @@ func (c *CA) SaveCert(path string) error {
 	return nil
 }
 
-// SaveKey writes the CA private key PEM (0600 — secret).
+// SaveKey writes the CA private key PEM, 0600 (secret).
 func (c *CA) SaveKey(path string) error {
 	der, err := x509.MarshalECPrivateKey(c.key)
 	if err != nil {
@@ -75,7 +73,6 @@ func (c *CA) SaveKey(path string) error {
 	return nil
 }
 
-// Load reads a CA cert + key from PEM files.
 func Load(certPath, keyPath string) (*CA, error) {
 	certRaw, err := os.ReadFile(certPath)
 	if err != nil {

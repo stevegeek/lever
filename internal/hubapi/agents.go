@@ -14,15 +14,14 @@ type Agent struct {
 	ID   string
 	Slug string
 	Name string
-	// Role is the authorization role stored on the record when it was created
-	// (scion#1089). It is EMPTY for a record created by a scion that predates
-	// roles — which scion#1102 resolves to `full`, not `baseline`. Callers must
-	// treat empty as "unknown authority", never as a default.
+	// Role is the authorization role stored on the record at create. It is
+	// empty for a record created by a scion without roles, which current
+	// scion resolves to full. Callers must treat empty as unknown authority,
+	// never as a default.
 	Role string
-	// RoleGrandfathered is scion's marker for a Role its role migration wrote,
-	// not one an operator chose: every record that stored no role was stamped
-	// `full` once, and marked. To lever that is the empty-role hazard wearing
-	// a stored role, and every consumer of Role treats it as such.
+	// RoleGrandfathered marks a Role scion's migration stamped (full) on a
+	// record that stored none. Every consumer of Role must treat it like an
+	// empty role.
 	RoleGrandfathered bool
 	// Phase, Activity and ContainerStatus are the record's state as the hub
 	// stores it. They are agent-reported text (an agent may post its own
@@ -31,23 +30,20 @@ type Agent struct {
 	Phase           string
 	Activity        string
 	ContainerStatus string
-	// Volumes are the extra mounts the record was created with (the inline
-	// config's `volumes`, which a resume recreates the container from).
-	// Hub-stored text: compare it, never echo it unsanitized.
+	// Volumes are the extra mounts the record was created with; a resume
+	// recreates the container from them. Hub-stored text: compare it, never
+	// echo it unsanitized.
 	Volumes []Volume
 }
 
-// Volume is one entry of a record's inline-config `volumes` (scion's
-// api.VolumeMount, local type): a guest source, an in-container target.
+// Volume is one entry of a record's inline-config volumes (scion's
+// api.VolumeMount).
 type Volume struct {
 	Source   string `json:"source"`
 	Target   string `json:"target"`
 	ReadOnly bool   `json:"read_only"`
 }
 
-// wireAgent decodes the subset of the hub's agent record lever reads. The hub
-// embeds its whole store.Agent in the list response, so this deliberately names
-// only the fields lever uses rather than mirroring a large upstream struct.
 type wireAgent struct {
 	ID              string `json:"id"`
 	Slug            string `json:"slug"`
@@ -64,26 +60,19 @@ type wireAgent struct {
 	} `json:"appliedConfig"`
 }
 
-// agentPageLimit is what lever asks for per page. It matches the hub's own
-// default; a lever project holds a manager and a handful of workers, so one
-// page always suffices in practice and the cursor loop is the safety net.
+// agentPageLimit matches the hub's default; one page suffices in practice.
 const agentPageLimit = 500
 
-// agentPageCap bounds the cursor loop. A hub that keeps returning a cursor
-// would otherwise spin forever; giving up loudly is correct, because a caller
-// that received a truncated list would read a missing agent as "nothing to
-// check".
+// agentPageCap bounds the cursor loop. Giving up loudly is required: a caller
+// handed a truncated list would read a missing agent as nothing to check.
 const agentPageCap = 20
 
 // Agents lists a project's agent records, by project name or slug, with the
 // role each record stores.
 //
-// The stored role is not available any other way: `scion list --format json`
-// renders api.AgentInfo, which carries no role field, while this endpoint
-// embeds the hub's whole agent record. Reading it is how lever detects a record
-// created before scion#1089 — such a record stores no role at all, and a scion
-// at or after scion#1102 resolves an unset stored role to `full` on dispatch
-// and on every token refresh (scion#1101).
+// scion list --format json carries no role field, so this is the only way to
+// detect a record that stores no role, which scion resolves to full on
+// dispatch and on every token refresh.
 //
 // Requires an agent read scope on the caller's token.
 func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint string) ([]Agent, error) {
@@ -100,9 +89,8 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}
 
-		// Decode loosely and REQUIRE the key, exactly as SharedDirs does: a
-		// caller reads "no record for this agent" as "nothing to check", so a
-		// hub that renamed the field would silently disarm the check.
+		// Require the key: a caller reads "no record" as "nothing to check",
+		// so a hub that renamed the field would silently disarm the check.
 		var raw map[string]json.RawMessage
 		if err := c.get(ctx, path, &raw); err != nil {
 			return nil, err
@@ -149,14 +137,11 @@ func (c *Client) Agents(ctx context.Context, projectNameOrSlug, endpointHint str
 // VerifyAgentRole refuses to KEEP an agent record that stores no role while the
 // installed scion resolves that to full hub authority.
 //
-// It is the one implementation behind every lever path that resumes or retains
-// an existing agent: apply's start-manager, `lever up`'s own suspended/running
-// fast paths, and the broker's worker resume. rolesSupported asks the installed
-// binary (not the pin) whether roles exist at all.
+// Every path that resumes or retains an existing agent must call it.
+// rolesSupported asks the installed binary, not the pin, whether roles exist.
 //
-// Fails CLOSED on every question it cannot answer. Not knowing whether scion
-// has roles, and not being able to read the record, are both states in which
-// guessing hands out authority.
+// Fails closed on every question it cannot answer: guessing hands out
+// authority.
 func VerifyAgentRole(ctx context.Context, rolesSupported func(context.Context) (bool, error), c *Client, projectName, agentName string) error {
 	roles, err := rolesSupported(ctx)
 	if err != nil {
@@ -164,8 +149,7 @@ func VerifyAgentRole(ctx context.Context, rolesSupported func(context.Context) (
 			"so cannot tell what authority %q would resume with: %w", agentName, err)
 	}
 	if !roles {
-		// Pre-scion#1089: no record stores a role and none needs to, because
-		// there are no role-derived scopes to widen.
+		// A scion without roles has no role-derived scopes to widen.
 		return nil
 	}
 	agents, err := c.Agents(ctx, projectName, "the instance hub")
@@ -197,10 +181,9 @@ func VerifyAgentRole(ctx context.Context, rolesSupported func(context.Context) (
 		"or pin a scion older than scion#1089 until you are ready to lose the session", agentName)
 }
 
-// AgentID resolves an agent slug (or name) to the hub's agent UUID — the id
-// notification records carry, and so the only way to attribute an event to an
-// agent. An agent the hub does not list is an error, never an empty id: a
-// caller that treated "" as "no filter" would show one agent another's events.
+// AgentID resolves an agent slug (or name) to the hub's agent UUID. An agent
+// the hub does not list is an error, never an empty id: a caller that treated
+// "" as "no filter" would show one agent another's events.
 func (c *Client) AgentID(ctx context.Context, projectNameOrSlug, endpointHint, agentSlug string) (string, error) {
 	agents, err := c.Agents(ctx, projectNameOrSlug, endpointHint)
 	if err != nil {

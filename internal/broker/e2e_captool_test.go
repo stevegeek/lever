@@ -1,17 +1,12 @@
 package broker
 
-// e2e_captool_test.go exercises the WHOLE first-party capability chain over real
-// mTLS: the host mints a worker ticket, the worker enrols (mTLS cert), the manager
-// delegates a constrained `db.read` capability to the worker, and the worker
-// calls the gated MCP gateway. The "db" backend is a REAL captool.Server that
-// independently re-verifies the forwarded token (signature + bound_agent +
-// capability + caveats + expiry + epoch) and enforces a hard backstop before its
-// handler ever runs over an in-memory store.
-//
-// It reuses the broker e2e helpers (jailServer, agentClient, signedCert) and the
-// gateway/broker test config (testConfig). The captool server is built inline so
-// the test stays self-contained and fast (no SQLite dependency) while still
-// exercising the captool VERIFY pipeline + backstop + the broker forward seam.
+// This test drives the whole first-party capability chain over real mTLS: the
+// host mints a worker ticket, the worker enrols, the manager delegates a
+// constrained db.read to it, and the worker calls the gated MCP gateway. The
+// "db" backend is a real captool.Server that re-verifies the forwarded token
+// (signature, bound_agent, capability, caveats, expiry, epoch) and enforces a
+// hard backstop before its handler runs. The captool server is built inline
+// over an in-memory store (no SQLite) so the test stays fast.
 
 import (
 	"bytes"
@@ -42,10 +37,9 @@ type dbRow struct {
 	Name  string
 }
 
-// memStore is a tiny in-test data source: rows in tables A, B, C. The captool
-// read handler returns only the rows matching the (table, filter) request. The
-// point of the test is to prove the capability constraints gate which rows the
-// agent can ever obtain — not to test a real database.
+// memStore holds rows in tables A, B and C. The test proves the capability
+// constraints gate which rows the agent can obtain; it does not test a real
+// database.
 var memStore = []dbRow{
 	{Table: "A", Name: "alice"},
 	{Table: "A", Name: "bob"},
@@ -68,8 +62,8 @@ func readBackstop(vc captool.ValidatedContext, args map[string]string) error {
 	}
 }
 
-// readHandler returns only the rows whose Table and Name match the request args.
-// A name (filter) is required; an empty/absent filter yields no rows.
+// readHandler returns only the rows whose Table and Name match the request
+// args. A name (filter) is required: an empty or absent filter yields no rows.
 func readHandler(_ captool.ValidatedContext, args map[string]string) (any, error) {
 	table := args["table"]
 	filter := args["filter"]
@@ -82,12 +76,10 @@ func readHandler(_ captool.ValidatedContext, args map[string]string) (any, error
 	return map[string]any{"rows": rows}, nil
 }
 
-// newCaptoolDB stands up a real captool.Server for the "db" tool, mounted on its
-// own httptest server, registered with the broker over the loopback admin
-// listener. It returns the captool server's URL (the tool's "loopback port",
-// for the direct-dial step) — the broker now has "db" registered as a
-// first-party tool whose backend is that server. Both servers are registered
-// with t.Cleanup.
+// newCaptoolDB stands up a real captool.Server for the "db" tool and registers
+// it with the broker as first-party over the loopback admin listener. It
+// returns the captool server's URL, the tool's loopback port for the
+// direct-dial step.
 func newCaptoolDB(t *testing.T, b *Broker) string {
 	t.Helper()
 
@@ -96,9 +88,8 @@ func newCaptoolDB(t *testing.T, b *Broker) string {
 	adminTS := httptest.NewServer(b.AdminHandler())
 	t.Cleanup(adminTS.Close)
 
-	// Forward-declared pointer: the httptest handler derefs captoolSrv per-request,
-	// AFTER it is assigned below. This lets Config.Backend equal the captool
-	// server's own URL (which the broker proxies /mcp/db/ to) without a
+	// The handler dereferences captoolSrv per request, after it is assigned
+	// below, so Config.Backend can be the captool server's own URL without a
 	// chicken-and-egg between New() and NewServer().
 	var captoolSrv *captool.Server
 	captoolTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -130,9 +121,8 @@ func newCaptoolDB(t *testing.T, b *Broker) string {
 		t.Fatalf("captool.New: %v", err)
 	}
 
-	// Pre-load the config envelope with the REAL captool backend URL.
-	// The config-authoritative handleRegister takes backend/allowed_values/
-	// FirstParty from the pre-loaded config, so this must reflect the actual
+	// The config-authoritative handleRegister takes backend, allowed_values and
+	// FirstParty from the pre-loaded config, so the config must carry the real
 	// test server address before captoolSrv.Register() POSTs /register.
 	if err := b.reg.Register(registry.Tool{
 		Name: "db", Backend: captoolTS.URL, FirstParty: true,
@@ -143,9 +133,8 @@ func newCaptoolDB(t *testing.T, b *Broker) string {
 		t.Fatalf("preload db config envelope: %v", err)
 	}
 
-	// Register the "db" tool (backend=captoolTS.URL, first_party=true) and cache
-	// the broker pubkey + epoch. MUST happen before jailServer()/JailHandler()
-	// builds the gateway routes (registration-order footgun) — otherwise /mcp/db/ 404s.
+	// Register (which also caches the broker pubkey and epoch) must run before
+	// jailServer()/JailHandler() builds the gateway routes, or /mcp/db/ 404s.
 	if err := captoolSrv.Register(context.Background()); err != nil {
 		t.Fatalf("captool.Register: %v", err)
 	}
@@ -174,8 +163,8 @@ func mcpCall(t *testing.T, client *http.Client, url, token string, args map[stri
 
 // TestE2ECaptoolFirstPartyDelegatedRead drives the full acceptance scenario.
 func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
-	// ── Setup: broker + rules (manager may delegate db.read to worker; worker is
-	// a pure executor with no obtain) ─────────────────────────────────────────
+	// Setup: the manager may delegate db.read to the worker; the worker is a
+	// pure executor with no obtain.
 	cfg := testConfig(t, withToolSecret(e2eToolSecret)) // AllowDelegate("manager","db","read","worker"); no worker obtain
 	b := New(cfg)
 
@@ -189,10 +178,10 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	managerCert := signedCert(t, b, "manager")
 	managerClient := agentClient(t, b, managerCert)
 
-	// ── Step 1: mint — host authority → ticket (staged in the guest by a dispatch)
+	// Step 1: the host mints a ticket (a dispatch stages it in the guest).
 	ticket := mintWorkerTicket(t, b, "worker")
 
-	// ── Step 1b: enrol — worker self-generates a key, POSTs /enrol → cert ──────
+	// Step 1b: the worker generates a key and POSTs /enrol for a cert.
 	workerCSRPEM, workerKeyPEM := csrWithKey(t, "worker")
 	enrolReqBody, _ := json.Marshal(wire.EnrolRequest{Ticket: ticket, CSR: string(workerCSRPEM)})
 	certlessClient := agentClient(t, b, tls.Certificate{})
@@ -218,8 +207,8 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	}
 	workerClient := agentClient(t, b, workerTLSCert)
 
-	// ── Step 2: request (delegation) — manager delegates a db.read bound to the
-	// worker, constrained to table=A, filter=alice → capability token ─────────
+	// Step 2: the manager delegates a db.read bound to the worker, constrained
+	// to table=A, filter=alice.
 	capReqBody, _ := json.Marshal(wire.CapRequest{
 		Tool: "db", Op: "read", BoundTo: "worker",
 		Constraints: map[string]string{"table": "A", "filter": "alice"},
@@ -242,9 +231,9 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	}
 	capToken := capResult.Token
 
-	// ── Step 3 (ALLOWED): worker calls read{table:A, filter:alice} → broker
-	// verifies, forwards token + X-Lever-Caller to captool, captool re-verifies +
-	// backstop + handler returns ONLY alice's row. ────────────────────────────
+	// Step 3, allowed: the broker verifies and forwards the token and
+	// X-Lever-Caller; captool re-verifies, applies its backstop, and returns
+	// only alice's row.
 	allowedResp := mcpCall(t, workerClient, srv.URL, capToken, map[string]any{"table": "A", "filter": "alice"})
 	defer allowedResp.Body.Close()
 	if allowedResp.StatusCode != http.StatusOK {
@@ -259,9 +248,9 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 		t.Fatalf("SECURITY: allowed read leaked bob/secret rows: %s", allowedText)
 	}
 
-	// ── Step 4 (DENIED: forbidden table) — same token (caveat table=A) used for
-	// table=C. The capability constraint denies it (and the captool backstop
-	// forbids C as defence-in-depth). Assert non-200 and NO rows reach the agent.
+	// Step 4, denied: the same token (caveat table=A) used for table=C. The
+	// capability constraint denies it; the captool backstop forbids C as
+	// defence in depth. No rows may reach the agent.
 	deniedTableResp := mcpCall(t, workerClient, srv.URL, capToken, map[string]any{"table": "C", "filter": "carol"})
 	defer deniedTableResp.Body.Close()
 	if deniedTableResp.StatusCode == http.StatusOK {
@@ -270,9 +259,8 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	}
 	assertNoRows(t, deniedTableResp, "carol")
 
-	// ── Step 5 (DENIED: dropped/changed filter) — same token (caveat
-	// filter=alice) with filter=bob. The canonical-projected filter no longer
-	// matches the token caveat → denied. Assert non-200 and NO rows. ──────────
+	// Step 5, denied: filter=bob no longer matches the token's filter=alice
+	// caveat.
 	deniedFilterResp := mcpCall(t, workerClient, srv.URL, capToken, map[string]any{"table": "A", "filter": "bob"})
 	defer deniedFilterResp.Body.Close()
 	if deniedFilterResp.StatusCode == http.StatusOK {
@@ -281,8 +269,8 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	}
 	assertNoRows(t, deniedFilterResp, "bob")
 
-	// ── Step 5b (DENIED: omitted filter) — token requires filter=alice; omitting
-	// filter leaves the caveat unsatisfied → denied. ──────────────────────────
+	// Step 5b, denied: omitting filter leaves the filter=alice caveat
+	// unsatisfied.
 	droppedFilterResp := mcpCall(t, workerClient, srv.URL, capToken, map[string]any{"table": "A"})
 	defer droppedFilterResp.Body.Close()
 	if droppedFilterResp.StatusCode == http.StatusOK {
@@ -291,10 +279,10 @@ func TestE2ECaptoolFirstPartyDelegatedRead(t *testing.T) {
 	}
 	assertNoRows(t, droppedFilterResp, "alice")
 
-	// ── Step 6 (DENIED: broker bypass) — the same VALID token, posted straight
-	// to the tool's own port with a self-asserted X-Lever-Caller, as an agent
-	// with a manager.allow_ports hole to that port could. Without the broker's
-	// per-boot tool secret the tool refuses before any MCP dispatch. ──────────
+	// Step 6, denied (broker bypass): the same valid token posted straight to
+	// the tool's own port with a self-asserted X-Lever-Caller, as an agent with
+	// a manager.allow_ports hole to that port could. Without the broker's
+	// per-boot tool secret the tool refuses before any MCP dispatch.
 	bypassBody, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
 		"params": map[string]any{"name": "read", "arguments": map[string]any{

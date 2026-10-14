@@ -1,55 +1,42 @@
 package voice
 
-// The sherpa-onnx adapter: every assumption lever makes about sherpa-onnx's
-// text-to-speech program, sherpa-onnx-offline-tts, is in this file.
-// Checked against sherpa-onnx's source on its master branch (2026-10):
-// sherpa-onnx/csrc/sherpa-onnx-offline-tts.cc, parse-options.cc,
-// offline-tts-model-config.cc, offline-tts-kokoro-model-config.cc,
-// offline-tts-vits-model-config.cc, offline-tts-kokoro-model.cc,
-// offline-tts-vits-model.cc, offline-tts-kokoro-impl.h and wave-writer.cc,
-// and its documentation of the Kokoro models. Not yet run against a built
-// release; the fake in tools/test/fakesherpa stands in for it in tests.
+// The sherpa-onnx adapter: every assumption lever makes about
+// sherpa-onnx-offline-tts is in this file. Checked against sherpa-onnx's
+// source on master (2026-10: sherpa-onnx-offline-tts.cc, parse-options.cc,
+// the Kokoro and VITS model config and model files, wave-writer.cc) and its
+// Kokoro documentation, not against a built release; tools/test/fakesherpa
+// stands in for it in tests.
 //
-//  1. One run speaks one text: the text is the program's one positional
-//     argument (more than one, or none, is an error), the WAV goes to
-//     --output-filename, and the program exits, status 0 on success. It
-//     reads no stdin, and it loads the model files it is given on every
-//     run.
+//  1. One run speaks one text: the program's one positional argument, the
+//     WAV to --output-filename, exit 0 on success. It reads no stdin and
+//     loads the model files on every run.
 //  2. Options are Kaldi's --name=value. lever passes, for Kokoro,
 //     --kokoro-model, --kokoro-voices, --kokoro-tokens, --kokoro-data-dir
-//     (espeak-ng's data) and --kokoro-length-scale; for a VITS (Piper)
-//     model --vits-model, --vits-tokens, --vits-data-dir and
-//     --vits-length-scale; and --num-threads, --sid and --output-filename.
-//     Nothing else. The length scale is the speed: larger is slower, and
-//     the engine uses 1/scale as its speed while --speed is left at 1
-//     (--speed itself is newer than some releases that run Kokoro, so
-//     lever does not pass it). The data directory must hold phontab,
-//     phonindex, phondata and intonations. kokoro-en-v0_19 is a version 1
-//     Kokoro model: espeak-ng alone makes its phonemes, so it takes no
-//     --kokoro-lexicon or --kokoro-lang (a multi-lingual Kokoro model,
-//     version 2, would require one of them).
-//  3. A first pass reads --config=FILE (a file of more options) and
-//     --help from every argument that starts with "--", up to a lone "--",
-//     positional ones included; the second pass reads options up to the
-//     first argument that does not start with "--" or a lone "--", which
-//     is dropped. lever passes the text last, after "--", so no text is
-//     ever read as an option (not even as --config), and never passes a
-//     text that starts with "-" either (SpeechInput).
-//  4. The output is a WAV file with a 44-byte header (fmt and data
-//     chunks), 16-bit PCM, mono, at the model's sample rate (read from the
-//     model's metadata). lever reads only the fmt and data chunks of it and
-//     sends on a WAV it writes itself (SpeechWAV): nothing else of the file
-//     leaves the tool.
-//  5. The program prints progress to stdout, and the text it speaks, its
-//     own arguments and timings to stderr. lever discards the child's
-//     stdout and stderr: text must never reach the tool's log.
-//  6. The text is not SSML or any other markup: sherpa-onnx speaks it as
-//     plain text (through espeak-ng's phonemizer for these models).
-//     SpeechInput still removes control and format characters and angle
-//     brackets.
-//  7. A speaker id (--sid) out of the model's range is not an error: the
-//     engine logs it and speaks voice 0. lever's table must therefore
-//     carry the documented ids (speechmodels.go).
+//     (espeak-ng's data) and --kokoro-length-scale; for VITS (Piper)
+//     --vits-model, --vits-tokens, --vits-data-dir and --vits-length-scale;
+//     and --num-threads, --sid and --output-filename. Nothing else. The
+//     length scale is the speed (larger is slower); --speed is not passed
+//     because some releases that run Kokoro lack it. The data directory must
+//     hold phontab, phonindex, phondata and intonations. kokoro-en-v0_19 is
+//     a version 1 model: it takes no --kokoro-lexicon or --kokoro-lang (a
+//     version 2 model would require one).
+//  3. A first pass reads --config=FILE and --help from every argument
+//     starting with "--" up to a lone "--", positional ones included; the
+//     second reads options up to the first non-option or a lone "--", which
+//     is dropped. lever passes the text last, after "--", so no text is ever
+//     read as an option (not even --config), and never passes a text
+//     starting with "-" (SpeechInput).
+//  4. The output is a WAV with a 44-byte header, 16-bit PCM, mono, at the
+//     model's sample rate. lever reads only its fmt and data chunks and
+//     sends on a WAV it writes itself (SpeechWAV).
+//  5. The program prints progress, the text, its arguments and timings to
+//     stdout and stderr; lever discards both: text must never reach the
+//     tool's log.
+//  6. The text is plain text, not SSML. SpeechInput still removes control
+//     and format characters and angle brackets.
+//  7. A speaker id (--sid) out of range is not an error: the engine speaks
+//     voice 0. lever's table must carry the documented ids
+//     (speechmodels.go).
 
 import (
 	"encoding/binary"
@@ -64,27 +51,23 @@ import (
 
 // The limits of read-aloud, for lever-tool-tts and the remote proxy.
 const (
-	// DefaultSpeakMaxChars is lever-tool-tts's -max-chars when unset: the
-	// longest text of one request, in characters. The page sends a message
-	// in parts of at most this many, sentence by sentence.
+	// DefaultSpeakMaxChars is -max-chars when unset: the longest text of
+	// one request. The page sends a message in parts of at most this many.
 	DefaultSpeakMaxChars = 600
 	MinSpeakMaxChars     = 100
 	MaxSpeakMaxChars     = 2000
 	// MinSpeed and MaxSpeed bound -speed (1 = the model's own pace).
-	MinSpeed = 0.5
-	MaxSpeed = 2.0
-	// MaxThreads bounds -threads.
+	MinSpeed   = 0.5
+	MaxSpeed   = 2.0
 	MaxThreads = 16
 	// maxSpeechSeconds bounds the audio of one request lever reads back:
-	// even a slow voice speaks DefaultSpeakMaxChars characters in well
-	// under a minute.
+	// even a slow voice speaks DefaultSpeakMaxChars in well under a minute.
 	maxSpeechSeconds = 5 * 60
 )
 
-// SherpaArgs is the sherpa-onnx-offline-tts argument list that speaks text
-// with voice v of model m from the models directory dir into out
-// (assumptions 1 to 3): the options, "--", and the text. text must have
-// passed SpeechInput.
+// SherpaArgs is the sherpa-onnx-offline-tts argument list (assumptions 1
+// to 3): the options, "--", and the text, which must have passed
+// SpeechInput.
 func SherpaArgs(m SpeechModel, dir string, v SpeechVoice, speed float64, threads int, out, text string) []string {
 	p := func(rel string) string { return SpeechPath(dir, m, rel) }
 	scale := strconv.FormatFloat(1/speed, 'f', 3, 64)
@@ -104,11 +87,10 @@ func SherpaArgs(m SpeechModel, dir string, v SpeechVoice, speed float64, threads
 // ErrBadText: nothing speakable is left of the text, or it is too long.
 var ErrBadText = errors.New("text")
 
-// SpeechInput is text as lever hands it to the engine: valid UTF-8; control
-// and format characters, and angle brackets, as spaces (no markup reaches
-// the engine); runs of white space as one space; trimmed; and no leading
-// "-" (assumption 3). It refuses an empty result, and one longer than
-// maxChars characters (the caller splits a long text).
+// SpeechInput is text as lever hands it to the engine: valid UTF-8, control
+// and format characters and angle brackets as spaces (no markup reaches the
+// engine), whitespace runs collapsed, trimmed, and no leading "-"
+// (assumption 3). It refuses an empty result or one over maxChars.
 func SpeechInput(text string, maxChars int) (string, error) {
 	text = strings.ToValidUTF8(text, " ")
 	text = strings.Map(func(r rune) rune {
@@ -128,10 +110,9 @@ func SpeechInput(text string, maxChars int) (string, error) {
 	return text, nil
 }
 
-// SpeechWAV reads the engine's WAV (assumption 4): RIFF/WAVE, a fmt chunk
-// of 16-bit PCM, mono, at rate, and a data chunk; other chunks are
-// skipped. It returns a canonical 44-byte-header WAV of those samples, at
-// most maxSpeechSeconds long, so nothing else of the file goes on.
+// SpeechWAV reads the engine's WAV (assumption 4) and returns a canonical
+// 44-byte-header WAV of its samples, at most maxSpeechSeconds long, so
+// nothing else of the file goes on.
 func SpeechWAV(b []byte, rate int) ([]byte, error) {
 	le := binary.LittleEndian
 	if len(b) < 12 || string(b[0:4]) != "RIFF" || string(b[8:12]) != "WAVE" {
@@ -181,8 +162,6 @@ func SpeechWAV(b []byte, rate int) ([]byte, error) {
 	return pcmWAV(data, rate), nil
 }
 
-// pcmWAV is samples (16-bit PCM, mono) at rate in the canonical 44-byte
-// header.
 func pcmWAV(samples []byte, rate int) []byte {
 	b := make([]byte, WAVHeaderLen+len(samples))
 	le := binary.LittleEndian
@@ -202,5 +181,4 @@ func pcmWAV(samples []byte, rate int) []byte {
 	return b
 }
 
-// maxSpeechFile bounds the engine's output file lever reads.
 func maxSpeechFile(rate int) int64 { return int64(2*rate*maxSpeechSeconds) + 4096 }

@@ -38,10 +38,8 @@ func TestImageInspectArgs(t *testing.T) {
 	}
 }
 
-// TestNormalizeImageID pins the docker-vs-podman prefix reconciliation: docker
-// prints the ID as "sha256:<hex>", (some) podman versions print bare "<hex>".
-// Without stripping the prefix on both sides, the host-vs-jail comparison in
-// ImageLoaded would never match and the guard would never skip a redundant load.
+// TestNormalizeImageID: docker prints the ID as "sha256:<hex>", some podman
+// versions print bare "<hex>"; ImageLoaded must strip both sides to match.
 func TestNormalizeImageID(t *testing.T) {
 	hex := "eb84fdc6f2a3a064445bb2a2fbc89c515666c428d6c96b6ab68a4cd218819688"
 	for _, in := range []string{
@@ -64,10 +62,9 @@ const (
 	testImgRef  = "scionlocal/lever-claude:latest"
 )
 
-// imageLoadedRunner scripts the FakeRunner so hostImageID (a `docker …` call)
-// and jailImageID (an `orb …` prefix call) resolve independently. A missing
-// script for either binary makes that side error — the real-world "image not
-// present / inspect exits non-zero" case — which the readers map to "".
+// imageLoadedRunner scripts the host docker and the jail prefix call
+// independently. A missing script makes that side error, as an absent image
+// does, which the readers map to "".
 func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *proc.FakeRunner {
 	t.Helper()
 	r := proc.NewFakeRunner()
@@ -80,9 +77,8 @@ func imageLoadedRunner(t *testing.T, hostOut, jailOut string) *proc.FakeRunner {
 	return r
 }
 
-// TestImageLoaded exercises the fail-open host-vs-jail comparison offline
-// through the proc.Runner seam — previously unreachable because the readers
-// shelled out to os/exec directly.
+// TestImageLoaded: the host-vs-jail comparison fails open (reports not
+// loaded) whenever either side cannot be read.
 func TestImageLoaded(t *testing.T) {
 	prefix := orbPrefix("lever-demo", "leveruser")
 	cases := []struct {
@@ -97,8 +93,7 @@ func TestImageLoaded(t *testing.T) {
 		{"jail-missing", testImageID, "", false},
 		// identical IDs on both sides -> the redundant load can be skipped.
 		{"matching", testImageID, testImageID, true},
-		// docker prints "sha256:<hex>", podman prints bare "<hex>": normalizeImageID
-		// must reconcile BOTH sides or this guard would never fire.
+		// docker prints "sha256:<hex>", podman prints bare "<hex>".
 		{"sha256-prefix-reconciled", "sha256:" + testImageID + "\n", testImageID + "\n", true},
 		// a rebuilt tag with a genuinely different jail ID -> fail-open false.
 		{"genuine-mismatch", testImageID, strings.Repeat("a", 64), false},
@@ -143,8 +138,6 @@ func TestPruneImagesErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestPruneImagesSuccess: a clean prune returns nil and drives the prune argv
-// through the host runner.
 func TestPruneImagesSuccess(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
@@ -172,7 +165,7 @@ func TestPruneImagesArgs(t *testing.T) {
 	}
 }
 
-// TestWarmImageArgs pins the warm-up argv (lever#165): scion's exact keep-id
+// TestWarmImageArgs pins the warm-up argv: scion's exact keep-id
 // flag (a different mapping builds a different layer copy), `true` as the
 // entrypoint so neither sciontool's hook nor claude runs, and no pull or
 // network.
@@ -190,8 +183,6 @@ func TestWarmImageArgs(t *testing.T) {
 	}
 }
 
-// TestWarmImage drives the warm-up through the host runner and wraps a
-// failure with the image.
 func TestWarmImage(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
@@ -204,8 +195,8 @@ func TestWarmImage(t *testing.T) {
 
 	r = proc.NewFakeRunner() // no script for the prefix binary -> Run errors
 	err := WarmImage(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", "img")
-	if !errors.Is(err, proc.ErrUnscripted) || !strings.Contains(err.Error(), "warm image img") {
-		t.Fatalf("WarmImage error = %v, want the runner error wrapped with the image", err)
+	if !errors.Is(err, proc.ErrUnscripted) || !strings.Contains(err.Error(), "warm image lever.local/img") {
+		t.Fatalf("WarmImage error = %v, want the runner error wrapped with the name agents run", err)
 	}
 }
 
@@ -288,42 +279,61 @@ func TestLoadImageLoadFailureBeforeDrainKeepsLoadStderr(t *testing.T) {
 	}
 }
 
-// TestLocalhostAliasArgs pins the post-load re-tag that closes lever#26: a
-// docker archive's unqualified RepoTag lands in podman as docker.io/<ref>,
-// while a container spec's unqualified <ref> resolves through the short-name
-// path to localhost/<ref> — which, after a rebuild, still points at the OLD
-// image. Tagging the fresh docker.io/ name as localhost/ makes both names
-// one image, and the superseded copy goes dangling for the prune.
-func TestLocalhostAliasArgs(t *testing.T) {
-	got := localhostAliasArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64")
-	want := []string{
-		"orb", "-m", "lever-demo", "-u", "leveruser",
-		"env",
-		"XDG_RUNTIME_DIR=/run/user/501",
-		"podman", "tag", "docker.io/scionlocal/lever-claude:arm64", "localhost/scionlocal/lever-claude:arm64",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("localhostAliasArgs:\n got  %v\n want %v", got, want)
+// TestAliasArgs pins the post-load re-tag. A docker archive's unqualified
+// RepoTag lands in podman as docker.io/<ref>. Agents run it as
+// lever.local/<ref>, a qualified name scion never rewrites to the hub's image
+// registry, and an agent record created on the unqualified <ref> resolves it
+// to localhost/<ref>, which after a rebuild would still point at the old
+// image; every name is tagged onto the fresh image.
+func TestAliasArgs(t *testing.T) {
+	pre := []string{"orb", "-m", "lever-demo", "-u", "leveruser", "env", "XDG_RUNTIME_DIR=/run/user/501", "podman", "tag"}
+	for _, c := range []struct {
+		ref  string
+		tags []string
+	}{
+		{"scionlocal/lever-claude:arm64", []string{"docker.io/scionlocal/lever-claude:arm64", "localhost/scionlocal/lever-claude:arm64", "lever.local/lever-claude:arm64"}},
+		{"scionlocal/x", []string{"docker.io/scionlocal/x:latest", "localhost/scionlocal/x:latest", "lever.local/x:latest"}},
+		{"alpine:3", []string{"docker.io/library/alpine:3", "localhost/alpine:3", "lever.local/alpine:3"}},
+		{"localhost/scionlocal/x:1", []string{"localhost/scionlocal/x:1", "lever.local/localhost/scionlocal/x:1"}},
+	} {
+		got := aliasArgs(orbPrefix("lever-demo", "leveruser"), "501", c.ref)
+		if want := append(append([]string{}, pre...), c.tags...); !reflect.DeepEqual(got, want) {
+			t.Errorf("aliasArgs(%q):\n got  %v\n want %v", c.ref, got, want)
+		}
 	}
 }
 
-// Only an unqualified ref has the two-name problem; a ref that names its
-// registry (or one already under localhost/) is loaded under that exact name
-// and needs no alias.
-func TestLocalhostAliasSkipsQualifiedRefs(t *testing.T) {
+// A ref that names its registry is loaded under that exact name and needs no
+// alias; neither does a digest-pinned one.
+func TestAliasSkipsQualifiedRefs(t *testing.T) {
 	// A digest-pinned ref (security.require_image_digest) is self-naming
 	// too: docker save writes it with no RepoTag, and a digest is not a
 	// legal tag target, so an alias attempt could only fail the load.
-	for _, ref := range []string{"ghcr.io/org/img:1", "localhost/scionlocal/x:latest", "reg:5000/img:1", "docker.io/scionlocal/x:latest",
+	for _, ref := range []string{"ghcr.io/org/img:1", "lever.local/lever-claude:arm64", "reg:5000/img:1", "docker.io/scionlocal/x:latest",
 		"scionlocal/x@sha256:" + strings.Repeat("a", 64), "alpine@sha256:" + strings.Repeat("a", 64)} {
 		r := proc.NewFakeRunner()
 		r.Script("orb", proc.Result{})
-		if err := aliasLocalhost(context.Background(), r, orbPrefix("m", "u"), "501", ref); err != nil {
+		if err := aliasLoaded(context.Background(), r, orbPrefix("m", "u"), "501", ref); err != nil {
 			t.Fatalf("%s: %v", ref, err)
 		}
 		if len(r.Calls) != 0 {
 			t.Errorf("%s: qualified ref must not be re-tagged, got %+v", ref, r.Calls)
 		}
+	}
+}
+
+// TestImageLoadedChecksTheAgentName: an install whose jail holds the image
+// only under its old unqualified name is not loaded, so the next apply loads
+// it again and tags the name agents run.
+func TestImageLoadedChecksTheAgentName(t *testing.T) {
+	r := proc.NewFakeRunner()
+	r.Script("docker", proc.Result{Stdout: testImageID})
+	r.Script("orb", proc.Result{Stdout: testImageID})
+	if !ImageLoaded(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64") {
+		t.Fatal("want loaded")
+	}
+	if got := r.Calls[1].Args[len(r.Calls[1].Args)-1]; got != "lever.local/lever-claude:arm64" {
+		t.Fatalf("the jail was asked for %q, want the agent name", got)
 	}
 }
 
@@ -335,7 +345,7 @@ func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
 	if err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/lever-claude:arm64 localhost/scionlocal/lever-claude:arm64") {
+	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/lever-claude:arm64 localhost/scionlocal/lever-claude:arm64 lever.local/lever-claude:arm64") {
 		t.Fatalf("want load then alias, got %+v", r.Calls)
 	}
 	// The docker-save path shares the same tail.
@@ -347,7 +357,7 @@ func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/x:latest localhost/scionlocal/x:latest") {
+	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/x:latest localhost/scionlocal/x:latest lever.local/x:latest") {
 		t.Fatalf("want load then alias with :latest filled in, got %+v", r.Calls)
 	}
 	// A failed load never re-tags.
@@ -361,11 +371,11 @@ func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
 }
 
 // An alias failure is fatal: the container would otherwise run the stale
-// localhost/ image while apply reports success — the exact #26 failure.
+// localhost/ image while apply reports success.
 func TestLocalhostAliasFailureIsFatal(t *testing.T) {
 	r := &loadThenFail{FakeRunner: proc.NewFakeRunner()}
 	err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x:latest", func(w io.Writer) error { return nil })
-	if err == nil || !strings.Contains(err.Error(), "localhost/scionlocal/x:latest") {
+	if err == nil || !strings.Contains(err.Error(), "localhost/scionlocal/x:latest and lever.local/x:latest") {
 		t.Fatalf("err = %v, want the alias failure naming the target tag", err)
 	}
 }

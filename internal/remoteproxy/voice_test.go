@@ -22,7 +22,6 @@ import (
 // wavClip is a canonical clip of n samples (PCM s16le, 16 kHz, mono).
 func wavClip(n int) []byte { return voice.CanonicalWAV(n) }
 
-// voiceRec is a transcriber that records what it was sent.
 type voiceRec struct {
 	mu    sync.Mutex
 	clips [][]byte
@@ -495,9 +494,8 @@ func TestVoiceSlowTranscriptionOutlivesTheBodyDeadline(t *testing.T) {
 	}
 }
 
-// fakeTool is a stand-in for lever-tool-whisper's dictation socket: health
-// answers ready, and each clip gets the answer set in word ("" = a
-// transcript).
+// fakeTool stands in for lever-tool-whisper's dictation socket; each clip gets
+// the answer in word ("" = a transcript).
 type fakeTool struct {
 	mu    sync.Mutex
 	word  string
@@ -588,8 +586,6 @@ func TestVoiceThroughTheDictationSocket(t *testing.T) {
 	}
 }
 
-// slowSvc is a ready transcriber for the real dictation handler that
-// reports each start and works until its context ends.
 type slowSvc struct{ started chan struct{} }
 
 func (s *slowSvc) Ready() bool { return true }
@@ -599,10 +595,8 @@ func (s *slowSvc) Transcribe(ctx context.Context, _ []byte) (string, error) {
 	return "", ctx.Err()
 }
 
-// A browser that gives up counts its clip, whether it waited in the tool's
-// queue (behind an agent clip) or its transcription had started: only a
-// clip that never reached the tool, or that the tool refused before
-// whisper-server, is given back.
+// A browser that gives up counts its clip, whether it was queued or being
+// transcribed; only a clip that never reached whisper-server is given back.
 func TestVoiceCanceledClipsCount(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "rp")
 	if err != nil {

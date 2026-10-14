@@ -8,14 +8,9 @@ import (
 )
 
 // TestBootstrapMaterialRoundTripsToAgent pins the manager-enrolment wire
-// contract across the apply→agent package boundary: what apply stages must be
-// what lever-agent boot loads. The two ends declare the envelope independently
-// (apply.BootstrapMaterial vs agent.Bootstrap) with hand-maintained,
-// supposedly byte-identical json tags. Nothing else in the suite exercises
-// both ends together — apply/run_test.go only stages `{}` and checks the latch,
-// and no test decodes a manager bootstrap.json against agent's reader — so a
-// tag typo on either side passes CI today and breaks live manager enrolment.
-// This test is that missing guard.
+// contract: apply.BootstrapMaterial and agent.Bootstrap declare the envelope
+// independently with hand-maintained json tags, and nothing else exercises
+// both ends together, so a tag typo would otherwise break live enrolment.
 func TestBootstrapMaterialRoundTripsToAgent(t *testing.T) {
 	treeDir := t.TempDir()
 
@@ -30,8 +25,6 @@ func TestBootstrapMaterialRoundTripsToAgent(t *testing.T) {
 		t.Fatalf("StageBootstrapMaterial: %v", err)
 	}
 
-	// LoadBootstrap reads the concrete file StageBootstrapMaterial writes by
-	// convention: treeDir/.lever/bootstrap.json.
 	got, err := agent.LoadBootstrap(filepath.Join(treeDir, ".lever", "bootstrap.json"))
 	if err != nil {
 		t.Fatalf("agent.LoadBootstrap: %v", err)

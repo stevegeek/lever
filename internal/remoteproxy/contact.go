@@ -21,47 +21,37 @@ import (
 
 // The contact fence.
 //
-// A contact-tier login (config.TierContact) may only chat, and only with the
-// agents its allowed_users entry lists. The hub cannot enforce the second
-// half: scion binds roles per project, not per agent, and its DM checks look
-// only at the USER half of a conversation key. The contact's hub role holds
-// agent.message alone (lever-remote-contact), and this fence is what limits
-// it to its agents and to the chat.
+// A contact-tier login may only chat, and only with the agents its
+// allowed_users entry lists. The hub cannot enforce the second half: scion
+// binds roles per project, not per agent, and its DM checks look only at the
+// USER half of a conversation key. The contact's hub role holds
+// agent.message alone; this fence limits it to its agents and to the chat.
 //
-// The fence is an allow-list. Everything a contact's request may do is named
-// below; everything else is refused before the hub sees it:
+// The fence is an allow-list; everything else is refused before the hub sees
+// it and audited as deny-contact:
 //
-//   - static web assets, and the SPA shell for the chat page of one of its
-//     own conversations; every other page gets lever's landing page, which
-//     links those conversations. With lever's chat page on (Config.ChatAgent)
-//     every page instead redirects to /lever/chat, which the proxy serves
-//     before the fence (chatpage.go); the hub rules below are the same;
+//   - static web assets, and the SPA shell for its own conversations' chat
+//     pages (other pages get lever's landing page, or a redirect to
+//     /lever/chat when lever's chat page is on);
 //   - its own identity and the web UI's public settings;
 //   - its DM conversations, dm:agent:<allowed agent>:user:<its own id>, and
 //     only their messages, read, typing, mute and pin routes;
 //   - a new message with no "@word" (scion routes a leading @mention to any
 //     agent in the project, and fans out later ones), no reply_to_id and no
 //     attachments;
-//   - the event stream, with its subjects replaced by the contact's own chat
-//     and notification subjects;
-//   - fixed empty answers for the lists the web UI loads at start (projects,
-//     spaces, agents, users) and for presence.
-//
-// A refusal is audited as deny-contact.
+//   - the event stream, with its subjects replaced by the contact's own;
+//   - fixed empty answers for the lists the web UI loads at start, and for
+//     presence.
 
-// DecisionDenyContact is the audit decision for a contact request the fence
-// refused.
+// DecisionDenyContact audits a request the contact fence refused.
 const DecisionDenyContact Decision = "deny-contact"
 
-// contactCacheTTL bounds how long the fence trusts a resolved agent id or
-// user id. An agent that is purged and started again gets a new id; the
-// fence sees it within this time.
+// contactCacheTTL bounds how long a resolved id is trusted: a purged and
+// restarted agent gets a new id.
 const contactCacheTTL = 30 * time.Second
 
-// maxContactMessage bounds the message body the fence reads to check it.
 const maxContactMessage = 1 << 20
 
-// contactFence holds what the fence resolves from the hub.
 type contactFence struct {
 	resolve func(ctx context.Context) (map[string]string, error) // agent name → hub id
 	whoAmI  func(ctx context.Context, cookie string) (string, error)
@@ -86,8 +76,6 @@ func (f *contactFence) now() time.Time {
 	return time.Now()
 }
 
-// agentIDs resolves names to hub ids (from the cache when it is fresh) and
-// returns id → name for the names that resolved.
 func (f *contactFence) agentIDs(ctx context.Context, names []string) (map[string]string, error) {
 	f.mu.Lock()
 	fresh := f.ids != nil && f.now().Sub(f.idsAt) < contactCacheTTL
@@ -111,7 +99,6 @@ func (f *contactFence) agentIDs(ctx context.Context, names []string) (map[string
 	return out, nil
 }
 
-// userID is the contact's hub user id, asked of the hub with its own session.
 func (f *contactFence) userID(ctx context.Context, login, cookie string) (string, error) {
 	f.mu.Lock()
 	u, ok := f.users[login]
@@ -132,8 +119,6 @@ func (f *contactFence) userID(ctx context.Context, login, cookie string) (string
 	return id, nil
 }
 
-// contactScope is what one request's checks need: the contact's hub user id
-// and the hub ids of its agents, by name.
 type contactScope struct {
 	userID string
 	agents map[string]string // hub id → name
@@ -142,7 +127,6 @@ type contactScope struct {
 
 func (s contactScope) key(agentID string) string { return "dm:agent:" + agentID + ":user:" + s.userID }
 
-// allows reports whether key is one of the contact's own DM conversations.
 func (s contactScope) allows(key string) bool {
 	parts := strings.Split(key, ":")
 	if len(parts) != 5 || parts[0] != "dm" || parts[1] != "agent" || parts[3] != "user" {
@@ -152,14 +136,11 @@ func (s contactScope) allows(key string) bool {
 	return ok && parts[4] == s.userID && s.userID != ""
 }
 
-// errNoSessionCheck means the proxy was built without Config.ContactSession.
 var errNoSessionCheck = errors.New("its session cannot be checked")
 
-// sessionAllows asks Config.ContactSession about the agent of the DM key
-// (one scope.allows already accepted). A contact's words reach an agent only
-// through a post, so only a post is refused: a session that may follow an
-// older skill (resumed, not started fresh since the skill changed) could
-// trust a lever marker the contact types.
+// sessionAllows refuses only a post: a contact's words reach an agent only
+// through one, and a session that may follow an older skill (not started
+// fresh since the skill changed) could trust a lever marker the contact types.
 func (f *contactFence) sessionAllows(scope contactScope, key string) error {
 	parts := strings.Split(key, ":")
 	name := scope.agents[parts[2]]
@@ -169,22 +150,23 @@ func (f *contactFence) sessionAllows(scope contactScope, key string) error {
 	return f.session(name)
 }
 
-// contactCanned is the fixed answer for a list the web UI loads at start.
 var contactCanned = map[string]string{
 	"/api/v1/projects":    `{"projects":[],"totalCount":0}`,
 	"/api/v1/chat/spaces": `{"spaces":[]}`,
 	"/api/v1/agents":      `{"agents":[],"totalCount":0}`,
 	"/api/v1/users":       `{"users":[],"totalCount":0}`,
+	// The hub's count covers every DM of the user, also those with agents the
+	// contact may not see.
+	"/api/v1/chat/unread-count": `{"conversations":0,"threads":0,"dms":0}`,
 }
 
-// contactForwardGET are the other GET routes a contact may use as they are.
 var contactForwardGET = []string{
 	"/api/v1/auth/me", "/auth/me", "/api/v1/auth/admin-status", "/api/v1/settings/public",
 	"/api/v1/system/status", "/api/v1/chat/user-prefs",
 }
 
-// fenceContact decides one request from a contact. It returns the request to
-// forward (possibly rewritten), or nil when it answered the request itself.
+// fenceContact returns the request to forward (possibly rewritten), or nil
+// when it answered the request itself.
 func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditLine, login string, names []string, cookie *string) *http.Request {
 	deny := func(msg string) *http.Request {
 		g.deny(w, line, http.StatusForbidden, DecisionDenyContact, msg)
@@ -200,8 +182,8 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 	}
 	uid, err := f.userID(r.Context(), login, *cookie)
 	if errors.Is(err, errSessionUnknown) {
-		// The hub no longer knows this session (it restarted, or the
-		// session lapsed): replace it once, as forward does for a GET.
+		// The hub does not know this session (restart or lapse): replace it once,
+		// as forward does for a GET.
 		g.cfg.Session.Invalidate(login, *cookie)
 		if fresh, cerr := g.cfg.Session.Cookie(r.Context(), login); cerr == nil {
 			*cookie = fresh
@@ -239,9 +221,8 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		g.answerContact(w, line, "application/json", `{}`)
 		return nil
 	case (m == http.MethodGet || m == http.MethodHead) && p == "/api/v1/chat/dms":
-		// The hub lists every DM the user is in, with a message preview;
-		// the answer is cut down to the contact's own conversations. With
-		// agent messages on, the previews go too (stripDMPreviews).
+		// Cut down to the contact's own conversations; with agent messages on, the
+		// previews go too.
 		r = r.WithContext(context.WithValue(r.Context(), keepDMKey{}, scope.allows))
 		if g.cfg.MatchAgentMessages != nil {
 			r = withRewrite(r, stripDMPreviews)
@@ -253,8 +234,7 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 		return r
 	case (m == http.MethodGet || m == http.MethodHead) && !strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/auth/"):
 		if g.chat != nil {
-			// The chat page is on: it is the contact's only page. A fixed
-			// target, nothing of the request in Location.
+			// Fixed target: nothing of the request in Location.
 			line.Decision, line.Status = DecisionAllow, http.StatusFound
 			g.audit(*line)
 			w.Header().Set("Cache-Control", "no-store")
@@ -262,9 +242,7 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 			w.WriteHeader(http.StatusFound)
 			return nil
 		}
-		// A page. The chat page of one of its own conversations gets the
-		// SPA shell; every other page gets the landing page, never the
-		// hub's (the hub renders some pages with server-side data).
+		// Never the hub's page: the hub renders some with server-side data.
 		if key, ok := strings.CutPrefix(p, "/chat/dm/"); ok && scope.allows(key) {
 			return r
 		}
@@ -274,7 +252,6 @@ func (g *gate) fenceContact(w http.ResponseWriter, r *http.Request, line *AuditL
 	return deny("a contact may only chat with its agents")
 }
 
-// fenceConversation checks a /api/v1/chat/conversations/{key}/... request.
 func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *AuditLine, scope contactScope, deny func(string) *http.Request) *http.Request {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/conversations/")
 	key, sub, _ := strings.Cut(rest, "/")
@@ -287,8 +264,7 @@ func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *A
 		if g.cfg.MatchAgentMessages == nil {
 			return r
 		}
-		// Agent messages on: only the agent rows the agent ledger recorded
-		// reach the contact (agentmsgs.go).
+		// Agent messages on: only rows the agent ledger recorded reach the contact.
 		agentID := strings.Split(key, ":")[2]
 		name := scope.agents[agentID]
 		return withRewrite(r, func(resp *http.Response) { g.filterHistory(resp, scope.login, name, agentID, scope.userID) })
@@ -311,24 +287,36 @@ func (g *gate) fenceConversation(w http.ResponseWriter, r *http.Request, line *A
 	return deny("a contact may not use this conversation route")
 }
 
-// checkContactMessage refuses a new message that could reach another agent:
-// an @word (scion's mention routing), a reply_to_id, or attachments.
+// checkContactMessage refuses a message that could reach another agent.
 func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line *AuditLine, deny func(string) *http.Request) *http.Request {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxContactMessage+1))
 	_ = r.Body.Close()
 	if err != nil || len(body) > maxContactMessage {
 		return deny("message too large or unreadable")
 	}
-	// Only content and idempotency_key: every other field the hub reads
-	// changes routing or what the agent sees beside the verified text
-	// (attachments, reply_to_id, metadata such as RE-to, which the agent's
-	// envelope shows as reply_context).
+	// Only content, idempotency_key and offer_wake: every other field changes
+	// routing or what the agent sees beside the verified text (reply_context,
+	// attachments). offer_wake only asks the hub to answer instead of storing
+	// a failed row, and only for a caller allowed to wake the agent. wake is
+	// refused: a contact wakes a worker only through lever's wake route, which
+	// checks the session is fresh and limits the rate.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return deny("message is not valid JSON")
 	}
-	for k := range fields {
-		if k != "content" && k != "idempotency_key" {
+	for k, v := range fields {
+		switch k {
+		case "content", "idempotency_key":
+			if !jsonString(v) {
+				return deny("a contact's message field " + strconv.Quote(k) + " must be a string")
+			}
+		case "offer_wake":
+			if v := string(bytes.TrimSpace(v)); v != "true" && v != "false" {
+				return deny(`a contact's message field "offer_wake" must be true or false`)
+			}
+		case "wake":
+			return deny("a contact's message may not wake the agent; use the chat page's wake")
+		default:
 			return deny("a contact's message may carry only content (field " + strconv.Quote(k) + " refused)")
 		}
 	}
@@ -338,12 +326,10 @@ func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line 
 	if err := json.Unmarshal(body, &msg); err != nil {
 		return deny("message is not valid JSON")
 	}
-	// The text itself is not filtered: a contact may write anything,
-	// including what looks like a lever marker. Who wrote a message is never
-	// decided from its text. The proxy records this post in the chat ledger
-	// as the contact's, and an agent's message_verify answers "web, tier
-	// contact" with these words, whatever they say. Only a mention is
-	// refused, because the hub routes it to another agent.
+	// The text is not filtered: authorship is never decided from text. The
+	// ledger records this post as the contact's, and message_verify answers
+	// "web, tier contact" whatever it says. Only a mention is refused, because
+	// the hub routes it to another agent.
 	if hasMention(msg.Content) {
 		return deny(`a contact's message may not contain a word starting with "@" (it would route to another agent); write "at" or leave it out`)
 	}
@@ -353,8 +339,14 @@ func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line 
 	return r2
 }
 
-// hasMention reports whether any whitespace-separated word starts with "@",
-// the tokens scion's mention extraction looks at (pkg/messages/mentions.go).
+// jsonString is false for null: the hub would read it as an empty value.
+func jsonString(raw json.RawMessage) bool {
+	var s string
+	raw = bytes.TrimSpace(raw)
+	return len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &s) == nil
+}
+
+// hasMention matches the tokens scion's mention extraction looks at.
 func hasMention(s string) bool {
 	for _, w := range strings.FieldsFunc(s, unicode.IsSpace) {
 		if strings.HasPrefix(w, "@") || strings.HasPrefix(w, "＠") {
@@ -364,17 +356,17 @@ func hasMention(s string) bool {
 	return false
 }
 
-// contactRootFiles are the web UI's own files at the root (scion
-// web/public). Any other root path would get the SPA shell.
-var contactRootFiles = []string{"/favicon.svg", "/scion-notification-icon.png"}
+// contactRootFiles are the web UI's own root files; any other root path would
+// get the SPA shell.
+var contactRootFiles = []string{
+	"/favicon.svg", "/scion-notification-icon.png", "/favicon.ico", "/manifest.webmanifest",
+	"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",
+}
 
-// isStaticAsset reports whether p is one of the web UI's own static files,
-// which carry no data.
 func isStaticAsset(p string) bool {
 	return strings.HasPrefix(p, "/assets/") || strings.HasPrefix(p, "/shoelace/") || slices.Contains(contactRootFiles, p)
 }
 
-// answerContact writes a fixed answer and audits it as allowed.
 func (g *gate) answerContact(w http.ResponseWriter, line *AuditLine, contentType, body string) {
 	line.Decision, line.Status = DecisionAllow, http.StatusOK
 	g.audit(*line)
@@ -382,15 +374,14 @@ func (g *gate) answerContact(w http.ResponseWriter, line *AuditLine, contentType
 	// The landing page is an entry page (entryNavigation): never framed.
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
-	// The answer depends on who asks: an operator gets another one at the
-	// same URL, so no cache may keep this.
+	// The answer depends on who asks: no cache may keep it.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = io.WriteString(w, body)
 }
 
-// contactLanding is lever's page for a contact: links to its conversations.
-// No script; the hub's own pages are never shown to a contact.
+// contactLanding has no script; the hub's own pages are never shown to a
+// contact.
 func contactLanding(s contactScope) string {
 	ids := make([]string, 0, len(s.agents))
 	for id := range s.agents {
@@ -411,17 +402,13 @@ func contactLanding(s contactScope) string {
 	return b.String()
 }
 
-// errNoUserID means the hub's /auth/me answer carried no id.
 var errNoUserID = errors.New("the hub named no user id")
 
-// errSessionUnknown means the hub answered the login's session with a 401
-// or a redirect (to its login page): it does not know the session.
+// errSessionUnknown: the hub answered with a 401 or a redirect to its login.
 var errSessionUnknown = errors.New("the hub does not know this session")
 
-// hubWhoAmI asks the hub, with a login's own session, for its user id.
 func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, error) {
-	// No redirect is followed: a session the hub does not know is answered
-	// with one, and the operator view asks this with a contact's session.
+	// No redirect is followed: the hub answers an unknown session with one.
 	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: noRedirect}
 	if cfg.DialContext != nil {
 		client.Transport = jailTransport(cfg.DialContext)
@@ -456,10 +443,9 @@ func hubWhoAmI(cfg Config) func(ctx context.Context, cookie string) (string, err
 	}
 }
 
-// HubDoer is a hubapi.Doer over the proxy's own route to the hub, with a
-// bearer token: the remote PAT, which can also attach and message, so the
-// fence only ever sends GET with it (Do has no body). The contact fence
-// resolves agent names with it.
+// HubDoer is a hubapi.Doer over the proxy's route to the hub with the remote
+// PAT, the controller's read-only token: it sends GET only, so even a wider
+// token could not act through it.
 type HubDoer struct {
 	Target      *url.URL
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -469,6 +455,9 @@ type HubDoer struct {
 }
 
 func (d *HubDoer) Do(ctx context.Context, method, p string) (int, []byte, error) {
+	if method != http.MethodGet {
+		return 0, nil, fmt.Errorf("remoteproxy: the remote PAT is sent with GET only, not %s", method)
+	}
 	d.once.Do(func() {
 		d.client = &http.Client{Timeout: 15 * time.Second}
 		if d.DialContext != nil {
@@ -499,14 +488,12 @@ func (d *HubDoer) Do(ctx context.Context, method, p string) (int, []byte, error)
 
 type keepDMKey struct{}
 
-// contactKeepDM is the DM filter fenceContact attached to r, if any.
 func contactKeepDM(r *http.Request) func(string) bool {
 	f, _ := r.Context().Value(keepDMKey{}).(func(string) bool)
 	return f
 }
 
-// filterDMList keeps only the DMs keep allows in a /api/v1/chat/dms answer.
-// An answer it cannot read is replaced by an empty list: failing closed.
+// filterDMList fails closed: an answer it cannot read becomes an empty list.
 func filterDMList(resp *http.Response, keep func(string) bool) {
 	if resp.StatusCode != http.StatusOK {
 		return

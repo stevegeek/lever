@@ -12,7 +12,6 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// orbGuest returns a Guest shaped like orbstack's, for argv-identical assertions.
 func orbGuest(host proc.Runner, machine string) Guest {
 	return Guest{
 		Host:       host,
@@ -60,7 +59,6 @@ func TestApplyEgressSkipsRebuildWhenAlreadyClosed(t *testing.T) {
 	}
 }
 
-// scriptFirewall answers every root iptables call and the restore commit.
 func scriptFirewall(f *proc.FakeRunner) {
 	f.Script("orb -u root -m lever-jail iptables", proc.Result{})
 	f.Script("orb -u root -m lever-jail ip6tables", proc.Result{})
@@ -69,7 +67,6 @@ func scriptFirewall(f *proc.FakeRunner) {
 	f.Script("orb -u root -m lever-jail bash -c exec ip", proc.Result{})
 }
 
-// committedV4 is the IPv4 ruleset ApplyEgress committed.
 func committedV4(t *testing.T, f *proc.FakeRunner) string {
 	t.Helper()
 	bins, inputs := backendtest.RestoreCommits(f)
@@ -197,7 +194,7 @@ func TestApplyEgressResolvesAliasAndAppliesRules(t *testing.T) {
 	}
 }
 
-// --- lever#34: resolver DNAT targets ACCEPTed in the open posture only ---
+// Resolver DNAT targets are ACCEPTed in the open posture only.
 
 func TestApplyEgressAcceptsResolverForwardTargetsBeforeAliasDrop(t *testing.T) {
 	f := proc.NewFakeRunner()
@@ -260,7 +257,6 @@ func TestApplyEgressResolverForwardErrorFails(t *testing.T) {
 	}
 }
 
-// jumpListing is an OUTPUT listing whose first and only rule is the jump.
 const jumpListing = "-P OUTPUT ACCEPT\n-A OUTPUT -j LEVER_EGRESS\n"
 
 // listingRunner answers `iptables -S LEVER_EGRESS` and `ip6tables -S
@@ -324,7 +320,7 @@ func newListingRunner(v4, v6 string) *listingRunner {
 	return r
 }
 
-// R1: a closed posture that reached only ONE family (v4 closed, v6 open or
+// A closed posture that reached only ONE family (v4 closed, v6 open or
 // absent) is not "already closed": the next closed apply must rebuild both,
 // not take the I2 skip and leave v6 open forever.
 func TestApplyEgressDoesNotSkipAHalfClosedPosture(t *testing.T) {
@@ -344,8 +340,8 @@ func TestApplyEgressDoesNotSkipAHalfClosedPosture(t *testing.T) {
 	}
 }
 
-// R1: the IPv6 commit fails. Nothing is committed (v6 goes first), the
-// error says so, and a re-apply rebuilds.
+// The IPv6 commit fails. Nothing is committed (v6 goes first), the error
+// says so, and a re-apply rebuilds.
 func TestApplyEgressV6CommitFailureThenReapplyRebuilds(t *testing.T) {
 	r := newListingRunner("", "")
 	r.FailV6 = true
@@ -366,7 +362,7 @@ func TestApplyEgressV6CommitFailureThenReapplyRebuilds(t *testing.T) {
 	backendtest.AssertAtomicCommitOrder(t, r.FakeRunner)
 }
 
-// R2: under an OPEN (or absent) chain nothing lever wrote blocks DNS, so a
+// Under an OPEN (or absent) chain nothing lever wrote blocks DNS, so a
 // failed resolve is a real fault: no fallback to the chain's old alias.
 func TestApplyEgressNoAliasFallbackUnderAnOpenChain(t *testing.T) {
 	open4 := "-N LEVER_EGRESS\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n"
@@ -381,8 +377,8 @@ func TestApplyEgressNoAliasFallbackUnderAnOpenChain(t *testing.T) {
 	}
 }
 
-// R4: the fallback reads each family's alias from ITS OWN chain, and only
-// an address of that family.
+// The fallback reads each family's alias from ITS OWN chain, and only an
+// address of that family.
 func TestLiveAliasFallbackPerFamily(t *testing.T) {
 	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
 	commits := func(r *listingRunner) (v4, v6 string) {
@@ -428,10 +424,9 @@ func TestLiveAliasFallbackPerFamily(t *testing.T) {
 }
 
 // The fallback keys on the IPv4 chain being closed (the guest resolves over
-// IPv4). Both half-closed states: v4 closed + v6 open (the old stuck state,
-// or an interrupted closed->open apply) heals from the live aliases; v6
-// closed + v4 open (a closed apply whose IPv4 commit failed) blocks no IPv4
-// DNS, so a failed lookup there is a real fault and nothing is committed.
+// IPv4). v4 closed + v6 open heals from the live aliases; v6 closed + v4
+// open (a closed apply whose IPv4 commit failed) blocks no IPv4 DNS, so a
+// failed lookup there is a real fault and nothing is committed.
 func TestAliasFallbackHalfClosedStates(t *testing.T) {
 	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
 	open4 := "-N LEVER_EGRESS\n-A LEVER_EGRESS -d 0.250.250.254/32 -p tcp -m tcp --dport 8443 -j ACCEPT\n-A LEVER_EGRESS -d 0.250.250.254/32 -j DROP\n"
@@ -454,9 +449,9 @@ func TestAliasFallbackHalfClosedStates(t *testing.T) {
 }
 
 // The re-apply skip for a live closed posture holds only for a chain that is
-// exactly the closed ruleset (lever#187): a rule added or removed by hand,
-// or a port the config now allows, is rebuilt, with the alias read back from
-// the live chain when the closed chain blocks the lookup.
+// exactly the closed ruleset: a rule added or removed by hand, or a port the
+// config now allows, is rebuilt, with the alias read back from the live
+// chain when the closed chain blocks the lookup.
 func TestApplyEgressRebuildsAClosedChainThatDiffers(t *testing.T) {
 	resolve := func(context.Context) (string, string, error) { return "", "", errors.New("dns blocked") }
 	cases := map[string]struct {

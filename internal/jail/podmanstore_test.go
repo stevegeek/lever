@@ -107,7 +107,6 @@ func TestReadStoreHealthMissingFilesAreEmpty(t *testing.T) {
 	}
 }
 
-// missingRunner turns a scripted Code 3 into the error a real exit 3 brings.
 type missingRunner struct{ *proc.FakeRunner }
 
 func (m missingRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {

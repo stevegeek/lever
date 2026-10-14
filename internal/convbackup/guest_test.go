@@ -14,10 +14,9 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// These tests run the guest scripts with the real bash, GNU tar and
-// coreutils of the machine running the tests, in a fake HOME laid out the
-// way scion lays out the jail run user's. They are what shows the scripts
-// never follow a link the agent planted.
+// These tests run the guest scripts with the machine's real bash, GNU tar
+// and coreutils in a fake HOME laid out like scion's. They are what shows the
+// scripts never follow a link the agent planted.
 
 func needGNU(t *testing.T) {
 	t.Helper()

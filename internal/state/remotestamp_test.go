@@ -9,10 +9,9 @@ import (
 	"testing"
 )
 
-// runningProxyPID pretends a proxy is running by recording pid in remote.pid,
-// the file remoteproxy.Serve writes for itself once it is bound. The stamp is
-// written and read against that file, so no test can produce a stamp without
-// one — which is the point: a stamp is a statement about a running process.
+// runningProxyPID records pid in remote.pid, as a bound proxy would. A stamp
+// is a statement about a running process, so no test can write one without
+// it.
 func runningProxyPID(t *testing.T, s State, pid int) {
 	t.Helper()
 	if err := os.WriteFile(s.RemotePID(), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
@@ -20,10 +19,8 @@ func runningProxyPID(t *testing.T, s State, pid int) {
 	}
 }
 
-// TestRemoteStampRoundTripAndMismatch pins the contract apply's reuse shortcut
-// depends on: a stamp matches only the exact version+config it recorded, and
-// every doubt reads as a mismatch (so the proxy restarts rather than serving a
-// config the operator has since changed).
+// TestRemoteStampRoundTripAndMismatch: a stamp matches only the exact
+// version and config it recorded, and every doubt reads as a mismatch.
 func TestRemoteStampRoundTripAndMismatch(t *testing.T) {
 	s := ForConfig(t.TempDir())
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
@@ -31,8 +28,7 @@ func TestRemoteStampRoundTripAndMismatch(t *testing.T) {
 	}
 	runningProxyPID(t, s, 4242)
 
-	// Absent file: mismatch, not a crash — a proxy started by an older lever
-	// left no stamp and must be restarted, never trusted.
+	// Absent file: mismatch, never trusted.
 	if s.RemoteStampMatches("v1", "h1") {
 		t.Error("an absent stamp must not match")
 	}
@@ -50,8 +46,6 @@ func TestRemoteStampRoundTripAndMismatch(t *testing.T) {
 		t.Error("a different CONFIG must not match — this is the allowed_users defect")
 	}
 
-	// Truncated/garbage content reads as a mismatch rather than matching by
-	// accident or erroring.
 	if err := os.WriteFile(s.RemoteStamp(), []byte("v1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +53,7 @@ func TestRemoteStampRoundTripAndMismatch(t *testing.T) {
 		t.Error("a truncated stamp must not match")
 	}
 
-	// The stamp names a proxy credential-adjacent state dir; keep it owner-only.
+	// Owner-only, like the rest of the state dir.
 	if err := s.WriteRemoteStamp("v1", "h1"); err != nil {
 		t.Fatal(err)
 	}
@@ -75,15 +69,10 @@ func TestRemoteStampRoundTripAndMismatch(t *testing.T) {
 	}
 }
 
-// TestRemoteStampIsBoundToTheProxyThatOwnsThePIDFile is the "stale but
-// matching" defect. remote.pid is written by EVERY `lever remote serve`, while
-// the stamp used to be written only by apply — so a proxy started by hand took
-// over the pid file and inherited the stamp a previous apply had left. Alive,
-// listening, stamp matching: apply reported success while a process it had
-// never started enforced a config it had never read.
-//
-// remoteproxy.Serve now writes the stamp itself, and the stamp names its pid,
-// so a starter that takes the pid file without stamping cannot inherit one.
+// TestRemoteStampIsBoundToTheProxyThatOwnsThePIDFile: a proxy started by
+// hand that takes over remote.pid without stamping must not inherit a stamp
+// another process left, or apply would vouch for a process enforcing a
+// config it never read.
 func TestRemoteStampIsBoundToTheProxyThatOwnsThePIDFile(t *testing.T) {
 	s := ForConfig(t.TempDir())
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
@@ -98,16 +87,15 @@ func TestRemoteStampIsBoundToTheProxyThatOwnsThePIDFile(t *testing.T) {
 		t.Fatal("a stamp must match while the proxy it describes still owns remote.pid")
 	}
 
-	// Another proxy takes over remote.pid without stamping — an older lever,
-	// or anything else that starts one. The inherited stamp must not vouch
-	// for it.
+	// Another proxy takes over remote.pid without stamping: the inherited
+	// stamp must not vouch for it.
 	runningProxyPID(t, s, 4343)
 	if s.RemoteStampMatches("v1", "h1") {
 		t.Error("a stamp must not describe a proxy that did not write it")
 	}
 
-	// That proxy stamping its OWN config is what makes the stamp usable again
-	// — and it is the other config that now fails to match.
+	// That proxy stamping its own config makes the stamp usable again, and
+	// the other config now fails to match.
 	if err := s.WriteRemoteStamp("v1", "h2"); err != nil {
 		t.Fatal(err)
 	}
@@ -128,10 +116,9 @@ func TestRemoteStampIsBoundToTheProxyThatOwnsThePIDFile(t *testing.T) {
 	}
 }
 
-// TestWriteRemoteStampLeavesNoStaleRecordOnFailure: callers treat a stamp
-// write failure as a warning and keep serving (remoteproxy.Serve), which is
-// only safe because a failure leaves NO stamp. An absent stamp costs the next
-// apply a redundant restart; a stale one costs it the check entirely.
+// TestWriteRemoteStampLeavesNoStaleRecordOnFailure: callers keep serving
+// after a stamp write failure, which is only safe because a failure leaves
+// no stamp.
 func TestWriteRemoteStampLeavesNoStaleRecordOnFailure(t *testing.T) {
 	s := ForConfig(t.TempDir())
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {

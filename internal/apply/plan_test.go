@@ -1,12 +1,12 @@
 package apply
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// planStepNames extracts the Kind from each Step.
 func planStepNames(steps []Step) []string {
 	out := make([]string, len(steps))
 	for i, s := range steps {
@@ -15,7 +15,6 @@ func planStepNames(steps []Step) []string {
 	return out
 }
 
-// contains reports whether needle is in haystack.
 func contains(haystack []string, needle string) bool {
 	for _, v := range haystack {
 		if v == needle {
@@ -42,9 +41,8 @@ func TestPlanBrokerOnlyKeepsOnlyBrokerSteps(t *testing.T) {
 			t.Fatalf("broker-only plan = %v, want exactly %v", got, want)
 		}
 	}
-	// Scion/container/registration steps must NOT appear (the fresh machine has no
-	// scion binary; init-machine would fail).
-	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-project", "write-manifest", "start-manager", "config-registry", "credential", "bootstrap-token"} {
+	// The fresh machine has no scion binary, so init-machine would fail.
+	for _, banned := range []string{"init-machine", "scion-server", "load-image", "register-project", "write-manifest", "start-manager", "config-registry", "credential", "bootstrap-token", "hub-identity", "remote-proxy"} {
 		if contains(got, banned) {
 			t.Fatalf("broker-only plan must omit %q: %v", banned, got)
 		}
@@ -73,7 +71,7 @@ func TestPlanOrder(t *testing.T) {
 	for _, s := range steps {
 		kinds = append(kinds, string(s.Kind))
 	}
-	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "bootstrap-token", "scion-server", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager"}
+	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "scion-server", "hub-identity", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager"}
 	if len(kinds) != len(want) {
 		t.Fatalf("kinds=%v want=%v", kinds, want)
 	}
@@ -82,93 +80,54 @@ func TestPlanOrder(t *testing.T) {
 			t.Fatalf("step %d = %q want %q (all=%v)", i, kinds[i], want[i], kinds)
 		}
 	}
-	// register-project targets the instance tree — ONE registration regardless
-	// of worker count (workers no longer register their own scion projects).
-	// (0:broker-up 1:load-image 2:init-machine 3:config-registry 4:bootstrap-token 5:scion-server 6:register-project 7:agent-template 8:mint-manager-bootstrap 9:start-manager)
+	// One registration of the instance tree, whatever the worker count.
 	if steps[6].Target != "/t" {
 		t.Fatalf("register-project target=%q", steps[6].Target)
 	}
 }
 
-// TestPlanIncludesBootstrapTokenOnceBeforeScionServer pins the bootstrap-token
-// step's presence and position directly: it mints (or reuses) the controller
-// PAT that scion-server's dev-auth-off hub will require, so it must run
-// exactly once and strictly before scion-server.
-func TestPlanIncludesBootstrapTokenOnceBeforeScionServer(t *testing.T) {
-	app := &config.App{
-		Name: "demo", Backend: "orbstack", Tree: "/t",
-		Manager: config.Manager{Image: "img"},
-	}
-	kinds := planStepNames(Plan(app, PlanOpts{}))
-	btIdx, scionIdx, count := -1, -1, 0
-	for i, k := range kinds {
-		if k == "bootstrap-token" {
-			count++
-			btIdx = i
-		}
-		if k == "scion-server" {
-			scionIdx = i
-		}
-	}
-	if count != 1 {
-		t.Fatalf("bootstrap-token appears %d times, want exactly 1 (kinds=%v)", count, kinds)
-	}
-	if scionIdx < 0 {
-		t.Fatalf("no scion-server step; kinds=%v", kinds)
-	}
-	if !(btIdx < scionIdx) {
-		t.Fatalf("bootstrap-token (idx %d) must come before scion-server (idx %d); kinds=%v", btIdx, scionIdx, kinds)
-	}
-}
-
-// TestPlanRemoteProxyAbsentWhenDisabled proves the default (remote.enabled
-// left off): the remote-proxy step must not appear, so `lever apply --dry-run`
-// never advertises a start step that won't run.
-func TestPlanRemoteProxyAbsentWhenDisabled(t *testing.T) {
-	app := &config.App{
-		Name: "demo", Backend: "orbstack", Tree: "/t",
-		Manager: config.Manager{Image: "img"},
-	}
-	kinds := planStepNames(Plan(app, PlanOpts{}))
-	if contains(kinds, "remote-proxy") {
-		t.Fatalf("plan must omit remote-proxy when remote is disabled: %v", kinds)
-	}
-}
-
-// TestPlanRemoteProxyPresentAndOrderedAfterScionServer proves the positive
-// case: with remote.enabled: true, the remote-proxy step must appear, and
-// strictly after scion-server (the proxy needs the hub up).
-func TestPlanRemoteProxyPresentAndOrderedAfterScionServer(t *testing.T) {
+// hub-identity needs the live hub and mints the PAT every later hub call
+// uses; remote-proxy signs in only logins hub-identity already invited and
+// bound, so it runs last.
+func TestPlanOrderWithRemote(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
 		Manager: config.Manager{Image: "img"},
 		Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"},
 	}
-	kinds := planStepNames(Plan(app, PlanOpts{}))
-	rpIdx, scionIdx := -1, -1
-	for i, k := range kinds {
-		if k == "remote-proxy" {
-			rpIdx = i
-		}
-		if k == "scion-server" {
-			scionIdx = i
-		}
+	steps := Plan(app, PlanOpts{})
+	got := planStepNames(steps)
+	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "scion-server", "hub-identity", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager", "remote-proxy"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("plan = %v\nwant   %v", got, want)
 	}
-	if rpIdx < 0 {
-		t.Fatalf("plan must include remote-proxy when remote is enabled: %v", kinds)
-	}
-	if scionIdx < 0 {
-		t.Fatalf("no scion-server step; kinds=%v", kinds)
-	}
-	if !(scionIdx < rpIdx) {
-		t.Fatalf("remote-proxy (idx %d) must come after scion-server (idx %d); kinds=%v", rpIdx, scionIdx, kinds)
+	if steps[5].Target != "/t" {
+		t.Fatalf("hub-identity target = %q, want the tree", steps[5].Target)
 	}
 }
 
-// TestPlanBrokerOnlyOmitsRemoteProxyEvenWhenEnabled proves the VM-level
-// acceptance gate (which never invokes scion at all) excludes remote-proxy
-// even when the config enables remote access — the brokerOnlyKinds allowlist
-// governs, not RemoteEnabled().
+func TestPlanRemoteOffHasNoProxyAndNoBootstrapToken(t *testing.T) {
+	app := &config.App{
+		Name: "demo", Backend: "orbstack", Tree: "/t",
+		Manager: config.Manager{Image: "img"},
+	}
+	kinds := planStepNames(Plan(app, PlanOpts{}))
+	for _, banned := range []string{"remote-proxy", "bootstrap-token"} {
+		if contains(kinds, banned) {
+			t.Fatalf("plan must omit %s with remote off: %v", banned, kinds)
+		}
+	}
+	n := 0
+	for _, k := range kinds {
+		if k == "hub-identity" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("hub-identity appears %d times, want 1: %v", n, kinds)
+	}
+}
+
 func TestPlanBrokerOnlyOmitsRemoteProxyEvenWhenEnabled(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
@@ -279,13 +238,9 @@ func TestPlanLoadsDistinctWorkerImages(t *testing.T) {
 	}
 }
 
-// TestPlanAgentTemplateIsOrdered pins the two constraints the agent-template
-// step sits between, which the flat want-list above states only positionally.
-// It must run AFTER register-project, because its settings half writes at
-// project scope and the project has to exist; and BEFORE start-manager, because
-// an agent's system prompt is staged when its home is provisioned and never
-// re-staged — a template written afterwards would miss the very agent this
-// apply creates.
+// agent-template must follow register-project (its settings are written at
+// project scope) and precede start-manager: an agent's system prompt is staged
+// when its home is provisioned and never re-staged.
 func TestPlanAgentTemplateIsOrdered(t *testing.T) {
 	app := &config.App{Name: "demo", Backend: "orbstack", Tree: "/t", Manager: config.Manager{Image: "img"}}
 	idx := map[string]int{}
@@ -304,10 +259,6 @@ func TestPlanAgentTemplateIsOrdered(t *testing.T) {
 	}
 }
 
-// TestPlanLoadImageCarriesTarPath: each load-image step names the archive
-// its image ships in (lever#32) — the manager's tar for the manager image
-// and for a worker that inherits it, a worker's own tar for its own image,
-// and no tar for an image that still comes from host docker.
 func TestPlanLoadImageCarriesTarPath(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
@@ -339,10 +290,8 @@ func TestPlanLoadImageCarriesTarPath(t *testing.T) {
 	}
 }
 
-// TestPlanLoadImageTarWinsOverDockerSource: when one ref is named both with
-// an archive and without (a worker restating the manager image with its own
-// tar), the archive is the source whatever the declaration order — a tar
-// beside a config is an explicit choice, host docker is the fallback.
+// A ref named both with and without an archive loads from the archive
+// whatever the declaration order.
 func TestPlanLoadImageTarWinsOverDockerSource(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",

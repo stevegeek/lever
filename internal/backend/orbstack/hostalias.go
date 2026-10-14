@@ -8,8 +8,8 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// resolveHostAlias returns the IPv4 and IPv6 addresses host.orb.internal
-// resolves to FROM INSIDE the machine (both forward to the host's 127.0.0.1).
+// resolveHostAlias resolves the alias FROM INSIDE the machine; both addresses
+// forward to the host's 127.0.0.1.
 func resolveHostAlias(ctx context.Context, r proc.Runner, machine string) (v4, v6 string, err error) {
 	res, err := r.Run(ctx, nil, "orb", "-m", machine, "getent", "ahosts", "host.orb.internal")
 	if err != nil {

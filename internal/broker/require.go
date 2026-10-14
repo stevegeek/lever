@@ -6,15 +6,12 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
-// requireLiveAgent is the shared authn+revocation preamble of the jail
-// handlers: it authenticates the caller via mTLS (ca.RequireAgent) and denies
-// a revoked identity, writing the audited 403 itself on failure. op is the
-// audit-ledger operation name; detailPrefix (e.g. "consume: ") is prepended
-// verbatim to the deny detail — most handlers pass "".
+// requireLiveAgent authenticates the caller via mTLS and denies a revoked
+// identity, writing the audited 403 itself.
 //
-// Deliberately NOT used by gateway.go or llmproxy.go: both run isRevoked
-// AFTER parsing the token id so post-revocation replays correlate with their
-// mint line in the audit ledger.
+// Deliberately NOT used by the gateway or the llm proxy: they check
+// revocation AFTER parsing the token id, so a replay after revocation ties to
+// its mint line.
 func (b *Broker) requireLiveAgent(w http.ResponseWriter, r *http.Request, op, detailPrefix string) (string, bool) {
 	caller, err := ca.RequireAgent(r)
 	if err != nil {
@@ -30,10 +27,8 @@ func (b *Broker) requireLiveAgent(w http.ResponseWriter, r *http.Request, op, de
 	return caller, true
 }
 
-// requireManager is the manager-only variant: authenticate the caller, require
-// the manager CN, then deny a revoked manager. Order matters — the CN check
-// precedes the revocation check so a non-manager caller is audited as
-// "not the manager identity" regardless of revocation state.
+// requireManager checks the manager CN before revocation, so a non-manager
+// is audited as such whatever its revocation state.
 func (b *Broker) requireManager(w http.ResponseWriter, r *http.Request, op, detailPrefix string) (string, bool) {
 	caller, err := ca.RequireAgent(r)
 	if err != nil {

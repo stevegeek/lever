@@ -20,29 +20,22 @@ const (
 	TierContact = "contact"
 )
 
-// RemoteUser is one allowed_users entry. The plain string form is a login
-// with tier operator (the meaning before tiers existed); the map form names
-// the tier and, for a contact, the agents it may reach.
+// RemoteUser is one allowed_users entry: a plain login (tier operator) or a
+// map naming the tier and, for a contact, the agents it may reach.
 type RemoteUser struct {
 	Login string `yaml:"login"`
 	// Tier is TierOperator or TierContact; "" means TierOperator.
 	Tier string `yaml:"tier"`
-	// Agents is the agents a contact may reach, by name (declared workers,
-	// or the app name for the manager). Required for a contact, refused for
-	// an operator: a contact's reach is always explicit, so a new worker
-	// never widens it by accident.
+	// Agents is required for a contact and refused for an operator: a
+	// contact's reach is always explicit, so a new worker never widens it by
+	// accident.
 	Agents []string `yaml:"agents"`
 	// See is the agents a contact may see on the chat page (name, label,
 	// state) but not message: no history, no input, no id. Contact only;
 	// disjoint from Agents.
 	See []string `yaml:"see"`
-	// Files false gives this login no file exchange at all (remote.files):
-	// no upload, no download, no share to it. nil = true. Contact or
-	// operator; read only while remote.files is on.
+	// Files and Voice false turn that feature off for this login.
 	Files *bool `yaml:"files"`
-	// Voice false gives this login no dictation (remote.voice): no mic on
-	// the page, and the transcribe route refuses it. nil = true. Contact or
-	// operator; read only while remote.voice is on.
 	Voice *bool `yaml:"voice"`
 }
 
@@ -52,8 +45,7 @@ func (u RemoteUser) FilesAllowed() bool { return u.Files == nil || *u.Files }
 // VoiceAllowed is Voice with nil read as true.
 func (u RemoteUser) VoiceAllowed() bool { return u.Voice == nil || *u.Voice }
 
-// UnmarshalYAML accepts a plain login or a {login, tier, agents, see, files,
-// voice} map, and refuses any other key in the map.
+// UnmarshalYAML refuses unknown keys in the map form.
 func (u *RemoteUser) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind == yaml.ScalarNode {
 		return n.Decode(&u.Login)
@@ -98,10 +90,15 @@ func (r Remote) LoginsWithTier(tier string) []string {
 	return out
 }
 
-// HubEmailFor is the hub user email a remote sign-in as login becomes
-// (remoteproxy's identityFor): the login itself when it contains "@", else
-// <login>@id.lever.local; the unnamed operator (login "", when allowed_users
-// is empty) is lever-operator@lever.local.
+// ScionDevUserID is scion's fixed ID for its dev-auth user (scion
+// pkg/hub/devauth.go). On a hub that once ran with dev auth it owns the
+// project and every agent, so it stays lever's controller; any agent can
+// rename it through scion's workstation identity route, so no remote login may
+// ever resolve to it.
+const ScionDevUserID = "be67fbc9-c869-5d43-b15d-c28ca3e8d355"
+
+// HubEmailFor is the hub user email a remote sign-in as login becomes; it
+// must agree with remoteproxy's identityFor.
 func HubEmailFor(login string) string {
 	switch {
 	case login == "":
@@ -113,8 +110,7 @@ func HubEmailFor(login string) string {
 }
 
 // HubUserEmails is the set of hub user emails the proxy's sign-ins can
-// create: one per allowed login, or the single unnamed operator when the
-// list is empty.
+// create.
 func (r Remote) HubUserEmails() []string {
 	if len(r.AllowedUsers) == 0 {
 		return []string{HubEmailFor("")}
@@ -126,9 +122,8 @@ func (r Remote) HubUserEmails() []string {
 	return out
 }
 
-// WebSenders is the envelope sender each of those sign-ins posts as: "user:"
-// plus the hub email, lowercased (the hub lowercases emails), sorted. A
-// message an agent receives from one of them can only be a web chat post.
+// WebSenders is the envelope sender each sign-in posts as. A message an
+// agent receives from one of them can only be a web chat post.
 func (r Remote) WebSenders() []string {
 	var out []string
 	for _, e := range r.HubUserEmails() {

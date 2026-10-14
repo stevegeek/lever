@@ -9,8 +9,8 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// lever#162: the command wrappers lever reads are walked like env, nested
-// in any order; a form lever cannot read is unread.
+// The command wrappers lever reads are walked like env, nested in any order;
+// a form lever cannot read is unread.
 func TestParseWrappers(t *testing.T) {
 	py := []string{"python3", "/tree/x.py"}
 	for _, tc := range []struct {

@@ -18,15 +18,12 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// The scaffold engine behind `lever init` and doctor's skills check: writes
-// the embedded skills into the instance tree, hash-guarding owner edits via
-// hashes recorded in the state dir's state.State.Skills file, with
-// owner-blessed customizations tracked in state.State.SkillsAdopted
-// (`init --adopt`).
-// Pure file operations — no jail interaction. Every read and write of a
-// tree file goes through fsutil.ReadInTree/WriteInTree: the tree is
-// agent-writable, so a scaffold path replaced by a symlink out of the tree
-// (to lever.yaml, the state dir, a shell rc) is refused rather than followed.
+// The scaffold engine behind `lever init` and doctor's skills check. It writes
+// the embedded skills into the instance tree and hash-guards owner edits with
+// hashes in state.State.Skills, with owner-blessed customizations in
+// state.State.SkillsAdopted (`init --adopt`). Every tree read and write goes
+// through fsutil.ReadInTree/WriteInTree: the tree is agent-writable, so a
+// scaffold path replaced by a symlink out of the tree is refused, not followed.
 
 type skillAction string
 
@@ -44,11 +41,9 @@ const (
 type skillSyncResult struct {
 	RelPath string
 	Action  skillAction
-	// AdoptedVersion is the `lever-version:` frontmatter stamp of an ADOPTED
-	// file (set only for Action == skillAdopted; empty = no stamp found). An
-	// adoption pins the file to the framework baseline it was adopted at, so
-	// doctor compares this against the current Version to surface a baseline
-	// that has silently drifted versions behind (#16).
+	// AdoptedVersion is the `lever-version:` stamp of an adopted file (empty = no
+	// stamp). An adoption pins the file to the baseline it was adopted at, so
+	// doctor compares this against the current version.
 	AdoptedVersion string
 }
 
@@ -57,8 +52,8 @@ type skillTarget struct {
 	content []byte // rendered
 }
 
-// skillTargets is the lever skill of every agent, at the path
-// sessionrec.SkillRel names for it (the session record hashes the same file).
+// skillTargets is every agent's lever skill, at sessionrec.SkillRel (the
+// session record hashes the same file).
 func skillTargets(app *config.App) []skillTarget {
 	rel, _ := sessionrec.SkillRel(app, app.Name)
 	ts := []skillTarget{{relPath: rel, content: skills.OperatorWith(cli.Version, brokerctl.ChatConfigured(app), app.AgentMessagesOn(), skillFiles(app), app.AnyRecyclableWorker())}}
@@ -69,18 +64,14 @@ func skillTargets(app *config.App) []skillTarget {
 	return ts
 }
 
-// state.Skills records the scaffold hashes; state.SkillsAdopted records
-// owner-blessed customizations (path → hash of the adopted on-disk content).
-// They are separate files so adoption never disturbs the scaffold-tracking
-// schema. Both live host-side, outside the mounted tree, so an agent cannot
-// re-bless its own tampering.
+// Both hash files live host-side, outside the mounted tree, so an agent cannot
+// re-bless its own tampering; adoption is kept separate from scaffold tracking.
 const (
-	// claudeMDAdoptKey is the adoption-map key for the tree-root CLAUDE.md
-	// (whole-file hash — adoption covers the file, not just the lever block).
+	// claudeMDAdoptKey is the adoption key for the tree-root CLAUDE.md (a
+	// whole-file hash, not just the lever block).
 	claudeMDAdoptKey = "CLAUDE.md"
 )
 
-// loadHashState reads a path → hash map from path; an absent file is empty.
 func loadHashState(path string) (map[string]string, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -96,9 +87,8 @@ func loadHashState(path string) (map[string]string, error) {
 	return m, nil
 }
 
-// saveHashState writes a path → hash map to path (0644 — hashes are not
-// secrets), creating the state dir if needed. Atomic, so a crash mid-write
-// never leaves a torn record that would misreport every skill as edited.
+// saveHashState writes 0644 (hashes are not secrets), atomically, so a crash
+// never leaves a torn record that misreports every skill as edited.
 func saveHashState(path string, m map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -157,16 +147,16 @@ func syncSkills(app *config.App, stateDir state.State, force, check bool) ([]ski
 			if err := fsutil.WriteInTree(app.Tree, tgt.relPath, tgt.content, 0o644); err != nil {
 				return nil, fmt.Errorf("write %s: %w", tgt.relPath, err)
 			}
-			// Content is the framework scaffold again — any adoption record
-			// would bless content that no longer exists.
+			// The content is the framework scaffold again: an adoption record would bless
+			// content that no longer exists.
 			if hasAdopted {
 				delete(adopted, tgt.relPath)
 				adoptedDirty = true
 			}
 		}
-		// Record/refresh the hash for every non-skip outcome in write mode, so
-		// pre-init adopters whose content happens to match get tracked too.
-		// Adopted files stay off skills.json — their content isn't ours.
+		// Record the hash for every non-skip outcome in write mode, so matching
+		// content gets tracked too. Adopted files stay off skills.json: their content
+		// is not lever's.
 		if !check && act != skillSkipped && act != skillAdopted {
 			if st[tgt.relPath] != want {
 				st[tgt.relPath] = want
@@ -192,11 +182,9 @@ func syncSkills(app *config.App, stateDir state.State, force, check bool) ([]ski
 	return results, nil
 }
 
-// decideSkill maps the observed target state to (action, writeNeeded).
-// Current content always wins; an
-// adopted customization is respected (only --force reclaims it); an
-// unmodified scaffold refreshes silently; anything else — including an
-// untracked pre-existing file — is treated as an owner edit.
+// decideSkill: current content always wins; an adopted customization is kept
+// (only --force reclaims it); an unmodified scaffold refreshes silently;
+// anything else, an untracked file included, is an owner edit.
 func decideSkill(exists, isCurrent, matchesRecord, matchesAdopted, force, check bool) (skillAction, bool) {
 	switch {
 	case !exists:
@@ -238,11 +226,10 @@ func claudeMDBlock() string {
 		skillMarkerEnd
 }
 
-// writeClaudeMDWithBlock rewrites the tree's CLAUDE.md so it carries the
-// current marker block: replaced in place when markers exist, appended
-// otherwise. Written in place (not by rename) so a CLAUDE.md that is itself
-// a symlink inside the tree keeps working and keeps its mode; a link that
-// leaves the tree is refused (fsutil.ErrEscapesTree).
+// writeClaudeMDWithBlock writes CLAUDE.md with the current marker block,
+// replaced in place or appended. Written in place, not by rename, so an
+// in-tree symlink keeps working and its mode; a link out of the tree is
+// refused (fsutil.ErrEscapesTree).
 func writeClaudeMDWithBlock(tree, s, block string) error {
 	begin := strings.Index(s, skillMarkerBegin)
 	end := strings.Index(s, skillMarkerEnd)
@@ -259,8 +246,8 @@ func writeClaudeMD(tree, content string) error {
 	return nil
 }
 
-// readClaudeMD reads the tree's CLAUDE.md through the tree confinement (the
-// file is agent-writable; see fsutil.ReadInTree). Absent is fs.ErrNotExist.
+// readClaudeMD reads the agent-writable CLAUDE.md through the tree
+// confinement. Absent is fs.ErrNotExist.
 func readClaudeMD(tree string) ([]byte, error) {
 	b, err := fsutil.ReadInTree(tree, claudeMDAdoptKey)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -269,7 +256,6 @@ func readClaudeMD(tree string) ([]byte, error) {
 	return b, err
 }
 
-// claudeMDBlockCurrent reports whether s carries the current marker block.
 func claudeMDBlockCurrent(s string) bool {
 	begin := strings.Index(s, skillMarkerBegin)
 	end := strings.Index(s, skillMarkerEnd)
@@ -289,7 +275,7 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 		if check {
 			return skillMissing, nil
 		}
-		// A record for a deleted file would bless whatever we write next.
+		// A record for a deleted file would bless whatever is written next.
 		if _, ok := adopted[claudeMDAdoptKey]; ok {
 			delete(adopted, claudeMDAdoptKey)
 			if err := saveAdoptedState(stateDir, adopted); err != nil {
@@ -306,12 +292,11 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 			if skills.Hash(b) == rec {
 				return skillAdopted, nil
 			}
-			// Drift after adoption: owner territory (or tampering) — never
-			// write without force; doctor surfaces the distinction.
+			// Drift after adoption is owner territory or tampering: never write without
+			// force; doctor tells them apart.
 			return skillSkipped, nil
 		}
-		// --force reclaims adopted territory, same semantics as forced skill
-		// files: restore the framework block and drop the now-stale record.
+		// --force reclaims adopted territory: restore the block and drop the record.
 		delete(adopted, claudeMDAdoptKey)
 		if err := saveAdoptedState(stateDir, adopted); err != nil {
 			return "", err
@@ -336,8 +321,8 @@ func ensureClaudeMDBlock(tree string, stateDir state.State, force, check bool) (
 	return skillRefreshed, writeClaudeMDWithBlock(tree, s, block)
 }
 
-// skillsUpToDate is doctor's predicate over a check-mode run. An adopted
-// customization is a deliberate owner decision, so it counts as OK.
+// skillsUpToDate counts an adopted customization as OK: a deliberate owner
+// decision.
 func skillsUpToDate(results []skillSyncResult, blockAction skillAction) bool {
 	for _, r := range results {
 		if r.Action != skillUnchanged && r.Action != skillAdopted {
@@ -347,13 +332,11 @@ func skillsUpToDate(results []skillSyncResult, blockAction skillAction) bool {
 	return blockAction == skillUnchanged || blockAction == skillAdopted
 }
 
-// adoptSkills records the on-disk hash of every owner-customized scaffold
-// (plus the whole-file CLAUDE.md) as an accepted baseline. Recording rather
-// than muting keeps the doctor check useful as tamper detection: the files
-// live inside the agent-writable tree, the baseline does not. Only genuine
-// customizations qualify — framework-current content needs no baseline, and
-// a stale-but-unmodified scaffold is refresh territory, not a customization
-// (adopting it would pin old framework content).
+// adoptSkills records the on-disk hash of every owner-customized scaffold (and
+// the whole CLAUDE.md) as an accepted baseline. Recording rather than muting
+// keeps doctor's tamper detection: the files are agent-writable, the baseline
+// is not. Framework-current content needs no baseline, and an unmodified stale
+// scaffold is refreshed, not adopted (that would pin old content).
 func adoptSkills(app *config.App, stateDir state.State) ([]skillSyncResult, error) {
 	st, err := loadSkillState(stateDir)
 	if err != nil {
@@ -388,24 +371,21 @@ func adoptSkills(app *config.App, stateDir state.State) ([]skillSyncResult, erro
 		}
 		onDiskHash := skills.Hash(onDisk)
 		if onDiskHash == skills.Hash(tgt.content) {
-			// Framework-current beats adopted; a stale record would pin an
-			// old baseline over content we own.
+			// Framework-current beats adopted; a stale record would pin an old baseline.
 			unrecord(tgt.relPath)
 			results = append(results, skillSyncResult{RelPath: tgt.relPath, Action: skillUnchanged})
 			continue
 		}
 		if rec, ok := st[tgt.relPath]; ok && rec == onDiskHash {
-			// Unmodified old scaffold: `lever init` refreshes it.
 			results = append(results, skillSyncResult{RelPath: tgt.relPath, Action: skillStale})
 			continue
 		}
 		record(tgt.relPath, onDiskHash)
 		results = append(results, skillSyncResult{RelPath: tgt.relPath, Action: skillAdopted})
 	}
-	// CLAUDE.md: whole-file adoption, with or without the lever block —
-	// adopting a CLAUDE.md that deliberately omits the block is the point.
-	// But a file carrying the current block needs no baseline (and a record
-	// would freeze future block refreshes).
+	// CLAUDE.md is adopted whole, block or not (omitting the block can be the
+	// point). A file with the current block needs no baseline, and a record would
+	// freeze block refreshes.
 	b, err := readClaudeMD(app.Tree)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -427,7 +407,6 @@ func adoptSkills(app *config.App, stateDir state.State) ([]skillSyncResult, erro
 	return results, nil
 }
 
-// skillFiles is remote.files as the skills render it.
 func skillFiles(app *config.App) skills.Files {
 	return skills.Files{On: app.FilesOn(), NoUploads: app.FilesOn() && !app.FilesUploadsOn(), NoShares: app.FilesOn() && !app.FilesSharesOn()}
 }

@@ -23,7 +23,6 @@ func TestResolveConfigPathExplicitWins(t *testing.T) {
 func TestResolveConfigPathCwdOnlyNoWalkUp(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 
-	// In the instance root → found.
 	t.Chdir(dir)
 	got, err := resolveConfigPath("")
 	if err != nil {
@@ -35,8 +34,7 @@ func TestResolveConfigPathCwdOnlyNoWalkUp(t *testing.T) {
 		t.Fatalf("resolved %q want %q", gotR, wantR)
 	}
 
-	// In a SUBDIR → must NOT walk up; no config in cwd → error (security: a
-	// planted parent config must never be picked up).
+	// In a subdirectory: no walk-up, so a planted parent config is never used.
 	sub := filepath.Join(dir, "nested", "deep")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
@@ -48,15 +46,12 @@ func TestResolveConfigPathCwdOnlyNoWalkUp(t *testing.T) {
 }
 
 func TestInstanceAppMachine(t *testing.T) {
-	// explicit flag wins, no config needed
 	if m, err := (instanceApp{err: os.ErrNotExist}).machine("lever-custom"); err != nil || m != "lever-custom" {
 		t.Fatalf("explicit machine: got %q err %v", m, err)
 	}
-	// no flag, no config → the error says so
 	_, err := (instanceApp{err: os.ErrNotExist}).machine("")
 	testutil.WantErrIs(t, err, os.ErrNotExist)
 	testutil.WantErrContaining(t, err, "no --machine given")
-	// no flag → derived from discovered config
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 	ia := loadInstanceApp()

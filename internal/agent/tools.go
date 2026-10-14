@@ -9,8 +9,7 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// ListTools fetches the broker's registered tool names over mTLS so the agent
-// can register each tool's /mcp/<tool>/ gateway with claude at boot.
+// ListTools fetches the broker's registered tool names over mTLS.
 func ListTools(ctx context.Context, brokerURL string, client *http.Client) ([]string, error) {
 	var out wire.ToolsResponse
 	if err := httpjson.Get(ctx, client, brokerURL+wire.PathTools, &out); err != nil {

@@ -22,21 +22,16 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// TestStopSuspendsManager verifies the happy path: with a reachable jail,
-// `lever stop` SUSPENDS the manager (best-effort, via scion) before powering
-// the machine off. It must be `scion suspend`, not `scion stop`: the
-// conversation is durable (the agent home is a persistent bind-mount, and
-// scion resume relaunches the harness with `claude --continue`, restoring
-// the session — live-proven 2026-07-04), so suspend keeps the record
-// resumable for the next `lever up`, while `scion stop` would REMOVE the
-// container and discard the session.
+// TestStopSuspendsManager: with a reachable jail, `lever stop` suspends the
+// manager before powering off. It must be `scion suspend`: resume relaunches
+// `claude --continue` from the persistent agent home, while `scion stop`
+// removes the container and discards the session.
 func TestStopSuspendsManager(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
 
-	// Seed the controller PAT so the suspend client's HubTokenSource resolves it:
-	// this guards that stop's scion client keeps its HubTokenSource wiring (a
-	// dropped source would authenticate anonymously against the dev-auth-off hub).
+	// The suspend client must keep its HubTokenSource: without it the call goes
+	// anonymously, and the hub refuses it.
 	if err := state.ForConfig(dir).SaveControllerPAT("pat-stop-suspend"); err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +50,7 @@ func TestStopSuspendsManager(t *testing.T) {
 	if !sb.stopped {
 		t.Fatal("stop must call Backend.Stop")
 	}
-	// A list (is the manager's phase stopped over a live harness? see
-	// healStoppedManager), then the suspend.
+	// A list (healStoppedManager's phase check), then the suspend.
 	if len(f.Calls) != 2 || f.Calls[0].Args[0] != "list" {
 		t.Fatalf("expected a list then the suspend, got %+v", f.Calls)
 	}
@@ -69,25 +63,21 @@ func TestStopSuspendsManager(t *testing.T) {
 	}
 }
 
-// twoWorkersYAML declares the workers the worker-suspend tests list: scratch
-// and idle.
 const twoWorkersYAML = scratchWorkerYAML + "  - name: idle\n    dir: workers/idle\n"
 
-// stopFleetJSON is a `scion list --format json` answer: the manager and
-// scratch running, idle suspended, and an agent the config does not declare.
+// stopFleetJSON: the manager and scratch running, idle suspended, and an
+// agent the config does not declare.
 const stopFleetJSON = `[{"slug":"demo","phase":"running"},{"slug":"scratch","phase":"running"},` +
 	`{"slug":"idle","phase":"suspended"},{"slug":"stray","phase":"running"}]`
 
-// TestStopSuspendsRunningWorkers: after the manager, `lever stop` suspends
-// every configured worker the hub shows running — a worker left running
-// across the power-off comes back in phase error and does not resume. A
-// suspended worker and an undeclared agent are left alone. Every failure of
-// the worker pass is a warning: the machine is powered off regardless.
+// TestStopSuspendsRunningWorkers: a worker left running across the power-off
+// comes back in phase error and does not resume, so stop suspends every
+// configured running worker. Suspended and undeclared agents are left alone.
+// Worker-pass failures only warn.
 func TestStopSuspendsRunningWorkers(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		scripts map[string]string
-		// wantArgv are the leading words of every scion call, in order.
+		name     string
+		scripts  map[string]string
 		wantArgv []string
 		wantOut  string
 		alsoOut  string // a second line the output must contain, when set
@@ -105,11 +95,9 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 			wantOut:  "warning: listing agents failed",
 		},
 		{
-			// The manager's suspend failing is a warning too: the worker pass
-			// still runs under its own budget, then the power-off.
+			// The manager's suspend failing only warns; the worker pass still runs.
 			name: "manager suspend fails",
-			// The extra list checks whether the record was already suspended
-			// (a refusal that is no failure); it reads running here.
+			// The extra list checks whether the record was already suspended.
 			scripts:  map[string]string{"scion suspend scratch": "ok", argvScionList: stopFleetJSON},
 			wantArgv: []string{"list", "suspend demo", "list", "list", "suspend scratch"},
 			wantOut:  "warning: scion suspend failed",
@@ -160,9 +148,8 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 	}
 }
 
-// TestStopDoesNotClearStagedState is the behavioral contrast with `destroy`:
-// stop must preserve the staged bootstrap ticket + manifest so a following
-// `lever up` can resume fast, without re-applying.
+// TestStopDoesNotClearStagedState: unlike destroy, stop keeps the staged
+// bootstrap ticket and manifest so `lever up` can resume without re-applying.
 func TestStopDoesNotClearStagedState(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	tree := filepath.Join(dir, "workspace")
@@ -179,8 +166,6 @@ func TestStopDoesNotClearStagedState(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	// Jail unreachable: skips the suspend branch entirely, isolating this test
-	// to the staged-state behavior.
 	sb := &stubBackend{resolveRunUserErr: errors.New("machine not up")}
 	root := stubRoot(sb)
 	var out bytes.Buffer
@@ -202,10 +187,8 @@ func TestStopDoesNotClearStagedState(t *testing.T) {
 	}
 }
 
-// TestStopSkipsSuspendWhenJailUnreachable covers the DECISION documented in
-// stop.go: if ResolveRunUser fails (jail unreachable — already halted, or
-// never came up), stop skips the best-effort suspend and still proceeds to
-// power off, rather than failing the command.
+// TestStopSkipsSuspendWhenJailUnreachable: an unreachable jail skips the
+// suspend and still powers off rather than failing.
 func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -229,11 +212,8 @@ func TestStopSkipsSuspendWhenJailUnreachable(t *testing.T) {
 	}
 }
 
-// TestStopAlsoStopsRemoteProxy proves `lever stop` tears the remote-access
-// proxy down alongside the broker: a live pid recorded in remote.pid must be
-// killed and the pid file removed (state.State.StopRemoteProxy mirrors
-// StopBroker exactly — see its doc; the mechanism itself is unit-tested in
-// internal/brokerctl, this only pins that stop.go actually calls it).
+// TestStopAlsoStopsRemoteProxy pins that stop calls StopRemoteProxy; the
+// mechanism is tested in internal/brokerctl.
 func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -263,8 +243,6 @@ func TestStopAlsoStopsRemoteProxy(t *testing.T) {
 	waitStopped(t, done, "the remote proxy")
 }
 
-// waitStopped fails unless the stand-in daemon whose done channel this is
-// exits soon.
 func waitStopped(t *testing.T, done <-chan struct{}, what string) {
 	t.Helper()
 	select {
@@ -274,9 +252,7 @@ func waitStopped(t *testing.T, done <-chan struct{}, what string) {
 	}
 }
 
-// TestStopWithExplicitMachineDoesNotStopBroker mirrors destroy's --machine
-// escape hatch: targeting an explicit machine must not touch the host broker
-// for the current instance.
+// An explicit --machine must not touch the current instance's host broker.
 func TestStopWithExplicitMachineDoesNotStopBroker(t *testing.T) {
 	sb := &stubBackend{}
 	root := stubRoot(sb)
@@ -308,9 +284,7 @@ func TestStopHostDaemonsIsQuietWhenNothingRuns(t *testing.T) {
 	}
 }
 
-// fakeSuspender is a workerSuspender: List answers agents; Suspend runs
-// suspend for the worker (nil = succeed at once). It tracks the peak number
-// of suspends in flight.
+// fakeSuspender tracks the peak number of suspends in flight.
 type fakeSuspender struct {
 	agents  []scion.Agent
 	suspend map[string]func(ctx context.Context) error
@@ -454,8 +428,8 @@ func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
 	}
 }
 
-// blockingProbe's harness probe waits for its context to end, like a hung
-// podman exec; it records that context's deadline.
+// blockingProbe's harness probe hangs until its context ends, like a hung
+// podman exec.
 type blockingProbe struct{ deadline time.Time }
 
 func (p *blockingProbe) HubToken(context.Context, string) (jail.HubTokenTimes, error) {
@@ -469,8 +443,6 @@ func (p *blockingProbe) HarnessAlive(ctx context.Context, _ string) (bool, error
 }
 func (p *blockingProbe) ReportSessionRunning(context.Context, string) error { return nil }
 
-// ctxRecordingRunner records, for every scion suspend, whether its context
-// was already done when the call ran.
 type ctxRecordingRunner struct {
 	*proc.FakeRunner
 	suspendCtxErr []error
@@ -519,9 +491,8 @@ func TestStopHealCannotEatTheSuspendBudget(t *testing.T) {
 	}
 }
 
-// expiredThenReportProbe models #84 and #156 at once: the token reads expired
-// until a reset-auth has run (seen on the scion runner), and the session
-// report records whether the reset came first.
+// expiredThenReportProbe: the token reads expired until a reset-auth has run,
+// and the session report records whether the reset came first.
 type expiredThenReportProbe struct {
 	f                *proc.FakeRunner
 	reportAfterReset []bool
@@ -545,10 +516,9 @@ func (p *expiredThenReportProbe) ReportSessionRunning(context.Context, string) e
 	return nil
 }
 
-// TestHealStoppedManagerResetsAnExpiredTokenFirst: with an expired token the
-// stop heal resets it (behind the role guard) before the session report, which
-// would otherwise go out on a token the hub refuses; a guard refusal resets
-// nothing.
+// TestHealStoppedManagerResetsAnExpiredTokenFirst: an expired token is reset
+// (behind the role guard) before the session report, which the hub would
+// otherwise refuse; a guard refusal resets nothing.
 func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
 	for _, refuse := range []bool{false, true} {
 		f := proc.NewFakeRunner()
@@ -582,10 +552,8 @@ func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
 	}
 }
 
-// TestStopKeepVM: --keep-vm suspends the manager and stops the jail's hub
-// and the host daemons as a plain stop does, but never powers the VM off
-// (lever#196). The suspend comes before the hub stop: a suspend needs the
-// hub.
+// TestStopKeepVM: --keep-vm suspends the manager and stops the hub and host
+// daemons but never powers off. The suspend comes first: it needs the hub.
 func TestStopKeepVM(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -651,9 +619,8 @@ type failingHub struct{}
 
 func (failingHub) ServerStop(context.Context) error { return errors.New("scion: no answer") }
 
-// With the jail not answering, --keep-vm suspended nothing: it runs nothing
-// there, never powers the VM off, and fails naming plain `lever stop` (a VM
-// that is up after all still runs its agents).
+// With the jail not answering, --keep-vm suspended nothing: it never powers
+// off and fails naming plain `lever stop` (an up VM still runs its agents).
 func TestStopKeepVMJailUnreachable(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -729,7 +696,6 @@ func TestStopAfterKeepVMHubDown(t *testing.T) {
 	}
 }
 
-// hubDownRunner answers every scion call as a hub that does not serve.
 type hubDownRunner struct{ *proc.FakeRunner }
 
 func (r hubDownRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
@@ -744,9 +710,8 @@ func (r hubDownRunner) RunIn(ctx context.Context, dir string, env map[string]str
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
-// A suspend that did not take under --keep-vm: the hub is still stopped and
-// the VM left up, but the command fails rather than claim the agents are
-// suspended (that container goes on running in the VM).
+// A failed suspend under --keep-vm fails the command: that container goes on
+// running in the VM.
 func TestStopKeepVMSuspendFailureFails(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	t.Chdir(dir)
@@ -773,8 +738,6 @@ func TestStopKeepVMSuspendFailureFails(t *testing.T) {
 	}
 }
 
-// suspendFailsRunner fails `scion suspend` and answers every other scion
-// call ok.
 type suspendFailsRunner struct{ *proc.FakeRunner }
 
 func (r suspendFailsRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {

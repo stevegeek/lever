@@ -33,8 +33,7 @@ func TestPollOncePropagatesInboxErrorWithoutWriting(t *testing.T) {
 func TestPollOnceSkipsEventsWithoutID(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "events.log")
-	// One event has no "id" (id guard at bridge.go:46) — it must be dropped, leaving
-	// only the identified event written.
+	// An event without an id must be dropped.
 	fi := &fakeInbox{batches: [][]scion.Event{
 		{{"type": "noise"}, {"id": "e1", "type": "input-needed"}},
 	}}
@@ -52,9 +51,8 @@ func TestPollOnceSkipsEventsWithoutID(t *testing.T) {
 	}
 }
 
-// TestPollOnceCreatesOwnerOnlyFiles: the events file carries message content
-// and is owner-only (0600), in an owner-only directory, like every other
-// state file.
+// TestPollOnceCreatesOwnerOnlyFiles: the events file carries message content,
+// so it and its directory are owner-only.
 func TestPollOnceCreatesOwnerOnlyFiles(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	file := filepath.Join(dir, "events.log")
@@ -111,8 +109,6 @@ func TestPollOnceAppendsOnlyNewEvents(t *testing.T) {
 	}
 }
 
-// TestPollOnceMarksWorkerText: each line the manager Monitors carries the
-// event message as marked worker text on one line.
 func TestPollOnceMarksWorkerText(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "events.log")
 	fi := &fakeInbox{batches: [][]scion.Event{

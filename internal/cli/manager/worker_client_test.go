@@ -24,7 +24,6 @@ func TestWorkerCall_postsAndDecodes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Inject a client + base URL (bypass mTLS bootstrap for the unit test).
 	c := httpCaller{client: srv.Client(), baseURL: srv.URL}
 	res, err := workerCall(context.Background(), c, "/worker/start",
 		map[string]string{"worker": "worker", "task": "go"})
@@ -36,10 +35,8 @@ func TestWorkerCall_postsAndDecodes(t *testing.T) {
 	}
 }
 
-// TestHTTPCaller_surfacesBody proves a non-200 broker response has its body
-// (the specific deny reason, since task #4a) included in the returned error,
-// mirroring agent/capability.go's Request. Before this, the caller discarded
-// the body entirely, so a returned deny reason never reached the caller.
+// TestHTTPCaller_surfacesBody: a non-200 response's body (the deny reason) is
+// in the returned error.
 func TestHTTPCaller_surfacesBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "policy: may not obtain/delegate (tool=db op=read)", http.StatusForbidden)
@@ -57,9 +54,8 @@ func TestHTTPCaller_surfacesBody(t *testing.T) {
 	}
 }
 
-// TestMTLSCaller_missingBootstrapOrIdentity pins the production caller's two
-// pre-dial failure modes: an unreadable bootstrap, and a bootstrap with no
-// identity beside it, each named in the error.
+// TestMTLSCaller_missingBootstrapOrIdentity: an unreadable bootstrap and a
+// missing identity are each named in the error.
 func TestMTLSCaller_missingBootstrapOrIdentity(t *testing.T) {
 	dir := t.TempDir()
 	c := mtlsCaller{bootstrapPath: filepath.Join(dir, "bootstrap.json"), idDir: filepath.Join(dir, "id")}
@@ -75,9 +71,8 @@ func TestMTLSCaller_missingBootstrapOrIdentity(t *testing.T) {
 	testutil.WantErrContaining(t, err, "agent identity not found in "+c.idDir)
 }
 
-// TestBootstrapPath_workerTicket: a worker's bootstrap is the ticket
-// $LEVER_BOOTSTRAP names (/run/lever/bootstrap.json), never the manager's
-// path, where a worker has no file (or a stale copy in its writable tree).
+// TestBootstrapPath_workerTicket: a worker reads the ticket $LEVER_BOOTSTRAP
+// names, never the manager's path (where its writable tree may hold a stale copy).
 func TestBootstrapPath_workerTicket(t *testing.T) {
 	t.Setenv(bootstrapEnv, "")
 	if got := bootstrapPath(); got != managerBootstrapPath {

@@ -1,14 +1,9 @@
 package broker
 
-// characterization_test.go pins exact, previously-unasserted behavior of the
-// broker security paths ahead of the Theme-A extractions
-// (docs/superpowers/specs/2026-08-01-refactoring-plan.md, Session 2 /
-// item A-TESTS). These are characterization tests: they assert what the code
-// does TODAY — exact audit deny lines (A1), the full /request deny-detail
-// string (A3), renew/enrol CSR proof-of-possession failures (A4), the
-// directive admin channel's method/body validation (A2), and the reverse-proxy
-// forwarding-header scrub (A7) — so a later refactor that silently changes an
-// audit line, deny detail, status code, or scrub property fails loudly.
+// Characterization tests for the broker security paths: exact audit deny
+// lines, the full /request deny detail, CSR proof-of-possession failures, the
+// directive admin channel's method/body validation and the reverse-proxy
+// forwarding-header scrub, so a refactor that changes any of them fails.
 
 import (
 	"bytes"
@@ -23,12 +18,9 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// --- A1: exact deny audit lines on the copy-pasted authn+revocation preambles ---
-
 // The directive consume/check handlers prefix their revoked-deny audit detail
 // with the op name ("consume: revoked" / "check: revoked") — unlike most jail
-// handlers, which audit a bare "revoked". Only the substring "revoked" was
-// asserted before; a prefix regression would have passed silently.
+// handlers, which audit a bare "revoked".
 func TestDirectiveConsumeCheckRevokedDenyAuditDetail(t *testing.T) {
 	cases := []struct {
 		path       string
@@ -69,13 +61,9 @@ func TestWorkerListRevokedManagerDenyAuditDetail(t *testing.T) {
 	}
 }
 
-// Pins the A1-sanctioned audit-line change on /worker/list: pre-refactor the
-// handler merged authn-failure and wrong-CN into one branch that always
-// audited "list: not the manager identity", dropping err.Error() on the
-// certless path. Consolidated onto requireManager, a certless probe now
-// audits caller="" with the op-prefixed RequireAgent error (consistent with
-// every other jail handler), while a wrong-CN caller keeps the exact
-// "list: not the manager identity" line.
+// On /worker/list a certless probe audits caller="" with the op-prefixed
+// RequireAgent error, like every other jail handler, while a wrong-CN caller
+// audits "list: not the manager identity".
 func TestWorkerListCertlessAndWrongCNDenyAuditDetail(t *testing.T) {
 	t.Run("certless", func(t *testing.T) {
 		cfg, audit := auditConfig(t)
@@ -140,12 +128,10 @@ func TestDirectiveCertlessDenyAuditsEmptyCallerAndError(t *testing.T) {
 	}
 }
 
-// --- A3: the full /request deny-detail suffix string ---
-
 // The policy deny detail must carry BOTH optional suffixes when a delegated,
 // op-coerced request is denied: " coerced_to=<op>" and " bound_to=<agent>",
 // inside the parenthesised suffix. Pinned byte-exact (HTTP body and audit
-// line) — no prior test asserted coerced_to=, bound_to=, or the closing paren.
+// line).
 func TestRequestPolicyDenyDetailFullStringWithCoercionAndDelegation(t *testing.T) {
 	cfg, audit := coarseConfig(t, false) // nobody holds the {utilities,*} grant
 	b := New(cfg)
@@ -191,11 +177,8 @@ func TestRequestUnregisteredOpDenyDetailFullString(t *testing.T) {
 	}
 }
 
-// --- A4: CSR proof-of-possession on /renew and garbage-PEM on both endpoints ---
-
-// tamperCSRSignature flips the last byte of the CSR's DER (inside the
-// signature value) and re-encodes, producing a parseable CSR whose
-// self-signature no longer verifies.
+// tamperCSRSignature yields a parseable CSR whose self-signature no longer
+// verifies.
 func tamperCSRSignature(t *testing.T, csrPEM []byte) []byte {
 	t.Helper()
 	blk, _ := pem.Decode(csrPEM)
@@ -208,10 +191,9 @@ func tamperCSRSignature(t *testing.T, csrPEM []byte) []byte {
 }
 
 // On /renew, CheckSignature is the ONLY proof-of-possession check
-// (SignPublicKey does not re-verify, unlike enrol's ca.SignCSR). A refactor
-// that dropped it would pass the rest of the suite — this test is the guard:
-// a signature-tampered CSR must 403 and audit the verbatim
-// "broker: CSR signature:" error prefix.
+// (SignPublicKey does not re-verify, unlike enrol's ca.SignCSR), and nothing
+// else in the suite would notice it gone: a signature-tampered CSR must 403
+// and audit the verbatim "broker: CSR signature:" error prefix.
 func TestRenewRejectsTamperedCSRSignature(t *testing.T) {
 	cfg, audit := auditConfig(t)
 	b := New(cfg)
@@ -265,11 +247,8 @@ func TestRenewAndEnrolRejectGarbageCSRPEM(t *testing.T) {
 	})
 }
 
-// --- A2: directive admin channel — wrong method, resolve happy path, malformed bodies ---
-
 // Every directive admin route must 405 a wrong-method request (when the
-// channel is enabled). No 405 test existed anywhere; a wrong method constant
-// in a future route wrapper would have passed the suite.
+// channel is enabled).
 func TestDirectiveAdminRoutesReject405OnWrongMethod(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
 	sock := serveDirectiveAdmin(t, b)
@@ -297,8 +276,7 @@ func TestDirectiveAdminRoutesReject405OnWrongMethod(t *testing.T) {
 	}
 }
 
-// /directive/resolve happy path: the only broker-side positive coverage of
-// the lone GET route — enrolled agent resolves to (cn, slug, generation).
+// /directive/resolve: an enrolled agent resolves to (cn, slug, generation).
 func TestDirectiveResolveHappyPath(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
 	b.directives.BumpGeneration("manager") // generation 0 -> 1 (as enrol would)
@@ -323,8 +301,7 @@ func TestDirectiveResolveHappyPath(t *testing.T) {
 }
 
 // send and selftest share a decode block (MaxBytesReader + two std-base64
-// decodes): malformed JSON and undecodable base64 must both 400. Exactly the
-// lines a future decodeSignedStatement extraction moves — unasserted before.
+// decodes): malformed JSON and undecodable base64 must both 400.
 func TestDirectiveSendAndSelftestRejectMalformedBodies(t *testing.T) {
 	b, _, _, _ := directiveTestBroker(t)
 	sock := serveDirectiveAdmin(t, b)
@@ -347,10 +324,8 @@ func TestDirectiveSendAndSelftestRejectMalformedBodies(t *testing.T) {
 	}
 }
 
-// --- A7: forwarding-header scrub in the two reverse-proxy Rewrites ---
-
-// spoofedHeaders is what a jail agent could set to smuggle identity/session
-// context upstream through the broker's reverse proxies.
+// setSpoofedForwardingHeaders sets what a jail agent could use to smuggle
+// identity or session context upstream through the broker's reverse proxies.
 func setSpoofedForwardingHeaders(h http.Header) {
 	h.Set("Cookie", "session=evil")
 	h.Set("X-Forwarded-For", "6.6.6.6")
@@ -375,9 +350,9 @@ func headerRecordingUpstream(t *testing.T, got *forwardedHeaders, respBody strin
 
 // assertForwardingHeadersScrubbed pins the scrub property: Cookie,
 // X-Forwarded-Host, and X-Forwarded-Proto never reach the upstream, and the
-// inbound X-Forwarded-For chain is dropped. Note rewriteUpstream re-sets the
-// immediate client IP as X-Forwarded-For, so the pinned property for XFF is
-// "spoofed chain absent", not "header absent".
+// inbound X-Forwarded-For chain is dropped. rewriteUpstream re-sets the
+// immediate client IP as X-Forwarded-For, so for XFF the property is "spoofed
+// chain absent", not "header absent".
 func assertForwardingHeadersScrubbed(t *testing.T, got forwardedHeaders) {
 	t.Helper()
 	if got.cookie != "" {

@@ -21,8 +21,6 @@ func hostPathsInstance(t *testing.T, body string) (string, string) {
 	return p, root
 }
 
-// hostPathsTree writes ws/tools/bin, ws/secret and ws/workers/w/bin under
-// root.
 func hostPathsTree(t *testing.T, root string) {
 	t.Helper()
 	mustWrite(t, filepath.Join(root, "ws", "tools", "bin"))
@@ -30,10 +28,9 @@ func hostPathsTree(t *testing.T, root string) {
 	mustWrite(t, filepath.Join(root, "ws", "workers", "w", "bin"))
 }
 
-// shortTemp is a temporary directory under /tmp, so that a Unix socket path
-// in it stays within the platform's limit however long TMPDIR is (macOS
-// /var/folders/...): the tree check, not the length check, is what a test
-// of a socket path reaches.
+// shortTemp is under /tmp so a Unix socket path in it stays within the
+// platform's limit however long TMPDIR is: the test must reach the tree
+// check, not the length check.
 func shortTemp(t *testing.T) string {
 	t.Helper()
 	d, err := os.MkdirTemp("/tmp", "lv")
@@ -50,7 +47,6 @@ func whisperCmd(extra string) string {
 	return "[/opt/lever/lever-tool-whisper, -tree, ROOT/ws, -whisper-port, \"9100\", -models, /m, -server, /s, -dictate-socket, /run/lv/d.sock" + extra + "]"
 }
 
-// supervisedTool is a broker block with one supervised tool running cmd.
 func supervisedTool(cmd string) string {
 	return "broker:\n  llm_auth: subscription\n  tools:\n    - name: t\n      backend: 127.0.0.1:3201\n      command: " + cmd + "\n"
 }
@@ -276,7 +272,7 @@ func TestToolHostPaths(t *testing.T) {
 	check("command path", paths("/opt/x", "--key-file=/k"), []got{{"broker.tools[t] command", "/opt/x", hostProgram}})
 	// An interpreter's first argument is the script it runs, unless a flag.
 	check("interpreter script", paths("ruby", "/t/x.rb", "/t/y"), []got{{"broker.tools[t] script", "/t/x.rb", hostProgram}})
-	// Leading flags are skipped to find the script (LOW-3).
+	// Leading flags are skipped to find the script.
 	check("interpreter flag first", paths("python3", "-u", "/t/x.py"), []got{{"broker.tools[t] script", "/t/x.py", hostProgram}})
 	check("flag with a value", paths("python3", "-W", "ignore", "/t/x.py", "/t/data"), []got{
 		{"broker.tools[t] -W value", "ignore", hostProgram},
@@ -364,7 +360,7 @@ func TestHostPathUnknownArgumentsNotChecked(t *testing.T) {
 	}
 }
 
-// LOW-3: interpreter commands the old parser skipped are refused in the tree.
+// Interpreter commands with leading flags are refused in the tree.
 func TestHostPathInterpreterVariantsRefused(t *testing.T) {
 	for _, cmd := range []string{
 		"[bash, ws/tools/bin, -c, x]",
@@ -414,8 +410,8 @@ func TestHostPathUnreadableRefused(t *testing.T) {
 	testutil.WantErrContaining(t, err, "manager.credential_file", "permission denied", locked, "cannot tell whether it lies in the mounted tree")
 }
 
-// LOW-3: ".." in a tool path is refused, because the kernel resolves it
-// after links (ws/link/../tools/bin reads as under tools).
+// ".." in a tool path is refused, because the kernel resolves it after
+// links (ws/link/../tools/bin reads as under tools).
 func TestHostPathDotDotRefused(t *testing.T) {
 	p, root := hostPathsInstance(t, "manager:\n  read_only: [tools]\n"+supervisedTool("[ws/workers/../tools/bin]"))
 	_, err := LoadNoHostChecks(p)

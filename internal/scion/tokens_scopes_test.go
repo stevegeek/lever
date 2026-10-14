@@ -22,8 +22,8 @@ func TestHelpListsScope(t *testing.T) {
 	}
 }
 
-// KnowsUATScope reads the scope list from exactly `scion hub token create
-// --help` (it needs no hub, so it answers on `lever up` after a pin change).
+// KnowsUATScope reads the scope list from scion hub token create --help, which
+// needs no hub.
 func TestKnowsUATScopeArgv(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion hub token create --help", proc.Result{Stdout: "Scopes:\n  agent:attach   Attach\n  agent:lifecycle   Start, stop\n"})

@@ -15,7 +15,8 @@ func TestWorkerSpecs(t *testing.T) {
 	app := &config.App{
 		Tree:    "/host/tree",
 		Manager: config.Manager{Image: "mgr:img", Model: "mgr-model", Resources: config.Resources{Memory: "4GiB", CPU: "2"}},
-		// Explicit subscription: api-key is the default post-7d86f73; this makes the helper worker assert APIKey:false.
+		// Explicit subscription (api-key is the default), so the worker asserts
+		// APIKey:false.
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},
@@ -32,13 +33,13 @@ func TestWorkerSpecs(t *testing.T) {
 	if w.Name != "worker" || w.WorkspaceSubdir != "workers/worker" ||
 		w.HostWorkspace != filepath.Join("/host/tree", "workers/worker") ||
 		w.TicketDir != "/run/user/501/lever/tickets/worker" ||
-		w.Image != "mgr:img" /* inherits manager */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
+		w.Image != "lever.local/mgr:img" /* inherits manager, under the name scion never rewrites */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
 		t.Fatalf("bad worker spec: %+v", w)
 	}
 	if w.Recyclable || !specs[1].Recyclable {
 		t.Fatalf("Recyclable = %v/%v, want workers[].recyclable (false/true)", w.Recyclable, specs[1].Recyclable)
 	}
-	if specs[1].Image != "helper:img" || specs[1].Model != "helper-model" || specs[1].APIKey {
+	if specs[1].Image != "lever.local/helper:img" || specs[1].Model != "helper-model" || specs[1].APIKey {
 		t.Fatalf("bad helper spec: %+v", specs[1])
 	}
 	// instructions_file is the worker's OWN or nothing — never inherited from
@@ -81,9 +82,8 @@ func TestWorkerBrokerURL(t *testing.T) {
 	}
 }
 
-// The production worker gate holds for ten seconds (lever#31); dispatchConfig
-// itself needs a live backend to run, so the value is pinned here and the
-// wiring is checked live (a dispatch now takes about ten seconds longer).
+// dispatchConfig needs a live backend, so the worker gate's value is pinned
+// here and its wiring checked live.
 func TestWorkerLiveSettleIsTenSeconds(t *testing.T) {
 	if workerLiveSettle < 10*time.Second {
 		t.Fatalf("workerLiveSettle = %s, want >= 10s", workerLiveSettle)

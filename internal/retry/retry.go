@@ -1,5 +1,5 @@
-// Package retry holds the one bounded poll loop the backends, the scion client
-// and the bridge previously each hand-rolled.
+// Package retry holds the bounded poll loop shared by the backends, the scion
+// client and the bridge.
 package retry
 
 import (
@@ -13,11 +13,10 @@ import (
 var ErrExhausted = errors.New("retry: attempts exhausted")
 
 // Until calls fn up to attempts times (unbounded when attempts <= 0) and
-// returns nil as soon as fn reports done. A non-nil error from fn is returned
-// immediately, unwrapped. Between attempts Until sleeps interval, or returns
-// ctx.Err() when ctx is cancelled first; ctx is not consulted before the
-// first attempt, so fn always runs at least once. After the last attempt Until
-// returns ErrExhausted without sleeping.
+// returns nil once fn reports done. An error from fn is returned immediately,
+// unwrapped. Between attempts it sleeps interval or returns ctx.Err(); fn
+// always runs at least once, and ErrExhausted is returned without a final
+// sleep.
 func Until(ctx context.Context, attempts int, interval time.Duration, fn func() (done bool, err error)) error {
 	for i := 0; attempts <= 0 || i < attempts; i++ {
 		done, err := fn()

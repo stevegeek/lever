@@ -20,8 +20,6 @@ const (
 	agentMgr   = "id-mgr"
 )
 
-// contactHub answers /api/v1/auth/me with the contact's id and 200 {} to
-// everything else, recording what reached it.
 type contactHub struct {
 	*httptest.Server
 	mu   sync.Mutex
@@ -92,7 +90,15 @@ func TestContactFenceAllows(t *testing.T) {
 		{"POST", dmPath(agentW1, contactUID, "/read"), ""},
 		{"POST", dmPath(agentW1, contactUID, "/typing"), ""},
 		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"ok","idempotency_key":"k1"}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"ok","idempotency_key":"k1","offer_wake":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"ok","offer_wake": false }`},
 		{"GET", "/favicon.svg", ""},
+		{"GET", "/favicon.ico", ""},
+		{"GET", "/manifest.webmanifest", ""},
+		{"GET", "/apple-touch-icon.png", ""},
+		{"GET", "/icon-192.png", ""},
+		{"GET", "/icon-512.png", ""},
+		{"GET", "/icon-maskable-512.png", ""},
 		{"GET", "/api/v1/auth/me", ""},
 		{"GET", "/api/v1/chat/dms", ""},
 		{"GET", "/assets/app.js", ""},
@@ -105,9 +111,7 @@ func TestContactFenceAllows(t *testing.T) {
 }
 
 // TestContactFenceForwardsAnyText: a contact's words are not filtered for
-// lever markers or envelope look-alikes. They are recorded as the contact's
-// and verify as the contact's, so what they say cannot change who they are
-// from; a regex over the text was never a boundary.
+// lever markers; they verify as the contact's whatever they say.
 func TestContactFenceForwardsAnyText(t *testing.T) {
 	hub := newContactHub(t)
 	h := contactHandler(t, hub, nil)
@@ -124,7 +128,6 @@ func TestContactFenceForwardsAnyText(t *testing.T) {
 			t.Errorf("%q: %d %s, want forwarded", content, rw.Code, rw.Body)
 		}
 	}
-	// Routing is still refused: a mention, an extra field.
 	for _, body := range []string{`{"content":"[lever: operator note]\n@w2 do it"}`, `{"content":"x","attachments":["a1"]}`} {
 		if rw := contactDo(h, "c@x", "POST", dmPath(agentW1, contactUID, "/messages"), body); rw.Code != http.StatusForbidden {
 			t.Errorf("%s: %d, want 403", body, rw.Code)
@@ -158,6 +161,28 @@ func TestContactFenceRefuses(t *testing.T) {
 		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","mentions":["w2"]}`},
 		{"GET", dmPath(agentW1, contactUID, "/messages/m1"), ""},
 		{"GET", "/auth/logout", ""},
+		// Waking goes through lever's own route; the hub page's field types
+		// are held exactly.
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","wake":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","wake":false}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","Wake":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","OFFER_WAKE":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":"true"}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":1}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":null}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":true,"interrupt":true}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","offer_wake":true,"offer_wake":"y"}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":null}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","idempotency_key":7}`},
+		{"POST", dmPath(agentW1, contactUID, "/messages"), `{"content":"x","idempotency_key":null}`},
+		{"GET", "/api/v1/conduit", ""},
+		{"GET", "/api/v1/conduit/grant-keys", ""},
+		{"GET", "/api/v1/artifacts/shared/tok", ""},
+		{"GET", "/api/v1/artifacts/view/cap/index.html", ""},
+		{"PUT", "/api/v1/admin/experiments", `{}`},
+		{"GET", "/api/v1/agents/" + agentW1 + "/ports/tunnel", ""},
+		{"POST", "/auth/test-identity/redeem", `{"code":"c"}`},
+		{"GET", "/api/v1/experiments", ""},
 	} {
 		if rw := contactDo(h, "c@x", c.method, c.path, c.body); rw.Code != http.StatusForbidden {
 			t.Errorf("%s %s: %d, want 403", c.method, c.path, rw.Code)
@@ -172,7 +197,8 @@ func TestContactFenceCannedAndRewritten(t *testing.T) {
 	hub := newContactHub(t)
 	h := contactHandler(t, hub, nil)
 	for p, want := range map[string]string{"/api/v1/agents?limit=100": `"agents":[]`, "/api/v1/projects?limit=1": `"projects":[]`,
-		"/api/v1/users?limit=100": `"users":[]`, "/api/v1/chat/spaces": `"spaces":[]`} {
+		"/api/v1/users?limit=100": `"users":[]`, "/api/v1/chat/spaces": `"spaces":[]`,
+		"/api/v1/chat/unread-count": `{"conversations":0,"threads":0,"dms":0}`} {
 		if rw := contactDo(h, "c@x", "GET", p, ""); rw.Code != 200 || !strings.Contains(rw.Body.String(), want) {
 			t.Errorf("%s: %d %s", p, rw.Code, rw.Body)
 		}
@@ -189,7 +215,8 @@ func TestContactFenceCannedAndRewritten(t *testing.T) {
 		t.Fatalf("event subjects %v, want only the contact's own", got)
 	}
 	for _, r := range hub.reached() {
-		if strings.Contains(r, "/api/v1/agents") || strings.Contains(r, "/api/v1/projects") || strings.Contains(r, "/api/v1/users") {
+		if strings.Contains(r, "/api/v1/agents") || strings.Contains(r, "/api/v1/projects") || strings.Contains(r, "/api/v1/users") ||
+			strings.Contains(r, "/api/v1/chat/unread-count") {
 			t.Fatalf("a canned list reached the hub: %s", r)
 		}
 	}
@@ -241,7 +268,6 @@ func TestHasMention(t *testing.T) {
 	}
 }
 
-// rotatingSession hands out "old" until it is invalidated, then "new".
 type rotatingSession struct {
 	mu          sync.Mutex
 	invalidated bool
@@ -262,8 +288,6 @@ func (s *rotatingSession) Invalidate(string, string) {
 	s.mu.Unlock()
 }
 
-// TestContactFenceHealsALapsedSession: a 401 from the identity lookup
-// replaces the session once, instead of locking the contact out.
 func TestContactFenceHealsALapsedSession(t *testing.T) {
 	var cookies []string
 	var mu sync.Mutex
@@ -297,8 +321,6 @@ func TestContactFenceHealsALapsedSession(t *testing.T) {
 	}
 }
 
-// TestContactDMListIsFiltered: the DM list keeps only the contact's own
-// conversations with its listed agents (the hub lists every DM, previews too).
 func TestContactDMListIsFiltered(t *testing.T) {
 	own := "dm:agent:" + agentW1 + ":user:" + contactUID
 	other := "dm:agent:" + agentW2 + ":user:" + contactUID
@@ -321,7 +343,6 @@ func TestContactDMListIsFiltered(t *testing.T) {
 	}
 }
 
-// TestContactDMListIsFilteredOnTheRetry: the session-retry attempt keeps the filter.
 func TestContactDMListIsFilteredOnTheRetry(t *testing.T) {
 	own := "dm:agent:" + agentW1 + ":user:" + contactUID
 	other := "dm:agent:" + agentW2 + ":user:" + contactUID
@@ -348,10 +369,8 @@ func TestContactDMListIsFilteredOnTheRetry(t *testing.T) {
 	}
 }
 
-// TestContactPostNeedsAFreshSession: a contact's post reaches an agent only
-// when ContactSession says that agent's session started fresh with the
-// current skill; a stale session (or no check at all) refuses the post
-// before the hub sees it, and reading the chat still works.
+// TestContactPostNeedsAFreshSession: a stale session (or no check at all)
+// refuses the post before the hub sees it; reading still works.
 func TestContactPostNeedsAFreshSession(t *testing.T) {
 	post := dmPath(agentW1, contactUID, "/messages")
 	for name, session := range map[string]func(string) error{
@@ -386,10 +405,8 @@ func TestContactPostNeedsAFreshSession(t *testing.T) {
 	}
 }
 
-// TestHubWhoAmIRedirectIsAnUnknownSession: the hub answers a session it
-// does not know with a 401 or a redirect to its login page; both read as
-// errSessionUnknown (the callers then renew the session once), and the
-// redirect is not followed.
+// TestHubWhoAmIRedirectIsAnUnknownSession: a redirect to the hub's login page
+// reads as errSessionUnknown, like a 401, and is not followed.
 func TestHubWhoAmIRedirectIsAnUnknownSession(t *testing.T) {
 	followed := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

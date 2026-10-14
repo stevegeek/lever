@@ -18,14 +18,12 @@ import (
 )
 
 // guardError is a ReadOnlyGuard refusal: fixed text lever composes (never
-// container or guest output, which the agent can shape), and a reason
-// class the supervisor logs once per change.
+// container or guest output, which the agent can shape) and a reason class
+// the supervisor logs once per change.
 type guardError struct{ class, msg string }
 
 func (e *guardError) Error() string { return e.msg }
 
-// guardClass is the class of a guard refusal for the supervisor's
-// once-per-reason log: a guardError's own, else one class for all.
 func guardClass(err error) string {
 	var g *guardError
 	if errors.As(err, &g) {
@@ -34,20 +32,19 @@ func guardClass(err error) string {
 	return "other"
 }
 
-// readOnlyGuard is the production ReadOnlyGuard. Through the jail runner it
-// reads the manager container's configured mounts (podman inspect) and
-// requires the whole manager.read_only plan (apply.ManagerTreeMountGaps:
-// entries read-only, pins in place — a missing pin lets the agent move an
-// entry away). Then it checks the RUNNING container from the guest side
-// (jail.ContainerLiveMounts: the kernel's mountinfo and device+inode, no
-// program run inside the container, which the agent controls): every
-// planned directory must be a mount point, the entries read-only, each
-// covering the directory the host has there now. Anything it cannot read
-// — no container yet, a stopped one — is a refusal, so the tool waits.
+// readOnlyGuard is the production ReadOnlyGuard. It reads the manager
+// container's configured mounts (podman inspect) and requires the whole
+// manager.read_only plan (entries read-only, pins in place: a missing pin
+// lets the agent move an entry away). Then it checks the running container
+// from the guest side (mountinfo and device+inode, no program run inside
+// the agent-controlled container): every planned directory a mount point,
+// the entries read-only, each covering the directory the host has there
+// now. Anything it cannot read, such as no or a stopped container, is a
+// refusal, so the tool waits.
 func readOnlyGuard(app *config.App, jr proc.Runner, jailMount string) ReadOnlyGuard {
 	ref := jail.ContainerName(path.Base(jailMount), app.Name)
-	// read_only's own plan: a shared folder does not change what protects
-	// a tool under a read_only entry, so adding one does not hold it back.
+	// read_only's own plan: a shared folder does not change what protects a
+	// tool under a read_only entry.
 	want := app.ReadOnlyEntryMounts()
 	return func(ctx context.Context, _ []string) error {
 		return checkManagerReadOnly(ctx, app.Name, app.Tree, jailMount, want,
@@ -58,9 +55,9 @@ func readOnlyGuard(app *config.App, jr proc.Runner, jailMount string) ReadOnlyGu
 	}
 }
 
-// checkManagerReadOnly is readOnlyGuard's decision, with the two reads
-// injected for tests. tree is the host tree: a planned directory missing
-// there is named as such, not as an unreadable mount.
+// checkManagerReadOnly has the two reads injected for tests. A planned
+// directory missing from the host tree is named as such, not as an
+// unreadable mount.
 func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, want []config.TreeMount,
 	mounts func(context.Context) ([]jail.Mount, error),
 	live func(context.Context, []jail.LiveMount) ([]jail.LiveMountProblem, error)) error {
@@ -98,15 +95,13 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 	return nil
 }
 
-// sharedGuard is the broker's check before any worker starts or resumes
-// while shared folders are configured (broker.DispatchConfig.SharedGuard):
-// the manager container must hold its whole tree plan (ManagerTreeMounts:
-// the pins over every shared folder and its ancestors, and the worker
-// dirs), read the way the tool guard reads it. With no manager container,
-// or a stopped one whose configured mounts hold the plan, it passes: the
-// live half needs a running process, and a manager that is down cannot
-// swap anything. A mount table it cannot read is ErrSharedCheckUnavailable.
-// nil when no shared folder is configured.
+// sharedGuard is the check before any worker starts or resumes while shared
+// folders are configured: the manager container must hold its whole tree
+// plan (the pins over every shared folder and its ancestors, and the worker
+// dirs), read as the tool guard reads it. With no manager container, or a
+// stopped one whose configured mounts hold the plan, it passes: a manager
+// that is down cannot swap anything. An unreadable mount table is
+// ErrSharedCheckUnavailable. nil when no shared folder is configured.
 func sharedGuard(app *config.App, jr proc.Runner, jailMount string) func(context.Context) error {
 	if len(app.SharedFolders) == 0 {
 		return nil
@@ -123,9 +118,8 @@ func sharedGuard(app *config.App, jr proc.Runner, jailMount string) func(context
 	}
 }
 
-// sharedGuardDecision maps a tree-plan check to the shared guard's answer:
-// a manager that is down passes; an unreadable mount table is
-// ErrSharedCheckUnavailable (retry); every other refusal stands.
+// sharedGuardDecision: a manager that is down passes; an unreadable mount
+// table is ErrSharedCheckUnavailable (retry); every other refusal stands.
 func sharedGuardDecision(err error) error {
 	var g *guardError
 	if !errors.As(err, &g) {

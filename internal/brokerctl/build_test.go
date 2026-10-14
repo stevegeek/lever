@@ -86,7 +86,6 @@ func TestBuildBrokerNoLLMToolForSubscription(t *testing.T) {
 	}
 }
 
-// writeKeyFile writes content to a temp file with the given perm and returns the path.
 func writeKeyFile(t *testing.T, content string, perm os.FileMode) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -94,7 +93,7 @@ func writeKeyFile(t *testing.T, content string, perm os.FileMode) string {
 	if err := os.WriteFile(p, []byte(content), perm); err != nil {
 		t.Fatal(err)
 	}
-	// Explicitly set the mode (WriteFile may not honour it reliably with umask).
+	// umask may have narrowed WriteFile's mode.
 	if err := os.Chmod(p, perm); err != nil {
 		t.Fatal(err)
 	}

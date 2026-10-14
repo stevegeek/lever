@@ -21,8 +21,8 @@ import (
 // directory tiny-kokoro/, 10 files).
 const testSpeechArchive = "../../voice/testdata/tiny-kokoro.tar.bz2"
 
-// pinTestSpeech swaps lever's speech model table for one model named
-// kokoro-en-v0_19 pinned to testSpeechArchive, for the test's length.
+// pinTestSpeech swaps in one speech model, kokoro-en-v0_19 pinned to
+// testSpeechArchive, for the test's length.
 func pinTestSpeech(t *testing.T) voice.SpeechModel {
 	t.Helper()
 	b, err := os.ReadFile(testSpeechArchive)
@@ -41,8 +41,6 @@ func pinTestSpeech(t *testing.T) voice.SpeechModel {
 	return m
 }
 
-// archiveFetch is a fetch of a speech model from a loopback server that
-// serves testSpeechArchive.
 func archiveFetch(t *testing.T) func(context.Context, voice.SpeechModel, string) (string, error) {
 	t.Helper()
 	b, err := os.ReadFile(testSpeechArchive)
@@ -179,7 +177,6 @@ func TestRunSpeechFetch(t *testing.T) {
 	if err := runSpeechFetch(context.Background(), app, st, "tacotron", fetch, &out); err == nil || !strings.Contains(err.Error(), "not in lever's pinned speech model table") {
 		t.Fatalf("unknown model: %v", err)
 	}
-	// No tool: the state directory.
 	app.Broker.Tools = app.Broker.Tools[:1]
 	out.Reset()
 	if err := runSpeechFetch(context.Background(), app, st, "", fetch, &out); err != nil {

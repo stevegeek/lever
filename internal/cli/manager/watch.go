@@ -13,10 +13,8 @@ import (
 
 var errMissingEventsFile = errors.New("watch: --events-file is required")
 
-// brokerInboxer adapts the manager's broker msg call to bridge.Inboxer,
-// replacing the old in-container scion client. project="" is the manager's
-// own/operator inbox (bridge always polls with unread=false, project="" — see
-// bridge.go PollOnce — the full inbox, deduped by id there).
+// brokerInboxer adapts the broker msg call to bridge.Inboxer. project="" is the
+// manager's own inbox; bridge polls the full inbox and dedupes by id.
 type brokerInboxer struct{ c brokerCaller }
 
 func newBrokerInboxer(c brokerCaller) brokerInboxer { return brokerInboxer{c: c} }
@@ -29,7 +27,6 @@ func (b brokerInboxer) Inbox(ctx context.Context, unread bool, project string) (
 	return decodeMsgEvents(raw)
 }
 
-// compile-time proof brokerInboxer satisfies bridge.Inboxer.
 var _ bridge.Inboxer = brokerInboxer{}
 
 func newWatchCmd(c brokerCaller) *cobra.Command {

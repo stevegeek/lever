@@ -23,9 +23,11 @@ command.
 | Network | Needed for the first boot (see [what the first boot downloads](#what-the-first-boot-downloads)) and for the agents' model calls | |
 
 The host keeps the jail VM's memory for as long as the VM runs, so leave the host itself 2-4 GB
-beside it. With a 2-core host, give lever a prebuilt scion binary (`scion.binary`): building scion
-from source takes about 4 CPU-minutes, so 2-3 minutes on 2 cores the first time and after every
-scion pin change.
+beside it. Building scion from source takes about 4 CPU-minutes, so 2-3 minutes on 2 cores the
+first time and after every scion pin change. A release build of lever downloads its release's
+prebuilt scion for the pin the examples use instead
+([prebuilt scion](/reference/config/#prebuilt-scion)). For another pin on a 2-core host, give lever
+a prebuilt scion binary (`scion.binary`).
 
 ## Where the memory goes
 
@@ -55,7 +57,9 @@ Their bursts are builds and tests; scion limits each container to 2 CPUs unless 
 - **The agent image** is the largest item: about 5 GB for an image built on scion's Claude harness
   image. It is stored three times: in the host's Docker store, in the jail's podman store, and once
   more when podman first prepares it for the rootless user. Budget about 15 GB for it, and more
-  while an old and a new image coexist after a rebuild.
+  while an old and a new image coexist after a rebuild. The opt-in slim image
+  (`make lever-image-slim`, see [building the image](/getting-started/install/)) should come to about
+  1 GB, about 3 GB for its three copies, and its load and preparation shrink with it.
 - **The Lima VM disk** is sparse and grows up to `disk` (default `24GiB`). The Ubuntu cloud image
   Lima caches on the host is about 0.9 GB.
 - **On the host:** the Go module cache for scion (0.5-1 GB) unless you use `scion.binary`, and the
@@ -71,7 +75,8 @@ its start as it grows. An SSD is the single biggest help on an older machine.
 - **In the guest, with apt:** `podman`, `uidmap`, `passt`, `fuse-overlayfs`, `slirp4netns`,
   `dbus-user-session`, `iptables`, `curl` and `netcat-openbsd` when any is missing, and the
   guest release's HWE kernel (`linux-generic-hwe-26.04`) with `guest_kernel: hwe`.
-- **On the host:** the Go modules of the pinned scion (skipped with `scion.binary`); with
+- **On the host:** the Go modules of the pinned scion (skipped with `scion.binary`), or, for the
+  scion pin of a lever release, that release's prebuilt scion (about 40 MB); with
   `remote.enabled` and a `version:` or `source:` scion, the npm packages of scion's web UI.
 - **The agent image** is never pulled from inside the jail: `make lever-image` builds it on the host
   (that build downloads its base images and Claude Code), and `lever apply` copies it in. A host
@@ -111,7 +116,7 @@ guest_profile: small        # trim the guest's services, add zram swap
 scion:
   binary: /path/to/scion    # a prebuilt linux scion for the guest's arch: no 4 CPU-minute build
 manager:
-  image: scionlocal/lever-claude:arm64
+  image: lever.local/lever-claude:arm64
   resources: { memory: 1536MiB, cpu: "1.5" }
 workers:
   - name: worker
@@ -142,6 +147,10 @@ What each part does:
   past the cap with a message the manager can act on (suspend or stop a worker first), instead of letting
   the VM run out of memory.
 - **`scion.binary`** skips building scion on the host.
+- **The slim image** (`image: lever.local/lever-claude-slim:arm64`, built with
+  `make lever-image-slim`) should save about 12 GB of disk across its three copies, and minutes of
+  image load on a slow disk. It carries no browser, cloud CLIs or language toolchains; see
+  [the slim image](/getting-started/install/).
 
 The guest budget for this profile is about 2-2.5 GB: the guest and hub about 0.5 GB, the manager
 and one worker 0.4-0.5 GB each, their work and the page cache the rest. That leaves room in 4 GiB

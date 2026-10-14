@@ -94,9 +94,7 @@ func TestResolveListSubject(t *testing.T) {
 	}
 }
 
-// fakeMsgRuntime embeds the package's existing fakeRuntime (via the WorkerRuntime
-// interface field) for lifecycle methods it never exercises, and overrides
-// Message/Inbox to capture what the msg handlers pass through.
+// fakeMsgRuntime captures what the msg handlers pass to Message and Inbox.
 type fakeMsgRuntime struct {
 	WorkerRuntime
 	sent         []scion.MsgOpts
@@ -159,10 +157,8 @@ func TestMsgSend_workerToWorkerDisabled(t *testing.T) {
 	}
 }
 
-// TestMsgSendDenyLeaksReason proves the /msg/send policy-resolution deny
-// (resolveMsgTarget) returns its specific reason as the HTTP body — not a
-// bare "forbidden" — so agents can self-correct instead of reverse-engineering
-// routable addresses by trial and error. Contrast with
+// TestMsgSendDenyLeaksReason: a resolveMsgTarget deny returns its reason as
+// the HTTP body so agents can self-correct. Contrast with
 // TestMsgRuntimeError_genericBody, whose scion-runtime branch MUST stay opaque.
 func TestMsgSendDenyLeaksReason(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(t, true)
@@ -393,8 +389,7 @@ func TestMsgSend_unknownCaller(t *testing.T) {
 func TestMsgList_managerReadsWorker(t *testing.T) {
 	b, rt, _ := newMsgTestBroker(t, true)
 	withAgentIDs(b)
-	// The event must be ATTRIBUTED to scratch: /msg/list now returns only the
-	// events the hub attributes to the subject agent.
+	// /msg/list returns only events the hub attributes to the subject agent.
 	rt.events = []scion.Event{{"id": "1", "type": "test", "agentId": "id-scratch"}}
 	rec := callWorker(t, b, "/msg/list", `{"worker":"scratch"}`, "manager")
 	if rec.Code != 200 {
@@ -536,7 +531,6 @@ func TestMsgSend_deniesRevokedCaller(t *testing.T) {
 	}
 }
 
-// assertRevokedManagerDenied revokes the manager and pins that path answers 403.
 func assertRevokedManagerDenied(t *testing.T, path, body string) {
 	t.Helper()
 	b, _, _ := newMsgTestBroker(t, true)
@@ -593,8 +587,6 @@ func withAgentIDs(b *Broker) {
 	}
 }
 
-// assertFleetCut lists the fleet feed as cn with body and pins that exactly
-// one event — wantID — survives the cut.
 func assertFleetCut(t *testing.T, body, cn, wantID, why string) {
 	t.Helper()
 	b, rt, _ := newMsgTestBroker(t, true)
@@ -614,7 +606,7 @@ func TestMsgList_managerSeesOnlyItsOwnEventsByDefault(t *testing.T) {
 	assertFleetCut(t, `{"all":true}`, "manager", "e1", "the manager's default inbox is its own")
 }
 
-// The documented manager-only selector must now actually select.
+// The documented manager-only selector selects.
 func TestMsgList_managerWorkerSelectorSelects(t *testing.T) {
 	assertFleetCut(t, `{"all":true,"worker":"worker"}`, "manager", "e3", "--worker must select that worker's events")
 }
@@ -772,9 +764,8 @@ func (hangingListRuntime) List(ctx context.Context, _ string) ([]scion.Agent, er
 
 // The phase read before a send has its own, shorter bound: a list that
 // hangs costs the send msgPhaseTimeout, not the route's whole deadline, and
-// the send goes on without the check (as for any failed read). Without the
-// bound the hung list held the request until the route timed out (503) and
-// nothing was sent.
+// the send goes on without the check (as for any failed read) instead of
+// holding the request until the route times out.
 func TestMsgSendPhaseReadHasItsOwnBound(t *testing.T) {
 	b, rt, buf := newMsgTestBroker(t, true)
 	rt.WorkerRuntime = hangingListRuntime{rt.WorkerRuntime}

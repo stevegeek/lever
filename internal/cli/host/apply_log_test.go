@@ -8,9 +8,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestApplyLogSanitizesGuestText: apply's loud lines wrap errors that carry
-// guest text (scion stderr, hub responses) via %v, so the sink strips
-// terminal escapes from the formatted line before it reaches stderr.
+// TestApplyLogSanitizesGuestText: apply's lines wrap errors carrying guest
+// text, so the sink strips terminal escapes before stderr.
 func TestApplyLogSanitizesGuestText(t *testing.T) {
 	guestErr := errors.New("scion: \x1b]0;pwned\x07\x1b[2K\x1b[1;32mall good\x1b[0m")
 	want := "start-manager: resume failed (scion: all good) — starting fresh\n"

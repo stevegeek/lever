@@ -15,10 +15,6 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// TestJailHandlerGatewayDeniesNoCert verifies that a tools/call request to the
-// jail mux's /mcp/<tool>/ path with no client cert is rejected 403.
-// The gateway is bound at JailHandler() time, so the tool must be registered
-// BEFORE calling JailHandler().
 func TestJailHandlerGatewayDeniesNoCert(t *testing.T) {
 	var reached bool
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,14 +24,13 @@ func TestJailHandlerGatewayDeniesNoCert(t *testing.T) {
 	defer up.Close()
 
 	b := New(testConfig(t))
-	// Register a tool BEFORE calling JailHandler() — gateways are bound at call time.
+	// Gateways are bound when JailHandler() is called, so register first.
 	if err := b.reg.Register(regTool("db", up.URL, "read")); err != nil {
 		t.Fatal(err)
 	}
 
 	h := b.JailHandler()
 
-	// POST with no client cert — RequireAgent must reject with 403.
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"table":"A","_capability":"fake"}}}`
 	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
 	// Deliberately no r.TLS set → no client cert.
@@ -50,8 +45,6 @@ func TestJailHandlerGatewayDeniesNoCert(t *testing.T) {
 	}
 }
 
-// TestAdminHandlerRegisterAddsTool verifies that a POST to /register on the admin
-// handler adds the tool to the registry and returns 200.
 func TestAdminHandlerRegisterAddsTool(t *testing.T) {
 	b := New(testConfig(t))
 	// Pre-load the config envelope for "calendar" (config-authoritative: tool
@@ -79,9 +72,9 @@ func TestAdminHandlerRegisterAddsTool(t *testing.T) {
 	}
 }
 
-// The jail (agent-facing) listener serves NO ticket-minting route: /provision
-// used to hand the MANAGER a fresh ticket for any declared worker, which let a
-// compromised manager enrol as that worker. It answers 404 now, whoever asks.
+// The jail listener serves no ticket-minting route: a ticket handed to the
+// manager would let a compromised manager enrol as any declared worker.
+// /provision answers 404, whoever asks.
 func TestJailHandlerDoesNotServeProvision(t *testing.T) {
 	b := New(testConfig(t))
 	h := b.JailHandler()
@@ -102,8 +95,6 @@ func TestJailHandlerDoesNotServeProvision(t *testing.T) {
 	}
 }
 
-// TestAdminHandlerDoesNotExposeProvision verifies that /provision is NOT served
-// on the admin handler either (should 404).
 func TestAdminHandlerDoesNotExposeProvision(t *testing.T) {
 	b := New(testConfig(t))
 	h := b.AdminHandler()
@@ -186,8 +177,8 @@ func TestRoutesRejectWrongMethod(t *testing.T) {
 }
 
 // TestEpochReportsTheInstanceID: /epoch carries the instance id for lever on
-// the host (lever#181), and stays a wire.EpochResponse for the tools that
-// read only the epoch.
+// the host, and stays a wire.EpochResponse for the tools that read only the
+// epoch.
 func TestEpochReportsTheInstanceID(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Version, cfg.ConfigHash, cfg.InstanceID = "v1", "h1", "0123456789abcdef0123456789abcdef"

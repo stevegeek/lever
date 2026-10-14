@@ -45,8 +45,8 @@ func TestClaudeIsZero(t *testing.T) {
 	}
 }
 
-// An envelope without a claude block marshals as before (no "claude" key),
-// so an agent image that predates the block reads the same bytes.
+// An envelope without a claude block has no "claude" key, so an agent image
+// without the field reads the same bytes.
 func TestBootstrapOmitsEmptyClaude(t *testing.T) {
 	b, err := json.Marshal(Bootstrap{Ticket: "t"})
 	if err != nil {

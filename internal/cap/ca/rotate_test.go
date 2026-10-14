@@ -53,9 +53,8 @@ func TestServerCertSourceRotatesNearExpiry(t *testing.T) {
 	if second.Leaf.SerialNumber.Cmp(first.Leaf.SerialNumber) == 0 {
 		t.Fatal("cert inside the rotation margin must be re-minted")
 	}
-	// The rotated cert keeps the SANs and chains to the CA. (NotAfter is not
-	// compared: mint uses the real clock, so old and new expiries coincide when
-	// the test warps only the source's view of now.)
+	// NotAfter is not compared: mint uses the real clock, so old and new
+	// expiries coincide when only the source's clock is warped.
 	if err := second.Leaf.VerifyHostname("host.orb.internal"); err != nil {
 		t.Fatalf("rotated cert DNS SAN: %v", err)
 	}

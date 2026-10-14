@@ -116,6 +116,9 @@ func (g *gate) serveNewConversation(w http.ResponseWriter, r *http.Request, line
 	select {
 	case err := <-done:
 		if err != nil {
+			if errors.Is(err, ErrConversationBusy) || errors.Is(err, ErrConversationLocked) {
+				g.newConvs.give(g.cfg.ChatAgent)
+			}
 			status, word := newConvFailure(err)
 			refuse(status, word, nil)
 			return
@@ -132,6 +135,9 @@ func newConvFailure(err error) (int, string) {
 		return http.StatusConflict, "busy"
 	case errors.Is(err, ErrConversationLocked):
 		return http.StatusConflict, "in-progress"
+	case errors.Is(err, context.DeadlineExceeded):
+		// The run goes on in its own session; the proxy stopped waiting.
+		return http.StatusGatewayTimeout, "timeout"
 	}
 	return http.StatusBadGateway, "failed"
 }

@@ -920,12 +920,15 @@ comes after the page's).
 An operator login has a **New conversation** button in the manager's chat. It does what
 [`lever conversation new`](/operations/#start-a-new-conversation) does on the host: back the
 manager's conversation up, end its session, and start it again in a new one that runs its boot
-prompt (the `manager.prompt_file` the record was created with). The page asks first. When the manager is in the middle of a turn,
-it says so and asks again before it interrupts the turn. Then it shows "starting &lt;name&gt; on a
-new conversation…" and reads the list every 3 seconds, for up to 3 minutes, until the manager is
-running again; the boot prompt's reply arrives in the same chat. Text you were typing stays in the
-box, and the box is off while the manager is down. The old conversation stays in its backup on
-the host (`lever conversation list`), and `lever conversation restore` puts it back.
+prompt (the `manager.prompt_file` the record was created with). The page asks first. When the
+manager is in the middle of a turn, it says so and asks again before it interrupts the turn.
+Then it shows "starting &lt;name&gt; on a new conversation…" and reads the list every 3 seconds,
+for up to 3 minutes, until the manager is running again; the boot prompt's reply arrives in the
+same chat. When the manager has not gone down after a minute, the page stops waiting and says
+so: lever's own checks may have refused (and changed nothing), or the run may still be on its
+way; `lever conversation list` and the log below tell which. Text you were typing stays in the box, and the box is off
+while the manager is down. The old conversation stays in its backup on the host
+(`lever conversation list`), and `lever conversation restore` puts it back.
 
 The route (`POST /lever/api/new-conversation`) is accepted only:
 

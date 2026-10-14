@@ -5,15 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
 	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
@@ -31,10 +32,29 @@ type sessionBegin func() (commit func() error, err error)
 
 // beginFreshSession records a new conversation's session as `lever up
 // --fresh` does: at the operator's word, on the skill on disk once the old
-// container is gone.
+// container is gone. A session it cannot record on a skill gets a record that
+// matches none, so the old session's record never vouches for it.
 func beginFreshSession(app *config.App, st state.State) sessionBegin {
+	fence := func() error {
+		return sessionrec.Append(st.Sessions(), sessionrec.Record{
+			Agent: app.Name, SkillHash: brokerctl.UncheckedSkill, Version: cli.VersionString(), Started: time.Now().UTC(),
+		})
+	}
 	return func() (func() error, error) {
-		return brokerctl.BeginSession(app, st, cli.VersionString(), app.Name), nil
+		if _, err := sessionrec.SkillHash(app, app.Name); err != nil {
+			if ferr := fence(); ferr != nil {
+				return nil, ferr
+			}
+			return func() error { return err }, nil
+		}
+		commit := brokerctl.BeginSession(app, st, cli.VersionString(), app.Name)
+		return func() error {
+			err := commit()
+			if err != nil {
+				err = errors.Join(err, fence())
+			}
+			return err
+		}, nil
 	}
 }
 
@@ -117,7 +137,9 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 	if last, err := o.waitPhase(ctx, scion.PhaseSuspended); err != nil {
 		return m, false, fmt.Errorf("the manager did not suspend (last seen %s); nothing was changed", scion.BoundedQuote(last))
 	}
-	m, saved, err = o.backup(ctx, req.Reason)
+	// skipEmpty: a manager that empties its own transcripts must not rotate the
+	// real backups out one reset at a time.
+	m, saved, err = o.backupIf(ctx, req.Reason, true)
 	if errors.Is(err, convbackup.ErrNoHome) {
 		err = fmt.Errorf("%w, so it cannot tell whether the conversation would be lost", err)
 	}
@@ -159,18 +181,16 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 	}
 	o.log("conversation: starting manager %q in a new session", o.app.Name)
 	if err := o.sc.Resume(ctx, o.app.Name, project); err != nil {
-		if scion.IsRefusedByHub(err) {
-			err = apply.HubRefusedResume("the start", err)
-		} else {
-			err = apply.ResumeFailed("the start", err)
-		}
+		// Not apply.ResumeFailed: its exit code and its "conversation kept" are
+		// not true once the old session has ended.
+		err = fmt.Errorf("starting the manager failed: %s", termsafe.Sanitize(scion.ErrSummary(err)))
 		return m, saved, o.afterStop(m, saved, guard.AfterFailure(ctx, err))
 	}
 	if err := guard.Resumed(ctx); err != nil {
 		return m, saved, o.afterStop(m, saved, err)
 	}
 	if err := commit(); err != nil {
-		o.log("conversation: warning: the new session was not recorded (%v); contacts cannot post to the manager until it next starts fresh", err)
+		o.log("conversation: warning: the new session was not recorded on a skill (%v); contacts cannot post to the manager until it next starts fresh", err)
 	}
 	if err := o.gate(ctx); err != nil {
 		return m, saved, o.afterStop(m, saved, guard.AfterFailure(ctx, err))
@@ -195,7 +215,7 @@ func (o convOps) afterStop(m convbackup.Meta, saved bool, cause error) error {
 	if !saved {
 		return fmt.Errorf("%w; the manager's old session has ended (its home held no conversation to back up): `lever up` starts it in a new conversation", cause)
 	}
-	return fmt.Errorf("%w; the manager's old session has ended and is in backup %s: `lever up` starts it in a new conversation, `lever conversation restore %s` resumes the old one", cause, m.ID, m.ID)
+	return fmt.Errorf("%w; the manager's old session has ended and is in backup %s: `lever up` starts it in a new conversation, and `lever conversation restore %s` after that puts the old one back", cause, m.ID, m.ID)
 }
 
 // lockConversation keeps two conversation changes (new, restore) of one

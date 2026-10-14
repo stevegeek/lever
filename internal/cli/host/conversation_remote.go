@@ -53,6 +53,10 @@ func runConversationNew(ctx context.Context, st state.State, configPath, by stri
 	if err != nil {
 		return 0, err
 	}
+	configPath, err = filepath.Abs(configPath)
+	if err != nil {
+		return 0, err
+	}
 	logDir := st.BringupLogDir()
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return 0, err

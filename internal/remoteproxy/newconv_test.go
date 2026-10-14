@@ -3,6 +3,7 @@ package remoteproxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -168,10 +169,23 @@ func TestNewConversationBusyAndState(t *testing.T) {
 		t.Fatalf("hub down: %d %s", rw.Code, rw.Body)
 	}
 
+	// lever's own busy changed nothing, so it does not spend the minute: the
+	// forced retry the page then makes goes through.
+	n = &newConvRec{err: ErrConversationBusy}
+	h = NewHandler(newConvConfig(t, hub, n, ""))
+	if rw := newConvPost(h, chatOp, ""); rw.Code != http.StatusConflict {
+		t.Fatalf("lever busy: %d", rw.Code)
+	}
+	n.err = nil
+	if rw := newConvPost(h, chatOp, `{"force":true}`); rw.Code != http.StatusAccepted {
+		t.Fatalf("forced after lever's busy: %d", rw.Code)
+	}
+
 	for err, want := range map[error]string{
-		ErrConversationBusy:   "busy",
-		ErrConversationLocked: "in-progress",
-		errors.New("secret"):  "failed",
+		ErrConversationBusy:                              "busy",
+		ErrConversationLocked:                            "in-progress",
+		errors.New("secret"):                             "failed",
+		fmt.Errorf("wait: %w", context.DeadlineExceeded): "timeout",
 	} {
 		n := &newConvRec{err: err}
 		rw := newConvPost(NewHandler(newConvConfig(t, hub, n, "")), chatOp, "")

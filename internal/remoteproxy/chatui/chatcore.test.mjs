@@ -653,4 +653,5 @@ test('new conversation: the operator\'s manager only, and fixed text', () => {
   }
   assert.equal(newConversationText(500, { error: '<b>own</b>' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
   assert.equal(newConversationText(500, { error: 'constructor' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
+  assert.match(newConversationText(0, null, 'boss'), /may have started/);
 });

@@ -691,8 +691,7 @@ type gate struct {
 	live        liveRequests
 	// revokeEvery overrides revokePoll (tests).
 	revokeEvery time.Duration
-	// newConvs limits the new conversation route to one a minute.
-	newConvs wakeLimiter
+	newConvs    wakeLimiter
 	// newConvWaitFor overrides newConvAnswerWait (tests).
 	newConvWaitFor time.Duration
 }

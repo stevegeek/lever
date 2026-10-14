@@ -7,11 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -190,6 +193,10 @@ func TestNewConversationFailureAfterStop(t *testing.T) {
 			if got := f.calls(); got != tc.calls {
 				t.Fatalf("calls = %q, want %q", got, tc.calls)
 			}
+			var ee *cli.ExitError
+			if errors.As(err, &ee) {
+				t.Fatalf("exit code %d: a resume failure's code says the conversation was kept", ee.Code)
+			}
 		})
 	}
 }
@@ -240,5 +247,67 @@ func TestLockConversation(t *testing.T) {
 	in := &config.App{Name: "mgr", Tree: root}
 	if _, err := lockConversation(in, st); !errors.Is(err, errConvStateInTree) {
 		t.Fatalf("state in tree: %v", err)
+	}
+}
+
+// TestNewConversationEmptyTranscripts: transcripts with no content are not
+// saved (no backup is pushed out for them), and the reset goes on.
+func TestNewConversationEmptyTranscripts(t *testing.T) {
+	f, _ := newConvFixtureWith(t)
+	writeConvFile(t, f.transcript("empty.jsonl"), "")
+	_, saved, err := f.ops.newConversation(context.Background(), newConvRequest{Reason: "x"})
+	if err != nil || saved || f.calls() != "suspend,stop,resume-fresh" {
+		t.Fatalf("err %v saved %v calls %q", err, saved, f.calls())
+	}
+	store, _ := f.ops.store()
+	if all, _ := store.List(); len(all) != 0 {
+		t.Fatalf("backups = %+v", all)
+	}
+}
+
+// TestBeginFreshSession: the new session is recorded on the skill on disk;
+// one whose skill cannot be read is recorded on none, before the start, so
+// the previous record never vouches for it.
+func TestBeginFreshSession(t *testing.T) {
+	root := t.TempDir()
+	st := state.State{Dir: filepath.Join(root, "state")}
+	tree := filepath.Join(root, "tree")
+	for _, d := range []string{st.Dir, tree} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := &config.App{Name: "mgr", Tree: tree}
+	if err := sessionrec.Append(st.Sessions(), sessionrec.Record{Agent: "mgr", SkillHash: "old", Started: time.Now().UTC().Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	latest := func() string {
+		recs, err := sessionrec.Latest(st.Sessions())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return recs["mgr"].SkillHash
+	}
+	commit, err := beginFreshSession(app, st)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := latest(); got != brokerctl.UncheckedSkill {
+		t.Fatalf("before the start: %q, want the fence", got)
+	}
+	if commit() == nil {
+		t.Fatal("commit of an unreadable skill succeeded")
+	}
+	rel, _ := sessionrec.SkillRel(app, "mgr")
+	writeConvFile(t, filepath.Join(tree, rel), "skill text\n")
+	commit, err = beginFreshSession(app, st)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := latest(); got == brokerctl.UncheckedSkill || got == "old" {
+		t.Fatalf("after a readable skill: %q", got)
 	}
 }

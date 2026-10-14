@@ -2512,3 +2512,15 @@ test('new conversation: a refusal shows fixed text', async () => {
   assert.equal(env.els.error.textContent, 'A new conversation is already being started.');
   assert.equal(env.els.newconv.disabled, false);
 });
+
+test('new conversation: a manager that never goes down is reported after a minute', async () => {
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS({ activity: '' })], { newConversation: true }) }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  for (let i = 0; i < 19; i++) await env.runTimers(3000);
+  assert.equal(env.els.error.hidden, true, 'not before a minute');
+  await env.runTimers(3000);
+  await tick(5);
+  assert.match(env.els.error.textContent, /has not gone down yet/);
+  assert.equal(env.els.newconv.disabled, false);
+});

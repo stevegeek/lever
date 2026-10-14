@@ -258,6 +258,8 @@ export const NEW_CONVERSATION_PATH = '/lever/api/new-conversation';
 // After it is accepted the list is read every WAKE_POLL_MS for up to 3 min:
 // the manager is suspended, backed up, stopped and started.
 export const NEW_CONVERSATION_POLLS = 60;
+// After this many reads with the manager still up the page stops waiting.
+export const NEW_CONVERSATION_DOWN_POLLS = 20;
 
 // newConversationOffered: the open chat is the manager's, and the list offers
 // the action.
@@ -288,7 +290,8 @@ const NEW_CONVERSATION_TEXT = {
 export function newConversationText(status, body, name) {
   const word = body && typeof body === 'object' ? str(body.error) : '';
   if (Object.hasOwn(NEW_CONVERSATION_TEXT, word)) return NEW_CONVERSATION_TEXT[word];
-  return `${name}'s new conversation could not be started (HTTP ${status || 'no answer'}).`;
+  if (!status) return `No answer from the server: ${name}'s new conversation may have started all the same; the list shows when it goes down.`;
+  return `${name}'s new conversation could not be started (HTTP ${status}).`;
 }
 
 // The operator's read-only view of contact conversations (/lever/api/contacts).

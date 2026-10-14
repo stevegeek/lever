@@ -35,6 +35,7 @@ import {
   LIST_MS,
   MAX_MESSAGE,
   NEW_CONVERSATION_PATH,
+  NEW_CONVERSATION_DOWN_POLLS,
   NEW_CONVERSATION_POLLS,
   NOT_SHOWN,
   NOT_YET,
@@ -1674,7 +1675,6 @@ async function newConversation() {
       showError(newConversationText(res.status, res.body, name));
       return;
     }
-    // It goes down (suspended, stopped) and comes back running.
     let down = false;
     for (let i = 0; i < NEW_CONVERSATION_POLLS; i++) {
       await sleep(WAKE_POLL_MS);
@@ -1685,8 +1685,13 @@ async function newConversation() {
       if (!a) return;
       if (a.state !== 'running' && a.state !== 'unknown') down = true;
       if (down && a.state === 'running') return;
+      // lever's own checks refuse after the page was answered (a turn that
+      // started, a failed backup): the manager then never goes down.
+      if (!down && i + 1 >= NEW_CONVERSATION_DOWN_POLLS) break;
     }
-    if (chat && chat.name === name) showError(`${name} is not running again yet; \`lever doctor\` on the host shows why.`);
+    if (chat && chat.name === name) {
+      showError(down ? `${name} is not running again yet; \`lever doctor\` on the host shows why.` : `${name} has not gone down yet: lever may have refused, or may still be on its way. \`lever conversation list\` and .lever-state/logs/conversation-new.log on the host say which.`);
+    }
   } finally {
     renewing = '';
     showWakeView();

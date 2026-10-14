@@ -79,6 +79,13 @@ type wakeLimiter struct {
 	now  func() time.Time
 }
 
+// give returns name's slot: the call it was taken for changed nothing.
+func (l *wakeLimiter) give(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.last, name)
+}
+
 func (l *wakeLimiter) take(name string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

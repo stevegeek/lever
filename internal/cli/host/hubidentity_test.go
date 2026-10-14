@@ -711,6 +711,17 @@ type hiScion struct {
 	listErr     error
 	// onInit runs inside InitProject.
 	onInit func()
+	// hubProjectID is the tree's hub.projectId in the jail user's scion
+	// config; configErr fails its read.
+	hubProjectID string
+	configErr    error
+}
+
+func (s *hiScion) ConfigGetProject(_ context.Context, dir, key string) (string, error) {
+	if key != "hub.projectId" {
+		return "", fmt.Errorf("unexpected config key %s", key)
+	}
+	return s.hubProjectID, s.configErr
 }
 
 func (s *hiScion) InitProject(_ context.Context, dir string) error {
@@ -1313,6 +1324,44 @@ func TestHubIdentityResetForgetsAndBootstraps(t *testing.T) {
 	}
 	if tok := hiTokenNamed(h, "lever-controller", ctl.ID); tok == nil || !e.diskPATIs(e.st.LoadControllerPAT, tok.ID) {
 		t.Fatal("no new controller PAT")
+	}
+}
+
+// After register-project's re-init the marker names a new local ID and the
+// jail user's scion config pins hub.projectId to the recorded project. A reset
+// accepts that and registers the recorded project; a pin to anything else, or
+// one that cannot be read, is still refused.
+func TestHubIdentityResetAcceptsAReinitMarker(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.mustRun()
+	prev := e.record().ProjectID
+	e.jr.marker = "project-id: 0a0b0c0d-0000-4000-8000-000000000002\nproject-slug: lever\n"
+
+	for _, c := range []struct {
+		name   string
+		pinned string
+		err    error
+	}{
+		{"pinned elsewhere", "another-project", nil},
+		{"pin unreadable", prev, errors.New("scion config get: exit 1")},
+	} {
+		e.sc.hubProjectID, e.sc.configErr = c.pinned, c.err
+		e.reset = true
+		if err := e.run(); err == nil || !strings.Contains(err.Error(), "may have rewritten it") {
+			t.Fatalf("%s: err = %v, want the marker refused", c.name, err)
+		}
+	}
+
+	h := e.newHub()
+	h.addUser("", hubauth.AdminEmail, "admin", "active", e.now.Add(-time.Hour))
+	e.sc.hubProjectID, e.sc.configErr = prev, nil
+	e.reset = true
+	e.mustRun()
+	if got := e.record().ProjectID; got != prev {
+		t.Fatalf("project after the reset = %q, want the recorded %q", got, prev)
+	}
+	if !slices.ContainsFunc(h.projects, func(p hubapi.Project) bool { return p.ID == prev }) {
+		t.Fatalf("the hub has no project %s: %+v", prev, h.projects)
 	}
 }
 

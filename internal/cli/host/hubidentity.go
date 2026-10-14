@@ -59,6 +59,7 @@ type identityScion interface {
 	HubLink(ctx context.Context, dir string) error
 	KnowsUATScope(ctx context.Context, scope string) (bool, error)
 	List(ctx context.Context, project string) ([]scion.Agent, error)
+	ConfigGetProject(ctx context.Context, dir, key string) (string, error)
 }
 
 // hubIdentity is the hub-identity apply step.
@@ -695,6 +696,9 @@ func (h *hubIdentity) registerProject(ctx context.Context, jp, prev string) (str
 	if err != nil {
 		return "", errHubIdentity("%w", err)
 	}
+	if prev != "" && id != prev && h.pinnedTo(ctx, jp, prev) {
+		id = prev
+	}
 	if before != "" && id != before || prev != "" && id != prev {
 		return "", errHubIdentity("the tree's project marker changed from project %s to %s during `scion init`; refusing", before, id)
 	}
@@ -710,8 +714,14 @@ func (h *hubIdentity) registerProject(ctx context.Context, jp, prev string) (str
 
 // checkProjectMarker returns the project ID the tree's marker names ("" when
 // there is no readable marker and no prev). When prev is known the marker must
-// be readable and name it: an agent that could make it unreadable here could
-// write its own once scion init has run.
+// be readable and resolve to it: an agent that could make it unreadable here
+// could write its own once scion init has run.
+//
+// After register-project's re-init the marker names a new local ID, and the
+// jail user's scion config for it pins hub.projectId to prev, as treeLinkedTo
+// accepts. An agent choosing the marker can steer which config scion reads,
+// but the answer must still be prev, so the project lever registers is the
+// one it recorded.
 func (h *hubIdentity) checkProjectMarker(ctx context.Context, jp, prev string) (string, error) {
 	id, _, err := readProjectMarker(ctx, h.jr, jp)
 	switch {
@@ -721,10 +731,23 @@ func (h *hubIdentity) checkProjectMarker(ctx context.Context, jp, prev string) (
 		return "", errHubIdentity("lever last registered project %s, but the tree's project marker cannot be read (%v); an agent may have replaced it. %s",
 			prev, err, markerFix(jp, prev))
 	case prev != "" && id != prev:
+		if h.pinnedTo(ctx, jp, prev) {
+			return prev, nil
+		}
 		return "", errHubIdentity("the tree's project marker %s/.scion names project %s, but lever last registered %s; an agent may have rewritten it. %s",
 			jp, id, prev, markerFix(jp, prev))
 	}
 	return id, nil
+}
+
+// pinnedTo reports whether the jail's scion resolves the tree's hub project to
+// want through hub.projectId. A failed read is not a match.
+func (h *hubIdentity) pinnedTo(ctx context.Context, jp, want string) bool {
+	if h.sc == nil || want == "" {
+		return false
+	}
+	id, err := h.sc.ConfigGetProject(ctx, jp, "hub.projectId")
+	return err == nil && id == want
 }
 
 func markerFix(jp, prev string) string {

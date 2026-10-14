@@ -242,7 +242,7 @@ Two things need more than the controller's authority, and `lever-admin` does the
   hub-identity step writes explicit `false` overrides for `hub.conduit` (an inbound shell, sftp and
   port path into every agent, reaching the jail loopback and any Unix socket), `hub.artifacts`
   (hub-held publishing with unauthenticated share links), `hub.chat_thread_groups` (project-wide
-  chat groups that agents can create and rename, and that operators and contacts see) and
+  chat groups that agents can create and rename, and that project members with read access see) and
   `federation.project_visitors` (users of external issuers acting in projects, and credentials for
   peer hubs), as `lever-admin` through scion's admin experiments route. It never writes `true` and
   leaves every other override as it is. All four are off by scion's default; the explicit override
@@ -252,7 +252,7 @@ Two things need more than the controller's authority, and `lever-admin` does the
   one is on: `GET /api/v1/conduit/grant-keys`, `GET /api/v1/artifacts?mine=1` and
   `GET /api/v1/thread-groups` answer 404 exactly while their experiment is off. The federation
   experiment has no such route (its one route is `POST /api/v1/auth/federation-token`, which also
-  needs the hub's OIDC provider, never on under lever), so the admin route's answer after the write
+  needs the hub's OIDC provider, which lever does not configure), so the admin route's answer after the write
   is the proof. One found on is pinned off and the hub restarted, because conduit's relay starts
   only with the hub; one still on after that fails the apply. scion has no API to write the
   artifacts section's own `enabled` switch, so the experiment is the one lever pins. `lever

@@ -26,11 +26,11 @@ type pinnedExperiment struct {
 // and port path into every agent, reaching the jail loopback and any Unix
 // socket; hub.artifacts adds hub-held publishing with unauthenticated share
 // links beside lever's reviewed file paths. hub.chat_thread_groups lets agents
-// create and rename project-wide chat groups that operators and contacts see,
-// and copies users' personal groups into the project. federation.project_visitors
+// create and rename project-wide chat groups that project members with read
+// access see, and copies users' personal groups into the project. federation.project_visitors
 // admits users of external issuers and mints this hub's users credentials for
 // peer hubs; its only route is POST and also needs the hub's OIDC provider,
-// which lever never turns on, so no GET tells whether it is on. scion reads
+// which lever does not configure, so no GET tells whether it is on. scion reads
 // all of them per request from the hub database, except conduit's relay,
 // which starts only with the hub.
 var pinnedOffExperiments = []pinnedExperiment{
@@ -151,8 +151,8 @@ func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (s
 // experimentsPin is ensureHubExperimentsOff's seams.
 type experimentsPin struct {
 	// admin is the hub as lever-admin: the experiments admin route is
-	// hub-admin only, and the probes need no token, so this also works on a
-	// fresh hub before the controller PAT exists.
+	// hub-admin only, and lever-admin signs every probe route, so this also
+	// works on a fresh hub before the controller PAT exists.
 	admin *hubapi.Client
 	st    state.State
 	known scopeKnownFunc

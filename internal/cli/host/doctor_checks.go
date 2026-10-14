@@ -2186,8 +2186,8 @@ func checkHubRuntime(ctx context.Context, hc *hubapi.Client) checkResult {
 	return checkResult{name, true, apply.AgentRuntime, ""}
 }
 
-// unaskedExperiments are the experiments lever pins now that the pin rec
-// records neither held off nor looked for.
+// unaskedExperiments returns the experiments lever pins that rec lists
+// neither as off nor as looked for.
 func unaskedExperiments(rec state.HubExperimentsRecord) []string {
 	var out []string
 	for _, n := range pinnedOffNames() {
@@ -2240,6 +2240,20 @@ func checkHubExperiments(ctx context.Context, st state.State, known scopeKnownFu
 	if len(rec.Off) == 0 {
 		return checkResult{name, true, "off: this hub registers none of the experiments lever pins", ""}
 	}
-	return checkResult{name, true, fmt.Sprintf("off at the hub; pinned off by lever on %s (%s)",
-		rec.PinnedAt.Format(time.RFC3339), strings.Join(rec.Off, ", ")), ""}
+	var probed, unprobed []string
+	for _, e := range pinnedOffExperiments {
+		if !slices.Contains(rec.Off, e.name) {
+			continue
+		}
+		if e.probe == "" {
+			unprobed = append(unprobed, e.name)
+		} else {
+			probed = append(probed, e.name)
+		}
+	}
+	detail := fmt.Sprintf("off at the hub; pinned off by lever on %s (%s)", rec.PinnedAt.Format(time.RFC3339), strings.Join(probed, ", "))
+	if len(unprobed) > 0 {
+		detail += fmt.Sprintf("; %s pinned off on the same apply, which no route can show, so doctor reads only lever's record", strings.Join(unprobed, ", "))
+	}
+	return checkResult{name, true, detail, ""}
 }

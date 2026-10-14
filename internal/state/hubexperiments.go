@@ -16,8 +16,8 @@ import (
 // NotApplicable means the hub had no experiments admin route (an older scion).
 // Off lists the names lever holds at an explicit false; a name this hub does
 // not register is off by construction and not listed. Asked lists every name
-// that pin looked for, so doctor can tell a record an older lever wrote, which
-// never looked for a name lever pins now.
+// the pin looked for; a pinned name missing from it was never checked on this
+// hub.
 type HubExperimentsRecord struct {
 	NotApplicable bool      `json:"not_applicable,omitempty"`
 	Off           []string  `json:"off,omitempty"`

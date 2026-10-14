@@ -259,7 +259,7 @@ PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
 for x in hub.conduit hub.artifacts hub.chat_thread_groups federation.project_visitors; do
-	check "lever-admin pinned $x off" grep -q "\"$x\"" "$INST/.lever-state/hub-experiments.json"
+	check "lever-admin pinned $x off" python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" "$x"
 done
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
 cimage() { X inspect -f '{{.ImageName}}' "$1" 2>/dev/null; }

@@ -14,7 +14,8 @@ version bump moves the block under the new version heading.
   calls to scion's CLI and hub need no change. One change on the scion side is visible: the
   jail's runtime broker now reads the runtimes, profiles, harness configs and image registry stored
   in the hub database on SQLite hubs too, so the copy there, whose runtime and registry lever's
-  apply sets as `lever-admin`, wins over the jail's `settings.yaml` for every agent start.
+  apply sets as `lever-admin`, wins over the jail's `settings.yaml` for every agent start. So do
+  the profiles and any harness configs stored there, which only a hub admin can write.
 - **The agent image bakes Claude Code 2.1.300 (was 2.1.296).** The messages lever reads from
   Claude Code (a stale background session, no conversation to continue), its session records,
   the agent-view switch and the hook events lever uses are unchanged in 2.1.300. It fixes, among
@@ -32,11 +33,12 @@ version bump moves the block under the new version heading.
 
 - **Two more scion experiments are kept off: chat thread groups and federation.** The new scion
   registers `hub.chat_thread_groups` (project-wide chat groups that agents can create and rename,
-  shown to operators and contacts) and `federation.project_visitors` (users of external issuers
+  shown to project members with read access) and `federation.project_visitors` (users of external issuers
   acting in projects, and short-lived credentials for peer hubs), both off by scion's default.
   Every apply now pins them off as `lever-admin` beside conduit and artifacts, and proves thread
   groups off with `GET /api/v1/thread-groups`; the federation experiment has no route a probe
-  can read, so the hub's experiments answer after the write proves it. `hub-experiments.json` now
+  can read, so the hub's experiments answer after the write proves it, and doctor reports it from
+  lever's record. `hub-experiments.json` now
   records which experiments lever looked for, and doctor's *scion conduit and artifacts* row warns
   when an older lever wrote it until the next apply. The remote proxy refuses
   `/api/v1/thread-groups*` for every login, and the new `POST /api/v1/auth/federation-token` falls

@@ -277,7 +277,7 @@ export function newConversationForceAsk(name) {
 
 const NEW_CONVERSATION_TEXT = {
   busy: 'It is in the middle of a turn; nothing was changed.',
-  'in-progress': 'A new conversation is already being started.',
+  'in-progress': 'lever is already changing the manager (a new conversation, a restore, or lever up, apply, stop or reload). Try again when it is done.',
   'not-running': 'It is not running; nothing was changed.',
   'rate-limited': 'A new conversation was started a moment ago; try again in a minute.',
   'not-allowed': 'Only the operator can start a new conversation.',

@@ -2509,7 +2509,7 @@ test('new conversation: a refusal shows fixed text', async () => {
   const env = await loadChat(hubWith({ agents: () => roster([BOSS()], { newConversation: true }), newConversation: () => ({ status: 409, body: { error: 'in-progress' } }) }));
   env.els.newconv.dispatch('click');
   await tick(5);
-  assert.equal(env.els.error.textContent, 'A new conversation is already being started.');
+  assert.equal(env.els.error.textContent, 'lever is already changing the manager (a new conversation, a restore, or lever up, apply, stop or reload). Try again when it is done.');
   assert.equal(env.els.newconv.disabled, false);
 });
 

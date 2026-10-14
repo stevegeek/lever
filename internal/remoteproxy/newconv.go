@@ -30,7 +30,7 @@ const (
 // Config.NewConversation's refusals that changed nothing.
 var (
 	ErrConversationBusy   = errors.New("the manager is in the middle of a turn")
-	ErrConversationLocked = errors.New("another conversation change is running")
+	ErrConversationLocked = errors.New("another change to the manager is running")
 )
 
 const (

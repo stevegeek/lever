@@ -34,6 +34,8 @@ type fakeConvScion struct {
 	// stopErr fails Stop; stopLands says whether the phase moves anyway.
 	stopErr   error
 	stopLands bool
+	// task is the last task ResumeTask passed ("" for none).
+	task string
 }
 
 func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
@@ -85,6 +87,20 @@ func (f *fakeConvScion) Resume(context.Context, string, string) error {
 	}
 	f.phase = scion.PhaseRunning
 	return nil
+}
+
+// ResumeTask is Resume with a task; on a suspended record the hub would add
+// it to the continued session ("resume-task"), which no caller may do.
+func (f *fakeConvScion) ResumeTask(ctx context.Context, w, p, task string) error {
+	f.mu.Lock()
+	f.task = task
+	if f.phase != scion.PhaseStopped {
+		f.calls = append(f.calls, "resume-task")
+		f.mu.Unlock()
+		return errors.New("fake: a task on a record that is not stopped")
+	}
+	f.mu.Unlock()
+	return f.Resume(ctx, w, p)
 }
 
 // convFixture is an instance and a fake jail HOME laid out as scion lays out

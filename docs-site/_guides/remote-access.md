@@ -930,7 +930,7 @@ comes after the page's).
 An operator login has a **New conversation** button in the manager's chat. It does what
 [`lever conversation new`](/operations/#start-a-new-conversation) does on the host: back the
 manager's conversation up, end its session, and start it again in a new one that runs its boot
-prompt (the `manager.prompt_file` the record was created with). The page asks first. When the
+prompt (`manager.prompt_file` as it is now). The page asks first. When the
 manager is in the middle of a turn, it says so and asks again before it interrupts the turn.
 Then it shows "starting &lt;name&gt; on a new conversation…" and reads the list every 3 seconds,
 for up to 3 minutes, until the manager is running again; the boot prompt's reply arrives in the
@@ -952,7 +952,7 @@ The proxy runs `lever conversation new` itself, as the host user it runs as, in 
 (a restart of the proxy does not stop it half way), with its output in
 `.lever-state/logs/conversation-new.log` and its summary in `lever doctor`'s last bring-up row.
 lever's own checks run there again: a turn that started in the meantime, a backup that fails, or
-another `new` or `restore` that is running stops it with nothing changed. The page gets fixed
+another `new`, `restore`, `up`, `apply`, `stop` or `reload` that is running stops it with nothing changed. The page gets fixed
 words only. The action exists only while the state directory is outside the tree, where the
 backup can be kept; otherwise the page offers no button and the route answers 503. Each request is
 a line in the [audit log](#audit-log) (`remote-new-conversation` or `deny-new-conversation` with a

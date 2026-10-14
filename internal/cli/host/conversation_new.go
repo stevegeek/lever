@@ -1,9 +1,11 @@
 package host
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -64,8 +66,9 @@ const (
 	// exitConversationBusy: the manager is in the middle of a turn; nothing
 	// was changed.
 	exitConversationBusy = 5
-	// exitConversationLocked: another `new` or `restore` is running; nothing
-	// was changed.
+	// exitConversationLocked: another change to the manager record (`new`,
+	// `restore`, `up`, `apply`, `stop`, `reload`) is running; nothing was
+	// changed.
 	exitConversationLocked = 6
 )
 
@@ -91,7 +94,7 @@ func managerBusy(activity string) bool {
 // The hub resumes a suspended record with claude --continue and a stopped one
 // in a fresh session, so: suspend (nothing writes the transcripts while they
 // are copied), back up, stop, then resume. The hub gives that fresh session
-// the task the record was created with, the boot prompt. Up to the stop
+// the boot prompt: manager.prompt_file as it is now. Up to the stop
 // every failure resumes the manager, when this call suspended it, on its own
 // conversation. After the stop no resume can continue the old session, so a
 // failure leaves the manager stopped and names the backup.
@@ -102,8 +105,14 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 	if _, err := o.store(); err != nil {
 		return m, false, err
 	}
-	if o.session == nil {
+	if o.session == nil || o.bootTask == nil {
 		return m, false, errors.New("internal error: the new conversation is not wired")
+	}
+	// Read before anything changes: a prompt that cannot start a session is
+	// the operator's to fix while the manager still runs.
+	task, err := o.bootTask()
+	if err != nil {
+		return m, false, fmt.Errorf("%w; nothing was changed", err)
 	}
 	project := o.guest.Workspace
 	agents, err := o.sc.List(ctx, project)
@@ -180,7 +189,7 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 		return m, saved, o.afterStop(m, saved, err)
 	}
 	o.log("conversation: starting manager %q in a new session", o.app.Name)
-	if err := o.sc.Resume(ctx, o.app.Name, project); err != nil {
+	if err := o.resumeFresh(ctx, task); err != nil {
 		// Not apply.ResumeFailed: its exit code and its "conversation kept" are
 		// not true once the old session has ended.
 		err = fmt.Errorf("starting the manager failed: %s", termsafe.Sanitize(scion.ErrSummary(err)))
@@ -196,6 +205,17 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 		return m, saved, o.afterStop(m, saved, guard.AfterFailure(ctx, err))
 	}
 	return m, saved, guard.Live(ctx)
+}
+
+// resumeFresh starts the stopped record in a new session on task, the
+// current manager.prompt_file, which the hub also stores as the record's task.
+// With no prompt_file the hub falls back to the task it stored at the last
+// fresh create or new conversation; it offers no way to clear that.
+func (o convOps) resumeFresh(ctx context.Context, task string) error {
+	if task == "" {
+		return o.sc.Resume(ctx, o.app.Name, o.guest.Workspace)
+	}
+	return o.sc.ResumeTask(ctx, o.app.Name, o.guest.Workspace, task)
 }
 
 // stillSuspended reports whether the hub reads the manager suspended: a stop
@@ -218,18 +238,67 @@ func (o convOps) afterStop(m convbackup.Meta, saved bool, cause error) error {
 	return fmt.Errorf("%w; the manager's old session has ended and is in backup %s: `lever up` starts it in a new conversation, and `lever conversation restore %s` after that puts the old one back", cause, m.ID, m.ID)
 }
 
-// lockConversation keeps two conversation changes (new, restore) of one
-// instance apart: each suspends, swaps or stops the same record.
-func lockConversation(app *config.App, st state.State) (func(), error) {
+// lockConversation keeps the changes to one instance's manager record apart:
+// new and restore suspend, swap or stop it; up, apply, stop and reload
+// resume, suspend or recreate it. verb and from (where the command came from, or "")
+// name the caller to the one it turns away.
+func lockConversation(app *config.App, st state.State, verb, from string) (func(), error) {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil, errConvStateInTree
 	}
-	unlock, err := hostledger.TryLockFile(filepath.Join(st.Dir, "conversation.lock"))
+	return takeManagerLock(st, verb, from)
+}
+
+// lockLifecycle is lockConversation for up, apply, stop and reload. With the state
+// directory inside the tree there is no new or restore to keep apart from,
+// and a lock file there would be the agents' to hold.
+func lockLifecycle(app *config.App, st state.State, verb string) (func(), error) {
+	if brokerctl.StateInsideTree(app, st) {
+		return func() {}, nil
+	}
+	return takeManagerLock(st, verb, "")
+}
+
+// managerLockHolder names the command that holds the manager lock now, or ""
+// when none does. It takes the lock for a moment to tell.
+func managerLockHolder(app *config.App, st state.State) string {
+	if brokerctl.StateInsideTree(app, st) {
+		return ""
+	}
+	p := filepath.Join(st.Dir, managerLockName)
+	unlock, err := hostledger.TryLockFile(p)
+	if err == nil {
+		unlock()
+		return ""
+	}
+	if !errors.Is(err, hostledger.ErrLocked) {
+		return ""
+	}
+	return cmp.Or(termsafe.Sanitize(hostledger.LockHolder(p)), "another lever command")
+}
+
+// managerLockName is the lock lockConversation and lockLifecycle share.
+const managerLockName = "conversation.lock"
+
+// takeManagerLock never waits: a new conversation can hold the lock for
+// minutes, and a command that waited on it silently would look hung. The
+// one it turns away exits 6 and names the holder.
+func takeManagerLock(st state.State, verb, from string) (func(), error) {
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		return nil, fmt.Errorf("locking the manager record: %w", err)
+	}
+	p := filepath.Join(st.Dir, managerLockName)
+	holder := fmt.Sprintf("`%s`%s (pid %d, since %s)", verb, from, os.Getpid(), time.Now().UTC().Format("15:04:05 UTC"))
+	unlock, err := hostledger.TryLockFileAs(p, holder)
 	if errors.Is(err, hostledger.ErrLocked) {
-		return nil, cli.WithExitCode(errors.New("another `lever conversation new` or `restore` is running; nothing was changed"), exitConversationLocked)
+		other := termsafe.Sanitize(hostledger.LockHolder(p))
+		if other == "" {
+			other = "another `lever conversation new`, `conversation restore`, `up`, `apply`, `stop` or `reload`"
+		}
+		return nil, cli.WithExitCode(fmt.Errorf("%s is changing this instance's manager; nothing was changed. Run `%s` again once it has finished", other, verb), exitConversationLocked)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("locking the conversation: %w", err)
+		return nil, fmt.Errorf("locking the manager record: %w", err)
 	}
 	return unlock, nil
 }
@@ -248,9 +317,9 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		Short: "Back up the manager's conversation and start it again in a new one, with its boot prompt",
 		Long: "Back up the manager's conversation, then start the manager again in a new Claude session on the same\n" +
-			"record (no image reload, no record deletion), which runs the boot prompt the record was created with\n" +
-			"(manager.prompt_file at the last fresh create). A manager in the middle\n" +
-			"of a turn is left alone unless --force. `lever conversation restore` puts the old conversation back.",
+			"record (no image reload, no record deletion), which runs the boot prompt (manager.prompt_file as it is\n" +
+			"now). A manager in the middle of a turn is left alone unless --force.\n" +
+			"`lever conversation restore` puts the old conversation back.",
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			req, ok := newConvBy[by]
 			if !ok {
@@ -262,7 +331,11 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
-			unlock, err := lockConversation(app, st)
+			from := ""
+			if by == "chat" {
+				from = " from the chat page"
+			}
+			unlock, err := lockConversation(app, st, "lever conversation new", from)
 			if err != nil {
 				return err
 			}

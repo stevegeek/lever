@@ -41,6 +41,7 @@ func newConvFixtureWith(t *testing.T) (*convFixture, *newConvSession) {
 			return func() error { sess.committed++; return nil }, nil
 		}
 	}
+	f.ops.bootTask = func() (string, error) { return "boot prompt", nil }
 	return f, sess
 }
 
@@ -57,6 +58,9 @@ func TestNewConversation(t *testing.T) {
 	m, saved, err := f.ops.newConversation(context.Background(), newConvRequest{Reason: "new conversation"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if f.sc.task != "boot prompt" {
+		t.Fatalf("task = %q, want the prompt as it is now", f.sc.task)
 	}
 	if !saved || m.Files != 1 || m.Reason != "new conversation" {
 		t.Fatalf("backup = %+v saved %v", m, saved)
@@ -225,29 +229,56 @@ func TestNewConversationPhases(t *testing.T) {
 	}
 }
 
-// TestLockConversation: one conversation change at a time, with its own exit
-// code; none with the state directory inside the tree.
+// TestLockConversation: one change to the manager record at a time across
+// new, restore, up, apply, stop and reload, with its own exit code and the holder
+// named; new and restore refuse a state directory inside the tree, where the
+// others take no lock.
 func TestLockConversation(t *testing.T) {
 	root := t.TempDir()
 	st := state.State{Dir: filepath.Join(root, "state")}
-	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree")}
-	unlock, err := lockConversation(app, st)
+	unlock, err := lockConversation(app, st, "lever conversation new", " from the chat page")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = lockConversation(app, st)
-	var ee *cli.ExitError
-	if !errors.As(err, &ee) || ee.Code != exitConversationLocked {
-		t.Fatalf("second lock: %v", err)
+	if got := managerLockHolder(app, st); !strings.Contains(got, "`lever conversation new` from the chat page (pid ") {
+		t.Fatalf("holder = %q", got)
+	}
+	for _, verb := range []string{"lever conversation restore", "lever up", "lever apply", "lever stop", "lever reload"} {
+		take := func() (func(), error) { return lockLifecycle(app, st, verb) }
+		if verb == "lever conversation restore" {
+			take = func() (func(), error) { return lockConversation(app, st, verb, "") }
+		}
+		_, err = take()
+		var ee *cli.ExitError
+		if !errors.As(err, &ee) || ee.Code != exitConversationLocked {
+			t.Fatalf("%s: %v", verb, err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "from the chat page") || !strings.Contains(msg, "Run `"+verb+"` again") {
+			t.Fatalf("%s: %v", verb, err)
+		}
 	}
 	unlock()
+	if got := managerLockHolder(app, st); got != "" {
+		t.Fatalf("holder after release = %q", got)
+	}
+	up, err := lockLifecycle(app, st, "lever up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockConversation(app, st, "lever conversation new", ""); err == nil || !strings.Contains(err.Error(), "`lever up` (pid ") {
+		t.Fatalf("new under up: %v", err)
+	}
+	up()
 	in := &config.App{Name: "mgr", Tree: root}
-	if _, err := lockConversation(in, st); !errors.Is(err, errConvStateInTree) {
+	if _, err := lockConversation(in, st, "lever conversation new", ""); !errors.Is(err, errConvStateInTree) {
 		t.Fatalf("state in tree: %v", err)
 	}
+	free, err := lockLifecycle(in, st, "lever up")
+	if err != nil {
+		t.Fatalf("up with the state in the tree: %v", err)
+	}
+	free()
 }
 
 // TestNewConversationEmptyTranscripts: transcripts with no content are not
@@ -309,5 +340,28 @@ func TestBeginFreshSession(t *testing.T) {
 	}
 	if got := latest(); got == brokerctl.UncheckedSkill || got == "old" {
 		t.Fatalf("after a readable skill: %q", got)
+	}
+}
+
+// TestNewConversationBootTask: the prompt is read before anything changes, so
+// an unreadable one changes nothing; with no prompt_file the record's stored
+// task runs (a plain resume of the stopped record).
+func TestNewConversationBootTask(t *testing.T) {
+	f, sess := newConvFixtureWith(t)
+	f.ops.bootTask = func() (string, error) { return "", errors.New("reading manager prompt /x: denied") }
+	if _, _, err := f.ops.newConversation(context.Background(), newConvRequest{Reason: "x"}); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(f.sc.calls) != 0 || sess.asked != 0 {
+		t.Fatalf("calls = %v session %+v, want none", f.sc.calls, sess)
+	}
+
+	f, _ = newConvFixtureWith(t)
+	f.ops.bootTask = func() (string, error) { return "", nil }
+	if _, _, err := f.ops.newConversation(context.Background(), newConvRequest{Reason: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.calls(); got != "suspend,stop,resume-fresh" || f.sc.task != "" {
+		t.Fatalf("calls = %q task %q", got, f.sc.task)
 	}
 }

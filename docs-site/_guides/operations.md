@@ -444,11 +444,12 @@ lever conversation new
 
 It backs the conversation up, then starts the manager again in a new Claude session on the same
 scion record, in the same image, and the new session runs the manager's boot prompt, so the
-manager opens with whatever that prompt asks for (a stand-up, an overview). The prompt is the
-one the record was created with: `manager.prompt_file` as it was at the manager's last fresh
-create. scion keeps it with the record and gives it to every new session; after you change
-`prompt_file`, `lever up --fresh` (or `--fresh --keep-conversation`) puts the new text on the
-record. It takes about as long as `lever stop` and `lever up` take for the manager alone. From
+manager opens with whatever that prompt asks for (a stand-up, an overview). The prompt is
+`manager.prompt_file` as it is when the command runs, so an edit since the manager was created
+takes effect without `lever up --fresh`. lever reads it before it changes anything: a prompt it
+cannot read, or one too long for scion's command line, stops the command with the manager
+untouched. scion also stores the prompt on the record, so a later `lever up` that has to start
+the manager in a new session runs the same text. It takes about as long as `lever stop` and `lever up` take for the manager alone. From
 the phone, the [chat page](/remote-access/#a-new-conversation-for-the-manager) has the same action.
 
 What happens, in order:
@@ -468,12 +469,13 @@ What happens, in order:
    does not end up reading `stopped` over a running claude. If lever can see that the stop did
    not land (the record still reads suspended), a manager it suspended is resumed on its old
    conversation; if it cannot tell, it starts nothing and says so.
-4. It starts the record, which scion does in a new session with the boot prompt (with no
-   `prompt_file`, the session waits for your first message), and runs the same checks as any
+4. It starts the record, which scion does in a new session with the boot prompt, and runs the same checks as any
    resume of the manager (the tree mounts, then the wait for claude's session start). The new
    session is recorded for the contact gate as `lever up --fresh` records one; when the
    manager's lever skill cannot be read, it is recorded on no skill, and contacts cannot post to
-   the manager until it next starts fresh.
+   the manager until it next starts fresh. With no `prompt_file`, scion gives the session the
+   prompt it stored last (at the manager's last fresh create or new conversation), or none;
+   scion offers no way to clear a stored prompt short of `lever up --fresh`.
 
 From the stop on, the old session cannot be continued by a resume. If a later step fails, the
 manager stays down, and the error names the backup: `lever up` starts the manager (in a new
@@ -485,9 +487,15 @@ The old transcripts also stay in the manager's home (the new session is a new fi
 until Claude Code's own cleanup removes them. Each new conversation is one of the 10 backups lever
 keeps.
 
-Only one `lever conversation new` or `restore` runs at a time per instance; a second one exits
-`6` and changes nothing. Other lifecycle commands (`lever up`, `lever stop`, `lever reload`) do
-not wait for it: do not run them while a new conversation is under way.
+`lever conversation new`, `lever conversation restore`, `lever up`, `lever apply`, `lever stop` and
+`lever reload` share one lock per instance (`.lever-state/conversation.lock`): while one of them runs, the
+others exit `6`, name the command that holds the lock (with its pid and start time), and change
+nothing. None of them waits, since a new conversation can take minutes: run the command again
+once the other has finished. `lever up` lets go of the lock before it attaches you, so a new
+conversation from the chat page can run while you are attached; its stop ends your attach, and
+`lever up` says so instead of reporting the manager dead. With the state directory inside the
+tree there are no conversation backups, so no new conversation or restore, and the others take
+no lock.
 
 **Keep the manager's continuity in files.** A new conversation drops everything the manager only
 held in its context. Have the manager keep what must survive in the tree (a log, notes, open

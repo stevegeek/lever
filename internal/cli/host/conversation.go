@@ -32,6 +32,7 @@ type convScion interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 	Suspend(ctx context.Context, worker, project string) error
 	Resume(ctx context.Context, worker, project string) error
+	ResumeTask(ctx context.Context, worker, project, task string) error
 	Stop(ctx context.Context, worker, project string) error
 }
 
@@ -54,6 +55,8 @@ type convOps struct {
 	// session begins the record of a new conversation's fresh session (see
 	// newConversation).
 	session func() sessionBegin
+	// bootTask reads the boot prompt a new conversation's session runs.
+	bootTask func() (string, error)
 }
 
 type managerResume interface {
@@ -80,7 +83,8 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 		beginResume: func(ctx context.Context) (managerResume, error) {
 			return apply.BeginManagerResume(ctx, w.deps, app, project, "conversation")
 		},
-		session: func() sessionBegin { return beginFreshSession(app, st) },
+		session:  func() sessionBegin { return beginFreshSession(app, st) },
+		bootTask: func() (string, error) { return apply.ManagerTask(app) },
 	}
 }
 
@@ -570,7 +574,7 @@ func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
-			unlock, err := lockConversation(app, st)
+			unlock, err := lockConversation(app, st, "lever conversation restore", "")
 			if err != nil {
 				return err
 			}

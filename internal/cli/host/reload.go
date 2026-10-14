@@ -23,6 +23,11 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			unlock, err := lockLifecycle(app, stateFor(path), "lever reload")
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			// Stop the broker first, or apply's start-broker would keep the stale one and
 			// the old config. A no-op if none runs.
 			if err := brokerctl.StopBroker(stateFor(path)); err != nil {

@@ -149,10 +149,11 @@ version bump moves the block under the new version heading.
 - **lever-admin links the jail's runtime broker to the project (lever#206).** The new scion links a
   broker to a project only for a caller allowed to update that broker (its owner or a super-admin),
   which no hub token can be, so the controller token's hub link links none and no agent could
-  start ("no runtime brokers available"). Every apply checks with the controller token that the
-  instance's hub project lists a broker; when it lists none (a fresh instance), it links the
-  jail's own broker as `lever-admin`, and refuses when the hub lists any number of brokers but one.
-  No hub restart is needed.
+  start ("no runtime brokers available"). scion links its co-located broker itself when
+  hub-identity registers the project on the live hub; before every hub link and on every apply
+  lever checks with the controller token that the project lists a broker, and when it lists none
+  it links the jail's own broker as `lever-admin`, refusing when the hub lists any number of
+  brokers but one. No hub restart is needed.
 - **The remote proxy follows the new hub (lever#206).** A contact may send `offer_wake`, which the
   hub's web chat now sends on every message (never `wake`: a contact wakes a worker only through
   the chat page). The hub's named SSE heartbeat passes through to the browser, a duplicate send's

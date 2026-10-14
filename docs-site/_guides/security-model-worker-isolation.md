@@ -233,10 +233,11 @@ Two things need more than the controller's authority, and `lever-admin` does the
 
 - **The runtime broker link.** scion links a runtime broker to a project only for a caller allowed
   to update that broker (its owner or a super-admin), which no hub token can be, so the controller
-  PAT's hub link links none and no agent could start. After the link, `lever apply` checks with the
-  controller PAT that the project lists a broker; when it lists none, it links the jail's own broker
-  as `lever-admin` (`POST /api/v1/projects/<id>/providers`, with the tree's jail path), and refuses
-  when the hub lists any number of brokers but one.
+  PAT's hub link links none and no agent could start. scion links its co-located broker itself
+  when hub-identity registers the project; before every hub link and on every apply, `lever apply`
+  checks with the controller PAT that the project lists a broker, and when it lists none it links
+  the jail's own broker as `lever-admin` (`POST /api/v1/projects/<id>/providers`, with the tree's
+  jail path), refusing when the hub lists any number of brokers but one.
 - **Two scion experiments kept off.** On a scion with hub-wide experiments, every apply's
   hub-identity step writes explicit `false` overrides for `hub.conduit` (an inbound shell, sftp and
   port path into every agent, reaching the jail loopback and any Unix socket) and `hub.artifacts`

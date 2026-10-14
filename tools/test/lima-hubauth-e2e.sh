@@ -14,8 +14,8 @@
 # Needs: Lima >= 2.0, Go, an agent image archive (IMAGE_TAR: a docker archive
 # holding $IMAGE:<arch>, e.g. from `podman save` of `make lever-image-slim`'s
 # output), and the older lever to migrate from (OLD_LEVER, or OLD_REF: a git
-# ref of this repo built into the work dir; default: the commit before the
-# proxy-auth change, the merge base with main).
+# ref of this repo built into the work dir; default: c288d646, the 0.38.0
+# release, the last before proxy auth).
 #
 # The config keeps the image name an older lever.yaml uses (scionlocal/...):
 # after the migration this lever starts agents on its lever.local/ name, and
@@ -70,7 +70,7 @@ while [ "$RP" = "$JP" ] || [ "$RP" = "$AP" ]; do RP=$(pick); done
 
 say "build"
 if [ -z "${OLD_LEVER:-}" ]; then
-	OLD_REF="${OLD_REF:-$(cd "$REPO_ROOT" && git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~1)}"
+	OLD_REF="${OLD_REF:-c288d646fd21c706db6d3ed1979d46ebcef446b1}"
 	mkdir -p "$WORK/old"
 	(cd "$REPO_ROOT" && git archive "$OLD_REF") | tar -x -C "$WORK/old" || { echo "git archive $OLD_REF failed"; exit 1; }
 	(cd "$WORK/old" && go build -o "$WORK/lever-old" ./cmd/lever) || { echo "building the old lever failed"; exit 1; }
@@ -176,6 +176,26 @@ for i in 1 2; do
 	(cd "$INST" && timeout 3600 "$OLD_LEVER" apply 2>&1 | tail -15) && break
 done
 check "old flow: manager runs" running
+
+say "old lever: the operator signs in and a dev-auth window caps it"
+# The older lever binds and caps a login only after its first sign-in, from a
+# dev-auth window, which opens only with no container running. Its ceiling
+# names user.list, which the older scion's hub-member carried and the current
+# one reserves: no hub user holds it, so none may delete that ceiling.
+code=$(proxy operator@example.com -o /dev/null -w '%{http_code}' "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "old flow: the operator signs in through the older proxy ($code)" '[ "$code" = 200 ]'
+(cd "$INST" && timeout 1800 "$OLD_LEVER" stop 2>&1 | tail -2)
+(cd "$INST" && timeout 3600 "$OLD_LEVER" up 2>&1 | tail -5)
+# rrfield <key> [<email>]: a remote-role.json map entry, or a list joined by commas.
+rrfield() {
+	python3 -c 'import json,sys
+v = json.load(open(sys.argv[1])).get(sys.argv[2]) or ""
+print(v.get(sys.argv[3], "") if isinstance(v, dict) else ",".join(v))' "$INST/.lever-state/remote-role.json" "$@" 2>/dev/null
+}
+ceil0=$(rrfield ceilings operator@example.com)
+checkx "old flow: the dev user capped the operator ($ceil0)" '[ -n "$ceil0" ]'
+checkx "old flow: that ceiling names user.list" '[[ ",$(rrfield ceiling_permissions)," == *,user.list,* ]]'
+check "old flow: manager runs after the window" running
 X exec "lever--$NAME" lever-manager agent start worker --task probe 2>&1 | tail -1
 X exec "lever--$NAME" lever-manager msg send --to worker pre-migration 2>&1 | tail -1
 
@@ -199,6 +219,8 @@ CUR_SCION="$SCION_VERSION"
 write_config ""
 (cd "$INST" && "$LEVER" init >/dev/null 2>&1)
 (cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tee "$WORK/migrate.log" | tail -25)
+migrate_rc=$?
+checkx "the migration apply succeeded ($migrate_rc)" '[ "$migrate_rc" = 0 ]'
 pid1=$(hubpid)
 checkx "the hub restarted once with lever's auth env" '[ -n "$pid1" ] && [ "$pid0" != "$pid1" ] && hubproxyenv'
 checkx "the manager container was not restarted" '[ "$mgr0" = "$(X inspect -f "{{.State.StartedAt}}" "lever--$NAME")" ]'
@@ -209,6 +231,10 @@ check "doctor: hub authentication" row_ok "hub authentication"
 check "doctor: hub identities" row_ok "hub identities"
 check "doctor: remote web role" row_ok "remote web role"
 check "doctor: remote access" row_ok "remote access"
+check "the older ceiling was rewritten in place" grep -qF "access constraint lever-remote-ceiling:operator@example.com ($ceil0) has permissions" "$WORK/migrate.log"
+checkx "the operator keeps that one ceiling ($(rrfield ceilings operator@example.com))" '[ "$(rrfield ceilings operator@example.com)" = "$ceil0" ]'
+checkx "the ceiling no longer names user.list" '[[ ",$(rrfield ceiling_permissions)," != *,user.list,* ]]'
+check "no relaxation-authority refusal" sh -c '! grep -q insufficient_constraint_relaxation_authority "$1"' _ "$WORK/migrate.log"
 check "broker path as the member controller: agent list" mgrlist
 X exec "lever--$NAME" lever-manager agent stop worker 2>&1 | tail -1
 checkx "broker path: resume the worker" 'X exec "lever--$NAME" lever-manager agent resume worker 2>&1 | grep -qE "running|resumed"'

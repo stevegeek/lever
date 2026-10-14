@@ -17,6 +17,10 @@
 # ref of this repo built into the work dir; default: the commit before the
 # proxy-auth change, the merge base with main).
 #
+# The config keeps the image name an older lever.yaml uses (scionlocal/...):
+# after the migration this lever starts agents on its lever.local/ name, and
+# doctor flags the manager the older lever created on the unqualified one.
+#
 # Env: IMAGE_TAR (required), IMAGE (default scionlocal/lever-claude-slim),
 # OLD_LEVER | OLD_REF, LEVER (default ~/.local/bin/lever), SCION_VERSION
 # (default: the release pin), OLD_SCION_VERSION (the older lever's pin,
@@ -213,6 +217,13 @@ att=$(cd "$INST" && timeout 15 script -qfec "'$LEVER' attach" /dev/null 2>&1 | h
 checkx "lever attach opens with the member controller's PAT" '[ ${#att} -gt 100 ] && ! printf "%s" "$att" | grep -qiE "authentication failed|forbidden|no access token"'
 checkx "the migration needed no broker link (the old window linked it)" '! grep -q "linking the jail.s runtime broker" "$WORK/migrate.log"'
 start_worker2 "migrated"
+AGENT_IMAGE="lever.local/${IMAGE#scionlocal/}:$ARCH"
+w2img=$(X inspect -f '{{.ImageName}}' lever--worker2 2>&1)
+checkx "migrated: worker2 runs the image under its lever.local name ($w2img)" '[ "$w2img" = "$AGENT_IMAGE" ]'
+checkx "migrated: the jail holds $AGENT_IMAGE" 'X image inspect "$AGENT_IMAGE" >/dev/null 2>&1'
+mrow=$(doctor_row "manager image")
+echo "      | $mrow" | cut -c1-400
+checkx "migrated: doctor warns that the manager runs an unqualified image name" '[[ "$mrow" == "! manager image"*unqualified* ]]'
 fence_checks "migrated"
 
 say "a contact added while agents run"
@@ -354,6 +365,9 @@ PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_
 checkx "fresh: the project lists the jail's runtime broker" 'G sh -c "read -r t; curl -sS -m 20 -H \"Authorization: Bearer \$t\" http://127.0.0.1:8080/api/v1/projects/$PROJ/providers" < "$INST/.lever-state/controller.pat" | grep -q brokerId'
 check "fresh: no hub link refused the earlier instance's project marker" sh -c '! grep -q "project not found under the user access token" "$1"' _ "$WORK/fresh.log"
 start_worker2 "fresh"
+checkx "fresh: the manager runs $AGENT_IMAGE" '[ "$(X inspect -f "{{.ImageName}}" "lever--$NAME")" = "$AGENT_IMAGE" ]'
+check "fresh: doctor: manager image" row_ok "manager image"
+check "fresh: doctor: hub container runtime" row_ok "hub container runtime"
 fence_checks "fresh"
 
 say "teardown"

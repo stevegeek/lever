@@ -116,7 +116,7 @@ guest_profile: small        # trim the guest's services, add zram swap
 scion:
   binary: /path/to/scion    # a prebuilt linux scion for the guest's arch: no 4 CPU-minute build
 manager:
-  image: scionlocal/lever-claude:arm64
+  image: lever.local/lever-claude:arm64
   resources: { memory: 1536MiB, cpu: "1.5" }
 workers:
   - name: worker
@@ -147,7 +147,7 @@ What each part does:
   past the cap with a message the manager can act on (suspend or stop a worker first), instead of letting
   the VM run out of memory.
 - **`scion.binary`** skips building scion on the host.
-- **The slim image** (`image: scionlocal/lever-claude-slim:arm64`, built with
+- **The slim image** (`image: lever.local/lever-claude-slim:arm64`, built with
   `make lever-image-slim`) should save about 12 GB of disk across its three copies, and minutes of
   image load on a slow disk. It carries no browser, cloud CLIs or language toolchains; see
   [the slim image](/getting-started/install/).

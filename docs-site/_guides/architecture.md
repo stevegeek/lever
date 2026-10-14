@@ -209,7 +209,7 @@ its workers need. Two patterns, both instance choices:
   generic. (A baked toolchain is an *instance* artifact, not part of the core.)
 
 **Images are tagged by architecture.** Agent images carry an arch tag
-(`scionlocal/lever-claude:arm64` / `:amd64`), never a shared `:latest`, so a host that cross-builds
+(`lever.local/lever-claude:arm64` / `:amd64`), never a shared `:latest`, so a host that cross-builds
 both — an arm64 laptop producing an amd64 server image — never clobbers one arch with the other. A
 **tagless** `manager.image` in the config auto-resolves to the jail's arch at apply time (the jail's
 arch equals its host's), so **one config is portable** across an arm64 laptop and an amd64 server; an

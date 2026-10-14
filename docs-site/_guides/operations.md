@@ -1133,6 +1133,13 @@ caller rename that user), lever restores the address with the controller PAT and
 hub's 60 s user cache before it goes on. Every later apply re-pins the dev user's address the same
 way.
 
+The same apply loads the agent image again and tags it `lever.local/<name>`, the name lever now
+starts agents on, which the hub's image registry setting cannot redirect (see [worker
+isolation](/security-model/worker-isolation/)). A `manager.image` of `scionlocal/<name>` keeps
+working. The manager and any worker the older lever created keep their unqualified name until
+they are recreated, and doctor's `manager image` row warns until then: `lever up --fresh
+--keep-conversation` recreates the manager.
+
 Lever finds the controller by its user ID, through the controller PAT, so an agent renaming the dev
 user does not stop an apply. Only minting or revoking a controller token needs the address: lever
 re-pins it and asserts the controller together, up to five times. If an agent keeps renaming the
@@ -1218,7 +1225,7 @@ Both open the hub database directly; `recover-authz` refuses while a hub runs. T
 | `lever apply` fails at `hub-identity`: "the controller (scion's dev user) lacks an authority lever needs after its demotion … It stays a member" | the first apply after an upgrade demoted the controller, and the probe of the controller PAT then failed | lever's agent operations that need the missing authority fail until it is fixed; lever does not make the controller an admin again. Report the error text; the fix is a permission on lever's `lever-controller` role |
 | `lever apply` fails at `hub-identity`: "lever-controller's address does not stay on the controller … long enough to mint or revoke its token" | a token was due (missing, near expiry, or with other scopes), and something, most likely an agent, kept renaming scion's dev user through the hub's identity route | removals of remote logins already took effect and the old token keeps working. `lever stop`, then `lever apply`; find which agent made the calls |
 | `lever apply` warns "the controller's address is … right after lever re-pinned it" | something keeps renaming scion's dev user, most likely an agent; the apply does not need the address unless a token is due | find the agent; until it stops, lever's messages carry the agent-chosen sender label (see [credentials](/security-model/credentials/)) |
-| `lever apply`/`up --reset-hub-identity` fails: "the tree's project marker … names project …, but lever last registered …" | the tree's `.scion` marker, in the manager's workspace, names another project than the one lever registered | if the marker is lever's own (a project you re-created on purpose), remove `<tree>/.scion` on the host and run again; otherwise an agent wrote it |
+| `lever apply`/`up --reset-hub-identity` fails: "the tree's project marker … names project …, but lever last registered …" | the tree's `.scion` marker, in the manager's workspace, names another project than the one lever registered | if the marker is lever's own (a project you re-created on purpose), remove `<tree>/.scion` on the host and run again; otherwise an agent wrote it. A marker the register-project step re-created (a new local ID) is accepted when the jail's scion config pins the tree to the registered project (`hub.projectId`), so this needs no action after a re-init |
 | Doctor's `hub authentication` row fails | the hub runs without lever's auth settings (started by hand, or before a key change), the hub admits an address nobody invited (not `invite_only`), the jail's public key differs from the host key or its directory or file is not root's or is writable by others, a login provider is configured, or scion's dev token exists | `lever apply` (it reinstalls the key, pins the settings, removes the dev token and restarts the hub when they differ) |
 | Doctor's `hub identities` row fails | another hub admin exists, the controller holds a token lever did not record, or scion's dev user was renamed since the last apply | `lever apply` (it demotes extra admins and restores the controller's address); revoke an unrecorded token with scion |
 
@@ -1277,12 +1284,12 @@ A host that only runs an instance does not need Docker. Build the agent image wh
 (`make lever-image`), save it, and ship the archive with the instance:
 
 ```sh
-docker save -o images/lever-claude.tar scionlocal/lever-claude:arm64   # on the build machine
+docker save -o images/lever-claude.tar lever.local/lever-claude:arm64   # on the build machine
 ```
 
 ```yaml
 manager:
-  image: scionlocal/lever-claude          # the tag inside the archive (arch-resolved, as always)
+  image: lever.local/lever-claude          # the tag inside the archive (arch-resolved, as always)
   image_tar: images/lever-claude.tar      # instance root, outside the mounted tree
 ```
 

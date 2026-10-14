@@ -35,7 +35,7 @@ egress: closed                            # seal the jail: agents reach only the
 scion:
   version: b41cd6fe                       # pin a scion commit; a lever release ships this one prebuilt
 manager:
-  image: scionlocal/lever-claude
+  image: lever.local/lever-claude
   prompt_file: manager.md
 
 broker:

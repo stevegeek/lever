@@ -33,7 +33,7 @@ scion:
 broker:
   llm_auth: subscription
 manager:
-  image: scionlocal/lever-claude
+  image: lever.local/lever-claude
   prompt_file: manager.md   # resolved at the root (host-only), not inside the mount
   credential_file: ~/.scion/oauth-token  # YOU supply this: your Claude OAuth token (0600)
   allow_ports: []
@@ -67,7 +67,7 @@ You'll see a `backend: <profile summary>` line, then the ordered plan:
 
 ```
   broker-up
-  load-image              scionlocal/lever-claude:arm64
+  load-image              lever.local/lever-claude:arm64
   init-machine
   config-registry
   scion-server
@@ -80,7 +80,7 @@ You'll see a `backend: <profile summary>` line, then the ordered plan:
 ```
 
 (With `manager.image_tar` set, the `load-image` line also names the archive it streams in:
-`load-image  scionlocal/lever-claude:arm64 (from /…/hello-worker/images/lever-claude.tar)`.)
+`load-image  lever.local/lever-claude:arm64 (from /…/hello-worker/images/lever-claude.tar)`.)
 
 `scion-server` starts the jail's hub with `--dev-auth=false`, in scion's proxy auth mode: it trusts
 only assertions lever signs with a key held on the host. `hub-identity` then signs in as lever's

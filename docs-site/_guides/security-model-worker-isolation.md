@@ -327,12 +327,18 @@ mutating routes, or running the hub in hosted mode (which removes `system/*` ent
 The image registry route is the one to watch, since it changes where agent images come from.
 scion rewrites a bare image name such as `scionlocal/lever-claude` to the registry it holds, and
 this scion keeps that registry in the hub database, which outranks `settings.yaml` and applies at
-the next agent start without a restart. An agent can therefore point it at a registry it
-controls, and the next agent started, a worker or the manager, would run that registry's image.
-Every `lever apply` sets it back to `scionlocal` as lever-admin before anything starts an agent.
-Between applies it stays open: set `security.require_image_digest`, so every image is pinned by
-digest and a foreign registry can only fail the pull. The runtime route can likewise switch the
-hub's container runtime, which fails agent starts until it is set back by hand.
+the next agent start without a restart. An agent can set it to a registry it controls. lever
+therefore starts every agent on a name with a registry host, `lever.local/<name>`, which scion
+never rewrites: whatever the registry says, the agent runs the image `lever apply` loaded into the
+jail. No registry by that name exists, and none is contacted while the image is loaded. As defence
+in depth, every `lever apply` also sets the registry back to `scionlocal` as lever-admin. An agent
+record created by an older lever keeps its bare image name, and the registry still applies to it
+at each start; `lever doctor`'s `manager image` row lists such records, and recreating them closes
+it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
+until the next `lever apply` sets it back to podman as lever-admin; doctor's `hub container
+runtime` row fails meanwhile. The workstation settings route can turn on
+`auto_inject_gcloud_adc`, which makes scion copy the jail user's gcloud credentials into every
+agent it starts; the jail holds none, and every apply removes the key.
 
 The project marker `<tree>/.scion` is in the agents' reach too. lever never takes a symlink
 there for the marker and removes one before `scion init`, but scion's broker, starting an agent,

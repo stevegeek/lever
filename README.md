@@ -90,7 +90,7 @@ dependency. See [core vs instance](docs-site/_guides/core-vs-instance.md).
 go install github.com/stevegeek/lever/cmd/lever@latest   # host `lever` onto your GOBIN/PATH
 # — or from a clone (requires Go 1.26+):
 make install              # build host `lever` + the host tools lever-tool-github, lever-tool-fizzy, lever-tool-whisper, lever-tool-tts → ~/.local/bin (must be on PATH)
-make lever-image          # build the agent image scionlocal/lever-claude:<arch>
+make lever-image          # build the agent image lever.local/lever-claude:<arch>
 
 cd path/to/my-instance && lever up        # bring up jail + scion + manager, attach the manager TTY
 lever up path/to/my-instance/lever.yaml   # or pass an explicit config path

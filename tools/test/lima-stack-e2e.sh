@@ -3,8 +3,9 @@
 # with the agent image (lever-admin links the runtime broker and pins the
 # experiments off), a manager and a worker, messages both ways, remote access
 # for an operator and a contact, the experiment and broker fence, a contact
-# removed while an agent loops the controller rename, an agent's image registry
-# write undone by the next apply, `lever stop` and a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
+# removed while an agent loops the controller rename, an agent's image
+# registry, runtime and gcloud settings writes (a worker still starts on lever's
+# image, and the next apply undoes them), `lever stop` and a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
 # Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
@@ -14,8 +15,9 @@
 # the host.
 #
 # Env: SCION_VERSION (default: the release pin), IMAGE_TAR, IMAGE (default
-# scionlocal/lever-claude-slim), SAVE_IMAGE_TAR (copy the archive lever loaded
-# there, e.g. for the hub auth e2e), LEVER (default ~/.local/bin/lever), NAME,
+# lever.local/lever-claude-slim), SAVE_IMAGE_TAR (copy the archive lever loaded
+# there, e.g. for the hub auth e2e; a lever.local image is also tagged
+# scionlocal/<name> in it, the name an older lever.yaml uses), LEVER (default ~/.local/bin/lever), NAME,
 # KEEP=1 (leave the VM for inspection).
 set -uo pipefail
 
@@ -23,7 +25,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 NAME="${NAME:-stacke2e}"
 VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
-IMAGE="${IMAGE:-scionlocal/lever-claude-slim}"
+IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
 SCION_VERSION="${SCION_VERSION:-$(sed -n 's/^const ReleasePin = "\(.*\)"/\1/p' "$REPO_ROOT/internal/provision/scionbin/release.go")}"
 SCION_MODULE=github.com/GoogleCloudPlatform/scion
 OPERATOR=operator@example.com
@@ -204,10 +206,16 @@ if [ -z "${IMAGE_TAR:-}" ]; then
 		bad "agent image build"; exit 1
 	fi
 	G rm -rf /tmp/stackctx
-	# podman names a local build localhost/<ref>; lever looks the archive up by
-	# the docker form of manager.image.
-	if G podman tag "$IMAGE:$ARCH" "docker.io/$IMAGE:$ARCH" &&
-		G podman save --format docker-archive -o /tmp/stack-img.tar "docker.io/$IMAGE:$ARCH" >/dev/null 2>&1 &&
+	# podman names a local build of an unqualified ref localhost/<ref>; lever
+	# looks the archive up by the docker form of manager.image.
+	case "$IMAGE" in
+	lever.local/*) names="$IMAGE:$ARCH docker.io/scionlocal/${IMAGE#lever.local/}:$ARCH" ;;
+	*) names="docker.io/$IMAGE:$ARCH" ;;
+	esac
+	tagged=1
+	for n in $names; do [ "$n" = "$IMAGE:$ARCH" ] || G podman tag "$IMAGE:$ARCH" "$n" || tagged=0; done
+	if [ "$tagged" = 1 ] &&
+		G podman save -m --format docker-archive -o /tmp/stack-img.tar $names >/dev/null 2>&1 &&
 		limactl copy "$VM:/tmp/stack-img.tar" "$INST/img.tar" >/dev/null; then
 		ok "agent image saved to an archive for lever to load"
 	else
@@ -243,6 +251,9 @@ PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
+cimage() { X inspect -f '{{.ImageName}}' "$1" 2>/dev/null; }
+checkx "the manager runs lever's image under its lever.local name ($(cimage "lever--$NAME"))" '[ "$(cimage "lever--$NAME")" = "lever.local/${IMAGE#lever.local/}:$ARCH" ]'
+check "no registry called lever.local resolves in the guest" G sh -c '! getent hosts lever.local'
 
 say "manager, worker and messages"
 # X joins its arguments into one shell line, so no argument here holds a space.
@@ -358,23 +369,27 @@ check "lever-admin linked the jail's runtime broker" grep -q "linking the jail's
 checkx "the project lists the broker again" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q "$BROKER"'
 check "the manager runs after the re-link" running
 
-say "an agent points the hub's agent image registry at its own"
-# The hub's registry route takes any loopback caller. On this scion it writes
-# the database's endpoints section, which outranks settings.yaml and applies at
-# the next dispatch, so only lever-admin's write in hub-identity undoes it.
-cat > "$WORK/registry.py" <<'PY'
-import json, os, urllib.error, urllib.request
+say "an agent points the hub's image registry and runtime at its own, and turns on gcloud injection"
+# These hub routes take any loopback caller. On this scion the registry and
+# runtime land in the database, which outranks settings.yaml and applies at the
+# next dispatch. lever's agent images carry a registry host, so the registry
+# write cannot redirect a start; each apply also sets all three back.
+cat > "$WORK/call.py" <<'PY'
+import json, os, sys, urllib.error, urllib.request
 tok = open(os.path.expanduser("~/.scion/scion-token")).read().strip()
 ep = os.environ.get("SCION_HUB_ENDPOINT") or os.environ.get("SCION_HUB_URL")
-req = urllib.request.Request(ep + "/api/v1/system/registry", data=json.dumps({"image_registry": "registry.invalid/agent-chosen"}).encode(), method="PUT",
+req = urllib.request.Request(ep + sys.argv[2], data=sys.argv[3].encode(), method=sys.argv[1],
                              headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
 try:
     print(urllib.request.urlopen(req, timeout=10).status)
 except urllib.error.HTTPError as e:
     print(e.code)
 PY
-limactl copy "$WORK/registry.py" "$VM:/tmp/registry.py"
-X cp /tmp/registry.py "lever--$NAME:/tmp/registry.py"
+limactl copy "$WORK/call.py" "$VM:/tmp/call.py"
+X cp /tmp/call.py "lever--$NAME:/tmp/call.py"
+# agentcall <method> <path> <json>: the hub's status for the manager's call.
+# X joins its arguments into one shell line, so the JSON is quoted for it.
+agentcall() { X exec "lever--$NAME" python3 /tmp/call.py "$1" "$2" "'$3'" 2>&1 | tail -1; }
 # hubreg: image_registry in the hub database's endpoints section ("" with no row).
 hubreg() {
 	G python3 -c 'import json, os, sqlite3
@@ -382,14 +397,35 @@ c = sqlite3.connect("file:" + os.path.expanduser("~/.scion/hub.db") + "?mode=ro"
 r = c.execute("select value from hub_settings where section = ?", ("endpoints",)).fetchone()
 print(json.loads(r[0]).get("image_registry", "") if r else "")'
 }
-code=$(X exec "lever--$NAME" python3 /tmp/registry.py 2>&1 | tail -1)
+hubrt() { hubbody /api/v1/system/runtime | python3 -c 'import json,sys; print(json.load(sys.stdin).get("configured", ""))'; }
+gcloudset() { G sh -c 'grep -q "^auto_inject_gcloud_adc:" ~/.scion/settings.yaml'; }
+checkx "the runtime is podman before the writes ($(hubrt))" '[ "$(hubrt)" = podman ]'
+code=$(agentcall PUT /api/v1/system/registry '{"image_registry":"registry.invalid/agent-chosen"}')
 checkx "the agent's registry write reaches the hub ($code)" '[ "$code" = 200 ]'
 reg=$(hubreg 2>&1)
 checkx "the hub's endpoints section holds the agent's registry ($reg)" '[ "$reg" = registry.invalid/agent-chosen ]'
+mgr agent stop worker | tail -1 | sed 's/^/      | /'
+checkx "the worker resumes under the agent's registry" 'mgr agent resume worker | grep -qE "running|resumed"'
+checkx "the worker runs lever's image, not the agent's registry ($(cimage lever--worker))" '[ "$(cimage lever--worker)" = "lever.local/${IMAGE#lever.local/}:$ARCH" ]'
+code=$(agentcall PATCH /api/v1/system/workstation-settings '{"auto_inject_gcloud_adc":true}')
+checkx "the agent's gcloud injection write reaches the hub ($code)" '[ "$code" = 200 ]'
+check "settings.yaml carries auto_inject_gcloud_adc" gcloudset
+code=$(agentcall PUT /api/v1/system/runtime '{"runtime":"docker"}')
+checkx "the agent's runtime write reaches the hub ($code)" '[ "$code" = 200 ]'
+checkx "the hub's runtime is the agent's ($(hubrt))" '[ "$(hubrt)" = docker ]'
+doctor_run
+checkx "doctor: hub container runtime fails on the agent's runtime" '! row_ok "hub container runtime"'
 up 5
 reg=$(hubreg 2>&1)
 checkx "apply set the hub's registry back to scionlocal ($reg)" '[ "$reg" = scionlocal ]'
-check "the manager runs after the registry repair" running
+checkx "apply set the hub's runtime back to podman ($(hubrt))" '[ "$(hubrt)" = podman ]'
+checkx "apply removed auto_inject_gcloud_adc" '! gcloudset'
+check "the manager runs after the repair" running
+mgr agent stop worker | tail -1 | sed 's/^/      | /'
+checkx "the worker resumes after the runtime repair" 'mgr agent resume worker | grep -qE "running|resumed"'
+doctor_run
+check "doctor: hub container runtime" row_ok "hub container runtime"
+check "doctor: manager image" row_ok "manager image"
 
 say "lever stop, then lever up (agents resume)"
 (cd "$INST" && timeout 900 "$LEVER" stop 2>&1 | tail -3)

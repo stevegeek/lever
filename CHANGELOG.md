@@ -176,7 +176,9 @@ version bump moves the block under the new version heading.
 - **`lever up --reset-hub-identity` / `lever apply --reset-hub-identity`.** After a deliberate hub
   database reset, it revokes the recorded tokens (best effort), forgets lever's hub records and
   tokens and sets the hub up as new. It refuses a tree project marker that names another project
-  than the one lever registered, since the tree is the manager's workspace. Lever does
+  than the one lever registered, since the tree is the manager's workspace; a marker that
+  register-project's re-init gave a new local ID counts when the jail's scion config pins it to
+  the registered project. Lever does
   this on its own only on positive evidence (its `lever-controller` role gone and `lever-admin`
   created by this run); otherwise the apply fails and names the flag.
 
@@ -200,14 +202,24 @@ version bump moves the block under the new version heading.
   and artifacts* fails while either is on. The remote proxy refuses conduit, artifacts and writes
   to the experiments admin route for every login, and also an agent's port tunnel and delegations
   and scion's test-identity routes. On an older scion nothing changes.
-- **Every apply sets the hub's agent image registry back (lever#207).** On the new scion the
-  workstation `PUT /api/v1/system/registry` route, which any loopback caller including an agent
-  can call, stores the registry in the hub database, where it outranks `settings.yaml` and applies
-  at the next agent start. An agent could point it at a registry it controls, so the next worker
-  or manager would run that registry's image, and lever's `scion config set` no longer undid it.
-  The hub-identity step now sets it to `scionlocal` as `lever-admin` before anything starts an
-  agent. Between applies it stays open: `security.require_image_digest` turns a foreign
-  registry into a failed pull.
+- **Agents start on an image name the hub's image registry cannot redirect (lever#207).** On the
+  new scion the workstation `PUT /api/v1/system/registry` route, which any loopback caller
+  including an agent can call, stores the registry in the hub database, where it outranks
+  `settings.yaml` and applies at the next agent start. scion rewrites every unqualified image name
+  such as `scionlocal/lever-claude` to that registry, so an agent could make the next worker or
+  manager run an image from a registry it controls. lever now starts every agent on a name with a
+  registry host, `lever.local/<name>`, which scion never rewrites; load-image tags the loaded
+  image with it, and no registry by that name exists or is contacted. A `manager.image` or
+  `workers[].image` of `scionlocal/<name>` runs as `lever.local/<name>`, any other unqualified
+  name `<name>` as `lever.local/<name>`, and a name with a registry host as written; a config whose
+  images would share one name is refused. As defence in depth the hub-identity step also sets the
+  registry to `scionlocal` as `lever-admin` on every apply.
+- **Every apply sets the hub's container runtime back to podman and turns off gcloud credential
+  injection (lever#207).** The same loopback routes let an agent switch the runtime the hub starts
+  agents with, which then fail to start, and set `auto_inject_gcloud_adc`, which copies the jail
+  user's gcloud credentials into every agent started afterwards. The hub-identity step sets the
+  runtime to `podman` as `lever-admin`, and the apply's settings write removes the gcloud key. The
+  new `lever doctor` row *hub container runtime* fails while the hub's runtime is not podman.
 - **The remote proxy refuses broker writes (lever#207).** A remote web user keeps scion's
   `broker.create`, so an operator login could register a broker and receive its join token and
   secret in the browser, and the extra broker blocked lever-admin's link of a new project's
@@ -258,6 +270,15 @@ version bump moves the block under the new version heading.
   image (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
   recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
   version* row says so.
+- **`lever.local` image names.** `make lever-image` and `make lever-image-slim` tag
+  `lever.local/lever-claude[-slim]:<arch>`, and also `scionlocal/...` so a `lever.yaml` that still
+  names it keeps working; the examples and docs use `lever.local/`. The first apply loads the image
+  again and tags its `lever.local/` name. A manager or worker an older lever created keeps its
+  unqualified name, which the hub's registry still applies to: doctor's *manager image* row warns
+  and names them; recreate the manager with `lever up --fresh --keep-conversation` and recycle
+  or delete the workers. `security.allowed_image_registries` applies to the name as configured,
+  so a list with `scionlocal` still allows `scionlocal/...` and needs `lever.local` for the new
+  names.
 
 ### Known issues
 
@@ -269,9 +290,10 @@ version bump moves the block under the new version heading.
   then lever's messages carry the label the agent chose (no forgery follows: verification needs
   lever's own record). An agent renaming in a loop makes an apply that must mint a controller token
   fail, never a revocation; `lever stop` ends it.
-- An agent can still change the hub's agent image registry or container runtime between applies
-  through scion's workstation routes; the next apply sets the registry back, not the runtime.
-  scion's broker writes the project marker through a dangling symlink an agent leaves in the tree
+- An agent can still change the hub's agent image registry, container runtime or gcloud
+  injection between applies through scion's workstation routes. The registry no longer reaches an
+  agent lever starts, only records an older lever created; another runtime fails agent starts
+  until the next apply sets it back. scion's broker writes the project marker through a dangling symlink an agent leaves in the tree
   when it starts an agent, creating a file of fixed content at a path the agent chose as the jail
   user. Both need a scion change.
 

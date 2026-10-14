@@ -59,7 +59,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/voice` | Speech on the host. Speech to text: the pinned Whisper models and `lever voice fetch`, the `whisper-server` supervisor and adapter, the dictation socket and the agent operation of `lever-tool-whisper`. Text to speech: the pinned speech model archives (unpacked with a manifest of every file), the sherpa-onnx adapter, the per-text runner and the speech socket of `lever-tool-tts`. |
 | `internal/webpush` | Web Push (RFC 8030/8291/8292) sender for the chat page's notifications, stdlib only. |
 | `internal/wire` | Leaf package: agent⇄broker request/response types, route paths and bootstrap material. Imports no other lever package. |
-| `image/lever-claude` | Build context for the generic agent image (`scionlocal/lever-claude:<arch>`), and the lever layer of the slim one. |
+| `image/lever-claude` | Build context for the generic agent image (`lever.local/lever-claude:<arch>`), and the lever layer of the slim one. |
 | `image/scion-slim` | The slim image's base (`make lever-image-slim`): what scion needs in an agent container, in place of `scion-claude`. |
 | `image/contract` | The agent-image contract check (`make image-contract IMAGE=...`) and its tests. |
 | `examples/` | Runnable instances used by docs and tests. |

@@ -70,7 +70,7 @@ backend: orbstack
 egress: closed
 tree: workspace
 manager:
-  image: scionlocal/lever-claude
+  image: lever.local/lever-claude
   prompt_file: manager.md
   allow_ports: []
 broker:

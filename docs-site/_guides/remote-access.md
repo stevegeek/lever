@@ -145,7 +145,13 @@ the dial error names it and the `apt-get` line if it is ever absent.
 
 ### 2. Make sure the host has node
 
-The web UI's assets are built **on your host**, at `apply` time, and staged into the guest. You
+**On a release lever with the scion pin of its release** (`b41cd6fe`, the examples' pin) you can
+skip this step: lever downloads the web UI that release ships, checks it against the sha256 built
+into `lever`, and stages it, so the host needs neither node nor Go. Only a failed download builds
+it, as below. See [prebuilt scion](/reference/config/#prebuilt-scion).
+
+For any other pin, a `source:` checkout, or a lever built from a checkout, the web UI's assets are
+built **on your host**, at `apply` time, and staged into the guest. You
 need **node >= 20 and npm** on `PATH` — nothing in the guest, and nothing permanent: the build
 output is cached, so this only costs you the first apply per pin.
 
@@ -591,7 +597,9 @@ pinned: the source is the Scion commit `scion.version` names, fetched through th
 and checksum-verified, and `npm ci` installs from its committed lockfile. That bounds *which*
 code runs, not *what it can do*. If that is not a trade you want, `scion.binary` mode skips the
 build entirely, and serves only the UI its binary embeds: build scion with upstream's `make all`
-for one (see [`scion.binary:` is exempt](#2-make-sure-the-host-has-node)).
+for one (see [`scion.binary:` is exempt](#2-make-sure-the-host-has-node)). The scion pin of a
+lever release skips it too: the web UI comes prebuilt with the release, built by the same commands
+in the release build and checked against the sha256 embedded in `lever`.
 
 ## Audit log
 

@@ -11,8 +11,9 @@ Part of [getting started](/getting-started/). Steps keep their original numberin
 A release archive from GitHub holds the same host binaries, ready to run. Its `lever` needs **no Go
 toolchain** for the scion pin of its release (`65531d7f`, the pin in the examples): `lever apply`
 downloads that release's prebuilt scion, checks it against the sha256 built into `lever`, and skips
-the scion compile. Any other pin, a failed download, and `remote.enabled` (which builds scion's web
-UI from source) still need Go. See [prebuilt scion](/reference/config/#prebuilt-scion).
+the scion compile. With `remote.enabled` it downloads that release's prebuilt web UI the same way,
+so remote access on that pin needs **neither Go nor node**. Any other pin, and a failed download,
+still need Go (and node for the web UI). See [prebuilt scion](/reference/config/#prebuilt-scion).
 
 To build from a checkout instead:
 

@@ -3,6 +3,8 @@ package guest
 import (
 	"archive/tar"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
@@ -220,5 +223,70 @@ func TestStageWebAssetsScriptQuotesTheDigest(t *testing.T) {
 	got := stageWebAssetsScript("'; touch /tmp/pwned; '")
 	if !strings.Contains(got, `'\''`) {
 		t.Fatalf("digest was not shell-quoted: %s", got)
+	}
+}
+
+func fakePrebuilt(t *testing.T, fn func(ctx context.Context, version string) (string, string, error)) {
+	t.Helper()
+	old := prebuiltWebUI
+	t.Cleanup(func() { prebuiltWebUI = old })
+	prebuiltWebUI = fn
+}
+
+// A release's web UI is staged as-is: no Go, no node.
+func TestEnsureScionWebAssetsStagesThePrebuiltUI(t *testing.T) {
+	dist := filepath.Join(t.TempDir(), "client")
+	write(t, filepath.Join(dist, filepath.FromSlash(layout.WebAssetsSentinel)), "x")
+	fakePrebuilt(t, func(_ context.Context, version string) (string, string, error) {
+		if version != scionbin.ReleasePin {
+			t.Fatalf("version = %s", version)
+		}
+		return dist, "release-abc", nil
+	})
+	f := proc.NewFakeRunner()
+	f.Script("orb -m m /bin/bash -c", proc.Result{})
+	f.Script("orb -u root -m m bash -c", proc.Result{})
+	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
+	if err := g.EnsureScionWebAssets(context.Background(), ScionSpec{Version: scionbin.ReleasePin, WebUI: true}); err != nil {
+		t.Fatalf("EnsureScionWebAssets: %v", err)
+	}
+	var staged bool
+	for _, c := range f.Calls {
+		if c.Name == "go" || c.Name == "npm" || c.Name == "node" {
+			t.Fatalf("a prebuilt UI ran %s %v", c.Name, c.Args)
+		}
+		if c.Stdin != "" {
+			staged = strings.Contains(c.Args[len(c.Args)-1], "release-abc")
+		}
+	}
+	if !staged {
+		t.Fatal("the prebuilt UI was not staged under its digest")
+	}
+}
+
+// A refused download stops the apply; an unavailable one builds instead.
+func TestEnsureScionWebAssetsPrebuiltErrors(t *testing.T) {
+	g := func(f *proc.FakeRunner) Guest {
+		return Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
+	}
+	fakePrebuilt(t, func(context.Context, string) (string, string, error) {
+		return "", "", fmt.Errorf("%w: bad bytes", scionbin.ErrReleaseTampered)
+	})
+	f := proc.NewFakeRunner()
+	err := g(f).EnsureScionWebAssets(context.Background(), ScionSpec{Version: scionbin.ReleasePin, WebUI: true})
+	if !errors.Is(err, scionbin.ErrReleaseTampered) || len(f.Calls) != 0 {
+		t.Fatalf("err = %v, calls %+v; want the refusal and no fallback build", err, f.Calls)
+	}
+
+	// Unavailable: the source build runs, starting with the module download
+	// (which this runner fails).
+	fakePrebuilt(t, func(context.Context, string) (string, string, error) {
+		_, _, err := webassets.Prebuilt(context.Background(), "666333f9")
+		return "", "", err
+	})
+	f = proc.NewFakeRunner()
+	err = g(f).EnsureScionWebAssets(context.Background(), ScionSpec{Version: scionbin.ReleasePin, WebUI: true})
+	if err == nil || len(f.Calls) == 0 || f.Calls[0].Name != "go" {
+		t.Fatalf("err = %v, calls %+v; want the source build attempted", err, f.Calls)
 	}
 }

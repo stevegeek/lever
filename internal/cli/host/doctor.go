@@ -218,7 +218,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkMcpJsonInTree(app.Tree) },
 		func() checkResult { return checkTreeBackup(app, state, time.Now()) },
 		func() checkResult { return checkGoToolchain(app.Scion, scionPrebuilt(app), probes) },
-		func() checkResult { return checkNodeToolchain(app, probes) },
+		func() checkResult { return checkNodeToolchain(app, webUIPrebuilt(app), probes) },
 		func() checkResult { return checkOperatorSkills(app, state) },
 		func() checkResult { return checkDirectives(app, state) },
 		func() checkResult { return checkRemote(ctx, app, state, probes, jr) },

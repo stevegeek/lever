@@ -204,7 +204,9 @@ examples pin (`65531d7f`). When `scion.version` names that commit (as written in
 its full hash or a prefix of at least 7 hex digits, or as its module version), a release build of
 lever downloads the binary for the guest's architecture from its own GitHub release instead of
 building it. The host then needs no Go toolchain and skips the scion compile (about 4 CPU-minutes).
-`remote.enabled` still needs Go and node, to build the web UI from the module source.
+The release also ships scion's web UI built from that commit (a `scion-web_<pin>.tar.gz` asset of
+a few MB), so with [`remote.enabled`](#remote) lever downloads it instead of building it, and the
+host needs neither Go nor node for remote access either.
 
 - The download is https only, from `github.com` and GitHub's release asset hosts. The sha256 and
   size of every asset are embedded in the lever binary when the release is built. lever checks
@@ -215,11 +217,19 @@ building it. The host then needs no Go toolchain and skips the scion compile (ab
   from source once you have looked.
 - When the download cannot happen (no network, the asset or release missing, a redirect to a host
   lever does not allow), lever builds scion from source as it does for any other pin, and the step
-  notes *prebuilt scion not downloaded; using a source build*. That build needs Go.
+  notes *prebuilt scion not downloaded; using a source build*. That build needs Go; the web UI
+  build needs Go and node.
+- The web UI archive is checked the same way (https, the same hosts, the embedded sha256 and size)
+  before lever unpacks it, and it is unpacked only when it holds nothing but directories and
+  regular files under plain relative names (no links, devices, absolute paths or `..`), within
+  limits on the file count and sizes. An archive that breaks those rules stops the apply like a
+  digest mismatch. The unpacked UI is cached in `~/.cache/lever/scion-web/release-<sha256>/`
+  (`~/Library/Caches/lever/scion-web/` on macOS) and reused on the next apply.
 - The verified binary stays in lever's cache directory (`~/.cache/lever/scion-bin/` on Linux,
   `~/Library/Caches/lever/scion-bin/` on macOS). lever hashes it on each apply and downloads it
   again if it changed.
-- Set `LEVER_SCION_DOWNLOAD=off` in lever's environment to always build from source.
+- Set `LEVER_SCION_DOWNLOAD=off` in lever's environment to always build from source (scion and
+  its web UI).
 - A lever built from a checkout (`make install`, `go build`, `go install`) embeds no digests and
   always builds scion.
 
@@ -266,7 +276,8 @@ mode would thus add work to every hook and give no data.
 
 **With [`remote.enabled`](#remote), `version:` and `source:` additionally need node >= 20 + npm on
 the host.** Neither carries built web assets, so lever builds the hub's web UI host-side from the
-same source tree and stages it into the guest; `binary:` is exempt. Cache location, sizes, and
+same source tree and stages it into the guest; `binary:` is exempt, and so is the scion pin of
+your lever release, whose web UI lever downloads ([prebuilt scion](#prebuilt-scion)). Cache location, sizes, and
 failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-host-has-node).
 
 ### `manager`
@@ -507,7 +518,7 @@ access guide](/remote-access/) for the accepted security posture, setup steps, a
 
 | Key | Type | Required | Default | Meaning |
 |---|---|---|---|---|
-| `enabled` | bool | no | `false` | Turns the proxy on. Loads on both backends (`orbstack` and `lima`); the Lima path is not yet live-validated (see the [guide](/remote-access/#lima)). Requires **node >= 20 + npm on the host** with [`scion.version`](#scion) or `scion.source`: neither carries built web assets, so lever builds the UI host-side and stages it into the guest. `binary:` is exempt, and serves only the UI its binary embeds (upstream's `make all`). `lever doctor` checks it. |
+| `enabled` | bool | no | `false` | Turns the proxy on. Loads on both backends (`orbstack` and `lima`); the Lima path is not yet live-validated (see the [guide](/remote-access/#lima)). Requires **node >= 20 + npm on the host** with [`scion.version`](#scion) or `scion.source`: neither carries built web assets, so lever builds the UI host-side and stages it into the guest. The scion pin of a lever release needs no node (nor Go): lever downloads that release's prebuilt web UI ([prebuilt scion](#prebuilt-scion)). `binary:` is exempt, and serves only the UI its binary embeds (upstream's `make all`). `lever doctor` checks it. |
 | `port` | int | no | `8445` | Port the proxy binds (on `bind`). Must not collide with the broker's `jail_port`/`admin_port` (rejected at config load). Also rejected if listed in `manager.allow_ports`: the proxy trusts the identity header because only the front can reach its listener, and an allow_ports hole would let the jail reach it directly. Give each remote-enabled instance on the host its own port: the proxies reach their own jails, so only the host listeners are shared ground. |
 | `login_port` | int | no | - | **Deprecated; ignored.** The hub login needs no port any more (the proxy signs the browser's user in with a lever-signed assertion; see the [guide](/remote-access/#how-the-browser-is-logged-in)). The key still loads, whether remote access is on or off, binds and grants nothing, and `lever apply`, `lever up` and `lever remote serve` warn until you remove it. |
 | `base_url` | string (URL) | **yes when `enabled`** | - | The front's public origin, as an absolute `https://` URL with its port when not 443: the tailnet serve hostname (`https://myhost.tailxxxx.ts.net`), or another front's (`https://myvm.exe.xyz:8445`). **Rejected at config load if empty while `enabled: true`**: the proxy matches every request's `Origin` against the host this resolves to, and an empty `base_url` would fail closed on every request — a proxy that could never serve anything, so lever refuses to load that config at all. It configures **only the proxy**; lever deliberately never passes it to the hub as `--base-url` (see the [guide](/remote-access/#the-tailnet-url-never-reaches-the-hub)). |

@@ -7,6 +7,24 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **A release ships scion's web UI prebuilt, so remote access on its pin needs no Go or node
+  (lever#205).** The release build also builds scion's web UI at the release pin, with the same
+  `npm ci` and `npm run build` an apply runs, in a job of its own with a read-only token and no
+  credentials or cache shared with the job that builds `lever`, and uploads it as
+  `scion-web_<pin>.tar.gz` (a deterministic archive of a few MB, sourcemaps left out) beside the
+  prebuilt scion binaries; its sha256 and size are embedded in `lever` with theirs. With `remote.enabled` and `scion.version`
+  naming that pin, `lever apply` downloads it instead of fetching the module with Go and building
+  it with node. The download follows the scion binary's rules: https only, from `github.com` and
+  GitHub's release asset hosts, checked against the embedded digest and size before anything is
+  unpacked; a mismatch stops the apply, and a download that cannot happen falls back to the source
+  build. lever unpacks only directories and regular files under plain relative names (no links,
+  devices, absolute paths or `..`), with its own modes and limits on the file count and sizes, and
+  an archive that breaks those rules stops the apply too. The unpacked UI is cached by its digest.
+  `lever doctor`'s *go toolchain* and *node toolchain* rows pass without Go and node when the
+  download applies. `LEVER_SCION_DOWNLOAD=off` builds both from source.
+
 ### Changed
 
 - **scion is pinned to `65531d7f`, its nightly-20261014.** The examples, the release's prebuilt

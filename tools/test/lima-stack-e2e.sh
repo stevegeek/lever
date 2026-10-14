@@ -238,7 +238,6 @@ PY
 check "the controller PAT was granted the baseline reads and inbox:read" python3 "$WORK/granted.py" "$rec"
 check "the hub runs in proxy auth mode" hubproxyenv
 check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
-check "lever-admin linked the jail's runtime broker" grep -q "linking the jail's runtime broker .* as lever-admin" "$WORK/up.log"
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
@@ -283,9 +282,12 @@ check "doctor: remote web role (bound before any sign-in)" row_ok "remote web ro
 checkx "doctor: no failed row" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
 
 say "a contact removed while an agent loops the controller rename, with a token due"
-# Any agent can rename scion's dev user through the hub's workstation identity
-# route; a removal must still take effect: at the proxy before any step, and at
-# the hub before any controller work.
+# Any agent can call the hub's workstation identity route, which renames scion's
+# dev user. A fresh instance has none (the controller is lever-controller), so
+# the loop must change nothing lever relies on: the apply mints the due token
+# and succeeds, and the removal takes effect at the proxy and at the hub. The
+# hub auth e2e runs the same step on a migrated hub, where the dev user is the
+# controller.
 write_config "$IMAGE_LINE" "    - { login: contact2@example.com, tier: contact, agents: [$NAME] }"
 (cd "$INST" && timeout 1800 "$LEVER" reload 2>&1 | mask_secrets | tail -3)
 code=$(pcode contact2@example.com "http://127.0.0.1:$RP/api/v1/auth/me")
@@ -329,13 +331,9 @@ code=$(pcode contact2@example.com "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "the removed contact is refused under the rename loop ($code)" '[ "$code" = 403 ]'
 doctor_run
 check "doctor: the removed contact's hub user is suspended under the loop" row_ok "remote web role"
-if [ "$race_rc" != 0 ]; then
-	check "the failed apply names the rename and says removals took effect" grep -q "does not stay on the controller.*already took effect" "$WORK/race.log"
-	checkx "the proxy was not restarted (the fence refused the contact)" '[ "$ppid0" = "$(cat "$INST/.lever-state/remote.pid")" ]'
-	check "the stale proxy audited the refusal as deny-revoked" grep -q '"ts_login":"contact2@example.com".*"decision":"deny-revoked"' "$INST/.lever-state/remote-audit.jsonl"
-else
-	echo "      | note: the controller assertion won the race; the apply minted and restarted the proxy"
-fi
+checkx "the apply under the loop succeeds (no dev user to contest) ($race_rc)" '[ "$race_rc" = 0 ]'
+checkx "it re-minted the due controller token" 'python3 -c "import json,sys; sys.exit(0 if \"inbox:read\" in json.load(open(sys.argv[1]))[\"requested_scopes\"] else 1)" "$rec"'
+check "doctor: hub identities under the loop (the controller untouched)" row_ok "hub identities"
 X exec "lever--$NAME" pkill -f loop.py
 sleep 2
 up 5
@@ -344,6 +342,18 @@ checkx "the controller keeps its agents: the manager still lists the worker" 'mg
 doctor_run
 check "after the loop stops, doctor: hub identities" row_ok "hub identities"
 check "after the loop stops, doctor: remote web role" row_ok "remote web role"
+
+say "lever-admin links the broker back to a project left without one"
+# The controller token may unlink a broker (project.update) but never link one;
+# scion's auto-provide linked it when the project was created.
+BROKER=$(hubbody "/api/v1/projects/$PROJ/providers" | python3 -c 'import json,sys; print(json.load(sys.stdin)["providers"][0]["brokerId"])')
+code=$(hub DELETE "/api/v1/projects/$PROJ/providers/$BROKER")
+checkx "the project's broker unlinked ($code)" '[ "$code" = 200 ] || [ "$code" = 204 ]'
+checkx "the project lists no broker" '! hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
+up 8
+check "lever-admin linked the jail's runtime broker" grep -q "linking the jail's runtime broker .* as lever-admin" "$WORK/up.log"
+checkx "the project lists the broker again" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q "$BROKER"'
+check "the manager runs after the re-link" running
 
 say "lever stop, then lever up (agents resume)"
 (cd "$INST" && timeout 900 "$LEVER" stop 2>&1 | tail -3)

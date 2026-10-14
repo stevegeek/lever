@@ -21,8 +21,7 @@ const workspacePathOf = `grep -E '^` + layout.WorkspacePathKey + `:' "$s" 2>/dev
 func (g Guest) ReadScionProjectState(ctx context.Context, workspacePath string) (types.ScionProjectState, error) {
 	// The space-separated ENTRY format assumes no whitespace in a workspace
 	// path; workspace paths are lever constants under /lever.
-	script := `
-if [ -e ` + shellSingleQuote(workspacePath+"/"+layout.ProjectMarker) + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi
+	script := markerStateScript(workspacePath) + `
 for s in ` + projectSettingsGlob + `; do
   [ -e "$s" ] || continue
   d=$(basename "$(dirname "$(dirname "$s")")")
@@ -35,6 +34,14 @@ done
 		return types.ScionProjectState{}, fmt.Errorf("guest: read scion project state: %w", err)
 	}
 	return parseScionState(res.Stdout), nil
+}
+
+// markerStateScript prints "MARKER 1" only for a regular file. A symlink an
+// agent put in the tree is no marker: reading it as one would skip the re-init
+// that removes it, and scion writes through it on every agent start.
+func markerStateScript(workspacePath string) string {
+	m := shellSingleQuote(workspacePath + "/" + layout.ProjectMarker)
+	return `if [ -f ` + m + ` ] && [ ! -L ` + m + ` ]; then echo "MARKER 1"; else echo "MARKER 0"; fi`
 }
 
 // RemoveScionProjectConfigs removes every ~/.scion/project-configs/<name>

@@ -10,6 +10,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 func TestParseScionStateMarkerAndEntries(t *testing.T) {
@@ -368,5 +369,61 @@ func TestScionHubEndpointRepairScript(t *testing.T) {
 	}
 	if readFileString(t, stale) != before {
 		t.Error("second run modified the file")
+	}
+}
+
+// TestMarkerStateScriptCountsOnlyARegularFile runs the marker check under
+// bash: a symlink, dangling or not, and a directory are no marker.
+func TestMarkerStateScriptCountsOnlyARegularFile(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("no bash")
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir, m string)
+		want  string
+	}{
+		{"regular file", func(t *testing.T, _, m string) { mustWrite(t, m) }, "MARKER 1"},
+		{"absent", func(*testing.T, string, string) {}, "MARKER 0"},
+		{"dangling symlink", func(t *testing.T, dir, m string) { mustLink(t, filepath.Join(dir, "nowhere"), m) }, "MARKER 0"},
+		{"symlink to a file", func(t *testing.T, dir, m string) {
+			mustWrite(t, filepath.Join(dir, "f"))
+			mustLink(t, filepath.Join(dir, "f"), m)
+		}, "MARKER 0"},
+		{"directory", func(t *testing.T, _, m string) {
+			if err := os.Mkdir(m, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, "MARKER 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ws := filepath.Join(dir, "ws")
+			if err := os.Mkdir(ws, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, dir, filepath.Join(ws, layout.ProjectMarker))
+			out, err := exec.Command("bash", "-c", markerStateScript(ws)).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(out)); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func mustWrite(t *testing.T, p string) {
+	t.Helper()
+	if err := os.WriteFile(p, []byte("project-id: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustLink(t *testing.T, target, p string) {
+	t.Helper()
+	if err := os.Symlink(target, p); err != nil {
+		t.Fatal(err)
 	}
 }

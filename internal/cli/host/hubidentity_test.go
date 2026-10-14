@@ -701,10 +701,15 @@ type hiScion struct {
 	// experiments: the jail's scion has hub experiments.
 	experiments bool
 	listErr     error
+	// onInit runs inside InitProject.
+	onInit func()
 }
 
 func (s *hiScion) InitProject(_ context.Context, dir string) error {
 	s.h.event("scion init %s", dir)
+	if s.onInit != nil {
+		s.onInit()
+	}
 	return nil
 }
 
@@ -1925,4 +1930,19 @@ func TestHubIdentityPinsTheImageRegistry(t *testing.T) {
 	if len(f.hub.tokens) != 0 {
 		t.Fatal("a token was minted after the registry write failed")
 	}
+}
+
+// A fresh hub removes a marker it cannot read, a symlink an agent left in the
+// tree included, before scion init writes through it.
+func TestHubIdentityFreshRemovesAnUnreadableMarker(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	marker := e.jr.marker
+	e.jr.marker = ""
+	e.sc.onInit = func() {
+		if e.jr.removed != 1 {
+			t.Errorf("scion init ran with %d marker removals before it, want 1", e.jr.removed)
+		}
+		e.jr.marker = marker
+	}
+	e.mustRun()
 }

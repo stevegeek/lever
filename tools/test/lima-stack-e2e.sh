@@ -531,6 +531,7 @@ checkx "conversation new succeeds ($conv_rc)" '[ "$conv_rc" = 0 ]'
 bid=$(sed -n 's/.*the old one is backup \([^ ]*\) (.*/\1/p' "$WORK/conv-new.log" | head -1)
 checkx "it names a backup (${bid:-none})" '[ -n "$bid" ]'
 checkx "the backup is listed" '(cd "$INST" && "$LEVER" conversation list 2>&1) | grep -q "^$bid"'
+# Against an honest manager: the phase is the agent's own report to the hub.
 checkx "the hub never read the manager stopped with claude running" '! grep -q "^stopped yes" "$WORK/conv-samples"'
 check "the manager runs on its new conversation" running
 checkx "the hub reads the manager running ($(mgrrec phase))" '[ "$(mgrrec phase)" = running ]'

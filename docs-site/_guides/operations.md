@@ -466,7 +466,10 @@ What happens, in order:
 3. It stops the record. scion resumes a suspended record with `claude --continue` and a stopped
    one in a new session, so the stop is what ends the old session. It is a real stop of the
    container, not a second claude process, so the hub's phase is true throughout and the manager
-   does not end up reading `stopped` over a running claude. If lever can see that the stop did
+   does not end up reading `stopped` over a running claude. (The phase and activity lever reads
+   here are the manager's own reports to the hub: a manager that lies can hold off a new
+   conversation until `--force`, or skip its own suspend before the backup of its own home; the
+   stop still ends its container.) If lever can see that the stop did
    not land (the record still reads suspended), a manager it suspended is resumed on its old
    conversation; if it cannot tell, it starts nothing and says so.
 4. It starts the record, which scion does in a new session with the boot prompt, and runs the same checks as any
@@ -493,7 +496,9 @@ others exit `6`, name the command that holds the lock (with its pid and start ti
 nothing. None of them waits, since a new conversation can take minutes: run the command again
 once the other has finished. `lever up` lets go of the lock before it attaches you, so a new
 conversation from the chat page can run while you are attached; its stop ends your attach, and
-`lever up` says so instead of reporting the manager dead. With the state directory inside the
+`lever up` says so instead of reporting the manager dead. The broker's heal of an expired manager
+certificate also skips while the lock is held (the next lapse retries), and a new conversation
+gives up after 20 minutes; to stop one sooner, end the process the refusal names. With the state directory inside the
 tree there are no conversation backups, so no new conversation or restore, and the others take
 no lock.
 

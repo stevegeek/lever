@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/daemon"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/logging"
@@ -224,6 +225,11 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	cfg.AgentMessages = AgentMessages(app, st)
 	cfg.Files = Files(app, st)
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
+	if !StateInsideTree(app, st) {
+		cfg.Dispatch.LockManager = func() (func(), error) {
+			return hostledger.TryLockFileAs(st.ConversationLock(), fmt.Sprintf("the broker's certificate heal of the manager (pid %d)", os.Getpid()))
+		}
+	}
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
 	// Made here when apply did not make it first (a manual `lever broker

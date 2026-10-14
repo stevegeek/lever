@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -265,7 +264,7 @@ func managerLockHolder(app *config.App, st state.State) string {
 	if brokerctl.StateInsideTree(app, st) {
 		return ""
 	}
-	p := filepath.Join(st.Dir, managerLockName)
+	p := st.ConversationLock()
 	unlock, err := hostledger.TryLockFile(p)
 	if err == nil {
 		unlock()
@@ -277,9 +276,6 @@ func managerLockHolder(app *config.App, st state.State) string {
 	return cmp.Or(termsafe.Sanitize(hostledger.LockHolder(p)), "another lever command")
 }
 
-// managerLockName is the lock lockConversation and lockLifecycle share.
-const managerLockName = "conversation.lock"
-
 // takeManagerLock never waits: a new conversation can hold the lock for
 // minutes, and a command that waited on it silently would look hung. The
 // one it turns away exits 6 and names the holder.
@@ -287,7 +283,7 @@ func takeManagerLock(st state.State, verb, from string) (func(), error) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("locking the manager record: %w", err)
 	}
-	p := filepath.Join(st.Dir, managerLockName)
+	p := st.ConversationLock()
 	holder := fmt.Sprintf("`%s`%s (pid %d, since %s)", verb, from, os.Getpid(), time.Now().UTC().Format("15:04:05 UTC"))
 	unlock, err := hostledger.TryLockFileAs(p, holder)
 	if errors.Is(err, hostledger.ErrLocked) {
@@ -302,6 +298,11 @@ func takeManagerLock(st state.State, verb, from string) (func(), error) {
 	}
 	return unlock, nil
 }
+
+// conversationNewDeadline bounds a whole new conversation: it holds the lock
+// that lever stop also takes, so a stalled hub must not keep the operator from
+// powering off. Recovery steps run on their own budget past it.
+const conversationNewDeadline = 20 * time.Minute
 
 // newConvBy are the callers --by names, beyond the operator's terminal.
 var newConvBy = map[string]newConvRequest{
@@ -348,6 +349,8 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 			rep := run.rep
 			ctx, stop := applySignalContext(pctx)
 			defer stop()
+			ctx, cancel := context.WithTimeout(ctx, conversationNewDeadline)
+			defer cancel()
 			rep.Group("jail", 0)
 			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
 			if err != nil {

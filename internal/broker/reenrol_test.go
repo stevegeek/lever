@@ -596,3 +596,42 @@ func TestHealManagerResumeGuard(t *testing.T) {
 		})
 	}
 }
+
+// The manager's heal never bounces it while lever holds the manager lock (a
+// new conversation, a restore, up, stop): busy skips it without a ticket or
+// a counted attempt, and the heal holds the lock while it bounces.
+func TestHealSkipsTheManagerWhileLeverChangesIt(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "appname", Phase: "stopped", ContainerStatus: "Exited (0)"}},
+	}}
+	b, _, managerDir := reenrolBroker(t, rt, "all")
+	var buf bytes.Buffer
+	b.log = slog.New(slog.NewTextHandler(&buf, nil))
+	held, during := true, false
+	b.lockManager = func() (func(), error) {
+		if held || during {
+			return nil, errors.New("locked")
+		}
+		during = true
+		return func() { during = false }, nil
+	}
+	b.healLapse(context.Background(), "test-manager")
+	if len(rt.staged) != 0 || len(rt.resumed) != 0 || stagedCN(t, managerDir) != "" {
+		t.Fatalf("a heal ran under lever's lock: staged=%d resume=%v", len(rt.staged), rt.resumed)
+	}
+	if !strings.Contains(buf.String(), "lever is changing the manager") {
+		t.Fatalf("no audit line for the skipped heal:\n%s", buf.String())
+	}
+	b.reenrolMu.Lock()
+	tries := b.reenrolTries["test-manager"]
+	delete(b.reenrolLast, "test-manager")
+	b.reenrolMu.Unlock()
+	if tries != 0 {
+		t.Fatalf("a skipped heal counted as a failed attempt: %d", tries)
+	}
+	held = false
+	b.healLapse(context.Background(), "test-manager")
+	if len(rt.resumed) != 1 || during {
+		t.Fatalf("after release: resume=%v, lock still held %v", rt.resumed, during)
+	}
+}

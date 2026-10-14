@@ -39,7 +39,9 @@ version bump moves the block under the new version heading.
   (exit 5) unless `--force`. `new`, `restore`, `up`, `apply`, `stop` and `reload` share one lock
   per instance: while one runs, the others exit 6 with nothing changed and name the command that
   holds it (none waits; `up` lets go before it attaches, and says so when a new conversation
-  ends the attach). After
+  ends the attach). The broker's heal of an expired manager certificate skips while the lock is
+  held, and a new conversation gives up after 20 minutes, so `lever stop` is never refused for
+  longer. After
   the stop a failure leaves the manager down and names the backup; `lever conversation restore`
   puts the old conversation back at any time. An operator login on the chat page gets a **New
   conversation** button in the manager's chat: it asks first (and again before it interrupts a
@@ -116,8 +118,10 @@ version bump moves the block under the new version heading.
   with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. The
   first `lever apply` installs the new scion pin in the jail.
 - **The manager's skill text changed (lever#221),** so contacts' posts to the manager are
-  refused until it next starts fresh. The `lever up --fresh --keep-conversation` above does that;
-  so does `lever conversation new`.
+  refused until it next starts in a new session. The `lever up --fresh --keep-conversation` above
+  does not lift it: the restored conversation keeps the record of the skill it started on. Run
+  `lever conversation new` after it (or `lever up --fresh` without `--keep-conversation`) when
+  contacts use the chat page.
 - **`lever up`, `lever apply`, `lever stop` and `lever reload` now refuse to run (exit 6) while
   another of them, or a `lever conversation new` or `restore`, runs for the same instance
   (lever#221).** A script that ran two of them at once for one instance must run them in turn.

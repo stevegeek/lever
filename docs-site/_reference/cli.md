@@ -27,6 +27,7 @@ omitted — there is no walk-up discovery, so run them from the instance root.
 | `lever reload [config]` | Apply config changes (new worker, tool, or grant) to a **running** instance without a VM power cycle: stops the broker, re-runs the idempotent apply on the current config, spawns a fresh broker. The manager container keeps running, so its conversation is preserved and your TTY isn't taken. Needed because the broker reads `lever.yaml` only at startup — a plain re-`apply` keeps the old broker. |
 | `lever stop` | Power the jail off but **keep its disk** — the daily "done for the day". Suspends the manager (conversation preserved) and every running worker, stops the host broker; a later `lever up` powers it back on and resumes the same session. Installed runtimes and scion state persist. `--machine`/`--backend` target another jail (the broker is then not stopped). `--keep-vm` suspends the agents and stops the jail's hub, the broker and the remote proxy but leaves the VM running, so the next `lever up` skips the VM boot; the VM keeps its memory on the host meanwhile ([stopping without powering off](/operations/#stopping-without-powering-off)). It acts on the current instance only and refuses `--machine`. |
 | `lever destroy` | Full teardown: delete the isolated machine and everything in it. Targets `lever-<name>` from config; override with `--machine`. `lever down` is a deprecated alias. |
+| `lever conversation new [config]` | Start the manager on a new conversation without recreating anything: it backs the conversation up (as `backup`; no backup, no change), stops the record so the old session ends, and starts the same record again in a new Claude session, which scion gives the task the record was created with (`manager.prompt_file` at the last fresh create; `lever up --fresh` puts a changed one on the record), through the same checks as any resume of the manager. A manager in the middle of a turn is left alone (exit `5`) unless `--force`; the manager must be running or suspended. A failure before the stop resumes a manager it suspended on its own conversation; one after it leaves the manager down and names the backup (`lever up` starts it in a new session, `lever conversation restore <id>` puts the old one back). Only one `new` or `restore` runs at a time (exit `6`). `--progress` as for `up`. See [start a new conversation](/operations/#start-a-new-conversation). |
 | `lever conversation list\|backup\|restore [ID]` | The manager's conversation backups in `.lever-state/conversations/` (0700, files 0600; the last 10 are kept; none when the state directory is inside the tree). `list` shows them, newest first. `backup` copies the manager's `~/.claude/projects` from the jail (which must be up). `restore` puts a backup (default: the newest) back into a running or suspended manager: it backs up the conversation it replaces (`--no-backup` skips that), suspends the manager, swaps the transcripts (the replaced ones stay in the manager's home as `~/.claude/projects.lever-replaced-<stamp>`), records the session with the lever skill the restored conversation started with, and resumes and gates the manager. Only the transcripts travel; `~/.claude.json` stays the record's own. |
 | `lever worker purge NAME` | Discard a declared worker's scion record and staged bootstrap ticket so it can be re-dispatched fresh with a new task — a worker's task is fixed at creation, so `lever-manager agent start` against an existing worker returns 409. Never touches the worker's workspace (its work product); requires `--force`. Host-side (operator) command. The in-jail manager cannot purge, but it can recycle a worker the config marks `recyclable: true` (`lever-manager agent recycle`, which runs the same teardown). |
 
@@ -79,14 +80,16 @@ commands that write the store (`snapshot`, `gc`, `delete`, `verify --fix`, `lock
 
 ### Exit codes
 
-`lever` exits `0` on success and `1` on an error, with two exceptions from `lever up` and
-`lever apply` that a script can tell apart by the code (never by the error text, which can carry
+`lever` exits `0` on success and `1` on an error, with these exceptions from `lever up`,
+`lever apply` and `lever conversation` that a script can tell apart by the code (never by the error text, which can carry
 text from the jail):
 
 | Code | Meaning |
 |---|---|
 | `3` | lever could not resume the manager. The record and its conversation are kept. Run `lever up` again (a transient failure clears) and `lever doctor` for the cause; `lever up --fresh` starts a new conversation (it backs up the old one first). |
 | `4` | The hub refused the resume (a token without the lifecycle scope, or a phase that cannot be resumed now). The manager is kept. Do **not** answer this with `--fresh`. |
+| `5` | `lever conversation new`: the manager is in the middle of a turn. Nothing was changed; try again later, or pass `--force`. |
+| `6` | `lever conversation new` or `restore`: another of them is running for this instance. Nothing was changed. |
 
 A command prints its usage text only after a flag or argument error (an unknown or missing flag, a
 wrong combination of flags, the wrong number of arguments), not after a failure at run time.

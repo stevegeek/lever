@@ -22,14 +22,18 @@ import (
 	"github.com/stevegeek/lever/internal/state"
 )
 
-// fakeConvScion is a manager record a restore drives: Suspend and Resume move
-// its phase, and every call is recorded.
+// fakeConvScion is a manager record a restore or a new conversation drives:
+// Suspend, Stop and Resume move its phase, and every call is recorded.
 type fakeConvScion struct {
 	mu         sync.Mutex
 	phase      string
+	activity   string
 	calls      []string
 	suspendErr error
 	resumeErr  error
+	// stopErr fails Stop; stopLands says whether the phase moves anyway.
+	stopErr   error
+	stopLands bool
 }
 
 func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
@@ -42,7 +46,17 @@ func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
 	if f.phase == scion.PhaseRunning {
 		cs = "Up 1 minute"
 	}
-	return []scion.Agent{{Slug: "mgr", Phase: f.phase, ContainerStatus: cs}}, nil
+	return []scion.Agent{{Slug: "mgr", Phase: f.phase, Activity: f.activity, ContainerStatus: cs}}, nil
+}
+
+func (f *fakeConvScion) Stop(context.Context, string, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "stop")
+	if f.stopErr == nil || f.stopLands {
+		f.phase = scion.PhaseStopped
+	}
+	return f.stopErr
 }
 
 func (f *fakeConvScion) Suspend(context.Context, string, string) error {
@@ -56,10 +70,16 @@ func (f *fakeConvScion) Suspend(context.Context, string, string) error {
 	return nil
 }
 
+// Resume continues a suspended record's session ("resume") and starts a
+// stopped one in a new session ("resume-fresh"), as the hub does.
 func (f *fakeConvScion) Resume(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, "resume")
+	if f.phase == scion.PhaseStopped {
+		f.calls = append(f.calls, "resume-fresh")
+	} else {
+		f.calls = append(f.calls, "resume")
+	}
 	if f.resumeErr != nil {
 		return f.resumeErr
 	}

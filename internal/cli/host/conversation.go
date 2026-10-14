@@ -32,6 +32,7 @@ type convScion interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 	Suspend(ctx context.Context, worker, project string) error
 	Resume(ctx context.Context, worker, project string) error
+	Stop(ctx context.Context, worker, project string) error
 }
 
 type convOps struct {
@@ -50,6 +51,9 @@ type convOps struct {
 	beginResume func(ctx context.Context) (managerResume, error)
 	now         func() time.Time
 	suspendWait apply.RetryBudget
+	// session begins the record of a new conversation's fresh session (see
+	// newConversation).
+	session func() sessionBegin
 }
 
 type managerResume interface {
@@ -76,6 +80,7 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 		beginResume: func(ctx context.Context) (managerResume, error) {
 			return apply.BeginManagerResume(ctx, w.deps, app, project, "conversation")
 		},
+		session: func() sessionBegin { return beginFreshSession(app, st) },
 	}
 }
 
@@ -417,12 +422,22 @@ func verifyStored(store convbackup.Store, id string) error {
 // waitSuspended waits until the hub reads the manager suspended with no live
 // container: no agent process may run while its files move.
 func (o convOps) waitSuspended(ctx context.Context) error {
+	last, err := o.waitPhase(ctx, scion.PhaseSuspended)
+	if errors.Is(err, retry.ErrExhausted) {
+		return fmt.Errorf("the manager did not suspend (last seen %s); nothing was restored", scion.BoundedQuote(last))
+	}
+	return err
+}
+
+// waitPhase waits until the hub reads the manager in phase with no live
+// container, within suspendWait. last is the phase/container status last
+// seen; an exhausted wait is retry.ErrExhausted.
+func (o convOps) waitPhase(ctx context.Context, phase string) (last string, err error) {
 	b := o.suspendWait
 	if b.Attempts <= 0 {
 		b = apply.RetryBudget{Attempts: 30, Interval: time.Second}
 	}
-	var last string
-	err := retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
+	err = retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
 		agents, err := o.sc.List(ctx, o.guest.Workspace)
 		if err != nil {
 			return false, nil
@@ -432,12 +447,9 @@ func (o convOps) waitSuspended(ctx context.Context) error {
 			return false, errors.New("the manager record disappeared")
 		}
 		last = rec.Phase + "/" + rec.ContainerStatus
-		return rec.Phase == scion.PhaseSuspended && !scion.ContainerLive(rec.ContainerStatus), nil
+		return rec.Phase == phase && !scion.ContainerLive(rec.ContainerStatus), nil
 	})
-	if errors.Is(err, retry.ErrExhausted) {
-		return fmt.Errorf("the manager did not suspend (last seen %s); nothing was restored", scion.BoundedQuote(last))
-	}
-	return err
+	return last, err
 }
 
 func (o convOps) latestSession() (sessionrec.Record, bool, error) {
@@ -458,9 +470,9 @@ func (o convOps) recordSession(hash string) error {
 func newConversationCmd(bf BackendFactory) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "conversation",
-		Short: "List, take and restore backups of the manager's conversation",
+		Short: "Start the manager on a new conversation; list, take and restore backups of its conversation",
 	}
-	c.AddCommand(newConversationListCmd(), newConversationBackupCmd(bf), newConversationRestoreCmd(bf))
+	c.AddCommand(newConversationNewCmd(bf), newConversationListCmd(), newConversationBackupCmd(bf), newConversationRestoreCmd(bf))
 	return c
 }
 
@@ -558,6 +570,11 @@ func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
+			unlock, err := lockConversation(app, st)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			run, pctx, err := startBringup(cmd, app, st, "conversation-restore", progressMode)
 			if err != nil {
 				return err

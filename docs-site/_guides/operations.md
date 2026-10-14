@@ -433,6 +433,68 @@ keep the old mounts; `lever apply` warns.
   the device until they are recreated). Turned off, the row fails while the manager still holds
   the device. See [`nested_virt`](/reference/config/#top-level).
 
+## Start a new conversation
+
+A long conversation fills the manager's context. To start the day clean, without recreating
+anything:
+
+```bash
+lever conversation new
+```
+
+It backs the conversation up, then starts the manager again in a new Claude session on the same
+scion record, in the same image, and the new session runs the manager's boot prompt, so the
+manager opens with whatever that prompt asks for (a stand-up, an overview). The prompt is the
+one the record was created with: `manager.prompt_file` as it was at the manager's last fresh
+create. scion keeps it with the record and gives it to every new session; after you change
+`prompt_file`, `lever up --fresh` (or `--fresh --keep-conversation`) puts the new text on the
+record. It takes about as long as `lever stop` and `lever up` take for the manager alone. From
+the phone, the [chat page](/remote-access/#a-new-conversation-for-the-manager) has the same action.
+
+What happens, in order:
+
+1. lever reads the manager's record. A manager in the middle of a turn (the hub reads it
+   working) is left alone: the command says so and exits `5`. `--force` interrupts the turn.
+   The record must be running or suspended. A turn that starts in the moment between this look
+   and the suspend is interrupted, as any suspend interrupts it.
+2. It suspends a running manager, so nothing writes the transcripts while they are copied, and
+   backs up `~/.claude/projects` as [`lever conversation backup`](#the-managers-conversation-across---fresh)
+   does (transcripts with no content are not saved, so they push no real backup out). **No backup, no new conversation:** if the backup fails, or lever cannot find the
+   manager's home, the manager is resumed on its own conversation (one that was suspended before
+   stays suspended) and nothing else changes.
+3. It stops the record. scion resumes a suspended record with `claude --continue` and a stopped
+   one in a new session, so the stop is what ends the old session. It is a real stop of the
+   container, not a second claude process, so the hub's phase is true throughout and the manager
+   does not end up reading `stopped` over a running claude. If lever can see that the stop did
+   not land (the record still reads suspended), a manager it suspended is resumed on its old
+   conversation; if it cannot tell, it starts nothing and says so.
+4. It starts the record, which scion does in a new session with the boot prompt (with no
+   `prompt_file`, the session waits for your first message), and runs the same checks as any
+   resume of the manager (the tree mounts, then the wait for claude's session start). The new
+   session is recorded for the contact gate as `lever up --fresh` records one; when the
+   manager's lever skill cannot be read, it is recorded on no skill, and contacts cannot post to
+   the manager until it next starts fresh.
+
+From the stop on, the old session cannot be continued by a resume. If a later step fails, the
+manager stays down, and the error names the backup: `lever up` starts the manager (in a new
+session), and `lever conversation restore <id>` after that puts the old conversation back. A new
+conversation is reversible the same way afterwards: `lever conversation restore` with the backup
+it printed puts the old conversation back.
+
+The old transcripts also stay in the manager's home (the new session is a new file beside them),
+until Claude Code's own cleanup removes them. Each new conversation is one of the 10 backups lever
+keeps.
+
+Only one `lever conversation new` or `restore` runs at a time per instance; a second one exits
+`6` and changes nothing. Other lifecycle commands (`lever up`, `lever stop`, `lever reload`) do
+not wait for it: do not run them while a new conversation is under way.
+
+**Keep the manager's continuity in files.** A new conversation drops everything the manager only
+held in its context. Have the manager keep what must survive in the tree (a log, notes, open
+tasks), and have the boot prompt read it, so a fresh session picks up where the last one left
+off. Messages that arrive while the manager is down wait in the hub as they do across
+`lever stop`; a boot prompt that reads the manager's events picks them up.
+
 ## The manager's conversation across `--fresh`
 
 A manager keeps the image, model, mounts and devices it was created with, so changing one of them

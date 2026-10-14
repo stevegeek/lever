@@ -61,6 +61,9 @@ type agentsAnswer struct {
 	// Speech: the page reads with these voices (the device's when a request
 	// fails).
 	Speech *speechInfo `json:"speech,omitempty"`
+	// NewConversation: the page offers the manager's new conversation
+	// (operator only).
+	NewConversation bool `json:"newConversation,omitempty"`
 }
 
 // filesInfo is checked by the page; the proxy checks it again.
@@ -448,6 +451,7 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 		ans.Files = &filesInfo{MaxBytes: g.files.cfg.MaxBytes, Extensions: g.files.cfg.Extensions,
 			Uploads: !g.files.cfg.NoUploads, Shares: !g.files.cfg.NoShares}
 	}
+	ans.NewConversation = v.tier == chatledger.TierOperator && g.cfg.NewConversation != nil
 	ans.Voice = g.voiceInfoFor(v.login)
 	ans.ReadAloud = g.readAloudFor(v.login)
 	ans.Speech = g.speechInfoFor(v.login)

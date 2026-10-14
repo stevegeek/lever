@@ -32,6 +32,8 @@ import {
   inputView,
   askDraft,
   wakeText,
+  newConversationOffered,
+  newConversationText,
   WAKE_POLL_MS,
   WAKE_POLLS,
   LIST_MS,
@@ -632,4 +634,24 @@ test('speakErrorText: the proxy words in the page words', () => {
   assert.match(speakErrorText(503, { error: 'unavailable' }), /server voice is unavailable/);
   assert.match(speakErrorText(403, { error: 'agent' }), /not on your list/);
   assert.equal(speakErrorText(500, { error: 'weird' }), 'weird (HTTP 500)');
+});
+
+test('new conversation: the operator\'s manager only, and fixed text', () => {
+  const l = (over) => agentList({ tier: 'operator', newConversation: true, agents: [], ...over });
+  assert.equal(l({}).newConversation, true);
+  assert.equal(l({ tier: 'contact' }).newConversation, false, 'only the operator');
+  assert.equal(l({ newConversation: 'yes' }).newConversation, false, 'only true');
+  const mgr = { role: 'manager', access: 'message' };
+  assert.equal(newConversationOffered(l({}), mgr), true);
+  assert.equal(newConversationOffered(l({}), { ...mgr, role: 'worker' }), false);
+  assert.equal(newConversationOffered(l({}), { ...mgr, access: 'see' }), false);
+  assert.equal(newConversationOffered(l({ tier: 'contact' }), mgr), false);
+  assert.equal(newConversationOffered(null, mgr), false);
+  assert.equal(newConversationOffered(l({}), null), false);
+  for (const w of ['busy', 'in-progress', 'not-running', 'rate-limited', 'not-allowed', 'unavailable', 'failed', 'origin']) {
+    assert.ok(!newConversationText(409, { error: w }, 'boss').includes('HTTP'), w);
+  }
+  assert.equal(newConversationText(500, { error: '<b>own</b>' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
+  assert.equal(newConversationText(500, { error: 'constructor' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
+  assert.match(newConversationText(0, null, 'boss'), /may have started/);
 });

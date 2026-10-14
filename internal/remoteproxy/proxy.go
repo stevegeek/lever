@@ -116,6 +116,11 @@ type Config struct {
 	// Wake asks the broker to resume a worker for a login that may message it.
 	// A refusal is a *WakeError. Nil answers every wake 503.
 	Wake func(ctx context.Context, login, tier, worker string) error
+	// NewConversation backs the manager's conversation up and starts it again
+	// in a fresh session, for an operator login (newconv.go); force interrupts
+	// a turn. A refusal that changed nothing is ErrConversationBusy or
+	// ErrConversationLocked. Nil answers 503 and the page offers no action.
+	NewConversation func(ctx context.Context, force bool) error
 	// MatchAgentMessages reports which agent rows of a contact's DM the
 	// broker's agent ledger recorded. A contact sees only those agent rows;
 	// any error hides every agent row. Nil: no contact answer is rewritten.
@@ -688,6 +693,9 @@ type gate struct {
 	live        liveRequests
 	// revokeEvery overrides revokePoll (tests).
 	revokeEvery time.Duration
+	newConvs    wakeLimiter
+	// newConvWaitFor overrides newConvAnswerWait (tests).
+	newConvWaitFor time.Duration
 }
 
 func (g *gate) audit(line AuditLine) {

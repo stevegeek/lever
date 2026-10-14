@@ -267,6 +267,10 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		g.serveOperatorView(w, r, line, v)
 		return true
 	}
+	if p == newConvPath {
+		g.serveNewConversation(w, r, line, v)
+		return true
+	}
 	if name, under := wakeTarget(p); under {
 		if name == "" {
 			g.answerChat(w, line, DecisionAllow, http.StatusNotFound, nil, []byte("not found\n"), r)

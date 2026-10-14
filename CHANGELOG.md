@@ -43,6 +43,14 @@ version bump moves the block under the new version heading.
   until it runs again; a draft in the box stays. Contacts never get it, and the route refuses
   them. Every request is in the proxy's audit log.
 
+- **A tagged release publishes a Homebrew cask, so `brew install stevegeek/tap/lever` installs
+  lever.** The cask installs `lever` and the four host tools (`lever-tool-github`, `-fizzy`,
+  `-whisper`, `-tts`) from the release archive on macOS (Apple Silicon and Intel), and clears the macOS quarantine flag
+  on them, as the binaries are not notarized. The cask lists the Linux archives too, untested. GoReleaser pushes it to the
+  `stevegeek/homebrew-tap` repository after the release assets are uploaded, with the
+  `HOMEBREW_TAP_TOKEN` repository secret; without the secret, or for a prerelease tag, the release
+  still succeeds and the tap is left alone. (lever#75)
+
 ### Changed
 
 - **scion is pinned to `65531d7f`, its nightly-20261014.** The examples, the release's prebuilt
@@ -109,13 +117,6 @@ version bump moves the block under the new version heading.
   agent can rename scion's dev user (`PUT /api/v1/system/identity`) or set the hub's runtime and
   image registry. lever's mitigations are unchanged (see the 0.39.0 security notes). scion's fix
   for the identity and workstation-settings routes landed after this nightly.
-- **A tagged release publishes a Homebrew cask, so `brew install stevegeek/tap/lever` installs
-  lever.** The cask installs `lever` and the four host tools (`lever-tool-github`, `-fizzy`,
-  `-whisper`, `-tts`) from the release archive on macOS (Apple Silicon and Intel), and clears the macOS quarantine flag
-  on them, as the binaries are not notarized. The cask lists the Linux archives too, untested. GoReleaser pushes it to the
-  `stevegeek/homebrew-tap` repository after the release assets are uploaded, with the
-  `HOMEBREW_TAP_TOKEN` repository secret; without the secret, or for a prerelease tag, the release
-  still succeeds and the tap is left alone. (lever#75)
 
 ## [0.39.1] - 2026-10-14
 

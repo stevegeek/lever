@@ -284,10 +284,14 @@ func (rc *remoteController) awaitListening(ctx context.Context, child *exec.Cmd)
 
 func lastLogLine(path string) string { return lastFileLine(path, 4<<10) }
 
-// removeJailFileScript removes only a regular file at $1 (a directory there is
-// a stray in-repo git-mode project, not a stale marker) and is a no-op when $1
-// is absent.
-const removeJailFileScript = `if [ ! -d "$1" ] && [ -e "$1" ]; then rm -f -- "$1"; fi`
+// removeJailFileScript removes a file or any symlink at $1 (a directory there
+// is a stray in-repo git-mode project, not a stale marker) and is a no-op when
+// $1 is absent.
+//
+// A dangling symlink must go too: -e is false for one, and scion init writes
+// the marker with a plain open that follows it, so an agent's link in the tree
+// would make the jail user create a file wherever the link points.
+const removeJailFileScript = `if [ -L "$1" ] || { [ ! -d "$1" ] && [ -e "$1" ]; }; then rm -f -- "$1"; fi`
 
 func removeJailFile(ctx context.Context, jr proc.Runner, jailPath string) error {
 	if _, err := jr.Run(ctx, nil, "sh", "-c", removeJailFileScript, "_", jailPath); err != nil {

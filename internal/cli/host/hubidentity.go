@@ -221,6 +221,11 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	if err := h.admin.SetImageRegistry(ctx, apply.ImageRegistry); err != nil {
 		return errHubIdentity("setting the hub's agent image registry to %s as lever-admin: %w", apply.ImageRegistry, err)
 	}
+	// The runtime route is open the same way and lasts the same way; another
+	// runtime fails every agent start.
+	if err := h.admin.SetRuntime(ctx, apply.AgentRuntime); err != nil {
+		return errHubIdentity("setting the hub's container runtime to %s as lever-admin: %w", apply.AgentRuntime, err)
+	}
 
 	if _, err := h.adminHygiene(ctx, admin.ID, owe); err != nil {
 		return err

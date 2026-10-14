@@ -2160,6 +2160,28 @@ func checkScionTelemetry(ctx context.Context, mode config.ScionTelemetryMode, re
 		"run `lever stop && lever up` (the conversation is kept) so the manager starts with the current settings"}
 }
 
+// checkHubRuntime reads the container runtime the hub starts agents with. Any
+// loopback caller, an agent included, can change it through the system
+// runtime route, and every later agent start then fails; each apply sets it
+// back.
+func checkHubRuntime(ctx context.Context, hc *hubapi.Client) checkResult {
+	const name = "hub container runtime"
+	rt, err := hc.Runtime(ctx)
+	if err != nil {
+		if hubAnswered(err) {
+			return checkResult{name, false, "could not read it: " + err.Error(),
+				"the hub answered, so this is not a down instance — check the controller PAT (`" + stateDirName() + "/`)"}
+		}
+		return checkResult{name, true, "not checked (hub not reachable): " + err.Error(), ""}
+	}
+	if rt != apply.AgentRuntime {
+		return checkResult{name, false,
+			fmt.Sprintf("the hub starts agents with %q, not %s: an agent may have changed it, and agent starts fail until it is set back", rt, apply.AgentRuntime),
+			"run `lever apply`: it sets it back as lever-admin"}
+	}
+	return checkResult{name, true, apply.AgentRuntime, ""}
+}
+
 // checkHubExperiments fails when the hub serves a pinned-off scion experiment
 // (pinnedOffExperiments), probed with the controller PAT, and warns when it is
 // off only by scion's default because lever never pinned it on this hub. The

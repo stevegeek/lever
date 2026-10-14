@@ -46,6 +46,9 @@ type hiHub struct {
 	// registry is the hub's agent image registry, which any loopback caller,
 	// an agent included, can set through system/registry.
 	registry string
+	// runtime is the active profile's container runtime, which the
+	// system/runtime route sets for any loopback caller too.
+	runtime string
 
 	// cache models the hub's email-to-user cache: an email keeps resolving to
 	// a row for N more assertions.
@@ -577,6 +580,11 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		h.registry = str("image_registry")
 		h.event("registry %s by %s", h.registry, me.ID)
 		return hiJSON(200, map[string]any{"image_registry": h.registry})
+
+	case method == http.MethodPut && p == "/api/v1/system/runtime":
+		h.runtime = str("runtime")
+		h.event("runtime %s by %s", h.runtime, me.ID)
+		return hiJSON(200, map[string]any{"detected": h.runtime, "configured": h.runtime, "available": true})
 
 	case method == http.MethodPut && p == "/api/v1/system/identity":
 		email := str("email")
@@ -1929,6 +1937,26 @@ func TestHubIdentityPinsTheImageRegistry(t *testing.T) {
 	}
 	if len(f.hub.tokens) != 0 {
 		t.Fatal("a token was minted after the registry write failed")
+	}
+}
+
+// An agent can switch the hub's container runtime through system/runtime, which
+// fails every later agent start; each apply sets it back as lever-admin.
+func TestHubIdentityPinsTheRuntime(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.hub.runtime = "docker"
+	e.mustRun()
+	admin := e.hub.byEmail(hubauth.AdminEmail)
+	if e.hub.runtime != "podman" || admin == nil || !slices.Contains(e.hub.events, "runtime podman by "+admin.ID) {
+		t.Fatalf("runtime %q after apply; events: %q", e.hub.runtime, e.hub.events)
+	}
+	f := newHIEnv(t, hiRemoteApp(false))
+	f.hub.down["PUT /api/v1/system/runtime"] = http.StatusForbidden
+	if err := f.run(); err == nil || !strings.Contains(err.Error(), "container runtime") {
+		t.Fatalf("refused runtime write: err = %v", err)
+	}
+	if len(f.hub.tokens) != 0 {
+		t.Fatal("a token was minted after the runtime write failed")
 	}
 }
 

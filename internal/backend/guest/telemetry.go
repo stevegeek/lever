@@ -23,7 +23,8 @@ import (
 // block at its own startup), so the caller tells the operator to stop and
 // up; lever does not restart the manager on its own.
 
-// EnsureScionTelemetry reports whether it wrote the file.
+// EnsureScionTelemetry reports whether it changed the telemetry block. The
+// same write removes auto_inject_gcloud_adc (see withoutGcloudADC).
 func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error) {
 	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
@@ -36,13 +37,44 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 		return false, err
 	}
 	updated, changed, err := telemetrySettingsConverged(existing, off)
-	if err != nil || !changed {
+	if err != nil {
+		return false, err
+	}
+	updated, removed, err := withoutGcloudADC(updated)
+	if err != nil || !changed && !removed {
 		return false, err
 	}
 	if err := g.writeScionSettings(ctx, updated); err != nil {
 		return false, err
 	}
-	return true, nil
+	return changed, nil
+}
+
+// keyGcloudADC is the settings key that makes scion's broker copy the jail
+// user's gcloud application-default credentials into every agent it starts.
+// Any loopback caller, an agent included, can set it through the workstation
+// settings route, and the broker reads it at each start. lever never sets it,
+// so every apply removes it.
+const keyGcloudADC = "auto_inject_gcloud_adc"
+
+func withoutGcloudADC(existing []byte) ([]byte, bool, error) {
+	if !bytes.Contains(existing, []byte(keyGcloudADC)) {
+		return existing, false, nil
+	}
+	doc, err := layout.ParseSettings(existing)
+	if err != nil {
+		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
+	}
+	root := layout.DocumentRoot(doc)
+	if root == nil || layout.MapGet(root, keyGcloudADC) == nil {
+		return existing, false, nil
+	}
+	layout.MapDelete(root, keyGcloudADC)
+	out, err := encodeSettings(doc)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
 }
 
 // telemetrySettingsConverged:

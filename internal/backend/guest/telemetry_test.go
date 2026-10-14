@@ -174,6 +174,29 @@ func TestEnsureScionTelemetryWritesOnlyOnChange(t *testing.T) {
 	}
 }
 
+// An agent can turn on scion's gcloud credential injection through the
+// workstation settings route; the apply's settings write removes the key
+// whatever the telemetry mode, and says nothing changed in telemetry.
+func TestEnsureScionTelemetryRemovesGcloudADC(t *testing.T) {
+	for _, off := range []bool{true, false} {
+		f := proc.NewFakeRunner()
+		f.Script("orb -m m /bin/bash -c", proc.Result{Stdout: "LEGACY 0\nschema_version: \"1\"\nauto_inject_gcloud_adc: true\ntelemetry:\n  enabled: false\n"})
+		f.Script("orb -m m bash -c", proc.Result{})
+		g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
+		changed, err := g.EnsureScionTelemetry(context.Background(), off)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, writes := writtenSettings(f)
+		if writes != 1 || strings.Contains(written, "gcloud") || !strings.Contains(written, "schema_version") {
+			t.Fatalf("off=%v: writes=%d\n%s", off, writes, written)
+		}
+		if changed != !off {
+			t.Fatalf("off=%v: telemetry changed = %v", off, changed)
+		}
+	}
+}
+
 func TestEnsureScionTelemetryFailsWhenItCannotRead(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("orb -m m /bin/bash -c", proc.Result{Stdout: "not the LEGACY header\n"})

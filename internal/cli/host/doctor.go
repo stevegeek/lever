@@ -233,6 +233,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkHubIdentities(ctx, hubAuth) },
 		func() checkResult { return checkRemoteWebRole(ctx, app, hubAuth) },
 		func() checkResult { return checkHubExperiments(ctx, state, jailScion.KnowsUATScope, hc) },
+		func() checkResult { return checkHubRuntime(ctx, hc) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },
 		func() checkResult {

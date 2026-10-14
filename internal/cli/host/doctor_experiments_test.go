@@ -87,3 +87,41 @@ func TestCheckHubExperimentsCorruptRecord(t *testing.T) {
 		t.Fatalf("row = %+v, want a failure naming the record", r)
 	}
 }
+
+type runtimeHub struct {
+	status int
+	body   string
+	err    error
+}
+
+func (h runtimeHub) Do(_ context.Context, method, path string) (int, []byte, error) {
+	if method != "GET" || path != "/api/v1/system/runtime" {
+		return 404, nil, nil
+	}
+	return h.status, []byte(h.body), h.err
+}
+
+func TestCheckHubRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		hub     runtimeHub
+		wantOK  bool
+		wantSub string
+	}{
+		{"podman", runtimeHub{status: 200, body: `{"detected":"podman","configured":"podman","available":true}`}, true, "podman"},
+		{"switched by an agent", runtimeHub{status: 200, body: `{"configured":"docker"}`}, false, `"docker", not podman`},
+		{"unset", runtimeHub{status: 200, body: `{"configured":""}`}, false, `"", not podman`},
+		{"refused", runtimeHub{status: 401, body: `{}`}, false, "could not read it"},
+		{"hub down", runtimeHub{err: errors.New("connection refused")}, true, "not checked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := checkHubRuntime(context.Background(), &hubapi.Client{T: tc.hub})
+			if r.name != "hub container runtime" || r.ok != tc.wantOK || !strings.Contains(r.detail, tc.wantSub) {
+				t.Fatalf("row = %+v, want ok=%v detail~%q", r, tc.wantOK, tc.wantSub)
+			}
+			if !r.ok && r.fix == "" {
+				t.Fatalf("a failed row needs a fix: %+v", r)
+			}
+		})
+	}
+}

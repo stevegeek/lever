@@ -362,6 +362,10 @@ func runSoundRegister(t *testing.T, linked []bool, linkedErr error, hubLinkFails
 			r.linkedCalls++
 			return linked[i], nil
 		},
+		EnsureProjectProvider: func(_ context.Context, jp string) error {
+			r.order = append(r.order, "provider "+jp)
+			return nil
+		},
 		StripProjectSharedDirs: func(context.Context, string) error {
 			r.stripCalls++
 			r.order = append(r.order, "settle")
@@ -412,7 +416,7 @@ func TestRegisterSoundAndLinkedSettlesWithoutRelinking(t *testing.T) {
 	if n := hubLinks(r.f); n != 0 {
 		t.Fatalf("hub link ran %d times on a linked project", n)
 	}
-	if want := []string{"repair /lever", "linked? /lever", "settle"}; !slices.Equal(r.order, want) {
+	if want := []string{"repair /lever", "linked? /lever", "provider /lever", "settle"}; !slices.Equal(r.order, want) {
 		t.Fatalf("order = %q, want %q", r.order, want)
 	}
 	if r.ceilingCalled != 1 {
@@ -428,7 +432,9 @@ func TestRegisterSoundButUnlinkedRelinks(t *testing.T) {
 	if r.err != nil {
 		t.Fatalf("Run: %v", r.err)
 	}
-	if want := []string{"repair /lever", "linked? /lever", "hub link", "linked? /lever", "settle"}; !slices.Equal(r.order, want) {
+	// The link's agent sync needs a broker on the project, so the provider
+	// link comes first; the settle step checks it again.
+	if want := []string{"repair /lever", "linked? /lever", "provider /lever", "hub link", "linked? /lever", "provider /lever", "settle"}; !slices.Equal(r.order, want) {
 		t.Fatalf("order = %q, want %q", r.order, want)
 	}
 	if n := hubLinks(r.f); n != 1 {

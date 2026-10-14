@@ -1116,35 +1116,55 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 			if err := w.sc.ServerStart(ctx, opts); err != nil {
 				return err
 			}
-			_, err := w.sc.RuntimeBrokerReady(ctx, "global")
+			online, err := w.sc.RuntimeBrokerReady(ctx, "global")
+			if err == nil && !online {
+				// start-manager trusts the scion-server step's broker wait.
+				err = errors.New("the hub's runtime broker did not come back online after the restart")
+			}
 			return err
 		},
-		log:  w.log,
-		warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
+		linkBroker: w.ensureProjectProvider,
+		log:        w.log,
+		warn:       func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
 	}
 	return h.run(ctx)
 }
 
-// projectLinked is the register-project soundness predicate's link half: the
-// jail's scion says linked, and the tree's project is the one hub-identity
-// recorded.
+// projectLinked is the register-project soundness predicate's link half
+// (treeLinkedTo) for the project hub-identity recorded.
 func (w *applyWiring) projectLinked(ctx context.Context, jp string) (bool, error) {
 	rec, found, err := w.state.LoadHubIdentity()
 	if err != nil || !found || rec.ProjectID == "" {
 		return false, err
 	}
-	linked, err := w.sc.ConfigGetProject(ctx, jp, "hub.linked")
+	return treeLinkedTo(ctx, w.jr, w.sc.ConfigGetProject, jp, rec.ProjectID)
+}
+
+// treeLinkedTo reports whether the jail's scion says the tree's project is
+// linked, and to hub project want: by the marker scion init wrote or, after
+// register-project's re-init gave the tree a new local ID, by the
+// hub.projectId pinHubProject wrote into the jail user's scion config, out of
+// the agents' reach.
+func treeLinkedTo(ctx context.Context, jr proc.Runner, get func(ctx context.Context, dir, key string) (string, error), jp, want string) (bool, error) {
+	linked, err := get(ctx, jp, "hub.linked")
 	if err != nil {
 		return false, err
 	}
 	if linked != "true" {
 		return false, nil
 	}
-	id, _, err := readProjectMarker(ctx, w.jr, jp)
+	id, _, err := readProjectMarker(ctx, jr, jp)
 	if err != nil {
 		return false, err
 	}
-	return id == rec.ProjectID, nil
+	if id == want {
+		return true, nil
+	}
+	hubID, err := get(ctx, jp, "hub.projectId")
+	if err != nil {
+		return false, err
+	}
+	return hubID == want, nil
 }
 
 func (w *applyWiring) ensureScionTelemetry(ctx context.Context) (bool, error) {

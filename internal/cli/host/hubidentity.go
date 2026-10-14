@@ -77,6 +77,9 @@ type hubIdentity struct {
 	// restartHub stops and starts the live hub and waits for its broker; only
 	// a pinned-off scion experiment found on needs it.
 	restartHub func(ctx context.Context) error
+	// linkBroker makes the project at a jail path list a runtime broker
+	// (ensureProjectProvider); nil skips it.
+	linkBroker func(ctx context.Context, jp string) error
 	log        func(format string, args ...any)
 	warn       func(format string, args ...any)
 	sleep      func(ctx context.Context, d time.Duration) error
@@ -261,6 +264,12 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	// The PAT cannot register a project, so the link comes after the REST
 	// registration and the mint, and takes scion's already-linked path.
 	if registered {
+		// The link's agent sync needs a runtime broker on the project.
+		if h.linkBroker != nil {
+			if err := h.linkBroker(ctx, jp); err != nil {
+				return errHubIdentity("%w", err)
+			}
+		}
 		if err := h.sc.HubLink(ctx, jp); err != nil {
 			return errHubIdentity("hub link: %w", err)
 		}
@@ -388,6 +397,7 @@ func (h *hubIdentity) forgetHub() error {
 		func() error { return removeIfPresent(h.st.ControllerPAT()) },
 		func() error { return removeIfPresent(h.st.ControllerPATRecord()) },
 		func() error { return removeIfPresent(h.st.RemoteRole()) },
+		func() error { return removeIfPresent(h.st.HubExperiments()) },
 		h.st.RemoveHubIdentity,
 	} {
 		if err := rm(); err != nil {

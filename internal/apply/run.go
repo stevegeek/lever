@@ -200,10 +200,10 @@ type Deps struct {
 	// scion.ServerOpts.Env). It also carries the assertion key's fingerprint,
 	// so a hub started before a key change is detected and restarted.
 	HubAuthEnv map[string]string
-	// EnsureProjectProvider runs after hub-identity and the hub link: when the
-	// instance's hub project lists no runtime broker, it links the jail's
-	// broker to it as lever-admin, or fails. A project the hub does not list
-	// is left alone.
+	// EnsureProjectProvider runs before each hub link (whose agent sync needs a
+	// broker) and again when the project settles: when the instance's hub
+	// project lists no runtime broker, it links the jail's broker to it as
+	// lever-admin, or fails. A project the hub does not list is left alone.
 	EnsureProjectProvider func(ctx context.Context, jailWorkspacePath string) error
 	// WaitBrokerReady blocks until the scion runtime broker is registered and
 	// online. The workstation daemon brings up its Hub API and its runtime broker
@@ -818,7 +818,11 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 		}
 		if !linked {
 			// hub-identity registered the project with this ID and name, so the link
-			// takes scion's already-linked path, which a project PAT may run.
+			// takes scion's already-linked path, which a project PAT may run. Its
+			// agent sync needs a runtime broker on the project.
+			if err := r.d.EnsureProjectProvider(ctx, jp); err != nil {
+				return err
+			}
 			if err := r.hubLink(ctx, jp); err != nil {
 				return err
 			}
@@ -850,6 +854,9 @@ func (r *run) registerProject(ctx context.Context, s Step) error {
 		return err
 	}
 	if err := r.pinHubProject(ctx, jp); err != nil {
+		return err
+	}
+	if err := r.d.EnsureProjectProvider(ctx, jp); err != nil {
 		return err
 	}
 	if err := r.hubLink(ctx, jp); err != nil {

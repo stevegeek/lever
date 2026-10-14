@@ -689,7 +689,9 @@ type hiScion struct {
 	st        state.State
 	lifecycle bool
 	inbox     bool
-	listErr   error
+	// experiments: the jail's scion has hub experiments.
+	experiments bool
+	listErr     error
 }
 
 func (s *hiScion) InitProject(_ context.Context, dir string) error {
@@ -706,7 +708,7 @@ func (s *hiScion) HubLink(_ context.Context, dir string) error {
 }
 
 func (s *hiScion) KnowsUATScope(_ context.Context, scope string) (bool, error) {
-	return scope == lifecycleScope && s.lifecycle || scope == inboxReadScope && s.inbox, nil
+	return scope == lifecycleScope && s.lifecycle || scope == inboxReadScope && s.inbox || scope == experimentsScope && s.experiments, nil
 }
 
 func (s *hiScion) List(context.Context, string) ([]scion.Agent, error) {
@@ -1769,5 +1771,98 @@ func TestHubIdentityNeverSuspendsLeversOwnUsers(t *testing.T) {
 	}
 	if !hiAnyContains(e.warns, "lever's own hub user", "gone@example.com") {
 		t.Fatalf("no warning: %q", e.warns)
+	}
+}
+
+// The link half of register-project's soundness check: the marker names the
+// recorded project, or, after a re-init gave the tree a new local ID, the
+// project's hub.projectId does.
+func TestTreeLinkedTo(t *testing.T) {
+	for _, tc := range []struct {
+		name, marker, linked, hubID string
+		want                        bool
+	}{
+		{"marker names it", "project-id: p1\nproject-slug: lever\n", "true", "", true},
+		{"re-init: hub.projectId names it", "project-id: p2\nproject-slug: lever\n", "true", "p1", true},
+		{"another project", "project-id: p2\nproject-slug: lever\n", "true", "p3", false},
+		{"not linked", "project-id: p1\nproject-slug: lever\n", "false", "p1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jr := &hiJailRunner{t: t, marker: tc.marker}
+			get := func(_ context.Context, _, key string) (string, error) {
+				switch key {
+				case "hub.linked":
+					return tc.linked, nil
+				case "hub.projectId":
+					return tc.hubID, nil
+				}
+				return "", errors.New("unexpected key " + key)
+			}
+			got, err := treeLinkedTo(context.Background(), jr, get, hiJailMount, "p1")
+			if err != nil || got != tc.want {
+				t.Fatalf("treeLinkedTo = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// expSplitDoer sends the experiments routes, as lever-admin, to a fake
+// experiments hub and everything else to the identity fake.
+type expSplitDoer struct {
+	rest hiDoer
+	exp  *fakeExperimentsHub
+}
+
+func (d expSplitDoer) Do(ctx context.Context, method, path string) (int, []byte, error) {
+	return d.DoBody(ctx, method, path, nil)
+}
+
+func (d expSplitDoer) DoBody(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	if err := hubapi.AssertionPathAllowed(method, path); err != nil {
+		return 0, nil, err
+	}
+	if strings.HasPrefix(path, "/api/v1/admin/experiments") || strings.HasPrefix(path, "/api/v1/conduit/") || strings.HasPrefix(path, "/api/v1/artifacts") {
+		return d.exp.DoBody(ctx, method, path, body)
+	}
+	return d.rest.DoBody(ctx, method, path, body)
+}
+
+// On a scion with hub experiments the step pins them off as lever-admin after
+// the removed logins are suspended and before the project's broker link and
+// hub link; a refused pin fails the step.
+func TestHubIdentityPinsExperimentsAndLinksTheBrokerFirst(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		e := newHIEnv(t, hiRemoteApp(false))
+		e.sc.experiments = true
+		exp := newFakeExperimentsHub()
+		if refused {
+			exp.putStatus = 403
+		}
+		step := e.step()
+		step.admin = &hubapi.Client{T: expSplitDoer{rest: hiDoer{h: e.hub, email: hubauth.AdminEmail}, exp: exp}}
+		step.linkBroker = func(_ context.Context, jp string) error {
+			e.hub.event("broker link %s", jp)
+			return nil
+		}
+		err := step.run(context.Background())
+		if refused {
+			if err == nil || !strings.Contains(err.Error(), "hub-identity: hub experiments") {
+				t.Fatalf("refused pin: err = %v", err)
+			}
+			if len(e.hub.tokens) != 0 {
+				t.Fatal("a token was minted after the pin failed")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("run: %v\nevents: %q", err, e.hub.events)
+		}
+		if v, ok := exp.overrides["hub.conduit"]; !ok || v {
+			t.Fatalf("overrides = %v", exp.overrides)
+		}
+		if rec, found, _ := e.st.LoadHubExperimentsRecord(); !found || !sameScopeSet(rec.Off, pinnedOffNames()) {
+			t.Fatalf("pin record = %+v found=%v", rec, found)
+		}
+		hiWantOrder(t, e.hub, "broker link "+hiJailMount, "scion link "+hiJailMount)
 	}
 }

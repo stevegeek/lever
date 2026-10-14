@@ -3,7 +3,7 @@
 # build.sh; keep this directory OUTSIDE the instance tree.
 ARG LEVER_IMAGE_ARCH=amd64
 ARG LEVER_BASE=lever-claude:${LEVER_IMAGE_ARCH}
-ARG GO_VERSION=1.26.4
+ARG GO_VERSION=1.26.9
 FROM --platform=linux/${LEVER_IMAGE_ARCH} golang:${GO_VERSION}-bookworm AS go
 
 FROM ${LEVER_BASE}

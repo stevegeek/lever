@@ -67,7 +67,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `tools/test` | Live end-to-end test scripts and the fake LLM upstream. |
 | `docs/` | Design specs, plans, and audits. Historical records, not user docs. |
 
-All binaries are built from one Go module (Go 1.26+). The three in-jail binaries are cross-compiled
+All binaries are built from one Go module (Go 1.26.9+, the `go` line of `go.mod`). The three in-jail binaries are cross-compiled
 for `linux/<arch>` with `CGO_ENABLED=0` and copied to `/usr/local/bin` in the agent image.
 
 scion itself is too large to embed (about 40 MB per arch compressed). The release build runs

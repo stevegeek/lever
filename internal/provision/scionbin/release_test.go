@@ -24,8 +24,8 @@ import (
 
 const (
 	testLeverVersion = "1.2.3"
-	testCommit       = "b41cd6fe2bf17c88aca86b54398bf14e4bd04e40"
-	testModule       = "v0.3.0-preview.3.0.20261013021256-b41cd6fe2bf1"
+	testCommit       = "65531d7fb8bc23675f77125f9cfd67c4b0060229"
+	testModule       = "v0.3.0-preview.3.0.20261014014810-65531d7fb8bc"
 )
 
 // fakeScion is an amd64 ELF header padded to a realistic shape, its gzip
@@ -394,8 +394,8 @@ func TestLoadReleaseValidates(t *testing.T) {
 		t.Fatalf("no manifest: %v, %v; want nil, nil", rel, err)
 	}
 	h := strings.Repeat("a", 64)
-	good := `{"lever_version":"1.2.3","scion_version":"b41cd6fe","module_version":"v0","commit":"` + testCommit +
-		`","assets":{"amd64":{"name":"scion_b41cd6fe_linux_amd64.gz","sha256":"` + h + `","size":10,"binary_sha256":"` + h + `","binary_size":20}}}`
+	good := `{"lever_version":"1.2.3","scion_version":"65531d7f","module_version":"v0","commit":"` + testCommit +
+		`","assets":{"amd64":{"name":"scion_65531d7f_linux_amd64.gz","sha256":"` + h + `","size":10,"binary_sha256":"` + h + `","binary_size":20}}}`
 	if rel, err := scionbin.LoadRelease(writeManifest(t, good)); err != nil || rel == nil {
 		t.Fatalf("good manifest: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestLoadReleaseValidates(t *testing.T) {
 	for name, edit := range map[string][2]string{
 		"version with a path":  {`"1.2.3"`, `"1.2.3/../x"`},
 		"version with a query": {`"1.2.3"`, `"1.2.3-a?b"`},
-		"asset name path":      {`scion_b41cd6fe_linux_amd64.gz`, `../scion_b41cd6fe_linux_amd64.gz`},
+		"asset name path":      {`scion_65531d7f_linux_amd64.gz`, `../scion_65531d7f_linux_amd64.gz`},
 		"asset for other arch": {`"amd64":{`, `"arm64":{`},
 		"short sha256":         {`"sha256":"` + h, `"sha256":"` + h[:63]},
 		"zero size":            {`"size":10`, `"size":0`},

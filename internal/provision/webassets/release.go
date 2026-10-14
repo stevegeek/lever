@@ -172,8 +172,8 @@ func unpackRelease(r io.Reader, dst string) error {
 	if entries == 0 {
 		return bad("empty archive")
 	}
-	if _, err := os.Lstat(filepath.Join(dst, filepath.FromSlash(layout.WebAssetsSentinel))); err != nil {
-		return bad("no %s", layout.WebAssetsSentinel)
+	if fi, err := os.Lstat(filepath.Join(dst, filepath.FromSlash(layout.WebAssetsSentinel))); err != nil || !fi.Mode().IsRegular() {
+		return bad("no %s file", layout.WebAssetsSentinel)
 	}
 	return nil
 }

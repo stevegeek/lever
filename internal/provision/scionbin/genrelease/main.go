@@ -12,7 +12,7 @@
 // and the release job's goreleaser before-hook builds the binaries and pins
 // that archive without running npm:
 //
-//	go run ./internal/provision/scionbin/genrelease -version 1.2.3 -web-archive build/web-ui
+//	go run ./internal/provision/scionbin/genrelease -version 1.2.3 -web-archive _web-ui
 //
 // Without -web-archive it builds the web UI itself. A lever built without
 // genrelease embeds no manifest and builds scion from source.

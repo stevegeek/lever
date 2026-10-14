@@ -68,7 +68,9 @@ version bump moves the block under the new version heading.
   jail's runtime broker now reads the runtimes, profiles, harness configs and image registry stored
   in the hub database on SQLite hubs too, so the copy there, whose runtime and registry lever's
   apply sets as `lever-admin`, wins over the jail's `settings.yaml` for every agent start. So do
-  the profiles and any harness configs stored there, which only a hub admin can write.
+  the profiles and any harness configs stored there. Only a hub admin can write them, except the
+  active profile's runtime, which scion's loopback `PUT /api/v1/system/runtime` lets any jailed
+  agent set (the known issue below); lever sets it back at every apply.
 - **The agent image bakes Claude Code 2.1.300 (was 2.1.296).** The messages lever reads from
   Claude Code (a stale background session, no conversation to continue), its session records,
   the agent-view switch and the hook events lever uses are unchanged in 2.1.300. It fixes, among
@@ -91,7 +93,9 @@ version bump moves the block under the new version heading.
   default and 8 MiB for an agent list page. The agent list is read 50 records a page instead of
   500, still giving up loudly after 20 pages rather than act on a partial list, so a project of
   more than 1,000 agents (10,000 before) now stops `lever up` with that error; the capability
-  read asks the hub for its compact view, which leaves out the task text. curl stops a reply at the
+  read asks the hub for its compact view, which leaves out the task text (an agent's own status
+  message stays in it, and scion does not limit its size: one agent can still fill a page, which
+  stops `lever up` rather than letting it act on a partial list). curl stops a reply at the
   cap (`--max-filesize`) and lever kills a transfer whose output passes it, so a broken peer cannot
   make lever hold an unbounded reply; a reply over the cap is an error that names the call and
   the cap, never a truncated body. `lever doctor` has a new *hub agent list* row: it warns when an

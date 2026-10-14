@@ -192,6 +192,7 @@ func TestCredentialMintRoutesRefused(t *testing.T) {
 		{"POST", "/api/v1/auth/invite/redeem", true},
 		{"POST", "/api/v1/auth/some-future-route", true},
 		{"POST", "/api/v1/auth/federation-token", true},
+		{"POST", "/api/v1/Auth/Federation-Token", true},
 		{"GET", "/api/v1/auth", true},
 		{"POST", "/api/v1/auth/tokens/t1", true},
 		{"GET", "/api/v1/auth/tokens/t1/revoke", true},

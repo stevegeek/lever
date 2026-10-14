@@ -735,8 +735,8 @@ type agentListSizer func(ctx context.Context, project string) (int, error)
 
 // checkAgentListSize warns while the hub's agent list still fits the reply
 // cap lever reads it under: past the cap, resume and the stored-role check
-// refuse to run. Each record carries its full task text, so a few very long
-// tasks can fill a page.
+// refuse to run. Each record carries its full task text and the agent's own
+// last status message, which scion does not limit, so one agent can fill a page.
 func checkAgentListSize(ctx context.Context, project string, measure agentListSizer) checkResult {
 	const name = "hub agent list"
 	capMiB := hubapi.AgentListReplyCap >> 20
@@ -749,7 +749,7 @@ func checkAgentListSize(ctx context.Context, project string, measure agentListSi
 		if errors.As(err, &apiErr) && apiErr.TooLarge {
 			return checkResult{name, false, err.Error(),
 				"a page of agent records passed what lever reads, so `lever up` cannot check or resume its agents; " +
-					"delete agents you no longer need (each record carries its full task text)"}
+					"find the agent with an outsized task or status message (`scion list` in the jail) and delete it, or any agent you no longer need"}
 		}
 		// The roles row reports a hub that answered unusably.
 		return checkResult{name, true, "not checked: " + err.Error(), ""}
@@ -757,7 +757,7 @@ func checkAgentListSize(ctx context.Context, project string, measure agentListSi
 	detail := fmt.Sprintf("largest page %d KiB of the %d MiB lever reads", largest>>10, capMiB)
 	if largest > hubapi.AgentListReplyCap/2 {
 		return checkResult{name, true, detail,
-			"agent records carry their full task text; delete agents you no longer need before a page reaches the cap, " +
+			"agent records carry their full task text and last status message; delete agents you no longer need before a page reaches the cap, " +
 				"when `lever up` can no longer check or resume them"}
 	}
 	return checkResult{name, true, detail, ""}

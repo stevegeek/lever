@@ -9,9 +9,10 @@ before:
     # internal/provision/scionbin/release/, which lever embeds. A released
     # lever then downloads the binary and the web UI for that pin instead of
     # building them, so the host needs no Go or node toolchain for scion.
-    # The web UI comes prebuilt from the workflow's webui job (build/web-ui),
-    # so no npm runs where the release token and lever's source are.
-    - go run ./internal/provision/scionbin/genrelease -version {{ .Version }} -web-archive build/web-ui
+    # The web UI comes prebuilt from the workflow's webui job (_web-ui), so no
+    # npm runs where the release token and lever's source are. The leading
+    # underscore keeps the go tool (and the go mod tidy above) out of it.
+    - go run ./internal/provision/scionbin/genrelease -version {{ .Version }} -web-archive _web-ui
     # Fail the release if the manifest is missing, names another version or
     # pin, or does not match the assets about to be uploaded.
     - sh -c "LEVER_REQUIRE_SCION_RELEASE={{ .Version }} go test -count=1 -run TestReleaseManifestEmbedded ./internal/provision/scionbin"

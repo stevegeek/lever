@@ -81,7 +81,7 @@ func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 // -f` on the sentinel catches a directory whose contents were removed but
 // whose marker survived.
 func (g Guest) stagedWebDigest(ctx context.Context) string {
-	script := fmt.Sprintf("test -f %s && cat %s",
+	script := fmt.Sprintf("test -f %s && /bin/cat %s",
 		shellSingleQuote(filepath.Join(layout.WebAssetsDir, filepath.FromSlash(layout.WebAssetsSentinel))),
 		shellSingleQuote(filepath.Join(layout.WebAssetsDir, webDigestFile)))
 	// Absolute path: a bare name resolves on the run user's PATH, which has

@@ -181,6 +181,7 @@ const authAPIPrefix = "/api/v1/auth/"
 // p is the decoded path, which is what scion's ServeMux matches; paths that
 // cleaning would change get a redirect, not a dispatch.
 func mintsCredential(method, p string) bool {
+	p = strings.ToLower(p)
 	if p == strings.TrimSuffix(authAPIPrefix, "/") {
 		return true
 	}

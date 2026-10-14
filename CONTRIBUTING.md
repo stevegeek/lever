@@ -105,7 +105,10 @@ The agent image carries sciontool (and, in the slim image, scion) built from the
 needs a new image: bump `JailABI` (see below) so `lever doctor` asks for the rebuild. Run
 `make test-lima-stack-e2e` on the new pin: `make test-lima-e2e` does not start scion. With
 `SAVE_IMAGE_TAR=<file>` it keeps the image archive it built, for `make test-lima-hubauth-e2e
-IMAGE_TAR=<file>`, which migrates an instance the older release brought up on its pin.
+IMAGE_TAR=<file>`, which migrates an instance the older release brought up on its pin. With
+`IMAGE_CACHE=<file>` it reuses the archive an earlier run saved there when the in-jail
+fingerprint (`internal/jailabi/fingerprint.txt`), the pins, the arch and the image name are
+unchanged, and otherwise builds the image and saves it there, so a rerun skips the in-guest build.
 
 ## Build
 

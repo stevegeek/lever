@@ -980,7 +980,7 @@ func (r *run) startManager(ctx context.Context, s Step) error {
 	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
 	// Read the prompt before any waiting: a missing or unreadable prompt file is a
 	// config error and should fail fast.
-	task, err := r.managerTask()
+	task, err := ManagerTask(r.app)
 	if err != nil {
 		return err
 	}
@@ -1182,8 +1182,10 @@ func (r *run) warnManagerClaude(ctx context.Context, jp string) {
 		r.app.Name, got.Describe(), jail.DescribeClaude(want))
 }
 
-func (r *run) managerTask() (string, error) {
-	p := r.app.ManagerPromptPath()
+// ManagerTask reads the manager's boot prompt (manager.prompt_file) as a
+// fresh session's task; "" when none is set.
+func ManagerTask(app *config.App) (string, error) {
+	p := app.ManagerPromptPath()
 	if p == "" {
 		return "", nil
 	}

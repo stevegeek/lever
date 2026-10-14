@@ -13,3 +13,9 @@ func LockFile(string) (func(), error) { return func() {}, nil }
 
 // TryLockFile is a no-op like LockFile.
 func TryLockFile(string) (func(), error) { return func() {}, nil }
+
+// TryLockFileAs is a no-op like LockFile.
+func TryLockFileAs(string, string) (func(), error) { return func() {}, nil }
+
+// LockHolder has nothing to read where there is no lock.
+func LockHolder(string) string { return "" }

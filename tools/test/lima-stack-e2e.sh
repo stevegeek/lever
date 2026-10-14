@@ -2,8 +2,9 @@
 # Live Lima e2e of the whole stack on the pinned scion: a real `lever up`
 # with the agent image (lever-admin links the runtime broker and pins the
 # experiments off), a manager and a worker, messages both ways, remote access
-# for an operator and a contact, the experiment fence, a contact removed while
-# an agent loops the controller rename, `lever stop` and a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
+# for an operator and a contact, the experiment and broker fence, a contact
+# removed while an agent loops the controller rename, an agent's image registry
+# write undone by the next apply, `lever stop` and a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
 # Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
@@ -269,6 +270,8 @@ for login in "$OPERATOR" "$CONTACT"; do
 	done
 	checkx "proxy refuses an experiments write for $login" \
 		'refused "$login" -X PUT -H "Content-Type: application/json" --data "{\"overrides\":{\"hub.conduit\":true}}" "http://127.0.0.1:$RP/api/v1/admin/experiments"'
+	checkx "proxy refuses a broker registration for $login" \
+		'refused "$login" -X POST -H "Content-Type: application/json" --data "{\"name\":\"remote-broker\"}" "http://127.0.0.1:$RP/api/v1/brokers"'
 done
 
 say "doctor"
@@ -354,6 +357,39 @@ up 8
 check "lever-admin linked the jail's runtime broker" grep -q "linking the jail's runtime broker .* as lever-admin" "$WORK/up.log"
 checkx "the project lists the broker again" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q "$BROKER"'
 check "the manager runs after the re-link" running
+
+say "an agent points the hub's agent image registry at its own"
+# The hub's registry route takes any loopback caller. On this scion it writes
+# the database's endpoints section, which outranks settings.yaml and applies at
+# the next dispatch, so only lever-admin's write in hub-identity undoes it.
+cat > "$WORK/registry.py" <<'PY'
+import json, os, urllib.error, urllib.request
+tok = open(os.path.expanduser("~/.scion/scion-token")).read().strip()
+ep = os.environ.get("SCION_HUB_ENDPOINT") or os.environ.get("SCION_HUB_URL")
+req = urllib.request.Request(ep + "/api/v1/system/registry", data=json.dumps({"image_registry": "registry.invalid/agent-chosen"}).encode(), method="PUT",
+                             headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+try:
+    print(urllib.request.urlopen(req, timeout=10).status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+PY
+limactl copy "$WORK/registry.py" "$VM:/tmp/registry.py"
+X cp /tmp/registry.py "lever--$NAME:/tmp/registry.py"
+# hubreg: image_registry in the hub database's endpoints section ("" with no row).
+hubreg() {
+	G python3 -c 'import json, os, sqlite3
+c = sqlite3.connect("file:" + os.path.expanduser("~/.scion/hub.db") + "?mode=ro", uri=True)
+r = c.execute("select value from hub_settings where section = ?", ("endpoints",)).fetchone()
+print(json.loads(r[0]).get("image_registry", "") if r else "")'
+}
+code=$(X exec "lever--$NAME" python3 /tmp/registry.py 2>&1 | tail -1)
+checkx "the agent's registry write reaches the hub ($code)" '[ "$code" = 200 ]'
+reg=$(hubreg 2>&1)
+checkx "the hub's endpoints section holds the agent's registry ($reg)" '[ "$reg" = registry.invalid/agent-chosen ]'
+up 5
+reg=$(hubreg 2>&1)
+checkx "apply set the hub's registry back to scionlocal ($reg)" '[ "$reg" = scionlocal ]'
+check "the manager runs after the registry repair" running
 
 say "lever stop, then lever up (agents resume)"
 (cd "$INST" && timeout 900 "$LEVER" stop 2>&1 | tail -3)

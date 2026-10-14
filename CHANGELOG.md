@@ -7,6 +7,16 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **A tagged release publishes a Homebrew cask, so `brew install stevegeek/tap/lever` installs
+  lever.** The cask installs `lever` and the four host tools (`lever-tool-github`, `-fizzy`,
+  `-whisper`, `-tts`) from the release archive on macOS (Apple Silicon and Intel), and clears the macOS quarantine flag
+  on them, as the binaries are not notarized. The cask lists the Linux archives too, untested. GoReleaser pushes it to the
+  `stevegeek/homebrew-tap` repository after the release assets are uploaded, with the
+  `HOMEBREW_TAP_TOKEN` repository secret; without the secret, or for a prerelease tag, the release
+  still succeeds and the tap is left alone. (lever#75)
+
 ## [0.39.1] - 2026-10-14
 
 ### Fixed

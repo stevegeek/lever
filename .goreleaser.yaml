@@ -99,3 +99,39 @@ release:
 
 changelog:
   disable: true
+
+# The default GITHUB_TOKEN cannot push to another repository, hence
+# HOMEBREW_TAP_TOKEN, which should be able to write to the tap repo only:
+# whoever can write the cask runs code on every machine that installs it.
+homebrew_casks:
+  - name: lever
+    ids: [lever]
+    repository:
+      owner: stevegeek
+      name: homebrew-tap
+      token: '{{ index .Env "HOMEBREW_TAP_TOKEN" }}'
+    skip_upload: '{{ if or (not (index .Env "HOMEBREW_TAP_TOKEN")) .Prerelease }}true{{ else }}false{{ end }}'
+    commit_msg_template: "lever {{ .Tag }}"
+    homepage: https://lever.to
+    description: Jailed multi-agent orchestration for Claude Code
+    binaries:
+      - lever
+      - lever-tool-github
+      - lever-tool-fizzy
+      - lever-tool-whisper
+      - lever-tool-tts
+    caveats: |
+      lever starts broker tools with PATH=/usr/local/bin:/usr/bin:/bin, not
+      your shell PATH. Where Homebrew's bin directory is not on it (Apple
+      Silicon, Linux), name each tool by absolute path in lever.yaml, e.g.
+        command: [/opt/homebrew/bin/lever-tool-github, ...]
+    hooks:
+      post:
+        # The binaries are not notarized: without this, Gatekeeper refuses
+        # to run the quarantined copies Homebrew downloads on macOS.
+        install: |
+          if OS.mac?
+            %w[lever lever-tool-github lever-tool-fizzy lever-tool-whisper lever-tool-tts].each do |bin|
+              system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/#{bin}"]
+            end
+          end

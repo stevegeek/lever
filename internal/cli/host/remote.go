@@ -77,7 +77,7 @@ func newRemoteServeCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			handler, push, err := buildRemoteHandler(app, st, dial, hubLogin, auditFn, cmd.ErrOrStderr())
+			handler, push, err := buildRemoteHandler(app, st, path, dial, hubLogin, auditFn, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
@@ -211,7 +211,7 @@ func guestClock(ctx context.Context, prefixFn func() []string, run proc.Runner, 
 	return hubauth.ClockFromGuestEpoch(epoch, before.Add(after.Sub(before)/2)), nil
 }
 
-func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.Context, network, addr string) (net.Conn, error), hubLogin remoteHubLogin, auditFn func(remoteproxy.AuditLine), warn io.Writer) (http.Handler, *remoteproxy.Push, error) {
+func buildRemoteHandler(app *config.App, st state.State, configPath string, dial func(ctx context.Context, network, addr string) (net.Conn, error), hubLogin remoteHubLogin, auditFn func(remoteproxy.AuditLine), warn io.Writer) (http.Handler, *remoteproxy.Push, error) {
 	// The hub's address inside the guest, where the dialer lands, so also the
 	// right Host header. It is deliberately not host-reachable (see
 	// scion.DefaultHubEndpoint).
@@ -262,6 +262,7 @@ func buildRemoteHandler(app *config.App, st state.State, dial func(ctx context.C
 		AgentRecords:       records,
 		Labels:             remoteLabels(app),
 		Wake:               remoteWake(app, st),
+		NewConversation:    remoteNewConversation(app, st, configPath),
 		MatchAgentMessages: remoteAgentMessages(app, st),
 		// The operator view of contact conversations reads only for a contact apply
 		// bound to a hub user (opview.go).

@@ -602,6 +602,8 @@ not in one spelling / `login-redirect` for an intercepted sign-in navigation / `
 contact fence refuses a request / `chat-unavailable` when the [chat page](#the-chat-page) cannot
 resolve your hub user / `remote-wake` and `deny-wake` for a [wake](#waking-a-worker), with a
 `reason` word on a refusal, and `remote-wake-result` for the broker's late answer /
+`remote-new-conversation`, `deny-new-conversation` and `remote-new-conversation-result` for a
+[new conversation](#a-new-conversation-for-the-manager) /
 `operator-view` and `deny-operator-view` for the [operator's view of contact
 conversations](#the-operators-view-of-contact-conversations), with `contact`, `agent` and `count`
 fields and a `reason` word on a refusal / the `push-*` and `deny-push` lines of
@@ -844,11 +846,13 @@ is given and nothing else.
 - **An operator** sees the manager and every configured worker, and may message all of them.
   The page also has two links: **Terminal** (per agent) opens the hub web UI's terminal for that
   agent, for the times you need Claude Code itself; **Console** opens the hub's full web UI,
-  which stays at its own paths (`/agents`, `/chat`, ...). Only `/` leads to the chat page.
+  which stays at its own paths (`/agents`, `/chat`, ...). Only `/` leads to the chat page. The
+  manager's chat has a **New conversation** button
+  ([below](#a-new-conversation-for-the-manager)).
 - **A [contact](#contacts-chat-only-logins)** sees the agents of its entry: those in `agents:` it
   may message, those in `see:` it may only see (name, label and state, greyed as "view only";
   no history, no input). An agent in neither list never appears: not its name, its id, or its
-  conversation. A contact gets no Terminal and no Console link.
+  conversation. A contact gets no Terminal and no Console link, and no New conversation button.
 
 The list comes in this order: the manager (when the login has it), then the agents it may
 message in config order, then the see-only agents. Each row shows the agent's name, then its
@@ -911,6 +915,37 @@ page says waking is not available. Each wake is a line in the [audit log](#audit
 (`remote-wake` or `deny-wake` with a reason word; `remote-wake-result` when the broker's answer
 comes after the page's).
 
+### A new conversation for the manager
+
+An operator login has a **New conversation** button in the manager's chat. It does what
+[`lever conversation new`](/operations/#start-a-new-conversation) does on the host: back the
+manager's conversation up, end its session, and start it again in a new one that runs its boot
+prompt (the `manager.prompt_file` the record was created with). The page asks first. When the manager is in the middle of a turn,
+it says so and asks again before it interrupts the turn. Then it shows "starting &lt;name&gt; on a
+new conversation…" and reads the list every 3 seconds, for up to 3 minutes, until the manager is
+running again; the boot prompt's reply arrives in the same chat. Text you were typing stays in the
+box, and the box is off while the manager is down. The old conversation stays in its backup on
+the host (`lever conversation list`), and `lever conversation restore` puts it back.
+
+The route (`POST /lever/api/new-conversation`) is accepted only:
+
+- from an operator login; a contact gets 403 and never sees the button;
+- from the page itself (the same `Origin` and `Sec-Fetch-Site` rule as the wake);
+- while the manager is running or suspended, and not mid-turn unless the page asked for it
+  (`{"force": true}`, after your second confirmation);
+- once a minute, across all logins (429 with `Retry-After`).
+
+The proxy runs `lever conversation new` itself, as the host user it runs as, in its own session
+(a restart of the proxy does not stop it half way), with its output in
+`.lever-state/logs/conversation-new.log` and its summary in `lever doctor`'s last bring-up row.
+lever's own checks run there again: a turn that started in the meantime, a backup that fails, or
+another `new` or `restore` that is running stops it with nothing changed. The page gets fixed
+words only. The action exists only while the state directory is outside the tree, where the
+backup can be kept; otherwise the page offers no button and the route answers 503. Each request is
+a line in the [audit log](#audit-log) (`remote-new-conversation` or `deny-new-conversation` with a
+reason word; `remote-new-conversation-result` for the outcome when it comes after the page's
+answer).
+
 ### Labels
 
 A label is a short text the manager keeps beside a worker's name, for example the address a deal
@@ -960,7 +995,8 @@ but never replaces the name.
 
 The proxy answers these itself and forwards none of them to the hub: `GET /` (a redirect to
 `/lever/chat`), `/lever/chat`, its `.css` and two `.js` files, the app manifest and icons,
-`GET /lever/api/agents` (the list), `POST /lever/api/agents/<name>/wake`, the operator's
+`GET /lever/api/agents` (the list), `POST /lever/api/agents/<name>/wake`,
+`POST /lever/api/new-conversation`, the operator's
 `/lever/api/contacts` routes ([below](#the-operators-view-of-contact-conversations)), and, while
 their feature is on, the push routes and `/lever/sw.js` ([Notifications](#notifications)) and
 `/lever/api/files/` ([Files in the chat](#files-in-the-chat)). Anything else under `/lever/` is a
@@ -1720,8 +1756,10 @@ to your own host, never to a cloud speech service.
 - **No lifecycle or fleet management from the phone.** Worker dispatch stays a manager action —
   asked for in chat, like any other task — not a button the phone UI exposes as an operator
   capability of its own. The one exception is narrow: a message to an asleep worker
-  [wakes it](#waking-a-worker) (resume only, a worker the login may message, once a minute). The
-  page cannot start, create, stop or remove an agent.
+  [wakes it](#waking-a-worker) (resume only, a worker the login may message, once a minute), and
+  an operator login can start the manager on a
+  [new conversation](#a-new-conversation-for-the-manager) (same record, backup first, once a
+  minute). The page cannot otherwise start, create, stop or remove an agent.
 - **No new authority.** A remote chat message is text in the agent's session. With verified
   web chat it is provably yours, but it is still not a directive (see the accepted posture above).
 - **No credential on the phone.** The session cookie stays on the host, the hub's `Set-Cookie` is

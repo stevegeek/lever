@@ -100,7 +100,7 @@ func TestRemoteHandlerRefusesAFencedOffLogin(t *testing.T) {
 		}
 	}
 	dial := func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("no jail") }
-	h, _, err := buildRemoteHandler(app, st, dial, remoteHubLogin{}, audit, io.Discard)
+	h, _, err := buildRemoteHandler(app, st, "", dial, remoteHubLogin{}, audit, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

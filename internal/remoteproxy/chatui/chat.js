@@ -34,6 +34,8 @@ import {
   viewFilesPath,
   LIST_MS,
   MAX_MESSAGE,
+  NEW_CONVERSATION_PATH,
+  NEW_CONVERSATION_POLLS,
   NOT_SHOWN,
   NOT_YET,
   WAKE_POLLS,
@@ -54,6 +56,10 @@ import {
   mergeRows,
   messageLength,
   messageText,
+  newConversationAsk,
+  newConversationForceAsk,
+  newConversationOffered,
+  newConversationText,
   nextCursor,
   oneLine,
   pushKeyBytes,
@@ -119,6 +125,7 @@ const el = {
   mic: $('mic'),
   voice: $('voice'),
   readvoice: $('readvoice'),
+  newconv: $('newconv'),
 };
 
 let roster = null; // the list as last applied (agentList shape)
@@ -150,6 +157,7 @@ let uploading = false; // a file upload is under way
 let filesOpen = false; // the Files panel is open
 let filesSeq = 0; // counts Files panel reads and closes
 let waking = ''; // the agent a send is waking ('' = none)
+let renewing = ''; // the agent a new conversation is starting ('' = none)
 let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
@@ -726,7 +734,8 @@ function applyView(a) {
   showState(chipText(a), v.input);
   el.text.disabled = !v.input;
   syncSend();
-  showNote(waking === a.name ? `waking ${a.name}…` : v.note);
+  showNote(waking === a.name ? `waking ${a.name}…` : renewing === a.name ? `starting ${a.name} on a new conversation…` : v.note);
+  syncNewConversation(a);
   el.ask.hidden = !v.ask;
   setText(el.ask, v.ask ? `Ask the manager to start ${a.name}` : '');
 }
@@ -1343,6 +1352,7 @@ function openChat(name) {
   setText(el.label, a.label);
   el.label.hidden = !a.label;
   setLink(el.terminal, roster.tier === 'operator' ? a.terminal : '');
+  syncNewConversation(a);
   resetHistory();
   closeFiles();
   showError('');
@@ -1384,6 +1394,7 @@ function closeChat() {
   setText(el.label, '');
   el.label.hidden = true;
   setLink(el.terminal, '');
+  syncNewConversation(null);
   showState('', true);
   resetHistory();
   closeFiles();
@@ -1637,6 +1648,52 @@ async function wake(c, text) {
   }
 }
 
+function syncNewConversation(a) {
+  el.newconv.hidden = !newConversationOffered(roster, a);
+  el.newconv.disabled = !!renewing;
+}
+
+// The manager's new conversation: asked twice when it is mid-turn, then the
+// list is read until it runs again. The draft stays in the box throughout.
+async function newConversation() {
+  const c = chat;
+  if (!c || renewing) return;
+  const name = c.name;
+  if (!window.confirm(newConversationAsk(name))) return;
+  showError('');
+  renewing = name;
+  showWakeView();
+  try {
+    let res = await api(NEW_CONVERSATION_PATH, { method: 'POST' });
+    const word = (r) => (r.body && typeof r.body === 'object' ? r.body.error : '');
+    if (res.status === 409 && word(res) === 'busy') {
+      if (!window.confirm(newConversationForceAsk(name))) return;
+      res = await api(NEW_CONVERSATION_PATH, { method: 'POST', body: JSON.stringify({ force: true }) });
+    }
+    if (res.status !== 202) {
+      showError(newConversationText(res.status, res.body, name));
+      return;
+    }
+    // It goes down (suspended, stopped) and comes back running.
+    let down = false;
+    for (let i = 0; i < NEW_CONVERSATION_POLLS; i++) {
+      await sleep(WAKE_POLL_MS);
+      const l = await readList();
+      if (l.error) continue;
+      applyRoster(l);
+      const a = l.agents.find((x) => x.name === name);
+      if (!a) return;
+      if (a.state !== 'running' && a.state !== 'unknown') down = true;
+      if (down && a.state === 'running') return;
+    }
+    if (chat && chat.name === name) showError(`${name} is not running again yet; \`lever doctor\` on the host shows why.`);
+  } finally {
+    renewing = '';
+    showWakeView();
+    listSoon();
+  }
+}
+
 function showWakeView() {
   const a = chat && roster && roster.agents.find((x) => x.name === chat.name);
   if (a) applyView(a);
@@ -1872,6 +1929,7 @@ el.refresh.addEventListener('click', () => {
   void loadViewFiles();
 });
 el.back.addEventListener('click', closeChat);
+el.newconv.addEventListener('click', () => void newConversation());
 el.ask.addEventListener('click', askManager);
 el.push.addEventListener('click', () => void togglePush());
 el.attach.addEventListener('click', () => {

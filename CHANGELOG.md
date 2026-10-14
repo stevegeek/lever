@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **A new conversation for the manager, from the host and from the chat page (lever#221).**
+  `lever conversation new` backs the manager's conversation up, then starts the manager again in
+  a new Claude session on the same record and image, which runs the boot prompt the record was
+  created with (`manager.prompt_file` at the last fresh create), so a
+  morning stand-up no longer needs `lever up --fresh` and its two-minute recreate. lever suspends
+  the manager for the backup (no backup, no change: the manager is resumed on its own
+  conversation), then stops the record, because scion continues a suspended record with
+  `claude --continue` and starts a stopped one in a new session with the record's task, and then
+  starts it with the usual resume checks. The real stop ends the old session, so the hub never reads
+  the manager `stopped` over a running claude. A manager in the middle of a turn is left alone
+  (exit 5) unless `--force`; one change at a time per instance (exit 6, `restore` included). After
+  the stop a failure leaves the manager down and names the backup; `lever conversation restore`
+  puts the old conversation back at any time. An operator login on the chat page gets a **New
+  conversation** button in the manager's chat: it asks first (and again before it interrupts a
+  turn), runs `lever conversation new` on the host, once a minute at most, and follows the manager
+  until it runs again; a draft in the box stays. Contacts never get it, and the route refuses
+  them. Every request is in the proxy's audit log.
+
 ## [0.39.1] - 2026-10-14
 
 ### Fixed

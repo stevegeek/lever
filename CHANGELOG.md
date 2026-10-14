@@ -27,21 +27,26 @@ version bump moves the block under the new version heading.
 
 - **A new conversation for the manager, from the host and from the chat page (lever#221).**
   `lever conversation new` backs the manager's conversation up, then starts the manager again in
-  a new Claude session on the same record and image, which runs the boot prompt the record was
-  created with (`manager.prompt_file` at the last fresh create), so a
-  morning stand-up no longer needs `lever up --fresh` and its two-minute recreate. lever suspends
+  a new Claude session on the same record and image, which runs the boot prompt as
+  `manager.prompt_file` holds it now (lever reads it before it changes anything and passes it to
+  scion, which also stores it on the record), so a morning stand-up, or an edited prompt, no
+  longer needs `lever up --fresh` and its two-minute recreate. lever suspends
   the manager for the backup (no backup, no change: the manager is resumed on its own
   conversation), then stops the record, because scion continues a suspended record with
-  `claude --continue` and starts a stopped one in a new session with the record's task, and then
+  `claude --continue` and starts a stopped one in a new session, and then
   starts it with the usual resume checks. The real stop ends the old session, so the hub never reads
   the manager `stopped` over a running claude. A manager in the middle of a turn is left alone
-  (exit 5) unless `--force`; one change at a time per instance (exit 6, `restore` included). After
+  (exit 5) unless `--force`. `new`, `restore`, `up`, `apply`, `stop` and `reload` share one lock
+  per instance: while one runs, the others exit 6 with nothing changed and name the command that
+  holds it (none waits; `up` lets go before it attaches, and says so when a new conversation
+  ends the attach). After
   the stop a failure leaves the manager down and names the backup; `lever conversation restore`
   puts the old conversation back at any time. An operator login on the chat page gets a **New
   conversation** button in the manager's chat: it asks first (and again before it interrupts a
   turn), runs `lever conversation new` on the host, once a minute at most, and follows the manager
   until it runs again; a draft in the box stays. Contacts never get it, and the route refuses
-  them. Every request is in the proxy's audit log.
+  them. Every request is in the proxy's audit log. The manager's skill gains a short section on
+  keeping its continuity in files, since a new conversation starts without the old context.
 
 - **A tagged release publishes a Homebrew cask, so `brew install stevegeek/tap/lever` installs
   lever.** The cask installs `lever` and the four host tools (`lever-tool-github`, `-fizzy`,
@@ -110,6 +115,12 @@ version bump moves the block under the new version heading.
   `make lever-image-slim`, then any instance image built from it) and recreate the manager on it
   with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. The
   first `lever apply` installs the new scion pin in the jail.
+- **The manager's skill text changed (lever#221),** so contacts' posts to the manager are
+  refused until it next starts fresh. The `lever up --fresh --keep-conversation` above does that;
+  so does `lever conversation new`.
+- **`lever up`, `lever apply`, `lever stop` and `lever reload` now refuse to run (exit 6) while
+  another of them, or a `lever conversation new` or `restore`, runs for the same instance
+  (lever#221).** A script that ran two of them at once for one instance must run them in turn.
 
 ### Known issues
 
